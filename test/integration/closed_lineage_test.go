@@ -273,8 +273,9 @@ func TestClosedLineageSearchClosedFilter(t *testing.T) {
 	ck.Eq(0, len(openAfter), "closed:open still returned the closed conversation = %v", rowIDs(openAfter))
 }
 
-// TestClosedLineageParentCostUnchangedByClose pins that closing a descendant
-// does not remove its spend from its ancestor's lineage.
+// TestClosedLineageParentScopeUnchangedByClose pins that closing a descendant
+// does not remove it from its ancestor's lineage SCOPE (the union of
+// subtreeSelector). It asserts selector/scope membership, not a cost figure:
 //
 // Fallback assertion, and why: the cost rollup (subtreeSpend -> insights
 // .SubtreeCost) prices a turn by consulting the daemon's model catalog
@@ -289,7 +290,7 @@ func TestClosedLineageSearchClosedFilter(t *testing.T) {
 // ConversationExport (which resolves the conversation only if its id is in the
 // caller's scope). Removing the lineage union makes the post-close export
 // answer not-found.
-func TestClosedLineageParentCostUnchangedByClose(t *testing.T) {
+func TestClosedLineageParentScopeUnchangedByClose(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")

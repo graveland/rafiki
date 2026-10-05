@@ -140,7 +140,8 @@ two flags: `--open` and `--closed` (mutually exclusive) narrow to
 conversations still open or already finished. Its table gains a `CLOSED`
 column — the finish time, `-` while open — and the JSON arm carries
 `closed_at` only for a finished row (never a zero time). `rafikid agent
-search` has neither the flags nor the column.
+search` has neither the flags nor the column, but its `-j` JSON rows carry
+`closed_at` when set.
 
 ## `export`
 

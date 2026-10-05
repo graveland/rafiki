@@ -315,7 +315,7 @@ func (c *Controller) subtreeSelector(ctx context.Context, rootChildID string) (i
 		add(snap.ChildID, snap.SessionID)
 	}
 	if c.lineage != nil {
-		members, err := c.lineage.Lineage(ctx, rootChildID)
+		members, err := c.lineageMembers(ctx, rootChildID)
 		if err != nil {
 			return insights.SubtreeSelector{}, fmt.Errorf("subtree lineage for %s: %w", rootChildID, err)
 		}
@@ -327,6 +327,21 @@ func (c *Controller) subtreeSelector(ctx context.Context, rootChildID string) (i
 	sel.ExternalRefs = dedupeStrings(sel.ExternalRefs)
 	sel.ExternalRefPrefixes = dedupeStrings(sel.ExternalRefPrefixes)
 	return sel, nil
+}
+
+// lineageMembers resolves rootChildID's lineage through the wired source,
+// passing a root fallback when the source can use one. The database's own view
+// of an ancestor's root comes from the ancestor's row, so a MISSING ancestor row
+// loses its whole persisted subtree; the live store still knows the root of an
+// ancestor it is running, so pass it down. An ancestor unknown to BOTH the
+// database and the live store stays the live-set-only fallback.
+func (c *Controller) lineageMembers(ctx context.Context, rootChildID string) ([]childstore.LineageMember, error) {
+	if rooted, ok := c.lineage.(childstore.RootedLineageSource); ok {
+		if root := c.st.RootOf(rootChildID); root != "" {
+			return rooted.LineageWithRoot(ctx, rootChildID, root)
+		}
+	}
+	return c.lineage.Lineage(ctx, rootChildID)
 }
 
 // dedupeStrings removes duplicates from in, preserving first-seen order. It is

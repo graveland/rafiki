@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -168,6 +169,11 @@ func (c *Controller) sweepHeartbeats(ctx context.Context, now time.Time) {
 		if c.coster != nil {
 			if spent, err := c.subtreeSpend(ctx, snap.ChildID); err == nil {
 				parts = append(parts, fmt.Sprintf("this agent and its subagents have spent $%.2f", spent))
+			} else {
+				// The cost clause is omitted, not asserted as $0.00 — but a
+				// persistent unreadable spend (lineage blind) must be visible, so
+				// warn rather than swallow it.
+				slog.Warn("heartbeat sweep: spend unreadable", "childId", snap.ChildID, "errorType", fmt.Sprintf("%T", err))
 			}
 		}
 		var detail string

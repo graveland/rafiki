@@ -132,6 +132,24 @@ func TestSetChildBudgetOnABreachedChildClearsItAndSteersResume(t *testing.T) {
 	ck.True(told, "a raise on a previously breached child must steer it that it may resume")
 }
 
+// A raise on a child whose caller has a budget must FAIL CLOSED when the
+// caller's own spend cannot be read: a budget that cannot be checked is not
+// enforced, and treating an unreadable lineage as "spend is zero" would let a
+// closed descendant's spend vanish from the rollup. Mirrors
+// TestCheckSpawnLimitsFailsClosedOnALineageError for the SetChildBudget path.
+func TestSetChildBudgetFailsClosedOnALineageError(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := limitsFixture(t, 3, 3) // c_d0 -> c_d1
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 10.00 })
+	_ = c.st.Update("c_d1", func(s *childstore.Session) { s.MaxCost = 2.00 })
+	c.coster = fakeCoster{spend: 0}
+	c.lineage = &fakeLineageSource{err: errors.New("lineage down")}
+
+	err := c.SetChildBudget(context.Background(), "c_d0", "c_d1", 5.00)
+	ck.Require().Error(err, "a budgeted caller whose lineage cannot be read must not be allowed to raise a child's budget")
+	ck.StrContains(err.Error(), "could not be read", "the refusal must read as the fail-closed budget message; got %v", err)
+}
+
 func TestSetChildBudgetAsOperatorCanRaiseARootCoordinator(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := limitsFixture(t, 3) // a single root child, c_d0

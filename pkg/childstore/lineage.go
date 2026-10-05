@@ -24,6 +24,21 @@ type LineageSource interface {
 	Lineage(ctx context.Context, ancestorChildID string) ([]LineageMember, error)
 }
 
+// RootedLineageSource is an OPTIONAL capability of a LineageSource that can
+// still resolve a subtree when the ancestor's OWN row is missing, given the
+// ancestor's root supplied by the caller. A database lineage cannot know an
+// unpersisted ancestor's root — it is read from the ancestor's own row — so a
+// missing row would otherwise lose every descendant beneath it. The caller
+// holds the live store, where an unpersisted-but-running ancestor's root is
+// still known (childstore.RootOf), so it passes that root down.
+//
+// An ancestor unknown to BOTH the database and the caller's live store stays
+// the documented (nil, nil) / live-set-only fallback.
+type RootedLineageSource interface {
+	LineageSource
+	LineageWithRoot(ctx context.Context, ancestorChildID, rootFallback string) ([]LineageMember, error)
+}
+
 // LineageRow pairs a member with the labels it was read with, so a caller can
 // walk the parent chain without a second lookup. Labels are the raw child
 // labels (rafiki/parent, rafiki/root, and their legacy fundi/ spellings).

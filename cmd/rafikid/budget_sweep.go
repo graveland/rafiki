@@ -73,8 +73,11 @@ func (c *Controller) sweepBudgets(ctx context.Context) {
 			// Best-effort here, unlike admission: this path cannot fail
 			// closed usefully — refusing to sweep changes nothing, and
 			// blocking every task in the fleet on a transient query error
-			// would be far worse than a late breach.
-			slog.Debug("budget sweep: spend unreadable", "childId", snap.ChildID, "error", err)
+			// would be far worse than a late breach. Warn, not Debug, so a
+			// PERSISTENT unreadable spend (which leaves the tree's
+			// mid-flight breach detection blind) is visible to an operator
+			// rather than silent.
+			slog.Warn("budget sweep: spend unreadable", "childId", snap.ChildID, "errorType", fmt.Sprintf("%T", err))
 			continue
 		}
 		if spent < snap.MaxCost {

@@ -2022,6 +2022,16 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	c.st.Insert(sess)
 
 	if err := c.writeRecord(childID); err != nil {
+		// FIX 5's minimal row must exist before anything else: the lineage
+		// walk cannot cross a MISSING intermediate row, so a lost initial
+		// insert would hide a whole sub-subtree from its ancestor's spend.
+		// With a persistence store configured, a failed insert REFUSES the
+		// spawn and unwinds every trace of it. A store-less controller keeps
+		// the best-effort warn (there is no row to write in a DB-less test).
+		if c.children != nil {
+			c.abortSpawn(childID, ch)
+			return protocol.SpawnResponseData{}, fmt.Errorf("spawn %s: %w", childID, err)
+		}
 		slog.Warn("write state record (spawning)", "childId", childID, "error", err)
 	}
 
@@ -3101,6 +3111,32 @@ func (c *Controller) ownsChildRow(snap childstore.Snapshot) bool {
 	return owner == "" || owner == c.daemonID
 }
 
+// abortSpawn unwinds a spawn whose initial record could not be persisted,
+// leaving no half-spawned child behind. It is the teardown Close and Kill
+// perform, minus the tombstone — there is no row to tombstone, which is
+// exactly why the spawn is being refused. Any process already launched is
+// terminated, both the in-memory store and the process map drop the child, and
+// the executor/daraja/inbox state taken for it is released so nothing dangles.
+func (c *Controller) abortSpawn(childID string, ch *child.Child) {
+	if ch != nil {
+		if _, err := ch.Shutdown(5*time.Second, 5*time.Second); err != nil {
+			slog.Warn("abort spawn: shutdown", "childId", childID, "errorType", fmt.Sprintf("%T", err))
+		}
+	}
+	c.st.Delete(childID)
+	c.cm.Remove(childID)
+	c.rateWatch.drop(childID)
+	c.dropPendingResume(childID)
+	c.forgetBoundExecutor(childID)
+	if c.darajaReg != nil {
+		c.darajaReg.Forget(childID)
+	}
+	if c.darajaPool != nil {
+		c.darajaPool.DropReplay(childID)
+	}
+	c.dropInboxForForgotten(childID, "spawn aborted")
+}
+
 // Close finalizes an exited child: it leaves the in-memory store and its
 // conversations.child row, and can never be resumed, reattached or continued
 // again. Its TRANSCRIPT is not deleted — no foreign key references
@@ -3153,6 +3189,25 @@ func (c *Controller) Close(childID string) error {
 		return nil
 	}
 
+	// Persist the child's current snapshot BEFORE forgetting it: the upsert
+	// carries its session_id/conversation_id to conversations.child (and clears
+	// closed_at), and the tombstone below stamps closed_at again. A child whose
+	// lineage could not be recorded must not silently drop out of its
+	// ancestors' spend, so a persist failure FAILS CLOSED: the child stays in
+	// the live store, is not tombstoned, and the error is returned. This runs
+	// before the daraja revocation so a failed persist leaves nothing torn.
+	//
+	// Only for a row THIS daemon owns: a recovered row belonging to another
+	// daemon is not ours to write (the upsert would stamp our daemon label and
+	// our exited status onto a live child's row), and we do not tombstone it
+	// below for the same reason.
+	owns := c.ownsChildRow(snap)
+	if owns {
+		if err := c.writeRecord(childID); err != nil {
+			return fmt.Errorf("close %s: %w", childID, err)
+		}
+	}
+
 	// Revoke the daraja's ability to reconnect — the row is going away.
 	// Must run before st.Delete; once the row is gone the OnDisconnect handler
 	// (fired if the daraja was still connected) has no child to label. The
@@ -3195,7 +3250,6 @@ func (c *Controller) Close(childID string) error {
 	// Drop — a full, terminal delete, worse than the reset-to-pending
 	// recoverOne's own resume path can cause — another daemon's live child's
 	// queue.
-	owns := c.ownsChildRow(snap)
 	if owns {
 		c.dropInboxForForgotten(childID, "child forgotten")
 	}
@@ -3309,6 +3363,7 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 	snaps := c.st.FindByStatus(protocol.StatusExited)
 	now := time.Now().UnixMilli()
 	var closed []string
+	failed := 0
 	for _, s := range snaps {
 		if olderThanMs > 0 && !s.ExitedAt.IsZero() {
 			age := now - s.ExitedAt.UnixMilli()
@@ -3323,26 +3378,42 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 		if _, still := c.st.Get(s.ChildID); !still {
 			continue
 		}
-		c.st.Delete(s.ChildID)
-		// A cascaded child is closed and belongs in the answer; the guard above
-		// is what keeps it from being named a second time on its own iteration.
-		closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
 		// A synthetic thread child has no durable footprint at all, so the
-		// store delete above is its whole close. Same reasoning as Close.
+		// store delete is its whole close. Same reasoning as Close: nothing to
+		// persist, no failure path.
 		if s.Native {
+			c.st.Delete(s.ChildID)
+			// A cascaded child is closed and belongs in the answer; the guard above
+			// is what keeps it from being named a second time on its own iteration.
+			closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
 			closed = append(closed, s.ChildID)
 			continue
 		}
-		// The other deletion path, and the one that leaks without this: a row
-		// for a child forgotten here is never pending-for-a-live-child again
-		// and never terminal, so the retention sweep can never reach it.
-		//
 		// Gated on ownsChildRow, same reasoning as Forget above: sweepExpired
 		// calls ForgetAllExited on the daemon's own grace-window tick, and a
 		// recovered record — including one belonging to a still-live OTHER
 		// daemon's child — carries its old ExitedAt, so this is not merely a
 		// hypothetical race.
 		owns := c.ownsChildRow(s)
+		// Persist before forgetting: the upsert carries the child's session_id
+		// to conversations.child before the tombstone stamps closed_at. A child
+		// whose lineage could not be recorded must not silently drop out of its
+		// ancestors' spend, so skip it (leave it for the next tick), log the
+		// child id, and count the failure to surface in the result. Only for a
+		// row this daemon owns — another daemon's recovered row is not ours to
+		// write (nor to tombstone below).
+		if owns {
+			if err := c.writeRecord(s.ChildID); err != nil {
+				slog.Warn("close-all-exited: child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))
+				failed++
+				continue
+			}
+		}
+		c.st.Delete(s.ChildID)
+		closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
+		// The other deletion path, and the one that leaks without this: a row
+		// for a child forgotten here is never pending-for-a-live-child again
+		// and never terminal, so the retention sweep can never reach it.
 		if owns {
 			c.dropInboxForForgotten(s.ChildID, "child forgotten")
 			c.rateWatch.drop(s.ChildID)
@@ -3369,6 +3440,9 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 			}
 		}
 		closed = append(closed, s.ChildID)
+	}
+	if failed > 0 {
+		return closed, fmt.Errorf("close-all-exited: %d child(ren) not persisted", failed)
 	}
 	return closed, nil
 }
@@ -4321,6 +4395,12 @@ func (c *Controller) writeRecord(childID string) error {
 // row's status column. The upsert COALESCEs an empty value so an ordinary
 // write cannot blank what the last real exit recorded.
 //
+// A failed upsert is RETURNED as well as logged, so a caller that must not let
+// a child drop out of the database (Close, CloseAllExited, the spawn-fatal
+// insert) can fail closed; the ordinary best-effort callers log and carry on.
+// A child absent from the in-memory store leaves nothing to write and is not an
+// error.
+//
 // noteConversationID records a child's resolved conversation id on its store
 // entry so the next writeRecord carries it to conversations.child.
 //
@@ -4372,7 +4452,10 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 		err := c.children.Upsert(ctx, rec)
 		cancel()
 		if err != nil {
-			slog.Warn("write child row", "childId", childID, "error", err)
+			// Returned, not just logged: the callers that must fail CLOSED on a
+			// lost row (Close/CloseAllExited/abortSpawn) decide their own fate
+			// from it, while the best-effort writers log and carry on.
+			return fmt.Errorf("write child row %s: %w", childID, err)
 		}
 	}
 	return nil
