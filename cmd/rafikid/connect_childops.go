@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -114,7 +115,7 @@ func searchResponseFrom(result protocol.SearchResponseData) *rafikiv1.SearchResp
 			SessionId:   h.SessionID,
 			SessionName: h.SessionName,
 			EntryId:     h.EntryID,
-			Timestamp:   h.Timestamp,
+			Timestamp:   timestamppb.New(h.Timestamp),
 			Role:        h.Role,
 			Snippet:     h.Snippet,
 			MatchStart:  int32(h.MatchStart),
@@ -125,7 +126,7 @@ func searchResponseFrom(result protocol.SearchResponseData) *rafikiv1.SearchResp
 		Hits:      hits,
 		TotalHits: int32(result.TotalHits),
 		Scanned:   int32(result.Scanned),
-		Elapsed:   result.Elapsed,
+		Elapsed:   durationpb.New(result.Elapsed),
 	}
 }
 

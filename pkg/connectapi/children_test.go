@@ -45,7 +45,7 @@ func sampleChildren() []protocol.ChildSummary {
 	return []protocol.ChildSummary{{
 		ChildID: "c_1", Name: "scout", Kind: "fundi", Status: "idle",
 		Model: "claude-opus-5", Cwd: "/tmp", PID: &pid,
-		StartedAt: time.UnixMilli(100), LastActivity: 200, SessionID: "conv-uuid",
+		StartedAt: time.UnixMilli(100), LastActivity: time.UnixMilli(200), SessionID: "conv-uuid",
 		Labels: map[string]string{"rafiki/parent": "c_0"}, ContextWindow: 200000,
 	}}
 }
@@ -63,7 +63,7 @@ func TestListChildrenMapsFields(t *testing.T) {
 	ck.False(c.GetChildId() != "c_1" || c.GetName() != "scout" || c.GetKind() != "fundi", "identity fields wrong: %+v", c)
 	ck.False(c.GetStatus() != "idle" || c.GetModel() != "claude-opus-5" || c.GetCwd() != "/tmp", "state fields wrong: %+v", c)
 	ck.Eq(4242, c.GetPid(), "Pid")
-	ck.False(c.GetStartedAt() == nil || !c.GetStartedAt().AsTime().Equal(time.UnixMilli(100)) || c.GetLastActivity() != 200, "timestamps wrong: %+v", c)
+	ck.False(c.GetStartedAt() == nil || !c.GetStartedAt().AsTime().Equal(time.UnixMilli(100)) || c.GetLastActivity() == nil || !c.GetLastActivity().AsTime().Equal(time.UnixMilli(200)), "timestamps wrong: %+v", c)
 	ck.False(c.GetSessionId() != "conv-uuid" || c.GetContextWindow() != 200000, "session/window wrong: %+v", c)
 	ck.Eq("c_0", c.GetLabels()["rafiki/parent"], "labels wrong: %+v", c.GetLabels())
 }

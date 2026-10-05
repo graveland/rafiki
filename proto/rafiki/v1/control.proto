@@ -252,8 +252,8 @@ message ChildSummary {
   // pid is optional: an exited child has none, and 0 is a legal pid.
   optional int32 pid = 7;
   google.protobuf.Timestamp started_at = 23;
-  int64 last_activity = 9;
-  reserved 8;  // was: started_at (unix ms int)
+  google.protobuf.Timestamp last_activity = 24;
+  reserved 8, 9;  // was: started_at, last_activity (unix ms ints)
   // exit_code is optional: unset while alive, and 0 means clean exit.
   optional int32 exit_code = 10;
   map<string, string> labels = 11;
@@ -1552,8 +1552,10 @@ message SearchResponse {
   repeated SearchHit hits = 1;
   int32 total_hits = 2;
   int32 scanned = 3;
-  // elapsed is ms (time.Since(start).Milliseconds() in Controller.Search).
-  int64 elapsed = 4;
+  // elapsed is the scan's wall time (time.Since in Controller.Search).
+  google.protobuf.Duration elapsed = 5;
+
+  reserved 4;  // was: elapsed (ms int)
 
   // SearchHit mirrors protocol.SearchHit: one content match.
   message SearchHit {
@@ -1562,12 +1564,14 @@ message SearchResponse {
     string session_id = 3;
     string session_name = 4;
     string entry_id = 5;
-    // timestamp is unix ms, the ring event's own Timestamp (pkg/ring).
-    int64 timestamp = 6;
+    // timestamp is the ring event's own point in time (pkg/ring).
+    google.protobuf.Timestamp timestamp = 11;
     string role = 7;
     string snippet = 8;
     int32 match_start = 9;
     int32 match_end = 10;
+
+    reserved 6;  // was: timestamp (unix ms int)
   }
 }
 

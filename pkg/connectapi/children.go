@@ -45,13 +45,16 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 		Model:         c.Model,
 		Cwd:           c.Cwd,
 		SessionId:     c.SessionID,
-		LastActivity:  c.LastActivity,
 		Labels:        c.Labels,
 		ContextWindow: int32(c.ContextWindow),
 	}
 	if !c.StartedAt.IsZero() {
 		out.StartedAt = timestamppb.New(c.StartedAt)
 	}
+	// last_activity is always sent, even for a zero time: the old wire set
+	// started_at/last_activity from UnixMilli unconditionally, and a zero time
+	// is the year-1 Timestamp, not an absent one.
+	out.LastActivity = timestamppb.New(c.LastActivity)
 	if c.PID != nil {
 		pid := int32(*c.PID)
 		out.Pid = &pid

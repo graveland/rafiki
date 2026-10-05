@@ -209,7 +209,7 @@ func TestChildOpsSearchReceivesTheRequest(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := &fakeChildOps{searchOut: &rafikiv1.SearchResponse{
 		Hits:      []*rafikiv1.SearchResponse_SearchHit{{ChildId: "c_1", Snippet: "hit"}},
-		TotalHits: 1, Scanned: 3, Elapsed: 9,
+		TotalHits: 1, Scanned: 3, Elapsed: durationpb.New(9 * time.Millisecond),
 	}}
 	resp, err := newChildOpsServer(f).Search(context.Background(),
 		connect.NewRequest(&rafikiv1.SearchRequest{
@@ -226,7 +226,7 @@ func TestChildOpsSearchReceivesTheRequest(t *testing.T) {
 		len(f.searchReq.GetSessionFilter().GetHasLabel()) != 1 {
 		t.Errorf("seam got %+v, want the request fields intact", f.searchReq)
 	}
-	if resp.Msg.GetHits()[0].GetSnippet() != "hit" || resp.Msg.GetTotalHits() != 1 || resp.Msg.GetElapsed() != 9 {
+	if resp.Msg.GetHits()[0].GetSnippet() != "hit" || resp.Msg.GetTotalHits() != 1 || resp.Msg.GetElapsed().AsDuration() != 9*time.Millisecond {
 		t.Errorf("resp = %+v, want the seam answer back", resp.Msg)
 	}
 }

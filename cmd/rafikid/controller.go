@@ -1339,7 +1339,7 @@ func (c *Controller) Search(q searchQuery) protocol.SearchResponseData {
 				SessionFile: snap.SessionFile,
 				SessionID:   snap.SessionID,
 				SessionName: snap.Name,
-				Timestamp:   ev.Timestamp,
+				Timestamp:   time.UnixMilli(ev.Timestamp),
 				Snippet:     snippet,
 				MatchStart:  idx,
 				MatchEnd:    idx + len(q.Query),
@@ -1349,7 +1349,7 @@ func (c *Controller) Search(q searchQuery) protocol.SearchResponseData {
 					Hits:      hits,
 					TotalHits: len(hits),
 					Scanned:   scanned,
-					Elapsed:   time.Since(start).Milliseconds(),
+					Elapsed:   time.Since(start),
 				}
 			}
 		}
@@ -1358,7 +1358,7 @@ func (c *Controller) Search(q searchQuery) protocol.SearchResponseData {
 		Hits:      hits,
 		TotalHits: len(hits),
 		Scanned:   scanned,
-		Elapsed:   time.Since(start).Milliseconds(),
+		Elapsed:   time.Since(start),
 	}
 }
 

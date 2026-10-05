@@ -441,7 +441,7 @@ type ChildSummary struct {
 	SessionFile   string            `json:"sessionFile,omitempty"`
 	Status        string            `json:"status"`
 	StartedAt     time.Time         `json:"startedAt"`
-	LastActivity  int64             `json:"lastActivity"`
+	LastActivity  time.Time         `json:"lastActivity"`
 	ExitCode      *int              `json:"exitCode"` // null while alive
 	ExitSignal    string            `json:"exitSignal,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
@@ -526,24 +526,24 @@ type GetStreamsResponseData struct {
 
 // SearchHit is one content match in a Search response (§6.15).
 type SearchHit struct {
-	ChildID     string `json:"childId"`
-	SessionFile string `json:"sessionFile"`
-	SessionID   string `json:"sessionId,omitempty"`
-	SessionName string `json:"sessionName,omitempty"`
-	EntryID     string `json:"entryId,omitempty"`
-	Timestamp   int64  `json:"timestamp"`
-	Role        string `json:"role,omitempty"`
-	Snippet     string `json:"snippet"`
-	MatchStart  int    `json:"matchStart"`
-	MatchEnd    int    `json:"matchEnd"`
+	ChildID     string    `json:"childId"`
+	SessionFile string    `json:"sessionFile"`
+	SessionID   string    `json:"sessionId,omitempty"`
+	SessionName string    `json:"sessionName,omitempty"`
+	EntryID     string    `json:"entryId,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+	Role        string    `json:"role,omitempty"`
+	Snippet     string    `json:"snippet"`
+	MatchStart  int       `json:"matchStart"`
+	MatchEnd    int       `json:"matchEnd"`
 }
 
 // SearchResponseData is the data payload of a Search answer (§6.15).
 type SearchResponseData struct {
-	Hits      []SearchHit `json:"hits"`
-	TotalHits int         `json:"totalHits"`
-	Scanned   int         `json:"scanned"`
-	Elapsed   int64       `json:"elapsed"`
+	Hits      []SearchHit   `json:"hits"`
+	TotalHits int           `json:"totalHits"`
+	Scanned   int           `json:"scanned"`
+	Elapsed   time.Duration `json:"elapsed"`
 }
 
 // ChildCounts breaks down live vs exited child totals for StatusResponseData.

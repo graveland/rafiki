@@ -612,7 +612,7 @@ class ChildSummary:
     cwd: str = ""
     pid: Optional[int] = None
     started_at: Optional[datetime.datetime] = None
-    last_activity: int = 0
+    last_activity: Optional[datetime.datetime] = None
     exit_code: Optional[int] = None
     labels: dict[str, str] = dataclasses.field(default_factory=dict)
     session_id: str = ""
@@ -645,8 +645,8 @@ class ChildSummary:
             out["pid"] = self.pid
         if self.started_at is not None:
             out["startedAt"] = _ts_out(self.started_at)
-        if self.last_activity != 0:
-            out["lastActivity"] = str(self.last_activity)
+        if self.last_activity is not None:
+            out["lastActivity"] = _ts_out(self.last_activity)
         if self.exit_code is not None:
             out["exitCode"] = self.exit_code
         if self.labels:
@@ -703,7 +703,7 @@ class ChildSummary:
             obj.started_at = _ts_in(_v, "startedAt")
         _v = _d.get("lastActivity")
         if _v is not None:
-            obj.last_activity = _int_in(_v)
+            obj.last_activity = _ts_in(_v, "lastActivity")
         _v = _d.get("exitCode")
         if _v is not None:
             obj.exit_code = _int_in(_v)
@@ -4995,7 +4995,7 @@ class SearchResponse:
     hits: list[SearchResponse.SearchHit] = dataclasses.field(default_factory=list)
     total_hits: int = 0
     scanned: int = 0
-    elapsed: int = 0
+    elapsed: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -5005,8 +5005,8 @@ class SearchResponse:
             out["totalHits"] = self.total_hits
         if self.scanned != 0:
             out["scanned"] = self.scanned
-        if self.elapsed != 0:
-            out["elapsed"] = str(self.elapsed)
+        if self.elapsed is not None:
+            out["elapsed"] = _dur_out(self.elapsed)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "SearchResponse":
@@ -5022,7 +5022,7 @@ class SearchResponse:
             obj.scanned = _int_in(_v)
         _v = _d.get("elapsed")
         if _v is not None:
-            obj.elapsed = _int_in(_v)
+            obj.elapsed = _dur_in(_v, "elapsed")
         return obj
 
     @dataclasses.dataclass
@@ -5032,7 +5032,7 @@ class SearchResponse:
         session_id: str = ""
         session_name: str = ""
         entry_id: str = ""
-        timestamp: int = 0
+        timestamp: Optional[datetime.datetime] = None
         role: str = ""
         snippet: str = ""
         match_start: int = 0
@@ -5050,8 +5050,8 @@ class SearchResponse:
                 out["sessionName"] = self.session_name
             if self.entry_id != "":
                 out["entryId"] = self.entry_id
-            if self.timestamp != 0:
-                out["timestamp"] = str(self.timestamp)
+            if self.timestamp is not None:
+                out["timestamp"] = _ts_out(self.timestamp)
             if self.role != "":
                 out["role"] = self.role
             if self.snippet != "":
@@ -5081,7 +5081,7 @@ class SearchResponse:
                 obj.entry_id = _v
             _v = _d.get("timestamp")
             if _v is not None:
-                obj.timestamp = _int_in(_v)
+                obj.timestamp = _ts_in(_v, "timestamp")
             _v = _d.get("role")
             if _v is not None:
                 obj.role = _v

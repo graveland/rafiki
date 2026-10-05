@@ -183,7 +183,7 @@ func TestChildSummary_NullPID(t *testing.T) {
 		Cwd:          "/tmp",
 		Status:       "exited",
 		StartedAt:    time.Unix(1716636789, 0),
-		LastActivity: 1716636890,
+		LastActivity: time.Unix(1716636890, 0),
 	}
 	b, err := json.Marshal(cs)
 	c.Require().NoError(err)

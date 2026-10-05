@@ -120,11 +120,11 @@ func TestChildOpsSearchResponseMapping(t *testing.T) {
 		h, want := resp.Hits[0], controlSearchResult().Hits[0]
 		c.False(h.ChildId != want.ChildID || h.SessionFile != want.SessionFile ||
 			h.SessionId != want.SessionID || h.SessionName != want.SessionName ||
-			h.EntryId != want.EntryID || h.Timestamp != want.Timestamp ||
+			h.EntryId != want.EntryID || h.Timestamp == nil || !h.Timestamp.AsTime().Equal(want.Timestamp) ||
 			h.Role != want.Role || h.Snippet != want.Snippet ||
 			h.MatchStart != int32(want.MatchStart) || h.MatchEnd != int32(want.MatchEnd), "hit = %+v, want %+v", h, want)
-		if resp.TotalHits != 1 || resp.Scanned != 4 || resp.Elapsed != 9 {
-			t.Errorf("totals = %d/%d/%d, want 1/4/9", resp.TotalHits, resp.Scanned, resp.Elapsed)
+		if resp.TotalHits != 1 || resp.Scanned != 4 || resp.Elapsed == nil || resp.Elapsed.AsDuration() != 9*time.Millisecond {
+			t.Errorf("totals = %d/%d/%v, want 1/4/9ms", resp.TotalHits, resp.Scanned, resp.Elapsed)
 		}
 	})
 	t.Run("no hits is an empty array, never null", func(t *testing.T) {
@@ -133,6 +133,23 @@ func TestChildOpsSearchResponseMapping(t *testing.T) {
 		c.NotNil(resp.Hits, "hits = nil, want an empty repeated field")
 		c.Empty(resp.Hits, "hits = %d entries, want 0", len(resp.Hits))
 	})
+}
+
+// A zero elapsed and a zero (epoch) hit timestamp stay PRESENT on the wire, as
+// the old int64s did: elapsed as a zero Duration, the timestamp as the epoch
+// Timestamp (Controller.Search builds it with time.UnixMilli, so 0 ms is the
+// epoch, never an absent field).
+func TestChildOpsSearchZeroElapsedAndTimestampStayPresent(t *testing.T) {
+	c := assert.NewCollecting(t)
+	resp := searchResponseFrom(protocol.SearchResponseData{
+		Hits: []protocol.SearchHit{{ChildID: "c_1", Timestamp: time.UnixMilli(0)}},
+	})
+	c.Require().NotNil(resp.Elapsed, "elapsed must stay present for a zero value")
+	c.Eq(time.Duration(0), resp.Elapsed.AsDuration(), "zero elapsed")
+	c.Require().Len(resp.Hits, 1, "hits")
+	got := resp.Hits[0].GetTimestamp()
+	c.Require().NotNil(got, "hit timestamp must stay present")
+	c.Eq(time.UnixMilli(0).UnixMilli(), got.AsTime().UnixMilli(), "epoch hit timestamp")
 }
 
 // controlSearchResult is one framed hit with every field set, so a dropped
@@ -145,7 +162,7 @@ func controlSearchResult() protocol.SearchResponseData {
 			SessionID:   "sid",
 			SessionName: "name",
 			EntryID:     "e1",
-			Timestamp:   1700000000000,
+			Timestamp:   time.UnixMilli(1700000000000),
 			Role:        "user",
 			Snippet:     "the match",
 			MatchStart:  4,
@@ -153,7 +170,7 @@ func controlSearchResult() protocol.SearchResponseData {
 		}},
 		TotalHits: 1,
 		Scanned:   4,
-		Elapsed:   9,
+		Elapsed:   9 * time.Millisecond,
 	}
 }
 

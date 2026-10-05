@@ -174,6 +174,34 @@ func TestListChildrenRejectsOutOfRangeSince(t *testing.T) {
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
+// ─── ChildSummary.last_activity (Timestamp) ──────────────────────────────────
+
+func TestListChildrenLastActivityRoundTrips(t *testing.T) {
+	c := assert.NewCollecting(t)
+	active := time.UnixMilli(1757000000000)
+	s := connectapi.NewServer(nil)
+	s.SetChildLister(&fakeLister{all: []protocol.ChildSummary{{ChildID: "c_1", LastActivity: active}}})
+	resp, err := s.ListChildren(context.Background(), connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+	c.Require().NoError(err, "ListChildren")
+	got := resp.Msg.GetChildren()[0].GetLastActivity()
+	c.Require().NotNil(got, "last_activity")
+	c.Eq(active.UnixMilli(), got.AsTime().UnixMilli(), "last_activity round-trip")
+}
+
+// A zero LastActivity is the year-1 Timestamp, not an absent one: the old wire
+// always sent UnixMilli (which for a zero time is a large negative count), so
+// the field stays present and its UnixMilli is unchanged.
+func TestListChildrenLastActivityZeroTimeIsRepresentable(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := connectapi.NewServer(nil)
+	s.SetChildLister(&fakeLister{all: []protocol.ChildSummary{{ChildID: "c_1"}}})
+	resp, err := s.ListChildren(context.Background(), connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+	c.Require().NoError(err, "ListChildren")
+	got := resp.Msg.GetChildren()[0].GetLastActivity()
+	c.Require().NotNil(got, "last_activity must stay present for a zero value")
+	c.Eq(time.Time{}.UnixMilli(), got.AsTime().UnixMilli(), "zero last_activity keeps the old UnixMilli")
+}
+
 // ─── Search session filter .since (Timestamp) ────────────────────────────────
 
 func TestSearchRejectsOutOfRangeSessionSince(t *testing.T) {

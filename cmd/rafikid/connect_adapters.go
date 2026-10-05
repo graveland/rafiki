@@ -172,7 +172,7 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 		SessionFile:  snap.SessionFile,
 		Status:       string(snap.Status),
 		StartedAt:    snap.StartedAt,
-		LastActivity: snap.LastActivity.UnixMilli(),
+		LastActivity: snap.LastActivity,
 		ExitCode:     snap.ExitCode,
 		ExitSignal:   snap.ExitSignal,
 		// The once-resolved routing spec, mirrored from the session. Model is
