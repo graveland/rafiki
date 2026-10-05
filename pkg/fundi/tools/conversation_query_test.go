@@ -60,6 +60,71 @@ func TestConversationSearchMaterializesAndFormatsRows(t *testing.T) {
 	}
 }
 
+// TestConversationSearchBindsSinceUntil pins that the tool's since/until
+// arguments actually bind to the filter and reach the reader. Before the fix
+// these fields carried no json tag, so encoding/json (which matches by
+// case-insensitive FIELD NAME and does not cross underscores) never bound a
+// `since`/`until` key to them and they were silently ignored -- so this test
+// fails (nil filter times) against that pre-fix behaviour.
+func TestConversationSearchBindsSinceUntil(t *testing.T) {
+	c := assert.NewCollecting(t)
+	fake := &fakeConversationReader{}
+	tool, _ := ConversationSearchBlueprint{}.Materialize(ToolOpts{Conversations: fake})
+
+	_, err := tool.Execute(context.Background(), ToolInput(
+		`{"since":"2026-01-02T03:04:05Z","until":"2026-01-03T06:07:08Z"}`))
+	c.Require().NoError(err, "Execute")
+	since, _ := time.Parse(time.RFC3339, "2026-01-02T03:04:05Z")
+	until, _ := time.Parse(time.RFC3339, "2026-01-03T06:07:08Z")
+	if fake.query.Since == nil || !fake.query.Since.Equal(since) {
+		t.Errorf("Since = %v, want %v (the tool must bind the since argument)", fake.query.Since, since)
+	}
+	if fake.query.Until == nil || !fake.query.Until.Equal(until) {
+		t.Errorf("Until = %v, want %v (the tool must bind the until argument)", fake.query.Until, until)
+	}
+}
+
+// TestConversationSearchBlankSinceUntilIsUnbounded pins that an absent key OR a
+// blanked optional argument ("") means unbounded, never an error.
+func TestConversationSearchBlankSinceUntilIsUnbounded(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		in   ToolInput
+	}{
+		{"absent", ToolInput(`{}`)},
+		{"empty strings", ToolInput(`{"since":"","until":""}`)},
+		{"null", ToolInput(`{"since":null,"until":null}`)},
+	} {
+		fake := &fakeConversationReader{}
+		tool, _ := ConversationSearchBlueprint{}.Materialize(ToolOpts{Conversations: fake})
+		_, err := tool.Execute(context.Background(), tc.in)
+		c.Require().NoError(err, "%s: Execute", tc.name)
+		c.True(fake.query.Since == nil && fake.query.Until == nil,
+			"%s: since/until = %v/%v, want both nil (unbounded)", tc.name, fake.query.Since, fake.query.Until)
+	}
+}
+
+// TestConversationSearchMalformedSinceIsAnError pins that a genuinely malformed
+// non-empty bound fails the whole call loudly rather than being ignored.
+func TestConversationSearchMalformedSinceIsAnError(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		in   ToolInput
+	}{
+		{"date only", ToolInput(`{"since":"2026-01-01"}`)},
+		{"garbage", ToolInput(`{"until":"not-a-time"}`)},
+		{"wrong type", ToolInput(`{"since":123}`)},
+	} {
+		fake := &fakeConversationReader{}
+		tool, _ := ConversationSearchBlueprint{}.Materialize(ToolOpts{Conversations: fake})
+		_, err := tool.Execute(context.Background(), tc.in)
+		c.Require().Error(err, "%s: Execute returned no error", tc.name)
+		c.StrContains(err.Error(), "conversation_search", "%s: error does not name the tool", tc.name)
+	}
+}
+
 func TestConversationSearchEmptyResult(t *testing.T) {
 	c := assert.NewCollecting(t)
 	fake := &fakeConversationReader{}

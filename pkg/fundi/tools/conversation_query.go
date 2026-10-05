@@ -36,6 +36,43 @@ type ConversationQuery struct {
 	Limit                                       int
 }
 
+// rfc3339Time binds one RFC3339 time argument. An EMPTY string -- an optional
+// argument the caller blanked -- means UNSET (no bound), matching the proto's
+// absent Timestamp; a genuine non-empty malformed value still fails loudly.
+type rfc3339Time struct{ *time.Time }
+
+func (r *rfc3339Time) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("time: %w", err)
+	}
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return fmt.Errorf("time: %w", err)
+	}
+	r.Time = &t
+	return nil
+}
+
+// conversationSearchArgs is the raw JSON the conversation_search tool binds.
+// Since/Until go through rfc3339Time so a blanked optional argument is
+// unbounded rather than a hard failure. min_tokens deliberately carries no json
+// tag: encoding/json does not match "min_tokens" to MinTokens, so it stays
+// ignored -- a pre-existing quirk kept as-is.
+type conversationSearchArgs struct {
+	Since, Until                                rfc3339Time
+	Owner, Persona, Source, Model, Status, Path string
+	MinTokens                                   int64
+	Text                                        string
+	Limit                                       int
+}
+
 // ConversationTranscriptTurn mirrors insights.TranscriptTurn.
 type ConversationTranscriptTurn struct {
 	Ordinal                                    int
@@ -142,9 +179,15 @@ func (t *conversationSearchTool) Execute(ctx context.Context, in ToolInput) (Too
 	if err := ctx.Err(); err != nil {
 		return ToolResult{}, err
 	}
-	var q ConversationQuery
-	if err := in.Unmarshal(&q); err != nil {
+	var args conversationSearchArgs
+	if err := in.Unmarshal(&args); err != nil {
 		return ToolResult{}, fmt.Errorf("conversation_search: %w", err)
+	}
+	q := ConversationQuery{
+		Since: args.Since.Time, Until: args.Until.Time,
+		Owner: args.Owner, Persona: args.Persona, Source: args.Source,
+		Model: args.Model, Status: args.Status, Path: args.Path,
+		MinTokens: args.MinTokens, Text: args.Text, Limit: args.Limit,
 	}
 	rows, err := t.reader.ConversationSearch(ctx, q)
 	if err != nil {
