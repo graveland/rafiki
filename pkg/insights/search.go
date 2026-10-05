@@ -28,7 +28,6 @@ type SearchFilter struct {
 	Text              string // ILIKE substring match against the first user message snippet
 	Entrypoint        string // match conversations by origin_entrypoint
 	ExcludeEntrypoint string // drop conversations with this origin_entrypoint
-	Closed            string // "" = any, "open" = closed_at IS NULL, "closed" = closed_at IS NOT NULL
 	Limit             int    // defaults to 50 when <= 0
 }
 
@@ -66,11 +65,6 @@ const defaultSearchLimit = 50
 func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]ConversationSummary, error) {
 	if err := f.Path.validate(); err != nil {
 		return nil, err
-	}
-	switch f.Closed {
-	case "", "open", "closed":
-	default:
-		return nil, fmt.Errorf("invalid closed filter %q: use %q, %q or %q", f.Closed, "", "open", "closed")
 	}
 	limit := f.Limit
 	if limit <= 0 {
@@ -111,14 +105,6 @@ func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]C
 	}
 	if f.ExcludeEntrypoint != "" {
 		convConds = append(convConds, "c.origin_entrypoint IS DISTINCT FROM "+a.next(f.ExcludeEntrypoint))
-	}
-	// Closed filters on the conversation column itself (conversation.closed_at),
-	// so it participates in the pre-lateral ordered LIMIT below.
-	switch f.Closed {
-	case "open":
-		convConds = append(convConds, "c.closed_at IS NULL")
-	case "closed":
-		convConds = append(convConds, "c.closed_at IS NOT NULL")
 	}
 	// Model, Source, and Since/Until filter on PER-TURN values via ONE shared
 	// EXISTS — a single turn must satisfy all of them, matching the population

@@ -82,6 +82,16 @@ func wireTime(ts *timestamppb.Timestamp) time.Time {
 	return ts.AsTime()
 }
 
+// wireTimePtr is wireTime as a *time.Time: nil for an unset message or the
+// epoch, matching StatsFilter's nil-means-unbounded Since/Until.
+func wireTimePtr(ts *timestamppb.Timestamp) *time.Time {
+	t := wireTime(ts)
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
 // buildSearchQuery maps the proto SearchRequest onto the framed SearchQuery.
 // Extracted so the field mapping is testable without a Controller behind it.
 func buildSearchQuery(req *rafikiv1.SearchRequest) searchQuery {
@@ -182,13 +192,13 @@ func modelInfoResponseFrom(mi protocol.ModelInfoResponseData) *rafikiv1.ModelInf
 
 // buildStatsFilter maps the proto request's filter fields onto the framed
 // insights.StatsFilter, exactly as the framed conversationStats handler
-// builds it: unixToTimePtr treats 0 as unset, matching
+// builds it: an unset or epoch Timestamp means unbounded, matching
 // StatsFilter's nil-means-unbounded Since/Until. Extracted so the field
 // mapping is testable without a Controller behind it.
 func buildStatsFilter(req *rafikiv1.ConversationStatsRequest) insights.StatsFilter {
 	return insights.StatsFilter{
-		Since:   unixToTimePtr(req.GetSinceUnix()),
-		Until:   unixToTimePtr(req.GetUntilUnix()),
+		Since:   wireTimePtr(req.GetSince()),
+		Until:   wireTimePtr(req.GetUntil()),
 		Owner:   req.GetOwner(),
 		Persona: req.GetPersona(),
 		Source:  req.GetSource(),

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -168,7 +169,7 @@ func TestConversationFindingsMapsRowsAndFilter(t *testing.T) {
 		analyses: []connectapi.ReviewAnalysis{{
 			ID: "a-1", ConversationID: "conv-1", Model: "openrouter/x/glm", Profile: "work",
 			Status: "ok", Error: "",
-			InputTokens: 15000, OutputTokens: 900, CostUSD: 0.0210, CreatedAtUnix: 1757000000,
+			InputTokens: 15000, OutputTokens: 900, CostUSD: 0.0210, CreatedAt: time.Unix(1757000000, 0),
 		}},
 	}
 	s := newFindingsServer(f)
@@ -203,9 +204,9 @@ func TestConversationFindingsMapsRowsAndFilter(t *testing.T) {
 	a := ana[0]
 	c.False(a.GetId() != "a-1" || a.GetConversationId() != "conv-1" || a.GetModel() != "openrouter/x/glm" ||
 		a.GetProfile() != "work" || a.GetStatus() != "ok" || a.GetError() != "", "analysis = %+v, want the fake's row", a)
-	if a.GetInputTokens() != 15000 || a.GetOutputTokens() != 900 || a.GetCostUsd() != 0.0210 || a.GetCreatedAtUnix() != 1757000000 {
+	if a.GetInputTokens() != 15000 || a.GetOutputTokens() != 900 || a.GetCostUsd() != 0.0210 || a.GetCreatedAt().AsTime().Unix() != 1757000000 {
 		t.Errorf("analysis scalars = (%d,%d,%v,%d), want (15000,900,0.021,1757000000)",
-			a.GetInputTokens(), a.GetOutputTokens(), a.GetCostUsd(), a.GetCreatedAtUnix())
+			a.GetInputTokens(), a.GetOutputTokens(), a.GetCostUsd(), a.GetCreatedAt().AsTime().Unix())
 	}
 }
 

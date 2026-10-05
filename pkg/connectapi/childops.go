@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // ChildOps is the operator-side slice of the daemon behind the Resume,
@@ -264,6 +265,13 @@ func (s *Server) ConversationStats(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ConversationStatsRequest],
 ) (*connect.Response[rafikiv1.ConversationStatsResponse], error) {
+	for _, ts := range []*timestamppb.Timestamp{req.Msg.GetSince(), req.Msg.GetUntil()} {
+		if ts != nil {
+			if err := ts.CheckValid(); err != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			}
+		}
+	}
 	o, err := s.childOp()
 	if err != nil {
 		return nil, err

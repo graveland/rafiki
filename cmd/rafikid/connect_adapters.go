@@ -694,10 +694,10 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 		return nil, err
 	}
 	rows, err := a.c.ConversationSearch(ctx, scope, insights.SearchFilter{
-		Since: unixToTimePtr(f.SinceUnix), Until: unixToTimePtr(f.UntilUnix),
+		Since: f.Since, Until: f.Until,
 		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
 		Status: f.Status, Path: insights.Path(f.Path), MinTokens: f.MinTokens,
-		Text: f.Text, Limit: f.Limit, Closed: f.Closed,
+		Text: f.Text, Limit: f.Limit,
 	})
 	if err != nil {
 		logIfUncoded("connect: conversation search failed", err)
@@ -705,21 +705,14 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 	}
 	out := make([]connectapi.ConversationSummaryRow, 0, len(rows))
 	for _, r := range rows {
-		row := connectapi.ConversationSummaryRow{
+		out = append(out, connectapi.ConversationSummaryRow{
 			ID: r.ID, Name: r.Name, Owner: r.Owner, Persona: r.Persona, Source: r.Source,
-			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAtUnix: r.CreatedAt.Unix(),
-			Turns: r.Turns, InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
+			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAt: r.CreatedAt,
+			ClosedAt: r.ClosedAt, Turns: r.Turns,
+			InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
 			CacheReadTokens: r.CacheReadTokens, CacheHitRatio: r.CacheHitRatio, TotalCostUSD: r.TotalCostUSD,
 			FirstMessage: r.FirstMessage,
-		}
-		// ClosedAt is the ONLY signal a row was closed; ClosedAtUnix stays nil
-		// (proto optional unset) for an open conversation, never 0, so "closed at
-		// the epoch" and "still open" cannot collapse into each other.
-		if r.ClosedAt != nil {
-			unix := r.ClosedAt.Unix()
-			row.ClosedAtUnix = &unix
-		}
-		out = append(out, row)
+		})
 	}
 	return out, nil
 }
@@ -742,7 +735,7 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 		turns = append(turns, connectapi.TranscriptTurnRow{
 			Ordinal: t.Ordinal, Role: t.Role, Content: t.Content, Skills: t.Skills,
 			InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
-			LatencyMS: t.LatencyMS, Model: t.Model, PrefixHash: t.PrefixHash,
+			Latency: msPtrDuration(t.LatencyMS), Model: t.Model, PrefixHash: t.PrefixHash,
 			ServedProvider: t.ServedProvider,
 		})
 	}
@@ -764,7 +757,7 @@ func (a connectConversations) RunQuery(ctx context.Context, name string, f conne
 		return connectapi.CatalogueResult{}, err
 	}
 	res, err := a.c.ConversationQuery(ctx, scope, name, insights.StatsFilter{
-		Since: unixToTimePtr(f.SinceUnix), Until: unixToTimePtr(f.UntilUnix),
+		Since: f.Since, Until: f.Until,
 		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
 		Path: insights.Path(f.Path),
 	})
@@ -874,14 +867,12 @@ func (a connectFindingsReader) RecentAnalyses(ctx context.Context, conversationI
 	return analyses, err
 }
 
-// unixToTimePtr converts a wire Unix-seconds value to *time.Time, treating 0
-// as unset -- matches pkg/control/dispatch.go's unixToTime (duplicated here
-// rather than exported, since pkg/control and cmd/rafikid have no shared
-// leaf package for it and it is three lines).
-func unixToTimePtr(sec int64) *time.Time {
-	if sec == 0 {
+// msPtrDuration converts an optional millisecond count onto an optional
+// time.Duration, keeping nil (not reported) distinct from a measured zero.
+func msPtrDuration(ms *int) *time.Duration {
+	if ms == nil {
 		return nil
 	}
-	t := time.Unix(sec, 0)
-	return &t
+	d := time.Duration(*ms) * time.Millisecond
+	return &d
 }

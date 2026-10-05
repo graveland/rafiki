@@ -66,12 +66,12 @@ transcript = c.export(child)              # the child's decomposed transcript
 transcript = c.export_conversation(conv)  # any readable conversation, by its id
 rows = c.conversation_search(text="x", source="claude", limit=50)
                                           # conversations (id, name, turns, cost,
-                                          # first_message); a user credential
-                                          # reads all of its owner's, a child
-                                          # credential only its own subtree
-rows = c.conversation_search(closed="closed")  # "" any, "open" running,
-                                                # "closed" finished; rows carry
-                                                # closed_at when set
+                                          # first_message, created_at, closed_at);
+                                          # a user credential reads all of its
+                                          # owner's, a child credential only its
+                                          # own subtree
+rows = c.conversation_search(since=dt, until=dt)  # datetime bounds on turn
+                                                  # activity; None means unbounded
 ver  = c.status().version                 # daemon version (user credential only)
 c.stop(child)                             # graceful, then the kill ladder;
                                           # carries a per-call read timeout of

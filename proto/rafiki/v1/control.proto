@@ -647,8 +647,10 @@ message ListModelsResponse {
 // server-derived scope on top, per docs/plans/2026-09-12-conversation-query-
 // layer-design.md §3: scope is never on the wire).
 message ConversationSearchRequest {
-  optional int64 since_unix = 1;
-  optional int64 until_unix = 2;
+  // since/until bound the conversation's created_at. Unset or the epoch means
+  // unbounded (the old since_unix/until_unix = 0).
+  google.protobuf.Timestamp since = 13;
+  google.protobuf.Timestamp until = 14;
   string owner      = 3;
   string persona    = 4;
   string source     = 5;
@@ -658,7 +660,9 @@ message ConversationSearchRequest {
   int64  min_tokens = 9;
   string text       = 10;
   int32  limit      = 11; // 0 = default; server clamps to a max
-  string closed     = 12; // "" = any, "open", "closed"
+
+  reserved 1, 2, 12;  // was: since_unix, until_unix, closed
+  reserved "since_unix", "until_unix", "closed";
 }
 
 message ConversationSummary {
@@ -670,7 +674,7 @@ message ConversationSummary {
   string model    = 6;
   string status   = 7;
   string driven_by = 8;
-  int64  created_at_unix = 9;
+  google.protobuf.Timestamp created_at = 18;
   int32  turns = 10;
   int64  input_tokens = 11;
   int64  output_tokens = 12;
@@ -678,7 +682,12 @@ message ConversationSummary {
   double cache_hit_ratio = 14;
   double total_cost_usd = 15;
   string first_message = 16;
-  optional int64 closed_at_unix = 17; // unset = not closed (conversation.closed_at)
+  // closed_at is unset while the conversation is open, and equal to
+  // conversation.closed_at otherwise.
+  google.protobuf.Timestamp closed_at = 19;
+
+  reserved 9, 17;  // was: created_at_unix, closed_at_unix
+  reserved "created_at_unix", "closed_at_unix";
 }
 
 message ConversationSearchResponse {
@@ -699,12 +708,16 @@ message TranscriptTurn {
   optional int64 input_tokens = 5;
   optional int64 output_tokens = 6;
   optional int64 cache_read_tokens = 7;
-  optional int32 latency_ms = 8;
+  // latency is unset when not reported, mirroring the old optional latency_ms.
+  google.protobuf.Duration latency = 12;
   string model = 9;
   string prefix_hash = 10;
   // The OpenRouter provider that served the turn (e.g. "Together"); empty
   // when not reported (native Anthropic, no turn row, or pre-column turns).
   string served_provider = 11;
+
+  reserved 8;
+  reserved "latency_ms";
 }
 
 message ConversationExportResponse {
@@ -724,13 +737,17 @@ message ConversationExportResponse {
 // authenticated identity.
 message ConversationQueryRequest {
   string name = 1; // "tools" | "skills" | "classes" | "models" | "sizes" | "coverage"
-  optional int64 since_unix = 2;
-  optional int64 until_unix = 3;
+  // since/until are unset or the epoch for unbounded (the old *_unix = 0).
+  google.protobuf.Timestamp since = 9;
+  google.protobuf.Timestamp until = 10;
   string owner   = 4;
   string persona = 5;
   string source  = 6;
   string model   = 7;
   string path    = 8; // "" | "proxy" | "direct"
+
+  reserved 2, 3;
+  reserved "since_unix", "until_unix";
 }
 
 // QueryColumn declares one column's name and value kind. kind is one of
@@ -831,7 +848,10 @@ message ReviewAnalysis {
   int64 input_tokens = 7;
   int64 output_tokens = 8;
   double cost_usd = 9;
-  int64 created_at_unix = 10;
+  google.protobuf.Timestamp created_at = 11;
+
+  reserved 10;
+  reserved "created_at_unix";
 }
 
 message ConversationFindingsResponse {
@@ -1634,17 +1654,21 @@ message ModelRoutesResponse {
 
 // ConversationStatsRequest mirrors protocol.ConversationStatsRequest: global
 // (filtered) stats when conversation_id is empty, scoped to one conversation
-// otherwise — in which case the filter fields are ignored. since_unix and
-// until_unix are Unix seconds; 0 means unbounded.
+// otherwise — in which case the filter fields are ignored. since and until
+// are unset or the epoch for unbounded.
 message ConversationStatsRequest {
   string conversation_id = 1;
-  int64 since_unix = 2;
-  int64 until_unix = 3;
+  // since/until are unset or the epoch for unbounded (the old *_unix = 0).
+  google.protobuf.Timestamp since = 9;
+  google.protobuf.Timestamp until = 10;
   string owner = 4;
   string persona = 5;
   string source = 6;
   string model = 7;
   string path = 8;
+
+  reserved 2, 3;
+  reserved "since_unix", "until_unix";
 }
 
 message ConversationStatsResponse {

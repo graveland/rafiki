@@ -267,12 +267,30 @@ func TestChildOpsConversationStatsWrapsTheJSON(t *testing.T) {
 	c := assert.NewCollecting(t)
 	f := &fakeChildOps{statsJSON: `{"volume":{"conversations":3}}`}
 	resp, err := newChildOpsServer(f).ConversationStats(context.Background(),
-		connect.NewRequest(&rafikiv1.ConversationStatsRequest{Owner: "u1", SinceUnix: 42}))
+		connect.NewRequest(&rafikiv1.ConversationStatsRequest{Owner: "u1", Since: timestamppb.New(time.Unix(42, 0))}))
 	c.Require().NoError(err, "ConversationStats")
 	c.Eq(f.statsJSON, resp.Msg.GetStatsJson(), "stats_json")
 	c.Require().NotNil(f.statsReq, "the seam was never called")
-	if f.statsReq.GetOwner() != "u1" || f.statsReq.GetSinceUnix() != 42 {
+	if f.statsReq.GetOwner() != "u1" || !f.statsReq.GetSince().AsTime().Equal(time.Unix(42, 0)) {
 		t.Errorf("seam got %+v, want the request fields intact", f.statsReq)
+	}
+}
+
+// An out-of-range Timestamp on the stats request is refused InvalidArgument
+// before the seam is touched.
+func TestChildOpsConversationStatsRejectsOutOfRangeTimes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		req  *rafikiv1.ConversationStatsRequest
+	}{
+		{"since", &rafikiv1.ConversationStatsRequest{Since: outOfRangeTimestamp}},
+		{"until", &rafikiv1.ConversationStatsRequest{Until: outOfRangeTimestamp}},
+	} {
+		f := &fakeChildOps{}
+		_, err := newChildOpsServer(f).ConversationStats(context.Background(), connect.NewRequest(tc.req))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: code", tc.name)
+		c.Nil(f.statsReq, "%s: the seam must not be called", tc.name)
 	}
 }
 

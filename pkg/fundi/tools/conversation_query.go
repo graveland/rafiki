@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func init() {
@@ -18,16 +19,17 @@ func init() {
 // ModelRow/RateLimitStatus in pkg/connectapi for the established pattern.
 type ConversationSummaryRow struct {
 	ID, Name, Owner, Persona, Source, Model, Status, DrivenBy string
-	CreatedAtUnix                                             int64
+	CreatedAt                                                 time.Time
 	Turns                                                     int
 	InputTokens, OutputTokens, CacheReadTokens                int64
 	CacheHitRatio, TotalCostUSD                               float64
 	FirstMessage                                              string
 }
 
-// ConversationQuery mirrors insights.SearchFilter.
+// ConversationQuery mirrors insights.SearchFilter. Since/Until are RFC3339
+// times (unset = unbounded).
 type ConversationQuery struct {
-	SinceUnix, UntilUnix                        int64
+	Since, Until                                *time.Time
 	Owner, Persona, Source, Model, Status, Path string
 	MinTokens                                   int64
 	Text                                        string
@@ -67,7 +69,7 @@ type ConversationReader interface {
 // insights.SearchFilter, for conversation_search) -- same package, two
 // different filter shapes for two different tools.
 type CatalogueFilter struct {
-	SinceUnix, UntilUnix                int64
+	Since, Until                        *time.Time
 	Owner, Persona, Source, Model, Path string
 }
 
@@ -109,8 +111,8 @@ func (ConversationSearchBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "since_unix", Type: "integer", Description: "Unix seconds; only conversations with turn activity at or after this time."},
-			{Name: "until_unix", Type: "integer", Description: "Unix seconds; only conversations with turn activity before this time."},
+			{Name: "since", Type: "string", Description: "RFC3339 time; only conversations with turn activity at or after this time."},
+			{Name: "until", Type: "string", Description: "RFC3339 time; only conversations with turn activity before this time."},
 			{Name: "model", Type: "string", Description: "Filter by served model id."},
 			{Name: "source", Type: "string", Description: "Filter by capture source (e.g. \"agent\", \"claude\", \"rafiki-claude\")."},
 			{Name: "status", Type: "string", Description: "Filter by conversation status."},
@@ -235,8 +237,8 @@ func (ConversationQueryBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "name", Type: "string", Description: "One of: tools, skills, classes, models, sizes, coverage."},
-			{Name: "since_unix", Type: "integer", Description: "Unix seconds lower bound (meaning varies by query -- see its description)."},
-			{Name: "until_unix", Type: "integer", Description: "Unix seconds upper bound."},
+			{Name: "since", Type: "string", Description: "RFC3339 time lower bound (meaning varies by query -- see its description)."},
+			{Name: "until", Type: "string", Description: "RFC3339 time upper bound."},
 			{Name: "model", Type: "string", Description: "Filter by served model id (ignored by queries with no per-turn model)."},
 			{Name: "source", Type: "string", Description: "Filter by capture source."},
 			{Name: "path", Type: "string", Description: "\"proxy\" or \"direct\"; empty means either."},
@@ -264,9 +266,9 @@ func (t *conversationQueryTool) Execute(ctx context.Context, in ToolInput) (Tool
 		return ToolResult{}, err
 	}
 	var req struct {
-		Name                string `json:"name"`
-		SinceUnix           int64  `json:"since_unix"`
-		UntilUnix           int64  `json:"until_unix"`
+		Name                string     `json:"name"`
+		Since               *time.Time `json:"since"`
+		Until               *time.Time `json:"until"`
 		Model, Source, Path string
 	}
 	if err := in.Unmarshal(&req); err != nil {
@@ -276,7 +278,7 @@ func (t *conversationQueryTool) Execute(ctx context.Context, in ToolInput) (Tool
 		return ToolResult{}, fmt.Errorf("conversation_query: name is required")
 	}
 	res, err := t.reader.RunQuery(ctx, req.Name, CatalogueFilter{
-		SinceUnix: req.SinceUnix, UntilUnix: req.UntilUnix,
+		Since: req.Since, Until: req.Until,
 		Model: req.Model, Source: req.Source, Path: req.Path,
 	})
 	if err != nil {

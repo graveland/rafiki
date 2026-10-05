@@ -13,6 +13,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/conversationview"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -79,7 +80,7 @@ func conversationFilterVals(cmd *cobra.Command) conversationview.FilterVals {
 }
 
 // unixOrZero converts a resolved filter timestamp to the wire's Unix-seconds
-// convention, where 0 means unset.
+// convention, where 0 means unset (recall/memory verbs still on unix seconds).
 func unixOrZero(t *time.Time) int64 {
 	if t == nil {
 		return 0
@@ -87,16 +88,13 @@ func unixOrZero(t *time.Time) int64 {
 	return t.Unix()
 }
 
-// unixPtrOrNil converts a resolved filter timestamp to the Connect wire's
-// optional int64: nil means unset, so the field is absent rather than sent as
-// 0. The proto's optional int64 generates *int64, where a bare unixOrZero
-// would wrongly send "unset" as a present zero.
-func unixPtrOrNil(t *time.Time) *int64 {
+// timeTS converts a resolved filter timestamp to a wire Timestamp: nil stays
+// absent (unbounded), matching the old unix 0.
+func timeTS(t *time.Time) *timestamppb.Timestamp {
 	if t == nil {
 		return nil
 	}
-	u := t.Unix()
-	return &u
+	return timestamppb.New(*t)
 }
 
 // conversationsMode maps the global --output flag (and its -j/-J shorthands)
@@ -173,8 +171,8 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		req.SinceUnix = unixOrZero(f.Since)
-		req.UntilUnix = unixOrZero(f.Until)
+		req.Since = timeTS(f.Since)
+		req.Until = timeTS(f.Until)
 		req.Owner = f.Owner
 		req.Persona = f.Persona
 		req.Source = f.Source
@@ -208,10 +206,6 @@ func newConversationsSearchCmd() *cobra.Command {
 	cmd.Flags().Int64("min-tokens", 0, "minimum total tokens")
 	cmd.Flags().String("text", "", "full-text search over first messages")
 	cmd.Flags().Int("limit", 0, "max results (0 = default)")
-	// --open/--closed narrow by conversation.closed_at; neither means any.
-	cmd.Flags().Bool("open", false, "only conversations still open")
-	cmd.Flags().Bool("closed", false, "only finished conversations")
-	cmd.MarkFlagsMutuallyExclusive("open", "closed")
 	return cmd
 }
 
@@ -235,23 +229,11 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--limit must be at most %d", int32(math.MaxInt32))
 	}
 
-	// --open/--closed map onto the wire's closed filter; neither leaves it
-	// empty (any), cobra already rejects setting both.
-	open, _ := cmd.Flags().GetBool("open")
-	closed, _ := cmd.Flags().GetBool("closed")
-	closedFilter := ""
-	switch {
-	case open:
-		closedFilter = "open"
-	case closed:
-		closedFilter = "closed"
-	}
-
-	// Since/Until ride the proto's optional int64: absent means unbounded, so
-	// a resolved nil stays absent rather than being sent as a present zero.
+	// Since/Until ride the proto's Timestamp: unset means unbounded, so a
+	// resolved nil stays absent rather than being sent as a zero Timestamp.
 	req := &rafikiv1.ConversationSearchRequest{
-		SinceUnix: unixPtrOrNil(f.Since),
-		UntilUnix: unixPtrOrNil(f.Until),
+		Since:     timeTS(f.Since),
+		Until:     timeTS(f.Until),
 		Owner:     f.Owner,
 		Persona:   f.Persona,
 		Source:    f.Source,
@@ -261,7 +243,6 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 		MinTokens: f.MinTokens,
 		Text:      f.Text,
 		Limit:     int32(f.Limit),
-		Closed:    closedFilter,
 	}
 
 	resp, err := ep.control().ConversationSearch(cmdCtx(cmd), connect.NewRequest(req))
@@ -290,16 +271,15 @@ func renderSearchResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.C
 }
 
 // summaryFromProto converts a wire ConversationSummary to the domain shape
-// conversationview renders. CreatedAt is rebuilt from the wire's Unix seconds
-// in UTC so the JSON rendering does not depend on the client machine's
-// timezone; the table renderer Local()s it, so both surfaces are stable.
-// ClosedAt is present only when the wire field is set (optional int64): unset
-// means the conversation is still open, never a zero time.
+// conversationview renders. CreatedAt and ClosedAt come straight from the
+// wire's Timestamps (protojson already carries them in UTC); ClosedAt is
+// present only when the wire field is set, never a zero time for an open
+// conversation.
 func summaryFromProto(r *rafikiv1.ConversationSummary) insightstypes.ConversationSummary {
 	s := insightstypes.ConversationSummary{
 		ID: r.GetId(), Name: r.GetName(), Owner: r.GetOwner(), Persona: r.GetPersona(),
 		Source: r.GetSource(), Model: r.GetModel(), Status: r.GetStatus(), DrivenBy: r.GetDrivenBy(),
-		CreatedAt: time.Unix(r.GetCreatedAtUnix(), 0).UTC(),
+		CreatedAt: r.GetCreatedAt().AsTime(),
 		Turns:     int(r.GetTurns()),
 
 		InputTokens:     r.GetInputTokens(),
@@ -311,8 +291,8 @@ func summaryFromProto(r *rafikiv1.ConversationSummary) insightstypes.Conversatio
 
 		FirstMessage: r.GetFirstMessage(),
 	}
-	if r.ClosedAtUnix != nil {
-		closed := time.Unix(*r.ClosedAtUnix, 0).UTC()
+	if c := r.GetClosedAt(); c != nil {
+		closed := c.AsTime()
 		s.ClosedAt = &closed
 	}
 	return s
@@ -385,8 +365,8 @@ func transcriptFromProto(resp *rafikiv1.ConversationExportResponse) *insightstyp
 			PrefixHash:      t.GetPrefixHash(),
 			ServedProvider:  t.GetServedProvider(),
 		}
-		if t.LatencyMs != nil {
-			ms := int(*t.LatencyMs)
+		if l := t.GetLatency(); l != nil {
+			ms := int(l.AsDuration().Milliseconds())
 			turn.LatencyMS = &ms
 		}
 		tr.Turns = append(tr.Turns, turn)
@@ -439,7 +419,7 @@ func runConversationsQuery(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	resp, err := client.ConversationQuery(ctx, connect.NewRequest(&rafikiv1.ConversationQueryRequest{
-		Name: args[0], SinceUnix: unixPtrOrNil(f.Since), UntilUnix: unixPtrOrNil(f.Until),
+		Name: args[0], Since: timeTS(f.Since), Until: timeTS(f.Until),
 		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model, Path: string(f.Path),
 	}))
 	if err != nil {
@@ -685,7 +665,7 @@ func renderFindingsTable(w io.Writer, resp *rafikiv1.ConversationFindingsRespons
 		for _, a := range analyses {
 			tb.Row(a.GetId(), a.GetConversationId(), a.GetModel(), a.GetStatus(),
 				fmt.Sprintf("$%.4f", a.GetCostUsd()),
-				time.Unix(a.GetCreatedAtUnix(), 0).Local().Format("2006-01-02 15:04"))
+				a.GetCreatedAt().AsTime().Local().Format("2006-01-02 15:04"))
 		}
 		if err := tb.Render(); err != nil {
 			return err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -131,12 +132,14 @@ func TestConversationQueryMaterializesAndRendersTheCatalogue(t *testing.T) {
 	tool, err := (ConversationQueryBlueprint{}).Materialize(ToolOpts{Conversations: fake})
 	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 	res, err := tool.Execute(context.Background(), ToolInput(
-		`{"name":"tools","since_unix":100,"until_unix":200,"model":"m1","source":"agent","path":"proxy"}`))
+		`{"name":"tools","since":"2026-01-02T03:04:05Z","until":"2026-01-03T03:04:05Z","model":"m1","source":"agent","path":"proxy"}`))
 	c.Require().NoError(err, "Execute")
 	c.False(!strings.Contains(res.Text, "tool\tcalls\tavg\n") || !strings.Contains(res.Text, "bash\t3\t0.75\n"), "Execute text = %q, want the header row and the typed cells", res.Text)
 	c.Eq("tools", fake.runName, "query name forwarded")
-	if f := fake.runFilter; f.SinceUnix != 100 || f.UntilUnix != 200 || f.Model != "m1" || f.Source != "agent" || f.Path != "proxy" {
-		t.Errorf("filter forwarded = %+v, want every field the input carried (until_unix in particular)", f)
+	since, _ := time.Parse(time.RFC3339, "2026-01-02T03:04:05Z")
+	until, _ := time.Parse(time.RFC3339, "2026-01-03T03:04:05Z")
+	if f := fake.runFilter; f.Since == nil || !f.Since.Equal(since) || f.Until == nil || !f.Until.Equal(until) || f.Model != "m1" || f.Source != "agent" || f.Path != "proxy" {
+		t.Errorf("filter forwarded = %+v, want every field the input carried (until in particular)", f)
 	}
 }
 

@@ -6,29 +6,30 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strconv"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// ConversationSearchFilter mirrors insights.SearchFilter. SinceUnix/UntilUnix
-// of 0 mean unset, matching that type's nil-means-unbounded convention.
+// ConversationSearchFilter mirrors insights.SearchFilter. A nil Since/Until is
+// unbounded, matching that type's nil-means-unbounded convention.
 type ConversationSearchFilter struct {
-	SinceUnix, UntilUnix                        int64
+	Since, Until                                *time.Time
 	Owner, Persona, Source, Model, Status, Path string
 	MinTokens                                   int64
 	Text                                        string
-	Closed                                      string
 	Limit                                       int
 }
 
 // ConversationSummaryRow mirrors insights.ConversationSummary.
 type ConversationSummaryRow struct {
 	ID, Name, Owner, Persona, Source, Model, Status, DrivenBy string
-	CreatedAtUnix                                             int64
-	ClosedAtUnix                                              *int64 // nil = still open (proto optional: unset, never 0)
+	CreatedAt                                                 time.Time
+	ClosedAt                                                  *time.Time // nil = still open
 	Turns                                                     int
 	InputTokens, OutputTokens, CacheReadTokens                int64
 	CacheHitRatio, TotalCostUSD                               float64
@@ -41,8 +42,8 @@ type TranscriptTurnRow struct {
 	Role                                       string
 	Content                                    []byte
 	Skills                                     []string
-	InputTokens, OutputTokens, CacheReadTokens *int64 // nil = not reported
-	LatencyMS                                  *int
+	InputTokens, OutputTokens, CacheReadTokens *int64         // nil = not reported
+	Latency                                    *time.Duration // nil = not reported
 	Model, PrefixHash                          string
 	ServedProvider                             string // OpenRouter provider that served the turn; empty = not reported
 }
@@ -58,7 +59,7 @@ type TranscriptRow struct {
 // ConversationSearchFilter, to keep it visibly distinct from that existing
 // type -- this is a different filter shape used by a different RPC.
 type CatalogueFilter struct {
-	SinceUnix, UntilUnix                int64
+	Since, Until                        *time.Time
 	Owner, Persona, Source, Model, Path string
 }
 
@@ -116,19 +117,19 @@ func (s *Server) ConversationSearch(
 	if limit > maxConversationSearchLimit {
 		limit = maxConversationSearchLimit
 	}
-	// Reject an unknown closed value here, before the adapter, so every
-	// implementation agrees on the same InvalidArgument behaviour.
-	switch closed := req.Msg.GetClosed(); closed {
-	case "", "open", "closed":
-	default:
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("closed must be one of \"\", \"open\" or \"closed\", got "+strconv.Quote(closed)))
+	since, err := protoTimePtr(req.Msg.GetSince())
+	if err != nil {
+		return nil, err
+	}
+	until, err := protoTimePtr(req.Msg.GetUntil())
+	if err != nil {
+		return nil, err
 	}
 	f := ConversationSearchFilter{
-		SinceUnix: req.Msg.GetSinceUnix(), UntilUnix: req.Msg.GetUntilUnix(),
+		Since: since, Until: until,
 		Owner: req.Msg.GetOwner(), Persona: req.Msg.GetPersona(), Source: req.Msg.GetSource(),
 		Model: req.Msg.GetModel(), Status: req.Msg.GetStatus(), Path: req.Msg.GetPath(),
-		MinTokens: req.Msg.GetMinTokens(), Text: req.Msg.GetText(), Closed: req.Msg.GetClosed(), Limit: limit,
+		MinTokens: req.Msg.GetMinTokens(), Text: req.Msg.GetText(), Limit: limit,
 	}
 	rows, err := (*p).Search(ctx, f)
 	if err != nil {
@@ -136,14 +137,19 @@ func (s *Server) ConversationSearch(
 	}
 	out := make([]*rafikiv1.ConversationSummary, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, &rafikiv1.ConversationSummary{
+		row := &rafikiv1.ConversationSummary{
 			Id: r.ID, Name: r.Name, Owner: r.Owner, Persona: r.Persona, Source: r.Source,
-			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAtUnix: r.CreatedAtUnix,
-			ClosedAtUnix: r.ClosedAtUnix,
-			Turns:        int32(r.Turns), InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
+			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAt: timestamppb.New(r.CreatedAt),
+			Turns: int32(r.Turns), InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
 			CacheReadTokens: r.CacheReadTokens, CacheHitRatio: r.CacheHitRatio,
 			TotalCostUsd: r.TotalCostUSD, FirstMessage: r.FirstMessage,
-		})
+		}
+		// ClosedAt stays unset (never a zero Timestamp) for an open conversation,
+		// so "closed at the epoch" and "still open" cannot collapse.
+		if r.ClosedAt != nil {
+			row.ClosedAt = timestamppb.New(*r.ClosedAt)
+		}
+		out = append(out, row)
 	}
 	return connect.NewResponse(&rafikiv1.ConversationSearchResponse{Rows: out}), nil
 }
@@ -169,12 +175,16 @@ func (s *Server) ConversationExport(
 	}
 	turns := make([]*rafikiv1.TranscriptTurn, 0, len(tr.Turns))
 	for _, t := range tr.Turns {
-		turns = append(turns, &rafikiv1.TranscriptTurn{
+		turn := &rafikiv1.TranscriptTurn{
 			Ordinal: int32(t.Ordinal), Role: t.Role, Content: t.Content, Skills: t.Skills,
 			InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
-			LatencyMs: latencyMS32(t.LatencyMS), Model: t.Model, PrefixHash: t.PrefixHash,
+			Model: t.Model, PrefixHash: t.PrefixHash,
 			ServedProvider: t.ServedProvider,
-		})
+		}
+		if t.Latency != nil {
+			turn.Latency = durationpb.New(*t.Latency)
+		}
+		turns = append(turns, turn)
 	}
 	return connect.NewResponse(&rafikiv1.ConversationExportResponse{
 		ConversationId: tr.ConversationID, Owner: tr.Owner, Persona: tr.Persona,
@@ -194,8 +204,16 @@ func (s *Server) ConversationQuery(
 	if name == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name is required"))
 	}
+	since, err := protoTimePtr(req.Msg.GetSince())
+	if err != nil {
+		return nil, err
+	}
+	until, err := protoTimePtr(req.Msg.GetUntil())
+	if err != nil {
+		return nil, err
+	}
 	f := CatalogueFilter{
-		SinceUnix: req.Msg.GetSinceUnix(), UntilUnix: req.Msg.GetUntilUnix(),
+		Since: since, Until: until,
 		Owner: req.Msg.GetOwner(), Persona: req.Msg.GetPersona(), Source: req.Msg.GetSource(),
 		Model: req.Msg.GetModel(), Path: req.Msg.GetPath(),
 	}
@@ -251,12 +269,20 @@ func queryError(err error) error {
 	return connect.NewError(connect.CodeInternal, errors.New(internalRedactedText))
 }
 
-// latencyMS32 narrows an optional latency to the proto's optional int32,
-// keeping nil (not reported) distinct from a measured zero.
-func latencyMS32(ms *int) *int32 {
-	if ms == nil {
-		return nil
+// protoTimePtr converts an optional wire Timestamp to *time.Time, treating an
+// unset message AND the epoch (the message's zero value) as nil -- the
+// filter's "unbounded", matching the old integer 0. An out-of-range value is
+// refused as InvalidArgument, per design rule 4.
+func protoTimePtr(ts *timestamppb.Timestamp) (*time.Time, error) {
+	if ts == nil {
+		return nil, nil
 	}
-	v := int32(*ms)
-	return &v
+	if err := ts.CheckValid(); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if ts.GetSeconds() == 0 && ts.GetNanos() == 0 {
+		return nil, nil
+	}
+	t := ts.AsTime()
+	return &t, nil
 }

@@ -17,7 +17,7 @@ package integration_test
 // child-credential cases) a REAL per-child secret minted at spawn, so they
 // exercise cmd/rafikid's wiring — the lineage source hung off the Postgres
 // child store (wireLineageSource), childConversationScope's subtreeSelector
-// call, and the connect search adapter's Closed/ClosedAtUnix mapping — that no
+// call, and the connect search adapter's ClosedAt mapping — that no
 // unit fixture can see.
 //
 // Database hygiene (CLAUDE.md): RAFIKI_TEST_DSN points at a disposable but
@@ -126,15 +126,14 @@ func seedChildConversation(t *testing.T, pool *pgxpool.Pool, dsn, childID, owner
 	return convID
 }
 
-// searchByText issues one ConversationSearch for marker, optionally filtered by
-// closed ("" | "open" | "closed"), as the credential token names ("" = the
-// local socket's operator trust). It fails the test on any RPC error; the
-// caller asserts on the returned rows.
-func searchByText(t *testing.T, client rafikiv1connect.ControlClient, ctx context.Context, token, marker, closed string) []*rafikiv1.ConversationSummary {
+// searchByText issues one ConversationSearch for marker as the credential token
+// names ("" = the local socket's operator trust). It fails the test on any RPC
+// error; the caller asserts on the returned rows.
+func searchByText(t *testing.T, client rafikiv1connect.ControlClient, ctx context.Context, token, marker string) []*rafikiv1.ConversationSummary {
 	t.Helper()
 	resp, err := client.ConversationSearch(ctx, authorize(token, connect.NewRequest(
-		&rafikiv1.ConversationSearchRequest{Text: marker, Closed: closed})))
-	assert.NewAborting(t).NoError(err, "ConversationSearch(text=%q, closed=%q) as %q", marker, closed, token)
+		&rafikiv1.ConversationSearchRequest{Text: marker})))
+	assert.NewAborting(t).NoError(err, "ConversationSearch(text=%q) as %q", marker, token)
 	return resp.Msg.GetRows()
 }
 
@@ -194,7 +193,7 @@ func TestClosedLineageChildCredentialStillSearchesAClosedDescendant(t *testing.T
 	// Before the close the descendant is live, so the parent's subtree names its
 	// conversation — the positive control that keeps the post-close assertion
 	// from passing for a search that never worked.
-	before := searchByText(t, client, ctx, parentToken, marker, "")
+	before := searchByText(t, client, ctx, parentToken, marker)
 	ck.Eq(1, len(before), "parent search before close = %v, want exactly the descendant's conversation", rowIDs(before))
 	ck.Eq(convID, before[0].GetId(), "parent search before close returned the wrong conversation")
 
@@ -205,7 +204,7 @@ func TestClosedLineageChildCredentialStillSearchesAClosedDescendant(t *testing.T
 
 	// Headline: the closed descendant's conversation is STILL in the parent's
 	// subtree scope.
-	after := searchByText(t, client, ctx, parentToken, marker, "")
+	after := searchByText(t, client, ctx, parentToken, marker)
 	ck.Eq(1, len(after), "parent search AFTER close = %v, want exactly the descendant's conversation — a closed descendant must stay in its ancestor's subtree scope", rowIDs(after))
 	ck.Eq(convID, after[0].GetId(), "parent search after close returned a different conversation")
 
@@ -218,17 +217,15 @@ func TestClosedLineageChildCredentialStillSearchesAClosedDescendant(t *testing.T
 	}
 }
 
-// TestClosedLineageSearchClosedFilter: after a child is closed, a USER
-// credential's ConversationSearch can separate the now-closed conversation from
-// the still-open ones, and each row carries closed_at_unix.
+// TestClosedLineageSearchCarriesClosedAt: after a child is closed, a USER
+// credential's ConversationSearch returns the now-closed conversation and the
+// row carries closed_at as a Timestamp.
 //
 // The Close call stamps conversation.closed_at on every conversation linked to
-// the child (stampConversationsClosed); the search adapter forwards the
-// "closed"/"open" filter to insights.Search and maps the stamped column onto
-// the optional ClosedAtUnix. This is the end-to-end proof of both halves: the
-// filter selects the right rows, and a closed row is distinguishable from an
-// open one on the wire.
-func TestClosedLineageSearchClosedFilter(t *testing.T) {
+// the child (stampConversationsClosed); the search adapter maps the stamped
+// column onto the wire Timestamp. This is the end-to-end proof that a closed
+// row is distinguishable from an open one on the wire.
+func TestClosedLineageSearchCarriesClosedAt(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -253,24 +250,21 @@ func TestClosedLineageSearchClosedFilter(t *testing.T) {
 	defer cancel()
 	client := d.connectClient()
 
-	// Before close: the row is open, so "closed" does not return it.
-	openBefore := searchByText(t, client, ctx, ownerToken, marker, "closed")
-	ck.Eq(0, len(openBefore), "a not-yet-closed conversation matched closed:closed = %v", rowIDs(openBefore))
+	// Before close: the row is open, so its closed_at is unset.
+	openBefore := searchByText(t, client, ctx, ownerToken, marker)
+	ck.Eq(1, len(openBefore), "open search = %v, want exactly the seeded conversation", rowIDs(openBefore))
+	ck.True(openBefore[0].GetClosedAt() == nil, "a not-yet-closed conversation must leave closed_at unset, got %v", openBefore[0].GetClosedAt())
 
 	killAndForget(t, d, child)
 
-	// After close: "closed" returns exactly it, carrying closed_at_unix.
-	closedRows := searchByText(t, client, ctx, ownerToken, marker, "closed")
-	ck.Eq(1, len(closedRows), "closed:closed = %v, want exactly the closed child's conversation", rowIDs(closedRows))
+	// After close: the row is returned and carries closed_at.
+	closedRows := searchByText(t, client, ctx, ownerToken, marker)
+	ck.Eq(1, len(closedRows), "closed search = %v, want exactly the closed child's conversation", rowIDs(closedRows))
 	if len(closedRows) == 1 {
 		row := closedRows[0]
-		ck.Eq(convID, row.GetId(), "closed:closed returned the wrong conversation")
-		ck.NotNil(row.ClosedAtUnix, "the closed row carries no closed_at_unix; the adapter dropped conversation.closed_at")
+		ck.Eq(convID, row.GetId(), "search returned the wrong conversation")
+		ck.NotNil(row.GetClosedAt(), "the closed row carries no closed_at; the adapter dropped conversation.closed_at")
 	}
-
-	// "open" no longer returns it.
-	openAfter := searchByText(t, client, ctx, ownerToken, marker, "open")
-	ck.Eq(0, len(openAfter), "closed:open still returned the closed conversation = %v", rowIDs(openAfter))
 }
 
 // TestClosedLineageParentScopeUnchangedByClose pins that closing a descendant

@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -55,7 +58,12 @@ func newConversationsServer(f *fakeConversationInsights) *connectapi.Server {
 
 // ptrInt64 builds the *int64 a proto `optional int64` field decodes to.
 func ptrInt64(v int64) *int64 { return &v }
-func ptrInt(v int) *int       { return &v }
+
+// ptrMS builds the *time.Duration a turn's latency takes.
+func ptrMS(ms int) *time.Duration {
+	d := time.Duration(ms) * time.Millisecond
+	return &d
+}
 
 func TestConversationSearchNotWiredFailsUnavailable(t *testing.T) {
 	s := connectapi.NewServer(nil)
@@ -69,7 +77,7 @@ func TestConversationSearchMapsRowsAndFilter(t *testing.T) {
 	f := &fakeConversationInsights{rows: []connectapi.ConversationSummaryRow{{
 		ID: "c1", Name: "fix the lease", Owner: "brent", Persona: "worker",
 		Source: "proxy", Model: "openrouter/x/glm", Status: "idle", DrivenBy: "fundi",
-		CreatedAtUnix: 1757000000, Turns: 7,
+		CreatedAt: time.Unix(1757000000, 0), Turns: 7,
 		InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 800,
 		CacheHitRatio: 0.8, TotalCostUSD: 0.0123, FirstMessage: "please fix",
 	}}}
@@ -99,40 +107,97 @@ func TestConversationSearchClampsLimit(t *testing.T) {
 	c.Eq(500, f.gotFilter.Limit, "filter Limit")
 }
 
-// TestConversationSearchMapsClosedFilterAndRow pins the closed filter through
-// to the adapter AND the row's optional closed_at on the wire: a set value must
-// appear as closed_at_unix, an absent one must stay unset (never 0).
-func TestConversationSearchMapsClosedFilterAndRow(t *testing.T) {
+// TestConversationSearchMapsClosedAtRow pins the row's closed_at on the wire: a
+// set value appears as a Timestamp, an absent one stays unset (never a zero
+// Timestamp), so "closed" and "still open" cannot collapse.
+func TestConversationSearchMapsClosedAtRow(t *testing.T) {
 	c := assert.NewCollecting(t)
+	closed := time.Unix(1757000000, 0)
 	f := &fakeConversationInsights{rows: []connectapi.ConversationSummaryRow{
-		{ID: "closed", ClosedAtUnix: ptrInt64(1757000000)},
+		{ID: "closed", ClosedAt: &closed},
 		{ID: "open"},
 	}}
 	s := newConversationsServer(f)
 
 	resp, err := s.ConversationSearch(context.Background(),
-		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Closed: "open"}))
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
 	c.Require().NoError(err, "ConversationSearch")
-	c.Eq("open", f.gotFilter.Closed, "filter Closed")
 
 	rows := resp.Msg.GetRows()
 	c.Require().Len(rows, 2, "rows = %d, want 2", len(rows))
-	c.Require().True(rows[0].ClosedAtUnix != nil, "closed row must set closed_at_unix on the wire")
-	c.Eq(int64(1757000000), rows[0].GetClosedAtUnix(), "closed_at_unix")
-	c.False(rows[1].ClosedAtUnix != nil, "open row must leave closed_at_unix unset, got %v", rows[1].GetClosedAtUnix())
+	c.Require().True(rows[0].ClosedAt != nil, "closed row must set closed_at on the wire")
+	c.Eq(closed.Unix(), rows[0].GetClosedAt().AsTime().Unix(), "closed_at")
+	c.False(rows[1].ClosedAt != nil, "open row must leave closed_at unset, got %v", rows[1].GetClosedAt())
 }
 
-// An unrecognised closed value is refused at the handler, before the adapter is
-// ever called, so every adapter implementation agrees.
-func TestConversationSearchRejectsInvalidClosedValue(t *testing.T) {
+// TestConversationSearchRequestHasNoClosedField pins the removal: the request
+// message must carry no `closed` field and its old number 12 must be reserved,
+// so no client can send the removed filter.
+func TestConversationSearchRequestHasNoClosedField(t *testing.T) {
+	md := (&rafikiv1.ConversationSearchRequest{}).ProtoReflect().Descriptor()
+	if fd := md.Fields().ByName(protoreflect.Name("closed")); fd != nil {
+		t.Errorf("ConversationSearchRequest still has a `closed` field: %v", fd)
+	}
+	if fd := md.Fields().ByNumber(12); fd != nil {
+		t.Errorf("field number 12 is still live: %v", fd)
+	}
+	if !md.ReservedNames().Has("closed") {
+		t.Errorf("name `closed` is not reserved")
+	}
+	if !md.ReservedRanges().Has(12) {
+		t.Errorf("number 12 is not reserved: %v", md.ReservedRanges())
+	}
+}
+
+// TestConversationSearchSinceUntilRoundTrip pins that a set since/until reach
+// the filter as times, and that unset stays nil (unbounded).
+func TestConversationSearchSinceUntilRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
+	since := time.Unix(1700000000, 0)
+	until := time.Unix(1700003600, 0)
 	f := &fakeConversationInsights{}
 	s := newConversationsServer(f)
 
-	_, err := s.ConversationSearch(context.Background(),
-		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Closed: "bogus"}))
-	c := assert.NewAborting(t)
-	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "invalid closed err = %v, want", err)
-	c.False(f.searchCalled, "the adapter must not be called for an invalid closed value")
+	_, err := s.ConversationSearch(context.Background(), connect.NewRequest(&rafikiv1.ConversationSearchRequest{
+		Since: timestamppb.New(since), Until: timestamppb.New(until),
+	}))
+	c.Require().NoError(err, "ConversationSearch")
+	c.Require().True(f.gotFilter.Since != nil && f.gotFilter.Until != nil, "since/until reached the seam")
+	c.Eq(since.Unix(), f.gotFilter.Since.Unix(), "since")
+	c.Eq(until.Unix(), f.gotFilter.Until.Unix(), "until")
+}
+
+func TestConversationSearchUnsetOrEpochSinceIsUnbounded(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		req  *rafikiv1.ConversationSearchRequest
+	}{
+		{"unset", &rafikiv1.ConversationSearchRequest{}},
+		{"epoch", &rafikiv1.ConversationSearchRequest{Since: timestamppb.New(time.Unix(0, 0))}},
+	} {
+		f := &fakeConversationInsights{}
+		_, err := newConversationsServer(f).ConversationSearch(context.Background(), connect.NewRequest(tc.req))
+		c.Require().NoError(err, "%s: ConversationSearch", tc.name)
+		c.False(f.gotFilter.Since != nil, "%s: since must stay nil", tc.name)
+	}
+}
+
+// An out-of-range Timestamp is refused InvalidArgument before the adapter runs.
+func TestConversationSearchRejectsOutOfRangeTimes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		req  *rafikiv1.ConversationSearchRequest
+	}{
+		{"since", &rafikiv1.ConversationSearchRequest{Since: outOfRangeTimestamp}},
+		{"until", &rafikiv1.ConversationSearchRequest{Until: outOfRangeTimestamp}},
+	} {
+		f := &fakeConversationInsights{}
+		_, err := newConversationsServer(f).ConversationSearch(context.Background(), connect.NewRequest(tc.req))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: code", tc.name)
+		c.False(f.searchCalled, "%s: the adapter must not be called", tc.name)
+	}
 }
 
 func TestConversationSearchErrorFailsInternalAndRedacts(t *testing.T) {
@@ -208,12 +273,12 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 				Ordinal: 3, Role: "assistant", Content: []byte(`[{"type":"text"}]`),
 				Skills:      []string{"brainstorming"},
 				InputTokens: ptrInt64(100), OutputTokens: ptrInt64(20), CacheReadTokens: ptrInt64(80),
-				LatencyMS: ptrInt(1500), Model: "openrouter/x/glm", PrefixHash: "abc123",
+				Latency: ptrMS(1500), Model: "openrouter/x/glm", PrefixHash: "abc123",
 			}, {
 				Ordinal: 4, Role: "user", Content: []byte(`[{"type":"text"}]`),
 			}, {
 				Ordinal: 5, Role: "assistant", Content: []byte(`[{"type":"text"}]`),
-				InputTokens: ptrInt64(0), LatencyMS: ptrInt(0),
+				InputTokens: ptrInt64(0), Latency: ptrMS(0),
 			}},
 			AvailableSkills: []string{"brainstorming", "writing-plans"},
 		},
@@ -238,8 +303,8 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 	if len(turn.GetSkills()) != 1 || turn.GetSkills()[0] != "brainstorming" {
 		t.Errorf("turn skills = %v, want [brainstorming]", turn.GetSkills())
 	}
-	if turn.GetLatencyMs() != 1500 || turn.GetPrefixHash() != "abc123" {
-		t.Errorf("turn metrics = (%d,%q), want (1500,abc123)", turn.GetLatencyMs(), turn.GetPrefixHash())
+	if got := turn.GetLatency(); got == nil || got.AsDuration() != 1500*time.Millisecond || turn.GetPrefixHash() != "abc123" {
+		t.Errorf("turn metrics = (%v,%q), want (1.5s,abc123)", turn.GetLatency(), turn.GetPrefixHash())
 	}
 	if turn.InputTokens == nil || turn.GetInputTokens() != 100 || turn.CacheReadTokens == nil {
 		t.Errorf("reported metrics must be set on the wire: in=%v cache=%v", turn.InputTokens, turn.CacheReadTokens)
@@ -247,14 +312,14 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 	// Unreported metrics stay UNSET on the wire, not zero.
 	unmetered := msg.GetTurns()[1]
 	if unmetered.InputTokens != nil || unmetered.OutputTokens != nil ||
-		unmetered.CacheReadTokens != nil || unmetered.LatencyMs != nil {
+		unmetered.CacheReadTokens != nil || unmetered.Latency != nil {
 		t.Errorf("unreported metrics must be unset, got in=%v out=%v cache=%v latency=%v",
-			unmetered.InputTokens, unmetered.OutputTokens, unmetered.CacheReadTokens, unmetered.LatencyMs)
+			unmetered.InputTokens, unmetered.OutputTokens, unmetered.CacheReadTokens, unmetered.Latency)
 	}
 	// A measured zero stays SET on the wire: zero is not "not reported".
 	zeroed := msg.GetTurns()[2]
-	if zeroed.InputTokens == nil || zeroed.LatencyMs == nil {
-		t.Errorf("measured zeros must stay set, got in=%v latency=%v", zeroed.InputTokens, zeroed.LatencyMs)
+	if zeroed.InputTokens == nil || zeroed.Latency == nil {
+		t.Errorf("measured zeros must stay set, got in=%v latency=%v", zeroed.InputTokens, zeroed.Latency)
 	}
 	if len(msg.GetAvailableSkills()) != 2 || msg.GetAvailableSkills()[0] != "brainstorming" {
 		t.Errorf("available_skills = %v, want [brainstorming writing-plans]", msg.GetAvailableSkills())
@@ -277,6 +342,21 @@ func TestConversationQueryEmptyNameFailsInvalidArgument(t *testing.T) {
 	assert.NewAborting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ConversationQuery empty name err = %v, want", err)
 }
 
+// An out-of-range Timestamp on the query request is refused before the adapter.
+func TestConversationQueryRejectsOutOfRangeTimes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		req  *rafikiv1.ConversationQueryRequest
+	}{
+		{"since", &rafikiv1.ConversationQueryRequest{Name: "tools", Since: outOfRangeTimestamp}},
+		{"until", &rafikiv1.ConversationQueryRequest{Name: "tools", Until: outOfRangeTimestamp}},
+	} {
+		_, err := newConversationsServer(&fakeConversationInsights{}).ConversationQuery(context.Background(), connect.NewRequest(tc.req))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: code", tc.name)
+	}
+}
+
 // A successful query must carry the declared columns through verbatim and
 // land each cell in the oneof variant its QueryRowValue flags select.
 func TestConversationQueryMapsColumnsAndCellVariants(t *testing.T) {
@@ -297,11 +377,11 @@ func TestConversationQueryMapsColumnsAndCellVariants(t *testing.T) {
 
 	resp, err := s.ConversationQuery(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationQueryRequest{
-			Name: "tools", SinceUnix: ptrInt64(1757000000), Owner: "brent", Path: "proxy",
+			Name: "tools", Since: timestamppb.New(time.Unix(1757000000, 0)), Owner: "brent", Path: "proxy",
 		}))
 	c.Require().NoError(err, "ConversationQuery")
 	c.Eq("tools", f.gotName, "got name")
-	if f.gotQuery.Owner != "brent" || f.gotQuery.SinceUnix != 1757000000 || f.gotQuery.Path != "proxy" {
+	if f.gotQuery.Owner != "brent" || f.gotQuery.Since == nil || f.gotQuery.Since.Unix() != 1757000000 || f.gotQuery.Path != "proxy" {
 		t.Errorf("filter = %+v, want owner=brent since=1757000000 path=proxy", f.gotQuery)
 	}
 	cols := resp.Msg.GetColumns()

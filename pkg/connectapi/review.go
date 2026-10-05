@@ -5,8 +5,10 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -66,7 +68,7 @@ type ReviewAnalysis struct {
 	ID, ConversationID, Model, Profile, Status, Error string
 	InputTokens, OutputTokens                         int64
 	CostUSD                                           float64
-	CreatedAtUnix                                     int64
+	CreatedAt                                         time.Time
 }
 
 // ConversationFindingsReader answers scoped review reads, matching
@@ -171,7 +173,7 @@ func (s *Server) ConversationFindings(
 			Id: a.ID, ConversationId: a.ConversationID, Model: a.Model, Profile: a.Profile,
 			Status: a.Status, Error: a.Error,
 			InputTokens: a.InputTokens, OutputTokens: a.OutputTokens,
-			CostUsd: a.CostUSD, CreatedAtUnix: a.CreatedAtUnix,
+			CostUsd: a.CostUSD, CreatedAt: timestamppb.New(a.CreatedAt),
 		})
 	}
 	return connect.NewResponse(&rafikiv1.ConversationFindingsResponse{

@@ -77,7 +77,7 @@ func newMCPChildConversationReader(ctx context.Context, ctrl *Controller, childI
 
 func (r *conversationReader) ConversationSearch(ctx context.Context, q tools.ConversationQuery) ([]tools.ConversationSummaryRow, error) {
 	f := insights.SearchFilter{
-		Since: unixSecPtr(q.SinceUnix), Until: unixSecPtr(q.UntilUnix),
+		Since: q.Since, Until: q.Until,
 		Owner: q.Owner, Persona: q.Persona, Source: q.Source, Model: q.Model,
 		Status: q.Status, Path: insights.Path(q.Path), MinTokens: q.MinTokens,
 		Text: q.Text, Limit: q.Limit,
@@ -91,7 +91,7 @@ func (r *conversationReader) ConversationSearch(ctx context.Context, q tools.Con
 		out = append(out, tools.ConversationSummaryRow{
 			ID: row.ID, Name: row.Name, Owner: row.Owner, Persona: row.Persona,
 			Source: row.Source, Model: row.Model, Status: row.Status, DrivenBy: row.DrivenBy,
-			CreatedAtUnix: row.CreatedAt.Unix(), Turns: row.Turns,
+			CreatedAt: row.CreatedAt, Turns: row.Turns,
 			InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, CacheReadTokens: row.CacheReadTokens,
 			CacheHitRatio: row.CacheHitRatio, TotalCostUSD: row.TotalCostUSD, FirstMessage: row.FirstMessage,
 		})
@@ -121,7 +121,7 @@ func (r *conversationReader) ConversationExport(ctx context.Context, conversatio
 
 func (r *conversationReader) RunQuery(ctx context.Context, name string, f tools.CatalogueFilter) (tools.CatalogueResult, error) {
 	res, err := r.ctrl.ConversationQuery(ctx, r.scope, name, insights.StatsFilter{
-		Since: unixSecPtr(f.SinceUnix), Until: unixSecPtr(f.UntilUnix),
+		Since: f.Since, Until: f.Until,
 		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
 		Path: insights.Path(f.Path),
 	})
@@ -169,9 +169,8 @@ func catalogueResult(res insights.QueryResult) (tools.CatalogueResult, error) {
 	return tools.CatalogueResult{Columns: cols, Rows: rows}, nil
 }
 
-// unixSecPtr maps a 0 (unset) Unix-seconds filter onto a nil *time.Time; any
-// other value becomes the second boundary. Kept local: pkg/control's
-// unixToTime helper is unexported and cmd/rafikid is a different package.
+// unixSecPtr maps a 0 (unset) Unix-seconds field onto a nil *time.Time; any
+// other value becomes the second boundary. Used by the still-unix recall tool.
 func unixSecPtr(sec int64) *time.Time {
 	if sec == 0 {
 		return nil

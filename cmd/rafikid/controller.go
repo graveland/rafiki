@@ -1646,7 +1646,7 @@ func (c *Controller) ConversationFindings(ctx context.Context, scope insights.Sc
 			ID: a.ID, ConversationID: a.ConversationID, Model: a.Model, Profile: a.Profile,
 			Status: a.Status, Error: a.Error,
 			InputTokens: a.InputTokens, OutputTokens: a.OutputTokens,
-			CostUSD: a.CostUSD, CreatedAtUnix: a.CreatedAt.Unix(),
+			CostUSD: a.CostUSD, CreatedAt: a.CreatedAt,
 		})
 	}
 	return findings, analysisRows, nil

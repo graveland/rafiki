@@ -199,10 +199,9 @@ func TestMCPChildReaderBindsAnEmptyScopeOnALineageError(t *testing.T) {
 		"reader scope must be the empty (deny-all) subtree; got %+v", r.scope)
 }
 
-// The daemon adapter must forward the closed filter to insights and map a
-// row's ClosedAt onto the wire's optional ClosedAtUnix — nil (unset) for an
-// open conversation, never 0.
-func TestConnectSearchMapsClosedFilterAndRow(t *testing.T) {
+// The daemon adapter must map a row's ClosedAt onto the mirror's ClosedAt —
+// nil (unset) for an open conversation, never a zero time.
+func TestConnectSearchMapsClosedAtRow(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	closedAt := time.Unix(1700000000, 0)
 	open := time.Unix(1690000000, 0)
@@ -212,12 +211,11 @@ func TestConnectSearchMapsClosedFilterAndRow(t *testing.T) {
 	}}
 	a := connectConversations{c: &Controller{insights: fb}}
 
-	rows, err := a.Search(context.Background(), connectapi.ConversationSearchFilter{Closed: "closed"})
+	rows, err := a.Search(context.Background(), connectapi.ConversationSearchFilter{})
 	ck.Require().NoError(err, "search")
-	ck.Eq("closed", fb.gotFilter.Closed, "the closed filter is forwarded to insights.SearchFilter")
 
 	ck.Require().Eq(2, len(rows), "rows")
-	ck.Require().NotNil(rows[0].ClosedAtUnix, "a closed row maps ClosedAt -> ClosedAtUnix")
-	ck.Eq(closedAt.Unix(), *rows[0].ClosedAtUnix, "closed-at unix seconds")
-	ck.True(rows[1].ClosedAtUnix == nil, "an open row leaves ClosedAtUnix unset (nil), never 0; got %v", rows[1].ClosedAtUnix)
+	ck.Require().NotNil(rows[0].ClosedAt, "a closed row maps ClosedAt -> ClosedAt")
+	ck.Eq(closedAt.Unix(), rows[0].ClosedAt.Unix(), "closed-at")
+	ck.True(rows[1].ClosedAt == nil, "an open row leaves ClosedAt unset (nil), never a zero time; got %v", rows[1].ClosedAt)
 }

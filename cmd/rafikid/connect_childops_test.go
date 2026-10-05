@@ -192,7 +192,7 @@ func TestChildOpsStatsFilterMapping(t *testing.T) {
 	t.Run("fields pass through", func(t *testing.T) {
 		c := assert.NewCollecting(t)
 		f := buildStatsFilter(&rafikiv1.ConversationStatsRequest{
-			SinceUnix: 1700000000, UntilUnix: 1700003600,
+			Since: timestamppb.New(time.Unix(1700000000, 0)), Until: timestamppb.New(time.Unix(1700003600, 0)),
 			Owner: "u1", Persona: "impl", Source: "cli", Model: "m", Path: "proxy",
 		})
 		c.False(f.Since == nil || f.Since.Unix() != 1700000000 || f.Until == nil || f.Until.Unix() != 1700003600, "since/until = %v/%v, want the unix seconds", f.Since, f.Until)

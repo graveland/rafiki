@@ -14,6 +14,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/conversationview"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -304,8 +306,8 @@ func TestConversationsModeFromOutputFlag(t *testing.T) {
 }
 
 // Every filter flag must reach the wire verbatim, and --since resolves to the
-// request's Unix seconds with an absent --until staying a present zero (the
-// stats request's since/until are plain int64, where 0 means unset).
+// request's Timestamp (a present message), with an absent --until staying
+// unset (a nil message, never a zero Timestamp).
 func TestConversationsStatsSendsFiltersOverConnect(t *testing.T) {
 	c := assert.NewCollecting(t)
 	stub := newConversationsHarness(t)
@@ -324,8 +326,9 @@ func TestConversationsStatsSendsFiltersOverConnect(t *testing.T) {
 	c.Eq("", req.ConversationId, "ConversationId")
 	c.False(req.Owner != "alice" || req.Persona != "reviewer" || req.Source != "cli" ||
 		req.Model != "claude-sonnet-5" || req.Path != "proxy", "filters did not reach the wire: %+v", req)
-	c.Greater(0, req.SinceUnix, "SinceUnix")
-	c.Eq(0, req.UntilUnix, "UntilUnix")
+	c.Require().NotNil(req.Since, "Since on the wire")
+	c.True(req.Since.AsTime().Unix() > 0, "Since = %v, want the resolved --since", req.Since)
+	c.Nil(req.Until, "an unset --until must ride as a nil message, got %v", req.Until)
 }
 
 // A positional conversation id switches to the per-conversation stats and the
@@ -421,7 +424,7 @@ func sampleProtoSummaries() []*rafikiv1.ConversationSummary {
 	return []*rafikiv1.ConversationSummary{
 		{
 			Id: "conv-abc", Owner: "alice", Persona: "reviewer", Source: "cli", Model: "claude-sonnet-5",
-			Status: "completed", DrivenBy: "client", CreatedAtUnix: 1716000000,
+			Status: "completed", DrivenBy: "client", CreatedAt: timestamppb.New(time.Unix(1716000000, 0)),
 			Turns: 7, InputTokens: 900, OutputTokens: 120, CacheReadTokens: 2400,
 			CacheHitRatio: 0.727, TotalCostUsd: 0.042,
 			FirstMessage: "why do the stats disagree",
@@ -505,13 +508,13 @@ func TestConversationsSearchSendsFiltersOverConnect(t *testing.T) {
 	req := calls[0]
 	c.False(req.Owner != "alice" || req.Path != "proxy" || req.Status != "completed" ||
 		req.MinTokens != 5 || req.Text != "stats" || req.Limit != 3, "filters did not reach the wire: %+v", req)
-	if req.SinceUnix == nil || *req.SinceUnix <= 0 {
-		t.Errorf("SinceUnix = %v, want the resolved --since", req.SinceUnix)
+	if req.Since == nil || req.Since.AsTime().Unix() <= 0 {
+		t.Errorf("Since = %v, want the resolved --since", req.Since)
 	}
 	until, err := time.Parse(time.RFC3339, "2026-01-02T03:04:05Z")
 	c.Require().NoError(err)
-	if req.UntilUnix == nil || req.GetUntilUnix() != until.Unix() {
-		t.Errorf("UntilUnix = %v, want the parsed RFC3339 --until (%d)", req.UntilUnix, until.Unix())
+	if req.Until == nil || req.GetUntil().AsTime().Unix() != until.Unix() {
+		t.Errorf("Until = %v, want the parsed RFC3339 --until (%d)", req.Until, until.Unix())
 	}
 
 	// Without the flags: absent, not present-zero.
@@ -522,8 +525,8 @@ func TestConversationsSearchSendsFiltersOverConnect(t *testing.T) {
 	calls = stub.searched()
 	c.Require().Len(calls, 1, "got %d ConversationSearch calls, want 1", len(calls))
 	req = calls[0]
-	if req.SinceUnix != nil || req.UntilUnix != nil {
-		t.Errorf("unset --since/--until must ride absent, got %v/%v", req.SinceUnix, req.UntilUnix)
+	if req.Since != nil || req.Until != nil {
+		t.Errorf("unset --since/--until must ride absent, got %v/%v", req.Since, req.Until)
 	}
 }
 
@@ -542,53 +545,30 @@ func TestConversationsSearchLimitBeyondInt32(t *testing.T) {
 	c.Empty(stub.searched(), "a rejected request must not reach the wire, got %d calls", len(stub.searched()))
 }
 
-// --open and --closed map onto the wire's closed filter verbatim; neither
-// leaves it empty (any); setting both is rejected before any dial.
-func TestConversationsSearchClosedFlagsReachTheRequest(t *testing.T) {
+// The removed closed filter must leave no CLI surface: --open and --closed are
+// not registered flags on `conversations search` any more.
+func TestConversationsSearchHasNoOpenClosedFlags(t *testing.T) {
 	c := assert.NewCollecting(t)
-	for _, tc := range []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"--open", []string{"--open"}, "open"},
-		{"--closed", []string{"--closed"}, "closed"},
-		{"neither", nil, ""},
-	} {
-		stub := newConversationsHarness(t)
-		stub.searchResp = searchResponse(sampleProtoSummaries())
-
-		cmd := newConversationsSearchCmd()
-		cmd.SetArgs(tc.args)
-		c.Require().NoError(cmd.Execute(), "%s: conversations search", tc.name)
-
-		calls := stub.searched()
-		c.Require().Len(calls, 1, "%s: got %d ConversationSearch calls, want 1", tc.name, len(calls))
-		c.Eq(tc.want, calls[0].GetClosed(), "%s: Closed", tc.name)
-	}
-
-	stub := newConversationsHarness(t)
-	stub.searchResp = searchResponse(sampleProtoSummaries())
 	cmd := newConversationsSearchCmd()
-	cmd.SetArgs([]string{"--open", "--closed"})
-	c.Require().Error(cmd.Execute(), "expected --open and --closed together to error")
-	c.Empty(stub.searched(), "a rejected request must not reach the wire, got %d calls", len(stub.searched()))
+	c.Nil(cmd.Flags().Lookup("open"), "--open must be gone")
+	c.Nil(cmd.Flags().Lookup("closed"), "--closed must be gone")
 }
 
-// closed_at_unix is optional: present means the conversation was closed (at
-// that moment), absent means it is still open and must map to a nil ClosedAt,
-// never a zero time.
+// closed_at is a Timestamp: present means the conversation was closed (at that
+// moment), absent means it is still open and must map to a nil ClosedAt, never
+// a zero time.
 func TestSummaryFromProtoMapsClosedAt(t *testing.T) {
 	c := assert.NewCollecting(t)
 	want := time.Unix(1716003600, 0).UTC()
 	got := summaryFromProto(&rafikiv1.ConversationSummary{
-		Id: "conv-closed", CreatedAtUnix: 1716000000, ClosedAtUnix: int64Ptr(1716003600),
+		Id: "conv-closed", CreatedAt: timestamppb.New(time.Unix(1716000000, 0)),
+		ClosedAt: timestamppb.New(time.Unix(1716003600, 0)),
 	})
 	c.Require().NotNil(got.ClosedAt, "ClosedAt")
 	c.True(got.ClosedAt.Equal(want), "ClosedAt = %v, want %v", got.ClosedAt, want)
 
-	open := summaryFromProto(&rafikiv1.ConversationSummary{Id: "conv-open", CreatedAtUnix: 1716000000})
-	c.Nil(open.ClosedAt, "an unset closed_at_unix must map to a nil ClosedAt")
+	open := summaryFromProto(&rafikiv1.ConversationSummary{Id: "conv-open", CreatedAt: timestamppb.New(time.Unix(1716000000, 0))})
+	c.Nil(open.ClosedAt, "an unset closed_at must map to a nil ClosedAt")
 }
 
 // ─── export ─────────────────────────────────────────────────────────────────
@@ -604,7 +584,7 @@ func sampleProtoExport() *rafikiv1.ConversationExportResponse {
 			// exercised from both sides.
 			{Ordinal: 2, Role: "assistant", Content: []byte(`[{"type":"text","text":"hi"}]`),
 				OutputTokens: int64Ptr(12), InputTokens: int64Ptr(0), Model: "claude-sonnet-5",
-				LatencyMs: int32Ptr(1500), ServedProvider: "openrouter"},
+				Latency: durationpb.New(1500 * time.Millisecond), ServedProvider: "openrouter"},
 		},
 	}
 }
@@ -948,7 +928,7 @@ func TestConversationsFindingsRendersRows(t *testing.T) {
 		},
 		Analyses: []*rafikiv1.ReviewAnalysis{{
 			Id: "a1", ConversationId: "conv-a", Model: "anthropic/claude-sonnet-5",
-			Status: "ok", CostUsd: 0.0123, CreatedAtUnix: 1716000000,
+			Status: "ok", CostUsd: 0.0123, CreatedAt: timestamppb.New(time.Unix(1716000000, 0)),
 		}},
 	}
 
@@ -1007,12 +987,12 @@ func TestUnixOrZero(t *testing.T) {
 	c.Eq(1716000000, unixOrZero(&tm), "got")
 }
 
-func TestUnixPtrOrNil(t *testing.T) {
+func TestTimeTS(t *testing.T) {
 	c := assert.NewCollecting(t)
-	c.Nil(unixPtrOrNil(nil), "nil: got")
+	c.Nil(timeTS(nil), "nil: got")
 	tm := time.Unix(1716000000, 0)
-	got := unixPtrOrNil(&tm)
-	c.False(got == nil || *got != 1716000000, "got %v, want 1716000000", got)
+	got := timeTS(&tm)
+	c.False(got == nil || got.AsTime().Unix() != 1716000000, "got %v, want 1716000000", got)
 }
 
 func int64Ptr(v int64) *int64 { return &v }

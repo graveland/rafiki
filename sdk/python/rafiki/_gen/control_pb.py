@@ -1625,8 +1625,8 @@ class ListModelsResponse:
 
 @dataclasses.dataclass
 class ConversationSearchRequest:
-    since_unix: Optional[int] = None
-    until_unix: Optional[int] = None
+    since: Optional[datetime.datetime] = None
+    until: Optional[datetime.datetime] = None
     owner: str = ""
     persona: str = ""
     source: str = ""
@@ -1636,14 +1636,13 @@ class ConversationSearchRequest:
     min_tokens: int = 0
     text: str = ""
     limit: int = 0
-    closed: str = ""
 
     def to_dict(self) -> dict:
         out = {}
-        if self.since_unix is not None:
-            out["sinceUnix"] = str(self.since_unix)
-        if self.until_unix is not None:
-            out["untilUnix"] = str(self.until_unix)
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
+        if self.until is not None:
+            out["until"] = _ts_out(self.until)
         if self.owner != "":
             out["owner"] = self.owner
         if self.persona != "":
@@ -1662,18 +1661,16 @@ class ConversationSearchRequest:
             out["text"] = self.text
         if self.limit != 0:
             out["limit"] = self.limit
-        if self.closed != "":
-            out["closed"] = self.closed
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ConversationSearchRequest":
         obj = cls()
-        _v = _d.get("sinceUnix")
+        _v = _d.get("since")
         if _v is not None:
-            obj.since_unix = _int_in(_v)
-        _v = _d.get("untilUnix")
+            obj.since = _ts_in(_v, "since")
+        _v = _d.get("until")
         if _v is not None:
-            obj.until_unix = _int_in(_v)
+            obj.until = _ts_in(_v, "until")
         _v = _d.get("owner")
         if _v is not None:
             obj.owner = _v
@@ -1701,9 +1698,6 @@ class ConversationSearchRequest:
         _v = _d.get("limit")
         if _v is not None:
             obj.limit = _int_in(_v)
-        _v = _d.get("closed")
-        if _v is not None:
-            obj.closed = _v
         return obj
 
 @dataclasses.dataclass
@@ -1716,7 +1710,7 @@ class ConversationSummary:
     model: str = ""
     status: str = ""
     driven_by: str = ""
-    created_at_unix: int = 0
+    created_at: Optional[datetime.datetime] = None
     turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -1724,7 +1718,7 @@ class ConversationSummary:
     cache_hit_ratio: float = 0.0
     total_cost_usd: float = 0.0
     first_message: str = ""
-    closed_at_unix: Optional[int] = None
+    closed_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -1744,8 +1738,8 @@ class ConversationSummary:
             out["status"] = self.status
         if self.driven_by != "":
             out["drivenBy"] = self.driven_by
-        if self.created_at_unix != 0:
-            out["createdAtUnix"] = str(self.created_at_unix)
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
         if self.turns != 0:
             out["turns"] = self.turns
         if self.input_tokens != 0:
@@ -1760,8 +1754,8 @@ class ConversationSummary:
             out["totalCostUsd"] = _float_out(self.total_cost_usd)
         if self.first_message != "":
             out["firstMessage"] = self.first_message
-        if self.closed_at_unix is not None:
-            out["closedAtUnix"] = str(self.closed_at_unix)
+        if self.closed_at is not None:
+            out["closedAt"] = _ts_out(self.closed_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ConversationSummary":
@@ -1790,9 +1784,9 @@ class ConversationSummary:
         _v = _d.get("drivenBy")
         if _v is not None:
             obj.driven_by = _v
-        _v = _d.get("createdAtUnix")
+        _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at_unix = _int_in(_v)
+            obj.created_at = _ts_in(_v, "createdAt")
         _v = _d.get("turns")
         if _v is not None:
             obj.turns = _int_in(_v)
@@ -1814,9 +1808,9 @@ class ConversationSummary:
         _v = _d.get("firstMessage")
         if _v is not None:
             obj.first_message = _v
-        _v = _d.get("closedAtUnix")
+        _v = _d.get("closedAt")
         if _v is not None:
-            obj.closed_at_unix = _int_in(_v)
+            obj.closed_at = _ts_in(_v, "closedAt")
         return obj
 
 @dataclasses.dataclass
@@ -1862,7 +1856,7 @@ class TranscriptTurn:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
-    latency_ms: Optional[int] = None
+    latency: Optional[datetime.timedelta] = None
     model: str = ""
     prefix_hash: str = ""
     served_provider: str = ""
@@ -1883,8 +1877,8 @@ class TranscriptTurn:
             out["outputTokens"] = str(self.output_tokens)
         if self.cache_read_tokens is not None:
             out["cacheReadTokens"] = str(self.cache_read_tokens)
-        if self.latency_ms is not None:
-            out["latencyMs"] = self.latency_ms
+        if self.latency is not None:
+            out["latency"] = _dur_out(self.latency)
         if self.model != "":
             out["model"] = self.model
         if self.prefix_hash != "":
@@ -1916,9 +1910,9 @@ class TranscriptTurn:
         _v = _d.get("cacheReadTokens")
         if _v is not None:
             obj.cache_read_tokens = _int_in(_v)
-        _v = _d.get("latencyMs")
+        _v = _d.get("latency")
         if _v is not None:
-            obj.latency_ms = _int_in(_v)
+            obj.latency = _dur_in(_v, "latency")
         _v = _d.get("model")
         if _v is not None:
             obj.model = _v
@@ -1986,8 +1980,8 @@ class ConversationExportResponse:
 @dataclasses.dataclass
 class ConversationQueryRequest:
     name: str = ""
-    since_unix: Optional[int] = None
-    until_unix: Optional[int] = None
+    since: Optional[datetime.datetime] = None
+    until: Optional[datetime.datetime] = None
     owner: str = ""
     persona: str = ""
     source: str = ""
@@ -1998,10 +1992,10 @@ class ConversationQueryRequest:
         out = {}
         if self.name != "":
             out["name"] = self.name
-        if self.since_unix is not None:
-            out["sinceUnix"] = str(self.since_unix)
-        if self.until_unix is not None:
-            out["untilUnix"] = str(self.until_unix)
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
+        if self.until is not None:
+            out["until"] = _ts_out(self.until)
         if self.owner != "":
             out["owner"] = self.owner
         if self.persona != "":
@@ -2019,12 +2013,12 @@ class ConversationQueryRequest:
         _v = _d.get("name")
         if _v is not None:
             obj.name = _v
-        _v = _d.get("sinceUnix")
+        _v = _d.get("since")
         if _v is not None:
-            obj.since_unix = _int_in(_v)
-        _v = _d.get("untilUnix")
+            obj.since = _ts_in(_v, "since")
+        _v = _d.get("until")
         if _v is not None:
-            obj.until_unix = _int_in(_v)
+            obj.until = _ts_in(_v, "until")
         _v = _d.get("owner")
         if _v is not None:
             obj.owner = _v
@@ -2353,7 +2347,7 @@ class ReviewAnalysis:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
-    created_at_unix: int = 0
+    created_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -2375,8 +2369,8 @@ class ReviewAnalysis:
             out["outputTokens"] = str(self.output_tokens)
         if self.cost_usd != 0.0:
             out["costUsd"] = _float_out(self.cost_usd)
-        if self.created_at_unix != 0:
-            out["createdAtUnix"] = str(self.created_at_unix)
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ReviewAnalysis":
@@ -2408,9 +2402,9 @@ class ReviewAnalysis:
         _v = _d.get("costUsd")
         if _v is not None:
             obj.cost_usd = _float_in(_v)
-        _v = _d.get("createdAtUnix")
+        _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at_unix = _int_in(_v)
+            obj.created_at = _ts_in(_v, "createdAt")
         return obj
 
 @dataclasses.dataclass
@@ -5358,8 +5352,8 @@ class ModelRoutesResponse:
 @dataclasses.dataclass
 class ConversationStatsRequest:
     conversation_id: str = ""
-    since_unix: int = 0
-    until_unix: int = 0
+    since: Optional[datetime.datetime] = None
+    until: Optional[datetime.datetime] = None
     owner: str = ""
     persona: str = ""
     source: str = ""
@@ -5370,10 +5364,10 @@ class ConversationStatsRequest:
         out = {}
         if self.conversation_id != "":
             out["conversationId"] = self.conversation_id
-        if self.since_unix != 0:
-            out["sinceUnix"] = str(self.since_unix)
-        if self.until_unix != 0:
-            out["untilUnix"] = str(self.until_unix)
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
+        if self.until is not None:
+            out["until"] = _ts_out(self.until)
         if self.owner != "":
             out["owner"] = self.owner
         if self.persona != "":
@@ -5391,12 +5385,12 @@ class ConversationStatsRequest:
         _v = _d.get("conversationId")
         if _v is not None:
             obj.conversation_id = _v
-        _v = _d.get("sinceUnix")
+        _v = _d.get("since")
         if _v is not None:
-            obj.since_unix = _int_in(_v)
-        _v = _d.get("untilUnix")
+            obj.since = _ts_in(_v, "since")
+        _v = _d.get("until")
         if _v is not None:
-            obj.until_unix = _int_in(_v)
+            obj.until = _ts_in(_v, "until")
         _v = _d.get("owner")
         if _v is not None:
             obj.owner = _v
