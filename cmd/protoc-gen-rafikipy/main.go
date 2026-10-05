@@ -160,6 +160,13 @@ func buildRegistry(files []*descriptorpb.FileDescriptorProto) *registry {
 		entries: map[string]*entryFields{},
 	}
 	for _, fd := range files {
+		// The google/protobuf well-known types arrive in the request as
+		// dependencies but are never rendered; their types resolve to the
+		// built-in kinds (see wellKnownKind), so they must not enter the
+		// registry as ordinary classes.
+		if isWellKnownFile(fd.GetName()) {
+			continue
+		}
 		mod := moduleName(fd.GetName())
 		for _, m := range fd.GetMessageType() {
 			reg.addMessage(mod, m, fd.GetPackage(), m.GetName())
@@ -197,6 +204,13 @@ func (reg *registry) addMessage(mod string, m *descriptorpb.DescriptorProto, pkg
 	for _, e := range m.GetEnumType() {
 		reg.addEnum(fq, e, classRef{module: mod, path: pyPath + "." + e.GetName()})
 	}
+}
+
+// isWellKnownFile reports whether a descriptor is one of the google/protobuf
+// well-known types, which the generator resolves as built-in kinds and never
+// emits as a module.
+func isWellKnownFile(name string) bool {
+	return strings.HasPrefix(name, "google/protobuf/")
 }
 
 func (reg *registry) addEnum(scope string, e *descriptorpb.EnumDescriptorProto, ref classRef) {
@@ -237,7 +251,8 @@ func checkFile(fd *descriptorpb.FileDescriptorProto, reg *registry) error {
 			t := f.GetType()
 			if (t == descriptorpb.FieldDescriptorProto_TYPE_MESSAGE ||
 				t == descriptorpb.FieldDescriptorProto_TYPE_ENUM) &&
-				reg.entries[f.GetTypeName()] == nil && reg.byFQ[f.GetTypeName()] == nil {
+				reg.entries[f.GetTypeName()] == nil && reg.byFQ[f.GetTypeName()] == nil &&
+				wellKnownKind(f.GetTypeName()) == "" {
 				return fmt.Errorf("%s.%s: unresolved type %q", fq, f.GetName(), f.GetTypeName())
 			}
 		}
