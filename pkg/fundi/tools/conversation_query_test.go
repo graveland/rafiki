@@ -208,6 +208,50 @@ func TestConversationQueryMaterializesAndRendersTheCatalogue(t *testing.T) {
 	}
 }
 
+// TestConversationQueryBlankSinceUntilIsUnbounded pins that an absent key OR a
+// blanked optional argument ("") means unbounded, never an error. Before the
+// rfc3339Time fix a "" reached time.Time's JSON unmarshaller and hard-failed
+// the call with `parsing time "" ... cannot parse`, so this test fails against
+// the pre-fix source.
+func TestConversationQueryBlankSinceUntilIsUnbounded(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		in   ToolInput
+	}{
+		{"absent", ToolInput(`{"name":"tools"}`)},
+		{"empty strings", ToolInput(`{"name":"tools","since":"","until":""}`)},
+		{"null", ToolInput(`{"name":"tools","since":null,"until":null}`)},
+	} {
+		fake := &fakeConversationReader{}
+		tool, _ := ConversationQueryBlueprint{}.Materialize(ToolOpts{Conversations: fake})
+		_, err := tool.Execute(context.Background(), tc.in)
+		c.Require().NoError(err, "%s: Execute", tc.name)
+		c.True(fake.runFilter.Since == nil && fake.runFilter.Until == nil,
+			"%s: since/until = %v/%v, want both nil (unbounded)", tc.name, fake.runFilter.Since, fake.runFilter.Until)
+	}
+}
+
+// TestConversationQueryMalformedSinceIsAnError pins that a genuinely malformed
+// non-empty bound fails the whole call loudly rather than being ignored.
+func TestConversationQueryMalformedSinceIsAnError(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		in   ToolInput
+	}{
+		{"date only", ToolInput(`{"name":"tools","since":"2026-01-01"}`)},
+		{"garbage", ToolInput(`{"name":"tools","until":"not-a-time"}`)},
+		{"wrong type", ToolInput(`{"name":"tools","since":123}`)},
+	} {
+		fake := &fakeConversationReader{}
+		tool, _ := ConversationQueryBlueprint{}.Materialize(ToolOpts{Conversations: fake})
+		_, err := tool.Execute(context.Background(), tc.in)
+		c.Require().Error(err, "%s: Execute returned no error", tc.name)
+		c.StrContains(err.Error(), "conversation_query", "%s: error does not name the tool", tc.name)
+	}
+}
+
 func TestConversationQueryEmptyResult(t *testing.T) {
 	c := assert.NewCollecting(t)
 	fake := &fakeConversationReader{}

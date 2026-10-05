@@ -309,9 +309,9 @@ func (t *conversationQueryTool) Execute(ctx context.Context, in ToolInput) (Tool
 		return ToolResult{}, err
 	}
 	var req struct {
-		Name                string     `json:"name"`
-		Since               *time.Time `json:"since"`
-		Until               *time.Time `json:"until"`
+		Name                string      `json:"name"`
+		Since               rfc3339Time `json:"since"`
+		Until               rfc3339Time `json:"until"`
 		Model, Source, Path string
 	}
 	if err := in.Unmarshal(&req); err != nil {
@@ -321,7 +321,7 @@ func (t *conversationQueryTool) Execute(ctx context.Context, in ToolInput) (Tool
 		return ToolResult{}, fmt.Errorf("conversation_query: name is required")
 	}
 	res, err := t.reader.RunQuery(ctx, req.Name, CatalogueFilter{
-		Since: req.Since, Until: req.Until,
+		Since: req.Since.Time, Until: req.Until.Time,
 		Model: req.Model, Source: req.Source, Path: req.Path,
 	})
 	if err != nil {
