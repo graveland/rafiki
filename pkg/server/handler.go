@@ -42,7 +42,10 @@ func (h *Handler) Mount(mux *http.ServeMux, wrap func(http.Handler) http.Handler
 		mux.Handle("/v1/chat/completions", wrap(h.Chat))
 	}
 	if h.Control != nil && h.ControlPath != "" {
-		mux.Handle(h.ControlPath, wrap(h.Control))
+		// RequireEpoch is OUTERMOST, before the caller's wrap: a request whose
+		// epoch is missing or wrong must be refused as a protocol mismatch,
+		// never as an auth failure the caller's middleware would report first.
+		mux.Handle(h.ControlPath, RequireEpoch(wrap(h.Control)))
 	}
 	// Login is how a caller without a valid credential gets one, so it must
 	// not sit behind wrap — every other face is wrapped by the caller's auth
@@ -52,7 +55,10 @@ func (h *Handler) Mount(mux *http.ServeMux, wrap func(http.Handler) http.Handler
 	// come from connectapi.Server.LoginRoutes, which mounts no identity
 	// resolution of its own).
 	if h.Login != nil && h.LoginPath != "" {
-		mux.Handle(h.LoginPath, h.Login)
+		// Login is unwrapped by the caller's auth (see the comment above), so
+		// the epoch gate is applied HERE, by Mount itself, on top of the
+		// unwrapped handler — a stale Login peer must still be refused.
+		mux.Handle(h.LoginPath, RequireEpoch(h.Login))
 	}
 	if h.MCP != nil && h.MCPPath != "" {
 		mux.Handle(h.MCPPath, wrap(h.MCP))

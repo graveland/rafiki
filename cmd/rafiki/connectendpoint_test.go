@@ -5,12 +5,14 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -90,6 +92,7 @@ func TestTheCredentialRidesEveryRequestIncludingTheTUIs(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Get("Authorization")
+		w.Header().Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -116,6 +119,7 @@ func TestTheCredentialRidesEveryRequestIncludingTheTUIs(t *testing.T) {
 func TestBearerTransportDoesNotMutateTheCallersRequest(t *testing.T) {
 	c := assert.NewAborting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -127,6 +131,7 @@ func TestBearerTransportDoesNotMutateTheCallersRequest(t *testing.T) {
 	c.NoError(err, "roundtrip")
 	defer resp.Body.Close()
 	c.Eq("", req.Header.Get("Authorization"), "the caller's request was mutated: Authorization =")
+	c.Eq("", req.Header.Get(protocol.EpochHeader), "the caller's request was mutated: Rafiki-Protocol =")
 }
 
 func TestSocketFlagIsGone(t *testing.T) {

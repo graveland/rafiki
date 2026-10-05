@@ -3,7 +3,10 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -82,7 +85,11 @@ func TestMountLoginBypassesWrap(t *testing.T) {
 	h.Mount(mux, deny)
 
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rafiki.v1.Login/BeginLogin", nil))
+	loginReq := httptest.NewRequest(http.MethodPost, "/rafiki.v1.Login/BeginLogin", nil)
+	// Login is epoch-gated by Mount itself (outside the caller's wrap), so a
+	// current-wire caller with no credential still reaches it.
+	loginReq.Header.Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
+	mux.ServeHTTP(rec, loginReq)
 	c.Eq(http.StatusOK, rec.Code, "Login must answer without a credential")
 
 	rec = httptest.NewRecorder()

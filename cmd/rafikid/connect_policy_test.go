@@ -87,7 +87,7 @@ func proxyFaceConnectRoute(t *testing.T) rafikiv1connect.ControlClient {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	return rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+	return rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
 }
 
 // childCredentials enumerates the three child-shaped credentials the proxy
@@ -571,7 +571,7 @@ func TestScopeForNilIsUnreachableOnTheRealProxyFace(t *testing.T) {
 	c.NoError(err, "startProxyFace")
 	defer face.Close(ctx)
 
-	client := rafikiv1connect.NewControlClient(http.DefaultClient, face.URL)
+	client := rafikiv1connect.NewControlClient(epochClient(http.DefaultClient), face.URL)
 	_, err = client.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
 	c.Error(err, "ConversationSearch with no credential on the real proxy face succeeded, want a refusal")

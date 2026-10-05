@@ -190,7 +190,7 @@ func mountChildScope(t *testing.T) *childScopeFixture {
 	h.Mount(mux, auth.Middleware)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	fx.client = rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+	fx.client = rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
 	return fx
 }
 

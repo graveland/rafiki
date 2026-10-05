@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -23,7 +24,8 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// tokenRoundTripper is the client half of cmd/rafiki's bearerTransport.
+// tokenRoundTripper is the client half of cmd/rafiki's bearerTransport: it
+// carries the credential AND the protocol epoch the mounted face now requires.
 type tokenRoundTripper struct {
 	base  http.RoundTripper
 	token string
@@ -34,6 +36,7 @@ func (t tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	if t.token != "" {
 		r.Header.Set("Authorization", "Bearer "+t.token)
 	}
+	r.Header.Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
 	return t.base.RoundTrip(r)
 }
 

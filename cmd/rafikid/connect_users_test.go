@@ -774,7 +774,7 @@ func TestRevokeTokenCancelsOpenStream(t *testing.T) {
 	h.Mount(mux, server.NewUserTokenAuth(ustore, proxyBootToken, server.DefaultAuthCacheTTL).Middleware)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	client := rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+	client := rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
 
 	// The ready message is sent by the handler, which runs strictly after the
 	// interceptor registered the stream — receiving it proves the stream is
@@ -827,7 +827,7 @@ func cutMount(t *testing.T, ustore *cutUserStore, reg *streamRegistry, auth *ser
 	h.Mount(mux, auth.Middleware)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+	return rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
 }
 
 // openExecutorSession opens the stub's executor-session stream under the cut

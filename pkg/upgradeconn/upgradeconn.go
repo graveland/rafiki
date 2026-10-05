@@ -42,9 +42,12 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/http/httpguts"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // Conn is a hijacked connection that reads through the buffer the HTTP server
@@ -111,6 +114,15 @@ func Handler[T any](proto Protocol,
 			return
 		}
 
+		// The epoch gate runs BEFORE authorize: it is pure (no side effects),
+		// and a mismatch is a plain 400 that never hijacks. Doing it after
+		// authorize would strand a peer that spent a one-shot ticket or enroll
+		// token on an exchange the far side cannot finish.
+		if got := r.Header.Get(protocol.EpochHeader); got != strconv.Itoa(protocol.Epoch) {
+			http.Error(w, epochMismatchBody(got), http.StatusBadRequest)
+			return
+		}
+
 		// Checked before authorize: it has no side effects, and authorize's
 		// side effects (redeeming a ticket, consuming an enroll token,
 		// rotating a credential) are all one-shot — failing here after a
@@ -160,7 +172,8 @@ func Handler[T any](proto Protocol,
 		// hijacked and no longer writes anything.
 		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
 			"Upgrade: " + string(proto) + "\r\n" +
-			"Connection: Upgrade\r\n"); err != nil {
+			"Connection: Upgrade\r\n" +
+			protocol.EpochHeader + ": " + strconv.Itoa(protocol.Epoch) + "\r\n"); err != nil {
 			conn.Close()
 			return
 		}
@@ -212,10 +225,13 @@ func Dial(conn net.Conn, proto Protocol, host string, hdr http.Header) (*Conn, h
 	}
 	req.Header.Set("Upgrade", string(proto))
 	req.Header.Set("Connection", "Upgrade")
+	// Set here, not by the caller: no caller can forget the epoch, and the
+	// hdr it passes cannot override it.
+	req.Header.Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
 	for k, vs := range hdr {
 		// Not overridable: they identify the exchange itself.
 		switch http.CanonicalHeaderKey(k) {
-		case "Upgrade", "Connection":
+		case "Upgrade", "Connection", protocol.EpochHeader:
 			continue
 		}
 		for _, v := range vs {
@@ -237,7 +253,25 @@ func Dial(conn net.Conn, proto Protocol, host string, hdr http.Header) (*Conn, h
 		_ = resp.Body.Close()
 		return nil, nil, &Refused{Status: resp.StatusCode, Reason: strings.TrimSpace(string(body))}
 	}
+	// A 101 without the epoch (an old peer) or with a different one is the
+	// same mismatch the server would have refused, only past the point where a
+	// status code could carry it. It is terminal: reported as a 400 *Refused so
+	// the reconnect loops treat it like any other 400, never retry forever.
+	if got := resp.Header.Get(protocol.EpochHeader); got != strconv.Itoa(protocol.Epoch) {
+		return nil, nil, &Refused{Status: http.StatusBadRequest, Reason: epochMismatchBody(got)}
+	}
 	return &Conn{Conn: conn, r: br}, resp.Header, nil
+}
+
+// epochMismatchBody is the plain-400 body for an upgrade whose Rafiki-Protocol
+// header is missing or wrong. A missing header reads as the epoch-1 peer it is.
+func epochMismatchBody(sent string) string {
+	peer := sent
+	if peer == "" {
+		peer = "none"
+	}
+	return fmt.Sprintf("rafiki protocol mismatch: this side speaks %d, peer sent %s",
+		protocol.Epoch, peer)
 }
 
 // Header names carried on the upgrade exchange.

@@ -32,6 +32,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -184,6 +186,7 @@ type bearerTransport struct {
 func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+b.token)
+	r.Header.Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
 	return b.base.RoundTrip(r)
 }
 
@@ -203,13 +206,13 @@ func faceClient(t *testing.T, d *daemon, token string) rafikiv1connect.ControlCl
 // (*daemon).connectClient uses against the daemon's control socket.
 func childConnectClient(t *testing.T, sockPath string) rafikiv1connect.ControlClient {
 	t.Helper()
-	h := &http.Client{Transport: &http2.Transport{
+	h := &http.Client{Transport: epochTransport{base: &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 			var dl net.Dialer
 			return dl.DialContext(ctx, "unix", sockPath)
 		},
-	}}
+	}}}
 	return rafikiv1connect.NewControlClient(h, "http://child.rafiki.invalid")
 }
 
@@ -300,7 +303,8 @@ def call(method, body):
         conn.request("POST", "/rafiki.v1.Control/" + method,
                      body=json.dumps(body).encode(),
                      headers={"Content-Type": "application/json",
-                              "Connect-Protocol-Version": "1"})
+                              "Connect-Protocol-Version": "1",
+                              "Rafiki-Protocol": "2"})
         resp = conn.getresponse()
         data = resp.read()
         if resp.status != 200:
@@ -370,7 +374,8 @@ def run_driver():
     conn.request("POST", "/rafiki.v1.Control/Receive",
                  body=b"\x00" + len(req_payload).to_bytes(4, "big") + req_payload,
                  headers={"Content-Type": "application/connect+json",
-                          "Connect-Protocol-Version": "1"})
+                          "Connect-Protocol-Version": "1",
+                          "Rafiki-Protocol": "2"})
     resp = conn.getresponse()
     if resp.status != 200:
         with open(probe, "a") as f:

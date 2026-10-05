@@ -123,7 +123,9 @@ func loginEndpointFor(t *testing.T, fake *fakeLogin) connectEndpoint {
 	t.Helper()
 	mux := http.NewServeMux()
 	path, handler := rafikiv1connect.NewLoginHandler(fake)
-	mux.Handle(path, handler)
+	// Answer with the current epoch, as the daemon's Login mount does, so the
+	// CLI's login transport (which verifies the response header) accepts it.
+	mux.Handle(path, epochResponseHeader(handler))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return connectEndpoint{httpClient: srv.Client(), baseURL: srv.URL, describe: srv.URL, identity: srv.URL}
@@ -136,7 +138,9 @@ func serveLoginOnSocket(t *testing.T, fake *fakeLogin) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	path, handler := rafikiv1connect.NewLoginHandler(fake)
-	mux.Handle(path, handler)
+	// Answer with the current epoch, as the daemon's Login mount does, so the
+	// CLI's login transport (which verifies the response header) accepts it.
+	mux.Handle(path, epochResponseHeader(handler))
 	proto := &http.Protocols{}
 	proto.SetUnencryptedHTTP2(true)
 	proto.SetHTTP1(true)

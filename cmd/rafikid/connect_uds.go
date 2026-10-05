@@ -79,7 +79,11 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	// credential presented to the local socket is refused on operator verbs
 	// exactly as it is remotely.
 	routePath, handler := connectControlRoute(srv, reg, connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
-	mux.Handle(routePath, handler)
+	// RequireEpoch is the OUTERMOST layer of this mount too, before identity
+	// resolution and before the policy gate: the socket changes who can reach
+	// the daemon, never what wire it accepts. The proxy face applies the same
+	// wrapper inside Handler.Mount.
+	mux.Handle(routePath, server.RequireEpoch(handler))
 
 	// Login mounts with NO interceptors — deliberately NOT through
 	// connectControlRoute: the policy gate fail-closes every non-Control
@@ -89,7 +93,9 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	// socket's filesystem trust is admission enough; Login itself reads no
 	// identity.
 	loginPath, loginHandler := srv.LoginRoutes()
-	mux.Handle(loginPath, loginHandler)
+	// Login is mounted without authentication on purpose (above), but a stale
+	// Login peer is still a stale wire: gate it on the epoch like Control.
+	mux.Handle(loginPath, server.RequireEpoch(loginHandler))
 
 	// h2c AND HTTP/1.1, per pkg/childsock's rule for the same situation: a
 	// non-nil Protocols lists ONLY the supported protocols, so HTTP/1 must be

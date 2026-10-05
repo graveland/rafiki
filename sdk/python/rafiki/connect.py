@@ -37,6 +37,7 @@ import httpx
 
 from .errors import (
     CODE_DEADLINE_EXCEEDED,
+    CODE_FAILED_PRECONDITION,
     CODE_UNAVAILABLE,
     ConnectError,
     StreamEnded,
@@ -46,6 +47,11 @@ from ._gen import control_pb as _control_pb
 
 # The protocol version header every Connect request carries.
 PROTOCOL_HEADER = {"Connect-Protocol-Version": "1"}
+
+# The wire-protocol epoch, mirroring pkg/protocol (Go). Every request carries
+# EPOCH_HEADER: EPOCH; every response must too, or the daemon is stale.
+EPOCH = "2"
+EPOCH_HEADER = "Rafiki-Protocol"
 
 # Reserved invalid host for unix-socket endpoints, matching the Go client's
 # connectUDSBaseURL: a misconfiguration that bypasses the dialer fails loudly
@@ -186,6 +192,7 @@ class ConnectClient:
 
     def _headers(self, content_type: str) -> dict:
         headers = dict(PROTOCOL_HEADER)
+        headers[EPOCH_HEADER] = EPOCH
         headers["Content-Type"] = content_type
         # A child-credential socket is the credential: the proxy strips any
         # inbound Authorization and injects the child's own secret, so
@@ -194,6 +201,33 @@ class ConnectClient:
         if self._token and self._send_auth:
             headers["Authorization"] = "Bearer " + self._token
         return headers
+
+    def _check_epoch(self, resp: httpx.Response, body: "bytes | None" = None) -> None:
+        """Refuse a response whose Rafiki-Protocol is missing (an old daemon)
+        or different. The daemon's OWN protocol_mismatch error is not masked:
+        when the body carries that reason the caller surfaces it instead.
+
+        ``body`` is the already-read error body for a streamed non-200; for a
+        unary response it is read here. A 200 stream is checked on its
+        response headers alone — reading it would consume the stream.
+        """
+        got = resp.headers.get(EPOCH_HEADER)
+        if got == EPOCH:
+            return
+        if body is None and resp.status_code >= 400:
+            try:
+                body = resp.content
+            except Exception:  # pragma: no cover - defensive
+                body = b""
+        if body and b"protocol_mismatch" in body:
+            return
+        peer = got if got else "none"
+        raise ConnectError(
+            CODE_FAILED_PRECONDITION,
+            "daemon speaks rafiki protocol %s; this client speaks %s — upgrade the daemon"
+            % (peer, EPOCH),
+            resp.status_code,
+        )
 
     def _unary_once(self, method: str, payload: dict, timeout: "float | None" = None) -> dict:
         try:
@@ -217,6 +251,7 @@ class ConnectClient:
             # deadline_exceeded, never retried.
             code = _timeout_of(exc)
             raise ConnectError(code, "%s against %s: %s" % (code, self._describe(), exc)) from exc
+        self._check_epoch(resp)
         if resp.status_code == 200:
             if not resp.content:
                 return {}
@@ -312,7 +347,11 @@ class ConnectClient:
         if resp.status_code != 200:
             content = resp.read()
             resp.close()
+            self._check_epoch(resp, content)
             raise error_from_http(resp.status_code, content)
+        # The stream's headers arrive with this response, before any body byte:
+        # check the epoch here, on the response itself, never after a message.
+        self._check_epoch(resp)
         try:
             for flags, chunk in _envelopes(resp.iter_bytes()):
                 if flags & _FLAG_COMPRESSED:

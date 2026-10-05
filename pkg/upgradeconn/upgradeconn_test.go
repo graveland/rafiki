@@ -7,11 +7,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -152,7 +155,8 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 	req := "GET " + PathFor(Daraja) + " HTTP/1.1\r\n" +
 		"Host: " + addr + "\r\n" +
 		"Upgrade: " + string(Daraja) + "\r\n" +
-		"Connection: Upgrade\r\n\r\n" +
+		"Connection: Upgrade\r\n" +
+		protocol.EpochHeader + ": " + strconv.Itoa(protocol.Epoch) + "\r\n\r\n" +
 		"{\"type\":\"daraja_first\"}\n" +
 		"{\"type\":\"daraja_more\"}\n"
 	if _, err := raw.Write([]byte(req)); err != nil {

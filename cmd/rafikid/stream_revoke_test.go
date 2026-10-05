@@ -270,7 +270,7 @@ func TestStreamInterceptorAfterPolicy(t *testing.T) {
 	h.Mount(mux, auth.Middleware)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	client := rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+	client := rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
 
 	req := connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "watcher"})
 	req.Header().Set("Authorization", "Bearer "+proxyChildToken)
@@ -397,7 +397,7 @@ func TestExpiredTokenStreamContinues(t *testing.T) {
 	h.Mount(mux, server.NewUserTokenAuth(ustore, proxyBootToken, server.DefaultAuthCacheTTL).Middleware)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	client := rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+	client := rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
 
 	req := connect.NewRequest(&rafikiv1.StreamEventsRequest{
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c1"}},

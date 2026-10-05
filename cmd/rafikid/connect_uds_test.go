@@ -37,15 +37,16 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-// udsHTTPClient dials the given unix socket and speaks h2c over it.
+// udsHTTPClient dials the given unix socket and speaks h2c over it, carrying
+// the current protocol epoch the daemon's gate requires (epochClient).
 func udsHTTPClient(sock string) *http.Client {
-	return &http.Client{Transport: &http2.Transport{
+	return epochClient(&http.Client{Transport: &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", sock)
 		},
-	}}
+	}})
 }
 
 func TestServeConnectUDSAnswersRPCs(t *testing.T) {

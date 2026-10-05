@@ -222,7 +222,9 @@ func serveConnectOnUnixSocket(t *testing.T, path string, handlerPath string, han
 	ln, err := net.Listen("unix", path)
 	assert.NewAborting(t).NoError(err, "listen %s", path)
 	mux := http.NewServeMux()
-	mux.Handle(handlerPath, handler)
+	// The fake daemon answers with the current epoch, as the real RequireEpoch
+	// gate does, so the CLI's client transport accepts it.
+	mux.Handle(handlerPath, epochResponseHeader(handler))
 	protos := &http.Protocols{}
 	protos.SetUnencryptedHTTP2(true)
 	srv := &http.Server{Handler: mux, Protocols: protos}

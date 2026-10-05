@@ -24,9 +24,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // SocketName is the file name served inside a child's socket directory. The
@@ -156,6 +159,10 @@ func ServeTransport(ctx context.Context, dir string, target *url.URL, secret str
 		// failure (never headers, never the secret).
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			w.Header().Set("Content-Type", "application/json")
+			// Even a synthesized error is a response from this proxy: carry the
+			// epoch so a client's response-header check reads this proxy as
+			// current-wire, not as an old daemon.
+			w.Header().Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
 			w.WriteHeader(http.StatusServiceUnavailable)
 			fmt.Fprintf(w, `{"code":"unavailable","message":%q}`,
 				fmt.Sprintf("rafiki daemon unreachable: %v", err))
@@ -275,6 +282,10 @@ func serve(ctx context.Context, dir string, handler http.Handler) (*Server, erro
 // X-Rafiki-* family carries the daemon's own session attribution
 // (X-Rafiki-Session on the per-boot credential) and must never survive a hop
 // through a per-child socket — the socket speaks with exactly one voice.
+//
+// Rafiki-Protocol is deliberately NOT stripped: it is the caller's protocol
+// epoch, the daemon's gate checks it, and rewriting it here would make a stale
+// child look current (or the reverse). The proxy forwards it untouched.
 func stripCredentials(h http.Header) {
 	for k := range h {
 		kanon := http.CanonicalHeaderKey(k)

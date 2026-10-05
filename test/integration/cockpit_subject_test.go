@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -21,17 +22,27 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
+// epochTransport adds the protocol epoch every Connect client must carry now
+// that the daemon's mounts gate on it.
+type epochTransport struct{ base http.RoundTripper }
+
+func (t epochTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
+	return t.base.RoundTrip(r)
+}
+
 // connectClient dials the daemon's control unix socket, where the Connect
 // control plane is served as h2c. It must match cmd/rafiki/connectclient.go.
 func (d *daemon) connectClient() rafikiv1connect.ControlClient {
 	sock := d.socketPath
-	h := &http.Client{Transport: &http2.Transport{
+	h := &http.Client{Transport: epochTransport{base: &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 			var dl net.Dialer
 			return dl.DialContext(ctx, "unix", sock)
 		},
-	}}
+	}}}
 	return rafikiv1connect.NewControlClient(h, "http://connect.rafiki.invalid")
 }
 

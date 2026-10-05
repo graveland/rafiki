@@ -3,13 +3,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -17,6 +21,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // connectUDSBaseURL is a sentinel. Over a unix socket the host is meaningless
@@ -27,24 +32,34 @@ import (
 const connectUDSBaseURL = "http://connect.rafiki.invalid"
 
 // connectHTTPClient speaks h2c over the given unix socket. It must match
-// cmd/rafikid/connect_uds.go, which serves h2c on the same socket.
+// cmd/rafikid/connect_uds.go, which serves h2c on the same socket. It carries
+// the protocol epoch (token-less) so even a local, credential-less profile
+// speaks the current wire; newConnectEndpoint adds the bearer on top when the
+// profile has one.
 func connectHTTPClient(socketPath string) *http.Client {
-	return &http.Client{Transport: &http2.Transport{
+	return &http.Client{Transport: &bearerTransport{base: &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socketPath)
 		},
-	}}
+	}}}
 }
 
-// bearerTransport attaches the control-plane credential to every request.
+// bearerTransport attaches the control-plane credential AND the protocol epoch
+// to every request, and verifies the epoch the daemon answers with.
 //
 // In the transport rather than at each call site so that the cockpit's own
 // client — which this package hands to pkg/tui and never sees again — carries
 // the same credential as the pre-flight calls. A per-call header would
 // authenticate the pre-flight and leave the TUI's stream unauthenticated,
-// which fails only once the alt screen is already up.
+// which fails only once the alt screen is already up. The epoch rides the same
+// transport for the same reason: a stream the TUI opens must be gated on the
+// wire too, and the response-header check has to see the stream's own response
+// headers, not a later message.
+//
+// token may be empty (a tokenless local profile, or the Login endpoint): the
+// epoch is still sent, and the response is still checked.
 type bearerTransport struct {
 	base  http.RoundTripper
 	token string
@@ -54,8 +69,77 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone before mutating: RoundTrippers must not modify the caller's
 	// request.
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
-	return t.base.RoundTrip(r)
+	if t.token != "" {
+		r.Header.Set("Authorization", "Bearer "+t.token)
+	}
+	r.Header.Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
+	resp, err := t.base.RoundTrip(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkDaemonEpoch(resp); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
+}
+
+// checkDaemonEpoch refuses a response whose Rafiki-Protocol header is missing
+// (an old daemon) or different, naming both epochs so the operator knows which
+// side to upgrade. It never masks the daemon's OWN protocol_mismatch error: if
+// the body is a Connect error carrying that reason, the response is returned
+// untouched so the client surfaces the daemon's more specific message.
+func checkDaemonEpoch(resp *http.Response) error {
+	if resp.Header.Get(protocol.EpochHeader) == strconv.Itoa(protocol.Epoch) {
+		return nil
+	}
+	if daemonRefusedEpoch(resp) {
+		return nil
+	}
+	got := resp.Header.Get(protocol.EpochHeader)
+	if got == "" {
+		got = "none"
+	}
+	return fmt.Errorf("daemon speaks rafiki protocol %s; this client speaks %d — upgrade the daemon",
+		got, protocol.Epoch)
+}
+
+// daemonRefusedEpoch reports whether resp is a Connect error whose ErrorInfo
+// reason is protocol_mismatch — the daemon's own epoch refusal. It reads (and
+// restores) the body only for an error status, so a healthy response body is
+// never touched.
+func daemonRefusedEpoch(resp *http.Response) bool {
+	if resp.StatusCode < 400 || resp.Body == nil {
+		return false
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return false
+	}
+	resp.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(data), resp.Body), Closer: resp.Body}
+	var body struct {
+		Details []struct {
+			Debug struct {
+				Reason string `json:"reason"`
+			} `json:"debug"`
+		} `json:"details"`
+	}
+	if json.Unmarshal(data, &body) != nil {
+		return false
+	}
+	for _, d := range body.Details {
+		if d.Debug.Reason == protocol.ErrProtocolMismatch {
+			return true
+		}
+	}
+	return false
+}
+
+// readCloser pairs a reconstructed reader with the original body's Closer so a
+// peeked-at error body still closes the underlying connection.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // connectEndpoint is a resolved Connect control plane: the transport, the base
@@ -207,7 +291,7 @@ func newLoginEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	}
 
 	return connectEndpoint{
-		httpClient: &http.Client{Transport: http.DefaultTransport},
+		httpClient: &http.Client{Transport: &bearerTransport{base: http.DefaultTransport}},
 		baseURL:    p.URL,
 		describe:   p.URL,
 		identity:   p.URL,
