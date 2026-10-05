@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
+import datetime
 import math
 from typing import Optional
 
@@ -139,14 +140,14 @@ class EventSubject:
 @dataclasses.dataclass
 class EventCursor:
     ordinals: dict[str, int] = dataclasses.field(default_factory=dict)
-    floor_unix_ms: int = 0
+    floor: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
         if self.ordinals:
             out["ordinals"] = dict((k, v) for k, v in self.ordinals.items())
-        if self.floor_unix_ms != 0:
-            out["floorUnixMs"] = str(self.floor_unix_ms)
+        if self.floor is not None:
+            out["floor"] = _ts_out(self.floor)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "EventCursor":
@@ -154,9 +155,9 @@ class EventCursor:
         _v = _d.get("ordinals")
         if _v is not None:
             obj.ordinals = {k: _int_in(v) for k, v in _v.items()}
-        _v = _d.get("floorUnixMs")
+        _v = _d.get("floor")
         if _v is not None:
-            obj.floor_unix_ms = _int_in(_v)
+            obj.floor = _ts_in(_v, "floor")
         return obj
 
 @dataclasses.dataclass
@@ -610,7 +611,7 @@ class ChildSummary:
     model: str = ""
     cwd: str = ""
     pid: Optional[int] = None
-    started_at: int = 0
+    started_at: Optional[datetime.datetime] = None
     last_activity: int = 0
     exit_code: Optional[int] = None
     labels: dict[str, str] = dataclasses.field(default_factory=dict)
@@ -642,8 +643,8 @@ class ChildSummary:
             out["cwd"] = self.cwd
         if self.pid is not None:
             out["pid"] = self.pid
-        if self.started_at != 0:
-            out["startedAt"] = str(self.started_at)
+        if self.started_at is not None:
+            out["startedAt"] = _ts_out(self.started_at)
         if self.last_activity != 0:
             out["lastActivity"] = str(self.last_activity)
         if self.exit_code is not None:
@@ -699,7 +700,7 @@ class ChildSummary:
             obj.pid = _int_in(_v)
         _v = _d.get("startedAt")
         if _v is not None:
-            obj.started_at = _int_in(_v)
+            obj.started_at = _ts_in(_v, "startedAt")
         _v = _d.get("lastActivity")
         if _v is not None:
             obj.last_activity = _int_in(_v)
@@ -750,7 +751,7 @@ class ListChildrenRequest:
     name: str = ""
     name_contains: str = ""
     cwd_contains: str = ""
-    since: int = 0
+    since: Optional[datetime.datetime] = None
     labels: dict[str, str] = dataclasses.field(default_factory=dict)
     has_label: list[str] = dataclasses.field(default_factory=list)
 
@@ -764,8 +765,8 @@ class ListChildrenRequest:
             out["nameContains"] = self.name_contains
         if self.cwd_contains != "":
             out["cwdContains"] = self.cwd_contains
-        if self.since != 0:
-            out["since"] = str(self.since)
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
         if self.labels:
             out["labels"] = dict((k, v) for k, v in self.labels.items())
         if self.has_label:
@@ -788,7 +789,7 @@ class ListChildrenRequest:
             obj.cwd_contains = _v
         _v = _d.get("since")
         if _v is not None:
-            obj.since = _int_in(_v)
+            obj.since = _ts_in(_v, "since")
         _v = _d.get("labels")
         if _v is not None:
             obj.labels = {k: v for k, v in _v.items()}
@@ -1123,18 +1124,18 @@ class SpawnResponse:
 @dataclasses.dataclass
 class KillRequest:
     child_id: str = ""
-    shutdown_timeout_ms: int = 0
-    kill_timeout_ms: int = 0
+    shutdown_timeout: Optional[datetime.timedelta] = None
+    kill_timeout: Optional[datetime.timedelta] = None
     include_descendants: bool = False
 
     def to_dict(self) -> dict:
         out = {}
         if self.child_id != "":
             out["childId"] = self.child_id
-        if self.shutdown_timeout_ms != 0:
-            out["shutdownTimeoutMs"] = str(self.shutdown_timeout_ms)
-        if self.kill_timeout_ms != 0:
-            out["killTimeoutMs"] = str(self.kill_timeout_ms)
+        if self.shutdown_timeout is not None:
+            out["shutdownTimeout"] = _dur_out(self.shutdown_timeout)
+        if self.kill_timeout is not None:
+            out["killTimeout"] = _dur_out(self.kill_timeout)
         if self.include_descendants != False:
             out["includeDescendants"] = self.include_descendants
         return out
@@ -1144,12 +1145,12 @@ class KillRequest:
         _v = _d.get("childId")
         if _v is not None:
             obj.child_id = _v
-        _v = _d.get("shutdownTimeoutMs")
+        _v = _d.get("shutdownTimeout")
         if _v is not None:
-            obj.shutdown_timeout_ms = _int_in(_v)
-        _v = _d.get("killTimeoutMs")
+            obj.shutdown_timeout = _dur_in(_v, "shutdownTimeout")
+        _v = _d.get("killTimeout")
         if _v is not None:
-            obj.kill_timeout_ms = _int_in(_v)
+            obj.kill_timeout = _dur_in(_v, "killTimeout")
         _v = _d.get("includeDescendants")
         if _v is not None:
             obj.include_descendants = _v
@@ -1160,7 +1161,7 @@ class KillResponse:
     child_id: str = ""
     exit_code: Optional[int] = None
     signal: str = ""
-    duration_ms: int = 0
+    duration: Optional[datetime.timedelta] = None
     escalated: bool = False
     descendant_ids: list[str] = dataclasses.field(default_factory=list)
 
@@ -1172,8 +1173,8 @@ class KillResponse:
             out["exitCode"] = self.exit_code
         if self.signal != "":
             out["signal"] = self.signal
-        if self.duration_ms != 0:
-            out["durationMs"] = str(self.duration_ms)
+        if self.duration is not None:
+            out["duration"] = _dur_out(self.duration)
         if self.escalated != False:
             out["escalated"] = self.escalated
         if self.descendant_ids:
@@ -1191,9 +1192,9 @@ class KillResponse:
         _v = _d.get("signal")
         if _v is not None:
             obj.signal = _v
-        _v = _d.get("durationMs")
+        _v = _d.get("duration")
         if _v is not None:
-            obj.duration_ms = _int_in(_v)
+            obj.duration = _dur_in(_v, "duration")
         _v = _d.get("escalated")
         if _v is not None:
             obj.escalated = _v
@@ -2449,8 +2450,8 @@ class ExecutorRow:
     launch_kinds: list[str] = dataclasses.field(default_factory=list)
     eligible: bool = False
     reason: str = ""
-    connected_at_ms: int = 0
-    last_seen_ms: int = 0
+    connected_at: Optional[datetime.datetime] = None
+    last_seen: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -2478,10 +2479,10 @@ class ExecutorRow:
             out["eligible"] = self.eligible
         if self.reason != "":
             out["reason"] = self.reason
-        if self.connected_at_ms != 0:
-            out["connectedAtMs"] = str(self.connected_at_ms)
-        if self.last_seen_ms != 0:
-            out["lastSeenMs"] = str(self.last_seen_ms)
+        if self.connected_at is not None:
+            out["connectedAt"] = _ts_out(self.connected_at)
+        if self.last_seen is not None:
+            out["lastSeen"] = _ts_out(self.last_seen)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ExecutorRow":
@@ -2522,12 +2523,12 @@ class ExecutorRow:
         _v = _d.get("reason")
         if _v is not None:
             obj.reason = _v
-        _v = _d.get("connectedAtMs")
+        _v = _d.get("connectedAt")
         if _v is not None:
-            obj.connected_at_ms = _int_in(_v)
-        _v = _d.get("lastSeenMs")
+            obj.connected_at = _ts_in(_v, "connectedAt")
+        _v = _d.get("lastSeen")
         if _v is not None:
-            obj.last_seen_ms = _int_in(_v)
+            obj.last_seen = _ts_in(_v, "lastSeen")
         return obj
 
 @dataclasses.dataclass
@@ -2616,7 +2617,7 @@ class DarajaLaunchResponse:
     child_id: str = ""
     pid: int = 0
     pgid: int = 0
-    connected_unix_ms: int = 0
+    connected_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -2626,8 +2627,8 @@ class DarajaLaunchResponse:
             out["pid"] = self.pid
         if self.pgid != 0:
             out["pgid"] = self.pgid
-        if self.connected_unix_ms != 0:
-            out["connectedUnixMs"] = str(self.connected_unix_ms)
+        if self.connected_at is not None:
+            out["connectedAt"] = _ts_out(self.connected_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "DarajaLaunchResponse":
@@ -2641,9 +2642,9 @@ class DarajaLaunchResponse:
         _v = _d.get("pgid")
         if _v is not None:
             obj.pgid = _int_in(_v)
-        _v = _d.get("connectedUnixMs")
+        _v = _d.get("connectedAt")
         if _v is not None:
-            obj.connected_unix_ms = _int_in(_v)
+            obj.connected_at = _ts_in(_v, "connectedAt")
         return obj
 
 @dataclasses.dataclass
@@ -4747,19 +4748,19 @@ class ResumeResponse:
 
 @dataclasses.dataclass
 class CloseAllExitedRequest:
-    older_than_ms: int = 0
+    older_than: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
-        if self.older_than_ms != 0:
-            out["olderThanMs"] = str(self.older_than_ms)
+        if self.older_than is not None:
+            out["olderThan"] = _dur_out(self.older_than)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CloseAllExitedRequest":
         obj = cls()
-        _v = _d.get("olderThanMs")
+        _v = _d.get("olderThan")
         if _v is not None:
-            obj.older_than_ms = _int_in(_v)
+            obj.older_than = _dur_in(_v, "olderThan")
         return obj
 
 @dataclasses.dataclass
@@ -4840,7 +4841,7 @@ class StatusRequest:
 @dataclasses.dataclass
 class StatusResponse:
     version: str = ""
-    started_at: int = 0
+    started_at: Optional[datetime.datetime] = None
     children: Optional[StatusResponse.ChildCounts] = None
     memory_bytes: int = 0
     socket: str = ""
@@ -4850,8 +4851,8 @@ class StatusResponse:
         out = {}
         if self.version != "":
             out["version"] = self.version
-        if self.started_at != 0:
-            out["startedAt"] = str(self.started_at)
+        if self.started_at is not None:
+            out["startedAt"] = _ts_out(self.started_at)
         if self.children is not None:
             out["children"] = self.children.to_dict()
         if self.memory_bytes != 0:
@@ -4869,7 +4870,7 @@ class StatusResponse:
             obj.version = _v
         _v = _d.get("startedAt")
         if _v is not None:
-            obj.started_at = _int_in(_v)
+            obj.started_at = _ts_in(_v, "startedAt")
         _v = _d.get("children")
         if _v is not None:
             obj.children = StatusResponse.ChildCounts.from_dict(_v)
@@ -4952,7 +4953,7 @@ class SearchRequest:
     class SearchSessionFilter:
         cwd_contains: str = ""
         name_contains: str = ""
-        since: int = 0
+        since: Optional[datetime.datetime] = None
         labels: dict[str, str] = dataclasses.field(default_factory=dict)
         has_label: list[str] = dataclasses.field(default_factory=list)
 
@@ -4962,8 +4963,8 @@ class SearchRequest:
                 out["cwdContains"] = self.cwd_contains
             if self.name_contains != "":
                 out["nameContains"] = self.name_contains
-            if self.since != 0:
-                out["since"] = str(self.since)
+            if self.since is not None:
+                out["since"] = _ts_out(self.since)
             if self.labels:
                 out["labels"] = dict((k, v) for k, v in self.labels.items())
             if self.has_label:
@@ -4980,7 +4981,7 @@ class SearchRequest:
                 obj.name_contains = _v
             _v = _d.get("since")
             if _v is not None:
-                obj.since = _int_in(_v)
+                obj.since = _ts_in(_v, "since")
             _v = _d.get("labels")
             if _v is not None:
                 obj.labels = {k: v for k, v in _v.items()}
@@ -5438,7 +5439,7 @@ class EnrollExecutorRequest:
     isolation: str = ""
     workspace_mode: str = ""
     admits: str = ""
-    ttl_seconds: int = 0
+    ttl: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -5454,8 +5455,8 @@ class EnrollExecutorRequest:
             out["workspaceMode"] = self.workspace_mode
         if self.admits != "":
             out["admits"] = self.admits
-        if self.ttl_seconds != 0:
-            out["ttlSeconds"] = str(self.ttl_seconds)
+        if self.ttl is not None:
+            out["ttl"] = _dur_out(self.ttl)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "EnrollExecutorRequest":
@@ -5478,9 +5479,9 @@ class EnrollExecutorRequest:
         _v = _d.get("admits")
         if _v is not None:
             obj.admits = _v
-        _v = _d.get("ttlSeconds")
+        _v = _d.get("ttl")
         if _v is not None:
-            obj.ttl_seconds = _int_in(_v)
+            obj.ttl = _dur_in(_v, "ttl")
         return obj
 
 @dataclasses.dataclass
@@ -6450,3 +6451,70 @@ def _float_in(value) -> float:
             return -math.inf
         return float(value)
     raise TypeError("expected a number (or non-finite string) on the wire")
+
+
+def _ts_out(value: datetime.datetime) -> str:
+    """datetime → protojson Timestamp: RFC3339 in UTC with the fractional
+    seconds omitted when zero. A naive value is taken as UTC; an aware one is
+    converted to it."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    else:
+        value = value.astimezone(datetime.timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _ts_in(value, field: str) -> datetime.datetime:
+    """protojson Timestamp → tz-aware UTC datetime, nanoseconds truncated to
+    microseconds. 'field' names the offending field in the error, never the
+    offending content."""
+    if not isinstance(value, str):
+        raise ValueError("invalid Timestamp for field %r" % field)
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    # datetime.fromisoformat accepts only 3 or 6 fractional digits before
+    # Python 3.11, while protojson emits up to 9 (nanoseconds); rewrite the
+    # fraction to exactly 6 digits, truncating nanoseconds to microseconds.
+    dot = text.find(".")
+    if dot != -1:
+        end = len(text)
+        for i in range(dot + 1, len(text)):
+            if text[i] in "+-Zz":
+                end = i
+                break
+        text = text[:dot + 1] + (text[dot + 1:end] + "000000")[:6] + text[end:]
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("invalid Timestamp for field %r" % field) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _dur_out(value: datetime.timedelta) -> str:
+    """timedelta → protojson Duration: seconds with up to six fractional digits
+    (trailing zeros dropped) and an 's' suffix."""
+    micros = value // datetime.timedelta(microseconds=1)
+    sign = "-" if micros < 0 else ""
+    micros = abs(micros)
+    whole, frac = divmod(micros, 1000000)
+    if frac:
+        return "%s%d.%ss" % (sign, whole, ("%06d" % frac).rstrip("0"))
+    return "%s%ds" % (sign, whole)
+
+
+def _dur_in(value, field: str) -> datetime.timedelta:
+    """protojson Duration → timedelta, nanoseconds truncated to microseconds
+    with the sign preserved. 'field' names the offending field in the error."""
+    if not isinstance(value, str) or not value.endswith("s"):
+        raise ValueError("invalid Duration for field %r" % field)
+    body = value[:-1]
+    negative = body.startswith("-")
+    if negative:
+        body = body[1:]
+    whole, _, frac = body.partition(".")
+    if not whole.isdigit() or (frac and not frac.isdigit()):
+        raise ValueError("invalid Duration for field %r" % field)
+    nanos = int(whole) * 1000000000 + int((frac + "000000000")[:9])
+    micros = nanos // 1000
+    return datetime.timedelta(microseconds=-micros if negative else micros)

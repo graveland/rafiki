@@ -74,7 +74,7 @@ func (r *eventRenderer) seed(ctx context.Context, notes io.Writer, client roster
 		return
 	}
 	for _, ch := range resp.Msg.GetChildren() {
-		r.noteChild(ch.GetChildId(), ch.GetName(), ch.GetStatus(), ch.GetStartedAt(), time.Now())
+		r.noteChild(ch.GetChildId(), ch.GetName(), ch.GetStatus(), ch.GetStartedAt().AsTime(), time.Now())
 	}
 }
 
@@ -90,14 +90,14 @@ func (r *eventRenderer) seedChild(ctx context.Context, notes io.Writer, client c
 		return
 	}
 	ch := resp.Msg.GetChild()
-	r.noteChild(childID, ch.GetName(), ch.GetStatus(), ch.GetStartedAt(), time.Now())
+	r.noteChild(childID, ch.GetName(), ch.GetStatus(), ch.GetStartedAt().AsTime(), time.Now())
 }
 
 // noteChild records a name and a first-known status without overwriting
 // anything the stream itself has already taught us. bornAt prefers the
 // child's started_at when the source carries one: an exit rendered from a
 // seeded child then reports a real lifetime instead of "since connect".
-func (r *eventRenderer) noteChild(id, name, status string, startedAtMs int64, now time.Time) {
+func (r *eventRenderer) noteChild(id, name, status string, startedAt time.Time, now time.Time) {
 	if id == "" {
 		return
 	}
@@ -113,8 +113,8 @@ func (r *eventRenderer) noteChild(id, name, status string, startedAtMs int64, no
 		r.status[id] = status
 		r.statusAt[id] = now
 	}
-	if startedAtMs > 0 {
-		r.bornAt[id] = time.UnixMilli(startedAtMs)
+	if !startedAt.IsZero() {
+		r.bornAt[id] = startedAt
 	} else {
 		r.bornAt[id] = now
 	}

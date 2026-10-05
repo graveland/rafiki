@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -226,9 +227,9 @@ func TestRouteSteerChangesNextRequestProviderObject(t *testing.T) {
 	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer kcancel()
 	_, _ = client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{
-		ChildId:           child,
-		ShutdownTimeoutMs: 2000,
-		KillTimeoutMs:     2000,
+		ChildId:         child,
+		ShutdownTimeout: durationpb.New(2 * time.Second),
+		KillTimeout:     durationpb.New(2 * time.Second),
 	}))
 }
 

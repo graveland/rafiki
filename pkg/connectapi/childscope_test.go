@@ -5,6 +5,7 @@ package connectapi_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -58,7 +59,7 @@ func (emptyLifecycle) Spawn(context.Context, connectapi.SpawnParams) (string, er
 	return "c_spawned", nil
 }
 
-func (emptyLifecycle) Kill(context.Context, string, int64, int64) (connectapi.KillOutcome, error) {
+func (emptyLifecycle) Kill(context.Context, string, time.Duration, time.Duration) (connectapi.KillOutcome, error) {
 	return connectapi.KillOutcome{}, nil
 }
 

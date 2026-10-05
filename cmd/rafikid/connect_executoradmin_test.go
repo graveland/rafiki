@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/types/known/durationpb"
+
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -39,7 +41,7 @@ func TestExecutorAdminEnrollStampsOwnerFromTheConnection(t *testing.T) {
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 
 	resp, err := a.Enroll(ctx, &rafikiv1.EnrollExecutorRequest{
-		Name: "laptop", Labels: map[string]string{"env": "dev"}, TtlSeconds: 3600,
+		Name: "laptop", Labels: map[string]string{"env": "dev"}, Ttl: durationpb.New(time.Hour),
 	})
 	c.NoError(err)
 	c.NotEq("", resp.Token, "enroll returned an empty token")
@@ -74,8 +76,8 @@ func TestExecutorAdminEnrollRefusesAClientSuppliedOwner(t *testing.T) {
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 
 	_, err := a.Enroll(ctx, &rafikiv1.EnrollExecutorRequest{
-		Labels:     map[string]string{"owner": "mallory"},
-		TtlSeconds: 3600,
+		Labels: map[string]string{"owner": "mallory"},
+		Ttl:    durationpb.New(time.Hour),
 	})
 	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
@@ -92,7 +94,7 @@ func TestExecutorAdminNilIdentityFallsBackToTheDaemonOSUser(t *testing.T) {
 	c := assert.NewAborting(t)
 	a, s := adminFixture()
 
-	if _, err := a.Enroll(context.Background(), &rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}); err != nil {
+	if _, err := a.Enroll(context.Background(), &rafikiv1.EnrollExecutorRequest{Ttl: durationpb.New(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	want, err := user.Current()
@@ -217,11 +219,11 @@ func TestExecutorAdminListMarksConnectedFromTheLivePool(t *testing.T) {
 }
 
 // TestExecutorAdminListCarriesConnectionTimestamps pins the timestamp
-// pass-through on the empty-kind path: connected_at_ms comes from the live
-// pool's join time and is 0 for an executor with no current connection
-// (ConnectedAt nil), and last_seen_ms mirrors the store's last_seen_at — set
-// when the row carries one, 0 when the column is NULL (the Go zero time: an
-// executor never seen).
+// pass-through on the empty-kind path: connected_at comes from the live
+// pool's join time and is unset for an executor with no current connection
+// (ConnectedAt nil), and last_seen mirrors the store's last_seen_at — set
+// when the row carries one, unset when the column is NULL (the Go zero time:
+// an executor never seen).
 func TestExecutorAdminListCarriesConnectionTimestamps(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	joined := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
@@ -245,14 +247,14 @@ func TestExecutorAdminListCarriesConnectionTimestamps(t *testing.T) {
 		byID[r.ID] = r
 	}
 	ck.True(byID["exec-live"].Connected, "exec-live not marked connected though the pool has it live")
-	if got, want := byID["exec-live"].ConnectedAtMs, joined.UnixMilli(); got != want {
-		t.Errorf("exec-live connected_at_ms = %d, want the pool's join time %d", got, want)
+	if got := byID["exec-live"].ConnectedAt; !got.Equal(joined) {
+		t.Errorf("exec-live connected_at = %v, want the pool's join time %v", got, joined)
 	}
-	if got, want := byID["exec-live"].LastSeenMs, seen.UnixMilli(); got != want {
-		t.Errorf("exec-live last_seen_ms = %d, want the store row's sighting %d", got, want)
+	if got := byID["exec-live"].LastSeen; !got.Equal(seen) {
+		t.Errorf("exec-live last_seen = %v, want the store row's sighting %v", got, seen)
 	}
-	ck.Eq(0, byID["exec-off"].ConnectedAtMs, "exec-off connected_at_ms")
-	ck.Eq(0, byID["exec-off"].LastSeenMs, "exec-off last_seen_ms")
+	ck.True(byID["exec-off"].ConnectedAt.IsZero(), "exec-off connected_at")
+	ck.True(byID["exec-off"].LastSeen.IsZero(), "exec-off last_seen")
 }
 
 // TestExecutorAdminLabelMapsTheRow pins the single-row mapping: the updated
@@ -329,7 +331,7 @@ func TestExecutorEnrollCarriesOwner(t *testing.T) {
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 
-	_, err := a.Enroll(ctx, &rafikiv1.EnrollExecutorRequest{Name: "laptop", TtlSeconds: 3600})
+	_, err := a.Enroll(ctx, &rafikiv1.EnrollExecutorRequest{Name: "laptop", Ttl: durationpb.New(time.Hour)})
 	c.Require().NoError(err)
 	c.Require().Len(s.minted, 1, "want one minted token, got %d", len(s.minted))
 	c.Eq("u1", s.minted[0].OwnerUserID, "the minted token must carry the caller's durable user id, got")
@@ -346,7 +348,7 @@ func TestExecutorEnrollNilIdentityUnowned(t *testing.T) {
 	c := assert.NewAborting(t)
 	a, s := adminFixture()
 
-	if _, err := a.Enroll(context.Background(), &rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}); err != nil {
+	if _, err := a.Enroll(context.Background(), &rafikiv1.EnrollExecutorRequest{Ttl: durationpb.New(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	c.Require().Len(s.minted, 1, "want one minted token, got %d", len(s.minted))

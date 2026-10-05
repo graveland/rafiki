@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insights"
@@ -38,11 +41,11 @@ func (a connectChildOps) Resume(ctx context.Context, childID, apiKey string) (st
 	return res.ChildID, nil
 }
 
-// CloseAllExited closes every exited child older than olderThanMs. It takes
+// CloseAllExited closes every exited child older than olderThan. It takes
 // the seam's ctx for symmetry but Controller.CloseAllExited has never needed
 // one (its per-child deletes bound themselves internally).
-func (a connectChildOps) CloseAllExited(_ context.Context, olderThanMs int64) ([]string, error) {
-	return a.c.CloseAllExited(olderThanMs)
+func (a connectChildOps) CloseAllExited(_ context.Context, olderThan time.Duration) ([]string, error) {
+	return a.c.CloseAllExited(olderThan)
 }
 
 // SetLabels applies set entries then remove entries, and returns the full
@@ -53,8 +56,8 @@ func (a connectChildOps) SetLabels(_ context.Context, childID string, set map[st
 }
 
 // Status converts Controller.Status into the proto vitals message, nested
-// ChildCounts included. started_at is unix ms, matching
-// Controller.startedAt.UnixMilli.
+// ChildCounts included. started_at is a Timestamp, matching
+// Controller.startedAt.
 func (a connectChildOps) Status(_ context.Context) (*rafikiv1.StatusResponse, error) {
 	return statusResponseFrom(a.c.Status()), nil
 }
@@ -66,6 +69,16 @@ func (a connectChildOps) Status(_ context.Context) (*rafikiv1.StatusResponse, er
 // limit<=0 floor is the default limit, exactly as on the framed plane.
 func (a connectChildOps) Search(_ context.Context, req *rafikiv1.SearchRequest) (*rafikiv1.SearchResponse, error) {
 	return searchResponseFrom(a.c.Search(buildSearchQuery(req))), nil
+}
+
+// wireTime maps a wire Timestamp onto a time.Time, treating an unset message
+// AND the epoch (the message's zero value) as the zero time — the filter's
+// "unbounded", matching the old integer 0.
+func wireTime(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil || (ts.GetSeconds() == 0 && ts.GetNanos() == 0) {
+		return time.Time{}
+	}
+	return ts.AsTime()
 }
 
 // buildSearchQuery maps the proto SearchRequest onto the framed SearchQuery.
@@ -81,7 +94,7 @@ func buildSearchQuery(req *rafikiv1.SearchRequest) searchQuery {
 		q.SessionFilter = protocol.SearchSessionFilter{
 			CwdContains:  sf.GetCwdContains(),
 			NameContains: sf.GetNameContains(),
-			Since:        sf.GetSince(),
+			Since:        wireTime(sf.GetSince()),
 			Labels:       sf.GetLabels(),
 			HasLabel:     sf.GetHasLabel(),
 		}
@@ -119,14 +132,17 @@ func searchResponseFrom(result protocol.SearchResponseData) *rafikiv1.SearchResp
 // statusResponseFrom converts the framed ControllerStatus onto the proto
 // vitals message. Extracted for the same reason as buildSearchQuery.
 func statusResponseFrom(st protocol.StatusResponseData) *rafikiv1.StatusResponse {
-	return &rafikiv1.StatusResponse{
+	out := &rafikiv1.StatusResponse{
 		Version:     st.Version,
-		StartedAt:   st.StartedAt,
 		Children:    &rafikiv1.StatusResponse_ChildCounts{Live: int32(st.Children.Live), Exited: int32(st.Children.Exited)},
 		MemoryBytes: st.MemoryBytes,
 		Socket:      st.Socket,
 		LogsDir:     st.LogsDir,
 	}
+	if !st.StartedAt.IsZero() {
+		out.StartedAt = timestamppb.New(st.StartedAt)
+	}
+	return out
 }
 
 // ShutdownDaemon is a fail-closed stub: the child-drain half of the framed

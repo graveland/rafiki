@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -96,7 +98,7 @@ func TestExecutorAdminUnwiredIsUnavailable(t *testing.T) {
 	}{
 		{"enroll", func() error {
 			_, err := s.EnrollExecutor(context.Background(),
-				connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}))
+				connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Ttl: durationpb.New(3600 * time.Second)}))
 			return err
 		}},
 		{"create", func() error {
@@ -133,17 +135,17 @@ func TestExecutorAdminUnwiredIsUnavailable(t *testing.T) {
 }
 
 // TestExecutorAdminEnrollRefusesNonPositiveTTL mirrors the framed dispatcher:
-// a non-positive ttl_seconds is refused before the seam is touched, rather
+// a non-positive (or unset) ttl is refused before the seam is touched, rather
 // than silently minting the Controller's 72h default.
 func TestExecutorAdminEnrollRefusesNonPositiveTTL(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	f := &fakeExecutorAdmin{}
 	s.SetExecutorAdmin(f)
-	for _, ttl := range []int64{0, -1} {
+	for _, ttl := range []*durationpb.Duration{nil, durationpb.New(0), durationpb.New(-time.Second)} {
 		_, err := s.EnrollExecutor(context.Background(),
-			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: ttl}))
-		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ttl %d: got %v, want CodeInvalidArgument", ttl, err)
+			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Ttl: ttl}))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ttl %v: got %v, want CodeInvalidArgument", ttl, err)
 	}
 	c.Eq(0, f.calls, "seam was called")
 }
@@ -159,7 +161,7 @@ func TestExecutorAdminEnrollDelegatesToSeam(t *testing.T) {
 	resp, err := s.EnrollExecutor(context.Background(), connect.NewRequest(&rafikiv1.EnrollExecutorRequest{
 		Name: "laptop", Labels: map[string]string{"env": "work"},
 		Roots: []string{"/home/brent"}, Isolation: "container",
-		WorkspaceMode: "workspace", Admits: "kind=claude", TtlSeconds: 3600,
+		WorkspaceMode: "workspace", Admits: "kind=claude", Ttl: durationpb.New(3600 * time.Second),
 	}))
 	c.Require().NoError(err)
 	c.Eq("tok-1", resp.Msg.GetToken(), "token")
@@ -167,7 +169,7 @@ func TestExecutorAdminEnrollDelegatesToSeam(t *testing.T) {
 	c.False(got.GetName() != "laptop" || got.GetLabels()["env"] != "work" ||
 		got.GetRoots()[0] != "/home/brent" || got.GetIsolation() != "container" ||
 		got.GetWorkspaceMode() != "workspace" || got.GetAdmits() != "kind=claude" ||
-		got.GetTtlSeconds() != 3600, "seam saw %+v, want the request's fields", got)
+		got.GetTtl().AsDuration() != 3600*time.Second, "seam saw %+v, want the request's fields", got)
 }
 
 // TestExecutorAdminCreateDelegatesToSeam is Enroll's pin on the stateless path:
@@ -295,7 +297,7 @@ func TestExecutorAdminUncodedErrorIsRedactedAndCodedPasses(t *testing.T) {
 			enrollErr: errors.New("pgx: conn to db.internal:5432 refused"),
 		})
 		_, err := s.EnrollExecutor(context.Background(),
-			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}))
+			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Ttl: durationpb.New(3600 * time.Second)}))
 		c.Require().Eq(connect.CodeInternal, connect.CodeOf(err), "got %v, want CodeInternal", err)
 		c.False(err == nil || !strings.Contains(err.Error(), internalErrText), "err.Error() = %v, want the fixed redacted text", err)
 		c.NotStrContains(err.Error(), "db.internal", "err.Error() = %v, want the raw cause redacted", err)
@@ -308,7 +310,7 @@ func TestExecutorAdminUncodedErrorIsRedactedAndCodedPasses(t *testing.T) {
 			Message: "that executor name is already taken for this owner",
 		}})
 		_, err := s.EnrollExecutor(context.Background(),
-			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Name: "laptop", TtlSeconds: 3600}))
+			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Name: "laptop", Ttl: durationpb.New(3600 * time.Second)}))
 		c.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got %v, want CodeInvalidArgument", err)
 		c.StrContains(err.Error(), "that executor name is already taken for this owner", "err.Error() = %v, want the authored message", err)
 	})
@@ -345,7 +347,7 @@ func TestExecutorAdminCodedErrorPassesThrough(t *testing.T) {
 			errors.New("conversation queries require a user credential")),
 	})
 	_, err := s.EnrollExecutor(context.Background(),
-		connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}))
+		connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Ttl: durationpb.New(3600 * time.Second)}))
 	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "got %v, want PermissionDenied", err)
 	c.False(err == nil || !strings.Contains(err.Error(), "require a user credential"), "err.Error() = %v, want the authored text, not redaction", err)
 	c.Empty(msgs, "mapper logged %d record(s) for a coded error", len(msgs))

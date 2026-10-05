@@ -23,6 +23,7 @@ generated dataclasses in ``rafiki._gen``.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
 import os
 import shutil
@@ -47,17 +48,17 @@ from .errors import (
 REMOTE_IDLE_CEILING = 60.0
 
 # The daemon's Kill-handler defaults (cmd/rafikid/controller.go: Kill passes
-# durOrDefault(shutdownTimeoutMs, 180*time.Second) and
-# durOrDefault(killTimeoutMs, 30*time.Second); pinned by
+# durOrDefault(shutdownTimeout, 180*time.Second) and
+# durOrDefault(killTimeout, 30*time.Second); pinned by
 # TestKillTimeoutDefaults in cmd/rafikid). stop() mirrors them so its per-call
 # read timeout covers exactly the work the daemon may do before answering.
-DEFAULT_SHUTDOWN_MS = 180_000
-DEFAULT_KILL_MS = 30_000
+DEFAULT_SHUTDOWN = datetime.timedelta(seconds=180)
+DEFAULT_KILL = datetime.timedelta(seconds=30)
 
 # Slack on top of the two windows above: the daemon answers only after the
 # ladder completes AND the exit is persisted (waitForChildRemoval), so the
 # read timeout is the two windows plus headroom, not the windows exactly.
-STOP_TIMEOUT_SLACK_MS = 30_000
+STOP_TIMEOUT_SLACK = datetime.timedelta(seconds=30)
 
 # The states that mean "settled": a fundi child sits idle between turns
 # (agent_settled is pi's true-idle event; the daemon maps it to idle), and
@@ -86,6 +87,16 @@ def _labels_wire(labels: dict | None) -> dict:
     if labels is None:
         return {}
     return {str(k): str(v) for k, v in labels.items()}
+
+
+def _as_timedelta(value: "datetime.timedelta | float | int | None") -> "datetime.timedelta | None":
+    """Coerce a ``timedelta`` or a number of seconds to a ``timedelta``; None
+    stays None (the wire's unset, which the daemon reads as its own default)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.timedelta):
+        return value
+    return datetime.timedelta(seconds=float(value))
 
 
 class Settle:
@@ -304,32 +315,35 @@ class Client:
             self._prompt_floor[child_id] = floor
         return message_id
 
-    def stop(self, child_id: str, *, shutdown_timeout_ms: "int | None" = None, kill_timeout_ms: "int | None" = None):
+    def stop(self, child_id: str, *, shutdown_timeout: "datetime.timedelta | float | None" = None, kill_timeout: "datetime.timedelta | float | None" = None):
         """Stop a child: the graceful window first, then the SIGTERM/SIGKILL
         rungs of the kill ladder at the caller's timeouts. Returns the
         KillResponse (exit_code is None for a signalled child). The child's
         own daemon-managed descendants are NOT swept.
 
-        The call carries a per-call read timeout of
-        ``(shutdown_timeout_ms or DEFAULT_SHUTDOWN_MS) +
-        (kill_timeout_ms or DEFAULT_KILL_MS) + STOP_TIMEOUT_SLACK_MS`` — the
-        daemon may legitimately spend the whole graceful window on a child
-        that cannot answer the shutdown (a script that never reads its
-        Receive stream), then the kill rung, then the reap, before answering;
-        the default 30 s read timeout would fire while the stop was still
-        working.
+        ``shutdown_timeout`` and ``kill_timeout`` are each a ``timedelta`` or a
+        number of seconds; None (or zero) leaves the daemon's own default —
+        180 s graceful, then 30 s to kill. The call carries a per-call read
+        timeout of ``(shutdown_timeout or DEFAULT_SHUTDOWN) +
+        (kill_timeout or DEFAULT_KILL) + STOP_TIMEOUT_SLACK`` — the daemon may
+        legitimately spend the whole graceful window on a child that cannot
+        answer the shutdown (a script that never reads its Receive stream),
+        then the kill rung, then the reap, before answering; the default 30 s
+        read timeout would fire while the stop was still working.
         """
+        shutdown = _as_timedelta(shutdown_timeout)
+        kill = _as_timedelta(kill_timeout)
         req = _gen.control_pb.KillRequest(
             child_id=child_id,
-            shutdown_timeout_ms=shutdown_timeout_ms or 0,
-            kill_timeout_ms=kill_timeout_ms or 0,
+            shutdown_timeout=shutdown or None,
+            kill_timeout=kill or None,
         )
-        timeout_ms = (
-            (shutdown_timeout_ms or DEFAULT_SHUTDOWN_MS)
-            + (kill_timeout_ms or DEFAULT_KILL_MS)
-            + STOP_TIMEOUT_SLACK_MS
-        )
-        return self._call("Kill", req, _gen.control_pb.KillResponse, timeout_ms / 1000.0)
+        timeout_s = (
+            (shutdown or DEFAULT_SHUTDOWN)
+            + (kill or DEFAULT_KILL)
+            + STOP_TIMEOUT_SLACK
+        ).total_seconds()
+        return self._call("Kill", req, _gen.control_pb.KillResponse, timeout_s)
 
     def export(self, child_id: str) -> _gen.control_pb.ConversationExportResponse:
         """One child's decomposed transcript. ConversationExport speaks
@@ -397,9 +411,9 @@ class Client:
         return self._call("ConversationSearch", req, _gen.control_pb.ConversationSearchResponse).rows
 
     def status(self) -> _gen.control_pb.StatusResponse:
-        """The daemon's status: ``version``, ``started_at`` (unix ms), child
-        counts. A user credential only: a child credential is refused
-        permission_denied (callers recording a build tolerate that)."""
+        """The daemon's status: ``version``, ``started_at`` (a tz-aware UTC
+        ``datetime``), child counts. A user credential only: a child credential
+        is refused permission_denied (callers recording a build tolerate that)."""
         return self._call("Status", _gen.control_pb.StatusRequest(), _gen.control_pb.StatusResponse)
 
     # ── presets ──────────────────────────────────────────────────────────────

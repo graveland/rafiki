@@ -21,6 +21,6 @@ func TestKillTimeoutDefaults(t *testing.T) {
 // TestDurOrDefault verifies that explicit non-zero values are honoured.
 func TestDurOrDefault(t *testing.T) {
 	c := assert.NewAborting(t)
-	c.Eq(time.Second, durOrDefault(1000, 99*time.Second), "durOrDefault(1000ms): got")
+	c.Eq(time.Second, durOrDefault(time.Second, 99*time.Second), "durOrDefault(1s): got")
 	c.Eq(5*time.Second, durOrDefault(-1, 5*time.Second), "durOrDefault(-1): got")
 }

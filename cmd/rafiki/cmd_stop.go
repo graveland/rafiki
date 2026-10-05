@@ -10,6 +10,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -120,10 +121,10 @@ func stopOne(ctx context.Context, cmd *cobra.Command, ctrl rafikiv1connect.Contr
 
 	req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
 	if st > 0 {
-		req.ShutdownTimeoutMs = st.Milliseconds()
+		req.ShutdownTimeout = durationpb.New(st)
 	}
 	if kt > 0 {
-		req.KillTimeoutMs = kt.Milliseconds()
+		req.KillTimeout = durationpb.New(kt)
 	}
 
 	resp, err := ctrl.Kill(ctx, connect.NewRequest(req))
@@ -139,12 +140,12 @@ func stopOne(ctx context.Context, cmd *cobra.Command, ctrl rafikiv1connect.Contr
 // These are the fields of the wire KillResponse the CLI renders; the framed
 // plane's abandoned flag has no Connect counterpart and is gone.
 type stopResultJSON struct {
-	ID         string `json:"id"`
-	ExitCode   *int32 `json:"exitCode"`
-	Signal     string `json:"signal,omitempty"`
-	DurationMs int64  `json:"durationMs"`
-	Escalated  bool   `json:"escalated"`
-	Error      string `json:"error,omitempty"`
+	ID        string `json:"id"`
+	ExitCode  *int32 `json:"exitCode"`
+	Signal    string `json:"signal,omitempty"`
+	Duration  string `json:"duration,omitempty"`
+	Escalated bool   `json:"escalated"`
+	Error     string `json:"error,omitempty"`
 }
 
 // renderStopResults writes the outcome of a `rafiki stop` run either as JSON
@@ -164,7 +165,7 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 			if r.Kill != nil {
 				rj.ExitCode = r.Kill.ExitCode
 				rj.Signal = r.Kill.Signal
-				rj.DurationMs = r.Kill.DurationMs
+				rj.Duration = r.Kill.GetDuration().AsDuration().String()
 				rj.Escalated = r.Kill.Escalated
 			}
 			if r.Err != nil {
@@ -208,7 +209,7 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 			id,
 			exit,
 			defaultDash(r.Kill.GetSignal()),
-			(time.Duration(r.Kill.GetDurationMs()) * time.Millisecond).String(),
+			r.Kill.GetDuration().AsDuration().String(),
 			strconv.FormatBool(r.Kill.GetEscalated()),
 			errCell,
 		)

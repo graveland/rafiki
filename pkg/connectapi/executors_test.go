@@ -43,16 +43,16 @@ func TestListExecutorsMapsRows(t *testing.T) {
 // TestListExecutorsKindScopedTimestampsRideThrough pins the kind-scoped
 // path's timestamp contract: the lister's rows map onto the wire AS-IS — a
 // timestamp the lister set reaches the caller unchanged, and one it left
-// unset stays 0 rather than sprouting a value. ListExecutorRows populates
+// unset stays unset rather than sprouting a value. ListExecutorRows populates
 // neither field today (a live-only row has no persisted sighting to show),
-// so 0 is what the daemon's kind-scoped listing actually serves.
+// so unset is what the daemon's kind-scoped listing actually serves.
 func TestListExecutorsKindScopedTimestampsRideThrough(t *testing.T) {
 	c := assert.NewCollecting(t)
 	joined := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	seen := joined.Add(-time.Hour)
 	s := NewServer(nil)
 	s.SetExecutorLister(fakeExecutorLister{rows: []ExecutorRow{
-		{ID: "exec-set", ConnectedAtMs: joined.UnixMilli(), LastSeenMs: seen.UnixMilli()},
+		{ID: "exec-set", ConnectedAt: joined, LastSeen: seen},
 		{ID: "exec-unset"},
 	}})
 	resp, err := s.ListExecutors(context.Background(),
@@ -60,14 +60,15 @@ func TestListExecutorsKindScopedTimestampsRideThrough(t *testing.T) {
 	c.Require().NoError(err)
 	rows := resp.Msg.GetRows()
 	c.Require().Len(rows, 2, "want 2 rows, got %d", len(rows))
-	if got, want := rows[0].GetConnectedAtMs(), joined.UnixMilli(); got != want {
-		t.Errorf("row 0 connected_at_ms = %d, want the lister's %d", got, want)
+	if got := rows[0].GetConnectedAt(); got == nil || !got.AsTime().Equal(joined) {
+		t.Errorf("row 0 connected_at = %v, want the lister's %v", got, joined)
 	}
-	got, want := rows[0].GetLastSeenMs(), seen.UnixMilli()
-	c.Eq(want, got, "row 0 last_seen_ms")
-	if rows[1].GetConnectedAtMs() != 0 || rows[1].GetLastSeenMs() != 0 {
-		t.Errorf("row 1 = (connected_at_ms %d, last_seen_ms %d), want both 0",
-			rows[1].GetConnectedAtMs(), rows[1].GetLastSeenMs())
+	if got := rows[0].GetLastSeen(); got == nil || !got.AsTime().Equal(seen) {
+		t.Errorf("row 0 last_seen = %v, want the lister's %v", got, seen)
+	}
+	if rows[1].GetConnectedAt() != nil || rows[1].GetLastSeen() != nil {
+		t.Errorf("row 1 = (connected_at %v, last_seen %v), want both unset",
+			rows[1].GetConnectedAt(), rows[1].GetLastSeen())
 	}
 }
 

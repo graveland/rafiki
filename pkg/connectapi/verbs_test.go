@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -239,8 +241,8 @@ func childIDsOf(cs []*rafikiv1.ChildSummary) map[string]bool {
 // widen it.
 func TestListChildrenFiltersMatchListFilterSemantics(t *testing.T) {
 	all := []protocol.ChildSummary{
-		{ChildID: "c_1", Name: "scout-1", Cwd: "/work/a", StartedAt: 100, Labels: map[string]string{"team": "a", "env": "prod"}},
-		{ChildID: "c_2", Name: "scout-2", Cwd: "/work/b", StartedAt: 200, Labels: map[string]string{"team": "b"}},
+		{ChildID: "c_1", Name: "scout-1", Cwd: "/work/a", StartedAt: time.UnixMilli(100), Labels: map[string]string{"team": "a", "env": "prod"}},
+		{ChildID: "c_2", Name: "scout-2", Cwd: "/work/b", StartedAt: time.UnixMilli(200), Labels: map[string]string{"team": "b"}},
 	}
 	cases := []struct {
 		name string
@@ -250,7 +252,7 @@ func TestListChildrenFiltersMatchListFilterSemantics(t *testing.T) {
 		{"name exact", &rafikiv1.ListChildrenRequest{Name: "scout-1"}, []string{"c_1"}},
 		{"name_contains", &rafikiv1.ListChildrenRequest{NameContains: "scout"}, []string{"c_1", "c_2"}},
 		{"cwd_contains", &rafikiv1.ListChildrenRequest{CwdContains: "/work/b"}, []string{"c_2"}},
-		{"since", &rafikiv1.ListChildrenRequest{Since: 150}, []string{"c_2"}},
+		{"since", &rafikiv1.ListChildrenRequest{Since: timestamppb.New(time.UnixMilli(150))}, []string{"c_2"}},
 		{"labels AND-match", &rafikiv1.ListChildrenRequest{Labels: map[string]string{"team": "a"}}, []string{"c_1"}},
 		{"has_label", &rafikiv1.ListChildrenRequest{HasLabel: []string{"env"}}, []string{"c_1"}},
 	}

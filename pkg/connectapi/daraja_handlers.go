@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
@@ -211,10 +212,10 @@ func (s *Server) DarajaLaunch(
 	}
 
 	return connect.NewResponse(&rafikiv1.DarajaLaunchResponse{
-		ChildId:         childID,
-		Pid:             result.Pid,
-		Pgid:            result.Pgid,
-		ConnectedUnixMs: time.Now().UnixMilli(),
+		ChildId:     childID,
+		Pid:         result.Pid,
+		Pgid:        result.Pgid,
+		ConnectedAt: timestamppb.New(time.Now()),
 	}), nil
 }
 

@@ -87,7 +87,7 @@ func (l *identityLifecycle) Spawn(ctx context.Context, _ connectapi.SpawnParams)
 	return "c_new", nil
 }
 
-func (l *identityLifecycle) Kill(context.Context, string, int64, int64) (connectapi.KillOutcome, error) {
+func (l *identityLifecycle) Kill(context.Context, string, time.Duration, time.Duration) (connectapi.KillOutcome, error) {
 	return connectapi.KillOutcome{}, nil
 }
 

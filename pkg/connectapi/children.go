@@ -4,6 +4,9 @@ package connectapi
 
 import (
 	"context"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -42,10 +45,12 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 		Model:         c.Model,
 		Cwd:           c.Cwd,
 		SessionId:     c.SessionID,
-		StartedAt:     c.StartedAt,
 		LastActivity:  c.LastActivity,
 		Labels:        c.Labels,
 		ContextWindow: int32(c.ContextWindow),
+	}
+	if !c.StartedAt.IsZero() {
+		out.StartedAt = timestamppb.New(c.StartedAt)
 	}
 	if c.PID != nil {
 		pid := int32(*c.PID)
@@ -75,6 +80,16 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 		}
 	}
 	return out
+}
+
+// timestampTime maps a wire Timestamp onto a time.Time, treating an unset
+// message AND the epoch (the message's zero value) as the zero time. Every
+// filter reads the zero time as "unbounded", matching the old integer 0.
+func timestampTime(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil || (ts.GetSeconds() == 0 && ts.GetNanos() == 0) {
+		return time.Time{}
+	}
+	return ts.AsTime()
 }
 
 // SpawnParams is the narrow set of spawn inputs a client controls. The three
@@ -137,7 +152,7 @@ type ChildLifecycle interface {
 	// Spawn creates a child and returns its id.
 	Spawn(ctx context.Context, p SpawnParams) (string, error)
 	// Kill ends a child and reports how it ended.
-	Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (KillOutcome, error)
+	Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (KillOutcome, error)
 	// Close finalizes an exited child: it leaves the daemon's store and can
 	// never be resumed again. The transcript is NOT deleted. Closing a live
 	// child is an error, not an implicit kill.
@@ -159,10 +174,10 @@ type ChildLifecycle interface {
 // Kill actually returns. There is deliberately no status string: that struct
 // has none, and a client wanting the settled status calls GetChild.
 type KillOutcome struct {
-	ExitCode   *int
-	Signal     string
-	DurationMs int64
-	Escalated  bool
+	ExitCode  *int
+	Signal    string
+	Duration  time.Duration
+	Escalated bool
 }
 
 // SetChildLifecycle attaches the spawn/kill source.

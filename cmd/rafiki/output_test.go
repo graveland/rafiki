@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -21,7 +22,7 @@ func TestRenderList_Table(t *testing.T) {
 	c := assert.NewAborting(t)
 	var buf bytes.Buffer
 	children := []*rafikiv1.ChildSummary{
-		{ChildId: "c_01HXABC", Name: "afk-impl", Status: "streaming", Model: "anthropic/claude-sonnet-4", StartedAt: 1716636789},
+		{ChildId: "c_01HXABC", Name: "afk-impl", Status: "streaming", Model: "anthropic/claude-sonnet-4", StartedAt: timestamppb.New(time.UnixMilli(1716636789))},
 	}
 	c.NoError(renderList(&buf, children, outputTable, false, false))
 	out := buf.String()
@@ -377,9 +378,9 @@ func TestRenderListJSONLOnePerLine(t *testing.T) {
 		c.NoError(err, "line %d is not a bare ChildSummary protojson object: %v (%q)", i+1, err, line)
 		ids = append(ids, ch.ChildId)
 		c.NotStrContains(line, "\"children\"", "line %d carries an envelope", i+1)
-		// The int64-rendered fields must be strings (protojson), not numbers.
+		// A Timestamp must render RFC3339 (a string), never a bare number.
 		if strings.Contains(line, `"startedAt":0`) || strings.Contains(line, `"startedAt":1`) {
-			t.Fatalf("line %d encodes an int64 field as a number, not a protojson string: %q", i+1, line)
+			t.Fatalf("line %d encodes a timestamp as a number, not a protojson string: %q", i+1, line)
 		}
 	}
 	want := []string{"c_01", "c_02", "c_03"}
@@ -409,7 +410,7 @@ func TestGetTextRendersListTable(t *testing.T) {
 // encoding is now the canonical protojson (camelCase, int64 as string).
 func TestGetJSONShapesUnchanged(t *testing.T) {
 	c := assert.NewAborting(t)
-	one := &rafikiv1.ChildSummary{ChildId: "c_1", Name: "solo", Status: "idle", StartedAt: 1700000000000}
+	one := &rafikiv1.ChildSummary{ChildId: "c_1", Name: "solo", Status: "idle", StartedAt: timestamppb.New(time.UnixMilli(1700000000000))}
 	two := []*rafikiv1.ChildSummary{
 		one,
 		{ChildId: "c_2", Name: "duo", Status: "exited", ExitCode: int32Ptr(3)},
@@ -426,8 +427,8 @@ func TestGetJSONShapesUnchanged(t *testing.T) {
 		t.Fatalf("single-target shape must not be wrapped, got:\n%s", bare.String())
 	}
 	c.StrContains(bare.String(), `"childId": "c_1"`, "JSON mode must stay pretty-printed:\n")
-	// protojson: int64 fields are strings.
-	c.StrContains(bare.String(), `"startedAt": "1700000000000"`, "startedAt must render as a protojson string:\n")
+	// protojson: a Timestamp renders RFC3339.
+	c.StrContains(bare.String(), `"startedAt": "2023-11-14T22:13:20Z"`, "startedAt must render as a protojson RFC3339 string:\n")
 
 	var wrapped bytes.Buffer
 	c.NoError(emitGet(&wrapped, []string{"a", "b"}, two, 0, outputJSON, false))
@@ -479,7 +480,7 @@ func TestStatusTextKeyValue(t *testing.T) {
 	started := time.UnixMilli(1757000000000)
 	daemon := &rafikiv1.StatusResponse{
 		Version:     "1.2.3",
-		StartedAt:   1757000000000,
+		StartedAt:   timestamppb.New(time.UnixMilli(1757000000000)),
 		Children:    &rafikiv1.StatusResponse_ChildCounts{Live: 2, Exited: 1},
 		MemoryBytes: 16 << 20,
 		Socket:      "/tmp/d.sock",
@@ -509,7 +510,7 @@ func TestStatusTextKeyValue(t *testing.T) {
 		Model:     "openrouter/x/y",
 		CostUsd:   costPtr(0.5),
 		Cwd:       "/repo",
-		StartedAt: 1757000000000,
+		StartedAt: timestamppb.New(time.UnixMilli(1757000000000)),
 		Labels:    map[string]string{"env": "prod"},
 	}
 	buf.Reset()
@@ -529,7 +530,7 @@ func TestStatusJSONLCompactLine(t *testing.T) {
 	c := assert.NewAborting(t)
 	daemon := &rafikiv1.StatusResponse{
 		Version:   "1.2.3",
-		StartedAt: 1757000000000,
+		StartedAt: timestamppb.New(time.UnixMilli(1757000000000)),
 		Children:  &rafikiv1.StatusResponse_ChildCounts{Live: 1},
 	}
 	var buf bytes.Buffer
@@ -541,7 +542,7 @@ func TestStatusJSONLCompactLine(t *testing.T) {
 	var back map[string]any
 	c.NoError(json.Unmarshal([]byte(line), &back), "line is not JSON")
 	c.False(back["version"] != "1.2.3", "payload changed: %q", line)
-	c.False(back["startedAt"] != "1757000000000", "int64 startedAt must render as a protojson string: %q", line)
+	c.False(back["startedAt"] != "2025-09-04T15:33:20Z", "startedAt must render as a protojson RFC3339 string: %q", line)
 }
 
 // tasks' text mode is a table with every column the wire row carries, always:

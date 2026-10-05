@@ -66,16 +66,21 @@ func executorAdminErr(op string, err error) error {
 }
 
 // EnrollExecutor serves the EnrollExecutor RPC: mint a one-time
-// enrollment token. ttl_seconds must be positive — the handler
+// enrollment token. ttl must be positive — the handler
 // refuses a non-positive one rather than silently minting the Controller's
 // 72h default, and this face serves the same verb.
 func (s *Server) EnrollExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.EnrollExecutorRequest],
 ) (*connect.Response[rafikiv1.EnrollExecutorResponse], error) {
-	if req.Msg.GetTtlSeconds() <= 0 {
+	if ttl := req.Msg.GetTtl(); ttl != nil {
+		if err := ttl.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	if req.Msg.GetTtl().AsDuration() <= 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("ttl_seconds must be positive"))
+			errors.New("ttl must be positive"))
 	}
 	p := s.execAdmin.Load()
 	if p == nil {

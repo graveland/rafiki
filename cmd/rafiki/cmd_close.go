@@ -9,6 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -107,7 +108,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 		olderThan, _ := cmd.Flags().GetDuration("older-than")
 		req := &rafikiv1.CloseAllExitedRequest{}
 		if olderThan > 0 {
-			req.OlderThanMs = olderThan.Milliseconds()
+			req.OlderThan = durationpb.New(olderThan)
 		}
 		resp, err := ctrl.CloseAllExited(ctx, connect.NewRequest(req))
 		if err != nil {
@@ -251,10 +252,10 @@ func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, 
 	if include || get.Msg.GetChild().GetStatus() != string(protocol.StatusExited) {
 		req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
 		if st > 0 {
-			req.ShutdownTimeoutMs = st.Milliseconds()
+			req.ShutdownTimeout = durationpb.New(st)
 		}
 		if kt > 0 {
-			req.KillTimeoutMs = kt.Milliseconds()
+			req.KillTimeout = durationpb.New(kt)
 		}
 		_, err := ctrl.Kill(ctx, connect.NewRequest(req))
 		if err != nil {

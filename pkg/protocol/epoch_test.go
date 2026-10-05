@@ -33,9 +33,9 @@ func TestEpochIsTwoAndHeaderName(t *testing.T) {
 // here rather than in a transport package precisely so this stays true.
 //
 // The set is the package's whole non-test import set today — frame.go's
-// bufio/bytes/errors/io plus types.go's encoding/json. Every entry is stdlib;
-// the test fails the moment a third-party package (connectrpc, pgx, net/http)
-// is added.
+// bufio/bytes/errors/io plus types.go's encoding/json and time. Every entry is
+// stdlib; the test fails the moment a third-party package (connectrpc, pgx,
+// net/http) is added.
 func TestProtocolImportsOnlyEncodingJSON(t *testing.T) { checkProtocolImports(t) }
 
 // TestEpochProtocolImportsOnlyEncodingJSON is the same pin under a name the
@@ -70,5 +70,5 @@ func checkProtocolImports(t *testing.T) {
 		got = append(got, p)
 	}
 	slices.Sort(got)
-	c.EqDeep([]string{"bufio", "bytes", "encoding/json", "errors", "io"}, got, "pkg/protocol imports")
+	c.EqDeep([]string{"bufio", "bytes", "encoding/json", "errors", "io", "time"}, got, "pkg/protocol imports")
 }

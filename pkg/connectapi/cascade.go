@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -79,13 +80,13 @@ func cascadeErr(err error) error {
 }
 
 // cascadeKill ends childID's live descendants and returns the ids it ended.
-func cascadeKill(ctx context.Context, lc ChildLifecycle, childID string, shutdownMs, killMs int64) ([]string, error) {
+func cascadeKill(ctx context.Context, lc ChildLifecycle, childID string, shutdownTimeout, killTimeout time.Duration) ([]string, error) {
 	ids, err := descendantsOf(lc, childID)
 	if err != nil {
 		return nil, err
 	}
 	return cascade(ids, func(id string) error {
-		_, err := lc.Kill(ctx, id, shutdownMs, killMs)
+		_, err := lc.Kill(ctx, id, shutdownTimeout, killTimeout)
 		return err
 	})
 }

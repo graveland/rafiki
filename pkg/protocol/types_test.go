@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -181,7 +182,7 @@ func TestChildSummary_NullPID(t *testing.T) {
 		PID:          nil,
 		Cwd:          "/tmp",
 		Status:       "exited",
-		StartedAt:    1716636789,
+		StartedAt:    time.Unix(1716636789, 0),
 		LastActivity: 1716636890,
 	}
 	b, err := json.Marshal(cs)

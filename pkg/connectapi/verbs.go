@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/imagefit"
@@ -180,7 +181,7 @@ func listFilterFromWire(req *rafikiv1.ListChildrenRequest) protocol.ListFilter {
 		Name:         req.GetName(),
 		NameContains: req.GetNameContains(),
 		CwdContains:  req.GetCwdContains(),
-		Since:        req.GetSince(),
+		Since:        timestampTime(req.GetSince()),
 		Labels:       req.GetLabels(),
 		HasLabel:     req.GetHasLabel(),
 	}
@@ -204,7 +205,7 @@ func matchesChildFilter(c protocol.ChildSummary, f protocol.ListFilter) bool {
 	if f.CwdContains != "" && !strings.Contains(c.Cwd, f.CwdContains) {
 		return false
 	}
-	if f.Since > 0 && c.StartedAt < f.Since {
+	if !f.Since.IsZero() && c.StartedAt.Before(f.Since) {
 		return false
 	}
 	for k, v := range f.Labels {
@@ -232,6 +233,11 @@ func (s *Server) ListChildren(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListChildrenRequest],
 ) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
+	if ts := req.Msg.GetSince(); ts != nil {
+		if err := ts.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
 	p := s.children.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
@@ -518,17 +524,27 @@ func (s *Server) Kill(
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lifecycle not yet wired"))
 	}
+	if o := req.Msg.GetShutdownTimeout(); o != nil {
+		if err := o.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	if o := req.Msg.GetKillTimeout(); o != nil {
+		if err := o.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
 	var descendants []string
 	if req.Msg.GetIncludeDescendants() {
 		var err error
 		descendants, err = cascadeKill(ctx, *p, childID,
-			req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
+			req.Msg.GetShutdownTimeout().AsDuration(), req.Msg.GetKillTimeout().AsDuration())
 		if err != nil {
 			return nil, cascadeErr(err)
 		}
 	}
 	out, err := (*p).Kill(ctx, childID,
-		req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
+		req.Msg.GetShutdownTimeout().AsDuration(), req.Msg.GetKillTimeout().AsDuration())
 	if err != nil {
 		var ce *ControllerError
 		if !errors.As(err, &ce) {
@@ -538,12 +554,14 @@ func (s *Server) Kill(
 		return nil, ConnectErr(err)
 	}
 	resp := &rafikiv1.KillResponse{
-		ChildId:    childID,
-		Signal:     out.Signal,
-		DurationMs: out.DurationMs,
-		Escalated:  out.Escalated,
+		ChildId:   childID,
+		Signal:    out.Signal,
+		Escalated: out.Escalated,
 
 		DescendantIds: descendants,
+	}
+	if out.Duration != 0 {
+		resp.Duration = durationpb.New(out.Duration)
 	}
 	if out.ExitCode != nil {
 		code := int32(*out.ExitCode)

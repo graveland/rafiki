@@ -122,8 +122,8 @@ func daemonStatusKeyValues(st *rafikiv1.StatusResponse) []statusKV {
 	if st.GetVersion() != "" {
 		out = append(out, statusKV{"version", st.GetVersion()})
 	}
-	if st.GetStartedAt() > 0 {
-		out = append(out, statusKV{"started", formatUnixMilli(st.GetStartedAt())})
+	if ts := st.GetStartedAt(); ts != nil {
+		out = append(out, statusKV{"started", formatTimestamp(ts)})
 	}
 	if st.GetChildren().GetLive() > 0 || st.GetChildren().GetExited() > 0 {
 		out = append(out, statusKV{"children",
@@ -162,7 +162,7 @@ func childStatusKeyValues(ch *rafikiv1.ChildSummary, useColor bool) []statusKV {
 	if ch.GetCwd() != "" {
 		out = append(out, statusKV{"cwd", shortenCwd(ch.GetCwd())})
 	}
-	out = append(out, statusKV{"started", formatUnixMilli(ch.GetStartedAt())})
+	out = append(out, statusKV{"started", formatTimestamp(ch.GetStartedAt())})
 	out = append(out, statusKV{"labels", formatLabels(ch.GetLabels(), 40, false)})
 	return out
 }

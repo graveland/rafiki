@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -104,15 +105,15 @@ func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
 	}
 }
 
-// Connected is a live-pool view field distinct from Enabled/last_seen_ms — a
+// Connected is a live-pool view field distinct from Enabled/last_seen — a
 // client wants to know how long the CURRENT connection has held, separate
 // from whether the row is enabled or when it was last seen at all.
 func TestRenderExecutorTableShowsConnectedSince(t *testing.T) {
 	c := assert.NewCollecting(t)
-	connectedMs := time.Now().Add(-90 * time.Second).UnixMilli()
+	connectedAt := time.Now().Add(-90 * time.Second)
 	execs := []*rafikiv1.ExecutorRow{
-		{Id: fixtureTailA, Enabled: true, Connected: true, ConnectedAtMs: connectedMs},
-		{Id: fixtureTailB, Enabled: true}, // not connected: connected_at_ms 0
+		{Id: fixtureTailA, Enabled: true, Connected: true, ConnectedAt: timestamppb.New(connectedAt)},
+		{Id: fixtureTailB, Enabled: true}, // not connected: connected_at unset
 	}
 	var buf bytes.Buffer
 	c.Require().NoError(renderExecutorTable(&buf, execs, false), "renderExecutorTable")
@@ -127,15 +128,15 @@ func TestRenderExecutorTableEmptyAndLastSeen(t *testing.T) {
 	c.NoError(renderExecutorTable(&buf, nil, false), "renderExecutorTable")
 	c.Eq("No enrolled executors.\n", buf.String(), "empty pool renders")
 
-	// last_seen_ms 0 is "never seen": a dash, not a relative time.
+	// last_seen unset is "never seen": a dash, not a relative time.
 	buf.Reset()
 	c.NoError(renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailA, Enabled: true}}, false), "renderExecutorTable")
-	c.NotStrContains(buf.String(), "ago", "a zero last-seen must render as '-', not a relative time:\n")
+	c.NotStrContains(buf.String(), "ago", "an unset last-seen must render as '-', not a relative time:\n")
 
 	// A real sighting renders under LAST SEEN.
 	buf.Reset()
-	seenMs := time.Now().Add(-time.Hour).UnixMilli()
-	c.NoError(renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailB, Enabled: true, LastSeenMs: seenMs}}, false), "renderExecutorTable")
+	seenAt := time.Now().Add(-time.Hour)
+	c.NoError(renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailB, Enabled: true, LastSeen: timestamppb.New(seenAt)}}, false), "renderExecutorTable")
 	c.StrContains(buf.String(), "ago", "a sighted row must render a relative last-seen time:\n")
 }
 
@@ -267,15 +268,13 @@ func runExecutorCLI(t *testing.T, args ...string) string {
 }
 
 func TestExecutorListOnConnect(t *testing.T) {
-	const (
-		connectedMs = int64(1700000000000)
-		seenMs      = int64(1700000005000)
-	)
+	connectedAt := time.UnixMilli(1700000000000)
+	seenAt := time.UnixMilli(1700000005000)
 	fullA := fixturePrefix + fixtureTailA
 	fullB := fixturePrefix + fixtureTailB
 	srv := &executorStubControl{rows: []*rafikiv1.ExecutorRow{
 		{Id: fullA, Machine: "laptop", Enabled: true, Connected: true,
-			ConnectedAtMs: connectedMs, LastSeenMs: seenMs,
+			ConnectedAt: timestamppb.New(connectedAt), LastSeen: timestamppb.New(seenAt),
 			Labels: map[string]string{"env": "prod", "machine": "laptop"}},
 		{Id: fullB, Machine: "rack",
 			Labels: map[string]string{"machine": "rack"}},
@@ -309,8 +308,8 @@ func TestExecutorListOnConnect(t *testing.T) {
 			"\"machine\": \"laptop\"",
 			"\"enabled\": true",
 			"\"connected\": true",
-			"\"connectedAtMs\": \"1700000000000\"", // int64 rides as a JSON string
-			"\"lastSeenMs\": \"1700000005000\"",
+			"\"connectedAt\": \"2023-11-14T22:13:20Z\"", // Timestamp rides as RFC3339
+			"\"lastSeen\": \"2023-11-14T22:13:25Z\"",
 		} {
 			c.StrContains(out, want, "protojson output missing")
 		}
@@ -371,7 +370,7 @@ func TestExecutorEnrollTokenToStdoutOnly(t *testing.T) {
 	c.Eq("tok-secret-1\n", out, "stdout")
 	c.StrContains(readErr(), "Token minted", "the one-time notice must go to stderr, got:\n")
 	c.Eq("lab", srv.sawEnroll.GetName(), "name")
-	c.Eq(1800, srv.sawEnroll.GetTtlSeconds(), "ttl_seconds")
+	c.Eq(30*time.Minute, srv.sawEnroll.GetTtl().AsDuration(), "ttl")
 }
 
 func TestExecutorCreateEchoesProtojson(t *testing.T) {

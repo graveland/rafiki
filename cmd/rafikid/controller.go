@@ -873,7 +873,7 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
 	snaps := c.st.List()
 	if filter.Status == "" && filter.Name == "" && filter.NameContains == "" &&
-		filter.CwdContains == "" && filter.Since == 0 &&
+		filter.CwdContains == "" && filter.Since.IsZero() &&
 		len(filter.Labels) == 0 && len(filter.HasLabel) == 0 {
 		return snaps
 	}
@@ -891,7 +891,7 @@ func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
 		if filter.CwdContains != "" && !strings.Contains(s.Cwd, filter.CwdContains) {
 			continue
 		}
-		if filter.Since > 0 && s.StartedAt.UnixMilli() < filter.Since {
+		if !filter.Since.IsZero() && s.StartedAt.Before(filter.Since) {
 			continue
 		}
 		if !matchesLabelFilter(s.Labels, filter.Labels, filter.HasLabel) {
@@ -1376,7 +1376,7 @@ func (c *Controller) Status() protocol.StatusResponseData {
 	runtime.ReadMemStats(&ms)
 	return protocol.StatusResponseData{
 		Version:     version.String(),
-		StartedAt:   c.startedAt.UnixMilli(),
+		StartedAt:   c.startedAt,
 		Children:    protocol.ChildCounts{Live: live, Exited: exited},
 		MemoryBytes: int64(ms.Sys),
 		Socket:      c.socketPath,
@@ -2896,7 +2896,7 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 	return false
 }
 
-func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (protocol.KillResponseData, error) {
+func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (protocol.KillResponseData, error) {
 	// Revoke the daraja's reconnect credential so a dead child cannot
 	// re-authenticate on a later port scan or stale-connection replay. The
 	// belt dies with the credential: a killed child is settled by the kill
@@ -2956,10 +2956,10 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		c.handleStatusChange(childID, protocol.StatusShuttingDown, prev)
 	}
 
-	shutdownTimeout := durOrDefault(shutdownTimeoutMs, 180*time.Second)
-	killTimeout := durOrDefault(killTimeoutMs, 30*time.Second)
+	shutdown := durOrDefault(shutdownTimeout, 180*time.Second)
+	kill := durOrDefault(killTimeout, 30*time.Second)
 
-	res, err := ch.Shutdown(shutdownTimeout, killTimeout)
+	res, err := ch.Shutdown(shutdown, kill)
 	if err != nil {
 		return protocol.KillResponseData{}, fmt.Errorf("shutdown: %w", err)
 	}
@@ -2980,11 +2980,11 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		exitCode = &code
 	}
 	return protocol.KillResponseData{
-		ExitCode:   exitCode,
-		Signal:     res.Signal,
-		DurationMs: res.Duration.Milliseconds(),
-		Escalated:  res.Escalated,
-		Abandoned:  res.Abandoned,
+		ExitCode:  exitCode,
+		Signal:    res.Signal,
+		Duration:  res.Duration,
+		Escalated: res.Escalated,
+		Abandoned: res.Abandoned,
 	}, nil
 }
 
@@ -3381,15 +3381,15 @@ func (c *Controller) deleteSpillDir(childID string) error {
 	return nil
 }
 
-func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
+func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 	snaps := c.st.FindByStatus(protocol.StatusExited)
-	now := time.Now().UnixMilli()
+	now := time.Now()
 	var closed []string
 	failed := 0
 	for _, s := range snaps {
-		if olderThanMs > 0 && !s.ExitedAt.IsZero() {
-			age := now - s.ExitedAt.UnixMilli()
-			if age < olderThanMs {
+		if olderThan > 0 && !s.ExitedAt.IsZero() {
+			age := now.Sub(s.ExitedAt)
+			if age < olderThan {
 				continue
 			}
 		}
@@ -4970,11 +4970,11 @@ func splitComma(s string) []string {
 	return out
 }
 
-func durOrDefault(ms int64, def time.Duration) time.Duration {
-	if ms <= 0 {
+func durOrDefault(d time.Duration, def time.Duration) time.Duration {
+	if d <= 0 {
 		return def
 	}
-	return time.Duration(ms) * time.Millisecond
+	return d
 }
 
 func framePassesTypeFilter(frame []byte, include, exclude []string) bool {
@@ -5010,7 +5010,7 @@ func matchesSessionFilter(snap childstore.Snapshot, f protocol.SearchSessionFilt
 	if f.NameContains != "" && !strings.Contains(snap.Name, f.NameContains) {
 		return false
 	}
-	if f.Since > 0 && snap.StartedAt.UnixMilli() < f.Since {
+	if !f.Since.IsZero() && snap.StartedAt.Before(f.Since) {
 		return false
 	}
 	if !matchesLabelFilter(snap.Labels, f.Labels, f.HasLabel) {
@@ -5207,7 +5207,7 @@ func (c *Controller) ExecutorEnroll(id users.Identity, req protocol.ExecutorEnro
 	if err != nil {
 		return protocol.ExecutorEnrollResponseData{}, err
 	}
-	ttl := time.Duration(req.TTLSeconds) * time.Second
+	ttl := req.TTL
 	if ttl <= 0 {
 		ttl = 72 * time.Hour
 	}

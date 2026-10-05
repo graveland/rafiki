@@ -98,7 +98,7 @@ func (a connectExecutorAdmin) Enroll(
 		Isolation:     req.GetIsolation(),
 		WorkspaceMode: req.GetWorkspaceMode(),
 		Admits:        req.GetAdmits(),
-		TTLSeconds:    req.GetTtlSeconds(),
+		TTL:           req.GetTtl().AsDuration(),
 	})
 	if err != nil {
 		return nil, err
@@ -208,9 +208,9 @@ func (a connectExecutorAdmin) List(ctx context.Context, selector string, limit i
 // TestExecutorAdminListLeavesEligibilityUnevaluated: LaunchKinds is a
 // live-pool observation the store row does not carry, and Eligible/Reason are
 // unset on this path by ListExecutorsRequest's contract. The timestamps ride
-// the row's own fields: ConnectedAtMs from the live pool's join time (0 when
-// the executor has no current connection) and LastSeenMs from the store's
-// last_seen_at (0 when the row has never been seen).
+// the row's own fields: ConnectedAt from the live pool's join time (the zero
+// time when the executor has no current connection) and LastSeen from the
+// store's last_seen_at (the zero time when the row has never been seen).
 func executorRowFrom(e executors.Executor) connectapi.ExecutorRow {
 	return connectapi.ExecutorRow{
 		ID:            e.ID,
@@ -222,21 +222,19 @@ func executorRowFrom(e executors.Executor) connectapi.ExecutorRow {
 		Admits:        e.Admits,
 		Enabled:       e.Enabled,
 		Connected:     e.Connected,
-		ConnectedAtMs: unixMs(e.ConnectedAt),
-		LastSeenMs:    unixMs(&e.LastSeenAt),
+		ConnectedAt:   timeOrZero(e.ConnectedAt),
+		LastSeen:      e.LastSeenAt,
 	}
 }
 
-// unixMs renders an observation time as the wire's unix-ms encoding: a nil
-// pointer or the zero time.Time is 0, the wire's "absent". The zero time is a
-// meaningful state here, not a bug: the store leaves LastSeenAt at its zero
-// value when last_seen_at is NULL (an executor never seen), and Controller.
-// ExecutorList leaves ConnectedAt nil for an executor with no live
-// connection. UnixMilli of the zero time would otherwise surface a year-1
-// count no client can render.
-func unixMs(t *time.Time) int64 {
-	if t == nil || t.IsZero() {
-		return 0
+// timeOrZero returns the pointed-to time, or the zero time when the pointer is
+// nil. The zero time is the wire's "absent" here: the store leaves LastSeenAt at
+// its zero value when last_seen_at is NULL (an executor never seen), and
+// Controller.ExecutorList leaves ConnectedAt nil for an executor with no live
+// connection.
+func timeOrZero(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
 	}
-	return t.UnixMilli()
+	return *t
 }

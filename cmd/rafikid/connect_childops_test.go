@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -87,25 +89,26 @@ func TestChildOpsModelInfoRoutingAutoCompactMatchesCatalog(t *testing.T) {
 func TestChildOpsSearchQueryMapping(t *testing.T) {
 	t.Run("fields pass through", func(t *testing.T) {
 		c := assert.NewCollecting(t)
+		since := time.UnixMilli(123456)
 		q := buildSearchQuery(&rafikiv1.SearchRequest{
 			Query: "needle", Regex: true, Limit: 7, Context: 2,
 			SessionFilter: &rafikiv1.SearchRequest_SearchSessionFilter{
 				CwdContains:  "/work",
 				NameContains: "fix",
-				Since:        123456,
+				Since:        timestamppb.New(since),
 				Labels:       map[string]string{"team": "core"},
 				HasLabel:     []string{"urgent"},
 			},
 		})
 		c.False(q.Query != "needle" || !q.Regex || q.Limit != 7 || q.Context != 2, "scalar fields = %+v, want the request's values", q)
 		sf := q.SessionFilter
-		c.False(sf.CwdContains != "/work" || sf.NameContains != "fix" || sf.Since != 123456 ||
+		c.False(sf.CwdContains != "/work" || sf.NameContains != "fix" || !sf.Since.Equal(since) ||
 			sf.Labels["team"] != "core" || len(sf.HasLabel) != 1 || sf.HasLabel[0] != "urgent", "session filter = %+v, want every field mapped", sf)
 	})
 	t.Run("absent session filter means every child", func(t *testing.T) {
 		q := buildSearchQuery(&rafikiv1.SearchRequest{Query: "needle"})
 		assert.NewCollecting(t).False(q.SessionFilter.CwdContains != "" || q.SessionFilter.NameContains != "" ||
-			q.SessionFilter.Since != 0 || q.SessionFilter.Labels != nil || q.SessionFilter.HasLabel != nil, "session filter = %+v, want the zero value (nil proto filter)", q.SessionFilter)
+			!q.SessionFilter.Since.IsZero() || q.SessionFilter.Labels != nil || q.SessionFilter.HasLabel != nil, "session filter = %+v, want the zero value (nil proto filter)", q.SessionFilter)
 	})
 }
 
@@ -157,13 +160,13 @@ func controlSearchResult() protocol.SearchResponseData {
 func TestChildOpsStatusMapping(t *testing.T) {
 	resp := statusResponseFrom(protocol.StatusResponseData{
 		Version:     "v1",
-		StartedAt:   1700000000000,
+		StartedAt:   time.UnixMilli(1700000000000),
 		Children:    protocol.ChildCounts{Live: 3, Exited: 2},
 		MemoryBytes: 1 << 20,
 		Socket:      "/tmp/r.sock",
 		LogsDir:     "/tmp/logs",
 	})
-	assert.NewCollecting(t).False(resp.Version != "v1" || resp.StartedAt != 1700000000000 ||
+	assert.NewCollecting(t).False(resp.Version != "v1" || resp.StartedAt == nil || !resp.StartedAt.AsTime().Equal(time.UnixMilli(1700000000000)) ||
 		resp.Children.GetLive() != 3 || resp.Children.GetExited() != 2 ||
 		resp.MemoryBytes != 1<<20 || resp.Socket != "/tmp/r.sock" || resp.LogsDir != "/tmp/logs", "status = %+v, want every field mapped", resp)
 }

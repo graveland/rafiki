@@ -5,6 +5,8 @@ package rail
 import (
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -193,7 +195,7 @@ func (r *Rail) PrevAttention() string {
 // rail already folded in, and only CountedThrough stops that from doubling
 // every badge on every reconnect.
 //
-// FloorUnixMs is not optional. Without it a child that spawned AND exited
+// Floor is not optional. Without it a child that spawned AND exited
 // entirely inside a disconnect is indistinguishable from a brand new one -- the
 // EventCursor proto says so, and the cockpit is the first consumer that can
 // observe the difference.
@@ -205,7 +207,7 @@ func (r *Rail) Cursor() *rafikiv1.EventCursor {
 		ords[id] = n.RailCursor
 	}
 	return &rafikiv1.EventCursor{
-		Ordinals:    ords,
-		FloorUnixMs: time.Now().Add(-replayFloor).UnixMilli(),
+		Ordinals: ords,
+		Floor:    timestamppb.New(time.Now().Add(-replayFloor)),
 	}
 }

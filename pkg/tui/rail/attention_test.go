@@ -183,7 +183,7 @@ func TestCursorUsesRailCursorNotSeen(t *testing.T) {
 	got := c.GetOrdinals()["c_1"]
 	ck.Require().Eq(7, got, "cursor ordinal = %d, want 7 (RailCursor). Resuming from Seen instead is "+
 		"what makes a reconnect re-deliver events the rail already counted", got)
-	ck.NotEq(0, c.GetFloorUnixMs(), "the cursor needs a floor: without it a child that spawned AND exited "+
+	ck.NotNil(c.GetFloor(), "the cursor needs a floor: without it a child that spawned AND exited "+
 		"entirely inside a disconnect is indistinguishable from a brand new one")
 }
 

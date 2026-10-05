@@ -83,7 +83,7 @@ func (l *recordingLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) 
 	return "c_new", nil
 }
 
-func (l *recordingLifecycle) Kill(_ context.Context, childID string, _, _ int64) (connectapi.KillOutcome, error) {
+func (l *recordingLifecycle) Kill(_ context.Context, childID string, _, _ time.Duration) (connectapi.KillOutcome, error) {
 	l.kills = append(l.kills, childID)
 	return connectapi.KillOutcome{}, nil
 }

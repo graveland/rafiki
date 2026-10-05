@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -13,15 +16,15 @@ import (
 )
 
 // sampleChild is a message exercising every protojson rendering quirk the
-// helpers must normalize: an int64 (rendered as a string), a map, and an
-// unset field (omitted).
+// helpers must normalize: a Timestamp (rendered RFC3339), a map, and an unset
+// field (omitted).
 func sampleChild() *rafikiv1.ChildSummary {
 	return &rafikiv1.ChildSummary{
 		ChildId:   "c_1",
 		Name:      "alpha",
 		Kind:      "fundi",
 		Status:    "idle",
-		StartedAt: 1700000000000,
+		StartedAt: timestamppb.New(time.UnixMilli(1700000000000)),
 		Labels:    map[string]string{"rafiki/parent": "c_0"},
 	}
 }
@@ -36,7 +39,7 @@ func TestProtoOutEmitProtoJSONIsCanonicalAndStable(t *testing.T) {
   "name": "alpha",
   "kind": "fundi",
   "status": "idle",
-  "startedAt": "1700000000000",
+  "startedAt": "2023-11-14T22:13:20Z",
   "labels": {
     "rafiki/parent": "c_0"
   }
@@ -56,7 +59,7 @@ func TestProtoOutEmitProtoJSONLOneCompactLine(t *testing.T) {
 	var out bytes.Buffer
 	c.NoError(emitProto(&out, sampleChild(), outputJSONL), "emitProto jsonl")
 	got := out.String()
-	want := `{"childId":"c_1","name":"alpha","kind":"fundi","status":"idle","startedAt":"1700000000000","labels":{"rafiki/parent":"c_0"}}` + "\n"
+	want := `{"childId":"c_1","name":"alpha","kind":"fundi","status":"idle","startedAt":"2023-11-14T22:13:20Z","labels":{"rafiki/parent":"c_0"}}` + "\n"
 	c.Eq(want, got, "emitProto jsonl")
 	c.False(strings.Contains(got, "\n") && !strings.HasSuffix(got, "\n"), "emitProto jsonl split across lines: %q", got)
 }

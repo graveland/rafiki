@@ -26,6 +26,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -351,7 +352,7 @@ func TestScriptChildCallsRecall(t *testing.T) {
 		kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer kcancel()
 		if _, err := opClient.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{
-			ChildId: scriptID, ShutdownTimeoutMs: 2000, KillTimeoutMs: 2000,
+			ChildId: scriptID, ShutdownTimeout: durationpb.New(2 * time.Second), KillTimeout: durationpb.New(2 * time.Second),
 		})); err != nil {
 			t.Logf("kill the sleeper %s: %v", scriptID, err)
 		}

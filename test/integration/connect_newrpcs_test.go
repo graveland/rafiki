@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -93,8 +94,8 @@ func TestConnectNewRPCsWired(t *testing.T) {
 	// a one-time enrollment token. A short TTL keeps the shared test DB
 	// free of residue if the token is never claimed.
 	_, err = client.EnrollExecutor(ctx, connect.NewRequest(&rafikiv1.EnrollExecutorRequest{
-		Name:       "wired-test-machine",
-		TtlSeconds: 300,
+		Name: "wired-test-machine",
+		Ttl:  durationpb.New(300 * time.Second),
 	}))
 	unwired("EnrollExecutor", err)
 

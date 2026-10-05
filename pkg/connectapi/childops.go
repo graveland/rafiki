@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -20,7 +21,7 @@ import (
 // depending on the interface keeps the handler testable without a database.
 type ChildOps interface {
 	Resume(ctx context.Context, childID, apiKey string) (string, error)
-	CloseAllExited(ctx context.Context, olderThanMs int64) ([]string, error)
+	CloseAllExited(ctx context.Context, olderThan time.Duration) ([]string, error)
 	SetLabels(ctx context.Context, childID string, set map[string]string, remove []string) (map[string]string, error)
 	Status(ctx context.Context) (*rafikiv1.StatusResponse, error)
 	Search(ctx context.Context, req *rafikiv1.SearchRequest) (*rafikiv1.SearchResponse, error)
@@ -104,17 +105,22 @@ func (s *Server) Resume(
 
 // CloseAllExited serves the CloseAllExited RPC
 // verb: close (forget) every exited child, optionally older than
-// older_than_ms. The count is derivable from the id list, so the wire carries
+// older_than. The count is derivable from the id list, so the wire carries
 // proto shape drops it as derivable from the repeated field.
 func (s *Server) CloseAllExited(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.CloseAllExitedRequest],
 ) (*connect.Response[rafikiv1.CloseAllExitedResponse], error) {
+	if o := req.Msg.GetOlderThan(); o != nil {
+		if err := o.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
 	o, err := s.childOp()
 	if err != nil {
 		return nil, err
 	}
-	closed, err := o.CloseAllExited(ctx, req.Msg.GetOlderThanMs())
+	closed, err := o.CloseAllExited(ctx, req.Msg.GetOlderThan().AsDuration())
 	if err != nil {
 		// A partial result must not read as a bare failure: some children WERE
 		// closed before the failure, and the wire carries only the error. Record
@@ -185,6 +191,13 @@ func (s *Server) Search(
 	if req.Msg.GetQuery() == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("query is required"))
+	}
+	if sf := req.Msg.GetSessionFilter(); sf != nil {
+		if ts := sf.GetSince(); ts != nil {
+			if err := ts.CheckValid(); err != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument, err)
+			}
+		}
 	}
 	o, err := s.childOp()
 	if err != nil {

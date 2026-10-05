@@ -254,7 +254,7 @@ func TestEventRendererSeedChildNamesAndTimes(t *testing.T) {
 	born := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	client := stubbedChildSource{getChild: func(ctx context.Context, req *connect.Request[rafikiv1.GetChildRequest]) (*connect.Response[rafikiv1.GetChildResponse], error) {
 		return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
-			ChildId: "c_1", Name: "solo", Status: "streaming", StartedAt: born.UnixMilli(),
+			ChildId: "c_1", Name: "solo", Status: "streaming", StartedAt: timestamppb.New(born),
 		}}), nil
 	}}
 

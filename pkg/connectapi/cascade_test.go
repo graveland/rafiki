@@ -5,6 +5,7 @@ package connectapi_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/multigres/testkit/assert"
@@ -25,7 +26,7 @@ type treeLifecycle struct {
 
 func (l *treeLifecycle) DescendantIDs(string) []string { return l.descendants }
 
-func (l *treeLifecycle) Kill(_ context.Context, id string, _, _ int64) (connectapi.KillOutcome, error) {
+func (l *treeLifecycle) Kill(_ context.Context, id string, _, _ time.Duration) (connectapi.KillOutcome, error) {
 	l.order = append(l.order, "kill:"+id)
 	return connectapi.KillOutcome{}, l.errFor[id]
 }

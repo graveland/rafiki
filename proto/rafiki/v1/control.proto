@@ -4,6 +4,8 @@ package rafiki.v1;
 
 import "rafiki/v1/event.proto";
 import "rafiki/daraja/v1/daraja.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1";
 
@@ -58,10 +60,15 @@ enum EventTier {
 // EventCursor resumes a subscription.
 message EventCursor {
   // child_id -> last ordinal seen. A child absent from this map replays from
-  // floor_unix_ms. Without the floor, a child that spawned and exited entirely
+  // floor. Without the floor, a child that spawned and exited entirely
   // during a disconnect is indistinguishable from a brand new one.
-  map<string, int32> ordinals      = 1;
-  int64              floor_unix_ms = 2;
+  map<string, int32> ordinals = 1;
+  // floor is the earliest event time a child absent from ordinals replays
+  // from. Unset or the epoch means unbounded (the old floor_unix_ms = 0).
+  google.protobuf.Timestamp floor = 3;
+
+  reserved 2;
+  reserved "floor_unix_ms";
 }
 
 message StreamEventsRequest {
@@ -244,8 +251,9 @@ message ChildSummary {
   string cwd = 6;
   // pid is optional: an exited child has none, and 0 is a legal pid.
   optional int32 pid = 7;
-  int64 started_at = 8;
+  google.protobuf.Timestamp started_at = 23;
   int64 last_activity = 9;
+  reserved 8;  // was: started_at (unix ms int)
   // exit_code is optional: unset while alive, and 0 means clean exit.
   optional int32 exit_code = 10;
   map<string, string> labels = 11;
@@ -292,12 +300,14 @@ message ListChildrenRequest {
   // of these values (protocol.Status strings).
   repeated string statuses = 1;
   // The remaining filters mirror protocol.ListFilter: exact name, substring
-  // name/cwd, unix-ms age floor, AND-match labels (every k=v present) and
+  // name/cwd, time age floor, AND-match labels (every k=v present) and
   // key-presence has_label.
   string name = 2;
   string name_contains = 3;
   string cwd_contains = 4;
-  int64 since = 5;
+  // since is a time floor: a child that started before it is excluded. Unset
+  // means unbounded (the old since = 0).
+  google.protobuf.Timestamp since = 8;
   map<string, string> labels = 6;
   repeated string has_label = 7;
 }
@@ -419,12 +429,20 @@ message SpawnResponse {
 
 message KillRequest {
   string child_id = 1;
-  int64 shutdown_timeout_ms = 2;
-  int64 kill_timeout_ms = 3;
+  // shutdown_timeout bounds the graceful window before escalation to SIGTERM.
+  // Unset or zero selects the daemon default (180s), exactly as the old
+  // shutdown_timeout_ms = 0 did.
+  google.protobuf.Duration shutdown_timeout = 5;
+  // kill_timeout bounds the window between SIGTERM and SIGKILL. Unset or zero
+  // selects the daemon default (30s), exactly as the old kill_timeout_ms = 0.
+  google.protobuf.Duration kill_timeout = 6;
   // include_descendants also kills every live descendant of child_id, deepest
   // first, before child_id itself. Off (the default) it ends child_id alone and
   // leaves its subtree running, exactly as before.
   bool include_descendants = 4;
+
+  reserved 2, 3;
+  reserved "shutdown_timeout_ms", "kill_timeout_ms";
 }
 
 // KillResponse mirrors protocol.KillResponseData, which is what
@@ -435,11 +453,14 @@ message KillResponse {
   // exit_code is optional: a signalled child has none, and 0 means clean exit.
   optional int32 exit_code = 2;
   string signal = 3;
-  int64 duration_ms = 4;
+  google.protobuf.Duration duration = 7;
   bool escalated = 5;
   // descendant_ids are the descendants include_descendants ended, deepest
   // first. Descendants that had already exited are not listed.
   repeated string descendant_ids = 6;
+
+  reserved 4;
+  reserved "duration_ms";
 }
 
 // CloseRequest finalizes a conversation: the child leaves the daemon's store
@@ -849,10 +870,13 @@ message ExecutorRow {
   // do with an ineligible row (show it greyed out, exclude it from a count).
   bool eligible = 11;
   string reason = 12;
-  // unix ms of the current connection's join time; 0 = not connected.
-  int64 connected_at_ms = 13;
-  // unix ms of the last pool sighting; 0 = unknown.
-  int64 last_seen_ms = 14;
+  // connected_at is the current connection's join time; unset = not connected.
+  google.protobuf.Timestamp connected_at = 15;
+  // last_seen is the last pool sighting; unset = unknown.
+  google.protobuf.Timestamp last_seen = 16;
+
+  reserved 13, 14;
+  reserved "connected_at_ms", "last_seen_ms";
 }
 
 message ListExecutorsRequest {
@@ -906,9 +930,12 @@ message DarajaLaunchResponse {
   string child_id = 1;
   int32 pid = 2;
   int32 pgid = 3;
-  // connected_unix_ms marks when the daraja completed its reverse dial and
+  // connected_at marks when the daraja completed its reverse dial and
   // the pool registered the connection.
-  int64 connected_unix_ms = 4;
+  google.protobuf.Timestamp connected_at = 5;
+
+  reserved 4;
+  reserved "connected_unix_ms";
 }
 
 // DarajaSend writes bytes to a live child's stdin via the connected daraja.
@@ -1441,9 +1468,13 @@ message ResumeResponse {
 }
 
 // CloseAllExitedRequest mirrors protocol.ForgetAllExitedRequest.
-// older_than_ms filters by age; zero means all exited entries.
+// older_than filters by age; unset or zero means all exited entries, exactly
+// as the old older_than_ms = 0 did.
 message CloseAllExitedRequest {
-  int64 older_than_ms = 1;
+  google.protobuf.Duration older_than = 2;
+
+  reserved 1;
+  reserved "older_than_ms";
 }
 
 // CloseAllExitedResponse lists the ids of the children that were closed, in
@@ -1471,13 +1502,15 @@ message StatusRequest {}
 // StatusResponse mirrors protocol.StatusResponseData.
 message StatusResponse {
   string version = 1;
-  // started_at is unix ms, the daemon process's start time
-  // (Controller.startedAt.UnixMilli).
-  int64 started_at = 2;
+  // started_at is the daemon process's start time
+  // (Controller.startedAt).
+  google.protobuf.Timestamp started_at = 7;
   ChildCounts children = 3;
   int64 memory_bytes = 4;
   string socket = 5;
   string logs_dir = 6;
+
+  reserved 2;  // was: started_at (unix ms int)
 
   // ChildCounts breaks down live vs exited child totals, mirroring
   // protocol.ChildCounts.
@@ -1503,11 +1536,14 @@ message SearchRequest {
   message SearchSessionFilter {
     string cwd_contains = 1;
     string name_contains = 2;
-    // since is unix ms, compared against each child's StartedAt.UnixMilli
-    // (matchesSessionFilter); 0 means unbounded.
-    int64 since = 3;
+    // since is a time floor, compared against each child's StartedAt
+    // (matchesSessionFilter); unset or the epoch means unbounded, exactly as
+    // the old since = 0 did.
+    google.protobuf.Timestamp since = 6;
     map<string, string> labels = 4;
     repeated string has_label = 5;
+
+    reserved 3;  // was: since (unix ms int)
   }
 }
 
@@ -1630,7 +1666,13 @@ message EnrollExecutorRequest {
   string isolation = 4;
   string workspace_mode = 5;
   string admits = 6;
-  int64 ttl_seconds = 7;
+  // ttl is the enrollment token's lifetime. A non-positive value is refused
+  // with InvalidArgument, exactly as the old ttl_seconds <= 0 was; the
+  // daemon's own 72h default applies where no positive ttl is supplied.
+  google.protobuf.Duration ttl = 8;
+
+  reserved 7;
+  reserved "ttl_seconds";
 }
 
 // EnrollExecutorResponse mirrors protocol.ExecutorEnrollResponseData.

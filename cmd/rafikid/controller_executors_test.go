@@ -118,8 +118,8 @@ func TestExecutorEnrollMintsATokenWithTheGivenLabels(t *testing.T) {
 	c := &Controller{execStore: s}
 
 	resp, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{
-		Labels:     map[string]string{"env": "work"},
-		TTLSeconds: 3600,
+		Labels: map[string]string{"env": "work"},
+		TTL:    time.Hour,
 	})
 	ck.NoError(err, "enroll")
 	ck.NotEq("", resp.Token, "enroll returned an empty token")
@@ -139,9 +139,9 @@ func TestExecutorEnrollStampsOwnerFromTheConnection(t *testing.T) {
 	c := &Controller{execStore: s}
 
 	_, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{
-		Name:       "laptop",
-		Labels:     map[string]string{"env": "dev"},
-		TTLSeconds: 3600,
+		Name:   "laptop",
+		Labels: map[string]string{"env": "dev"},
+		TTL:    time.Hour,
 	})
 	ck.NoError(err)
 	ck.Len(s.minted, 1, "want one minted token, got %d", len(s.minted))
@@ -174,8 +174,8 @@ func TestExecutorEnrollRefusesAClientSuppliedOwner(t *testing.T) {
 	c := &Controller{execStore: newFakeExecStore()}
 	for _, key := range []string{"owner", "machine"} {
 		_, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{
-			Labels:     map[string]string{key: "someone-else"},
-			TTLSeconds: 3600,
+			Labels: map[string]string{key: "someone-else"},
+			TTL:    time.Hour,
 		})
 		var ce *connectapi.ControllerError
 		if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
@@ -200,7 +200,7 @@ func TestExecutorCreateRefusesAClientSuppliedOwner(t *testing.T) {
 func TestExecutorEnrollRefusesANameASelectorCannotCarry(t *testing.T) {
 	c := &Controller{execStore: newFakeExecStore()}
 	_, err := c.ExecutorEnroll(users.Identity{Username: "brent"},
-		protocol.ExecutorEnrollRequest{Name: "my,laptop", TTLSeconds: 3600})
+		protocol.ExecutorEnrollRequest{Name: "my,laptop", TTL: time.Hour})
 	assert.NewAborting(t).Error(err, "a comma splits a selector; --name must be validated daemon-side too")
 }
 
@@ -252,7 +252,7 @@ func TestUnclassifiedStoreErrorsAreStillInternal(t *testing.T) {
 func TestExecutorVerbsRefuseWithoutAStore(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := &Controller{} // execStore nil
-	if _, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{TTLSeconds: 1}); err == nil {
+	if _, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{TTL: time.Second}); err == nil {
 		t.Fatal("enroll must refuse without a store")
 	}
 	if _, err := c.ExecutorList(protocol.ExecutorListRequest{}); err == nil {

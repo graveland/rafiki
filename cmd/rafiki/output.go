@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"golang.org/x/term"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
@@ -114,8 +114,8 @@ func renderList(w io.Writer, children []*rafikiv1.ChildSummary, mode outputMode,
 	for _, tr := range treeRows {
 		ch := tr.Child
 		started := "-"
-		if ch.GetStartedAt() > 0 {
-			started = time.UnixMilli(ch.GetStartedAt()).Format("2006-01-02 15:04")
+		if ts := ch.GetStartedAt(); ts != nil {
+			started = ts.AsTime().Local().Format("2006-01-02 15:04")
 		}
 		provider, model := splitProviderModel(ch.GetModel())
 		idCell := ch.GetChildId()
@@ -185,13 +185,13 @@ func writeProtoChildren(w io.Writer, children []*rafikiv1.ChildSummary) error {
 	return writeIndentedJSON(w, env)
 }
 
-// formatUnixMilli renders a wire millisecond timestamp the way the list
+// formatTimestamp renders a wire Timestamp the way the list
 // table's STARTED column does, or "-" when absent.
-func formatUnixMilli(ms int64) string {
-	if ms <= 0 {
+func formatTimestamp(ts *timestamppb.Timestamp) string {
+	if ts == nil || ts.AsTime().IsZero() {
 		return "-"
 	}
-	return time.UnixMilli(ms).Format("2006-01-02 15:04")
+	return ts.AsTime().Local().Format("2006-01-02 15:04")
 }
 
 // humanBytes renders a byte count in binary units for status display.

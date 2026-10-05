@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -21,8 +23,8 @@ type fakeLifecycle struct {
 	killOut    connectapi.KillOutcome
 	killErr    error
 	killedID   string
-	gotShutdow int64
-	gotKill    int64
+	gotShutdow time.Duration
+	gotKill    time.Duration
 	closedID   string
 	closeErr   error
 
@@ -44,10 +46,10 @@ func (f *fakeLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (stri
 	return "c_new", nil
 }
 
-func (f *fakeLifecycle) Kill(_ context.Context, childID string, shutdownMs, killMs int64) (connectapi.KillOutcome, error) {
+func (f *fakeLifecycle) Kill(_ context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (connectapi.KillOutcome, error) {
 	f.killedID = childID
-	f.gotShutdow = shutdownMs
-	f.gotKill = killMs
+	f.gotShutdow = shutdownTimeout
+	f.gotKill = killTimeout
 	if f.killErr != nil {
 		return connectapi.KillOutcome{}, f.killErr
 	}
@@ -161,19 +163,19 @@ func TestSpawnErrorBecomesInternal(t *testing.T) {
 func TestKillPassesTimeouts(t *testing.T) {
 	c := assert.NewCollecting(t)
 	code := 0
-	f := &fakeLifecycle{killOut: connectapi.KillOutcome{ExitCode: &code, DurationMs: 12}}
+	f := &fakeLifecycle{killOut: connectapi.KillOutcome{ExitCode: &code, Duration: 12 * time.Millisecond}}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
 	resp, err := s.Kill(context.Background(), connect.NewRequest(&rafikiv1.KillRequest{
-		ChildId: "c_1", ShutdownTimeoutMs: 5000, KillTimeoutMs: 2000,
+		ChildId: "c_1", ShutdownTimeout: durationpb.New(5 * time.Second), KillTimeout: durationpb.New(2 * time.Second),
 	}))
 	c.Require().NoError(err, "Kill")
-	if f.killedID != "c_1" || f.gotShutdow != 5000 || f.gotKill != 2000 {
-		t.Errorf("kill args wrong: id=%q shutdown=%d kill=%d", f.killedID, f.gotShutdow, f.gotKill)
+	if f.killedID != "c_1" || f.gotShutdow != 5*time.Second || f.gotKill != 2*time.Second {
+		t.Errorf("kill args wrong: id=%q shutdown=%v kill=%v", f.killedID, f.gotShutdow, f.gotKill)
 	}
-	if resp.Msg.GetExitCode() != 0 || resp.Msg.GetDurationMs() != 12 {
-		t.Errorf("outcome wrong: exit=%d duration=%d", resp.Msg.GetExitCode(), resp.Msg.GetDurationMs())
+	if resp.Msg.GetExitCode() != 0 || resp.Msg.GetDuration().AsDuration() != 12*time.Millisecond {
+		t.Errorf("outcome wrong: exit=%d duration=%v", resp.Msg.GetExitCode(), resp.Msg.GetDuration().AsDuration())
 	}
 	c.Eq("c_1", resp.Msg.GetChildId(), "ChildId")
 }

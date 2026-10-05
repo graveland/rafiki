@@ -10,7 +10,10 @@
 //	§10 — status constants
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ─── Status constants (§10) ──────────────────────────────────────────────────
 
@@ -92,23 +95,27 @@ const (
 // Labels is an AND-match: every key=value pair must be present on the child.
 // HasLabel matches children that have the key present regardless of value.
 type ListFilter struct {
-	Status       string            `json:"status,omitempty"`
-	Name         string            `json:"name,omitempty"`
-	NameContains string            `json:"nameContains,omitempty"`
-	CwdContains  string            `json:"cwdContains,omitempty"`
-	Since        int64             `json:"since,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`   // AND-match: all k=v must match
-	HasLabel     []string          `json:"hasLabel,omitempty"` // key presence only
+	Status       string `json:"status,omitempty"`
+	Name         string `json:"name,omitempty"`
+	NameContains string `json:"nameContains,omitempty"`
+	CwdContains  string `json:"cwdContains,omitempty"`
+	// Since is a time floor: a child that started before it is excluded. The
+	// zero time means unbounded.
+	Since    time.Time         `json:"since,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`   // AND-match: all k=v must match
+	HasLabel []string          `json:"hasLabel,omitempty"` // key presence only
 }
 
 // SearchSessionFilter narrows which children a content search scans (§6.15).
 // Labels/HasLabel apply the same AND-match semantics as ListFilter.
 type SearchSessionFilter struct {
-	CwdContains  string            `json:"cwdContains,omitempty"`
-	NameContains string            `json:"nameContains,omitempty"`
-	Since        int64             `json:"since,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	HasLabel     []string          `json:"hasLabel,omitempty"`
+	CwdContains  string `json:"cwdContains,omitempty"`
+	NameContains string `json:"nameContains,omitempty"`
+	// Since is a time floor compared against each child's StartedAt; the zero
+	// time means unbounded.
+	Since    time.Time         `json:"since,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
+	HasLabel []string          `json:"hasLabel,omitempty"`
 }
 
 // ─── Requests ────────────────────────────────────────────────────────────────
@@ -433,7 +440,7 @@ type ChildSummary struct {
 	SessionID     string            `json:"sessionId,omitempty"`
 	SessionFile   string            `json:"sessionFile,omitempty"`
 	Status        string            `json:"status"`
-	StartedAt     int64             `json:"startedAt"`
+	StartedAt     time.Time         `json:"startedAt"`
 	LastActivity  int64             `json:"lastActivity"`
 	ExitCode      *int              `json:"exitCode"` // null while alive
 	ExitSignal    string            `json:"exitSignal,omitempty"`
@@ -483,11 +490,11 @@ type SpawnResponseData struct {
 // internal/child's abandonTimeout). Omitted when false, so a reaped kill's
 // payload is unchanged.
 type KillResponseData struct {
-	ExitCode   *int   `json:"exitCode"`
-	Signal     string `json:"signal,omitempty"`
-	DurationMs int64  `json:"durationMs"`
-	Escalated  bool   `json:"escalated"`
-	Abandoned  bool   `json:"abandoned,omitempty"`
+	ExitCode  *int          `json:"exitCode"`
+	Signal    string        `json:"signal,omitempty"`
+	Duration  time.Duration `json:"duration"`
+	Escalated bool          `json:"escalated"`
+	Abandoned bool          `json:"abandoned,omitempty"`
 }
 
 // GetRecentResponseData is the data payload of a GetRecent answer (§6.11).
@@ -548,7 +555,7 @@ type ChildCounts struct {
 // StatusResponseData is the data payload of a Status answer (§6.16).
 type StatusResponseData struct {
 	Version     string      `json:"version"`
-	StartedAt   int64       `json:"startedAt"`
+	StartedAt   time.Time   `json:"startedAt"`
 	Children    ChildCounts `json:"children"`
 	MemoryBytes int64       `json:"memoryBytes"`
 	Socket      string      `json:"socket,omitempty"`
@@ -602,7 +609,7 @@ type ExecutorEnrollRequest struct {
 	Isolation     string            `json:"isolation,omitempty"`
 	WorkspaceMode string            `json:"workspaceMode,omitempty"`
 	Admits        string            `json:"admits,omitempty"`
-	TTLSeconds    int64             `json:"ttlSeconds"`
+	TTL           time.Duration     `json:"ttl"`
 }
 
 // ExecutorEnrollResponseData is the data payload of an enroll answer.

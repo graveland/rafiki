@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -26,12 +27,11 @@ import (
 // outcome worse than a slow one.
 const lifecycleTimeout = 3 * time.Minute
 
-// forceShutdownMs is the shutdown grace a FORCED kill allows before the daemon
+// forceShutdown is the shutdown grace a FORCED kill allows before the daemon
 // escalates to SIGKILL. One millisecond rather than zero: zero means "use the
-// daemon's default" on this wire (protocol.KillRequest omits the field when
-// unset), so it would ask for the polite kill the user just pressed a key to
-// escape.
-const forceShutdownMs = 1
+// daemon's default" on this wire (KillRequest omits the field when unset), so
+// it would ask for the polite kill the user just pressed a key to escape.
+const forceShutdown = time.Millisecond
 
 // statusShuttingDown is protocol.StatusShuttingDown's wire value. Spelled out
 // rather than imported for the same reason rail.LiveStatuses spells its
@@ -178,7 +178,7 @@ func (c *Cockpit) killCmd(childID, name string, force, include bool) tea.Cmd {
 
 		req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
 		if force {
-			req.ShutdownTimeoutMs = forceShutdownMs
+			req.ShutdownTimeout = durationpb.New(forceShutdown)
 		}
 		resp, err := c.client.Kill(ctx, connect.NewRequest(req))
 		if err != nil {

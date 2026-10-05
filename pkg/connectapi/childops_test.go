@@ -7,8 +7,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -25,7 +28,7 @@ type fakeChildOps struct {
 	// Recorded arguments.
 	resumeChildID  string
 	resumeAPIKey   string
-	exitedOlderMs  int64
+	exitedOlder    time.Duration
 	labelsChildID  string
 	labelsSet      map[string]string
 	labelsRemove   []string
@@ -58,8 +61,8 @@ func (f *fakeChildOps) Resume(_ context.Context, childID, apiKey string) (string
 	return f.resumeID, nil
 }
 
-func (f *fakeChildOps) CloseAllExited(_ context.Context, olderThanMs int64) ([]string, error) {
-	f.exitedOlderMs = olderThanMs
+func (f *fakeChildOps) CloseAllExited(_ context.Context, olderThan time.Duration) ([]string, error) {
+	f.exitedOlder = olderThan
 	if f.exitedErr != nil {
 		return f.exitedIDs, f.exitedErr
 	}
@@ -139,9 +142,9 @@ func TestChildOpsCloseAllExitedPassesOlderThanThrough(t *testing.T) {
 	c := assert.NewCollecting(t)
 	f := &fakeChildOps{exitedIDs: []string{"c_a", "c_b"}}
 	resp, err := newChildOpsServer(f).CloseAllExited(context.Background(),
-		connect.NewRequest(&rafikiv1.CloseAllExitedRequest{OlderThanMs: 5000}))
+		connect.NewRequest(&rafikiv1.CloseAllExitedRequest{OlderThan: durationpb.New(5 * time.Second)}))
 	c.Require().NoError(err, "CloseAllExited")
-	c.Eq(5000, f.exitedOlderMs, "seam got older_than_ms")
+	c.Eq(5*time.Second, f.exitedOlder, "seam got older_than")
 	if len(resp.Msg.GetChildIds()) != 2 || resp.Msg.GetChildIds()[0] != "c_a" {
 		t.Errorf("resp child_ids = %v, want [c_a c_b]", resp.Msg.GetChildIds())
 	}
@@ -185,7 +188,7 @@ func TestChildOpsSetLabelsPassesSetAndRemoveThrough(t *testing.T) {
 func TestChildOpsStatusReturnsTheSeamAnswer(t *testing.T) {
 	want := &rafikiv1.StatusResponse{
 		Version:     "test",
-		StartedAt:   1234,
+		StartedAt:   timestamppb.New(time.UnixMilli(1234)),
 		Children:    &rafikiv1.StatusResponse_ChildCounts{Live: 2, Exited: 1},
 		MemoryBytes: 64,
 		Socket:      "/tmp/s.sock",
@@ -194,7 +197,8 @@ func TestChildOpsStatusReturnsTheSeamAnswer(t *testing.T) {
 	resp, err := newChildOpsServer(&fakeChildOps{statusOut: want}).Status(context.Background(),
 		connect.NewRequest(&rafikiv1.StatusRequest{}))
 	assert.NewAborting(t).NoError(err, "Status")
-	if resp.Msg.GetVersion() != "test" || resp.Msg.GetStartedAt() != 1234 ||
+	if resp.Msg.GetVersion() != "test" || resp.Msg.GetStartedAt() == nil ||
+		!resp.Msg.GetStartedAt().AsTime().Equal(time.UnixMilli(1234)) ||
 		resp.Msg.GetChildren().GetLive() != 2 || resp.Msg.GetChildren().GetExited() != 1 ||
 		resp.Msg.GetMemoryBytes() != 64 || resp.Msg.GetSocket() != "/tmp/s.sock" || resp.Msg.GetLogsDir() != "/tmp/logs" {
 		t.Errorf("resp = %+v, want %+v", resp.Msg, want)

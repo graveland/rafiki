@@ -41,6 +41,7 @@ import (
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -606,9 +607,9 @@ func TestConnectScriptVerbsOnTheConnectPlane(t *testing.T) {
 	kctx2, kcancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer kcancel2()
 	if _, err := opClient.Kill(kctx2, connect.NewRequest(&rafikiv1.KillRequest{
-		ChildId:           scriptID,
-		ShutdownTimeoutMs: 2000,
-		KillTimeoutMs:     2000,
+		ChildId:         scriptID,
+		ShutdownTimeout: durationpb.New(2 * time.Second),
+		KillTimeout:     durationpb.New(2 * time.Second),
 	})); err != nil {
 		t.Fatalf("kill the sleeper: %v", err)
 	}

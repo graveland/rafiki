@@ -11,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -172,7 +174,7 @@ func (s *reviewStubControl) Kill(
 	}
 	code := int32(0)
 	return connect.NewResponse(&rafikiv1.KillResponse{
-		ChildId: req.Msg.GetChildId(), ExitCode: &code, DurationMs: 1,
+		ChildId: req.Msg.GetChildId(), ExitCode: &code, Duration: durationpb.New(time.Millisecond),
 	}), nil
 }
 

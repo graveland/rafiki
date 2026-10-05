@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -139,7 +140,7 @@ func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
 		Isolation:     isolation,
 		WorkspaceMode: wm,
 		Admits:        admits,
-		TtlSeconds:    int64(ttl.Seconds()),
+		Ttl:           durationpb.New(ttl),
 	}))
 	if err != nil {
 		return connectVerbErr(err, ep.describe)
@@ -275,12 +276,12 @@ func renderExecutorTable(w io.Writer, execs []*rafikiv1.ExecutorRow, useColor bo
 	rows := make([][]string, len(execs))
 	for i, ex := range execs {
 		lastSeen := "-"
-		if ms := ex.GetLastSeenMs(); ms != 0 {
-			lastSeen = humanize.Time(time.UnixMilli(ms))
+		if ts := ex.GetLastSeen(); ts != nil {
+			lastSeen = humanize.Time(ts.AsTime())
 		}
 		connectedSince := "-"
-		if ms := ex.GetConnectedAtMs(); ms != 0 {
-			connectedSince = humanize.Time(time.UnixMilli(ms))
+		if ts := ex.GetConnectedAt(); ts != nil {
+			connectedSince = humanize.Time(ts.AsTime())
 		}
 		rows[i] = []string{
 			shortExecutorID(ex.GetId()),
@@ -327,9 +328,9 @@ func renderExecutorTable(w io.Writer, execs []*rafikiv1.ExecutorRow, useColor bo
 // executorStatus collapses the row's two booleans into one operational word:
 // whether the machine can take work right now (live), exists but is not
 // talking to us (offline), or has been switched off (disabled). Connected is
-// the daemon's live-pool view of the row, and connected_at_ms/last_seen_ms
-// are the wire's 0 when there is no current connection or no sighting ever —
-// exactly what renderExecutorTable dashes.
+// the daemon's live-pool view of the row, and connected_at/last_seen
+// are unset on the wire when there is no current connection or no sighting
+// ever — exactly what renderExecutorTable dashes.
 func executorStatus(ex *rafikiv1.ExecutorRow) string {
 	switch {
 	case !ex.GetEnabled():

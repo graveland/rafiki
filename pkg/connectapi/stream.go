@@ -82,6 +82,13 @@ func (s *Server) StreamEvents(
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	if c := req.Msg.GetCursor(); c != nil {
+		if f := c.GetFloor(); f != nil {
+			if err := f.CheckValid(); err != nil {
+				return connect.NewError(connect.CodeInvalidArgument, err)
+			}
+		}
+	}
 	if sc := s.childScope(ctx); sc != nil {
 		switch filter.Subject.Scope {
 		case eventlog.ScopeAll:
@@ -155,8 +162,8 @@ func (s *Server) replay(
 	}
 
 	var floorTime time.Time
-	if cursor.FloorUnixMs > 0 {
-		floorTime = time.UnixMilli(cursor.FloorUnixMs)
+	if f := cursor.GetFloor(); f != nil {
+		floorTime = timestampTime(f)
 	}
 
 	// Determine children to replay.

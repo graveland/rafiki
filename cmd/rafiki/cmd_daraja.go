@@ -518,9 +518,9 @@ func runDarajaLaunch(cmd *cobra.Command, _ []string) error {
 		return diagnoseConnectError(err, endpoint.describe)
 	}
 
-	fmt.Fprintf(os.Stdout, "child_id=%s pid=%d pgid=%d connected_at=%d\n",
+	fmt.Fprintf(os.Stdout, "child_id=%s pid=%d pgid=%d connected_at=%s\n",
 		resp.Msg.GetChildId(), resp.Msg.GetPid(), resp.Msg.GetPgid(),
-		resp.Msg.GetConnectedUnixMs())
+		resp.Msg.GetConnectedAt().AsTime().UTC().Format(time.RFC3339))
 	return nil
 }
 

@@ -171,7 +171,7 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 		SessionID:    snap.SessionID,
 		SessionFile:  snap.SessionFile,
 		Status:       string(snap.Status),
-		StartedAt:    snap.StartedAt.UnixMilli(),
+		StartedAt:    snap.StartedAt,
 		LastActivity: snap.LastActivity.UnixMilli(),
 		ExitCode:     snap.ExitCode,
 		ExitSignal:   snap.ExitSignal,
@@ -409,16 +409,16 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 	}
 }
 
-func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, killMs int64) (connectapi.KillOutcome, error) {
-	res, err := l.c.Kill(ctx, childID, shutdownMs, killMs)
+func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (connectapi.KillOutcome, error) {
+	res, err := l.c.Kill(ctx, childID, shutdownTimeout, killTimeout)
 	if err != nil {
 		return connectapi.KillOutcome{}, err
 	}
 	return connectapi.KillOutcome{
-		ExitCode:   res.ExitCode,
-		Signal:     res.Signal,
-		DurationMs: res.DurationMs,
-		Escalated:  res.Escalated,
+		ExitCode:  res.ExitCode,
+		Signal:    res.Signal,
+		Duration:  res.Duration,
+		Escalated: res.Escalated,
 	}, nil
 }
 

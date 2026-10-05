@@ -31,7 +31,7 @@ func (f *fakeResolveClient) ListChildren(_ context.Context, req *connect.Request
 	f.listCalls++
 	// Resolution must see every child: the request carries no filter.
 	if req.Msg.GetStatuses() != nil || req.Msg.GetName() != "" || req.Msg.GetNameContains() != "" ||
-		req.Msg.GetCwdContains() != "" || req.Msg.GetSince() != 0 || req.Msg.GetLabels() != nil ||
+		req.Msg.GetCwdContains() != "" || req.Msg.GetSince() != nil || req.Msg.GetLabels() != nil ||
 		req.Msg.GetHasLabel() != nil {
 		return nil, errors.New("fakeResolveClient: ListChildren called with a filter")
 	}

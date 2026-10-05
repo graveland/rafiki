@@ -5,8 +5,10 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -27,15 +29,15 @@ type ExecutorRow struct {
 	Admits        string
 	Enabled       bool
 	Connected     bool
-	// ConnectedAtMs is unix ms of the current connection's join time; 0 = not
-	// connected. LastSeenMs is unix ms of the row's last pool sighting; 0 =
-	// never seen. Both pass through whatever the source set — a row built
-	// without them carries 0.
-	ConnectedAtMs int64
-	LastSeenMs    int64
-	LaunchKinds   []string
-	Eligible      bool
-	Reason        string
+	// ConnectedAt is the current connection's join time; the zero time means
+	// not connected. LastSeen is the row's last pool sighting; the zero time
+	// means never seen. Both pass through whatever the source set — a row built
+	// without them carries the zero time.
+	ConnectedAt time.Time
+	LastSeen    time.Time
+	LaunchKinds []string
+	Eligible    bool
+	Reason      string
 }
 
 // ExecutorLister is the narrow slice of the daemon's Controller needed to
@@ -104,7 +106,7 @@ func (s *Server) ListExecutors(
 }
 
 func toProtoExecutor(r ExecutorRow) *rafikiv1.ExecutorRow {
-	return &rafikiv1.ExecutorRow{
+	out := &rafikiv1.ExecutorRow{
 		Id:            r.ID,
 		Machine:       r.Machine,
 		Labels:        r.Labels,
@@ -114,10 +116,15 @@ func toProtoExecutor(r ExecutorRow) *rafikiv1.ExecutorRow {
 		Admits:        r.Admits,
 		Enabled:       r.Enabled,
 		Connected:     r.Connected,
-		ConnectedAtMs: r.ConnectedAtMs,
-		LastSeenMs:    r.LastSeenMs,
 		LaunchKinds:   r.LaunchKinds,
 		Eligible:      r.Eligible,
 		Reason:        r.Reason,
 	}
+	if !r.ConnectedAt.IsZero() {
+		out.ConnectedAt = timestamppb.New(r.ConnectedAt)
+	}
+	if !r.LastSeen.IsZero() {
+		out.LastSeen = timestamppb.New(r.LastSeen)
+	}
+	return out
 }

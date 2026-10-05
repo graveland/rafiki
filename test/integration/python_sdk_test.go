@@ -304,7 +304,7 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path.endswith("/Kill"):
             req = json.loads(body)
-            self._json({"childId": req.get("childId", ""), "exitCode": 0, "durationMs": "12"})
+            self._json({"childId": req.get("childId", ""), "exitCode": 0, "duration": "0.012s"})
             return
         self._err(404, None, None)
 
@@ -446,9 +446,9 @@ def run():
             return orig_unary(method, payload, timeout)
         c._conn._unary_once = spy_unary
         kid = c.stop("c_stop")
-        assert kid.child_id == "c_stop" and kid.exit_code == 0 and kid.duration_ms == 12, kid
+        assert kid.child_id == "c_stop" and kid.exit_code == 0 and kid.duration == datetime.timedelta(milliseconds=12), kid
         assert captured_kill["Kill"] == 240.0, captured_kill
-        kid = c.stop("c_stop", shutdown_timeout_ms=5000, kill_timeout_ms=3000)
+        kid = c.stop("c_stop", shutdown_timeout=datetime.timedelta(seconds=5), kill_timeout=3)
         assert captured_kill["Kill"] == 38.0, captured_kill
         note("9 stop-timeout OK")
 
@@ -705,8 +705,8 @@ def run():
         dt = time.time() - t0
         assert kid.child_id == wid2, kid
         assert dt < 30, "stop() of a cooperative child took %.1fs" % dt
-        assert kid.duration_ms >= 0, kid.duration_ms
-        note("stopped: exit=%s duration_ms=%s wall=%.3fs" % (kid.exit_code, kid.duration_ms, dt))
+        assert kid.duration is not None, kid
+        note("stopped: exit=%s duration=%s wall=%.3fs" % (kid.exit_code, kid.duration, dt))
         states = c.wait([wid2], timeout=30)
         note("stopped: %s" % (states,))
         child2 = c.get(wid2)
