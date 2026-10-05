@@ -61,7 +61,7 @@ func (f *fakeChildOps) Resume(_ context.Context, childID, apiKey string) (string
 func (f *fakeChildOps) CloseAllExited(_ context.Context, olderThanMs int64) ([]string, error) {
 	f.exitedOlderMs = olderThanMs
 	if f.exitedErr != nil {
-		return nil, f.exitedErr
+		return f.exitedIDs, f.exitedErr
 	}
 	return f.exitedIDs, nil
 }
@@ -145,6 +145,25 @@ func TestChildOpsCloseAllExitedPassesOlderThanThrough(t *testing.T) {
 	if len(resp.Msg.GetChildIds()) != 2 || resp.Msg.GetChildIds()[0] != "c_a" {
 		t.Errorf("resp child_ids = %v, want [c_a c_b]", resp.Msg.GetChildIds())
 	}
+}
+
+// A PARTIAL CloseAllExited — some children closed, others failed to persist —
+// must not read as a bare failure: the wire carries only the error, so the
+// count closed must reach the log or a caller cannot tell anything happened.
+// Fails against the pre-change handler, which discarded the closed list.
+func TestChildOpsPartialCloseAllExitedLogsCountClosed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := &fakeChildOps{
+		exitedIDs: []string{"c_a", "c_b"},
+		exitedErr: errors.New("close-all-exited: 1 child(ren) not persisted"),
+	}
+	logs, err := captureSlog(t, func() error {
+		_, err := newChildOpsServer(f).CloseAllExited(context.Background(),
+			connect.NewRequest(&rafikiv1.CloseAllExitedRequest{}))
+		return err
+	})
+	c.Require().Error(err, "a partial close must still return an error")
+	c.StrContains(logs, "closed=2", "the log must record the count closed; got:\n%s", logs)
 }
 
 func TestChildOpsSetLabelsPassesSetAndRemoveThrough(t *testing.T) {

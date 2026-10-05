@@ -98,6 +98,29 @@ func TestCloseFailsClosedWhenPersistFails(t *testing.T) {
 	ck.True(ok, "a child whose lineage was not recorded must stay in the live store, not be forgotten")
 }
 
+// A persist failure must leave a trace: Close returns the wrapped error AND
+// logs at Warn with the child id and the error TYPE only, so a persistently
+// failing sweep-driven Close is visible rather than silent. Fails against the
+// pre-change Close, which returned the error without logging.
+func TestClosePersistFailureIsLogged(t *testing.T) {
+	ck := assert.NewAborting(t)
+	logs := captureLogs(t)
+	ctrl := newTestController(t)
+	ctrl.children = &failingChildStore{}
+
+	const id = "c_close_persist_log"
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: id, Kind: protocol.KindFundi, Status: protocol.StatusExited,
+		Cwd: t.TempDir(), StartedAt: time.Now(),
+	})
+
+	ck.Require().Error(ctrl.Close(id), "Close must fail closed")
+	got := logs.String()
+	ck.StrContains(got, id, "the log must name the child; got:\n%s", got)
+	ck.StrContains(got, "close: child not persisted", "the log must be the close persist warning; got:\n%s", got)
+	ck.StrContains(got, "errorType", "the log must carry the error TYPE, never the message; got:\n%s", got)
+}
+
 // CloseAllExited must persist each child before forgetting it and SKIP the ones
 // it cannot: the healthy children still close, the failing one stays, and the
 // failure is surfaced in the returned error.

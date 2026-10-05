@@ -2,24 +2,32 @@ package childstoredb
 
 import (
 	"context"
+	"fmt"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multigres/testkit/assert"
 )
 
-// One malformed labels row must not take the whole tree down with it: it cannot
-// be proven a descendant, so Lineage skips it, returns every other row, and
-// reports no error. Without the skip, every budget sweep for this tree would
-// fail on the same row forever.
-//
-// The malformed row is the ROOT's own row (selected by child_id = root, so it is
-// returned even though a non-object value can never match the @> containment).
-// Its labels are valid JSON but not a JSON object — a shape the normal Marshal
-// can never produce, so it is inserted directly.
-//
-// Fails against the pre-change Lineage, which returned the unmarshal error for
-// the whole call.
-func TestLineageSkipsARowWithUnparseableLabels(t *testing.T) {
+// insertLineageChildRaw writes a child row with a verbatim labels JSON value,
+// so a test can inject a shape the normal Marshal never produces (a non-object,
+// a non-string walk value, an extra key).
+func insertLineageChildRaw(t *testing.T, pool *pgxpool.Pool, id, labelsJSON string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO conversations.child (child_id, kind, status, spawned_at, labels)
+		VALUES ($1, 'fundi', 'idle', now(), $2::jsonb)`, id, labelsJSON)
+	c.NoError(err, "insert raw %s", id)
+}
+
+// A returned row may carry unrelated non-string labels (numbers, bools, nested
+// objects) alongside the parent/root keys the walk reads. Those extra keys must
+// be IGNORED: the row stays in the tree AND the walk crosses it, so the row's
+// own child is not dropped from the rollup. Fails against the old skip, which
+// dropped the row (and with it the whole sub-subtree beneath it).
+func TestLineageKeepsARowWithExtraNonStringLabels(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	s := New(pool)
@@ -29,17 +37,59 @@ func TestLineageSkipsARowWithUnparseableLabels(t *testing.T) {
 	root, mid, leaf := p+"_root", p+"_mid", p+"_leaf"
 	cleanupLineage(t, pool, root, mid, leaf)
 
-	_, err := pool.Exec(ctx, `
-		INSERT INTO conversations.child (child_id, kind, status, spawned_at, labels)
-		VALUES ($1, 'fundi', 'idle', now(), '"not-an-object"'::jsonb)`, root)
-	c.Require().NoError(err, "seed the malformed root row")
+	insertLineageChild(t, s, root, "", "", false)
+	insertLineageChildRaw(t, pool, mid,
+		fmt.Sprintf(`{"rafiki/root":%q,"rafiki/parent":%q,"n":1}`, root, root))
+	insertLineageChildRaw(t, pool, leaf,
+		fmt.Sprintf(`{"rafiki/root":%q,"rafiki/parent":%q}`, root, mid))
 
-	insertLineageChild(t, s, mid, root, root, false)
-	insertLineageChild(t, s, leaf, mid, root, true) // a closed descendant
+	got, err := s.Lineage(ctx, root)
+	c.Require().NoError(err, "Lineage(%s): an extra non-string label must not fail the call", root)
+	c.ElementsMatch([]string{root, mid, leaf}, lineageIDs(got),
+		"Lineage = %v; the extra-label row and its child must both stay", lineageIDs(got))
+}
 
-	got, err := s.Lineage(ctx, mid)
-	c.Require().NoError(err, "one malformed row must not fail the whole tree")
-	c.ElementsMatch([]string{mid, leaf}, lineageIDs(got), "Lineage = %v", lineageIDs(got))
+// A returned row whose parent key is PRESENT but not a string leaves the chain
+// through it undeterminable: Lineage must fail closed (a budget caller then
+// skips rather than under-counting), naming the ambiguous row by child id.
+func TestLineageErrorsOnNonStringParentLabel(t *testing.T) {
+	c := assert.NewCollecting(t)
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	p := lineagePrefix()
+	root, mid := p+"_root", p+"_mid"
+	cleanupLineage(t, pool, root, mid)
+
+	insertLineageChild(t, s, root, "", "", false)
+	insertLineageChildRaw(t, pool, mid,
+		fmt.Sprintf(`{"rafiki/root":%q,"rafiki/parent":5}`, root))
+
+	_, err := s.Lineage(ctx, root)
+	c.Require().Error(err, "a non-string parent on a returned row must be an error")
+	c.StrContains(err.Error(), mid, "the error must name the ambiguous row: %v", err)
+}
+
+// A returned row whose labels value is not a JSON object at all is ambiguous by
+// shape: Lineage must fail closed. The root's OWN row (selected by child_id) is
+// the returned row here — a non-object value can never match the @> containment,
+// so no descendant row can carry this shape.
+func TestLineageErrorsOnNonObjectLabels(t *testing.T) {
+	c := assert.NewCollecting(t)
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	p := lineagePrefix()
+	root := p + "_root"
+	cleanupLineage(t, pool, root)
+
+	insertLineageChildRaw(t, pool, root, `"not-an-object"`)
+
+	_, err := s.Lineage(ctx, root)
+	c.Require().Error(err, "non-object labels on a returned row must be an error")
+	c.StrContains(err.Error(), root, "the error must name the ambiguous row: %v", err)
 }
 
 // A missing ancestor row with a caller-supplied root still resolves the

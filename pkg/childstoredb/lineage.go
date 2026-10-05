@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 
@@ -42,12 +41,68 @@ SELECT child_id, COALESCE(session_id, ''), COALESCE(conversation_id::text, ''),
 // rafiki consolidation, so the subtree query matches both keys.
 const legacyRootKey = "fundi/root"
 
+// legacyParentKey is the pre-rename spelling of childstore.LabelParent.
+const legacyParentKey = "fundi/parent"
+
+// lineageWalkLabelKeys are the ONLY labels the parent walk reads. A row's
+// other labels are irrelevant to it and are never inspected, so a non-string
+// value under any other key cannot affect ancestry. A row is ambiguous only
+// when one of THESE keys is present with a non-string value — the chain through
+// that row then cannot be determined — or when its labels are not a JSON
+// object at all.
+var lineageWalkLabelKeys = [...]string{
+	childstore.LabelParent,
+	legacyParentKey,
+	childstore.LabelRoot,
+	legacyRootKey,
+}
+
+// parseLineageLabels decodes a child row's labels tolerantly, returning only
+// the walk-relevant keys (parent/root, and their legacy spellings) as strings.
+// Every other label is ignored, so an unrelated non-string value never breaks
+// the row: {"rafiki/root":"x","rafiki/parent":"p","n":1} parses fine and the
+// row stays in the tree. It errors only on genuine ambiguity: labels that are
+// not a JSON object, or a walk key present with a non-string value (including
+// JSON null). A MISSING walk key is not ambiguity — a top-level row or an
+// orphan, exactly as DescendantsOf already treats it.
+func parseLineageLabels(raw []byte) (map[string]string, error) {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		// A JSON null unmarshals into a nil map with no error, but it is not the
+		// object shape a labels column must hold: refuse it rather than reading it
+		// as an empty label set.
+		return nil, errors.New("labels is not a JSON object")
+	}
+	out := make(map[string]string, len(lineageWalkLabelKeys))
+	for _, key := range lineageWalkLabelKeys {
+		v, ok := obj[key]
+		if !ok {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("label %q is present but not a string", key)
+		}
+		out[key] = s
+	}
+	return out, nil
+}
+
 // Lineage returns the ancestor's own row (when it exists) and every descendant
 // at any depth, live or closed. An unknown ancestor yields (nil, nil).
 //
 // This is the database half of childstore.LineageSource: coverage comes from
 // the child table (tombstoned rows included), so a closed descendant stays in
 // its ancestors' subtree scope and spend accounting.
+//
+// Label parsing is tolerant per key: a returned row carrying unrelated
+// non-string labels is IGNORED and stays in the tree, while genuine ambiguity
+// about a returned row — labels that are not a JSON object, or a parent/root
+// key present with a non-string value — is an ERROR, so a budget caller fails
+// closed rather than silently dropping a subtree.
 func (s *Store) Lineage(ctx context.Context, ancestorChildID string) ([]childstore.LineageMember, error) {
 	return s.lineage(ctx, ancestorChildID, "")
 }
@@ -79,8 +134,10 @@ func (s *Store) lineage(ctx context.Context, ancestorChildID, rootFallback strin
 	} else if err != nil {
 		return nil, fmt.Errorf("childstoredb: lineage %s: %w", ancestorChildID, err)
 	} else {
-		var labels map[string]string
-		if err := json.Unmarshal(ancestorLabels, &labels); err != nil {
+		labels, err := parseLineageLabels(ancestorLabels)
+		if err != nil {
+			// The ancestor's own row is also a RETURNED row: an ambiguous parent or
+			// root key on it makes the whole chain undeterminable, so fail closed.
 			return nil, fmt.Errorf("childstoredb: lineage %s: %w", ancestorChildID, err)
 		}
 		// The ancestor's root is its stored root label, falling back to the
@@ -108,11 +165,7 @@ func (s *Store) lineage(ctx context.Context, ancestorChildID, rootFallback strin
 	}
 	defer rows.Close()
 
-	var (
-		lineageRows     []childstore.LineageRow
-		skippedBadLabel int
-		firstSkippedID  string
-	)
+	var lineageRows []childstore.LineageRow
 	for rows.Next() {
 		var (
 			member     childstore.LineageMember
@@ -121,28 +174,18 @@ func (s *Store) lineage(ctx context.Context, ancestorChildID, rootFallback strin
 		if err := rows.Scan(&member.ChildID, &member.SessionID, &member.ConversationID, &member.Closed, &memberJSON); err != nil {
 			return nil, fmt.Errorf("childstoredb: lineage %s: %w", ancestorChildID, err)
 		}
-		var memberLabels map[string]string
-		if err := json.Unmarshal(memberJSON, &memberLabels); err != nil {
-			// One unparseable row must not fail the whole tree: it cannot be
-			// proven a descendant, so it is skipped rather than allowed to take
-			// every other row down with it (which would make every budget sweep
-			// for this tree skip forever). Counted and logged once per call, and
-			// named by child id only — the parse error is the same shape for every
-			// row and would only add noise.
-			if skippedBadLabel == 0 {
-				firstSkippedID = member.ChildID
-			}
-			skippedBadLabel++
-			continue
+		// Every returned row is already proven to be in the tree — the query
+		// matched it by root containment or by child_id — so a row can never be
+		// dropped without losing its whole sub-subtree from a budget rollup. Parse
+		// tolerantly; only genuine ambiguity about a returned row fails closed.
+		memberLabels, err := parseLineageLabels(memberJSON)
+		if err != nil {
+			return nil, fmt.Errorf("childstoredb: lineage %s: %w", member.ChildID, err)
 		}
 		lineageRows = append(lineageRows, childstore.LineageRow{Member: member, Labels: memberLabels})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("childstoredb: lineage %s: %w", ancestorChildID, err)
-	}
-	if skippedBadLabel > 0 {
-		slog.Warn("childstoredb: lineage skipped rows with unparseable labels",
-			"ancestor", ancestorChildID, "childId", firstSkippedID, "count", skippedBadLabel)
 	}
 
 	return childstore.DescendantsOf(lineageRows, ancestorChildID), nil

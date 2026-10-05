@@ -46,6 +46,65 @@ func TestSpawnRefusedWhenInitialRowCannotBePersisted(t *testing.T) {
 	}
 }
 
+// A refused spawn must also release the per-child MCP credential minted before
+// the initial insert: buildEnv mints it, then writeRecord fails. forgetMCPToken
+// otherwise runs only from handleChildExit — which never runs for a refused
+// spawn — so the credential would stay live until a later mint swept it. Fails
+// against the pre-change abortSpawn, which left the token registered.
+func TestRefusedSpawnDropsTheMintedMCPToken(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	// The proxy face must be wired for a claude child to mint a token at all
+	// (buildEnv → proxyChildEnv is the local path's only mint site).
+	ctrl.proxyURL, ctrl.proxyToken = "http://127.0.0.1:1/", "boot-secret"
+	fs := &failingChildStore{}
+	ctrl.children = fs
+
+	_, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Cwd:       os.TempDir(),
+		PiBinary:  fakePiBin(t),
+		NoSession: true,
+	}, users.Identity{})
+	ck.Require().Error(err, "the spawn must be refused")
+	ck.Require().Eq(1, len(fs.failed), "exactly the initial insert is attempted")
+	childID := fs.failed[0]
+
+	if tok, ok := ctrl.mcpTokensByChild[childID]; ok {
+		t.Fatalf("the refused spawn left MCP token %q registered for %s", tok, childID)
+	}
+	for tok, id := range ctrl.mcpTokens {
+		if id == childID {
+			t.Fatalf("the refused spawn left secret %q mapped to %s in mcpTokens", tok, childID)
+		}
+	}
+}
+
+// The script-output hook registers per-spawn state at spec-build time, BEFORE
+// the initial insert, and creates a coalescer on the child's first line; both
+// live until handleChildExit takes them. A refused spawn must release them, or
+// the state — and a parked flush goroutine — would leak. Fails against the
+// pre-change abortSpawn, which touched neither.
+func TestAbortSpawnReleasesScriptOutputState(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	// Register per-spawn state and a coalescer exactly as the hook does once the
+	// child's first line arrives.
+	ctrl.scriptOutputHook("c_abort")
+	state := ctrl.scriptOutputState["c_abort"]
+	ck.Require().NotNil(state, "the hook must have registered state")
+	ck.Require().NotNil(ctrl.registerScriptOutputCoalescer("c_abort", state), "the coalescer must register")
+
+	ctrl.abortSpawn("c_abort", nil)
+
+	ctrl.scriptOutputsMu.Lock()
+	_, stillState := ctrl.scriptOutputState["c_abort"]
+	_, stillCo := ctrl.scriptOutputs["c_abort"]
+	ctrl.scriptOutputsMu.Unlock()
+	ck.False(stillState, "abortSpawn left the script-output state registered")
+	ck.False(stillCo, "abortSpawn left the coalescer registered")
+}
+
 // The other half of the guard: a SUCCESSFUL persist must spawn exactly as
 // before, so the refusal above is not over-broad.
 func TestSpawnProceedsWhenInitialRowPersists(t *testing.T) {

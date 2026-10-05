@@ -116,6 +116,14 @@ func (s *Server) CloseAllExited(
 	}
 	closed, err := o.CloseAllExited(ctx, req.Msg.GetOlderThanMs())
 	if err != nil {
+		// A partial result must not read as a bare failure: some children WERE
+		// closed before the failure, and the wire carries only the error. Record
+		// the count closed here — with the error, whose text names the failure
+		// count — before the generic mapping below logs the cause and redacts it.
+		if len(closed) > 0 {
+			slog.Warn("connect: forget_all_exited closed some children before failing",
+				"closed", len(closed), "error", err)
+		}
 		return nil, mapChildOpsErr(err, "connect: forget_all_exited failed")
 	}
 	return connect.NewResponse(&rafikiv1.CloseAllExitedResponse{ChildIds: closed}), nil

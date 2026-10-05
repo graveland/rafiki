@@ -3135,6 +3135,19 @@ func (c *Controller) abortSpawn(childID string, ch *child.Child) {
 		c.darajaPool.DropReplay(childID)
 	}
 	c.dropInboxForForgotten(childID, "spawn aborted")
+	// The per-child MCP secret is minted BEFORE the initial insert (buildEnv /
+	// scriptRunner run before writeRecord), and forgetMCPToken normally runs
+	// from handleChildExit — which never runs for a refused spawn, so the
+	// credential would stay live until a later mint triggered sweepMCPTokens.
+	c.forgetMCPToken(childID)
+	// The script-output hook registers per-spawn state at spec-build time and
+	// creates the coalescer lazily on the child's first line; both live until
+	// handleChildExit takes them. A refused spawn has an output line's worth of
+	// window (child.Spawn runs before the insert), so release them here too:
+	// take drops the state entry, and Close stops the coalescer's goroutine.
+	if co := c.takeScriptOutputCoalescer(childID); co != nil {
+		co.Close()
+	}
 }
 
 // Close finalizes an exited child: it leaves the in-memory store and its
@@ -3204,6 +3217,12 @@ func (c *Controller) Close(childID string) error {
 	owns := c.ownsChildRow(snap)
 	if owns {
 		if err := c.writeRecord(childID); err != nil {
+			// A persist that keeps failing would otherwise leave no trace once the
+			// error is discarded: the caller sees one refusal, and a sweep's
+			// best-effort Close sees nothing at all. Log the child id and the error
+			// TYPE only — never the message, which can name infrastructure — then
+			// still return the wrapped error.
+			slog.Warn("close: child not persisted", "childId", childID, "errorType", fmt.Sprintf("%T", err))
 			return fmt.Errorf("close %s: %w", childID, err)
 		}
 	}
