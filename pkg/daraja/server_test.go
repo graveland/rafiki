@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
@@ -138,4 +139,46 @@ func TestServerRelayCarriesStdioBothWays(t *testing.T) {
 		}
 	}
 	t.Fatalf("timeout; got %q", got.String())
+}
+
+// A Duration grace round-trips: Shutdown still ends the process when the
+// caller sends an explicit span rather than an int count of milliseconds.
+func TestServerShutdownAcceptsADurationGrace(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
+	ck.Require().NoError(h.Start(), "Start")
+	c, _ := newTestServer(t, h)
+
+	_, err := c.Shutdown(context.Background(), connect.NewRequest(&darajapb.ShutdownRequest{
+		Grace: durationpb.New(200 * time.Millisecond),
+	}))
+	ck.Require().NoError(err, "Shutdown with a Duration grace")
+	ck.False(h.Running(), "process still running after Shutdown")
+}
+
+// An out-of-range Duration is refused InvalidArgument before the host is
+// touched, per design rule 4.
+func TestServerShutdownRejectsOutOfRangeGrace(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
+	c, _ := newTestServer(t, h)
+
+	_, err := c.Shutdown(context.Background(), connect.NewRequest(&darajapb.ShutdownRequest{
+		Grace: &durationpb.Duration{Seconds: 1 << 62},
+	}))
+	ck.Require().NotNil(err, "an out-of-range grace must be refused")
+	ck.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code for an out-of-range grace")
+}
+
+// Restart refuses an out-of-range Duration the same way Shutdown does.
+func TestServerRestartRejectsOutOfRangeGrace(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
+	c, _ := newTestServer(t, h)
+
+	_, err := c.Restart(context.Background(), connect.NewRequest(&darajapb.RestartRequest{
+		Grace: &durationpb.Duration{Seconds: 1 << 62},
+	}))
+	ck.Require().NotNil(err, "an out-of-range grace must be refused")
+	ck.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code for an out-of-range grace")
 }

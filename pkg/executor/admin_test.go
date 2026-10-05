@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/adminpb"
 	"go.graveland.dev/rafiki/pkg/darajapb"
@@ -127,12 +128,60 @@ func TestReapEndsTheWholeGroup(t *testing.T) {
 	pgid := int(resp.Msg.GetPgid())
 
 	rr, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{
-		ChildId: "c1", GraceMs: 500,
+		ChildId: "c1", Grace: durationpb.New(500 * time.Millisecond),
 	}))
 	c.Require().NoError(err, "Reap")
 	c.True(rr.Msg.GetReaped(), "Reap reported nothing reaped for a live launch")
 
 	// The group must be gone. ESRCH from a zero-signal probe is the proof.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("process group %d still alive after Reap", pgid)
+}
+
+// An out-of-range Duration grace is refused InvalidArgument, before any
+// process is signalled.
+func TestReapRejectsOutOfRangeGrace(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{SocketDir: t.TempDir()})
+	defer a.Close()
+
+	_, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{
+		ChildId: "c1", Grace: &durationpb.Duration{Seconds: 1 << 62},
+	}))
+	c.Require().NotNil(err, "an out-of-range grace must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code for an out-of-range grace")
+}
+
+// An unset grace falls back to the server default (the old grace_ms=0 meaning)
+// rather than being refused or treated as a zero-length wait.
+func TestReapWithUnsetGraceUsesTheDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c1",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	c.Require().NoError(err, "Launch")
+	pgid := int(resp.Msg.GetPgid())
+
+	rr, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{ChildId: "c1"}))
+	c.Require().NoError(err, "Reap with unset grace")
+	c.True(rr.Msg.GetReaped(), "Reap reported nothing reaped for a live launch")
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {

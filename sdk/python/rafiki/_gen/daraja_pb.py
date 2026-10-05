@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
+import datetime
 import math
 from typing import Optional
 
@@ -271,14 +272,14 @@ class ChildSpec:
 @dataclasses.dataclass
 class RestartRequest:
     spec: Optional[ChildSpec] = None
-    grace_ms: int = 0
+    grace: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
         if self.spec is not None:
             out["spec"] = self.spec.to_dict()
-        if self.grace_ms != 0:
-            out["graceMs"] = self.grace_ms
+        if self.grace is not None:
+            out["grace"] = _dur_out(self.grace)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "RestartRequest":
@@ -286,9 +287,9 @@ class RestartRequest:
         _v = _d.get("spec")
         if _v is not None:
             obj.spec = ChildSpec.from_dict(_v)
-        _v = _d.get("graceMs")
+        _v = _d.get("grace")
         if _v is not None:
-            obj.grace_ms = _int_in(_v)
+            obj.grace = _dur_in(_v, "grace")
         return obj
 
 @dataclasses.dataclass
@@ -310,19 +311,19 @@ class RestartResponse:
 
 @dataclasses.dataclass
 class ShutdownRequest:
-    grace_ms: int = 0
+    grace: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
-        if self.grace_ms != 0:
-            out["graceMs"] = self.grace_ms
+        if self.grace is not None:
+            out["grace"] = _dur_out(self.grace)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ShutdownRequest":
         obj = cls()
-        _v = _d.get("graceMs")
+        _v = _d.get("grace")
         if _v is not None:
-            obj.grace_ms = _int_in(_v)
+            obj.grace = _dur_in(_v, "grace")
         return obj
 
 @dataclasses.dataclass
@@ -444,3 +445,70 @@ def _float_in(value) -> float:
             return -math.inf
         return float(value)
     raise TypeError("expected a number (or non-finite string) on the wire")
+
+
+def _ts_out(value: datetime.datetime) -> str:
+    """datetime → protojson Timestamp: RFC3339 in UTC with the fractional
+    seconds omitted when zero. A naive value is taken as UTC; an aware one is
+    converted to it."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    else:
+        value = value.astimezone(datetime.timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _ts_in(value, field: str) -> datetime.datetime:
+    """protojson Timestamp → tz-aware UTC datetime, nanoseconds truncated to
+    microseconds. 'field' names the offending field in the error, never the
+    offending content."""
+    if not isinstance(value, str):
+        raise ValueError("invalid Timestamp for field %r" % field)
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    # datetime.fromisoformat accepts only 3 or 6 fractional digits before
+    # Python 3.11, while protojson emits up to 9 (nanoseconds); rewrite the
+    # fraction to exactly 6 digits, truncating nanoseconds to microseconds.
+    dot = text.find(".")
+    if dot != -1:
+        end = len(text)
+        for i in range(dot + 1, len(text)):
+            if text[i] in "+-Zz":
+                end = i
+                break
+        text = text[:dot + 1] + (text[dot + 1:end] + "000000")[:6] + text[end:]
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("invalid Timestamp for field %r" % field) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _dur_out(value: datetime.timedelta) -> str:
+    """timedelta → protojson Duration: seconds with up to six fractional digits
+    (trailing zeros dropped) and an 's' suffix."""
+    micros = value // datetime.timedelta(microseconds=1)
+    sign = "-" if micros < 0 else ""
+    micros = abs(micros)
+    whole, frac = divmod(micros, 1000000)
+    if frac:
+        return "%s%d.%ss" % (sign, whole, ("%06d" % frac).rstrip("0"))
+    return "%s%ds" % (sign, whole)
+
+
+def _dur_in(value, field: str) -> datetime.timedelta:
+    """protojson Duration → timedelta, nanoseconds truncated to microseconds
+    with the sign preserved. 'field' names the offending field in the error."""
+    if not isinstance(value, str) or not value.endswith("s"):
+        raise ValueError("invalid Duration for field %r" % field)
+    body = value[:-1]
+    negative = body.startswith("-")
+    if negative:
+        body = body[1:]
+    whole, _, frac = body.partition(".")
+    if not whole.isdigit() or (frac and not frac.isdigit()):
+        raise ValueError("invalid Duration for field %r" % field)
+    nanos = int(whole) * 1000000000 + int((frac + "000000000")[:9])
+    micros = nanos // 1000
+    return datetime.timedelta(microseconds=-micros if negative else micros)

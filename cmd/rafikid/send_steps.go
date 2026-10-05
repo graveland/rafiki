@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -440,7 +441,7 @@ func ssExecuteRequest(p ssStepPlan) (*executorpb.ExecuteRequest, error) {
 	return &executorpb.ExecuteRequest{
 		Tool:        p.tool,
 		InputJson:   input,
-		TimeoutMs:   int64(timeoutMs),
+		Timeout:     durationpb.New(time.Duration(timeoutMs) * time.Millisecond),
 		WorkspaceId: p.workspaceID,
 	}, nil
 }

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"sync"
-	"time"
 
 	"connectrpc.com/connect"
 
@@ -64,9 +63,14 @@ func (s *Server) Restart(
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("daraja: a script child is never restarted — its exit is its result"))
 	}
+	if g := req.Msg.GetGrace(); g != nil {
+		if err := g.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
 	pid, err := s.host.Restart(
 		SpecFromProto(req.Msg.GetSpec()),
-		time.Duration(req.Msg.GetGraceMs())*time.Millisecond,
+		req.Msg.GetGrace().AsDuration(),
 	)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -113,7 +117,12 @@ func SpecFromProto(p *darajapb.ChildSpec) ChildSpec {
 func (s *Server) Shutdown(
 	ctx context.Context, req *connect.Request[darajapb.ShutdownRequest],
 ) (*connect.Response[darajapb.ShutdownResponse], error) {
-	code, sig, err := s.host.Shutdown(time.Duration(req.Msg.GetGraceMs()) * time.Millisecond)
+	if g := req.Msg.GetGrace(); g != nil {
+		if err := g.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	code, sig, err := s.host.Shutdown(req.Msg.GetGrace().AsDuration())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

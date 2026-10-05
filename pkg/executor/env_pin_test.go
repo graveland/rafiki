@@ -5,9 +5,11 @@ package executor_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -47,7 +49,7 @@ func TestToolSubprocessRunsUnderPinnedEnvNotProcessDrift(t *testing.T) {
 			CallId:    "t1",
 			Tool:      "bash",
 			InputJson: []byte(`{"command":"printf '%s|%s' \"$PINNED_PROBE\" \"${PATH%%:*}\""}`),
-			TimeoutMs: 10000,
+			Timeout:   durationpb.New(10 * time.Second),
 		}))
 	if err != nil {
 		t.Fatal(err)

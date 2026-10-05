@@ -16,9 +16,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
@@ -55,7 +57,7 @@ func (c *Client) Execute(ctx context.Context, tool string, input json.RawMessage
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:      tool,
 		InputJson: input,
-		TimeoutMs: 600_000, // 10 minutes; matches bash.go's maxBashTimeout
+		Timeout:   durationpb.New(10 * time.Minute), // matches bash.go's maxBashTimeout
 	}))
 	if err != nil {
 		return "", fmt.Errorf("executor execute: %w", err)

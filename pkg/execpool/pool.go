@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -747,7 +748,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:        tool,
 		InputJson:   input,
-		TimeoutMs:   600_000,
+		Timeout:     durationpb.New(10 * time.Minute),
 		WorkspaceId: c.workspaceID,
 	}))
 	if err != nil {
@@ -996,7 +997,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:      tool,
 		InputJson: input,
-		TimeoutMs: 600_000,
+		Timeout:   durationpb.New(10 * time.Minute),
 	}))
 	if err != nil {
 		return "", fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)

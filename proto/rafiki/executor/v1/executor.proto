@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package rafiki.executor.v1;
 
+import "google/protobuf/duration.proto";
+
 option go_package = "go.graveland.dev/rafiki/pkg/executorpb;executorpb";
 
 service ExecutorService {
@@ -147,13 +149,17 @@ message ExecuteRequest {
   string call_id = 1;
   string tool = 2;
   bytes  input_json = 3;
-  int64  timeout_ms = 4;
+  reserved 4;
+  reserved "timeout_ms";
   map<string, int64> expect_mtime = 5;
   bool   background = 6;
   // workspace_id selects the workspace this call runs in. Empty means the
   // executor's own root — the pre-phase-08 behaviour, kept so an executor and
   // a daemon of different vintages still interoperate.
   string workspace_id = 7;
+  // timeout bounds one tool call. Unset or zero means no timeout, exactly as
+  // the old timeout_ms=0 did.
+  google.protobuf.Duration timeout = 8;
 }
 
 message ExecuteResponse {

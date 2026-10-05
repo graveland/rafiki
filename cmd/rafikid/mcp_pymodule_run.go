@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -96,7 +98,7 @@ func (e *mcpPyModuleRunExecutor) Run(ctx context.Context, input json.RawMessage)
 	stream, err := e.client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:        "pymodule_run",
 		InputJson:   e.bindCwd(input),
-		TimeoutMs:   600_000, // matches pkg/executorclient.Client.Execute's bound
+		Timeout:     durationpb.New(10 * time.Minute), // matches pkg/executorclient.Client.Execute's bound
 		WorkspaceId: e.workspaceID,
 	}))
 	if err != nil {

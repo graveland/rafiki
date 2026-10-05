@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
@@ -27,7 +28,7 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		t.Helper()
 		c := assert.NewAborting(t)
 		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-			CallId: "call-1", Tool: tool, InputJson: []byte(input), TimeoutMs: 30000,
+			CallId: "call-1", Tool: tool, InputJson: []byte(input), Timeout: durationpb.New(30 * time.Second),
 		}))
 		c.NoError(err, "Execute(%s)", tool)
 		var result *executorpb.Result
@@ -97,7 +98,7 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		c.NoError(os.WriteFile(p, []byte("changed by someone else"), 0o644))
 
 		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-			CallId: "c", Tool: "edit", TimeoutMs: 30000,
+			CallId: "c", Tool: "edit", Timeout: durationpb.New(30 * time.Second),
 			InputJson:   []byte(`{"file_path":"` + p + `","old_string":"original","new_string":"mine"}`),
 			ExpectMtime: map[string]int64{p: stale},
 		}))

@@ -11,9 +11,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -90,7 +92,7 @@ func TestExecutorDoesNotServeParentSideTools(t *testing.T) {
 
 	for _, tool := range []string{"task_add", "task_list", "web_search", "web_fetch", "skill"} {
 		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-			CallId: "x", Tool: tool, InputJson: []byte(`{}`), TimeoutMs: 5000,
+			CallId: "x", Tool: tool, InputJson: []byte(`{}`), Timeout: durationpb.New(5 * time.Second),
 		}))
 		c.NoError(err, "%s: transport error, want a typed Failure", tool)
 		var failed bool
@@ -111,7 +113,7 @@ func TestExecuteHonoursTimeoutMs(t *testing.T) {
 	ctx := context.Background()
 
 	stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-		CallId: "slow", Tool: "bash", InputJson: []byte(`{"command":"sleep 10"}`), TimeoutMs: 500,
+		CallId: "slow", Tool: "bash", InputJson: []byte(`{"command":"sleep 10"}`), Timeout: durationpb.New(500 * time.Millisecond),
 	}))
 	c.NoError(err)
 	var code executorpb.Failure_Code

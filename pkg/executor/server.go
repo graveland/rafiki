@@ -402,6 +402,14 @@ func (s *Server) Execute(
 ) error {
 	msg := req.Msg
 
+	// A present timeout must be a valid Duration; unset or zero means no
+	// timeout, exactly as the old timeout_ms=0 did.
+	if t := msg.GetTimeout(); t != nil {
+		if err := t.CheckValid(); err != nil {
+			return connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+
 	// Look up the workspace. An empty workspace_id means the executor's own
 	// root.
 	var ws *workspace
@@ -445,9 +453,9 @@ func (s *Server) Execute(
 	// Honour the client's deadline. Without it CODE_TIMEOUT — one of four
 	// documented failure codes, with its own retry semantics — can never be
 	// produced, and a read or grep on a pathological tree runs forever.
-	if msg.TimeoutMs > 0 {
+	if d := msg.GetTimeout().AsDuration(); d > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(msg.TimeoutMs)*time.Millisecond)
+		ctx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
 	}
 
@@ -492,7 +500,7 @@ func (s *Server) Execute(
 			Event: &executorpb.ExecuteResponse_Failed{
 				Failed: &executorpb.Failure{
 					Code:    executorpb.Failure_CODE_TIMEOUT,
-					Message: fmt.Sprintf("tool %q exceeded timeout_ms=%d", msg.Tool, msg.TimeoutMs),
+					Message: fmt.Sprintf("tool %q exceeded timeout=%s", msg.Tool, msg.GetTimeout().AsDuration()),
 				},
 			},
 		})

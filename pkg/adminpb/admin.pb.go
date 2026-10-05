@@ -10,6 +10,7 @@ import (
 	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -174,8 +175,8 @@ type ReapRequest struct {
 	// NOT a bare pgid: a process group id is recycled once its group empties, so
 	// signalling a number supplied by a peer could reach an unrelated group.
 	ChildId string `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
-	// grace_ms between SIGTERM and SIGKILL. Zero means the server default.
-	GraceMs       int32 `protobuf:"varint,2,opt,name=grace_ms,json=graceMs,proto3" json:"grace_ms,omitempty"`
+	// grace between SIGTERM and SIGKILL. Unset or zero means the server default.
+	Grace         *durationpb.Duration `protobuf:"bytes,3,opt,name=grace,proto3" json:"grace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -217,11 +218,11 @@ func (x *ReapRequest) GetChildId() string {
 	return ""
 }
 
-func (x *ReapRequest) GetGraceMs() int32 {
+func (x *ReapRequest) GetGrace() *durationpb.Duration {
 	if x != nil {
-		return x.GraceMs
+		return x.Grace
 	}
-	return 0
+	return nil
 }
 
 type ReapResponse struct {
@@ -397,7 +398,7 @@ var File_rafiki_admin_v1_admin_proto protoreflect.FileDescriptor
 
 const file_rafiki_admin_v1_admin_proto_rawDesc = "" +
 	"\n" +
-	"\x1brafiki/admin/v1/admin.proto\x12\x0frafiki.admin.v1\x1a\x1drafiki/daraja/v1/daraja.proto\"\xa2\x01\n" +
+	"\x1brafiki/admin/v1/admin.proto\x12\x0frafiki.admin.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1drafiki/daraja/v1/daraja.proto\"\xa2\x01\n" +
 	"\rLaunchRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12/\n" +
@@ -406,10 +407,10 @@ const file_rafiki_admin_v1_admin_proto_rawDesc = "" +
 	"\x06ticket\x18\x05 \x01(\tR\x06ticket\"D\n" +
 	"\x0eLaunchResponse\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\x12\x12\n" +
-	"\x04pgid\x18\x02 \x01(\x05R\x04pgidJ\x04\b\x03\x10\x04R\x06socket\"C\n" +
+	"\x04pgid\x18\x02 \x01(\x05R\x04pgidJ\x04\b\x03\x10\x04R\x06socket\"i\n" +
 	"\vReapRequest\x12\x19\n" +
-	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x19\n" +
-	"\bgrace_ms\x18\x02 \x01(\x05R\agraceMs\"&\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12/\n" +
+	"\x05grace\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x05graceJ\x04\b\x02\x10\x03R\bgrace_ms\"&\n" +
 	"\fReapResponse\x12\x16\n" +
 	"\x06reaped\x18\x01 \x01(\bR\x06reaped\"*\n" +
 	"\rStatusRequest\x12\x19\n" +
@@ -441,27 +442,29 @@ func file_rafiki_admin_v1_admin_proto_rawDescGZIP() []byte {
 
 var file_rafiki_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_rafiki_admin_v1_admin_proto_goTypes = []any{
-	(*LaunchRequest)(nil),      // 0: rafiki.admin.v1.LaunchRequest
-	(*LaunchResponse)(nil),     // 1: rafiki.admin.v1.LaunchResponse
-	(*ReapRequest)(nil),        // 2: rafiki.admin.v1.ReapRequest
-	(*ReapResponse)(nil),       // 3: rafiki.admin.v1.ReapResponse
-	(*StatusRequest)(nil),      // 4: rafiki.admin.v1.StatusRequest
-	(*StatusResponse)(nil),     // 5: rafiki.admin.v1.StatusResponse
-	(*darajapb.ChildSpec)(nil), // 6: rafiki.daraja.v1.ChildSpec
+	(*LaunchRequest)(nil),       // 0: rafiki.admin.v1.LaunchRequest
+	(*LaunchResponse)(nil),      // 1: rafiki.admin.v1.LaunchResponse
+	(*ReapRequest)(nil),         // 2: rafiki.admin.v1.ReapRequest
+	(*ReapResponse)(nil),        // 3: rafiki.admin.v1.ReapResponse
+	(*StatusRequest)(nil),       // 4: rafiki.admin.v1.StatusRequest
+	(*StatusResponse)(nil),      // 5: rafiki.admin.v1.StatusResponse
+	(*darajapb.ChildSpec)(nil),  // 6: rafiki.daraja.v1.ChildSpec
+	(*durationpb.Duration)(nil), // 7: google.protobuf.Duration
 }
 var file_rafiki_admin_v1_admin_proto_depIdxs = []int32{
 	6, // 0: rafiki.admin.v1.LaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
-	0, // 1: rafiki.admin.v1.AdminService.Launch:input_type -> rafiki.admin.v1.LaunchRequest
-	2, // 2: rafiki.admin.v1.AdminService.Reap:input_type -> rafiki.admin.v1.ReapRequest
-	4, // 3: rafiki.admin.v1.AdminService.Status:input_type -> rafiki.admin.v1.StatusRequest
-	1, // 4: rafiki.admin.v1.AdminService.Launch:output_type -> rafiki.admin.v1.LaunchResponse
-	3, // 5: rafiki.admin.v1.AdminService.Reap:output_type -> rafiki.admin.v1.ReapResponse
-	5, // 6: rafiki.admin.v1.AdminService.Status:output_type -> rafiki.admin.v1.StatusResponse
-	4, // [4:7] is the sub-list for method output_type
-	1, // [1:4] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	7, // 1: rafiki.admin.v1.ReapRequest.grace:type_name -> google.protobuf.Duration
+	0, // 2: rafiki.admin.v1.AdminService.Launch:input_type -> rafiki.admin.v1.LaunchRequest
+	2, // 3: rafiki.admin.v1.AdminService.Reap:input_type -> rafiki.admin.v1.ReapRequest
+	4, // 4: rafiki.admin.v1.AdminService.Status:input_type -> rafiki.admin.v1.StatusRequest
+	1, // 5: rafiki.admin.v1.AdminService.Launch:output_type -> rafiki.admin.v1.LaunchResponse
+	3, // 6: rafiki.admin.v1.AdminService.Reap:output_type -> rafiki.admin.v1.ReapResponse
+	5, // 7: rafiki.admin.v1.AdminService.Status:output_type -> rafiki.admin.v1.StatusResponse
+	5, // [5:8] is the sub-list for method output_type
+	2, // [2:5] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_admin_v1_admin_proto_init() }

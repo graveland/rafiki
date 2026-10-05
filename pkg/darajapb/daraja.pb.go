@@ -9,6 +9,7 @@ package darajapb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -694,9 +695,9 @@ type RestartRequest struct {
 	// holds — which is how a caller restarts without restating everything it
 	// already knows.
 	Spec *ChildSpec `protobuf:"bytes,1,opt,name=spec,proto3" json:"spec,omitempty"`
-	// grace_ms to wait after the interrupt before escalating to a hard kill.
-	// Zero means the server default.
-	GraceMs       int32 `protobuf:"varint,2,opt,name=grace_ms,json=graceMs,proto3" json:"grace_ms,omitempty"`
+	// grace to wait after the interrupt before escalating to a hard kill.
+	// Unset or zero means the server default.
+	Grace         *durationpb.Duration `protobuf:"bytes,3,opt,name=grace,proto3" json:"grace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -738,11 +739,11 @@ func (x *RestartRequest) GetSpec() *ChildSpec {
 	return nil
 }
 
-func (x *RestartRequest) GetGraceMs() int32 {
+func (x *RestartRequest) GetGrace() *durationpb.Duration {
 	if x != nil {
-		return x.GraceMs
+		return x.Grace
 	}
-	return 0
+	return nil
 }
 
 type RestartResponse struct {
@@ -790,8 +791,10 @@ func (x *RestartResponse) GetPid() int32 {
 }
 
 type ShutdownRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	GraceMs       int32                  `protobuf:"varint,1,opt,name=grace_ms,json=graceMs,proto3" json:"grace_ms,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// grace to wait after the interrupt before escalating to a hard kill.
+	// Unset or zero means the server default.
+	Grace         *durationpb.Duration `protobuf:"bytes,2,opt,name=grace,proto3" json:"grace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -826,11 +829,11 @@ func (*ShutdownRequest) Descriptor() ([]byte, []int) {
 	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{9}
 }
 
-func (x *ShutdownRequest) GetGraceMs() int32 {
+func (x *ShutdownRequest) GetGrace() *durationpb.Duration {
 	if x != nil {
-		return x.GraceMs
+		return x.Grace
 	}
-	return 0
+	return nil
 }
 
 type ShutdownResponse struct {
@@ -977,7 +980,7 @@ var File_rafiki_daraja_v1_daraja_proto protoreflect.FileDescriptor
 
 const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\n" +
-	"\x1drafiki/daraja/v1/daraja.proto\x12\x10rafiki.daraja.v1\"$\n" +
+	"\x1drafiki/daraja/v1/daraja.proto\x12\x10rafiki.daraja.v1\x1a\x1egoogle/protobuf/duration.proto\"$\n" +
 	"\fRelayRequest\x12\x14\n" +
 	"\x05stdin\x18\x01 \x01(\fR\x05stdin\"\xcb\x01\n" +
 	"\rRelayResponse\x12\x18\n" +
@@ -1019,14 +1022,14 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\tChildSpec\x12*\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x16.rafiki.daraja.v1.KindR\x04kind\x126\n" +
 	"\x06claude\x18\x02 \x01(\v2\x1e.rafiki.daraja.v1.ClaudeParamsR\x06claude\x126\n" +
-	"\x06script\x18\x03 \x01(\v2\x1e.rafiki.daraja.v1.ScriptParamsR\x06script\"\\\n" +
+	"\x06script\x18\x03 \x01(\v2\x1e.rafiki.daraja.v1.ScriptParamsR\x06script\"\x82\x01\n" +
 	"\x0eRestartRequest\x12/\n" +
-	"\x04spec\x18\x01 \x01(\v2\x1b.rafiki.daraja.v1.ChildSpecR\x04spec\x12\x19\n" +
-	"\bgrace_ms\x18\x02 \x01(\x05R\agraceMs\"#\n" +
+	"\x04spec\x18\x01 \x01(\v2\x1b.rafiki.daraja.v1.ChildSpecR\x04spec\x12/\n" +
+	"\x05grace\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x05graceJ\x04\b\x02\x10\x03R\bgrace_ms\"#\n" +
 	"\x0fRestartResponse\x12\x10\n" +
-	"\x03pid\x18\x01 \x01(\x05R\x03pid\",\n" +
-	"\x0fShutdownRequest\x12\x19\n" +
-	"\bgrace_ms\x18\x01 \x01(\x05R\agraceMs\"G\n" +
+	"\x03pid\x18\x01 \x01(\x05R\x03pid\"R\n" +
+	"\x0fShutdownRequest\x12/\n" +
+	"\x05grace\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x05graceJ\x04\b\x01\x10\x02R\bgrace_ms\"G\n" +
 	"\x10ShutdownResponse\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
 	"\x06signal\x18\x02 \x01(\tR\x06signal\"\x0f\n" +
@@ -1059,21 +1062,22 @@ func file_rafiki_daraja_v1_daraja_proto_rawDescGZIP() []byte {
 var file_rafiki_daraja_v1_daraja_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_rafiki_daraja_v1_daraja_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_rafiki_daraja_v1_daraja_proto_goTypes = []any{
-	(Kind)(0),                // 0: rafiki.daraja.v1.Kind
-	(*RelayRequest)(nil),     // 1: rafiki.daraja.v1.RelayRequest
-	(*RelayResponse)(nil),    // 2: rafiki.daraja.v1.RelayResponse
-	(*ProcessRestarted)(nil), // 3: rafiki.daraja.v1.ProcessRestarted
-	(*ProcessExited)(nil),    // 4: rafiki.daraja.v1.ProcessExited
-	(*ClaudeParams)(nil),     // 5: rafiki.daraja.v1.ClaudeParams
-	(*ScriptParams)(nil),     // 6: rafiki.daraja.v1.ScriptParams
-	(*ChildSpec)(nil),        // 7: rafiki.daraja.v1.ChildSpec
-	(*RestartRequest)(nil),   // 8: rafiki.daraja.v1.RestartRequest
-	(*RestartResponse)(nil),  // 9: rafiki.daraja.v1.RestartResponse
-	(*ShutdownRequest)(nil),  // 10: rafiki.daraja.v1.ShutdownRequest
-	(*ShutdownResponse)(nil), // 11: rafiki.daraja.v1.ShutdownResponse
-	(*HealthRequest)(nil),    // 12: rafiki.daraja.v1.HealthRequest
-	(*HealthResponse)(nil),   // 13: rafiki.daraja.v1.HealthResponse
-	nil,                      // 14: rafiki.daraja.v1.ScriptParams.EnvEntry
+	(Kind)(0),                   // 0: rafiki.daraja.v1.Kind
+	(*RelayRequest)(nil),        // 1: rafiki.daraja.v1.RelayRequest
+	(*RelayResponse)(nil),       // 2: rafiki.daraja.v1.RelayResponse
+	(*ProcessRestarted)(nil),    // 3: rafiki.daraja.v1.ProcessRestarted
+	(*ProcessExited)(nil),       // 4: rafiki.daraja.v1.ProcessExited
+	(*ClaudeParams)(nil),        // 5: rafiki.daraja.v1.ClaudeParams
+	(*ScriptParams)(nil),        // 6: rafiki.daraja.v1.ScriptParams
+	(*ChildSpec)(nil),           // 7: rafiki.daraja.v1.ChildSpec
+	(*RestartRequest)(nil),      // 8: rafiki.daraja.v1.RestartRequest
+	(*RestartResponse)(nil),     // 9: rafiki.daraja.v1.RestartResponse
+	(*ShutdownRequest)(nil),     // 10: rafiki.daraja.v1.ShutdownRequest
+	(*ShutdownResponse)(nil),    // 11: rafiki.daraja.v1.ShutdownResponse
+	(*HealthRequest)(nil),       // 12: rafiki.daraja.v1.HealthRequest
+	(*HealthResponse)(nil),      // 13: rafiki.daraja.v1.HealthResponse
+	nil,                         // 14: rafiki.daraja.v1.ScriptParams.EnvEntry
+	(*durationpb.Duration)(nil), // 15: google.protobuf.Duration
 }
 var file_rafiki_daraja_v1_daraja_proto_depIdxs = []int32{
 	3,  // 0: rafiki.daraja.v1.RelayResponse.restarted:type_name -> rafiki.daraja.v1.ProcessRestarted
@@ -1083,19 +1087,21 @@ var file_rafiki_daraja_v1_daraja_proto_depIdxs = []int32{
 	5,  // 4: rafiki.daraja.v1.ChildSpec.claude:type_name -> rafiki.daraja.v1.ClaudeParams
 	6,  // 5: rafiki.daraja.v1.ChildSpec.script:type_name -> rafiki.daraja.v1.ScriptParams
 	7,  // 6: rafiki.daraja.v1.RestartRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
-	1,  // 7: rafiki.daraja.v1.DarajaService.Relay:input_type -> rafiki.daraja.v1.RelayRequest
-	8,  // 8: rafiki.daraja.v1.DarajaService.Restart:input_type -> rafiki.daraja.v1.RestartRequest
-	10, // 9: rafiki.daraja.v1.DarajaService.Shutdown:input_type -> rafiki.daraja.v1.ShutdownRequest
-	12, // 10: rafiki.daraja.v1.DarajaService.Health:input_type -> rafiki.daraja.v1.HealthRequest
-	2,  // 11: rafiki.daraja.v1.DarajaService.Relay:output_type -> rafiki.daraja.v1.RelayResponse
-	9,  // 12: rafiki.daraja.v1.DarajaService.Restart:output_type -> rafiki.daraja.v1.RestartResponse
-	11, // 13: rafiki.daraja.v1.DarajaService.Shutdown:output_type -> rafiki.daraja.v1.ShutdownResponse
-	13, // 14: rafiki.daraja.v1.DarajaService.Health:output_type -> rafiki.daraja.v1.HealthResponse
-	11, // [11:15] is the sub-list for method output_type
-	7,  // [7:11] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	15, // 7: rafiki.daraja.v1.RestartRequest.grace:type_name -> google.protobuf.Duration
+	15, // 8: rafiki.daraja.v1.ShutdownRequest.grace:type_name -> google.protobuf.Duration
+	1,  // 9: rafiki.daraja.v1.DarajaService.Relay:input_type -> rafiki.daraja.v1.RelayRequest
+	8,  // 10: rafiki.daraja.v1.DarajaService.Restart:input_type -> rafiki.daraja.v1.RestartRequest
+	10, // 11: rafiki.daraja.v1.DarajaService.Shutdown:input_type -> rafiki.daraja.v1.ShutdownRequest
+	12, // 12: rafiki.daraja.v1.DarajaService.Health:input_type -> rafiki.daraja.v1.HealthRequest
+	2,  // 13: rafiki.daraja.v1.DarajaService.Relay:output_type -> rafiki.daraja.v1.RelayResponse
+	9,  // 14: rafiki.daraja.v1.DarajaService.Restart:output_type -> rafiki.daraja.v1.RestartResponse
+	11, // 15: rafiki.daraja.v1.DarajaService.Shutdown:output_type -> rafiki.daraja.v1.ShutdownResponse
+	13, // 16: rafiki.daraja.v1.DarajaService.Health:output_type -> rafiki.daraja.v1.HealthResponse
+	13, // [13:17] is the sub-list for method output_type
+	9,  // [9:13] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_daraja_v1_daraja_proto_init() }

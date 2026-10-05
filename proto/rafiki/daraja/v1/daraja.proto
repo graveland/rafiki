@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package rafiki.daraja.v1;
 
+import "google/protobuf/duration.proto";
+
 option go_package = "go.graveland.dev/rafiki/pkg/darajapb;darajapb";
 
 // DarajaService is served BY daraja, which hosts exactly one child process.
@@ -197,9 +199,11 @@ message RestartRequest {
   // holds — which is how a caller restarts without restating everything it
   // already knows.
   ChildSpec spec = 1;
-  // grace_ms to wait after the interrupt before escalating to a hard kill.
-  // Zero means the server default.
-  int32 grace_ms = 2;
+  // grace to wait after the interrupt before escalating to a hard kill.
+  // Unset or zero means the server default.
+  google.protobuf.Duration grace = 3;
+  reserved 2;
+  reserved "grace_ms";
 }
 
 message RestartResponse {
@@ -207,7 +211,11 @@ message RestartResponse {
 }
 
 message ShutdownRequest {
-  int32 grace_ms = 1;
+  // grace to wait after the interrupt before escalating to a hard kill.
+  // Unset or zero means the server default.
+  google.protobuf.Duration grace = 2;
+  reserved 1;
+  reserved "grace_ms";
 }
 
 message ShutdownResponse {

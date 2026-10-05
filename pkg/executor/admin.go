@@ -600,7 +600,12 @@ func scrubRafikiCredentialEnv(environ []string) []string {
 func (a *AdminServer) Reap(
 	ctx context.Context, req *connect.Request[adminpb.ReapRequest],
 ) (*connect.Response[adminpb.ReapResponse], error) {
-	grace := time.Duration(req.Msg.GetGraceMs()) * time.Millisecond
+	if g := req.Msg.GetGrace(); g != nil {
+		if err := g.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	grace := req.Msg.GetGrace().AsDuration()
 	if grace <= 0 {
 		grace = defaultReapGrace
 	}

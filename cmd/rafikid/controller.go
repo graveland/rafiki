@@ -3819,7 +3819,7 @@ func (c *Controller) handleDarajaClaudeAbort(childID string, ch *child.Child, sn
 		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
 	}
 	spec := buildDarajaAbortSpec(snap, sessionID)
-	if _, err := c.darajaPool.Restart(context.Background(), childID, spec, 3000); err != nil {
+	if _, err := c.darajaPool.Restart(context.Background(), childID, spec, 3*time.Second); err != nil {
 		return fmt.Errorf("claude abort restart: %w", err)
 	}
 	return nil

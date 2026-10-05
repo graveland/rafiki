@@ -253,14 +253,14 @@ func (r *Runner) Wait() (exitCode int, signal string) {
 // plan's Task 7).
 func (r *Runner) PID() int { return 0 }
 
-func (r *Runner) Terminate() error { return r.shutdown(3000) }
+func (r *Runner) Terminate() error { return r.shutdown(3 * time.Second) }
 func (r *Runner) Kill() error      { return r.shutdown(0) }
 
-func (r *Runner) shutdown(graceMs int32) error {
+func (r *Runner) shutdown(grace time.Duration) error {
 	r.doneOnce.Do(func() { close(r.done) })
 	ctx, cancel := context.WithTimeout(context.Background(), darajaShutdownTimeout)
 	defer cancel()
-	code, signal, err := r.pool.Shutdown(ctx, r.childID, graceMs)
+	code, signal, err := r.pool.Shutdown(ctx, r.childID, grace)
 	if err != nil {
 		// Unreachable (no live connection) — give up locally rather than
 		// hang. -1 matches child.Runner's documented "could not be

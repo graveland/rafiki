@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package rafiki.admin.v1;
 
+import "google/protobuf/duration.proto";
 import "rafiki/daraja/v1/daraja.proto";
 
 option go_package = "go.graveland.dev/rafiki/pkg/adminpb;adminpb";
@@ -69,8 +70,10 @@ message ReapRequest {
   // NOT a bare pgid: a process group id is recycled once its group empties, so
   // signalling a number supplied by a peer could reach an unrelated group.
   string child_id = 1;
-  // grace_ms between SIGTERM and SIGKILL. Zero means the server default.
-  int32 grace_ms = 2;
+  // grace between SIGTERM and SIGKILL. Unset or zero means the server default.
+  google.protobuf.Duration grace = 3;
+  reserved 2;
+  reserved "grace_ms";
 }
 
 message ReapResponse {
