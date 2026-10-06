@@ -382,6 +382,67 @@ func TestRelayReplacesStaleSocketFile(t *testing.T) {
 	defer conn.Close()
 }
 
+// A non-shutdown accept failure must close every live pair and return the
+// error, so a caller that restarts Serve does not inherit orphaned relays.
+func TestRelayAcceptFailureClosesLivePairsAndReturns(t *testing.T) {
+	c := assert.NewAborting(t)
+	ln, err := net.Listen("unix", filepath.Join(shortDir(t), "s"))
+	c.NoError(err)
+
+	// Upstream echoes until the relay closes it, then signals.
+	up, err := net.Listen("tcp", "127.0.0.1:0")
+	c.NoError(err)
+	defer up.Close()
+	upstreamClosed := make(chan struct{})
+	go func() {
+		conn, err := up.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+		close(upstreamClosed)
+	}()
+	addr := up.Addr().String()
+	dial := func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- serveListener(ctx, ln, dial) }()
+
+	// Establish a live pair and prove the splice works.
+	client := dialRelay(t, ln.Addr().String())
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	_, err = client.Write([]byte("x"))
+	c.NoError(err)
+	buf := make([]byte, 1)
+	_, err = io.ReadFull(client, buf)
+	c.NoError(err)
+
+	// Inject a non-shutdown accept failure by closing the listener under it.
+	c.NoError(ln.Close())
+
+	select {
+	case err := <-errCh:
+		c.Error(err, "a non-shutdown accept failure must be reported")
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveListener did not return after the accept failure")
+	}
+
+	// Every live pair was closed: both the client and the upstream.
+	expectClosed(t, client)
+	select {
+	case <-upstreamClosed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the live upstream connection was not closed on accept failure")
+	}
+}
+
 // serveUntilReturn runs Serve in the background and reports its error and
 // whether it returned within a short deadline. It cancels the context on
 // timeout so a hung Serve does not leak.

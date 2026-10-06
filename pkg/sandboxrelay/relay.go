@@ -62,31 +62,44 @@ func Serve(ctx context.Context, dir string, dial DialFunc) error {
 	if err := os.Chmod(path, 0o666); err != nil {
 		return fmt.Errorf("sandboxrelay: chmod %s: %w", path, err)
 	}
+	return serveListener(ctx, ln, dial)
+}
 
+// serveListener runs the accept/splice loop on an already-bound listener. It is
+// split out of Serve so a test can inject an accept failure through the
+// listener; Serve owns the dir/socket setup around it.
+func serveListener(ctx context.Context, ln net.Listener, dial DialFunc) error {
 	var (
 		mu   sync.Mutex
 		live = make(map[*pair]struct{})
 		wg   sync.WaitGroup
 	)
 
+	// closeAll ends every live splice: the pairs are snapshotted under the lock
+	// and closed outside it, so the mutex is never held across I/O. Both the
+	// ctx-cancel shutdown and the non-shutdown accept failure use it, so the two
+	// paths cannot drift.
+	closeAll := func() {
+		mu.Lock()
+		closers := make([]io.Closer, 0, len(live))
+		for p := range live {
+			closers = append(closers, p)
+		}
+		mu.Unlock()
+		for _, c := range closers {
+			_ = c.Close()
+		}
+	}
+
 	// Shutdown: close the listener to unblock Accept, then end every live
-	// splice. The pairs are snapshotted under the lock and closed outside it,
-	// so the mutex is never held across I/O.
+	// splice.
 	watcherDone := make(chan struct{})
 	defer close(watcherDone)
 	go func() {
 		select {
 		case <-ctx.Done():
 			_ = ln.Close()
-			mu.Lock()
-			closers := make([]io.Closer, 0, len(live))
-			for p := range live {
-				closers = append(closers, p)
-			}
-			mu.Unlock()
-			for _, c := range closers {
-				_ = c.Close()
-			}
+			closeAll()
 		case <-watcherDone:
 		}
 	}()
@@ -96,10 +109,16 @@ func Serve(ctx context.Context, dir string, dial DialFunc) error {
 		if err != nil {
 			if ctx.Err() != nil {
 				// Shutdown: let the in-flight splices finish, then report clean.
+				closeAll()
 				wg.Wait()
 				return nil
 			}
-			return fmt.Errorf("sandboxrelay: accept on %s: %w", path, err)
+			// A non-shutdown accept failure: nothing owns the live splices any
+			// more, so close them and let them finish before reporting the error.
+			// A caller that restarts Serve must not find duplicate relays.
+			closeAll()
+			wg.Wait()
+			return fmt.Errorf("sandboxrelay: accept on %s: %w", ln.Addr(), err)
 		}
 
 		p := &pair{client: conn}
@@ -110,6 +129,7 @@ func Serve(ctx context.Context, dir string, dial DialFunc) error {
 			// Close it here instead.
 			mu.Unlock()
 			_ = p.Close()
+			closeAll()
 			wg.Wait()
 			return nil
 		}
