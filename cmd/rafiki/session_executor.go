@@ -349,9 +349,11 @@ func startSessionExecutor(ctx context.Context, root string, p profile.Resolved) 
 		case errors.Is(err, execpool.ErrEnrollmentRejected):
 			// A ticket is one-shot and tied to this session's stream.
 			// Rejection means the stream is gone or the ticket was spent,
-			// and neither is recoverable by retrying.
-			slog.Warn("this session's executor ticket was refused; the machine " +
-				"is no longer offered as a workspace for this session")
+			// and neither is recoverable by retrying. err wraps the refusal's
+			// Reason (an epoch mismatch, a spent ticket, a revoked row), so
+			// log it rather than a fixed string.
+			slog.Warn("this session's executor ticket was refused; the machine "+
+				"is no longer offered as a workspace for this session", "error", err)
 		default:
 			slog.Warn("this machine's executor stopped", "error", err)
 		}

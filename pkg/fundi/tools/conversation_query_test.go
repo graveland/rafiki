@@ -60,6 +60,23 @@ func TestConversationSearchMaterializesAndFormatsRows(t *testing.T) {
 	}
 }
 
+// TestConversationSearchBindsMinTokens pins that the schema's advertised
+// min_tokens argument actually reaches the filter. The field carried no json
+// tag, and encoding/json does not cross underscores, so "min_tokens" never
+// bound to MinTokens and an agent's token filter was silently dropped -- this
+// test fails (MinTokens 0) against that pre-fix behaviour.
+func TestConversationSearchBindsMinTokens(t *testing.T) {
+	c := assert.NewCollecting(t)
+	fake := &fakeConversationReader{}
+	tool, _ := ConversationSearchBlueprint{}.Materialize(ToolOpts{Conversations: fake})
+
+	_, err := tool.Execute(context.Background(), ToolInput(`{"min_tokens":2500}`))
+	c.Require().NoError(err, "Execute")
+	if fake.query.MinTokens != 2500 {
+		t.Errorf("MinTokens = %d, want 2500 (the tool must bind the min_tokens argument)", fake.query.MinTokens)
+	}
+}
+
 // TestConversationSearchBindsSinceUntil pins that the tool's since/until
 // arguments actually bind to the filter and reach the reader. Before the fix
 // these fields carried no json tag, so encoding/json (which matches by

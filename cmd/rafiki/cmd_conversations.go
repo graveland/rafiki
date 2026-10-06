@@ -336,9 +336,9 @@ func renderExportResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.C
 
 // transcriptFromProto converts the wire transcript to the domain shape
 // conversationview renders. Content arrives as the verbatim JSON bytes of the
-// content-block array (proto bytes, no base64 once decoded); LatencyMs
-// narrows from the proto's optional int32 back to *int, keeping "not
-// reported" distinct from a measured zero.
+// content-block array (proto bytes, no base64 once decoded); LatencyMS
+// narrows from the proto's optional Duration to *int milliseconds, keeping
+// "not reported" distinct from a measured zero.
 func transcriptFromProto(resp *rafikiv1.ConversationExportResponse) *insightstypes.Transcript {
 	tr := &insightstypes.Transcript{
 		ConversationID:  resp.GetConversationId(),

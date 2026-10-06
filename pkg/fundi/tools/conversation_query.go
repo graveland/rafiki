@@ -62,13 +62,14 @@ func (r *rfc3339Time) UnmarshalJSON(b []byte) error {
 
 // conversationSearchArgs is the raw JSON the conversation_search tool binds.
 // Since/Until go through rfc3339Time so a blanked optional argument is
-// unbounded rather than a hard failure. min_tokens deliberately carries no json
-// tag: encoding/json does not match "min_tokens" to MinTokens, so it stays
-// ignored -- a pre-existing quirk kept as-is.
+// unbounded rather than a hard failure. MinTokens carries an explicit
+// json:"min_tokens" tag: encoding/json does not cross underscores, so without
+// it the schema's advertised min_tokens argument would never bind (the filter
+// would be silently dropped).
 type conversationSearchArgs struct {
 	Since, Until                                rfc3339Time
 	Owner, Persona, Source, Model, Status, Path string
-	MinTokens                                   int64
+	MinTokens                                   int64 `json:"min_tokens"`
 	Text                                        string
 	Limit                                       int
 }
