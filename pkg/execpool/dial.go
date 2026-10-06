@@ -209,6 +209,13 @@ func dialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, string, error)
 	return conn, sni, nil
 }
 
+// DialDaemon opens the raw connection Connect would use, for callers (the
+// sandbox relay) that splice it rather than speak on it.
+func DialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, error) {
+	c, _, err := dialDaemon(ctx, o)
+	return c, err
+}
+
 // credFileHas reports whether a readable, non-empty credential file exists.
 func credFileHas(path string) bool {
 	if path == "" {
