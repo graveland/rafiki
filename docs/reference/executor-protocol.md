@@ -91,9 +91,11 @@ GET /executor/connect HTTP/1.1
 Upgrade: rafiki-executor
 Connection: Upgrade
 Authorization: Bearer <credential>
+Rafiki-Protocol: 2
         ↓
 HTTP/1.1 101 Switching Protocols
 Rafiki-Executor-Id: …
+Rafiki-Protocol: 2
         ↓
 HTTP/2, roles inverted
 ```
@@ -140,6 +142,18 @@ closes under it. A refused upgrade is never hijacked: no HTTP/2 begins, no
 side effect of the exchange (a spent token, a rotated credential) has happened
 or needs undoing, and the socket closes after the response.
 
+**The epoch gate runs before `authorize`.** The dialing side sets
+`Rafiki-Protocol: 2` on the Upgrade request (`upgradeconn.Dial` sets it and
+callers cannot override it), and `upgradeconn.Handler` refuses a missing or
+different value with a **plain 400** whose body names both epochs, BEFORE any
+credential is touched. That ordering is what stops a stale peer from spending
+a one-shot `Enroll` token or ticket on an exchange the far side cannot finish;
+the 400 is terminal by the 400/401/403 rule below, so a mismatched executor
+fails at once rather than retrying forever. The 101 carries `Rafiki-Protocol:
+2`, and the dialer reports a 101 without it (an old peer) or with another value
+as a 400 `Refused`, terminal the same way. See `control-protocol.md` "The
+protocol epoch" for the full rule.
+
 The scheme selects what the secret is:
 
 | Scheme | Secret | Used when |
@@ -178,7 +192,7 @@ be upgraded.
 | Status | Meaning | Peer behaviour |
 |---|---|---|
 | `401` | A decision about the credential — unknown, consumed, expired, disabled, no such row, or a `machine` name already claimed by another executor of the same owner. Also a missing or malformed Authorization header. | Stop. Retrying cannot un-revoke a row, nor free a taken name. `Connect` returns `ErrEnrollmentRejected` (daraja: `ErrRejected`). |
-| `400` | Malformed `Rafiki-Self-Reported`. | Stop — terminal. |
+| `400` | Malformed `Rafiki-Self-Reported`, or a missing/wrong `Rafiki-Protocol` epoch header (the gate runs before `authorize`). | Stop — terminal. |
 | `503` | The store could not be reached or read. | Keep reconnecting with backoff. |
 | `409` | Another connection for this executor is already live and answering. | Retry shortly; if this machine is not sharing its credential with another, the incumbent is healthy and should be yielded to. |
 

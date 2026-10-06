@@ -2,6 +2,11 @@
 //
 // Source: rafiki/v1/control.proto
 
+// All time fields use `google.protobuf.Timestamp` (a point) or
+// `google.protobuf.Duration` (a span); never unit-suffixed ints or strings.
+// Unset means 'not set'; where an older int's zero meant 'unbounded/default',
+// unset or zero keeps that meaning.
+
 package rafikiv1connect
 
 import (

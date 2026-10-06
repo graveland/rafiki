@@ -4,6 +4,11 @@
 // 	protoc        v7.35.1
 // source: rafiki/v1/control.proto
 
+// All time fields use `google.protobuf.Timestamp` (a point) or
+// `google.protobuf.Duration` (a span); never unit-suffixed ints or strings.
+// Unset means 'not set'; where an older int's zero meant 'unbounded/default',
+// unset or zero keeps that meaning.
+
 package rafikiv1
 
 import (
@@ -12165,9 +12170,8 @@ func (x *CreateUserRequest) GetMintToken() bool {
 
 // CreateUserResponse mirrors protocol.UserCreateResponseData: the plaintext
 // token, the only time it is ever transmitted — the daemon stores a digest
-// and cannot reproduce it. created_at deviates from the mirror: the Go field
-// is an RFC3339 string, but unix seconds win, matching
-// UserRow.created_at_unix.
+// and cannot reproduce it. created_at is a google.protobuf.Timestamp,
+// matching UserRow.created_at.
 // Never mints an admin. Admins come only from rafikid user create --admin.
 type CreateUserResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
@@ -12357,7 +12361,7 @@ func (x *ListUsersResponse) GetUsers() []*UserRow {
 }
 
 // UserRow mirrors users.User (pkg/users/users.go): one identity row.
-// deleted_at_unix is set when the row is tombstoned: the token no longer
+// deleted_at is set when the row is tombstoned: the token no longer
 // authenticates, but history still resolves the username through it.
 // OMITTED: the bearer-token digest usersdb stores beside the row
 // (users.HashToken) — a token is transmitted exactly once, at mint

@@ -215,16 +215,24 @@ client can always read the daemon's epoch) and passes a request through only
 when its header is exactly the daemon's epoch. A missing or different value is
 a Connect error — code `failed_precondition` (HTTP 400), `ErrorInfo` reason
 `protocol_mismatch`, message "this daemon speaks rafiki protocol 2; upgrade
-your rafiki client (peer sent none)". A stream is refused the same way: the
-gate runs before the handler, so it cannot know a stream is coming and answers
-the unary error form.
+your rafiki client (peer sent none)". A stream is refused with the SAME code,
+message and reason, but in the form the caller's protocol expects: a Connect
+streaming request (`Content-Type: application/connect+`) gets the enveloped
+HTTP-200 end-of-stream error, so a connect-go streaming client surfaces the
+`failed_precondition` and the message instead of a bare `internal: HTTP status
+400 Bad Request` (its streaming client ignores the body of a non-200 response);
+a unary request keeps the HTTP-400 JSON form. Every refusal — stream or unary —
+still carries `Rafiki-Protocol: 2`.
 
 **Connect (client side).** The Go transport (`checkDaemonEpoch`) and the
 Python SDK both check the response's `Rafiki-Protocol`: a response without it
-(an old daemon) or with another value fails with "daemon speaks rafiki protocol
-N; this client speaks 2 — upgrade the daemon". The daemon's own
-`protocol_mismatch` refusal is never masked — the client surfaces that more
-specific message as-is.
+(an old daemon) or with another value fails with a **terminal**
+`failed_precondition` (reason `protocol_mismatch`) — "daemon speaks rafiki
+protocol N; this client speaks 2 — upgrade the daemon". It is never surfaced as
+`unavailable`, which would read as "is rafikid running?" and make an
+Unavailable-retrying caller (the cockpit's stream loop included) retry an old
+daemon forever. The daemon's own `protocol_mismatch` refusal is never masked —
+the client surfaces that more specific message as-is.
 
 **Executor and daraja upgrade links.** The dialing side sets the header on the
 HTTP Upgrade request (`upgradeconn.Dial`); `upgradeconn.Handler` refuses a
@@ -240,12 +248,20 @@ by the dialer as a 400 `Refused`, terminal the same way.
 ### Deploy runbook (one deploy, at an idle time)
 
 Stop every child (including daraja-hosted claude children, which survive a
-daemon restart); rebuild and restart BOTH daemons (work, home) and EVERY
-executor and CLI binary from the same commit; re-pin `rafiki-py` in the
+daemon restart). Upgrade in this order: **daemons first**, then every executor
+and daraja, then the CLIs. The daemons must lead because a new executor or
+daraja dialing a NOT-yet-upgraded daemon has its one-shot `Enroll` token or
+ticket SPENT — the old daemon runs `authorize` with no epoch gate, redeeming
+the credential — before the new client refuses the header-less 101: the
+credential is burnt for nothing (avoid enrolling a new executor during the
+window). Rebuild and restart BOTH daemons (work, home) and EVERY executor and
+CLI binary from the same commit; re-pin `rafiki-py` in the
 workflow/eval/review-swarm repos; restart agents (sessions resume from the
-database; script children cannot resume). Prod migration max must be ≤ 44
-first (`0045`/`0046` apply on start). The protocol epoch makes a forgotten
-binary fail with a clear message instead of misbehaving.
+database; script children cannot resume). Run `rafikid migrate` on each daemon
+before starting it — rafikid applies migrations on startup only with `--dev`,
+so a production deploy needs the explicit command — and confirm prod migration
+max is ≤ 44 first. The protocol epoch makes a forgotten binary fail with a
+clear message instead of misbehaving.
 
 ### Two event tiers
 
