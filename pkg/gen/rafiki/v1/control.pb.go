@@ -14052,7 +14052,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0f_latest_ordinalB\v\n" +
 	"\t_cost_usdB\v\n" +
 	"\t_max_costJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"\"\xdb\x02\n" +
+	"\"\xe1\x02\n" +
 	"\x13ListChildrenRequest\x12\x1a\n" +
 	"\bstatuses\x18\x01 \x03(\tR\bstatuses\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12#\n" +
@@ -14063,7 +14063,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\thas_label\x18\a \x03(\tR\bhasLabel\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"K\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x05\x10\x06\"K\n" +
 	"\x14ListChildrenResponse\x123\n" +
 	"\bchildren\x18\x01 \x03(\v2\x17.rafiki.v1.ChildSummaryR\bchildren\",\n" +
 	"\x0fGetChildRequest\x12\x19\n" +
