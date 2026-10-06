@@ -227,14 +227,14 @@ class ReadStep:
 @dataclasses.dataclass
 class BashStep:
     command: str = ""
-    timeout_ms: int = 0
+    timeout: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
         if self.command != "":
             out["command"] = self.command
-        if self.timeout_ms != 0:
-            out["timeoutMs"] = self.timeout_ms
+        if self.timeout is not None:
+            out["timeout"] = _dur_out(self.timeout)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "BashStep":
@@ -242,9 +242,9 @@ class BashStep:
         _v = _d.get("command")
         if _v is not None:
             obj.command = _v
-        _v = _d.get("timeoutMs")
+        _v = _d.get("timeout")
         if _v is not None:
-            obj.timeout_ms = _int_in(_v)
+            obj.timeout = _dur_in(_v, "timeout")
         return obj
 
 @dataclasses.dataclass
@@ -6064,15 +6064,15 @@ class TokenRow:
 @dataclasses.dataclass
 class MintTokenRequest:
     name: str = ""
-    ttl_seconds: int = 0
+    ttl: Optional[datetime.timedelta] = None
     username: str = ""
 
     def to_dict(self) -> dict:
         out = {}
         if self.name != "":
             out["name"] = self.name
-        if self.ttl_seconds != 0:
-            out["ttlSeconds"] = str(self.ttl_seconds)
+        if self.ttl is not None:
+            out["ttl"] = _dur_out(self.ttl)
         if self.username != "":
             out["username"] = self.username
         return out
@@ -6082,9 +6082,9 @@ class MintTokenRequest:
         _v = _d.get("name")
         if _v is not None:
             obj.name = _v
-        _v = _d.get("ttlSeconds")
+        _v = _d.get("ttl")
         if _v is not None:
-            obj.ttl_seconds = _int_in(_v)
+            obj.ttl = _dur_in(_v, "ttl")
         _v = _d.get("username")
         if _v is not None:
             obj.username = _v
@@ -6272,7 +6272,7 @@ class CompleteLoginRequest:
 class CompleteLoginResponse:
     token: str = ""
     username: str = ""
-    expires_at_unix: int = 0
+    expires_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -6280,8 +6280,8 @@ class CompleteLoginResponse:
             out["token"] = self.token
         if self.username != "":
             out["username"] = self.username
-        if self.expires_at_unix != 0:
-            out["expiresAtUnix"] = str(self.expires_at_unix)
+        if self.expires_at is not None:
+            out["expiresAt"] = _ts_out(self.expires_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CompleteLoginResponse":
@@ -6292,9 +6292,9 @@ class CompleteLoginResponse:
         _v = _d.get("username")
         if _v is not None:
             obj.username = _v
-        _v = _d.get("expiresAtUnix")
+        _v = _d.get("expiresAt")
         if _v is not None:
-            obj.expires_at_unix = _int_in(_v)
+            obj.expires_at = _ts_in(_v, "expiresAt")
         return obj
 
 @dataclasses.dataclass

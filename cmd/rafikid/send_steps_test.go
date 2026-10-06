@@ -448,6 +448,36 @@ func TestSendStepsPartyResolution(t *testing.T) {
 	c.Eq("send steps need an executor pool; this daemon has none", ssErrMessage(err), "no-pool message")
 }
 
+// TestSendStepBashTimeoutJSONIsMilliseconds pins the unit of the send-step
+// bash timeout on its way to the executor: an explicit 5 s timeout must keep
+// encoding as timeout_ms 5000, not become a nanosecond Duration.
+func TestSendStepBashTimeoutJSONIsMilliseconds(t *testing.T) {
+	c := assert.NewAborting(t)
+	exec, client := ssScriptedServer(t, ssRun(ssResultText("ok")))
+	pool := &ssFakePool{
+		live:    ssLive("e-1"),
+		clients: map[string]executorpbconnect.ExecutorServiceClient{"e-1": client},
+	}
+	r := ssRunner(pool, map[string]childstore.Snapshot{"t-1": ssFundi("/w", "e-1", "")})
+	_, _, err := r.RunSendSteps(context.Background(), "c-1", "t-1", []protocol.SendStep{
+		{Where: protocol.StepSiteChild, Bash: &protocol.BashStep{Command: "sleep 1", TimeoutMs: 5000}},
+	})
+	c.Require().NoError(err, "run error")
+	calls := exec.calls()
+	c.Require().Len(calls, 1, "Execute calls")
+	var bash struct {
+		TimeoutMs int `json:"timeout_ms"`
+	}
+	c.Require().NoError(json.Unmarshal(calls[0].GetInputJson(), &bash), "bash input")
+	c.Eq(5000, bash.TimeoutMs, "bash timeout_ms is milliseconds")
+
+	// The protocol surface the agent authors against stays milliseconds too:
+	// a five-second floor is 5000, never a nanosecond Duration.
+	raw, err := json.Marshal(protocol.BashStep{Command: "sleep 1", TimeoutMs: 5000})
+	c.Require().NoError(err, "marshal protocol step")
+	c.StrContains(string(raw), `"timeout_ms":5000`, "agent-facing JSON unit")
+}
+
 // TestSendStepsCwdBinding pins the cwd semantics of a workspace-less party:
 // a relative read path joins onto Cwd, the bash command gets a single-quoted
 // cd prefix, and pymodule_run's cwd binds through bindCwdTo. With a

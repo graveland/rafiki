@@ -22,6 +22,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -346,13 +347,13 @@ func (s *Service) Complete(ctx context.Context, loginID, callbackQuery string) (
 			errors.New("could not mint a session token"))
 	}
 
-	var expiresAt int64
+	var expiresAt *timestamppb.Timestamp
 	if minted.ExpiresAt != nil {
-		expiresAt = minted.ExpiresAt.Unix()
+		expiresAt = timestamppb.New(*minted.ExpiresAt)
 	}
 	slog.Info("oidclogin: login succeeded",
 		"username", minted.Username, "token_id", minted.ID, "client_host", pend.clientHost)
-	return &rafikiv1.CompleteLoginResponse{Token: secret, Username: minted.Username, ExpiresAtUnix: expiresAt}, nil
+	return &rafikiv1.CompleteLoginResponse{Token: secret, Username: minted.Username, ExpiresAt: expiresAt}, nil
 }
 
 // domainAllowed compares for EXACT equality: a suffix or subdomain match

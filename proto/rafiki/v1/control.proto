@@ -101,7 +101,15 @@ enum StepSite {
 }
 
 message ReadStep { string path = 1; int32 start = 2; int32 end = 3; }
-message BashStep { string command = 1; int32 timeout_ms = 2; }
+message BashStep {
+  string command = 1;
+  // timeout is the command's own bound. Unset or zero selects the
+  // send-step default (30s); a value above the maximum (60s) is refused.
+  google.protobuf.Duration timeout = 3;
+
+  reserved 2;
+  reserved "timeout_ms";
+}
 message PymoduleRunStep {
   string repo = 1;
   string script = 2;
@@ -1936,8 +1944,15 @@ message TokenRow {
   reserved "created_at_unix", "expires_at_unix", "revoked_at_unix";
 }
 // MintTokenRequest mints a service token. username empty = the caller.
-// ttl_seconds 0 = never expires.
-message MintTokenRequest { string name = 1; int64 ttl_seconds = 2; string username = 3; }
+// ttl unset or zero = never expires; negative is refused.
+message MintTokenRequest {
+  string name = 1;
+  google.protobuf.Duration ttl = 4;
+  string username = 3;
+
+  reserved 2;
+  reserved "ttl_seconds";
+}
 message MintTokenResponse { TokenRow info = 1; string token = 2; }
 // ListTokensRequest: username empty = the caller; all_users = every user (admin).
 message ListTokensRequest { string username = 1; bool include_revoked = 2; bool all_users = 3; }
@@ -1962,7 +1977,15 @@ message BeginLoginRequest { uint32 redirect_port = 1; string client_host = 2; }
 message BeginLoginResponse { string login_id = 1; string authorize_url = 2; uint32 redirect_port = 3; }
 // callback_query: the raw query string the IdP redirected to the loopback with.
 message CompleteLoginRequest { string login_id = 1; string callback_query = 2; }
-message CompleteLoginResponse { string token = 1; string username = 2; int64 expires_at_unix = 3; }
+message CompleteLoginResponse {
+  string token = 1;
+  string username = 2;
+  // expires_at unset = the token never expires.
+  google.protobuf.Timestamp expires_at = 4;
+
+  reserved 3;
+  reserved "expires_at_unix";
+}
 
 // ─── Raw child I/O (GetStreams / SendFrame) ───────────────────────────────
 

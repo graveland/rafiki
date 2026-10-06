@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -37,7 +38,7 @@ type fakeUserAdmin struct {
 	gotRemoveName     string
 	gotCreate         [3]any // username, email, mintToken
 	gotUpdate         [2]any // username, email
-	gotMint           [3]any // username, name, ttlSeconds
+	gotMint           [3]any // username, name, ttl (time.Duration)
 	gotListTokens     [3]any // username, includeRevoked, allUsers
 	gotRevokeID       string
 }
@@ -63,8 +64,8 @@ func (f *fakeUserAdmin) Update(_ context.Context, username string, email *string
 	return f.updateRow, f.updateErr
 }
 
-func (f *fakeUserAdmin) MintToken(_ context.Context, username, name string, ttlSeconds int64) (*rafikiv1.MintTokenResponse, error) {
-	f.gotMint = [3]any{username, name, ttlSeconds}
+func (f *fakeUserAdmin) MintToken(_ context.Context, username, name string, ttl time.Duration) (*rafikiv1.MintTokenResponse, error) {
+	f.gotMint = [3]any{username, name, ttl}
 	return f.mintResp, f.mintErr
 }
 
@@ -169,12 +170,12 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 		t.Fatalf("Update saw = %v", f.gotUpdate)
 	}
 
-	mintResp, err := s.MintToken(ctx, connect.NewRequest(&rafikiv1.MintTokenRequest{Name: "n", TtlSeconds: 3600, Username: "alice"}))
+	mintResp, err := s.MintToken(ctx, connect.NewRequest(&rafikiv1.MintTokenRequest{Name: "n", Ttl: durationpb.New(3600 * time.Second), Username: "alice"}))
 	c.NoError(err, "MintToken")
 	if mintResp.Msg.GetToken() != "rfk_y" || mintResp.Msg.GetInfo().GetId() != "t1" {
 		t.Fatalf("MintToken response = %+v", mintResp.Msg)
 	}
-	if f.gotMint[0] != "alice" || f.gotMint[1] != "n" || f.gotMint[2] != int64(3600) {
+	if f.gotMint[0] != "alice" || f.gotMint[1] != "n" || f.gotMint[2] != 3600*time.Second {
 		t.Fatalf("MintToken saw = %v", f.gotMint)
 	}
 
@@ -198,6 +199,27 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 		t.Fatalf("RemoveUser: %v", err)
 	}
 	c.Eq("alice", f.gotRemoveName, "Remove saw username")
+}
+
+// TestMintTokenRefusesBadTTL pins the proto-boundary guard: a Duration that
+// exceeds the proto range, or is negative, answers InvalidArgument and never
+// reaches the backend — the old ttl_seconds < 0 refusal, kept in Duration
+// terms.
+func TestMintTokenRefusesBadTTL(t *testing.T) {
+	c := assert.NewAborting(t)
+	for name, ttl := range map[string]*durationpb.Duration{
+		"negative":     durationpb.New(-time.Second),
+		"out of range": {Seconds: 315576000001},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeUserAdmin{}
+			s := &Server{}
+			s.SetUserAdmin(f)
+			_, err := s.MintToken(context.Background(), connect.NewRequest(&rafikiv1.MintTokenRequest{Ttl: ttl}))
+			c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "MintToken ttl")
+			c.Nil(f.gotMint[0], "a bad ttl reached the backend")
+		})
+	}
 }
 
 // TestUserAdminErrMapping proves userAdminErr passes an already-coded error

@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -66,7 +68,7 @@ func readStep(where rafikiv1.StepSite) *rafikiv1.SendStep {
 func bashStep(where rafikiv1.StepSite) *rafikiv1.SendStep {
 	return &rafikiv1.SendStep{
 		Where: where,
-		Kind:  &rafikiv1.SendStep_Bash{Bash: &rafikiv1.BashStep{Command: "go test ./...", TimeoutMs: 2500}},
+		Kind:  &rafikiv1.SendStep_Bash{Bash: &rafikiv1.BashStep{Command: "go test ./...", Timeout: durationpb.New(2500 * time.Millisecond)}},
 	}
 }
 
@@ -154,6 +156,36 @@ func TestSendStepsWireConversion(t *testing.T) {
 	}))
 	c.EqualError(err, "invalid_argument: step 2: where is required (child or sender)",
 		"second step's index")
+}
+
+// TestSendStepsRefusesBadBashTimeout pins the proto-boundary guard: a bash
+// step whose Duration exceeds the proto range, or is negative, is refused
+// InvalidArgument before the runner sees it — the old int32 timeout_ms range
+// refusal, now expressed as a Duration.
+func TestSendStepsRefusesBadBashTimeout(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for name, timeout := range map[string]*durationpb.Duration{
+		"negative":     durationpb.New(-time.Second),
+		"out of range": {Seconds: 315576000001},
+	} {
+		t.Run(name, func(t *testing.T) {
+			acc := &fakeAccepter{}
+			s := connectapi.NewServer(nil)
+			s.SetInbox(acc)
+			runner := &fakeSendStepRunner{}
+			s.SetSendStepRunner(runner)
+			_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+				ChildId: "c_1",
+				Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+				Steps: []*rafikiv1.SendStep{{
+					Where: rafikiv1.StepSite_STEP_SITE_SENDER,
+					Kind:  &rafikiv1.SendStep_Bash{Bash: &rafikiv1.BashStep{Command: "x", Timeout: timeout}},
+				}},
+			}))
+			c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "bad bash timeout")
+			c.Eq(0, len(runner.steps), "a bad timeout reached the runner")
+		})
+	}
 }
 
 // TestSendStepsAppendRenderedTextAndReturnSummaries: the rendered output is

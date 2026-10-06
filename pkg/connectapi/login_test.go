@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -119,7 +121,7 @@ func TestLoginRoundTrip(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := &fakeLoginBackend{
 		beginResp:    &rafikiv1.BeginLoginResponse{LoginId: "l1", AuthorizeUrl: "https://idp/authorize", RedirectPort: 9999},
-		completeResp: &rafikiv1.CompleteLoginResponse{Token: "rfk_login", Username: "alice", ExpiresAtUnix: 100},
+		completeResp: &rafikiv1.CompleteLoginResponse{Token: "rfk_login", Username: "alice", ExpiresAt: timestamppb.New(time.Unix(100, 0))},
 	}
 	s := &Server{}
 	s.SetLoginBackend(f)
@@ -136,7 +138,7 @@ func TestLoginRoundTrip(t *testing.T) {
 
 	complete, err := loginService{s: s}.CompleteLogin(ctx, connect.NewRequest(&rafikiv1.CompleteLoginRequest{LoginId: "l1", CallbackQuery: "code=x&state=y"}))
 	c.NoError(err, "CompleteLogin")
-	if complete.Msg.GetToken() != "rfk_login" || complete.Msg.GetUsername() != "alice" || complete.Msg.GetExpiresAtUnix() != 100 {
+	if complete.Msg.GetToken() != "rfk_login" || complete.Msg.GetUsername() != "alice" || complete.Msg.GetExpiresAt().AsTime().Unix() != 100 {
 		t.Fatalf("CompleteLogin response = %+v", complete.Msg)
 	}
 	if f.gotComplete != [2]any{"l1", "code=x&state=y"} {

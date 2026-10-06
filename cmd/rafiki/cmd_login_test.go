@@ -23,6 +23,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -241,10 +242,10 @@ func waitFlow(t *testing.T, done chan error) {
 func TestLoginListenerCallbackPathEndToEnd(t *testing.T) {
 	c := assert.NewAborting(t)
 	isolateProfiles(t)
-	expires := time.Now().Add(24 * time.Hour).Unix()
+	expires := time.Now().Add(24 * time.Hour)
 	fake := newFakeLogin(
 		&rafikiv1.BeginLoginResponse{LoginId: "l-1", AuthorizeUrl: "https://idp.example.net/authorize?client_id=rafiki"},
-		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-listener", Username: "ada", ExpiresAtUnix: expires},
+		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-listener", Username: "ada", ExpiresAt: timestamppb.New(expires)},
 	)
 	ep := loginEndpointFor(t, fake)
 
@@ -279,7 +280,7 @@ func TestLoginListenerCallbackPathEndToEnd(t *testing.T) {
 	out := stderr.String()
 	c.StrContains(out, "https://idp.example.net/authorize?client_id=rafiki", "authorize URL on stderr")
 	c.StrContains(out, "logged in as ada (profile test)", "success line")
-	c.StrContains(out, time.Unix(expires, 0).Local().Format("2006-01-02 15:04"), "local expiry")
+	c.StrContains(out, expires.Local().Format("2006-01-02 15:04"), "local expiry")
 }
 
 // The daemon pins a callback port (oidc.toml) different from the one the
@@ -291,7 +292,7 @@ func TestLoginRebindsToTheDaemonPinnedPort(t *testing.T) {
 	pinned := unassignedPort(t)
 	fake := newFakeLogin(
 		&rafikiv1.BeginLoginResponse{LoginId: "l-2", AuthorizeUrl: "https://idp.example.net/authorize", RedirectPort: uint32(pinned)},
-		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-pin", Username: "grace", ExpiresAtUnix: 0},
+		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-pin", Username: "grace"},
 	)
 	ep := loginEndpointFor(t, fake)
 
@@ -380,7 +381,7 @@ func TestLoginPastePathEndToEnd(t *testing.T) {
 	isolateProfiles(t)
 	fake := newFakeLogin(
 		&rafikiv1.BeginLoginResponse{LoginId: "l-4", AuthorizeUrl: "https://idp.example.net/authorize?client_id=rafiki"},
-		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-paste", Username: "linus", ExpiresAtUnix: 1735689600},
+		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-paste", Username: "linus", ExpiresAt: timestamppb.New(time.Unix(1735689600, 0))},
 	)
 	ep := loginEndpointFor(t, fake)
 
@@ -586,7 +587,7 @@ func TestLoginCommandEndToEndThroughRootCmd(t *testing.T) {
 	isolateProfiles(t)
 	fake := newFakeLogin(
 		&rafikiv1.BeginLoginResponse{LoginId: "l-7", AuthorizeUrl: "https://idp.example.net/authorize"},
-		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-root", Username: "root-user", ExpiresAtUnix: 1735689600},
+		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-root", Username: "root-user", ExpiresAt: timestamppb.New(time.Unix(1735689600, 0))},
 	)
 	sock := serveLoginOnSocket(t, fake)
 	saveProfile(t, profile.Profile{Name: "sso", Socket: sock})

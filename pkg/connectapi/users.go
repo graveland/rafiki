@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -25,7 +26,7 @@ type UserAdmin interface {
 	List(ctx context.Context, includeDeleted bool, limit int32) ([]*rafikiv1.UserRow, error)
 	Remove(ctx context.Context, username string) error
 	Update(ctx context.Context, username string, email *string) (*rafikiv1.UserRow, error)
-	MintToken(ctx context.Context, username, name string, ttlSeconds int64) (*rafikiv1.MintTokenResponse, error)
+	MintToken(ctx context.Context, username, name string, ttl time.Duration) (*rafikiv1.MintTokenResponse, error)
 	ListTokens(ctx context.Context, username string, includeRevoked, allUsers bool) ([]*rafikiv1.TokenRow, error)
 	RevokeToken(ctx context.Context, id string) (*rafikiv1.TokenRow, error)
 }
@@ -118,7 +119,15 @@ func (s *Server) MintToken(
 	if err != nil {
 		return nil, err
 	}
-	resp, err := backend.MintToken(ctx, req.Msg.GetUsername(), req.Msg.GetName(), req.Msg.GetTtlSeconds())
+	if ttl := req.Msg.GetTtl(); ttl != nil {
+		if err := ttl.CheckValid(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
+	if req.Msg.GetTtl().AsDuration() < 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("ttl must not be negative"))
+	}
+	resp, err := backend.MintToken(ctx, req.Msg.GetUsername(), req.Msg.GetName(), req.Msg.GetTtl().AsDuration())
 	if err != nil {
 		return nil, userAdminErr(err)
 	}

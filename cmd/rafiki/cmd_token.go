@@ -15,6 +15,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/table"
@@ -94,7 +95,11 @@ func runTokenMint(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	resp, err := ep.control().MintToken(cmdCtx(cmd),
-		connect.NewRequest(&rafikiv1.MintTokenRequest{Name: name, TtlSeconds: ttlSeconds, Username: user}))
+		connect.NewRequest(&rafikiv1.MintTokenRequest{
+			Name:     name,
+			Ttl:      durationpb.New(time.Duration(ttlSeconds) * time.Second),
+			Username: user,
+		}))
 	if err != nil {
 		return userConnectErr(err, ep.describe)
 	}

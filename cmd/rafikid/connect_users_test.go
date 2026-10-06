@@ -405,7 +405,7 @@ func TestMintTokenAuthority(t *testing.T) {
 		ck := assert.NewAborting(t)
 		st := &userAdminFakeStore{}
 		a := connectUserAdmin{c: &Controller{users: st}}
-		resp, err := a.MintToken(plainUserCtx("u1", "alice"), "", "ci", 3600)
+		resp, err := a.MintToken(plainUserCtx("u1", "alice"), "", "ci", time.Hour)
 		ck.Require().NoError(err, "MintToken with empty username")
 		ck.Eq("u1", st.mintedUser, "resolved target = the caller")
 		ck.Eq(users.OriginService, st.mintedReq.Origin, "origin")
@@ -463,7 +463,7 @@ func TestMintTokenAuthority(t *testing.T) {
 	t.Run("negative ttl refused", func(t *testing.T) {
 		st := &userAdminFakeStore{}
 		a := connectUserAdmin{c: &Controller{users: st}}
-		_, err := a.MintToken(adminCtx(), "", "ci", -1)
+		_, err := a.MintToken(adminCtx(), "", "ci", -time.Second)
 		assert.NewAborting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "negative ttl code")
 	})
 	t.Run("child credential refused", func(t *testing.T) {

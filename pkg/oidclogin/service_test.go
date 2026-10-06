@@ -723,7 +723,7 @@ func TestCompleteMintsOIDCTokenWithTTL(t *testing.T) {
 	resp := happyComplete(t, svc, iss, nil)
 	c.Eq("rfk_secret", resp.GetToken(), "token")
 	c.Eq("alice", resp.GetUsername(), "username")
-	c.Eq(exp.Unix(), resp.GetExpiresAtUnix(), "expires_at_unix")
+	c.Eq(exp.UTC(), resp.GetExpiresAt().AsTime().UTC(), "expires_at")
 
 	c.Eq("u_1", m.gotUserID, "minted for the resolved user")
 	c.Eq(users.OriginOIDC, m.gotToken.Origin, "token origin")

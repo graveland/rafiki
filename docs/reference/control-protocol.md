@@ -331,7 +331,7 @@ defined under "Who may call what" below; each row names its own.
 | `ListUsers` | unary · userOnly (admin-gated) | Enumerate users. Tokens are never returned |
 | `RemoveUser` | unary · userOnly (admin-gated) | Tombstone a user: its token stops authenticating, but history keeps resolving the username |
 | `UpdateUser` | unary · userOnly (admin-gated) | Edit a user: `email` is the only editable field (`optional` — an unset request is refused "nothing to update"; empty clears the address). The admin bit is deliberately NOT editable here — it comes only from `rafikid user create --admin` (§"User administration") |
-| `MintToken` | unary · userOnly | Mint a service token (`origin "service"`) for the target user — the caller by default, another user with admin authority; `ttl_seconds` 0 = never expires. The plaintext rides the response exactly once (§"User administration") |
+| `MintToken` | unary · userOnly | Mint a service token (`origin "service"`) for the target user — the caller by default, another user with admin authority; `ttl` (a `Duration`; unset or zero = never expires, negative refused). The plaintext rides the response exactly once (§"User administration") |
 | `ListTokens` | unary · userOnly | The target's credential rows — metadata only, never secrets. `username` empty = the caller; `all_users` (every user) requires admin authority (§"User administration") |
 | `RevokeToken` | unary · userOnly | Tombstone one credential by id (`revoked_at`); already-revoked answers the unchanged row. Owner or admin; on a live daemon the revocation also cuts that token's open streams (§"Token revocation and open streams") |
 | `GetStreams` | unary · userOnly | A live child's raw, uncompressed stdin/stderr capture, for debugging (§"The raw child channel") |
@@ -954,7 +954,9 @@ appended to the message text the child reads ("text\n\nrendered", or the
 rendered output alone when the request carried no text blocks). Every step
 carries `where` (`StepSite`: `CHILD` runs on the target child's executor and
 workspace, `SENDER` on the caller's own) and exactly one of `read`, `bash`,
-`pymodule_run`. An unspecified site or an absent kind is refused
+`pymodule_run`. A `bash` step carries an optional `timeout` (a `Duration`;
+unset or zero selects the 30 s default, a value above 60 s is refused
+`invalid_argument`). An unspecified site or an absent kind is refused
 `invalid_argument` per step, never defaulted; steps with `ABORT` are refused
 the same way, because an abort carries no content. The response carries one
 `StepSummary` per step — index, tool, where, outcome, byte count, truncated
@@ -991,7 +993,7 @@ child needs no `tools` restriction at all (restrictions carried in its launch ar
 |---|---|
 | steps per send | 16 |
 | `bash` timeout | default 30 s, at most 60 s |
-| per-step executor call | 60 s (`bash`: its `timeout_ms` plus 5 s) |
+| per-step executor call | 60 s (`bash`: its `timeout` plus 5 s) |
 | whole send | 120 s |
 | per-step output | 32 KiB, kept from the front, marked `[truncated: showing N of M bytes]` |
 | rendered block | 128 KiB, refused `invalid_argument` naming the five largest steps |
@@ -1257,7 +1259,8 @@ ordering is pinned by `TestUserRPCsRefuseNonAdmin`.
   username requires admin authority; on the anonymous local socket a username
   is REQUIRED (`--user is required on an unauthenticated socket`), since
   there is no caller to default to. `MintToken` mints an `origin "service"`
-  token (`ttl_seconds` 0 = never expires) whose plaintext rides the response
+  token (`ttl`, a `Duration`; unset or zero = never expires, negative refused)
+  whose plaintext rides the response
   exactly once; `ListTokens` returns metadata rows only, `include_revoked`
   adding tombstoned credentials (revocation is a filter, never a deletion);
   `RevokeToken` stamps `revoked_at` — an unknown id answers `CodeNotFound`,
@@ -1312,7 +1315,8 @@ own unless the daemon PINS one (`oidc.toml`'s `redirect_port`), in which case
 the client must rebind there. `CompleteLogin` takes the `login_id` and the
 raw callback query string the IdP redirected with, and returns the minted
 token (`origin "oidc"`, the config's `session_ttl` as its TTL, named
-`"login <client_host> <date>"`), the username, and the expiry. A login is
+`"login <client_host> <date>"`), the username, and `expires_at` (a
+`Timestamp`; unset = the token never expires). A login is
 SINGLE-USE: the pending entry is removed first, success or failure.
 
 The pending-login surface is bounded by the engine's own guards

@@ -20,6 +20,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
@@ -176,7 +177,7 @@ func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui l
 		return fmt.Errorf("write token to profile %q: %w", p.Name, err)
 	}
 	fmt.Fprintf(ui.stderr, "logged in as %s (profile %s), token expires %s\n",
-		complete.Msg.GetUsername(), p.Name, tokenExpiryText(complete.Msg.GetExpiresAtUnix()))
+		complete.Msg.GetUsername(), p.Name, tokenExpiryText(complete.Msg.GetExpiresAt()))
 	return nil
 }
 
@@ -290,11 +291,12 @@ func clientHost() string {
 	return h
 }
 
-// tokenExpiryText renders the token's expiry in local time; 0 means the token
-// never expires, which is what a daemon-issued token with no TTL reports.
-func tokenExpiryText(sec int64) string {
-	if sec <= 0 {
+// tokenExpiryText renders the token's expiry in local time; unset or the
+// epoch means the token never expires, which is what a daemon-issued token
+// with no TTL reports.
+func tokenExpiryText(expires *timestamppb.Timestamp) string {
+	if expires == nil || expires.AsTime().Unix() <= 0 {
 		return "never"
 	}
-	return time.Unix(sec, 0).Local().Format("2006-01-02 15:04")
+	return expires.AsTime().Local().Format("2006-01-02 15:04")
 }

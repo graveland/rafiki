@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -71,9 +72,20 @@ func sendStepsFromWire(steps []*rafikiv1.SendStep) ([]protocol.SendStep, error) 
 				End:   int(k.Read.GetEnd()),
 			}
 		case *rafikiv1.SendStep_Bash:
+			timeout := k.Bash.GetTimeout()
+			if timeout != nil {
+				if err := timeout.CheckValid(); err != nil {
+					return nil, connect.NewError(connect.CodeInvalidArgument,
+						fmt.Errorf("step %d: timeout: %w", i+1, err))
+				}
+				if timeout.AsDuration() < 0 {
+					return nil, connect.NewError(connect.CodeInvalidArgument,
+						fmt.Errorf("step %d: timeout must not be negative", i+1))
+				}
+			}
 			step.Bash = &protocol.BashStep{
 				Command:   k.Bash.GetCommand(),
-				TimeoutMs: int(k.Bash.GetTimeoutMs()),
+				TimeoutMs: int(timeout.AsDuration() / time.Millisecond),
 			}
 		case *rafikiv1.SendStep_PymoduleRun:
 			step.PymoduleRun = &protocol.PymoduleRunStep{

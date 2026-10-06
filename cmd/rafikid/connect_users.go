@@ -199,8 +199,8 @@ func (a connectUserAdmin) Remove(ctx context.Context, username string) error {
 
 // MintToken mints a service token for the resolved target user. The plaintext
 // rides the response exactly once, like CreateUser's.
-func (a connectUserAdmin) MintToken(ctx context.Context, username, name string, ttlSeconds int64) (*rafikiv1.MintTokenResponse, error) {
-	if ttlSeconds < 0 {
+func (a connectUserAdmin) MintToken(ctx context.Context, username, name string, ttl time.Duration) (*rafikiv1.MintTokenResponse, error) {
+	if ttl < 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("ttl must not be negative"))
 	}
 	userID, err := a.resolveTokenTarget(ctx, username)
@@ -213,7 +213,7 @@ func (a connectUserAdmin) MintToken(ctx context.Context, username, name string, 
 	t, token, err := a.c.users.MintToken(ctx, userID, users.NewToken{
 		Name:   name,
 		Origin: users.OriginService,
-		TTL:    time.Duration(ttlSeconds) * time.Second,
+		TTL:    ttl,
 	})
 	if err != nil {
 		// Unreachable through the ordinary paths (resolveTokenTarget already

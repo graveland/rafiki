@@ -42,7 +42,7 @@ func TestTokenMintSendsTheFlags(t *testing.T) {
 	c.Require().NotNil(req, "the stub never saw a MintToken request")
 	c.Eq("ci", req.Msg.GetName(), "name")
 	c.Eq("alice", req.Msg.GetUsername(), "username")
-	c.Eq(int64(720*3600), req.Msg.GetTtlSeconds(), "ttl seconds")
+	c.Eq(720*time.Hour, req.Msg.GetTtl().AsDuration(), "ttl")
 
 	c.Eq("rfk_fresh\n", out.String(), "table mode must print the token and nothing else")
 }
@@ -60,7 +60,7 @@ func TestTokenMintDefaultsNameToTheHostname(t *testing.T) {
 	}
 	req := stub.lastMint()
 	c.Require().NotNil(req, "the stub never saw a MintToken request")
-	c.Eq(int64(0), req.Msg.GetTtlSeconds(), "no --ttl means never expires")
+	c.Eq(time.Duration(0), req.Msg.GetTtl().AsDuration(), "no --ttl means never expires")
 	c.Eq("", req.Msg.GetUsername(), "no --user means the caller")
 	if host, err := os.Hostname(); err == nil && host != "" {
 		c.Eq("cli "+host, req.Msg.GetName(), "default name")
