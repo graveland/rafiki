@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -501,4 +502,90 @@ func TestValidateNamedHappyPath(t *testing.T) {
 	c.Eq(168*time.Hour, got.TTL, "TTL defaulted")
 	c.Eq(protocol.NetworkEgress, got.Network, "Network defaulted")
 	c.Eq("", string(got.Scope), "Scope empty for named")
+}
+
+// TestValidateLimitsNonFinite pins that NaN and Inf are refused for cpus.
+// They are neither < 0 nor > cap nor == 0, so without an explicit finite
+// check a CHILD would slip the clamp un-clamped; cpus arrives as a proto
+// double, so NaN is reachable from a caller.
+func TestValidateLimitsNonFinite(t *testing.T) {
+	tests := []struct {
+		subtest string
+		cpus    float64
+	}{
+		{"nan", math.NaN()},
+		{"positive inf", math.Inf(1)},
+		{"negative inf", math.Inf(-1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.subtest, func(t *testing.T) {
+			s := spawnSpec()
+			s.CPUs = tt.cpus
+			_, err := Validate(s, baseCfg(), nil, Caller{}, false)
+			requireErr(t, err, "cpus")
+		})
+	}
+	t.Run("child with a finite cap", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ChildMaxCPUs = 2
+		s := spawnSpec()
+		s.CPUs = math.NaN()
+		_, err := Validate(s, cfg, nil, Caller{Child: true}, false)
+		requireErr(t, err, "cpus")
+	})
+}
+
+// TestValidateResolvedIsIndependentCopy pins that the returned Resolved owns
+// copies of the input's Mounts, Env and Labels: downstream tasks (2.2, 2.3,
+// 3.2) add daemon-owned labels to it, and that must not reach the caller's
+// SandboxSpec.
+func TestValidateResolvedIsIndependentCopy(t *testing.T) {
+	s := spawnSpec()
+	s.Mounts = []protocol.SandboxMount{{Target: "/d", Kind: protocol.MountRW, Volume: "v"}}
+	s.Env = map[string]string{"A": "B"}
+	s.Labels = map[string]string{"team": "x"}
+
+	got, err := Validate(s, baseCfg(), nil, Caller{}, false)
+	c := assert.NewAborting(t)
+	c.NoError(err, "Validate")
+
+	// Mutate the Resolved the way a downstream consumer would.
+	got.Env["A"] = "changed"
+	got.Env["NEW"] = "1"
+	got.Labels["team"] = "changed"
+	got.Labels["rafiki/created-by"] = "1"
+	got.Mounts[0].Volume = "changed"
+
+	c.EqDiff(map[string]string{"A": "B"}, s.Env, "input env untouched")
+	c.EqDiff(map[string]string{"team": "x"}, s.Labels, "input labels untouched")
+	c.EqDiff([]protocol.SandboxMount{{Target: "/d", Kind: protocol.MountRW, Volume: "v"}}, s.Mounts, "input mounts untouched")
+}
+
+// TestValidateResolvedCloneTriState pins that cloning preserves the tri-state:
+// nil stays nil ("all") and a non-nil empty collection stays non-nil empty
+// ("none"). Collapsing the two would turn "all" into "none".
+func TestValidateResolvedCloneTriState(t *testing.T) {
+	t.Run("nil stays nil", func(t *testing.T) {
+		got, err := Validate(spawnSpec(), baseCfg(), nil, Caller{}, false)
+		c := assert.NewAborting(t)
+		c.NoError(err, "Validate")
+		c.Nil(got.Env, "nil Env stays nil")
+		c.Nil(got.Labels, "nil Labels stays nil")
+		c.Nil(got.Mounts, "nil Mounts stays nil")
+	})
+	t.Run("empty stays non-nil empty", func(t *testing.T) {
+		s := spawnSpec()
+		s.Env = map[string]string{}
+		s.Labels = map[string]string{}
+		s.Mounts = []protocol.SandboxMount{}
+		got, err := Validate(s, baseCfg(), nil, Caller{}, false)
+		c := assert.NewAborting(t)
+		c.NoError(err, "Validate")
+		c.NotNil(got.Env, "empty Env stays non-nil")
+		c.Len(got.Env, 0, "empty Env stays empty")
+		c.NotNil(got.Labels, "empty Labels stays non-nil")
+		c.Len(got.Labels, 0, "empty Labels stays empty")
+		c.NotNil(got.Mounts, "empty Mounts stays non-nil")
+		c.Len(got.Mounts, 0, "empty Mounts stays empty")
+	})
 }

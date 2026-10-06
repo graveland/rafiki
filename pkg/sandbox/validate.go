@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"regexp"
 	"strings"
@@ -28,7 +29,9 @@ var (
 // spawn block. roots are the launcher's reported --sandbox-mount-root values.
 //
 // It is pure: the input is never mutated, and a failure returns the zero
-// Resolved.
+// Resolved. The returned Resolved owns genuine copies of the input's Mounts,
+// Env and Labels, so a caller may add daemon-owned labels to it without
+// touching the SandboxSpec it passed in.
 func Validate(spec protocol.SandboxSpec, cfg Config, roots []string, c Caller, named bool) (Resolved, error) {
 	// 1. Name / scope / (non-named) TTL.
 	if named {
@@ -59,6 +62,13 @@ func Validate(spec protocol.SandboxSpec, cfg Config, roots []string, c Caller, n
 	}
 
 	out := Resolved{SandboxSpec: spec}
+	// A genuine copy: the caller may add daemon-owned labels to the Resolved
+	// without mutating the spec it passed in. nil stays nil and a non-nil
+	// empty collection stays non-nil empty (the tri-state the preset/label
+	// vocabulary relies on), so only allocate when the source is non-nil.
+	out.Mounts = cloneMounts(spec.Mounts)
+	out.Env = cloneStringMap(spec.Env)
+	out.Labels = cloneStringMap(spec.Labels)
 
 	// 2. Image.
 	switch {
@@ -199,6 +209,12 @@ func validateLimits(out *Resolved, cfg Config, c Caller) error {
 	if out.MemoryBytes < 0 {
 		return fmt.Errorf("sandbox: memory_bytes must not be negative")
 	}
+	// NaN and Inf are neither < 0 nor > cap nor == 0, so without this a child
+	// could slip the clamp un-clamped and hand Docker an undefined NanoCPUs.
+	// cpus arrives as a proto double, so NaN is reachable from a caller.
+	if math.IsNaN(out.CPUs) || math.IsInf(out.CPUs, 0) {
+		return fmt.Errorf("sandbox: cpus must be a finite number")
+	}
 	if out.CPUs < 0 {
 		return fmt.Errorf("sandbox: cpus must not be negative")
 	}
@@ -235,6 +251,31 @@ func validateLimits(out *Resolved, cfg Config, c Caller) error {
 	return nil
 }
 
+// cloneMounts returns a copy of in, preserving the nil/empty distinction: a
+// nil slice stays nil, a non-nil empty slice stays non-nil empty.
+func cloneMounts(in []protocol.SandboxMount) []protocol.SandboxMount {
+	if in == nil {
+		return nil
+	}
+	out := make([]protocol.SandboxMount, len(in))
+	copy(out, in)
+	return out
+}
+
+// cloneStringMap returns a copy of in, preserving the nil/empty distinction: a
+// nil map stays nil, a non-nil empty map stays non-nil empty.
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// isReservedLabelKey reports whether k is reserved for the daemon.
 func isReservedLabelKey(k string) bool {
 	if strings.HasPrefix(k, "rafiki/") || strings.HasPrefix(k, "rafiki.") || strings.HasPrefix(k, "fundi/") {
 		return true

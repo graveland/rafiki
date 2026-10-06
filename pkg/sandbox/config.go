@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -46,8 +47,8 @@ type Config struct {
 }
 
 // ConfigFromEnv resolves the sandbox configuration. An unset (empty) variable
-// takes its default; a malformed value, a negative number, or TTL > MaxTTL is
-// an error naming the variable.
+// takes its default; a malformed value, a non-positive duration, a negative
+// number, or TTL > MaxTTL is an error naming the variable.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		Image:         getenv(EnvImage),
@@ -81,9 +82,6 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	if cfg.SweepInterval, err = durationEnv(getenv, EnvSweepInterval, DefaultSweepInterval); err != nil {
 		return Config{}, err
 	}
-	if cfg.SweepInterval <= 0 {
-		return Config{}, fmt.Errorf("%s must be positive, got %s", EnvSweepInterval, cfg.SweepInterval)
-	}
 	if cfg.MaxPerOwner, err = intEnv(getenv, EnvMaxPerOwner, DefaultMaxPerOwner); err != nil {
 		return Config{}, err
 	}
@@ -99,6 +97,12 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
+// durationEnv parses a duration-valued variable. An unset variable takes def;
+// a malformed or non-positive value is refused, naming the variable. Every
+// duration in this config must be strictly positive: a zero TTL would either
+// expire a named sandbox instantly or silently mean "never", both violating
+// the rule that a named sandbox always expires, and a zero sweep interval
+// would spin.
 func durationEnv(getenv func(string) string, name string, def time.Duration) (time.Duration, error) {
 	v := getenv(name)
 	if v == "" {
@@ -108,8 +112,8 @@ func durationEnv(getenv func(string) string, name string, def time.Duration) (ti
 	if err != nil {
 		return 0, fmt.Errorf("%s: %q is not a valid duration: %w", name, v, err)
 	}
-	if d < 0 {
-		return 0, fmt.Errorf("%s: %s must not be negative", name, d)
+	if d <= 0 {
+		return 0, fmt.Errorf("%s: %s must be positive", name, d)
 	}
 	return d, nil
 }
@@ -152,6 +156,11 @@ func floatEnv(getenv func(string) string, name string, def float64) (float64, er
 	f, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %q is not a valid number: %w", name, v, err)
+	}
+	// ParseFloat accepts "NaN" and "Inf"; neither is < 0, so without this a
+	// NaN cap would silently disable the child clamp (see validateLimits).
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("%s: %q is not a finite number", name, v)
 	}
 	if f < 0 {
 		return 0, fmt.Errorf("%s: %g must not be negative", name, f)
