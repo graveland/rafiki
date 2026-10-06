@@ -75,6 +75,25 @@ func TestExecuteDoesNotRetryASideEffectingToolAfterAStreamBreak(t *testing.T) {
 		"side-effecting tool", f.executeCalls)
 }
 
+// A dead cached connection surfaces through stream.Err, so Execute wraps it as
+// ErrStreamBroken even though the transport refused to dial and nothing was
+// sent. ErrRedialed is the proof the request never left, so it must win over the
+// "maybe ran" classification -- otherwise a side-effecting tool is never
+// re-bound and every later call hits the same corpse.
+func TestExecuteRecoversASideEffectingToolWhenTheTransportRedialed(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFakeBinder()
+	f.mode = "ephemeral"
+	f.live = true
+	f.failWith = fmt.Errorf("executor stream: unavailable: %w: %w", execpool.ErrRedialed, execpool.ErrStreamBroken)
+	f.failTimes = 1
+	b := newBoundExecutor("c1", f)
+
+	_, err := b.Execute(context.Background(), "bash", nil)
+	c.NoError(err, "the request never reached the executor; bash must be re-dispatched on a fresh binding")
+	c.Eq(2, f.executeCalls, "executeCalls")
+}
+
 func TestExecuteRetriesAReadOnlyToolAfterAStreamBreak(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newFakeBinder()

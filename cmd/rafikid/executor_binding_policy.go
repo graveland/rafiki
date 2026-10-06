@@ -61,6 +61,12 @@ func retryable(err error, idempotent bool) bool {
 	if errors.Is(err, execpool.ErrToolFailed) {
 		return false
 	}
+	// A redial means the transport refused to open a new connection for this
+	// request, so nothing was sent. It arrives wrapped in ErrStreamBroken (the
+	// failure surfaces via stream.Err), which must not downgrade it to "maybe ran".
+	if errors.Is(err, execpool.ErrRedialed) {
+		return true
+	}
 	if errors.Is(err, execpool.ErrStreamBroken) {
 		return idempotent
 	}
