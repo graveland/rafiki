@@ -256,12 +256,14 @@ background job; the daemon polls this to surface what's long-running.
 ### Execute
 
 ```
-Execute(callId, tool, inputJSON, timeoutMs, expectMtime, background, workspaceId)
+Execute(callId, tool, inputJSON, timeout, expectMtime, background, workspaceId)
   → stream { Output(chunk) | Result(content[], isError, observedMtime)
             | Failed(code, msg) | handle }
 ```
 
-Server-streaming. Dispatches a single tool call. `workspaceId` selects the
+Server-streaming. Dispatches a single tool call. `timeout` (a `Duration`)
+bounds one tool call — unset or zero means no timeout, exactly as the old
+`timeout_ms=0` did. `workspaceId` selects the
 workspace this call runs in — empty means the executor's own root, the
 pre-phase-08 behaviour kept as a compatibility path so an executor and a
 daemon of different vintages still interoperate.
@@ -767,14 +769,15 @@ against a recycled pgid answer `reaped=false` instead of signalling a stranger.
 ### Reap
 
 ```
-Reap(childId, graceMs) → { reaped }
+Reap(childId, grace) → { reaped }
 ```
 
 Ends one launched daraja and its child: SIGTERM to the process group, wait out
-`graceMs` (zero means the server default, 3s — matching daraja's own
-`stopLocked` rather than inventing a second escalation policy), then SIGKILL
-the group. An unknown `childId` returns `reaped=false`, NOT an error —
-reaping something already gone is the normal case, so Reap is idempotent.
+`grace` (a `Duration`; unset or zero means the server default, 3s — matching
+daraja's own `stopLocked` rather than inventing a second escalation policy),
+then SIGKILL the group. An unknown `childId` returns `reaped=false`, NOT an
+error — reaping something already gone is the normal case, so Reap is
+idempotent.
 
 ### Status
 
@@ -900,7 +903,7 @@ different retry decision for each code:
 | `CODE_TOOL_FAILED` (3) | The tool itself errored (missing file, unknown tool name, bash exit ≠ 0 in a *synchronous* call). | Yes — the error is tool-specific. |
 | `CODE_DENIED` (1) | Structural refusal (stale mtime, sandbox violation, tool not permitted). | **Never.** The condition is permanent for this request. |
 | `CODE_EXECUTOR_LOST` (2) | The executor disappeared mid-call. | Yes — a different executor may still serve the request. |
-| `CODE_TIMEOUT` (4) | The tool call exceeded `timeoutMs`. | Yes — a longer timeout may succeed. |
+| `CODE_TIMEOUT` (4) | The tool call exceeded `timeout`. | Yes — a longer timeout may succeed. |
 
 **`bash` exit ≠ 0 in a synchronous call is a `Result` (with `is_error=true`),
 not a `Failure`.** That is existing behaviour and the protocol preserves it.

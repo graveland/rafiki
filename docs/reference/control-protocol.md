@@ -195,6 +195,58 @@ The **per-child unix socket** (script children, and any child kind whose
 tools are hosted) is described under "Script children" below: the socket is
 the credential, and it reverse-proxies the daemon's whole proxy face.
 
+### The protocol epoch
+
+The wire carries a version so a stale peer fails loudly instead of silently
+exchanging fields the two sides no longer agree on. `protocol.Epoch` is the
+value — **2** today, and a peer that sends no header is an epoch-1 peer
+(`pkg/protocol/epoch.go`; the constant is bumped on every wire-breaking
+change). It rides the HTTP header **`Rafiki-Protocol`** (`protocol.EpochHeader`).
+
+**Connect (control plane).** Every client request carries `Rafiki-Protocol: 2`
+— the Go client transport sets it in `bearerTransport` (`cmd/rafiki/connectclient.go`),
+unconditionally, token or not, and `rafiki-py` sets it in its own transport.
+The daemon gates every `/rafiki.v1.` request with `pkg/server.RequireEpoch`,
+applied at the OUTERMOST layer of BOTH mounts (before authentication, so the
+authentication-exempt `Login` service is gated too — the `Login` route carries
+no interceptors but still speaks the current wire). The gate sets
+`Rafiki-Protocol: 2` on the response unconditionally (refusals included, so a
+client can always read the daemon's epoch) and passes a request through only
+when its header is exactly the daemon's epoch. A missing or different value is
+a Connect error — code `failed_precondition` (HTTP 400), `ErrorInfo` reason
+`protocol_mismatch`, message "this daemon speaks rafiki protocol 2; upgrade
+your rafiki client (peer sent none)". A stream is refused the same way: the
+gate runs before the handler, so it cannot know a stream is coming and answers
+the unary error form.
+
+**Connect (client side).** The Go transport (`checkDaemonEpoch`) and the
+Python SDK both check the response's `Rafiki-Protocol`: a response without it
+(an old daemon) or with another value fails with "daemon speaks rafiki protocol
+N; this client speaks 2 — upgrade the daemon". The daemon's own
+`protocol_mismatch` refusal is never masked — the client surfaces that more
+specific message as-is.
+
+**Executor and daraja upgrade links.** The dialing side sets the header on the
+HTTP Upgrade request (`upgradeconn.Dial`); `upgradeconn.Handler` refuses a
+mismatch with a **plain 400** and a body naming both epochs ("rafiki protocol
+mismatch: this side speaks 2, peer sent none"). It runs BEFORE `authorize`:
+pure, no side effects, and a plain status that never hijacks — so a peer never
+spends a one-shot ticket or enroll token on an exchange the far side cannot
+finish. The 400 is terminal for the client (the existing 400/401/403-terminal
+rule), so a stale executor fails at once rather than retrying forever. A 101
+whose response carries no header (an old peer) or a different one is reported
+by the dialer as a 400 `Refused`, terminal the same way.
+
+### Deploy runbook (one deploy, at an idle time)
+
+Stop every child (including daraja-hosted claude children, which survive a
+daemon restart); rebuild and restart BOTH daemons (work, home) and EVERY
+executor and CLI binary from the same commit; re-pin `rafiki-py` in the
+workflow/eval/review-swarm repos; restart agents (sessions resume from the
+database; script children cannot resume). Prod migration max must be ≤ 44
+first (`0045`/`0046` apply on start). The protocol epoch makes a forgotten
+binary fail with a clear message instead of misbehaving.
+
 ### Two event tiers
 
 | Tier | Contents | Cursor | Resumable |
@@ -259,8 +311,8 @@ defined under "Who may call what" below; each row names its own.
 | `GetHistory` | unary · childScoped | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming · childScoped | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see "`Send` and the durable inbox" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
-| `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `latest_ordinal`, `cost_usd` and `max_cost` per child); answers only the caller's own subtree |
-| `GetChild` | unary · childScoped | Get one child's summary by id (reports `latest_ordinal`, `cost_usd` and `max_cost`). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
+| `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child); answers only the caller's own subtree |
+| `GetChild` | unary · childScoped | Get one child's summary by id (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost`). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
 | `Spawn` | unary · childScoped | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. Fields 15–29 are operator-only (§"Spawn's operator-only fields" below) |
 | `Kill` | unary · childScoped | Stop a child gracefully, escalating to SIGKILL if necessary. `shutdown_timeout`/`kill_timeout` (Durations) bound the graceful window and the SIGTERM→SIGKILL escalation; each unset or zero selects the daemon default (180 s / 30 s). `include_descendants` first stops every live descendant, deepest first (reported in `descendant_ids`); off, the subtree is left running |
 | `Close` | unary · childScoped | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped. An error for a live child — closing is never an implicit kill. `include_descendants` closes every descendant first, deepest first, each of which must already be exited (reported in `descendant_ids`). A descendant that cannot be ended aborts before the parent is touched, so no child is orphaned; one already exited or gone is skipped. Native Task subagents are never listed: they end and close with their parent. The daemon never refuses a parent for having descendants; the CLI and cockpit ask first |
@@ -1028,8 +1080,8 @@ Every event payload is classified into a tier:
 | `TurnStart` | durable | Start of an agent turn |
 | `TurnEnd` | durable | End of an agent turn |
 | `ToolExecutionStart` | durable | Tool began executing (name, tool_use_id) |
-| `ToolExecutionEnd` | durable | Tool completed (duration_ms, is_error) |
-| `Retry` | durable | Turn-level retry with attempt count and reason. Today's only producer is the daemon's rate-limit auto-resume (`cmd/rafikid/ratelimit_resume.go`): `will_retry: true` announces a scheduled resume of a claude child whose turn a 429 killed — `reason` is the cause ("rate limited (HTTP 429)"), `resume_at_unix_ms` the fire instant (epoch ms; optional, absent on resolution events and pre-field rows), `max_attempts` the schedule cap; `will_retry: false` resolves it (fired, cleared by a clean completion, or the attempt cap reached), with the human sentence in `reason`. Wall-clock times are never embedded in `reason`: the producing daemon's clock zone is arbitrary (a container runs UTC), so clients render `resume_at_unix_ms` in the viewer's local zone. The cockpit renders the scheduling half as a system block in the transcript and shows ⟳ on the rail row until the resolution half arrives |
+| `ToolExecutionEnd` | durable | Tool completed (duration, is_error) |
+| `Retry` | durable | Turn-level retry with attempt count and reason. Today's only producer is the daemon's rate-limit auto-resume (`cmd/rafikid/ratelimit_resume.go`): `will_retry: true` announces a scheduled resume of a claude child whose turn a 429 killed — `reason` is the cause ("rate limited (HTTP 429)"), `resume_at` (a `Timestamp`) the fire instant (unset on resolution events and pre-field rows), `max_attempts` the schedule cap; `will_retry: false` resolves it (fired, cleared by a clean completion, or the attempt cap reached), with the human sentence in `reason`. Wall-clock times are never embedded in `reason`: the producing daemon's clock zone is arbitrary (a container runs UTC), so clients render `resume_at` in the viewer's local zone. The cockpit renders the scheduling half as a system block in the transcript and shows ⟳ on the rail row until the resolution half arrives |
 | `ChildSpawned` | durable | A sub-agent was created (child_id, parent_id, name) |
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
@@ -1555,6 +1607,12 @@ transport error, and never a successful result carrying the text.
 | `memory_tree` | Fetch every memory under a path, full bodies; when the subtree exceeds the output budget it degrades to paths plus first lines and asks you to narrow |
 | `memory_delete` | Remove one of your memories from recall results — tombstoned, not destroyed |
 
+The time filters on `conversation_search`, `conversation_query` and `recall`
+are **RFC3339 strings** (`since`/`until`) — the fundi agent tools bind the same
+schema, and the handler parses the string into the `Timestamp` the Connect
+verb carries (`rfc3339Time`, `pkg/fundi/tools`). A blank or absent value means
+unbounded, and a time that will not parse is a tool error.
+
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
 and cross-agent — not the client's private per-session checklist (the native
 checklist keeps that job), and the description now pairs the ledger with
@@ -1721,6 +1779,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `internal` | `internal` | Unexpected daemon-side error. |
 | `no_agent_db` | `unavailable` | The conversation/recall/pymodule backend is unwired (`RAFIKI_DB` unset). |
 | `payload_too_large` | `invalid_argument` | A transcript or report exceeds its size cap. |
+| `protocol_mismatch` | `failed_precondition` | A Connect request's `Rafiki-Protocol` header is missing or names a different epoch (`pkg/server.RequireEpoch`). Attached by the epoch gate, not the domain error table — see "The protocol epoch" above. |
 
 **Reasons ride `google.rpc.ErrorInfo`** (`pkg/rpcreason`): `Attach` puts the
 reason on a Connect error, `Reason` reads it back; the client reads the

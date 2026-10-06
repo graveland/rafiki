@@ -135,13 +135,11 @@ rafikid agent search --text "skill gap"
 All the `stats` filter flags, plus `--status`, `--min-tokens`, `--text`
 (full-text search over first messages), `--limit` (0 = backend default).
 
-The socket twin `rafiki conversations search` runs the same query and adds
-two flags: `--open` and `--closed` (mutually exclusive) narrow to
-conversations still open or already finished. Its table gains a `CLOSED`
-column — the finish time, `-` while open — and the JSON arm carries
-`closed_at` only for a finished row (never a zero time). `rafikid agent
-search` has neither the flags nor the column, but its `-j` JSON rows carry
-`closed_at` when set.
+The socket twin `rafiki conversations search` runs the same query. Its table
+gains a `CLOSED` column — the conversation's `closed_at` finish time, `-`
+while open — and the JSON arm carries `closed_at` only for a finished row
+(never a zero time). `rafikid agent search` has no such column, but its
+`-j` JSON rows carry `closed_at` when set.
 
 ## `export`
 
@@ -647,7 +645,7 @@ UDS-only daemons refuse with a clear diagnostic.
 | `--executor` | no | Label selector; defaults to the first available executor |
 | `--resume` | no | Claude session id to continue from |
 
-Output format: `child_id=<id> pid=<n> pgid=<n> connected_at=<epoch_ms>`
+Output format: `child_id=<id> pid=<n> pgid=<n> connected_at=<RFC3339>`
 on stdout; errors go to stderr.
 
 ## `rafiki skills`
@@ -846,14 +844,14 @@ rafiki memory status
 
 ### The zero asymmetry (`--since` on recall vs backfill)
 
-The wire's zero means different things on the two verbs, deliberately:
+An unset time means different things on the two verbs, deliberately:
 
-- **`Recall`'s `since_unix`/`until_unix` 0 = unbounded.** A search without
-  `--since` covers all time; the CLI sends 0 only when you did not pass the
-  flag.
-- **`RecallBackfill`'s `since_unix` 0 = "from the beginning", and
-  `max_cost_usd <= 0` is REFUSED (`CodeInvalidArgument`).** A wire
-  `RecallBackfillRequest{}` — both fields zero — can never start an
+- **`Recall`'s `since`/`until` are `Timestamp`s, and unset = unbounded.** A
+  search without `--since` covers all time; the CLI leaves the field unset only
+  when you did not pass the flag.
+- **`RecallBackfill`'s `since` is a `Timestamp` and unset = "from the
+  beginning", and `max_cost_usd <= 0` is REFUSED (`CodeInvalidArgument`).** A
+  wire `RecallBackfillRequest{}` — no `since`, zero budget — can never start an
   all-history, budgetless backfill: the summarizer would otherwise read a
   missing budget as unlimited spend. The CLI makes both flags required, so
   "all history" only ever happens because an operator typed a timestamp

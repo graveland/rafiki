@@ -112,6 +112,23 @@ for msg in c.receive():                        # the inbox, streamed
     print(msg.text.text, msg.text.message_ids)
 ```
 
+## Time and the protocol epoch
+
+Every time field on the wire is a `google.protobuf.Timestamp` (a point) or a
+`google.protobuf.Duration` (a span) — never a unit-suffixed int or an RFC3339
+string. The generated dataclasses surface them as tz-aware UTC `datetime`s
+(Timestamp, nanoseconds truncated to microseconds) and `timedelta`s (Duration);
+an unset field is `None`, which is the sentinel callers pass to mean
+"unbounded" (`since=None`, `until=None`). Timestamps cross the boundary as
+stored protos, so no epoch-int arithmetic is needed on either side.
+
+The client also carries the **protocol epoch**: every request sends the
+`Rafiki-Protocol` header and every response is checked for it, so a stale daemon
+or a stale client fails with a clear "upgrade" message instead of silently
+exchanging fields the two sides no longer agree on. The epoch is bumped on any
+wire-breaking change (see "The protocol epoch" in
+`docs/reference/control-protocol.md`); this SDK's build pins the current value.
+
 ## Errors and the retry rule
 
 Every failure raises `ConnectError(code, message, status)` — the code is
