@@ -124,6 +124,14 @@ message DescribeResponse {
   // pymodules_sync: it only ever NARROWS what this executor will do, and a
   // wrong value costs a skipped sync rather than admitting anyone.
   bool pymodule_git_sync = 14;
+  // sandbox_mount_roots are the host directories this launcher's operator
+  // declared with --sandbox-mount-root. Self-reported, and safe to be: the
+  // daemon uses them only to PRE-CHECK a requested host path; the launcher
+  // re-checks every bind source itself, so a wrong entry costs a refusal.
+  repeated string sandbox_mount_roots = 15;
+  // sandbox_relay_dir is the host directory (--relay-dir) the daemon
+  // bind-mounts into a sandbox container so it can reach the daemon.
+  string sandbox_relay_dir = 16;
 }
 
 message HealthRequest {}
