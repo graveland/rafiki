@@ -94,6 +94,55 @@ func TestEpochClientDoesNotMaskAProtocolMismatchError(t *testing.T) {
 	t.Run("ClientDoesNotMaskAProtocolMismatchError", TestClientDoesNotMaskAProtocolMismatchError)
 }
 
+// TestClientEpochRefusalIsTerminalFailedPrecondition drives the REAL generated
+// Connect client through bearerTransport against a daemon that omits the
+// response epoch (an old daemon). The refusal must be a Connect
+// failed_precondition carrying the protocol_mismatch reason — not a plain
+// error connect wraps as Unavailable, which would render as "is rafikid
+// running?" and make an Unavailable-retrying caller (the cockpit's stream loop
+// included) retry an old daemon forever.
+func TestClientEpochRefusalIsTerminalFailedPrecondition(t *testing.T) {
+	c := assert.NewAborting(t)
+	oldDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // no Rafiki-Protocol: an epoch-1 daemon
+	}))
+	defer oldDaemon.Close()
+
+	client := &http.Client{Transport: &bearerTransport{base: http.DefaultTransport}}
+	ctrl := rafikiv1connect.NewControlClient(client, oldDaemon.URL)
+
+	_, err := ctrl.ListModels(context.Background(), connect.NewRequest(&rafikiv1.ListModelsRequest{}))
+	c.Error(err, "an old daemon must be refused")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err),
+		"unary: the client's epoch refusal must be failed_precondition, never unavailable")
+	c.Eq(protocol.ErrProtocolMismatch, rpcreason.Reason(err),
+		"unary: the protocol_mismatch reason must survive")
+
+	stream, err := ctrl.StreamEvents(context.Background(), connect.NewRequest(&rafikiv1.StreamEventsRequest{}))
+	if err == nil {
+		stream.Receive()
+		err = stream.Err()
+	}
+	c.Error(err, "an old daemon must refuse the stream too")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err),
+		"stream: terminal failed_precondition, never a retried unavailable")
+	c.Eq(protocol.ErrProtocolMismatch, rpcreason.Reason(err),
+		"stream: the protocol_mismatch reason must survive")
+
+	// The CLI's rendering must show the upgrade message, not the misleading
+	// "cannot reach the daemon" advice that an Unavailable produces.
+	msg := connectVerbErr(err, oldDaemon.URL).Error()
+	c.StrContains(msg, "protocol_mismatch", "the CLI must surface the rafiki reason")
+	c.StrContains(msg, "upgrade the daemon", "the CLI must show the upgrade message")
+	c.NotStrContains(msg, "is rafikid running", "an old daemon must not read as unreachable")
+}
+
+// TestEpochClientRefusalIsTerminal is the -run 'Epoch'-visible entry for the
+// test above, whose own name does not contain "Epoch".
+func TestEpochClientRefusalIsTerminal(t *testing.T) {
+	t.Run("ClientEpochRefusalIsTerminalFailedPrecondition", TestClientEpochRefusalIsTerminalFailedPrecondition)
+}
+
 // epochResponseHeader makes a fake daemon answer with the current epoch, the
 // way the real daemon's RequireEpoch gate does, so the CLI's client transport
 // (which verifies the response header) accepts it.

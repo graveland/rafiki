@@ -52,12 +52,17 @@ func RequireEpoch(next http.Handler) http.Handler {
 	})
 }
 
-// writeEpochRefusal answers a request whose epoch is missing or wrong. It is a
-// plain Connect unary error at HTTP 400 for EVERY /rafiki.v1. request, streams
-// included: the gate runs before the handler, so it cannot know a stream is
-// coming, and the client reads the code and reason off the JSON body either
-// way. Forcing the unary content type is what keeps connect's ErrorWriter from
-// answering a streaming request with the enveloped HTTP-200 form.
+// writeEpochRefusal answers a request whose epoch is missing or wrong. It emits
+// the form the caller's protocol expects. A Connect streaming request
+// (Content-Type application/connect+) gets the enveloped HTTP-200
+// end-of-stream error connect-go parses into failed_precondition plus the
+// message; forcing the unary JSON form there would reach a connect-go streaming
+// client as a bare "internal: HTTP status 400 Bad Request", because its
+// validateResponse turns any non-200 into an error WITHOUT reading the body. A
+// unary (or unknown-protocol) request keeps the connect unary JSON form — code
+// failed_precondition at HTTP 400 — which every other client reads the code,
+// message and reason off. Either way the code, the message and the ErrorInfo
+// reason are identical.
 func writeEpochRefusal(w http.ResponseWriter, r *http.Request) {
 	peer := r.Header.Get(protocol.EpochHeader)
 	if peer == "" {
@@ -70,6 +75,20 @@ func writeEpochRefusal(w http.ResponseWriter, r *http.Request) {
 		connect.NewError(connect.CodeFailedPrecondition, errors.New(msg)),
 		protocol.ErrProtocolMismatch)
 	req := r.Clone(r.Context())
-	req.Header.Set("Content-Type", "application/json")
+	if !isConnectStreamRequest(req) {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	_ = connect.NewErrorWriter().Write(w, req, err)
+}
+
+// isConnectStreamRequest reports whether r is a Connect streaming request, by
+// the documented discriminator: a Content-Type whose media type begins with
+// "application/connect+" (parameters and case irrelevant). The ErrorWriter
+// classifies on the same prefix.
+func isConnectStreamRequest(r *http.Request) bool {
+	ctype := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ctype, ';'); i >= 0 {
+		ctype = ctype[:i]
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(ctype)), "application/connect+")
 }

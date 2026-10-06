@@ -72,6 +72,39 @@ func TestRequireEpochRefusesMissingAndWrongValues(t *testing.T) {
 	}
 }
 
+// TestRequireEpochStreamRefusalIsLegible drives a REAL connect-go streaming
+// client — no epoch header, an epoch-1 peer — against the gate and asserts the
+// refusal arrives as failed_precondition plus the message. The gate forces the
+// unary JSON form for everything, and connect-go's streaming client ignores a
+// non-200 response body, so a stream would otherwise surface as a bare
+// "internal: HTTP status 400 Bad Request" with no message.
+func TestRequireEpochStreamRefusalIsLegible(t *testing.T) {
+	c := assert.NewAborting(t)
+	srv := httptest.NewServer(RequireEpoch(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	defer srv.Close()
+
+	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
+	stream, err := client.StreamEvents(context.Background(), connect.NewRequest(&rafikiv1.StreamEventsRequest{}))
+	if err == nil {
+		stream.Receive()
+		err = stream.Err()
+	}
+	c.Error(err, "a stream from a mismatched peer must be refused")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err),
+		"the stream refusal must carry failed_precondition, not a bare HTTP status")
+	c.Eq(protocol.ErrProtocolMismatch, rpcreason.Reason(err), "reason")
+	c.StrContains(err.Error(), "this daemon speaks rafiki protocol 2", "message names the daemon's epoch")
+	c.StrContains(err.Error(), "peer sent none", "message names the peer")
+}
+
+// TestEpochStreamRefusalIsLegible is the -run 'Epoch'-visible entry for the
+// test above, whose own name does not contain "Epoch".
+func TestEpochStreamRefusalIsLegible(t *testing.T) {
+	t.Run("RequireEpochStreamRefusalIsLegible", TestRequireEpochStreamRefusalIsLegible)
+}
+
 // TestRequireEpochPassesMatching pins the happy path: a matching header reaches
 // the handler, and the response carries the epoch.
 func TestRequireEpochPassesMatching(t *testing.T) {

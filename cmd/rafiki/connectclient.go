@@ -22,6 +22,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 // connectUDSBaseURL is a sentinel. Over a unix socket the host is meaningless
@@ -86,9 +87,16 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // checkDaemonEpoch refuses a response whose Rafiki-Protocol header is missing
 // (an old daemon) or different, naming both epochs so the operator knows which
-// side to upgrade. It never masks the daemon's OWN protocol_mismatch error: if
-// the body is a Connect error carrying that reason, the response is returned
-// untouched so the client surfaces the daemon's more specific message.
+// side to upgrade. The refusal is a Connect failed_precondition carrying the
+// protocol_mismatch reason — the same code and reason the daemon's own gate and
+// the Python client use. That matters: a plain error comes back from
+// connect-go as Unavailable, which renders as "is rafikid running?" and is
+// exactly the code an Unavailable-retrying caller (the cockpit's stream loop
+// included) keeps retrying. failed_precondition is terminal.
+//
+// It never masks the daemon's OWN protocol_mismatch error: if the body is a
+// Connect error carrying that reason, the response is returned untouched so the
+// client surfaces the daemon's more specific message.
 func checkDaemonEpoch(resp *http.Response) error {
 	if resp.Header.Get(protocol.EpochHeader) == strconv.Itoa(protocol.Epoch) {
 		return nil
@@ -100,8 +108,11 @@ func checkDaemonEpoch(resp *http.Response) error {
 	if got == "" {
 		got = "none"
 	}
-	return fmt.Errorf("daemon speaks rafiki protocol %s; this client speaks %d — upgrade the daemon",
-		got, protocol.Epoch)
+	return rpcreason.Attach(
+		connect.NewError(connect.CodeFailedPrecondition,
+			fmt.Errorf("daemon speaks rafiki protocol %s; this client speaks %d — upgrade the daemon",
+				got, protocol.Epoch)),
+		protocol.ErrProtocolMismatch)
 }
 
 // daemonRefusedEpoch reports whether resp is a Connect error whose ErrorInfo
