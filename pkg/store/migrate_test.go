@@ -322,3 +322,67 @@ func TestMigrate0037ServedProvider(t *testing.T) {
 		   AND column_name='served_provider')`).Scan(&exists), "probe served_provider after down")
 	c.False(exists, "served_provider survived the down migration")
 }
+
+// TestMigrate0047Sandbox pins 0047: the chain produces conversations.sandbox
+// with the columns the store reads, both partial indexes, and a state CHECK —
+// and the down migration actually drops the table.
+func TestMigrate0047Sandbox(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	var cols int
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name='sandbox'
+		   AND column_name IN ('id','owner_user_id','name','executor_id','launcher_executor_id',
+		       'container_id','image','spec','created_by','owner_child','scope','state',
+		       'created_at','expires_at','removed_at')`).Scan(&cols), "probe sandbox columns")
+	c.Eq(15, cols, "sandbox columns")
+
+	var idx int
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		 WHERE schemaname='conversations' AND tablename='sandbox'
+		   AND indexname IN ('sandbox_owner_name_unique','sandbox_owner_child_live')`).Scan(&idx), "probe sandbox indexes")
+	c.Eq(2, idx, "sandbox indexes")
+
+	insert := func(id, owner, name, state string) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO conversations.sandbox
+			   (id, owner_user_id, name, executor_id, launcher_executor_id, image, spec, state)
+			 VALUES ($1,$2,$3,'e','l','alpine','{}'::jsonb,$4)`, id, owner, name, state)
+		return err
+	}
+
+	// The state CHECK rejects an unknown state.
+	if err := insert("s1", "o1", "n1", "bogus"); err == nil {
+		t.Fatal("sandbox accepted state 'bogus'; the CHECK constraint is missing")
+	}
+	c.NoError(insert("s2", "o1", "n2", "ready"), "insert a valid row")
+
+	// The (owner, name) unique index constrains LIVE rows only: a duplicate
+	// live name is refused, a different name is fine, and a tombstone frees one.
+	if err := insert("s3", "o1", "n2", "ready"); err == nil {
+		t.Fatal("a second live (owner, name) was accepted; the partial unique index is missing")
+	}
+	c.NoError(insert("s4", "o1", "n3", "ready"), "a different live name is fine")
+	// Empty names (spawn blocks) are excluded from the index, so two coexist.
+	c.NoError(insert("s5", "o1", "", "ready"), "an empty name is unconstrained")
+	c.NoError(insert("s6", "o1", "", "ready"), "a second empty name is unconstrained")
+	if _, err := pool.Exec(ctx, `UPDATE conversations.sandbox SET removed_at=now() WHERE id='s2'`); err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+	c.NoError(insert("s7", "o1", "n2", "ready"), "reusing a freed name")
+
+	// There is no MigrateTo API, so exercise the down migration directly.
+	down, err := os.ReadFile("migrations/0047_sandbox.down.sql")
+	c.NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	var exists bool
+	c.NoError(pool.QueryRow(ctx, `SELECT to_regclass('conversations.sandbox') IS NOT NULL`).Scan(&exists), "probe sandbox after down")
+	c.False(exists, "conversations.sandbox survived the down migration")
+}
