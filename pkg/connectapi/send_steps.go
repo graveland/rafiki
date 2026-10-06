@@ -83,9 +83,17 @@ func sendStepsFromWire(steps []*rafikiv1.SendStep) ([]protocol.SendStep, error) 
 						fmt.Errorf("step %d: timeout must not be negative", i+1))
 				}
 			}
+			// A positive sub-millisecond timeout rounds UP to 1ms: truncating it
+			// to 0 would silently mean "unset" and hand back the 30s default,
+			// the opposite of what a very short timeout asked for. Zero/unset
+			// still means the default.
+			timeoutMs := int(timeout.AsDuration() / time.Millisecond)
+			if timeoutMs == 0 && timeout.AsDuration() > 0 {
+				timeoutMs = 1
+			}
 			step.Bash = &protocol.BashStep{
 				Command:   k.Bash.GetCommand(),
-				TimeoutMs: int(timeout.AsDuration() / time.Millisecond),
+				TimeoutMs: timeoutMs,
 			}
 		case *rafikiv1.SendStep_PymoduleRun:
 			step.PymoduleRun = &protocol.PymoduleRunStep{

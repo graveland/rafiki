@@ -158,6 +158,43 @@ func TestSendStepsWireConversion(t *testing.T) {
 		"second step's index")
 }
 
+// TestSendStepSubMillisecondTimeoutRoundsUp pins the send-step default's
+// lower bound: a POSITIVE timeout below one millisecond rounds up to 1ms,
+// never truncates to 0 (which would silently mean "unset" and hand back the
+// 30s default). Zero and unset still select the default.
+func TestSendStepSubMillisecondTimeoutRoundsUp(t *testing.T) {
+	for name, tc := range map[string]struct {
+		timeout *durationpb.Duration
+		want    int
+	}{
+		"500us rounds up":           {durationpb.New(500 * time.Microsecond), 1},
+		"1500us rounds down to 1ms": {durationpb.New(1500 * time.Microsecond), 1},
+		"zero is the default":       {durationpb.New(0), 0},
+		"unset is the default":      {nil, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			acc := &fakeAccepter{}
+			s := connectapi.NewServer(nil)
+			s.SetInbox(acc)
+			runner := &fakeSendStepRunner{render: "R"}
+			s.SetSendStepRunner(runner)
+			_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+				ChildId: "c_1",
+				Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+				Blocks:  textBlocks("msg"),
+				Steps: []*rafikiv1.SendStep{{
+					Where: rafikiv1.StepSite_STEP_SITE_SENDER,
+					Kind:  &rafikiv1.SendStep_Bash{Bash: &rafikiv1.BashStep{Command: "x", Timeout: tc.timeout}},
+				}},
+			}))
+			c.Require().NoError(err, "Send")
+			c.Require().Eq(1, len(runner.steps), "runner steps")
+			c.Eq(tc.want, runner.steps[0].Bash.TimeoutMs, "TimeoutMs")
+		})
+	}
+}
+
 // TestSendStepsRefusesBadBashTimeout pins the proto-boundary guard: a bash
 // step whose Duration exceeds the proto range, or is negative, is refused
 // InvalidArgument before the runner sees it — the old int32 timeout_ms range

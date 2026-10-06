@@ -98,6 +98,19 @@ type recallInput struct {
 }
 
 func (t *recallTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	// The pre-cutover since_unix/until_unix keys are REFUSED, not ignored:
+	// encoding/json drops unknown keys, so a legacy caller would otherwise
+	// get an unbounded search with no error. Name the replacement argument
+	// so the model can correct itself.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(input, &raw); err == nil {
+		for _, legacy := range [][2]string{{"since_unix", "since"}, {"until_unix", "until"}} {
+			if _, ok := raw[legacy[0]]; ok {
+				return ToolResult{}, fmt.Errorf(
+					"recall: %s is no longer supported; use %s (an RFC3339 timestamp)", legacy[0], legacy[1])
+			}
+		}
+	}
 	var in recallInput
 	if err := input.Unmarshal(&in); err != nil {
 		return ToolResult{}, fmt.Errorf("recall: invalid input: %w", err)

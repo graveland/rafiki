@@ -178,6 +178,38 @@ func TestRecallToolBlankSinceUntilIsUnbounded(t *testing.T) {
 	c.StrContains(err.Error(), "time", "malformed since error")
 }
 
+// A legacy since_unix/until_unix argument is REFUSED with an error naming
+// the replacement, never silently dropped into an unbounded search. The new
+// keys still work, and blank/absent still means unbounded.
+func TestRecallToolRejectsLegacyUnixArgs(t *testing.T) {
+	c := assert.NewCollecting(t)
+	fake := &fakeRecallBinding{recallOut: "x"}
+	tool, err := RecallBlueprint{}.Materialize(ToolOpts{Recall: fake})
+	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
+
+	for _, tc := range []struct{ in, legacy, replacement string }{
+		{`{"query":"x","since_unix":100}`, "since_unix", "since"},
+		{`{"query":"x","until_unix":200}`, "until_unix", "until"},
+	} {
+		_, err := tool.Execute(context.Background(), ToolInput(tc.in))
+		c.Require().Error(err, "Execute(%s): accepted the legacy key", tc.in)
+		c.StrContains(err.Error(), tc.legacy, "error names the legacy arg")
+		c.StrContains(err.Error(), tc.replacement, "error names the replacement arg")
+	}
+
+	if _, err := tool.Execute(context.Background(), ToolInput(`{"query":"x","since":"1970-01-01T00:01:40Z"}`)); err != nil {
+		t.Fatalf("RFC3339 since rejected: %v", err)
+	}
+	since := time.Unix(100, 0).UTC()
+	c.Require().NotNil(fake.recallQ.Since, "RFC3339 since forwarded")
+	c.True(fake.recallQ.Since.Equal(since), "since = %v, want %v", fake.recallQ.Since, since)
+
+	if _, err := tool.Execute(context.Background(), ToolInput(`{"query":"x"}`)); err != nil {
+		t.Fatalf("absent bounds rejected: %v", err)
+	}
+	c.False(fake.recallQ.Since != nil || fake.recallQ.Until != nil, "absent bounds = unbounded")
+}
+
 func TestRecallToolRequiresQuery(t *testing.T) {
 	c := assert.NewCollecting(t)
 	tool, err := RecallBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{}})
