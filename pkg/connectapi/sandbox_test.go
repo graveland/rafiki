@@ -162,6 +162,41 @@ func TestSandboxListResolvesOwnerFromCredential(t *testing.T) {
 	c.Eq(users.Identity{}, f.listOwner, "UDS caller resolves the zero identity")
 }
 
+// TestSandboxChildTokenAdminBitIsDemoted pins the handler-side admin guard: a
+// non-user credential that somehow carries an admin bit is demoted to
+// non-admin before it reaches the sandbox manager — recallOwner's rule
+// (`IsAdmin && IsUserCredential()`), enforced in code rather than by the
+// upstream invariant that a child token never has the bit. A genuine user
+// credential keeps its admin bit.
+func TestSandboxChildTokenAdminBitIsDemoted(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := &fakeSandboxManager{}
+	s := &Server{}
+	s.SetSandboxManager(f)
+
+	// A child token with the admin bit set (a shape pkg/server does not
+	// produce today) must arrive non-admin.
+	childCtx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "owner-1", ChildID: "c_1", IsAdmin: true, Via: server.ProvenanceChildToken})
+	_, err := s.ListSandboxes(childCtx, connect.NewRequest(&rafikiv1.ListSandboxesRequest{}))
+	c.Require().NoError(err, "ListSandboxes (child with admin bit)")
+	c.False(f.listOwner.IsAdmin, "a child-token admin bit must be demoted before the manager")
+
+	// The Create path too, since it also passes the resolved identity through.
+	_, err = s.CreateSandbox(childCtx, connect.NewRequest(&rafikiv1.CreateSandboxRequest{
+		Spec: &rafikiv1.SandboxSpec{Name: "box", Image: "i"},
+	}))
+	c.Require().NoError(err, "CreateSandbox (child with admin bit)")
+	c.False(f.createdOwner.IsAdmin, "a child-token admin bit must be demoted on Create too")
+
+	// A genuine user credential keeps its admin bit.
+	userCtx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", IsAdmin: true, Via: server.ProvenanceUser})
+	_, err = s.ListSandboxes(userCtx, connect.NewRequest(&rafikiv1.ListSandboxesRequest{}))
+	c.Require().NoError(err, "ListSandboxes (admin user)")
+	c.True(f.listOwner.IsAdmin, "a user credential keeps its admin bit")
+}
+
 // TestSandboxRemovePassesChildAndRef: Remove passes the caller child and the
 // ref through unchanged, and requires a ref.
 func TestSandboxRemovePassesChildAndRef(t *testing.T) {

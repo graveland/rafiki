@@ -65,17 +65,25 @@ func (s *Server) sandboxManager() (SandboxManager, error) {
 // connection. A per-child credential (ProvenanceChildToken) contributes its
 // child id as callerChild and its owner's user id as the owner; every other
 // identity — a user credential or the unix socket's nil local trust — passes
-// callerChild == "". The admin bit is carried as-is here and demoted for the
-// child case by the adapter (recallOwner, cmd/rafikid/recall.go): a per-child
-// token never carries IsAdmin in the first place (pkg/server/usertoken.go), so
-// this is belt-and-braces, and SandboxList is keyed on the owner's USER ID, so
-// admin never widens a fleet read.
+// callerChild == "".
+//
+// The admin bit is carried forward ONLY for a genuine user credential
+// (recallOwner's rule, cmd/rafikid/recall.go): a child-token or any other
+// non-user credential is demoted to non-admin HERE, so a credential that
+// somehow presented an admin bit can never reach the sandbox manager as admin
+// — the adapter's recallOwner demotion is then belt-and-braces, not the only
+// guard. SandboxList is keyed on the owner's USER ID regardless, so admin
+// never widens a fleet read.
 func sandboxCaller(ctx context.Context) (users.Identity, string) {
 	id := server.IdentityFromContext(ctx)
 	if id == nil {
 		return users.Identity{}, ""
 	}
-	owner := users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin}
+	owner := users.Identity{
+		UserID:   id.UserID,
+		Username: id.Username,
+		IsAdmin:  id.IsAdmin && id.IsUserCredential(),
+	}
 	if id.Via == server.ProvenanceChildToken {
 		return owner, id.ChildID
 	}
