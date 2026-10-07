@@ -113,24 +113,35 @@ func (s *Server) Proxy(
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
+	// A pipe body has no known length, so Go would send EVERY request chunked,
+	// including a bodyless one — and docker refuses a chunked container start.
+	// Reading ahead to the first body chunk tells an empty body from a
+	// streamed one: only a request that sends bytes gets the pipe.
+	firstChunk, more := nextProxyBody(stream)
+	var body io.Reader = http.NoBody
 	pr, pw := io.Pipe()
 	defer pr.Close() // unblock the filler goroutine on every return path
-	go func() {
-		defer pw.Close()
-		for {
-			msg, err := stream.Receive()
-			if err != nil {
-				return // io.EOF on half-close: the body is complete
+	if more {
+		body = pr
+		go func() {
+			defer pw.Close()
+			if _, err := pw.Write(firstChunk); err != nil {
+				return
 			}
-			if b := msg.GetBody(); len(b) > 0 {
+			for {
+				b, ok := nextProxyBody(stream)
+				if !ok {
+					return // io.EOF on half-close: the body is complete
+				}
 				if _, err := pw.Write(b); err != nil {
 					return
 				}
 			}
-		}
-	}()
+		}()
+	}
 
-	req, err := http.NewRequestWithContext(ctx, start.GetMethod(), target, pr)
+	req, err := http.NewRequestWithContext(ctx, start.GetMethod(), target, body)
+
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("proxy: build request: %w", err))
 	}
@@ -192,6 +203,21 @@ func (s *Server) Proxy(
 		}
 		if rerr != nil {
 			return connect.NewError(connect.CodeUnavailable, fmt.Errorf("proxy: read response: %w", rerr))
+		}
+	}
+}
+
+// nextProxyBody returns the next non-empty request body chunk, skipping
+// messages that carry none. It reports false once the stream ends or errors,
+// which is how the caller learns the body is complete.
+func nextProxyBody(stream *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) ([]byte, bool) {
+	for {
+		msg, err := stream.Receive()
+		if err != nil {
+			return nil, false
+		}
+		if b := msg.GetBody(); len(b) > 0 {
+			return b, true
 		}
 	}
 }

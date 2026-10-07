@@ -344,3 +344,38 @@ func TestDockerGuardPassesNormalPostThrough(t *testing.T) {
 	c.Eq("/containers/json", rec.path, "upstream path")
 	c.Eq(`{"all":true}`, string(rec.body), "body reached upstream intact")
 }
+
+// A request the caller sent without a body must reach the upstream without
+// one: no chunked transfer encoding and a zero length. Docker refuses a
+// container start that carries a chunked body.
+func TestProxyBodylessRequestIsNotChunked(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	c.NoError(err, "listen")
+	type seen struct {
+		encoding []string
+		length   int64
+	}
+	got := make(chan seen, 1)
+	up := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		got <- seen{encoding: r.TransferEncoding, length: r.ContentLength}
+		w.WriteHeader(204)
+	})}
+	t.Cleanup(func() { _ = up.Close() })
+	go func() { _ = up.Serve(ln) }()
+
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"up": "http://" + ln.Addr().String()},
+	})
+	head, _, err := proxyOnce(t, esrv, "up", "POST", "/containers/abc/start", nil, nil)
+	c.NoError(err, "proxy round trip")
+	c.Require().NotNil(head, "head")
+	c.Eq(int32(204), head.Status, "status")
+
+	s := <-got
+	c.EqDeep([]string(nil), s.encoding, "a bodyless request must not be chunked")
+	c.Eq(int64(0), s.length, "a bodyless request has zero length")
+}
