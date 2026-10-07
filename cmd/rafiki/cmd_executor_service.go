@@ -88,6 +88,10 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 	cmd.Flags().StringArray("proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable) — the main reason to run an executor as a service")
 	cmd.Flags().StringArray("launch", nil, "child protocol this executor will host for the daemon, e.g. --launch claude "+
 		"(repeatable). Opt-in: with no --launch this executor hosts nothing")
+	cmd.Flags().StringArray("sandbox-mount-root", nil, "host directory a sandboxed child's container may bind-mount from "+
+		"(repeatable; absolute, must exist). With no root, no bind is permitted")
+	cmd.Flags().String("relay-dir", "", "absolute directory under which to expose the daemon to sandboxes over a unix "+
+		"socket (created if missing). Requires --connect or --connect-socket")
 	cmd.Flags().String("binary", "", "path to the rafiki binary (default: this one)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
@@ -179,6 +183,23 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	for _, k := range launchKinds {
 		args = append(args, "--launch", k)
+	}
+
+	// Sandbox exposure is validated identically to serve's own flags, before
+	// the unit is written, so an install cannot bake in a root that does not
+	// exist or a relay with no daemon to forward to.
+	relayDirFlag, _ := cmd.Flags().GetString("relay-dir")
+	relayDir, err := resolveSandboxRelayDir(relayDirFlag)
+	if err != nil {
+		return err
+	}
+	sandboxRoots, _ := cmd.Flags().GetStringArray("sandbox-mount-root")
+	args, err = appendSandboxMountRootArgs(args, sandboxRoots)
+	if err != nil {
+		return err
+	}
+	if relayDir != "" {
+		args = append(args, "--relay-dir", relayDir)
 	}
 
 	pathEnv, _ := cmd.Flags().GetString("path-env")
@@ -359,6 +380,24 @@ func appendProxyArgs(args []string, proxies []string) ([]string, error) {
 	}
 	for _, p := range proxies {
 		args = append(args, "--proxy", p)
+	}
+	return args, nil
+}
+
+// appendSandboxMountRootArgs validates --sandbox-mount-root flags (repeatable
+// absolute existing directories) and appends them to args as repeated
+// "--sandbox-mount-root value" pairs for the service unit's argv. Same
+// reasoning as appendProxyArgs: validated at install time so a bad root fails
+// the install rather than the first supervised start.
+func appendSandboxMountRootArgs(args []string, roots []string) ([]string, error) {
+	if len(roots) == 0 {
+		return args, nil
+	}
+	if _, err := resolveSandboxMountRoots(roots); err != nil {
+		return nil, err
+	}
+	for _, r := range roots {
+		args = append(args, "--sandbox-mount-root", r)
 	}
 	return args, nil
 }

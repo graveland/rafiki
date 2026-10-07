@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -20,6 +22,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/sandbox"
+	"go.graveland.dev/rafiki/pkg/sandboxrelay"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -54,6 +58,62 @@ func resolveRoot(root string) (string, error) {
 		wd = abs
 	}
 	return wd, nil
+}
+
+// resolveSandboxMountRoots validates repeated --sandbox-mount-root flags: each
+// must name an absolute path to an existing directory. A relative path or a
+// missing directory is refused up front, naming the flag, because this list is
+// what gates which host paths a sandbox container may bind-mount: a typo that
+// silently matched nothing would surface only later as a refusal deep in the
+// docker proxy guard, far from the flag that caused it.
+func resolveSandboxMountRoots(roots []string) ([]string, error) {
+	out := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
+			return nil, fmt.Errorf("--sandbox-mount-root must not be empty")
+		}
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("--sandbox-mount-root %q must be an absolute path", r)
+		}
+		st, err := os.Stat(r)
+		if err != nil {
+			return nil, fmt.Errorf("--sandbox-mount-root %q: %w", r, err)
+		}
+		if !st.IsDir() {
+			return nil, fmt.Errorf("--sandbox-mount-root %q is not a directory", r)
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// resolveSandboxRelayDir validates --relay-dir: absolute if set. The relay
+// creates the directory if it is missing, so only absoluteness is checked here.
+func resolveSandboxRelayDir(dir string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("--relay-dir %q must be an absolute path", dir)
+	}
+	return dir, nil
+}
+
+// relayDirNeedsDaemon refuses --relay-dir when this command has no daemon
+// address to relay to. The relay is the sandboxes' only link to the daemon, so
+// a relay with nowhere to dial is not a degraded mode but a broken one — better
+// to refuse the start than to bind a socket every sandbox connection dies on.
+// The address may come from --connect, --connect-socket, or a remote
+// $RAFIKI_URL, exactly the sources resolveExecutorConnectFlags accepts.
+func relayDirNeedsDaemon(relayDir, connect, connectSocket string) error {
+	if relayDir == "" {
+		return nil
+	}
+	if connect != "" || connectSocket != "" || executorEnvURL() != "" {
+		return nil
+	}
+	return fmt.Errorf("--relay-dir requires --connect or --connect-socket (or a remote RAFIKI_URL): " +
+		"the relay forwards sandbox connections to the daemon, and there is none to forward to")
 }
 
 // executorProfileProxy resolves a reachable LLM proxy URL for daraja-hosted
@@ -187,9 +247,24 @@ func loadExecutorEnv() {
 // before anything else resolves a default from the environment, so the
 // overrides file's values keep winning over whatever later mutates the
 // process environment, however that mutation happens.
+//
+// The executor's own credential is dropped from the snapshot. It is hygiene,
+// not isolation: a tool subprocess shares this process's /proc, so the value is
+// still readable there by anyone who could read this process's environment
+// anyway. What the drop buys is that a tool that dumps os.environ (or a shell
+// that echoes it) does not hand the executor's durable credential to a child
+// that has no business reconnecting as this machine.
 func executorPinnedEnv() []string {
 	loadExecutorEnv()
-	return os.Environ()
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok && k == sandbox.CredentialEnv {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // skillsSyncEnabled resolves the effective --skills-sync value from the flag,
@@ -291,6 +366,8 @@ func newExecutorServeCmd() *cobra.Command {
 		pymoduleGitSync   bool
 		proxyArgs         []string
 		launchKinds       []string
+		sandboxMountRoots []string
+		relayDir          string
 	)
 
 	cmd := &cobra.Command{
@@ -313,7 +390,23 @@ Two transports, exactly one of which is used:
 
 			pinnedEnv := executorPinnedEnv()
 
+			// The relay has nowhere to forward sandboxes unless this command
+			// already knows how to reach the daemon, so refuse before anything
+			// else resolves a default.
+			if err := relayDirNeedsDaemon(relayDir, connectAddr, connectSocket); err != nil {
+				return err
+			}
+
 			resolvedConnect, resolvedSocket, err := resolveExecutorConnectFlags(connectAddr, connectSocket)
+			if err != nil {
+				return err
+			}
+
+			mountRoots, err := resolveSandboxMountRoots(sandboxMountRoots)
+			if err != nil {
+				return err
+			}
+			resolvedRelayDir, err := resolveSandboxRelayDir(relayDir)
 			if err != nil {
 				return err
 			}
@@ -329,20 +422,22 @@ Two transports, exactly one of which is used:
 			}
 
 			srv := executor.NewServer(executor.Options{
-				Root:            wd,
-				Concurrency:     concurrency,
-				Version:         version.String(),
-				RTK:             tools.ParseRTKMode(rtkMode),
-				SpillDir:        spillDir,
-				JobOutputBudget: jobBudgetMB << 20,
-				LSPConfig:       lspConfig,
-				NoLSP:           noLSP,
-				SkillsSync:      skillsSyncEnabled(cmd, skillsSync, launchKinds),
-				PyModulesSync:   pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
-				PymoduleGitSync: pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
-				Proxies:         proxies,
-				LaunchKinds:     launchKinds,
-				Env:             pinnedEnv,
+				Root:              wd,
+				Concurrency:       concurrency,
+				Version:           version.String(),
+				RTK:               tools.ParseRTKMode(rtkMode),
+				SpillDir:          spillDir,
+				JobOutputBudget:   jobBudgetMB << 20,
+				LSPConfig:         lspConfig,
+				NoLSP:             noLSP,
+				SkillsSync:        skillsSyncEnabled(cmd, skillsSync, launchKinds),
+				PyModulesSync:     pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
+				PymoduleGitSync:   pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
+				Proxies:           proxies,
+				LaunchKinds:       launchKinds,
+				SandboxMountRoots: mountRoots,
+				SandboxRelayDir:   resolvedRelayDir,
+				Env:               pinnedEnv,
 			})
 			defer func() { _ = srv.Close() }()
 
@@ -397,8 +492,8 @@ Two transports, exactly one of which is used:
 
 			// resolveExecutorConnectFlags already guarantees exactly one of
 			// these is set, or returned an error above.
-			return serveReverseDial(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
-				enrollToken, credential, credentialFile, handler)
+			return serveWithRelay(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
+				enrollToken, credential, credentialFile, resolvedRelayDir, handler)
 		},
 	}
 
@@ -452,23 +547,34 @@ Two transports, exactly one of which is used:
 		"SHA-256 fingerprint of the daemon's leaf certificate. Pins the leaf instead of verifying against system roots — use for a self-signed or internal-CA daemon")
 	cmd.Flags().StringVar(&serverName, "server-name", "",
 		"TLS server name (SNI) to present, when it differs from the host in --connect. Needed when dialling an IP or a node port while the certificate names a hostname")
+	cmd.Flags().StringArrayVar(&sandboxMountRoots, "sandbox-mount-root", nil,
+		"host directory a sandboxed child's container may bind-mount from (repeatable; absolute, must exist). "+
+			"A bind outside every root and the --relay-dir is refused. With no root, no bind is permitted")
+	cmd.Flags().StringVar(&relayDir, "relay-dir", "",
+		"absolute directory under which to expose the daemon to sandboxes over a unix socket "+
+			"(created if missing). Requires --connect or --connect-socket")
 
 	return cmd
 }
 
-func serveReverseDial(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) error {
-	// The default deliberately does NOT sit under --root. It used to
-	// (`<root>/.rafiki-executor-credential`), which put the executor's own
-	// credential inside the very directory tree its file tools operate on — and
-	// native executors have no path scoping, by design. An agent running on the
-	// executor could read it and reconnect as that machine, including after an
-	// operator disabled it. paths.DataDir is for state that must survive a
+// executorConnectOptions builds the ConnectOptions this command dials the
+// daemon with. It is shared by the executor's own reverse dial and the relay's
+// per-connection dial, so both reach the same listener the same way; the relay
+// only ever calls DialDaemon on it, which reads the dial fields and ignores the
+// handler and credential.
+func executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) execpool.ConnectOptions {
+	// The credential-file default deliberately does NOT sit under --root. It
+	// used to (`<root>/.rafiki-executor-credential`), which put the executor's
+	// own credential inside the very directory tree its file tools operate on —
+	// and native executors have no path scoping, by design. An agent running on
+	// the executor could read it and reconnect as that machine, including after
+	// an operator disabled it. paths.DataDir is for state that must survive a
 	// reboot, which a credential must: losing it means re-enrolling by hand.
 	credFile := credentialFile
 	if credFile == "" && credential == "" {
 		credFile = filepath.Join(paths.DataDir(), "executor.cred")
 	}
-	if err := execpool.Connect(ctx, execpool.ConnectOptions{
+	return execpool.ConnectOptions{
 		Addr:           addr,
 		SocketPath:     socketPath,
 		PinCert:        pinCert,
@@ -482,8 +588,57 @@ func serveReverseDial(ctx context.Context, addr, socketPath, pinCert, serverName
 			"version": version.String(),
 		},
 		Handler: handler,
-	}); err != nil {
+	}
+}
+
+func serveReverseDial(ctx context.Context, opts execpool.ConnectOptions) error {
+	if err := execpool.Connect(ctx, opts); err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	return nil
+}
+
+// serveWithRelay runs the executor's reverse dial for the life of the command
+// and, when a relay dir was given, a sandbox relay alongside it.
+//
+// The relay is the sandboxes' only link to the daemon, so it is not a
+// best-effort sidecar: a Serve error (other than the clean return of a
+// cancelled context) is logged and ends the command nonzero, and a relay that
+// stops takes the reverse dial down with it rather than leaving a socket that
+// accepts connections into nothing.
+func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, relayDir string, handler http.Handler) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	connErr := make(chan error, 1)
+	go func() {
+		connErr <- serveReverseDial(ctx, executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, handler))
+	}()
+
+	if relayDir == "" {
+		return <-connErr
+	}
+
+	// The relay dials the SAME daemon the reverse dial does, with the same TLS
+	// posture; only the per-connection fields matter here.
+	dialOpts := executorConnectOptions(addr, socketPath, pinCert, serverName, "", "", "", nil)
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- sandboxrelay.Serve(ctx, relayDir, func(dctx context.Context) (net.Conn, error) {
+			return execpool.DialDaemon(dctx, dialOpts)
+		})
+	}()
+
+	select {
+	case err := <-relayErr:
+		cancel()
+		if err != nil {
+			slog.Error("sandbox relay stopped; ending executor serve", "error", err)
+			return fmt.Errorf("sandbox relay: %w", err)
+		}
+		return <-connErr
+	case err := <-connErr:
+		cancel()
+		return err
+	}
 }

@@ -160,6 +160,17 @@ func TestLoadExecutorEnvAppliesFileWithoutOverridingProcess(t *testing.T) {
 func TestExecutorPinnedEnvCarriesOverridesAndShrugsOffDrift(t *testing.T) {
 	dir := t.TempDir()
 
+	// loadExecutorEnv writes the overrides file's values into the PROCESS
+	// environment (that is the feature), so restore PATH and the sentinel
+	// afterwards: a later test in this package would otherwise inherit
+	// PATH=/pinned/bin, and TestClientDoesNotLinkPostgres shells out to `go`.
+	origPath, hadPath := os.LookupEnv("PATH")
+	origPin, hadPin := os.LookupEnv("EXECUTOR_PIN_TEST_VAR")
+	t.Cleanup(func() {
+		restoreEnvValue("PATH", origPath, hadPath)
+		restoreEnvValue("EXECUTOR_PIN_TEST_VAR", origPin, hadPin)
+	})
+
 	overrides := filepath.Join(dir, "executor-overrides.env")
 	c := assert.NewCollecting(t)
 	c.Require().NoError(os.WriteFile(overrides,
@@ -188,4 +199,54 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// restoreEnvValue puts key back to value (or unsets it) after a test mutated
+// the process environment, so a later test in the package does not inherit it.
+func restoreEnvValue(key, value string, had bool) {
+	if had {
+		_ = os.Setenv(key, value)
+		return
+	}
+	_ = os.Unsetenv(key)
+}
+
+// The executor's own credential must not ride into the environment of the tool
+// subprocesses it spawns: hygiene, not isolation — it is still readable from
+// /proc — but a tool that dumps os.environ must not hand a child this machine's
+// durable credential.
+func TestExecutorPinnedEnvDropsTheCredential(t *testing.T) {
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+	// Keep both environment files out of the way for a deterministic snapshot.
+	t.Setenv(paths.ExecutorEnvFileEnv, filepath.Join(dir, "absent-executor.env"))
+	t.Setenv(paths.ExecutorOverridesFileEnv, filepath.Join(dir, "absent-overrides.env"))
+	t.Setenv("RAFIKI_EXECUTOR_CREDENTIAL", "sekret-credential-value")
+	t.Setenv("EXECUTOR_PIN_TEST_KEEP", "keep-me")
+
+	pinned := executorPinnedEnv()
+	c.Eq("", envValue(pinned, "RAFIKI_EXECUTOR_CREDENTIAL"), "the executor's own credential must be dropped from the pinned environment")
+	c.Eq("keep-me", envValue(pinned, "EXECUTOR_PIN_TEST_KEEP"), "every other variable must survive the drop")
+}
+
+func TestExecutorServiceAppendSandboxMountRootArgsNoopWhenEmpty(t *testing.T) {
+	c := assert.NewAborting(t)
+	args := []string{"executor", "serve"}
+	got, err := appendSandboxMountRootArgs(args, nil)
+	c.NoError(err, "appendSandboxMountRootArgs")
+	c.EqDiff(args, got, "got")
+}
+
+func TestExecutorServiceAppendSandboxMountRootArgsAppendsEachAsARepeatedFlag(t *testing.T) {
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+	got, err := appendSandboxMountRootArgs([]string{"executor", "serve"}, []string{dir})
+	c.NoError(err, "appendSandboxMountRootArgs")
+	want := []string{"executor", "serve", "--sandbox-mount-root", dir}
+	c.EqDiff(want, got, "got")
+}
+
+func TestExecutorServiceAppendSandboxMountRootArgsRejectsRelativeBeforeInstalling(t *testing.T) {
+	_, err := appendSandboxMountRootArgs([]string{"executor", "serve"}, []string{"relative/root"})
+	assert.NewAborting(t).Error(err, "expected an error for a relative --sandbox-mount-root")
 }

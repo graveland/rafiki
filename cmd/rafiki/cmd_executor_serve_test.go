@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -183,4 +184,67 @@ func TestPymoduleSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
 
 func TestPymoduleGitSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
 	assert.NewCollecting(t).False(pymoduleGitSyncFromArgv(t, []string{"--launch", "script", "--pymodule-git-sync=false"}, ""), "an explicit --pymodule-git-sync=false must beat the --launch script implication")
+}
+
+// --relay-dir binds a socket every sandbox connection is spliced through, so a
+// relay with nowhere to dial is refused rather than started. The daemon address
+// may come from --connect, --connect-socket, or a remote RAFIKI_URL — the same
+// three sources resolveExecutorConnectFlags accepts.
+func TestExecutorServeRelayDirRequiresConnect(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("RAFIKI_URL", "")
+
+	err := relayDirNeedsDaemon("/srv/relay", "", "")
+	c.Error(err, "--relay-dir with no daemon address must be refused")
+	c.StrContains(err.Error(), "--relay-dir", "the refusal must name the flag")
+	c.StrContains(err.Error(), "--connect", "the refusal must say what is missing")
+
+	c.NoError(relayDirNeedsDaemon("", "", ""), "no relay dir imposes no requirement")
+	c.NoError(relayDirNeedsDaemon("/srv/relay", "daemon.example.com:8443", ""), "--connect must satisfy the requirement")
+	c.NoError(relayDirNeedsDaemon("/srv/relay", "", "/run/rafikid.sock"), "--connect-socket must satisfy the requirement")
+
+	t.Setenv("RAFIKI_URL", "https://rafiki.example.net")
+	c.NoError(relayDirNeedsDaemon("/srv/relay", "", ""), "a remote RAFIKI_URL must satisfy the requirement")
+}
+
+// --sandbox-mount-root gates which host paths a container may bind-mount, so a
+// relative or missing root is refused up front rather than surfacing much later
+// as an opaque refusal in the docker proxy guard.
+func TestExecutorServeResolveSandboxMountRootsValidatesEachRoot(t *testing.T) {
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+
+	got, err := resolveSandboxMountRoots([]string{dir})
+	c.NoError(err, "an absolute existing directory must be accepted")
+	c.EqDeep([]string{dir}, got, "the accepted roots must be returned verbatim")
+
+	_, err = resolveSandboxMountRoots([]string{"relative/path"})
+	c.Require().Error(err, "a relative root must be refused")
+	c.StrContains(err.Error(), "--sandbox-mount-root", "the refusal must name the flag")
+
+	_, err = resolveSandboxMountRoots([]string{filepath.Join(dir, "does-not-exist")})
+	c.Require().Error(err, "a missing root must be refused")
+	c.StrContains(err.Error(), "--sandbox-mount-root", "the refusal must name the flag")
+
+	file := filepath.Join(dir, "a-file")
+	c.Require().NoError(os.WriteFile(file, []byte("x"), 0o644))
+	_, err = resolveSandboxMountRoots([]string{file})
+	c.Require().Error(err, "a path that is not a directory must be refused")
+}
+
+// --relay-dir is made by the relay if missing, so only absoluteness is checked.
+func TestExecutorServeResolveSandboxRelayDirRequiresAbsolute(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	got, err := resolveSandboxRelayDir("")
+	c.NoError(err)
+	c.Eq("", got, "an unset relay dir stays unset")
+
+	got, err = resolveSandboxRelayDir("/srv/relay")
+	c.NoError(err)
+	c.Eq("/srv/relay", got, "an absolute relay dir is accepted as given")
+
+	_, err = resolveSandboxRelayDir("relay")
+	c.Require().Error(err, "a relative relay dir must be refused")
+	c.StrContains(err.Error(), "--relay-dir", "the refusal must name the flag")
 }
