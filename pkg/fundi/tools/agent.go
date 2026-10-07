@@ -91,6 +91,14 @@ type SpawnSpec struct {
 	// tool before its first turn, recorded as real tool_use/tool_result
 	// history. Nil means no pre-fill; an empty non-nil list is refused.
 	Prefill []protocol.PrefillRead
+
+	// Sandbox, when set, is the spawn block's sandbox: the new child's executor
+	// is provisioned into a container described by it, and that container's
+	// executor is offered to the child (ScopeSelf) or its subtree
+	// (ScopeSubtree). Nil means the child runs on the ordinary executor set.
+	// It carries no Name and no TTL — both are named-sandbox-only fields the
+	// daemon refuses on a spawn block.
+	Sandbox *protocol.SandboxSpec
 }
 
 // SendSpec is one agent_send: the message and the steps the daemon runs at

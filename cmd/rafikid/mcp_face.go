@@ -277,6 +277,21 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 			opts.Presets = newPresetBinding(ctrl, owner.UserID, "")
 		}
 	}
+	// The sandbox verbs need only the sandbox table, so they decline on a
+	// DB-less daemon (nil sandboxStore) -- the same nil-means-decline rule as
+	// Presets. A per-child caller binds its own child id and its owner's
+	// NON-admin identity through sandboxOwnerIdentity, exactly as the Connect
+	// adapter does, so the Connect child credential and this face grant the same
+	// set (TestMCPSandboxMatchesConnectChildPolicy). callerChild mirrors
+	// connectapi's sandboxCaller: a ProvenanceChildToken caller contributes its
+	// child id, every other credential "".
+	if ctrl.sandboxStore != nil {
+		callerChild := ""
+		if isChild {
+			callerChild = id.ChildID
+		}
+		opts.Sandboxes = newMCPSandboxes(ctrl, owner, callerChild)
+	}
 	// Recall + memory tools, bound to the caller's owner the same way the
 	// conversation reader is: an admin's conversation-derived hits cover the
 	// whole daemon, but only for a real user credential; a named user's are
@@ -402,6 +417,9 @@ var mcpBlueprints = []tools.Tool{
 	&tools.AgentModelsBlueprint{},
 	&tools.AgentReportBlueprint{},
 	&tools.AgentResultBlueprint{},
+	&tools.SandboxCreateBlueprint{},
+	&tools.SandboxListBlueprint{},
+	&tools.SandboxRemoveBlueprint{},
 	&tools.TaskAddBlueprint{},
 	&tools.TaskUpdateBlueprint{},
 	&tools.TaskDropBlueprint{},

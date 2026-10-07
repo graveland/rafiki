@@ -37,7 +37,16 @@ const agentSpawnDescription = "Spawn a subagent to do a piece of work in paralle
 	"spawn one for a step you could just do.\n\n" +
 	"Prefer `preset` to choosing a model yourself: a preset (see preset_list) " +
 	"fixes the operator's seat policy for a role, and your other fields narrow " +
-	"what it grants."
+	"what it grants.\n\n" +
+	"Pass `sandbox` to give the worker a fresh, isolated container instead of " +
+	"running it on your own machine: the new agent's executor is provisioned into " +
+	"a sandbox described by the block, with its own mounts, network and resource " +
+	"limits (see sandbox_create for the field meanings — `ro` mounts cannot be " +
+	"written even by root, `network: none` means no network, and a host_path must " +
+	"sit under a directory the launcher's operator allowed). `sandbox.scope` is " +
+	"required: \"self\" offers the container only to the new agent, \"subtree\" " +
+	"also to its own descendants. If the sandbox cannot be created the spawn is " +
+	"refused — the agent never starts toolless or on your own machine instead."
 
 type AgentSpawnBlueprint struct{}
 
@@ -113,6 +122,37 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"cost you almost nothing to send; use this instead of pasting file contents into prompt. " +
 					"Put CLAUDE.md or skill files here too, with ranges. The agent does not need the read tool " +
 					"for this: a tool-less agent gets the files as text under `=== <path> ===` headers."},
+			{Name: "sandbox", Type: "object",
+				Description: "Run the new agent inside a fresh, isolated container it cannot escape: its executor is provisioned into a sandbox with the mounts, network and limits below. `scope` is required: \"self\" offers the container only to the new agent, \"subtree\" also to its descendants. A `ro` mount cannot be written even by root in the container, `network: none` means no network at all, and a host_path must sit under a directory the launcher's operator allowed. If the sandbox cannot be created the spawn is refused.",
+				Properties: []SchemaProperty{
+					{Name: "scope", Type: "string", Enum: []string{"self", "subtree"},
+						Description: "How far the sandbox's executor is offered: \"self\" (the new agent only) or \"subtree\" (the new agent and its descendants). Required."},
+					{Name: "image", Type: "string",
+						Description: "Container image to run; it must run `rafiki executor serve`. Omit for the daemon's configured default."},
+					{Name: "launcher", Type: "string",
+						Description: "Which docker launcher to create it on, by machine label or executor id. Omit when only one is in scope."},
+					{Name: "workdir", Type: "string",
+						Description: "Absolute working directory inside the container. Omit for the image's default."},
+					{Name: "mounts", Type: "array", Items: sandboxMountSchema(),
+						Description: "Directories to make visible inside the container. Each is {target, kind, host_path, volume}; kind (ro/rw/ephemeral) is required."},
+					{Name: "network", Type: "string", Enum: []string{"egress", "none"},
+						Description: "\"egress\" reaches the network (the default); \"none\" means no network at all."},
+					{Name: "read_only_rootfs", Type: "boolean",
+						Description: "true to mount the container's root filesystem read-only, so only the mounts are writable."},
+					{Name: "env", Type: "object",
+						Description: "Environment variables for the container, as a JSON object of name to value. RAFIKI_ keys are reserved."},
+					{Name: "user", Type: "string",
+						Description: "uid or uid:gid the container runs as. Omit for the image's default."},
+					{Name: "labels", Type: "object",
+						Description: "Labels to attach, as a JSON object of name to value. rafiki/ and fundi/ keys are reserved."},
+					{Name: "memory_bytes", Type: "integer",
+						Description: "Memory limit in bytes (e.g. 2147483648 for 2 GiB). Omit for no explicit limit."},
+					{Name: "cpus", Type: "number",
+						Description: "CPU limit as a count of cores (e.g. 2 or 0.5). Omit for no explicit limit."},
+					{Name: "pids_limit", Type: "integer",
+						Description: "Maximum number of processes in the container. Omit for no explicit limit."},
+				},
+				Required: []string{"scope"}},
 		},
 		Required: []string{"prompt"},
 	}
@@ -137,25 +177,26 @@ type agentSpawnTool struct {
 
 func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var params struct {
-		Prompt             string    `json:"prompt"`
-		Name               string    `json:"name,omitempty"`
-		Model              string    `json:"model,omitempty"`
-		Cwd                string    `json:"cwd,omitempty"`
-		Task               string    `json:"task,omitempty"`
-		Kind               string    `json:"kind,omitempty"`
-		MaxDepth           *int      `json:"max_depth,omitempty"`
-		MaxCost            *float64  `json:"max_cost,omitempty"`
-		MaxChildren        *int      `json:"max_children,omitempty"`
-		Executor           string    `json:"executor,omitempty"`
-		Workspace          string    `json:"workspace,omitempty"`
-		Preset             string    `json:"preset,omitempty"`
-		Thinking           string    `json:"thinking,omitempty"`
-		AppendSystemPrompt string    `json:"append_system_prompt,omitempty"`
-		Tools              *[]string `json:"tools,omitempty"`
-		Skills             *[]string `json:"skills,omitempty"`
-		MCPServers         *[]string `json:"mcp_servers,omitempty"`
-		ContextFiles       *bool     `json:"context_files,omitempty"`
-		Prefill            []string  `json:"prefill,omitempty"`
+		Prompt             string             `json:"prompt"`
+		Name               string             `json:"name,omitempty"`
+		Model              string             `json:"model,omitempty"`
+		Cwd                string             `json:"cwd,omitempty"`
+		Task               string             `json:"task,omitempty"`
+		Kind               string             `json:"kind,omitempty"`
+		MaxDepth           *int               `json:"max_depth,omitempty"`
+		MaxCost            *float64           `json:"max_cost,omitempty"`
+		MaxChildren        *int               `json:"max_children,omitempty"`
+		Executor           string             `json:"executor,omitempty"`
+		Workspace          string             `json:"workspace,omitempty"`
+		Preset             string             `json:"preset,omitempty"`
+		Thinking           string             `json:"thinking,omitempty"`
+		AppendSystemPrompt string             `json:"append_system_prompt,omitempty"`
+		Tools              *[]string          `json:"tools,omitempty"`
+		Skills             *[]string          `json:"skills,omitempty"`
+		MCPServers         *[]string          `json:"mcp_servers,omitempty"`
+		ContextFiles       *bool              `json:"context_files,omitempty"`
+		Prefill            []string           `json:"prefill,omitempty"`
+		Sandbox            *spawnSandboxParam `json:"sandbox,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -191,6 +232,14 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		prefillReads = parsed
 	}
 
+	// The spawn-block sandbox is parsed at the tool, so a malformed block fails
+	// the call rather than failing inside the daemon's admission; an absent
+	// field (nil) means the child runs on the ordinary executor set.
+	sandbox, err := buildSpawnSandbox(params.Sandbox)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)
+	}
+
 	// SpawnSpec carries no parent. The implementation supplies the caller's
 	// own id, which it closed over at construction.
 	info, err := t.agents.Spawn(ctx, SpawnSpec{
@@ -213,6 +262,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		MCPServers:         params.MCPServers,
 		ContextFiles:       params.ContextFiles,
 		Prefill:            prefillReads,
+		Sandbox:            sandbox,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)

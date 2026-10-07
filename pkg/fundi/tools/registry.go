@@ -296,6 +296,15 @@ type ToolOpts struct {
 	// LLM that can be prompt-injected into naming somebody else.
 	Agents AgentSpawner
 
+	// Sandboxes, when non-nil, gives this agent the sandbox_create/list/remove
+	// tools. nil means the daemon has no sandbox table (a DB-less daemon), so
+	// the three decline to materialize — the same nil-means-decline rule as
+	// Agents. Like Agents it is bound to ONE caller at construction and takes no
+	// caller identity in any method: the daemon closes over the child id and the
+	// owner's NON-admin identity, so a tool argument can never name a different
+	// owner or act as an operator.
+	Sandboxes SandboxManager
+
 	// Parent, when non-nil, gives this caller agent_report and agent_result.
 	Parent ParentReporter
 

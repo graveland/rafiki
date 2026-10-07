@@ -129,6 +129,14 @@ var tierByTool = map[string]Tier{
 
 	// Daemon — annotates the executor's own database row.
 	"executor_annotate": TierDaemon,
+
+	// Daemon — the sandbox verbs touch the daemon's sandbox table and the
+	// executor pool, never the caller's filesystem: the container they name
+	// runs on the launcher's machine, so the effect is the same wherever the
+	// agent runs.
+	"sandbox_create": TierDaemon,
+	"sandbox_list":   TierDaemon,
+	"sandbox_remove": TierDaemon,
 }
 
 // notRoutedYet names workspace tools the parent does not forward to an executor.

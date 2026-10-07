@@ -409,6 +409,10 @@ func applySpawnSpecShaping(req *protocol.SpawnRequest, spec tools.SpawnSpec) {
 		req.NoContextFiles = true
 	}
 	req.Prefill = spec.Prefill
+	// The spawn-block sandbox rides through verbatim: it is the new child's
+	// container description, and the daemon validates it (host paths bounded by
+	// the launcher's roots, resources clamped for a child) in Controller.Spawn.
+	req.Sandbox = spec.Sandbox
 }
 
 // Spawn creates a descendant. ParentChildID is the caller's own id, taken
