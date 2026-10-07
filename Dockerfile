@@ -48,6 +48,24 @@ RUN set -eux; \
 
 
 
+FROM debian:trixie-slim AS sandbox
+
+# Image for sandboxed executors and the sandbox relay foothold. Both launch it
+# with an explicit `rafiki` entrypoint (pkg/sandbox/createbody.go,
+# pkg/foothold/foothold.go), so it carries no rafikid.
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r -g 1000 rafiki && useradd -r -m -u 1000 -g rafiki -s /bin/bash rafiki
+
+COPY --from=build /out/rafiki /usr/local/bin/rafiki
+COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
+
+USER rafiki
+
+ENTRYPOINT ["rafiki"]
+
+
 FROM debian:trixie-slim AS release
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep \
