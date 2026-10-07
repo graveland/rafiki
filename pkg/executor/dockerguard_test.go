@@ -4,6 +4,7 @@ package executor
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -87,6 +88,47 @@ func TestDockerGuardAllowsRelayDir(t *testing.T) {
 	c := assert.NewCollecting(t)
 	relay := t.TempDir()
 	c.NoError(checkCreateBody(createBody(t, bindMount(relay, "/relay")), nil, relay), "bind exactly the relay dir")
+}
+
+// TestDockerGuardRefusesSocketUnderRoot: a bind of a unix socket still permits
+// connect(), so a socket under a declared root (docker.sock, a controller or
+// executor socket) is a full escape and must be refused by FILE TYPE, not path.
+func TestDockerGuardRefusesSocketUnderRoot(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// A unix socket path must stay under the ~104-byte sun_path limit; on macOS
+	// the default temp dir resolves through /private/var/folders/…, so use /tmp.
+	base := "/tmp"
+	if _, err := os.Stat(base); err != nil {
+		base = os.TempDir()
+	}
+	root, err := os.MkdirTemp(base, "rafiki-guard-")
+	c.Require().NoError(err, "mkdirtemp")
+	t.Cleanup(func() { os.RemoveAll(root) })
+	sock := filepath.Join(root, "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	c.Require().NoError(err, "listen on a unix socket under the root")
+	t.Cleanup(func() { _ = ln.Close() })
+
+	err = checkCreateBody(createBody(t, bindMount(sock, "/sock")), []string{root}, "")
+	c.Require().Error(err, "a socket bind source must be refused")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+	c.StrContains(err.Error(), "socket", "the refusal names the file type: %v", err)
+}
+
+// TestDockerGuardAllowsDirectoryAndRegularFileUnderRoot: the type check refuses
+// only the irregular shapes; the ordinary directory and file binds still pass.
+func TestDockerGuardAllowsDirectoryAndRegularFileUnderRoot(t *testing.T) {
+	c := assert.NewCollecting(t)
+	root := t.TempDir()
+	sub := filepath.Join(root, "data")
+	c.Require().NoError(os.Mkdir(sub, 0o755), "mkdir")
+	file := filepath.Join(root, "notes.txt")
+	c.Require().NoError(os.WriteFile(file, []byte("hi"), 0o600), "write file")
+
+	c.NoError(checkCreateBody(createBody(t, bindMount(sub, "/data")), []string{root}, ""),
+		"a directory source is allowed")
+	c.NoError(checkCreateBody(createBody(t, bindMount(file, "/notes")), []string{root}, ""),
+		"a regular file source is allowed")
 }
 
 func TestDockerGuardAllowsVolumeAndTmpfs(t *testing.T) {

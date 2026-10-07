@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -291,6 +292,25 @@ func scanDuplicateKeys(dec *json.Decoder) error {
 	}
 }
 
+// bindSourceTypeName names a file mode for the refusal above: the four shapes
+// the type check distinguishes, in the words an operator would use.
+func bindSourceTypeName(m os.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m.IsRegular():
+		return "regular file"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeDevice != 0:
+		return "device"
+	case m&os.ModeNamedPipe != 0:
+		return "named pipe"
+	default:
+		return "irregular file"
+	}
+}
+
 // mountString extracts a string field from a decoded mount, refusing a
 // wrong-typed value rather than silently treating it as empty.
 func mountString(m map[string]json.RawMessage, key string) (string, error) {
@@ -316,6 +336,24 @@ func checkBindSource(src string, roots []string, relayDir string) error {
 	if err != nil {
 		return connect.NewError(connect.CodePermissionDenied,
 			fmt.Errorf("sandbox: bind source %q cannot be resolved: %v", src, err))
+	}
+
+	// A bind of a unix SOCKET still permits connect(): a root containing
+	// docker.sock, the daemon's controller.sock, an executor socket or a
+	// credential file would be a full escape for every child of the launcher's
+	// owner. The path checks below cannot see that — only the file type can — so
+	// after resolving, refuse anything that is not a regular file or a
+	// directory (socket, device, named pipe, irregular). This is the LAUNCHER's
+	// check, on the launcher's host: the daemon's own pre-check (pkg/sandbox's
+	// Validate) stays LEXICAL, because it cannot stat a path on another machine.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return connect.NewError(connect.CodePermissionDenied,
+			fmt.Errorf("sandbox: bind source %q cannot be inspected: %v", src, err))
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return connect.NewError(connect.CodePermissionDenied,
+			fmt.Errorf("sandbox: bind source %q is a %s, not a regular file or directory: a socket, device or fifo under a mount root is a capability grant, not data", src, bindSourceTypeName(info.Mode())))
 	}
 
 	// Roots first: a source under a declared root passes without the relay dir
