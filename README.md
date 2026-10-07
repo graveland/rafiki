@@ -936,6 +936,12 @@ must have the `rafiki` binary on `PATH` (and whatever the agent's tools need);
 the daemon pulls the image if it is absent. `RAFIKI_SANDBOX_IMAGE` overrides the default image
 (`ghcr.io/graveland/rafiki-sandbox:latest`, the Dockerfile's `sandbox` target,
 published by `.github/workflows/images.yml`); a create may still pass `--image`.
+The default image is a general-purpose working machine: common process,
+network and archive tools, a C toolchain, Python with `uv`, Node, and the
+latest stable Go and Rust (Rust and the user-level `PATH` live under the
+non-root `rafiki` user's home, so `cargo install`, `go install` and `npm -g`
+work without root). It is rebuilt without cache every Monday so Debian security
+fixes and new Go/Rust releases land without a merge.
 
 Create, list and remove **named** sandboxes from the CLI (they go through the
 daemon — the client never dials a sandbox directly):

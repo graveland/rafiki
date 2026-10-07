@@ -7,6 +7,8 @@ on:
       - 'docs/**'
       - '*.md'
   workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * 1'
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/rafiki-sandbox
@@ -59,6 +61,10 @@ jobs:
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          # A scheduled run exists to re-resolve the apt packages and the
+          # latest Go/Rust, which a cached layer would silently pin.
+          no-cache: ${{ github.event_name == 'schedule' }}
+          pull: ${{ github.event_name == 'schedule' }}
 
       - name: Export digest
         run: |
@@ -109,6 +115,7 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
+            type=schedule,pattern=weekly-{{date 'YYYYMMDD'}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Create the multi-arch manifest
