@@ -871,12 +871,22 @@ rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
 - `--sandbox-mount-root` (repeatable) is the ONLY set of host paths a sandbox
   may bind-mount; a `host_path` mount outside every root is refused, both by
   the daemon (pre-check) and by the launcher (re-check). With no root, no host
-  path may be mounted.
+  path may be mounted. A root is a read grant of EVERYTHING under it, to every
+  child of the owner, so a root must not contain a socket or a credential: a
+  bind source that is not a regular file or a directory (a socket, device or
+  fifo) is refused by the launcher, because an `ro` bind of a unix socket still
+  permits `connect()`.
 - `--relay-dir` makes the launcher bind `<dir>/daemon.sock` and splice each
-  sandbox's connection to a fresh authenticated dial of the daemon. It
+  sandbox's connection to a fresh dial of the daemon (TLS/pin applied when the
+  daemon is remote; nothing authenticates the LAUNCHER on the relayed
+  connection — the sandbox's own credential is the only auth). It
   requires `--connect`/`--connect-socket` (or a remote `RAFIKI_URL`) — a relay
   with no daemon to dial refuses to start, because a sandbox's only link back
-  is that socket.
+  is that socket. The relay re-exports the executor's own `0177` socket at
+  `0666` inside a `0755` directory, so every local user on the launcher host
+  (and every container that can see the relay dir) can reach the executor and
+  daraja Upgrade routes through it — credential-gated, but a deliberate
+  widening worth knowing about.
 - The launcher's `docker` proxy inspects every container-create body against a
   fail-closed allowlist (exactly the fields the daemon emits, no duplicate
   keys, bind sources symlink-resolved under a mount root), so a body that asks
@@ -900,12 +910,21 @@ rafiki sandbox rm work
 
 A named sandbox has a TTL and always expires. A sandbox bound to a child as a
 **spawn block** (`SpawnRequest.sandbox`; fundi/MCP expose it as an
-`agent_spawn` field) is created, listed and removed with its child instead, and
-is never managed by `rafiki sandbox`.
+`agent_spawn` field) is created and removed with its child, but it is not
+invisible to the CLI: `rafiki sandbox ls` shows spawn-block rows too (their
+`owner_child` names the child), and `rafiki sandbox rm <id>` removes one (the
+spawning child, or any of its ancestors, may also remove it). A spawn block is
+unnamed and has no TTL.
+
+A sandboxed child's working directory is a path **inside the container**: the
+executor runs in the container and cannot see a host path, so a spawn block's
+`cwd` is rewritten to the sandbox's `workdir` (the container root when the spec
+names none), and a NAMED sandbox's `workdir` is resolved from its row. Nothing
+else needs to be done; passing a host `cwd` cannot break a sandboxed child.
 
 Defaults and limits come from the daemon's environment — `RAFIKI_SANDBOX_IMAGE`,
 `_NETWORK`, `_TTL`, `_MAX_TTL`, `_MAX_PER_OWNER`, `_SWEEP_INTERVAL`, and the
-per-child clamp `_CHILD_MAX_MEMORY_BYTES`/`_CHILD_MAX_CPUS`/`_CHILD_MAX_PIDS`
+per-child caps `_CHILD_MAX_MEMORY_BYTES`/`_CHILD_MAX_CPUS`/`_CHILD_MAX_PIDS`
 (see `.env.example`). `RAFIKI_SANDBOX_MAX_PER_OWNER` caps the live sandboxes one
 owner may hold and **counts spawn blocks too** (a block holds a cap slot like a
 named sandbox); 0 means unlimited. Mounts, network, resource limits,

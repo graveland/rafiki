@@ -404,9 +404,9 @@ defined under "Who may call what" below; each row names its own.
 | `RevokeToken` | unary · userOnly | Tombstone one credential by id (`revoked_at`); already-revoked answers the unchanged row. Owner or admin; on a live daemon the revocation also cuts that token's open streams (§"Token revocation and open streams") |
 | `GetStreams` | unary · userOnly | A live child's raw, uncompressed stdin/stderr capture, for debugging (§"The raw child channel") |
 | `SendFrame` | unary · userOnly | Forward a raw child-protocol frame to a live child's stdin, verbatim and uninspected, for debugging and scripting (§"The raw child channel"). userOnly — children use `Send` |
-| `CreateSandbox` | unary · childScoped | Create a named sandbox — a container, created by a launcher executor's declared `docker` proxy, that runs `rafiki executor serve` and enrolls as an ordinary executor. `spec` is a `SandboxSpec` (`name` required; `image` defaults to the daemon's `RAFIKI_SANDBOX_IMAGE`; a `host_path` mount must sit under the launcher's `--sandbox-mount-root`; a child caller's memory/cpu/pids are clamped by `RAFIKI_SANDBOX_CHILD_MAX_*`). The owner is resolved from the credential — a per-child credential creates under its owner's NON-admin identity. Blocks until the sandbox's executor joins the pool (a 60 s budget) and returns the row; every failure rolls back. `CodeInvalidArgument` when no `docker` launcher is in scope, the owner's cap (`RAFIKI_SANDBOX_MAX_PER_OWNER`, which counts spawn blocks too) is reached, or the spec fails validation |
+| `CreateSandbox` | unary · childScoped | Create a named sandbox — a container, created by a launcher executor's declared `docker` proxy, that runs `rafiki executor serve` and enrolls as an ordinary executor. `spec` is a `SandboxSpec` (`name` required; `image` defaults to the daemon's `RAFIKI_SANDBOX_IMAGE` and must be a plausible image reference; a `host_path` mount must sit under the launcher's `--sandbox-mount-root`; a child caller's memory/cpu/pids are bounded by `RAFIKI_SANDBOX_CHILD_MAX_*` — an omitted or 0 value takes the cap, an over-cap value is REFUSED). The owner is resolved from the credential — a per-child credential creates under its owner's NON-admin identity. Blocks until the sandbox's executor joins the pool (a 60 s budget) and returns the row; every failure rolls back. `CodeInvalidArgument` when no `docker` launcher is in scope, the owner's cap (`RAFIKI_SANDBOX_MAX_PER_OWNER`, which counts spawn blocks too) is reached, or the spec fails validation |
 | `ListSandboxes` | unary · ownerScoped | The CALLER'S OWNER's live sandboxes — never an admin's whole fleet. The list is keyed on the owner's user id, so a local (unix-socket) caller, whose identity is empty, sees only the sandboxes owned by that local identity. `state` is one of `creating`/`ready`/`lost`/`removing`; a `ready` row whose executor is gone is reported `lost` when its launcher is live and confirms the container is missing (and that downgrade is persisted) |
-| `RemoveSandbox` | unary · childScoped | Remove one of the owner's live sandboxes by `ref` (name, then row id). An operator credential (`callerChild` empty) may remove any of the owner's rows; a per-child credential may remove only a row it created or one a descendant created (`CodePermissionDenied` otherwise, `childstore.IsDescendant`). Removal stops and removes the CONTAINER first (a deleted executor row would make the sandbox's `unless-stopped` policy restart it in a loop), then evicts and deletes the executor row, then tombstones the sandbox row; named volumes are never removed, and a launcher that is offline leaves the row `removing` until it returns |
+| `RemoveSandbox` | unary · childScoped | Remove one of the owner's live sandboxes by `ref` (name, then row id). An operator credential (`callerChild` empty) may remove any of the owner's rows; a per-child credential may remove only a row it created or one a descendant created (`CodePermissionDenied` otherwise, `childstore.IsDescendant`; once the creating descendant is gone from the in-memory store, only an operator or the TTL can remove it). Removal stops and removes the CONTAINER first (a deleted executor row would make the sandbox's `unless-stopped` policy restart it in a loop), then evicts and deletes the executor row, then tombstones the sandbox row; named volumes are never removed, and a launcher that is offline leaves the row `removing` until it returns — unless the launcher's executor ROW is gone too, in which case the row is tombstoned and the container is left to the orphan arm (see §Sandboxes) |
 
 #### Who may call what (the provenance gate)
 
@@ -524,9 +524,13 @@ flag is stored on the child, so a resumed child keeps its stored value.
 
 Field 31 (`sandbox`) is child-ALLOWED for the same deliberate reason:
 `SandboxSpec` cannot express privilege. Host paths are bounded by the
-launcher's declared `--sandbox-mount-root` (re-checked launcher-side), volumes
-are owner-prefixed, a child's memory/cpu/pids are clamped to the daemon's
-`RAFIKI_SANDBOX_CHILD_MAX_*` caps, and the spec has no field for a capability
+launcher's declared `--sandbox-mount-root` (re-checked launcher-side, which
+also refuses a source that is not a regular file or a directory — a socket
+under a root would be a capability grant); volumes
+are owner-prefixed, a child's memory/cpu/pids are bounded by the daemon's
+`RAFIKI_SANDBOX_CHILD_MAX_*` caps (an omitted or 0 value takes the cap; an
+OVER-cap value is REFUSED, never silently clamped), and the spec has no field
+for a capability
 (field 31 in `control.proto`'s comment, enforced by `pkg/sandbox.Validate`). A
 child that may spawn may therefore also ask its own child to be provisioned
 with a sandbox. See §"Sandboxes" on `CreateSandbox`.
@@ -582,16 +586,45 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   (`childstore.IsDescendant`). The hint is fail-closed: a wrong or empty one can
   only fail to find an owned sandbox, never admit an unrelated one. An
   ancestor's stored selector must still match a sandbox's labels for the
-  sandbox to be handed down.
+  sandbox to be handed down. Every `ChooseFor` — for every child, sandboxed or
+  not — runs this lookup, so a bind now depends on the sandbox table; a store
+  error fails the bind closed rather than reading as "not owned".
+- **A sandboxed child's cwd is a CONTAINER path.** `provisionWorkspace` sends
+  the child's cwd as the Provision workdir, and the executor validates it
+  exists in ITS filesystem view — for a sandbox, inside the container. A spawn
+  block's cwd is therefore rewritten at `Spawn` to the sandbox's resolved
+  `workdir` (the container root when the spec names none), overriding the
+  inherited host cwd; a NAMED sandbox's workdir is resolved the same way in
+  `provisionWorkspace` from the executor's sandbox row
+  (`sandboxWorkdirForExecutor`, `cmd/rafikid/workspace_wiring.go`), because
+  `Spawn` never sees a named sandbox's spec. Without this, an inherited host
+  cwd does not exist inside the container and every workspace tool fails at
+  Provision.
+- **A sandbox's `owner` label follows its CREATOR, not the connection.** A
+  sandbox created by a child is stamped with the creator child's attested
+  `owner` label (the user's name), the way `attestOwner` stamps the child's
+  own. Every child-provenance identity carries an empty `Username`, so
+  deriving it from the connection would stamp the daemon's OS user on a
+  child's sandbox — the same owner for two users' children, a cross-owner
+  collision on the executor's `(owner, machine)` unique index.
 - **Removal is keyed on the OWNING child.** `Close`/`CloseAllExited` remove
-  the closing child's OWN spawn blocks, never its descendants' — a live
-  `subtree` descendant may still be using the container. A half-created
+  the sandboxes the closing child OWNS — its own spawn block — and nothing
+  else, so a block a live descendant owns itself is left alone. But a
+  `subtree` block is SHARED: closing its OWNER tears its container down from
+  under the owner's live descendants, which then fail closed (their next bind
+  finds no connected sandbox). A half-created
   (`creating`) row is reaped once it is older than 30 minutes or, on the first
   sweep after a restart, when it predates that process; a childless spawn
   block is protected for the same 30 minutes (`Close` removes promptly; the
   reaper is a backstop). A container is removed before its executor row (a
   deleted executor row would make `unless-stopped` restart it in a loop), and
-  a sandbox whose launcher is not live stays `removing` until it returns.
+  a sandbox whose launcher is not live stays `removing` until it returns —
+  UNLESS the launcher's executor ROW is also gone (a permanently dead
+  launcher, or one removed from under the sandbox), in which case the row is
+  tombstoned and the container is left to the orphan arm. That arm needs some
+  OTHER live docker launcher on the same engine to remove it; with none, the
+  container restart-loops (`unless-stopped`, its executor row gone so auth
+  fails terminally) until one appears.
   `lost` is never silently recreated. The reaper is row-keyed by design —
   **two daemons must not share one Docker engine**, or they reap each other's
   sandboxes.

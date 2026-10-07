@@ -90,15 +90,20 @@ ordinary durable executor whose operator declared three things:
   proxy. The daemon finds a launcher by looking for this proxy name in the
   creator's effective executor set — a launcher is never chosen by default.
 - `--sandbox-mount-root <dir>` (repeatable) — every host directory a sandbox
-  may bind-mount. Reported as `DescribeResponse.sandboxMountRoots`.
+  may bind-mount. Reported as `DescribeResponse.sandboxMountRoots`. A root is a
+  read grant of EVERYTHING under it, to every child of the owner, so it must
+  not contain a socket or a credential file: the launcher's guard refuses a
+  bind source that is not a regular file or a directory (see "The create-body
+  guard" below).
 - `--relay-dir <dir>` — the host directory the daemon bind-mounts into the
   container so its `rafiki executor serve` can reach the daemon. Reported as
   `DescribeResponse.sandboxRelayDir`.
 
 **The relay.** `--relay-dir` makes `rafiki executor serve` also bind
 `<relay-dir>/daemon.sock` (`sandboxrelay.Serve`) and splice every accepted
-sandbox connection to a fresh, authenticated dial of the daemon the launcher
-itself is connected to. The relay never reads or writes the bytes it carries:
+sandbox connection to a fresh dial of the daemon the launcher
+itself is connected to (TLS and pin applied when the daemon is remote; nothing
+authenticates the LAUNCHER on the relayed connection). The relay never reads or writes the bytes it carries:
 the sandbox speaks the daemon's own protocol end to end, so the **credential
 the create body put in the container's environment is what the daemon
 authenticates — the relay only carries it, untouched**. The socket is
@@ -126,7 +131,9 @@ construction rather than by a remembered list. A key repeated at any object
 level is refused too — a map decode keeps only the LAST value, while the
 engine MERGES repeated object keys, so the two views of the same document
 must agree. Each `bind` mount's source is symlink-resolved and must sit at or
-under a declared `--sandbox-mount-root` (or equal the resolved relay dir);
+under a declared `--sandbox-mount-root` (or equal the resolved relay dir), and
+must be a regular file or a directory — a socket, device or fifo is refused,
+because an `ro` bind of a unix socket still permits `connect()`;
 `volume` and `tmpfs` mounts pass (the daemon owns their contents);
 `NetworkMode` is limited to `""`, `bridge` or `none`. A named volume's source
 is `rafiki-<ownerKey>-<name>`: `ownerKey` is derived from the owner's user id by
