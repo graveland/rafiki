@@ -248,3 +248,19 @@ func TestExecutorServeResolveSandboxRelayDirRequiresAbsolute(t *testing.T) {
 	c.Require().Error(err, "a relative relay dir must be refused")
 	c.StrContains(err.Error(), "--relay-dir", "the refusal must name the flag")
 }
+
+// A local docker socket implies the relay dir, beside the daemon's own sockets;
+// anything else (no docker proxy, an http docker endpoint) implies none.
+func TestExecutorServeDefaultSandboxRelayDir(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+
+	c.Eq("/run/user/1000/rafiki/relay",
+		defaultSandboxRelayDir(map[string]string{"docker": "unix:///var/run/docker.sock"}),
+		"a local docker socket defaults the relay dir under the runtime dir")
+	c.Eq("", defaultSandboxRelayDir(nil), "no docker proxy means no relay")
+	c.Eq("", defaultSandboxRelayDir(map[string]string{"ollama": "http://localhost:11434"}),
+		"a non-docker proxy means no relay")
+	c.Eq("", defaultSandboxRelayDir(map[string]string{"docker": "http://remote:2375"}),
+		"a remote docker endpoint cannot see a local relay dir")
+}

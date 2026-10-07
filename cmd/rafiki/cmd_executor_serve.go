@@ -99,6 +99,20 @@ func resolveSandboxRelayDir(dir string) (string, error) {
 	return dir, nil
 }
 
+// defaultSandboxRelayDir is the relay directory an executor uses when
+// --relay-dir is not given: under paths.RuntimeDir, beside the daemon's own
+// sockets. It applies only when the executor declares a docker launcher whose
+// socket is local, because the container's bind mount is resolved by the docker
+// host and a path made here does not exist on a remote or VM-hosted one — those
+// still need an explicit --relay-dir. Without a docker proxy the executor hosts
+// no sandboxes and binds nothing.
+func defaultSandboxRelayDir(proxies map[string]string) string {
+	if !strings.HasPrefix(proxies["docker"], "unix://") {
+		return ""
+	}
+	return filepath.Join(paths.RuntimeDir(), "relay")
+}
+
 // relayDirNeedsDaemon refuses --relay-dir when this command has no daemon
 // address to relay to. The relay is the sandboxes' only link to the daemon, so
 // a relay with nowhere to dial is not a degraded mode but a broken one — better
@@ -406,10 +420,6 @@ Two transports, exactly one of which is used:
 			if err != nil {
 				return err
 			}
-			resolvedRelayDir, err := resolveSandboxRelayDir(relayDir)
-			if err != nil {
-				return err
-			}
 
 			wd, err := resolveRoot(root)
 			if err != nil {
@@ -419,6 +429,14 @@ Two transports, exactly one of which is used:
 			proxies, err := executor.ParseProxyFlags(proxyArgs)
 			if err != nil {
 				return err
+			}
+
+			resolvedRelayDir, err := resolveSandboxRelayDir(relayDir)
+			if err != nil {
+				return err
+			}
+			if !cmd.Flags().Changed("relay-dir") {
+				resolvedRelayDir = defaultSandboxRelayDir(proxies)
 			}
 
 			srv := executor.NewServer(executor.Options{
@@ -552,7 +570,9 @@ Two transports, exactly one of which is used:
 			"A bind outside every root and the --relay-dir is refused. With no root, no bind is permitted")
 	cmd.Flags().StringVar(&relayDir, "relay-dir", "",
 		"absolute directory under which to expose the daemon to sandboxes over a unix socket "+
-			"(created if missing). Requires --connect or --connect-socket")
+			"(created if missing). Requires --connect or --connect-socket. Defaults to a "+
+			"directory under the runtime dir when --proxy docker= names a local unix socket; "+
+			"--relay-dir= (empty) disables it")
 
 	return cmd
 }
