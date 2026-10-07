@@ -35,6 +35,12 @@ func TestSandboxCmdParseMount(t *testing.T) {
 			{"rw:/scratch", "rw", "/scratch", "", ""},
 			{"ephemeral:/tmp", "ephemeral", "/tmp", "", ""},
 			{"rw:/scratch=volume:scratch", "rw", "/scratch", "", "scratch"},
+			// An "=" inside a host path is not a second source.
+			{"ro:/work=host:/srv/a=b", "ro", "/work", "/srv/a=b", ""},
+			// An "=" inside the target is not a source at all.
+			{"ro:/a=b=host:/p", "ro", "/a=b", "/p", ""},
+			// An "=" inside a volume name is not a second source.
+			{"rw:/x=volume:a=b", "rw", "/x", "", "a=b"},
 		}
 		for _, tc := range cases {
 			m, err := parseSandboxMount(tc.in)
@@ -103,7 +109,10 @@ func TestSandboxCmdParseMemory(t *testing.T) {
 		c.Eq(tc.want, got, "parseSandboxMemoryBytes(%q)", tc.in)
 	}
 
-	for _, bad := range []string{"", "-1", "abc", "1e3", "12x"} {
+	// Non-finite and overflowing values must be refused, not converted to an
+	// implementation-defined int64. "" and "abc" have no suffix; the rest
+	// exercise the float path.
+	for _, bad := range []string{"", "-1", "abc", "1e3", "12x", "inf", "infg", "nan", "nang", "99999999t", "999999999999999999999"} {
 		_, err := parseSandboxMemoryBytes(bad)
 		c.Require().Error(err, "parseSandboxMemoryBytes(%q) succeeded, want an error", bad)
 		c.StrContains(err.Error(), bad, "the error must name the flag value")

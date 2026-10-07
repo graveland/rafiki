@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -339,12 +340,31 @@ func parseSandboxMounts(values []string) ([]*rafikiv1.SandboxMount, error) {
 //
 //	<kind>:<target>[=host:<path>|volume:<name>]
 //
-// A missing or unknown kind, a missing target, an unknown source prefix, and
-// a value naming both a host path and a volume are all parse errors naming the
-// flag value. Deeper validation (absolute clean paths, launcher mount roots,
-// ephemeral forbidding a source) is the daemon's, so it stays in one place.
+// The source, when present, is located by its "=host:" or "=volume:" marker
+// rather than by the first "=", so a target or source value that itself
+// contains "=" (e.g. a host path "/srv/a=b") is not mistaken for a second
+// source. A value carrying BOTH markers, or an unrecognised source shape, is a
+// parse error naming the flag value. A missing or unknown kind and a missing
+// target are refused too. Deeper validation (absolute clean paths, launcher
+// mount roots, ephemeral forbidding a source) is the daemon's, so it stays in
+// one place.
 func parseSandboxMount(value string) (*rafikiv1.SandboxMount, error) {
-	spec, source, hasSource := strings.Cut(value, "=")
+	hostIdx := strings.Index(value, "=host:")
+	volIdx := strings.Index(value, "=volume:")
+	if hostIdx >= 0 && volIdx >= 0 {
+		return nil, fmt.Errorf("--mount %q: a mount takes at most one of host:<path> or volume:<name>", value)
+	}
+
+	spec := value
+	source := ""
+	hasSource := false
+	switch {
+	case hostIdx >= 0:
+		spec, source, hasSource = value[:hostIdx], value[hostIdx+1:], true
+	case volIdx >= 0:
+		spec, source, hasSource = value[:volIdx], value[volIdx+1:], true
+	}
+
 	kind, target, ok := strings.Cut(spec, ":")
 	if !ok {
 		return nil, fmt.Errorf("--mount %q: missing kind (want <kind>:<target>, kind is ro, rw or ephemeral)", value)
@@ -360,14 +380,19 @@ func parseSandboxMount(value string) (*rafikiv1.SandboxMount, error) {
 
 	m := &rafikiv1.SandboxMount{Kind: kind, Target: target}
 	if !hasSource {
-		return m, nil
+		// A bare "=" with no recognised "=host:"/"=volume:" marker is a
+		// malformed source, not a "=" inside a target: name what followed it.
+		eq := strings.Index(value, "=")
+		if eq < 0 {
+			return m, nil
+		}
+		seg, _, hasColon := strings.Cut(value[eq+1:], ":")
+		if hasColon && seg != "host" && seg != "volume" && seg != "" {
+			return nil, fmt.Errorf("--mount %q: unknown source %q (want host:<path> or volume:<name>)", value, seg)
+		}
+		return nil, fmt.Errorf("--mount %q: source must be host:<path> or volume:<name>", value)
 	}
 
-	// Exactly one source: a second "host:"/"volume:" segment means the value
-	// named both (or named the same one twice), which is ambiguous.
-	if strings.Contains(source, "=") {
-		return nil, fmt.Errorf("--mount %q: a mount takes at most one of host:<path> or volume:<name>", value)
-	}
 	srcKind, srcValue, ok := strings.Cut(source, ":")
 	if !ok || srcValue == "" {
 		return nil, fmt.Errorf("--mount %q: source must be host:<path> or volume:<name>", value)
@@ -385,8 +410,9 @@ func parseSandboxMount(value string) (*rafikiv1.SandboxMount, error) {
 
 // parseSandboxMemoryBytes parses --memory: a plain byte count, or a value with
 // a binary suffix (case-insensitive) — b, k/kb/kib, m/mb/mib, g/gb/gib,
-// t/tb/tib, each a power of 1024. "1g" is 1073741824. A negative or
-// unparseable value is refused, naming the flag.
+// t/tb/tib, each a power of 1024. "1g" is 1073741824. A negative, non-finite
+// ("inf"/"nan", with or without a suffix), or int64-overflowing value is
+// refused, naming the flag.
 func parseSandboxMemoryBytes(value string) (int64, error) {
 	if n, err := strconv.ParseInt(value, 10, 64); err == nil {
 		if n < 0 {
@@ -419,10 +445,22 @@ func parseSandboxMemoryBytes(value string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("--memory %q: %q is not a number", value, num)
 	}
+	// ParseFloat accepts "inf"/"nan", and int64(f*mult) of those (or of an
+	// overflowing product) is implementation-defined — refuse them explicitly
+	// rather than hand the daemon a garbage byte count.
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("--memory %q is not a finite size", value)
+	}
 	if f < 0 {
 		return 0, fmt.Errorf("--memory %q must not be negative", value)
 	}
-	return int64(f * float64(mult)), nil
+	product := f * float64(mult)
+	// float64(math.MaxInt64) is 2^63; anything at or above it cannot be
+	// converted to an int64 byte count.
+	if product >= float64(math.MaxInt64) {
+		return 0, fmt.Errorf("--memory %q is too large (overflows an int64 byte count)", value)
+	}
+	return int64(product), nil
 }
 
 // parseEnvPairs parses a slice of "K=V" strings into a map. Unlike
