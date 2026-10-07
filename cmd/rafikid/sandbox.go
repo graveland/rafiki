@@ -48,13 +48,15 @@ const (
 	sandboxConnectBudget       = 60 * time.Second
 )
 
-// sandboxMinReapAge is how long a spawn-block row must have existed before the
-// reaper may remove it on the strength of its owning child's row being absent.
-// sandboxCreateForSpawn inserts the row BEFORE the spawn writes the child's own
-// DB row, so an absent child row means "not written yet" as often as "closed";
-// a young row is never reaped on that test alone (2× the connect budget means a
-// still-connecting sandbox is never reaped).
-const sandboxMinReapAge = 2 * sandboxConnectBudget
+// sandboxStaleCreatingAge is the deliberate bound after which a `creating` row
+// is treated as abandoned. It has to cover an UNBOUNDED image pull (PullImage
+// has no budget of its own), so it is generous; a still-connecting create is
+// never abandoned by age. It is also the grace before the childless-spawn arm
+// may reap a spawn-block row on its owning child's row being absent (the row is
+// inserted before the spawn writes the child's own row, so an absent child on a
+// young row means "not written yet"). The reaper is a backstop — task 5.1's
+// Close removes a spawn block promptly — so the long grace is the right trade.
+const sandboxStaleCreatingAge = 30 * time.Minute
 
 // sandboxOwnerVolumeKey derives the short, stable owner key named volumes are
 // prefixed with. owner.UserID is a uuidv7 string; the FIRST 12 characters of a
@@ -670,17 +672,35 @@ func (c *Controller) removeSandboxRow(ctx context.Context, row sandbox.Row) erro
 		// launcher is permanently gone and waiting is pointless — free the cap
 		// slot and leave the container to the reaper. If the row is still there
 		// the launcher may come back, so keep the row `removing` and retry.
+		offline := &connectapi.ControllerError{
+			Code:    protocol.ErrInternal,
+			Message: "launcher offline; the sandbox will be removed when it reconnects",
+		}
+		// executorsdb.pgStore.Get collapses EVERY error — a pool exhaustion, a
+		// reset connection, a ctx cancel and a genuine miss — into ErrNotFound,
+		// so ErrNotFound alone is not proof the launcher is gone. Confirm with
+		// List, which returns a real error on failure (pgStore.List does). Only
+		// when List SUCCEEDS and lacks the id is the launcher treated as
+		// permanently gone; a List error is transient and the row is left
+		// `removing`.
 		switch _, gerr := c.execStore.Get(ctx, row.LauncherExecutorID); {
 		case gerr == nil:
-			return &connectapi.ControllerError{
-				Code:    protocol.ErrInternal,
-				Message: "launcher offline; the sandbox will be removed when it reconnects",
-			}
-		case errors.Is(gerr, executors.ErrNotFound):
-			launcherGone = true
-		default:
+			return offline
+		case !errors.Is(gerr, executors.ErrNotFound):
 			return gerr
 		}
+		execs, lerr := c.execStore.List(ctx)
+		if lerr != nil {
+			return lerr
+		}
+		for _, e := range execs {
+			if e.ID == row.LauncherExecutorID {
+				// The launcher's row exists; the ErrNotFound above was a
+				// collapsed transient error.
+				return offline
+			}
+		}
+		launcherGone = true
 	}
 	if row.ContainerID != "" && !launcherGone {
 		if c.sandboxEngine == nil {
@@ -796,7 +816,7 @@ func (c *Controller) startSandboxSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			c.sweepSandboxes(ctx)
+			c.sweepSandboxesOnBoot(ctx)
 		}
 		ticker := time.NewTicker(c.sandboxCfg.SweepInterval)
 		defer ticker.Stop()
@@ -811,10 +831,22 @@ func (c *Controller) startSandboxSweeper(ctx context.Context) {
 	}()
 }
 
-// sweepSandboxes is one idempotent pass: orphan-container reaping, TTL expiry,
-// finishing rows stuck in `removing`, and the spawn-block reaper. Run by the
-// loop in main.go every sandboxCfg.SweepInterval and once shortly after boot.
+// sweepSandboxesOnBoot is the first pass after startup. It is sweepSandboxes
+// with one addition: EVERY live `creating` row is treated as abandoned, because
+// no in-flight create survives a process restart. Its container, if one was
+// made, is left for the orphan arm to reap on this or the next pass.
+func (c *Controller) sweepSandboxesOnBoot(ctx context.Context) {
+	c.sweepSandboxesPass(ctx, true)
+}
+
+// sweepSandboxes is one idempotent pass: orphan-container reaping, abandoned
+// `creating` rows, TTL expiry, finishing rows stuck in `removing`, and the
+// spawn-block reaper. Run by the loop in main.go every sandboxCfg.SweepInterval.
 func (c *Controller) sweepSandboxes(ctx context.Context) {
+	c.sweepSandboxesPass(ctx, false)
+}
+
+func (c *Controller) sweepSandboxesPass(ctx context.Context, boot bool) {
 	if c.sandboxStore == nil {
 		return
 	}
@@ -831,9 +863,28 @@ func (c *Controller) sweepSandboxes(ctx context.Context) {
 		return
 	}
 
+	// Abandoned `creating` rows: a half-created sandbox (the daemon died between
+	// row mint and container start) holds a cap slot and, if CreateContainer
+	// ran, an `unless-stopped` container the orphan arm keeps because its row is
+	// live. Every `creating` row is abandoned on the boot sweep (nothing
+	// in-flight survives a restart) or once it is older than
+	// sandboxStaleCreatingAge (covering an unbounded image pull). Removing the
+	// row makes its container an orphan, which the orphan arm reaps on this or
+	// the next pass.
+	for _, r := range rows {
+		if r.State != sandboxStateCreating {
+			continue
+		}
+		if !boot && now.Sub(r.CreatedAt) < sandboxStaleCreatingAge {
+			continue
+		}
+		if err := c.removeSandboxRow(ctx, r); err != nil {
+			slog.Warn("sandbox sweep: abandoning a stale creating row failed", "sandboxId", r.ID, "error", err)
+		}
+	}
+
 	// TTL: every live NAMED row past its expiry is removed with system
-	// authority. A `creating` row is skipped — the create flow owns it and its
-	// rollback, and its TTL cannot have elapsed anyway.
+	// authority. A `creating` row is handled by the abandoned arm above.
 	for _, r := range rows {
 		if r.Name == "" || r.ExpiresAt == nil || !r.ExpiresAt.Before(now) {
 			continue
@@ -913,12 +964,12 @@ func (c *Controller) reapOrphanContainers(ctx context.Context) {
 // reapChildlessSandboxes removes live spawn-block rows whose owning child's
 // PERSISTED row is closed or absent.
 //
-// A `creating` row is skipped (the create flow owns it), and so is a row
-// younger than sandboxMinReapAge: sandboxCreateForSpawn inserts the row before
-// the spawn writes the child's own row, so an absent child row on a young row
-// usually means "not written yet". The decision reads the PERSISTED child rows
-// (List returns live rows only) — never the in-memory store, where a live child
-// may not yet be loaded while recovery runs.
+// A `creating` row is skipped (the abandoned arm above owns it), and so is a
+// row younger than sandboxStaleCreatingAge: sandboxCreateForSpawn inserts the
+// row before the spawn writes the child's own row, so an absent child row on a
+// young row usually means "not written yet". The decision reads the PERSISTED
+// child rows (List returns live rows only) — never the in-memory store, where a
+// live child may not yet be loaded while recovery runs.
 func (c *Controller) reapChildlessSandboxes(ctx context.Context, rows []sandbox.Row, now time.Time) {
 	liveChildren, childKnown := c.liveChildSet(ctx)
 	if !childKnown {
@@ -931,7 +982,7 @@ func (c *Controller) reapChildlessSandboxes(ctx context.Context, rows []sandbox.
 		if r.State == sandboxStateCreating {
 			continue
 		}
-		if now.Sub(r.CreatedAt) < sandboxMinReapAge {
+		if now.Sub(r.CreatedAt) < sandboxStaleCreatingAge {
 			continue
 		}
 		if liveChildren[r.OwnerChild] {

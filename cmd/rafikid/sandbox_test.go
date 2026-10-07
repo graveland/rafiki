@@ -260,6 +260,30 @@ func (t *timelineExecStore) Delete(ctx context.Context, id string) error {
 	return t.fakeExecStore.Delete(ctx, id)
 }
 
+// erroringExecStore injects Get/List errors, so a test can exercise the
+// dead-launcher confirmation path without a database. (The real
+// executorsdb.pgStore.Get collapses every error into ErrNotFound; List does
+// not.)
+type erroringExecStore struct {
+	*fakeExecStore
+	getErr  error
+	listErr error
+}
+
+func (e *erroringExecStore) Get(ctx context.Context, id string) (executors.Executor, error) {
+	if e.getErr != nil {
+		return executors.Executor{}, e.getErr
+	}
+	return e.fakeExecStore.Get(ctx, id)
+}
+
+func (e *erroringExecStore) List(ctx context.Context) ([]executors.Executor, error) {
+	if e.listErr != nil {
+		return nil, e.listErr
+	}
+	return e.fakeExecStore.List(ctx)
+}
+
 // childLiveness is a childstore.ChildStore whose List returns live children.
 type childLiveness struct {
 	stubChildStore
@@ -616,6 +640,71 @@ func TestSandboxRemoveDeadLauncherFreesSlot(t *testing.T) {
 	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "a dead launcher cannot remove the container")
 }
 
+// TestSandboxRemoveTransientGetErrorLeavesRemoving: a Get error that is NOT a
+// real absence (pgStore.Get collapses every error into ErrNotFound) must not be
+// read as "launcher gone" — the row is left removing.
+func TestSandboxRemoveTransientGetErrorLeavesRemoving(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.ctrl.execStore = &erroringExecStore{fakeExecStore: env.exec, getErr: errors.New("db blip")}
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-1", State: sandboxStateReady,
+	}))
+
+	err := env.ctrl.SandboxRemove(context.Background(), owner, "", "dev")
+	ck.Error(err, "a transient Get error must surface")
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "a transient error must not tombstone the row")
+	ck.Eq(sandboxStateRemoving, row.State, "left removing")
+}
+
+// TestSandboxRemoveConfirmsAbsenceWithList: Get says not-found but List errors,
+// so the launcher-gone conclusion is not safe — the row is left removing.
+func TestSandboxRemoveConfirmsAbsenceWithList(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	// Get returns ErrNotFound (as pgStore.Get does for any error); List errors.
+	env.ctrl.execStore = &erroringExecStore{fakeExecStore: env.exec, listErr: errors.New("list failed")}
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-1", State: sandboxStateReady,
+	}))
+
+	err := env.ctrl.SandboxRemove(context.Background(), owner, "", "dev")
+	ck.Error(err, "a List error must surface")
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "a List error must not tombstone the row")
+	ck.Eq(sandboxStateRemoving, row.State, "left removing")
+}
+
+// TestSandboxRemoveListFindsLauncherLeavesRemoving: Get says not-found but List
+// contains the launcher, so the ErrNotFound was a collapsed transient error —
+// the row is left removing.
+func TestSandboxRemoveListFindsLauncherLeavesRemoving(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.ctrl.execStore = &erroringExecStore{fakeExecStore: env.exec, getErr: executors.ErrNotFound}
+	env.exec.execs["launcher"] = executors.Executor{ID: "launcher", Enabled: true}
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-1", State: sandboxStateReady,
+	}))
+
+	err := env.ctrl.SandboxRemove(context.Background(), owner, "", "dev")
+	ck.Error(err, "the launcher exists, so it is merely offline")
+	ck.True(strings.Contains(err.Error(), "launcher offline"), "error text: %v", err)
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "the row is not tombstoned")
+	ck.Eq(sandboxStateRemoving, row.State, "left removing")
+}
+
 // TestSandboxRemoveSkipsTombstonedRow: removeSandboxRow re-reads the row, so a
 // stale snapshot of an already-removed row is a no-op.
 func TestSandboxRemoveSkipsTombstonedRow(t *testing.T) {
@@ -825,24 +914,63 @@ func TestSandboxReaperKeepsYoungSpawnBlock(t *testing.T) {
 	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "its container is kept")
 }
 
-// TestSandboxReaperKeepsCreatingSpawnBlock: a `creating` spawn-block row whose
-// child is absent is kept — the create flow owns it and its rollback.
-func TestSandboxReaperKeepsCreatingSpawnBlock(t *testing.T) {
+// TestSandboxReaperRemovesCreatingRowOnBootSweep: every live `creating` row is
+// abandoned on the first post-boot sweep — no in-flight create survives a
+// restart — so a daemon that died mid-create does not hold a cap slot forever.
+func TestSandboxReaperRemovesCreatingRowOnBootSweep(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	env := newSandboxEnv(t)
 	owner := sandboxOwner()
 	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
-	env.ctrl.children = childLiveness{} // child-1 is absent
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
-		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "child-1", Scope: protocol.ScopeSelf,
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev",
+		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
+		State: sandboxStateCreating, CreatedAt: time.Now(),
+	}))
+
+	env.ctrl.sweepSandboxesOnBoot(context.Background())
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt != nil, "a creating row present at boot is abandoned")
+}
+
+// TestSandboxReaperRemovesStaleCreatingRow: a `creating` row older than
+// sandboxStaleCreatingAge is abandoned on any sweep (covering an unbounded
+// image pull / a wedged create).
+func TestSandboxReaperRemovesStaleCreatingRow(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev",
 		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
 		State: sandboxStateCreating, CreatedAt: sandboxOldTime(),
 	}))
 
 	env.ctrl.sweepSandboxes(context.Background())
 	row, _ := env.store.get("sbx-1")
-	ck.True(row.RemovedAt == nil, "a creating spawn-block row is never reaped")
+	ck.True(row.RemovedAt != nil, "a stale creating row is abandoned")
+}
+
+// TestSandboxReaperKeepsYoungCreatingRow: a young `creating` row (an in-flight
+// create) is kept on a non-boot sweep.
+func TestSandboxReaperKeepsYoungCreatingRow(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev",
+		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
+		State: sandboxStateCreating, CreatedAt: time.Now(),
+	}))
+
+	env.ctrl.sweepSandboxes(context.Background())
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "a young creating row is kept")
 	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "its container is kept")
 }
 
