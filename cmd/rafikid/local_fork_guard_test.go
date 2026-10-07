@@ -119,3 +119,56 @@ func TestClaudeRunnerRefusesLocalForkForAConfinedChild(t *testing.T) {
 	ck.NoError(err, "an unconfined claude child keeps its local fallback")
 	ck.True(runner == nil, "the local path is signalled by a nil runner")
 }
+
+// TestLocalForkRefusedWithAbsentParentAllowsResume pins the F1 regression: a
+// child whose OWN row is live and unconfined but whose parent's row is gone
+// (Controller.Close deletes it — controller.go's c.st.Delete(childID)) must
+// still be allowed a local fork. The guard used to walk the whole lineage, and
+// a missing ancestor made lineageChain return the misleading "lineage chain for
+// X exceeds 64 links" error — refusing an ordinary resume of an exited,
+// unconfined claude child. The fix is in the guard alone: when the child's own
+// row exists it reads the child's own selector and never consults lineageChain,
+// whose fail-closed error the executor-selection path still relies on.
+func TestLocalForkRefusedWithAbsentParentAllowsResume(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	ctx := context.Background()
+
+	// The child's own row is live; its parent ("p_gone") is absent from the store.
+	env.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_exit", Status: protocol.StatusExited, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: "p_gone"},
+	})
+
+	// The guard: the child's own row is present, so it reads its own selector
+	// (empty) and does not walk the absent parent. Allowed.
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_exit", "p_gone", owner.UserID),
+		"a live, unconfined child with an absent parent may fork locally")
+
+	// A child with a live row and a NON-EMPTY own selector is still refused,
+	// even with an absent parent.
+	env.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_conf_exit", Status: protocol.StatusExited, StartedAt: time.Now(),
+		ExecutorSelector: "machine=sbx-1",
+		Labels:           map[string]string{childstore.LabelParent: "p_gone"},
+	})
+	err := env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_conf_exit", "p_gone", owner.UserID)
+	ck.Error(err, "a confined child with an absent parent must still be refused")
+	ck.StrContains(err.Error(), "confined to the executor plane", "refusal text: %v", err)
+
+	// A child with a live row and a sandbox it OWNS is still refused, even with
+	// an absent parent and an empty selector.
+	env.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_sbx_exit", Status: protocol.StatusExited, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: "p_gone"},
+	})
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-own", OwnerUserID: owner.UserID, OwnerChild: "c_sbx_exit", Scope: protocol.ScopeSelf,
+		ExecutorID: "exec-sbx", State: sandboxStateReady,
+	})
+	err = env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_sbx_exit", "p_gone", owner.UserID)
+	ck.Error(err, "a child owning a sandbox must still be refused")
+	ck.StrContains(err.Error(), "sandbox", "refusal names the sandbox")
+}

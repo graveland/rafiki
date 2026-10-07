@@ -544,10 +544,13 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 //
 // It reads stored state only, never the request:
 //
-//   - the child's own stored lineage (its row exists on a resume/recovery),
-//     else the parent's (a fresh spawn's own row does not exist yet, and
-//     inheritExecutorGrant will copy the parent's grant onto it), so a
-//     non-empty executor grant ANYWHERE from the root down confines it; and
+//   - the child's OWN stored selector when its row exists (a resume/recovery):
+//     inheritExecutorGrant copied the parent's grant onto it at spawn and never
+//     lets it narrow away, so its own selector is the whole grant. Reading it
+//     directly — rather than walking its ancestry — also avoids a lineage whose
+//     ancestor rows Close has since deleted. Only when the child's own row is
+//     absent (a fresh spawn, whose row does not exist yet and whose grant
+//     inheritExecutorGrant is about to copy) is the parent's chain walked; and
 //   - sandbox ownership, read exactly as controllerBinder.ChooseFor reads it
 //     (ownedSandbox): the child's own spawn-block sandbox, or a subtree one an
 //     ancestor holds. A sandboxed child's stored selector is always
@@ -561,14 +564,18 @@ func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parent
 		// below must never run on a nil parent (context.WithTimeout panics).
 		ctx = context.Background()
 	}
-	subject := childID
-	if _, ok := c.st.Get(subject); !ok {
+	if snap, ok := c.st.Get(childID); ok {
+		// The child's own row exists. Its own stored selector is the whole
+		// confinement: inheritExecutorGrant gave it at least its parent's grant
+		// and it may only ever narrow from there, so walking the ancestry adds
+		// nothing and can fail on an ancestor row Close has deleted.
+		if strings.TrimSpace(snap.ExecutorSelector) != "" {
+			return localForkConfinedErr(kind, "an executor grant")
+		}
+	} else if parentChildID != "" {
 		// A fresh spawn has no row of its own yet; its confinement is the one it
 		// will inherit, so read the parent's lineage instead.
-		subject = parentChildID
-	}
-	if subject != "" {
-		chain, err := c.lineageChain(subject)
+		chain, err := c.lineageChain(parentChildID)
 		if err != nil {
 			return err
 		}
