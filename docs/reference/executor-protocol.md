@@ -128,7 +128,13 @@ engine MERGES repeated object keys, so the two views of the same document
 must agree. Each `bind` mount's source is symlink-resolved and must sit at or
 under a declared `--sandbox-mount-root` (or equal the resolved relay dir);
 `volume` and `tmpfs` mounts pass (the daemon owns their contents);
-`NetworkMode` is limited to `""`, `bridge` or `none`.
+`NetworkMode` is limited to `""`, `bridge` or `none`. A named volume's source
+is `rafiki-<ownerKey>-<name>`: `ownerKey` is derived from the owner's user id by
+stripping every non-alphanumeric character, taking the LAST 12 characters of
+what remains (uuidv7's random tail, not the shared millisecond timestamp
+prefix), or the literal `local` for the empty anonymous owner
+(`sandboxOwnerVolumeKey`, `cmd/rafikid/sandbox.go`; `CreateBody` requires the
+key to match `^[A-Za-z0-9]{1,32}$`). Named volumes are never removed.
 
 Two residuals, both accepted. The guard covers `POST /containers/create` ONLY
 — every other Docker route proxies uninspected, which is safe because the

@@ -571,9 +571,18 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   Child-owned sandboxes are dropped from ordinary selection candidates, so a
   `self` descendant (whose stored selector narrows to the sandbox) resolves to
   nothing and fails closed. `subtree` admits descendants to the same container
-  (concurrent workspaces separated by workdir only; no path scoping). An
-  ancestor's stored selector must match a sandbox's labels for the sandbox to
-  be handed down.
+  (concurrent workspaces separated by workdir only; no path scoping). A fresh
+  `subtree` descendant binds on its FIRST (eager) bind — which runs before its
+  own `conversations.child` row is inserted — because `ownedSandbox`
+  (`cmd/rafikid/sandbox.go`) takes the spawning child's PARENT as an ancestry
+  hint: `ChooseFor` passes the request's `ParentChildID` (daemon-written — a
+  child-scoped caller's is forced to its own id), falling back to the child's
+  stored parent label on a rebind/recovery. A `subtree` row is therefore
+  eligible when its owner is the child, the parent, or an ancestor of either
+  (`childstore.IsDescendant`). The hint is fail-closed: a wrong or empty one can
+  only fail to find an owned sandbox, never admit an unrelated one. An
+  ancestor's stored selector must still match a sandbox's labels for the
+  sandbox to be handed down.
 - **Removal is keyed on the OWNING child.** `Close`/`CloseAllExited` remove
   the closing child's OWN spawn blocks, never its descendants' — a live
   `subtree` descendant may still be using the container. A half-created

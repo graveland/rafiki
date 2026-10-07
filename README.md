@@ -906,8 +906,11 @@ is never managed by `rafiki sandbox`.
 Defaults and limits come from the daemon's environment — `RAFIKI_SANDBOX_IMAGE`,
 `_NETWORK`, `_TTL`, `_MAX_TTL`, `_MAX_PER_OWNER`, `_SWEEP_INTERVAL`, and the
 per-child clamp `_CHILD_MAX_MEMORY_BYTES`/`_CHILD_MAX_CPUS`/`_CHILD_MAX_PIDS`
-(see `.env.example`). Mounts, network, resource limits, `--read-only-rootfs`,
-user, env and labels are all per-create flags on `rafiki sandbox create`.
+(see `.env.example`). `RAFIKI_SANDBOX_MAX_PER_OWNER` caps the live sandboxes one
+owner may hold and **counts spawn blocks too** (a block holds a cap slot like a
+named sandbox); 0 means unlimited. Mounts, network, resource limits,
+`--read-only-rootfs`, user, env and labels are all per-create flags on
+`rafiki sandbox create`.
 
 ## Subagents
 
