@@ -209,16 +209,18 @@ func sandboxResourceProperties() []SchemaProperty {
 const sandboxCreateDescription = "Create a sandbox: an isolated container that runs its own " +
 	"rafiki executor, with its own mounts, network and resource limits, reachable from " +
 	"agent_spawn. Use it to give a worker a clean, disposable machine — a checkout it " +
-	"cannot corrupt, or a run with no network — instead of running it on your own " +
-	"filesystem.\n\n" +
+	"cannot corrupt, or a run whose CONTAINER has no network — instead of running it on " +
+	"your own filesystem.\n\n" +
 	"`mounts` is a list of {target, kind, host_path, volume}. `kind` is required and is " +
 	"one of \"ro\", \"rw\" or \"ephemeral\": a \"ro\" mount cannot be written even by root " +
 	"inside the container, so it is how you hand in a checkout to read; \"rw\" is " +
 	"read-write; \"ephemeral\" is a tmpfs removed with the container. A `host_path` source " +
 	"must sit under a directory the launcher's operator allowed (its --sandbox-mount-root) " +
 	"— a path outside is refused — and `volume` names a persistent named volume instead.\n\n" +
-	"`network` is \"egress\" (reaches the network, the default) or \"none\" (no network at " +
-	"all, not even DNS). `ttl` is a duration like \"72h\" or \"30m\": the sandbox is removed " +
+	"`network` is \"egress\" (reaches the network, the default) or \"none\" (severs the " +
+	"container's own network, not even DNS). This is a DOCKER setting on the " +
+	"container: an agent driving tools in it still runs in the daemon, so \"none\" " +
+	"does not cut that agent's own egress. `ttl` is a duration like \"72h\" or \"30m\": the sandbox is removed " +
 	"automatically when it elapses, so you do not have to remember to tear it down; remove " +
 	"one early with sandbox_remove. `memory_bytes`, `cpus` and `pids_limit` bound the " +
 	"container's resources. See sandbox_list for what you have."
@@ -240,7 +242,7 @@ func (SandboxCreateBlueprint) InputSchema() Schema {
 		{Name: "mounts", Type: "array", Items: sandboxMountSchema(),
 			Description: "Directories to make visible inside the container. Each is {target, kind, host_path, volume}; kind (ro/rw/ephemeral) is required."},
 		{Name: "network", Type: "string", Enum: []string{"egress", "none"},
-			Description: "\"egress\" reaches the network (the default); \"none\" means no network at all."},
+			Description: "\"egress\" reaches the network (the default); \"none\" severs the CONTAINER's network — an agent driving tools in it still runs in the daemon, so this does not cut its own egress."},
 		{Name: "read_only_rootfs", Type: "boolean",
 			Description: "true to mount the container's own root filesystem read-only, so only the mounts are writable."},
 		{Name: "env", Type: "object",

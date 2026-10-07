@@ -42,11 +42,20 @@ const agentSpawnDescription = "Spawn a subagent to do a piece of work in paralle
 	"running it on your own machine: the new agent's executor is provisioned into " +
 	"a sandbox described by the block, with its own mounts, network and resource " +
 	"limits (see sandbox_create for the field meanings — `ro` mounts cannot be " +
-	"written even by root, `network: none` means no network, and a host_path must " +
-	"sit under a directory the launcher's operator allowed). `sandbox.scope` is " +
-	"required: \"self\" offers the container only to the new agent, \"subtree\" " +
-	"also to its own descendants. If the sandbox cannot be created the spawn is " +
-	"refused — the agent never starts toolless or on your own machine instead."
+	"written even by root, and a host_path must sit under a directory the " +
+	"launcher's operator allowed). `sandbox.scope` is required: \"self\" offers " +
+	"the container only to the new agent, \"subtree\" also to its own descendants. " +
+	"If the sandbox cannot be created the spawn is refused — the agent never starts " +
+	"toolless or on your own machine instead.\n\n" +
+	"What the sandbox confines, and what it does not: the agent itself runs in the " +
+	"DAEMON — only its workspace tools (bash, file edits, background jobs) are " +
+	"routed into the container. `network` is a DOCKER setting on the container: " +
+	"\"none\" severs the container's own processes from the network, but it does " +
+	"NOT cut the agent's own egress — its model calls, recall, agent_spawn and the " +
+	"daemon-tier webfetch/websearch tools still run in the daemon. Suppressing " +
+	"those per-child is a v1 gap. Likewise a mount root is a read grant of " +
+	"everything under it, to every child of the owner: a root containing a socket " +
+	"or a credential file is refused, but choose roots deliberately."
 
 type AgentSpawnBlueprint struct{}
 
@@ -123,7 +132,7 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"Put CLAUDE.md or skill files here too, with ranges. The agent does not need the read tool " +
 					"for this: a tool-less agent gets the files as text under `=== <path> ===` headers."},
 			{Name: "sandbox", Type: "object",
-				Description: "Run the new agent inside a fresh, isolated container it cannot escape: its executor is provisioned into a sandbox with the mounts, network and limits below. `scope` is required: \"self\" offers the container only to the new agent, \"subtree\" also to its descendants. A `ro` mount cannot be written even by root in the container, `network: none` means no network at all, and a host_path must sit under a directory the launcher's operator allowed. If the sandbox cannot be created the spawn is refused.",
+				Description: "Run the new agent's workspace inside a fresh, isolated container: its executor is provisioned into a sandbox with the mounts, network and limits below. `scope` is required: \"self\" offers the container only to the new agent, \"subtree\" also to its descendants. A `ro` mount cannot be written even by root in the container; `network` confines the CONTAINER's own processes (the agent itself still runs in the daemon — see the tool description); a host_path must sit under a directory the launcher's operator allowed. If the sandbox cannot be created the spawn is refused.",
 				Properties: []SchemaProperty{
 					{Name: "scope", Type: "string", Enum: []string{"self", "subtree"},
 						Description: "How far the sandbox's executor is offered: \"self\" (the new agent only) or \"subtree\" (the new agent and its descendants). Required."},
@@ -136,7 +145,7 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					{Name: "mounts", Type: "array", Items: sandboxMountSchema(),
 						Description: "Directories to make visible inside the container. Each is {target, kind, host_path, volume}; kind (ro/rw/ephemeral) is required."},
 					{Name: "network", Type: "string", Enum: []string{"egress", "none"},
-						Description: "\"egress\" reaches the network (the default); \"none\" means no network at all."},
+						Description: "\"egress\" reaches the network (the default); \"none\" severs the CONTAINER's network — the agent itself still runs in the daemon, so this does not cut its own egress."},
 					{Name: "read_only_rootfs", Type: "boolean",
 						Description: "true to mount the container's root filesystem read-only, so only the mounts are writable."},
 					{Name: "env", Type: "object",
