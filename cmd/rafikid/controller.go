@@ -428,6 +428,14 @@ type Controller struct {
 	// transport. Nil only when the feature is unwired (a hand-built test
 	// Controller), where the sandbox verbs fail closed.
 	sandboxEngine func(launcherID string) *sandbox.Engine
+	// sandboxBootTime is when this daemon process started, captured once at
+	// startup (main.go). The sandbox sweeper's FIRST pass abandons a `creating`
+	// row only when the row was created BEFORE this instant: a row created after
+	// it is an in-flight create THIS process is running (the first pass fires a
+	// few seconds after the socket is already serving clients), so the boot pass
+	// leaves it to the age gate. Injectable so a test can pin it; the zero value
+	// disables the boot abandonment (only the age gate then applies).
+	sandboxBootTime time.Time
 
 	// skillStore is the database-backed skills tier. nil when the daemon has
 	// no store, in which case children get only their on-disk tiers.

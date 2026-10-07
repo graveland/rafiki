@@ -914,24 +914,53 @@ func TestSandboxReaperKeepsYoungSpawnBlock(t *testing.T) {
 	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "its container is kept")
 }
 
-// TestSandboxReaperRemovesCreatingRowOnBootSweep: every live `creating` row is
-// abandoned on the first post-boot sweep — no in-flight create survives a
-// restart — so a daemon that died mid-create does not hold a cap slot forever.
+// TestSandboxReaperRemovesCreatingRowOnBootSweep: a live `creating` row created
+// BEFORE this process started is abandoned on the first post-boot sweep — no
+// in-flight create survives a restart — so a daemon that died mid-create does
+// not hold a cap slot forever. Its executor is evicted, freeing the slot.
 func TestSandboxReaperRemovesCreatingRowOnBootSweep(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	env := newSandboxEnv(t)
 	owner := sandboxOwner()
 	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	boot := time.Now()
+	env.ctrl.sandboxBootTime = boot
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev",
 		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
-		State: sandboxStateCreating, CreatedAt: time.Now(),
+		State: sandboxStateCreating, CreatedAt: boot.Add(-time.Minute), // predates this process
 	}))
 
 	env.ctrl.sweepSandboxesOnBoot(context.Background())
 	row, _ := env.store.get("sbx-1")
 	ck.True(row.RemovedAt != nil, "a creating row present at boot is abandoned")
+	ck.True(env.pool.evicted["exec-created"], "its executor is evicted, freeing the cap slot")
+}
+
+// TestSandboxReaperKeepsPostBootCreatingRow: a live `creating` row created AFTER
+// this process started is an IN-FLIGHT create this process is running — the
+// first sweep fires a few seconds in, after clients can already reach the
+// daemon — so the boot pass must NOT abandon it. It is left to the age gate.
+func TestSandboxReaperKeepsPostBootCreatingRow(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	boot := time.Now()
+	env.ctrl.sandboxBootTime = boot
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev",
+		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
+		State: sandboxStateCreating, CreatedAt: boot.Add(time.Second), // created after this process
+	}))
+
+	env.ctrl.sweepSandboxesOnBoot(context.Background())
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "an in-flight create that postdates the boot is kept")
+	ck.False(env.pool.evicted["exec-created"], "its executor is not evicted")
+	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "its container is kept")
 }
 
 // TestSandboxReaperRemovesStaleCreatingRow: a `creating` row older than

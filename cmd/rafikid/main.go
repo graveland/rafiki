@@ -602,6 +602,11 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
 	ctrl.sandboxCfg = sandboxCfg
 	ctrl.sandboxStore = sandboxStore
+	// The sandbox sweeper's boot pass abandons a `creating` row only when it
+	// predates this instant: a row created after process start is an in-flight
+	// create this process is running. Captured here, before any client can reach
+	// the socket.
+	ctrl.sandboxBootTime = time.Now()
 	ctrl.streamRevoke = streamRevoke
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)

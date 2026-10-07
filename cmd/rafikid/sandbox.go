@@ -832,9 +832,12 @@ func (c *Controller) startSandboxSweeper(ctx context.Context) {
 }
 
 // sweepSandboxesOnBoot is the first pass after startup. It is sweepSandboxes
-// with one addition: EVERY live `creating` row is treated as abandoned, because
-// no in-flight create survives a process restart. Its container, if one was
-// made, is left for the orphan arm to reap on this or the next pass.
+// with one addition: a live `creating` row that predates this process is treated
+// as abandoned, because no in-flight create survives a process restart. A row
+// created AFTER this process started is an in-flight create this process is
+// running, so the boot pass leaves it to the age gate like any other pass. Its
+// container, if one was made, is left for the orphan arm to reap on this or the
+// next pass.
 func (c *Controller) sweepSandboxesOnBoot(ctx context.Context) {
 	c.sweepSandboxesPass(ctx, true)
 }
@@ -866,16 +869,17 @@ func (c *Controller) sweepSandboxesPass(ctx context.Context, boot bool) {
 	// Abandoned `creating` rows: a half-created sandbox (the daemon died between
 	// row mint and container start) holds a cap slot and, if CreateContainer
 	// ran, an `unless-stopped` container the orphan arm keeps because its row is
-	// live. Every `creating` row is abandoned on the boot sweep (nothing
-	// in-flight survives a restart) or once it is older than
-	// sandboxStaleCreatingAge (covering an unbounded image pull). Removing the
-	// row makes its container an orphan, which the orphan arm reaps on this or
-	// the next pass.
+	// live. A `creating` row is abandoned once it is older than
+	// sandboxStaleCreatingAge (covering an unbounded image pull), and — on the
+	// boot pass only — when it predates this process (nothing in-flight survives
+	// a restart). A row created AFTER this process started is an in-flight create
+	// this process is running and is left alone. Removing the row makes its
+	// container an orphan, which the orphan arm reaps on this or the next pass.
 	for _, r := range rows {
 		if r.State != sandboxStateCreating {
 			continue
 		}
-		if !boot && now.Sub(r.CreatedAt) < sandboxStaleCreatingAge {
+		if !c.sandboxCreatingAbandoned(r, boot, now) {
 			continue
 		}
 		if err := c.removeSandboxRow(ctx, r); err != nil {
@@ -910,6 +914,32 @@ func (c *Controller) sweepSandboxesPass(ctx context.Context, boot bool) {
 	}
 
 	c.reapChildlessSandboxes(ctx, rows, now)
+}
+
+// sandboxCreatingAbandoned reports whether a live `creating` row must be
+// abandoned by this pass.
+//
+// Age gate: a `creating` row older than sandboxStaleCreatingAge is abandoned on
+// ANY pass — PullImage has no budget of its own, so the age gate is what covers
+// an unbounded pull or a wedged create.
+//
+// Boot gate: on the first pass after startup a `creating` row that was created
+// BEFORE this process started is abandoned too — no in-flight create survives a
+// restart, so such a row is a half-created sandbox holding a cap slot. The
+// comparison is against the INJECTED sandboxBootTime, never the wall clock, so a
+// test can pin it. A zero sandboxBootTime disables the boot gate (only the age
+// gate applies). A row created AFTER this process started is an in-flight create
+// this process is running — the first pass fires a few seconds after the socket
+// is already serving clients — so the boot pass must not destroy it; it is left
+// to the age gate like any other in-flight create.
+func (c *Controller) sandboxCreatingAbandoned(r sandbox.Row, boot bool, now time.Time) bool {
+	if now.Sub(r.CreatedAt) >= sandboxStaleCreatingAge {
+		return true
+	}
+	if boot && !c.sandboxBootTime.IsZero() && r.CreatedAt.Before(c.sandboxBootTime) {
+		return true
+	}
+	return false
 }
 
 // reapOrphanContainers removes, per live docker launcher, every container whose
