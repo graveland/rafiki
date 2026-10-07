@@ -61,16 +61,22 @@ func (b *controllerBinder) ChooseFor(childID string) (string, error) {
 			return "", err
 		}
 		if owned {
-			if b.c.execPool != nil {
+			// Only a `ready` row is a FULLY live sandbox. A `removing` row is being
+			// torn down, a `lost` row has no container, and `creating` is an
+			// in-flight create with no container yet — binding any of them would
+			// hand the child a workspace that is going away. All take the same
+			// not-connected path, never a fall-through to ordinary selection.
+			if row.State == sandboxStateReady && b.c.execPool != nil {
 				for _, le := range b.c.execPool.Live() {
 					if le.Executor.ID == row.ExecutorID && le.Executor.Enabled && le.Executor.OwnerUserID == b.owner.UserID {
 						return le.Executor.ID, nil
 					}
 				}
 			}
-			// The row exists but its executor is not live (or is disabled or was
-			// re-owned). This NEVER falls through to chooseExecutor: falling through
-			// would let the child bind somewhere else instead of to its sandbox.
+			// The row is not a fully live sandbox (or its executor is not live,
+			// disabled, or was re-owned). This NEVER falls through to
+			// chooseExecutor: falling through would let the child bind somewhere
+			// else instead of to its sandbox.
 			return "", fmt.Errorf("sandbox %q is not connected", sandboxDisplayName(row))
 		}
 	}

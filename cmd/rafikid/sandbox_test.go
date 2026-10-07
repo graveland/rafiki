@@ -1047,8 +1047,11 @@ func TestSandboxCreateNilEngineFailsClosed(t *testing.T) {
 	ck.True(strings.Contains(err.Error(), "sandbox engine is not wired"), "error text: %v", err)
 }
 
-// TestSandboxRemoveSandboxesOwnedBy: closing a child removes its own and its
-// descendants' spawn-block sandboxes, and leaves an unrelated child's alone.
+// TestSandboxRemoveSandboxesOwnedBy: teardown removes the OWNING child's own
+// spawn-block sandbox ONLY. A still-live descendant's own sandbox survives its
+// ancestor's close (its workspace may be in use), and an unrelated child's is
+// untouched. Teardown is keyed on the owning child; the reaper covers each
+// sandbox once its OWN child's row is closed or absent.
 func TestSandboxRemoveSandboxesOwnedBy(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
@@ -1069,12 +1072,12 @@ func TestSandboxRemoveSandboxesOwnedBy(t *testing.T) {
 	}
 
 	env.ctrl.removeSandboxesOwnedBy(context.Background(), "a")
-	for _, id := range []string{"sbx-a", "sbx-b"} {
+	a, _ := env.store.get("sbx-a")
+	ck.True(a.RemovedAt != nil, "the owning child's own sandbox is removed")
+	for _, id := range []string{"sbx-b", "sbx-other"} {
 		row, _ := env.store.get(id)
-		ck.True(row.RemovedAt != nil, "%s removed", id)
+		ck.True(row.RemovedAt == nil, "%s must NOT be removed (only the owning child's sandbox is)", id)
 	}
-	other, _ := env.store.get("sbx-other")
-	ck.True(other.RemovedAt == nil, "an unrelated child's sandbox is kept")
 }
 
 // TestSandboxCreateForSpawnHappyPath: the spawn flow's unnamed variant mints a

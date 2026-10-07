@@ -300,6 +300,66 @@ func TestSandboxSpawnCloseFailedRemovalStillCloses(t *testing.T) {
 	ck.Eq(sandboxStateRemoving, row.State, "left removing")
 }
 
+// TestSandboxSpawnCloseDoesNotCascadeToDescendants: closing a parent removes its
+// OWN spawn-block sandbox but must NOT touch a still-live descendant's own
+// sandbox (whose workspace it may be actively using). Teardown is keyed on the
+// owning child; the reaper covers a sandbox once its own child's row closes.
+func TestSandboxSpawnCloseDoesNotCascadeToDescendants(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxSpawnEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	// parent (exited, closing) -> child (still live).
+	env.ctrl.st.Insert(&childstore.Session{
+		ChildID: "parent", Status: protocol.StatusExited, StartedAt: time.Now(),
+		Kind: protocol.KindFundi, Labels: map[string]string{},
+	})
+	sandboxSeedChild(env, "child", "parent")
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-parent", OwnerUserID: owner.UserID, OwnerChild: "parent", Scope: protocol.ScopeSelf,
+		ExecutorID: "exec-p", LauncherExecutorID: "launcher", ContainerID: "ctr-p", State: sandboxStateReady,
+	})
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-child", OwnerUserID: owner.UserID, OwnerChild: "child", Scope: protocol.ScopeSelf,
+		ExecutorID: "exec-c", LauncherExecutorID: "launcher", ContainerID: "ctr-c", State: sandboxStateReady,
+	})
+
+	ck.NoError(env.ctrl.Close("parent"), "close")
+
+	prow, _ := env.store.get("sbx-parent")
+	ck.True(prow.RemovedAt != nil, "the closing child's own sandbox is removed")
+	crow, _ := env.store.get("sbx-child")
+	ck.True(crow.RemovedAt == nil, "a still-live descendant's own sandbox must survive its ancestor's close")
+	ck.False(sandboxHas(env.docker.removed, "ctr-c"), "the descendant's container is kept: %v", env.docker.removed)
+}
+
+// TestSandboxSpawnRemovingOrLostSandboxDoesNotBind: only a `ready` row is a fully
+// live sandbox. A `removing` (being torn down) or `lost` (no container) row whose
+// executor is still connected must take the not-connected error path, never bind
+// and never fall through to ordinary selection.
+func TestSandboxSpawnRemovingOrLostSandboxDoesNotBind(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{sandboxStateRemoving, sandboxStateLost} {
+		t.Run(state, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			env := newSandboxSpawnEnv(t)
+			owner := sandboxOwner()
+			env.pool.live = []execpool.LiveExecutor{ownedSandboxEx("exec-sbx", "c1", "sbx-1", owner.UserID)}
+			insertSandboxRow(env, sandbox.Row{
+				ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "c1", Scope: protocol.ScopeSelf,
+				ExecutorID: "exec-sbx", State: state,
+			})
+
+			got, err := env.ctrl.binderFor(protocol.SpawnRequest{},
+				executorOwner{Name: "u", UserID: owner.UserID}).ChooseFor("c1")
+			ck.Error(err, "a %s sandbox must not bind", state)
+			ck.True(strings.Contains(err.Error(), "not connected"), "error text: %v", err)
+			ck.Eq("", got, "must not bind")
+		})
+	}
+}
+
 // TestSandboxSpawnKillLeavesSandbox: a killed child keeps its sandbox — a killed
 // child can resume, and its workspace must be there if it does.
 func TestSandboxSpawnKillLeavesSandbox(t *testing.T) {

@@ -737,10 +737,19 @@ func (c *Controller) removeSandboxRow(ctx context.Context, row sandbox.Row) erro
 	return c.sandboxStore.MarkRemoved(ctx, row.ID, time.Now())
 }
 
-// removeSandboxesOwnedBy tears down every live sandbox a child owns — its own
-// spawn block and any descendant's. Called by the spawn flow when the owning
-// child closes (task 5.1). Best-effort: each failure is logged and the sweep
-// retries.
+// removeSandboxesOwnedBy tears down every live sandbox whose OWNING child is
+// childID — its own spawn block, and nothing else. Called by Close and
+// CloseAllExited when the owning child closes, and by the spawn flow's failure
+// path (task 5.1).
+//
+// It deliberately does NOT cascade to descendants: Close tombstones ONE child,
+// and a still-LIVE descendant's spawn-block sandbox must survive its ancestor's
+// close — especially a `subtree` block it is actively using. Teardown is keyed on
+// the OWNING child (the design's "removed when its owning child's persisted DB row
+// is closed or absent"), and the reaper (reapChildlessSandboxes) covers each
+// sandbox once its OWN child's row is closed or absent, so nothing leaks.
+//
+// Best-effort: each failure is logged and the reaper retries.
 func (c *Controller) removeSandboxesOwnedBy(ctx context.Context, childID string) {
 	if c.sandboxStore == nil || childID == "" {
 		return
@@ -751,10 +760,7 @@ func (c *Controller) removeSandboxesOwnedBy(ctx context.Context, childID string)
 		return
 	}
 	for _, r := range rows {
-		if r.OwnerChild == "" {
-			continue
-		}
-		if r.OwnerChild != childID && !c.st.IsDescendant(childID, r.OwnerChild) {
+		if r.OwnerChild != childID {
 			continue
 		}
 		if err := c.removeSandboxRow(ctx, r); err != nil {
