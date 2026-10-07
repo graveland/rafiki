@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,39 @@ func TestValidateImageFromSpecWins(t *testing.T) {
 	got, err := Validate(s, baseCfg(), nil, Caller{}, true)
 	assert.NewAborting(t).NoError(err, "Validate")
 	assert.NewAborting(t).Eq("spec:img", got.Image, "Image from spec")
+}
+
+// TestValidateImageReference pins 2.2-F6: the (child-supplied) image is
+// interpolated into the engine's /images/<ref>/json path and the
+// fromImage/tag query, so anything that could reshape either — a query or
+// fragment marker, whitespace, a ".." segment, an absolute path — is refused,
+// while ordinary references pass.
+func TestValidateImageReference(t *testing.T) {
+	ck := assert.NewAborting(t)
+	for _, ok := range []string{
+		"alpine",
+		"rafiki/sandbox:test",
+		"rafiki-sandbox:latest",
+		"registry.example.com:5000/team/img:1.2.3",
+		"localhost:5000/img",
+		"ghcr.io/org/img:v1",
+		"img@sha256:" + strings.Repeat("a", 64),
+	} {
+		s := namedSpec()
+		s.Image = ok
+		_, err := Validate(s, baseCfg(), nil, Caller{}, true)
+		ck.NoError(err, "image %q must validate", ok)
+	}
+	for _, bad := range []string{
+		"img?", "img#frag", "a/../b", "img with space", "img%2f",
+		"/abs/img", "..", "img:tag/extra", "reg/img@sha256:short",
+	} {
+		s := namedSpec()
+		s.Image = bad
+		_, err := Validate(s, baseCfg(), nil, Caller{}, true)
+		ck.Error(err, "image %q must be refused", bad)
+		ck.StrContains(err.Error(), "image", "refusal names the field: %v", err)
+	}
 }
 
 func TestValidateNamedTTLDefault(t *testing.T) {

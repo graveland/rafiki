@@ -25,6 +25,24 @@ var (
 	userRe       = regexp.MustCompile(`^[A-Za-z0-9_.-]+(:[A-Za-z0-9_.-]+)?$`)
 )
 
+// imageRefRe is a conservative Docker image reference: an optional registry
+// host[:port], slash-separated path components, an optional :tag and an
+// optional @sha256:<hex> digest. Every component must START with an
+// alphanumeric, so a "." or ".." segment (which would reshape the engine URL
+// path) can never match; the charset excludes "?", "#", "%" and whitespace,
+// so the ref cannot inject a query or fragment either. It is deliberately
+// looser than the OCI grammar (uppercase and "__" are permitted) and only
+// needs to be tight enough that the child-supplied image is safe to
+// interpolate into the engine's /images/<ref>/json path and the
+// fromImage/tag query (2.2-F6).
+var imageRefRe = regexp.MustCompile(`^` +
+	`[a-zA-Z0-9][a-zA-Z0-9._-]*` + // registry host or first path component
+	`(:[0-9]+)?` + // optional registry port
+	`(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*` + // path components
+	`(:[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127})?` + // optional tag
+	`(@sha256:[a-f0-9]{64})?` + // optional digest
+	`$`)
+
 // Validate checks spec for creation. named=true is CreateSandbox, false is a
 // spawn block. roots are the launcher's reported --sandbox-mount-root values.
 //
@@ -78,6 +96,13 @@ func Validate(spec protocol.SandboxSpec, cfg Config, roots []string, c Caller, n
 		out.Image = cfg.Image
 	default:
 		return Resolved{}, fmt.Errorf("sandbox: image is required: set image in the spec or RAFIKI_SANDBOX_IMAGE on the daemon")
+	}
+	// The image is interpolated into the engine's /images/<ref>/json path and
+	// the fromImage/tag query, so it must be a reference and nothing else — a
+	// child supplies it, and a value carrying "/", "?", "#" or ".." would
+	// reshape the request. Validated whichever source supplied it.
+	if !imageRefRe.MatchString(out.Image) {
+		return Resolved{}, fmt.Errorf("sandbox: image %q is not a valid image reference", out.Image)
 	}
 
 	// 3. Named TTL.

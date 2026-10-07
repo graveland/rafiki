@@ -588,7 +588,9 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   ancestor's stored selector must still match a sandbox's labels for the
   sandbox to be handed down. Every `ChooseFor` — for every child, sandboxed or
   not — runs this lookup, so a bind now depends on the sandbox table; a store
-  error fails the bind closed rather than reading as "not owned".
+  error fails the bind closed rather than reading as "not owned". The lookup is
+  a single indexed read of the owner's live rows (`ListLive`, partial index
+  `sandbox_owner_live`, migration 0048) with a 5 s budget.
 - **A sandboxed child's cwd is a CONTAINER path.** `provisionWorkspace` sends
   the child's cwd as the Provision workdir, and the executor validates it
   exists in ITS filesystem view — for a sandbox, inside the container. A spawn
