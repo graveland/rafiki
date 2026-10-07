@@ -122,6 +122,22 @@ func defaultSandboxRelayDir(proxies map[string]string) string {
 	return filepath.Join(paths.RuntimeDir(), "relay")
 }
 
+// resolveFootholdImage is the foothold image this launcher runs: the explicit
+// --relay-foothold-image, else sandbox.DefaultImage when nothing else relays for
+// it. "Nothing else" is an explicit --relay-dir, or a platform whose docker host
+// shares this kernel (defaultSandboxRelayDir non-empty); it keys off GOOS and
+// the docker proxy exactly as defaultSandboxRelayDir does, never off sniffing a
+// VM. Without a local docker socket there is no launcher, so no foothold.
+func resolveFootholdImage(image string, relayDirSet bool, proxies map[string]string) string {
+	if image != "" || relayDirSet {
+		return image
+	}
+	if !strings.HasPrefix(proxies["docker"], "unix://") || defaultSandboxRelayDir(proxies) != "" {
+		return ""
+	}
+	return sandbox.DefaultImage
+}
+
 // relayDirNeedsDaemon refuses --relay-dir when this command has no daemon
 // address to relay to. The relay is the sandboxes' only link to the daemon, so
 // a relay with nowhere to dial is not a degraded mode but a broken one — better
@@ -222,8 +238,9 @@ func hostnameOrEmpty() string {
 const relayFootholdImageHelp = "image to run as this launcher's foothold: a container inside the docker host's kernel that bridges " +
 	"a volume socket to a loopback TCP relay, for docker hosts that cannot bind-mount this host's " +
 	"sockets (Docker Desktop or OrbStack; the bridge dials host.docker.internal, which those " +
-	"runtimes map to this host's loopback). The image must have rafiki on PATH. Requires --proxy " +
-	"docker=unix://… and --connect or --connect-socket; exclusive with --relay-dir"
+	"runtimes map to this host's loopback). The image must have rafiki on PATH. Defaults to " +
+	sandbox.DefaultImage + " when --proxy docker=unix://… is set on a non-Linux host and --relay-dir is not. " +
+	"Requires --proxy docker=unix://… and --connect or --connect-socket; exclusive with --relay-dir"
 
 // executorProfileProxy resolves a reachable LLM proxy URL for daraja-hosted
 // children from this executor's OWN profile, best-effort — see
@@ -527,9 +544,11 @@ Two transports, exactly one of which is used:
 				return err
 			}
 
-			// Foothold mode is selected only by --relay-foothold-image; these
-			// checks refuse combinations that cannot serve a sandbox, before
-			// anything binds.
+			// Foothold mode is selected by --relay-foothold-image, or by default
+			// where the docker host cannot bind this host's sockets
+			// (resolveFootholdImage); these checks refuse combinations that cannot
+			// serve a sandbox, before anything binds.
+			relayFootholdImage = resolveFootholdImage(relayFootholdImage, cmd.Flags().Changed("relay-dir"), proxies)
 			if err := validateRelayFoothold(relayFootholdImage, relayDir, cmd.Flags().Changed("relay-dir"), proxies); err != nil {
 				return err
 			}

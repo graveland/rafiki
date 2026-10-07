@@ -98,8 +98,10 @@ ordinary durable executor whose operator declared three things:
 - `--relay-dir <dir>` — the host directory the daemon bind-mounts into the
   container so its `rafiki executor serve` can reach the daemon. Reported as
   `DescribeResponse.sandboxRelayDir`.
-- `--relay-foothold-image <ref>` — select **foothold mode** in place of
-  `--relay-dir` (the two are mutually exclusive): the launcher runs one
+- `--relay-foothold-image <ref>` — the image for **foothold mode**, which
+  replaces `--relay-dir` (the two are mutually exclusive) and is the default,
+  with `ghcr.io/graveland/rafiki-sandbox:latest`, on a non-Linux host with a
+  `unix://` `docker` proxy and no `--relay-dir` (`resolveFootholdImage`): the launcher runs one
   foothold container per docker host, inside the docker host's own kernel,
   whose relay socket lives in a named volume the sandbox mounts. Works only
   where the docker runtime maps `host.docker.internal` to this host's loopback

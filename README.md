@@ -902,9 +902,11 @@ the container (`--relay-dir`, defaulting to `<runtime dir>/relay` when the
 `docker` proxy is a local unix socket), and the sandbox dials
 `/run/rafiki-relay/daemon.sock`. A docker host in **another kernel** — OrbStack
 or Docker Desktop on macOS — cannot see a host bind-mount, so select
-**foothold mode** instead with
-`--relay-foothold-image <ref>` (mutually exclusive with `--relay-dir`; it
-requires a `unix://` `docker` proxy and a daemon address). Foothold mode works
+**foothold mode** instead. It is the default on a non-Linux host with a
+`unix://` `docker` proxy and no `--relay-dir`, running the published image
+`ghcr.io/graveland/rafiki-sandbox:latest`; `--relay-foothold-image <ref>`
+overrides the image (mutually exclusive with `--relay-dir`; it requires a
+`unix://` `docker` proxy and a daemon address). Foothold mode works
 only where the docker runtime maps `host.docker.internal` to this host's
 loopback (Docker Desktop, OrbStack): the foothold's bridge dials its OWN
 host's loopback, so a plain lima VM or a remote docker context — which cannot
@@ -931,8 +933,9 @@ sandboxes already created on the old volume without a relay.
 **The image must run `rafiki`.** A sandbox runs `rafiki executor serve
 --connect-socket /run/rafiki-relay/daemon.sock` as its entrypoint, so the image
 must have the `rafiki` binary on `PATH` (and whatever the agent's tools need);
-the daemon pulls the image if it is absent. The daemon sets
-`RAFIKI_SANDBOX_IMAGE` as the default image; a create may still pass `--image`.
+the daemon pulls the image if it is absent. `RAFIKI_SANDBOX_IMAGE` overrides the default image
+(`ghcr.io/graveland/rafiki-sandbox:latest`, the Dockerfile's `sandbox` target,
+published by `.github/workflows/images.yml`); a create may still pass `--image`.
 
 Create, list and remove **named** sandboxes from the CLI (they go through the
 daemon — the client never dials a sandbox directly):

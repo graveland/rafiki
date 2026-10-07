@@ -27,6 +27,12 @@ const (
 
 // Defaults, all in one place. The child_max_* caps default to 0 = no clamp.
 const (
+	// DefaultImage is the published sandbox image (the Dockerfile's sandbox
+	// target, built by .github/workflows/images.yml). It also serves as the
+	// launcher's foothold image. protocol.Epoch refuses a mismatched build
+	// loudly, so a floating tag is safe.
+	DefaultImage = "ghcr.io/graveland/rafiki-sandbox:latest"
+
 	DefaultNetwork       = protocol.NetworkEgress
 	DefaultTTL           = 168 * time.Hour
 	DefaultMaxTTL        = 720 * time.Hour
@@ -51,12 +57,16 @@ type Config struct {
 // number, or TTL > MaxTTL is an error naming the variable.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		Image:         getenv(EnvImage),
+		Image:         DefaultImage,
 		Network:       DefaultNetwork,
 		TTL:           DefaultTTL,
 		MaxTTL:        DefaultMaxTTL,
 		MaxPerOwner:   DefaultMaxPerOwner,
 		SweepInterval: DefaultSweepInterval,
+	}
+
+	if v := getenv(EnvImage); v != "" {
+		cfg.Image = v
 	}
 
 	if v := getenv(EnvNetwork); v != "" {

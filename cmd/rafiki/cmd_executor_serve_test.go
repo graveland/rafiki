@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -357,4 +358,22 @@ func TestExecutorServeRelayFootholdBindsLoopbackOnly(t *testing.T) {
 	c.Require().True(ok, "the foothold relay listener must be TCP")
 	c.True(addr.IP.Equal(net.IPv4(127, 0, 0, 1)),
 		"the foothold relay must bind 127.0.0.1, never a wildcard or 0.0.0.0")
+}
+
+// The foothold is the default exactly where defaultSandboxRelayDir is not: a
+// local docker socket on a non-Linux host, with no explicit relay choice.
+func TestResolveFootholdImage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	local := map[string]string{"docker": "unix:///var/run/docker.sock"}
+
+	setRelayDirGOOS(t, "darwin")
+	c.Eq(sandbox.DefaultImage, resolveFootholdImage("", false, local), "darwin local socket defaults to the published image")
+	c.Eq("mine:1", resolveFootholdImage("mine:1", false, local), "an explicit image wins")
+	c.Eq("", resolveFootholdImage("", true, local), "an explicit --relay-dir opts out")
+	c.Eq("", resolveFootholdImage("", false, map[string]string{"docker": "http://remote:2375"}), "a remote docker has no foothold")
+	c.Eq("", resolveFootholdImage("", false, nil), "no docker proxy means no launcher")
+
+	setRelayDirGOOS(t, "linux")
+	c.Eq("", resolveFootholdImage("", false, local), "linux keeps the host-bind relay dir")
 }

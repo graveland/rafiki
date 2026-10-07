@@ -19,7 +19,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	c := assert.NewAborting(t)
 	cfg, err := ConfigFromEnv(envFrom(nil))
 	c.NoError(err, "ConfigFromEnv(empty)")
-	c.Eq("", cfg.Image, "Image default")
+	c.Eq(DefaultImage, cfg.Image, "Image default")
 	c.Eq(protocol.NetworkEgress, cfg.Network, "Network default")
 	c.Eq(168*time.Hour, cfg.TTL, "TTL default")
 	c.Eq(720*time.Hour, cfg.MaxTTL, "MaxTTL default")

@@ -100,7 +100,7 @@ func newSandboxCreateCmd() *cobra.Command {
 		Long: `Create a named sandbox and print it.
 
 --name is required: a named sandbox is addressed by name (or id) afterwards.
---image may be omitted when the daemon sets RAFIKI_SANDBOX_IMAGE. --ttl may be
+--image may be omitted to take the daemon's RAFIKI_SANDBOX_IMAGE (default: the published ghcr sandbox image). --ttl may be
 omitted to take the daemon's configured default (RAFIKI_SANDBOX_TTL); --network
 may be omitted to take RAFIKI_SANDBOX_NETWORK.
 
