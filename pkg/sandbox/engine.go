@@ -75,7 +75,7 @@ func (e *Engine) ImageExists(ctx context.Context, ref string) (bool, error) {
 // ImageID returns the content-addressed image ID (sha256:…) a ref currently
 // resolves to locally. A 404 is an error: the caller decides whether to pull.
 func (e *Engine) ImageID(ctx context.Context, ref string) (string, error) {
-	req, err := e.newRequest(ctx, http.MethodGet, "/images/"+url.PathEscape(ref)+"/json", nil, nil)
+	req, err := e.newRequest(ctx, http.MethodGet, "/images/"+ref+"/json", nil, nil)
 	if err != nil {
 		return "", err
 	}

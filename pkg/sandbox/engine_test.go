@@ -109,12 +109,15 @@ func TestEngineImageIDReturnsID(t *testing.T) {
 		_, _ = w.Write([]byte(`{"Id":"sha256:abc"}`))
 	})
 	c := assert.NewAborting(t)
-	id, err := e.ImageID(context.Background(), "nginx:latest")
+	id, err := e.ImageID(context.Background(), "ghcr.io/org/img:v1")
 	c.NoError(err, "ImageID")
 	c.Eq("sha256:abc", id, "id")
 	got := rec.last(t)
 	c.Eq("GET", got.Method, "method")
-	c.Eq("/images/nginx:latest/json", got.Path, "path")
+	// A registry-slash ref is not pre-escaped: it must match ImageExists's
+	// raw "/images/<ref>/json" path exactly, not double-encode.
+	c.Eq("/images/ghcr.io/org/img:v1/json", got.Path, "path")
+	c.Eq("", got.RawURI[len("/images/ghcr.io/org/img:v1/json"):], "no query")
 }
 
 func TestEngineImageIDNotFoundIsError(t *testing.T) {
