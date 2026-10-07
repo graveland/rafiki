@@ -1728,6 +1728,18 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		req.Kind = protocol.KindFundi
 	}
 
+	// A spawn block confines the child to a sandbox workspace, which only a
+	// fundi child can be. A claude or script child is LAUNCHED, not
+	// workspace-bound, so a sandbox on one would be built and then never used —
+	// refused here, before the sandbox is created. Checked after preset
+	// resolution so the effective kind is the one that will actually run.
+	if req.Sandbox != nil && req.Kind != protocol.KindFundi {
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "a sandbox spawn block is only supported for kind=fundi: claude and script children are launched, not workspace-bound",
+		}
+	}
+
 	// A pre-fill the child could not run is refused here, before anything
 	// else reads req — same ordering argument as applyPreset above: the
 	// preset's kind and tool shaping are already resolved, so the check sees
@@ -1859,6 +1871,45 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// before) because the "fundi" kind needs it to pin --spill-dir
 	// (see buildAgentArgv/agentSpillDir).
 	childID := newChildID()
+
+	// A spawn block: create the sandbox NOW, before the runtime is built.
+	// agentRuntimeOptions eagerly binds below, and a correct bind needs the
+	// sandbox row in place; the row itself records every access-gating fact the
+	// bind relies on. A failure REFUSES the spawn — a sandboxed child must never
+	// start toolless or native.
+	//
+	// On success the request's sibling grant is rewritten to the sandbox's
+	// machine label. This is NOT routed through persistRefAsSelector: that
+	// resolves a ref by selection, which now (correctly) excludes child-owned
+	// sandbox rows, so it could never express the pin. The stored selector is
+	// what confines the child's DESCENDANTS through lineage narrowing.
+	//
+	// sandboxOwnedChild, while non-empty, is the child whose sandbox a later
+	// failure must tear down. It is cleared once the child's own row is written.
+	sandboxOwnedChild := ""
+	if req.Sandbox != nil {
+		executor, rowID, err := c.sandboxCreateForSpawn(ctx, owner, req.ParentChildID, childID, *req.Sandbox)
+		if err != nil {
+			return protocol.SpawnResponseData{}, err
+		}
+		machine := executor.Labels["machine"]
+		if machine == "" {
+			machine = sandboxSpawnMachineName(rowID)
+		}
+		req.ExecutorRef = ""
+		req.ExecutorSelector = "machine=" + machine
+		sandboxOwnedChild = childID
+		defer func() {
+			if sandboxOwnedChild == "" {
+				return
+			}
+			// Every failure below means the child never ran, so its sandbox goes
+			// with it rather than waiting for the reaper. WithoutCancel: teardown
+			// must still run when the spawn's own context was cancelled.
+			c.removeSandboxesOwnedBy(context.WithoutCancel(ctx), sandboxOwnedChild)
+		}()
+	}
+
 	env, vals := c.buildEnv(req, childID, c.socketPath)
 	// claudeEnv is only meaningful for the local-subprocess path — once
 	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
@@ -2059,6 +2110,11 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 		slog.Warn("write state record (spawning)", "childId", childID, "error", err)
 	}
+
+	// The child's own row is written (or the daemon has no store to write to).
+	// From here the spawn cannot be unwound, so its sandbox must NOT be: clear
+	// the failure-path teardown armed above.
+	sandboxOwnedChild = ""
 
 	// Assign the ledger row now that the child is admitted and registered.
 	// Ordering is load-bearing: phase 05 refuses spawns for depth, cost and
@@ -3335,6 +3391,15 @@ func (c *Controller) Close(childID string) error {
 			slog.Warn("delete script host dir", "childId", childID, "error", err)
 		}
 	}
+
+	// A spawn-block sandbox exists only for its child. The child's row is
+	// tombstoned above (or never was ours to write), so tear the sandbox down
+	// now rather than waiting for the reaper. Best-effort and bounded: a failed
+	// removal is logged (removeSandboxesOwnedBy) and must NEVER fail the close —
+	// the reaper finishes any container left behind.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Minute)
+	c.removeSandboxesOwnedBy(closeCtx, childID)
+	closeCancel()
 	return nil
 }
 
@@ -3485,6 +3550,12 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 				slog.Warn("delete script host dir", "childId", s.ChildID, "error", err)
 			}
 		}
+		// A spawn-block sandbox exists only for its child; the child's row is
+		// tombstoned above, so tear the sandbox down now rather than waiting for
+		// the reaper. Best-effort: a failure is logged and never fails the sweep.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Minute)
+		c.removeSandboxesOwnedBy(closeCtx, s.ChildID)
+		closeCancel()
 		closed = append(closed, s.ChildID)
 	}
 	if failed > 0 {
@@ -5420,6 +5491,23 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
 	if err != nil {
 		return err
+	}
+	// A sandbox's executor row backs a container that restarts forever
+	// (`--restart unless-stopped`). Deleting the row alone would evict nothing
+	// and orphan that container, so the sandbox must be removed through the
+	// path that stops it first. Presence of the label, not value: a row written
+	// with an empty value is still a sandbox.
+	if _, isSandbox := e.Labels[sandbox.RowLabelSandbox]; isSandbox {
+		sbx := e.Labels[sandbox.RowLabelID]
+		if sbx == "" {
+			sbx = shortID(e.ID)
+		}
+		return &connectapi.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: fmt.Sprintf(
+				"executor %s is sandbox %q: deleting its row would orphan a container that restarts forever — remove it with `rafiki sandbox rm`",
+				shortID(e.ID), sbx),
+		}
 	}
 	return translateExecutorErr(c.execStore.Delete(context.Background(), e.ID))
 }

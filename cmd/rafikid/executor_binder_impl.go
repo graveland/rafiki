@@ -3,13 +3,20 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 )
+
+// sandboxBindTimeout bounds the ownership lookup every bind runs. It is short:
+// the query is one indexed read, and blocking a bind on a wedged store must not
+// wedge the child's first tool call.
+const sandboxBindTimeout = 5 * time.Second
 
 // controllerBinder is the Controller's executorBinder, bound to ONE spawn
 // request and its attested owner.
@@ -34,12 +41,55 @@ func (c *Controller) binderFor(req protocol.SpawnRequest, owner executorOwner) e
 //
 // The error is explainNoMatch's per-candidate diagnostic, which boundExecutor
 // surfaces to the agent verbatim.
-func (b *controllerBinder) ChooseFor(string) (string, error) {
+func (b *controllerBinder) ChooseFor(childID string) (string, error) {
+	// A spawn-block sandbox OWNS this child — its own block, or for a
+	// subtree-scoped block one an ancestor holds. Ownership is checked first and
+	// is authoritative: a sandboxed child binds to its sandbox and NEVER falls
+	// through to ordinary selection, which would run it natively on a host the
+	// operator never offered it (and, for a `subtree` descendant, let a whole
+	// subtree escape the block).
+	//
+	// A missing sandbox store (a DB-less daemon) skips the lookup entirely: there
+	// are no spawn-block sandboxes without one.
+	if b.c.sandboxStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxBindTimeout)
+		row, owned, err := b.c.ownedSandbox(ctx, childID, b.owner.UserID)
+		cancel()
+		if err != nil {
+			// A store error is an error, never "not owned": treating it as
+			// unowned would let a sandboxed child silently rebind natively.
+			return "", err
+		}
+		if owned {
+			if b.c.execPool != nil {
+				for _, le := range b.c.execPool.Live() {
+					if le.Executor.ID == row.ExecutorID && le.Executor.Enabled && le.Executor.OwnerUserID == b.owner.UserID {
+						return le.Executor.ID, nil
+					}
+				}
+			}
+			// The row exists but its executor is not live (or is disabled or was
+			// re-owned). This NEVER falls through to chooseExecutor: falling through
+			// would let the child bind somewhere else instead of to its sandbox.
+			return "", fmt.Errorf("sandbox %q is not connected", sandboxDisplayName(row))
+		}
+	}
+
 	chosen, err := b.c.chooseExecutor(b.req, b.owner)
 	if err != nil {
 		return "", err
 	}
 	return chosen.ID, nil
+}
+
+// sandboxDisplayName names a sandbox row for an operator: its name when it has
+// one (a named sandbox), else the generated machine name of its spawn block,
+// which is what a caller can actually see and type.
+func sandboxDisplayName(row sandbox.Row) string {
+	if row.Name != "" {
+		return row.Name
+	}
+	return sandboxSpawnMachineName(row.ID)
 }
 
 func (b *controllerBinder) ProvisionOn(ctx context.Context, executorID string) (string, tools.ExecutorClient, error) {
