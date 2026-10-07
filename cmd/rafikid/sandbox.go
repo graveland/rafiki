@@ -773,10 +773,22 @@ func (c *Controller) removeSandboxesOwnedBy(ctx context.Context, childID string)
 // live row whose owner_child is childID, or — for a subtree-scoped row — an
 // ancestor of childID.
 //
+// parentChildID is an ANCESTRY HINT for the eager bind of a freshly spawned
+// child. That bind runs BEFORE the child's own conversations.child row exists in
+// the in-memory store (Spawn builds the runtime at controller.go ~1931 and only
+// inserts the session at ~2098), so IsDescendant(owner_child, childID) cannot
+// walk childID's parent chain and a fresh subtree descendant would start
+// unbound. The hint closes that window: a subtree row is also eligible when its
+// owner_child is the parent (the direct case) or an ancestor of the parent. The
+// hint is daemon-written — a child-scoped caller's ParentChildID is forced to
+// its own id (pkg/connectapi/verbs.go), an operator's ParentChildID is the
+// parent it chose — so a wrong or empty hint can only FAIL to find an owned
+// sandbox, never admit an unrelated one.
+//
 // No eligible row is (zero, false, nil). Exactly one is that row. More than one
 // is corruption (nesting is not allowed) and fails closed. A store error is
 // returned, never read as "not owned". Used by the spawn flow (task 5.1).
-func (c *Controller) ownedSandbox(ctx context.Context, childID, ownerUserID string) (sandbox.Row, bool, error) {
+func (c *Controller) ownedSandbox(ctx context.Context, childID, parentChildID, ownerUserID string) (sandbox.Row, bool, error) {
 	if c.sandboxStore == nil {
 		return sandbox.Row{}, false, &connectapi.ControllerError{Code: protocol.ErrInternal, Message: "sandboxes require a database"}
 	}
@@ -793,7 +805,19 @@ func (c *Controller) ownedSandbox(ctx context.Context, childID, ownerUserID stri
 			eligible = append(eligible, r)
 			continue
 		}
-		if r.Scope == protocol.ScopeSubtree && c.st.IsDescendant(r.OwnerChild, childID) {
+		if r.Scope != protocol.ScopeSubtree {
+			continue
+		}
+		if c.st.IsDescendant(r.OwnerChild, childID) {
+			eligible = append(eligible, r)
+			continue
+		}
+		// The parent hint: the direct block owner (childID is its child, so the
+		// equality arm covers what IsDescendant cannot walk yet) or one of the
+		// parent's ancestors. Gated on the same subtree scope, so a self-scoped
+		// parent block still never admits a descendant.
+		if parentChildID != "" &&
+			(r.OwnerChild == parentChildID || c.st.IsDescendant(r.OwnerChild, parentChildID)) {
 			eligible = append(eligible, r)
 		}
 	}

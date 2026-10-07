@@ -467,10 +467,12 @@ func (h *sandboxHarness) enrollOrdinaryExecutor(t *testing.T) {
 }
 
 // TestSandboxSpawnBlockScopes: a spawn-block sandbox is owned by its child and
-// the owner binds to it; a self-scoped block never covers the owner's own
-// child, which is refused with no ordinary executor to fall back to; an
-// unrelated child cannot reach a sandbox by naming its machine; and Kill leaves
-// the container alone while Close removes it (the fake engine sees the DELETE).
+// the owner binds to it; a `subtree` descendant binds to the SAME container as
+// its owner on the first (eager) bind; a self-scoped block never covers the
+// owner's own child, which starts unbound with no ordinary executor to fall back
+// to; an unrelated child cannot reach a sandbox by naming its machine; and Kill
+// leaves the container alone while Close removes it (the fake engine sees the
+// DELETE).
 func TestSandboxSpawnBlockScopes(t *testing.T) {
 	t.Parallel()
 	c := assert.NewAborting(t)
@@ -495,12 +497,15 @@ func TestSandboxSpawnBlockScopes(t *testing.T) {
 	c.Eq("subtree", row.GetScope(), "the block records its scope")
 	c.Eq(aExec, row.GetExecutorId(), "A bound to the sandbox the row owns")
 
-	// A descendant of A inherits A's selector; a child-owned sandbox is never an
-	// ordinary candidate, so the descendant stays inside the block and never
-	// escapes to the launcher.
+	// A descendant of A inherits A's selector AND — with the parent-hint eager
+	// bind — binds to A's SAME sandbox on its first bind, not only on a later
+	// tool call. A child-owned sandbox is never an ordinary candidate, so it can
+	// only ever land on A's container or nowhere.
 	b, err := h.spawn(t, spawnOpts{parent: a})
 	c.NoError(err, "spawn B under A")
-	c.NotEq(h.launcherID, h.labelsOf(t, b)["rafiki/executor"], "the descendant must not escape to the launcher")
+	bExec := h.labelsOf(t, b)["rafiki/executor"]
+	c.Eq(aExec, bExec, "the subtree descendant binds to its owner's SAME sandbox on the first (eager) bind")
+	c.NotEq(h.launcherID, bExec, "the descendant must not escape to the launcher")
 	h.cleanupChild(b)
 
 	// self: C owns a self block; D (C's child) must NOT share it. With no

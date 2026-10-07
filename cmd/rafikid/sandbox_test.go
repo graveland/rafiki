@@ -1116,7 +1116,7 @@ func TestSandboxOwnedByOwner(t *testing.T) {
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "c1", Scope: protocol.ScopeSelf, State: sandboxStateReady,
 	}))
-	row, ok, err := env.ctrl.ownedSandbox(context.Background(), "c1", "o")
+	row, ok, err := env.ctrl.ownedSandbox(context.Background(), "c1", "", "o")
 	ck.NoError(err, "ownedSandbox")
 	ck.True(ok, "c1 owns its own block")
 	ck.Eq("sbx-1", row.ID)
@@ -1132,7 +1132,7 @@ func TestSandboxOwnedBySubtreeDescendant(t *testing.T) {
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "a", Scope: protocol.ScopeSubtree, State: sandboxStateReady,
 	}))
-	row, ok, err := env.ctrl.ownedSandbox(context.Background(), "b", "o")
+	row, ok, err := env.ctrl.ownedSandbox(context.Background(), "b", "", "o")
 	ck.NoError(err, "ownedSandbox")
 	ck.True(ok, "the subtree block owns the descendant")
 	ck.Eq("sbx-1", row.ID)
@@ -1148,7 +1148,7 @@ func TestSandboxSelfScopeNotOwnedByDescendant(t *testing.T) {
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "a", Scope: protocol.ScopeSelf, State: sandboxStateReady,
 	}))
-	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "b", "o")
+	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "b", "", "o")
 	ck.NoError(err, "ownedSandbox")
 	ck.False(ok, "a self-scoped block does not own a descendant")
 }
@@ -1161,9 +1161,58 @@ func TestSandboxUnrelatedChildNotOwned(t *testing.T) {
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "a", Scope: protocol.ScopeSubtree, State: sandboxStateReady,
 	}))
-	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "unrelated", "o")
+	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "unrelated", "", "o")
 	ck.NoError(err, "ownedSandbox")
 	ck.False(ok, "an unrelated child owns nothing")
+}
+
+// TestSandboxOwnedByParentHintFreshDescendant: a fresh descendant whose own row
+// is NOT in the childstore still owns its ancestor's subtree block, resolved
+// through the daemon-written parent hint (the eager bind runs before the child's
+// row exists). The block is owned by the grandparent, so only the ANCESTOR arm
+// of the hint can resolve it.
+func TestSandboxOwnedByParentHintFreshDescendant(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	seedLineage(env, "root", "parent")
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "root", Scope: protocol.ScopeSubtree, State: sandboxStateReady,
+	}))
+	row, ok, err := env.ctrl.ownedSandbox(context.Background(), "child", "parent", "o")
+	ck.NoError(err, "ownedSandbox")
+	ck.True(ok, "the parent hint resolves the ancestor's subtree block")
+	ck.Eq("sbx-1", row.ID)
+}
+
+// TestSandboxParentHintSelfScopeNotOwned: the parent hint does not let a
+// self-scoped ancestor block cover a fresh descendant.
+func TestSandboxParentHintSelfScopeNotOwned(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	seedLineage(env, "root", "parent")
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "root", Scope: protocol.ScopeSelf, State: sandboxStateReady,
+	}))
+	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "child", "parent", "o")
+	ck.NoError(err, "ownedSandbox")
+	ck.False(ok, "a self-scoped block never admits a descendant through the hint")
+}
+
+// TestSandboxParentHintUnrelatedNotOwned: a hint naming an unrelated parent does
+// not admit a block the hint has no ancestral relationship with (fail-closed).
+func TestSandboxParentHintUnrelatedNotOwned(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	sandboxSeedChild(env, "stranger", "")
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: "o", OwnerChild: "root", Scope: protocol.ScopeSubtree, State: sandboxStateReady,
+	}))
+	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "child", "stranger", "o")
+	ck.NoError(err, "ownedSandbox")
+	ck.False(ok, "an unrelated parent hint admits nothing")
 }
 
 // TestSandboxTwoEligibleRowsIsAnError.
@@ -1177,7 +1226,7 @@ func TestSandboxTwoEligibleRowsIsAnError(t *testing.T) {
 			ID: id, OwnerUserID: "o", OwnerChild: "a", Scope: protocol.ScopeSubtree, State: sandboxStateReady,
 		}))
 	}
-	_, _, err := env.ctrl.ownedSandbox(context.Background(), "b", "o")
+	_, _, err := env.ctrl.ownedSandbox(context.Background(), "b", "", "o")
 	ck.Error(err, "two eligible rows must fail closed")
 }
 
@@ -1187,7 +1236,7 @@ func TestSandboxStoreErrorIsNotUnowned(t *testing.T) {
 	ck := assert.NewAborting(t)
 	env := newSandboxEnv(t)
 	env.store.listErr = errors.New("boom")
-	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "c1", "o")
+	_, ok, err := env.ctrl.ownedSandbox(context.Background(), "c1", "", "o")
 	ck.Error(err, "a store error must surface")
 	ck.False(ok, "a store error is not 'not owned'")
 }

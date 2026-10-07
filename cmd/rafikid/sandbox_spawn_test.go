@@ -78,7 +78,7 @@ func TestSandboxSpawnHappyPath(t *testing.T) {
 	ck.Require().NoError(err, "spawn")
 	childID := res.ChildID
 
-	row, ok, err := env.ctrl.ownedSandbox(context.Background(), childID, owner.UserID)
+	row, ok, err := env.ctrl.ownedSandbox(context.Background(), childID, "", owner.UserID)
 	ck.Require().NoError(err, "ownedSandbox")
 	ck.True(ok, "the new child owns its spawn-block sandbox")
 	ck.Eq(childID, row.OwnerChild, "owner child")
@@ -386,7 +386,7 @@ func TestSandboxSpawnKillLeavesSandbox(t *testing.T) {
 	_, err = env.ctrl.Kill(context.Background(), childID, 5*time.Second, 2*time.Second)
 	ck.NoError(err, "kill")
 
-	_, ok, oerr := env.ctrl.ownedSandbox(context.Background(), childID, owner.UserID)
+	_, ok, oerr := env.ctrl.ownedSandbox(context.Background(), childID, "", owner.UserID)
 	ck.NoError(oerr, "ownedSandbox")
 	ck.True(ok, "a killed child keeps its sandbox")
 }
@@ -456,6 +456,98 @@ func TestSandboxSpawnSubtreeDescendantBinds(t *testing.T) {
 		executorOwner{Name: "u", UserID: owner.UserID}).ChooseFor("b")
 	ck.NoError(err, "ChooseFor")
 	ck.Eq("exec-sbx", got, "the descendant binds to the same sandbox")
+}
+
+// TestSandboxSpawnSubtreeDescendantEagerBind: a fresh subtree descendant whose
+// own row is NOT yet in the childstore still binds to its ancestor's subtree
+// sandbox on the FIRST (eager) bind, through the daemon-written parent hint.
+// Before the hint the eager bind ran before the child's own row existed, so the
+// descendant started unbound and only reached the sandbox on a later bind.
+func TestSandboxSpawnSubtreeDescendantEagerBind(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxSpawnEnv(t)
+	owner := sandboxOwner()
+	// root -> parent -> child. The subtree block is owned by ROOT, so "child" has
+	// no row of its own and only the parent hint's ANCESTOR arm can resolve it.
+	seedLineage(env, "root", "parent")
+	env.pool.live = []execpool.LiveExecutor{ownedSandboxEx("exec-sbx", "root", "sbx-1", owner.UserID)}
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "root", Scope: protocol.ScopeSubtree,
+		ExecutorID: "exec-sbx", State: sandboxStateReady,
+	})
+
+	got, err := env.ctrl.binderFor(protocol.SpawnRequest{ParentChildID: "parent"},
+		executorOwner{Name: "u", UserID: owner.UserID}).ChooseFor("child")
+	ck.NoError(err, "ChooseFor")
+	ck.Eq("exec-sbx", got, "the fresh descendant binds to its ancestor's subtree sandbox on the eager bind")
+}
+
+// TestSandboxSpawnSubtreeEagerBindSelfNotAdmitted: the parent hint does not let a
+// self-scoped ancestor block cover a fresh descendant.
+func TestSandboxSpawnSubtreeEagerBindSelfNotAdmitted(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxSpawnEnv(t)
+	owner := sandboxOwner()
+	seedLineage(env, "root", "parent")
+	env.pool.live = []execpool.LiveExecutor{ownedSandboxEx("exec-sbx", "root", "sbx-1", owner.UserID)}
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "root", Scope: protocol.ScopeSelf,
+		ExecutorID: "exec-sbx", State: sandboxStateReady,
+	})
+
+	got, err := env.ctrl.binderFor(protocol.SpawnRequest{ParentChildID: "parent"},
+		executorOwner{Name: "u", UserID: owner.UserID}).ChooseFor("child")
+	ck.Error(err, "a self-scoped block must not admit a fresh descendant")
+	ck.Eq("", got, "unbound")
+}
+
+// TestSandboxSpawnSubtreeEagerBindNoHintFailClosed: with no parent hint and no
+// row for the child, a subtree block does not admit it — the hint can only fail
+// closed, never admit an unrelated child.
+func TestSandboxSpawnSubtreeEagerBindNoHintFailClosed(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxSpawnEnv(t)
+	owner := sandboxOwner()
+	seedLineage(env, "root", "parent")
+	env.pool.live = []execpool.LiveExecutor{ownedSandboxEx("exec-sbx", "root", "sbx-1", owner.UserID)}
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "root", Scope: protocol.ScopeSubtree,
+		ExecutorID: "exec-sbx", State: sandboxStateReady,
+	})
+
+	got, err := env.ctrl.binderFor(protocol.SpawnRequest{},
+		executorOwner{Name: "u", UserID: owner.UserID}).ChooseFor("child")
+	ck.Error(err, "with no hint and no row the block must not admit the child")
+	ck.Eq("", got, "unbound")
+}
+
+// TestSandboxSpawnRecoveryBindUsesStoredParent: on a rebind/recovery the request
+// carries no ParentChildID (resumeRequestFromSnapshot does not set it), so
+// ChooseFor derives the hint from the child's own stored parent label. The
+// stored-parent arm matters because IsDescendant needs the ANCESTOR's row too,
+// and recovery inserts rows one at a time — here the parent's row is not yet
+// loaded, so only the parent-hint equality arm can resolve ownership.
+func TestSandboxSpawnRecoveryBindUsesStoredParent(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxSpawnEnv(t)
+	owner := sandboxOwner()
+	// Only "child" is loaded; "parent" (the block owner) is not yet — the
+	// recovery race the fallback closes.
+	sandboxSeedChild(env, "child", "parent")
+	env.pool.live = []execpool.LiveExecutor{ownedSandboxEx("exec-sbx", "parent", "sbx-1", owner.UserID)}
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "parent", Scope: protocol.ScopeSubtree,
+		ExecutorID: "exec-sbx", State: sandboxStateReady,
+	})
+
+	got, err := env.ctrl.binderFor(protocol.SpawnRequest{},
+		executorOwner{Name: "u", UserID: owner.UserID}).ChooseFor("child")
+	ck.NoError(err, "ChooseFor")
+	ck.Eq("exec-sbx", got, "the recovered descendant binds through its stored parent")
 }
 
 // TestSandboxSpawnUnrelatedChildCannotReach: a child outside the block's subtree

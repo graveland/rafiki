@@ -52,8 +52,19 @@ func (b *controllerBinder) ChooseFor(childID string) (string, error) {
 	// A missing sandbox store (a DB-less daemon) skips the lookup entirely: there
 	// are no spawn-block sandboxes without one.
 	if b.c.sandboxStore != nil {
+		// The ancestry hint for a fresh descendant's eager bind. On a spawn the
+		// request carries the parent; on a rebind/recovery the request is rebuilt
+		// from the stored snapshot (resumeRequestFromSnapshot), which does NOT set
+		// ParentChildID, so fall back to the store's recorded parent — by then the
+		// child's own row exists (load_children inserts every recovered row before
+		// its runtime is built), so the lookup succeeds. An empty or missing hint
+		// is fail-closed: it can only fail to find an owned sandbox.
+		parent := b.req.ParentChildID
+		if parent == "" && b.c.st != nil {
+			parent, _ = b.c.st.ParentOf(childID)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxBindTimeout)
-		row, owned, err := b.c.ownedSandbox(ctx, childID, b.owner.UserID)
+		row, owned, err := b.c.ownedSandbox(ctx, childID, parent, b.owner.UserID)
 		cancel()
 		if err != nil {
 			// A store error is an error, never "not owned": treating it as
