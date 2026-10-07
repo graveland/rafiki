@@ -449,6 +449,17 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
+	// Sandboxes: the same per-child binding rule as the spawner above — the
+	// daemon-stamped child id and the owner's NON-admin identity are closed over
+	// at construction, never taken as a tool argument. Guarded on the store like
+	// the MCP face (newMCPSandboxes): the sandbox verbs need only the sandbox
+	// table, so a DB-less daemon declines and the three tools do not materialize
+	// rather than advertising verbs that can only error. newControllerSandboxes
+	// itself refuses an empty child id, so even a mis-built binding cannot act
+	// as an operator.
+	if c.sandboxStore != nil {
+		ro.Sandboxes = newControllerSandboxes(c, childID, ownerUserID)
+	}
 	// Same binding rule for the child→parent verbs: agent_report and
 	// agent_result report from THIS child's position in the tree, through the
 	// same hub the Connect verbs run.

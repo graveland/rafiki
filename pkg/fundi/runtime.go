@@ -251,6 +251,14 @@ type RuntimeOptions struct {
 	// fundi` process, which has no parent to report to.
 	Parent tools.ParentReporter
 
+	// Sandboxes, when non-nil, gives this child the sandbox_create/list/remove
+	// tools. Supplied by the daemon as a per-child adapter over the Controller,
+	// bound to the child's id and its owner's NON-admin identity; nil when no
+	// sandbox table is wired (a DB-less daemon) or for the standalone `rafikid
+	// fundi` process, which has no daemon store behind it. Like Agents the
+	// binding takes no caller identity in any method — see tools.SandboxManager.
+	Sandboxes tools.SandboxManager
+
 	// Quota, when non-nil, gives this child the quota_status tool -- its own
 	// captured Anthropic subscription rate-limit snapshot. Supplied by the
 	// daemon as a per-user adapter; nil when no quota source is configured
@@ -694,6 +702,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Tasks:              taskStore,
 		ChildID:            opts.Ref,
 		Agents:             opts.Agents,
+		Sandboxes:          opts.Sandboxes,
 		Parent:             opts.Parent,
 		Quota:              opts.Quota,
 		Conversations:      opts.Conversations,
