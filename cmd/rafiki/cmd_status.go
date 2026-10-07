@@ -152,7 +152,7 @@ func childStatusKeyValues(ch *rafikiv1.ChildSummary, useColor bool) []statusKV {
 		out = append(out, statusKV{"name", ch.GetName()})
 	}
 	out = append(out, statusKV{"kind", kindOrDefault(ch.GetKind())})
-	out = append(out, statusKV{"status", defaultDash(formatStatus(ch.GetStatus(), ch.ExitCode, ch.GetExitSignal(), useColor))})
+	out = append(out, statusKV{"status", defaultDash(formatChildStatus(ch, useColor))})
 	if ch.GetModel() != "" {
 		out = append(out, statusKV{"model", ch.GetModel()})
 	}

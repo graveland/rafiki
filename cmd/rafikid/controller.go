@@ -476,6 +476,11 @@ type Controller struct {
 	// from inside Controller.Spawn/Resume rather than over a Connect call.
 	darajaPool     *darajapool.Pool
 	darajaDialAddr string
+	// darajaLost holds the children whose daraja never reconnected within the
+	// Runner's grace window (Pool.OnLost). handleChildExit takes the entry and
+	// relaunches the child, so a host that vanished mid-session heals once its
+	// executor is back instead of leaving the child exited.
+	darajaLost sync.Map
 
 	// lastRecentSource records which branch GetRecent took ("db", "live",
 	// "exited"). Test seam: the branches are otherwise indistinguishable when
@@ -4506,7 +4511,19 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	}
 
 	c.releaseLease(childID)
+	var relaunch *childstore.ChildRecord
+	if _, lost := c.darajaLost.LoadAndDelete(childID); lost {
+		if s, ok := c.st.Get(childID); ok {
+			rec := childstore.RecordFromSnapshot(s)
+			rec.Status = lastStatus
+			rec.DaemonID = c.daemonID
+			relaunch = &rec
+		}
+	}
 	c.cm.Remove(childID)
+	if relaunch != nil {
+		c.relaunchLostDaraja(*relaunch)
+	}
 }
 
 // ─── persistence ─────────────────────────────────────────────────────────────

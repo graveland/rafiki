@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +71,8 @@ type Pool struct {
 	nextOnConnect  uint64
 	onDisconnectMu sync.Mutex
 	onDisconnect   []func(childID string)
+	onLostMu       sync.Mutex
+	onLost         []func(childID string)
 }
 
 // New creates a Pool backed by the given Registry.
@@ -242,6 +245,30 @@ func (p *Pool) OnDisconnect(fn func(childID string)) {
 	p.onDisconnectMu.Lock()
 	defer p.onDisconnectMu.Unlock()
 	p.onDisconnect = append(p.onDisconnect, fn)
+}
+
+// OnLost registers a callback invoked when a Runner gives up on a daraja that
+// never reconnected within its grace window, just before the Runner reports
+// the child exited. It is the one signal that separates "the child's host
+// vanished" from an operator kill or a process exit, both of which reach the
+// child's exit handler without it.
+func (p *Pool) OnLost(fn func(childID string)) {
+	p.onLostMu.Lock()
+	defer p.onLostMu.Unlock()
+	p.onLost = append(p.onLost, fn)
+}
+
+// FireLost fires the OnLost callbacks for childID. Exported for tests that
+// stand in for a Runner whose grace window ran out.
+func (p *Pool) FireLost(childID string) { p.fireLost(childID) }
+
+func (p *Pool) fireLost(childID string) {
+	p.onLostMu.Lock()
+	fns := slices.Clone(p.onLost)
+	p.onLostMu.Unlock()
+	for _, fn := range fns {
+		fn(childID)
+	}
 }
 
 // FireConnect fires all registered OnConnect callbacks for childID.

@@ -236,3 +236,37 @@ func TestCloseDropsAPendingResume(t *testing.T) {
 	ck.NoError(err, "Close")
 	ck.Eq(0, c.pendingCount(), "a closed child must not stay pending")
 }
+
+// TestLostDarajaRelaunchPendsUntilItsExecutorConnects pins the self-heal for a
+// daraja that never came back: the pool's OnLost marks the child, and the
+// relaunch that follows the child's exit pends on the pinned executor exactly
+// like a recovered child, then launches from the executor-connect sweep.
+func TestLostDarajaRelaunchPendsUntilItsExecutorConnects(t *testing.T) {
+	ck := assert.NewAborting(t)
+	logs := captureLogs(t)
+
+	c := newTestController(t)
+	c.daemonID = "me"
+	c.execPoolConn = execpool.New(newFakeExecStore())
+	pool := darajapool.New(darajapool.NewRegistry())
+	c.darajaPool = pool
+	fp := &fakePool{}
+	c.execPool = fp
+	c.WireDaraja(pool, pool.Reg(), "")
+	c.recoveryWalk.markDone()
+
+	pool.FireLost("c_lost")
+	_, marked := c.darajaLost.Load("c_lost")
+	ck.True(marked, "OnLost must mark the child for relaunch")
+
+	rec := claudeRec("tool_running", map[string]string{"rafiki/executor": "e_home"})
+	rec.ChildID = "c_lost"
+	c.relaunchLostDaraja(rec)
+	ck.StrContains(logs.String(), "deferring auto-resume until the child's executor connects",
+		"an unconnected executor must pend the relaunch; log:\n%s", logs.String())
+	ck.Eq(1, c.pendingCount(), "pending count")
+
+	fp.live = []execpool.LiveExecutor{exDescribe("e_home", []string{"claude"})}
+	c.sweepPendingResumes()
+	ck.Eq(0, c.pendingCount(), "the connect sweep must launch the relaunch")
+}

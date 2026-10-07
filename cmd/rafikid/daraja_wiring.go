@@ -25,6 +25,19 @@ func (c *Controller) WireDaraja(pool *darajapool.Pool, reg *darajapool.Registry,
 	c.darajaDialAddr = dialAddr
 	pool.OnConnect(c.onDarajaConnect)
 	pool.OnDisconnect(c.onDarajaDisconnect)
+	pool.OnLost(func(childID string) { c.darajaLost.Store(childID, struct{}{}) })
+}
+
+// relaunchLostDaraja resumes a claude child whose daraja stayed gone past the
+// Runner's grace window. rec.Status is the child's pre-exit status, so a child
+// that was mid-turn gets the continuation nudge and an idle one does not. The
+// resume pends until the child's pinned executor is connected, and the
+// executor-connect sweep launches it then. The exit that precedes this was
+// recorded as an ordinary exit; a failed relaunch leaves the child exited.
+func (c *Controller) relaunchLostDaraja(rec childstore.ChildRecord) {
+	slog.Info("relaunching claude child after its daraja was lost",
+		"childId", rec.ChildID, "executor", rec.Labels["rafiki/executor"])
+	c.launchRecoveryResume(rec, ownedByMe)
 }
 
 // onDarajaConnect fires when a daraja (re-)connects for childID. It clears the

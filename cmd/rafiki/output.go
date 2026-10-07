@@ -133,7 +133,7 @@ func renderList(w io.Writer, children []*rafikiv1.ChildSummary, mode outputMode,
 			idCell,
 			defaultDash(ch.GetName()),
 			kindOrDefault(ch.GetKind()),
-			formatStatus(ch.GetStatus(), ch.ExitCode, ch.GetExitSignal(), useColor),
+			formatChildStatus(ch, useColor),
 			defaultDash(provider),
 			defaultDash(model),
 			costfmt.Format(own, cur),
@@ -281,6 +281,27 @@ func formatStatus(status string, exitCode *int32, exitSignal string, useColor bo
 	default:
 		return colored + " (?)"
 	}
+}
+
+// darajaStateLabel is the daemon's mark that a claude child's executor-side
+// host is not connected (cmd/rafikid/daraja_wiring.go). The child's status
+// column keeps whatever it last said, so the label is the only honest signal
+// that nothing is behind an "idle" row.
+const darajaStateLabel = "rafiki/daraja-state"
+
+// formatChildStatus is formatStatus for a whole summary: a live child whose
+// daraja is unreachable reads "<status> (unreachable)" instead of a bare
+// status nothing is backing.
+func formatChildStatus(ch *rafikiv1.ChildSummary, useColor bool) string {
+	out := formatStatus(ch.GetStatus(), ch.ExitCode, ch.GetExitSignal(), useColor)
+	if ch.GetStatus() == "exited" || ch.GetLabels()[darajaStateLabel] != "unreachable" {
+		return out
+	}
+	note := " (unreachable)"
+	if useColor {
+		note = yellow(note)
+	}
+	return out + note
 }
 
 func colorStatus(status string, useColor bool) string {

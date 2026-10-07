@@ -358,3 +358,31 @@ func TestRunnerReportsExitWhenDarajaStaysLost(t *testing.T) {
 		t.Fatal("Wait never returned for a daraja that never reconnected")
 	}
 }
+
+func TestRunnerFiresOnLostBeforeReportingExit(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := New(NewRegistry())
+	lost := make(chan string, 1)
+	pool.OnLost(func(id string) { lost <- id })
+	r := NewRunner(pool, "c-lost")
+	r.lostGrace = 100 * time.Millisecond
+	_, _, _, err := r.Start()
+	c.NoError(err, "Start")
+
+	exited := make(chan struct{})
+	go func() {
+		_, _ = r.Wait()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait never returned for a daraja that never reconnected")
+	}
+	select {
+	case id := <-lost:
+		c.Eq("c-lost", id, "OnLost child")
+	default:
+		t.Fatal("OnLost must have fired before the exit was reported")
+	}
+}

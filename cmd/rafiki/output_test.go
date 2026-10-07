@@ -603,3 +603,16 @@ func TestTasksJSONLUnwrapped(t *testing.T) {
 // int32Ptr is a shared test helper (the watch tests' definition died with
 // cmd_watch_test.go; conversations/stop/output tests use it).
 func int32Ptr(v int32) *int32 { return &v }
+
+func TestFormatChildStatusMarksUnreachableDaraja(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	live := &rafikiv1.ChildSummary{Status: "idle", Labels: map[string]string{darajaStateLabel: "unreachable"}}
+	ck.Eq("idle (unreachable)", formatChildStatus(live, false), "a live child with a lost daraja")
+
+	plain := &rafikiv1.ChildSummary{Status: "idle"}
+	ck.Eq("idle", formatChildStatus(plain, false), "a reachable child is unchanged")
+
+	code := int32(0)
+	gone := &rafikiv1.ChildSummary{Status: "exited", ExitCode: &code, Labels: map[string]string{darajaStateLabel: "unreachable"}}
+	ck.Eq("exited (0)", formatChildStatus(gone, false), "an exited child carries no unreachable note")
+}

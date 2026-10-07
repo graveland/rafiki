@@ -185,6 +185,7 @@ func (r *Runner) pump() {
 			} else if time.Since(lostSince) >= r.lostGrace {
 				slog.Warn("daraja: connection lost and not restored; reporting the child exited",
 					"childId", r.childID, "grace", r.lostGrace)
+				r.pool.fireLost(r.childID)
 				r.reportExit(-1, "")
 				return
 			}
