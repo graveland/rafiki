@@ -693,6 +693,15 @@ func (c *Controller) removeSandboxRow(ctx context.Context, row sandbox.Row) erro
 		// when List SUCCEEDS and lacks the id is the launcher treated as
 		// permanently gone; a List error is transient and the row is left
 		// `removing`.
+		//
+		// A nil executor store means this daemon cannot resolve the launcher at
+		// all — the feature is disabled, not evidence the launcher is gone — so
+		// the row is left `removing` and retried, exactly like an offline
+		// launcher whose row still exists. Treating nil as "permanently gone"
+		// would tombstone a row whose container may still be running.
+		if c.execStore == nil {
+			return offline
+		}
 		switch _, gerr := c.execStore.Get(ctx, row.LauncherExecutorID); {
 		case gerr == nil:
 			return offline
@@ -729,9 +738,16 @@ func (c *Controller) removeSandboxRow(ctx context.Context, row sandbox.Row) erro
 	}
 
 	if row.ExecutorID != "" {
-		c.execPool.Evict(row.ExecutorID)
-		if err := c.execStore.Delete(ctx, row.ExecutorID); err != nil && !errors.Is(err, executors.ErrNotFound) {
-			return err
+		// A daemon with the sandbox feature disabled has no pool to evict from
+		// and no executor store to delete through; the row is still tombstoned
+		// so the owner's cap slot is freed.
+		if c.execPool != nil {
+			c.execPool.Evict(row.ExecutorID)
+		}
+		if c.execStore != nil {
+			if err := c.execStore.Delete(ctx, row.ExecutorID); err != nil && !errors.Is(err, executors.ErrNotFound) {
+				return err
+			}
 		}
 	}
 	return c.sandboxStore.MarkRemoved(ctx, row.ID, time.Now())
@@ -845,6 +861,16 @@ const sandboxInitialSweepDelay = 5 * time.Second
 // sweeperWg so Stop waits for it, the same contract as startSweeper.
 func (c *Controller) startSandboxSweeper(ctx context.Context) {
 	if c.sandboxStore == nil {
+		return
+	}
+	// Without the executor store and pool no sandbox can be created or removed,
+	// so a sweep could only ever fail — and the removal path needs the store to
+	// resolve a launcher's row. A daemon with a database but executors disabled
+	// (RAFIKI_EXECUTORS_ENABLED=0 with a control listener) has a sandbox store
+	// and neither of these; starting the sweeper anyway is the crash-on-boot this
+	// guard prevents. startSandboxSweeper runs once at boot, so this logs once.
+	if c.execStore == nil || c.execPool == nil {
+		slog.Info("sandbox sweeper disabled: sandboxes require an executor store and pool (RAFIKI_DB; also RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
 		return
 	}
 	c.sweeperWg.Add(1)

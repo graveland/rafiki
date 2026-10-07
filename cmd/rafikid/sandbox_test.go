@@ -724,6 +724,72 @@ func TestSandboxRemoveSkipsTombstonedRow(t *testing.T) {
 	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "no container removal on an already-removed row")
 }
 
+// TestSandboxSweepWithNilRuntimeDoesNotPanic: a daemon with a database but
+// executors DISABLED has a sandbox store and a NIL execStore/execPool. The
+// sweeper runs ~5s after every boot, and removeSandboxRow used to dereference
+// the nil store while tearing a row down — a crash-on-boot whenever a live
+// sandbox row existed. Every sweep arm that reaches removeSandboxRow must
+// return safely and leave the row `removing`, never tombstoned.
+func TestSandboxSweepWithNilRuntimeDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	// The crash shape: a sandbox store built from the database, executors off.
+	env.ctrl.execStore = nil
+	env.ctrl.execPool = nil
+
+	past := sandboxOldTime()
+	// A ready NAMED row past its TTL (the TTL arm) and a row a prior pass left
+	// `removing` (the finish-removing arm) — the two arms whose removeSandboxRow
+	// call panicked.
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-ttl", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-ttl", State: sandboxStateReady,
+		ExpiresAt: &past,
+	}))
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-removing", OwnerUserID: owner.UserID, Name: "other", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-removing", State: sandboxStateRemoving,
+	}))
+
+	// Neither pass may panic.
+	env.ctrl.sweepSandboxesOnBoot(context.Background())
+	env.ctrl.sweepSandboxes(context.Background())
+
+	for _, id := range []string{"sbx-ttl", "sbx-removing"} {
+		row, _ := env.store.get(id)
+		ck.Eq(sandboxStateRemoving, row.State, "%s is left removing", id)
+		ck.True(row.RemovedAt == nil, "%s must not be tombstoned with a nil executor store", id)
+	}
+}
+
+// TestSandboxSweeperNotStartedWithoutRuntime: startSandboxSweeper must not
+// start its goroutine when the executor store or pool is nil — a daemon with a
+// database but executors disabled has a sandbox store and neither, and a sweep
+// there could only fail. The goroutine's absence is what keeps it from running
+// at all; a started goroutine would trip the deadline below.
+func TestSandboxSweeperNotStartedWithoutRuntime(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	env.ctrl.execStore = nil
+	env.ctrl.execPool = nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env.ctrl.startSandboxSweeper(ctx)
+
+	done := make(chan struct{})
+	go func() { env.ctrl.sweeperWg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startSandboxSweeper started a goroutine despite a nil runtime")
+	}
+	ck.Eq(0, len(env.store.rows), "no sweep ran")
+}
+
 // TestSandboxRemoveChildAuthority: a creator and its ancestor may remove; a
 // sibling may not.
 func TestSandboxRemoveChildAuthority(t *testing.T) {
