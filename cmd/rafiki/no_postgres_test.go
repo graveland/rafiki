@@ -23,7 +23,13 @@ import (
 func TestClientDoesNotLinkPostgres(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", "go.graveland.dev/rafiki/cmd/rafiki").Output()
 	if err != nil {
-		t.Skipf("go list unavailable: %v", err)
+		// FAIL, do not skip: this test is the ENFORCEMENT of "cmd/rafiki
+		// links zero pgx packages", and a guard that silently skips on a
+		// missing toolchain is not a guard. The repo cannot be built without
+		// a Go toolchain, so `go` being absent is not a legitimate
+		// environment for this suite.
+		t.Fatalf("go list -deps go.graveland.dev/rafiki/cmd/rafiki could not run; "+
+			"the pgx-link guard cannot be evaluated without the Go toolchain on PATH: %v", err)
 	}
 	for _, dep := range strings.Split(string(out), "\n") {
 		if strings.Contains(dep, "jackc/pgx") || strings.Contains(dep, "lib/pq") {
