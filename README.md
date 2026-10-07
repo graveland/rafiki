@@ -849,6 +849,66 @@ exits, at the child's cwd.
 This says nothing about filesystem isolation, which comes from the
 operator's composition (containers) or from git worktrees passed as cwd.
 
+### Sandboxes
+
+A **sandbox** is a container the daemon creates on your behalf, through a
+**launcher** executor you declare, so an agent's workspace tools run inside a
+container instead of on the host. The daemon never touches a container runtime
+itself; the launcher is the only process that speaks to Docker.
+
+Declare a launcher where the Docker engine is reachable — a durable executor
+started with three flags: a proxy named exactly `docker` pointing at the
+(Docker) socket, the host directories a sandbox may bind-mount, and the relay
+directory the sandbox uses to reach the daemon:
+
+```sh
+rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
+  --proxy docker=unix:///var/run/docker.sock \
+  --sandbox-mount-root /srv/repos \
+  --relay-dir "$XDG_RUNTIME_DIR/rafiki/relay"
+```
+
+- `--sandbox-mount-root` (repeatable) is the ONLY set of host paths a sandbox
+  may bind-mount; a `host_path` mount outside every root is refused, both by
+  the daemon (pre-check) and by the launcher (re-check). With no root, no host
+  path may be mounted.
+- `--relay-dir` makes the launcher bind `<dir>/daemon.sock` and splice each
+  sandbox's connection to a fresh authenticated dial of the daemon. It
+  requires `--connect`/`--connect-socket` (or a remote `RAFIKI_URL`) — a relay
+  with no daemon to dial refuses to start, because a sandbox's only link back
+  is that socket.
+- The launcher's `docker` proxy inspects every container-create body against a
+  fail-closed allowlist (exactly the fields the daemon emits, no duplicate
+  keys, bind sources symlink-resolved under a mount root), so a body that asks
+  for `Binds`, `Privileged`, a device, etc. is refused. See
+  `docs/reference/executor-protocol.md` → "Sandbox launchers".
+
+**The image must run `rafiki`.** A sandbox runs `rafiki executor serve
+--connect-socket /run/rafiki-relay/daemon.sock` as its entrypoint, so the image
+must have the `rafiki` binary on `PATH` (and whatever the agent's tools need);
+the daemon pulls the image if it is absent. The daemon sets
+`RAFIKI_SANDBOX_IMAGE` as the default image; a create may still pass `--image`.
+
+Create, list and remove **named** sandboxes from the CLI (they go through the
+daemon — the client never dials a sandbox directly):
+
+```sh
+rafiki sandbox create --name work --mount ro:/work=host:/srv/repos/app
+rafiki sandbox ls
+rafiki sandbox rm work
+```
+
+A named sandbox has a TTL and always expires. A sandbox bound to a child as a
+**spawn block** (`SpawnRequest.sandbox`; fundi/MCP expose it as an
+`agent_spawn` field) is created, listed and removed with its child instead, and
+is never managed by `rafiki sandbox`.
+
+Defaults and limits come from the daemon's environment — `RAFIKI_SANDBOX_IMAGE`,
+`_NETWORK`, `_TTL`, `_MAX_TTL`, `_MAX_PER_OWNER`, `_SWEEP_INTERVAL`, and the
+per-child clamp `_CHILD_MAX_MEMORY_BYTES`/`_CHILD_MAX_CPUS`/`_CHILD_MAX_PIDS`
+(see `.env.example`). Mounts, network, resource limits, `--read-only-rootfs`,
+user, env and labels are all per-create flags on `rafiki sandbox create`.
+
 ## Subagents
 
 An agent can spawn and steer its own descendants, regardless of its own

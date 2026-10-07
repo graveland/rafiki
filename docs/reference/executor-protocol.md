@@ -20,12 +20,6 @@ selectors and never inherited by a child — which made it the direct cause of t
 confinement defects. `--connect-socket` reverses the direction so the executor enrolls, and
 the row is again the only authority on what an executor is.
 
-A container executor uses one of those two like any other host. There was once a
-third — `rafiki executor serve-stdio`, spoken over the stdio of a `docker exec
--i` — because rafiki started the container itself and gave it no network. It
-does not start containers any more, so the container has whatever network the
-operator gave it in `docker run`, and the stdio transport had no callers left.
-
 A fourth transport is the **client-run executor**: `rafiki create` and `rafiki
 attach` start an executor in-process and reverse-dial the daemon, so the
 operator's own machine becomes the workspace by default. It is not a new wire
@@ -79,6 +73,70 @@ in BOTH the durable and transient cases, so a child can move between the two
 without its stored selector — the thing its whole subtree inherits — ever being
 rewritten. The durable executor is preferred (durable before session in
 `sortCandidates`), and the transient one is a zero-config fallback.
+
+## Sandbox launchers
+
+The daemon never touches a container runtime. A **sandbox** is a container,
+created by the daemon through a **launcher** executor's declared `docker`
+proxy; the launcher is the only process that speaks to Docker. It is an
+ordinary durable executor whose operator declared three things:
+
+- `--proxy docker=unix:///var/run/docker.sock` — a proxy named exactly
+  `docker` (`sandbox.DockerProxyName`), whose base is a `unix://` socket. A
+  `unix://` base names a socket to DIAL, not an HTTP origin: `pkg/executor`
+  accepts it only in the authority-less absolute form (`unix:///path/to.sock`),
+  builds the target against the fixed `http://docker` origin and swaps in a
+  transport that dials that socket. `http`/`https` bases join as any other
+  proxy. The daemon finds a launcher by looking for this proxy name in the
+  creator's effective executor set — a launcher is never chosen by default.
+- `--sandbox-mount-root <dir>` (repeatable) — every host directory a sandbox
+  may bind-mount. Reported as `DescribeResponse.sandboxMountRoots`.
+- `--relay-dir <dir>` — the host directory the daemon bind-mounts into the
+  container so its `rafiki executor serve` can reach the daemon. Reported as
+  `DescribeResponse.sandboxRelayDir`.
+
+**The relay.** `--relay-dir` makes `rafiki executor serve` also bind
+`<relay-dir>/daemon.sock` (`sandboxrelay.Serve`) and splice every accepted
+sandbox connection to a fresh, authenticated dial of the daemon the launcher
+itself is connected to. The relay never reads or writes the bytes it carries:
+the sandbox speaks the daemon's own protocol end to end, so the **credential
+the create body put in the container's environment is what the daemon
+authenticates — the relay only carries it, untouched**. The socket is
+chmodded world-connectable because the container user differs from the host
+user; the daemon-side credential, not the socket, is the gate. The relay
+directory is mounted read-only at `/run/rafiki-relay` in the container, and
+the container's executor runs `--connect-socket /run/rafiki-relay/daemon.sock`.
+A dead relay is not a degraded mode: a launcher started with `--relay-dir` but
+no daemon address to dial refuses to start (`relayDirNeedsDaemon`), and a
+serve command whose relay exits ends the process nonzero. `--relay-dir`
+therefore requires `--connect` or `--connect-socket` (or a remote
+`RAFIKI_URL`).
+
+**The create-body guard.** Every proxied request whose proxy is `docker` and
+whose method is `POST` and whose path routes to Docker's `containers/create`
+(behind at most one Docker API version segment, matched case-insensitively,
+and any path carrying a `%` or `#` treated as a create) is buffered and
+inspected before it is forwarded (`pkg/executor/dockerguard.go`). The guard is
+a **fail-closed allowlist**, not a denylist: the top level, `HostConfig`, each
+mount and `RestartPolicy` are decoded and every key outside the exact set the
+daemon's create body emits (`pkg/sandbox.CreateBody`) is refused, so a
+privilege field nobody enumerated (`Binds`, `Privileged`, `Devices`,
+`VolumeOptions`, `DeviceCgroupRules`, a host namespace, …) is refused by
+construction rather than by a remembered list. A key repeated at any object
+level is refused too — a map decode keeps only the LAST value, while the
+engine MERGES repeated object keys, so the two views of the same document
+must agree. Each `bind` mount's source is symlink-resolved and must sit at or
+under a declared `--sandbox-mount-root` (or equal the resolved relay dir);
+`volume` and `tmpfs` mounts pass (the daemon owns their contents);
+`NetworkMode` is limited to `""`, `bridge` or `none`.
+
+Two residuals, both accepted. The guard covers `POST /containers/create` ONLY
+— every other Docker route proxies uninspected, which is safe because the
+proxy is driven only by the daemon and the design already accepts
+root-equivalent Docker access through the relay. And the check and the
+container start are separate calls, so the TOCTOU window is create→start
+(wider than check→create); the accepted posture is that the daemon is trusted
+on this link.
 
 ## Reaching the daemon
 
@@ -231,7 +289,8 @@ the same connection — see [AdminService: Launch, Reap and Status](#adminservic
 ```
 Describe() → { executorId, platform, roots[], concurrency, isolation,
                workspaceMode, tools[], version, selfReportedLabels,
-               proxies[], launchKinds[], skillsSync, pymodulesSync }
+               proxies[], launchKinds[], skillsSync, pymodulesSync,
+               sandboxMountRoots[], sandboxRelayDir }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -257,6 +316,13 @@ workspace_mode rules exist to forbid — unlike those two fields, which the
 executor does not report at all. `skillsSync` and `pymodulesSync` self-report
 the same way (see their Sync sections): each only narrows whether the daemon
 may push that corpus here, and both default to off.
+
+`sandboxMountRoots[]` and `sandboxRelayDir` self-report the launcher's
+`--sandbox-mount-root` directories and `--relay-dir` (see "Sandbox launchers"),
+and are safe to self-report for the same narrowing reason: the daemon uses the
+roots only to PRE-CHECK a requested host path, and the launcher re-checks every
+bind source itself, so a wrong entry costs a refusal, never access. A launcher
+that declares neither is simply not a sandbox launcher.
 
 ### Health
 
@@ -316,24 +382,27 @@ Provision(childId, workspaceMode, mounts[], workdir, network, memoryBytes, cpus,
 ```
 
 Provision prepares a workspace and returns the handle later `Execute` calls
-carry. A workspace is a handle bound to the filesystem the executor can see;
-there is nothing else it could be, because rafiki does not start containers — a
-container running the executor IS one.
+carry. A workspace is a handle bound to the filesystem the executor can see.
+The executor builds no container, so this call has no container spec to build
+from.
 
-Everything describing a shape the executor might build is therefore dead on this
-call: `mounts`, `network` and `workspaceMode` are unset by the daemon and ignored
-by the executor. `workdir` is the exception. It is where this workspace's tools
-START, in the executor's own filesystem vocabulary, and the daemon sends the
-child's cwd. An empty workdir means the executor's root. A requested workdir must
-exist and be a directory in the executor's filesystem view; anything else is
-refused with `CodeInvalidArgument` rather than silently starting somewhere the
-child cannot write. Existence is the whole check — the workdir is NOT required
-to sit under the executor's root, because a native executor has no path
-confinement (`bash` reaches the whole machine, so an under-root check is not a
-boundary) and the git worktrees coordinators create beside a repository to
-isolate workers must keep working. For a container executor the same check is
-the proto's mount rule: a path that is not one of the container's mounts does
-not exist in the container's view, so it is refused here too.
+`mounts`, `network` and `workspaceMode` are therefore never sent by the daemon
+and ignored by the executor. A container is a **sandbox**, created by a launcher
+executor through its docker proxy (see "Sandbox launchers"), and it runs
+`rafiki executor serve` itself — so by the time the daemon calls `Provision`
+the filesystem already exists and the call only has to name a workdir.
+`workdir` is that exception. It is where this workspace's tools START, in the
+executor's own filesystem vocabulary, and the daemon sends the child's cwd. An
+empty workdir means the executor's root. A requested workdir must exist and be
+a directory in the executor's filesystem view; anything else is refused with
+`CodeInvalidArgument` rather than silently starting somewhere the child cannot
+write. Existence is the whole check — the workdir is NOT required to sit under
+the executor's root, because a native executor has no path confinement (`bash`
+reaches the whole machine, so an under-root check is not a boundary) and the
+git worktrees coordinators create beside a repository to isolate workers must
+keep working. For a container executor the same check is the proto's mount
+rule: a path that is not one of the container's mounts does not exist in the
+container's view, so it is refused here too.
 
 The executor materializes one tool registry per workspace, with that registry's
 cwd set to the workdir: foreground `bash` starts there, the file tools resolve

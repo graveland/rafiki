@@ -404,6 +404,9 @@ defined under "Who may call what" below; each row names its own.
 | `RevokeToken` | unary · userOnly | Tombstone one credential by id (`revoked_at`); already-revoked answers the unchanged row. Owner or admin; on a live daemon the revocation also cuts that token's open streams (§"Token revocation and open streams") |
 | `GetStreams` | unary · userOnly | A live child's raw, uncompressed stdin/stderr capture, for debugging (§"The raw child channel") |
 | `SendFrame` | unary · userOnly | Forward a raw child-protocol frame to a live child's stdin, verbatim and uninspected, for debugging and scripting (§"The raw child channel"). userOnly — children use `Send` |
+| `CreateSandbox` | unary · childScoped | Create a named sandbox — a container, created by a launcher executor's declared `docker` proxy, that runs `rafiki executor serve` and enrolls as an ordinary executor. `spec` is a `SandboxSpec` (`name` required; `image` defaults to the daemon's `RAFIKI_SANDBOX_IMAGE`; a `host_path` mount must sit under the launcher's `--sandbox-mount-root`; a child caller's memory/cpu/pids are clamped by `RAFIKI_SANDBOX_CHILD_MAX_*`). The owner is resolved from the credential — a per-child credential creates under its owner's NON-admin identity. Blocks until the sandbox's executor joins the pool (a 60 s budget) and returns the row; every failure rolls back. `CodeInvalidArgument` when no `docker` launcher is in scope, the owner's cap (`RAFIKI_SANDBOX_MAX_PER_OWNER`, which counts spawn blocks too) is reached, or the spec fails validation |
+| `ListSandboxes` | unary · ownerScoped | The CALLER'S OWNER's live sandboxes — never an admin's whole fleet. The list is keyed on the owner's user id, so a local (unix-socket) caller, whose identity is empty, sees only the sandboxes owned by that local identity. `state` is one of `creating`/`ready`/`lost`/`removing`; a `ready` row whose executor is gone is reported `lost` when its launcher is live and confirms the container is missing (and that downgrade is persisted) |
+| `RemoveSandbox` | unary · childScoped | Remove one of the owner's live sandboxes by `ref` (name, then row id). An operator credential (`callerChild` empty) may remove any of the owner's rows; a per-child credential may remove only a row it created or one a descendant created (`CodePermissionDenied` otherwise, `childstore.IsDescendant`). Removal stops and removes the CONTAINER first (a deleted executor row would make the sandbox's `unless-stopped` policy restart it in a loop), then evicts and deletes the executor row, then tombstones the sandbox row; named volumes are never removed, and a launcher that is offline leaves the row `removing` until it returns |
 
 #### Who may call what (the provenance gate)
 
@@ -452,8 +455,8 @@ store and is refused.
 |---|---|---|
 | `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `UpdateUser`, `MintToken`, `ListTokens`, `RevokeToken`, `GetStreams`, `SendFrame` |
 | `anyCaller` | Read-only, non-scoped; child credentials included | `ListModels`, `ListPresets`, `GetPreset`, `GetRateLimitStatus`, `ListProviderBans`, `ListRoutes`, `ModelInfo`, `ModelRoutes` |
-| `childScoped` | A per-child credential may call these on its own subtree: the gate admits `ProvenanceChildToken` only, and the handler bounds it — the stored parent chain via `childstore.IsDescendant` (`connectapi.Server.SetChildScopeSource`, implemented in `cmd/rafikid/connect_childscope.go`), the caller itself refused (a child is not a descendant of its own id), unknown ids refused with the same answer. `Spawn` forces `ParentChildID` to the caller's own id — the child-spawn admission, whose depth/children/budget checks read the parent's grant through it — and a credential that names no child cannot spawn at all, since an empty forced parent would be the top-level spawn shape. `ListChildren` answers only the subtree; `StreamEvents` refuses the `All` subject and any non-descendant subject; `ListTasks` only a conversation inside the caller's subtree. The other child shapes stay refused. The source never resolves nil (the operator path) for a child-shaped credential — the empty-ChildID and vanished-row shapes resolve an always-refusing scope — and the daemon wiring is pinned end to end by `TestConnectChildScopedOnTheConnectPlane` (`test/integration`). The three script-hub verbs (`Report`/`Receive`/`SetResult`) resolve the caller's position from the credential rather than authorizing a target, and `Report`/`SetResult` admit ANY child credential — script or LLM, the LLM kinds reaching them through the `agent_report`/`agent_result` tools: `Report` acts outward on the caller's own parent (a top-level child appends to its own event log), `Receive` and `SetResult` are strictly self-only — `Receive`'s `child_id` is an identity self-check, not a subtree call, and both verbs refuse any caller that resolves to no child scope (a user credential has no position in the tree for a self-position verb to act on). `SetBudget` from a per-child credential is NOT operator authority: after the subtree check it applies `agent_set_budget`'s rule (`Controller.SetChildBudget` — direct parentage, bounded by the caller's own remaining grant). `SetRouting` from a per-child credential is bounded to `prefer`/`sort`/`quant`: `Controller.SetChildRouting` refuses `only=` from child provenance (it bypasses provider bans) and never clears an operator's `only`/`nodata`/`zdr`. The conversation reads `ConversationSearch`/`ConversationExport`/`ConversationQuery` answer a per-child credential from its own subtree (`insights.ScopeSubtree`, the MCP face's `conversation_*` boundary) — never its owner's corpus; a conversation outside it answers not-found. `ListPymodules`/`GetPymodule`/`PutPymodule`/`DeletePymodule` read and write the owner's corpus, exactly as the MCP face's pymodule tools do. `PutPreset`/`DeletePreset` admit only a TOP-LEVEL child (no parent — the operator's own session); a parented or unknown child is refused `CodePermissionDenied` by `connectPresets.authoringChild` | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `SetBudget`, `SetRouting`, `ListTasks`, `Report`, `Receive`, `SetResult`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `PutPreset`, `DeletePreset` |
-| `ownerScoped` | A per-child credential may call these as its OWNER: the gate admits `ProvenanceChildToken` only (the per-boot shapes stay refused); the handler resolves the owner's NON-admin identity (`recallOwner`, `cmd/rafikid/recall.go`), so conversation-derived reads cover only the owner's rows — never `Scope{All: true}`, even for an admin's child — and memories are the owner's own. The surface a fundi child's `recall`/`memory_*` tools already have, and what the MCP face gives a claude child. No subtree check | `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory` |
+| `childScoped` | A per-child credential may call these on its own subtree: the gate admits `ProvenanceChildToken` only, and the handler bounds it — the stored parent chain via `childstore.IsDescendant` (`connectapi.Server.SetChildScopeSource`, implemented in `cmd/rafikid/connect_childscope.go`), the caller itself refused (a child is not a descendant of its own id), unknown ids refused with the same answer. `Spawn` forces `ParentChildID` to the caller's own id — the child-spawn admission, whose depth/children/budget checks read the parent's grant through it — and a credential that names no child cannot spawn at all, since an empty forced parent would be the top-level spawn shape. `ListChildren` answers only the subtree; `StreamEvents` refuses the `All` subject and any non-descendant subject; `ListTasks` only a conversation inside the caller's subtree. The other child shapes stay refused. The source never resolves nil (the operator path) for a child-shaped credential — the empty-ChildID and vanished-row shapes resolve an always-refusing scope — and the daemon wiring is pinned end to end by `TestConnectChildScopedOnTheConnectPlane` (`test/integration`). The three script-hub verbs (`Report`/`Receive`/`SetResult`) resolve the caller's position from the credential rather than authorizing a target, and `Report`/`SetResult` admit ANY child credential — script or LLM, the LLM kinds reaching them through the `agent_report`/`agent_result` tools: `Report` acts outward on the caller's own parent (a top-level child appends to its own event log), `Receive` and `SetResult` are strictly self-only — `Receive`'s `child_id` is an identity self-check, not a subtree call, and both verbs refuse any caller that resolves to no child scope (a user credential has no position in the tree for a self-position verb to act on). `SetBudget` from a per-child credential is NOT operator authority: after the subtree check it applies `agent_set_budget`'s rule (`Controller.SetChildBudget` — direct parentage, bounded by the caller's own remaining grant). `SetRouting` from a per-child credential is bounded to `prefer`/`sort`/`quant`: `Controller.SetChildRouting` refuses `only=` from child provenance (it bypasses provider bans) and never clears an operator's `only`/`nodata`/`zdr`. The conversation reads `ConversationSearch`/`ConversationExport`/`ConversationQuery` answer a per-child credential from its own subtree (`insights.ScopeSubtree`, the MCP face's `conversation_*` boundary) — never its owner's corpus; a conversation outside it answers not-found. `ListPymodules`/`GetPymodule`/`PutPymodule`/`DeletePymodule` read and write the owner's corpus, exactly as the MCP face's pymodule tools do. `PutPreset`/`DeletePreset` admit only a TOP-LEVEL child (no parent — the operator's own session); a parented or unknown child is refused `CodePermissionDenied` by `connectPresets.authoringChild`. `CreateSandbox`/`RemoveSandbox` admit a per-child credential on its OWN containers: creates are clamped and bounded by the launcher's declared mount roots, and a remove is bounded to a row the caller or a descendant created (`childstore.IsDescendant`) — the Controller enforces both, since the gate admits by credential kind alone and a sandbox ref carries no subtree to check | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `SetBudget`, `SetRouting`, `ListTasks`, `Report`, `Receive`, `SetResult`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `PutPreset`, `DeletePreset`, `CreateSandbox`, `RemoveSandbox` |
+| `ownerScoped` | A per-child credential may call these as its OWNER: the gate admits `ProvenanceChildToken` only (the per-boot shapes stay refused); the handler resolves the owner's NON-admin identity (`recallOwner`, `cmd/rafikid/recall.go`), so conversation-derived reads cover only the owner's rows — never `Scope{All: true}`, even for an admin's child — and memories are the owner's own. The surface a fundi child's `recall`/`memory_*` tools already have, and what the MCP face gives a claude child. `ListSandboxes` answers the caller's owner's live sandboxes the same way — keyed on the owner's user id, so a local (unix-socket) caller, whose identity is empty, sees only that local identity's sandboxes, never an admin's whole fleet. No subtree check | `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `ListSandboxes` |
 
 The gate distinguishes three credential shapes:
 
@@ -501,7 +504,7 @@ is no caller to default to.
 
 #### Spawn's operator-only fields (15–29)
 
-`SpawnRequest` fields 1–14 and 30 are the child-ALLOWED set
+`SpawnRequest` fields 1–14, 30 and 31 are the child-ALLOWED set
 (`childAllowedSpawnFields`, `pkg/connectapi/verbs.go`): a caller with child
 provenance may set them, and `Spawn` forces `parent_child_id` to the caller's
 own id. Fields 15–29 (`config_dir`, `append_system_prompt`, `thinking`,
@@ -519,6 +522,15 @@ it, so it only reduces spend. `Spawn` ORs the request's value with the
 parent's own (`inheritSkipDerivedIndex`, `cmd/rafikid/controller.go`); the
 flag is stored on the child, so a resumed child keeps its stored value.
 
+Field 31 (`sandbox`) is child-ALLOWED for the same deliberate reason:
+`SandboxSpec` cannot express privilege. Host paths are bounded by the
+launcher's declared `--sandbox-mount-root` (re-checked launcher-side), volumes
+are owner-prefixed, a child's memory/cpu/pids are clamped to the daemon's
+`RAFIKI_SANDBOX_CHILD_MAX_*` caps, and the spec has no field for a capability
+(field 31 in `control.proto`'s comment, enforced by `pkg/sandbox.Validate`). A
+child that may spawn may therefore also ask its own child to be provisioned
+with a sandbox. See §"Sandboxes" on `CreateSandbox`.
+
 The guard is enforced as the child-allowed SET, not a literal list of 15 —
 so a NEW `SpawnRequest` field is operator-only by default. Adding one
 requires an explicit decision: add its number to `childAllowedSpawnFields`
@@ -534,6 +546,50 @@ tool plane (fundi/MCP `agent_spawn`, and any preset it can name, including
 one it wrote itself) before this guard ever runs. The wire guard exists to
 keep Connect at least as strict as the plane it replaced, not to claim these
 two fields are otherwise unreachable.
+
+#### Sandboxes
+
+A **sandbox** is a container created by a launcher executor through its
+declared `docker` proxy; it runs `rafiki executor serve` and enrolls as an
+ordinary executor (see `docs/reference/executor-protocol.md` → "Sandbox
+launchers"). There are two shapes. A **named** sandbox is created with
+`CreateSandbox`, addressed afterwards by name or id, carries a TTL
+(`RAFIKI_SANDBOX_TTL`, capped by `RAFIKI_SANDBOX_MAX_TTL`, both strictly
+positive — a named sandbox ALWAYS expires), and is removed with
+`RemoveSandbox`. A **spawn block** is `SpawnRequest.sandbox` (field 31): it is
+unnamed, has NO TTL, carries a `scope` (`self` or `subtree`), and is tied to
+the child it was spawned for (`owner_child`); its lifecycle follows the child.
+
+- **A launcher is never chosen by default.** A create is refused
+  `CodeInvalidArgument` when the creator's effective executor set contains no
+  live executor advertising the `docker` proxy, when several do and no
+  `launcher` names one, or when the chosen launcher declares no `--relay-dir`.
+- **Binding is an ownership lookup, not selection.** A sandboxed child — and,
+  for a `subtree` block, its descendants — binds to its sandbox through
+  `controllerBinder.ChooseFor` and NEVER falls through to an ordinary
+  executor, which would run it natively on a host the operator never offered.
+  Child-owned sandboxes are dropped from ordinary selection candidates, so a
+  `self` descendant (whose stored selector narrows to the sandbox) resolves to
+  nothing and fails closed. `subtree` admits descendants to the same container
+  (concurrent workspaces separated by workdir only; no path scoping). An
+  ancestor's stored selector must match a sandbox's labels for the sandbox to
+  be handed down.
+- **Removal is keyed on the OWNING child.** `Close`/`CloseAllExited` remove
+  the closing child's OWN spawn blocks, never its descendants' — a live
+  `subtree` descendant may still be using the container. A half-created
+  (`creating`) row is reaped once it is older than 30 minutes or, on the first
+  sweep after a restart, when it predates that process; a childless spawn
+  block is protected for the same 30 minutes (`Close` removes promptly; the
+  reaper is a backstop). A container is removed before its executor row (a
+  deleted executor row would make `unless-stopped` restart it in a loop), and
+  a sandbox whose launcher is not live stays `removing` until it returns.
+  `lost` is never silently recreated. The reaper is row-keyed by design —
+  **two daemons must not share one Docker engine**, or they reap each other's
+  sandboxes.
+- **The credential is not a secret from its own sandbox.** The create body
+  puts the sandbox's durable executor credential in the container's
+  environment; the relay carries it untouched. The container is entitled to
+  it — it is that executor's own credential.
 
 #### `ExecutorSession`: the session-executor stream
 
