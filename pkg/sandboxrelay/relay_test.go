@@ -412,7 +412,7 @@ func TestRelayAcceptFailureClosesLivePairsAndReturns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveListener(ctx, ln, dial) }()
+	go func() { errCh <- ServeListener(ctx, ln, dial) }()
 
 	// Establish a live pair and prove the splice works.
 	client := dialRelay(t, ln.Addr().String())
@@ -431,7 +431,7 @@ func TestRelayAcceptFailureClosesLivePairsAndReturns(t *testing.T) {
 	case err := <-errCh:
 		c.Error(err, "a non-shutdown accept failure must be reported")
 	case <-time.After(3 * time.Second):
-		t.Fatal("serveListener did not return after the accept failure")
+		t.Fatal("ServeListener did not return after the accept failure")
 	}
 
 	// Every live pair was closed: both the client and the upstream.
@@ -441,6 +441,74 @@ func TestRelayAcceptFailureClosesLivePairsAndReturns(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the live upstream connection was not closed on accept failure")
 	}
+}
+
+// ServeListener serves an already-bound TCP listener: it splices an accepted
+// TCP connection to an echo upstream and returns nil on ctx cancel.
+func TestServeListenerSplicesTCP(t *testing.T) {
+	c := assert.NewAborting(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	c.NoError(err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- ServeListener(ctx, ln, echoUpstream(t)) }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	c.NoError(err)
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_, err = conn.Write([]byte("ping\n"))
+	c.NoError(err)
+	buf := make([]byte, len("ping\n"))
+	_, err = io.ReadFull(conn, buf)
+	c.NoError(err)
+	c.Eq("ping\n", string(buf), "the TCP splice must echo the payload")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		c.NoError(err, "ServeListener must return nil when ctx is cancelled")
+	case <-time.After(3 * time.Second):
+		t.Fatal("ServeListener did not return after ctx was cancelled")
+	}
+}
+
+// TCPDial dials the address it was given and reaches an accepted peer.
+func TestTCPDialReachesAddr(t *testing.T) {
+	c := assert.NewAborting(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	c.NoError(err)
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	conn, err := TCPDial(ln.Addr().String())(context.Background())
+	c.NoError(err)
+	defer conn.Close()
+
+	select {
+	case peer := <-accepted:
+		defer peer.Close()
+	case <-time.After(3 * time.Second):
+		t.Fatal("TCPDial's connection never reached an accepted peer")
+	}
+}
+
+// TCPDial with an already-cancelled context fails with a non-nil error.
+func TestTCPDialHonoursContext(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := TCPDial("127.0.0.1:1")(ctx)
+	c.Error(err, "an already-cancelled context must fail the dial")
 }
 
 // serveUntilReturn runs Serve in the background and reports its error and

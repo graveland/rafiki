@@ -62,13 +62,11 @@ func Serve(ctx context.Context, dir string, dial DialFunc) error {
 	if err := os.Chmod(path, 0o666); err != nil {
 		return fmt.Errorf("sandboxrelay: chmod %s: %w", path, err)
 	}
-	return serveListener(ctx, ln, dial)
+	return ServeListener(ctx, ln, dial)
 }
 
-// serveListener runs the accept/splice loop on an already-bound listener. It is
-// split out of Serve so a test can inject an accept failure through the
-// listener; Serve owns the dir/socket setup around it.
-func serveListener(ctx context.Context, ln net.Listener, dial DialFunc) error {
+// ServeListener runs the accept/splice loop on an already-bound listener, which may be a unix or a TCP one. Serve owns the dir/socket setup around it; a caller that binds its own listener (the launcher's loopback TCP relay) calls this directly.
+func ServeListener(ctx context.Context, ln net.Listener, dial DialFunc) error {
 	var (
 		mu   sync.Mutex
 		live = make(map[*pair]struct{})
@@ -146,6 +144,15 @@ func serveListener(ctx context.Context, ln net.Listener, dial DialFunc) error {
 			}()
 			serve(ctx, p, dial)
 		}()
+	}
+}
+
+// TCPDial returns a DialFunc that opens a fresh TCP connection to addr
+// ("host:port"). It is how the foothold bridge reaches the launcher's relay.
+func TCPDial(addr string) DialFunc {
+	return func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
 	}
 }
 
