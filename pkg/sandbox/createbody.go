@@ -6,10 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
+
+// ownerVolumeKeyRe is the character set an OwnerVolumeKey may use. It excludes
+// '-' and '.', so the named-volume separator in mountsFor is unambiguous: key
+// "a" with volume "b-c" and key "a-b" with volume "c" can no longer both
+// produce "rafiki-a-b-c" and share one volume across owners.
+var ownerVolumeKeyRe = regexp.MustCompile(`^[A-Za-z0-9]{1,32}$`)
 
 // CreateInputs is the daemon-supplied context for one container create. Every
 // value here is written by the daemon from something it verified (or from the
@@ -68,8 +76,22 @@ type restartPolicy struct {
 // relay directory, and the owner key named volumes are prefixed with.
 //
 // A mount naming a volume requires an OwnerVolumeKey; without one the volume's
-// name would not be owner-scoped, so the request is refused.
+// name would not be owner-scoped, so the request is refused. A non-empty key
+// must match ownerVolumeKeyRe (no '-'), for the same reason.
 func CreateBody(r Resolved, in CreateInputs) ([]byte, error) {
+	if in.OwnerVolumeKey != "" && !ownerVolumeKeyRe.MatchString(in.OwnerVolumeKey) {
+		return nil, fmt.Errorf("sandbox: owner volume key %q must match %s", in.OwnerVolumeKey, ownerVolumeKeyRe)
+	}
+
+	network, err := networkMode(r.Network)
+	if err != nil {
+		return nil, err
+	}
+	nano, err := nanoCPUs(r.CPUs)
+	if err != nil {
+		return nil, err
+	}
+
 	body := createBody{
 		Image:      r.Image,
 		Entrypoint: []string{"rafiki"},
@@ -101,10 +123,10 @@ func CreateBody(r Resolved, in CreateInputs) ([]byte, error) {
 
 	body.HostConfig = hostConfig{
 		Mounts:         mounts,
-		NetworkMode:    networkMode(r.Network),
+		NetworkMode:    network,
 		ReadonlyRootfs: r.ReadOnlyRootfs,
 		Memory:         r.MemoryBytes,
-		NanoCpus:       nanoCPUs(r.CPUs),
+		NanoCpus:       nano,
 		PidsLimit:      r.PidsLimit,
 		// The env credential makes a restart rejoin the daemon without a new
 		// create, so a sandbox survives a host reboot.
@@ -183,19 +205,43 @@ func mountsFor(r Resolved, in CreateInputs) ([]mount, error) {
 }
 
 // networkMode maps a resolved network to Docker's mode. egress is the
-// host-reachable bridge; none severs the network entirely.
-func networkMode(n protocol.NetworkMode) string {
-	if n == protocol.NetworkNone {
-		return "none"
+// host-reachable bridge; none severs the network entirely. An empty or unknown
+// mode is an error: silently defaulting to egress (bridge) would turn the
+// zero-value trap into network reach a caller never asked for.
+func networkMode(n protocol.NetworkMode) (string, error) {
+	switch n {
+	case protocol.NetworkEgress:
+		return "bridge", nil
+	case protocol.NetworkNone:
+		return "none", nil
+	case "":
+		return "", errors.New("sandbox: network is unset; validate the spec first")
+	default:
+		return "", fmt.Errorf("sandbox: network %q is not %q or %q", n, protocol.NetworkEgress, protocol.NetworkNone)
 	}
-	return "bridge"
 }
 
 // nanoCPUs converts whole and fractional CPUs to Docker's integer nanocpu
-// count; a zero stays zero (meaning "no limit") so the field is omitted.
-func nanoCPUs(cpus float64) int64 {
+// count. A zero stays zero (meaning "no limit") so the field is omitted.
+//
+// A positive cpus that truncates to zero would omit the field entirely and
+// leave the sandbox with NO CPU limit — a child that passed the clamp would
+// escape its cap — and a value past the int64 range would make the conversion
+// undefined. Both fail closed instead.
+func nanoCPUs(cpus float64) (int64, error) {
 	if cpus == 0 {
-		return 0
+		return 0, nil
 	}
-	return int64(cpus * 1e9)
+	if cpus < 0 || math.IsNaN(cpus) || math.IsInf(cpus, 0) {
+		return 0, fmt.Errorf("sandbox: cpus %g is not a finite positive number", cpus)
+	}
+	nanos := cpus * 1e9
+	if nanos >= float64(math.MaxInt64) {
+		return 0, fmt.Errorf("sandbox: cpus %g exceeds the engine's nanocpu range", cpus)
+	}
+	n := int64(nanos)
+	if n <= 0 {
+		return 0, fmt.Errorf("sandbox: cpus %g rounds to zero nanocpus, which would leave the sandbox unlimited", cpus)
+	}
+	return n, nil
 }

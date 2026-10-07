@@ -236,6 +236,73 @@ func TestCreateBodyRequiresOwnerKeyForVolumes(t *testing.T) {
 	assert.NewAborting(t).Error(err, "a volume mount without an owner volume key is refused")
 }
 
+// TestCreateBodyTinyCPUsRefused pins that a positive cpus that truncates to
+// zero nanocpus is refused rather than emitting an omitted (unlimited) limit.
+func TestCreateBodyTinyCPUsRefused(t *testing.T) {
+	r := bodyResolved()
+	r.CPUs = 1e-10
+	_, err := CreateBody(r, bodyInputs())
+	c := assert.NewAborting(t)
+	c.Error(err, "a cpus that rounds to zero nanocpus is refused")
+	c.StrContains(err.Error(), "cpus", "error names cpus")
+}
+
+// TestCreateBodyHugeCPUsRefused pins that a cpus past the int64 nanocpu range
+// is refused rather than making the conversion undefined.
+func TestCreateBodyHugeCPUsRefused(t *testing.T) {
+	r := bodyResolved()
+	r.CPUs = 1e30
+	_, err := CreateBody(r, bodyInputs())
+	c := assert.NewAborting(t)
+	c.Error(err, "a cpus past the nanocpu range is refused")
+	c.StrContains(err.Error(), "cpus", "error names cpus")
+}
+
+// TestCreateBodyCPUsNormal pins that an ordinary fractional cpus is emitted.
+func TestCreateBodyCPUsNormal(t *testing.T) {
+	r := bodyResolved()
+	r.CPUs = 0.5
+	b := decodeBody(t, mustBody(t, r, bodyInputs()))
+	assert.NewAborting(t).Eq(int64(500_000_000), b.HostConfig.NanoCpus, "NanoCpus")
+}
+
+// TestCreateBodyOwnerVolumeKeyRefused pins that a key containing the volume
+// separator '-' is refused: it would let two owners collide on one volume name.
+func TestCreateBodyOwnerVolumeKeyRefused(t *testing.T) {
+	r := bodyResolved()
+	r.Mounts = []protocol.SandboxMount{{Target: "/d", Kind: protocol.MountRW, Volume: "v"}}
+	for _, key := range []string{"a-b", "a.b", "a/b", "a b"} {
+		t.Run(key, func(t *testing.T) {
+			in := bodyInputs()
+			in.OwnerVolumeKey = key
+			_, err := CreateBody(r, in)
+			c := assert.NewAborting(t)
+			c.Error(err, "owner volume key %q is refused", key)
+			c.StrContains(err.Error(), "owner volume key", "error names the key")
+		})
+	}
+}
+
+// TestCreateBodyNetworkZeroRefused pins that an unresolved network is refused
+// rather than silently becoming egress.
+func TestCreateBodyNetworkZeroRefused(t *testing.T) {
+	r := bodyResolved()
+	r.Network = ""
+	_, err := CreateBody(r, bodyInputs())
+	c := assert.NewAborting(t)
+	c.Error(err, "an unset network is refused")
+	c.StrContains(err.Error(), "network", "error names network")
+}
+
+func TestCreateBodyNetworkUnknownRefused(t *testing.T) {
+	r := bodyResolved()
+	r.Network = "host"
+	_, err := CreateBody(r, bodyInputs())
+	c := assert.NewAborting(t)
+	c.Error(err, "an unknown network is refused")
+	c.StrContains(err.Error(), "network", "error names network")
+}
+
 // mustBody is mustBody(t, r, in) with the error asserted nil.
 func mustBody(t *testing.T, r Resolved, in CreateInputs) []byte {
 	t.Helper()
