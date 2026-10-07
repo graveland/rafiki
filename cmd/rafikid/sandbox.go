@@ -387,21 +387,20 @@ func (c *Controller) sandboxProvision(
 		}
 	}()
 
-	// 6. Insert the row first, state=creating: the container is created only
-	// after its row exists, so a `creating` row never owns a container the
-	// reaper might misjudge.
-	if err := c.sandboxStore.Insert(ctx, row); err != nil {
-		if errors.Is(err, sandbox.ErrNameTaken) {
-			return sandbox.Row{}, executors.Executor{}, &connectapi.ControllerError{
-				Code:    protocol.ErrInvalidArgs,
-				Message: fmt.Sprintf("a sandbox named %q already exists", resolved.Name),
-			}
-		}
-		return sandbox.Row{}, executors.Executor{}, err
-	}
-
-	// 7. Mint the sandbox's own executor row. The credential is returned once
-	// and never stored or logged.
+	// 6. Mint the sandbox's own executor row FIRST, before the row is inserted,
+	// so the inserted row carries a non-empty executor_id. The credential is
+	// returned once and never stored or logged.
+	//
+	// The row must still exist before the CONTAINER does (step 8), so a
+	// `creating` row never owns a container the reaper might misjudge — but the
+	// executor row is not a container, and minting it first is what lets the
+	// sandbox's row record which executor it owns. That ownership is load-bearing
+	// downstream: ownedSandbox/ChooseFor bind the child through it, and
+	// removeSandboxRow evicts and deletes the executor through it. Minting it
+	// after the insert left executor_id empty and broke all three. A failure
+	// between the mint and the insert (including ErrNameTaken) is unwound by the
+	// deferred rollback above, which evicts and deletes a minted executor — so no
+	// failure path leaks one.
 	labels, err := executorTrustLabels(owner, name, resolved.Labels)
 	if err != nil {
 		return sandbox.Row{}, executors.Executor{}, err
@@ -432,6 +431,17 @@ func (c *Controller) sandboxProvision(
 	}
 	executorID = executor.ID
 	row.ExecutorID = executor.ID
+
+	// 7. Insert the row, state=creating, now carrying executor_id.
+	if err := c.sandboxStore.Insert(ctx, row); err != nil {
+		if errors.Is(err, sandbox.ErrNameTaken) {
+			return sandbox.Row{}, executors.Executor{}, &connectapi.ControllerError{
+				Code:    protocol.ErrInvalidArgs,
+				Message: fmt.Sprintf("a sandbox named %q already exists", resolved.Name),
+			}
+		}
+		return sandbox.Row{}, executors.Executor{}, err
+	}
 
 	// 8. Engine over the launcher's docker proxy.
 	exists, err := engine.ImageExists(ctx, resolved.Image)

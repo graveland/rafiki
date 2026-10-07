@@ -82,6 +82,9 @@ func TestSandboxSpawnHappyPath(t *testing.T) {
 	ck.Require().NoError(err, "ownedSandbox")
 	ck.True(ok, "the new child owns its spawn-block sandbox")
 	ck.Eq(childID, row.OwnerChild, "owner child")
+	// The row read back through the STORE carries its executor — this is what
+	// makes the bind-by-ownership lookup (and removal) possible at all.
+	ck.Eq("exec-created", row.ExecutorID, "the persisted row records its executor")
 
 	snap, ok := env.ctrl.st.Get(childID)
 	ck.Require().True(ok, "child stored")
@@ -171,6 +174,76 @@ func TestSandboxSpawnNonFundiKindRefused(t *testing.T) {
 	live, lerr := env.store.ListAllLive(context.Background())
 	ck.NoError(lerr, "list live")
 	ck.Len(live, 0, "no sandbox is created for a refused kind")
+}
+
+// --- persisted executor_id and its downstream effects -----------------------
+
+// TestSandboxSpawnCreatedRowPersistsExecutorID: a create leaves a PERSISTED row
+// (read back through the store, not the in-memory info) whose executor_id is the
+// executor the flow minted. An empty executor_id breaks the bind-by-ownership
+// lookup and leaks the executor row on removal.
+func TestSandboxSpawnCreatedRowPersistsExecutorID(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{
+		sandboxLauncher("launcher", "box", owner.UserID),
+		spawnedExecutor("exec-created", owner.UserID),
+	}
+
+	info, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
+	ck.Require().NoError(err, "create")
+
+	row, ok := env.store.get(info.ID)
+	ck.Require().True(ok, "row stored")
+	ck.NotEq("", row.ExecutorID, "executor_id must be persisted, not just set in memory")
+	ck.Eq("exec-created", row.ExecutorID, "persisted executor_id")
+	ck.Eq(sandboxStateReady, row.State, "state")
+}
+
+// TestSandboxSpawnCreatedSandboxRemovesExecutor: because the row now records its
+// executor, removeSandboxRow actually evicts and deletes the executor row rather
+// than leaking it.
+func TestSandboxSpawnCreatedSandboxRemovesExecutor(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{
+		sandboxLauncher("launcher", "box", owner.UserID),
+		spawnedExecutor("exec-created", owner.UserID),
+	}
+
+	_, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
+	ck.Require().NoError(err, "create")
+	ck.Require().NoError(env.ctrl.SandboxRemove(context.Background(), owner, "", "dev"), "remove")
+
+	ck.True(env.pool.evicted["exec-created"], "the executor was evicted")
+	ck.True(sandboxHas(env.exec.deleted, "exec-created"), "the executor row was deleted: %v", env.exec.deleted)
+}
+
+// TestSandboxSpawnCreatedSandboxReportsConnected: SandboxList reports a live
+// sandbox as connected, which it can only do from the persisted executor_id.
+func TestSandboxSpawnCreatedSandboxReportsConnected(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{
+		sandboxLauncher("launcher", "box", owner.UserID),
+		spawnedExecutor("exec-created", owner.UserID),
+	}
+
+	_, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
+	ck.Require().NoError(err, "create")
+
+	infos, err := env.ctrl.SandboxList(owner)
+	ck.Require().NoError(err, "list")
+	ck.Len(infos, 1, "one sandbox")
+	ck.True(infos[0].Connected, "a live sandbox reports connected")
+	ck.Eq("exec-created", infos[0].ExecutorID, "the reported executor")
+	ck.Eq(sandboxStateReady, infos[0].State, "a connected ready row stays ready")
 }
 
 // --- Close / Kill -----------------------------------------------------------
