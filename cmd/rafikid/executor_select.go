@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 )
 
 // executorPool is the slice of *execpool.Pool the controller uses. An
@@ -89,6 +90,14 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, owner executorOwn
 	if req.ExecutorRef != "" {
 		return c.resolveRef(req, req.ExecutorRef, candidates, nil, "", sel, childLabels, parentSet, owner.UserID)
 	}
+	// A sandbox is never an implicit choice: with neither a ref nor a selector,
+	// the caller has not asked for any particular machine, so a sandbox row must
+	// never be the fallback. (sortCandidates already orders sandboxes last, but
+	// that only helps when an ordinary executor also survives; a sandbox-only
+	// set must still be refused rather than silently spawned into.)
+	if req.ExecutorSelector == "" {
+		candidates = dropSandboxCandidates(candidates)
+	}
 	if len(candidates) == 0 {
 		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels, owner.UserID)
 	}
@@ -118,8 +127,55 @@ func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner
 
 	candidates = executors.Narrow(parentSet, sel)
 	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
+	// A child-owned sandbox is never an ordinary candidate: it is reached only
+	// through the ownership lookup (controllerBinder.ChooseFor), never by
+	// selector, ref or implicit choice. Dropping it HERE covers both choose
+	// functions (and launch selection), since both narrow through this method.
+	candidates = dropChildOwnedSandboxes(candidates)
 	sortCandidates(candidates)
 	return candidates, parentSet, childLabels, sel, nil
+}
+
+// isSandboxRow reports whether an executor's row is a sandbox row, by presence
+// of sandbox.RowLabelSandbox. Presence, not value, so a row written with an
+// empty value is still treated as a sandbox (fail closed).
+func isSandboxRow(e executors.Executor) bool {
+	_, ok := e.Labels[sandbox.RowLabelSandbox]
+	return ok
+}
+
+// isChildOwnedSandboxRow reports whether an executor's row is a child-owned
+// sandbox, by presence of sandbox.RowLabelOwnerChild — an empty value counts
+// too (fail closed), since the key is only ever written together with a value.
+func isChildOwnedSandboxRow(e executors.Executor) bool {
+	_, ok := e.Labels[sandbox.RowLabelOwnerChild]
+	return ok
+}
+
+// dropSandboxCandidates removes every sandbox row from candidates, preserving
+// order. Used only when a caller has named neither a ref nor a selector.
+func dropSandboxCandidates(candidates []executors.Executor) []executors.Executor {
+	kept := candidates[:0:0]
+	for _, e := range candidates {
+		if isSandboxRow(e) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+// dropChildOwnedSandboxes removes every child-owned sandbox row from
+// candidates, preserving order.
+func dropChildOwnedSandboxes(candidates []executors.Executor) []executors.Executor {
+	kept := candidates[:0:0]
+	for _, e := range candidates {
+		if isChildOwnedSandboxRow(e) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // chooseLaunchExecutor is chooseExecutor's sibling for a kind that must be
@@ -146,6 +202,11 @@ func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, owner execu
 	}
 	if req.ExecutorRef != "" {
 		return c.resolveRef(req, req.ExecutorRef, kept, launchable, launchKind, sel, childLabels, parentSet, owner.UserID)
+	}
+	// As in chooseExecutor: no ref and no selector means no executor was named,
+	// so a sandbox must never be the implicit launch target.
+	if req.ExecutorSelector == "" {
+		kept = dropSandboxCandidates(kept)
 	}
 	if len(kept) == 0 {
 		return executors.Executor{}, c.explainNoLaunchMatch(req, sel, parentSet, childLabels, launchKind, owner.UserID)
@@ -684,8 +745,21 @@ func shortID(id string) string {
 // should bind to something that also does. The session executor is a
 // zero-config fallback for a machine with no durable one, not the preferred
 // home.
+//
+// Sandbox last: a sandbox row is an explicit, narrowly-scoped machine, so a
+// BROAD selector (owner=x) must prefer an ordinary executor over a sandbox even
+// though both match. This orders sandboxes after every non-sandbox row; among
+// sandboxes (and among non-sandboxes) the durable-before-session, then-ID order
+// still applies. It does not exempt a sandbox named by ref or selector, which
+// still matches in matchExecutorRef/the selector; it only decides the winner
+// when a selector is broad.
 func sortCandidates(in []executors.Executor) {
 	sort.SliceStable(in, func(i, j int) bool {
+		sbi := isSandboxRow(in[i])
+		sbj := isSandboxRow(in[j])
+		if sbi != sbj {
+			return !sbi
+		}
 		si := in[i].Labels["kind"] == "session"
 		sj := in[j].Labels["kind"] == "session"
 		if si != sj {
