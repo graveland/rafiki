@@ -103,6 +103,39 @@ func TestEngineImageExistsError(t *testing.T) {
 	assert.NewAborting(t).Error(err, "500 is an error")
 }
 
+func TestEngineImageIDReturnsID(t *testing.T) {
+	e, rec := newTestEngine(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"Id":"sha256:abc"}`))
+	})
+	c := assert.NewAborting(t)
+	id, err := e.ImageID(context.Background(), "nginx:latest")
+	c.NoError(err, "ImageID")
+	c.Eq("sha256:abc", id, "id")
+	got := rec.last(t)
+	c.Eq("GET", got.Method, "method")
+	c.Eq("/images/nginx:latest/json", got.Path, "path")
+}
+
+func TestEngineImageIDNotFoundIsError(t *testing.T) {
+	e, _ := newTestEngine(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	_, err := e.ImageID(context.Background(), "nginx:latest")
+	c := assert.NewAborting(t)
+	c.Error(err, "a 404 is an error: the caller decides whether to pull")
+	c.StrContains(err.Error(), "404", "error carries the status")
+}
+
+func TestEngineImageIDEmptyIDIsError(t *testing.T) {
+	e, _ := newTestEngine(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"Id":""}`))
+	})
+	_, err := e.ImageID(context.Background(), "nginx:latest")
+	assert.NewAborting(t).Error(err, "an empty id is an error")
+}
+
 func TestEnginePullImage(t *testing.T) {
 	e, rec := newTestEngine(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

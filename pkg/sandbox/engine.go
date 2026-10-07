@@ -72,6 +72,33 @@ func (e *Engine) ImageExists(ctx context.Context, ref string) (bool, error) {
 	}
 }
 
+// ImageID returns the content-addressed image ID (sha256:…) a ref currently
+// resolves to locally. A 404 is an error: the caller decides whether to pull.
+func (e *Engine) ImageID(ctx context.Context, ref string) (string, error) {
+	req, err := e.newRequest(ctx, http.MethodGet, "/images/"+url.PathEscape(ref)+"/json", nil, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := e.hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: inspect image %s: %w", ref, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", statusError("inspect image "+ref, resp)
+	}
+	var out struct {
+		ID string `json:"Id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("sandbox: inspect image %s: decoding response: %w", ref, err)
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("sandbox: inspect image %s: docker returned no image id", ref)
+	}
+	return out.ID, nil
+}
+
 // PullImage pulls ref, reading the whole progress stream. Docker reports a
 // failed pull with status 200 and an {"error": …} object mid-stream, so a
 // non-empty error key is a failure even on a 2xx.
