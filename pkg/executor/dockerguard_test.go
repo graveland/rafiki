@@ -38,14 +38,14 @@ func TestDockerGuardAllowsBindUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	sub := filepath.Join(root, "data")
 	c.Require().NoError(os.Mkdir(sub, 0o755), "mkdir")
-	c.NoError(checkCreateBody(createBody(t, bindMount(sub, "/data")), []string{root}, ""), "bind under root")
+	c.NoError(checkCreateBody(createBody(t, bindMount(sub, "/data")), []string{root}, "", ""), "bind under root")
 }
 
 func TestDockerGuardRefusesBindOutsideRoot(t *testing.T) {
 	c := assert.NewCollecting(t)
 	root := t.TempDir()
 	outside := t.TempDir()
-	err := checkCreateBody(createBody(t, bindMount(outside, "/data")), []string{root}, "")
+	err := checkCreateBody(createBody(t, bindMount(outside, "/data")), []string{root}, "", "")
 	c.Require().Error(err, "bind outside root")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -56,7 +56,7 @@ func TestDockerGuardRefusesSymlinkEscapingRoot(t *testing.T) {
 	outside := t.TempDir()
 	link := filepath.Join(root, "escape")
 	c.Require().NoError(os.Symlink(outside, link), "symlink")
-	err := checkCreateBody(createBody(t, bindMount(link, "/data")), []string{root}, "")
+	err := checkCreateBody(createBody(t, bindMount(link, "/data")), []string{root}, "", "")
 	c.Require().Error(err, "symlink escaping root")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -68,7 +68,7 @@ func TestDockerGuardRefusesDotDotLexically(t *testing.T) {
 	// <root>/../<base(outside)> resolves, lexically and via symlinks, to a
 	// directory outside root.
 	src := filepath.Join(root, "..", filepath.Base(outside))
-	err := checkCreateBody(createBody(t, bindMount(src, "/data")), []string{root}, "")
+	err := checkCreateBody(createBody(t, bindMount(src, "/data")), []string{root}, "", "")
 	c.Require().Error(err, "dot-dot source")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -79,7 +79,7 @@ func TestDockerGuardRefusesBinds(t *testing.T) {
 		"HostConfig": map[string]any{"Binds": []string{"/etc:/host-etc"}},
 	})
 	c.Require().NoError(err, "marshal")
-	err = checkCreateBody(body, nil, "")
+	err = checkCreateBody(body, nil, "", "")
 	c.Require().Error(err, "non-empty Binds")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -87,7 +87,7 @@ func TestDockerGuardRefusesBinds(t *testing.T) {
 func TestDockerGuardAllowsRelayDir(t *testing.T) {
 	c := assert.NewCollecting(t)
 	relay := t.TempDir()
-	c.NoError(checkCreateBody(createBody(t, bindMount(relay, "/relay")), nil, relay), "bind exactly the relay dir")
+	c.NoError(checkCreateBody(createBody(t, bindMount(relay, "/relay")), nil, relay, ""), "bind exactly the relay dir")
 }
 
 // TestDockerGuardRefusesSocketUnderRoot: a bind of a unix socket still permits
@@ -109,7 +109,7 @@ func TestDockerGuardRefusesSocketUnderRoot(t *testing.T) {
 	c.Require().NoError(err, "listen on a unix socket under the root")
 	t.Cleanup(func() { _ = ln.Close() })
 
-	err = checkCreateBody(createBody(t, bindMount(sock, "/sock")), []string{root}, "")
+	err = checkCreateBody(createBody(t, bindMount(sock, "/sock")), []string{root}, "", "")
 	c.Require().Error(err, "a socket bind source must be refused")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 	c.StrContains(err.Error(), "socket", "the refusal names the file type: %v", err)
@@ -125,9 +125,9 @@ func TestDockerGuardAllowsDirectoryAndRegularFileUnderRoot(t *testing.T) {
 	file := filepath.Join(root, "notes.txt")
 	c.Require().NoError(os.WriteFile(file, []byte("hi"), 0o600), "write file")
 
-	c.NoError(checkCreateBody(createBody(t, bindMount(sub, "/data")), []string{root}, ""),
+	c.NoError(checkCreateBody(createBody(t, bindMount(sub, "/data")), []string{root}, "", ""),
 		"a directory source is allowed")
-	c.NoError(checkCreateBody(createBody(t, bindMount(file, "/notes")), []string{root}, ""),
+	c.NoError(checkCreateBody(createBody(t, bindMount(file, "/notes")), []string{root}, "", ""),
 		"a regular file source is allowed")
 }
 
@@ -137,12 +137,12 @@ func TestDockerGuardAllowsVolumeAndTmpfs(t *testing.T) {
 		map[string]string{"Type": "volume", "Source": "vol", "Target": "/v"},
 		map[string]string{"Type": "tmpfs", "Source": "", "Target": "/t"},
 	)
-	c.NoError(checkCreateBody(body, nil, ""), "volume and tmpfs need no root")
+	c.NoError(checkCreateBody(body, nil, "", ""), "volume and tmpfs need no root")
 }
 
 func TestDockerGuardRefusesUnknownMountType(t *testing.T) {
 	c := assert.NewCollecting(t)
-	err := checkCreateBody(createBody(t, map[string]string{"Type": "npipe", "Source": "x", "Target": "/p"}), nil, "")
+	err := checkCreateBody(createBody(t, map[string]string{"Type": "npipe", "Source": "x", "Target": "/p"}), nil, "", "")
 	c.Require().Error(err, "unknown mount type")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -150,7 +150,7 @@ func TestDockerGuardRefusesUnknownMountType(t *testing.T) {
 func TestDockerGuardRefusesWhenNoRootsDeclared(t *testing.T) {
 	c := assert.NewCollecting(t)
 	src := t.TempDir()
-	err := checkCreateBody(createBody(t, bindMount(src, "/data")), nil, "")
+	err := checkCreateBody(createBody(t, bindMount(src, "/data")), nil, "", "")
 	c.Require().Error(err, "no roots declared")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -158,7 +158,7 @@ func TestDockerGuardRefusesWhenNoRootsDeclared(t *testing.T) {
 func TestDockerGuardRefusesMissingSource(t *testing.T) {
 	c := assert.NewCollecting(t)
 	src := filepath.Join(t.TempDir(), "does-not-exist")
-	err := checkCreateBody(createBody(t, bindMount(src, "/data")), []string{t.TempDir()}, "")
+	err := checkCreateBody(createBody(t, bindMount(src, "/data")), []string{t.TempDir()}, "", "")
 	c.Require().Error(err, "missing source")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -215,7 +215,7 @@ func TestDockerGuardRefusesVolumeOptionsKey(t *testing.T) {
 		`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/v","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`,
 		`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/v","VolumeOptions":null}]}}`,
 	} {
-		err := checkCreateBody([]byte(body), nil, "")
+		err := checkCreateBody([]byte(body), nil, "", "")
 		c.Require().Error(err, "VolumeOptions must be refused: %s", body)
 		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 	}
@@ -227,7 +227,7 @@ func TestDockerGuardRefusesDuplicateTopLevelKey(t *testing.T) {
 	// but the engine MERGES repeated object keys, so it also sees the first
 	// HostConfig's Binds. A duplicate must be refused, not reconciled.
 	body := []byte(`{"HostConfig":{"Binds":["/:/h"]},"HostConfig":{"NetworkMode":"none"}}`)
-	err := checkCreateBody(body, nil, "")
+	err := checkCreateBody(body, nil, "", "")
 	c.Require().Error(err, "duplicate HostConfig must be refused")
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
@@ -238,7 +238,7 @@ func TestDockerGuardRefusesDuplicateInnerKey(t *testing.T) {
 	// VolumeOptions), but the engine keeps the first array's VolumeOptions. A
 	// repeated Mounts key is refused.
 	body := []byte(`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/v","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"o":"bind","device":"/etc"}}}}],"Mounts":[{"Type":"volume","Source":"x","Target":"/v"}]}}`)
-	err := checkCreateBody(body, nil, "")
+	err := checkCreateBody(body, nil, "", "")
 	c.Require().Error(err, "duplicate Mounts key must be refused")
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
@@ -246,7 +246,7 @@ func TestDockerGuardRefusesDuplicateInnerKey(t *testing.T) {
 func TestDockerGuardAllowsBodyWithNoDuplicateKeys(t *testing.T) {
 	c := assert.NewCollecting(t)
 	body := []byte(`{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/v"}],"NetworkMode":"none"}}`)
-	c.NoError(checkCreateBody(body, nil, ""), "a duplicate-free body must pass")
+	c.NoError(checkCreateBody(body, nil, "", ""), "a duplicate-free body must pass")
 }
 
 func TestDockerGuardRefusesUnknownHostConfigKey(t *testing.T) {
@@ -266,7 +266,7 @@ func TestDockerGuardRefusesUnknownHostConfigKey(t *testing.T) {
 	for name, value := range unlisted {
 		t.Run(name, func(t *testing.T) {
 			c := assert.NewCollecting(t)
-			err := checkCreateBody(hostConfigBody(t, map[string]any{name: value}), nil, "")
+			err := checkCreateBody(hostConfigBody(t, map[string]any{name: value}), nil, "", "")
 			c.Require().Error(err, "%s must be refused", name)
 			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 		})
@@ -276,7 +276,7 @@ func TestDockerGuardRefusesUnknownHostConfigKey(t *testing.T) {
 func TestDockerGuardRefusesUnknownTopLevelKey(t *testing.T) {
 	c := assert.NewCollecting(t)
 	body := []byte(`{"Image":"x","NetworkingConfig":{"EndpointsConfig":{}},"HostConfig":{}}`)
-	err := checkCreateBody(body, nil, "")
+	err := checkCreateBody(body, nil, "", "")
 	c.Require().Error(err, "unknown top-level key must be refused")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
@@ -315,7 +315,7 @@ func TestDockerGuardAcceptsDaemonCreateBody(t *testing.T) {
 	}
 	body, err := sandbox.CreateBody(r, in)
 	c.NoError(err, "CreateBody")
-	c.NoError(checkCreateBody(body, []string{root}, relay), "the daemon's own body must pass the guard")
+	c.NoError(checkCreateBody(body, []string{root}, relay, ""), "the daemon's own body must pass the guard")
 }
 
 func TestDockerGuardRefusesPrivilegeFields(t *testing.T) {
@@ -339,7 +339,7 @@ func TestDockerGuardRefusesPrivilegeFields(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewCollecting(t)
-			err := checkCreateBody(hostConfigBody(t, tc.hc), nil, "")
+			err := checkCreateBody(hostConfigBody(t, tc.hc), nil, "", "")
 			c.Require().Error(err, "%s must be refused", tc.name)
 			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 		})
@@ -349,6 +349,110 @@ func TestDockerGuardRefusesPrivilegeFields(t *testing.T) {
 func TestDockerGuardAllowsBridgeAndNoneNetwork(t *testing.T) {
 	c := assert.NewCollecting(t)
 	for _, mode := range []string{"", "bridge", "none"} {
-		c.NoError(checkCreateBody(hostConfigBody(t, map[string]any{"NetworkMode": mode}), nil, ""), "NetworkMode %q", mode)
+		c.NoError(checkCreateBody(hostConfigBody(t, map[string]any{"NetworkMode": mode}), nil, "", ""), "NetworkMode %q", mode)
 	}
+}
+
+// relayVolumeName and relayVolumeTarget mirror the foothold's relay volume and
+// its fixed mount target (sandbox.ContainerRelayDir).
+const (
+	relayVolumeName   = "rafiki.relay.test"
+	relayVolumeTarget = sandbox.ContainerRelayDir
+)
+
+// volumeBody builds a create body carrying exactly the given volume mounts,
+// each keyed by a raw JSON value. It exists for the relay-volume tests, whose
+// ReadOnly must be able to carry a non-boolean (a JSON string) to pin the
+// decode-error-is-refusal clause, which the map[string]string helper cannot.
+func volumeBody(t *testing.T, mounts ...map[string]any) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"Image":      "alpine",
+		"HostConfig": map[string]any{"Mounts": mounts},
+	})
+	assert.NewAborting(t).NoError(err, "marshal body")
+	return b
+}
+
+// relayMount builds a relay-volume mount. readOnly is the raw ReadOnly value:
+// pass nil to omit the key entirely.
+func relayMount(readOnly any, target string) map[string]any {
+	m := map[string]any{"Type": "volume", "Source": relayVolumeName, "Target": target}
+	if readOnly != nil {
+		m["ReadOnly"] = readOnly
+	}
+	return m
+}
+
+// TestDockerGuardRelayVolumeReadOnlyAtRelayTargetAllowed: the one shape a
+// foothold relay volume may take — read-only, at the fixed relay target.
+func TestDockerGuardRelayVolumeReadOnlyAtRelayTargetAllowed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := volumeBody(t, relayMount(true, relayVolumeTarget))
+	c.NoError(checkCreateBody(body, nil, "", relayVolumeName), "the relay volume read-only at the relay target")
+}
+
+// TestDockerGuardRefusesRelayVolumeReadWrite: a writable relay volume could
+// replace daemon.sock and capture other sandboxes' credentials, so ReadOnly
+// false and a missing ReadOnly key are both refused.
+func TestDockerGuardRefusesRelayVolumeReadWrite(t *testing.T) {
+	cases := []struct {
+		name     string
+		readOnly any
+	}{
+		{"ReadOnly false", false},
+		{"ReadOnly absent", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			body := volumeBody(t, relayMount(tc.readOnly, relayVolumeTarget))
+			err := checkCreateBody(body, nil, "", relayVolumeName)
+			c.Require().Error(err, "a writable relay volume must be refused")
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+		})
+	}
+}
+
+// TestDockerGuardRefusesRelayVolumeNonBoolReadOnly: ReadOnly must be the JSON
+// boolean true, not a truthy string — the decode error is a refusal, never a
+// silent false.
+func TestDockerGuardRefusesRelayVolumeNonBoolReadOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := volumeBody(t, relayMount("true", relayVolumeTarget))
+	err := checkCreateBody(body, nil, "", relayVolumeName)
+	c.Require().Error(err, "a non-boolean ReadOnly must be refused")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+}
+
+// TestDockerGuardRefusesRelayVolumeAtWrongTarget: read-only is not enough; the
+// relay volume is admitted only at the fixed relay target.
+func TestDockerGuardRefusesRelayVolumeAtWrongTarget(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := volumeBody(t, relayMount(true, "/data"))
+	err := checkCreateBody(body, nil, "", relayVolumeName)
+	c.Require().Error(err, "the relay volume at a non-relay target must be refused")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+}
+
+// TestDockerGuardOtherVolumeNamesStillAllowed: the relay rule names exactly one
+// volume; any other volume — even one whose name starts with "rafiki" — stays
+// admitted exactly as before, read-write and at any target.
+func TestDockerGuardOtherVolumeNamesStillAllowed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := volumeBody(t, map[string]any{
+		"Type": "volume", "Source": "rafiki-abc-data", "Target": "/data", "ReadOnly": false,
+	})
+	c.NoError(checkCreateBody(body, nil, "", relayVolumeName), "an unrelated volume is unaffected by the relay rule")
+}
+
+// TestDockerGuardRelayVolumeUnsetImposesNoRule: with no relay volume configured
+// an empty relayVolume imposes no constraint at all — the zero-value trap the
+// guard must not fall into.
+func TestDockerGuardRelayVolumeUnsetImposesNoRule(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := volumeBody(t, map[string]any{
+		"Type": "volume", "Source": relayVolumeName, "Target": "/data",
+	})
+	c.NoError(checkCreateBody(body, nil, "", ""), "no relay volume configured means no relay rule")
 }

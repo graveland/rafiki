@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -343,6 +345,109 @@ func TestDockerGuardPassesNormalPostThrough(t *testing.T) {
 	c.Eq("POST", rec.method, "upstream method")
 	c.Eq("/containers/json", rec.path, "upstream path")
 	c.Eq(`{"all":true}`, string(rec.body), "body reached upstream intact")
+}
+
+// eventLog is a mutex-guarded, ordered event recorder shared between a proxy's
+// BeforeSandboxCreate hook and an upstream server, so a test can assert that
+// the hook ran before the upstream ever saw the request.
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(e string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, e)
+}
+
+func (l *eventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
+// eventUpstream starts an HTTP server that records each request it receives in
+// log and answers 200.
+func eventUpstream(t *testing.T, log *eventLog) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	assert.NewAborting(t).NoError(err, "listen")
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		log.add("upstream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("upstream-ok"))
+	})}
+	t.Cleanup(func() { _ = srv.Close() })
+	go func() { _ = srv.Serve(ln) }()
+	return "http://" + ln.Addr().String()
+}
+
+// guardedCreateBody is a body the docker create guard admits (a bare volume
+// mount), so a test reaches the hook without tripping the allowlist.
+var guardedCreateBody = []byte(`{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/data"}]}}`)
+
+// TestProxyBeforeSandboxCreateRunsOnceBeforeForwarding: the hook fires exactly
+// once, and before the upstream sees the create.
+func TestProxyBeforeSandboxCreateRunsOnceBeforeForwarding(t *testing.T) {
+	c := assert.NewAborting(t)
+	log := &eventLog{}
+	url := eventUpstream(t, log)
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"docker": url},
+		BeforeSandboxCreate: func(context.Context) error {
+			log.add("hook")
+			return nil
+		},
+	})
+	head, respBody, err := proxyOnce(t, esrv, "docker", "POST", "/containers/create", nil, guardedCreateBody)
+	c.NoError(err, "create through the guard")
+	c.Require().NotNil(head, "head")
+	c.Eq(int32(200), head.Status, "status")
+	c.Eq("upstream-ok", string(respBody), "upstream body")
+	c.EqDeep([]string{"hook", "upstream"}, log.snapshot(), "the hook runs exactly once, before the upstream sees the request")
+}
+
+// TestProxyBeforeSandboxCreateErrorRefusesCreate: a hook error becomes
+// Unavailable and the create is never forwarded.
+func TestProxyBeforeSandboxCreateErrorRefusesCreate(t *testing.T) {
+	c := assert.NewAborting(t)
+	url, rec := echoUpstream(t)
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"docker": url},
+		BeforeSandboxCreate: func(context.Context) error {
+			return errors.New("foothold unavailable")
+		},
+	})
+	_, _, err := proxyOnce(t, esrv, "docker", "POST", "/containers/create", nil, guardedCreateBody)
+	c.Require().Error(err, "a failing hook must refuse the create")
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
+	c.Eq("", rec.method, "upstream must never be reached")
+}
+
+// TestProxyBeforeSandboxCreateNotCalledForOtherRequests: the hook is scoped to
+// guarded docker creates — a non-create docker POST and a non-docker proxy
+// request never invoke it.
+func TestProxyBeforeSandboxCreateNotCalledForOtherRequests(t *testing.T) {
+	c := assert.NewAborting(t)
+	var calls atomic.Int64
+	url, _ := echoUpstream(t)
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"docker": url, "llm": url},
+		BeforeSandboxCreate: func(context.Context) error {
+			calls.Add(1)
+			return nil
+		},
+	})
+	_, _, err := proxyOnce(t, esrv, "docker", "POST", "/containers/json", nil, []byte(`{"all":true}`))
+	c.NoError(err, "a non-create docker POST must stream through")
+	_, _, err = proxyOnce(t, esrv, "llm", "POST", "/containers/create", nil, []byte(`{}`))
+	c.NoError(err, "a non-docker proxy request must stream through")
+	c.Eq(int64(0), calls.Load(), "the hook runs only for guarded docker creates")
 }
 
 // A request the caller sent without a body must reach the upstream without

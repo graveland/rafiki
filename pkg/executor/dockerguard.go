@@ -16,6 +16,7 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 )
 
 // maxContainerCreateBody bounds how much of a docker container-create body the
@@ -115,8 +116,10 @@ func refuseUnknownKeys(where string, m map[string]json.RawMessage, allowed map[s
 //
 // A bind mount's source must resolve (through symlinks) to the relay dir or
 // under one of the operator's declared sandbox roots; a volume or tmpfs mount
-// passes; NetworkMode is limited to "", bridge or none.
-func checkCreateBody(body []byte, roots []string, relayDir string) error {
+// passes, except the foothold relay volume (relayVolume), which is admitted
+// only read-only at the fixed relay target; NetworkMode is limited to "",
+// bridge or none.
+func checkCreateBody(body []byte, roots []string, relayDir, relayVolume string) error {
 	// Refuse a duplicated key at any object level FIRST. A map decode keeps only
 	// the LAST value for a repeated key, while the Docker engine MERGES repeated
 	// object keys into one struct: `{"HostConfig":{"Binds":[...]},"HostConfig":
@@ -201,7 +204,21 @@ func checkCreateBody(body []byte, roots []string, relayDir string) error {
 		switch typ {
 		case "volume", "tmpfs":
 			// The daemon owns the contents of these; nothing host-side is
-			// exposed by naming one.
+			// exposed by naming one. The one exception is the foothold relay
+			// volume: it carries the relay socket (daemon.sock), so a mount
+			// that could replace it read-write would let one sandbox capture
+			// another sandbox's executor credentials. It is therefore admitted
+			// only when ReadOnly is the JSON boolean true and the target is the
+			// fixed relay dir, so it can never be written to. A missing
+			// ReadOnly key counts as false; a value that is not a JSON boolean
+			// is a refusal, not a silent false.
+			if relayVolume != "" && typ == "volume" && src == relayVolume {
+				ro, err := mountBool(m, "ReadOnly")
+				if err != nil || !ro || target != sandbox.ContainerRelayDir {
+					return connect.NewError(connect.CodePermissionDenied,
+						fmt.Errorf("sandbox: the relay volume %q may only be mounted read-only at /run/rafiki-relay", relayVolume))
+				}
+			}
 		case "bind":
 			if err := checkBindSource(src, roots, relayDir); err != nil {
 				return err
@@ -309,6 +326,22 @@ func bindSourceTypeName(m os.FileMode) string {
 	default:
 		return "irregular file"
 	}
+}
+
+// mountBool extracts a boolean field from a decoded mount. A missing key is
+// false; a value that is not a JSON boolean is an error, which callers treat
+// as a refusal rather than a silent false.
+func mountBool(m map[string]json.RawMessage, key string) (bool, error) {
+	raw, ok := m[key]
+	if !ok {
+		return false, nil
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return false, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sandbox: malformed mount %s: %w", key, err))
+	}
+	return b, nil
 }
 
 // mountString extracts a string field from a decoded mount, refusing a

@@ -160,11 +160,20 @@ func (s *Server) Proxy(
 			return connect.NewError(connect.CodeInvalidArgument,
 				fmt.Errorf("proxy: container create body exceeds %d bytes", maxContainerCreateBody))
 		}
-		if err := checkCreateBody(body, s.opts.SandboxMountRoots, s.opts.SandboxRelayDir); err != nil {
+		if err := checkCreateBody(body, s.opts.SandboxMountRoots, s.opts.SandboxRelayDir, s.opts.SandboxRelayVolume); err != nil {
 			return err
 		}
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		req.ContentLength = int64(len(body))
+		// The guarded create is the only point at which the executor may need
+		// to stand up the foothold relay before the container it serves starts.
+		// It runs after the guard has admitted the body and only for guarded
+		// creates; a non-create request streams through untouched.
+		if hook := s.opts.BeforeSandboxCreate; hook != nil {
+			if err := hook(ctx); err != nil {
+				return connect.NewError(connect.CodeUnavailable, fmt.Errorf("proxy: before sandbox create: %w", err))
+			}
+		}
 	}
 
 	client := http.DefaultClient
