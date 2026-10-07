@@ -919,11 +919,14 @@ command (which carries the relay port) — and the change is picked up on the
 next sandbox create, so a *fixed tag* needs a manual `docker pull` to take
 effect.
 
-Two accepted residuals of foothold mode, not protections: the foothold keeps
-running while the launcher is down (`RestartPolicy` `unless-stopped`) and its
-dial target is an ephemeral loopback port, so a local process could bind that
-port while the launcher is stopped; and the foothold's key is the launcher
-host name, so renaming the host orphans the old volume and foothold.
+Two accepted residuals of foothold mode, not protections: the hop from the
+foothold to the launcher's loopback TCP relay is plaintext and carries each
+sandbox's durable executor credential, and the foothold keeps running while the
+launcher is down (`RestartPolicy` `unless-stopped`) still dialing that
+ephemeral port — so a local process that binds the port while the launcher is
+stopped would receive those credentials. And the foothold's key is the launcher
+host name, so renaming the host orphans the old volume and foothold, stranding
+sandboxes already created on the old volume without a relay.
 
 **The image must run `rafiki`.** A sandbox runs `rafiki executor serve
 --connect-socket /run/rafiki-relay/daemon.sock` as its entrypoint, so the image

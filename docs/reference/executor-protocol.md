@@ -109,10 +109,12 @@ ordinary durable executor whose operator declared three things:
   and a daemon address, and is replaced by `foothold.Ensure` when the create
   body or the resolved image id drifts.
 
-Accepted residuals of foothold mode, not protections: while the launcher is
-down the foothold keeps running and its ephemeral loopback TCP hop is
-plaintext, and the foothold's key is the host name, so a rename orphans its
-volume.
+Accepted residuals of foothold mode, not protections: the foothold→launcher
+loopback TCP hop is plaintext and carries each sandbox's durable executor
+credential, and the foothold keeps running while the launcher is down, still
+dialing its ephemeral port — a local process that binds that port would receive
+those credentials. The foothold's key is the host name, so a rename orphans its
+volume, stranding sandboxes already created on it.
 
 **The relay.** `--relay-dir` makes `rafiki executor serve` also bind
 `<relay-dir>/daemon.sock` (`sandboxrelay.Serve`) and splice every accepted
