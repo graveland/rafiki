@@ -109,7 +109,7 @@ func createOIDCUser(t *testing.T, name, email string) {
 // runs, so both the username and the email must be fresh every time (the
 // emails are unique among active users).
 func oidcUser(prefix string) (name, email string) {
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	suffix := uniqueSuffix()
 	return prefix + "-" + suffix, prefix + "-" + suffix + "@" + oidcTestDomain
 }
 

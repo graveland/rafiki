@@ -633,11 +633,13 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	c.StrContains(bothErrBuf.String(), "cannot combine -j and -J", "-j -J error text changed; got")
 }
 
-// operatorName mints a unique username per run: the suite shares one
-// disposable database across runs and daemons, so a fixed name would collide
-// with the user a previous run created ("username ... is already taken").
+// operatorName mints a username unique BOTH within the run and across runs.
+// The suite shares one disposable database across runs and daemons, so a fixed
+// name would collide with the user a previous run created ("username ... is
+// already taken"). See uniqueSuffix for why the clock alone is not enough when
+// the tests run in parallel.
 func operatorName() string {
-	return fmt.Sprintf("operator-%d", time.Now().UnixNano())
+	return "operator-" + uniqueSuffix()
 }
 
 // TestCLI_PresetPutThenCreateOnTheSameProfile is the preset round trip end to

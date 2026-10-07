@@ -229,7 +229,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 	// whichever stale row came first. Tests that only inspected refusal MESSAGES
 	// never noticed; the moment a test asserted on placement identity, it
 	// compared against a row from a run an hour earlier.
-	marker := fmt.Sprintf("t%d", time.Now().UnixNano())
+	marker := "t" + uniqueSuffix()
 	labels = maps.Clone(labels)
 	labels["test-run"] = marker
 

@@ -126,6 +126,25 @@ func providerObject(t *testing.T, body []byte) map[string]any {
 	return p
 }
 
+// providerObjectWithoutGlobalBans is providerObject with the "ignore" key
+// removed.
+//
+// Provider bans are GLOBAL state in the shared disposable database: a daemon
+// rehydrates every live ban into the provider object of every request it
+// serves. TestCLI_ProviderBanRoundTrip holds a ban for the length of its round
+// trip and runs in PARALLEL with this file, so an "ignore" entry naming some
+// other test's provider slug can appear here at any moment without the routing
+// under test having changed. Excluding that one key keeps the comparison exact
+// on everything this test actually controls — which is the point: the steer's
+// own keys must match precisely, including the ABSENCE of "order" before the
+// steer is applied.
+func providerObjectWithoutGlobalBans(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	p := providerObject(t, body)
+	delete(p, "ignore")
+	return p
+}
+
 // writeRecordingProviders writes a providers.toml whose "fakeor" provider is
 // an anthropic-openrouter entry pointed at the recording server. The file
 // REPLACES the shipped registry, so the shipped anthropic entry is spelled out
@@ -205,7 +224,7 @@ func TestRouteSteerChangesNextRequestProviderObject(t *testing.T) {
 	sendPrompt(t, client, child, "first turn")
 	first := fake.waitForRequests(t, 1, 60*time.Second)
 	firstBody := append([]byte(nil), first[0]...)
-	c.EqDeep(map[string]any{"sort": "price"}, providerObject(t, firstBody),
+	c.EqDeep(map[string]any{"sort": "price"}, providerObjectWithoutGlobalBans(t, firstBody),
 		"first request provider object, body = %s", firstBody)
 
 	// 2. Steer the running child. Merge semantics leave sort=price in place.
@@ -216,7 +235,7 @@ func TestRouteSteerChangesNextRequestProviderObject(t *testing.T) {
 	sendPrompt(t, client, child, "second turn")
 	second := fake.waitForRequests(t, 2, 60*time.Second)
 	wantSecond := map[string]any{"order": []any{"fireworks"}, "sort": "price"}
-	c.EqDeep(wantSecond, providerObject(t, second[1]),
+	c.EqDeep(wantSecond, providerObjectWithoutGlobalBans(t, second[1]),
 		"second request provider object, body = %s", second[1])
 
 	// 4. The steer is not retroactive: the first recorded body is untouched.

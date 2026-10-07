@@ -81,8 +81,14 @@ func TestNoMatchingExecutorFailsImmediately(t *testing.T) {
 	})
 	ck.NoError(err, "with lazy binding, spawn succeeds even with no match")
 	// Spawn succeeds fast — it neither waits for an executor to appear nor
-	// blocks on selection failure.
-	ck.LessOrEqual(time.Second, time.Since(start), "spawn took")
+	// blocks on selection failure. This fixture wires a fake pool and no
+	// executor store, so the waits a regression would have to introduce are
+	// ones it adds itself; the bound is set well below the waits the real
+	// design uses (execpool's join and health timeouts are 10s each, the park
+	// timeout is 5 minutes) so it still fails on a genuine wait while leaving
+	// room for an ordinary scheduling hiccup on a loaded host. 1s did not: a
+	// loaded run took 1.066s and tripped it.
+	ck.LessOrEqual(5*time.Second, time.Since(start), "spawn took")
 	ck.NotEq("", got.ChildID, "childID must not be empty")
 }
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -292,7 +293,58 @@ func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (execu
 	return e, nil
 }
 
+// malformedID reports whether id cannot name an executor row at all, as far as
+// Go can tell. Postgres is the authority — executorReadErr maps the cast error
+// it returns — so this only short-circuits the common case (a short SUFFIX
+// ref) before the round trip.
+//
+// A malformed id is an ANSWER, not a read failure: the same rule usersdb
+// states for a token id ("a malformed id is no token: an answer, not a 22P02
+// outage"). Callers depend on it — executor ref resolution accepts a
+// user-supplied ref that may be a short SUFFIX and falls through to its suffix
+// search only on ErrNotFound, so letting the cast error through would break
+// `rafiki executor <suffix>` outright.
+func malformedID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err != nil
+}
+
+// invalidTextRepresentation is SQLSTATE 22P02: Postgres could not read the id
+// as a uuid, so it cannot name a row. That is an ANSWER (ErrNotFound), not a
+// read failure — the same rule malformedID states, but decided by the database
+// itself, so the two cannot disagree.
+const invalidTextRepresentation = "22P02"
+
+// executorReadErr classifies a read of the executor table: ErrNotFound when the
+// row cannot exist (no rows, or an id the database could not read as a uuid),
+// and a wrapped error otherwise.
+//
+// The distinction is load-bearing for every caller. execpool.refreshRow REVOKES
+// a connected executor on ErrNotFound but keeps the last known row on any other
+// error; executor ref resolution falls through to its suffix search on
+// ErrNotFound but surfaces a real error. Collapsing a dead connection into
+// ErrNotFound therefore told a connected executor its row was gone during a
+// database blip, and it exited. Authenticate, Enroll and the whole usersdb
+// store already checked pgx.ErrNoRows first; Get, SetLabels and Annotate did
+// not.
+func executorReadErr(what, id string, err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == invalidTextRepresentation {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("%s for executor %s: %w", what, id, err)
+	}
+	return nil
+}
+
 func (s *pgStore) Get(ctx context.Context, id string) (executors.Executor, error) {
+	if malformedID(id) {
+		return executors.Executor{}, ErrNotFound
+	}
 	var e executors.Executor
 	var labelsJSON, selfJSON, annotationsJSON []byte
 	var enrolledAt, lastSeenAt *time.Time
@@ -306,8 +358,8 @@ func (s *pgStore) Get(ctx context.Context, id string) (executors.Executor, error
 		&labelsJSON, &selfJSON, &annotationsJSON,
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 		&enrolledAt, &lastSeenAt, &e.OwnerUserID)
-	if err != nil {
-		return executors.Executor{}, ErrNotFound
+	if rerr := executorReadErr("read", id, err); rerr != nil {
+		return executors.Executor{}, rerr
 	}
 	json.Unmarshal(labelsJSON, &e.Labels)           //nolint:errcheck
 	json.Unmarshal(selfJSON, &e.SelfReported)       //nolint:errcheck
@@ -335,6 +387,9 @@ func (s *pgStore) List(ctx context.Context) ([]executors.Executor, error) {
 }
 
 func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (executors.Executor, error) {
+	if malformedID(id) {
+		return executors.Executor{}, ErrNotFound
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return executors.Executor{}, err
@@ -344,8 +399,8 @@ func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]strin
 	var currentJSON []byte
 	err = tx.QueryRow(ctx,
 		`SELECT labels FROM conversations.executors WHERE id = $1 FOR UPDATE`, id).Scan(&currentJSON)
-	if err != nil {
-		return executors.Executor{}, ErrNotFound
+	if rerr := executorReadErr("read labels", id, err); rerr != nil {
+		return executors.Executor{}, rerr
 	}
 	var current map[string]string
 	if err := json.Unmarshal(currentJSON, &current); err != nil {
@@ -406,6 +461,9 @@ func (s *pgStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *pgStore) Annotate(ctx context.Context, id string, set map[string]string, remove []string) error {
+	if malformedID(id) {
+		return ErrNotFound
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -415,8 +473,8 @@ func (s *pgStore) Annotate(ctx context.Context, id string, set map[string]string
 	var currentJSON []byte
 	err = tx.QueryRow(ctx,
 		`SELECT annotations FROM conversations.executors WHERE id = $1 FOR UPDATE`, id).Scan(&currentJSON)
-	if err != nil {
-		return ErrNotFound
+	if rerr := executorReadErr("read annotations", id, err); rerr != nil {
+		return rerr
 	}
 	var current map[string]string
 	if err := json.Unmarshal(currentJSON, &current); err != nil {

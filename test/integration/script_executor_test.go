@@ -109,7 +109,7 @@ func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName, ownerUserID s
 	t.Helper()
 	c := assert.NewAborting(t)
 
-	marker := fmt.Sprintf("t%d", time.Now().UnixNano())
+	marker := "t" + uniqueSuffix()
 	labels := map[string]string{
 		"env":      "scripthost",
 		"owner":    ownerName,
@@ -203,7 +203,7 @@ func TestScriptChildOnExecutor(t *testing.T) {
 	// owner label, and the spawn must carry that owner (ChildForMCPToken
 	// refuses an ownerless child, so an anonymous spawn would get a socket
 	// that 401s).
-	username := fmt.Sprintf("operator-%d", time.Now().UnixNano())
+	username := operatorName()
 	configDir := t.TempDir()
 	userCmd := cliCmdIn(t, d, configDir, "--output", "json", "user", "create", username)
 	var userStderr strings.Builder

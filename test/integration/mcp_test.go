@@ -117,7 +117,7 @@ func bootMCPDaemon(t *testing.T) *daemon {
 func (d *daemon) createMCPUser(t *testing.T) string {
 	t.Helper()
 	c := assert.NewAborting(t)
-	username := fmt.Sprintf("mcp-it-%d", time.Now().UnixNano())
+	username := "mcp-it-" + uniqueSuffix()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	resp, err := d.control(t).CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: username}))

@@ -252,14 +252,21 @@ func TestChild_InterruptSendsSIGINT(t *testing.T) {
 
 	select {
 	case <-ch.Idle():
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
+		// Generous for the same reason as the exit deadline below: the fixture
+		// is a bash loop with a 50ms sleep, and what is being asserted is that
+		// it STARTS, not that it starts quickly.
 		t.Fatal("never idle")
 	}
 	time.Sleep(100 * time.Millisecond) // ensure the process is fully running
 
 	c.NoError(ch.Interrupt(), "interrupt")
 
-	deadline := time.Now().Add(3 * time.Second)
+	// Generous: the assertion is that SIGINT TERMINATES the child, not that it
+	// does so within any particular time. The loop returns as soon as the
+	// signal is recorded, so a longer deadline costs nothing on a healthy run
+	// and stops a loaded machine from failing the test on scheduling alone.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if sig := ch.ExitResult().Signal; sig != "" {
 			c.Eq(syscall.SIGINT.String(), sig, "child exit signal")

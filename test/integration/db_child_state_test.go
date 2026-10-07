@@ -421,6 +421,23 @@ func nextDaemonID() string {
 	return fmt.Sprintf("it-%d-%d", os.Getpid(), itDaemonSeq.Add(1))
 }
 
+// itNameSeq makes uniqueSuffix unique within this process.
+var itNameSeq atomic.Uint64
+
+// uniqueSuffix returns a suffix unique within this process AND across runs.
+//
+// The clock alone is not enough: the tests run in PARALLEL, and macOS truncates
+// time.Now().UnixNano() to microseconds, so two tests can read the same value
+// and mint the same name. Against the shared disposable database a duplicate
+// name is refused ("already taken"), which is how this bit
+// TestScriptChildFromTheCLI: two parallel tests minted the same operator
+// username and the second `user create` failed. The counter supplies the
+// within-run uniqueness the clock cannot; the clock keeps names distinct across
+// runs.
+func uniqueSuffix() string {
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), itNameSeq.Add(1))
+}
+
 // dropDaemonRows deletes, on cleanup, the child rows a test daemon wrote.
 //
 // The whole suite shares one database, and a daemon recovers EVERY row in

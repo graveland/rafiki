@@ -187,7 +187,7 @@ func (f *fakeIssuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	f.mu.Lock()
 	claims := f.claims
-	code := fmt.Sprintf("code-%d", time.Now().UnixNano())
+	code := "code-" + uniqueSuffix()
 	f.codes[code] = &codeGrant{
 		claims:        claims,
 		nonce:         q.Get("nonce"),
