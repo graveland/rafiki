@@ -156,6 +156,9 @@ func TestDockerGuardRouteMatching(t *testing.T) {
 		"/containers/create/x",
 		"/_ping",
 		"/version",
+		// A pull carries its percent-escaped image ref in the QUERY; the `%`/`#`
+		// fail-closed test applies to the path only, so this must not be guarded.
+		"/images/create?fromImage=localhost%3A5000%2Fa%2Fb&tag=latest",
 	}
 	for _, p := range skip {
 		c.False(isContainersCreate(p), "%q must not be guarded", p)
@@ -174,6 +177,34 @@ func TestDockerGuardRefusesVolumeOptionsKey(t *testing.T) {
 		c.Require().Error(err, "VolumeOptions must be refused: %s", body)
 		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 	}
+}
+
+func TestDockerGuardRefusesDuplicateTopLevelKey(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// The guard's map decode keeps only the LAST HostConfig (NetworkMode none),
+	// but the engine MERGES repeated object keys, so it also sees the first
+	// HostConfig's Binds. A duplicate must be refused, not reconciled.
+	body := []byte(`{"HostConfig":{"Binds":["/:/h"]},"HostConfig":{"NetworkMode":"none"}}`)
+	err := checkCreateBody(body, nil, "")
+	c.Require().Error(err, "duplicate HostConfig must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+}
+
+func TestDockerGuardRefusesDuplicateInnerKey(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// The guard's map decode keeps only the second Mounts array (no
+	// VolumeOptions), but the engine keeps the first array's VolumeOptions. A
+	// repeated Mounts key is refused.
+	body := []byte(`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/v","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"o":"bind","device":"/etc"}}}}],"Mounts":[{"Type":"volume","Source":"x","Target":"/v"}]}}`)
+	err := checkCreateBody(body, nil, "")
+	c.Require().Error(err, "duplicate Mounts key must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+}
+
+func TestDockerGuardAllowsBodyWithNoDuplicateKeys(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := []byte(`{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/v"}],"NetworkMode":"none"}}`)
+	c.NoError(checkCreateBody(body, nil, ""), "a duplicate-free body must pass")
 }
 
 func TestDockerGuardRefusesUnknownHostConfigKey(t *testing.T) {

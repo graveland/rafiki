@@ -291,6 +291,43 @@ func TestDockerGuardRefusesEncodedCreatePath(t *testing.T) {
 	}
 }
 
+func TestDockerGuardPassesPullThrough(t *testing.T) {
+	c := assert.NewAborting(t)
+	url, rec := echoUpstream(t)
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"docker": url},
+	})
+	// A registry-qualified image ref is percent-escaped in the query. The
+	// `%`/`#` fail-closed test must apply to the path only, or the daemon cannot
+	// pull such an image at all.
+	head, respBody, err := proxyOnce(t, esrv, "docker", "POST",
+		"/images/create?fromImage=localhost%3A5000%2Fa%2Fb&tag=latest", nil, nil)
+	c.NoError(err, "a pull must stream through")
+	c.Require().NotNil(head, "head")
+	c.Eq(int32(200), head.Status, "status")
+	c.Eq("upstream-ok", string(respBody), "upstream body")
+	c.Eq("POST", rec.method, "upstream method")
+	c.Eq("/images/create", rec.path, "upstream path")
+	c.Eq("fromImage=localhost%3A5000%2Fa%2Fb&tag=latest", rec.query, "upstream query")
+}
+
+func TestDockerGuardRefusesDuplicateKeyBypass(t *testing.T) {
+	c := assert.NewAborting(t)
+	url, rec := echoUpstream(t)
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"docker": url},
+	})
+	// A duplicate HostConfig carries a Binds the guard's map decode would not
+	// see; the guard must refuse it, not forward it to the engine.
+	body := []byte(`{"HostConfig":{"Binds":["/:/host"]},"HostConfig":{"NetworkMode":"none"}}`)
+	_, _, err := proxyOnce(t, esrv, "docker", "POST", "/containers/create", nil, body)
+	c.Require().Error(err, "duplicate-key bypass must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.Eq("", rec.method, "upstream must never be reached")
+}
+
 func TestDockerGuardPassesNormalPostThrough(t *testing.T) {
 	c := assert.NewAborting(t)
 	url, rec := echoUpstream(t)

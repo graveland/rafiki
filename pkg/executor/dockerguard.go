@@ -3,7 +3,9 @@
 package executor
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -50,10 +52,16 @@ func isContainersCreate(p string) bool {
 	// reason about — treat it as a create. Over-inclusive is safe: a body with
 	// nothing privileged passes through untouched, while under-inclusive would
 	// stream a Binds/Mounts body unchecked.
-	if strings.ContainsAny(p, "%#") {
+	//
+	// The test is applied to the PATH only. A query is never part of the route,
+	// and `url.Values.Encode` percent-escapes the image ref in a pull
+	// (`POST /images/create?fromImage=reg%2Fimg`, or a digest ref), so testing
+	// the whole target would take every registry-qualified pull for a create and
+	// refuse it on its empty body — breaking the daemon's own image pull.
+	raw, _, _ := strings.Cut(p, "?")
+	if strings.ContainsAny(raw, "%#") {
 		return true
 	}
-	raw, _, _ := strings.Cut(p, "?")
 	clean := strings.ToLower(path.Clean(raw))
 
 	rest := clean
@@ -108,6 +116,16 @@ func refuseUnknownKeys(where string, m map[string]json.RawMessage, allowed map[s
 // under one of the operator's declared sandbox roots; a volume or tmpfs mount
 // passes; NetworkMode is limited to "", bridge or none.
 func checkCreateBody(body []byte, roots []string, relayDir string) error {
+	// Refuse a duplicated key at any object level FIRST. A map decode keeps only
+	// the LAST value for a repeated key, while the Docker engine MERGES repeated
+	// object keys into one struct: `{"HostConfig":{"Binds":[...]},"HostConfig":
+	// {"NetworkMode":"none"}}` would leave the guard inspecting only the second
+	// object while the engine acts on the merged one. The two views must be the
+	// same document, so a duplicate is refused rather than reconciled.
+	if err := checkNoDuplicateKeys(body); err != nil {
+		return err
+	}
+
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument,
@@ -193,6 +211,84 @@ func checkCreateBody(body []byte, roots []string, relayDir string) error {
 		}
 	}
 	return nil
+}
+
+// duplicateKeyError reports a key repeated within one object. It is distinct so
+// checkNoDuplicateKeys can tell a duplicate (a refusal the guard makes on its
+// own terms) from a syntax error the decoder happened to hit first.
+type duplicateKeyError struct{ key string }
+
+func (e duplicateKeyError) Error() string {
+	return fmt.Sprintf("object repeats key %q", e.key)
+}
+
+// checkNoDuplicateKeys walks the whole JSON document and refuses any object
+// level at which a key appears more than once. It uses json.Decoder.Token, not
+// a map decode — a map CANNOT see a duplicate, so this is the only way to make
+// the guard and the engine agree on what the document says.
+func checkNoDuplicateKeys(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := scanDuplicateKeys(dec); err != nil {
+		var dup duplicateKeyError
+		if errors.As(err, &dup) {
+			return connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("sandbox: container create body repeats key %q", dup.key))
+		}
+		return connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sandbox: malformed container create body: %w", err))
+	}
+	return nil
+}
+
+// scanDuplicateKeys reads exactly one JSON value, recursing through every array
+// and object, and refuses a repeated key in any object. A syntax error surfaces
+// as itself, so the caller can tell it from a duplicate.
+func scanDuplicateKeys(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil // a scalar value has no keys under it
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]bool)
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string")
+			}
+			if seen[key] {
+				return duplicateKeyError{key: key}
+			}
+			seen[key] = true
+			if err := scanDuplicateKeys(dec); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil { // consume the closing '}'
+			return err
+		}
+		return nil
+	case '[':
+		for dec.More() {
+			if err := scanDuplicateKeys(dec); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil { // consume the closing ']'
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("unexpected delimiter %q", delim)
+	}
 }
 
 // mountString extracts a string field from a decoded mount, refusing a
