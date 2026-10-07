@@ -152,6 +152,7 @@ func newRootCmd() *cobra.Command {
 		newCompletionCmd(),
 		newClaudeCmd(),
 		newExecutorCmd(),
+		newSandboxCmd(),
 		newDarajaCmd(),
 		newUserCmd(),
 		newTokenCmd(),
