@@ -62,6 +62,24 @@ func TestDescribeReportsCapabilities(t *testing.T) {
 	}
 }
 
+func TestDescribeSandboxFields(t *testing.T) {
+	c := assert.NewCollecting(t)
+	roots := []string{"/srv/one", "/srv/two"}
+	srv := executor.NewServer(executor.Options{
+		Root:              t.TempDir(),
+		Concurrency:       6,
+		Version:           "test",
+		SandboxMountRoots: roots,
+		SandboxRelayDir:   "/srv/relay",
+	})
+	client := newTestClient(t, srv)
+
+	resp, err := client.Describe(context.Background(), connect.NewRequest(&executorpb.DescribeRequest{}))
+	c.Require().NoError(err, "Describe")
+	c.EqDeep(roots, resp.Msg.SandboxMountRoots, "SandboxMountRoots")
+	c.Eq("/srv/relay", resp.Msg.SandboxRelayDir, "SandboxRelayDir")
+}
+
 func TestHealthReportsNoRunningHandles(t *testing.T) {
 	c := assert.NewCollecting(t)
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})

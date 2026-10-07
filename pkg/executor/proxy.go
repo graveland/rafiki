@@ -3,13 +3,16 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -41,6 +44,18 @@ func ParseProxyFlags(args []string) (map[string]string, error) {
 		u, err := url.Parse(raw)
 		if err != nil {
 			return nil, fmt.Errorf("executor: --proxy %q: invalid base url: %w", a, err)
+		}
+		if u.Scheme == "unix" {
+			// A unix base names the socket to dial, not an HTTP origin: the
+			// request URL is built against the fixed http://docker origin and
+			// the socket path is used only by the dialer. Accept it only in the
+			// authority-less absolute form (unix:///var/run/docker.sock) so a
+			// relative path or a host component cannot be mistaken for a socket.
+			if u.Host != "" || u.Opaque != "" || u.Path == "" || !filepath.IsAbs(u.Path) {
+				return nil, fmt.Errorf("executor: --proxy %q: unix base must be an absolute socket path (unix:///path/to.sock)", a)
+			}
+			out[name] = strings.TrimSuffix(raw, "/")
+			continue
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("executor: --proxy %q: scheme must be http or https", a)
@@ -84,12 +99,22 @@ func (s *Server) Proxy(
 		return connect.NewError(connect.CodePermissionDenied,
 			fmt.Errorf("proxy: undeclared proxy name %q", start.GetProxyName()))
 	}
-	target, err := joinProxyPath(base, start.GetPath())
+	// A unix base names a socket, not an origin: the target is still built as
+	// an http:// URL — joinProxyPath keeps validating the path — and the dialer
+	// is what carries the socket. http/https bases join as before.
+	dialUnix := ""
+	httpBase := base
+	if strings.HasPrefix(base, "unix://") {
+		dialUnix = strings.TrimPrefix(base, "unix://")
+		httpBase = "http://docker"
+	}
+	target, err := joinProxyPath(httpBase, start.GetPath())
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
 	pr, pw := io.Pipe()
+	defer pr.Close() // unblock the filler goroutine on every return path
 	go func() {
 		defer pw.Close()
 		for {
@@ -113,7 +138,30 @@ func (s *Server) Proxy(
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// The docker create-guard needs the whole body before it can decide; every
+	// other request streams the pipe straight through.
+	if guardContainersCreate(start) {
+		body, err := io.ReadAll(io.LimitReader(pr, maxContainerCreateBody+1))
+		if err != nil {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("proxy: read container create body: %w", err))
+		}
+		if len(body) > maxContainerCreateBody {
+			return connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("proxy: container create body exceeds %d bytes", maxContainerCreateBody))
+		}
+		if err := checkCreateBody(body, s.opts.SandboxMountRoots, s.opts.SandboxRelayDir); err != nil {
+			return err
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+	}
+
+	client := http.DefaultClient
+	if dialUnix != "" {
+		client = s.unixProxyClient(start.GetProxyName(), dialUnix)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("proxy: %s: %w", start.GetProxyName(), err))
 	}
@@ -168,4 +216,29 @@ func joinProxyPath(base, p string) (string, error) {
 		out += "?" + query
 	}
 	return out, nil
+}
+
+// unixProxyClient returns the cached HTTP client for a proxy whose base is a
+// unix socket, dialing socket. One client per proxy name, built lazily under
+// the mutex and returned before any request is made: the lock is never held
+// across a dial or a request, so a slow socket cannot serialize the executor.
+func (s *Server) unixProxyClient(name, socket string) *http.Client {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	if s.proxyClients == nil {
+		s.proxyClients = make(map[string]*http.Client)
+	}
+	if c, ok := s.proxyClients[name]; ok {
+		return c
+	}
+	c := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socket)
+			},
+		},
+	}
+	s.proxyClients[name] = c
+	return c
 }

@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -94,6 +96,20 @@ type Options struct {
 	// running `git` as a subprocess against whatever URL was registered.
 	// Off by default, same reasoning as SkillsSync.
 	PymoduleGitSync bool
+
+	// SandboxMountRoots are the host paths a sandboxed child's container may
+	// bind-mount from, from repeated --sandbox-mount-root flags. A bind whose
+	// source is not under one of these (or the relay dir) is refused by the
+	// docker proxy guard before the create request reaches the daemon. Empty
+	// means no bind is permitted, which is the right default: the operator of
+	// this machine, not the daemon, decides what it will expose.
+	SandboxMountRoots []string
+
+	// SandboxRelayDir is the one directory (beyond the mount roots) a sandbox
+	// container may bind-mount from — the host side of the rafiki relay socket.
+	// It is checked by equality rather than containment so that handing the
+	// container one socket does not hand it the whole directory tree above it.
+	SandboxRelayDir string
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -108,6 +124,12 @@ type Server struct {
 	sem     chan struct{} // bounds concurrent Execute calls
 	wsReg   *workspaceRegistry
 	lsp     *lsp.Manager
+
+	// proxyMu guards proxyClients, which caches one HTTP client per declared
+	// proxy name that points at a unix socket. Built lazily; never held across
+	// a request (the pool/cache lock must not be held while dialing).
+	proxyMu      sync.Mutex
+	proxyClients map[string]*http.Client
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -253,6 +275,8 @@ func (s *Server) Describe(
 		SkillsSync:         s.opts.SkillsSync,
 		PymodulesSync:      s.opts.PyModulesSync,
 		PymoduleGitSync:    s.opts.PymoduleGitSync,
+		SandboxMountRoots:  append([]string(nil), s.opts.SandboxMountRoots...),
+		SandboxRelayDir:    s.opts.SandboxRelayDir,
 	}), nil
 }
 
