@@ -147,6 +147,16 @@ func (c *Controller) scriptRunner(req protocol.SpawnRequest, childID, ownerName,
 	if c.scriptExecutorRouted() {
 		return c.darajaScriptRunner(req, childID, ownerName, ownerUserID)
 	}
+	// No executor in the pool can host this script child, so the only remaining
+	// hosting is a LOCAL fork on the daemon's own host. A child confined to the
+	// executor plane (a non-empty executor grant or a sandbox it owns) must NOT
+	// take that fork — forking it would run the child's code as the daemon's OS
+	// user, the exact escape checkKindNarrowing refuses at Spawn. The guard lives
+	// HERE, at the fork, so a caller that reaches this runner without Spawn's
+	// check (a resume, recovery, a future caller) is refused too.
+	if err := c.localForkRefused(c.baseCtx, protocol.KindScript, childID, req.ParentChildID, ownerUserID); err != nil {
+		return nil, err
+	}
 	return c.localScriptRunner(req, childID, ownerUserID)
 }
 

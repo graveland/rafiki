@@ -159,8 +159,17 @@ func (c *Controller) claudeExecutorRouted() bool {
 // laptop with no RAFIKI_EXECUTORS_ENABLED). Once an executor pool exists,
 // every claude spawn goes through daraja, proxied and passthrough-billed per
 // darajaClaudeParams (Phase 2).
+//
+// A child confined to the executor plane may NOT take the local-subprocess
+// fallback: forking the claude binary on the daemon's own host with the
+// daemon's filesystem is the same escape checkKindNarrowing refuses at Spawn
+// for kind claude. The refusal is made HERE, at the fork, so a resume or a
+// future caller is covered too.
 func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
 	if !c.claudeExecutorRouted() {
+		if err := c.localForkRefused(c.baseCtx, protocol.KindClaude, childID, req.ParentChildID, ownerUserID); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	exec, err := c.darajaLaunchExecutor(req, executorOwner{Name: ownerName, UserID: ownerUserID}, snap)

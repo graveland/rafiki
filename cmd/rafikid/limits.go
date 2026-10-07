@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -527,5 +528,80 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 			" ignores executors entirely — it would fork on the daemon's own host with the " +
 			"daemon's filesystem. Only kind \"fundi\" (and kind \"claude\" with an executor " +
 			"pool configured) can honour an executor grant.",
+	}
+}
+
+// localForkRefused reports the confinement that forbids hosting a child through
+// a LOCAL fork on the daemon's own host (the script and claude fallbacks), or
+// nil when the fork is allowed.
+//
+// checkKindNarrowing refuses this at Spawn for a FRESH child by reading the
+// PARENT's stored grant; this makes the SAME decision at the point of the fork,
+// so any caller that reaches a runner without that guard — a resume, startup
+// recovery, or a future runner caller — still cannot fork a confined child on
+// the daemon host. The two must agree: a parent the guard refuses is exactly a
+// child this refuses.
+//
+// It reads stored state only, never the request:
+//
+//   - the child's own stored lineage (its row exists on a resume/recovery),
+//     else the parent's (a fresh spawn's own row does not exist yet, and
+//     inheritExecutorGrant will copy the parent's grant onto it), so a
+//     non-empty executor grant ANYWHERE from the root down confines it; and
+//   - sandbox ownership, read exactly as controllerBinder.ChooseFor reads it
+//     (ownedSandbox): the child's own spawn-block sandbox, or a subtree one an
+//     ancestor holds. A sandboxed child's stored selector is always
+//     `machine=sbx-…`, so the grant arm normally covers this too; the lookup is
+//     belt-and-braces for a row whose selector was never persisted.
+//
+// A store or lineage error fails CLOSED (returns it), never open.
+func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parentChildID, ownerUserID string) error {
+	if ctx == nil {
+		// A hand-built Controller in a test may have no base context; the lookup
+		// below must never run on a nil parent (context.WithTimeout panics).
+		ctx = context.Background()
+	}
+	subject := childID
+	if _, ok := c.st.Get(subject); !ok {
+		// A fresh spawn has no row of its own yet; its confinement is the one it
+		// will inherit, so read the parent's lineage instead.
+		subject = parentChildID
+	}
+	if subject != "" {
+		chain, err := c.lineageChain(subject)
+		if err != nil {
+			return err
+		}
+		for _, sel := range chain {
+			if strings.TrimSpace(sel) != "" {
+				return localForkConfinedErr(kind, "an executor grant")
+			}
+		}
+	}
+	if c.sandboxStore != nil {
+		ctx, cancel := context.WithTimeout(ctx, sandboxBindTimeout)
+		defer cancel()
+		row, owned, err := c.ownedSandbox(ctx, childID, parentChildID, ownerUserID)
+		if err != nil {
+			return err
+		}
+		if owned {
+			return localForkConfinedErr(kind, "sandbox "+sandboxDisplayName(row))
+		}
+	}
+	return nil
+}
+
+// localForkConfinedErr is the actionable refusal localForkRefused returns. It
+// names the kind and the confinement, and points at the two fixes (host the
+// kind on an executor, or spawn top-level).
+func localForkConfinedErr(kind, confinement string) error {
+	return &connectapi.ControllerError{
+		Code: protocol.ErrInvalidArgs,
+		Message: fmt.Sprintf(
+			"refused: this %s child is confined to the executor plane (%s), and no live executor can host it — "+
+				"a local process on the daemon's own host would escape that confinement. "+
+				"Host a %s-capable executor, or run this spawn top-level.",
+			kind, confinement, kind),
 	}
 }
