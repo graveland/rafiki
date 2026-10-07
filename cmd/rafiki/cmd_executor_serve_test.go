@@ -3,6 +3,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -250,10 +251,12 @@ func TestExecutorServeResolveSandboxRelayDirRequiresAbsolute(t *testing.T) {
 }
 
 // A local docker socket implies the relay dir, beside the daemon's own sockets;
-// anything else (no docker proxy, an http docker endpoint) implies none.
+// anything else (no docker proxy, an http docker endpoint) implies none. The
+// relay dir default is Linux-only, so pin the OS for this test.
 func TestExecutorServeDefaultSandboxRelayDir(t *testing.T) {
 	c := assert.NewAborting(t)
 	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	setRelayDirGOOS(t, "linux")
 
 	c.Eq("/run/user/1000/rafiki/relay",
 		defaultSandboxRelayDir(map[string]string{"docker": "unix:///var/run/docker.sock"}),
@@ -263,4 +266,95 @@ func TestExecutorServeDefaultSandboxRelayDir(t *testing.T) {
 		"a non-docker proxy means no relay")
 	c.Eq("", defaultSandboxRelayDir(map[string]string{"docker": "http://remote:2375"}),
 		"a remote docker endpoint cannot see a local relay dir")
+}
+
+// setRelayDirGOOS overrides the OS defaultSandboxRelayDir keys off, restored on
+// cleanup so a test cannot leak a fake platform into its neighbours.
+func setRelayDirGOOS(t *testing.T, goos string) {
+	t.Helper()
+	prev := relayDirGOOS
+	relayDirGOOS = goos
+	t.Cleanup(func() { relayDirGOOS = prev })
+}
+
+// A host-bound relay dir can never work through a macOS docker VM, so the
+// default stays empty off Linux even for a local docker socket — the operator
+// must opt in with --relay-dir.
+func TestExecutorServeDefaultSandboxRelayDirIsLinuxOnly(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	setRelayDirGOOS(t, "darwin")
+
+	c.Eq("", defaultSandboxRelayDir(map[string]string{"docker": "unix:///var/run/docker.sock"}),
+		"a local docker socket must not imply a host-bound relay dir on darwin")
+}
+
+// Foothold mode and --relay-dir are two different relay mechanisms and cannot
+// be combined.
+func TestExecutorServeRelayFootholdExcludesRelayDir(t *testing.T) {
+	c := assert.NewAborting(t)
+	proxies := map[string]string{"docker": "unix:///var/run/docker.sock"}
+
+	err := validateRelayFoothold("sandbox:latest", "/srv/relay", true, proxies)
+	c.Require().Error(err, "a foothold image with a set --relay-dir must be refused")
+	c.StrContains(err.Error(), "--relay-foothold-image and --relay-dir are mutually exclusive",
+		"the refusal must name both flags")
+
+	c.NoError(validateRelayFoothold("", "/srv/relay", true, proxies),
+		"a relay dir without a foothold image is the ordinary host-bind path")
+	c.NoError(validateRelayFoothold("sandbox:latest", "", false, proxies),
+		"a foothold image with no relay dir is the foothold path")
+}
+
+// The foothold's engine dials the local docker unix socket directly, so an http
+// docker endpoint or no docker proxy at all cannot host one.
+func TestExecutorServeRelayFootholdRequiresLocalDockerSocket(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	err := validateRelayFoothold("sandbox:latest", "", false, map[string]string{"docker": "http://remote:2375"})
+	c.Require().Error(err, "an http docker endpoint cannot see the foothold's local socket")
+	c.StrContains(err.Error(), "--proxy docker=unix://", "the refusal must say which proxy value is required")
+
+	err = validateRelayFoothold("sandbox:latest", "", false, nil)
+	c.Require().Error(err, "no docker proxy at all must be refused: there is no socket to dial")
+	c.StrContains(err.Error(), "--proxy docker=unix://", "the refusal must say which proxy value is required")
+
+	c.NoError(validateRelayFoothold("sandbox:latest", "", false, map[string]string{"docker": "unix:///var/run/docker.sock"}),
+		"a local docker socket satisfies the requirement")
+}
+
+// A foothold relays sandbox connections to the daemon, so one with no daemon
+// address is refused — the same three sources relayDirNeedsDaemon accepts.
+func TestExecutorServeRelayFootholdNeedsDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("RAFIKI_URL", "")
+
+	err := relayFootholdNeedsDaemon("sandbox:latest", "", "")
+	c.Require().Error(err, "foothold mode with no daemon address must be refused")
+	c.StrContains(err.Error(), "--relay-foothold-image", "the refusal must name the flag")
+	c.StrContains(err.Error(), "--connect", "the refusal must say what is missing")
+
+	c.NoError(relayFootholdNeedsDaemon("", "", ""), "no foothold image imposes no requirement")
+	c.NoError(relayFootholdNeedsDaemon("sandbox:latest", "daemon.example.com:8443", ""), "--connect must satisfy the requirement")
+	c.NoError(relayFootholdNeedsDaemon("sandbox:latest", "", "/run/rafikid.sock"), "--connect-socket must satisfy the requirement")
+
+	t.Setenv("RAFIKI_URL", "https://rafiki.example.net")
+	c.NoError(relayFootholdNeedsDaemon("sandbox:latest", "", ""), "a remote RAFIKI_URL must satisfy the requirement")
+}
+
+// The foothold relay must bind loopback ONLY: a wildcard bind would expose this
+// unauthenticated relay (the daemon-side credential is the gate, not the relay)
+// on every interface of the docker host.
+func TestExecutorServeRelayFootholdBindsLoopbackOnly(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	ln, port, err := bindFootholdRelay()
+	c.Require().NoError(err, "bindFootholdRelay")
+	defer ln.Close()
+
+	c.True(port > 0, "a loopback bind must be assigned a port")
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	c.Require().True(ok, "the foothold relay listener must be TCP")
+	c.True(addr.IP.Equal(net.IPv4(127, 0, 0, 1)),
+		"the foothold relay must bind 127.0.0.1, never a wildcard or 0.0.0.0")
 }

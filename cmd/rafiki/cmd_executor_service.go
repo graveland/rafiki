@@ -92,6 +92,7 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 		"(repeatable; absolute, must exist). With no root, no bind is permitted")
 	cmd.Flags().String("relay-dir", "", "absolute directory under which to expose the daemon to sandboxes over a unix "+
 		"socket (created if missing). Requires --connect or --connect-socket")
+	cmd.Flags().String("relay-foothold-image", "", relayFootholdImageHelp)
 	cmd.Flags().String("binary", "", "path to the rafiki binary (default: this one)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
@@ -193,6 +194,14 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	relayFootholdImage, _ := cmd.Flags().GetString("relay-foothold-image")
+	proxies, err := executor.ParseProxyFlags(proxyArgs)
+	if err != nil {
+		return err
+	}
+	if err := validateRelayFoothold(relayFootholdImage, relayDirFlag, cmd.Flags().Changed("relay-dir"), proxies); err != nil {
+		return err
+	}
 	sandboxRoots, _ := cmd.Flags().GetStringArray("sandbox-mount-root")
 	args, err = appendSandboxMountRootArgs(args, sandboxRoots)
 	if err != nil {
@@ -200,6 +209,9 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	if relayDir != "" {
 		args = append(args, "--relay-dir", relayDir)
+	}
+	if relayFootholdImage != "" {
+		args = append(args, "--relay-foothold-image", relayFootholdImage)
 	}
 
 	pathEnv, _ := cmd.Flags().GetString("path-env")

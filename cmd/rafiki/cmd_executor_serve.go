@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/foothold"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
@@ -99,14 +100,22 @@ func resolveSandboxRelayDir(dir string) (string, error) {
 	return dir, nil
 }
 
+// relayDirGOOS is the OS defaultSandboxRelayDir keys off, a package var so a
+// test can pretend to be linux or darwin.
+var relayDirGOOS = runtime.GOOS
+
 // defaultSandboxRelayDir is the relay directory an executor uses when
 // --relay-dir is not given: under paths.RuntimeDir, beside the daemon's own
-// sockets. It applies only when the executor declares a docker launcher whose
-// socket is local, because the container's bind mount is resolved by the docker
-// host and a path made here does not exist on a remote or VM-hosted one — those
-// still need an explicit --relay-dir. Without a docker proxy the executor hosts
-// no sandboxes and binds nothing.
+// sockets. It applies only on Linux, and only when the executor declares a
+// docker launcher whose socket is local, because the container's bind mount is
+// resolved by the docker host and a path made here does not exist on a remote
+// or VM-hosted one — a host-bound relay can never work through a macOS docker
+// VM, so on other platforms it stays opt-in. Without a docker proxy the
+// executor hosts no sandboxes and binds nothing.
 func defaultSandboxRelayDir(proxies map[string]string) string {
+	if relayDirGOOS != "linux" {
+		return ""
+	}
 	if !strings.HasPrefix(proxies["docker"], "unix://") {
 		return ""
 	}
@@ -129,6 +138,91 @@ func relayDirNeedsDaemon(relayDir, connect, connectSocket string) error {
 	return fmt.Errorf("--relay-dir requires --connect or --connect-socket (or a remote RAFIKI_URL): " +
 		"the relay forwards sandbox connections to the daemon, and there is none to forward to")
 }
+
+// relayFootholdNeedsDaemon refuses --relay-foothold-image when this command has
+// no daemon address to relay to. It is the foothold sibling of
+// relayDirNeedsDaemon and reads the same three address sources. A foothold's
+// whole job is to carry sandbox connections to the daemon, so one with nowhere
+// to dial is a broken launcher, not a degraded one.
+func relayFootholdNeedsDaemon(image, connect, connectSocket string) error {
+	if image == "" {
+		return nil
+	}
+	if connect != "" || connectSocket != "" || executorEnvURL() != "" {
+		return nil
+	}
+	return fmt.Errorf("--relay-foothold-image requires --connect or --connect-socket (or a remote RAFIKI_URL): " +
+		"the relay forwards sandbox connections to the daemon, and there is none to forward to")
+}
+
+// validateRelayFoothold refuses --relay-foothold-image combinations that cannot
+// work, before anything binds. Foothold mode is selected ONLY by this flag —
+// nothing sniffs a VM — so these checks are the only thing standing between a
+// misconfigured launcher and a foothold that can never serve a sandbox. The
+// daemon-address requirement lives in relayFootholdNeedsDaemon, which the
+// caller checks alongside this.
+func validateRelayFoothold(image, relayDir string, relayDirSet bool, proxies map[string]string) error {
+	if image == "" {
+		return nil
+	}
+	if relayDirSet && relayDir != "" {
+		return fmt.Errorf("--relay-foothold-image and --relay-dir are mutually exclusive")
+	}
+	if !strings.HasPrefix(proxies["docker"], "unix://") {
+		return fmt.Errorf("--relay-foothold-image requires --proxy docker=unix:///path/to/docker.sock")
+	}
+	return nil
+}
+
+// bindFootholdRelay binds the launcher's loopback TCP relay and returns the
+// listener and the port the foothold container dials back to. Loopback ONLY: a
+// foothold reaches it as host.docker.internal, which is the docker host's
+// loopback, and a wildcard bind would expose this unauthenticated relay — the
+// daemon-side credential is the gate, not the relay — on every interface.
+func bindFootholdRelay() (net.Listener, int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, 0, fmt.Errorf("bind foothold relay: %w", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln.Close()
+		return nil, 0, fmt.Errorf("foothold relay listener is not TCP: %T", ln.Addr())
+	}
+	return ln, addr.Port, nil
+}
+
+// footholdEngine builds the Docker Engine client the foothold converges
+// through. It dials the local docker unix socket DIRECTLY rather than through
+// the executor proxy: the foothold is the launcher's own container, created
+// before any sandbox request could flow through the proxy, and the proxy's
+// create-body guard is for the sandboxes it forwards, not for this.
+func footholdEngine(dockerSocketPath string) *sandbox.Engine {
+	return sandbox.NewEngine(&http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", dockerSocketPath)
+		},
+	})
+}
+
+// hostnameOrEmpty returns this machine's hostname, or "" when it cannot be
+// read; foothold.Key turns an empty name into "host".
+func hostnameOrEmpty() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+// relayFootholdImageHelp is the shared help text for --relay-foothold-image,
+// used by both `executor serve` and `executor service install` so the two
+// cannot drift.
+const relayFootholdImageHelp = "image to run as this launcher's foothold: a container inside the docker host's kernel that bridges " +
+	"a volume socket to a loopback TCP relay, for docker hosts that cannot bind-mount this host's " +
+	"sockets (macOS VMs, remote hosts). The image must have rafiki on PATH. Requires --proxy " +
+	"docker=unix://… and --connect or --connect-socket; exclusive with --relay-dir"
 
 // executorProfileProxy resolves a reachable LLM proxy URL for daraja-hosted
 // children from this executor's OWN profile, best-effort — see
@@ -361,27 +455,28 @@ func pymoduleGitSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []strin
 
 func newExecutorServeCmd() *cobra.Command {
 	var (
-		connectAddr       string
-		connectSocket     string
-		root              string
-		concurrency       int
-		enrollToken       string
-		credentialFile    string
-		credential        string
-		pinnedFingerprint string
-		serverName        string
-		rtkMode           string
-		spillDir          string
-		jobBudgetMB       int64
-		lspConfig         string
-		noLSP             bool
-		skillsSync        bool
-		pymodulesSync     bool
-		pymoduleGitSync   bool
-		proxyArgs         []string
-		launchKinds       []string
-		sandboxMountRoots []string
-		relayDir          string
+		connectAddr        string
+		connectSocket      string
+		root               string
+		concurrency        int
+		enrollToken        string
+		credentialFile     string
+		credential         string
+		pinnedFingerprint  string
+		serverName         string
+		rtkMode            string
+		spillDir           string
+		jobBudgetMB        int64
+		lspConfig          string
+		noLSP              bool
+		skillsSync         bool
+		pymodulesSync      bool
+		pymoduleGitSync    bool
+		proxyArgs          []string
+		launchKinds        []string
+		sandboxMountRoots  []string
+		relayDir           string
+		relayFootholdImage string
 	)
 
 	cmd := &cobra.Command{
@@ -431,31 +526,74 @@ Two transports, exactly one of which is used:
 				return err
 			}
 
+			// Foothold mode is selected only by --relay-foothold-image; these
+			// checks refuse combinations that cannot serve a sandbox, before
+			// anything binds.
+			if err := validateRelayFoothold(relayFootholdImage, relayDir, cmd.Flags().Changed("relay-dir"), proxies); err != nil {
+				return err
+			}
+			if err := relayFootholdNeedsDaemon(relayFootholdImage, connectAddr, connectSocket); err != nil {
+				return err
+			}
+
 			resolvedRelayDir, err := resolveSandboxRelayDir(relayDir)
 			if err != nil {
 				return err
 			}
-			if !cmd.Flags().Changed("relay-dir") {
+			// Foothold mode replaces the host-bind relay dir with a volume the
+			// foothold serves; the two are mutually exclusive, so the default dir
+			// never applies.
+			if relayFootholdImage == "" && !cmd.Flags().Changed("relay-dir") {
 				resolvedRelayDir = defaultSandboxRelayDir(proxies)
 			}
 
+			// Foothold mode: the relay runs on a loopback TCP listener the foothold
+			// container dials back to, and the relay volume is what the sandbox
+			// mounts. The foothold is converged once up front — a foothold that
+			// cannot start means no sandbox can connect, which is a broken
+			// launcher, not a degraded one.
+			var (
+				relayVolume  string
+				beforeCreate func(context.Context) error
+				footholdLn   net.Listener
+			)
+			if relayFootholdImage != "" {
+				key := foothold.Key(hostnameOrEmpty())
+				ln, port, err := bindFootholdRelay()
+				if err != nil {
+					return err
+				}
+				footholdLn = ln
+				defer ln.Close()
+
+				dockerSocketPath := strings.TrimPrefix(proxies["docker"], "unix://")
+				fh := foothold.New(footholdEngine(dockerSocketPath), key, relayFootholdImage, port)
+				if err := fh.Ensure(cmdCtx(cmd)); err != nil {
+					return fmt.Errorf("foothold: %w", err)
+				}
+				relayVolume = foothold.VolumeName(key)
+				beforeCreate = fh.Ensure
+			}
+
 			srv := executor.NewServer(executor.Options{
-				Root:              wd,
-				Concurrency:       concurrency,
-				Version:           version.String(),
-				RTK:               tools.ParseRTKMode(rtkMode),
-				SpillDir:          spillDir,
-				JobOutputBudget:   jobBudgetMB << 20,
-				LSPConfig:         lspConfig,
-				NoLSP:             noLSP,
-				SkillsSync:        skillsSyncEnabled(cmd, skillsSync, launchKinds),
-				PyModulesSync:     pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
-				PymoduleGitSync:   pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
-				Proxies:           proxies,
-				LaunchKinds:       launchKinds,
-				SandboxMountRoots: mountRoots,
-				SandboxRelayDir:   resolvedRelayDir,
-				Env:               pinnedEnv,
+				Root:                wd,
+				Concurrency:         concurrency,
+				Version:             version.String(),
+				RTK:                 tools.ParseRTKMode(rtkMode),
+				SpillDir:            spillDir,
+				JobOutputBudget:     jobBudgetMB << 20,
+				LSPConfig:           lspConfig,
+				NoLSP:               noLSP,
+				SkillsSync:          skillsSyncEnabled(cmd, skillsSync, launchKinds),
+				PyModulesSync:       pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
+				PymoduleGitSync:     pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
+				Proxies:             proxies,
+				LaunchKinds:         launchKinds,
+				SandboxMountRoots:   mountRoots,
+				SandboxRelayDir:     resolvedRelayDir,
+				SandboxRelayVolume:  relayVolume,
+				BeforeSandboxCreate: beforeCreate,
+				Env:                 pinnedEnv,
 			})
 			defer func() { _ = srv.Close() }()
 
@@ -511,7 +649,7 @@ Two transports, exactly one of which is used:
 			// resolveExecutorConnectFlags already guarantees exactly one of
 			// these is set, or returned an error above.
 			return serveWithRelay(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
-				enrollToken, credential, credentialFile, resolvedRelayDir, handler)
+				enrollToken, credential, credentialFile, resolvedRelayDir, footholdLn, handler)
 		},
 	}
 
@@ -573,6 +711,7 @@ Two transports, exactly one of which is used:
 			"(created if missing). Requires --connect or --connect-socket. Defaults to a "+
 			"directory under the runtime dir when --proxy docker= names a local unix socket; "+
 			"--relay-dir= (empty) disables it")
+	cmd.Flags().StringVar(&relayFootholdImage, "relay-foothold-image", "", relayFootholdImageHelp)
 
 	return cmd
 }
@@ -619,14 +758,18 @@ func serveReverseDial(ctx context.Context, opts execpool.ConnectOptions) error {
 }
 
 // serveWithRelay runs the executor's reverse dial for the life of the command
-// and, when a relay dir was given, a sandbox relay alongside it.
+// and, when a relay was given, a sandbox relay alongside it. The relay is
+// either the host-bind unix relay under relayDir or — foothold mode — the
+// already-bound loopback TCP listener relayLn the foothold container dials
+// back to; exactly one is set.
 //
 // The relay is the sandboxes' only link to the daemon, so it is not a
 // best-effort sidecar: a Serve error (other than the clean return of a
 // cancelled context) is logged and ends the command nonzero, and a relay that
 // stops takes the reverse dial down with it rather than leaving a socket that
-// accepts connections into nothing.
-func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, relayDir string, handler http.Handler) error {
+// accepts connections into nothing. The caller owns relayLn and closes it on
+// every return path.
+func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, relayDir string, relayLn net.Listener, handler http.Handler) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -635,19 +778,31 @@ func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, 
 		connErr <- serveReverseDial(ctx, executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, handler))
 	}()
 
-	if relayDir == "" {
+	if relayDir == "" && relayLn == nil {
 		return <-connErr
 	}
 
 	// The relay dials the SAME daemon the reverse dial does, with the same TLS
 	// posture; only the per-connection fields matter here.
 	dialOpts := executorConnectOptions(addr, socketPath, pinCert, serverName, "", "", "", nil)
+	dial := func(dctx context.Context) (net.Conn, error) {
+		return execpool.DialDaemon(dctx, dialOpts)
+	}
+
 	relayErr := make(chan error, 1)
-	go func() {
-		relayErr <- sandboxrelay.Serve(ctx, relayDir, func(dctx context.Context) (net.Conn, error) {
-			return execpool.DialDaemon(dctx, dialOpts)
-		})
-	}()
+	if relayLn != nil {
+		// Foothold mode: the relay runs on the loopback TCP listener the
+		// foothold container dials back to, not a host-bind unix socket. The
+		// listener is owned by the caller, which closes it on every return path;
+		// ServeListener also closes it on ctx cancel.
+		go func() {
+			relayErr <- sandboxrelay.ServeListener(ctx, relayLn, dial)
+		}()
+	} else {
+		go func() {
+			relayErr <- sandboxrelay.Serve(ctx, relayDir, dial)
+		}()
+	}
 
 	select {
 	case err := <-relayErr:
