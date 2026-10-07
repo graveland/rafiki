@@ -27,6 +27,7 @@ type CreateInputs struct {
 	OwnerChild     string // "" for a named sandbox
 	Credential     string // the durable executor credential
 	RelayHostDir   string // the launcher's reported --relay-dir
+	RelayVolume    string // the foothold's relay volume name; exactly one of RelayHostDir and RelayVolume may be set
 	OwnerVolumeKey string // short stable owner key used to prefix named volumes
 }
 
@@ -73,12 +74,16 @@ type restartPolicy struct {
 // the output of Validate, so its Image, Network and limits are already
 // resolved. in carries the daemon-owned identity: the sandbox id, the owning
 // child (empty for a named sandbox), the executor credential, the launcher's
-// relay directory, and the owner key named volumes are prefixed with.
+// relay directory or foothold relay volume, and the owner key named volumes are
+// prefixed with.
 //
 // A mount naming a volume requires an OwnerVolumeKey; without one the volume's
 // name would not be owner-scoped, so the request is refused. A non-empty key
 // must match ownerVolumeKeyRe (no '-'), for the same reason.
 func CreateBody(r Resolved, in CreateInputs) ([]byte, error) {
+	if in.RelayHostDir != "" && in.RelayVolume != "" {
+		return nil, errors.New("sandbox: both a relay dir and a relay volume were given; a launcher has exactly one")
+	}
 	if in.OwnerVolumeKey != "" && !ownerVolumeKeyRe.MatchString(in.OwnerVolumeKey) {
 		return nil, fmt.Errorf("sandbox: owner volume key %q must match %s", in.OwnerVolumeKey, ownerVolumeKeyRe)
 	}
@@ -112,14 +117,14 @@ func CreateBody(r Resolved, in CreateInputs) ([]byte, error) {
 		return nil, err
 	}
 	// The relay mount is always present: the container's `rafiki executor
-	// serve` connects to the launcher's socket through it. Connecting to a
-	// unix socket works on a read-only bind.
-	mounts = append(mounts, mount{
-		Type:     "bind",
-		Source:   in.RelayHostDir,
-		Target:   ContainerRelayDir,
-		ReadOnly: true,
-	})
+	// serve` connects to the launcher's socket through it, either via a host
+	// bind (RelayHostDir) or a foothold volume (RelayVolume). Connecting to a
+	// unix socket works on a read-only mount.
+	relay := mount{Type: "bind", Source: in.RelayHostDir, Target: ContainerRelayDir, ReadOnly: true}
+	if in.RelayVolume != "" {
+		relay = mount{Type: "volume", Source: in.RelayVolume, Target: ContainerRelayDir, ReadOnly: true}
+	}
+	mounts = append(mounts, relay)
 
 	body.HostConfig = hostConfig{
 		Mounts:         mounts,

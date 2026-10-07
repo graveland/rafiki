@@ -132,6 +132,11 @@ message DescribeResponse {
   // sandbox_relay_dir is the host directory (--relay-dir) the daemon
   // bind-mounts into a sandbox container so it can reach the daemon.
   string sandbox_relay_dir = 16;
+  // sandbox_relay_volume is the NAME of the docker volume holding the relay
+  // socket when this launcher runs a foothold (--relay-foothold-image) instead
+  // of a host relay dir. Exactly one of sandbox_relay_dir and
+  // sandbox_relay_volume is set on a launcher.
+  string sandbox_relay_volume = 17;
 }
 
 message HealthRequest {}

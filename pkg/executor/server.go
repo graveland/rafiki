@@ -110,6 +110,15 @@ type Options struct {
 	// It is checked by equality rather than containment so that handing the
 	// container one socket does not hand it the whole directory tree above it.
 	SandboxRelayDir string
+
+	// SandboxRelayVolume is the name of the docker volume a foothold container
+	// serves the relay socket on. Mutually exclusive with SandboxRelayDir.
+	SandboxRelayVolume string
+
+	// BeforeSandboxCreate, when non-nil, runs after the docker create guard
+	// passes and before a container-create is forwarded. A non-nil error refuses
+	// the create (Unavailable). The foothold's Ensure is wired here.
+	BeforeSandboxCreate func(context.Context) error
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -277,6 +286,7 @@ func (s *Server) Describe(
 		PymoduleGitSync:    s.opts.PymoduleGitSync,
 		SandboxMountRoots:  append([]string(nil), s.opts.SandboxMountRoots...),
 		SandboxRelayDir:    s.opts.SandboxRelayDir,
+		SandboxRelayVolume: s.opts.SandboxRelayVolume,
 	}), nil
 }
 

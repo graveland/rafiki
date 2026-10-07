@@ -385,10 +385,19 @@ func (c *Controller) resolveSandboxLauncher(creatorChild string, owner users.Ide
 	}
 
 	le := docker[0]
-	if le.Describe == nil || le.Describe.GetSandboxRelayDir() == "" {
+	relayDir := le.Describe.GetSandboxRelayDir()
+	relayVolume := le.Describe.GetSandboxRelayVolume()
+	switch {
+	case relayDir != "" && relayVolume != "":
 		return execpool.LiveExecutor{}, &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
-			Message: fmt.Sprintf("launcher %q declares no --relay-dir, so a sandbox cannot connect back to it",
+			Message: fmt.Sprintf("launcher %q declares both --relay-dir and --relay-foothold-image; it must declare exactly one",
+				sandboxLauncherName(le)),
+		}
+	case relayDir == "" && relayVolume == "":
+		return execpool.LiveExecutor{}, &connectapi.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: fmt.Sprintf("launcher %q declares neither --relay-dir nor --relay-foothold-image, so a sandbox cannot connect back to it",
 				sandboxLauncherName(le)),
 		}
 	}
@@ -557,6 +566,7 @@ func (c *Controller) sandboxProvision(
 		OwnerChild:     ownerChild,
 		Credential:     credential,
 		RelayHostDir:   launcher.Describe.GetSandboxRelayDir(),
+		RelayVolume:    launcher.Describe.GetSandboxRelayVolume(),
 		OwnerVolumeKey: ownerKey,
 	})
 	if err != nil {

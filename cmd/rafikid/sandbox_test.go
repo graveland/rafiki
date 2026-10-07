@@ -349,6 +349,12 @@ func describeResponse(mountRoots []string, relayDir string) *executorpb.Describe
 	return &executorpb.DescribeResponse{SandboxMountRoots: mountRoots, SandboxRelayDir: relayDir}
 }
 
+// describeResponseWithVolume is the foothold variant: a relay volume name
+// rather than a host relay directory.
+func describeResponseWithVolume(mountRoots []string, relayVolume string) *executorpb.DescribeResponse {
+	return &executorpb.DescribeResponse{SandboxMountRoots: mountRoots, SandboxRelayVolume: relayVolume}
+}
+
 // spawnedExecutor is the executor the sandbox's container connects as — no
 // docker proxy.
 func spawnedExecutor(id, ownerUserID string) execpool.LiveExecutor {
@@ -559,6 +565,67 @@ func TestSandboxCreateRefusesLauncherWithoutRelayDir(t *testing.T) {
 
 	_, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
 	ck.Error(err, "must refuse")
+	ck.True(strings.Contains(err.Error(), "--relay-dir"), "error names --relay-dir: %v", err)
+}
+
+// TestSandboxCreateAcceptsLauncherWithRelayVolume: a foothold launcher, which
+// declares a relay volume instead of a relay dir, is accepted.
+func TestSandboxCreateAcceptsLauncherWithRelayVolume(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	le := sandboxLauncher("launcher", "box", owner.UserID)
+	le.Describe = describeResponseWithVolume([]string{"/srv/repos"}, "rafiki.relay.box")
+	env.pool.live = []execpool.LiveExecutor{
+		le,
+		spawnedExecutor("exec-created", owner.UserID),
+	}
+
+	info, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
+	ck.NoError(err, "a foothold launcher must be accepted")
+	ck.Eq("ready", info.State, "state")
+
+	// The relay volume reached the create body as a volume mount, not a bind.
+	var body struct {
+		HostConfig struct {
+			Mounts []struct {
+				Type   string `json:"Type"`
+				Source string `json:"Source"`
+				Target string `json:"Target"`
+			} `json:"Mounts"`
+		} `json:"HostConfig"`
+	}
+	ck.NoError(json.Unmarshal(env.docker.createBody, &body), "decode create body")
+	found := false
+	for _, m := range body.HostConfig.Mounts {
+		if m.Target == "/run/rafiki-relay" {
+			found = true
+			ck.Eq("volume", m.Type, "relay mount is a volume")
+			ck.Eq("rafiki.relay.box", m.Source, "relay mount names the volume")
+		}
+	}
+	ck.True(found, "relay mount present in the create body")
+}
+
+// TestSandboxCreateRefusesLauncherWithBothRelays: a launcher declaring both a
+// relay dir and a relay volume is refused rather than silently preferring one.
+func TestSandboxCreateRefusesLauncherWithBothRelays(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	le := sandboxLauncher("launcher", "box", owner.UserID)
+	le.Describe = &executorpb.DescribeResponse{
+		SandboxMountRoots:  []string{"/srv/repos"},
+		SandboxRelayDir:    "/var/run/rafiki-relay",
+		SandboxRelayVolume: "rafiki.relay.box",
+	}
+	env.pool.live = []execpool.LiveExecutor{le}
+
+	_, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
+	ck.Error(err, "must refuse both relays")
+	ck.True(strings.Contains(err.Error(), "--relay-foothold-image"), "error names --relay-foothold-image: %v", err)
 	ck.True(strings.Contains(err.Error(), "--relay-dir"), "error names --relay-dir: %v", err)
 }
 

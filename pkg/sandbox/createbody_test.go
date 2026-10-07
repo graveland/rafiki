@@ -145,6 +145,33 @@ func TestCreateBodyRelayMount(t *testing.T) {
 	c.EqDeep(mount{Type: "bind", Source: "/host/relay", Target: ContainerRelayDir, ReadOnly: true}, last, "relay mount")
 }
 
+// TestCreateBodyRelayVolumeMount: a foothold launcher hands the sandbox a
+// docker volume instead of a host bind, and the relay mount is that volume
+// rather than a bind to an empty source.
+func TestCreateBodyRelayVolumeMount(t *testing.T) {
+	in := bodyInputs()
+	in.RelayHostDir = ""
+	in.RelayVolume = "rafiki.relay.box"
+	b := decodeBody(t, mustBody(t, bodyResolved(), in))
+	c := assert.NewAborting(t)
+	c.NotEmpty(b.HostConfig.Mounts, "relay mount present")
+	last := b.HostConfig.Mounts[len(b.HostConfig.Mounts)-1]
+	c.EqDeep(mount{Type: "volume", Source: "rafiki.relay.box", Target: ContainerRelayDir, ReadOnly: true}, last, "relay volume mount")
+	for i, m := range b.HostConfig.Mounts {
+		c.Eq("volume", m.Type, "mounts[%d] is not a bind", i)
+	}
+}
+
+// TestCreateBodyRelayVolumeAndDirIsAnError: a launcher has exactly one relay
+// mechanism; declaring both is refused rather than silently preferring one.
+func TestCreateBodyRelayVolumeAndDirIsAnError(t *testing.T) {
+	in := bodyInputs()
+	in.RelayHostDir = "/host/relay"
+	in.RelayVolume = "rafiki.relay.box"
+	_, err := CreateBody(bodyResolved(), in)
+	assert.NewAborting(t).Error(err, "both a relay dir and a relay volume must be refused")
+}
+
 func TestCreateBodyNetwork(t *testing.T) {
 	t.Run("egress is bridge", func(t *testing.T) {
 		r := bodyResolved()

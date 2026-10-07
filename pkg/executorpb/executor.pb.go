@@ -162,8 +162,13 @@ type DescribeResponse struct {
 	// sandbox_relay_dir is the host directory (--relay-dir) the daemon
 	// bind-mounts into a sandbox container so it can reach the daemon.
 	SandboxRelayDir string `protobuf:"bytes,16,opt,name=sandbox_relay_dir,json=sandboxRelayDir,proto3" json:"sandbox_relay_dir,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// sandbox_relay_volume is the NAME of the docker volume holding the relay
+	// socket when this launcher runs a foothold (--relay-foothold-image) instead
+	// of a host relay dir. Exactly one of sandbox_relay_dir and
+	// sandbox_relay_volume is set on a launcher.
+	SandboxRelayVolume string `protobuf:"bytes,17,opt,name=sandbox_relay_volume,json=sandboxRelayVolume,proto3" json:"sandbox_relay_volume,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *DescribeResponse) Reset() {
@@ -304,6 +309,13 @@ func (x *DescribeResponse) GetSandboxMountRoots() []string {
 func (x *DescribeResponse) GetSandboxRelayDir() string {
 	if x != nil {
 		return x.SandboxRelayDir
+	}
+	return ""
+}
+
+func (x *DescribeResponse) GetSandboxRelayVolume() string {
+	if x != nil {
+		return x.SandboxRelayVolume
 	}
 	return ""
 }
@@ -2947,7 +2959,7 @@ var File_executor_proto protoreflect.FileDescriptor
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\x1a\x1egoogle/protobuf/duration.proto\"\x11\n" +
-	"\x0fDescribeRequest\"\xc0\x05\n" +
+	"\x0fDescribeRequest\"\xf2\x05\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -2967,7 +2979,8 @@ const file_executor_proto_rawDesc = "" +
 	"\x0epymodules_sync\x18\r \x01(\bR\rpymodulesSync\x12*\n" +
 	"\x11pymodule_git_sync\x18\x0e \x01(\bR\x0fpymoduleGitSync\x12.\n" +
 	"\x13sandbox_mount_roots\x18\x0f \x03(\tR\x11sandboxMountRoots\x12*\n" +
-	"\x11sandbox_relay_dir\x18\x10 \x01(\tR\x0fsandboxRelayDir\x1aE\n" +
+	"\x11sandbox_relay_dir\x18\x10 \x01(\tR\x0fsandboxRelayDir\x120\n" +
+	"\x14sandbox_relay_volume\x18\x11 \x01(\tR\x12sandboxRelayVolume\x1aE\n" +
 	"\x17SelfReportedLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0f\n" +
