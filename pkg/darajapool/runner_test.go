@@ -320,3 +320,41 @@ func TestRunnerRelaysScriptStderr(t *testing.T) {
 		}
 	}
 }
+
+func TestDisconnectOfTheLastConnectionFiresOnDisconnect(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool, childID, teardown := connectFakeDaraja(t, newScriptedDaraja())
+
+	gone := make(chan string, 1)
+	pool.OnDisconnect(func(id string) { gone <- id })
+
+	teardown()
+
+	select {
+	case id := <-gone:
+		c.Eq(childID, id, "OnDisconnect fired for the wrong child")
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnDisconnect never fired after the daraja connection closed")
+	}
+}
+
+func TestRunnerReportsExitWhenDarajaStaysLost(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := New(NewRegistry())
+	r := NewRunner(pool, "c-gone")
+	r.lostGrace = 200 * time.Millisecond
+	_, _, _, err := r.Start()
+	c.NoError(err, "Start")
+
+	done := make(chan int, 1)
+	go func() {
+		code, _ := r.Wait()
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		c.Eq(-1, code, "lost daraja must report the could-not-be-determined sentinel")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait never returned for a daraja that never reconnected")
+	}
+}

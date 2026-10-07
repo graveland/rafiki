@@ -383,7 +383,7 @@ func (p *Pool) serve(conn *upgradeconn.Conn, childID string) {
 	// Block until the connection is done.
 	<-lc.done
 
-	p.removeLive(childID, lc)
+	gone := p.removeLive(childID, lc)
 	slog.Info("darajapool: daraja left", "childId", childID)
 
 	// Tear down the relay holder for this connection.
@@ -398,8 +398,9 @@ func (p *Pool) serve(conn *upgradeconn.Conn, childID string) {
 	// Only fire OnDisconnect if WE were the ones who removed it — i.e., this
 	// was truly the last (and only) connection for this child. Displacement
 	// is handled inside installLive where the old connection's shutdown fires
-	// but OnDisconnect is NOT called for the displaced peer.
-	gone := p.removeLive(childID, lc)
+	// but OnDisconnect is NOT called for the displaced peer. The removal must
+	// be the one above: a second removeLive here would always find the entry
+	// already gone and the callback would never fire.
 	if gone {
 		p.onDisconnectMu.Lock()
 		fns := p.onDisconnect

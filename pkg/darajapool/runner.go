@@ -30,6 +30,13 @@ var ErrInterruptNotSupported = errors.New("darajapool: interrupting a daraja-hos
 // not spin the daemon.
 const watchRetryBackoff = 500 * time.Millisecond
 
+// darajaLostGrace is how long a Runner waits for a lost daraja to reconnect
+// before declaring the child gone. A daraja that survives a daemon restart
+// re-dials within its backoff ceiling, so a connection absent for this long
+// means the daraja (and its claude) died with its executor; without a bound
+// the child would sit idle forever with nothing behind it.
+const darajaLostGrace = 2 * time.Minute
+
 // darajaShutdownTimeout bounds Terminate/Kill's own Shutdown RPC call — it
 // must not hang the caller (e.g. Controller.Kill) indefinitely if the daraja
 // connection is wedged rather than cleanly gone.
@@ -74,6 +81,10 @@ type Runner struct {
 
 	exitCh chan exitInfo
 
+	// lostGrace is darajaLostGrace; a field so a test can shorten it without
+	// racing other runners' pumps.
+	lostGrace time.Duration
+
 	waitOnce sync.Once
 	waitInfo exitInfo
 
@@ -93,14 +104,15 @@ func NewRunner(pool *Pool, childID string) *Runner {
 	pr, pw := io.Pipe()
 	sr, sw := io.Pipe()
 	return &Runner{
-		pool:    pool,
-		childID: childID,
-		pr:      pr,
-		pw:      pw,
-		sr:      sr,
-		sw:      sw,
-		done:    make(chan struct{}),
-		exitCh:  make(chan exitInfo, 1),
+		pool:      pool,
+		childID:   childID,
+		pr:        pr,
+		pw:        pw,
+		sr:        sr,
+		sw:        sw,
+		done:      make(chan struct{}),
+		exitCh:    make(chan exitInfo, 1),
+		lostGrace: darajaLostGrace,
 	}
 }
 
@@ -154,6 +166,7 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 func (r *Runner) pump() {
 	defer r.pw.Close()
 	defer r.sw.Close()
+	var lostSince time.Time
 	for {
 		select {
 		case <-r.done:
@@ -165,7 +178,16 @@ func (r *Runner) pump() {
 		if err != nil {
 			// No connection right now (e.g. mid-reconnect). WireDaraja's
 			// OnDisconnect callback already marked the child unreachable;
-			// this loop's job is only to keep trying, not to report exit.
+			// keep trying until darajaLostGrace runs out, then report the
+			// child gone so it settles instead of idling with no process.
+			if lostSince.IsZero() {
+				lostSince = time.Now()
+			} else if time.Since(lostSince) >= r.lostGrace {
+				slog.Warn("daraja: connection lost and not restored; reporting the child exited",
+					"childId", r.childID, "grace", r.lostGrace)
+				r.reportExit(-1, "")
+				return
+			}
 			select {
 			case <-time.After(watchRetryBackoff):
 				continue
@@ -174,6 +196,7 @@ func (r *Runner) pump() {
 			}
 		}
 
+		lostSince = time.Time{}
 		stop := r.drain(events)
 		unsub()
 		if stop {
