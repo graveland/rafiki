@@ -7,6 +7,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -38,6 +39,24 @@ var _ tools.SandboxManager = (*mcpSandboxManager)(nil)
 // diverge on who may call a sandbox verb.
 func newMCPSandboxes(ctrl *Controller, owner users.Identity, callerChild string) *mcpSandboxManager {
 	return &mcpSandboxManager{ctrl: ctrl, owner: owner, callerChild: callerChild}
+}
+
+// mcpSandboxOwner builds the owner identity the sandbox binding receives,
+// carrying the admin bit forward ONLY for a genuine user credential -- the same
+// rule connectapi's sandboxCaller applies on the Connect plane. A per-child
+// credential that somehow presents the admin bit (a hand-built identity; a real
+// child token carries none) must never reach the sandbox manager as admin, so a
+// child of an admin can never act with admin authority on a sandbox verb on
+// EITHER face (CLAUDE.md: the two faces change together). This matters for the
+// empty-ChildID child-token shape in particular: it carries no child id, so the
+// manager cannot demote it via callerChild, and the admin bit must already be
+// gone here.
+func mcpSandboxOwner(id *server.Identity) users.Identity {
+	return users.Identity{
+		UserID:   id.UserID,
+		Username: id.Username,
+		IsAdmin:  id.IsAdmin && id.IsUserCredential(),
+	}
 }
 
 func (m *mcpSandboxManager) Create(ctx context.Context, spec protocol.SandboxSpec) (protocol.SandboxInfo, error) {

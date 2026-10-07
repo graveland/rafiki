@@ -284,13 +284,16 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// adapter does, so the Connect child credential and this face grant the same
 	// set (TestMCPSandboxMatchesConnectChildPolicy). callerChild mirrors
 	// connectapi's sandboxCaller: a ProvenanceChildToken caller contributes its
-	// child id, every other credential "".
+	// child id, every other credential "". The owner's admin bit is gated on a
+	// genuine user credential (mcpSandboxOwner), the same rule sandboxCaller
+	// applies, so a non-user credential can never reach the sandbox manager as
+	// admin on either face.
 	if ctrl.sandboxStore != nil {
 		callerChild := ""
 		if isChild {
 			callerChild = id.ChildID
 		}
-		opts.Sandboxes = newMCPSandboxes(ctrl, owner, callerChild)
+		opts.Sandboxes = newMCPSandboxes(ctrl, mcpSandboxOwner(id), callerChild)
 	}
 	// Recall + memory tools, bound to the caller's owner the same way the
 	// conversation reader is: an admin's conversation-derived hits cover the

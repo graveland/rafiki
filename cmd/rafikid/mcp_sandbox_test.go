@@ -10,8 +10,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/sandbox"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -131,4 +133,65 @@ func TestMCPSandboxManagerRemoveUsesChildId(t *testing.T) {
 	c.NoError(err, "sandbox_remove over MCP")
 	c.True(res.IsError, "a child must not remove a row a non-descendant created")
 	c.StrContains(mcpToolResultText(t, res), "not created by this child", "refusal reason")
+}
+
+// TestMCPSandboxOwnerDemotesAChildOfAnAdmin is the MCP-side twin of the Connect
+// test TestSandboxOwnerIdentityDemotesAChildOfAnAdmin: the owner the sandbox
+// binding receives carries the admin bit forward ONLY for a genuine user
+// credential. connectapi's sandboxCaller applies the same rule, so a
+// non-user credential that somehow presents the admin bit (a hand-built
+// identity; a real child token carries none) is demoted on both faces. The
+// empty-ChildID child-token shape is the one the review flagged: it has no
+// child id, so the manager cannot demote it via callerChild and the admin bit
+// must already be gone here.
+func TestMCPSandboxOwnerDemotesAChildOfAnAdmin(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	user := mcpSandboxOwner(&server.Identity{UserID: "u-admin", Username: "root", IsAdmin: true, Via: server.ProvenanceUser})
+	c.Eq("u-admin", user.UserID, "owner user id preserved")
+	c.True(user.IsAdmin, "a real user credential keeps its admin bit")
+
+	child := mcpSandboxOwner(&server.Identity{UserID: "u-admin", IsAdmin: true, ChildID: "c-child", Via: server.ProvenanceChildToken})
+	c.Eq("u-admin", child.UserID, "a child resolves its owner's user id")
+	c.False(child.IsAdmin, "a child-token credential must never keep the admin bit")
+
+	empty := mcpSandboxOwner(&server.Identity{UserID: "u-admin", IsAdmin: true, Via: server.ProvenanceChildToken})
+	c.False(empty.IsAdmin, "an empty-ChildID child token must never keep the admin bit")
+}
+
+// TestMCPSandboxManagerBindingsAreIsolated pins that two managers built for two
+// different children never see each other's child id: each binding carries the
+// id it was constructed with into Controller.SandboxRemove, so a row one child
+// created is removable by that child's binding and refused by the other's. The
+// child id is closed over at construction and never arrives as an argument, so
+// there is no way for one binding to act as the other.
+func TestMCPSandboxManagerBindingsAreIsolated(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	store := newFakeSandboxStore()
+	ctrl := &Controller{st: childstore.New(), sandboxStore: store}
+	owner := users.Identity{UserID: "u-owner"}
+
+	seed := func(id string) {
+		c.NoError(store.Insert(ctx, sandbox.Row{
+			ID: id, OwnerUserID: "u-owner", Name: id, CreatedBy: "c-a", State: sandboxStateReady,
+		}), "seed %s", id)
+	}
+
+	a := newMCPSandboxes(ctrl, owner, "c-a")
+	b := newMCPSandboxes(ctrl, owner, "c-b")
+
+	// Child A may remove its own row.
+	seed("sbx_one")
+	c.NoError(a.Remove(ctx, "sbx_one"), "child A removing its own row")
+
+	// Child B's binding carries c-b, not c-a, so A's row is refused.
+	seed("sbx_two")
+	err := b.Remove(ctx, "sbx_two")
+	c.Error(err, "child B removing A's row must be refused")
+	c.StrContains(err.Error(), "not created by this child", "refusal reason")
+
+	// A still carries c-a on a later call.
+	seed("sbx_three")
+	c.NoError(a.Remove(ctx, "sbx_three"), "child A removing another of its own rows")
 }

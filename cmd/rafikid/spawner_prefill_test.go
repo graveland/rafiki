@@ -35,3 +35,36 @@ func TestSpawnerPrefillShaping(t *testing.T) {
 		assert.NewCollecting(t).Nil(req.Prefill, "req.Prefill")
 	})
 }
+
+// TestSpawnerSandboxShaping pins that applySpawnSpecShaping copies
+// SpawnSpec.Sandbox onto protocol.SpawnRequest.Sandbox verbatim, and that a nil
+// spec sandbox leaves req.Sandbox nil (absent means no sandbox block). Both the
+// child-bound spawner (controllerSpawner.Spawn, agent_spawner.go) and the
+// user-bound one (userSpawner.Spawn, user_spawner.go) build their request and
+// then call this ONE helper, so deleting the `req.Sandbox = spec.Sandbox` line
+// fails here rather than silently dropping every spawn block.
+func TestSpawnerSandboxShaping(t *testing.T) {
+	t.Run("copied", func(t *testing.T) {
+		var req protocol.SpawnRequest
+		applySpawnSpecShaping(&req, tools.SpawnSpec{
+			Sandbox: &protocol.SandboxSpec{
+				Scope:   protocol.ScopeSubtree,
+				Image:   "rafiki/sandbox:1",
+				Network: protocol.NetworkNone,
+				Mounts:  []protocol.SandboxMount{{Target: "/work", Kind: protocol.MountRO, HostPath: "/srv/repos/a"}},
+			},
+		})
+		c := assert.NewAborting(t)
+		c.Require().NotNil(req.Sandbox, "req.Sandbox is nil; the shaping copy is gone")
+		c.Eq(protocol.ScopeSubtree, req.Sandbox.Scope, "Scope")
+		c.Eq("rafiki/sandbox:1", req.Sandbox.Image, "Image")
+		c.Eq(protocol.NetworkNone, req.Sandbox.Network, "Network")
+		c.Len(req.Sandbox.Mounts, 1, "Mounts")
+	})
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		var req protocol.SpawnRequest
+		applySpawnSpecShaping(&req, tools.SpawnSpec{})
+		assert.NewCollecting(t).Nil(req.Sandbox, "req.Sandbox")
+	})
+}

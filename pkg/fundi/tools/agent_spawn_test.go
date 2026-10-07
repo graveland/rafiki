@@ -148,8 +148,11 @@ func TestAgentSpawnSandboxSchemaRequiresScope(t *testing.T) {
 	c.EqDiff([]string{"target", "kind"}, toStrings(items["required"].([]any)), "sandbox mounts items required")
 	kind := items["properties"].(map[string]any)["kind"].(map[string]any)
 	c.EqDiff([]string{"ro", "rw", "ephemeral"}, toStrings(kind["enum"].([]any)), "sandbox mount kind enum")
+	network := sbProps["network"].(map[string]any)
+	c.EqDiff([]string{"egress", "none"}, toStrings(network["enum"].([]any)), "sandbox network enum")
 }
 
+// TestAgentSpawnPrefillParsed pins that agent_spawn parses its prefill list
 // at the tool (a malformed entry fails the call instead of failing inside
 // the child) and that the parsed entries reach SpawnSpec.Prefill verbatim.
 func TestAgentSpawnPrefillParsed(t *testing.T) {
