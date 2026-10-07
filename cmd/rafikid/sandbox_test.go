@@ -49,6 +49,11 @@ type fakeDocker struct {
 	removed    []string
 	started    []string
 	list       []map[string]any // entries for GET /containers/json
+
+	// onList runs while serving GET /containers/json, so a test can simulate a
+	// concurrent create landing between the container listing and the reaper's
+	// per-container row read.
+	onList func()
 }
 
 func (d *fakeDocker) record(s string) {
@@ -107,7 +112,11 @@ func (d *fakeDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/containers/json":
 		d.mu.Lock()
 		list := d.list
+		hook := d.onList
 		d.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(list)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/containers/") && strings.HasSuffix(r.URL.Path, "/json"):
@@ -564,13 +573,15 @@ func indexOf(list []string, want string) int {
 	return -1
 }
 
-// TestSandboxRemoveLauncherOfflineLeavesRemoving: an offline launcher leaves the
-// row in removing for the sweep to finish.
+// TestSandboxRemoveLauncherOfflineLeavesRemoving: an offline launcher whose
+// executor ROW still exists leaves the row in removing for the sweep to finish.
 func TestSandboxRemoveLauncherOfflineLeavesRemoving(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	env := newSandboxEnv(t)
 	owner := sandboxOwner()
+	// The launcher's executor row still exists — it may come back.
+	env.exec.execs["launcher"] = executors.Executor{ID: "launcher", Enabled: true}
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
 		LauncherExecutorID: "launcher", ContainerID: "ctr-1", State: sandboxStateReady,
@@ -582,6 +593,46 @@ func TestSandboxRemoveLauncherOfflineLeavesRemoving(t *testing.T) {
 	row, _ := env.store.get("sbx-1")
 	ck.Eq(sandboxStateRemoving, row.State, "left removing")
 	ck.True(row.RemovedAt == nil, "not tombstoned")
+}
+
+// TestSandboxRemoveDeadLauncherFreesSlot: an offline launcher whose executor row
+// is GONE is permanently dead — the removal proceeds so the cap slot is freed,
+// and the container is left to the reaper.
+func TestSandboxRemoveDeadLauncherFreesSlot(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	// "launcher" is not live in the pool AND has no executor row.
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-1", State: sandboxStateReady,
+	}))
+
+	ck.NoError(env.ctrl.SandboxRemove(context.Background(), owner, "", "dev"), "remove")
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt != nil, "the cap slot is freed (row tombstoned)")
+	ck.True(env.pool.evicted["exec-created"], "the sandbox's executor was evicted")
+	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "a dead launcher cannot remove the container")
+}
+
+// TestSandboxRemoveSkipsTombstonedRow: removeSandboxRow re-reads the row, so a
+// stale snapshot of an already-removed row is a no-op.
+func TestSandboxRemoveSkipsTombstonedRow(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	stale := sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, Name: "dev", ExecutorID: "exec-created",
+		LauncherExecutorID: "launcher", ContainerID: "ctr-1", State: sandboxStateReady,
+	}
+	ck.NoError(env.store.Insert(context.Background(), stale))
+	ck.NoError(env.store.MarkRemoved(context.Background(), "sbx-1", time.Now()))
+
+	ck.NoError(env.ctrl.removeSandboxRow(context.Background(), stale), "a tombstoned row is a no-op")
+	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "no container removal on an already-removed row")
 }
 
 // TestSandboxRemoveChildAuthority: a creator and its ancestor may remove; a
@@ -712,7 +763,8 @@ func TestSandboxReaperKeepsCreatingRowContainer(t *testing.T) {
 }
 
 // TestSandboxReaperBeforeRecoveryKeepsLiveSpawnBlock: a spawn-block row whose
-// child is live in the DB (but not yet loaded in memory) is kept.
+// child is live in the DB (but not yet loaded in memory) is kept, even though
+// the row is old enough to be reapable.
 func TestSandboxReaperBeforeRecoveryKeepsLiveSpawnBlock(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
@@ -723,7 +775,7 @@ func TestSandboxReaperBeforeRecoveryKeepsLiveSpawnBlock(t *testing.T) {
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "child-1", Scope: protocol.ScopeSelf,
 		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
-		State: sandboxStateReady,
+		State: sandboxStateReady, CreatedAt: sandboxOldTime(),
 	}))
 
 	env.ctrl.sweepSandboxes(context.Background())
@@ -731,8 +783,8 @@ func TestSandboxReaperBeforeRecoveryKeepsLiveSpawnBlock(t *testing.T) {
 	ck.True(row.RemovedAt == nil, "a live child's spawn-block sandbox is kept")
 }
 
-// TestSandboxReaperRemovesClosedChildSpawnBlock: a spawn-block row whose child
-// is absent from the DB (closed or gone) is removed.
+// TestSandboxReaperRemovesClosedChildSpawnBlock: an OLD spawn-block row whose
+// child is absent from the DB (closed or gone) is removed.
 func TestSandboxReaperRemovesClosedChildSpawnBlock(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
@@ -743,12 +795,99 @@ func TestSandboxReaperRemovesClosedChildSpawnBlock(t *testing.T) {
 	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
 		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "child-1", Scope: protocol.ScopeSelf,
 		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
-		State: sandboxStateReady,
+		State: sandboxStateReady, CreatedAt: sandboxOldTime(),
 	}))
 
 	env.ctrl.sweepSandboxes(context.Background())
 	row, _ := env.store.get("sbx-1")
 	ck.True(row.RemovedAt != nil, "a closed child's spawn-block sandbox is removed")
+}
+
+// TestSandboxReaperKeepsYoungSpawnBlock: a spawn-block row younger than
+// sandboxMinReapAge is kept even when its child row is absent, because
+// sandboxCreateForSpawn inserts the row before the spawn writes the child's row.
+func TestSandboxReaperKeepsYoungSpawnBlock(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	env.ctrl.children = childLiveness{} // child-1 is not live yet
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "child-1", Scope: protocol.ScopeSelf,
+		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
+		State: sandboxStateReady, CreatedAt: time.Now(), // young: mid-spawn
+	}))
+
+	env.ctrl.sweepSandboxes(context.Background())
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "a young spawn-block row is never reaped on an absent child")
+	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "its container is kept")
+}
+
+// TestSandboxReaperKeepsCreatingSpawnBlock: a `creating` spawn-block row whose
+// child is absent is kept — the create flow owns it and its rollback.
+func TestSandboxReaperKeepsCreatingSpawnBlock(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	env.ctrl.children = childLiveness{} // child-1 is absent
+	ck.NoError(env.store.Insert(context.Background(), sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "child-1", Scope: protocol.ScopeSelf,
+		ExecutorID: "exec-created", LauncherExecutorID: "launcher", ContainerID: "ctr-1",
+		State: sandboxStateCreating, CreatedAt: sandboxOldTime(),
+	}))
+
+	env.ctrl.sweepSandboxes(context.Background())
+	row, _ := env.store.get("sbx-1")
+	ck.True(row.RemovedAt == nil, "a creating spawn-block row is never reaped")
+	ck.False(sandboxHas(env.docker.removed, "ctr-1"), "its container is kept")
+}
+
+// TestSandboxReaperReadsTheRowAfterListingItsContainers proves the ordering
+// fix: a sandbox created AFTER the container listing (its row inserted while
+// ListContainers runs) must NOT have its container removed.
+func TestSandboxReaperReadsTheRowAfterListingItsContainers(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	env.docker.list = []map[string]any{
+		{"Id": "ctr-new", "Labels": map[string]string{sandbox.DockerLabelSandbox: "sbx-new"}},
+	}
+	// The concurrent create: a live row for sbx-new lands while the container
+	// listing is being served.
+	env.docker.onList = func() {
+		_ = env.store.Insert(context.Background(), sandbox.Row{
+			ID: "sbx-new", OwnerUserID: owner.UserID, Name: "new",
+			ExecutorID: "exec-created", LauncherExecutorID: "launcher",
+			ContainerID: "ctr-new", State: sandboxStateCreating, CreatedAt: time.Now(),
+		})
+	}
+
+	env.ctrl.sweepSandboxes(context.Background())
+	ck.False(sandboxHas(env.docker.removed, "ctr-new"),
+		"a container whose row was written after the listing is kept: %v", env.docker.removed)
+	row, _ := env.store.get("sbx-new")
+	ck.True(row.RemovedAt == nil, "the newly created row is untouched")
+}
+
+// TestSandboxCreateNilEngineFailsClosed: a seam that returns a nil engine is
+// refused instead of panicking.
+func TestSandboxCreateNilEngineFailsClosed(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{sandboxLauncher("launcher", "box", owner.UserID)}
+	env.ctrl.sandboxEngine = func(string) *sandbox.Engine { return nil }
+
+	_, err := env.ctrl.SandboxCreate(context.Background(), owner, "", sandboxSpec("dev"))
+	ck.Error(err, "a nil engine must be refused")
+	ck.True(strings.Contains(err.Error(), "sandbox engine is not wired"), "error text: %v", err)
 }
 
 // TestSandboxRemoveSandboxesOwnedBy: closing a child removes its own and its
@@ -911,6 +1050,10 @@ func TestSandboxChildCallerResolvesLauncherWithinItsSet(t *testing.T) {
 }
 
 // --- test helpers -----------------------------------------------------------
+
+// sandboxOldTime is a created_at old enough to pass sandboxMinReapAge, so a
+// test's spawn-block row is eligible for the reaper's child-absent test.
+func sandboxOldTime() time.Time { return time.Now().Add(-time.Hour) }
 
 // seedChild inserts a live child, optionally with a parent link.
 func sandboxSeedChild(env *sandboxEnv, id, parent string) {

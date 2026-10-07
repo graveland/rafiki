@@ -48,6 +48,14 @@ const (
 	sandboxConnectBudget       = 60 * time.Second
 )
 
+// sandboxMinReapAge is how long a spawn-block row must have existed before the
+// reaper may remove it on the strength of its owning child's row being absent.
+// sandboxCreateForSpawn inserts the row BEFORE the spawn writes the child's own
+// DB row, so an absent child row means "not written yet" as often as "closed";
+// a young row is never reaped on that test alone (2× the connect budget means a
+// still-connecting sandbox is never reaped).
+const sandboxMinReapAge = 2 * sandboxConnectBudget
+
 // sandboxOwnerVolumeKey derives the short, stable owner key named volumes are
 // prefixed with. owner.UserID is a uuidv7 string; the FIRST 12 characters of a
 // uuidv7 are its 48-bit millisecond timestamp, so two users minted in the same
@@ -287,8 +295,11 @@ func (c *Controller) resolveSandboxLauncher(creatorChild string, owner users.Ide
 				sandboxLauncherName(le)),
 		}
 	}
-	if c.sandboxEngine == nil {
-		return execpool.LiveExecutor{}, &connectapi.ControllerError{Code: protocol.ErrInternal, Message: "sandbox engine is not wired"}
+	if c.sandboxEngine == nil || c.sandboxEngine(le.Executor.ID) == nil {
+		return execpool.LiveExecutor{}, &connectapi.ControllerError{
+			Code:    protocol.ErrInternal,
+			Message: fmt.Sprintf("sandbox engine is not wired for launcher %q", sandboxLauncherName(le)),
+		}
 	}
 	return le, nil
 }
@@ -627,22 +638,51 @@ func (c *Controller) resolveSandboxRef(ctx context.Context, ownerUserID, ref str
 // deleted executor row makes the sandbox's executor exit terminally and its
 // `unless-stopped` policy would restart it in a loop.
 //
+// It re-reads the row by id first, so a caller acting on a stale snapshot (the
+// sweep) never writes to a row that has since been tombstoned or changed: an
+// already-removed row is a no-op.
+//
 // If the launcher is not live the row is left `removing` and an error is
-// returned; the TTL sweeper finishes the job when the launcher returns.
+// returned, UNLESS the launcher's executor ROW is also gone — a permanently
+// dead launcher — in which case the removal proceeds (the container is left to
+// the reaper) so the owner's cap slot is freed.
 func (c *Controller) removeSandboxRow(ctx context.Context, row sandbox.Row) error {
+	fresh, ok, err := c.sandboxStore.Get(ctx, row.ID)
+	if err != nil {
+		return err
+	}
+	if !ok || fresh.RemovedAt != nil {
+		// Already tombstoned (or gone): nothing to do. This is the re-Get that
+		// makes the sweep tolerant of a row removed under it.
+		return nil
+	}
+	row = fresh
+
 	if row.State != sandboxStateRemoving {
 		if err := c.sandboxStore.SetState(ctx, row.ID, sandboxStateRemoving); err != nil {
 			return err
 		}
 	}
 
-	if row.ContainerID != "" {
-		if !c.executorLive(row.LauncherExecutorID) {
+	launcherGone := false
+	if row.ContainerID != "" && !c.executorLive(row.LauncherExecutorID) {
+		// The launcher is offline. Is its executor ROW gone too? If so the
+		// launcher is permanently gone and waiting is pointless — free the cap
+		// slot and leave the container to the reaper. If the row is still there
+		// the launcher may come back, so keep the row `removing` and retry.
+		switch _, gerr := c.execStore.Get(ctx, row.LauncherExecutorID); {
+		case gerr == nil:
 			return &connectapi.ControllerError{
 				Code:    protocol.ErrInternal,
 				Message: "launcher offline; the sandbox will be removed when it reconnects",
 			}
+		case errors.Is(gerr, executors.ErrNotFound):
+			launcherGone = true
+		default:
+			return gerr
 		}
+	}
+	if row.ContainerID != "" && !launcherGone {
 		if c.sandboxEngine == nil {
 			return &connectapi.ControllerError{Code: protocol.ErrInternal, Message: "sandbox engine is not wired"}
 		}
@@ -771,65 +811,67 @@ func (c *Controller) startSandboxSweeper(ctx context.Context) {
 	}()
 }
 
-// sweepSandboxes is one idempotent pass: TTL expiry, finishing rows stuck in
-// `removing`, and the reaper. Run by the loop in main.go every
-// sandboxCfg.SweepInterval and once shortly after boot.
+// sweepSandboxes is one idempotent pass: orphan-container reaping, TTL expiry,
+// finishing rows stuck in `removing`, and the spawn-block reaper. Run by the
+// loop in main.go every sandboxCfg.SweepInterval and once shortly after boot.
 func (c *Controller) sweepSandboxes(ctx context.Context) {
 	if c.sandboxStore == nil {
 		return
 	}
+	now := time.Now()
+
+	// Orphan containers FIRST, and each candidate's row is read AFTER its
+	// launcher's container listing (see reapOrphanContainers), so a sandbox
+	// created during the listing is seen live and never reaped.
+	c.reapOrphanContainers(ctx)
+
 	rows, err := c.sandboxStore.ListAllLive(ctx)
 	if err != nil {
 		slog.Warn("sandbox sweep: list live failed", "error", err)
 		return
 	}
-	removed := map[string]bool{}
-	now := time.Now()
 
 	// TTL: every live NAMED row past its expiry is removed with system
-	// authority.
+	// authority. A `creating` row is skipped — the create flow owns it and its
+	// rollback, and its TTL cannot have elapsed anyway.
 	for _, r := range rows {
 		if r.Name == "" || r.ExpiresAt == nil || !r.ExpiresAt.Before(now) {
 			continue
 		}
-		if err := c.removeSandboxRow(ctx, r); err != nil {
-			slog.Warn("sandbox sweep: TTL removal failed", "sandboxId", r.ID, "error", err)
+		if r.State == sandboxStateCreating {
 			continue
 		}
-		removed[r.ID] = true
+		if err := c.removeSandboxRow(ctx, r); err != nil {
+			slog.Warn("sandbox sweep: TTL removal failed", "sandboxId", r.ID, "error", err)
+		}
 	}
 
 	// Finish rows a prior pass left `removing` (a launcher was offline).
+	// removeSandboxRow re-reads each row, so a row removed under this snapshot
+	// is a no-op.
 	for _, r := range rows {
-		if removed[r.ID] || r.State != sandboxStateRemoving {
+		if r.State != sandboxStateRemoving {
 			continue
 		}
 		if err := c.removeSandboxRow(ctx, r); err != nil {
 			slog.Warn("sandbox sweep: finishing removal failed", "sandboxId", r.ID, "error", err)
-			continue
 		}
-		removed[r.ID] = true
 	}
 
-	c.reapSandboxes(ctx, rows, removed)
+	c.reapChildlessSandboxes(ctx, rows, now)
 }
 
-// reapSandboxes removes containers whose sandbox row is gone, and live
-// spawn-block rows whose owning child's PERSISTED row is closed or absent.
-func (c *Controller) reapSandboxes(ctx context.Context, rows []sandbox.Row, removed map[string]bool) {
+// reapOrphanContainers removes, per live docker launcher, every container whose
+// sandbox row is absent or tombstoned.
+//
+// Each candidate's row is read with Get AFTER the container listing, so a
+// sandbox created in the window between the listing and this decision has its
+// row already and is kept. This is what makes the "a container with a `creating`
+// row is kept" invariant hold under a concurrent create.
+func (c *Controller) reapOrphanContainers(ctx context.Context) {
 	if c.execPool == nil || c.sandboxEngine == nil {
 		return
 	}
-	liveIDs := map[string]bool{}
-	for _, r := range rows {
-		if !removed[r.ID] {
-			liveIDs[r.ID] = true
-		}
-	}
-
-	// Orphan containers: any container labelled with a sandbox id that no live
-	// row claims. A container whose row is still `creating` is kept, because
-	// the row is inserted before the container exists.
 	for _, le := range c.execPool.Live() {
 		if !hasProxy(le.Proxies, sandbox.DockerProxyName) {
 			continue
@@ -846,7 +888,19 @@ func (c *Controller) reapSandboxes(ctx context.Context, rows []sandbox.Row, remo
 		}
 		for _, ct := range containers {
 			rowID := ct.Labels[sandbox.DockerLabelSandbox]
-			if rowID == "" || liveIDs[rowID] {
+			if rowID == "" {
+				continue
+			}
+			// Read the row AFTER the listing: a still-live row means the
+			// container is not an orphan.
+			row, ok, err := c.sandboxStore.Get(ctx, rowID)
+			if err != nil {
+				// Cannot decide; never remove on an unreadable store. Retried
+				// next pass.
+				slog.Warn("sandbox reaper: could not read a container's row", "sandboxId", rowID, "error", err)
+				continue
+			}
+			if ok && row.RemovedAt == nil {
 				continue
 			}
 			if err := engine.RemoveContainer(ctx, ct.ID, true, true); err != nil {
@@ -854,16 +908,30 @@ func (c *Controller) reapSandboxes(ctx context.Context, rows []sandbox.Row, remo
 			}
 		}
 	}
+}
 
-	// Spawn-block rows whose child is closed or absent. The decision reads the
-	// PERSISTED child rows (List returns live rows only) — never the in-memory
-	// store, where a live child may not yet be loaded while recovery runs.
+// reapChildlessSandboxes removes live spawn-block rows whose owning child's
+// PERSISTED row is closed or absent.
+//
+// A `creating` row is skipped (the create flow owns it), and so is a row
+// younger than sandboxMinReapAge: sandboxCreateForSpawn inserts the row before
+// the spawn writes the child's own row, so an absent child row on a young row
+// usually means "not written yet". The decision reads the PERSISTED child rows
+// (List returns live rows only) — never the in-memory store, where a live child
+// may not yet be loaded while recovery runs.
+func (c *Controller) reapChildlessSandboxes(ctx context.Context, rows []sandbox.Row, now time.Time) {
 	liveChildren, childKnown := c.liveChildSet(ctx)
 	if !childKnown {
 		return
 	}
 	for _, r := range rows {
-		if removed[r.ID] || r.Name != "" || r.OwnerChild == "" {
+		if r.Name != "" || r.OwnerChild == "" {
+			continue
+		}
+		if r.State == sandboxStateCreating {
+			continue
+		}
+		if now.Sub(r.CreatedAt) < sandboxMinReapAge {
 			continue
 		}
 		if liveChildren[r.OwnerChild] {
@@ -871,9 +939,7 @@ func (c *Controller) reapSandboxes(ctx context.Context, rows []sandbox.Row, remo
 		}
 		if err := c.removeSandboxRow(ctx, r); err != nil {
 			slog.Warn("sandbox reaper: removing a closed child's sandbox failed", "sandboxId", r.ID, "childId", r.OwnerChild, "error", err)
-			continue
 		}
-		removed[r.ID] = true
 	}
 }
 

@@ -159,16 +159,21 @@ func (s *pgStore) query(ctx context.Context, sql string, args ...any) ([]sandbox
 }
 
 func (s *pgStore) SetContainer(ctx context.Context, id, containerID string) error {
+	// removed_at IS NULL: a stale or concurrent writer must not resurrect a
+	// tombstoned row (the sweep re-reads rows, but a write can still race a
+	// removal).
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE conversations.sandbox SET container_id=$2 WHERE id=$1`, id, containerID); err != nil {
+		`UPDATE conversations.sandbox SET container_id=$2 WHERE id=$1 AND removed_at IS NULL`, id, containerID); err != nil {
 		return fmt.Errorf("set sandbox container: %w", err)
 	}
 	return nil
 }
 
 func (s *pgStore) SetState(ctx context.Context, id, state string) error {
+	// removed_at IS NULL: a stale snapshot's SetState(creating/ready) must not
+	// write to a tombstoned row. A no-op update is success — the row is gone.
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE conversations.sandbox SET state=$2 WHERE id=$1`, id, state); err != nil {
+		`UPDATE conversations.sandbox SET state=$2 WHERE id=$1 AND removed_at IS NULL`, id, state); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == checkViolation {
 			// An unknown state is the caller's error, not an outage; return it

@@ -278,6 +278,26 @@ func TestSetStateRejectsUnknownState(t *testing.T) {
 	c.Eq("lost", got.State, "state after rejected write")
 }
 
+func TestSetStateAndContainerSkipTombstoned(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	r := newRow(t, owner(t))
+	insert(t, s, r)
+
+	// Tombstone the row, then attempt writes a stale snapshot could issue.
+	c.NoError(s.MarkRemoved(ctx, r.ID, time.Now()), "mark removed")
+	c.NoError(s.SetState(ctx, r.ID, "lost"), "SetState on a tombstoned row must not error")
+	c.NoError(s.SetContainer(ctx, r.ID, "ctr-"+randHex(t)), "SetContainer on a tombstoned row must not error")
+
+	got, ok, err := s.Get(ctx, r.ID)
+	c.NoError(err, "get")
+	c.True(ok, "not found")
+	c.Eq("ready", got.State, "SetState wrote to a tombstoned row")
+	c.Eq(r.ContainerID, got.ContainerID, "SetContainer wrote to a tombstoned row")
+}
+
 func TestGetByName(t *testing.T) {
 	c := assert.NewAborting(t)
 	s, _ := testStore(t)
