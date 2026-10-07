@@ -428,6 +428,14 @@ message SpawnRequest {
   // it only reduces spend.
   bool skip_derived_index = 30;
 
+  // sandbox (field 31) is deliberately CHILD-ALLOWED, unlike fields 15-29.
+  // SandboxSpec cannot express privilege: host paths are bounded by the
+  // launcher's declared --sandbox-mount-root, volumes are owner-prefixed and
+  // never removed, and every resource limit is clamped for a child caller (see
+  // pkg/sandbox.Validate). A child that may spawn may therefore also ask its
+  // sandbox to be provisioned with it.
+  SandboxSpec sandbox = 31;
+
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
   // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -1048,6 +1056,96 @@ message GetRateLimitStatusResponse {
   reserved 5;
 }
 
+// SandboxMount is one mount in a sandbox. Exactly one of host_path / volume
+// backs a ro or rw mount; rw may have neither (an anonymous volume). An
+// ephemeral mount has neither (it is a tmpfs).
+message SandboxMount {
+  string target = 1;
+  // kind is a string enum mirroring protocol.MountKind: "ro", "rw" or
+  // "ephemeral". Empty is REFUSED by validation (pkg/sandbox.Validate), never
+  // defaulted.
+  string kind = 2;
+  string host_path = 3;
+  string volume = 4;
+}
+
+// SandboxSpec is the typed request to create a sandbox. Its string enum
+// fields (mount kind, network, scope) carry the SAME strings as the Go consts
+// in pkg/protocol/sandbox.go. A mount's kind and a spawn block's scope are
+// REFUSED when empty by pkg/sandbox.Validate, never defaulted; network's empty
+// resolves to the daemon's configured default.
+message SandboxSpec {
+  // name is a named sandbox only; refused on a spawn block (field 31).
+  string name = 1;
+  // launcher is an executor ref/selector; empty means the sole docker launcher
+  // in scope.
+  string launcher = 2;
+  string image = 3;
+  repeated SandboxMount mounts = 4;
+  string workdir = 5;
+  // network is a string enum mirroring protocol.NetworkMode: "egress" or
+  // "none". Empty resolves to the daemon's configured default network.
+  string network = 6;
+  bool read_only_rootfs = 7;
+  map<string, string> env = 8;
+  string user = 9;
+  int64 memory_bytes = 10;
+  double cpus = 11;
+  int64 pids_limit = 12;
+  map<string, string> labels = 13;
+  // ttl is a named sandbox's lifetime; refused on a spawn block. Unset means
+  // the daemon's configured default; a negative duration is refused.
+  google.protobuf.Duration ttl = 14;
+  // scope is a string enum mirroring protocol.SandboxScope: "self" or
+  // "subtree". Required on a spawn block (field 31), refused on a named
+  // sandbox.
+  string scope = 15;
+}
+
+// SandboxInfo mirrors protocol.SandboxInfo. Times are Timestamps, never ints
+// or strings.
+message SandboxInfo {
+  string id = 1;
+  string name = 2;
+  string executor_id = 3;
+  string launcher = 4;
+  string container_id = 5;
+  string image = 6;
+  string network = 7;
+  // state is one of "creating" | "ready" | "lost" | "removing".
+  string state = 8;
+  bool connected = 9;
+  // created_by is the creating child id, empty for an operator.
+  string created_by = 10;
+  // owner_child is a spawn block's owner child, empty for a named sandbox.
+  string owner_child = 11;
+  string scope = 12;
+  map<string, string> labels = 13;
+  google.protobuf.Timestamp created_at = 14;
+  google.protobuf.Timestamp expires_at = 15;
+}
+
+message CreateSandboxRequest {
+  SandboxSpec spec = 1;
+}
+
+message CreateSandboxResponse {
+  SandboxInfo sandbox = 1;
+}
+
+message ListSandboxesRequest {}
+
+message ListSandboxesResponse {
+  repeated SandboxInfo sandboxes = 1;
+}
+
+message RemoveSandboxRequest {
+  // ref is a sandbox name or row id.
+  string ref = 1;
+}
+
+message RemoveSandboxResponse {}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
@@ -1128,6 +1226,9 @@ service Control {
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc ShutdownDaemon(ShutdownDaemonRequest) returns (ShutdownDaemonResponse);
   rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc RemoveSandbox(RemoveSandboxRequest) returns (RemoveSandboxResponse);
   // ModelRoutes explains where a request for a model would go under a routing
   // spec: every hosting endpoint with its price, quantization, uptime and
   // measured throughput, marked eligible or excluded with the reason. Read-only.

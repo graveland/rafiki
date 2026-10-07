@@ -177,6 +177,12 @@ const (
 	ControlShutdownDaemonProcedure = "/rafiki.v1.Control/ShutdownDaemon"
 	// ControlModelInfoProcedure is the fully-qualified name of the Control's ModelInfo RPC.
 	ControlModelInfoProcedure = "/rafiki.v1.Control/ModelInfo"
+	// ControlCreateSandboxProcedure is the fully-qualified name of the Control's CreateSandbox RPC.
+	ControlCreateSandboxProcedure = "/rafiki.v1.Control/CreateSandbox"
+	// ControlListSandboxesProcedure is the fully-qualified name of the Control's ListSandboxes RPC.
+	ControlListSandboxesProcedure = "/rafiki.v1.Control/ListSandboxes"
+	// ControlRemoveSandboxProcedure is the fully-qualified name of the Control's RemoveSandbox RPC.
+	ControlRemoveSandboxProcedure = "/rafiki.v1.Control/RemoveSandbox"
 	// ControlModelRoutesProcedure is the fully-qualified name of the Control's ModelRoutes RPC.
 	ControlModelRoutesProcedure = "/rafiki.v1.Control/ModelRoutes"
 	// ControlConversationStatsProcedure is the fully-qualified name of the Control's ConversationStats
@@ -301,6 +307,9 @@ type ControlClient interface {
 	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
 	ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error)
 	ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error)
+	CreateSandbox(context.Context, *connect.Request[v1.CreateSandboxRequest]) (*connect.Response[v1.CreateSandboxResponse], error)
+	ListSandboxes(context.Context, *connect.Request[v1.ListSandboxesRequest]) (*connect.Response[v1.ListSandboxesResponse], error)
+	RemoveSandbox(context.Context, *connect.Request[v1.RemoveSandboxRequest]) (*connect.Response[v1.RemoveSandboxResponse], error)
 	// ModelRoutes explains where a request for a model would go under a routing
 	// spec: every hosting endpoint with its price, quantization, uptime and
 	// measured throughput, marked eligible or excluded with the reason. Read-only.
@@ -717,6 +726,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ModelInfo")),
 			connect.WithClientOptions(opts...),
 		),
+		createSandbox: connect.NewClient[v1.CreateSandboxRequest, v1.CreateSandboxResponse](
+			httpClient,
+			baseURL+ControlCreateSandboxProcedure,
+			connect.WithSchema(controlMethods.ByName("CreateSandbox")),
+			connect.WithClientOptions(opts...),
+		),
+		listSandboxes: connect.NewClient[v1.ListSandboxesRequest, v1.ListSandboxesResponse](
+			httpClient,
+			baseURL+ControlListSandboxesProcedure,
+			connect.WithSchema(controlMethods.ByName("ListSandboxes")),
+			connect.WithClientOptions(opts...),
+		),
+		removeSandbox: connect.NewClient[v1.RemoveSandboxRequest, v1.RemoveSandboxResponse](
+			httpClient,
+			baseURL+ControlRemoveSandboxProcedure,
+			connect.WithSchema(controlMethods.ByName("RemoveSandbox")),
+			connect.WithClientOptions(opts...),
+		),
 		modelRoutes: connect.NewClient[v1.ModelRoutesRequest, v1.ModelRoutesResponse](
 			httpClient,
 			baseURL+ControlModelRoutesProcedure,
@@ -893,6 +920,9 @@ type controlClient struct {
 	search                   *connect.Client[v1.SearchRequest, v1.SearchResponse]
 	shutdownDaemon           *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
 	modelInfo                *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
+	createSandbox            *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
+	listSandboxes            *connect.Client[v1.ListSandboxesRequest, v1.ListSandboxesResponse]
+	removeSandbox            *connect.Client[v1.RemoveSandboxRequest, v1.RemoveSandboxResponse]
 	modelRoutes              *connect.Client[v1.ModelRoutesRequest, v1.ModelRoutesResponse]
 	conversationStats        *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
 	enrollExecutor           *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
@@ -1228,6 +1258,21 @@ func (c *controlClient) ModelInfo(ctx context.Context, req *connect.Request[v1.M
 	return c.modelInfo.CallUnary(ctx, req)
 }
 
+// CreateSandbox calls rafiki.v1.Control.CreateSandbox.
+func (c *controlClient) CreateSandbox(ctx context.Context, req *connect.Request[v1.CreateSandboxRequest]) (*connect.Response[v1.CreateSandboxResponse], error) {
+	return c.createSandbox.CallUnary(ctx, req)
+}
+
+// ListSandboxes calls rafiki.v1.Control.ListSandboxes.
+func (c *controlClient) ListSandboxes(ctx context.Context, req *connect.Request[v1.ListSandboxesRequest]) (*connect.Response[v1.ListSandboxesResponse], error) {
+	return c.listSandboxes.CallUnary(ctx, req)
+}
+
+// RemoveSandbox calls rafiki.v1.Control.RemoveSandbox.
+func (c *controlClient) RemoveSandbox(ctx context.Context, req *connect.Request[v1.RemoveSandboxRequest]) (*connect.Response[v1.RemoveSandboxResponse], error) {
+	return c.removeSandbox.CallUnary(ctx, req)
+}
+
 // ModelRoutes calls rafiki.v1.Control.ModelRoutes.
 func (c *controlClient) ModelRoutes(ctx context.Context, req *connect.Request[v1.ModelRoutesRequest]) (*connect.Response[v1.ModelRoutesResponse], error) {
 	return c.modelRoutes.CallUnary(ctx, req)
@@ -1399,6 +1444,9 @@ type ControlHandler interface {
 	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
 	ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error)
 	ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error)
+	CreateSandbox(context.Context, *connect.Request[v1.CreateSandboxRequest]) (*connect.Response[v1.CreateSandboxResponse], error)
+	ListSandboxes(context.Context, *connect.Request[v1.ListSandboxesRequest]) (*connect.Response[v1.ListSandboxesResponse], error)
+	RemoveSandbox(context.Context, *connect.Request[v1.RemoveSandboxRequest]) (*connect.Response[v1.RemoveSandboxResponse], error)
 	// ModelRoutes explains where a request for a model would go under a routing
 	// spec: every hosting endpoint with its price, quantization, uptime and
 	// measured throughput, marked eligible or excluded with the reason. Read-only.
@@ -1811,6 +1859,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ModelInfo")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlCreateSandboxHandler := connect.NewUnaryHandler(
+		ControlCreateSandboxProcedure,
+		svc.CreateSandbox,
+		connect.WithSchema(controlMethods.ByName("CreateSandbox")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListSandboxesHandler := connect.NewUnaryHandler(
+		ControlListSandboxesProcedure,
+		svc.ListSandboxes,
+		connect.WithSchema(controlMethods.ByName("ListSandboxes")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRemoveSandboxHandler := connect.NewUnaryHandler(
+		ControlRemoveSandboxProcedure,
+		svc.RemoveSandbox,
+		connect.WithSchema(controlMethods.ByName("RemoveSandbox")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlModelRoutesHandler := connect.NewUnaryHandler(
 		ControlModelRoutesProcedure,
 		svc.ModelRoutes,
@@ -2047,6 +2113,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlShutdownDaemonHandler.ServeHTTP(w, r)
 		case ControlModelInfoProcedure:
 			controlModelInfoHandler.ServeHTTP(w, r)
+		case ControlCreateSandboxProcedure:
+			controlCreateSandboxHandler.ServeHTTP(w, r)
+		case ControlListSandboxesProcedure:
+			controlListSandboxesHandler.ServeHTTP(w, r)
+		case ControlRemoveSandboxProcedure:
+			controlRemoveSandboxHandler.ServeHTTP(w, r)
 		case ControlModelRoutesProcedure:
 			controlModelRoutesHandler.ServeHTTP(w, r)
 		case ControlConversationStatsProcedure:
@@ -2342,6 +2414,18 @@ func (UnimplementedControlHandler) ShutdownDaemon(context.Context, *connect.Requ
 
 func (UnimplementedControlHandler) ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ModelInfo is not implemented"))
+}
+
+func (UnimplementedControlHandler) CreateSandbox(context.Context, *connect.Request[v1.CreateSandboxRequest]) (*connect.Response[v1.CreateSandboxResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.CreateSandbox is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListSandboxes(context.Context, *connect.Request[v1.ListSandboxesRequest]) (*connect.Response[v1.ListSandboxesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListSandboxes is not implemented"))
+}
+
+func (UnimplementedControlHandler) RemoveSandbox(context.Context, *connect.Request[v1.RemoveSandboxRequest]) (*connect.Response[v1.RemoveSandboxResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemoveSandbox is not implemented"))
 }
 
 func (UnimplementedControlHandler) ModelRoutes(context.Context, *connect.Request[v1.ModelRoutesRequest]) (*connect.Response[v1.ModelRoutesResponse], error) {

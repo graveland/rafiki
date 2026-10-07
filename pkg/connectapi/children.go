@@ -123,6 +123,11 @@ type SpawnParams struct {
 	// every other kind; the controller refuses a script spawn without one.
 	Script *protocol.ScriptSpec
 
+	// Sandbox, when non-nil, is the spawn block's sandbox (proto field 31,
+	// child-allowed). Nil means the child runs on the ordinary executor set;
+	// the controller provisions and validates the container (pkg/sandbox).
+	Sandbox *protocol.SandboxSpec
+
 	MaxDepth    *int
 	MaxCost     *float64
 	MaxChildren *int

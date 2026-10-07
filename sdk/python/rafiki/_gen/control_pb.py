@@ -907,6 +907,7 @@ class SpawnRequest:
     record_requests: bool = False
     passthrough_auth: str = ""
     skip_derived_index: bool = False
+    sandbox: Optional[SandboxSpec] = None
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -967,6 +968,8 @@ class SpawnRequest:
             out["passthroughAuth"] = self.passthrough_auth
         if self.skip_derived_index != False:
             out["skipDerivedIndex"] = self.skip_derived_index
+        if self.sandbox is not None:
+            out["sandbox"] = self.sandbox.to_dict()
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1058,6 +1061,9 @@ class SpawnRequest:
         _v = _d.get("skipDerivedIndex")
         if _v is not None:
             obj.skip_derived_index = _v
+        _v = _d.get("sandbox")
+        if _v is not None:
+            obj.sandbox = SandboxSpec.from_dict(_v)
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)
@@ -2850,6 +2856,335 @@ class GetRateLimitStatusResponse:
         _v = _d.get("updatedAt")
         if _v is not None:
             obj.updated_at = _ts_in(_v, "updatedAt")
+        return obj
+
+@dataclasses.dataclass
+class SandboxMount:
+    target: str = ""
+    kind: str = ""
+    host_path: str = ""
+    volume: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.target != "":
+            out["target"] = self.target
+        if self.kind != "":
+            out["kind"] = self.kind
+        if self.host_path != "":
+            out["hostPath"] = self.host_path
+        if self.volume != "":
+            out["volume"] = self.volume
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SandboxMount":
+        obj = cls()
+        _v = _d.get("target")
+        if _v is not None:
+            obj.target = _v
+        _v = _d.get("kind")
+        if _v is not None:
+            obj.kind = _v
+        _v = _d.get("hostPath")
+        if _v is not None:
+            obj.host_path = _v
+        _v = _d.get("volume")
+        if _v is not None:
+            obj.volume = _v
+        return obj
+
+@dataclasses.dataclass
+class SandboxSpec:
+    name: str = ""
+    launcher: str = ""
+    image: str = ""
+    mounts: list[SandboxMount] = dataclasses.field(default_factory=list)
+    workdir: str = ""
+    network: str = ""
+    read_only_rootfs: bool = False
+    env: dict[str, str] = dataclasses.field(default_factory=dict)
+    user: str = ""
+    memory_bytes: int = 0
+    cpus: float = 0.0
+    pids_limit: int = 0
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    ttl: Optional[datetime.timedelta] = None
+    scope: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.launcher != "":
+            out["launcher"] = self.launcher
+        if self.image != "":
+            out["image"] = self.image
+        if self.mounts:
+            out["mounts"] = [x.to_dict() for x in self.mounts]
+        if self.workdir != "":
+            out["workdir"] = self.workdir
+        if self.network != "":
+            out["network"] = self.network
+        if self.read_only_rootfs != False:
+            out["readOnlyRootfs"] = self.read_only_rootfs
+        if self.env:
+            out["env"] = dict((k, v) for k, v in self.env.items())
+        if self.user != "":
+            out["user"] = self.user
+        if self.memory_bytes != 0:
+            out["memoryBytes"] = str(self.memory_bytes)
+        if self.cpus != 0.0:
+            out["cpus"] = _float_out(self.cpus)
+        if self.pids_limit != 0:
+            out["pidsLimit"] = str(self.pids_limit)
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.ttl is not None:
+            out["ttl"] = _dur_out(self.ttl)
+        if self.scope != "":
+            out["scope"] = self.scope
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SandboxSpec":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("launcher")
+        if _v is not None:
+            obj.launcher = _v
+        _v = _d.get("image")
+        if _v is not None:
+            obj.image = _v
+        _v = _d.get("mounts")
+        if _v is not None:
+            obj.mounts = [SandboxMount.from_dict(x) for x in _v]
+        _v = _d.get("workdir")
+        if _v is not None:
+            obj.workdir = _v
+        _v = _d.get("network")
+        if _v is not None:
+            obj.network = _v
+        _v = _d.get("readOnlyRootfs")
+        if _v is not None:
+            obj.read_only_rootfs = _v
+        _v = _d.get("env")
+        if _v is not None:
+            obj.env = {k: v for k, v in _v.items()}
+        _v = _d.get("user")
+        if _v is not None:
+            obj.user = _v
+        _v = _d.get("memoryBytes")
+        if _v is not None:
+            obj.memory_bytes = _int_in(_v)
+        _v = _d.get("cpus")
+        if _v is not None:
+            obj.cpus = _float_in(_v)
+        _v = _d.get("pidsLimit")
+        if _v is not None:
+            obj.pids_limit = _int_in(_v)
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("ttl")
+        if _v is not None:
+            obj.ttl = _dur_in(_v, "ttl")
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
+        return obj
+
+@dataclasses.dataclass
+class SandboxInfo:
+    id: str = ""
+    name: str = ""
+    executor_id: str = ""
+    launcher: str = ""
+    container_id: str = ""
+    image: str = ""
+    network: str = ""
+    state: str = ""
+    connected: bool = False
+    created_by: str = ""
+    owner_child: str = ""
+    scope: str = ""
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    created_at: Optional[datetime.datetime] = None
+    expires_at: Optional[datetime.datetime] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.id != "":
+            out["id"] = self.id
+        if self.name != "":
+            out["name"] = self.name
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        if self.launcher != "":
+            out["launcher"] = self.launcher
+        if self.container_id != "":
+            out["containerId"] = self.container_id
+        if self.image != "":
+            out["image"] = self.image
+        if self.network != "":
+            out["network"] = self.network
+        if self.state != "":
+            out["state"] = self.state
+        if self.connected != False:
+            out["connected"] = self.connected
+        if self.created_by != "":
+            out["createdBy"] = self.created_by
+        if self.owner_child != "":
+            out["ownerChild"] = self.owner_child
+        if self.scope != "":
+            out["scope"] = self.scope
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.expires_at is not None:
+            out["expiresAt"] = _ts_out(self.expires_at)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SandboxInfo":
+        obj = cls()
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        _v = _d.get("launcher")
+        if _v is not None:
+            obj.launcher = _v
+        _v = _d.get("containerId")
+        if _v is not None:
+            obj.container_id = _v
+        _v = _d.get("image")
+        if _v is not None:
+            obj.image = _v
+        _v = _d.get("network")
+        if _v is not None:
+            obj.network = _v
+        _v = _d.get("state")
+        if _v is not None:
+            obj.state = _v
+        _v = _d.get("connected")
+        if _v is not None:
+            obj.connected = _v
+        _v = _d.get("createdBy")
+        if _v is not None:
+            obj.created_by = _v
+        _v = _d.get("ownerChild")
+        if _v is not None:
+            obj.owner_child = _v
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _ts_in(_v, "createdAt")
+        _v = _d.get("expiresAt")
+        if _v is not None:
+            obj.expires_at = _ts_in(_v, "expiresAt")
+        return obj
+
+@dataclasses.dataclass
+class CreateSandboxRequest:
+    spec: Optional[SandboxSpec] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.spec is not None:
+            out["spec"] = self.spec.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CreateSandboxRequest":
+        obj = cls()
+        _v = _d.get("spec")
+        if _v is not None:
+            obj.spec = SandboxSpec.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class CreateSandboxResponse:
+    sandbox: Optional[SandboxInfo] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.sandbox is not None:
+            out["sandbox"] = self.sandbox.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CreateSandboxResponse":
+        obj = cls()
+        _v = _d.get("sandbox")
+        if _v is not None:
+            obj.sandbox = SandboxInfo.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class ListSandboxesRequest:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListSandboxesRequest":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ListSandboxesResponse:
+    sandboxes: list[SandboxInfo] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.sandboxes:
+            out["sandboxes"] = [x.to_dict() for x in self.sandboxes]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListSandboxesResponse":
+        obj = cls()
+        _v = _d.get("sandboxes")
+        if _v is not None:
+            obj.sandboxes = [SandboxInfo.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class RemoveSandboxRequest:
+    ref: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.ref != "":
+            out["ref"] = self.ref
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RemoveSandboxRequest":
+        obj = cls()
+        _v = _d.get("ref")
+        if _v is not None:
+            obj.ref = _v
+        return obj
+
+@dataclasses.dataclass
+class RemoveSandboxResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RemoveSandboxResponse":
+        obj = cls()
         return obj
 
 @dataclasses.dataclass

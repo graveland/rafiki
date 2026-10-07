@@ -822,6 +822,9 @@ func runDaemon(opts runDaemonOpts) error {
 			if ctrl.gitpymoduleStore != nil {
 				face.Control.SetGitSourceManager(connectGitSources{c: ctrl})
 			}
+			if ctrl.sandboxStore != nil {
+				face.Control.SetSandboxManager(connectSandbox{c: ctrl})
+			}
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
 			}

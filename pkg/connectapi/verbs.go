@@ -299,9 +299,9 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14 and 30, the child-reachable shape
-// of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any other set
-// field — including one added in the future — is refused to a child
+// with child provenance may set (fields 1-14, 30 and 31: the child-reachable
+// shape of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any
+// other set field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
 // in this set, rather than open on a literal operator-only list that a new
 // field could silently miss. See control.proto:310 and
@@ -311,6 +311,9 @@ var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
 	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
 	30: true,
+	// 31 (sandbox) is child-allowed on purpose: SandboxSpec cannot express
+	// privilege (see control.proto's comment on SpawnRequest.sandbox).
+	31: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req
@@ -427,6 +430,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Preset:           m.GetPreset(),
 		Prefill:          prefillFromProto(m.GetPrefill()),
 		Script:           scriptFromProto(m.GetScript()),
+		Sandbox:          sandboxSpecFromProto(m.GetSandbox()),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
 		SkipDerivedIndex: m.GetSkipDerivedIndex(),

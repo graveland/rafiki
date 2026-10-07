@@ -340,6 +340,23 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 	}
 }
 
+// TestSandboxVerbsAreClassifiedForChildren pins the sandbox verbs' policy
+// classes: CreateSandbox and RemoveSandbox are childScoped (a per-child
+// credential may provision and tear down its own containers, bounded in the
+// Controller), and ListSandboxes is ownerScoped (the caller's OWNER's rows,
+// never an admin's whole fleet). A drift to userOnly would make the sandbox
+// tools unreachable from a child; a drift to anyCaller would leak the fleet.
+func TestSandboxVerbsAreClassifiedForChildren(t *testing.T) {
+	for name, want := range map[string]controlPolicy{
+		"CreateSandbox": policyChildScoped,
+		"RemoveSandbox": policyChildScoped,
+		"ListSandboxes": policyOwnerScoped,
+	} {
+		got := policyFor(controlProcedurePrefix + name)
+		assert.NewCollecting(t).Eq(want, got, "policyFor(Control.%s) = %v, want", name, got)
+	}
+}
+
 // TestAuthorizeControlProcedure pins the identity × policy matrix at the
 // interceptor level. Admit is exactly nil; refuse is exactly
 // CodePermissionDenied. The empty Identity{} — what a bare per-boot token

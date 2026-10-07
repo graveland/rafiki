@@ -54,7 +54,9 @@ const (
 	// caller's subtree (childConversationScope); the pymodule verbs, read
 	// from and written to the owner's corpus exactly as the MCP face's
 	// pymodule tools do; and PutPreset/DeletePreset, which the handler admits
-	// only for a top-level child. The gate admits a
+	// only for a top-level child; and the sandbox verbs CreateSandbox and
+	// RemoveSandbox, which a child may call on its OWN containers (the
+	// Controller clamps and bounds what it may create or remove). The gate admits a
 	// ProvenanceChildToken caller on them, but a procedure name carries no
 	// target child id, so the gate cannot check the subtree itself: it admits
 	// and the HANDLER resolves the caller's subtree authority through
@@ -75,7 +77,7 @@ const (
 
 	// policyOwnerScoped marks the verbs that answer from the caller's OWNER's
 	// data — Recall, RecallContext, GetMemory, MemoryTree, PutMemory,
-	// DeleteMemory. The gate admits a ProvenanceChildToken caller only (the
+	// DeleteMemory, ListSandboxes. The gate admits a ProvenanceChildToken caller only (the
 	// other two child credentials name no owner and stay refused); the handler
 	// resolves the owner's NON-admin identity through recallOwner, so a child
 	// of an admin never reads daemon-wide. No subtree check: the surface is the
@@ -209,6 +211,17 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ListRoutes":  policyAnyCaller,
 	"SetRoute":    policyUserOnly,
 	"DeleteRoute": policyUserOnly,
+
+	// Sandboxes. CreateSandbox/RemoveSandbox are childScoped: a per-child
+	// credential may provision and tear down its OWN containers, bounded
+	// inside the Controller (a child's resources are clamped, its host paths
+	// are bounded by the launcher's mount roots, and it may remove only a row
+	// it or a descendant created). ListSandboxes is ownerScoped: it answers
+	// from the caller's OWNER's rows — never an admin's whole fleet — the same
+	// surface the recall tools give a child.
+	"CreateSandbox": policyChildScoped,
+	"RemoveSandbox": policyChildScoped,
+	"ListSandboxes": policyOwnerScoped,
 
 	// userOnly: the framed-protocol retirement verbs — operator verbs; no
 	// child tool reaches them; CreateUser/ListUsers/RemoveUser add an admin

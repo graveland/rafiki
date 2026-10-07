@@ -234,6 +234,15 @@ type SpawnRequest struct {
 	// tool_use/tool_result history. fundi only. Empty means none.
 	Prefill []PrefillRead `json:"prefill,omitempty"`
 
+	// Sandbox, when set, is the spawn block's sandbox: the new child's executor
+	// is provisioned into a container described by it, and the container's
+	// executor is offered to the child (ScopeSelf) or its subtree
+	// (ScopeSubtree). Nil means the child runs on the ordinary executor set.
+	// Child-allowed on the Connect wire (SpawnRequest.sandbox = 31): SandboxSpec
+	// cannot express privilege (host paths are bounded by the launcher's mount
+	// roots, volumes are owner-prefixed, resources are clamped).
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+
 	// ConfigDir, for kind=claude, is exported to the child as CLAUDE_CONFIG_DIR
 	// — it selects the claude config dir (plugins, hooks, MCP, settings). It is
 	// persisted so a resumed claude child re-uses the same profile.

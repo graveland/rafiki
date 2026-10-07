@@ -27,6 +27,10 @@ func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	// "unimplemented". This line is the pin.
 	var _ connectapi.DescendantLister = connectLifecycle{}
 	var _ connectapi.ConversationResolver = (*Controller)(nil)
+	// The sandbox adapters are wired as connectSandbox, not *Controller — the
+	// compiler stays silent if the adapter drops a method, so this line is the
+	// pin that every sandbox RPC stays reachable.
+	var _ connectapi.SandboxManager = connectSandbox{}
 }
 
 // stubChildStore is a no-op childstore.ChildStore; stubLineageStore embeds it
