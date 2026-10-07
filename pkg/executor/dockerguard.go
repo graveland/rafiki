@@ -3,7 +3,6 @@
 package executor
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -46,6 +45,14 @@ func guardContainersCreate(start *executorpb.ProxyStart) bool {
 // still ends at the create route behind a prefix it did not strip is guarded
 // rather than allowed to stream unchecked.
 func isContainersCreate(p string) bool {
+	// The engine routes on the DECODED path and a Go client drops the fragment,
+	// so a path carrying a percent-escape or a fragment is one the guard cannot
+	// reason about — treat it as a create. Over-inclusive is safe: a body with
+	// nothing privileged passes through untouched, while under-inclusive would
+	// stream a Binds/Mounts body unchecked.
+	if strings.ContainsAny(p, "%#") {
+		return true
+	}
 	raw, _, _ := strings.Cut(p, "?")
 	clean := strings.ToLower(path.Clean(raw))
 
@@ -61,117 +68,146 @@ func isContainersCreate(p string) bool {
 	return strings.HasSuffix(clean, "/containers/create")
 }
 
-// checkCreateBody inspects a docker container-create body and refuses any mount
-// or privilege field that could reach past the operator's declared sandbox
-// roots. It stays narrow — only the HostConfig fields below are read, and
-// nothing the container reports gates anything — but it fails closed on
-// everything the daemon cannot express: the daemon's CreateBody emits only
-// mount {Type,Source,Target,ReadOnly}, so a body carrying Binds, VolumeOptions,
-// a device, extra capabilities, a host namespace, or privileged mode did not
-// come from our daemon and is refused.
-//
-// Binds are refused outright because their source is a bare host path that is
-// easy to get wrong; Mounts name a Type, so a bind can be told from a volume.
-// A volume or tmpfs with no VolumeOptions is passed (the daemon controls what
-// those contain); a bind must resolve to the relay dir or under one of the
-// declared roots.
-func checkCreateBody(body []byte, roots []string, relayDir string) error {
-	var req struct {
-		HostConfig struct {
-			Binds  []string `json:"Binds"`
-			Mounts []struct {
-				Type          string          `json:"Type"`
-				Source        string          `json:"Source"`
-				Target        string          `json:"Target"`
-				VolumeOptions json.RawMessage `json:"VolumeOptions"`
-			} `json:"Mounts"`
-			Privileged  bool              `json:"Privileged"`
-			Devices     []json.RawMessage `json:"Devices"`
-			VolumesFrom []string          `json:"VolumesFrom"`
-			CapAdd      []string          `json:"CapAdd"`
-			CapDrop     []string          `json:"CapDrop"`
-			SecurityOpt []string          `json:"SecurityOpt"`
-			PidMode     string            `json:"PidMode"`
-			IpcMode     string            `json:"IpcMode"`
-			UTSMode     string            `json:"UTSMode"`
-			UsernsMode  string            `json:"UsernsMode"`
-			NetworkMode string            `json:"NetworkMode"`
-		} `json:"HostConfig"`
+// Allowlists of exactly the keys the daemon's CreateBody emits
+// (pkg/sandbox/createbody.go). Anything else is refused: the daemon's body is
+// a fixed struct, so a key outside these sets did not come from our daemon. A
+// denylist would only enforce what its author remembered.
+var (
+	createBodyTopKeys = map[string]bool{
+		"Image": true, "Entrypoint": true, "Cmd": true, "WorkingDir": true,
+		"Env": true, "Labels": true, "User": true, "HostConfig": true,
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("sandbox: malformed container create body: %w", err))
+	hostConfigKeys = map[string]bool{
+		"Mounts": true, "NetworkMode": true, "ReadonlyRootfs": true,
+		"Memory": true, "NanoCpus": true, "PidsLimit": true, "RestartPolicy": true,
 	}
+	mountKeys         = map[string]bool{"Type": true, "Source": true, "Target": true, "ReadOnly": true}
+	restartPolicyKeys = map[string]bool{"Name": true}
+)
 
-	if len(req.HostConfig.Binds) > 0 {
-		return connect.NewError(connect.CodePermissionDenied,
-			fmt.Errorf("sandbox: container create declares binds %v; use Mounts with an explicit type", req.HostConfig.Binds))
-	}
-
-	for _, m := range req.HostConfig.Mounts {
-		// A volume can itself be a host bind: VolumeOptions with a local
-		// driver whose options name a device bind /etc onto a "volume". The
-		// daemon never emits VolumeOptions, so any non-null value is refused.
-		if opts := bytes.TrimSpace(m.VolumeOptions); len(opts) > 0 && !bytes.Equal(opts, []byte("null")) {
+// refuseUnknownKeys returns a PermissionDenied error naming the first key in m
+// that is not on allowed.
+func refuseUnknownKeys(where string, m map[string]json.RawMessage, allowed map[string]bool) error {
+	for k := range m {
+		if !allowed[k] {
 			return connect.NewError(connect.CodePermissionDenied,
-				fmt.Errorf("sandbox: mount %q carries VolumeOptions %s, which can hide a host bind", m.Target, opts))
+				fmt.Errorf("sandbox: %s carries key %q, which the daemon never emits", where, k))
 		}
-		switch m.Type {
-		case "volume", "tmpfs":
-			// The daemon owns the contents of these; nothing host-side is
-			// exposed by naming one.
-		case "bind":
-			if err := checkBindSource(m.Source, roots, relayDir); err != nil {
-				return err
-			}
-		default:
-			return connect.NewError(connect.CodePermissionDenied,
-				fmt.Errorf("sandbox: mount %q has unsupported type %q", m.Target, m.Type))
-		}
-	}
-
-	if err := checkPrivilege(req.HostConfig.Privileged, req.HostConfig.Devices, req.HostConfig.VolumesFrom,
-		req.HostConfig.CapAdd, req.HostConfig.CapDrop, req.HostConfig.SecurityOpt, req.HostConfig.PidMode,
-		req.HostConfig.IpcMode, req.HostConfig.UTSMode, req.HostConfig.UsernsMode, req.HostConfig.NetworkMode); err != nil {
-		return err
 	}
 	return nil
 }
 
-// checkPrivilege refuses the HostConfig fields that grant a container more
-// privilege than a sandbox spec allows. The daemon's CreateBody cannot set any
-// of them, so their mere presence means the body did not come from our daemon.
-func checkPrivilege(privileged bool, devices []json.RawMessage, volumesFrom, capAdd, capDrop, securityOpt []string,
-	pidMode, ipcMode, utsMode, usernsMode, networkMode string) error {
-	refuse := func(field string, value any) error {
-		return connect.NewError(connect.CodePermissionDenied,
-			fmt.Errorf("sandbox: container create sets %s=%v, which the daemon never emits", field, value))
+// checkCreateBody inspects a docker container-create body against the exact
+// shape the daemon emits and refuses anything outside it. It fails CLOSED: the
+// top level, HostConfig, each mount and RestartPolicy are decoded into maps and
+// every key not on the daemon's allowlist is refused, so a privilege field this
+// code has never heard of (DeviceCgroupRules, Sysctls, Binds, VolumeOptions, a
+// host namespace, …) is refused by construction rather than by enumeration.
+//
+// A bind mount's source must resolve (through symlinks) to the relay dir or
+// under one of the operator's declared sandbox roots; a volume or tmpfs mount
+// passes; NetworkMode is limited to "", bridge or none.
+func checkCreateBody(body []byte, roots []string, relayDir string) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sandbox: malformed container create body: %w", err))
 	}
-	switch {
-	case privileged:
-		return refuse("Privileged", privileged)
-	case len(devices) > 0:
-		return refuse("Devices", len(devices))
-	case len(volumesFrom) > 0:
-		return refuse("VolumesFrom", volumesFrom)
-	case len(capAdd) > 0:
-		return refuse("CapAdd", capAdd)
-	case len(capDrop) > 0:
-		return refuse("CapDrop", capDrop)
-	case len(securityOpt) > 0:
-		return refuse("SecurityOpt", securityOpt)
-	case pidMode != "":
-		return refuse("PidMode", pidMode)
-	case ipcMode != "":
-		return refuse("IpcMode", ipcMode)
-	case utsMode != "":
-		return refuse("UTSMode", utsMode)
-	case usernsMode != "":
-		return refuse("UsernsMode", usernsMode)
-	case networkMode != "" && networkMode != "bridge" && networkMode != "none":
-		return refuse("NetworkMode", networkMode)
+	if err := refuseUnknownKeys("create body", top, createBodyTopKeys); err != nil {
+		return err
+	}
+
+	hcRaw, ok := top["HostConfig"]
+	if !ok {
+		// No HostConfig: nothing host-side is requested, so nothing to guard.
+		return nil
+	}
+	var hc map[string]json.RawMessage
+	if err := json.Unmarshal(hcRaw, &hc); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sandbox: malformed HostConfig: %w", err))
+	}
+	if err := refuseUnknownKeys("HostConfig", hc, hostConfigKeys); err != nil {
+		return err
+	}
+
+	if raw, ok := hc["NetworkMode"]; ok {
+		var mode string
+		if err := json.Unmarshal(raw, &mode); err != nil {
+			return connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("sandbox: malformed NetworkMode: %w", err))
+		}
+		if mode != "" && mode != "bridge" && mode != "none" {
+			return connect.NewError(connect.CodePermissionDenied,
+				fmt.Errorf("sandbox: container create sets NetworkMode=%q, which the daemon never emits", mode))
+		}
+	}
+
+	if raw, ok := hc["RestartPolicy"]; ok {
+		var rp map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &rp); err != nil {
+			return connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("sandbox: malformed RestartPolicy: %w", err))
+		}
+		if err := refuseUnknownKeys("RestartPolicy", rp, restartPolicyKeys); err != nil {
+			return err
+		}
+	}
+
+	rawMounts, ok := hc["Mounts"]
+	if !ok {
+		return nil
+	}
+	var mounts []map[string]json.RawMessage
+	if err := json.Unmarshal(rawMounts, &mounts); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sandbox: malformed Mounts: %w", err))
+	}
+	for _, m := range mounts {
+		if err := refuseUnknownKeys("mount", m, mountKeys); err != nil {
+			return err
+		}
+		typ, err := mountString(m, "Type")
+		if err != nil {
+			return err
+		}
+		src, err := mountString(m, "Source")
+		if err != nil {
+			return err
+		}
+		target, err := mountString(m, "Target")
+		if err != nil {
+			return err
+		}
+		switch typ {
+		case "volume", "tmpfs":
+			// The daemon owns the contents of these; nothing host-side is
+			// exposed by naming one.
+		case "bind":
+			if err := checkBindSource(src, roots, relayDir); err != nil {
+				return err
+			}
+		default:
+			return connect.NewError(connect.CodePermissionDenied,
+				fmt.Errorf("sandbox: mount %q has unsupported type %q", target, typ))
+		}
 	}
 	return nil
+}
+
+// mountString extracts a string field from a decoded mount, refusing a
+// wrong-typed value rather than silently treating it as empty.
+func mountString(m map[string]json.RawMessage, key string) (string, error) {
+	raw, ok := m[key]
+	if !ok {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sandbox: malformed mount %s: %w", key, err))
+	}
+	return s, nil
 }
 
 // checkBindSource resolves src through every symlink and refuses it unless it

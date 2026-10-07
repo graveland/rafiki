@@ -10,6 +10,9 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sandbox"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -137,6 +140,11 @@ func TestDockerGuardRouteMatching(t *testing.T) {
 		"/v1.43./containers/create",
 		"/Containers/Create",
 		"/V1.43/Containers/Create",
+		// A fragment or percent-escape is a path the guard cannot reason
+		// about (the engine routes on the decoded path), so it is guarded.
+		"/containers/create#x",
+		"/containers/creat%65",
+		"/%63ontainers/create",
 	}
 	for _, p := range guard {
 		c.True(isContainersCreate(p), "%q must be guarded", p)
@@ -154,20 +162,87 @@ func TestDockerGuardRouteMatching(t *testing.T) {
 	}
 }
 
-func TestDockerGuardRefusesVolumeOptions(t *testing.T) {
+func TestDockerGuardRefusesVolumeOptionsKey(t *testing.T) {
 	c := assert.NewCollecting(t)
-	// A "volume" whose local driver binds /etc — the exact bypass body.
-	body := []byte(`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/v","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`)
-	err := checkCreateBody(body, []string{t.TempDir()}, "")
-	c.Require().Error(err, "volume with VolumeOptions must be refused")
+	// The mount allowlist is Type/Source/Target/ReadOnly only, so the
+	// VolumeOptions KEY is refused whatever its value — non-null, or null.
+	for _, body := range []string{
+		`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/v","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`,
+		`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/v","VolumeOptions":null}]}}`,
+	} {
+		err := checkCreateBody([]byte(body), nil, "")
+		c.Require().Error(err, "VolumeOptions must be refused: %s", body)
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+	}
+}
+
+func TestDockerGuardRefusesUnknownHostConfigKey(t *testing.T) {
+	// Denylist misses; the allowlist refuses all of these by construction.
+	unlisted := map[string]any{
+		"DeviceCgroupRules": []string{"b *:* rwm"},
+		"Sysctls":           map[string]string{"net.ipv4.ip_forward": "1"},
+		"MaskedPaths":       []string{},
+		"ReadonlyPaths":     []string{},
+		"Runtime":           "runsc",
+		"CgroupParent":      "x",
+		"CgroupnsMode":      "host",
+		"DeviceRequests":    []any{},
+		"VolumeDriver":      "local",
+		"Isolation":         "hyperv",
+	}
+	for name, value := range unlisted {
+		t.Run(name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			err := checkCreateBody(hostConfigBody(t, map[string]any{name: value}), nil, "")
+			c.Require().Error(err, "%s must be refused", name)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+		})
+	}
+}
+
+func TestDockerGuardRefusesUnknownTopLevelKey(t *testing.T) {
+	c := assert.NewCollecting(t)
+	body := []byte(`{"Image":"x","NetworkingConfig":{"EndpointsConfig":{}},"HostConfig":{}}`)
+	err := checkCreateBody(body, nil, "")
+	c.Require().Error(err, "unknown top-level key must be refused")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
 
-func TestDockerGuardAllowsEmptyVolumeOptions(t *testing.T) {
-	c := assert.NewCollecting(t)
-	// Explicit null VolumeOptions is still "no options" and passes.
-	body := []byte(`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/v","VolumeOptions":null}]}}`)
-	c.NoError(checkCreateBody(body, nil, ""), "null VolumeOptions")
+// TestDockerGuardAcceptsDaemonCreateBody pins that the daemon's own
+// CreateBody output — the only body this guard should ever see — passes end to
+// end, so the allowlist matches the emitted struct exactly.
+func TestDockerGuardAcceptsDaemonCreateBody(t *testing.T) {
+	c := assert.NewAborting(t)
+	root := t.TempDir()
+	c.NoError(os.Mkdir(filepath.Join(root, "ro"), 0o755), "mkdir bind source")
+	relay := t.TempDir()
+
+	r := sandbox.Resolved{SandboxSpec: protocol.SandboxSpec{
+		Image:          "img:1",
+		Network:        protocol.NetworkEgress,
+		ReadOnlyRootfs: true,
+		Workdir:        "/work",
+		User:           "1000:1000",
+		MemoryBytes:    64 << 20,
+		CPUs:           1.5,
+		PidsLimit:      128,
+		Env:            map[string]string{"A": "1"},
+		Labels:         map[string]string{"team": "x"},
+		Mounts: []protocol.SandboxMount{
+			{Target: "/ro", Kind: protocol.MountRO, HostPath: filepath.Join(root, "ro")},
+			{Target: "/vol", Kind: protocol.MountRW, Volume: "data"},
+			{Target: "/tmp", Kind: protocol.MountEphemeral},
+		},
+	}}
+	in := sandbox.CreateInputs{
+		SandboxID:      "sbx-1",
+		Credential:     "cred",
+		RelayHostDir:   relay,
+		OwnerVolumeKey: "ownerk",
+	}
+	body, err := sandbox.CreateBody(r, in)
+	c.NoError(err, "CreateBody")
+	c.NoError(checkCreateBody(body, []string{root}, relay), "the daemon's own body must pass the guard")
 }
 
 func TestDockerGuardRefusesPrivilegeFields(t *testing.T) {

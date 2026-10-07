@@ -264,3 +264,46 @@ func TestDockerGuardAppliesToVersionGrammar(t *testing.T) {
 		})
 	}
 }
+
+func TestDockerGuardRefusesEncodedCreatePath(t *testing.T) {
+	// The engine routes on the decoded path and a Go client drops the
+	// fragment, so the guard must treat these as creates rather than stream
+	// their body unchecked.
+	paths := []string{
+		"/containers/create#x",
+		"/containers/creat%65",
+		"/%63ontainers/create",
+	}
+	bad := []byte(`{"HostConfig":{"Binds":["/:/host"]}}`)
+	for _, p := range paths {
+		t.Run(p, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			url, rec := echoUpstream(t)
+			esrv := executor.NewServer(executor.Options{
+				Root:    t.TempDir(),
+				Proxies: map[string]string{"docker": url},
+			})
+			_, _, err := proxyOnce(t, esrv, "docker", "POST", p, nil, bad)
+			c.Require().Error(err, "create at %q must be guarded", p)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+			c.Eq("", rec.method, "upstream must never be reached for %q", p)
+		})
+	}
+}
+
+func TestDockerGuardPassesNormalPostThrough(t *testing.T) {
+	c := assert.NewAborting(t)
+	url, rec := echoUpstream(t)
+	esrv := executor.NewServer(executor.Options{
+		Root:    t.TempDir(),
+		Proxies: map[string]string{"docker": url},
+	})
+	head, respBody, err := proxyOnce(t, esrv, "docker", "POST", "/containers/json", nil, []byte(`{"all":true}`))
+	c.NoError(err, "a non-create POST must stream through")
+	c.Require().NotNil(head, "head")
+	c.Eq(int32(200), head.Status, "status")
+	c.Eq("upstream-ok", string(respBody), "upstream body")
+	c.Eq("POST", rec.method, "upstream method")
+	c.Eq("/containers/json", rec.path, "upstream path")
+	c.Eq(`{"all":true}`, string(rec.body), "body reached upstream intact")
+}
