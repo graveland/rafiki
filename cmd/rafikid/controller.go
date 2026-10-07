@@ -60,6 +60,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -412,6 +413,21 @@ type Controller struct {
 	// execStore is the durable executor registry. Nil when the executor
 	// listener is not configured (require the pool to mint tokens).
 	execStore executors.Store
+
+	// sandboxStore is the durable sandbox registry (conversations.sandbox).
+	// Nil on a database-less daemon: every sandbox verb then returns
+	// ErrInternal "sandboxes require a database" — there is no DB-less path.
+	sandboxStore sandbox.Store
+	// sandboxCfg is the daemon's sandbox configuration, resolved once from the
+	// environment at startup (main.go). Zero on a database-less daemon, where
+	// no sandbox verb runs.
+	sandboxCfg sandbox.Config
+	// sandboxEngine builds the Docker Engine client for one launcher executor.
+	// In production it is sandbox.NewEngine over execpool.NewProxyTransport for
+	// the executor's own docker proxy; tests install a seam over an httptest
+	// transport. Nil only when the feature is unwired (a hand-built test
+	// Controller), where the sandbox verbs fail closed.
+	sandboxEngine func(launcherID string) *sandbox.Engine
 
 	// skillStore is the database-backed skills tier. nil when the daemon has
 	// no store, in which case children get only their on-disk tiers.

@@ -43,6 +43,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/sandbox"
+	"go.graveland.dev/rafiki/pkg/sandboxdb"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -582,7 +584,24 @@ func runDaemon(opts runDaemonOpts) error {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
+	// Sandbox configuration is env-derived and read once at startup; a
+	// malformed value is fatal — the daemon must not run with a sandbox config
+	// nobody can trust.
+	sandboxCfg, err := sandbox.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		slog.Error("invalid sandbox configuration", "error", err)
+		os.Exit(1)
+	}
+	// The sandbox registry: daemon-only, beside the other stores. A database-
+	// less daemon leaves it nil, and every sandbox verb then answers ErrInternal.
+	var sandboxStore sandbox.Store
+	if pool != nil {
+		sandboxStore = sandboxdb.NewPostgresStore(pool)
+	}
+
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
+	ctrl.sandboxCfg = sandboxCfg
+	ctrl.sandboxStore = sandboxStore
 	ctrl.streamRevoke = streamRevoke
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
@@ -612,6 +631,11 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool
 		ctrl.execPoolConn = execPool
+		// The sandbox Docker Engine reaches a launcher's docker proxy through
+		// the pool: one transport per launcher, built lazily per call.
+		ctrl.sandboxEngine = func(launcherID string) *sandbox.Engine {
+			return sandbox.NewEngine(execpool.NewProxyTransport(execPool, launcherID, sandbox.DockerProxyName))
+		}
 		// One sweeper for the pool, regardless of how many listeners feed it.
 		// It used to start inside the TLS branch, which was correct only while
 		// that was the sole way in; the unix listener below is the second.
@@ -882,6 +906,7 @@ func runDaemon(opts runDaemonOpts) error {
 
 	ctrl.startSweeper(ctx)
 	ctrl.startLeaseRenewal(ctx)
+	ctrl.startSandboxSweeper(ctx)
 
 	if pool != nil {
 		go syncPricingLoop(baseCtx, pool, catalog)
