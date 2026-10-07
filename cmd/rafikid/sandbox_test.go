@@ -1363,6 +1363,136 @@ func TestSandboxWorkdirForExecutorResolvesASandboxToItsContainerWorkdir(t *testi
 	ck.False(ok, "a non-sandbox executor keeps req.Cwd")
 }
 
+// --- C3: a sandbox row is never a launcher --------------------------------
+
+// TestSandboxResolveLauncherSkipsASandboxRow: a sandbox row is never itself a
+// launcher (nesting is out of scope in v1), even if it advertises the docker
+// proxy. A connection that won a sandbox credential must not be offered new
+// sandboxes' create bodies (which carry the new sandbox's durable credential).
+func TestSandboxResolveLauncherSkipsASandboxRow(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	le := sandboxLauncher("exec-sbx", "box", owner.UserID)
+	le.Executor.Labels[sandbox.RowLabelSandbox] = "1"
+	le.Executor.Labels[sandbox.RowLabelID] = "sbx-1"
+	env.pool.live = []execpool.LiveExecutor{le}
+
+	_, err := env.ctrl.resolveSandboxLauncher("", owner, "")
+	ck.Error(err, "a sandbox row must not be a launcher")
+	ck.StrContains(err.Error(), "no docker launcher is in scope", "refusal: %v", err)
+}
+
+// TestSandboxReaperSkipsASandboxRow: the orphan-container reaper iterates docker
+// executors; a sandbox row must be skipped so it never touches an engine it does
+// not own.
+func TestSandboxReaperSkipsASandboxRow(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	le := sandboxLauncher("exec-sbx", "box", owner.UserID)
+	le.Executor.Labels[sandbox.RowLabelSandbox] = "1"
+	le.Executor.Labels[sandbox.RowLabelID] = "sbx-1"
+	env.pool.live = []execpool.LiveExecutor{le}
+	env.docker.list = []map[string]any{{
+		"Id": "orphan-1", "State": "running",
+		"Labels": map[string]string{sandbox.DockerLabelSandbox: "sbx_nonexistent"},
+	}}
+
+	env.ctrl.reapOrphanContainers(context.Background())
+	ck.False(sandboxHas(env.docker.removed, "orphan-1"),
+		"a sandbox executor must not reap orphans: %v", env.docker.removed)
+}
+
+// --- B1: a sandbox-labelled executor row is deletable once its sandbox is gone
+
+// TestSandboxExecutorRmAllowedWhenSandboxRowGoneOrTombstoned: the refusal is
+// keyed on a LIVE sandbox row. A row whose sandbox row is absent or already
+// tombstoned (crash-F1) must be deletable — `rafiki sandbox rm` cannot find a
+// tombstoned row, so otherwise it is undeletable and blocks its (owner, machine)
+// name forever.
+func TestSandboxExecutorRmAllowedWhenSandboxRowGoneOrTombstoned(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	for _, tc := range []struct {
+		name  string
+		row   *sandbox.Row
+		allow bool
+	}{
+		{name: "a live sandbox row keeps the refusal", row: &sandbox.Row{ID: "sbx-1", State: sandboxStateReady}, allow: false},
+		{name: "an absent sandbox row allows the delete", row: nil, allow: true},
+		{name: "a tombstoned sandbox row allows the delete", row: &sandbox.Row{ID: "sbx-1", State: sandboxStateReady, RemovedAt: &now}, allow: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			env := newSandboxEnv(t)
+			env.exec.execs["exec-sbx"] = executors.Executor{
+				ID: "exec-sbx", Enabled: true,
+				Labels: map[string]string{sandbox.RowLabelSandbox: "1", sandbox.RowLabelID: "sbx-1"},
+			}
+			if tc.row != nil {
+				insertSandboxRow(env, *tc.row)
+			}
+
+			err := env.ctrl.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: "exec-sbx"})
+			if tc.allow {
+				ck.NoError(err, "the row must be deletable once its sandbox is gone")
+				ck.True(sandboxHas(env.exec.deleted, "exec-sbx"), "the row was deleted: %v", env.exec.deleted)
+				return
+			}
+			ck.Error(err, "a live sandbox's executor row must still be refused")
+			ck.StrContains(err.Error(), "rafiki sandbox rm", "refusal: %v", err)
+			_, still := env.exec.execs["exec-sbx"]
+			ck.True(still, "the row was not deleted")
+		})
+	}
+}
+
+// --- C1: a child-created sandbox's owner label is its owner's, not the daemon's
+
+// TestSandboxOwnerLabelIsTheCreatorChildsOwner: every child-provenance identity
+// carries an EMPTY Username, so sessionOwner would stamp the DAEMON's OS user on
+// a child's sandbox — the same owner for two different users' children, a
+// cross-owner collision on the executor's (owner, machine) unique index and a
+// lie in `executor ls`. The label must follow the creator child's attested
+// `owner` label, as attestOwner does for the child's own label.
+func TestSandboxOwnerLabelIsTheCreatorChildsOwner(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	// Two child-provenance owners: EMPTY Username, exactly the shape Connect's
+	// sandboxCaller, MCP's mcpSandboxOwner and fundi's controllerSandboxes all
+	// hand in.
+	ownerA := users.Identity{UserID: "user-a"}
+	ownerB := users.Identity{UserID: "user-b"}
+	env.pool.live = []execpool.LiveExecutor{
+		sandboxLauncher("launcher-a", "box-a", ownerA.UserID),
+		sandboxLauncher("launcher-b", "box-b", ownerB.UserID),
+		spawnedExecutor("exec-created", ownerA.UserID),
+	}
+	env.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c-alice", Status: protocol.StatusIdle, StartedAt: time.Now(),
+		Labels: map[string]string{"owner": "alice"},
+	})
+	env.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c-bob", Status: protocol.StatusIdle, StartedAt: time.Now(),
+		Labels: map[string]string{"owner": "bob"},
+	})
+
+	_, err := env.ctrl.SandboxCreate(context.Background(), ownerA, "c-alice",
+		protocol.SandboxSpec{Name: "dev-a", Image: "rafiki/sandbox:test"})
+	ck.Require().NoError(err, "alice's child creates a sandbox")
+	_, err = env.ctrl.SandboxCreate(context.Background(), ownerB, "c-bob",
+		protocol.SandboxSpec{Name: "dev-b", Image: "rafiki/sandbox:test"})
+	ck.Require().NoError(err, "bob's child creates a sandbox")
+
+	ck.Require().Len(env.exec.creates, 2, "two executor mints")
+	ck.Eq("alice", env.exec.creates[0].Labels["owner"], "the first sandbox's owner label")
+	ck.Eq("bob", env.exec.creates[1].Labels["owner"], "the second sandbox's owner label")
+}
+
 // --- test helpers -----------------------------------------------------------
 
 // sandboxOldTime is a created_at old enough to pass sandboxMinReapAge, so a

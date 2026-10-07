@@ -223,6 +223,40 @@ func sandboxContainerWorkdir(resolved sandbox.Resolved) string {
 	return "/"
 }
 
+// sandboxOwnerName resolves the owner NAME a sandbox's daemon-written `owner`
+// label carries. Every child-provenance identity carries an EMPTY Username
+// (Connect sandboxCaller, MCP mcpSandboxOwner, fundi controllerSandboxes.owner,
+// the fundi spawner), so sessionOwner would fall back to the DAEMON's OS user
+// and stamp a child's sandbox with the wrong owner — a cross-owner collision on
+// the executor's (owner, machine) unique index and a lie in `executor ls`.
+//
+// It derives the name the way attestOwner does for the child's own label: the
+// creator child's attested `owner` label, else sessionOwner(owner) (a real
+// username, or the daemon's OS user for a local UDS caller).
+func (c *Controller) sandboxOwnerName(creatorChild string, owner users.Identity) (string, error) {
+	if creatorChild != "" {
+		if snap, ok := c.st.Get(creatorChild); ok && snap.Labels["owner"] != "" {
+			return snap.Labels["owner"], nil
+		}
+	}
+	return sessionOwner(owner)
+}
+
+// sandboxRowLive reports whether the sandbox row id names exists and is not
+// tombstoned. A nil sandbox store cannot answer, so it reports TRUE — the
+// caller (ExecutorDelete) keeps its refusal rather than deleting a row it
+// cannot prove is orphaned.
+func (c *Controller) sandboxRowLive(ctx context.Context, id string) (bool, error) {
+	if c.sandboxStore == nil {
+		return true, nil
+	}
+	row, ok, err := c.sandboxStore.Get(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return ok && row.RemovedAt == nil, nil
+}
+
 // sandboxWorkdirForExecutor returns the container cwd a child bound to
 // executorID must start its tools in, and whether executorID is a sandbox at
 // all. It reads the sandbox row the executor's rafiki/sandbox-id label names and
@@ -301,6 +335,13 @@ func (c *Controller) resolveSandboxLauncher(creatorChild string, owner users.Ide
 	for _, e := range set {
 		le, ok := byID[e.ID]
 		if !ok {
+			continue
+		}
+		// A sandbox is never itself a launcher: nesting is out of scope in v1,
+		// and a container that won a sandbox credential must not be offered new
+		// sandboxes' create bodies (which carry the new sandbox's durable
+		// credential). One line, fail closed.
+		if isSandboxRow(le.Executor) {
 			continue
 		}
 		if hasProxy(le.Proxies, sandbox.DockerProxyName) {
@@ -455,7 +496,11 @@ func (c *Controller) sandboxProvision(
 	// between the mint and the insert (including ErrNameTaken) is unwound by the
 	// deferred rollback above, which evicts and deletes a minted executor — so no
 	// failure path leaks one.
-	labels, err := executorTrustLabels(owner, name, resolved.Labels)
+	ownerName, err := c.sandboxOwnerName(row.CreatedBy, owner)
+	if err != nil {
+		return sandbox.Row{}, executors.Executor{}, err
+	}
+	labels, err := executorTrustLabelsFor(ownerName, name, resolved.Labels)
 	if err != nil {
 		return sandbox.Row{}, executors.Executor{}, err
 	}
@@ -1074,6 +1119,11 @@ func (c *Controller) reapOrphanContainers(ctx context.Context) {
 		return
 	}
 	for _, le := range c.execPool.Live() {
+		// A sandbox row is never a launcher (resolveSandboxLauncher skips it too):
+		// it must not be asked to reap orphans on an engine it does not own.
+		if isSandboxRow(le.Executor) {
+			continue
+		}
 		if !hasProxy(le.Proxies, sandbox.DockerProxyName) {
 			continue
 		}

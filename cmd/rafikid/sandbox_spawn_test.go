@@ -690,12 +690,15 @@ func TestSandboxSpawnNoNestedSandbox(t *testing.T) {
 	ck.True(strings.Contains(err.Error(), "--proxy docker"), "error points at the fix: %v", err)
 }
 
-// TestSandboxSpawnExecutorRmRefused: deleting a sandbox's executor row directly
-// is refused — the row alone would orphan a container that restarts forever.
+// TestSandboxSpawnExecutorRmRefused: deleting a LIVE sandbox's executor row
+// directly is refused — the row alone would orphan a container that restarts
+// forever. (A row whose sandbox row is gone or tombstoned IS deletable; see
+// TestSandboxExecutorRmAllowedWhenSandboxRowGoneOrTombstoned.)
 func TestSandboxSpawnExecutorRmRefused(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	env := newSandboxEnv(t)
+	insertSandboxRow(env, sandbox.Row{ID: "sbx-1", OwnerUserID: "o", State: sandboxStateReady})
 	env.exec.execs["exec-sbx"] = executors.Executor{
 		ID: "exec-sbx", Enabled: true,
 		Labels: map[string]string{sandbox.RowLabelSandbox: "1", sandbox.RowLabelID: "sbx-1"},

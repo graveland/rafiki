@@ -26,6 +26,7 @@ type fakeExecStore struct {
 	seq         int
 	createCalls int
 	lastCreate  executors.NewToken
+	creates     []executors.NewToken
 	disabled    []string
 	deleted     []string
 
@@ -41,6 +42,7 @@ func newFakeExecStore() *fakeExecStore {
 func (f *fakeExecStore) Create(_ context.Context, t executors.NewToken) (executors.Executor, string, error) {
 	f.createCalls++
 	f.lastCreate = t
+	f.creates = append(f.creates, t)
 	e := executors.Executor{ID: "exec-created", Labels: t.Labels, Enabled: true}
 	f.execs[e.ID] = e
 	return e, "credential", nil

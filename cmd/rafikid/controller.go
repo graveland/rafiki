@@ -5262,6 +5262,19 @@ func translateExecutorErr(err error) error {
 // `--label owner=x` needs to learn that their selector will not mean what they
 // wrote.
 func executorTrustLabels(id users.Identity, name string, given map[string]string) (map[string]string, error) {
+	owner, err := sessionOwner(id)
+	if err != nil {
+		return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+	}
+	return executorTrustLabelsFor(owner, name, given)
+}
+
+// executorTrustLabelsFor is executorTrustLabels with the owner NAME supplied by
+// the caller instead of derived from the connection. The sandbox provisioner
+// uses it: every child-provenance identity carries an EMPTY Username, so
+// sessionOwner would stamp the DAEMON's OS user on a child's sandbox — the bug
+// attestOwner exists to avoid for the child's own label.
+func executorTrustLabelsFor(owner, name string, given map[string]string) (map[string]string, error) {
 	if _, ok := given["owner"]; ok {
 		return nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
@@ -5273,10 +5286,6 @@ func executorTrustLabels(id users.Identity, name string, given map[string]string
 			Code:    protocol.ErrInvalidArgs,
 			Message: "machine is set with --name, not with --label",
 		}
-	}
-	owner, err := sessionOwner(id)
-	if err != nil {
-		return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	labels := make(map[string]string, len(given)+2)
 	for k, v := range given {
@@ -5506,16 +5515,28 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 	// and orphan that container, so the sandbox must be removed through the
 	// path that stops it first. Presence of the label, not value: a row written
 	// with an empty value is still a sandbox.
+	//
+	// The refusal holds only while a LIVE sandbox row backs this executor. A row
+	// whose sandbox row is absent or already tombstoned (crash-F1: a create
+	// rollback that failed to delete the executor, or a launcher that vanished)
+	// would otherwise be UNDELETABLE by any CLI — `rafiki sandbox rm` cannot
+	// find a tombstoned row — and would block its (owner, machine) name forever.
 	if _, isSandbox := e.Labels[sandbox.RowLabelSandbox]; isSandbox {
-		sbx := e.Labels[sandbox.RowLabelID]
-		if sbx == "" {
-			sbx = shortID(e.ID)
+		live, err := c.sandboxRowLive(context.Background(), e.Labels[sandbox.RowLabelID])
+		if err != nil {
+			return err
 		}
-		return &connectapi.ControllerError{
-			Code: protocol.ErrInvalidArgs,
-			Message: fmt.Sprintf(
-				"executor %s is sandbox %q: deleting its row would orphan a container that restarts forever — remove it with `rafiki sandbox rm`",
-				shortID(e.ID), sbx),
+		if live {
+			sbx := e.Labels[sandbox.RowLabelID]
+			if sbx == "" {
+				sbx = shortID(e.ID)
+			}
+			return &connectapi.ControllerError{
+				Code: protocol.ErrInvalidArgs,
+				Message: fmt.Sprintf(
+					"executor %s is sandbox %q: deleting its row would orphan a container that restarts forever — remove it with `rafiki sandbox rm`",
+					shortID(e.ID), sbx),
+			}
 		}
 	}
 	return translateExecutorErr(c.execStore.Delete(context.Background(), e.ID))
