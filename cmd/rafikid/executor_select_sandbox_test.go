@@ -126,6 +126,72 @@ func TestSandboxSelectionChildOwnedNeverReachedByExplicitRef(t *testing.T) {
 	ck.Error(err, "an explicit ref naming a child-owned sandbox's machine must be refused")
 }
 
+func TestSandboxSelectionNeverPicksASandboxWhitespaceOrEmptyKey(t *testing.T) {
+	ck := assert.NewAborting(t)
+
+	// (a) A whitespace-only selector is NOT an implicit selector: it fails
+	// `== ""` but parses to the empty selector, so on a path that does not run
+	// promoteBareExecutorRef it would match everything — including a sandbox-only
+	// set. The implicit-sandbox drop must treat it as unnamed.
+	ws := selectFixture(t, "", sandboxEx("aaa-sbx", "", map[string]string{"env": "home"}))
+	_, err := ws.chooseExecutor(protocol.SpawnRequest{
+		ParentChildID: "c_parent", ExecutorSelector: " ",
+	}, executorOwner{})
+	ck.Error(err, "a whitespace-only selector must not implicitly pick a sandbox")
+
+	// (b) A row with the sandbox label key PRESENT but EMPTY is still a sandbox
+	// (fail closed): alone it is refused, and with an ordinary row it does not
+	// shadow it.
+	only := selectFixture(t, "", ex("aaa-sbx", map[string]string{sandbox.RowLabelSandbox: ""}, ""))
+	_, err = only.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	ck.Error(err, "a present-but-empty sandbox label must still exclude the row")
+
+	mixed := selectFixture(t, "",
+		ex("aaa-sbx", map[string]string{sandbox.RowLabelSandbox: "", "env": "home"}, ""),
+		ex("zzz-ordinary", map[string]string{"env": "home"}, ""),
+	)
+	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	ck.Require().NoError(err, "the ordinary row must serve the spawn")
+	ck.Eq("zzz-ordinary", chosen.ID, "an empty sandbox value must still be treated as a sandbox")
+}
+
+// Explicit-ref coverage beyond the machine-label path: a child-owned sandbox is
+// also never reached when named by its raw ID ref.
+func TestSandboxSelectionChildOwnedNeverReachedByIDRef(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := selectFixture(t, "",
+		childOwnedSandboxEx("sbx-id", "c_parent", map[string]string{"env": "home"}),
+	)
+	_, err := c.chooseExecutor(protocol.SpawnRequest{
+		ParentChildID: "c_parent", ExecutorRef: "sbx-id",
+	}, executorOwner{})
+	ck.Error(err, "an explicit ref by row id naming a child-owned sandbox must be refused")
+}
+
+// Rule 1's LAUNCH half: an empty selector with a sandbox-only launch candidate
+// set must not return the sandbox. Pinned here so that deleting the drop in
+// chooseLaunchExecutor fails a test.
+func TestSandboxSelectionEmptySelectorNeverPicksASandboxOnLaunch(t *testing.T) {
+	ck := assert.NewAborting(t)
+
+	// The sandbox is the ONLY launch-capable row, so absent the drop it would be
+	// kept[0].
+	only := selectFixture(t, "", exWithLaunch("aaa-sbx", map[string]string{
+		sandbox.RowLabelSandbox: "1", "env": "home",
+	}, "", "claude"))
+	_, err := only.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	ck.Error(err, "an empty selector must never implicitly pick a sandbox for launch")
+
+	// With an ordinary launch-capable executor present, the ordinary one wins.
+	mixed := selectFixture(t, "",
+		exWithLaunch("aaa-sbx", map[string]string{sandbox.RowLabelSandbox: "1", "env": "home"}, "", "claude"),
+		exWithLaunch("zzz-ordinary", map[string]string{"env": "home"}, "", "claude"),
+	)
+	chosen, err := mixed.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	ck.Require().NoError(err, "an ordinary launch-capable executor is present")
+	ck.Eq("zzz-ordinary", chosen.ID, "empty selector must pick the ordinary launch executor")
+}
+
 // Launch selection narrows through the same pipeline, so a child-owned sandbox
 // that advertises the launch kind is still never reached.
 func TestSandboxSelectionChildOwnedNeverReachedByLaunchSelection(t *testing.T) {

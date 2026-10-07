@@ -95,7 +95,7 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, owner executorOwn
 	// never be the fallback. (sortCandidates already orders sandboxes last, but
 	// that only helps when an ordinary executor also survives; a sandbox-only
 	// set must still be refused rather than silently spawned into.)
-	if req.ExecutorSelector == "" {
+	if !hasExplicitSelector(req) {
 		candidates = dropSandboxCandidates(candidates)
 	}
 	if len(candidates) == 0 {
@@ -134,6 +134,17 @@ func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner
 	candidates = dropChildOwnedSandboxes(candidates)
 	sortCandidates(candidates)
 	return candidates, parentSet, childLabels, sel, nil
+}
+
+// hasExplicitSelector reports whether req NAMES an executor via a selector that
+// says anything at all. The comparison is against the TrimSpace'd value, not
+// the raw string: a whitespace-only selector (" ") is not `== ""` yet parses
+// to the EMPTY selector, so on the paths that do not run promoteBareExecutorRef
+// (stored-selector re-selection via ChooseFor, MCP/Connect paths) a raw `== ""`
+// check would skip the implicit-sandbox drop and let a sandbox-only match be
+// returned. TrimSpace closes that hole.
+func hasExplicitSelector(req protocol.SpawnRequest) bool {
+	return strings.TrimSpace(req.ExecutorSelector) != ""
 }
 
 // isSandboxRow reports whether an executor's row is a sandbox row, by presence
@@ -205,7 +216,7 @@ func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, owner execu
 	}
 	// As in chooseExecutor: no ref and no selector means no executor was named,
 	// so a sandbox must never be the implicit launch target.
-	if req.ExecutorSelector == "" {
+	if !hasExplicitSelector(req) {
 		kept = dropSandboxCandidates(kept)
 	}
 	if len(kept) == 0 {
