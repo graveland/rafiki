@@ -98,6 +98,13 @@ ordinary durable executor whose operator declared three things:
 - `--relay-dir <dir>` — the host directory the daemon bind-mounts into the
   container so its `rafiki executor serve` can reach the daemon. Reported as
   `DescribeResponse.sandboxRelayDir`.
+- `--relay-foothold-image <ref>` — select **foothold mode** in place of
+  `--relay-dir` (the two are mutually exclusive): the launcher runs one
+  foothold container per docker host, inside the docker host's own kernel,
+  whose relay socket lives in a named volume the sandbox mounts. Reported as
+  `DescribeResponse.sandboxRelayVolume`. Requires a `unix://` `docker` proxy
+  and a daemon address, and is replaced by `foothold.Ensure` when the create
+  body or the resolved image id drifts.
 
 **The relay.** `--relay-dir` makes `rafiki executor serve` also bind
 `<relay-dir>/daemon.sock` (`sandboxrelay.Serve`) and splice every accepted
@@ -134,7 +141,12 @@ must agree. Each `bind` mount's source is symlink-resolved and must sit at or
 under a declared `--sandbox-mount-root` (or equal the resolved relay dir), and
 must be a regular file or a directory — a socket, device or fifo is refused,
 because an `ro` bind of a unix socket still permits `connect()`;
-`volume` and `tmpfs` mounts pass (the daemon owns their contents);
+`volume` and `tmpfs` mounts pass (the daemon owns their contents), except the
+launcher's relay volume (a foothold's `sandboxRelayVolume`), which is admitted
+only as a `volume` mount, read-only, at the fixed relay target
+`/run/rafiki-relay` — any other target, or a writable mount, is refused,
+because a writable relay volume lets a sandbox replace `daemon.sock` and
+capture the executor credential of every other sandbox sharing it;
 `NetworkMode` is limited to `""`, `bridge` or `none`. A named volume's source
 is `rafiki-<ownerKey>-<name>`: `ownerKey` is derived from the owner's user id by
 stripping every non-alphanumeric character, taking the LAST 12 characters of
@@ -303,7 +315,7 @@ the same connection — see [AdminService: Launch, Reap and Status](#adminservic
 Describe() → { executorId, platform, roots[], concurrency, isolation,
                workspaceMode, tools[], version, selfReportedLabels,
                proxies[], launchKinds[], skillsSync, pymodulesSync,
-               sandboxMountRoots[], sandboxRelayDir }
+               sandboxMountRoots[], sandboxRelayDir, sandboxRelayVolume }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -330,12 +342,16 @@ executor does not report at all. `skillsSync` and `pymodulesSync` self-report
 the same way (see their Sync sections): each only narrows whether the daemon
 may push that corpus here, and both default to off.
 
-`sandboxMountRoots[]` and `sandboxRelayDir` self-report the launcher's
-`--sandbox-mount-root` directories and `--relay-dir` (see "Sandbox launchers"),
-and are safe to self-report for the same narrowing reason: the daemon uses the
-roots only to PRE-CHECK a requested host path, and the launcher re-checks every
-bind source itself, so a wrong entry costs a refusal, never access. A launcher
-that declares neither is simply not a sandbox launcher.
+`sandboxMountRoots[]`, `sandboxRelayDir` and `sandboxRelayVolume` self-report
+the launcher's `--sandbox-mount-root` directories and its relay — `--relay-dir`
+or the foothold's `--relay-foothold-image` (see "Sandbox launchers"). Exactly
+one of `sandboxRelayDir` and `sandboxRelayVolume` is set on a launcher: an
+empty `sandboxRelayVolume` means no volume relay, and the daemon refuses a
+launcher that declares both or neither. They are safe to self-report for the
+same narrowing reason: the daemon uses the roots only to PRE-CHECK a requested
+host path, and the launcher re-checks every bind source itself, so a wrong
+entry costs a refusal, never access. A launcher that declares neither is simply
+not a sandbox launcher.
 
 ### Health
 

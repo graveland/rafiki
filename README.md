@@ -893,6 +893,25 @@ rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
   for `Binds`, `Privileged`, a device, etc. is refused. See
   `docs/reference/executor-protocol.md` → "Sandbox launchers".
 
+**The relay.** The sandbox reaches the daemon through a relay socket inside
+it. On Linux that socket is a host unix socket the launcher bind-mounts into
+the container (`--relay-dir`, defaulting to `<runtime dir>/relay` when the
+`docker` proxy is a local unix socket), and the sandbox dials
+`/run/rafiki-relay/daemon.sock`. A docker host in **another kernel** — OrbStack
+or Docker Desktop on macOS, a lima VM, a remote context — cannot see a host
+bind-mount, so select **foothold mode** instead with
+`--relay-foothold-image <ref>` (mutually exclusive with `--relay-dir`; it
+requires a `unix://` `docker` proxy and a daemon address). The launcher then
+runs one **foothold container** per docker host, inside the docker host's own
+kernel (`rafiki-foothold-<key>`, volume `rafiki.relay.<key>`), which serves the
+relay socket in the volume and splices it to a loopback TCP relay on the
+launcher. The sandbox mounts that volume read-only at `/run/rafiki-relay`, so
+it still reaches the daemon with **`network: none`**. The foothold is recreated
+automatically whenever the container spec changes — the image or the bridge
+command (which carries the relay port) — and the change is picked up on the
+next sandbox create, so a *fixed tag* needs a manual `docker pull` to take
+effect.
+
 **The image must run `rafiki`.** A sandbox runs `rafiki executor serve
 --connect-socket /run/rafiki-relay/daemon.sock` as its entrypoint, so the image
 must have the `rafiki` binary on `PATH` (and whatever the agent's tools need);
