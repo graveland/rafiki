@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -21,49 +22,80 @@ import (
 // cannot make the executor allocate without limit through the proxy.
 const maxContainerCreateBody = 1 << 20
 
-// dockerVersionRe matches docker's API version path segment, e.g. "v1.43".
-var dockerVersionRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+$`)
+// dockerVersionRe matches docker's API version path segment: any run of digits
+// and dots after a leading "v" (v1, v1.43, v1.43.0, v1.43.). This mirrors the
+// engine's own version middleware (`v[0-9.]+`), which strips exactly one such
+// leading segment before routing — matching it is what makes the guard
+// recognise every path the engine routes to a container create.
+var dockerVersionRe = regexp.MustCompile(`^v[0-9.]+$`)
 
 // guardContainersCreate reports whether a proxied request must be inspected
 // before it is forwarded: it is a docker container-create (optionally behind a
-// /v<major>.<minor> version segment). Every other docker request, and every
-// other proxy, streams through untouched.
+// /v<version> segment). Every other docker request, and every other proxy,
+// streams through untouched.
 func guardContainersCreate(start *executorpb.ProxyStart) bool {
 	return start.GetProxyName() == "docker" &&
 		start.GetMethod() == "POST" &&
 		isContainersCreate(start.GetPath())
 }
 
-// isContainersCreate reports whether the request path, ignoring query and an
-// optional leading docker version segment, is exactly /containers/create.
+// isContainersCreate reports whether the request path routes to docker's
+// container create. It strips at most one leading version segment exactly as
+// the engine's version middleware does, compares the route case-insensitively
+// (a fail-closed lowercase costs nothing), and then fails closed: any path that
+// still ends at the create route behind a prefix it did not strip is guarded
+// rather than allowed to stream unchecked.
 func isContainersCreate(p string) bool {
 	raw, _, _ := strings.Cut(p, "?")
-	segs := strings.Split(strings.TrimPrefix(path.Clean(raw), "/"), "/")
-	if len(segs) > 0 && dockerVersionRe.MatchString(segs[0]) {
-		segs = segs[1:]
+	clean := strings.ToLower(path.Clean(raw))
+
+	rest := clean
+	if seg, tail, ok := strings.Cut(strings.TrimPrefix(clean, "/"), "/"); ok {
+		if dockerVersionRe.MatchString(seg) {
+			rest = "/" + tail
+		}
 	}
-	return strings.Join(segs, "/") == "containers/create"
+	if rest == "/containers/create" {
+		return true
+	}
+	return strings.HasSuffix(clean, "/containers/create")
 }
 
 // checkCreateBody inspects a docker container-create body and refuses any mount
-// that would reach outside the operator's declared sandbox roots. It is
-// deliberately narrow: only HostConfig.Binds and HostConfig.Mounts are read,
-// nothing the container reports gates anything, and it checks bind SOURCES
-// only — it does not otherwise parse or understand the docker body.
+// or privilege field that could reach past the operator's declared sandbox
+// roots. It stays narrow — only the HostConfig fields below are read, and
+// nothing the container reports gates anything — but it fails closed on
+// everything the daemon cannot express: the daemon's CreateBody emits only
+// mount {Type,Source,Target,ReadOnly}, so a body carrying Binds, VolumeOptions,
+// a device, extra capabilities, a host namespace, or privileged mode did not
+// come from our daemon and is refused.
 //
 // Binds are refused outright because their source is a bare host path that is
 // easy to get wrong; Mounts name a Type, so a bind can be told from a volume.
-// A volume or tmpfs is passed (the daemon controls what those contain); a bind
-// must resolve to the relay dir or under one of the declared roots.
+// A volume or tmpfs with no VolumeOptions is passed (the daemon controls what
+// those contain); a bind must resolve to the relay dir or under one of the
+// declared roots.
 func checkCreateBody(body []byte, roots []string, relayDir string) error {
 	var req struct {
 		HostConfig struct {
 			Binds  []string `json:"Binds"`
 			Mounts []struct {
-				Type   string `json:"Type"`
-				Source string `json:"Source"`
-				Target string `json:"Target"`
+				Type          string          `json:"Type"`
+				Source        string          `json:"Source"`
+				Target        string          `json:"Target"`
+				VolumeOptions json.RawMessage `json:"VolumeOptions"`
 			} `json:"Mounts"`
+			Privileged  bool              `json:"Privileged"`
+			Devices     []json.RawMessage `json:"Devices"`
+			VolumesFrom []string          `json:"VolumesFrom"`
+			CapAdd      []string          `json:"CapAdd"`
+			CapDrop     []string          `json:"CapDrop"`
+			SecurityOpt []string          `json:"SecurityOpt"`
+			PidMode     string            `json:"PidMode"`
+			IpcMode     string            `json:"IpcMode"`
+			UTSMode     string            `json:"UTSMode"`
+			UsernsMode  string            `json:"UsernsMode"`
+			NetworkMode string            `json:"NetworkMode"`
 		} `json:"HostConfig"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -77,6 +109,13 @@ func checkCreateBody(body []byte, roots []string, relayDir string) error {
 	}
 
 	for _, m := range req.HostConfig.Mounts {
+		// A volume can itself be a host bind: VolumeOptions with a local
+		// driver whose options name a device bind /etc onto a "volume". The
+		// daemon never emits VolumeOptions, so any non-null value is refused.
+		if opts := bytes.TrimSpace(m.VolumeOptions); len(opts) > 0 && !bytes.Equal(opts, []byte("null")) {
+			return connect.NewError(connect.CodePermissionDenied,
+				fmt.Errorf("sandbox: mount %q carries VolumeOptions %s, which can hide a host bind", m.Target, opts))
+		}
 		switch m.Type {
 		case "volume", "tmpfs":
 			// The daemon owns the contents of these; nothing host-side is
@@ -89,6 +128,48 @@ func checkCreateBody(body []byte, roots []string, relayDir string) error {
 			return connect.NewError(connect.CodePermissionDenied,
 				fmt.Errorf("sandbox: mount %q has unsupported type %q", m.Target, m.Type))
 		}
+	}
+
+	if err := checkPrivilege(req.HostConfig.Privileged, req.HostConfig.Devices, req.HostConfig.VolumesFrom,
+		req.HostConfig.CapAdd, req.HostConfig.CapDrop, req.HostConfig.SecurityOpt, req.HostConfig.PidMode,
+		req.HostConfig.IpcMode, req.HostConfig.UTSMode, req.HostConfig.UsernsMode, req.HostConfig.NetworkMode); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkPrivilege refuses the HostConfig fields that grant a container more
+// privilege than a sandbox spec allows. The daemon's CreateBody cannot set any
+// of them, so their mere presence means the body did not come from our daemon.
+func checkPrivilege(privileged bool, devices []json.RawMessage, volumesFrom, capAdd, capDrop, securityOpt []string,
+	pidMode, ipcMode, utsMode, usernsMode, networkMode string) error {
+	refuse := func(field string, value any) error {
+		return connect.NewError(connect.CodePermissionDenied,
+			fmt.Errorf("sandbox: container create sets %s=%v, which the daemon never emits", field, value))
+	}
+	switch {
+	case privileged:
+		return refuse("Privileged", privileged)
+	case len(devices) > 0:
+		return refuse("Devices", len(devices))
+	case len(volumesFrom) > 0:
+		return refuse("VolumesFrom", volumesFrom)
+	case len(capAdd) > 0:
+		return refuse("CapAdd", capAdd)
+	case len(capDrop) > 0:
+		return refuse("CapDrop", capDrop)
+	case len(securityOpt) > 0:
+		return refuse("SecurityOpt", securityOpt)
+	case pidMode != "":
+		return refuse("PidMode", pidMode)
+	case ipcMode != "":
+		return refuse("IpcMode", ipcMode)
+	case utsMode != "":
+		return refuse("UTSMode", utsMode)
+	case usernsMode != "":
+		return refuse("UsernsMode", usernsMode)
+	case networkMode != "" && networkMode != "bridge" && networkMode != "none":
+		return refuse("NetworkMode", networkMode)
 	}
 	return nil
 }

@@ -117,3 +117,90 @@ func TestDockerGuardRefusesMissingSource(t *testing.T) {
 	c.Require().Error(err, "missing source")
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
 }
+
+// hostConfigBody builds a create body with exactly the given HostConfig.
+func hostConfigBody(t *testing.T, hc map[string]any) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"HostConfig": hc})
+	assert.NewAborting(t).NoError(err, "marshal body")
+	return b
+}
+
+func TestDockerGuardRouteMatching(t *testing.T) {
+	c := assert.NewCollecting(t)
+	guard := []string{
+		"/containers/create",
+		"/containers/create?x=1",
+		"/v1/containers/create",
+		"/v1.43/containers/create",
+		"/v1.43.0/containers/create",
+		"/v1.43./containers/create",
+		"/Containers/Create",
+		"/V1.43/Containers/Create",
+	}
+	for _, p := range guard {
+		c.True(isContainersCreate(p), "%q must be guarded", p)
+	}
+	skip := []string{
+		"/containers/json",
+		"/v1.43/containers/json",
+		"/volumes/create",
+		"/containers/create/x",
+		"/_ping",
+		"/version",
+	}
+	for _, p := range skip {
+		c.False(isContainersCreate(p), "%q must not be guarded", p)
+	}
+}
+
+func TestDockerGuardRefusesVolumeOptions(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// A "volume" whose local driver binds /etc — the exact bypass body.
+	body := []byte(`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"x","Target":"/v","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`)
+	err := checkCreateBody(body, []string{t.TempDir()}, "")
+	c.Require().Error(err, "volume with VolumeOptions must be refused")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+}
+
+func TestDockerGuardAllowsEmptyVolumeOptions(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// Explicit null VolumeOptions is still "no options" and passes.
+	body := []byte(`{"HostConfig":{"Mounts":[{"Type":"volume","Source":"vol","Target":"/v","VolumeOptions":null}]}}`)
+	c.NoError(checkCreateBody(body, nil, ""), "null VolumeOptions")
+}
+
+func TestDockerGuardRefusesPrivilegeFields(t *testing.T) {
+	cases := []struct {
+		name string
+		hc   map[string]any
+	}{
+		{"Privileged", map[string]any{"Privileged": true}},
+		{"Devices", map[string]any{"Devices": []any{map[string]any{"PathOnHost": "/dev/sda"}}}},
+		{"VolumesFrom", map[string]any{"VolumesFrom": []string{"other"}}},
+		{"CapAdd", map[string]any{"CapAdd": []string{"SYS_ADMIN"}}},
+		{"CapDrop", map[string]any{"CapDrop": []string{"ALL"}}},
+		{"SecurityOpt", map[string]any{"SecurityOpt": []string{"seccomp=unconfined"}}},
+		{"PidMode host", map[string]any{"PidMode": "host"}},
+		{"IpcMode host", map[string]any{"IpcMode": "host"}},
+		{"UTSMode host", map[string]any{"UTSMode": "host"}},
+		{"UsernsMode host", map[string]any{"UsernsMode": "host"}},
+		{"NetworkMode host", map[string]any{"NetworkMode": "host"}},
+		{"NetworkMode container", map[string]any{"NetworkMode": "container:other"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			err := checkCreateBody(hostConfigBody(t, tc.hc), nil, "")
+			c.Require().Error(err, "%s must be refused", tc.name)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+		})
+	}
+}
+
+func TestDockerGuardAllowsBridgeAndNoneNetwork(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, mode := range []string{"", "bridge", "none"} {
+		c.NoError(checkCreateBody(hostConfigBody(t, map[string]any{"NetworkMode": mode}), nil, ""), "NetworkMode %q", mode)
+	}
+}

@@ -236,3 +236,31 @@ func TestDockerGuardReplaysTheBufferedBodyIntact(t *testing.T) {
 	c.Eq("upstream-ok", string(respBody), "upstream body")
 	c.Eq(string(body), string(rec.body), "upstream received byte-identical body")
 }
+
+func TestDockerGuardAppliesToVersionGrammar(t *testing.T) {
+	// Every path form docker's version middleware can route to a container
+	// create must be guarded — including three-part, single-part and trailing-
+	// dot versions, and a mixed-case route.
+	paths := []string{
+		"/v1.43/containers/create",
+		"/v1.43.0/containers/create",
+		"/v1/containers/create",
+		"/v1.43./containers/create",
+		"/Containers/Create",
+	}
+	bad := []byte(`{"HostConfig":{"Binds":["/:/host"]}}`)
+	for _, p := range paths {
+		t.Run(p, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			url, rec := echoUpstream(t)
+			esrv := executor.NewServer(executor.Options{
+				Root:    t.TempDir(),
+				Proxies: map[string]string{"docker": url},
+			})
+			_, _, err := proxyOnce(t, esrv, "docker", "POST", p, nil, bad)
+			c.Require().Error(err, "create at %q must be guarded", p)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+			c.Eq("", rec.method, "upstream must never be reached for %q", p)
+		})
+	}
+}
