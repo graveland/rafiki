@@ -176,6 +176,77 @@ func TestSandboxSpawnNonFundiKindRefused(t *testing.T) {
 	ck.Len(live, 0, "no sandbox is created for a refused kind")
 }
 
+// TestSandboxSpawnBlockCwdIsTheContainerWorkdir: a spawn block rewrites the
+// child's cwd to a path in the CONTAINER — the resolved spec.Workdir, or the
+// container root when the spec names none — overriding the inherited host cwd.
+// Provision runs INSIDE the container, where the host cwd does not exist, so
+// without this every workspace tool fails on provision.
+func TestSandboxSpawnBlockCwdIsTheContainerWorkdir(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		workdir string
+		want    string
+	}{
+		{"no workdir resolves to the container root", "", "/"},
+		{"a declared workdir is kept", "/work", "/work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			env := newSandboxSpawnEnv(t)
+			owner := sandboxOwner()
+			sandboxSeedParent(env, "parent-1")
+			env.pool.live = []execpool.LiveExecutor{
+				sandboxLauncher("launcher", "box", owner.UserID),
+				spawnedExecutor("exec-created", owner.UserID),
+			}
+			spec := spawnBlockSpec()
+			spec.Workdir = tc.workdir
+
+			res, err := env.ctrl.Spawn(context.Background(), protocol.SpawnRequest{
+				Kind:          protocol.KindFundi,
+				Model:         "anthropic/sonnet-latest",
+				Cwd:           t.TempDir(),
+				ParentChildID: "parent-1",
+				Sandbox:       spec,
+			}, owner)
+			ck.Require().NoError(err, "spawn")
+			snap, ok := env.ctrl.st.Get(res.ChildID)
+			ck.Require().True(ok, "child stored")
+			ck.Eq(tc.want, snap.Cwd, "the child's cwd is a container path, never the inherited host cwd")
+		})
+	}
+}
+
+// TestSandboxSpawnBlockWithHostCwdNotInTheContainerStillSpawns is the assertion
+// the reviewer's 6.2-F5 asked for: the spawn's cwd is a HOST path that does not
+// exist at all, so if it reached Provision the executor (whose filesystem view
+// is the container) would refuse and the eager bind would fail — refusing a
+// top-level spawn. It succeeds only because Spawn rewrote the cwd to the
+// container workdir first.
+func TestSandboxSpawnBlockWithHostCwdNotInTheContainerStillSpawns(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxSpawnEnv(t)
+	owner := sandboxOwner()
+	sandboxSeedParent(env, "parent-1")
+	env.pool.live = []execpool.LiveExecutor{
+		sandboxLauncher("launcher", "box", owner.UserID),
+		spawnedExecutor("exec-created", owner.UserID),
+	}
+
+	res, err := env.ctrl.Spawn(context.Background(), protocol.SpawnRequest{
+		Kind:          protocol.KindFundi,
+		Model:         "anthropic/sonnet-latest",
+		Cwd:           "/nonexistent/rafiki-sandbox-cwd",
+		ParentChildID: "parent-1",
+		Sandbox:       spawnBlockSpec(),
+	}, owner)
+	ck.Require().NoError(err, "a spawn block must not inherit a cwd the container cannot see")
+	snap, _ := env.ctrl.st.Get(res.ChildID)
+	ck.Eq("/", snap.Cwd, "the host cwd was rewritten to the container root")
+}
+
 // --- persisted executor_id and its downstream effects -----------------------
 
 // TestSandboxSpawnCreatedRowPersistsExecutorID: a create leaves a PERSISTED row

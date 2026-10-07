@@ -82,9 +82,20 @@ func (c *Controller) provisionWorkspace(
 	// the proto's MUST ("rather than silently starting somewhere the child
 	// cannot write") and the honest answer for a cwd that lives on another
 	// machine or outside the container's mounts.
+	//
+	// When the executor IS a sandbox, the workdir is the sandbox's own resolved
+	// workdir (its container root when the spec names none), NOT req.Cwd: an
+	// inherited host path does not exist inside the container, so Provision
+	// would refuse every tool call. Spawn rewrites req.Cwd for a spawn block,
+	// but a NAMED sandbox (`executor: "<name>"`) is created out of band and
+	// Spawn never sees its spec, so this is the one place both cases resolve.
+	workdir := req.Cwd
+	if wd, ok := c.sandboxWorkdirForExecutor(ctx, executorID); ok {
+		workdir = wd
+	}
 	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{
 		ChildId: "",
-		Workdir: req.Cwd,
+		Workdir: workdir,
 	})
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err)

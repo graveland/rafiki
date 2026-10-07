@@ -1159,10 +1159,11 @@ func TestSandboxCreateForSpawnHappyPath(t *testing.T) {
 		spawnedExecutor("exec-created", owner.UserID),
 	}
 
-	executor, rowID, err := env.ctrl.sandboxCreateForSpawn(context.Background(), owner, "parent-1", "child-1",
+	executor, rowID, workdir, err := env.ctrl.sandboxCreateForSpawn(context.Background(), owner, "parent-1", "child-1",
 		protocol.SandboxSpec{Image: "rafiki/sandbox:test", Scope: protocol.ScopeSubtree})
 	ck.NoError(err, "spawn create")
 	ck.Eq("exec-created", executor.ID)
+	ck.Eq("/", workdir, "a spec with no workdir resolves to the container root")
 	row, ok := env.store.get(rowID)
 	ck.True(ok, "row stored")
 	ck.Eq("child-1", row.OwnerChild)
@@ -1322,6 +1323,44 @@ func TestSandboxChildCallerResolvesLauncherWithinItsSet(t *testing.T) {
 
 	_, err := env.ctrl.SandboxCreate(context.Background(), owner, "child-1", sandboxSpec("dev"))
 	ck.NoError(err, "a child caller creates within its launcher set")
+}
+
+// TestSandboxWorkdirForExecutorResolvesASandboxToItsContainerWorkdir: a child
+// bound to a sandbox starts its tools at the sandbox's resolved workdir — the
+// case Spawn cannot rewrite, because a NAMED sandbox's spec is created out of
+// band. A non-sandbox executor is left to req.Cwd.
+func TestSandboxWorkdirForExecutorResolvesASandboxToItsContainerWorkdir(t *testing.T) {
+	t.Parallel()
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+
+	specJSON, err := json.Marshal(protocol.SandboxSpec{Workdir: "/work"})
+	ck.NoError(err, "marshal spec")
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-1", OwnerUserID: owner.UserID, ExecutorID: "exec-sbx",
+		Spec: specJSON, State: sandboxStateReady,
+	})
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-2", OwnerUserID: owner.UserID, ExecutorID: "exec-sbx2",
+		Spec: []byte(`{}`), State: sandboxStateReady,
+	})
+	env.pool.live = []execpool.LiveExecutor{
+		ex("exec-sbx", map[string]string{sandbox.RowLabelSandbox: "1", sandbox.RowLabelID: "sbx-1", "machine": "dev"}, ""),
+		ex("exec-sbx2", map[string]string{sandbox.RowLabelSandbox: "1", sandbox.RowLabelID: "sbx-2"}, ""),
+		ex("exec-plain", map[string]string{"machine": "box"}, ""),
+	}
+
+	wd, ok := env.ctrl.sandboxWorkdirForExecutor(context.Background(), "exec-sbx")
+	ck.True(ok, "a sandbox executor is a sandbox")
+	ck.Eq("/work", wd, "the sandbox's resolved workdir")
+
+	wd, ok = env.ctrl.sandboxWorkdirForExecutor(context.Background(), "exec-sbx2")
+	ck.True(ok, "sandbox")
+	ck.Eq("/", wd, "a spec with no workdir means the container root")
+
+	_, ok = env.ctrl.sandboxWorkdirForExecutor(context.Background(), "exec-plain")
+	ck.False(ok, "a non-sandbox executor keeps req.Cwd")
 }
 
 // --- test helpers -----------------------------------------------------------

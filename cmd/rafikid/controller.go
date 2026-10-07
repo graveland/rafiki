@@ -1888,7 +1888,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// failure must tear down. It is cleared once the child's own row is written.
 	sandboxOwnedChild := ""
 	if req.Sandbox != nil {
-		executor, rowID, err := c.sandboxCreateForSpawn(ctx, owner, req.ParentChildID, childID, *req.Sandbox)
+		executor, rowID, containerWorkdir, err := c.sandboxCreateForSpawn(ctx, owner, req.ParentChildID, childID, *req.Sandbox)
 		if err != nil {
 			return protocol.SpawnResponseData{}, err
 		}
@@ -1898,6 +1898,15 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 		req.ExecutorRef = ""
 		req.ExecutorSelector = "machine=" + machine
+		// The child's cwd is a path in the CONTAINER, not on the daemon host.
+		// agent_spawn (and the operator CLI) default cwd to the PARENT's — a host
+		// path the executor, running inside the container, cannot see, so every
+		// workspace tool would fail at Provision. Rewrite it to the sandbox's
+		// resolved workdir (the container root when the spec names none), which
+		// is the only vocabulary the sandbox executor shares with us. Nothing
+		// else rewrites Cwd; an inherited host path would otherwise reach the
+		// executor verbatim.
+		req.Cwd = containerWorkdir
 		sandboxOwnedChild = childID
 		defer func() {
 			if sandboxOwnedChild == "" {

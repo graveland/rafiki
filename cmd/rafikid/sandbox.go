@@ -166,28 +166,32 @@ func (c *Controller) SandboxCreate(ctx context.Context, owner users.Identity, ca
 
 // sandboxCreateForSpawn is SandboxCreate for a spawn block: unnamed, tied to a
 // child, with a generated machine name and no TTL. It returns the executor the
-// spawn binds. Used by the spawn flow (task 5.1).
-func (c *Controller) sandboxCreateForSpawn(ctx context.Context, owner users.Identity, parentChild, newChildID string, spec protocol.SandboxSpec) (executors.Executor, string, error) {
+// spawn binds and the child's cwd INSIDE the container — the resolved
+// spec.Workdir, or "/" (the container root) when the spec names none. Spawn
+// rewrites the request's cwd to it, so a sandboxed child's tools start in the
+// container's filesystem, never at the inherited host path. Used by the spawn
+// flow (task 5.1).
+func (c *Controller) sandboxCreateForSpawn(ctx context.Context, owner users.Identity, parentChild, newChildID string, spec protocol.SandboxSpec) (executors.Executor, string, string, error) {
 	if err := c.requireSandboxRuntime(); err != nil {
-		return executors.Executor{}, "", err
+		return executors.Executor{}, "", "", err
 	}
 	launcher, err := c.resolveSandboxLauncher(parentChild, owner, spec.Launcher)
 	if err != nil {
-		return executors.Executor{}, "", err
+		return executors.Executor{}, "", "", err
 	}
 	resolved, err := sandbox.Validate(spec, c.sandboxCfg, launcher.Describe.GetSandboxMountRoots(), sandbox.Caller{Child: true}, false)
 	if err != nil {
-		return executors.Executor{}, "", &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return executors.Executor{}, "", "", &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	if err := c.checkSandboxCap(ctx, owner.UserID); err != nil {
-		return executors.Executor{}, "", err
+		return executors.Executor{}, "", "", err
 	}
 
 	rowID := "sbx_" + ulid.Make().String()
 	machine := sandboxSpawnMachineName(rowID)
 	specJSON, err := json.Marshal(resolved.SandboxSpec)
 	if err != nil {
-		return executors.Executor{}, "", fmt.Errorf("encoding sandbox spec: %w", err)
+		return executors.Executor{}, "", "", fmt.Errorf("encoding sandbox spec: %w", err)
 	}
 	row := sandbox.Row{
 		ID:                 rowID,
@@ -202,9 +206,59 @@ func (c *Controller) sandboxCreateForSpawn(ctx context.Context, owner users.Iden
 	}
 	provisioned, executor, err := c.sandboxProvision(ctx, owner, launcher, row, resolved, machine, newChildID, sandboxOwnerVolumeKey(owner.UserID))
 	if err != nil {
-		return executors.Executor{}, "", err
+		return executors.Executor{}, "", "", err
 	}
-	return executor, provisioned.ID, nil
+	return executor, provisioned.ID, sandboxContainerWorkdir(resolved), nil
+}
+
+// sandboxContainerWorkdir is the path a sandboxed child's tools start in, in the
+// CONTAINER's own filesystem vocabulary: the spec's workdir when it names one,
+// else the container root. It is what Spawn rewrites req.Cwd to for a spawn
+// block, because an inherited cwd is a HOST path that the executor (inside the
+// container) cannot see, so Provision would refuse every tool call.
+func sandboxContainerWorkdir(resolved sandbox.Resolved) string {
+	if resolved.Workdir != "" {
+		return resolved.Workdir
+	}
+	return "/"
+}
+
+// sandboxWorkdirForExecutor returns the container cwd a child bound to
+// executorID must start its tools in, and whether executorID is a sandbox at
+// all. It reads the sandbox row the executor's rafiki/sandbox-id label names and
+// returns the workdir the spec was RESOLVED with (the container root when the
+// spec names none) — the only cwd vocabulary the executor inside the container
+// shares with the daemon.
+//
+// This is the ONE resolution point for both a spawn block (Spawn also rewrites
+// req.Cwd, so the stored session carries a container path) and a NAMED sandbox
+// (`executor: "<name>"`), which Spawn never sees a spec for. It fails CLOSED to
+// the container root: a sandbox row whose spec cannot be read must never fall
+// back to an inherited host path.
+func (c *Controller) sandboxWorkdirForExecutor(ctx context.Context, executorID string) (string, bool) {
+	if c.sandboxStore == nil {
+		return "", false
+	}
+	row, ok := c.executorRow(executorID)
+	if !ok || !isSandboxRow(row) {
+		return "", false
+	}
+	id := row.Labels[sandbox.RowLabelID]
+	if id == "" {
+		return "/", true
+	}
+	sbx, found, err := c.sandboxStore.Get(ctx, id)
+	if err != nil || !found {
+		return "/", true
+	}
+	var spec protocol.SandboxSpec
+	if len(sbx.Spec) > 0 {
+		_ = json.Unmarshal(sbx.Spec, &spec)
+	}
+	if spec.Workdir != "" {
+		return spec.Workdir, true
+	}
+	return "/", true
 }
 
 // sandboxSpawnMachineName is the generated machine label for a spawn-block

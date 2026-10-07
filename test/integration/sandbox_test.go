@@ -165,13 +165,14 @@ func (h *sandboxHarness) waitLiveExecutors(t *testing.T, want int) {
 }
 
 type spawnOpts struct {
-	parent   string
-	selector string
-	ref      string
-	sandbox  *rafikiv1.SandboxSpec
-	maxDepth *int32
-	children *int32
-	cwd      string
+	parent    string
+	selector  string
+	ref       string
+	sandbox   *rafikiv1.SandboxSpec
+	maxDepth  *int32
+	children  *int32
+	cwd       string
+	extraArgs []string
 }
 
 // spawn spawns a fundi child over Connect and returns its id plus the error.
@@ -192,6 +193,7 @@ func (h *sandboxHarness) spawn(t *testing.T, o spawnOpts) (string, error) {
 		Sandbox:          o.sandbox,
 		MaxDepth:         o.maxDepth,
 		MaxChildren:      o.children,
+		ExtraArgs:        o.extraArgs,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -329,6 +331,65 @@ func (h *sandboxHarness) sandboxByName(t *testing.T, name string) *rafikiv1.Sand
 }
 
 // ─── scenarios ────────────────────────────────────────────────────────────────
+
+// sandboxPwdTurnsScript writes a --fake-turns ndjson file (pkg/fundi's hidden
+// LoadFakeSender seam) whose first turn calls the real bash tool with
+// `pwd > <outPath>` and whose second turn ends the turn. It is how this suite
+// proves a sandboxed child's tool ACTUALLY RUNS, and where: the marker holds
+// the tool's working directory, which must be the container workdir.
+func sandboxPwdTurnsScript(t *testing.T, outPath string) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+
+	commandJSON, err := json.Marshal("pwd > " + shellQuote(outPath))
+	c.NoError(err, "marshal scripted command")
+	toolUseTurn := fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{"command":%s}}],"usage":{"input_tokens":10,"output_tokens":5}}`, commandJSON)
+	const endTurn = `{"id":"msg_2","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":4,"output_tokens":2}}`
+
+	path := filepath.Join(t.TempDir(), "fake-turns.ndjson")
+	c.NoError(os.WriteFile(path, []byte(toolUseTurn+"\n"+endTurn+"\n"), 0o600), "write fake-turns script")
+	return path
+}
+
+// TestSandboxSpawnBlockRunsAToolInTheContainerWorkdir is the reviewer's 6.2-F5:
+// a sandboxed child ACTUALLY RUNS a tool, and the tool's working directory is
+// the CONTAINER workdir, never the inherited host cwd. The spawn's cwd is a
+// host path the container cannot see; the scripted bash tool writes its `pwd`
+// to a marker, which must read the container root. With the cwd defect the
+// provision would carry the host path and the tool would report it (or fail to
+// provision at all) — either way this assertion fails.
+func TestSandboxSpawnBlockRunsAToolInTheContainerWorkdir(t *testing.T) {
+	c := assert.NewAborting(t)
+	h := bootSandboxDaemon(t)
+
+	hostCwd := shortTempDir(t, "rafiki-sbx-hostcwd-")
+	markerPath := filepath.Join(shortTempDir(t, "rafiki-sbx-pwd-"), "pwd.out")
+	turns := sandboxPwdTurnsScript(t, markerPath)
+
+	id, err := h.spawn(t, spawnOpts{
+		sandbox:   &rafikiv1.SandboxSpec{Scope: "self"},
+		cwd:       hostCwd,
+		extraArgs: []string{"--fake-turns", turns},
+	})
+	c.NoError(err, "spawn with a sandbox block and scripted turns")
+	t.Cleanup(func() { h.cleanupChild(id) })
+
+	client := h.d.control(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err = client.SendFrame(ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   id,
+		FrameJson: `{"type":"prompt","message":"go"}`,
+	}))
+	c.NoError(err, "send prompt")
+
+	c.True(waitFor(t, 20*time.Second, func() bool { _, statErr := os.Stat(markerPath); return statErr == nil }),
+		"the scripted bash tool never ran in the sandboxed child\ndaemon stderr:\n%s", h.d.stderr.tail(4000))
+	out, err := os.ReadFile(markerPath)
+	c.NoError(err, "read the tool's pwd output")
+	c.Eq("/", strings.TrimSpace(string(out)),
+		"the tool must start at the container workdir, not the inherited host cwd %s", hostCwd)
+}
 
 // TestSandboxCreateBindsChildToTheSandboxExecutor: a named sandbox is created
 // through the CLI against the real daemon; the create body the launcher
