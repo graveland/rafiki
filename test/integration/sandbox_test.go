@@ -5,10 +5,13 @@ package integration_test
 // executor subprocess, and an in-process fake Docker Engine (see
 // sandbox_fakedocker_test.go) standing in for the container runtime.
 //
-// Every scenario would fail if its guard were deleted: the create-body shape is
-// asserted on the recorded body, the sandbox binding on the child's
-// rafiki/executor label, removal on whether the fake saw the DELETE, and the
-// reaper/TTL on the fake's container set.
+// Scenarios are written so that deleting the guard each names fails the test:
+// the create-body shape is asserted on the recorded body, the sandbox binding
+// on the child's rafiki/executor label, removal on whether the fake saw the
+// DELETE, and the reaper/TTL on the fake's container set. One exception is
+// stated at its test: the host-path refusal here exercises the DAEMON pre-check
+// only — the launcher's own re-check is covered inside pkg/executor, whose
+// Proxy-driven TestDockerGuard* tests run the real Proxy handler.
 
 import (
 	"bytes"
@@ -327,12 +330,18 @@ func (h *sandboxHarness) sandboxByName(t *testing.T, name string) *rafikiv1.Sand
 
 // ─── scenarios ────────────────────────────────────────────────────────────────
 
-// TestSandboxCreateRunsToolsInsideTheContainer: a named sandbox is created
+// TestSandboxCreateBindsChildToTheSandboxExecutor: a named sandbox is created
 // through the CLI against the real daemon; the create body the launcher
 // forwarded has network bridge, a read-only bind of the host path and the
 // read-only relay mount, and NO Binds array; a child spawned with executor:<name>
 // lands on the sandbox's own executor.
-func TestSandboxCreateRunsToolsInsideTheContainer(t *testing.T) {
+//
+// The binding half is asserted through the child's rafiki/executor label, not a
+// tool call: the sandbox's "container" here is a host process (the fake Docker
+// starts `rafiki executor serve` directly), so a request that the tools
+// actually run inside a container filesystem/mount set is not this test's
+// claim. The create-body assertions are what prove the container's shape.
+func TestSandboxCreateBindsChildToTheSandboxExecutor(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := bootSandboxDaemon(t)
 
@@ -404,8 +413,17 @@ func TestSandboxNetworkNoneAndReadOnlyMount(t *testing.T) {
 	}
 }
 
-// TestSandboxHostPathOutsideRootRefusedByTheDaemon: the daemon pre-check refuses
+// TestSandboxHostPathOutsideRootRefusedByTheDaemon: the DAEMON pre-check refuses
 // a host path outside every launcher mount root, naming the field.
+//
+// This test exercises the daemon arm ONLY. The launcher's own re-check (the
+// security boundary) is reachable only over the executor link the daemon owns,
+// so an integration test cannot drive its Proxy; it IS covered end to end
+// inside pkg/executor, whose Proxy-driven TestDockerGuard* tests
+// (dockerguard_test.go, proxy_test.go) run the real Proxy handler against the
+// real guard. The daemon-specific message asserted below pins the arm this test
+// names (the launcher's message says "outside sandbox mount roots", a different
+// string).
 func TestSandboxHostPathOutsideRootRefusedByTheDaemon(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := bootSandboxDaemon(t)
@@ -413,13 +431,26 @@ func TestSandboxHostPathOutsideRootRefusedByTheDaemon(t *testing.T) {
 	_, err := h.createSandboxCLI(t, "--name", "escape-"+runTag(),
 		"--mount", "ro:/etc=host:/etc")
 	c.Error(err, "a host path outside every root must be refused")
-	c.StrContains(err.Error(), "mount root", "the refusal names the mount root")
+	c.StrContains(err.Error(), "not under any launcher mount root",
+		"the refusal is the DAEMON pre-check's, not the launcher's")
 	c.Len(h.docker.recordedCreates(), 0, "no container was created")
 }
 
 // TestSandboxEmptySelectorNeverLandsInASandbox: with a named sandbox and an
 // ordinary executor both live, an empty-selector spawn binds to the ordinary
 // one — a sandbox is never an implicit choice.
+//
+// This is the end-to-end half of that rule; it cannot be made to fail by
+// deleting dropSandboxCandidates, because sortCandidates already orders
+// sandboxes last and the harness's launcher is itself an ordinary candidate. A
+// sandbox-ONLY candidate set is unreachable end to end: a top-level spawn's set
+// always contains the launcher (which must be live for the sandbox to have been
+// created), and any descendant whose set narrows to the sandbox does so through
+// an INHERITED explicit selector (inheritExecutorGrant), which the implicit
+// drop does not apply to. The sandbox-only case is pinned instead by the unit
+// test TestSandboxSelectionEmptySelectorNeverPicksASandbox
+// (cmd/rafikid/executor_select_sandbox_test.go), whose fixture is a
+// sandbox-only candidate set and which fails if the drop is deleted.
 func TestSandboxEmptySelectorNeverLandsInASandbox(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := bootSandboxDaemon(t)
@@ -520,9 +551,20 @@ func TestSandboxSpawnBlockScopes(t *testing.T) {
 	h.cleanupChild(d)
 	h.cleanupChild(cid)
 
-	// An unrelated top-level child cannot reach A's sandbox by naming its machine.
-	_, err = h.spawn(t, spawnOpts{ref: sandboxMachineName(row.GetId())})
-	c.Error(err, "an unrelated child must not reach a child-owned sandbox")
+	// An unrelated top-level child cannot reach A's sandbox by naming its
+	// machine: a child-owned sandbox is never a ref target. The machine name is
+	// read from the row's own executor, never mirrored. The CONTROL — the same
+	// ref shape naming the launcher — succeeds, so the refusal is specific to
+	// the sandbox, not a broken ref.
+	_, err = h.spawn(t, spawnOpts{ref: h.executorMachine(t, row.GetExecutorId())})
+	c.Error(err, "an unrelated child must not reach a child-owned sandbox by machine name")
+	c.StrContains(err.Error(), h.executorMachine(t, row.GetExecutorId()),
+		"the refusal names the machine it refused")
+	c.StrContains(err.Error(), "exists but is not usable",
+		"the refusal is the not-usable one, meaning the sandbox was found but excluded")
+	control := h.mustSpawn(t, spawnOpts{ref: "launcher"})
+	c.NotEq("", h.labelsOf(t, control)["rafiki/executor"],
+		"a ref naming the launcher succeeds — the control for the refusal above")
 
 	// Kill leaves the container; Close removes it.
 	h.killChild(a)
@@ -533,14 +575,18 @@ func TestSandboxSpawnBlockScopes(t *testing.T) {
 		"Close removes the spawn block's container")
 }
 
-// sandboxMachineName mirrors cmd/rafikid's sandboxSpawnMachineName: "sbx-" plus
-// the first 12 characters of the row id after its "sbx_" prefix, lowercased.
-func sandboxMachineName(rowID string) string {
-	rest := strings.TrimPrefix(rowID, "sbx_")
-	if len(rest) > 12 {
-		rest = rest[:12]
+// executorMachine reads the "machine" label of an executor row, so a test can
+// name a sandbox by the machine it actually advertises instead of mirroring
+// cmd/rafikid's name derivation by hand.
+func (h *sandboxHarness) executorMachine(t *testing.T, execID string) string {
+	t.Helper()
+	for _, e := range h.listStoreExecutors(t) {
+		if e.ID == execID {
+			return e.Labels["machine"]
+		}
 	}
-	return "sbx-" + strings.ToLower(rest)
+	t.Fatalf("executor %s not found in the store", execID)
+	return ""
 }
 
 // TestSandboxExecutorRmRefusesASandboxRow: `rafiki executor delete` refuses a
