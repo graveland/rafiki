@@ -886,7 +886,10 @@ rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
   `0666` inside a `0755` directory, so every local user on the launcher host
   (and every container that can see the relay dir) can reach the executor and
   daraja Upgrade routes through it — credential-gated, but a deliberate
-  widening worth knowing about.
+  widening worth knowing about. Foothold mode widens it further: the relay is
+  then a loopback TCP port every container on the docker host can reach
+  through `host.docker.internal` — non-rafiki containers included, not just
+  local users.
 - The launcher's `docker` proxy inspects every container-create body against a
   fail-closed allowlist (exactly the fields the daemon emits, no duplicate
   keys, bind sources symlink-resolved under a mount root), so a body that asks
@@ -898,10 +901,14 @@ it. On Linux that socket is a host unix socket the launcher bind-mounts into
 the container (`--relay-dir`, defaulting to `<runtime dir>/relay` when the
 `docker` proxy is a local unix socket), and the sandbox dials
 `/run/rafiki-relay/daemon.sock`. A docker host in **another kernel** — OrbStack
-or Docker Desktop on macOS, a lima VM, a remote context — cannot see a host
-bind-mount, so select **foothold mode** instead with
+or Docker Desktop on macOS — cannot see a host bind-mount, so select
+**foothold mode** instead with
 `--relay-foothold-image <ref>` (mutually exclusive with `--relay-dir`; it
-requires a `unix://` `docker` proxy and a daemon address). The launcher then
+requires a `unix://` `docker` proxy and a daemon address). Foothold mode works
+only where the docker runtime maps `host.docker.internal` to this host's
+loopback (Docker Desktop, OrbStack): the foothold's bridge dials its OWN
+host's loopback, so a plain lima VM or a remote docker context — which cannot
+see the bind-mount either — has no working foothold. The launcher then
 runs one **foothold container** per docker host, inside the docker host's own
 kernel (`rafiki-foothold-<key>`, volume `rafiki.relay.<key>`), which serves the
 relay socket in the volume and splices it to a loopback TCP relay on the
@@ -911,6 +918,12 @@ automatically whenever the container spec changes — the image or the bridge
 command (which carries the relay port) — and the change is picked up on the
 next sandbox create, so a *fixed tag* needs a manual `docker pull` to take
 effect.
+
+Two accepted residuals of foothold mode, not protections: the foothold keeps
+running while the launcher is down (`RestartPolicy` `unless-stopped`) and its
+dial target is an ephemeral loopback port, so a local process could bind that
+port while the launcher is stopped; and the foothold's key is the launcher
+host name, so renaming the host orphans the old volume and foothold.
 
 **The image must run `rafiki`.** A sandbox runs `rafiki executor serve
 --connect-socket /run/rafiki-relay/daemon.sock` as its entrypoint, so the image

@@ -101,10 +101,18 @@ ordinary durable executor whose operator declared three things:
 - `--relay-foothold-image <ref>` — select **foothold mode** in place of
   `--relay-dir` (the two are mutually exclusive): the launcher runs one
   foothold container per docker host, inside the docker host's own kernel,
-  whose relay socket lives in a named volume the sandbox mounts. Reported as
+  whose relay socket lives in a named volume the sandbox mounts. Works only
+  where the docker runtime maps `host.docker.internal` to this host's loopback
+  (Docker Desktop, OrbStack), since the foothold's bridge dials its OWN host's
+  loopback — not a plain lima VM or a remote docker context. Reported as
   `DescribeResponse.sandboxRelayVolume`. Requires a `unix://` `docker` proxy
   and a daemon address, and is replaced by `foothold.Ensure` when the create
   body or the resolved image id drifts.
+
+Accepted residuals of foothold mode, not protections: while the launcher is
+down the foothold keeps running and its ephemeral loopback TCP hop is
+plaintext, and the foothold's key is the host name, so a rename orphans its
+volume.
 
 **The relay.** `--relay-dir` makes `rafiki executor serve` also bind
 `<relay-dir>/daemon.sock` (`sandboxrelay.Serve`) and splice every accepted

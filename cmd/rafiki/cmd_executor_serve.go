@@ -221,7 +221,8 @@ func hostnameOrEmpty() string {
 // cannot drift.
 const relayFootholdImageHelp = "image to run as this launcher's foothold: a container inside the docker host's kernel that bridges " +
 	"a volume socket to a loopback TCP relay, for docker hosts that cannot bind-mount this host's " +
-	"sockets (macOS VMs, remote hosts). The image must have rafiki on PATH. Requires --proxy " +
+	"sockets (Docker Desktop or OrbStack; the bridge dials host.docker.internal, which those " +
+	"runtimes map to this host's loopback). The image must have rafiki on PATH. Requires --proxy " +
 	"docker=unix://… and --connect or --connect-socket; exclusive with --relay-dir"
 
 // executorProfileProxy resolves a reachable LLM proxy URL for daraja-hosted
@@ -708,8 +709,9 @@ Two transports, exactly one of which is used:
 			"A bind outside every root and the --relay-dir is refused. With no root, no bind is permitted")
 	cmd.Flags().StringVar(&relayDir, "relay-dir", "",
 		"absolute directory under which to expose the daemon to sandboxes over a unix socket "+
-			"(created if missing). Requires --connect or --connect-socket. Defaults to a "+
-			"directory under the runtime dir when --proxy docker= names a local unix socket; "+
+			"(created if missing). Requires --connect or --connect-socket. Defaults on Linux to a "+
+			"directory under the runtime dir when --proxy docker= names a local unix socket; on "+
+			"other platforms the relay dir is opt-in. "+
 			"--relay-dir= (empty) disables it")
 	cmd.Flags().StringVar(&relayFootholdImage, "relay-foothold-image", "", relayFootholdImageHelp)
 
