@@ -89,8 +89,13 @@ import (
 //     receive-pack, and this file never serves a repository.
 //   - filter.*/diff.*/merge.* drivers: only a checkout consults them, and the
 //     only checkout here is of a repository this file just created with
-//     `git init`, which carries no .gitattributes and no driver config; an
-//     EXISTING repository is never checked out.
+//     `git init`. Its local config carries no driver, but the SOURCE's
+//     .gitattributes arrives with the checkout and can select a driver defined
+//     in the receiver's global or system config (git-lfs shape). Two locks
+//     close that: gitEnv nulls both config files, and initAttributes pins
+//     `filter` unset in the new repository's info/attributes, which outranks
+//     the checked-out .gitattributes. An EXISTING repository is never checked
+//     out.
 //   - submodule.recurse/fetch.recurseSubmodules: a fetch from a bundle file has
 //     no remote to recurse into, so no submodule fetch is attempted.
 //   - include.path/includeIf: they read another config file, they run nothing,
@@ -107,6 +112,22 @@ var gitHardening = []string{
 	"-c", "protocol.ext.allow=never",
 	"-c", "protocol.file.allow=always",
 	"-c", "core.sshCommand=false",
+}
+
+// initAttributes is written to a freshly initialized destination's
+// info/attributes before anything is checked out. info/attributes outranks the
+// .gitattributes that arrives with the checkout, so the source cannot select a
+// filter driver; ident and working-tree-encoding are unset so the checkout
+// writes the bundled bytes unchanged.
+const initAttributes = "* -filter -ident -working-tree-encoding\n"
+
+// writeInitAttributes installs initAttributes in the new repository's git dir.
+func writeInitAttributes(repo string) error {
+	info := filepath.Join(repo, ".git", "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(info, "attributes"), []byte(initAttributes), 0o644)
 }
 
 // scratchDirName is the directory under the system temp dir that is the ONLY
@@ -132,23 +153,29 @@ var repoMkdir = os.Mkdir
 // makes git's messages locale-independent, so matching "Refusing to create an
 // empty bundle" cannot break under the pinned env's locale, and
 // GIT_TERMINAL_PROMPT=0 means git can never block waiting for a credential on
-// a terminal that does not exist. Any conflicting entry in the pinned env is
-// dropped: the child's getenv returns the FIRST match, so appending alone
-// would not override it.
+// a terminal that does not exist. GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM point at
+// /dev/null (and GIT_CONFIG_NOSYSTEM=1 covers a git too old to know the
+// former), so no driver, hook path or rewrite the receiver defined globally
+// can be selected by content the sandbox prepared; the only config git reads
+// is the repository's own and the -c options above. Any conflicting entry in
+// the pinned env is dropped: the child's getenv returns the FIRST match, so
+// appending alone would not override it.
 func (s *Server) gitEnv(extra ...string) []string {
 	base := s.opts.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	forced := make([]string, 0, 2+len(extra))
-	forced = append(forced, "LC_ALL=C", "GIT_TERMINAL_PROMPT=0")
+	forced := make([]string, 0, 5+len(extra))
+	forced = append(forced, "LC_ALL=C", "GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	forced = append(forced, extra...)
 
 	env := make([]string, 0, len(base)+len(forced))
 	for _, kv := range base {
 		name, _, _ := strings.Cut(kv, "=")
 		switch name {
-		case "LC_ALL", "GIT_TERMINAL_PROMPT", "GIT_CEILING_DIRECTORIES":
+		case "LC_ALL", "GIT_TERMINAL_PROMPT", "GIT_CEILING_DIRECTORIES",
+			"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM":
 			continue
 		}
 		env = append(env, kv)
@@ -709,6 +736,10 @@ func (s *Server) GitFetchBundle(
 				fmt.Errorf("git init: %s", strings.TrimSpace(string(out))))
 		}
 		createdRepo = true
+		if err := writeInitAttributes(repo); err != nil {
+			cleanup()
+			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("write info/attributes: %w", err))
+		}
 	}
 
 	if createdRepo {

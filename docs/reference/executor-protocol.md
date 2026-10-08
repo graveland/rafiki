@@ -954,9 +954,10 @@ Unary. Fetches a bundle file into `repo`, creating it when absent. It is git's
 own fetch semantics: a checked-out branch is refused, and a non-fast-forward
 update is refused unless `force`. A fetch never touches the working tree of an
 EXISTING repository; a repository that does not exist is created with the
-branch checked out. It never reads the source's `.git/config` or hooks, and a
-bundle carries objects and refs only — every git call the executor makes runs
-under `gitHardening` and a fixed environment. The
+branch checked out, with attribute filters disabled (`info/attributes`, below).
+It never reads the source's `.git/config` or hooks, and a bundle carries
+objects and refs only — every git call the executor makes runs under
+`gitHardening` and a fixed environment. The
 bundle is verified (`git bundle verify`, against a throwaway bare repository in
 the scratch directory, with the destination's object store attached as an
 alternate when there is one) BEFORE anything is created, so a corrupt bundle
@@ -976,8 +977,10 @@ and a `repo` must be an absolute, clean path whose final component is not a
 symlink (`GitFetchBundle` may create an absent one).
 
 Every invocation is prefixed with `gitHardening` — `-c core.fsmonitor=false`,
-`-c core.hooksPath=/dev/null`, `-c protocol.ext.allow=never`,
-`-c core.sshCommand=false`, `-c core.alternateRefsCommand=true` — as defense in
+`-c core.hooksPath=/dev/null`, `-c protocol.allow=never`,
+`-c protocol.file.allow=always` (the bundle is a local file),
+`-c protocol.ext.allow=never`, `-c core.sshCommand=false`,
+`-c core.alternateRefsCommand=true` — as defense in
 depth against a hostile `.git/config` in a repository the executor did not
 create: a repository's own
 configuration must not run a hook, an fsmonitor program, or a remote transport
@@ -986,8 +989,17 @@ helper. Each option is pinned by a test that fails when it is removed
 
 The subprocess environment forces `LC_ALL=C` (locale-independent messages) and
 `GIT_TERMINAL_PROMPT=0` (git can never block on a terminal that does not
-exist), dropping any conflicting `LC_ALL`/`GIT_TERMINAL_PROMPT`/
-`GIT_CEILING_DIRECTORIES` from the pinned base before prepending them.
+exist), and nulls the receiver's own git configuration with
+`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null` and
+`GIT_CONFIG_NOSYSTEM=1`, so a filter driver or rewrite defined there cannot be
+selected by content the sandbox prepared. Any conflicting entry for these names
+and `GIT_CEILING_DIRECTORIES` is dropped from the pinned base first.
+
+A repository `GitFetchBundle` creates gets `info/attributes` containing
+`* -filter -ident -working-tree-encoding` before the checkout. It outranks the
+`.gitattributes` that arrives with the checkout, so the source cannot select a
+filter driver, and the bundled bytes are written unchanged. Line-ending
+attributes (`text`, `eol`) are left to the source.
 
 Repository discovery is fenced by `GIT_CEILING_DIRECTORIES=<dir of repo>`, so a
 SUBDIRECTORY of a repository cannot be mistaken for one. The ceiling is defense

@@ -1553,3 +1553,89 @@ func TestGitFetchBundleDoesNotRecurseSubmodules(t *testing.T) {
 	_, err = os.Stat(filepath.Join(dest, "sub"))
 	c.True(os.IsNotExist(err), "the fetch wrote a submodule working tree (err=%v)", err)
 }
+
+// filterFixture returns a bundle of a branch whose .gitattributes selects the
+// filter driver "evil", plus the script that driver would run and the marker
+// the script writes.
+func filterFixture(t *testing.T, s *Server) (bundle, script, marker string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, ".gitattributes", "* filter=evil\n")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	marker = filepath.Join(t.TempDir(), "filter-marker")
+	script = filepath.Join(t.TempDir(), "smudge.sh")
+	c.NoError(os.WriteFile(script, []byte("#!/bin/sh\necho ran >> "+marker+"\ncat\n"), 0o755))
+	return b.GetBundlePath(), script, marker
+}
+
+// TestGitFetchBundleIgnoresReceiverGlobalFilter pins the GIT_CONFIG_GLOBAL and
+// GIT_CONFIG_SYSTEM nulling in gitEnv: a source .gitattributes selects a filter
+// driver the receiver defined in its global config, and the checkout of the
+// new repository must not run it. Info/attributes is also in force here, so
+// TestGitFetchBundleIgnoresInjectedFilterDriver pins that lock alone.
+func TestGitFetchBundleIgnoresReceiverGlobalFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	bundle, script, marker := filterFixture(t, s)
+
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	c.Require().NoError(os.WriteFile(global,
+		[]byte("[filter \"evil\"]\n\tsmudge = "+script+"\n\tprocess = "+script+"\n"), 0o644))
+	s.opts.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+global)
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	mustFetch(t, s, dest, bundle, "side", true)
+
+	_, err := os.Stat(marker)
+	c.True(os.IsNotExist(err), "a receiver-global filter driver ran on checkout (err=%v)", err)
+}
+
+// TestGitFetchBundleIgnoresInjectedFilterDriver pins info/attributes alone: a
+// driver defined through a config layer gitEnv does not null (GIT_CONFIG_COUNT
+// in the pinned env) is still not selectable by the source's .gitattributes.
+func TestGitFetchBundleIgnoresInjectedFilterDriver(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	bundle, script, marker := filterFixture(t, s)
+
+	s.opts.Env = append(os.Environ(),
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=filter.evil.smudge", "GIT_CONFIG_VALUE_0="+script)
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	mustFetch(t, s, dest, bundle, "side", true)
+
+	_, err := os.Stat(marker)
+	c.True(os.IsNotExist(err), "a filter driver selected by the source's .gitattributes ran (err=%v)", err)
+	got, readErr := os.ReadFile(filepath.Join(dest, "side.txt"))
+	c.Require().NoError(readErr)
+	c.Eq("side\n", string(got))
+}
+
+// TestGitEnvNullsGlobalAndSystemConfig pins the first filter lock directly:
+// a pinned env that names a real global or system config loses to /dev/null.
+// The checkout tests above cannot isolate it, since info/attributes closes the
+// same door.
+func TestGitEnvNullsGlobalAndSystemConfig(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := &Server{opts: Options{Env: []string{
+		"GIT_CONFIG_GLOBAL=/tmp/evil-global", "GIT_CONFIG_SYSTEM=/tmp/evil-system", "GIT_CONFIG_NOSYSTEM=0", "PATH=/usr/bin",
+	}}}
+	env := s.gitEnv()
+	first := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, seen := first[k]; !seen {
+			first[k] = v
+		}
+	}
+	c.Eq("/dev/null", first["GIT_CONFIG_GLOBAL"])
+	c.Eq("/dev/null", first["GIT_CONFIG_SYSTEM"])
+	c.Eq("1", first["GIT_CONFIG_NOSYSTEM"])
+	c.Eq("/usr/bin", first["PATH"])
+}
