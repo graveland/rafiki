@@ -403,6 +403,28 @@ func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
 	c.False(!present || len(cached.Scripts) != 1 || cached.Scripts[0].GetName() != "rotate_keys", "cached inventory = %+v (present %v), want the successful executor's snapshot", cached, present)
 }
 
+// TestGitPymodulePusherRefreshFailureKeepsPriorSnapshot pins what a sandbox
+// with network none relies on: its clone fails on every refresh, and that
+// failure must leave the snapshot a healthy executor already reported intact.
+func TestGitPymodulePusherRefreshFailureKeepsPriorSnapshot(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newGitSourceFixture()
+	f.clients["exec-alice"].resp = &executorpb.SyncPyModuleGitSourceResponse{
+		Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
+		VenvReady: true,
+	}
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "first refresh")
+
+	f.clients["exec-alice"].err = errors.New("git fetch origin main: could not resolve host")
+	_, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Error(err, "a refresh where every executor fails reports it")
+
+	cached, present := f.gp.inventoryFor("u_alice", "ops_tools")
+	c.False(!present || len(cached.Scripts) != 1 || cached.Scripts[0].GetName() != "rotate_keys",
+		"cached inventory = %+v (present %v), want the earlier successful snapshot", cached, present)
+}
+
 // TestGitPymodulePusherRefreshSkipsIneligibleExecutors: the Describe flag and
 // the owner label are both gates. An executor without the git-sync flag and
 // one whose owner label names no active user receive nothing for a USER's

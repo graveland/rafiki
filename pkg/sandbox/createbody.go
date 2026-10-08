@@ -33,7 +33,10 @@ type CreateInputs struct {
 }
 
 // The create body's fixed pieces. The entrypoint runs `rafiki executor serve`
-// bound to the relay socket the launcher mounts at ContainerRelayDir.
+// bound to the relay socket the launcher mounts at ContainerRelayDir, hosting
+// script children (--launch script, which also turns on the pymodule corpus
+// and git-source syncs). It never hosts claude: the image carries no claude
+// binary, and the command is not caller-expressible.
 const relaySocketPath = ContainerRelayDir + "/daemon.sock"
 
 // createBody is the JSON sent to POST /containers/create. Every field is
@@ -102,7 +105,7 @@ func CreateBody(r Resolved, in CreateInputs) ([]byte, error) {
 	body := createBody{
 		Image:      r.Image,
 		Entrypoint: []string{"rafiki"},
-		Cmd:        []string{"executor", "serve", "--connect-socket", relaySocketPath},
+		Cmd:        []string{"executor", "serve", "--connect-socket", relaySocketPath, "--launch", "script"},
 		Hostname:   containerHostname(in),
 		WorkingDir: r.Workdir,
 		User:       r.User,

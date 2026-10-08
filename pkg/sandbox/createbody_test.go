@@ -67,7 +67,7 @@ func TestCreateBodyImageEntrypointCmd(t *testing.T) {
 	b := decodeBody(t, data)
 	c.Eq("img:1", b.Image, "Image")
 	c.EqDeep([]string{"rafiki"}, b.Entrypoint, "Entrypoint")
-	c.EqDeep([]string{"executor", "serve", "--connect-socket", ContainerRelayDir + "/daemon.sock"}, b.Cmd, "Cmd")
+	c.EqDeep([]string{"executor", "serve", "--connect-socket", ContainerRelayDir + "/daemon.sock", "--launch", "script"}, b.Cmd, "Cmd")
 }
 
 func TestCreateBodyWorkingDir(t *testing.T) {

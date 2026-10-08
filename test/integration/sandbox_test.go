@@ -443,6 +443,31 @@ func TestSandboxCreateBindsChildToTheSandboxExecutor(t *testing.T) {
 		"the child bound to the sandbox's executor")
 }
 
+// TestSandboxExecutorAdvertisesScriptLaunchKind: a sandbox's executor serves
+// with --launch script from the create body, so script children can be hosted
+// in it. It never advertises claude: the image carries no claude binary and
+// the create body is a fixed allowlist.
+func TestSandboxExecutorAdvertisesScriptLaunchKind(t *testing.T) {
+	c := assert.NewAborting(t)
+	h := bootSandboxDaemon(t)
+
+	info, err := h.createSandboxCLI(t, "--name", "box-"+runTag())
+	c.NoError(err, "sandbox create")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := h.d.control(t).ListExecutors(ctx, connect.NewRequest(&rafikiv1.ListExecutorsRequest{Kind: "script"}))
+	c.NoError(err, "ListExecutors")
+	var found bool
+	for _, row := range resp.Msg.GetRows() {
+		if row.GetId() == info.GetExecutorId() {
+			found = true
+			c.EqDeep([]string{"script"}, row.GetLaunchKinds(), "sandbox executor launch kinds")
+		}
+	}
+	c.True(found, "the sandbox's executor %s is not in ListExecutors", info.GetExecutorId())
+}
+
 // sandboxStateReady is the persisted ready state literal.
 func sandboxStateReady() string { return "ready" }
 
