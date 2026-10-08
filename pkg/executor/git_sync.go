@@ -112,6 +112,11 @@ var gitHardening = []string{
 	"-c", "protocol.ext.allow=never",
 	"-c", "protocol.file.allow=always",
 	"-c", "core.sshCommand=false",
+	// Auto-maintenance forks a detached `git gc`/`git maintenance` after a
+	// fetch, which keeps writing under .git/objects after the RPC has
+	// returned; the repository is the caller's to repack, not ours.
+	"-c", "gc.auto=0",
+	"-c", "maintenance.auto=false",
 }
 
 // initAttributes is written to a freshly initialized destination's
