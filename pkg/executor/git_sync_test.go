@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -381,63 +382,121 @@ func TestGitFetchBundleRefusesCheckedOutBranch(t *testing.T) {
 	c.StrContains(err.Error(), "checked out", "the refusal should carry git's own message")
 }
 
-// The executor runs git inside a repository it did not create. Nothing that
-// repository's config planted -- a hook, an fsmonitor program, an ssh command
-// -- may execute, and none of it may travel to the destination.
-func TestGitFetchBundleIgnoresSourceHooksAndConfig(t *testing.T) {
+// The executor runs git inside a repository it did not create. Each test below
+// plants the hostile configuration in the repository the RPC actually operates
+// on, so deleting the matching gitHardening option turns the test red.
+
+// TestGitFetchBundleIgnoresHostileRepoFsmonitor pins
+// `-c core.fsmonitor=false`: git runs the repository's fsmonitor on the index
+// refresh a fetch performs, so without the option the marker appears.
+func TestGitFetchBundleIgnoresHostileRepoFsmonitor(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := gitServer(t)
-	src := gitFixture(t, map[string]string{"a.txt": "hello\n"})
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
 
-	// Two markers, so a failure names which config key was honoured: the
-	// hooks (a post-checkout would fire if any code path touched a working
-	// tree) and core.fsmonitor (which git runs on an index refresh, e.g. a
-	// fetch -- the hardening's core.fsmonitor=false is what stops it).
-	hookMarker := filepath.Join(t.TempDir(), "hook-marker")
-	fsmonMarker := filepath.Join(t.TempDir(), "fsmonitor-marker")
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side") // present, NOT checked out
+	marker := filepath.Join(t.TempDir(), "fsmonitor-marker")
+	fsmon := filepath.Join(t.TempDir(), "fsmonitor.sh")
+	c.Require().NoError(os.WriteFile(fsmon, []byte("#!/bin/sh\necho ran >> "+marker+"\nexit 1\n"), 0o755))
+	gitRun(t, dest, "config", "core.fsmonitor", fsmon)
+
+	mustFetch(t, s, dest, b.GetBundlePath(), "side", true)
+
+	_, err := os.Stat(marker)
+	c.True(os.IsNotExist(err), "the destination repo's fsmonitor ran on fetch (err=%v)", err)
+}
+
+// TestGitFetchBundleRefusesExtInsteadOfRewrite pins
+// `-c protocol.ext.allow=never`: a repo-local url.*.insteadOf can rewrite the
+// bundle path to an ext:: command, which would otherwise execute here.
+func TestGitFetchBundleRefusesExtInsteadOfRewrite(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side")
+	marker := filepath.Join(t.TempDir(), "ext-marker")
+	gitRun(t, dest, "config", "protocol.ext.allow", "always")
+	gitRun(t, dest, "config", "url.ext::touch "+marker+".insteadOf", b.GetBundlePath())
+
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: dest, BundlePath: b.GetBundlePath(), Branch: "side", Force: true,
+	}))
+	c.Require().Error(err, "a repo-local insteadOf routed the bundle through ext::")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	_, serr := os.Stat(marker)
+	c.True(os.IsNotExist(serr), "the ext:: transport executed (err=%v)", serr)
+}
+
+// TestGitFetchBundleIgnoresHostileSSHCommand pins `-c core.sshCommand=false`:
+// a repo-local url.*.insteadOf can rewrite the bundle path to an ssh:// URL,
+// and the repo's own core.sshCommand would then run.
+func TestGitFetchBundleIgnoresHostileSSHCommand(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side")
+	marker := filepath.Join(t.TempDir(), "ssh-marker")
+	evil := filepath.Join(t.TempDir(), "evil-ssh.sh")
+	c.Require().NoError(os.WriteFile(evil, []byte("#!/bin/sh\ntouch "+marker+"\nexit 0\n"), 0o755))
+	gitRun(t, dest, "config", "core.sshCommand", evil)
+	gitRun(t, dest, "config", "url.ssh://git@nonexistent.invalid/x.insteadOf", b.GetBundlePath())
+
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: dest, BundlePath: b.GetBundlePath(), Branch: "side", Force: true,
+	}))
+	c.Require().Error(err, "a repo-local insteadOf routed the bundle through ssh://")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	_, serr := os.Stat(marker)
+	c.True(os.IsNotExist(serr), "the config-planted ssh command executed (err=%v)", serr)
+}
+
+// TestGitFetchBundleForcesHooksOffOnCheckout pins `-c core.hooksPath=/dev/null`:
+// the one git call in this file that runs a hook is the checkout of a freshly
+// initialized destination, and a repo created by this call carries no config of
+// its own -- the hostile hooksPath arrives through the executor's git config.
+func TestGitFetchBundleForcesHooksOffOnCheckout(t *testing.T) {
+	c := assert.NewCollecting(t)
+	marker := filepath.Join(t.TempDir(), "hook-marker")
 	hookDir := filepath.Join(t.TempDir(), "hooks")
 	c.Require().NoError(os.MkdirAll(hookDir, 0o755))
-	for _, name := range []string{"post-checkout", "post-merge", "post-index-change"} {
-		body := "#!/bin/sh\necho ran >> " + hookMarker + "\n"
-		c.Require().NoError(os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o755))
-	}
-	fsmon := filepath.Join(t.TempDir(), "fsmonitor.sh")
-	c.Require().NoError(os.WriteFile(fsmon, []byte("#!/bin/sh\necho ran >> "+fsmonMarker+"\nexit 1\n"), 0o755))
-	gitRun(t, src, "config", "core.hooksPath", hookDir)
-	gitRun(t, src, "config", "core.fsmonitor", fsmon)
-	gitRun(t, src, "config", "core.sshCommand", fsmon)
+	c.Require().NoError(os.WriteFile(filepath.Join(hookDir, "post-checkout"),
+		[]byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755))
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	c.Require().NoError(os.WriteFile(cfg, []byte("[core]\n\thooksPath = "+hookDir+"\n"), 0o600))
 
-	// (1) Bundling the hostile repo's history must not run its hooks or
-	// fsmonitor, and a fresh destination must not inherit them.
+	// gitFixture nulls the global config; override it AFTER the fixture, then
+	// build the server so its pinned env carries the hostile global config.
+	src := gitFixture(t, map[string]string{"a.txt": "hello\n"})
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	t.Setenv("TMPDIR", t.TempDir())
+	s := &Server{opts: Options{Env: os.Environ()}}
 	b := mustBundle(t, s, src, "main", nil)
-	dest := filepath.Join(t.TempDir(), "dest")
+
+	dest := filepath.Join(t.TempDir(), "created")
 	mustFetch(t, s, dest, b.GetBundlePath(), "main", false)
 
-	_, err := os.Stat(fsmonMarker)
-	c.True(os.IsNotExist(err), "the source's fsmonitor ran during a bundle round trip (err=%v)", err)
-	_, err = os.Stat(hookMarker)
-	c.True(os.IsNotExist(err), "the source's hooks ran during a bundle round trip (err=%v)", err)
-	cfg, err := os.ReadFile(filepath.Join(dest, ".git", "config"))
-	c.Require().NoError(err, "read destination config")
-	c.NotStrContains(string(cfg), "hooksPath", "the destination inherited the source's hooksPath")
-	c.NotStrContains(string(cfg), "fsmonitor", "the destination inherited the source's fsmonitor")
-
-	// (2) Fetching INTO the hostile repo (an existing repository) must not
-	// touch its working tree, so its own post-checkout hook must not fire, and
-	// its fsmonitor must not run on the fetch's index refresh.
-	other := gitFixture(t, map[string]string{"b.txt": "other\n"})
-	gitRun(t, other, "checkout", "-q", "-b", "side")
-	writeFile(t, other, "side.txt", "side\n")
-	gitRun(t, other, "add", "-A")
-	gitCommit(t, other, "side")
-	gitRun(t, src, "branch", "side") // present but not checked out in src
-	b2 := mustBundle(t, s, other, "side", nil)
-	mustFetch(t, s, src, b2.GetBundlePath(), "side", true)
-
-	_, err = os.Stat(fsmonMarker)
-	c.True(os.IsNotExist(err), "the destination's fsmonitor ran on an existing repo's fetch (err=%v)", err)
-	_, err = os.Stat(hookMarker)
-	c.True(os.IsNotExist(err), "the destination's post-checkout hook ran; an existing repo's working tree was touched (err=%v)", err)
+	_, err := os.Stat(marker)
+	c.True(os.IsNotExist(err), "a post-checkout hook from the executor's git config ran (err=%v)", err)
 }
 
 func TestScratchDirRemovesOldBundles(t *testing.T) {
@@ -449,15 +508,18 @@ func TestScratchDirRemovesOldBundles(t *testing.T) {
 
 	old := filepath.Join(dir, "old.bundle")
 	fresh := filepath.Join(dir, "fresh.bundle")
+	oldLock := filepath.Join(dir, "old.bundle.lock")
+	freshLock := filepath.Join(dir, "fresh.bundle.lock")
 	other := filepath.Join(dir, "keep.txt")
 	oldDir := filepath.Join(dir, "stale.bundle") // the suffix on a directory
-	for _, p := range []string{old, fresh, other} {
+	for _, p := range []string{old, fresh, oldLock, freshLock, other} {
 		c.Require().NoError(os.WriteFile(p, []byte("x"), 0o600))
 	}
 	c.Require().NoError(os.MkdirAll(oldDir, 0o700))
 	past := time.Now().Add(-2 * time.Hour)
-	c.Require().NoError(os.Chtimes(old, past, past))
-	c.Require().NoError(os.Chtimes(oldDir, past, past))
+	for _, p := range []string{old, oldLock, oldDir} {
+		c.Require().NoError(os.Chtimes(p, past, past))
+	}
 
 	got, err := scratchDir()
 	c.Require().NoError(err, "scratchDir")
@@ -465,8 +527,12 @@ func TestScratchDirRemovesOldBundles(t *testing.T) {
 
 	_, err = os.Stat(old)
 	c.True(os.IsNotExist(err), "a .bundle older than an hour survived the sweep (err=%v)", err)
+	_, err = os.Stat(oldLock)
+	c.True(os.IsNotExist(err), "a stale .bundle.lock survived the sweep (err=%v)", err)
 	_, err = os.Stat(fresh)
 	c.NoError(err, "a fresh .bundle was removed")
+	_, err = os.Stat(freshLock)
+	c.NoError(err, "a fresh .bundle.lock was removed")
 	_, err = os.Stat(other)
 	c.NoError(err, "a non-bundle file was removed")
 	_, err = os.Stat(oldDir)
@@ -479,4 +545,427 @@ func TestScratchDirRemovesOldBundles(t *testing.T) {
 // would be silently skipped. The subtest carries the pinned name.
 func TestGitScratchDirRemovesOldBundles(t *testing.T) {
 	t.Run("TestScratchDirRemovesOldBundles", TestScratchDirRemovesOldBundles)
+}
+
+// TestGitFetchBundleRefusesBundlePathEscape is the HIGH guard: bundle_path is a
+// wire value that becomes a path git opens and this call removes, so it must be
+// an absolute, clean regular file whose parent resolves to the scratch
+// directory -- and the removal must be registered only after all of that holds.
+func TestGitFetchBundleRefusesBundlePathEscape(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	scratch, err := scratchDir()
+	c.Require().NoError(err, "scratchDir")
+
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	c.Require().NoError(os.WriteFile(victim, []byte("victim"), 0o600))
+	c.Require().NoError(os.Symlink(outside, filepath.Join(scratch, "link")))
+
+	target := filepath.Join(outside, "target")
+	c.Require().NoError(os.WriteFile(target, []byte("target"), 0o600))
+	symlinkBundle := filepath.Join(scratch, "evil.bundle")
+	c.Require().NoError(os.Symlink(target, symlinkBundle))
+
+	dirEntry := filepath.Join(scratch, "adir")
+	c.Require().NoError(os.Mkdir(dirEntry, 0o700))
+
+	// A real regular file inside scratch, reachable only through an unclean
+	// path: this is the case ONLY the cleanliness check refuses (its parent
+	// resolves to scratch and Lstat sees a regular file), and the file must
+	// survive because no removal was registered for a refused path.
+	real := filepath.Join(scratch, "real.bundle")
+	c.Require().NoError(os.WriteFile(real, []byte("not a bundle"), 0o600))
+
+	// Built by concatenation, not filepath.Join: Join would Clean the path and
+	// destroy the very traversal the check must refuse.
+	cases := []struct{ name, path string }{
+		{"dotdot through symlink", scratch + "/link/../victim"},
+		{"symlink final element", symlinkBundle},
+		{"relative", "relative.bundle"},
+		{"directory", dirEntry},
+		{"unclean missing file", scratch + "/./x.bundle"},
+		{"unclean existing file", scratch + "/./real.bundle"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cc := assert.NewCollecting(t)
+			_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+				Repo: repo, BundlePath: tc.path, Branch: "main",
+			}))
+			cc.Require().Error(err, "accepted bundle_path %q", tc.path)
+			cc.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code for %q", tc.path)
+		})
+	}
+	// A refused bundle_path must not be the file this call removed, and the
+	// escape targets outside scratch must all survive.
+	for _, p := range []string{victim, target, dirEntry, real} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a refused bundle_path removed %s (err=%v)", p, err)
+		}
+	}
+}
+
+// TestGitRefsSubdirectoryOfRepoIsNotARepo: repository discovery is fenced at
+// the repo's parent, so a subdirectory of a repository is not one.
+func TestGitRefsSubdirectoryOfRepoIsNotARepo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	sub := filepath.Join(repo, "sub")
+	c.Require().NoError(os.MkdirAll(sub, 0o755))
+
+	resp, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: sub}))
+	c.Require().NoError(err, "GitRefs on a subdirectory of a repository")
+	c.False(resp.Msg.GetExists(), "a subdirectory of a repo reported exists=true")
+	c.NotEq("", resp.Msg.GetScratchDir(), "scratch_dir")
+}
+
+// TestGitFetchBundleRefusesSubdirectoryOfRepo: a non-empty directory that is
+// only a subdirectory of a repository must not be adopted, and the ancestor
+// repository's refs must be left untouched.
+func TestGitFetchBundleRefusesSubdirectoryOfRepo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	b := mustBundle(t, s, src, "main", nil)
+
+	repo := gitFixture(t, map[string]string{"b.txt": "b\n"})
+	before := gitRun(t, repo, "show-ref")
+	sub := filepath.Join(repo, "sub")
+	c.Require().NoError(os.MkdirAll(sub, 0o755))
+	c.Require().NoError(os.WriteFile(filepath.Join(sub, "file.txt"), []byte("x"), 0o644))
+
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: sub, BundlePath: b.GetBundlePath(), Branch: "main",
+	}))
+	c.Require().Error(err, "adopted a subdirectory of a repository")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	c.Eq(before, gitRun(t, repo, "show-ref"), "the parent repository's refs changed")
+}
+
+func TestGitRepoPathMustBeAbsoluteAndClean(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	for _, bad := range []string{"relative/repo", repo + "/../" + filepath.Base(repo), repo + "/./x"} {
+		_, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: bad}))
+		c.Require().Error(err, "accepted repo %q", bad)
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code for %q", bad)
+	}
+}
+
+// TestGitRefusesSymlinkedRepoPath: a repo path whose final component is a
+// symlink is refused (Lstat, not Stat), so it cannot point anywhere.
+func TestGitRefusesSymlinkedRepoPath(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	link := filepath.Join(t.TempDir(), "repo-link")
+	c.Require().NoError(os.Symlink(repo, link))
+
+	_, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: link}))
+	c.Require().Error(err, "accepted a symlinked repo path")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+
+	_, err = s.GitBundle(context.Background(), connect.NewRequest(&executorpb.GitBundleRequest{Repo: link, Branch: "main"}))
+	c.Require().Error(err, "GitBundle accepted a symlinked repo path")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+}
+
+func TestGitFetchBundleRefusesNonRepoDirectory(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	b := mustBundle(t, s, src, "main", nil)
+
+	dir := t.TempDir()
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644))
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: dir, BundlePath: b.GetBundlePath(), Branch: "main",
+	}))
+	c.Require().Error(err, "adopted a non-empty non-repo directory")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+}
+
+// TestGitBundleRefusesHEADWithSpecificError pins the explicit HEAD refusal: it
+// fires before any subprocess, and its message is the one surfaced.
+func TestGitBundleRefusesHEADWithSpecificError(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+
+	orig := gitRunner
+	defer func() { gitRunner = orig }()
+	var calls int
+	gitRunner = func(dir string, env []string, args ...string) ([]byte, error) {
+		calls++
+		return nil, fmt.Errorf("git must not run for HEAD: %v", args)
+	}
+
+	_, err := s.GitBundle(context.Background(), connect.NewRequest(&executorpb.GitBundleRequest{Repo: repo, Branch: "HEAD"}))
+	c.Require().Error(err, "accepted HEAD")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.StrContains(err.Error(), "names the current checkout", "the explicit HEAD refusal must be the one that fired")
+	c.Eq(0, calls, "HEAD reached a git subprocess")
+}
+
+// TestGitBundleUpToDateWhenBundleWouldBeEmpty pins the empty-bundle branch
+// specifically: the branch tip is NOT in exclude_oids, so the tip
+// short-circuit cannot fire -- only git's "Refusing to create empty bundle"
+// can turn this into up_to_date.
+func TestGitBundleUpToDateWhenBundleWouldBeEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	mainTip := strings.TrimSpace(gitRun(t, repo, "rev-parse", "refs/heads/main"))
+	gitRun(t, repo, "checkout", "-q", "-b", "ahead")
+	writeFile(t, repo, "b.txt", "b\n")
+	gitRun(t, repo, "add", "-A")
+	gitCommit(t, repo, "ahead")
+	aheadTip := strings.TrimSpace(gitRun(t, repo, "rev-parse", "refs/heads/ahead"))
+	c.NotEq(mainTip, aheadTip, "fixture tips")
+
+	resp, err := s.GitBundle(context.Background(), connect.NewRequest(&executorpb.GitBundleRequest{
+		Repo: repo, Branch: "main", ExcludeOids: []string{aheadTip},
+	}))
+	c.Require().NoError(err, "GitBundle")
+	c.True(resp.Msg.GetUpToDate(), "up_to_date")
+	c.Eq(mainTip, resp.Msg.GetTipOid(), "tip_oid")
+	c.Eq("", resp.Msg.GetBundlePath(), "bundle_path")
+}
+
+// TestScratchDirRefusesSymlink: a symlink at the scratch path must not be
+// followed or adopted.
+func TestScratchDirRefusesSymlink(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	attacker := filepath.Join(tmp, "attacker")
+	c.Require().NoError(os.MkdirAll(attacker, 0o700))
+	c.Require().NoError(os.Symlink(attacker, filepath.Join(tmp, scratchDirName)))
+
+	_, err := scratchDir()
+	c.Require().Error(err, "adopted a symlinked scratch path")
+}
+
+func TestScratchDirRefusesNonDirectory(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	c.Require().NoError(os.WriteFile(filepath.Join(tmp, scratchDirName), []byte("x"), 0o600))
+
+	_, err := scratchDir()
+	c.Require().Error(err, "adopted a non-directory scratch path")
+}
+
+// TestScratchDirRefusesForeignOwner pins the ownership check via the uid seam,
+// since the test cannot chown.
+func TestScratchDirRefusesForeignOwner(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	c.Require().NoError(os.MkdirAll(filepath.Join(tmp, scratchDirName), 0o700))
+
+	orig := scratchDirEUID
+	defer func() { scratchDirEUID = orig }()
+	scratchDirEUID = func() int { return os.Geteuid() + 1 }
+
+	_, err := scratchDir()
+	c.Require().Error(err, "adopted a scratch dir owned by another uid")
+}
+
+// TestGitBundleRefusesReflogSyntax pins the explicit @{ refusal: it fires
+// before any subprocess, which check-ref-format would otherwise reach.
+func TestGitBundleRefusesReflogSyntax(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+
+	orig := gitRunner
+	defer func() { gitRunner = orig }()
+	var calls int
+	gitRunner = func(dir string, env []string, args ...string) ([]byte, error) {
+		calls++
+		return nil, fmt.Errorf("git must not run for a reflog-syntax branch: %v", args)
+	}
+
+	for _, branch := range []string{"x@{-1}", "main@{1}"} {
+		_, err := s.GitBundle(context.Background(), connect.NewRequest(&executorpb.GitBundleRequest{Repo: repo, Branch: branch}))
+		c.Require().Error(err, "accepted branch %q", branch)
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code for %q", branch)
+	}
+	c.Eq(0, calls, "a reflog-syntax branch reached a git subprocess")
+}
+
+// TestGitFetchBundleDoesNotCreateRepoBeforeVerify: a bundle that fails
+// verification must leave no destination behind.
+func TestGitFetchBundleDoesNotCreateRepoBeforeVerify(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	scratch, err := scratchDir()
+	c.Require().NoError(err, "scratchDir")
+	corrupt := filepath.Join(scratch, "corrupt.bundle")
+	c.Require().NoError(os.WriteFile(corrupt, []byte("this is not a git bundle\n"), 0o600))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	_, err = s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: dest, BundlePath: corrupt, Branch: "main",
+	}))
+	c.Require().Error(err, "accepted a corrupt bundle")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	_, serr := os.Stat(dest)
+	c.True(os.IsNotExist(serr), "the destination was created before the bundle verified (err=%v)", serr)
+}
+
+// TestGitFetchBundleRemovesRepoCreatedOnFailure: a failure after this call
+// created the repository must remove exactly what it created.
+func TestGitFetchBundleRemovesRepoCreatedOnFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
+
+	// The bundle carries refs/heads/main, so asking for refs/heads/other fails
+	// the fetch after the call created the repository.
+	absentBundle := mustBundle(t, s, src, "main", nil)
+	absent := filepath.Join(t.TempDir(), "created")
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: absent, BundlePath: absentBundle.GetBundlePath(), Branch: "other",
+	}))
+	c.Require().Error(err, "fetched a branch the bundle does not contain")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	_, serr := os.Stat(absent)
+	c.True(os.IsNotExist(serr), "a repo directory created by the failed call was left behind (err=%v)", serr)
+
+	// An existing EMPTY directory keeps the directory but loses the .git this
+	// call created.
+	emptyBundle := mustBundle(t, s, src, "main", nil)
+	empty := t.TempDir()
+	_, err = s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: empty, BundlePath: emptyBundle.GetBundlePath(), Branch: "other",
+	}))
+	c.Require().Error(err, "fetched a branch the bundle does not contain")
+	_, serr = os.Stat(filepath.Join(empty, ".git"))
+	c.True(os.IsNotExist(serr), "a .git created by the failed call was left behind (err=%v)", serr)
+	entries, rerr := os.ReadDir(empty)
+	c.Require().NoError(rerr)
+	c.Eq(0, len(entries), "the empty destination is no longer empty")
+}
+
+// TestGitEnvForcesCLocale pins LC_ALL=C: it must be present exactly once, and
+// the pinned env's own LC_ALL must not shadow it (getenv returns the first
+// match).
+func TestGitEnvForcesCLocale(t *testing.T) {
+	c := assert.NewCollecting(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	s := &Server{opts: Options{Env: []string{
+		"LC_ALL=tr_TR.UTF-8", "GIT_TERMINAL_PROMPT=1", "GIT_CEILING_DIRECTORIES=/nonexistent",
+	}}}
+	repo := t.TempDir()
+
+	orig := gitRunner
+	defer func() { gitRunner = orig }()
+	var got []string
+	gitRunner = func(dir string, env []string, args ...string) ([]byte, error) {
+		if got == nil {
+			got = env
+		}
+		return nil, errors.New("not running git")
+	}
+
+	_, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: repo}))
+	c.Require().NoError(err, "GitRefs")
+	c.Require().NotEmpty(got, "no git invocation recorded")
+
+	counts := map[string]int{}
+	for _, kv := range got {
+		counts[strings.SplitN(kv, "=", 2)[0]]++
+	}
+	c.Eq(1, counts["LC_ALL"], "LC_ALL must appear exactly once")
+	c.Eq(1, counts["GIT_TERMINAL_PROMPT"], "GIT_TERMINAL_PROMPT must appear exactly once")
+	c.Eq(1, counts["GIT_CEILING_DIRECTORIES"], "GIT_CEILING_DIRECTORIES must appear exactly once")
+	c.Contains(got, "LC_ALL=C")
+	c.Contains(got, "GIT_TERMINAL_PROMPT=0")
+}
+
+// hasArgSequence reports whether any recorded invocation contains want as a
+// contiguous run of argv elements.
+func hasArgSequence(invocations [][]string, want ...string) bool {
+	for _, inv := range invocations {
+		for i := 0; i+len(want) <= len(inv); i++ {
+			match := true
+			for j, w := range want {
+				if inv[i+j] != w {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestGitInvocationsUseArgvTerminator pins the `--` separators: every
+// positional argument that could be mistaken for an option is preceded by one.
+func TestGitInvocationsUseArgvTerminator(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+
+	orig := gitRunner
+	defer func() { gitRunner = orig }()
+	var invocations [][]string
+	gitRunner = func(dir string, env []string, args ...string) ([]byte, error) {
+		invocations = append(invocations, append([]string(nil), args...))
+		return orig(dir, env, args...)
+	}
+
+	mustBundle(t, s, repo, "main", []string{strings.Repeat("a", 40)})
+	_, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: repo}))
+	c.Require().NoError(err, "GitRefs")
+
+	c.True(hasArgSequence(invocations, "bundle", "create", "--"), "no `git bundle create --` invocation")
+	c.True(hasArgSequence(invocations, "cat-file", "-e", "--"), "no `git cat-file -e --` invocation")
+	c.True(hasArgSequence(invocations, "for-each-ref", "--format=%(refname:short)%09%(objectname)", "--", "refs/heads"),
+		"no `git for-each-ref -- refs/heads` invocation")
+}
+
+// TestGitFetchBundleReturnsNewOIDResolutionError pins the new_oid error return:
+// a resolution failure after a successful fetch must be returned, not silently
+// turned into an empty oid.
+func TestGitFetchBundleReturnsNewOIDResolutionError(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side")
+
+	orig := gitRunner
+	defer func() { gitRunner = orig }()
+	var resolves int
+	gitRunner = func(dir string, env []string, args ...string) ([]byte, error) {
+		if hasArgSequence([][]string{args}, "rev-parse", "--verify") {
+			resolves++
+			if resolves == 2 { // old_oid resolves first, new_oid second
+				return []byte("simulated failure"), errors.New("exit status 1")
+			}
+		}
+		return orig(dir, env, args...)
+	}
+
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: dest, BundlePath: b.GetBundlePath(), Branch: "side", Force: true,
+	}))
+	c.Require().Error(err, "a failed new_oid resolution must be returned, not silently emptied")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
 }
