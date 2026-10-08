@@ -8,6 +8,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // Compile-time interface check.
@@ -64,19 +65,19 @@ func (f *Fake) SetFailure(tool string, code executorpb.Failure_Code, message str
 
 // Execute dispatches the tool call, records it, and returns either the
 // pre-configured result or failure.
-func (f *Fake) Execute(_ context.Context, tool string, input json.RawMessage) (string, error) {
+func (f *Fake) Execute(_ context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, Call{Tool: tool, Input: input})
 	if fail, ok := f.failures[tool]; ok {
 		f.mu.Unlock()
-		return "", newError(fail)
+		return toolmeta.Result{}, newError(fail)
 	}
 	text, ok := f.results[tool]
 	f.mu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("fake executor: no result configured for %q", tool)
+		return toolmeta.Result{}, fmt.Errorf("fake executor: no result configured for %q", tool)
 	}
-	return text, nil
+	return toolmeta.Result{Text: text}, nil
 }
 
 // Calls returns a copy of the recorded invocations.

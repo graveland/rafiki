@@ -50,8 +50,9 @@ func TestAgentRouteMergesAndReportsCanonicalSpec(t *testing.T) {
 	sp := &fakeSpawner{routingResult: "sort=throughput,quant=fp8+,prefer=fireworks"}
 	reg, ctx := newAgentTools(t, sp)
 
-	out, err := reg.Execute(ctx, "agent_route", json.RawMessage(
+	outRes, err := reg.Execute(ctx, "agent_route", json.RawMessage(
 		`{"agent_id":"c_a","spec":"prefer=fireworks"}`))
+	out := outRes.Text
 	ck.NoError(err, "agent_route")
 	ck.Len(sp.routed, 1, "want 1 SetRouting call, got %d", len(sp.routed))
 	ck.Eq("c_a", sp.routed[0].ChildID, "target passed through")

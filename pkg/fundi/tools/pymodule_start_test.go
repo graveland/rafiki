@@ -69,7 +69,8 @@ func TestPyModuleStartReturnsTheChildAtOnce(t *testing.T) {
 	sp := &fakeSpawner{nextID: "c_started"}
 	sp.children = nil
 	reg, ctx := newAgentTools(t, sp)
-	text, err := reg.Execute(ctx, "pymodule_start", json.RawMessage(`{"repo":"local","script":"driver"}`))
+	textRes, err := reg.Execute(ctx, "pymodule_start", json.RawMessage(`{"repo":"local","script":"driver"}`))
+	text := textRes.Text
 	c.Require().NoError(err, "pymodule_start")
 	c.StrContains(text, "c_started", "result")
 	c.StrContains(text, "script", "result")

@@ -101,7 +101,8 @@ func TestRegisterAndExecute(t *testing.T) {
 	c := assert.NewAborting(t)
 	r := NewRegistry()
 	r.Register(&testEchoTool{name: "echo", desc: "echoes its input", schema: schemaWithRequiredX(), result: "got:hi"})
-	out, err := r.Execute(context.Background(), "echo", json.RawMessage(`{"x":"hi"}`))
+	outRes, err := r.Execute(context.Background(), "echo", json.RawMessage(`{"x":"hi"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.Eq("got:hi", out, "unexpected output")
 }
@@ -189,13 +190,15 @@ func TestExecuteContainsAPanickingTool(t *testing.T) {
 	r.Register(panickingTool{msg: "boom"})
 	r.Register(fineTool{})
 
-	out, err := r.Execute(context.Background(), "boom", json.RawMessage(`{}`))
+	outRes, err := r.Execute(context.Background(), "boom", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.Require().Error(err, "Execute returned a nil error for a panicking tool; the panic was not converted")
 	c.Eq("", out, "Execute returned result")
 	c.StrContains(err.Error(), "boom", "error %q does not carry the panic value; the model would learn nothing", err)
 	c.StrContains(err.Error(), "boom", "error %q does not name the tool that panicked", err)
 
-	out, err = r.Execute(context.Background(), "fine", json.RawMessage(`{}`))
+	outRes, err = r.Execute(context.Background(), "fine", json.RawMessage(`{}`))
+	out = outRes.Text
 	c.False(err != nil || out != "still here", "Execute(fine) = (%q, %v) after a contained panic, want (\"still here\", nil)", out, err)
 }
 

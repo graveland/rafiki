@@ -63,8 +63,9 @@ func TestAgentSendRendersStepSummaries(t *testing.T) {
 			Echo: "On branch send-steps\nnothing to commit"},
 	}}}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_send", json.RawMessage(
+	outRes, err := reg.Execute(ctx, "agent_send", json.RawMessage(
 		`{"agent":"c_a","message":"m","steps":[{"echo":true,"read":{"path":"/r.md"}}]}`))
+	out := outRes.Text
 	c.Require().NoError(err, "agent_send")
 	want := "delivered to c_a\n" +
 		"step 0 read (child): ok, 2048 bytes (truncated)\n" +
@@ -80,7 +81,8 @@ func TestAgentSendWithoutStepsUnchanged(t *testing.T) {
 	c := assert.NewAborting(t)
 	sp := &fakeSpawner{}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_send", json.RawMessage(`{"agent":"c_worker","message":"next step"}`))
+	outRes, err := reg.Execute(ctx, "agent_send", json.RawMessage(`{"agent":"c_worker","message":"next step"}`))
+	out := outRes.Text
 	c.Require().NoError(err, "agent_send")
 	c.Eq("delivered to c_worker\n", out, "result text")
 	c.Require().Len(sp.sent, 1, "want 1 send, got %d", len(sp.sent))

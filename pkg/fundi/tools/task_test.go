@@ -25,8 +25,9 @@ func newTaskTools(t *testing.T) (*Registry, context.Context) {
 func TestTaskAddReturnsHandles(t *testing.T) {
 	c := assert.NewAborting(t)
 	reg, ctx := newTaskTools(t)
-	out, err := reg.Execute(ctx, "task_add", json.RawMessage(
+	outRes, err := reg.Execute(ctx, "task_add", json.RawMessage(
 		`{"items":[{"content":"one","active_form":"doing one"},{"content":"two","active_form":"doing two"}]}`))
+	out := outRes.Text
 	c.NoError(err, "task_add")
 	c.False(!strings.Contains(out, "1 ") || !strings.Contains(out, "2 "), "result must echo handles; got:\n%s", out)
 	c.False(!strings.Contains(out, "one") || !strings.Contains(out, "two"), "result must echo the full list; got:\n%s", out)
@@ -39,8 +40,9 @@ func TestTaskUpdateTouchesOnlyNamedRows(t *testing.T) {
 		`{"items":[{"content":"one"},{"content":"two"}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	out, err := reg.Execute(ctx, "task_update", json.RawMessage(
+	outRes, err := reg.Execute(ctx, "task_update", json.RawMessage(
 		`{"changes":[{"handle":"1","status":"completed"}]}`))
+	out := outRes.Text
 	c.Require().NoError(err, "task_update")
 	c.StrContains(out, "☑ one", "task 1 should be completed; got:\n")
 	c.StrContains(out, "☐ two", "task 2 must be untouched; got:\n")
@@ -70,7 +72,8 @@ func TestTaskDropRequiresReason(t *testing.T) {
 func TestTaskListEmptyIsNotAnError(t *testing.T) {
 	c := assert.NewAborting(t)
 	reg, ctx := newTaskTools(t)
-	out, err := reg.Execute(ctx, "task_list", json.RawMessage(`{}`))
+	outRes, err := reg.Execute(ctx, "task_list", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.NoError(err, "task_list on an empty ledger must succeed")
 	c.StrContains(out, "0 task(s)", "got:\n")
 }
@@ -86,7 +89,8 @@ func TestTaskToolsAreIsolatedPerAgent(t *testing.T) {
 	if _, err := regA.Execute(ctxA, "task_add", json.RawMessage(`{"items":[{"content":"only-A"}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	out, err := regB.Execute(ctxB, "task_list", json.RawMessage(`{}`))
+	outRes, err := regB.Execute(ctxB, "task_list", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.NotStrContains(out, "only-A", "agent B can see agent A's tasks")
 }

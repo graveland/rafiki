@@ -11,6 +11,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 type nativeCapture struct{ events []*rafikiv1.Event }
@@ -149,7 +150,7 @@ func TestToolEndPublishesTheOutput(t *testing.T) {
 	em.SetNativeSink(sink)
 
 	em.ToolStart("tu_1", "bash", []byte(`{"command":"false"}`))
-	em.ToolEnd("tu_1", "bash", "cat: /nope: No such file", true)
+	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "cat: /nope: No such file"}, true)
 
 	var tr *rafikiv1.ToolResultBlock
 	for _, ev := range sink.events {

@@ -18,6 +18,7 @@ import (
 
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // ToolInput is the raw JSON input a tool receives from the model. It is a
@@ -30,9 +31,7 @@ func (i ToolInput) Unmarshal(v any) error {
 	return json.Unmarshal(json.RawMessage(i), v)
 }
 
-// ContentBlock is one piece of a tool result. Today every result is text;
-// the interface exists so a non-text block (an image, say) can be added
-// without changing Tool, Registry, or any existing tool.
+// ContentBlock is one piece of a tool result: a text block or an image block.
 type ContentBlock interface{ isContentBlock() }
 
 // TextBlock is a plain-text content block.
@@ -40,9 +39,18 @@ type TextBlock struct{ Text string }
 
 func (TextBlock) isContentBlock() {}
 
-// ToolResult is what a tool hands back to the model. Text carries the
-// common case; Blocks is nil for every tool today and takes precedence
-// over Text when set.
+// ImageBlock is an image content block — what `read` returns for a PNG. Data
+// is the raw bytes; the base64 encoding happens at the transport boundary.
+type ImageBlock struct {
+	MediaType string
+	Data      []byte
+}
+
+func (ImageBlock) isContentBlock() {}
+
+// ToolResult is what a tool hands back to the model. Text carries the common
+// case; Blocks, when set, takes precedence over Text and is how a tool returns
+// an image alongside its text.
 type ToolResult struct {
 	Text   string
 	Blocks []ContentBlock
@@ -73,6 +81,25 @@ func (r ToolResult) ContentBlocks() []ContentBlock {
 		return nil
 	}
 	return []ContentBlock{TextBlock{Text: r.Text}}
+}
+
+// toToolmeta flattens a ToolResult into the loop-facing toolmeta.Result: text
+// concatenated, images collected. It is the one place a tool result crosses
+// into the shape the agent loop — and through it the model request, the
+// persisted message row, and the event log — actually carries.
+func (r ToolResult) toToolmeta() toolmeta.Result {
+	out := toolmeta.Result{}
+	var images []toolmeta.Image
+	for _, b := range r.ContentBlocks() {
+		switch v := b.(type) {
+		case TextBlock:
+			out.Text += v.Text
+		case ImageBlock:
+			images = append(images, toolmeta.Image{MediaType: v.MediaType, Data: v.Data})
+		}
+	}
+	out.Images = images
+	return out
 }
 
 // Tool is the interface every agent tool implements. A tool value that
@@ -434,14 +461,14 @@ type Materializer interface {
 type Registry struct {
 	mu   sync.RWMutex
 	defs map[string]anthropic.ToolUnionParam
-	fns  map[string]func(context.Context, json.RawMessage) (string, error)
+	fns  map[string]func(context.Context, json.RawMessage) (toolmeta.Result, error)
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{
 		defs: make(map[string]anthropic.ToolUnionParam),
-		fns:  make(map[string]func(context.Context, json.RawMessage) (string, error)),
+		fns:  make(map[string]func(context.Context, json.RawMessage) (toolmeta.Result, error)),
 	}
 }
 
@@ -452,18 +479,12 @@ func (r *Registry) Register(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.defs[def.OfTool.Name] = def
-	r.fns[def.OfTool.Name] = func(ctx context.Context, input json.RawMessage) (string, error) {
+	r.fns[def.OfTool.Name] = func(ctx context.Context, input json.RawMessage) (toolmeta.Result, error) {
 		result, err := t.Execute(ctx, ToolInput(input))
 		if err != nil {
-			return "", err
+			return toolmeta.Result{}, err
 		}
-		var sb strings.Builder
-		for _, b := range result.ContentBlocks() {
-			if tb, ok := b.(TextBlock); ok {
-				sb.WriteString(tb.Text)
-			}
-		}
-		return sb.String(), nil
+		return result.toToolmeta(), nil
 	}
 }
 
@@ -537,18 +558,18 @@ func (r *Registry) Retains(name string) bool {
 // deliberately does not recover. Without this, a panic in any tool body
 // unwinds a goroutine nothing owns and kills the whole daemon, taking every
 // unrelated conversation with it.
-func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (result string, err error) {
+func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (result toolmeta.Result, err error) {
 	r.mu.RLock()
 	fn, ok := r.fns[name]
 	r.mu.RUnlock()
 	if !ok {
-		return "", fmt.Errorf("unknown tool %q", name)
+		return toolmeta.Result{}, fmt.Errorf("unknown tool %q", name)
 	}
 	defer func() {
 		if v := recover(); v != nil {
 			slog.Error("tools: tool panicked; reporting a failed tool result to the model",
 				"tool", name, "panic", v, "stack", string(debug.Stack()))
-			result = ""
+			result = toolmeta.Result{}
 			err = fmt.Errorf("tool %q panicked: %v", name, v)
 		}
 	}()

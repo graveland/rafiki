@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/skills"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // fakeExec is one executor's client. Each call returns the next queued error
@@ -45,16 +46,16 @@ func (f *fakeExec) next() error {
 	return e
 }
 
-func (f *fakeExec) Execute(_ context.Context, tool string, _ json.RawMessage) (string, error) {
+func (f *fakeExec) Execute(_ context.Context, tool string, _ json.RawMessage) (toolmeta.Result, error) {
 	if f.parent != nil {
 		f.parent.mu.Lock()
 		f.parent.executeCalls++
 		f.parent.mu.Unlock()
 	}
 	if err := f.next(); err != nil {
-		return "", err
+		return toolmeta.Result{}, err
 	}
-	return f.id + ":" + tool, nil
+	return toolmeta.Result{Text: f.id + ":" + tool}, nil
 }
 
 func (f *fakeExec) StartJob(_ context.Context, command string) (string, error) {
@@ -311,7 +312,8 @@ func TestBoundExecutorRebindsWhenTheExecutorIsGone(t *testing.T) {
 	fb.liveByID["a"] = false
 	fb.mu.Unlock()
 
-	got, err := b.Execute(context.Background(), "read", nil)
+	gotRes, err := b.Execute(context.Background(), "read", nil)
+	got := gotRes.Text
 	c.NoError(err, "a departed executor must be replaced, not surfaced")
 	c.Eq("b:read", got, "the retry must run on the NEW executor; got")
 }

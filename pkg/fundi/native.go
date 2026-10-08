@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // NativeSink receives fundi's rafiki-native events. It is optional: an Emitter
@@ -146,7 +147,7 @@ func (e *Emitter) publishError(err error) {
 // was persisted but never published — so watching an agent work showed every
 // tool call with its arguments, its ✓ or ✗, and nothing whatsoever of what it
 // returned. The output only appeared on reattach, from the conversation store.
-func (e *Emitter) publishToolResult(id, result string, isErr bool) {
+func (e *Emitter) publishToolResult(id string, result toolmeta.Result, isErr bool) {
 	if e.native == nil {
 		return
 	}
@@ -156,10 +157,32 @@ func (e *Emitter) publishToolResult(id, result string, isErr bool) {
 			Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
 				ToolUseId: id,
 				IsError:   isErr,
-				Content:   nativeText(result),
+				Content:   nativeToolResultContent(result),
 			}},
 		}},
 	})
+}
+
+// nativeToolResultContent builds the tool_result's content blocks: images
+// first (mirroring nativeUserContent and the request-side order), then the
+// text. The text block is always present so a text-free image-only result
+// still has the shape every consumer expects.
+func nativeToolResultContent(result toolmeta.Result) []*rafikiv1.ContentBlock {
+	var out []*rafikiv1.ContentBlock
+	for _, img := range result.Images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		out = append(out, &rafikiv1.ContentBlock{
+			Index: int32(len(out)),
+			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: img.MediaType, Data: img.Data}},
+		})
+	}
+	out = append(out, &rafikiv1.ContentBlock{
+		Index: int32(len(out)),
+		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: result.Text}},
+	})
+	return out
 }
 
 func (e *Emitter) publishNative(payload any) {

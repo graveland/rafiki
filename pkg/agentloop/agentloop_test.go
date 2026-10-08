@@ -107,11 +107,11 @@ func (f *fakeTools) Definitions() []anthropic.ToolUnionParam {
 	}
 }
 
-func (f *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (string, error) {
+func (f *fakeTools) Execute(_ context.Context, name string, _ json.RawMessage) (toolmeta.Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.executed = append(f.executed, name)
-	return "result of " + name, nil
+	return toolmeta.Result{Text: "result of " + name}, nil
 }
 
 func (f *fakeTools) executedNames() []string {
@@ -185,7 +185,7 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 	var turnTokens int64
 	ev := &Events{
 		OnToolCall:   func(name string, _ json.RawMessage) { events = append(events, "call:"+name) },
-		OnToolResult: func(name, _ string, _ error) { events = append(events, "result:"+name) },
+		OnToolResult: func(name string, _ toolmeta.Result, _ error) { events = append(events, "result:"+name) },
 		OnText:       func(text string) { events = append(events, "text") },
 		OnTurn: func(_ int, resp *anthropic.Message, dur time.Duration, err error) {
 			turns++
@@ -554,9 +554,9 @@ type failingTools struct {
 	failName string
 }
 
-func (f *failingTools) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
+func (f *failingTools) Execute(ctx context.Context, name string, input json.RawMessage) (toolmeta.Result, error) {
 	if name == f.failName {
-		return "", fmt.Errorf("boom: %s exploded", name)
+		return toolmeta.Result{}, fmt.Errorf("boom: %s exploded", name)
 	}
 	return f.fakeTools.Execute(ctx, name, input)
 }
@@ -664,9 +664,9 @@ func (r *recordingTools) Definitions() []anthropic.ToolUnionParam {
 	}
 }
 
-func (r *recordingTools) Execute(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
+func (r *recordingTools) Execute(ctx context.Context, _ string, _ json.RawMessage) (toolmeta.Result, error) {
 	r.ctxID = toolmeta.ToolCallID(ctx)
-	return "ok", nil
+	return toolmeta.Result{Text: "ok"}, nil
 }
 
 const respEchoTool = `{"id":"msg_t","type":"message","role":"assistant","model":"m",
@@ -679,7 +679,7 @@ func TestOnToolStartEndCarryID(t *testing.T) {
 	var startID, endID string
 	ev := &Events{
 		OnToolStart: func(id, _ string, _ json.RawMessage) { startID = id },
-		OnToolEnd:   func(id, _, _ string, _ error) { endID = id },
+		OnToolEnd:   func(id, _ string, _ toolmeta.Result, _ error) { endID = id },
 	}
 	_, err := Run(context.Background(), conv, tools, ev, llm.UserText("hi"))
 	assert.NewAborting(t).NoError(err)

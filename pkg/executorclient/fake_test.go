@@ -16,7 +16,8 @@ func TestFakeExecutorRecordsCalls(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := executorclient.NewFake()
 	f.SetResult("read", "file contents here")
-	out, err := f.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/x"}`))
+	outRes, err := f.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/x"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.Eq("file contents here", out, "got")
 	if len(f.Calls()) != 1 || f.Calls()[0].Tool != "read" {

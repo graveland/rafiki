@@ -9,6 +9,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/multigres/testkit/assert"
+
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // testEchoTool is a fully configurable Tool for blueprint and registry tests.
@@ -116,7 +118,8 @@ func TestMaterializeAllStatelessTools(t *testing.T) {
 		t.Fatalf("expected [a, b], got %v", []string{defs[0].OfTool.Name, defs[1].OfTool.Name})
 	}
 
-	out, err := r.Execute(context.Background(), "a", json.RawMessage(`{}`))
+	outRes, err := r.Execute(context.Background(), "a", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.False(err != nil || out != "a ok", "Execute(a) = (%q, %v)", out, err)
 }
 
@@ -146,7 +149,8 @@ func TestMaterializeAllWithMaterializer(t *testing.T) {
 	br.Register(&matTestBlueprint{})
 	r := br.MaterializeAll(ToolOpts{Cwd: "/tmp"})
 
-	out, err := r.Execute(context.Background(), "mat", json.RawMessage(`{}`))
+	outRes, err := r.Execute(context.Background(), "mat", json.RawMessage(`{}`))
+	out := outRes.Text
 	assert.NewAborting(t).False(err != nil || out != "materialized with cwd=/tmp", "Execute(mat) = (%q, %v)", out, err)
 }
 
@@ -202,8 +206,8 @@ type failingExecClient struct {
 	err error
 }
 
-func (f failingExecClient) Execute(context.Context, string, json.RawMessage) (string, error) {
-	return "", f.err
+func (f failingExecClient) Execute(context.Context, string, json.RawMessage) (toolmeta.Result, error) {
+	return toolmeta.Result{}, f.err
 }
 
 type readOnlyProbeTool struct{}

@@ -81,8 +81,9 @@ func TestBashRunsUnderPinnedEnv(t *testing.T) {
 	t.Setenv("PATH", "/drifted/bin")
 	t.Setenv("PINNED_PROBE", "drifted")
 
-	out, err := r.Execute(context.Background(), "bash",
+	outRes, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"printf '%s|%s' \"$PINNED_PROBE\" \"${PATH%%:*}\""}`))
+	out := outRes.Text
 	assert.NewAborting(t).NoError(err)
 	c := assert.NewAborting(t)
 	c.StrContains(out, "pinned|/usr/bin", "child must see the pinned env, got")
@@ -99,7 +100,8 @@ func TestBashNilEnvInheritsProcess(t *testing.T) {
 	assert.NewAborting(t).NoError(err)
 	r := NewRegistry()
 	r.Register(tool)
-	out, execErr := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"printenv PINNED_PROBE"}`))
+	outRes, execErr := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"printenv PINNED_PROBE"}`))
+	out := outRes.Text
 	assert.NewAborting(t).NoError(execErr)
 	assert.NewAborting(t).Eq("process", strings.TrimSpace(out), "nil env = process environment")
 }

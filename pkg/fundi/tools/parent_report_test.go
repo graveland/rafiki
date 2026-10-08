@@ -48,7 +48,8 @@ func (f *prFakeReporter) SetResult(_ context.Context, result string) error {
 func prRun(t *testing.T, rep *prFakeReporter, name, input string) (string, error) {
 	t.Helper()
 	reg := DefaultBlueprint.MaterializeOnly(ToolOpts{Parent: rep}, []string{"agent_report", "agent_result"})
-	return reg.Execute(context.Background(), name, json.RawMessage(input))
+	res, err := reg.Execute(context.Background(), name, json.RawMessage(input))
+	return res.Text, err
 }
 
 // TestAgentReportDefaultsKindToMessage: an empty kind means "message", and

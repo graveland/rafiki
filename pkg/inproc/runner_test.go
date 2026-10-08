@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // sampleEndTurn is one scripted assistant message: a completed turn whose text
@@ -347,13 +348,13 @@ func (*blockingToolSet) Definitions() []anthropic.ToolUnionParam {
 	}}}
 }
 
-func (ts *blockingToolSet) Execute(ctx context.Context, name string, _ json.RawMessage) (string, error) {
+func (ts *blockingToolSet) Execute(ctx context.Context, name string, _ json.RawMessage) (toolmeta.Result, error) {
 	if name != "bash" {
-		return "", fmt.Errorf("unknown tool %q", name)
+		return toolmeta.Result{}, fmt.Errorf("unknown tool %q", name)
 	}
 	ts.once.Do(func() { close(ts.started) })
 	<-ctx.Done()
-	return "", ctx.Err()
+	return toolmeta.Result{}, ctx.Err()
 }
 
 // ctxCheckingSender fails fast on an already-cancelled context before

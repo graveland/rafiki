@@ -16,6 +16,7 @@ package agentloop
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,7 +49,7 @@ var ErrResumeCapExceeded = errors.New("agentloop: resume attempt cap exceeded; c
 // on captured turns is the drift detector.
 type ToolSet interface {
 	Definitions() []anthropic.ToolUnionParam
-	Execute(ctx context.Context, name string, input json.RawMessage) (string, error)
+	Execute(ctx context.Context, name string, input json.RawMessage) (toolmeta.Result, error)
 }
 
 // Events are optional, nil-safe observation callbacks plus a couple of
@@ -58,7 +59,7 @@ type ToolSet interface {
 type Events struct {
 	OnText       func(text string)
 	OnToolCall   func(name string, input json.RawMessage)
-	OnToolResult func(name string, result string, err error)
+	OnToolResult func(name string, result toolmeta.Result, err error)
 	// OnTurn fires after each LLM call (including the graceful wrap-up call,
 	// if one happens — see drive) with its 1-based iteration number, usage,
 	// duration and error — the host metrics hook (sc's
@@ -68,7 +69,7 @@ type Events struct {
 	// tool_use id, so hosts can correlate execution events with the assistant
 	// message's tool_use blocks.
 	OnToolStart func(id, name string, input json.RawMessage)
-	OnToolEnd   func(id, name, result string, err error)
+	OnToolEnd   func(id, name string, result toolmeta.Result, err error)
 	// PendingUser, when non-nil, is polled after each tool batch's results are
 	// persisted and before the next Continue. Non-empty returned content is
 	// appended as an additional user message — the mid-turn steer seam.
@@ -98,7 +99,7 @@ func (e *Events) toolCall(name string, input json.RawMessage) {
 	}
 }
 
-func (e *Events) toolResult(name, result string, err error) {
+func (e *Events) toolResult(name string, result toolmeta.Result, err error) {
 	if e != nil && e.OnToolResult != nil {
 		e.OnToolResult(name, result, err)
 	}
@@ -110,7 +111,7 @@ func (e *Events) toolStart(id, name string, input json.RawMessage) {
 	}
 }
 
-func (e *Events) toolEnd(id, name, result string, err error) {
+func (e *Events) toolEnd(id, name string, result toolmeta.Result, err error) {
 	if e != nil && e.OnToolEnd != nil {
 		e.OnToolEnd(id, name, result, err)
 	}
@@ -568,31 +569,68 @@ func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse
 			ev.toolStart(use.id, use.name, use.input)
 			emitMu.Unlock()
 
-			var result string
+			var result toolmeta.Result
 			var err error
 			if use.name == "" {
-				result = "tool call had an empty name — this was a model hallucination; re-issue the call with a valid tool name"
+				result.Text = "tool call had an empty name — this was a model hallucination; re-issue the call with a valid tool name"
 				err = errors.New("empty tool name")
 			} else {
 				tctx := toolmeta.WithToolCallID(gctx, use.id)
 				result, err = tools.Execute(tctx, use.name, use.input)
-				if err != nil && result == "" {
-					result = fmt.Sprintf("Error executing tool: %v", err)
+				if err != nil && result.Text == "" {
+					result.Text = fmt.Sprintf("Error executing tool: %v", err)
 				}
 			}
-			result = truncateToolResult(result, toolmeta.MaxToolResultSize)
+			// Only the TEXT is size-capped: an image is already bounded by the
+			// tool that produced it, and clipping an image is not meaningful.
+			result.Text = truncateToolResult(result.Text, toolmeta.MaxToolResultSize)
 
 			emitMu.Lock()
 			ev.toolResult(use.name, result, err)
 			ev.toolEnd(use.id, use.name, result, err)
 			emitMu.Unlock()
 
-			results[i] = anthropic.NewToolResultBlock(use.id, result, err != nil)
+			results[i] = toolResultBlock(use.id, result, err != nil)
 			return nil // a failed tool is a marked result, never a group error
 		})
 	}
 	_ = g.Wait()
 	return results
+}
+
+// toolResultBlock builds the tool_result content block sent back to the model.
+// Images come first, mirroring llm.UserContent's block order; the text block is
+// always present (even when empty) so a text-free image-only result still has
+// the shape every consumer expects. This is the only place a tool's images are
+// turned into SDK content, so a change here is what the live request, the
+// persisted message row, and the event log all inherit.
+func toolResultBlock(id string, r toolmeta.Result, isErr bool) anthropic.ContentBlockParamUnion {
+	content := make([]anthropic.ToolResultBlockParamContentUnion, 0, len(r.Images)+1)
+	for _, img := range r.Images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		content = append(content, anthropic.ToolResultBlockParamContentUnion{
+			OfImage: &anthropic.ImageBlockParam{
+				Source: anthropic.ImageBlockParamSourceUnion{
+					OfBase64: &anthropic.Base64ImageSourceParam{
+						Data:      base64.StdEncoding.EncodeToString(img.Data),
+						MediaType: anthropic.Base64ImageSourceMediaType(img.MediaType),
+					},
+				},
+			},
+		})
+	}
+	content = append(content, anthropic.ToolResultBlockParamContentUnion{
+		OfText: &anthropic.TextBlockParam{Text: r.Text},
+	})
+	return anthropic.ContentBlockParamUnion{
+		OfToolResult: &anthropic.ToolResultBlockParam{
+			ToolUseID: id,
+			IsError:   anthropic.Bool(isErr),
+			Content:   content,
+		},
+	}
 }
 
 // truncateToolResult bounds one tool result, breaking at a newline near the

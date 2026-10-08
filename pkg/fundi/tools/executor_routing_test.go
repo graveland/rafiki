@@ -18,7 +18,8 @@ func TestRoutedToolsGoToTheExecutor(t *testing.T) {
 	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Cwd: t.TempDir(), Executor: fake,
 	})
-	out, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/x"}`))
+	outRes, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/x"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.Eq("from executor", out, "read did not route to the executor; got")
 }

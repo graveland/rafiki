@@ -21,6 +21,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // sampleEndTurn is the plain end_turn companion to emit_test.go's sampleResp:
@@ -89,12 +90,13 @@ func (ts fakeToolSet) Definitions() []anthropic.ToolUnionParam {
 	return defs
 }
 
-func (ts fakeToolSet) Execute(ctx context.Context, name string, in json.RawMessage) (string, error) {
+func (ts fakeToolSet) Execute(ctx context.Context, name string, in json.RawMessage) (toolmeta.Result, error) {
 	fn, ok := ts[name]
 	if !ok {
-		return "", fmt.Errorf("unknown tool %q", name)
+		return toolmeta.Result{}, fmt.Errorf("unknown tool %q", name)
 	}
-	return fn(ctx, in)
+	out, err := fn(ctx, in)
+	return toolmeta.Result{Text: out}, err
 }
 
 // frameTypes parses ndjson frames and returns their "type" fields in order.

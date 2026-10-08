@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/multigres/testkit/assert"
+
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // Every registered blueprint must appear in the tier table, and the table must
@@ -155,8 +157,8 @@ func TestRoutedToolsAreFilteredByTheExecutorsDescribe(t *testing.T) {
 // tools materialize, never on what they do.
 type stubExecutorClient struct{}
 
-func (stubExecutorClient) Execute(context.Context, string, json.RawMessage) (string, error) {
-	return "", nil
+func (stubExecutorClient) Execute(context.Context, string, json.RawMessage) (toolmeta.Result, error) {
+	return toolmeta.Result{}, nil
 }
 func (stubExecutorClient) StartJob(context.Context, string) (string, error) { return "", nil }
 func (stubExecutorClient) JobOutput(context.Context, string, int64) (JobSnapshot, error) {

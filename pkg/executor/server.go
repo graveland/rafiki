@@ -25,6 +25,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // Options configures an executor server.
@@ -528,7 +529,7 @@ func (s *Server) Execute(
 		}
 	}
 
-	resultStr, err := reg.Execute(ctx, msg.Tool, json.RawMessage(msg.InputJson))
+	toolRes, err := reg.Execute(ctx, msg.Tool, json.RawMessage(msg.InputJson))
 
 	// Check the deadline before the tool's own error, and even when the
 	// tool reports success: bash specifically treats a killed-by-context
@@ -559,14 +560,32 @@ func (s *Server) Execute(
 	}
 
 	result := &executorpb.Result{
-		Content: []*executorpb.ContentBlock{
-			{Block: &executorpb.ContentBlock_Text{Text: resultStr}},
-		},
+		Content:       encodeToolResult(toolRes),
 		ObservedMtime: s.collectObservedMtimes(msg.Tool, msg.InputJson),
 	}
 	return stream.Send(&executorpb.ExecuteResponse{
 		Event: &executorpb.ExecuteResponse_Result{Result: result},
 	})
+}
+
+// encodeToolResult turns a tool's result into the executor wire's content
+// blocks: images first, then text. The order mirrors the request-side block
+// order so an executor round-trip and an in-process call produce identical
+// sequences.
+func encodeToolResult(r toolmeta.Result) []*executorpb.ContentBlock {
+	blocks := make([]*executorpb.ContentBlock, 0, len(r.Images)+1)
+	for _, img := range r.Images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		blocks = append(blocks, &executorpb.ContentBlock{
+			Block: &executorpb.ContentBlock_Image{Image: &executorpb.ImageBlock{MediaType: img.MediaType, Data: img.Data}},
+		})
+	}
+	blocks = append(blocks, &executorpb.ContentBlock{
+		Block: &executorpb.ContentBlock_Text{Text: r.Text},
+	})
+	return blocks
 }
 
 // startBackground launches a bash command as a background job and streams the

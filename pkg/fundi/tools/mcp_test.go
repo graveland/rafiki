@@ -129,7 +129,8 @@ func TestRegisterMCPServerTools(t *testing.T) {
 		c.False(!names[want], "expected tool %q to be registered, got %v", want, names)
 	}
 
-	out, err := r.Execute(context.Background(), "mcp__my_server__add", json.RawMessage(`{"a":2,"b":3}`))
+	outRes, err := r.Execute(context.Background(), "mcp__my_server__add", json.RawMessage(`{"a":2,"b":3}`))
+	out := outRes.Text
 	c.Require().NoError(err, "unexpected error")
 	c.Require().Eq("5", out, "expected \"5\", got")
 }
@@ -295,7 +296,8 @@ func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
 	}
 	c.True(anthropicToolNameRETest.MatchString(want), "registered name %q does not match Anthropic's tool name grammar", want)
 
-	out, err := r.Execute(context.Background(), want, json.RawMessage(`{}`))
+	outRes, err := r.Execute(context.Background(), want, json.RawMessage(`{}`))
+	out := outRes.Text
 	c.NoError(err, "unexpected error calling %q", want)
 	c.Eq("ok:"+oddName, out, "expected")
 }
@@ -363,7 +365,8 @@ func TestRegisterMCPServerToolsClipsOversizedOutput(t *testing.T) {
 	p := OutputPolicy{Budget: 200, SpillDir: spillDir}
 	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, p, make(map[string]string)), "registerMCPServerTools")
 
-	out, err := r.Execute(context.Background(), "mcp__srv__big", json.RawMessage(`{}`))
+	outRes, err := r.Execute(context.Background(), "mcp__srv__big", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.NoError(err, "unexpected error")
 	c.LessOrEqual(400, len(out), "expected clipped output, got")
 	c.StrContains(out, "elided", "expected elision marker, got")
@@ -416,7 +419,8 @@ func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
 	r := NewRegistry()
 	c.NoError(registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
-	out, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":2,"b":3}`))
+	outRes, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":2,"b":3}`))
+	out := outRes.Text
 	c.False(err != nil || out != "5", "pre-kill call: err=%v out=%q", err, out)
 
 	mu.Lock()
@@ -425,7 +429,8 @@ func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
 	c.NotNil(ss, "no server-side session was recorded")
 	c.NoError(ss.Close(), "server-side close")
 
-	out, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":20,"b":22}`))
+	outRes, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":20,"b":22}`))
+	out = outRes.Text
 	c.NoError(err, "post-kill call should recover via redial")
 	c.Eq("42", out, "post-kill call: expected")
 }

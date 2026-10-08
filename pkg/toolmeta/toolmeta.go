@@ -14,6 +14,29 @@ package toolmeta
 
 import "context"
 
+// Result is what a tool hands back to the agent loop. Text is the common case;
+// Images ride alongside the text in the SAME tool_result block — a `read` of a
+// PNG returns one — and travel both into the model's live request and into the
+// durable conversation (the message row and the event log), so a resumed agent
+// still sees the image.
+//
+// It lives here, not in pkg/fundi/tools, for the same dependency reason this
+// package exists: the loop and the tools must agree on the shape, and neither
+// may import the other. Keep it a plain data type — no methods that need an
+// import beyond context.
+type Result struct {
+	Text   string
+	Images []Image
+}
+
+// Image is one image content block riding a tool result. MediaType is an IANA
+// media type ("image/png"); Data is the raw bytes — base64 encoding is the
+// transport's business, not the tool's.
+type Image struct {
+	MediaType string
+	Data      []byte
+}
+
 // MaxToolResultSize is the blind, content-agnostic cap applied to every tool
 // result by the agent loop.
 //

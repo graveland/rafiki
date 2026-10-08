@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // fakePool stands in for *execpool.Pool so selection is testable without a
@@ -63,8 +64,8 @@ func (f *fakePool) DisconnectOwner(userID string) int {
 // never dispatch a tool call.
 type stubExecutorClient struct{}
 
-func (stubExecutorClient) Execute(context.Context, string, json.RawMessage) (string, error) {
-	return "", nil
+func (stubExecutorClient) Execute(context.Context, string, json.RawMessage) (toolmeta.Result, error) {
+	return toolmeta.Result{}, nil
 }
 func (stubExecutorClient) StartJob(context.Context, string) (string, error) { return "", nil }
 func (stubExecutorClient) JobOutput(context.Context, string, int64) (tools.JobSnapshot, error) {

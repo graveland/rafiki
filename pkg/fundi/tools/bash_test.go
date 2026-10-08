@@ -142,8 +142,9 @@ func TestBashMergesStderrAndReportsExit(t *testing.T) {
 	c := assert.NewAborting(t)
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
-	out, err := r.Execute(context.Background(), "bash",
+	outRes, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"echo out; echo err >&2; exit 3"}`))
+	out := outRes.Text
 	c.NoError(err)
 	for _, want := range []string{"out", "err", "exit status 3"} {
 		c.StrContains(out, want, "missing")
@@ -157,7 +158,8 @@ func TestBashSuccessHasNoExitNote(t *testing.T) {
 	c := assert.NewAborting(t)
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
-	out, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`))
+	outRes, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.StrContains(out, "hi", "missing output, got")
 	c.NotStrContains(out, "exit status", "unexpected exit note on success")
@@ -170,7 +172,8 @@ func TestBashHonorsCwd(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, dir))
-	out, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"pwd"}`))
+	outRes, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"pwd"}`))
+	out := outRes.Text
 	c.NoError(err)
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	c.NoError(err)
@@ -235,8 +238,9 @@ func TestBashTimeoutFires(t *testing.T) {
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	start := time.Now()
-	out, err := r.Execute(context.Background(), "bash",
+	outRes, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"sleep `+sleepArg+` && echo never","timeout_ms":200}`))
+	out := outRes.Text
 	elapsed := time.Since(start)
 	c.NoError(err)
 	c.LessOrEqual(2*time.Second, elapsed, "timeout took %v to fire; anything near bashWaitDelay (%v) means Wait sat on pipes held by an orphaned grandchild instead of the process group being killed", elapsed, bashWaitDelay)
@@ -318,8 +322,9 @@ func TestBashBackgroundProcessKeepsOutput(t *testing.T) {
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 
-	out, err := r.Execute(context.Background(), "bash",
+	outRes, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"echo hi; sleep `+sleepArg+` &"}`))
+	out := outRes.Text
 	c.NoError(err, "a successful command that backgrounded a process was reported as a tool error")
 	c.StrContains(out, "hi", "collected output was destroyed, got")
 	c.StrContains(out, "background processes", "expected a note explaining the held pipes, got")
@@ -336,8 +341,9 @@ func TestBashOutputGoesThroughSpillPolicy(t *testing.T) {
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 200, SpillDir: spillDir}, t.TempDir()))
 
-	out, err := r.Execute(context.Background(), "bash",
+	outRes, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"printf 'x%.0s' {1..2000}"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.LessOrEqual(400, len(out), "expected clipped output, got")
 	c.StrContains(out, "elided", "expected elision marker, got")

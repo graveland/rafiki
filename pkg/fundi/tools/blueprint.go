@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // BlueprintRegistry holds every static Tool blueprint registered at init()
@@ -196,5 +198,22 @@ func (p *executorProxy) Execute(ctx context.Context, input ToolInput) (ToolResul
 		// the diagnostic still reaches the model — now marked as a failure.
 		return ToolResult{}, err
 	}
-	return NewTextResult(result), nil
+	return toolResultFromMeta(result), nil
+}
+
+// toolResultFromMeta rebuilds a ToolResult from a toolmeta.Result so an
+// executor-routed tool's images survive the proxy hop: image blocks are placed
+// on Blocks (which take precedence), with any text alongside.
+func toolResultFromMeta(r toolmeta.Result) ToolResult {
+	if len(r.Images) == 0 {
+		return ToolResult{Text: r.Text}
+	}
+	blocks := make([]ContentBlock, 0, len(r.Images)+1)
+	for _, img := range r.Images {
+		blocks = append(blocks, ImageBlock{MediaType: img.MediaType, Data: img.Data})
+	}
+	if r.Text != "" {
+		blocks = append(blocks, TextBlock{Text: r.Text})
+	}
+	return ToolResult{Blocks: blocks}
 }

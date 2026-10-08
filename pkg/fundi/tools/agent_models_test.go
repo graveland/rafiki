@@ -56,7 +56,8 @@ func catalogRows() []ModelInfo {
 func runModels(t *testing.T, sp *modelSpawner, args string) string {
 	t.Helper()
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_models", json.RawMessage(args))
+	outRes, err := reg.Execute(ctx, "agent_models", json.RawMessage(args))
+	out := outRes.Text
 	assert.NewAborting(t).NoError(err, "agent_models(%s)", args)
 	return out
 }

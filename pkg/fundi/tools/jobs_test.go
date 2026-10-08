@@ -30,7 +30,8 @@ func TestBashStartReturnsAHandle(t *testing.T) {
 	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Cwd: t.TempDir(), Executor: fake,
 	})
-	out, err := reg.Execute(context.Background(), "bash_start", []byte(`{"command":"npm run dev"}`))
+	outRes, err := reg.Execute(context.Background(), "bash_start", []byte(`{"command":"npm run dev"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.StrContains(out, "job-1", "result")
 	c.Eq("npm run dev", fake.JobCommand("job-1"), "command")
@@ -48,12 +49,14 @@ func TestBashOutputReportsRunningAndFinishedJobs(t *testing.T) {
 	}
 
 	fake.SetJobOutput("job-1", "building...\n", false, 0)
-	out, err := reg.Execute(ctx, "bash_output", []byte(`{"handle":"job-1"}`))
+	outRes, err := reg.Execute(ctx, "bash_output", []byte(`{"handle":"job-1"}`))
+	out := outRes.Text
 	c.NoError(err)
 	c.False(!strings.Contains(out, "building...") || !strings.Contains(out, "running"), "result = %q; want the output and a running marker", out)
 
 	fake.SetJobOutput("job-1", "building...\ndone\n", true, 0)
-	out, err = reg.Execute(ctx, "bash_output", []byte(`{"handle":"job-1"}`))
+	outRes, err = reg.Execute(ctx, "bash_output", []byte(`{"handle":"job-1"}`))
+	out = outRes.Text
 	c.NoError(err)
 	c.StrContains(out, "exit code 0", "result")
 }
@@ -64,7 +67,8 @@ func TestBashOutputOnAnUnknownHandleIsNotAnError(t *testing.T) {
 	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Cwd: t.TempDir(), Executor: fake,
 	})
-	out, err := reg.Execute(context.Background(), "bash_output", []byte(`{"handle":"nope"}`))
+	outRes, err := reg.Execute(context.Background(), "bash_output", []byte(`{"handle":"nope"}`))
+	out := outRes.Text
 	c.NoError(err, "an unknown handle must be a readable result, not a tool error")
 	c.StrContains(out, "no such job", "result")
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // NewInProcessExecutor returns an ExecutorClient that runs the workspace tools
@@ -42,7 +44,7 @@ func NewInProcessExecutor(opts ToolOpts) (ExecutorClient, map[string]bool) {
 // signatures, which is what makes this an adapter rather than a translation.
 type inProcessExecutor struct{ reg *Registry }
 
-func (e *inProcessExecutor) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
+func (e *inProcessExecutor) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	return e.reg.Execute(ctx, tool, input)
 }
 

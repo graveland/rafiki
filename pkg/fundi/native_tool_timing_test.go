@@ -11,6 +11,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // captureSink records every native event published.
@@ -50,7 +51,7 @@ func TestToolEndPublishesNativeExecutionEndWithDuration(t *testing.T) {
 	em.SetNativeSink(sink)
 
 	em.ToolStart("tu_1", "bash", json.RawMessage(`{}`))
-	em.ToolEnd("tu_1", "bash", "output", false)
+	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "output"}, false)
 
 	var found *rafikiv1.ToolExecutionEnd
 	for _, ev := range sink.events {
@@ -74,7 +75,7 @@ func TestToolEndWithoutStartStillPublishes(t *testing.T) {
 	em := NewEmitter(newDiscardFrontend(), "anthropic", nil)
 	em.SetNativeSink(sink)
 
-	em.ToolEnd("tu_orphan", "bash", "output", true)
+	em.ToolEnd("tu_orphan", "bash", toolmeta.Result{Text: "output"}, true)
 
 	var found *rafikiv1.ToolExecutionEnd
 	for _, ev := range sink.events {
@@ -92,6 +93,6 @@ func TestToolEndWithoutStartStillPublishes(t *testing.T) {
 func TestNilSinkToolPathIsNoOp(t *testing.T) {
 	em := NewEmitter(newDiscardFrontend(), "anthropic", nil)
 	em.ToolStart("tu_1", "bash", json.RawMessage(`{}`))
-	em.ToolEnd("tu_1", "bash", "output", false)
+	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "output"}, false)
 	// No panic, no nil deref. Nothing to assert beyond surviving the calls.
 }

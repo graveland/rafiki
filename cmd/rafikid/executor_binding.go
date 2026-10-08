@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // executorBinder is everything boundExecutor needs from the Controller.
@@ -346,8 +347,8 @@ func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn
 	return fn(cl2)
 }
 
-func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
-	return callBound(ctx, b, isIdempotentTool(tool), func(cl tools.ExecutorClient) (string, error) {
+func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
+	return callBound(ctx, b, isIdempotentTool(tool), func(cl tools.ExecutorClient) (toolmeta.Result, error) {
 		return cl.Execute(ctx, tool, input)
 	})
 }

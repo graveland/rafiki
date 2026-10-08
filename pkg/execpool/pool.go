@@ -16,11 +16,13 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
+	"go.graveland.dev/rafiki/pkg/executorclient"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
@@ -744,7 +746,7 @@ type workspaceClient struct {
 	workspaceID string
 }
 
-func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
+func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:        tool,
 		InputJson:   input,
@@ -752,27 +754,23 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 		WorkspaceId: c.workspaceID,
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
+		return toolmeta.Result{}, fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
 	}
 	defer stream.Close()
 
-	var resultText string
+	var result toolmeta.Result
 	for stream.Receive() {
 		switch ev := stream.Msg().Event.(type) {
 		case *executorpb.ExecuteResponse_Result:
-			for _, c := range ev.Result.Content {
-				if t := c.GetText(); t != "" {
-					resultText += t
-				}
-			}
+			result = executorclient.DecodeResult(ev.Result.Content)
 		case *executorpb.ExecuteResponse_Failed:
-			return "", failureError(ev.Failed)
+			return toolmeta.Result{}, failureError(ev.Failed)
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("executor stream: %w: %w", err, ErrStreamBroken)
+		return toolmeta.Result{}, fmt.Errorf("executor stream: %w: %w", err, ErrStreamBroken)
 	}
-	return resultText, nil
+	return result, nil
 }
 
 func (c *workspaceClient) StartJob(ctx context.Context, command string) (string, error) {
@@ -993,34 +991,30 @@ type executorClient struct {
 	inner executorpbconnect.ExecutorServiceClient
 }
 
-func (c *executorClient) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
+func (c *executorClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:      tool,
 		InputJson: input,
 		Timeout:   durationpb.New(10 * time.Minute),
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
+		return toolmeta.Result{}, fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
 	}
 	defer stream.Close()
 
-	var resultText string
+	var result toolmeta.Result
 	for stream.Receive() {
 		switch ev := stream.Msg().Event.(type) {
 		case *executorpb.ExecuteResponse_Result:
-			for _, c := range ev.Result.Content {
-				if t := c.GetText(); t != "" {
-					resultText += t
-				}
-			}
+			result = executorclient.DecodeResult(ev.Result.Content)
 		case *executorpb.ExecuteResponse_Failed:
-			return "", failureError(ev.Failed)
+			return toolmeta.Result{}, failureError(ev.Failed)
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("executor stream: %w: %w", err, ErrStreamBroken)
+		return toolmeta.Result{}, fmt.Errorf("executor stream: %w: %w", err, ErrStreamBroken)
 	}
-	return resultText, nil
+	return result, nil
 }
 
 func (c *executorClient) StartJob(ctx context.Context, command string) (string, error) {

@@ -23,7 +23,8 @@ func TestInProcessExecutorRunsWorkspaceTools(t *testing.T) {
 	c.Require().False(!served["read"], "read is not served; the standalone mode would have no file tools")
 
 	input, _ := json.Marshal(map[string]any{"file_path": path})
-	out, err := cl.Execute(context.Background(), "read", input)
+	outRes, err := cl.Execute(context.Background(), "read", input)
+	out := outRes.Text
 	c.Require().NoError(err, "Execute(read)")
 	c.StrContains(out, "hello", "read returned")
 }

@@ -17,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // dbTestPool mirrors rafiki's own scratch-database pattern (see
@@ -97,9 +98,9 @@ func (cancelOnExecuteTools) Definitions() []anthropic.ToolUnionParam {
 	}}}
 }
 
-func (c cancelOnExecuteTools) Execute(_ context.Context, name string, _ json.RawMessage) (string, error) {
+func (c cancelOnExecuteTools) Execute(_ context.Context, name string, _ json.RawMessage) (toolmeta.Result, error) {
 	c.cancel()
-	return "ok", nil
+	return toolmeta.Result{Text: "ok"}, nil
 }
 
 // TestRepairOrphansDBBackedGenuineOrphan closes the gap every other orphan

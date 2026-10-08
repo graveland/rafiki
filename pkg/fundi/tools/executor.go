@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // JobSnapshot is one poll of a background job.
@@ -34,7 +36,7 @@ type JobSnapshot struct {
 // web_search, the task tools, MCP dispatch) stays in the parent, which is
 // what keeps secrets above the boundary.
 type ExecutorClient interface {
-	Execute(ctx context.Context, tool string, input json.RawMessage) (string, error)
+	Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error)
 
 	// StartJob launches command in the background and returns a handle. It
 	// returns as soon as the process is running — never after it finishes.

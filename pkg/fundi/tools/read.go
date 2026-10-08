@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +36,11 @@ const (
 	// scanned for a NUL byte to detect binary content.
 	binaryCheckBytes = 8192
 
+	// maxImageBytes caps an image returned by read. Larger images are refused
+	// rather than truncated: a partially-read PNG is not a smaller PNG, and an
+	// oversized image would blow the model's context for no benefit.
+	maxImageBytes = 5 << 20
+
 	// readContinueFmt is the trailer appended when a result was cut short:
 	// it names the lines shown and the 1-based offset to resume from.
 	// tools.ReadContinuation parses it back out; the two must stay in
@@ -46,7 +52,8 @@ const (
 		"working directory. Output is numbered like `cat -n` (1-indexed). By " +
 		"default reads from the start of the file, up to 2000 lines; if the " +
 		"file is longer, a trailing note tells you the offset to continue from. " +
-		"Pass offset/limit to page through a large file explicitly."
+		"Pass offset/limit to page through a large file explicitly. " +
+		"An image file (png, jpg, gif, webp) is returned as image content, not text."
 )
 
 func init() { DefaultBlueprint.Register(&ReadBlueprint{}) }
@@ -109,6 +116,24 @@ func (rt *readTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	}
 	if info.IsDir() {
 		return ToolResult{}, fmt.Errorf("read: %q is a directory, not a file", absPath)
+	}
+
+	// Images are returned as image content blocks, not text: base64 lines of a
+	// PNG are useless to the model in a numbered listing but readable as an
+	// image. Detected by extension; the binary check below would otherwise
+	// reject every one of them.
+	if mediaType, isImage := imageMediaType(absPath); isImage {
+		if info.Size() > maxImageBytes {
+			return ToolResult{}, fmt.Errorf("read: %q is a %d-byte image; the limit is %d bytes", absPath, info.Size(), maxImageBytes)
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("read: %w", err)
+		}
+		return ToolResult{Blocks: []ContentBlock{
+			ImageBlock{MediaType: mediaType, Data: data},
+			TextBlock{Text: fmt.Sprintf("Read image %s (%s, %d bytes)", absPath, mediaType, len(data))},
+		}}, nil
 	}
 
 	f, err := os.Open(absPath)
@@ -222,4 +247,22 @@ type readInput struct {
 	FilePath string `json:"file_path"`
 	Offset   int    `json:"offset"`
 	Limit    int    `json:"limit"`
+}
+
+// imageExtensions maps the file extensions read treats as images to their IANA
+// media type. Detection is by extension, not content: a file NAMED .png that is
+// not a PNG is a broken input the API will reject, and guessing harder would
+// only turn mislabeled text into a mysterious image error.
+var imageExtensions = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+}
+
+// imageMediaType reports the media type for a path with an image extension.
+func imageMediaType(path string) (string, bool) {
+	mt, ok := imageExtensions[strings.ToLower(filepath.Ext(path))]
+	return mt, ok
 }

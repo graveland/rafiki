@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -25,7 +26,31 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
+
+// DecodeResult flattens an executor wire result into a toolmeta.Result: text
+// concatenated, images collected. Shared by this client and pkg/execpool so
+// both decode a routed tool's output identically — an image READ ON the
+// executor must arrive here as an image, not as a dropped base64 blob.
+func DecodeResult(content []*executorpb.ContentBlock) toolmeta.Result {
+	var out toolmeta.Result
+	var images []toolmeta.Image
+	var sb strings.Builder
+	for _, c := range content {
+		if img := c.GetImage(); img != nil {
+			if len(img.Data) == 0 {
+				continue
+			}
+			images = append(images, toolmeta.Image{MediaType: img.MediaType, Data: img.Data})
+			continue
+		}
+		sb.WriteString(c.GetText())
+	}
+	out.Text = sb.String()
+	out.Images = images
+	return out
+}
 
 // Compile-time interface check.
 var _ tools.ExecutorClient = (*Client)(nil)
@@ -53,38 +78,34 @@ func Dial(socketPath string) (*Client, error) {
 
 // Execute runs the named tool on the executor and returns the flattened
 // result string. This is the tools.ExecutorClient interface.
-func (c *Client) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
+func (c *Client) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:      tool,
 		InputJson: input,
 		Timeout:   durationpb.New(10 * time.Minute), // matches bash.go's maxBashTimeout
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor execute: %w", err)
+		return toolmeta.Result{}, fmt.Errorf("executor execute: %w", err)
 	}
 	defer stream.Close()
 
-	var resultText string
+	var result toolmeta.Result
 	var failure *executorpb.Failure
 	for stream.Receive() {
 		switch ev := stream.Msg().Event.(type) {
 		case *executorpb.ExecuteResponse_Result:
-			for _, c := range ev.Result.Content {
-				if t := c.GetText(); t != "" {
-					resultText += t
-				}
-			}
+			result = DecodeResult(ev.Result.Content)
 		case *executorpb.ExecuteResponse_Failed:
 			failure = ev.Failed
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("executor stream: %w", err)
+		return toolmeta.Result{}, fmt.Errorf("executor stream: %w", err)
 	}
 	if failure != nil {
-		return "", fmt.Errorf("executor: %s (code %v)", failure.Message, failure.Code)
+		return toolmeta.Result{}, fmt.Errorf("executor: %s (code %v)", failure.Message, failure.Code)
 	}
-	return resultText, nil
+	return result, nil
 }
 
 // StartJob launches command as a background job on the executor and returns

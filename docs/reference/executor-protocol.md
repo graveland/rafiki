@@ -399,7 +399,9 @@ The normal path is:
    `Result{content[], observedMtime}` on success or `Failed{…}` on error.
 
 **Result carries typed content**, not a bare string. `content[]` holds
-`ContentBlock` entries that may be text or (in a future phase) images.
+`ContentBlock` entries that may be text or images — a `read` of a PNG on the
+executor returns an `ImageBlock` here, and the parent reconstructs it as image
+content rather than dropping it.
 
 ### Attach
 

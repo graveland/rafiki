@@ -148,7 +148,8 @@ func TestAgentListRendersDescendants(t *testing.T) {
 		{ChildID: "c_b", Name: "impl", Model: "anthropic/claude-sonnet-4", Status: "streaming", Cwd: "/w", Depth: 1},
 	}}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.Require().NoError(err, "agent_list")
 	for _, want := range []string{"c_a", "reviewer", "idle", "c_b", "impl", "streaming"} {
 		c.StrContains(out, want, "agent_list output missing")
@@ -158,7 +159,8 @@ func TestAgentListRendersDescendants(t *testing.T) {
 func TestAgentListEmptyIsNotAnError(t *testing.T) {
 	c := assert.NewAborting(t)
 	reg, ctx := newAgentTools(t, &fakeSpawner{})
-	out, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	out := outRes.Text
 	c.NoError(err, "an empty subtree must not be an error")
 	c.StrContains(out, "0 agent(s)", "got:\n")
 }
@@ -180,7 +182,8 @@ func TestAgentModelsRendersCatalog(t *testing.T) {
 		{ID: "openai/gpt-5", Provider: "openai"},
 	}}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_models", json.RawMessage(`{"limit":10}`))
+	outRes, err := reg.Execute(ctx, "agent_models", json.RawMessage(`{"limit":10}`))
+	out := outRes.Text
 	c.NoError(err, "agent_models")
 	c.False(!strings.Contains(out, "anthropic/claude-opus-4") || !strings.Contains(out, "openai/gpt-5"), "got:\n%s", out)
 }
@@ -189,8 +192,9 @@ func TestAgentSpawnPassesSpecThrough(t *testing.T) {
 	c := assert.NewAborting(t)
 	sp := &fakeSpawner{nextID: "c_worker"}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+	outRes, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
 		`{"name":"impl","model":"anthropic/claude-sonnet-4","prompt":"do the thing","cwd":"/w","task":"2.1"}`))
+	out := outRes.Text
 	c.NoError(err, "agent_spawn")
 	c.Len(sp.spawned, 1, "want 1 spawn, got %d", len(sp.spawned))
 	got := sp.spawned[0]
@@ -232,7 +236,8 @@ func TestAgentViewReturnsTranscript(t *testing.T) {
 	c := assert.NewAborting(t)
 	sp := &fakeSpawner{view: "user: do the thing\nassistant: done\n"}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_view", json.RawMessage(`{"agent":"c_a"}`))
+	outRes, err := reg.Execute(ctx, "agent_view", json.RawMessage(`{"agent":"c_a"}`))
+	out := outRes.Text
 	c.NoError(err, "agent_view")
 	c.StrContains(out, "do the thing", "got:\n")
 }

@@ -16,6 +16,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // Emitter converts Anthropic SDK messages and tool-execution events into pi
@@ -203,13 +204,16 @@ func (e *Emitter) ToolStart(id, name string, input json.RawMessage) {
 
 // ToolEnd emits tool_execution_end for a completed tool call and accumulates
 // the corresponding toolResult message for the eventual agent_end frame.
-func (e *Emitter) ToolEnd(id, name, result string, isErr bool) {
-	e.fe.Emit(child.PiToolExecutionEnd(id, name, result, isErr, ""))
+//
+// As with UserMessage, images (a `read` of a PNG) ride the native event only:
+// the pi frames keep the text label read returns beside the image.
+func (e *Emitter) ToolEnd(id, name string, result toolmeta.Result, isErr bool) {
+	e.fe.Emit(child.PiToolExecutionEnd(id, name, result.Text, isErr, ""))
 	msg := child.PiToolResultMessage{
 		Role:       "toolResult",
 		ToolCallID: id,
 		ToolName:   name,
-		Content:    []child.PiContentBlock{child.PiTextBlock(result)},
+		Content:    []child.PiContentBlock{child.PiTextBlock(result.Text)},
 		IsError:    isErr,
 		Timestamp:  time.Now().UnixMilli(),
 	}

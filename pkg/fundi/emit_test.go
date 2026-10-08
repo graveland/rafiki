@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // silenceSlog swaps the default slog logger for a discard handler for the
@@ -190,7 +191,7 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 	em.UserMessage("go", nil)
 	em.AssistantTurn(&resp)
 	em.ToolStart("tu_1", "bash", json.RawMessage(`{"command":"ls"}`))
-	em.ToolEnd("tu_1", "bash", "file.txt", false)
+	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "file.txt"}, false)
 	em.AgentEnd()
 
 	var types []string

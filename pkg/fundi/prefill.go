@@ -252,7 +252,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 				return fmt.Errorf("prefill: re-marshal tool_use %s input: %w", tu.ID, err)
 			}
 			result, execErr := e.prefillReader().Execute(ctx, "read", input)
-			call := prefillCall{id: tu.ID, input: input, path: prefillInputPath(input), result: result}
+			call := prefillCall{id: tu.ID, input: input, path: prefillInputPath(input), result: result.Text}
 			if execErr != nil {
 				call.isError = true
 				call.result = execErr.Error()
@@ -415,7 +415,7 @@ func (e *Engine) readPrefillPath(ctx context.Context, path string, start, end in
 		}
 		call := prefillCall{input: input, path: path, lineStart: offset}
 		result, execErr := reader.Execute(ctx, "read", input)
-		call.result = result
+		call.result = result.Text
 		if execErr != nil {
 			call.isError = true
 			call.result = execErr.Error()
@@ -461,7 +461,7 @@ func (e *Engine) executePrefillGlob(ctx context.Context, entry string) ([]string
 	if err != nil {
 		return nil, fmt.Errorf("prefill: glob %q: %w", entry, err)
 	}
-	lines := strings.Split(strings.TrimRight(result, "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(result.Text, "\n"), "\n")
 	if len(lines) == 1 && lines[0] == "no files matched" {
 		return nil, fmt.Errorf("prefill: glob %q matched nothing", entry)
 	}

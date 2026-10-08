@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // repairTimeout bounds the post-abort orphan-repair call (see runTurn) — it
@@ -248,7 +249,7 @@ type toolSetWithConvID struct {
 	convID string
 }
 
-func (t toolSetWithConvID) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
+func (t toolSetWithConvID) Execute(ctx context.Context, name string, input json.RawMessage) (toolmeta.Result, error) {
 	ctx = context.WithValue(ctx, tools.ConversationIDKey{}, t.convID)
 	return t.ToolSet.Execute(ctx, name, input)
 }
@@ -1079,7 +1080,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			defer recoverEmit("OnToolStart", name)
 			e.em.ToolStart(id, name, input)
 		},
-		OnToolEnd: func(id, name, result string, err error) {
+		OnToolEnd: func(id, name string, result toolmeta.Result, err error) {
 			defer recoverEmit("OnToolEnd", name)
 			e.em.ToolEnd(id, name, result, err != nil)
 		},

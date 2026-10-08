@@ -37,7 +37,8 @@ func TestSkillToolReturnsBodyAndBaseDir(t *testing.T) {
 	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: []skillspkg.SkillMeta{meta}})
 	r.Register(skillT)
 
-	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"reviewer"}`))
+	outRes, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"reviewer"}`))
+	out := outRes.Text
 	c.NoError(err, "unexpected error")
 
 	wantPrefix := "Base directory for this skill: " + meta.Dir + "\n\n"
@@ -61,7 +62,8 @@ func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
 	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: []skillspkg.SkillMeta{m1, m2}})
 	r.Register(skillT)
 
-	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"nonexistent"}`))
+	outRes, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"nonexistent"}`))
+	out := outRes.Text
 	c.Error(err, "expected an error for an unknown skill, got output %q", out)
 	c.False(!strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta"), "expected error to list available skill names, got %v", err)
 }
