@@ -29,8 +29,27 @@ import (
 // process through GIT_CONFIG_PARAMETERS, so a nested invocation (git's own
 // auto-maintenance, a submodule fetch if one ever happened) inherits them too.
 //
-// Each option is pinned by a test that fails when it is removed:
+// Transport policy is the load-bearing part: protocol.allow=never refuses
+// EVERY transport and protocol.file.allow=always re-opens exactly the one this
+// file uses, a bundle path -- a plain local file. Only local files may be used
+// as a transport; every network or helper transport (ext::, git://, ssh://,
+// http(s)://, ftp://) is refused by git itself, before it can start a program,
+// so a repo-local url.*.insteadOf cannot route the bundle path to one. Without
+// protocol.file.allow=always the local bundle would be refused too and no
+// fetch could run at all.
 //
+// Each option is pinned by the tests named with it, except where two options
+// lock the same door and only the pair is pinned (noted there):
+//
+//   - protocol.allow=never -- TestGitFetchBundleRefusesGitProtocolInsteadOfRewrite
+//     (an insteadOf rewrite to git:// would otherwise run the repository's
+//     core.gitProxy) and TestGitFetchBundleRefusesHTTPHelperInsteadOfRewrite
+//     (an insteadOf rewrite to an http:// URL that answers 401 would otherwise
+//     run the repository's credential.helper and core.askPass). Those two are
+//     refused by this option alone, so they go red when it is removed; the
+//     ext:: and ssh:// rewrites below have their own lock too and stay green.
+//   - protocol.file.allow=always -- every fetch test in this file: it is what
+//     keeps the local bundle path reachable under protocol.allow=never.
 //   - core.alternateRefsCommand=true -- TestGitFetchBundleIgnoresHostileAlternateRefsCommand
 //     (a fetch's connectivity check enumerates the refs of an alternate object
 //     store by running this repository-local command). `true` and never an
@@ -44,17 +63,25 @@ import (
 //     initialized destination runs post-checkout).
 //   - protocol.ext.allow=never -- TestGitFetchBundleRefusesExtInsteadOfRewrite
 //     (a repo-local url.*.insteadOf can route the bundle path through ext::).
-//   - core.sshCommand=false -- TestGitFetchBundleIgnoresHostileSSHCommand
-//     (a repo-local url.*.insteadOf can route the bundle path through ssh://).
+//     protocol.allow=never already refuses ext::, so this is a second lock on
+//     the same door: each refuses ext:: alone and the test pins the pair, not
+//     either option by itself.
+//   - core.sshCommand=false -- TestGitFetchBundleIgnoresHostileSSHCommand (a
+//     repo-local url.*.insteadOf can route the bundle path through ssh://).
+//     protocol.allow=never refuses ssh:// before core.sshCommand is ever
+//     consulted, so this too is a second lock: the test pins the pair, not
+//     either option by itself.
 //
 // The remaining repo-local keys that can name a program were audited with
 // probes (TestGitHardeningHostileRepoConfigAudit) and need no option:
 //
-//   - core.pager, core.editor, core.askPass, credential.helper: git runs them
-//     only for a terminal, an editor, or a credential prompt. Every call here
-//     captures output through a pipe, launches no editor, and fetches from a
-//     local bundle path that requests no credential -- and GIT_TERMINAL_PROMPT=0
-//     is forced.
+//   - core.pager, core.editor: git runs them only for a terminal or an editor.
+//     Every call here captures output through a pipe and launches no editor.
+//   - core.askPass, credential.helper: git runs them only when a transport asks
+//     for a credential, and protocol.allow=never refuses every network
+//     transport, so the bundle path can never be rewritten to a URL that
+//     requests one. TestGitFetchBundleRefusesHTTPHelperInsteadOfRewrite plants
+//     both against a 401 server and proves neither runs.
 //   - gc.auto/gc.autoDetach: auto-maintenance may run after a fetch, but it is
 //     git's own binary; the only repository-supplied program in that path is
 //     the pre-auto-gc hook, which core.hooksPath=/dev/null disables.
@@ -70,13 +97,15 @@ import (
 //     and every -c above is applied after all config files are read, so an
 //     included value cannot override it.
 //   - url.<x>.insteadOf: it can only redirect the bundle path to another
-//     transport, and the two transports that name a program (ext:: and ssh://)
-//     are covered by protocol.ext.allow=never and core.sshCommand=false.
+//     transport, and protocol.allow=never refuses every transport but the local
+//     file one the bundle already uses.
 var gitHardening = []string{
 	"-c", "core.alternateRefsCommand=true",
 	"-c", "core.fsmonitor=false",
 	"-c", "core.hooksPath=/dev/null",
+	"-c", "protocol.allow=never",
 	"-c", "protocol.ext.allow=never",
+	"-c", "protocol.file.allow=always",
 	"-c", "core.sshCommand=false",
 }
 

@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -469,6 +471,81 @@ func TestGitFetchBundleIgnoresHostileSSHCommand(t *testing.T) {
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
 	_, serr := os.Stat(marker)
 	c.True(os.IsNotExist(serr), "the config-planted ssh command executed (err=%v)", serr)
+}
+
+// TestGitFetchBundleRefusesGitProtocolInsteadOfRewrite pins
+// `-c protocol.allow=never`: a repo-local url.*.insteadOf can rewrite the
+// bundle path to a git:// URL, and git would then run the repository's own
+// core.gitProxy program before it opens any connection -- so a marker-writing
+// proxy is proof enough, and no network is needed.
+func TestGitFetchBundleRefusesGitProtocolInsteadOfRewrite(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side") // present, NOT checked out
+	marker := filepath.Join(t.TempDir(), "gitproxy-marker")
+	proxy := filepath.Join(t.TempDir(), "gitproxy.sh")
+	c.Require().NoError(os.WriteFile(proxy, []byte("#!/bin/sh\ntouch "+marker+"\nexit 1\n"), 0o755))
+	gitRun(t, dest, "config", "core.gitProxy", proxy)
+	gitRun(t, dest, "config", "url.git://nonexistent.invalid/x.insteadOf", b.GetBundlePath())
+
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: dest, BundlePath: b.GetBundlePath(), Branch: "side", Force: true,
+	}))
+	c.Require().Error(err, "a repo-local insteadOf routed the bundle through git://")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	_, serr := os.Stat(marker)
+	c.True(os.IsNotExist(serr), "the git:// transport ran the config-planted gitProxy (err=%v)", serr)
+}
+
+// TestGitFetchBundleRefusesHTTPHelperInsteadOfRewrite pins
+// `-c protocol.allow=never` for the credential path: a repo-local
+// url.*.insteadOf can rewrite the bundle path to an http:// URL, and a 401
+// answer with WWW-Authenticate makes git consult the repository's
+// credential.helper and core.askPass. Each is planted as a marker-writing
+// script in its own subtest, against a real 401 server -- the shape the
+// vacuous no-auth-URL probes in TestGitHardeningHostileRepoConfigAudit could
+// not reach.
+func TestGitFetchBundleRefusesHTTPHelperInsteadOfRewrite(t *testing.T) {
+	for _, key := range []string{"credential.helper", "core.askPass"} {
+		t.Run(key, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			s := gitServer(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="rafiki"`)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer srv.Close()
+
+			src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+			gitRun(t, src, "checkout", "-q", "-b", "side")
+			writeFile(t, src, "side.txt", "side\n")
+			gitRun(t, src, "add", "-A")
+			gitCommit(t, src, "side")
+			b := mustBundle(t, s, src, "side", nil)
+
+			dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+			gitRun(t, dest, "branch", "side")
+			marker := filepath.Join(t.TempDir(), "http-helper-marker")
+			gitRun(t, dest, "config", key, markerScript(t, marker))
+			gitRun(t, dest, "config", "url."+srv.URL+"/x.insteadOf", b.GetBundlePath())
+
+			_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+				Repo: dest, BundlePath: b.GetBundlePath(), Branch: "side", Force: true,
+			}))
+			c.Require().Error(err, "a repo-local insteadOf routed the bundle through http://")
+			c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+			_, serr := os.Stat(marker)
+			c.True(os.IsNotExist(serr), "the http:// transport ran the config-planted %s (err=%v)", key, serr)
+		})
+	}
 }
 
 // TestGitFetchBundleForcesHooksOffOnCheckout pins `-c core.hooksPath=/dev/null`:
@@ -1356,8 +1433,13 @@ func includeProbe(key string) func(t *testing.T, repo, script string) {
 // in this file has run against it. The keys whose program would otherwise run
 // (core.fsmonitor, core.hooksPath, core.sshCommand, core.alternateRefsCommand)
 // are also covered by their named pin tests; this test is the evidence that
-// the rest are inert for the calls this file makes. The url.*.insteadOf
-// rewrite to ext::/ssh:// is covered by
+// the rest are inert for the calls this file makes. core.askPass and
+// credential.helper are deliberately NOT probed here: with no auth-requiring
+// URL they could never run, so they are covered where they can run -- against
+// the 401 server in TestGitFetchBundleRefusesHTTPHelperInsteadOfRewrite.
+// Every url.*.insteadOf rewrite is refused by protocol.allow=never, pinned by
+// TestGitFetchBundleRefusesGitProtocolInsteadOfRewrite,
+// TestGitFetchBundleRefusesHTTPHelperInsteadOfRewrite,
 // TestGitFetchBundleRefusesExtInsteadOfRewrite and
 // TestGitFetchBundleIgnoresHostileSSHCommand.
 func TestGitHardeningHostileRepoConfigAudit(t *testing.T) {
@@ -1367,12 +1449,6 @@ func TestGitHardeningHostileRepoConfigAudit(t *testing.T) {
 		}},
 		{"core.editor", func(t *testing.T, repo, script string) {
 			gitRun(t, repo, "config", "core.editor", script)
-		}},
-		{"core.askPass", func(t *testing.T, repo, script string) {
-			gitRun(t, repo, "config", "core.askPass", script)
-		}},
-		{"credential.helper", func(t *testing.T, repo, script string) {
-			gitRun(t, repo, "config", "credential.helper", script)
 		}},
 		{"core.fsmonitor", func(t *testing.T, repo, script string) {
 			gitRun(t, repo, "config", "core.fsmonitor", script)
