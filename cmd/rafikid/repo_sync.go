@@ -139,7 +139,7 @@ func (p *pathSyncer) SyncRepo(ctx context.Context, owner users.Identity, callerC
 		}
 	}
 	dstBundle := path.Join(dstRefs.Msg.GetScratchDir(), base)
-	if _, _, err := p.transfer(ctx, src, dst, bundle.Msg.GetBundlePath(), dstBundle, false, nil); err != nil {
+	if _, _, err := p.transfer(ctx, src, dst, bundle.Msg.GetBundlePath(), dstBundle, false, nil, transferOptions{requireFile: true}); err != nil {
 		return protocol.SyncRepoResult{}, err
 	}
 

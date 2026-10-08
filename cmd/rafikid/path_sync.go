@@ -374,7 +374,7 @@ func (p *pathSyncer) SyncPath(ctx context.Context, owner users.Identity, callerC
 		}
 	}
 
-	files, bytes, err := p.transfer(ctx, src, dst, req.Src.Path, req.Dst.Path, req.Overwrite, req.MaxBytes)
+	files, bytes, err := p.transfer(ctx, src, dst, req.Src.Path, req.Dst.Path, req.Overwrite, req.MaxBytes, transferOptions{})
 	if err != nil {
 		return protocol.SyncPathResult{}, err
 	}
@@ -400,11 +400,25 @@ func validateSyncEndpoint(side string, ep protocol.SyncEndpoint) error {
 	return nil
 }
 
+// transferOptions is the relay's per-call policy.
+type transferOptions struct {
+	// requireFile refuses a source whose ReadTree header says is_dir, before
+	// the destination is contacted. SyncRepo sets it: a git bundle is a
+	// regular file, so a header saying "directory" is the source answering
+	// something other than the bundle the verb asked for. SyncPath does not —
+	// a directory is exactly what it may relay.
+	requireFile bool
+}
+
 // transfer opens ReadTree on src and WriteTree on dst and relays the chunks
 // with backpressure — nothing is buffered whole. Any error on either side
 // cancels the derived context so both streams unwind, and the error is
 // attributed to the side that produced it.
-func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath, dstPath string, overwrite bool, maxBytes *int64) (files, bytes int64, err error) {
+//
+// The source's header decides the destination's shape, so opts.requireFile
+// turns a directory header into a refusal here, before the destination is
+// contacted at all.
+func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath, dstPath string, overwrite bool, maxBytes *int64, opts transferOptions) (files, bytes int64, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -422,6 +436,15 @@ func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath,
 	header := stream.Msg().GetHeader()
 	if header == nil {
 		return 0, 0, executorErr("source", errors.New("ReadTree stream did not start with a header"))
+	}
+	if opts.requireFile && header.GetIsDir() {
+		// A bundle is a regular file. A header saying otherwise is the source
+		// answering something this verb never asked for, refused before the
+		// destination is contacted at all.
+		return 0, 0, &connectapi.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "source returned a directory instead of a bundle file",
+		}
 	}
 
 	write := dst.client.WriteTree(ctx)
@@ -471,15 +494,35 @@ func destinationErr(write *connect.ClientStreamForClient[executorpb.WriteTreeReq
 	return executorErr("destination", sendErr)
 }
 
+// executorTextMaxRunes bounds how much of an executor's own text is echoed back
+// to a caller. An executor may be a compromised sandbox, and whatever it says
+// lands in a caller's (often an LLM's) context, so only a short, escaped
+// quotation of it is ever forwarded.
+const executorTextMaxRunes = 200
+
+// quoteExecutorText renders an executor's message for a caller: truncated to
+// executorTextMaxRunes runes, with control characters and newlines escaped and
+// the whole thing %q-quoted, so the untrusted text cannot forge a line of its
+// own or close the quotes that frame it.
+func quoteExecutorText(msg string) string {
+	r := []rune(msg)
+	if len(r) > executorTextMaxRunes {
+		r = r[:executorTextMaxRunes]
+	}
+	return fmt.Sprintf("%q", string(r))
+}
+
 // executorErr converts an error from an executor RPC into a
 // *connectapi.ControllerError. side is "source" or "destination" (or a step
 // name) and prefixes the message.
 //
-// A connect error's code is mapped onto the daemon's own vocabulary. Only the
-// codes whose messages this codebase authored (they come from pkg/executor) are
-// forwarded; every other code, and every non-connect error (a dropped
-// connection, whose text names infrastructure), becomes a fixed internal
-// message so raw transport text is never forwarded.
+// A connect error's code is mapped onto the daemon's own vocabulary. Every
+// other code, and every non-connect error (a dropped connection, whose text
+// names infrastructure), becomes a fixed internal message, so raw transport
+// text is never forwarded at all. The mapped codes keep a message, but the
+// executor's own words are UNTRUSTED: they are truncated and %q-quoted under a
+// fixed label rather than forwarded verbatim, so they can neither forge a
+// message of their own nor inject instructions into the caller's context.
 func executorErr(side string, err error) error {
 	if err == nil {
 		return nil
@@ -505,5 +548,8 @@ func executorErr(side string, err error) error {
 	default:
 		return &connectapi.ControllerError{Code: protocol.ErrInternal, Message: side + ": executor request failed"}
 	}
-	return &connectapi.ControllerError{Code: code, Message: side + ": " + ce.Message()}
+	return &connectapi.ControllerError{
+		Code:    code,
+		Message: fmt.Sprintf("%s: executor reported (untrusted text): %s", side, quoteExecutorText(ce.Message())),
+	}
 }

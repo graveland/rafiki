@@ -716,3 +716,89 @@ func TestRepoSyncCapsDestinationExcludes(t *testing.T) {
 		})
 	}
 }
+
+// --- a source whose header says the bundle is a directory -------------------
+
+// repoDirectorySource is a fake executor that answers as a source which
+// produced a bundle — GitRefs says the repo exists, GitBundle names a bundle
+// path and a tip — but whose ReadTree reports that path is a DIRECTORY.
+type repoDirectorySource struct {
+	executorpbconnect.UnimplementedExecutorServiceHandler
+	bundlePath string
+	tip        string
+}
+
+func (h *repoDirectorySource) GitRefs(context.Context, *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error) {
+	return connect.NewResponse(&executorpb.GitRefsResponse{Exists: true, ScratchDir: "/scratch"}), nil
+}
+
+func (h *repoDirectorySource) GitBundle(context.Context, *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error) {
+	return connect.NewResponse(&executorpb.GitBundleResponse{BundlePath: h.bundlePath, TipOid: h.tip}), nil
+}
+
+func (h *repoDirectorySource) ReadTree(_ context.Context, _ *connect.Request[executorpb.ReadTreeRequest], stream *connect.ServerStream[executorpb.ReadTreeResponse]) error {
+	return stream.Send(&executorpb.ReadTreeResponse{
+		Msg: &executorpb.ReadTreeResponse_Header{Header: &executorpb.TreeHeader{IsDir: true}},
+	})
+}
+
+// newDirectorySourceFixture wires the fake directory source against a REAL
+// destination executor, and returns the syncer, the destination's observing
+// client and the destination root.
+func newDirectorySourceFixture(t *testing.T) (*pathSyncer, *observingClient, string) {
+	t.Helper()
+	src := newFakeExecutorServer(t, &repoDirectorySource{
+		bundlePath: "/scratch/bundle.bin",
+		tip:        strings.Repeat("a", 40),
+	})
+	dstReal, dstRoot := newTreeSyncExecutor(t)
+	dstObs := &observingClient{ExecutorServiceClient: dstReal}
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-src", "u1", map[string]string{"machine": "src"}, "", true),
+		treeSyncExecutor("exec-dst", "u1", map[string]string{"machine": "dst"}, "", true),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-src": src, "exec-dst": dstObs})
+	_, p := newPathSyncFixture(t, pool)
+	return p, dstObs, dstRoot
+}
+
+// A git bundle is a regular file. A source whose ReadTree header says the path
+// is a directory is refused before the destination is contacted at all.
+func TestRepoSyncRefusesDirectorySource(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	p, dstObs, dstRoot := newDirectorySourceFixture(t)
+
+	_, err := p.SyncRepo(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncRepoRequest{
+		Src:    protocol.SyncEndpoint{Executor: "src", Path: "/work/src"},
+		Dst:    protocol.SyncEndpoint{Executor: "dst", Path: filepath.Join(dstRoot, "repo")},
+		Branch: "main",
+	})
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
+	ck.Eq("source returned a directory instead of a bundle file", ce.Message, "message")
+
+	// The relay never reached the destination.
+	_, writes := dstObs.counts()
+	ck.Eq(0, writes, "a directory source must be refused before the destination is contacted")
+	_, serr := os.Stat(filepath.Join(dstRoot, "repo"))
+	ck.True(os.IsNotExist(serr), "the destination must be untouched, got %v", serr)
+}
+
+// SyncPath's behaviour is unchanged: a directory is exactly what it may relay,
+// so the very header SyncRepo refuses still goes through here.
+func TestPathSyncRelaysDirectorySource(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	p, _, dstRoot := newDirectorySourceFixture(t)
+
+	dstDir := filepath.Join(dstRoot, "copy")
+	res, err := p.SyncPath(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncPathRequest{
+		Src: protocol.SyncEndpoint{Executor: "src", Path: "/work/dir"},
+		Dst: protocol.SyncEndpoint{Executor: "dst", Path: dstDir},
+	})
+	ck.Require().NoError(err, "SyncPath must still relay a directory source")
+	ck.Eq(int64(0), res.Files, "an empty directory carries no files")
+	fi, serr := os.Stat(dstDir)
+	ck.NoError(serr, "the destination directory must exist")
+	if fi != nil {
+		ck.True(fi.IsDir(), "the destination must be a directory, got %v", fi.Mode())
+	}
+}
