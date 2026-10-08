@@ -1213,15 +1213,42 @@ func TestPathSyncExecutorErrSanitizesExecutorText(t *testing.T) {
 		ck.True(strings.Contains(got, `\t`), "a tab must be escaped, got %q", got)
 	})
 
-	t.Run("an oversize message is truncated to 200 runes", func(t *testing.T) {
+	t.Run("an oversize message keeps its head and its tail", func(t *testing.T) {
 		ck := assert.NewCollecting(t)
-		// Multi-byte runes: truncation must count runes, not bytes.
-		in := strings.Repeat("é", 300)
-		got := body(t, in)
-		unquoted, uerr := strconv.Unquote(got)
-		ck.Require().NoError(uerr, "quoted literal, got %q", got)
-		ck.Eq(executorTextMaxRunes, len([]rune(unquoted)), "the text must be truncated to %d runes", executorTextMaxRunes)
-		ck.Eq(strings.Repeat("é", executorTextMaxRunes), unquoted, "the first %d runes are kept", executorTextMaxRunes)
+		// Multi-byte runes: truncation must count runes, not bytes. The long
+		// middle is what gets dropped.
+		head := strings.Repeat("é", executorTextHeadRunes)
+		middle := strings.Repeat("x", executorTextMaxRunes)
+		tail := strings.Repeat("ö", executorTextTailRunes)
+		in := head + middle + tail
+		ck.True(len([]rune(in)) > executorTextMaxRunes, "the fixture must be oversize")
+		unquoted, uerr := strconv.Unquote(body(t, in))
+		ck.Require().NoError(uerr, "quoted literal")
+		want := head + executorTextElision + tail
+		ck.Eq(want, unquoted, "the first %d and last %d runes survive, joined by %q", executorTextHeadRunes, executorTextTailRunes, executorTextElision)
+		ck.True(strings.Contains(unquoted, executorTextElision), "the elision marker must be present, got %q", unquoted)
+	})
+
+	t.Run("a message of exactly the limit is unchanged", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		in := strings.Repeat("a", executorTextMaxRunes)
+		unquoted, uerr := strconv.Unquote(body(t, in))
+		ck.Require().NoError(uerr, "quoted literal")
+		ck.Eq(in, unquoted, "a message of exactly %d runes must not be truncated", executorTextMaxRunes)
+		ck.False(strings.Contains(unquoted, executorTextElision), "no elision marker at the limit")
+	})
+
+	t.Run("a reason at the end survives a long path", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		// The macOS shape that motivated the middle cut: git names a long temp
+		// path first and puts the real reason last.
+		path := "/var/folders/xy/abcdefgh/" + strings.Repeat("a", 300) + "/rafiki-sync/deadbeef.bundle"
+		reason := "! [rejected] feat -> feat (non-fast-forward)"
+		in := "From " + path + "\nfatal: the remote end hung up unexpectedly\n" + reason
+		ck.True(len([]rune(in)) > executorTextMaxRunes, "the fixture must be oversize")
+		unquoted, uerr := strconv.Unquote(body(t, in))
+		ck.Require().NoError(uerr, "quoted literal")
+		ck.True(strings.HasSuffix(unquoted, reason), "the reason at the end must survive intact, got %q", unquoted)
 	})
 
 	t.Run("a prompt-injection-shaped string stays inside the quotes", func(t *testing.T) {

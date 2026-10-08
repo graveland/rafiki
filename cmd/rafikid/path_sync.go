@@ -498,16 +498,32 @@ func destinationErr(write *connect.ClientStreamForClient[executorpb.WriteTreeReq
 // to a caller. An executor may be a compromised sandbox, and whatever it says
 // lands in a caller's (often an LLM's) context, so only a short, escaped
 // quotation of it is ever forwarded.
-const executorTextMaxRunes = 200
+//
+// An oversize message is cut in the MIDDLE, never the end: git's failures name
+// a long temp path first and put the real reason last (on macOS, "From
+// /var/folders/…/<hex>.bundle … ! [rejected] feat -> feat
+// (non-fast-forward)"), so dropping the tail would drop the reason. The first
+// executorTextHeadRunes runes and the last executorTextTailRunes runes survive,
+// joined by executorTextElision; a message of executorTextMaxRunes runes or
+// fewer is unchanged.
+const (
+	executorTextMaxRunes  = 400
+	executorTextHeadRunes = 100
+	executorTextTailRunes = 280
+	executorTextElision   = " … "
+)
 
-// quoteExecutorText renders an executor's message for a caller: truncated to
-// executorTextMaxRunes runes, with control characters and newlines escaped and
-// the whole thing %q-quoted, so the untrusted text cannot forge a line of its
-// own or close the quotes that frame it.
+// quoteExecutorText renders an executor's message for a caller: truncated in
+// the middle (see above), with control characters and newlines escaped and the
+// whole thing %q-quoted, so the untrusted text cannot forge a line of its own
+// or close the quotes that frame it.
 func quoteExecutorText(msg string) string {
 	r := []rune(msg)
 	if len(r) > executorTextMaxRunes {
-		r = r[:executorTextMaxRunes]
+		kept := append([]rune{}, r[:executorTextHeadRunes]...)
+		kept = append(kept, []rune(executorTextElision)...)
+		kept = append(kept, r[len(r)-executorTextTailRunes:]...)
+		r = kept
 	}
 	return fmt.Sprintf("%q", string(r))
 }
