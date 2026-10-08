@@ -357,6 +357,22 @@ func TestSandboxVerbsAreClassifiedForChildren(t *testing.T) {
 	}
 }
 
+// TestSyncPathVerbsAreClassifiedForChildren pins the sync verbs' policy class:
+// SyncPath and SyncRepo are childScoped (a per-child credential may relay a
+// tree or a branch, and the syncer bounds it to executors the child can reach
+// and sandboxes it or a descendant created). A drift to userOnly would make
+// the sandbox sync tools unreachable from a child; a drift to anyCaller would
+// let any credential move data between executors.
+func TestSyncPathVerbsAreClassifiedForChildren(t *testing.T) {
+	for name, want := range map[string]controlPolicy{
+		"SyncPath": policyChildScoped,
+		"SyncRepo": policyChildScoped,
+	} {
+		got := policyFor(controlProcedurePrefix + name)
+		assert.NewCollecting(t).Eq(want, got, "policyFor(Control.%s) = %v, want", name, got)
+	}
+}
+
 // TestAuthorizeControlProcedure pins the identity × policy matrix at the
 // interceptor level. Admit is exactly nil; refuse is exactly
 // CodePermissionDenied. The empty Identity{} — what a bare per-boot token

@@ -3188,6 +3188,157 @@ class RemoveSandboxResponse:
         return obj
 
 @dataclasses.dataclass
+class SyncEndpoint:
+    executor: str = ""
+    path: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor != "":
+            out["executor"] = self.executor
+        if self.path != "":
+            out["path"] = self.path
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SyncEndpoint":
+        obj = cls()
+        _v = _d.get("executor")
+        if _v is not None:
+            obj.executor = _v
+        _v = _d.get("path")
+        if _v is not None:
+            obj.path = _v
+        return obj
+
+@dataclasses.dataclass
+class SyncPathRequest:
+    src: Optional[SyncEndpoint] = None
+    dst: Optional[SyncEndpoint] = None
+    overwrite: bool = False
+    max_bytes: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.src is not None:
+            out["src"] = self.src.to_dict()
+        if self.dst is not None:
+            out["dst"] = self.dst.to_dict()
+        if self.overwrite != False:
+            out["overwrite"] = self.overwrite
+        if self.max_bytes is not None:
+            out["maxBytes"] = str(self.max_bytes)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SyncPathRequest":
+        obj = cls()
+        _v = _d.get("src")
+        if _v is not None:
+            obj.src = SyncEndpoint.from_dict(_v)
+        _v = _d.get("dst")
+        if _v is not None:
+            obj.dst = SyncEndpoint.from_dict(_v)
+        _v = _d.get("overwrite")
+        if _v is not None:
+            obj.overwrite = _v
+        _v = _d.get("maxBytes")
+        if _v is not None:
+            obj.max_bytes = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class SyncPathResponse:
+    files: int = 0
+    bytes: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.files != 0:
+            out["files"] = str(self.files)
+        if self.bytes != 0:
+            out["bytes"] = str(self.bytes)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SyncPathResponse":
+        obj = cls()
+        _v = _d.get("files")
+        if _v is not None:
+            obj.files = _int_in(_v)
+        _v = _d.get("bytes")
+        if _v is not None:
+            obj.bytes = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class SyncRepoRequest:
+    src: Optional[SyncEndpoint] = None
+    dst: Optional[SyncEndpoint] = None
+    branch: str = ""
+    force: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.src is not None:
+            out["src"] = self.src.to_dict()
+        if self.dst is not None:
+            out["dst"] = self.dst.to_dict()
+        if self.branch != "":
+            out["branch"] = self.branch
+        if self.force != False:
+            out["force"] = self.force
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SyncRepoRequest":
+        obj = cls()
+        _v = _d.get("src")
+        if _v is not None:
+            obj.src = SyncEndpoint.from_dict(_v)
+        _v = _d.get("dst")
+        if _v is not None:
+            obj.dst = SyncEndpoint.from_dict(_v)
+        _v = _d.get("branch")
+        if _v is not None:
+            obj.branch = _v
+        _v = _d.get("force")
+        if _v is not None:
+            obj.force = _v
+        return obj
+
+@dataclasses.dataclass
+class SyncRepoResponse:
+    old_oid: str = ""
+    new_oid: str = ""
+    created_repo: bool = False
+    up_to_date: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.old_oid != "":
+            out["oldOid"] = self.old_oid
+        if self.new_oid != "":
+            out["newOid"] = self.new_oid
+        if self.created_repo != False:
+            out["createdRepo"] = self.created_repo
+        if self.up_to_date != False:
+            out["upToDate"] = self.up_to_date
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SyncRepoResponse":
+        obj = cls()
+        _v = _d.get("oldOid")
+        if _v is not None:
+            obj.old_oid = _v
+        _v = _d.get("newOid")
+        if _v is not None:
+            obj.new_oid = _v
+        _v = _d.get("createdRepo")
+        if _v is not None:
+            obj.created_repo = _v
+        _v = _d.get("upToDate")
+        if _v is not None:
+            obj.up_to_date = _v
+        return obj
+
+@dataclasses.dataclass
 class SkillRow:
     namespace: str = ""
     name: str = ""

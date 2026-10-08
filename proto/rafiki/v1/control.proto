@@ -1146,6 +1146,53 @@ message RemoveSandboxRequest {
 
 message RemoveSandboxResponse {}
 
+// ─── Path and repo sync ────────────────────────────────────────────────────
+// SyncPath copies a tree (or a single file) between two executors: src is read
+// with ReadTree and dst written with WriteTree, relayed through the daemon.
+// SyncRepo moves a git branch between two executors as a bundle — refs →
+// bundle → SyncPath of the bundle file → fetch — so nothing the source planted
+// (config, hooks) can execute at the destination. Both are childScoped at the
+// gate: the handler bounds a child to executors it can reach and sandboxes it
+// or a descendant created.
+
+// SyncEndpoint names one end of a transfer: an executor ref/selector and a
+// path on it. SyncRepo reads the path as the repository directory.
+message SyncEndpoint {
+  string executor = 1;
+  string path = 2;
+}
+
+message SyncPathRequest {
+  SyncEndpoint src = 1;
+  SyncEndpoint dst = 2;
+  // overwrite replaces the destination; allowed only when the destination
+  // executor's ROW says isolation=container.
+  bool overwrite = 3;
+  // max_bytes is the caller's cap on the transfer. optional: absent means no
+  // caller cap. A present value must be > 0; zero is refused (zero meaning
+  // "unlimited" is a trap).
+  optional int64 max_bytes = 4;
+}
+
+message SyncPathResponse {
+  int64 files = 1;
+  int64 bytes = 2;
+}
+
+message SyncRepoRequest {
+  SyncEndpoint src = 1;
+  SyncEndpoint dst = 2;
+  string branch = 3;
+  bool force = 4;
+}
+
+message SyncRepoResponse {
+  string old_oid = 1;
+  string new_oid = 2;
+  bool created_repo = 3;
+  bool up_to_date = 4;
+}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
@@ -1227,6 +1274,10 @@ service Control {
   rpc ShutdownDaemon(ShutdownDaemonRequest) returns (ShutdownDaemonResponse);
   rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
   rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  // SyncPath/SyncRepo relay a tree or a git branch between two executors the
+  // caller can reach; both are childScoped at the gate.
+  rpc SyncPath(SyncPathRequest) returns (SyncPathResponse);
+  rpc SyncRepo(SyncRepoRequest) returns (SyncRepoResponse);
   rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
   rpc RemoveSandbox(RemoveSandboxRequest) returns (RemoveSandboxResponse);
   // ModelRoutes explains where a request for a model would go under a routing

@@ -219,9 +219,13 @@ var controlPolicyTable = map[string]controlPolicy{
 	// it or a descendant created). ListSandboxes is ownerScoped: it answers
 	// from the caller's OWNER's rows — never an admin's whole fleet — the same
 	// surface the recall tools give a child.
+	// SyncPath/SyncRepo are childScoped: the handler bounds a child to
+	// executors it can reach and sandboxes it or a descendant created.
 	"CreateSandbox": policyChildScoped,
 	"RemoveSandbox": policyChildScoped,
 	"ListSandboxes": policyOwnerScoped,
+	"SyncPath":      policyChildScoped,
+	"SyncRepo":      policyChildScoped,
 
 	// userOnly: the framed-protocol retirement verbs — operator verbs; no
 	// child tool reaches them; CreateUser/ListUsers/RemoveUser add an admin
