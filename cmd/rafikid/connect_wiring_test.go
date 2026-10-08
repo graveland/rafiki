@@ -190,6 +190,36 @@ func TestPathSyncerNotWiredWithoutExecutorPool(t *testing.T) {
 		"a pool-less daemon keeps SyncPath Unavailable")
 }
 
+// TestWirePathSyncInstallsBothSides pins the production wiring on the NON-nil
+// path: wirePathSync must install the syncer on BOTH the Controller (the fundi
+// and MCP tool faces read it at construction) and the one Connect server both
+// mounts serve. Deleting EITHER SetPathSyncer call inside wirePathSync turns
+// this red — the Controller assertion catches a missing ctrl.SetPathSyncer, and
+// the route assertion catches a missing srv.SetPathSyncer.
+//
+// wirePathSync takes a concrete *execpool.Pool, because its typed-nil guard
+// (the pool-less daemon must install nothing) depends on that type: a
+// treeSyncExecutors interface parameter would make the typed-nil
+// *execpool.Pool look non-nil. So the non-nil pool here is a real, empty
+// execpool.Pool — never a typed-nil, and never consulted, since an empty
+// request is refused by endpoint validation before the pool is reached.
+func TestWirePathSyncInstallsBothSides(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctrl := &Controller{}
+	srv := connectapi.NewServer(nil)
+
+	wirePathSync(ctrl, execpool.New(nil), srv)
+	c.True(ctrl.syncer() != nil,
+		"wirePathSync must install the syncer on the Controller, or the fundi/MCP tool faces answer Unavailable")
+
+	client := mountPathSyncRoute(t, srv)
+	_, err := client.SyncPath(context.Background(), connect.NewRequest(&rafikiv1.SyncPathRequest{}))
+	c.NotEq(connect.CodeUnavailable, connect.CodeOf(err),
+		"wirePathSync must install the syncer on the Connect server too; got %v", err)
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err),
+		"a wired syncer refuses an empty request with InvalidArgument, never Unavailable")
+}
+
 // TestPathSyncerWiredGuards is a verify-pattern shim: the brief's verify
 // command uses -run 'TestPathSyncerWired|...', an UNANCHORED substring match,
 // and TestPathSyncerNotWiredWithoutExecutorPool does not contain that prefix.

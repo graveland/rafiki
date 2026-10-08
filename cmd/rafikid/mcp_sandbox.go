@@ -24,7 +24,12 @@ import (
 // reach daemon-wide sandbox state, and the two faces grant the same set
 // (TestMCPSandboxMatchesConnectChildPolicy).
 type mcpSandboxManager struct {
-	ctrl        *Controller
+	ctrl *Controller
+	// sync is the path-sync backend, captured at construction from the
+	// Controller (nil when none is wired). An interface so a test can inject a
+	// recording fake and observe the owner identity and caller child Sync and
+	// SyncRepo deliver.
+	sync        pathSyncBackend
 	owner       users.Identity
 	callerChild string
 }
@@ -38,7 +43,7 @@ var _ tools.SandboxManager = (*mcpSandboxManager)(nil)
 // and it resolves here exactly as it does there -- the two faces must not
 // diverge on who may call a sandbox verb.
 func newMCPSandboxes(ctrl *Controller, owner users.Identity, callerChild string) *mcpSandboxManager {
-	return &mcpSandboxManager{ctrl: ctrl, owner: owner, callerChild: callerChild}
+	return &mcpSandboxManager{ctrl: ctrl, sync: pathSyncOf(ctrl), owner: owner, callerChild: callerChild}
 }
 
 // mcpSandboxOwner builds the owner identity the sandbox binding receives,
@@ -76,19 +81,25 @@ func (m *mcpSandboxManager) Remove(ctx context.Context, ref string) error {
 // through sandboxOwnerIdentity, so a child of an admin acts as its owner's
 // NON-admin identity — and never a tool argument.
 func (m *mcpSandboxManager) Sync(ctx context.Context, req protocol.SyncPathRequest) (protocol.SyncPathResult, error) {
-	s := m.ctrl.syncer()
-	if s == nil {
+	if m.sync == nil {
 		return protocol.SyncPathResult{}, errPathSyncUnavailable()
 	}
-	return s.SyncPath(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, req)
+	res, err := m.sync.SyncPath(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, req)
+	if err != nil {
+		return protocol.SyncPathResult{}, redactPathSyncError(err, m.callerChild)
+	}
+	return res, nil
 }
 
 // SyncRepo relays one git branch between two executors this caller may reach,
 // with the same construction-time owner and caller child as Create.
 func (m *mcpSandboxManager) SyncRepo(ctx context.Context, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error) {
-	s := m.ctrl.syncer()
-	if s == nil {
+	if m.sync == nil {
 		return protocol.SyncRepoResult{}, errPathSyncUnavailable()
 	}
-	return s.SyncRepo(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, req)
+	res, err := m.sync.SyncRepo(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, req)
+	if err != nil {
+		return protocol.SyncRepoResult{}, redactPathSyncError(err, m.callerChild)
+	}
+	return res, nil
 }

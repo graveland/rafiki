@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 
@@ -30,13 +32,7 @@ type recordingSandboxControl struct {
 	info  protocol.SandboxInfo
 	list  []protocol.SandboxInfo
 	err   error
-	// sync is the path-sync backend the binding reaches through syncer(). nil
-	// models a daemon whose executor pool was never wired, which is the
-	// "path sync is not available" case.
-	sync *pathSyncer
 }
-
-func (r *recordingSandboxControl) syncer() *pathSyncer { return r.sync }
 
 func (r *recordingSandboxControl) SandboxCreate(_ context.Context, owner users.Identity, callerChild string, _ protocol.SandboxSpec) (protocol.SandboxInfo, error) {
 	r.calls = append(r.calls, recordedSandboxCall{verb: "create", owner: owner, callerChild: callerChild})
@@ -51,6 +47,40 @@ func (r *recordingSandboxControl) SandboxList(owner users.Identity) ([]protocol.
 func (r *recordingSandboxControl) SandboxRemove(_ context.Context, owner users.Identity, callerChild, ref string) error {
 	r.calls = append(r.calls, recordedSandboxCall{verb: "remove", owner: owner, callerChild: callerChild, ref: ref})
 	return r.err
+}
+
+// recordedSyncCall is one path-sync verb that reached the backend, with the
+// owner identity and caller child it was handed. The real *pathSyncer branches
+// on neither the admin bit nor the child id directly, so a recording fake is
+// the only way to pin what the adapter delivers.
+type recordedSyncCall struct {
+	owner       users.Identity
+	callerChild string
+}
+
+// recordingPathSync is a pathSyncBackend that records every call. err, when
+// set, is returned by both verbs on every call (and the call is still
+// recorded).
+type recordingPathSync struct {
+	syncCalls []recordedSyncCall
+	repoCalls []recordedSyncCall
+	err       error
+}
+
+func (r *recordingPathSync) SyncPath(_ context.Context, owner users.Identity, callerChild string, _ protocol.SyncPathRequest) (protocol.SyncPathResult, error) {
+	r.syncCalls = append(r.syncCalls, recordedSyncCall{owner: owner, callerChild: callerChild})
+	if r.err != nil {
+		return protocol.SyncPathResult{}, r.err
+	}
+	return protocol.SyncPathResult{}, nil
+}
+
+func (r *recordingPathSync) SyncRepo(_ context.Context, owner users.Identity, callerChild string, _ protocol.SyncRepoRequest) (protocol.SyncRepoResult, error) {
+	r.repoCalls = append(r.repoCalls, recordedSyncCall{owner: owner, callerChild: callerChild})
+	if r.err != nil {
+		return protocol.SyncRepoResult{}, r.err
+	}
+	return protocol.SyncRepoResult{}, nil
 }
 
 // TestSandboxToolBindingPassesChildAndNonAdminIdentity pins the binding's one
@@ -152,16 +182,78 @@ func TestSandboxSyncToolBindingUnavailableWithoutSyncer(t *testing.T) {
 	c.Eq("path sync is not available on this daemon", ce.Message, "SyncRepo message")
 }
 
-// TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity pins that Sync and
-// SyncRepo reach the syncer with the construction-time child id and the owner's
-// NON-admin identity — exactly the values Create passes. The fixture's "box" is
-// reachable only to c-child and exec-src only to u-owner, so the success and the
-// two refusals together pin both, and neither is a tool argument.
+// TestSandboxSyncToolBindingPassesNonAdminOwnerAndChild pins that Sync and
+// SyncRepo hand the syncer the construction-time child id and the owner's
+// NON-admin identity — a mutant that set IsAdmin or blanked the child id turns
+// this red.
+func TestSandboxSyncToolBindingPassesNonAdminOwnerAndChild(t *testing.T) {
+	c := assert.NewAborting(t)
+	rec := &recordingPathSync{}
+	m := &controllerSandboxes{c: &recordingSandboxControl{}, sync: rec, childID: "c_kid", ownerUserID: "u-owner"}
+
+	if _, err := m.Sync(context.Background(), protocol.SyncPathRequest{}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if _, err := m.SyncRepo(context.Background(), protocol.SyncRepoRequest{}); err != nil {
+		t.Fatalf("SyncRepo: %v", err)
+	}
+
+	c.Len(rec.syncCalls, 1, "Sync reached the syncer once")
+	c.Len(rec.repoCalls, 1, "SyncRepo reached the syncer once")
+	for _, call := range rec.syncCalls {
+		c.Eq("u-owner", call.owner.UserID, "Sync owner user id")
+		c.False(call.owner.IsAdmin, "Sync owner identity must never be admin")
+		c.Eq("c_kid", call.callerChild, "Sync carries the closed-over child id")
+	}
+	for _, call := range rec.repoCalls {
+		c.Eq("u-owner", call.owner.UserID, "SyncRepo owner user id")
+		c.False(call.owner.IsAdmin, "SyncRepo owner identity must never be admin")
+		c.Eq("c_kid", call.callerChild, "SyncRepo carries the closed-over child id")
+	}
+}
+
+// TestSandboxSyncToolBindingRedactsNonCodedErrors pins the one error boundary
+// the two faces share: a coded *connectapi.ControllerError passes through
+// verbatim, and anything else — a raw error that may carry a DSN — is replaced
+// by the generic text and never reaches the caller (and so never the model).
+func TestSandboxSyncToolBindingRedactsNonCodedErrors(t *testing.T) {
+	c := assert.NewAborting(t)
+	coded := &connectapi.ControllerError{Code: protocol.ErrNotFound, Message: `executor "box" is not reachable by this caller`}
+	raw := errors.New("failed to connect to `host=db user=rafiki`: postgres://user:secret@host/db")
+
+	callSync := func(sync pathSyncBackend) error {
+		m := &controllerSandboxes{c: &recordingSandboxControl{}, sync: sync, childID: "c_kid", ownerUserID: "u-owner"}
+		_, err := m.Sync(context.Background(), protocol.SyncPathRequest{})
+		return err
+	}
+	callRepo := func(sync pathSyncBackend) error {
+		m := &controllerSandboxes{c: &recordingSandboxControl{}, sync: sync, childID: "c_kid", ownerUserID: "u-owner"}
+		_, err := m.SyncRepo(context.Background(), protocol.SyncRepoRequest{})
+		return err
+	}
+
+	for name, call := range map[string]func(pathSyncBackend) error{"Sync": callSync, "SyncRepo": callRepo} {
+		if got := call(&recordingPathSync{err: coded}); got != error(coded) {
+			t.Fatalf("%s: a coded ControllerError must pass through verbatim, got %v", name, got)
+		}
+		got := call(&recordingPathSync{err: raw})
+		c.Eq("path sync failed: internal error", got.Error(), "%s: a raw error must be redacted", name)
+		c.NotStrContains(got.Error(), "secret", "%s: the DSN credential must not reach the returned text", name)
+		c.NotStrContains(got.Error(), "postgres://", "%s: the DSN must not reach the returned text", name)
+	}
+}
+
+// TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity exercises the REAL
+// *pathSyncer over the fake pool: the fixture's "box" is reachable only to
+// c-child and exec-src only to u-owner, so the success and the two refusals
+// together pin the child id and the owner. SyncRepo is exercised the same way;
+// a binding that BLANKED its child id would be treated as an operator and the
+// sibling's refusal would disappear.
 func TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity(t *testing.T) {
 	c := assert.NewAborting(t)
 	fx := newSandboxSyncFixture(t)
 
-	own := &controllerSandboxes{c: &recordingSandboxControl{sync: fx.p}, childID: "c-child", ownerUserID: "u-owner"}
+	own := &controllerSandboxes{c: &recordingSandboxControl{}, sync: fx.p, childID: "c-child", ownerUserID: "u-owner"}
 	c.False(own.owner().IsAdmin, "the bound owner identity must never be admin")
 
 	res, err := own.Sync(context.Background(), protocol.SyncPathRequest{
@@ -171,7 +263,20 @@ func TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity(t *testing.T) {
 	c.NoError(err, "the child that created the sandbox may sync into it")
 	c.Eq(int64(1), res.Files, "one file moved")
 
-	sibling := &controllerSandboxes{c: &recordingSandboxControl{sync: fx.p}, childID: "c-other", ownerUserID: "u-owner"}
+	// SyncRepo over the same real syncer and fake pool: both endpoints resolve
+	// for the creating child, so the verb proceeds to git (the source is not a
+	// repository). Blanking the child id would let the sibling below reach the
+	// sandbox and this refusal would vanish.
+	_, err = own.SyncRepo(context.Background(), protocol.SyncRepoRequest{
+		Src:    protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "repo")},
+		Dst:    protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "repo")},
+		Branch: "main",
+	})
+	c.Error(err, "the source is not a git repository")
+	c.StrContains(err.Error(), "source is not a git repository", "SyncRepo passed both resolves for the creating child")
+	c.NotStrContains(err.Error(), "not reachable", "a reachable sandbox must not be refused")
+
+	sibling := &controllerSandboxes{c: &recordingSandboxControl{}, sync: fx.p, childID: "c-other", ownerUserID: "u-owner"}
 	_, err = sibling.Sync(context.Background(), protocol.SyncPathRequest{
 		Src: protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "hello.txt")},
 		Dst: protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "copy2")},
@@ -179,7 +284,15 @@ func TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity(t *testing.T) {
 	c.Error(err, "a sibling must not reach the sandbox")
 	c.StrContains(err.Error(), "not reachable", "sibling refusal")
 
-	stranger := &controllerSandboxes{c: &recordingSandboxControl{sync: fx.p}, childID: "c-child", ownerUserID: "u-stranger"}
+	_, err = sibling.SyncRepo(context.Background(), protocol.SyncRepoRequest{
+		Src:    protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "repo")},
+		Dst:    protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "repo")},
+		Branch: "main",
+	})
+	c.Error(err, "a sibling must not reach the sandbox on SyncRepo either")
+	c.StrContains(err.Error(), "not reachable", "sibling SyncRepo refusal")
+
+	stranger := &controllerSandboxes{c: &recordingSandboxControl{}, sync: fx.p, childID: "c-child", ownerUserID: "u-stranger"}
 	_, err = stranger.Sync(context.Background(), protocol.SyncPathRequest{
 		Src: protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "hello.txt")},
 		Dst: protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "copy3")},

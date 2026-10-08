@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -21,13 +23,24 @@ type sandboxController interface {
 	SandboxCreate(ctx context.Context, owner users.Identity, callerChild string, spec protocol.SandboxSpec) (protocol.SandboxInfo, error)
 	SandboxList(owner users.Identity) ([]protocol.SandboxInfo, error)
 	SandboxRemove(ctx context.Context, owner users.Identity, callerChild, ref string) error
-	// syncer is the daemon's path-sync backend, nil until the executor pool is
-	// wired at boot. The child-bound manager takes it through this accessor so
-	// the binding stays the same object it uses for the other sandbox verbs.
-	syncer() *pathSyncer
 }
 
 var _ sandboxController = (*Controller)(nil)
+
+// pathSyncBackend is the path-sync surface the sandbox tool adapters call. It
+// is an interface, not *pathSyncer, so a test can substitute a recording fake
+// and observe the owner identity and caller child each sync verb is handed —
+// the binding property that is otherwise invisible because the real syncer
+// branches on neither the admin bit nor the child id directly.
+//
+// *pathSyncer satisfies it; the daemon installs one at boot (wirePathSync) and
+// the adapters capture it at construction.
+type pathSyncBackend interface {
+	SyncPath(ctx context.Context, owner users.Identity, callerChild string, req protocol.SyncPathRequest) (protocol.SyncPathResult, error)
+	SyncRepo(ctx context.Context, owner users.Identity, callerChild string, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error)
+}
+
+var _ pathSyncBackend = (*pathSyncer)(nil)
 
 // controllerSandboxes implements tools.SandboxManager for one fundi child.
 //
@@ -46,6 +59,7 @@ var _ sandboxController = (*Controller)(nil)
 // grant it.
 type controllerSandboxes struct {
 	c           sandboxController
+	sync        pathSyncBackend
 	childID     string
 	ownerUserID string
 }
@@ -67,7 +81,23 @@ func newControllerSandboxes(c *Controller, childID, ownerUserID string) tools.Sa
 	if childID == "" {
 		return nil
 	}
-	return &controllerSandboxes{c: c, childID: childID, ownerUserID: ownerUserID}
+	return &controllerSandboxes{c: c, sync: pathSyncOf(c), childID: childID, ownerUserID: ownerUserID}
+}
+
+// pathSyncOf reads the Controller's installed path-sync backend as the adapter
+// interface. It returns a NIL interface when none is wired: storing the
+// typed-nil *pathSyncer in the interface would make it non-nil and nil-panic
+// the first SyncPath call. The syncer is installed at boot (wirePathSync),
+// before any child spawns and before any MCP request builds a binding, so
+// capturing it here cannot go stale.
+func pathSyncOf(c *Controller) pathSyncBackend {
+	if c == nil {
+		return nil
+	}
+	if s := c.syncer(); s != nil {
+		return s
+	}
+	return nil
 }
 
 // owner is the identity every verb passes to the Controller: the owner's user id
@@ -93,21 +123,27 @@ func (m *controllerSandboxes) Remove(ctx context.Context, ref string) error {
 // reach. The owner and the caller's child id are the SAME values Create passes,
 // closed over at construction and never taken from a tool argument.
 func (m *controllerSandboxes) Sync(ctx context.Context, req protocol.SyncPathRequest) (protocol.SyncPathResult, error) {
-	s := m.c.syncer()
-	if s == nil {
+	if m.sync == nil {
 		return protocol.SyncPathResult{}, errPathSyncUnavailable()
 	}
-	return s.SyncPath(ctx, m.owner(), m.childID, req)
+	res, err := m.sync.SyncPath(ctx, m.owner(), m.childID, req)
+	if err != nil {
+		return protocol.SyncPathResult{}, redactPathSyncError(err, m.childID)
+	}
+	return res, nil
 }
 
 // SyncRepo relays one git branch between two executors the bound child may
 // reach, with the same construction-time owner and child id as Create.
 func (m *controllerSandboxes) SyncRepo(ctx context.Context, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error) {
-	s := m.c.syncer()
-	if s == nil {
+	if m.sync == nil {
 		return protocol.SyncRepoResult{}, errPathSyncUnavailable()
 	}
-	return s.SyncRepo(ctx, m.owner(), m.childID, req)
+	res, err := m.sync.SyncRepo(ctx, m.owner(), m.childID, req)
+	if err != nil {
+		return protocol.SyncRepoResult{}, redactPathSyncError(err, m.childID)
+	}
+	return res, nil
 }
 
 // errPathSyncUnavailable is what a sandbox tool face returns when this daemon
@@ -120,4 +156,23 @@ func errPathSyncUnavailable() error {
 		Code:    protocol.ErrInternal,
 		Message: "path sync is not available on this daemon",
 	}
+}
+
+// redactPathSyncError is the ONE error boundary the two sandbox tool faces
+// share. A *connectapi.ControllerError is a message the daemon authored and is
+// returned verbatim; anything else — a raw pgx error from the executor store,
+// the sandbox store or the pool, which can carry the DSN — is logged with the
+// child id and replaced by a generic text.
+//
+// The returned error's text reaches the MODEL as the tool result, so a secret
+// that leaks here leaks into a conversation. ConnectErr applies the same
+// discipline on the wire; this is the tool-face twin, and it exists because the
+// adapter's %w would otherwise carry the raw error straight through.
+func redactPathSyncError(err error, childID string) error {
+	var ce *connectapi.ControllerError
+	if errors.As(err, &ce) {
+		return err
+	}
+	slog.Warn("path sync failed with a non-coded error; redacting", "child", childID, "error", err)
+	return errors.New("path sync failed: internal error")
 }

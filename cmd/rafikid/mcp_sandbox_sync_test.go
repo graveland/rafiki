@@ -4,12 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -213,5 +215,71 @@ func TestMCPSandboxSyncMatchesConnectChildPolicy(t *testing.T) {
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpChildRequest("u-owner", "c-child", false))))
 	for _, name := range []string{"sandbox_sync", "sandbox_sync_repo"} {
 		c.Contains(names, name, "the MCP child credential is missing a verb the Connect plane admits")
+	}
+}
+
+// TestMCPSandboxSyncPassesNonAdminOwnerAndChild pins the MCP half of the
+// binding: Sync and SyncRepo hand the syncer the caller's child id and its
+// owner resolved to a NON-admin identity (sandboxOwnerIdentity), even when the
+// value the manager was constructed with is an admin. A mutant that forwarded
+// the raw owner (admin) or blanked the child id turns this red.
+func TestMCPSandboxSyncPassesNonAdminOwnerAndChild(t *testing.T) {
+	c := assert.NewAborting(t)
+	rec := &recordingPathSync{}
+	m := &mcpSandboxManager{
+		ctrl:        &Controller{},
+		sync:        rec,
+		owner:       users.Identity{UserID: "u-owner", Username: "owner", IsAdmin: true},
+		callerChild: "c-child",
+	}
+
+	if _, err := m.Sync(context.Background(), protocol.SyncPathRequest{}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if _, err := m.SyncRepo(context.Background(), protocol.SyncRepoRequest{}); err != nil {
+		t.Fatalf("SyncRepo: %v", err)
+	}
+
+	c.Len(rec.syncCalls, 1, "Sync reached the syncer once")
+	c.Len(rec.repoCalls, 1, "SyncRepo reached the syncer once")
+	for _, call := range rec.syncCalls {
+		c.Eq("u-owner", call.owner.UserID, "Sync owner user id")
+		c.False(call.owner.IsAdmin, "a child's Sync must deliver a NON-admin owner")
+		c.Eq("c-child", call.callerChild, "Sync carries the caller's child id")
+	}
+	for _, call := range rec.repoCalls {
+		c.Eq("u-owner", call.owner.UserID, "SyncRepo owner user id")
+		c.False(call.owner.IsAdmin, "a child's SyncRepo must deliver a NON-admin owner")
+		c.Eq("c-child", call.callerChild, "SyncRepo carries the caller's child id")
+	}
+}
+
+// TestMCPSandboxSyncRedactsNonCodedErrors is the MCP twin of the fundi
+// redaction test: a coded ControllerError passes through verbatim, and a raw
+// error that may carry a DSN is replaced by the generic text.
+func TestMCPSandboxSyncRedactsNonCodedErrors(t *testing.T) {
+	c := assert.NewAborting(t)
+	coded := &connectapi.ControllerError{Code: protocol.ErrNotFound, Message: `executor "box" is not reachable by this caller`}
+	raw := errors.New("failed to connect to `host=db user=rafiki`: postgres://user:secret@host/db")
+
+	callSync := func(sync pathSyncBackend) error {
+		m := &mcpSandboxManager{ctrl: &Controller{}, sync: sync, owner: users.Identity{UserID: "u-owner"}, callerChild: "c-child"}
+		_, err := m.Sync(context.Background(), protocol.SyncPathRequest{})
+		return err
+	}
+	callRepo := func(sync pathSyncBackend) error {
+		m := &mcpSandboxManager{ctrl: &Controller{}, sync: sync, owner: users.Identity{UserID: "u-owner"}, callerChild: "c-child"}
+		_, err := m.SyncRepo(context.Background(), protocol.SyncRepoRequest{})
+		return err
+	}
+
+	for name, call := range map[string]func(pathSyncBackend) error{"Sync": callSync, "SyncRepo": callRepo} {
+		if got := call(&recordingPathSync{err: coded}); got != error(coded) {
+			t.Fatalf("%s: a coded ControllerError must pass through verbatim, got %v", name, got)
+		}
+		got := call(&recordingPathSync{err: raw})
+		c.Eq("path sync failed: internal error", got.Error(), "%s: a raw error must be redacted", name)
+		c.NotStrContains(got.Error(), "secret", "%s: the DSN credential must not reach the returned text", name)
+		c.NotStrContains(got.Error(), "postgres://", "%s: the DSN must not reach the returned text", name)
 	}
 }
