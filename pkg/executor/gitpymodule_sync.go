@@ -98,13 +98,11 @@ func (s *Server) SyncPyModuleGitSource(
 	// the same shape validSegment applies to the name. Guarded on BOTH url
 	// and ref: the clone path is not exploitable in this shape today, but
 	// the guard is cheaper than trusting that accident to hold.
-	if url := req.Msg.GetUrl(); strings.HasPrefix(url, "-") {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("url %q begins with a dash and would parse as a git option, not a url", url))
+	if err := refuseLeadingDash("url", req.Msg.GetUrl()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if ref := req.Msg.GetRef(); strings.HasPrefix(ref, "-") {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("ref %q begins with a dash and would parse as a git option, not a ref", ref))
+	if err := refuseLeadingDash("ref", req.Msg.GetRef()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
 	dir := gitPymoduleRepoDir(req.Msg.GetName())
@@ -187,14 +185,35 @@ func refreshGitCheckout(dir, url, ref string) ([]byte, error) {
 	return nil, nil
 }
 
+// refuseLeadingDash refuses a wire-supplied value that git would parse as an
+// option rather than the value it is meant to be: `git fetch origin
+// --upload-pack=<cmd>` executes <cmd> locally on this executor. kind names the
+// field for the error message and must be the word a caller uses for it
+// ("url", "ref", "branch").
+func refuseLeadingDash(kind, value string) error {
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("%s %q begins with a dash and would parse as a git option, not a %s", kind, value, kind)
+	}
+	return nil
+}
+
+// gitRunner runs one git argv array in dir under env and returns its combined
+// output. It is a package variable so a test can observe or refuse an
+// invocation without running git; production is a plain exec.Command. env is
+// passed through verbatim -- nil means inherit this process's environment.
+var gitRunner = func(dir string, env []string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd.CombinedOutput()
+}
+
 // gitOutput runs one git command in dir and returns its combined output. It is
 // deliberately NOT path-guarded: every caller passes a path built from a
 // validSegment-validated name, and git's own ref resolution handles the
 // arguments.
 func gitOutput(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	return cmd.CombinedOutput()
+	return gitRunner(dir, nil, args...)
 }
 
 // buildRepoVenv builds the checkout's ONE shared venv at dir/.venv by running
