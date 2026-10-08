@@ -975,7 +975,7 @@ func TestWriteTreeCheckOverwritePathInvalidExemptionBase(t *testing.T) {
 
 	// A legitimate home still exempts its descendants, even under a denied
 	// prefix (/home is on the deny list).
-	c.NoError(checkOverwritePath("/home/tester/proj", root, "/home/tester"),
+	c.NoError(checkOverwritePath("/Users/tester/proj", root, "/Users/tester"),
 		"a legitimate home must exempt its descendants")
 }
 
@@ -1092,19 +1092,24 @@ func TestWriteTreeCheckOverwritePathHomeBase(t *testing.T) {
 	// path under it (the alias shape: macOS /etc -> /private/etc).
 	cases := []struct {
 		base string
+		temp string
 		want bool
 	}{
-		{"/", false},
-		{"/etc", false},
-		{"/private/etc", false},
-		{"/usr/local", false},
-		{"/var/root", false},
-		{"/home/tester", true},
-		{"/Users/tester", true},
-		{"/root", true},
+		{"/", "/tmp", false},
+		{"/etc", "/tmp", false},
+		{"/private/etc", "/tmp", false},
+		{"/usr/local", "/tmp", false},
+		{"/var/root", "/tmp", false},
+		{"/home/tester", "/tmp", true},
+		{"/Users/tester", "/tmp", true},
+		{"/root", "/tmp", true},
+		// A home strictly inside the (possibly denied-prefix) temp directory.
+		{"/private/var/folders/xx/T/home", "/private/var/folders/xx/T", true},
+		{"/private/var/folders/xx/T", "/private/var/folders/xx/T", false},
+		{"/private/etc", "/private/var/folders/xx/T", false},
 	}
 	for _, tc := range cases {
-		c.Eq(tc.want, treeUsableHomeBase(tc.base), "treeUsableHomeBase(%q)", tc.base)
+		c.Eq(tc.want, treeUsableHomeBase(tc.base, tc.temp), "treeUsableHomeBase(%q, %q)", tc.base, tc.temp)
 	}
 
 	root := filepath.Join(t.TempDir(), "root")
@@ -1123,6 +1128,6 @@ func TestWriteTreeCheckOverwritePathHomeBase(t *testing.T) {
 		"a home base under /usr must not exempt its own tree")
 
 	// A legitimate home still exempts its descendants.
-	c.NoError(checkOverwritePath("/home/tester/proj", root, "/home/tester"),
+	c.NoError(checkOverwritePath("/Users/tester/proj", root, "/Users/tester"),
 		"a legitimate home must exempt its descendants")
 }

@@ -761,7 +761,7 @@ func checkOverwritePath(target, root, home string) error {
 	// would exempt everything, and a base under a denied tree would exempt the
 	// very tree the deny list exists to protect. The home base is stricter
 	// than the others — see treeUsableHomeBase.
-	if homeResolved != "" && !treeUsableHomeBase(homeResolved) {
+	if homeResolved != "" && !treeUsableHomeBase(homeResolved, tempResolved) {
 		slog.Warn("executor: home directory is not a usable overwrite-guard exemption base",
 			"home", homeResolved)
 		homeResolved = ""
@@ -858,9 +858,15 @@ func treeUsableExemptionBase(base string) bool {
 // usable home base, because a deny-list tree reached through an alias (macOS's
 // /etc -> /private/etc) would otherwise exempt the tree the deny list exists to
 // protect.
-func treeUsableHomeBase(base string) bool {
+func treeUsableHomeBase(base, tempResolved string) bool {
 	if base == "" || base == string(filepath.Separator) {
 		return false
+	}
+	// A home inside the process temp directory is as legitimate as the temp
+	// directory itself (macOS keeps it under /private/var/folders, a denied
+	// tree); a home must still be a strict descendant of it.
+	if treeUsableExemptionBase(tempResolved) && treeStrictDescendant(base, tempResolved) {
+		return true
 	}
 	for _, prefix := range treeOverwriteDenyPrefixes {
 		switch prefix {
