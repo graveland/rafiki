@@ -37,6 +37,29 @@ func decodeBody(t *testing.T, data []byte) createBody {
 	return b
 }
 
+func TestCreateBodyHostname(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	t.Run("named sandbox uses sandbox id", func(t *testing.T) {
+		b := decodeBody(t, mustBody(t, bodyResolved(), bodyInputs()))
+		c.Eq("sbx-1", b.Hostname, "Hostname from sandbox id")
+	})
+
+	t.Run("spawn block uses child id", func(t *testing.T) {
+		in := bodyInputs()
+		in.OwnerChild = "c_01M4C9Q90QQ0JSCR10QAAV0HS9"
+		b := decodeBody(t, mustBody(t, bodyResolved(), in))
+		c.Eq("c-01M4C9Q90QQ0JSCR10QAAV0HS9", b.Hostname, "Hostname from child id with underscore replaced")
+	})
+
+	t.Run("child id with dot replaced", func(t *testing.T) {
+		in := bodyInputs()
+		in.OwnerChild = "c.01M4C9Q90QQ0JSCR10QAAV0HS9"
+		b := decodeBody(t, mustBody(t, bodyResolved(), in))
+		c.Eq("c-01M4C9Q90QQ0JSCR10QAAV0HS9", b.Hostname, "dots replaced too")
+	})
+}
+
 func TestCreateBodyImageEntrypointCmd(t *testing.T) {
 	data, err := CreateBody(bodyResolved(), bodyInputs())
 	c := assert.NewAborting(t)

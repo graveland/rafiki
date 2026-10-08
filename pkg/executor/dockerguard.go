@@ -84,8 +84,9 @@ func isContainersCreate(p string) bool {
 // denylist would only enforce what its author remembered.
 var (
 	createBodyTopKeys = map[string]bool{
-		"Image": true, "Entrypoint": true, "Cmd": true, "WorkingDir": true,
-		"Env": true, "Labels": true, "User": true, "HostConfig": true,
+		"Image": true, "Entrypoint": true, "Cmd": true, "Hostname": true,
+		"WorkingDir": true, "Env": true, "Labels": true, "User": true,
+		"HostConfig": true,
 	}
 	hostConfigKeys = map[string]bool{
 		"Mounts": true, "NetworkMode": true, "ReadonlyRootfs": true,

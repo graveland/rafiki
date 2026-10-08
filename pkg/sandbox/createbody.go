@@ -9,6 +9,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strings"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -42,6 +43,7 @@ type createBody struct {
 	Image      string            `json:"Image"`
 	Entrypoint []string          `json:"Entrypoint"`
 	Cmd        []string          `json:"Cmd"`
+	Hostname   string            `json:"Hostname,omitempty"`
 	WorkingDir string            `json:"WorkingDir,omitempty"`
 	Env        []string          `json:"Env,omitempty"`
 	Labels     map[string]string `json:"Labels,omitempty"`
@@ -101,6 +103,7 @@ func CreateBody(r Resolved, in CreateInputs) ([]byte, error) {
 		Image:      r.Image,
 		Entrypoint: []string{"rafiki"},
 		Cmd:        []string{"executor", "serve", "--connect-socket", relaySocketPath},
+		Hostname:   containerHostname(in),
 		WorkingDir: r.Workdir,
 		User:       r.User,
 		Labels:     labelsFor(r, in),
@@ -233,6 +236,23 @@ func networkMode(n protocol.NetworkMode) (string, error) {
 // leave the sandbox with NO CPU limit — a child that passed the clamp would
 // escape its cap — and a value past the int64 range would make the conversion
 // undefined. Both fail closed instead.
+// containerHostname computes a valid RFC 1123 hostname for the container.
+// For a spawn-block sandbox (has an OwnerChild), the child/agent ID is used so
+// `hostname` inside the container identifies which agent runs there. For a named
+// sandbox the sandbox ID is used instead. Underscores are replaced with hyphens
+// and the result is truncated to 63 characters (Docker's hostname limit).
+func containerHostname(in CreateInputs) string {
+	id := in.SandboxID
+	if in.OwnerChild != "" {
+		id = in.OwnerChild
+	}
+	h := strings.NewReplacer("_", "-", ".", "-").Replace(id)
+	if len(h) > 63 {
+		h = h[:63]
+	}
+	return h
+}
+
 func nanoCPUs(cpus float64) (int64, error) {
 	if cpus == 0 {
 		return 0, nil
