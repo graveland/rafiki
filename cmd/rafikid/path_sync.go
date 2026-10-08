@@ -79,13 +79,21 @@ func ambiguousRefErr(ref string, matches int) error {
 }
 
 // resolve returns the live, tree-sync-capable executor ref names, or an error.
-// Every error is a *connectapi.ControllerError.
+// Every refusal it authors is a *connectapi.ControllerError; an error from the
+// sandbox store or the executor pool is returned raw, and ConnectErr redacts it
+// on the wire.
 func (p *pathSyncer) resolve(ctx context.Context, owner users.Identity, callerChild, ref string) (syncTarget, error) {
+	if p.c == nil {
+		return syncTarget{}, &connectapi.ControllerError{
+			Code:    protocol.ErrInternal,
+			Message: "path sync is not wired to a controller",
+		}
+	}
 	candidates, rows, err := p.reachableExecutors(ctx, owner, callerChild)
 	if err != nil {
 		return syncTarget{}, err
 	}
-	chosen, matches := p.matchRef(ctx, ref, candidates, rows)
+	chosen, matches := p.matchRef(ctx, ref, candidates, rows, owner.UserID)
 	switch {
 	case matches == 0:
 		return syncTarget{}, notReachableErr(ref)
@@ -124,57 +132,89 @@ func (p *pathSyncer) resolve(ctx context.Context, owner users.Identity, callerCh
 // reachableExecutors is the set of executor ROWS the caller may name, plus the
 // sandbox rows it may reach by name/id.
 //
-// An operator or user (callerChild == "") gets every live executor whose row
-// OwnerUserID equals its own (NULL/empty on both sides counts as equal).
+// An operator or user (callerChild == "") gets every enabled live executor
+// whose row OwnerUserID equals its own (NULL/empty on both sides counts as
+// equal).
 //
 // A child gets its effective executor set — the parent's set intersected with
-// its own selector, via effectiveExecutorSetFor — UNION the executors of the
-// sandbox rows it or a descendant created, or that it owns, or that are
-// subtree-scoped beneath a child it descends from. The union widens nothing
-// else: a sandbox row is reached by ownership, never by selection.
+// its own selector, via effectiveExecutorSetFor.
+//
+// Either way, SANDBOX executors are stripped from that generic set and enter the
+// candidate list ONLY through the permitted rows below. A sandbox executor
+// admits "" and so sits in every empty-selector effective set; leaving it there
+// would let a child address a sibling's or an unrelated child's sandbox by
+// machine label or id. A sandbox row is reached by ownership — the caller
+// created it (directly or through a descendant), the caller owns it, or it is
+// subtree-scoped beneath a child the caller descends from — never by selection,
+// and a person reaches their own named sandboxes the same way rather than
+// through "every executor of mine".
 func (p *pathSyncer) reachableExecutors(ctx context.Context, owner users.Identity, callerChild string) ([]executors.Executor, []sandbox.Row, error) {
 	rows, err := p.permittedSandboxRows(ctx, owner.UserID, callerChild)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	var generic []executors.Executor
 	if callerChild == "" {
-		var out []executors.Executor
 		for _, le := range p.pool.Live() {
-			if le.Executor.OwnerUserID != owner.UserID {
+			if !le.Executor.Enabled || le.Executor.OwnerUserID != owner.UserID {
 				continue
 			}
-			out = append(out, le.Executor)
+			generic = append(generic, le.Executor)
 		}
-		return out, rows, nil
+	} else {
+		labels := map[string]string{}
+		if p.c.st != nil {
+			if snap, ok := p.c.st.Get(callerChild); ok {
+				labels = snap.Labels
+			}
+		}
+		set, err := p.c.effectiveExecutorSetFor(callerChild, labels, owner.UserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		generic = set
 	}
+	generic = dropSandboxCandidates(generic)
 
-	labels := map[string]string{}
-	if p.c != nil && p.c.st != nil {
-		if snap, ok := p.c.st.Get(callerChild); ok {
-			labels = snap.Labels
-		}
-	}
-	set, err := p.c.effectiveExecutorSetFor(callerChild, labels, owner.UserID)
-	if err != nil {
-		return nil, nil, err
-	}
-	seen := make(map[string]bool, len(set)+len(rows))
-	out := make([]executors.Executor, 0, len(set)+len(rows))
-	for _, e := range set {
-		if seen[e.ID] {
+	seen := make(map[string]bool, len(generic)+len(rows))
+	out := make([]executors.Executor, 0, len(generic)+len(rows))
+	for _, e := range generic {
+		if e.ID == "" || seen[e.ID] {
 			continue
 		}
 		seen[e.ID] = true
 		out = append(out, e)
 	}
 	for _, r := range rows {
-		if r.ExecutorID == "" || seen[r.ExecutorID] {
+		if seen[r.ExecutorID] {
 			continue
 		}
-		seen[r.ExecutorID] = true
-		out = append(out, p.executorRow(ctx, r.ExecutorID))
+		e, ok := p.sandboxTargetExecutor(ctx, r, owner.UserID)
+		if !ok {
+			continue
+		}
+		seen[e.ID] = true
+		out = append(out, e)
 	}
 	return out, rows, nil
+}
+
+// sandboxTargetExecutor resolves the executor a permitted sandbox row names,
+// and reports whether this caller may use it. The executor ROW is the
+// authority, so it is re-checked here rather than trusted from the sandbox row:
+// the executor must be enabled and owned by the same owner (NULL/empty on both
+// sides counts as equal). A row whose executor cannot be resolved is refused
+// (fail closed), which is also what a stale or foreign executor row gets.
+func (p *pathSyncer) sandboxTargetExecutor(ctx context.Context, r sandbox.Row, ownerUserID string) (executors.Executor, bool) {
+	if r.ExecutorID == "" {
+		return executors.Executor{}, false
+	}
+	e := p.executorRow(ctx, r.ExecutorID)
+	if !e.Enabled || e.OwnerUserID != ownerUserID {
+		return executors.Executor{}, false
+	}
+	return e, true
 }
 
 // permittedSandboxRows is the owner's live sandbox rows the caller may reach.
@@ -217,51 +257,54 @@ func (p *pathSyncer) sandboxRowReachable(callerChild string, r sandbox.Row) bool
 }
 
 // matchRef finds the executor ref names among candidates, or reports how many
-// candidates matched. A sandbox name or id is checked FIRST (restricted to the
-// rows the caller may reach), then an exact machine label, an exact id, and
-// finally resolveExecutorRef's unique trailing-id fragment. matches is 0 for no
-// match and the match count when it is ambiguous.
-func (p *pathSyncer) matchRef(ctx context.Context, ref string, candidates []executors.Executor, rows []sandbox.Row) (executors.Executor, int) {
+// DISTINCT executors matched. Every pass contributes — a sandbox row's name or
+// id, an exact machine label, an exact id, and resolveExecutorRef's trailing-id
+// fragment — and the matches are deduped by executor id. No pass has priority,
+// so a sandbox named like a real machine (or like another executor's id) cannot
+// capture a request addressed to that machine: both matches surface and the ref
+// is ambiguous. matches is 0 for no match and the distinct-executor count when
+// it is ambiguous.
+func (p *pathSyncer) matchRef(ctx context.Context, ref string, candidates []executors.Executor, rows []sandbox.Row, ownerUserID string) (executors.Executor, int) {
+	matched := make(map[string]executors.Executor)
+	add := func(e executors.Executor) {
+		if e.ID == "" {
+			return
+		}
+		matched[e.ID] = e
+	}
 	for _, r := range rows {
 		if (r.Name != "" && r.Name == ref) || r.ID == ref {
-			return p.executorRow(ctx, r.ExecutorID), 1
+			if e, ok := p.sandboxTargetExecutor(ctx, r, ownerUserID); ok {
+				add(e)
+			}
 		}
 	}
-
-	var byMachine []executors.Executor
 	for _, e := range candidates {
 		if e.Labels["machine"] == ref {
-			byMachine = append(byMachine, e)
+			add(e)
 		}
 	}
-	if len(byMachine) == 1 {
-		return byMachine[0], 1
-	}
-	if len(byMachine) > 1 {
-		return executors.Executor{}, len(byMachine)
-	}
-
 	for _, e := range candidates {
 		if e.ID == ref {
+			add(e)
+		}
+	}
+	if len(ref) >= executorRefMinLen {
+		for _, e := range candidates {
+			if strings.HasSuffix(e.ID, ref) {
+				add(e)
+			}
+		}
+	}
+	switch len(matched) {
+	case 0:
+		return executors.Executor{}, 0
+	case 1:
+		for _, e := range matched {
 			return e, 1
 		}
 	}
-
-	if len(ref) >= executorRefMinLen {
-		var frag []executors.Executor
-		for _, e := range candidates {
-			if strings.HasSuffix(e.ID, ref) {
-				frag = append(frag, e)
-			}
-		}
-		if len(frag) == 1 {
-			return frag[0], 1
-		}
-		if len(frag) > 1 {
-			return executors.Executor{}, len(frag)
-		}
-	}
-	return executors.Executor{}, 0
+	return executors.Executor{}, len(matched)
 }
 
 // liveExecutor returns the pool's live view of id, if any.
@@ -369,6 +412,7 @@ func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath,
 	if err != nil {
 		return 0, 0, executorErr("source", err)
 	}
+	defer stream.Close()
 	if !stream.Receive() {
 		if err := stream.Err(); err != nil {
 			return 0, 0, executorErr("source", err)
@@ -388,7 +432,7 @@ func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath,
 		MaxBytes:  maxBytes,
 	}}}
 	if err := write.Send(start); err != nil {
-		return 0, 0, executorErr("destination", err)
+		return 0, 0, destinationErr(write, err)
 	}
 
 	for stream.Receive() {
@@ -398,7 +442,7 @@ func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath,
 			continue
 		}
 		if err := write.Send(&executorpb.WriteTreeRequest{Msg: &executorpb.WriteTreeRequest_Chunk{Chunk: chunk.Chunk}}); err != nil {
-			return 0, 0, executorErr("destination", err)
+			return 0, 0, destinationErr(write, err)
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -410,6 +454,21 @@ func (p *pathSyncer) transfer(ctx context.Context, src, dst syncTarget, srcPath,
 		return 0, 0, executorErr("destination", err)
 	}
 	return resp.Msg.GetFiles(), resp.Msg.GetBytes(), nil
+}
+
+// destinationErr resolves what a failed destination Send stands for. A
+// client-streaming Send that fails because the server answered an error and
+// closed the stream surfaces only io.EOF, so CloseAndReceive is asked for the
+// server's own error; the opaque fallback is used only when that yields no
+// connect error either.
+func destinationErr(write *connect.ClientStreamForClient[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse], sendErr error) error {
+	if _, recvErr := write.CloseAndReceive(); recvErr != nil {
+		var ce *connect.Error
+		if errors.As(recvErr, &ce) {
+			return executorErr("destination", recvErr)
+		}
+	}
+	return executorErr("destination", sendErr)
 }
 
 // executorErr converts an error from an executor RPC into a

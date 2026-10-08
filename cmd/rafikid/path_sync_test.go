@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,6 +66,47 @@ func newTreeSyncExecutor(t *testing.T) (executorpbconnect.ExecutorServiceClient,
 	return client, root
 }
 
+// observingClient wraps a real executor client to count the tree-sync RPCs it
+// is asked for and to record the context each stream was opened with. Both
+// streams share one derived context, so a recorded context being cancelled is
+// the assertion that both streams were unwound.
+type observingClient struct {
+	executorpbconnect.ExecutorServiceClient
+	mu       sync.Mutex
+	reads    int
+	writes   int
+	readCtx  context.Context
+	writeCtx context.Context
+}
+
+func (c *observingClient) ReadTree(ctx context.Context, req *connect.Request[executorpb.ReadTreeRequest]) (*connect.ServerStreamForClient[executorpb.ReadTreeResponse], error) {
+	c.mu.Lock()
+	c.reads++
+	c.readCtx = ctx
+	c.mu.Unlock()
+	return c.ExecutorServiceClient.ReadTree(ctx, req)
+}
+
+func (c *observingClient) WriteTree(ctx context.Context) *connect.ClientStreamForClient[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse] {
+	c.mu.Lock()
+	c.writes++
+	c.writeCtx = ctx
+	c.mu.Unlock()
+	return c.ExecutorServiceClient.WriteTree(ctx)
+}
+
+func (c *observingClient) counts() (reads, writes int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads, c.writes
+}
+
+func (c *observingClient) streamContexts() (read, write context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readCtx, c.writeCtx
+}
+
 // treeSyncFakePool is the syncer's treeSyncExecutors AND the Controller's
 // executorPool: the live set, the dialer, and the handful of methods selection
 // needs. It embeds fakePool so the two views can never disagree in a test.
@@ -98,6 +140,15 @@ func treeSyncExecutor(id, ownerUserID string, labels map[string]string, isolatio
 		},
 		Describe: &executorpb.DescribeResponse{TreeSync: capable},
 	}
+}
+
+// treeSyncSandboxExecutor is treeSyncExecutor for a sandbox's executor: its row
+// carries the sandbox label isSandboxRow (and dropSandboxCandidates) key on.
+func treeSyncSandboxExecutor(id, ownerUserID, machine, isolation string) execpool.LiveExecutor {
+	return treeSyncExecutor(id, ownerUserID, map[string]string{
+		"machine":               machine,
+		sandbox.RowLabelSandbox: "1",
+	}, isolation, true)
 }
 
 // newPathSyncFixture wires a Controller whose executor pool IS the syncer's
@@ -155,6 +206,51 @@ func pollUntil(cond func() bool, budget time.Duration) bool {
 		time.Sleep(2 * time.Millisecond)
 	}
 	return cond()
+}
+
+// sandboxRowFor builds a live NAMED sandbox row pointing at an executor.
+func sandboxRowFor(id, name, ownerUserID, executorID, createdBy string) sandbox.Row {
+	return sandbox.Row{
+		ID:          id,
+		Name:        name,
+		OwnerUserID: ownerUserID,
+		ExecutorID:  executorID,
+		CreatedBy:   createdBy,
+		State:       sandboxStateReady,
+	}
+}
+
+// sandboxBlockRow builds a live SPAWN-BLOCK sandbox row (no name) owned by a
+// child, with the given scope and creator.
+func sandboxBlockRow(id, ownerUserID, executorID, ownerChild, createdBy string, scope protocol.SandboxScope) sandbox.Row {
+	return sandbox.Row{
+		ID:          id,
+		OwnerUserID: ownerUserID,
+		ExecutorID:  executorID,
+		CreatedBy:   createdBy,
+		OwnerChild:  ownerChild,
+		Scope:       scope,
+		State:       sandboxStateReady,
+	}
+}
+
+// assertNotReachable is the uniform refusal every out-of-reach ref must get.
+func assertNotReachable(t *testing.T, p *pathSyncer, callerChild, ref string) {
+	t.Helper()
+	ck := assert.NewCollecting(t)
+	_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, callerChild, ref)
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrNotFound, ce.Code, "%q code", ref)
+	ck.Eq(fmt.Sprintf("executor %q is not reachable by this caller", ref), ce.Message, "%q message", ref)
+}
+
+// assertReachable resolves ref and requires it to land on wantID.
+func assertReachable(t *testing.T, p *pathSyncer, callerChild, ref, wantID string) {
+	t.Helper()
+	ck := assert.NewCollecting(t)
+	target, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, callerChild, ref)
+	ck.Require().NoError(err, "%q must be reachable", ref)
+	ck.Eq(wantID, target.exec.ID, "%q must resolve to %s", ref, wantID)
 }
 
 // --- path validation -------------------------------------------------------
@@ -318,7 +414,7 @@ func TestPathSyncOverwriteAllowedOnContainerDestination(t *testing.T) {
 	ck.True(os.IsNotExist(serr), "the old tree must be gone, got %v", serr)
 }
 
-// --- reachability ----------------------------------------------------------
+// --- reachability: the generic arms ----------------------------------------
 
 func TestPathSyncMissingAndForbiddenExecutorLookIdentical(t *testing.T) {
 	ck := assert.NewCollecting(t)
@@ -372,16 +468,104 @@ func TestPathSyncRefusesAnotherOwnersExecutor(t *testing.T) {
 	ck.Eq(protocol.ErrNotFound, ce.Code, "SyncPath code")
 }
 
+// A DISABLED executor is not usable, for an operator just as for a child.
+func TestPathSyncOperatorDoesNotReachDisabledExecutor(t *testing.T) {
+	offClient, _ := newTreeSyncExecutor(t)
+	off := treeSyncExecutor("exec-off", "u1", map[string]string{"machine": "off"}, "", true)
+	off.Executor.Enabled = false
+	pool := newTreeSyncPool([]execpool.LiveExecutor{off},
+		map[string]executorpbconnect.ExecutorServiceClient{"exec-off": offClient})
+	_, p := newPathSyncFixture(t, pool)
+
+	assertNotReachable(t, p, "", "off")
+	assertNotReachable(t, p, "", "exec-off")
+}
+
+// --- reachability: sandboxes enter only through their permitted rows ---------
+
+// THE critical: a sandbox executor admits "" and so sits in EVERY empty-selector
+// effective set. A child must not reach a sibling's sandbox through it.
+func TestPathSyncChildCannotReachSiblingSandboxWithEmptySelector(t *testing.T) {
+	homeClient, _ := newTreeSyncExecutor(t)
+	sibClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-sibbox", "u1", "box-sib", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-home": homeClient, "exec-sibbox": sibClient})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+
+	// An EMPTY selector chain: the effective set would otherwise contain the
+	// sibling's sandbox executor.
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	insertPathSyncChild(t, ctrl, "c_sib", "c_root", "")
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_sib", "sibbox", "u1", "exec-sibbox", "c_sib")))
+
+	// By machine label, by id, by id fragment, by sandbox name, by row id.
+	for _, ref := range []string{"box-sib", "exec-sibbox", "sibbox", "sbx_sib"} {
+		assertNotReachable(t, p, "c_child", ref)
+	}
+	// The generic arm still works for the child.
+	assertReachable(t, p, "c_child", "home", "exec-home")
+}
+
+// An unrelated TOP-LEVEL child's sandbox is not the caller's either.
+func TestPathSyncChildCannotReachUnrelatedChildSandbox(t *testing.T) {
+	homeClient, _ := newTreeSyncExecutor(t)
+	unrelClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-unrelbox", "u1", "box-unrel", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-home": homeClient, "exec-unrelbox": unrelClient})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	insertPathSyncChild(t, ctrl, "c_unrel", "", "")
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_unrel", "unrelbox", "u1", "exec-unrelbox", "c_unrel")))
+
+	for _, ref := range []string{"box-unrel", "exec-unrelbox", "unrelbox", "sbx_unrel"} {
+		assertNotReachable(t, p, "c_child", ref)
+	}
+}
+
+// A child reaches the sandbox it created itself.
+func TestPathSyncChildReachesOwnSandbox(t *testing.T) {
+	homeClient, _ := newTreeSyncExecutor(t)
+	ownClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-ownbox", "u1", "box-own", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-home": homeClient, "exec-ownbox": ownClient})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_own", "ownbox", "u1", "exec-ownbox", "c_child")))
+
+	// The CreatedBy arm: the caller created it.
+	for _, ref := range []string{"box-own", "exec-ownbox", "ownbox", "sbx_own"} {
+		assertReachable(t, p, "c_child", ref, "exec-ownbox")
+	}
+}
+
+// The brief's original scenario: a child with a NON-empty selector chain
+// reaches the sandbox it created, and never its sibling's.
 func TestPathSyncChildReachesOwnSandboxNotSiblings(t *testing.T) {
-	ck := assert.NewCollecting(t)
 	homeClient, _ := newTreeSyncExecutor(t)
 	ownBoxClient, _ := newTreeSyncExecutor(t)
 	sibBoxClient, _ := newTreeSyncExecutor(t)
 
 	pool := newTreeSyncPool([]execpool.LiveExecutor{
 		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home", "env": "home"}, "", true),
-		treeSyncExecutor("exec-ownbox", "u1", map[string]string{"machine": "box-own"}, "container", true),
-		treeSyncExecutor("exec-sibbox", "u1", map[string]string{"machine": "box-sib"}, "container", true),
+		treeSyncSandboxExecutor("exec-ownbox", "u1", "box-own", "container"),
+		treeSyncSandboxExecutor("exec-sibbox", "u1", "box-sib", "container"),
 	}, map[string]executorpbconnect.ExecutorServiceClient{
 		"exec-home":   homeClient,
 		"exec-ownbox": ownBoxClient,
@@ -395,85 +579,243 @@ func TestPathSyncChildReachesOwnSandboxNotSiblings(t *testing.T) {
 	insertPathSyncChild(t, ctrl, "c_sib", "c_root", "")
 
 	// The child's own named sandbox, and its sibling's.
-	ck.NoError(ctrl.sandboxStore.Insert(t.Context(), sandboxRowFor("sbx_own", "ownbox", "u1", "exec-ownbox", "c_child")))
-	ck.NoError(ctrl.sandboxStore.Insert(t.Context(), sandboxRowFor("sbx_sib", "sibbox", "u1", "exec-sibbox", "c_sib")))
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_own", "ownbox", "u1", "exec-ownbox", "c_child")))
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_sib", "sibbox", "u1", "exec-sibbox", "c_sib")))
 
-	owner := users.Identity{UserID: "u1"}
-
-	// Its parent's set alone would not admit its own sandbox (no env=home), so
-	// naming the sandbox's EXECUTOR only resolves through the ownership union.
-	own, err := p.resolve(t.Context(), owner, "c_child", "box-own")
-	ck.Require().NoError(err, "a child must reach the sandbox it created by its executor ref")
-	ck.Eq("exec-ownbox", own.exec.ID, "own sandbox executor by machine label")
-
-	own, err = p.resolve(t.Context(), owner, "c_child", "exec-ownbox")
-	ck.Require().NoError(err, "a child must reach its own sandbox by executor id")
-	ck.Eq("exec-ownbox", own.exec.ID, "own sandbox executor by id")
-
-	// Its sandbox NAME resolves through the permitted rows.
-	own, err = p.resolve(t.Context(), owner, "c_child", "ownbox")
-	ck.Require().NoError(err, "a child must reach the sandbox it created by name")
-	ck.Eq("exec-ownbox", own.exec.ID, "own sandbox executor by name")
-
-	// Its sibling's sandbox is in neither the effective set nor the rows it
-	// may reach.
+	// The parent's set alone would not admit its own sandbox (no env=home), so
+	// naming the sandbox's EXECUTOR only resolves through the permitted rows.
+	for _, ref := range []string{"box-own", "exec-ownbox", "ownbox", "sbx_own"} {
+		assertReachable(t, p, "c_child", ref, "exec-ownbox")
+	}
+	// Its sibling's sandbox is in neither the effective set nor the rows it may
+	// reach.
 	for _, ref := range []string{"box-sib", "exec-sibbox", "sibbox", "sbx_sib"} {
-		_, err = p.resolve(t.Context(), owner, "c_child", ref)
-		ce := controllerErr(t, err)
-		ck.Eq(protocol.ErrNotFound, ce.Code, "sibling sandbox code for %q", ref)
-		ck.Eq(fmt.Sprintf("executor %q is not reachable by this caller", ref), ce.Message, "sibling sandbox message for %q", ref)
+		assertNotReachable(t, p, "c_child", ref)
 	}
 }
 
-// sandboxRowFor builds a live sandbox row pointing at an executor.
-func sandboxRowFor(id, name, ownerUserID, executorID, createdBy string) sandbox.Row {
-	return sandbox.Row{
-		ID:          id,
-		Name:        name,
-		OwnerUserID: ownerUserID,
-		ExecutorID:  executorID,
-		CreatedBy:   createdBy,
-		State:       sandboxStateReady,
-	}
-}
-
-func TestPathSyncRefusesIncapableExecutor(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	oldClient, _ := newTreeSyncExecutor(t)
+// A child reaches the SPAWN BLOCK written for it (OwnerChild == caller), even
+// though neither it nor a descendant created the row and its scope is self.
+func TestPathSyncChildReachesOwnSpawnBlock(t *testing.T) {
+	homeClient, _ := newTreeSyncExecutor(t)
+	blockClient, _ := newTreeSyncExecutor(t)
 	pool := newTreeSyncPool([]execpool.LiveExecutor{
-		treeSyncExecutor("exec-old", "u1", map[string]string{"machine": "old"}, "", false),
-	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-old": oldClient})
-	_, p := newPathSyncFixture(t, pool)
-
-	_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, "", "old")
-	ce := controllerErr(t, err)
-	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "code")
-	ck.Eq(`executor "old" does not support tree sync; upgrade it`, ce.Message, "message")
-
-	_, err = p.SyncPath(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncPathRequest{
-		Src: protocol.SyncEndpoint{Executor: "old", Path: "/work/src"},
-		Dst: protocol.SyncEndpoint{Executor: "old", Path: "/work/dst"},
-	})
-	ce = controllerErr(t, err)
-	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "SyncPath code")
-}
-
-func TestPathSyncRefusesOfflineExecutor(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	pool := newTreeSyncPool(nil, nil)
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-ownblock", "u1", "box-block", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-home": homeClient, "exec-ownblock": blockClient})
 	ctrl, p := newPathSyncFixture(t, pool)
 	ctrl.sandboxStore = newFakeSandboxStore()
 
 	insertPathSyncChild(t, ctrl, "c_root", "", "")
 	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	insertPathSyncChild(t, ctrl, "c_sib", "c_root", "")
+	// A self-scoped spawn block owned by the child, created by its parent: only
+	// the OwnerChild arm admits it.
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxBlockRow("sbx_block", "u1", "exec-ownblock", "c_child", "c_root", protocol.ScopeSelf)))
 
-	// A permitted sandbox row whose executor has no connection.
-	ck.NoError(ctrl.sandboxStore.Insert(t.Context(), sandboxRowFor("sbx_dead", "deadbox", "u1", "exec-dead", "c_child")))
+	for _, ref := range []string{"box-block", "exec-ownblock", "sbx_block"} {
+		assertReachable(t, p, "c_child", ref, "exec-ownblock")
+	}
+	// A sibling is not the block's owner, so it does not reach it.
+	for _, ref := range []string{"box-block", "exec-ownblock", "sbx_block"} {
+		assertNotReachable(t, p, "c_sib", ref)
+	}
+}
 
-	_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, "c_child", "deadbox")
+// A child reaches a sandbox a DESCENDANT of it created.
+func TestPathSyncChildReachesDescendantCreatedSandbox(t *testing.T) {
+	homeClient, _ := newTreeSyncExecutor(t)
+	grandClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-grandbox", "u1", "box-grand", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-home": homeClient, "exec-grandbox": grandClient})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	insertPathSyncChild(t, ctrl, "c_grand", "c_child", "")
+	// Created by the GRANDCHILD: only the descendant arm admits it to c_child.
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_grand", "grandbox", "u1", "exec-grandbox", "c_grand")))
+
+	for _, ref := range []string{"box-grand", "exec-grandbox", "grandbox", "sbx_grand"} {
+		assertReachable(t, p, "c_child", ref, "exec-grandbox")
+	}
+	// The grandchild reaches its own too.
+	assertReachable(t, p, "c_grand", "grandbox", "exec-grandbox")
+}
+
+// A child reaches a SUBTREE-scoped block owned by an ancestor it descends from,
+// and only a subtree-scoped one.
+func TestPathSyncChildReachesAncestorSubtreeSandbox(t *testing.T) {
+	homeClient, _ := newTreeSyncExecutor(t)
+	subClient, _ := newTreeSyncExecutor(t)
+	selfClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-subbox", "u1", "box-sub", "container"),
+		treeSyncSandboxExecutor("exec-selfbox", "u1", "box-self", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{
+		"exec-home": homeClient, "exec-subbox": subClient, "exec-selfbox": selfClient,
+	})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	// A subtree block owned by the ancestor, and a SELF block with the same
+	// shape — the second must stay out of reach.
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxBlockRow("sbx_sub", "u1", "exec-subbox", "c_root", "c_root", protocol.ScopeSubtree)))
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxBlockRow("sbx_self", "u1", "exec-selfbox", "c_root", "c_root", protocol.ScopeSelf)))
+
+	for _, ref := range []string{"box-sub", "exec-subbox", "sbx_sub"} {
+		assertReachable(t, p, "c_child", ref, "exec-subbox")
+	}
+	for _, ref := range []string{"box-self", "exec-selfbox", "sbx_self"} {
+		assertNotReachable(t, p, "c_child", ref)
+	}
+}
+
+// An operator reaches a sandbox only through its row, never through the generic
+// owner-matched list: an orphaned sandbox executor is out of reach, while one
+// with a live row is reachable by name AND by machine label.
+func TestPathSyncOperatorReachesSandboxesOnlyThroughTheirRows(t *testing.T) {
+	orphanClient, _ := newTreeSyncExecutor(t)
+	childBoxClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncSandboxExecutor("exec-orphanbox", "u1", "box-orphan", "container"),
+		treeSyncSandboxExecutor("exec-childbox", "u1", "box-child", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{
+		"exec-orphanbox": orphanClient, "exec-childbox": childBoxClient,
+	})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+	insertPathSyncChild(t, ctrl, "c_child", "", "")
+
+	// No row for the orphan: the generic arm must not carry it.
+	assertNotReachable(t, p, "", "box-orphan")
+	assertNotReachable(t, p, "", "exec-orphanbox")
+
+	// Another child's sandbox, with a live row: the operator owns it, and
+	// reaches it through the row.
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_child", "childbox", "u1", "exec-childbox", "c_child")))
+	for _, ref := range []string{"box-child", "exec-childbox", "childbox", "sbx_child"} {
+		assertReachable(t, p, "", ref, "exec-childbox")
+	}
+}
+
+// The sandbox row is not enough: its executor's ROW must be owned by the same
+// owner and enabled.
+func TestPathSyncSandboxRowExecutorMustMatchOwner(t *testing.T) {
+	foreignClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncSandboxExecutor("exec-foreignbox", "u2", "box-foreign", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-foreignbox": foreignClient})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+	insertPathSyncChild(t, ctrl, "c_child", "", "")
+
+	// The ROW belongs to u1; its executor belongs to u2.
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_foreign", "foreignbox", "u1", "exec-foreignbox", "c_child")))
+
+	assertNotReachable(t, p, "", "foreignbox")
+	assertNotReachable(t, p, "", "box-foreign")
+	assertNotReachable(t, p, "", "exec-foreignbox")
+}
+
+func TestPathSyncSandboxRowExecutorMustBeEnabled(t *testing.T) {
+	offBox := treeSyncSandboxExecutor("exec-offbox", "u1", "box-off", "container")
+	offBox.Executor.Enabled = false
+	pool := newTreeSyncPool([]execpool.LiveExecutor{offBox},
+		map[string]executorpbconnect.ExecutorServiceClient{"exec-offbox": &observingClient{}})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+	insertPathSyncChild(t, ctrl, "c_child", "", "")
+
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_off", "offbox", "u1", "exec-offbox", "c_child")))
+
+	assertNotReachable(t, p, "", "offbox")
+	assertNotReachable(t, p, "", "box-off")
+	assertNotReachable(t, p, "", "exec-offbox")
+}
+
+// --- reachability: name shadowing (no pass has priority) --------------------
+
+// A sandbox named like a real machine, both reachable by the caller, is
+// ambiguous — and nothing is sent to either.
+func TestPathSyncAmbiguousRefRefusedWhenSandboxShadowsMachine(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	homeObs := &observingClient{}
+	boxObs := &observingClient{}
+	homeClient, _ := newTreeSyncExecutor(t)
+	boxClient, _ := newTreeSyncExecutor(t)
+	homeObs.ExecutorServiceClient = homeClient
+	boxObs.ExecutorServiceClient = boxClient
+
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-home", "u1", map[string]string{"machine": "home"}, "", true),
+		treeSyncSandboxExecutor("exec-gbox", "u1", "box-g", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-home": homeObs, "exec-gbox": boxObs})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	insertPathSyncChild(t, ctrl, "c_grand", "c_child", "")
+	// The descendant's sandbox is NAMED like the real machine "home".
+	ck.NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_shadow", "home", "u1", "exec-gbox", "c_grand")))
+
+	_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, "c_child", "home")
 	ce := controllerErr(t, err)
-	ck.Eq(protocol.ErrNotFound, ce.Code, "code")
-	ck.Eq(`executor "deadbox" is not connected`, ce.Message, "message")
+	ck.Eq(protocol.ErrNotFound, ce.Code, "ambiguous code")
+	ck.Eq(`executor "home" is not reachable by this caller (matches 2 executors)`, ce.Message, "ambiguous message")
+
+	// Nothing was sent to either executor.
+	_, err = p.SyncPath(t.Context(), users.Identity{UserID: "u1"}, "c_child", protocol.SyncPathRequest{
+		Src: protocol.SyncEndpoint{Executor: "home", Path: "/work/src"},
+		Dst: protocol.SyncEndpoint{Executor: "home", Path: "/work/dst"},
+	})
+	ce = controllerErr(t, err)
+	ck.Eq(protocol.ErrNotFound, ce.Code, "SyncPath code")
+	for _, obs := range []*observingClient{homeObs, boxObs} {
+		reads, writes := obs.counts()
+		ck.Eq(0, reads, "no ReadTree may reach an ambiguous ref")
+		ck.Eq(0, writes, "no WriteTree may reach an ambiguous ref")
+	}
+}
+
+// The same name, with no clash, resolves.
+func TestPathSyncSandboxNameWithoutClashResolves(t *testing.T) {
+	boxClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncSandboxExecutor("exec-box", "u1", "box", "container"),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-box": boxClient})
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+	assert.NewAborting(t).NoError(ctrl.sandboxStore.Insert(t.Context(),
+		sandboxRowFor("sbx_box", "box", "u1", "exec-box", "c_child")))
+
+	// Name and machine label coincide, and they name the SAME executor: one
+	// match, not a false ambiguity.
+	assertReachable(t, p, "c_child", "box", "exec-box")
+	// Exact id and id fragment likewise dedupe.
+	assertReachable(t, p, "c_child", "exec-box", "exec-box")
+	assertReachable(t, p, "c_child", "c-box", "exec-box")
+	// And the row id.
+	assertReachable(t, p, "c_child", "sbx_box", "exec-box")
 }
 
 // --- relay -----------------------------------------------------------------
@@ -545,6 +887,43 @@ func TestPathSyncDestinationFailureIsReportedAsDestination(t *testing.T) {
 	ce := controllerErr(t, err)
 	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "code")
 	ck.True(strings.HasPrefix(ce.Message, "destination: "), "the failure must name the destination, got %q", ce.Message)
+}
+
+// A destination that refuses MID-STREAM must surface its own reason: the
+// relay's Send only sees io.EOF once the executor has answered and closed.
+func TestPathSyncMidStreamDestinationRefusalKeepsItsReason(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	srcClient, srcRoot := newTreeSyncExecutor(t)
+	dstClient, dstRoot := newTreeSyncExecutor(t)
+
+	// A source larger than the caller's cap, so the destination aborts while
+	// the relay is still streaming. It must be large enough that the abort
+	// propagates back to the relay's Send — a source small enough to fit in the
+	// transport's buffers would surface the error at CloseAndReceive instead and
+	// never exercise the Send path.
+	big := filepath.Join(srcRoot, "big.bin")
+	f, ferr := os.Create(big)
+	ck.Require().NoError(ferr, "create big file")
+	ck.Require().NoError(f.Truncate(64<<20), "truncate")
+	ck.Require().NoError(f.Close(), "close")
+
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-src", "u1", map[string]string{"machine": "src"}, "", true),
+		treeSyncExecutor("exec-dst", "u1", map[string]string{"machine": "dst"}, "", true),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-src": srcClient, "exec-dst": dstClient})
+	_, p := newPathSyncFixture(t, pool)
+
+	max := int64(10)
+	_, err := p.SyncPath(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncPathRequest{
+		Src:      protocol.SyncEndpoint{Executor: "src", Path: big},
+		Dst:      protocol.SyncEndpoint{Executor: "dst", Path: filepath.Join(dstRoot, "copy")},
+		MaxBytes: &max,
+	})
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
+	ck.Eq("destination: tree stream exceeds max_bytes 10", ce.Message, "the destination's own reason")
+	ck.False(strings.Contains(ce.Message, "executor request failed"),
+		"the opaque fallback must not replace the destination's reason, got %q", ce.Message)
 }
 
 func TestPathSyncCancelUnwindsBothStreams(t *testing.T) {
@@ -621,6 +1000,116 @@ func TestPathSyncCancelUnwindsBothStreams(t *testing.T) {
 		return true
 	}, 10*time.Second)
 	ck.True(gone, "the destination's staging directory must be cleaned up after cancellation")
+}
+
+// When ONE side fails, the derived context must be cancelled so the other
+// stream unwinds too: both streams are opened with that one context, so a
+// cancelled recorded context is the stream-closed assertion for both, and no
+// handler is left running.
+func TestPathSyncFailureCancelsBothStreams(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	realSrc, srcRoot := newTreeSyncExecutor(t)
+	realDst, dstRoot := newTreeSyncExecutor(t)
+	srcObs := &observingClient{ExecutorServiceClient: realSrc}
+	dstObs := &observingClient{ExecutorServiceClient: realDst}
+
+	big := filepath.Join(srcRoot, "big.bin")
+	f, ferr := os.Create(big)
+	ck.Require().NoError(ferr, "create big file")
+	ck.Require().NoError(f.Truncate(8<<20), "truncate")
+	ck.Require().NoError(f.Close(), "close")
+
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-src", "u1", map[string]string{"machine": "src"}, "", true),
+		treeSyncExecutor("exec-dst", "u1", map[string]string{"machine": "dst"}, "", true),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-src": srcObs, "exec-dst": dstObs})
+	_, p := newPathSyncFixture(t, pool)
+
+	max := int64(10)
+	_, err := p.SyncPath(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncPathRequest{
+		Src:      protocol.SyncEndpoint{Executor: "src", Path: big},
+		Dst:      protocol.SyncEndpoint{Executor: "dst", Path: filepath.Join(dstRoot, "copy")},
+		MaxBytes: &max,
+	})
+	ck.Error(err, "the destination's refusal must fail the transfer")
+
+	reads, srcWrites := srcObs.counts()
+	ck.Eq(1, reads, "the source stream must have been opened exactly once")
+	ck.Eq(0, srcWrites, "the source is never a WriteTree target")
+	_, dstWrites := dstObs.counts()
+	ck.Eq(1, dstWrites, "the destination stream must have been opened exactly once")
+
+	readCtx, _ := srcObs.streamContexts()
+	_, writeCtx := dstObs.streamContexts()
+	ck.True(readCtx != nil, "the source stream's context must be recorded")
+	ck.True(writeCtx != nil, "the destination stream's context must be recorded")
+	if readCtx != nil {
+		ck.True(readCtx.Err() != nil, "the source stream's context must be cancelled when the destination fails")
+	}
+	if writeCtx != nil {
+		ck.True(writeCtx.Err() != nil, "the destination stream's context must be cancelled")
+	}
+}
+
+// --- misc guards -----------------------------------------------------------
+
+func TestPathSyncResolveWithoutController(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := newTreeSyncPool(nil, nil)
+	p := newPathSyncer(nil, pool)
+
+	_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, "", "anything")
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrInternal, ce.Code, "code")
+}
+
+func TestPathSyncRefusesIncapableExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	oldClient, _ := newTreeSyncExecutor(t)
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-old", "u1", map[string]string{"machine": "old"}, "", false),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-old": oldClient})
+	_, p := newPathSyncFixture(t, pool)
+
+	_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, "", "old")
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "code")
+	ck.Eq(`executor "old" does not support tree sync; upgrade it`, ce.Message, "message")
+
+	_, err = p.SyncPath(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncPathRequest{
+		Src: protocol.SyncEndpoint{Executor: "old", Path: "/work/src"},
+		Dst: protocol.SyncEndpoint{Executor: "old", Path: "/work/dst"},
+	})
+	ce = controllerErr(t, err)
+	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "SyncPath code")
+}
+
+func TestPathSyncRefusesOfflineExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := newTreeSyncPool(nil, nil)
+	ctrl, p := newPathSyncFixture(t, pool)
+	ctrl.sandboxStore = newFakeSandboxStore()
+	// The executor's ROW still exists — the sandbox is down, not gone — so the
+	// sandbox row is reachable and the refusal is "not connected".
+	execStore := newFakeExecStore()
+	execStore.execs["exec-dead"] = executors.Executor{
+		ID: "exec-dead", Enabled: true, OwnerUserID: "u1",
+		Labels: map[string]string{"machine": "box-dead", sandbox.RowLabelSandbox: "1"},
+	}
+	ctrl.execStore = execStore
+
+	insertPathSyncChild(t, ctrl, "c_root", "", "")
+	insertPathSyncChild(t, ctrl, "c_child", "c_root", "")
+
+	// A permitted sandbox row whose executor has no connection.
+	ck.NoError(ctrl.sandboxStore.Insert(t.Context(), sandboxRowFor("sbx_dead", "deadbox", "u1", "exec-dead", "c_child")))
+
+	for _, ref := range []string{"deadbox", "box-dead", "exec-dead"} {
+		_, err := p.resolve(t.Context(), users.Identity{UserID: "u1"}, "c_child", ref)
+		ce := controllerErr(t, err)
+		ck.Eq(protocol.ErrNotFound, ce.Code, "%q code", ref)
+		ck.Eq(fmt.Sprintf("executor %q is not connected", ref), ce.Message, "%q message", ref)
+	}
 }
 
 // --- executorErr mapping ---------------------------------------------------
