@@ -24,6 +24,17 @@ CLI_BIN    := rafiki
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
+##@ Sandbox
+
+SANDBOX_DEV_IMAGE ?= rafiki-sandbox-dev:latest
+
+# --pull refreshes the published base (toolchains, rafiki binary). The file goes
+# in on stdin so the build context is empty: nothing from the repo can end up in
+# the image. Built into the docker engine the sandbox launcher uses.
+.PHONY: sandbox-dev-image
+sandbox-dev-image: ## Build the development sandbox image (protoc, golangci-lint, cache env) on the local docker engine.
+	docker build --pull -t $(SANDBOX_DEV_IMAGE) - < docker/sandbox-dev.Dockerfile
+
 ##@ Development
 
 # Run rafikid in the foreground. rafikid serves the proxy face itself on :8035 —

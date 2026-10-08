@@ -975,6 +975,16 @@ named sandbox); 0 means unlimited. Mounts, network, resource limits,
 `--read-only-rootfs`, user, env and labels are all per-create flags on
 `rafiki sandbox create`.
 
+**Development image.** `make sandbox-dev-image` builds `rafiki-sandbox-dev:latest`
+(`docker/sandbox-dev.Dockerfile`) on the local docker engine: the published
+sandbox image plus `protoc` and `golangci-lint` at pinned versions, and
+`GOCACHE`, `GOMODCACHE` and `CARGO_TARGET_DIR` set to fixed paths under `/cache`
+so build output has one home. Nothing from the repo is copied in (the build
+context is empty), so it cannot go stale against `go.mod`. Pass it per sandbox
+(`rafiki sandbox create --image rafiki-sandbox-dev:latest`, or the spawn block's
+`image`) — not as `RAFIKI_SANDBOX_IMAGE`, since it exists only in the engine that
+built it. The daemon pulls an image only when it is missing locally.
+
 ## Subagents
 
 An agent can spawn and steer its own descendants, regardless of its own

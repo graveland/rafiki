@@ -573,9 +573,9 @@ func (c *Controller) sandboxProvision(
 		return sandbox.Row{}, executors.Executor{}, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	containerName := sandbox.ContainerNamePrefix + rowID
-		if row.OwnerChild != "" {
-			containerName = sandbox.ContainerNamePrefix + row.OwnerChild
-		}
+	if row.OwnerChild != "" {
+		containerName = sandbox.ContainerNamePrefix + row.OwnerChild
+	}
 	containerID, err = engine.CreateContainer(ctx, containerName, body)
 	if err != nil {
 		return sandbox.Row{}, executors.Executor{}, err
