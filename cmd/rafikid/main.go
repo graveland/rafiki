@@ -825,6 +825,11 @@ func runDaemon(opts runDaemonOpts) error {
 			if ctrl.sandboxStore != nil {
 				face.Control.SetSandboxManager(connectSandbox{c: ctrl})
 			}
+			// Path sync shares the executor pool and the one Connect server
+			// both mounts serve. wirePathSync skips it entirely on a daemon
+			// with no pool (the pool pointer is checked before the syncer is
+			// constructed), leaving SyncPath/SyncRepo Unavailable there.
+			wirePathSync(ctrl, execPool, face.Control)
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
 			}
@@ -1084,6 +1089,22 @@ func runDaemon(opts runDaemonOpts) error {
 
 	slog.Info("done")
 	return nil
+}
+
+// wirePathSync installs the path-sync backend on the Controller and on the
+// one Connect server both mounts share (proxy face and UDS, exactly as the
+// sandbox manager is installed). A daemon with no executor pool serves no
+// sync: the nil check is on the POOL POINTER, before newPathSyncer, so a
+// typed-nil *execpool.Pool never enters the treeSyncExecutors interface — the
+// SyncPath/SyncRepo RPCs stay Unavailable and ctrl.syncer() stays nil instead
+// of the first call nil-panicking on the nil pool.
+func wirePathSync(ctrl *Controller, execPool *execpool.Pool, srv *connectapi.Server) {
+	if execPool == nil {
+		return
+	}
+	ps := newPathSyncer(ctrl, execPool)
+	ctrl.SetPathSyncer(ps)
+	srv.SetPathSyncer(ps)
 }
 
 // poolCloseTimeout bounds the wait on pgxpool.Pool.Close at daemon exit. Sized

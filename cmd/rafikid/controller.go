@@ -437,6 +437,12 @@ type Controller struct {
 	// disables the boot abandonment (only the age gate then applies).
 	sandboxBootTime time.Time
 
+	// pathSync is the path-sync backend, set once at boot by main (wirePathSync);
+	// nil means path sync is unavailable on this daemon and the SyncPath/SyncRepo
+	// RPCs answer Unavailable. It is a plain accessor target: the authorization
+	// lives entirely in pathSyncer.resolve, never here.
+	pathSync *pathSyncer
+
 	// skillStore is the database-backed skills tier. nil when the daemon has
 	// no store, in which case children get only their on-disk tiers.
 	skillStore skills.Store
@@ -600,6 +606,28 @@ func (c *Controller) SetLineageSource(src childstore.LineageSource) {
 		return
 	}
 	c.lineage = src
+}
+
+// SetPathSyncer installs the path-sync backend, wired once at boot by main
+// through wirePathSync. A nil pointer is REFUSED: the field is left untouched
+// (so an already-installed syncer survives a stray nil) and a warning is
+// logged — the same discipline SetLineageSource and connectapi's Set*Manager
+// setters apply. Storing nil is what would make an unwired daemon claim a
+// non-nil syncer and nil-panic on the first SyncPath call.
+func (c *Controller) SetPathSyncer(p *pathSyncer) {
+	if p == nil {
+		slog.Warn("SetPathSyncer refused a nil syncer; path sync stays unavailable")
+		return
+	}
+	c.pathSync = p
+}
+
+// syncer returns the path-sync backend, nil until SetPathSyncer installs one.
+// It is a plain accessor for the per-child tool adapters: it grants no
+// authority, because every endpoint a caller names is still resolved (and
+// authorized) through pathSyncer.resolve.
+func (c *Controller) syncer() *pathSyncer {
+	return c.pathSync
 }
 
 // wireLineageSource gives ctrl the child store's lineage view when the store

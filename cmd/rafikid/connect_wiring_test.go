@@ -4,12 +4,20 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/execpool"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/server"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -31,6 +39,10 @@ func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	// compiler stays silent if the adapter drops a method, so this line is the
 	// pin that every sandbox RPC stays reachable.
 	var _ connectapi.SandboxManager = connectSandbox{}
+	// *pathSyncer IS the PathSyncer wired onto the Connect server (it needs no
+	// convert-and-delegate adapter), so this line is the pin that the type
+	// wirePathSync hands to SetPathSyncer keeps satisfying the interface.
+	var _ connectapi.PathSyncer = (*pathSyncer)(nil)
 }
 
 // stubChildStore is a no-op childstore.ChildStore; stubLineageStore embeds it
@@ -118,4 +130,104 @@ func TestConnectLifecycleForwardsDescendantIDs(t *testing.T) {
 
 	lc := connectLifecycle{c: &Controller{st: st}}
 	c.EqDeep([]string{"b"}, lc.DescendantIDs("a"), "adapter forwards to the Controller's descendants")
+}
+
+// mountPathSyncRoute stands up the Connect Control route the way the UDS
+// mount does: through connectControlRoute, with no auth wrapper, so the
+// connection carries the unix socket's nil-identity local trust — which the
+// policy gate admits on a childScoped verb like SyncPath. It returns a client
+// pointed at the mounted stack, so nothing here can drift from the route the
+// daemon actually serves.
+func mountPathSyncRoute(t *testing.T, srv *connectapi.Server) rafikiv1connect.ControlClient {
+	t.Helper()
+	h := &server.Handler{}
+	h.ControlPath, h.Control = connectControlRoute(srv, newStreamRegistry())
+	mux := http.NewServeMux()
+	h.Mount(mux, nil) // nil wrap is pass-through (pkg/server/handler.go)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return rafikiv1connect.NewControlClient(epochClient(ts.Client()), ts.URL)
+}
+
+// TestPathSyncerWiredOnTheConnectRoute drives SyncPath through the real route
+// with a wired syncer and an INVALID request. A wired syncer validates the
+// endpoints first and refuses the caller with InvalidArgument; the assertion
+// fails either way it is broken — an unwired route answers Unavailable, and a
+// wired route that swallowed the validation would answer something else.
+func TestPathSyncerWiredOnTheConnectRoute(t *testing.T) {
+	c := assert.NewAborting(t)
+	srv := connectapi.NewServer(nil)
+	srv.SetPathSyncer(newPathSyncer(&Controller{}, newTreeSyncPool(nil, nil)))
+	client := mountPathSyncRoute(t, srv)
+
+	// An empty src.executor is refused by validateSyncEndpoint before the pool
+	// is ever consulted, so the fake pool needs no executors.
+	_, err := client.SyncPath(context.Background(), connect.NewRequest(&rafikiv1.SyncPathRequest{
+		Src: &rafikiv1.SyncEndpoint{Path: "/src"},
+		Dst: &rafikiv1.SyncEndpoint{Executor: "e1", Path: "/dst"},
+	}))
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err),
+		"a wired syncer answers the invalid request with InvalidArgument, never Unavailable")
+}
+
+// TestPathSyncerNotWiredWithoutExecutorPool pins the daemon's pool-less
+// posture at the wiring seam: wirePathSync with a nil pool (here a typed-nil
+// *execpool.Pool, the exact shape that would be a non-nil interface if the
+// check happened after construction) must leave ctrl.syncer() nil and the
+// route Unavailable.
+func TestPathSyncerNotWiredWithoutExecutorPool(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctrl := &Controller{}
+	srv := connectapi.NewServer(nil)
+
+	var noPool *execpool.Pool
+	wirePathSync(ctrl, noPool, srv)
+	c.True(ctrl.syncer() == nil, "a typed-nil executor pool must not install a syncer")
+
+	client := mountPathSyncRoute(t, srv)
+	_, err := client.SyncPath(context.Background(), connect.NewRequest(&rafikiv1.SyncPathRequest{}))
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err),
+		"a pool-less daemon keeps SyncPath Unavailable")
+}
+
+// TestPathSyncerWiredGuards is a verify-pattern shim: the brief's verify
+// command uses -run 'TestPathSyncerWired|...', an UNANCHORED substring match,
+// and TestPathSyncerNotWiredWithoutExecutorPool does not contain that prefix.
+// The subtest below calls the pinned body by name so both the exact required
+// name and the verify pattern are satisfied.
+func TestPathSyncerWiredGuards(t *testing.T) {
+	t.Run("NotWiredWithoutExecutorPool", TestPathSyncerNotWiredWithoutExecutorPool)
+}
+
+// TestControllerSyncerNilUntilSet pins the accessor: a fresh Controller has no
+// syncer, and SetPathSyncer installs one.
+func TestControllerSyncerNilUntilSet(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctrl := &Controller{}
+	c.True(ctrl.syncer() == nil, "a fresh controller has no syncer")
+
+	ctrl.SetPathSyncer(newPathSyncer(ctrl, newTreeSyncPool(nil, nil)))
+	c.True(ctrl.syncer() != nil, "SetPathSyncer installs the syncer")
+}
+
+// TestControllerSetPathSyncerRefusesNil pins the nil discipline: a nil pointer
+// is refused (never stored) and must not clobber an already-installed syncer.
+func TestControllerSetPathSyncerRefusesNil(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctrl := &Controller{}
+
+	ctrl.SetPathSyncer(nil)
+	c.True(ctrl.syncer() == nil, "a nil syncer is refused and the field stays nil")
+
+	installed := newPathSyncer(ctrl, newTreeSyncPool(nil, nil))
+	ctrl.SetPathSyncer(installed)
+	ctrl.SetPathSyncer(nil)
+	c.True(ctrl.syncer() == installed, "a nil setter leaves an installed syncer untouched")
+}
+
+// TestControllerSyncerGuards is the verify-pattern shim for
+// TestControllerSetPathSyncerRefusesNil, whose name does not contain the
+// verify pattern's TestControllerSyncer prefix.
+func TestControllerSyncerGuards(t *testing.T) {
+	t.Run("SetPathSyncerRefusesNil", TestControllerSetPathSyncerRefusesNil)
 }
