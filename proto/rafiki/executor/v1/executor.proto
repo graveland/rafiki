@@ -78,6 +78,23 @@ service ExecutorService {
   // "prune what's absent" model to replicate here.
   rpc SyncPyModuleGitSource(SyncPyModuleGitSourceRequest) returns (SyncPyModuleGitSourceResponse);
 
+  // ReadTree streams a file or directory tree from this executor. A directory
+  // is sent as a header followed by one chunk per entry; a file is sent as a
+  // header followed by its bytes.
+  rpc ReadTree(ReadTreeRequest) returns (stream ReadTreeResponse);
+  // WriteTree receives a file or directory tree on this executor. The start
+  // frame names the destination; the remaining frames carry the content.
+  rpc WriteTree(stream WriteTreeRequest) returns (WriteTreeResponse);
+  // GitRefs reports whether a repo exists on this executor and, if so, its
+  // branches plus the scratch directory bundle files may be written to.
+  rpc GitRefs(GitRefsRequest) returns (GitRefsResponse);
+  // GitBundle writes one branch to a bundle file in this executor's scratch
+  // directory, skipping the objects the caller already has.
+  rpc GitBundle(GitBundleRequest) returns (GitBundleResponse);
+  // GitFetchBundle fetches a bundle file into a repo on this executor,
+  // refusing a checked-out branch and a non-fast-forward update unless force.
+  rpc GitFetchBundle(GitFetchBundleRequest) returns (GitFetchBundleResponse);
+
   // Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
   // the response back. One stream per request/response cycle.
   rpc Proxy(stream ProxyRequest) returns (stream ProxyResponse);
@@ -137,6 +154,11 @@ message DescribeResponse {
   // of a host relay dir. Exactly one of sandbox_relay_dir and
   // sandbox_relay_volume is set on a launcher.
   string sandbox_relay_volume = 17;
+  // tree_sync reports that this executor accepts ReadTree/WriteTree and the
+  // Git* RPCs. Safe to self-report for the same reason as skills_sync: it only
+  // ever NARROWS what this executor will do, and a wrong value costs a refused
+  // sync rather than admitting anyone.
+  bool tree_sync = 18;
 }
 
 message HealthRequest {}
@@ -458,3 +480,17 @@ message SyncPyModuleGitSourceResponse {
   bool venv_ready = 3;
   string venv_error = 4;
 }
+
+message ReadTreeRequest  { string path = 1; }
+message ReadTreeResponse { oneof msg { TreeHeader header = 1; bytes chunk = 2; } }
+message TreeHeader       { bool is_dir = 1; }
+message WriteTreeRequest { oneof msg { WriteTreeStart start = 1; bytes chunk = 2; } }
+message WriteTreeStart   { string path = 1; bool is_dir = 2; bool overwrite = 3; optional int64 max_bytes = 4; }
+message WriteTreeResponse { int64 files = 1; int64 bytes = 2; }
+message GitRef            { string name = 1; string oid = 2; }
+message GitRefsRequest    { string repo = 1; }
+message GitRefsResponse   { bool exists = 1; repeated GitRef heads = 2; string scratch_dir = 3; }
+message GitBundleRequest  { string repo = 1; string branch = 2; repeated string exclude_oids = 3; }
+message GitBundleResponse { bool up_to_date = 1; string bundle_path = 2; int64 bytes = 3; string tip_oid = 4; }
+message GitFetchBundleRequest  { string repo = 1; string bundle_path = 2; string branch = 3; bool force = 4; }
+message GitFetchBundleResponse { string old_oid = 1; string new_oid = 2; bool created_repo = 3; }

@@ -73,6 +73,10 @@ const (
 	ErrAuthInvalid = "auth_invalid"
 	// ErrNotFound is the generic not-found error.
 	ErrNotFound = "not_found"
+	// ErrFailedPrecondition is returned when the request is well formed but the
+	// current state refuses it (a destination that exists, an executor that
+	// lacks a capability, a git update that is not a fast-forward).
+	ErrFailedPrecondition = "failed_precondition"
 	// ErrPermissionDenied is returned when an authenticated caller addresses
 	// a resource that belongs to a different user (executor ownership and
 	// the like): the request is well-formed, the target is simply not

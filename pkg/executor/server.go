@@ -293,6 +293,7 @@ func (s *Server) Describe(
 		SkillsSync:         s.opts.SkillsSync,
 		PymodulesSync:      s.opts.PyModulesSync,
 		PymoduleGitSync:    s.opts.PymoduleGitSync,
+		TreeSync:           true,
 		SandboxMountRoots:  append([]string(nil), s.opts.SandboxMountRoots...),
 		SandboxRelayDir:    s.opts.SandboxRelayDir,
 		SandboxRelayVolume: s.opts.SandboxRelayVolume,

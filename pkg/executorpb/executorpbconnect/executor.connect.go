@@ -70,6 +70,20 @@ const (
 	// ExecutorServiceSyncPyModuleGitSourceProcedure is the fully-qualified name of the
 	// ExecutorService's SyncPyModuleGitSource RPC.
 	ExecutorServiceSyncPyModuleGitSourceProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModuleGitSource"
+	// ExecutorServiceReadTreeProcedure is the fully-qualified name of the ExecutorService's ReadTree
+	// RPC.
+	ExecutorServiceReadTreeProcedure = "/rafiki.executor.v1.ExecutorService/ReadTree"
+	// ExecutorServiceWriteTreeProcedure is the fully-qualified name of the ExecutorService's WriteTree
+	// RPC.
+	ExecutorServiceWriteTreeProcedure = "/rafiki.executor.v1.ExecutorService/WriteTree"
+	// ExecutorServiceGitRefsProcedure is the fully-qualified name of the ExecutorService's GitRefs RPC.
+	ExecutorServiceGitRefsProcedure = "/rafiki.executor.v1.ExecutorService/GitRefs"
+	// ExecutorServiceGitBundleProcedure is the fully-qualified name of the ExecutorService's GitBundle
+	// RPC.
+	ExecutorServiceGitBundleProcedure = "/rafiki.executor.v1.ExecutorService/GitBundle"
+	// ExecutorServiceGitFetchBundleProcedure is the fully-qualified name of the ExecutorService's
+	// GitFetchBundle RPC.
+	ExecutorServiceGitFetchBundleProcedure = "/rafiki.executor.v1.ExecutorService/GitFetchBundle"
 	// ExecutorServiceProxyProcedure is the fully-qualified name of the ExecutorService's Proxy RPC.
 	ExecutorServiceProxyProcedure = "/rafiki.executor.v1.ExecutorService/Proxy"
 )
@@ -142,6 +156,22 @@ type ExecutorServiceClient interface {
 	// history is already the versioning and pruning mechanism, so there is no
 	// "prune what's absent" model to replicate here.
 	SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error)
+	// ReadTree streams a file or directory tree from this executor. A directory
+	// is sent as a header followed by one chunk per entry; a file is sent as a
+	// header followed by its bytes.
+	ReadTree(context.Context, *connect.Request[executorpb.ReadTreeRequest]) (*connect.ServerStreamForClient[executorpb.ReadTreeResponse], error)
+	// WriteTree receives a file or directory tree on this executor. The start
+	// frame names the destination; the remaining frames carry the content.
+	WriteTree(context.Context) *connect.ClientStreamForClient[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
+	// GitRefs reports whether a repo exists on this executor and, if so, its
+	// branches plus the scratch directory bundle files may be written to.
+	GitRefs(context.Context, *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error)
+	// GitBundle writes one branch to a bundle file in this executor's scratch
+	// directory, skipping the objects the caller already has.
+	GitBundle(context.Context, *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error)
+	// GitFetchBundle fetches a bundle file into a repo on this executor,
+	// refusing a checked-out branch and a non-fast-forward update unless force.
+	GitFetchBundle(context.Context, *connect.Request[executorpb.GitFetchBundleRequest]) (*connect.Response[executorpb.GitFetchBundleResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse]
@@ -242,6 +272,36 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SyncPyModuleGitSource")),
 			connect.WithClientOptions(opts...),
 		),
+		readTree: connect.NewClient[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse](
+			httpClient,
+			baseURL+ExecutorServiceReadTreeProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("ReadTree")),
+			connect.WithClientOptions(opts...),
+		),
+		writeTree: connect.NewClient[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse](
+			httpClient,
+			baseURL+ExecutorServiceWriteTreeProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("WriteTree")),
+			connect.WithClientOptions(opts...),
+		),
+		gitRefs: connect.NewClient[executorpb.GitRefsRequest, executorpb.GitRefsResponse](
+			httpClient,
+			baseURL+ExecutorServiceGitRefsProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("GitRefs")),
+			connect.WithClientOptions(opts...),
+		),
+		gitBundle: connect.NewClient[executorpb.GitBundleRequest, executorpb.GitBundleResponse](
+			httpClient,
+			baseURL+ExecutorServiceGitBundleProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("GitBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		gitFetchBundle: connect.NewClient[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse](
+			httpClient,
+			baseURL+ExecutorServiceGitFetchBundleProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("GitFetchBundle")),
+			connect.WithClientOptions(opts...),
+		),
 		proxy: connect.NewClient[executorpb.ProxyRequest, executorpb.ProxyResponse](
 			httpClient,
 			baseURL+ExecutorServiceProxyProcedure,
@@ -267,6 +327,11 @@ type executorServiceClient struct {
 	syncSkills            *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
 	syncPyModules         *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
 	syncPyModuleGitSource *connect.Client[executorpb.SyncPyModuleGitSourceRequest, executorpb.SyncPyModuleGitSourceResponse]
+	readTree              *connect.Client[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse]
+	writeTree             *connect.Client[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
+	gitRefs               *connect.Client[executorpb.GitRefsRequest, executorpb.GitRefsResponse]
+	gitBundle             *connect.Client[executorpb.GitBundleRequest, executorpb.GitBundleResponse]
+	gitFetchBundle        *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
 	proxy                 *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
@@ -338,6 +403,31 @@ func (c *executorServiceClient) SyncPyModules(ctx context.Context, req *connect.
 // SyncPyModuleGitSource calls rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource.
 func (c *executorServiceClient) SyncPyModuleGitSource(ctx context.Context, req *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
 	return c.syncPyModuleGitSource.CallUnary(ctx, req)
+}
+
+// ReadTree calls rafiki.executor.v1.ExecutorService.ReadTree.
+func (c *executorServiceClient) ReadTree(ctx context.Context, req *connect.Request[executorpb.ReadTreeRequest]) (*connect.ServerStreamForClient[executorpb.ReadTreeResponse], error) {
+	return c.readTree.CallServerStream(ctx, req)
+}
+
+// WriteTree calls rafiki.executor.v1.ExecutorService.WriteTree.
+func (c *executorServiceClient) WriteTree(ctx context.Context) *connect.ClientStreamForClient[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse] {
+	return c.writeTree.CallClientStream(ctx)
+}
+
+// GitRefs calls rafiki.executor.v1.ExecutorService.GitRefs.
+func (c *executorServiceClient) GitRefs(ctx context.Context, req *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error) {
+	return c.gitRefs.CallUnary(ctx, req)
+}
+
+// GitBundle calls rafiki.executor.v1.ExecutorService.GitBundle.
+func (c *executorServiceClient) GitBundle(ctx context.Context, req *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error) {
+	return c.gitBundle.CallUnary(ctx, req)
+}
+
+// GitFetchBundle calls rafiki.executor.v1.ExecutorService.GitFetchBundle.
+func (c *executorServiceClient) GitFetchBundle(ctx context.Context, req *connect.Request[executorpb.GitFetchBundleRequest]) (*connect.Response[executorpb.GitFetchBundleResponse], error) {
+	return c.gitFetchBundle.CallUnary(ctx, req)
 }
 
 // Proxy calls rafiki.executor.v1.ExecutorService.Proxy.
@@ -413,6 +503,22 @@ type ExecutorServiceHandler interface {
 	// history is already the versioning and pruning mechanism, so there is no
 	// "prune what's absent" model to replicate here.
 	SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error)
+	// ReadTree streams a file or directory tree from this executor. A directory
+	// is sent as a header followed by one chunk per entry; a file is sent as a
+	// header followed by its bytes.
+	ReadTree(context.Context, *connect.Request[executorpb.ReadTreeRequest], *connect.ServerStream[executorpb.ReadTreeResponse]) error
+	// WriteTree receives a file or directory tree on this executor. The start
+	// frame names the destination; the remaining frames carry the content.
+	WriteTree(context.Context, *connect.ClientStream[executorpb.WriteTreeRequest]) (*connect.Response[executorpb.WriteTreeResponse], error)
+	// GitRefs reports whether a repo exists on this executor and, if so, its
+	// branches plus the scratch directory bundle files may be written to.
+	GitRefs(context.Context, *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error)
+	// GitBundle writes one branch to a bundle file in this executor's scratch
+	// directory, skipping the objects the caller already has.
+	GitBundle(context.Context, *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error)
+	// GitFetchBundle fetches a bundle file into a repo on this executor,
+	// refusing a checked-out branch and a non-fast-forward update unless force.
+	GitFetchBundle(context.Context, *connect.Request[executorpb.GitFetchBundleRequest]) (*connect.Response[executorpb.GitFetchBundleResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error
@@ -509,6 +615,36 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SyncPyModuleGitSource")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceReadTreeHandler := connect.NewServerStreamHandler(
+		ExecutorServiceReadTreeProcedure,
+		svc.ReadTree,
+		connect.WithSchema(executorServiceMethods.ByName("ReadTree")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceWriteTreeHandler := connect.NewClientStreamHandler(
+		ExecutorServiceWriteTreeProcedure,
+		svc.WriteTree,
+		connect.WithSchema(executorServiceMethods.ByName("WriteTree")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceGitRefsHandler := connect.NewUnaryHandler(
+		ExecutorServiceGitRefsProcedure,
+		svc.GitRefs,
+		connect.WithSchema(executorServiceMethods.ByName("GitRefs")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceGitBundleHandler := connect.NewUnaryHandler(
+		ExecutorServiceGitBundleProcedure,
+		svc.GitBundle,
+		connect.WithSchema(executorServiceMethods.ByName("GitBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceGitFetchBundleHandler := connect.NewUnaryHandler(
+		ExecutorServiceGitFetchBundleProcedure,
+		svc.GitFetchBundle,
+		connect.WithSchema(executorServiceMethods.ByName("GitFetchBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
 	executorServiceProxyHandler := connect.NewBidiStreamHandler(
 		ExecutorServiceProxyProcedure,
 		svc.Proxy,
@@ -545,6 +681,16 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceSyncPyModulesHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncPyModuleGitSourceProcedure:
 			executorServiceSyncPyModuleGitSourceHandler.ServeHTTP(w, r)
+		case ExecutorServiceReadTreeProcedure:
+			executorServiceReadTreeHandler.ServeHTTP(w, r)
+		case ExecutorServiceWriteTreeProcedure:
+			executorServiceWriteTreeHandler.ServeHTTP(w, r)
+		case ExecutorServiceGitRefsProcedure:
+			executorServiceGitRefsHandler.ServeHTTP(w, r)
+		case ExecutorServiceGitBundleProcedure:
+			executorServiceGitBundleHandler.ServeHTTP(w, r)
+		case ExecutorServiceGitFetchBundleProcedure:
+			executorServiceGitFetchBundleHandler.ServeHTTP(w, r)
 		case ExecutorServiceProxyProcedure:
 			executorServiceProxyHandler.ServeHTTP(w, r)
 		default:
@@ -610,6 +756,26 @@ func (UnimplementedExecutorServiceHandler) SyncPyModules(context.Context, *conne
 
 func (UnimplementedExecutorServiceHandler) SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) ReadTree(context.Context, *connect.Request[executorpb.ReadTreeRequest], *connect.ServerStream[executorpb.ReadTreeResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.ReadTree is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) WriteTree(context.Context, *connect.ClientStream[executorpb.WriteTreeRequest]) (*connect.Response[executorpb.WriteTreeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.WriteTree is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) GitRefs(context.Context, *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.GitRefs is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) GitBundle(context.Context, *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.GitBundle is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) GitFetchBundle(context.Context, *connect.Request[executorpb.GitFetchBundleRequest]) (*connect.Response[executorpb.GitFetchBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.GitFetchBundle is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error {

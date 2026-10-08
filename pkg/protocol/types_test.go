@@ -117,6 +117,7 @@ func TestErrorCodeConstants(t *testing.T) {
 		{"ErrAuthRequired", protocol.ErrAuthRequired, "auth_required"},
 		{"ErrAuthInvalid", protocol.ErrAuthInvalid, "auth_invalid"},
 		{"ErrNotFound", protocol.ErrNotFound, "not_found"},
+		{"ErrFailedPrecondition", protocol.ErrFailedPrecondition, "failed_precondition"},
 		{"ErrInternal", protocol.ErrInternal, "internal"},
 	}
 	for _, tc := range cases {
