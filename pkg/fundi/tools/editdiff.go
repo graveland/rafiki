@@ -1,11 +1,74 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
 )
+
+// errOldStringNotFound marks a failure where an edit's old_string could not be
+// located in the file. resolveEdits uses it to decide whether to retry with
+// whitespace-insensitive matching before surfacing the error.
+var errOldStringNotFound = errors.New("old_string not found in file")
+
+// notFoundEdit builds the "old_string not found" error for edits[idx], with a
+// whitespace diagnostic appended when one is available so the model can
+// self-correct without re-reading the file.
+func notFoundEdit(content, old string, idx int) error {
+	msg := fmt.Sprintf("old_string in edits[%d] not found in file", idx)
+	if hint := diagnoseMismatch(content, old); hint != "" {
+		msg += "\n\n" + hint
+	}
+	return fmt.Errorf("%s: %w", msg, errOldStringNotFound)
+}
+
+// resolveEdits applies edits to lfContent, first with the exact/fuzzy matcher
+// and, when that fails to locate an edit's old_string, again with
+// whitespace-insensitive whole-line matching that re-indents the replacement to
+// the file's style. It reports whether the whitespace fallback was used.
+func resolveEdits(lfContent string, edits []editPair, sequential bool) (newContent string, whitespaceCorrected bool, err error) {
+	if sequential {
+		newContent, err = applyEditsSequential(lfContent, edits)
+	} else {
+		_, newContent, err = applyEdits(lfContent, edits)
+	}
+	if err == nil {
+		return newContent, false, nil
+	}
+	if !errors.Is(err, errOldStringNotFound) {
+		return "", false, err
+	}
+	if wsContent, ok := applyEditsWhitespaceInsensitive(lfContent, edits); ok {
+		return wsContent, true, nil
+	}
+	return "", false, err
+}
+
+// applyEditsWhitespaceInsensitive applies edits one at a time using
+// whitespace-insensitive whole-line matching, re-indenting each replacement to
+// the file's indentation style. It reports false if any edit has no unique
+// whitespace-equivalent match.
+func applyEditsWhitespaceInsensitive(lfContent string, edits []editPair) (string, bool) {
+	current := lfContent
+	for _, e := range edits {
+		oldLF := normalizeToLF(e.OldString)
+		newLF := normalizeToLF(e.NewString)
+		if strings.TrimSpace(oldLF) == "" {
+			return "", false
+		}
+		result, ok := whitespaceInsensitiveReplace(current, oldLF, newLF, false)
+		if !ok {
+			return "", false
+		}
+		current = result
+	}
+	if current == lfContent {
+		return "", false
+	}
+	return current, true
+}
 
 // normalizeToLF converts CRLF and solitary CR to LF.
 func normalizeToLF(s string) string {
@@ -151,7 +214,7 @@ func applyEdits(lfContent string, edits []editPair) (baseContent, newContent str
 			fuzzyBase = normalizeForFuzzyMatch(baseForMatch)
 			idx, _, _ = fuzzyFind(fuzzyBase, e.oldText)
 			if idx < 0 {
-				return "", "", fmt.Errorf("old_string in edits[%d] not found in file", i)
+				return "", "", notFoundEdit(lfContent, e.oldText, i)
 			}
 			usedFuzzy = true
 		}
@@ -179,7 +242,7 @@ func applyEdits(lfContent string, edits []editPair) (baseContent, newContent str
 		for i, e := range lfEdits {
 			idx, _, _ := fuzzyFind(baseForMatch, e.oldText)
 			if idx < 0 {
-				return "", "", fmt.Errorf("old_string in edits[%d] not found in file", i)
+				return "", "", notFoundEdit(lfContent, e.oldText, i)
 			}
 			matchResults[i].idx = idx
 			matchResults[i].fuzzyBase = baseForMatch
@@ -192,7 +255,7 @@ func applyEdits(lfContent string, edits []editPair) (baseContent, newContent str
 	for i, e := range lfEdits {
 		count := fuzzyCount(baseForMatch, e.oldText)
 		if count == 0 {
-			return "", "", fmt.Errorf("old_string in edits[%d] not found in file", i)
+			return "", "", notFoundEdit(lfContent, e.oldText, i)
 		}
 		if count > 1 {
 			return "", "", fmt.Errorf("old_string in edits[%d] matches %d times; add more surrounding context to make it unique", i, count)
@@ -434,7 +497,7 @@ func applyEditsSequential(lfContent string, edits []editPair) (string, error) {
 			fuzzyOld := normalizeForFuzzyMatch(oldLF)
 			idx = strings.Index(fuzzyCurrent, fuzzyOld)
 			if idx < 0 {
-				return "", fmt.Errorf("old_string in edits[%d] not found in file", i)
+				return "", notFoundEdit(current, oldLF, i)
 			}
 			// For fuzzy matches, apply in the fuzzy-normalized space then
 			// preserve unchanged lines from the original current.

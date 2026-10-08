@@ -9,7 +9,12 @@ import (
 )
 
 const (
-	editDescription = "Edit a file using exact text replacement (fuzzy fallback). " +
+	editDescription = "Edit a file using exact text replacement. Matching is " +
+		"exact first, then fuzzy (smart quotes, unicode dashes, trailing " +
+		"whitespace), then whitespace-insensitive: if old_string differs only " +
+		"in indentation or tabs-vs-spaces the matching lines are still edited " +
+		"and new_string is re-indented to the file's style, with the response " +
+		"saying so — verify the result. " +
 		"Use `path` (or `file_path`, an alias) — absolute or relative to the " +
 		"working directory. The file must have been read via the read tool in " +
 		"this session, or the edit will fail. " +
@@ -112,7 +117,11 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		lfNew := normalizeToLF(in.NewString)
 		count := strings.Count(lfContent, lfOld)
 		if count == 0 {
-			return ToolResult{}, fmt.Errorf("edit: old_string not found in %s", absPath)
+			msg := fmt.Sprintf("old_string not found in %s", absPath)
+			if hint := diagnoseMismatch(lfContent, lfOld); hint != "" {
+				msg += "\n\n" + hint
+			}
+			return ToolResult{}, fmt.Errorf("edit: %s", msg)
 		}
 		updated := strings.ReplaceAll(lfContent, lfOld, lfNew)
 		final := restoreLineEndings(updated, origLE)
@@ -127,18 +136,9 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		return NewTextResult(fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath)), nil
 	}
 
-	var newContent string
-	if in.Sequential {
-		var err error
-		newContent, err = applyEditsSequential(lfContent, edits)
-		if err != nil {
-			return ToolResult{}, fmt.Errorf("edit: %w", err)
-		}
-	} else {
-		_, newContent, err = applyEdits(lfContent, edits)
-		if err != nil {
-			return ToolResult{}, fmt.Errorf("edit: %w", err)
-		}
+	newContent, whitespaceCorrected, err := resolveEdits(lfContent, edits, in.Sequential)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("edit: %w", err)
 	}
 
 	final := restoreLineEndings(newContent, origLE)
@@ -153,10 +153,14 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	et.tr.RecordRead(absPath, fileMtime(absPath))
 	notifyFileChanged(ctx, et.changed, absPath)
 	n := len(edits)
-	if n == 1 {
-		return NewTextResult(fmt.Sprintf("replaced 1 block in %s", absPath)), nil
+	msg := fmt.Sprintf("replaced %d block in %s", n, absPath)
+	if n != 1 {
+		msg = fmt.Sprintf("replaced %d blocks in %s", n, absPath)
 	}
-	return NewTextResult(fmt.Sprintf("replaced %d blocks in %s", n, absPath)), nil
+	if whitespaceCorrected {
+		msg += "\n" + whitespaceCorrectedNote
+	}
+	return NewTextResult(msg), nil
 }
 
 type editInput struct {

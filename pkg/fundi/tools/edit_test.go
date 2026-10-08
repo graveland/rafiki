@@ -166,6 +166,51 @@ func TestEditToolRelativePathRejected(t *testing.T) {
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "absolute"), "expected an absolute-path error, got %v", err)
 }
 
+func TestEditToolFuzzyIndentation(t *testing.T) {
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.go")
+	// File is tab-indented; the model emits spaces at the same nesting level,
+	// which neither the exact nor the char-fuzzy matcher can locate.
+	c.NoError(os.WriteFile(p, []byte("func main() {\n\tfmt.Println(\"hello\")\n}\n"), 0o644))
+	tr := NewFileTracker()
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	res, err := editTool.Execute(context.Background(), ToolInput(
+		fmt.Sprintf(`{"path":%q,"old_string":"func main() {\n    fmt.Println(\"hello\")\n}","new_string":"func main() {\n    fmt.Println(\"bye\")\n}"}`, p),
+	))
+	c.NoError(err, "unexpected error")
+	b, _ := os.ReadFile(p)
+	c.Eq("func main() {\n\tfmt.Println(\"bye\")\n}\n", string(b), "replacement should be re-indented to tabs, got")
+	c.StrContains(res.Text, whitespaceCorrectedNote, "result should carry the whitespace note")
+}
+
+func TestEditToolNotFoundIncludesWhitespaceDiagnostic(t *testing.T) {
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.go")
+	c.NoError(os.WriteFile(p, []byte("func main() {\n\tfoo()\n}\n"), 0o644))
+	tr := NewFileTracker()
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// old_string requires a whitespace-insensitive match that is ambiguous
+	// only because the caller asked for a *different* text (qux vs foo), so it
+	// is genuinely absent — but the file region is similar enough to hint at.
+	_, err := editTool.Execute(context.Background(), ToolInput(
+		fmt.Sprintf(`{"path":%q,"old_string":"func main() {\n    qux()\n}","new_string":"func main() {\n    bar()\n}"}`, p),
+	))
+	c.Error(err, "expected a not-found error")
+	c.StrContains(err.Error(), "→", "error should visualize whitespace, got")
+	b, _ := os.ReadFile(p)
+	c.Eq("func main() {\n\tfoo()\n}\n", string(b), "file should be untouched, got")
+}
+
 func TestEditToolCRLFFile(t *testing.T) {
 	c := assert.NewAborting(t)
 	dir := t.TempDir()
