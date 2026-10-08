@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -323,6 +324,21 @@ func TestWriteTreeRejectsSpecialEntries(t *testing.T) {
 	}
 }
 
+func TestWriteTreeRejectsMalformedTar(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
+	payload[0] ^= 0xff // corrupt the header, leaving its checksum stale
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Error(err, "a malformed tar header must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "a tar-format error is InvalidArgument")
+	assertNoLeftovers(t, parent)
+}
+
 func TestWriteTreeStripsSpecialModeBits(t *testing.T) {
 	c := assert.NewCollecting(t)
 	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
@@ -367,6 +383,21 @@ func TestWriteTreeCreatesSymlinkVerbatim(t *testing.T) {
 	got, rerr := os.Readlink(link)
 	c.Require().NoError(rerr, "readlink")
 	c.Eq(target, got, "link target must be verbatim")
+}
+
+func TestWriteTreeDestinationRootIs0755(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Require().NoError(err, "WriteTree")
+
+	fi, serr := os.Stat(dest)
+	c.Require().NoError(serr, "stat dest")
+	c.Eq(os.FileMode(0o755), fi.Mode().Perm(), "the destination root mode is not carried by the stream")
 }
 
 func TestWriteTreeFailureLeavesDestinationUntouched(t *testing.T) {
@@ -416,6 +447,23 @@ func TestWriteTreeRefusesNonEmptyDestination(t *testing.T) {
 	}
 }
 
+func TestWriteTreeRefusesExistingFileDestination(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "out.txt")
+	c.Require().NoError(os.WriteFile(dest, []byte("existing"), 0o644), "seed dest")
+
+	payload := buildTar(t, tarEntry{name: "out.txt", typeflag: tar.TypeReg, mode: 0o644, body: "new"})
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Error(err, "an existing file destination without overwrite must be refused")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+
+	got, rerr := os.ReadFile(dest)
+	c.Require().NoError(rerr, "read dest")
+	c.Eq("existing", string(got), "the existing file must not be clobbered")
+}
+
 func TestWriteTreeAcceptsEmptyDirDestination(t *testing.T) {
 	c := assert.NewCollecting(t)
 	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
@@ -456,6 +504,30 @@ func TestWriteTreeOverwriteReplacesTree(t *testing.T) {
 	assertNoLeftovers(t, parent)
 }
 
+func TestWriteTreeOverwriteRemovesReadOnlyTree(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	roDir := filepath.Join(dest, "ro")
+	c.Require().NoError(os.MkdirAll(roDir, 0o755), "mkdir ro")
+	c.Require().NoError(os.WriteFile(filepath.Join(roDir, "stale.txt"), []byte("stale"), 0o644), "seed ro")
+	// A directory without write permission: unlink inside it needs u+rwx, so a
+	// plain RemoveAll of the aside tree fails and leaves it stranded.
+	c.Require().NoError(os.Chmod(roDir, 0o555), "chmod ro")
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o755) })
+
+	payload := buildTar(t, tarEntry{name: "fresh.txt", typeflag: tar.TypeReg, mode: 0o644, body: "fresh"})
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true, Overwrite: true}, payload)
+	c.Require().NoError(err, "overwrite must succeed over a read-only tree")
+
+	got, rerr := os.ReadFile(filepath.Join(dest, "fresh.txt"))
+	c.Require().NoError(rerr, "read fresh.txt")
+	c.Eq("fresh", string(got), "content")
+	assertNoLeftovers(t, parent)
+}
+
 func TestWriteTreeOverwriteRestoresOldOnRenameFailure(t *testing.T) {
 	c := assert.NewCollecting(t)
 	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
@@ -487,6 +559,32 @@ func TestWriteTreeOverwriteRestoresOldOnRenameFailure(t *testing.T) {
 	assertNoLeftovers(t, parent)
 }
 
+func TestWriteTreeOverwriteRestoreFailureNamesStrandedPath(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	c.Require().NoError(os.MkdirAll(dest, 0o755), "mkdir dest")
+	c.Require().NoError(os.WriteFile(filepath.Join(dest, "keep.txt"), []byte("old"), 0o644), "seed dest")
+
+	orig := treeRename
+	treeRename = func(oldpath, newpath string) error {
+		base := filepath.Base(oldpath)
+		if newpath == dest &&
+			(strings.HasPrefix(base, ".rafiki-sync-") || strings.HasPrefix(base, ".rafiki-old-")) {
+			return errors.New("simulated rename failure")
+		}
+		return orig(oldpath, newpath)
+	}
+	t.Cleanup(func() { treeRename = orig })
+
+	payload := buildTar(t, tarEntry{name: "fresh.txt", typeflag: tar.TypeReg, mode: 0o644, body: "fresh"})
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true, Overwrite: true}, payload)
+	c.Require().Error(err, "both the publish and the restore must fail")
+	c.StrContains(err.Error(), ".rafiki-old-", "the error must name the stranded aside path")
+}
+
 func TestWriteTreeMaxBytesAborts(t *testing.T) {
 	c := assert.NewCollecting(t)
 	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
@@ -497,6 +595,30 @@ func TestWriteTreeMaxBytesAborts(t *testing.T) {
 
 	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true, MaxBytes: int64p(10)}, payload)
 	c.Error(err, "exceeding max_bytes must abort")
+	c.Eq(connect.CodeResourceExhausted, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created despite exceeding max_bytes")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+func TestWriteTreeMaxBytesCountsStreamBytes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+
+	// Twenty empty entries are ~10 KiB of stream and zero file bytes, so a
+	// file-byte counter would never trip max_bytes.
+	var entries []tarEntry
+	for i := 0; i < 20; i++ {
+		entries = append(entries, tarEntry{name: fmt.Sprintf("e%d", i), typeflag: tar.TypeReg, mode: 0o644})
+	}
+	payload := buildTar(t, entries...)
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true, MaxBytes: int64p(4096)}, payload)
+	c.Error(err, "max_bytes must count the stream, not just file content")
 	c.Eq(connect.CodeResourceExhausted, connect.CodeOf(err), "code")
 	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
 		t.Errorf("destination created despite exceeding max_bytes")
@@ -541,30 +663,174 @@ func TestWriteTreeFreeSpaceFloorAborts(t *testing.T) {
 	assertNoLeftovers(t, parent)
 }
 
+func TestWriteTreePeriodicFreeSpaceFloorAborts(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	orig := treeFreeBytes
+	calls := 0
+	treeFreeBytes = func(string) (int64, error) {
+		calls++
+		if calls == 1 {
+			// The pre-write check passes, so only the periodic one can abort.
+			return 1 << 62, nil
+		}
+		return 1, nil
+	}
+	t.Cleanup(func() { treeFreeBytes = orig })
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+
+	// Enough empty entries that the stream alone — 512-byte headers, no file
+	// data — exceeds treeFreeCheckEvery. A file-byte counter never moved here.
+	entries := make([]tarEntry, 0, 17000)
+	for i := 0; i < 17000; i++ {
+		entries = append(entries, tarEntry{name: fmt.Sprintf("e%d", i), typeflag: tar.TypeReg, mode: 0o644})
+	}
+	payload := buildTar(t, entries...)
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Error(err, "a header-only flood must trip the periodic free-space check")
+	c.Eq(connect.CodeResourceExhausted, connect.CodeOf(err), "code")
+	c.True(calls >= 2, "the periodic check must have run; treeFreeBytes calls = %d", calls)
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created despite the free-space abort")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+func TestWriteTreeFileTransferRejectsSymlink(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "out")
+	payload := buildTar(t, tarEntry{name: "link", typeflag: tar.TypeSymlink, mode: 0o777, linkname: "/etc/passwd"})
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Error(err, "a file transfer must carry a regular file, not a symlink")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created for a refused symlink transfer")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+func TestWriteTreeFileTransferRejectsDirectory(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "out")
+	payload := buildTar(t, tarEntry{name: "d", typeflag: tar.TypeDir, mode: 0o755})
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Error(err, "a file transfer must carry a regular file, not a directory")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created for a refused directory transfer")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+func TestWriteTreeFileTransferRejectsEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "out")
+	payload := buildTar(t) // no entries
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Error(err, "a file transfer with no entry must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created for an empty transfer")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+func TestWriteTreeFileTransferRejectsTwoEntries(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "out")
+	payload := buildTar(t,
+		tarEntry{name: "a.txt", typeflag: tar.TypeReg, mode: 0o644, body: "a"},
+		tarEntry{name: "b.txt", typeflag: tar.TypeReg, mode: 0o644, body: "b"},
+	)
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Error(err, "a file transfer with two entries must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created for a two-entry file transfer")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+// TestWriteTreeOverwriteGuardRefusesAncestorOfRoot pins that WriteTree actually
+// CALLS checkOverwritePath on the overwrite path: deleting the call turns this
+// red, because the transfer would then proceed into an ancestor of the
+// executor's own root.
+func TestWriteTreeOverwriteGuardRefusesAncestorOfRoot(t *testing.T) {
+	c := assert.NewCollecting(t)
+	root := t.TempDir()
+	client := treeTestServer(t, Options{Root: root, Version: "test"})
+
+	dest := filepath.Dir(root)
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true, Overwrite: true}, payload)
+	c.Error(err, "the overwrite guard must refuse an ancestor of the executor root")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(filepath.Join(dest, "f.txt")); !os.IsNotExist(serr) {
+		t.Errorf("the refused destination was modified")
+	}
+}
+
 // TestWriteTreeOverwritePathGuard is a pattern-prefixed shim: the verify
-// command matches TestReadTree|TestWriteTree, and TestCheckOverwritePath is
-// the guard's pinned name, so the shim runs it under the verify pattern.
+// command matches TestReadTree|TestWriteTree, and TestCheckOverwritePath is the
+// guard's pinned name, so the shim runs it under the verify pattern.
 func TestWriteTreeOverwritePathGuard(t *testing.T) {
 	t.Run("TestCheckOverwritePath", TestCheckOverwritePath)
 }
 
 func TestCheckOverwritePath(t *testing.T) {
 	c := assert.NewCollecting(t)
-	root := "/srv/exec-root"
-	home := "/home/tester"
-	ancestorOfRoot := "/srv"
+
+	base := t.TempDir()
+	root := filepath.Join(base, "exec", "root")
+	home := filepath.Join(base, "home")
+	for _, d := range []string{root, home} {
+		c.Require().NoError(os.MkdirAll(d, 0o755), "mkdir %s", d)
+	}
+	ancestorOfRoot := filepath.Join(base, "exec")
+
+	// A symlink whose target is /etc: resolving it first is what makes the deny
+	// list see /etc/x instead of a harmless-looking temp path.
+	link := filepath.Join(base, "etclink")
+	c.Require().NoError(os.Symlink("/etc", link), "symlink to /etc")
 
 	cases := []struct {
+		name    string
 		path    string
 		allowed bool
 	}{
-		{"/", false},
-		{"/work", false},
-		{"/usr", false},
-		{root, false},
-		{home, false},
-		{ancestorOfRoot, false},
-		{"/work/repo", true},
+		{"slash", "/", false},
+		{"single-component", "/work", false},
+		{"private", "/private/etc", false},
+		{"usr-bin", "/usr/bin", false},
+		{"etc-ssh", "/etc/ssh", false},
+		{"users-other", "/Users/other", false},
+		{"root-itself", root, false},
+		{"ancestor-of-root", ancestorOfRoot, false},
+		{"home-itself", home, false},
+		{"symlink-targeting-etc", filepath.Join(link, "x"), false},
+		{"work-repo", "/work/repo", true},
+		{"under-temp", filepath.Join(os.TempDir(), "rafiki-scratch"), true},
 	}
 	for _, tc := range cases {
 		err := checkOverwritePath(tc.path, root, home)
@@ -574,6 +840,36 @@ func TestCheckOverwritePath(t *testing.T) {
 		}
 		c.Error(err, "checkOverwritePath(%q) must be refused", tc.path)
 	}
+}
+
+func TestWriteTreeCheckOverwritePathCaseVariantHome(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	base := t.TempDir()
+	home := filepath.Join(base, "HomeDir")
+	c.Require().NoError(os.MkdirAll(home, 0o755), "mkdir home")
+	root := filepath.Join(base, "root")
+	c.Require().NoError(os.MkdirAll(root, 0o755), "mkdir root")
+
+	variant := filepath.Join(base, "homedir")
+	if !sameFile(t, home, variant) {
+		t.Skip("filesystem is case-sensitive: a case variant of the home directory is a different path here")
+	}
+	c.Error(checkOverwritePath(variant, root, home),
+		"a case variant of the home directory must be refused on a case-insensitive filesystem")
+}
+
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	ai, aerr := os.Lstat(a)
+	if aerr != nil {
+		return false
+	}
+	bi, berr := os.Lstat(b)
+	if berr != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 func TestReadTreeWriteTreeRoundTripDirAndFile(t *testing.T) {

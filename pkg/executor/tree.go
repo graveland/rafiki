@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,16 +28,22 @@ const (
 	// treeFreeFloor is the free space below which a WriteTree refuses to
 	// start, or to continue, on the destination filesystem.
 	treeFreeFloor int64 = 256 << 20
-	// treeFreeCheckEvery is how many regular-file bytes may be written
-	// between free-space re-checks.
+	// treeFreeCheckEvery is how many incoming tar-stream bytes may be consumed
+	// between free-space re-checks. Stream bytes, not file bytes: a flood of
+	// headers and padding costs disk work too, and counting only file content
+	// would let an empty-file flood run unbounded.
 	treeFreeCheckEvery int64 = 8 << 20
 )
 
-// treeRename and treeFreeBytes are package variables so tests can swap them:
-// the overwrite/restore path and the free-space floor are both hard to reach
-// otherwise.
+// treeRename renames oldpath to newpath. It is a package variable so tests can
+// swap it, and it defaults to the raw rename(2) rather than os.Rename: Go's
+// os.Rename carries a userspace guard that refuses rename(dir, existing-dir)
+// with EEXIST even when POSIX replaces an empty directory, which is exactly the
+// directory swap a tree transfer performs.
 var (
-	treeRename    = os.Rename
+	treeRename = func(oldpath, newpath string) error {
+		return unix.Rename(oldpath, newpath)
+	}
 	treeFreeBytes = func(dir string) (int64, error) {
 		var st unix.Statfs_t
 		if err := unix.Statfs(dir, &st); err != nil {
@@ -45,6 +52,14 @@ var (
 		return int64(st.Bavail) * int64(st.Bsize), nil
 	}
 )
+
+// treeOverwriteDenyPrefixes are the system paths a tree transfer may never
+// replace. The check is prefix-based: the path itself or anything under it.
+var treeOverwriteDenyPrefixes = []string{
+	"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/proc",
+	"/root", "/sbin", "/sys", "/usr", "/var", "/System", "/Library",
+	"/Applications", "/private", "/Volumes", "/Users", "/home", "/opt",
+}
 
 // ReadTree streams a file or directory tree from this executor as a tar
 // stream, prefixed by one TreeHeader message.
@@ -183,7 +198,7 @@ func treeWriteEntry(tw *tar.Writer, name, full string, fi os.FileInfo) error {
 }
 
 func treeWriteFileEntry(tw *tar.Writer, name, full string, fi os.FileInfo) error {
-	f, err := os.Open(full)
+	f, err := treeOpenRead(full)
 	if err != nil {
 		return err
 	}
@@ -200,13 +215,23 @@ func treeWriteFileEntry(tw *tar.Writer, name, full string, fi os.FileInfo) error
 	return err
 }
 
+// treeOpenRead opens a file for reading without following a symlink at the
+// final component and without leaking the descriptor to a spawned child.
+func treeOpenRead(p string) (*os.File, error) {
+	fd, err := unix.Open(p, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	return os.NewFile(uintptr(fd), p), nil
+}
+
 // WriteTree receives a file or directory tree on this executor.
 //
 // The tar is untrusted: the caller may be a sandbox that has been compromised,
 // and this side is writing to a filesystem the daemon cares about. Every
 // entry is validated before anything is created, extraction happens into a
 // staging directory beside the destination, and the destination is only
-// touched by a rename once the whole transfer succeeded.
+// touched by the publish step once the whole transfer succeeded.
 func (s *Server) WriteTree(
 	_ context.Context,
 	stream *connect.ClientStream[executorpb.WriteTreeRequest],
@@ -236,7 +261,15 @@ func (s *Server) WriteTree(
 			fmt.Errorf("max_bytes must be greater than zero, got %d", *start.MaxBytes))
 	}
 	if start.GetOverwrite() {
-		home, _ := os.UserHomeDir()
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			// An unknown home is not a reason to skip the guard's other rules,
+			// only the home-specific ones — and never something to discard
+			// silently.
+			slog.Warn("executor: home directory unknown; the overwrite guard skips the home rules",
+				"error", herr)
+			home = ""
+		}
 		if err := checkOverwritePath(dest, s.opts.Root, home); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
@@ -253,8 +286,15 @@ func (s *Server) WriteTree(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
+	// The destination's own mode is not carried by the stream (ReadTree never
+	// emits the root), so the staging directory — which becomes the
+	// destination — is given the conventional repository mode rather than
+	// MkdirTemp's 0o700.
+	if err := os.Chmod(staging, 0o755); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
 	// A failed transfer leaves nothing behind: every error path below runs
-	// this, and after a successful rename staging no longer exists.
+	// this, and after a successful publish staging no longer exists.
 	defer os.RemoveAll(staging)
 
 	var maxBytes int64
@@ -300,11 +340,9 @@ func (s *Server) WriteTree(
 		return nil, res.err
 	}
 
-	// The destination is touched only here, and only by renames.
+	// A file transfer carries exactly one entry, and it must be a regular file.
 	staged := staging
 	if !start.GetIsDir() {
-		// A file transfer stages the file inside the staging directory and
-		// renames the file into place.
 		entries, rerr := os.ReadDir(staging)
 		if rerr != nil {
 			return nil, connect.NewError(connect.CodeInternal, rerr)
@@ -314,6 +352,29 @@ func (s *Server) WriteTree(
 				fmt.Errorf("a file transfer must contain exactly one entry, got %d", len(entries)))
 		}
 		staged = filepath.Join(staging, entries[0].Name())
+		sfi, serr := os.Lstat(staged)
+		if serr != nil {
+			return nil, connect.NewError(connect.CodeInternal, serr)
+		}
+		if !sfi.Mode().IsRegular() {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("a file transfer must contain exactly one regular file, got a %s", sfi.Mode().Type()))
+		}
+	}
+
+	// publish puts the staged tree in place. A directory is renamed (POSIX
+	// rename replaces an empty destination directory); a file is hard-linked,
+	// which cannot clobber — if the destination appeared after the checks
+	// above, Link fails rather than silently replacing it.
+	publish := func() error {
+		if start.GetIsDir() {
+			return treeRename(staged, dest)
+		}
+		if lerr := os.Link(staged, dest); lerr != nil {
+			return lerr
+		}
+		_ = os.Remove(staged)
+		return nil
 	}
 
 	if !start.GetOverwrite() {
@@ -332,18 +393,12 @@ func (s *Server) WriteTree(
 				return nil, connect.NewError(connect.CodeFailedPrecondition,
 					errors.New("destination exists"))
 			}
-			// os.Rename refuses to replace an existing directory outright, so
-			// the empty one is removed first. It holds nothing, so nothing is
-			// lost if the rename then fails.
-			if err := os.Remove(dest); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
-			}
 		case os.IsNotExist(lerr):
 			// The destination is clear.
 		default:
 			return nil, connect.NewError(connect.CodeInternal, lerr)
 		}
-		if err := treeRename(staged, dest); err != nil {
+		if err := publish(); err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
 	} else {
@@ -356,17 +411,24 @@ func (s *Server) WriteTree(
 		} else if !os.IsNotExist(lerr) {
 			return nil, connect.NewError(connect.CodeInternal, lerr)
 		}
-		if err := treeRename(staged, dest); err != nil {
+		if err := publish(); err != nil {
 			if oldAside != "" {
 				if rerr := treeRename(oldAside, dest); rerr != nil {
 					return nil, connect.NewError(connect.CodeInternal,
-						fmt.Errorf("rename staged tree into place: %v (restoring the old tree also failed: %v)", err, rerr))
+						fmt.Errorf("publish the staged tree: %v (restoring the replaced tree also failed: %v; it is stranded at %s)",
+							err, rerr, oldAside))
 				}
 			}
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
 		if oldAside != "" {
-			_ = os.RemoveAll(oldAside)
+			// The new tree is already in place; a failure to remove the old one
+			// is worth a warning, not an error that would misreport a
+			// successful transfer.
+			if rerr := removeTreeAll(oldAside); rerr != nil {
+				slog.Warn("executor: replaced tree could not be removed and is stranded",
+					"path", oldAside, "error", rerr)
+			}
 		}
 	}
 
@@ -374,6 +436,22 @@ func (s *Server) WriteTree(
 		Files: res.files,
 		Bytes: res.bytes,
 	}), nil
+}
+
+// removeTreeAll removes a tree even when it contains read-only directories: it
+// chmods every directory to 0o700 first (write permission is what unlink needs)
+// and then removes the whole tree.
+func removeTreeAll(dir string) error {
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
 }
 
 // treeDirPerm is one directory's deferred chmod: extraction creates every
@@ -384,39 +462,67 @@ type treeDirPerm struct {
 	mode os.FileMode
 }
 
-// treeExtractWriter counts regular-file bytes as they are written, enforces
-// max_bytes, and re-checks free space every treeFreeCheckEvery bytes.
-type treeExtractWriter struct {
-	dst        io.Writer
+// treeFileCounter counts the regular-file bytes written to it; that total is
+// what the response reports. The resource guards count stream bytes instead —
+// see treeStreamReader.
+type treeFileCounter struct {
+	dst   io.Writer
+	total int64
+}
+
+func (w *treeFileCounter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	w.total += int64(n)
+	return n, err
+}
+
+// treeStreamReader wraps the incoming tar stream, counting every byte consumed
+// — headers and padding included — and enforcing max_bytes and the periodic
+// free-space floor on that total. Counting file content instead would let a
+// flood of empty files, directories or symlinks do unbounded disk work while
+// the counters never moved.
+type treeStreamReader struct {
+	r          io.Reader
 	total      int64
 	sinceCheck int64
 	maxBytes   int64
 	parentDir  string
 }
 
-func (w *treeExtractWriter) Write(p []byte) (int, error) {
-	if w.maxBytes > 0 && w.total+int64(len(p)) > w.maxBytes {
-		return 0, connect.NewError(connect.CodeResourceExhausted,
-			fmt.Errorf("tree exceeds max_bytes %d", w.maxBytes))
+func (s *treeStreamReader) Read(p []byte) (int, error) {
+	if s.maxBytes > 0 {
+		remaining := s.maxBytes - s.total
+		if remaining <= 0 {
+			return 0, connect.NewError(connect.CodeResourceExhausted,
+				fmt.Errorf("tree stream exceeds max_bytes %d", s.maxBytes))
+		}
+		if int64(len(p)) > remaining {
+			p = p[:remaining]
+		}
 	}
-	n, err := w.dst.Write(p)
-	w.total += int64(n)
-	w.sinceCheck += int64(n)
-	if w.sinceCheck >= treeFreeCheckEvery {
-		w.sinceCheck = 0
-		if ferr := treeCheckFreeSpace(w.parentDir); ferr != nil {
-			return n, ferr
+	n, err := s.r.Read(p)
+	s.total += int64(n)
+	s.sinceCheck += int64(n)
+	if s.sinceCheck >= treeFreeCheckEvery {
+		s.sinceCheck = 0
+		if ferr := treeCheckFreeSpace(s.parentDir); ferr != nil {
+			// 0 bytes, not n: io.ReadFull discards an error that arrives with a
+			// read that filled the buffer, and tar.Reader reads headers through
+			// io.ReadFull — so an error returned alongside the data would be
+			// silently dropped and the transfer would carry on.
+			return 0, ferr
 		}
 	}
 	return n, err
 }
 
 // extractTree reads a tar stream and materialises it under staging. It returns
-// the number of regular files and their total bytes. Every validation failure
-// is CodeInvalidArgument; resource limits are CodeResourceExhausted.
+// the number of regular files and their total bytes. Malformed trees are
+// CodeInvalidArgument; resource limits are CodeResourceExhausted.
 func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64, int64, error) {
-	tr := tar.NewReader(r)
-	w := &treeExtractWriter{parentDir: parentDir, maxBytes: maxBytes}
+	sr := &treeStreamReader{r: r, maxBytes: maxBytes, parentDir: parentDir}
+	tr := tar.NewReader(sr)
+	w := &treeFileCounter{}
 	var dirs []treeDirPerm
 	var files int64
 
@@ -474,14 +580,17 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return files, w.total, treeExtractErr(err)
 			}
-			// The mode goes to the kernel raw through unix.Open, so the mask
-			// here is what actually keeps a setuid/setgid/sticky tar mode from
+			// The mode goes to the kernel raw through unix.Open, so masking it
+			// to 0o777 is what keeps a setuid/setgid/sticky tar mode from
 			// becoming a setuid/setgid/sticky file. os.OpenFile would drop
-			// those bits for us, which is exactly why it is not used: a guard
+			// those bits itself, which is exactly why it is not used: a guard
 			// the standard library silently performs is a guard no test can
-			// pin. O_EXCL refuses a path that already exists, symlink or not.
-			perm := uint32(hdr.Mode) & 0o777 &^ (0o4000 | 0o2000 | 0o1000)
-			fd, ferr := unix.Open(target, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, perm)
+			// pin. O_EXCL refuses a path that already exists, symlink or not;
+			// O_NOFOLLOW and O_CLOEXEC keep the final component from being a
+			// symlink and the descriptor from leaking into a spawned child.
+			perm := uint32(hdr.Mode) & 0o777
+			fd, ferr := unix.Open(target,
+				unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
 			if ferr != nil {
 				return files, w.total, treeExtractErr(ferr)
 			}
@@ -512,14 +621,18 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 	return files, w.total, nil
 }
 
-// treeExtractErr passes a Connect error through and classifies anything else
-// as a malformed tree.
+// treeExtractErr maps errors from extraction: a Connect error is passed
+// through, a tar-format error is a malformed tree (CodeInvalidArgument), and
+// anything else is an I/O or filesystem failure (CodeInternal).
 func treeExtractErr(err error) error {
 	var ce *connect.Error
 	if errors.As(err, &ce) {
 		return err
 	}
-	return connect.NewError(connect.CodeInvalidArgument, err)
+	if errors.Is(err, tar.ErrHeader) {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	return connect.NewError(connect.CodeInternal, err)
 }
 
 // cleanEntryName validates a tar entry name and returns its slash-cleaned
@@ -574,14 +687,34 @@ func safeJoin(root, name string) (string, error) {
 // catastrophic. It is applied only when overwrite is set: without it a
 // non-existent destination is required and nothing is replaced.
 //
-// Two components is the floor, not three: /work/repo is a legitimate sandbox
-// target, while /work and / are not targets at all. root and home are refused
-// with their ancestors, because replacing a directory that contains either
-// takes the executor's own working tree with it.
+// Every rule is applied to the symlink-resolved path, so a link pointing into
+// /etc is refused as /etc even though its own name is elsewhere. Two
+// components is the floor, not three: /work/repo is a legitimate sandbox
+// target, while /work and / are not targets at all.
 func checkOverwritePath(target, root, home string) error {
-	clean := filepath.Clean(target)
+	resolved := treeResolvePath(target)
+
+	homeResolved := ""
+	if home != "" {
+		homeResolved = treeResolvePath(home)
+	}
+	rootResolved := ""
+	if root != "" {
+		rootResolved = treeResolvePath(root)
+	}
+	tempResolved := treeResolvePath(os.TempDir())
+
+	// Exceptions, checked before the deny list: a path strictly under the
+	// user's home, under the process temp directory, or under the executor's
+	// own root is a legitimate target even when a denied prefix would
+	// otherwise cover it (/home, macOS's /private/var/folders, an executor
+	// rooted under /usr).
+	exemptFromDeny := treeStrictDescendant(resolved, tempResolved) ||
+		(homeResolved != "" && treeStrictDescendant(resolved, homeResolved)) ||
+		(root != "" && root != "/" && treeStrictDescendant(resolved, rootResolved))
+
 	components := 0
-	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+	for _, part := range strings.Split(resolved, string(filepath.Separator)) {
 		if part != "" && part != "." {
 			components++
 		}
@@ -589,22 +722,88 @@ func checkOverwritePath(target, root, home string) error {
 	if components < 2 {
 		return fmt.Errorf("refusing to overwrite %q: fewer than two path components", target)
 	}
-	switch clean {
-	case "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/opt",
-		"/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var",
-		"/Users", "/System", "/Library", "/Applications":
-		return fmt.Errorf("refusing to overwrite %q: protected top-level path", target)
+
+	if !exemptFromDeny {
+		for _, prefix := range treeOverwriteDenyPrefixes {
+			if resolved == prefix || strings.HasPrefix(resolved, prefix+string(filepath.Separator)) {
+				return fmt.Errorf("refusing to overwrite %q (%s): protected system path", target, resolved)
+			}
+		}
 	}
-	for _, protected := range []string{root, home} {
-		if protected == "" {
-			continue
-		}
-		protected = filepath.Clean(protected)
-		if clean == protected || strings.HasPrefix(protected, clean+string(filepath.Separator)) {
-			return fmt.Errorf("refusing to overwrite %q: it is %q or an ancestor of it", target, protected)
-		}
+
+	// Equality and ancestry are decided with os.SameFile, not string
+	// comparison, so a case-insensitive filesystem or an alias cannot slip a
+	// path past the root and home rules.
+	if treeSameOrAncestor(resolved, rootResolved) {
+		return fmt.Errorf("refusing to overwrite %q (%s): it is the executor root or an ancestor of it", target, resolved)
+	}
+	if homeResolved != "" && treeSameOrAncestor(resolved, homeResolved) {
+		return fmt.Errorf("refusing to overwrite %q (%s): it is the home directory or an ancestor of it", target, resolved)
 	}
 	return nil
+}
+
+// treeResolvePath resolves the longest existing ancestor of p with
+// EvalSymlinks and re-joins the non-existent tail, so a rule applied to the
+// result sees through a symlink planted anywhere in the path.
+func treeResolvePath(p string) string {
+	clean := filepath.Clean(p)
+	existing := clean
+	var tail []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		existing = parent
+	}
+	if resolved, err := filepath.EvalSymlinks(existing); err == nil {
+		existing = resolved
+	}
+	return filepath.Join(append([]string{existing}, tail...)...)
+}
+
+// treeStrictDescendant reports whether p is strictly under ancestor.
+func treeStrictDescendant(p, ancestor string) bool {
+	if ancestor == "" || p == ancestor {
+		return false
+	}
+	ancestor = strings.TrimSuffix(ancestor, string(filepath.Separator))
+	if ancestor == "" {
+		return strings.HasPrefix(p, string(filepath.Separator))
+	}
+	return strings.HasPrefix(p, ancestor+string(filepath.Separator))
+}
+
+// treeSameOrAncestor reports whether resolved names protected itself or a
+// directory containing it, comparing inodes with os.SameFile where both paths
+// exist. A protected path that does not exist yet (a synthetic or uncreated
+// executor root) falls back to a string comparison so it is still protected.
+func treeSameOrAncestor(resolved, protected string) bool {
+	if protected == "" {
+		return false
+	}
+	protected = filepath.Clean(protected)
+	rfi, rerr := os.Lstat(resolved)
+	if rerr != nil {
+		return resolved == protected ||
+			strings.HasPrefix(protected, resolved+string(filepath.Separator))
+	}
+	for cur := protected; ; {
+		if ci, err := os.Lstat(cur); err == nil && os.SameFile(rfi, ci) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return false
 }
 
 // treeCheckFreeSpace refuses when dir's filesystem has less than
