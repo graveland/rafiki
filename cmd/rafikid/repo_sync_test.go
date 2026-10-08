@@ -4,10 +4,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -23,18 +25,12 @@ import (
 
 // --- harness ----------------------------------------------------------------
 
-// withTmpDir runs fn with TMPDIR pointing at dir, restoring the previous value
-// (or its absence) afterwards.
-func withTmpDir(dir string, fn func()) {
-	prev, had := os.LookupEnv("TMPDIR")
-	os.Setenv("TMPDIR", dir)
-	defer func() {
-		if had {
-			os.Setenv("TMPDIR", prev)
-		} else {
-			os.Unsetenv("TMPDIR")
-		}
-	}()
+// withTmpDir runs fn with TMPDIR pointing at dir. t.Setenv checks the error and
+// restores the environment when the test ends, and also forbids t.Parallel —
+// this harness relies on both.
+func withTmpDir(t *testing.T, dir string, fn func()) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
 	fn()
 }
 
@@ -49,6 +45,7 @@ func withTmpDir(dir string, fn func()) {
 // genuinely independent, as two machines are in production. Each handler runs
 // to completion inside the window, so the value it observes is this endpoint's.
 type repoScratchClient struct {
+	t *testing.T
 	executorpbconnect.ExecutorServiceClient
 	tmp string
 }
@@ -56,21 +53,21 @@ type repoScratchClient struct {
 func (c *repoScratchClient) GitRefs(ctx context.Context, req *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error) {
 	var resp *connect.Response[executorpb.GitRefsResponse]
 	var err error
-	withTmpDir(c.tmp, func() { resp, err = c.ExecutorServiceClient.GitRefs(ctx, req) })
+	withTmpDir(c.t, c.tmp, func() { resp, err = c.ExecutorServiceClient.GitRefs(ctx, req) })
 	return resp, err
 }
 
 func (c *repoScratchClient) GitBundle(ctx context.Context, req *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error) {
 	var resp *connect.Response[executorpb.GitBundleResponse]
 	var err error
-	withTmpDir(c.tmp, func() { resp, err = c.ExecutorServiceClient.GitBundle(ctx, req) })
+	withTmpDir(c.t, c.tmp, func() { resp, err = c.ExecutorServiceClient.GitBundle(ctx, req) })
 	return resp, err
 }
 
 func (c *repoScratchClient) GitFetchBundle(ctx context.Context, req *connect.Request[executorpb.GitFetchBundleRequest]) (*connect.Response[executorpb.GitFetchBundleResponse], error) {
 	var resp *connect.Response[executorpb.GitFetchBundleResponse]
 	var err error
-	withTmpDir(c.tmp, func() { resp, err = c.ExecutorServiceClient.GitFetchBundle(ctx, req) })
+	withTmpDir(c.t, c.tmp, func() { resp, err = c.ExecutorServiceClient.GitFetchBundle(ctx, req) })
 	return resp, err
 }
 
@@ -92,14 +89,30 @@ type repoSyncFixture struct {
 }
 
 func newRepoSyncFixture(t *testing.T) *repoSyncFixture {
+	return newRepoSyncFixtureWith(t, nil, nil)
+}
+
+// newRepoSyncFixtureWith builds the fixture and lets a test decorate either
+// endpoint's client (nil means the unmodified real client). A decorator sits
+// between the observability wrapper and the scratch-pinned real client, so a
+// fabricated reply is attributed to the endpoint a test means.
+func newRepoSyncFixtureWith(t *testing.T, decorateSrc, decorateDst func(executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient) *repoSyncFixture {
 	t.Helper()
 	srcReal, srcRoot := newTreeSyncExecutor(t)
 	dstReal, dstRoot := newTreeSyncExecutor(t)
 
 	srcScratch := t.TempDir()
 	dstScratch := t.TempDir()
-	srcObs := &observingClient{ExecutorServiceClient: &repoScratchClient{ExecutorServiceClient: srcReal, tmp: srcScratch}}
-	dstObs := &observingClient{ExecutorServiceClient: &repoScratchClient{ExecutorServiceClient: dstReal, tmp: dstScratch}}
+	var srcClient executorpbconnect.ExecutorServiceClient = &repoScratchClient{t: t, ExecutorServiceClient: srcReal, tmp: srcScratch}
+	var dstClient executorpbconnect.ExecutorServiceClient = &repoScratchClient{t: t, ExecutorServiceClient: dstReal, tmp: dstScratch}
+	if decorateSrc != nil {
+		srcClient = decorateSrc(srcClient)
+	}
+	if decorateDst != nil {
+		dstClient = decorateDst(dstClient)
+	}
+	srcObs := &observingClient{ExecutorServiceClient: srcClient}
+	dstObs := &observingClient{ExecutorServiceClient: dstClient}
 
 	pool := newTreeSyncPool([]execpool.LiveExecutor{
 		treeSyncExecutor("exec-src", "u1", map[string]string{"machine": "src"}, "", true),
@@ -457,4 +470,249 @@ func TestRepoSyncNamesFailingStep(t *testing.T) {
 		ce := controllerErr(t, err)
 		ck.True(strings.HasPrefix(ce.Message, "dst fetch: "), "got %q", ce.Message)
 	})
+}
+
+// --- fabricated endpoints ---------------------------------------------------
+
+// repoRecordingSource records every GitBundle exclude list the daemon sends,
+// then answers with the real executor — so what the daemon forwards to a
+// source can be asserted without changing the flow.
+type repoRecordingSource struct {
+	executorpbconnect.ExecutorServiceClient
+	mu       sync.Mutex
+	excludes [][]string
+}
+
+func (c *repoRecordingSource) GitBundle(ctx context.Context, req *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error) {
+	c.mu.Lock()
+	c.excludes = append(c.excludes, append([]string(nil), req.Msg.GetExcludeOids()...))
+	c.mu.Unlock()
+	return c.ExecutorServiceClient.GitBundle(ctx, req)
+}
+
+func (c *repoRecordingSource) lastExcludes() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.excludes) == 0 {
+		return nil
+	}
+	return c.excludes[len(c.excludes)-1]
+}
+
+// repoScriptedBundleSource answers GitBundle with a fabricated reply; every
+// other RPC reaches the real executor.
+type repoScriptedBundleSource struct {
+	executorpbconnect.ExecutorServiceClient
+	reply *executorpb.GitBundleResponse
+}
+
+func (c *repoScriptedBundleSource) GitBundle(context.Context, *connect.Request[executorpb.GitBundleRequest]) (*connect.Response[executorpb.GitBundleResponse], error) {
+	return connect.NewResponse(c.reply), nil
+}
+
+// repoScriptedRefsDestination rewrites the destination's GitRefs reply (the
+// heads only, keeping the real scratch dir) to exercise a destination the
+// daemon does not control.
+type repoScriptedRefsDestination struct {
+	executorpbconnect.ExecutorServiceClient
+	rewrite func(*executorpb.GitRefsResponse)
+}
+
+func (c *repoScriptedRefsDestination) GitRefs(ctx context.Context, req *connect.Request[executorpb.GitRefsRequest]) (*connect.Response[executorpb.GitRefsResponse], error) {
+	resp, err := c.ExecutorServiceClient.GitRefs(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	c.rewrite(resp.Msg)
+	return resp, nil
+}
+
+// --- up-to-date means the destination BRANCH is at the tip -------------------
+
+// A destination head other than the requested branch holding the source tip
+// must not short-circuit: the requested branch does not exist yet.
+func TestRepoSyncCreatesBranchSharingCommitWithAnotherHead(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newRepoSyncFixture(t)
+
+	dstRepo := filepath.Join(f.dst.root, "repo")
+	tip := initRepo(t, dstRepo, "main", "one.txt")
+	// The source's dev sits on the SAME commit as the destination's main.
+	srcRepo := filepath.Join(f.src.root, "repo")
+	gitExec(t, f.src.root, "clone", "-q", dstRepo, srcRepo)
+	gitExec(t, srcRepo, "branch", "dev")
+
+	res, err := f.sync(t, srcRepo, dstRepo, "dev", false)
+	ck.Require().NoError(err, "the destination has no dev and must be made one")
+	ck.False(res.UpToDate, "a branch the destination lacks is not up to date")
+	ck.Eq("", res.OldOID, "dev did not exist on the destination")
+	ck.Eq(tip, res.NewOID, "dev's tip")
+	ck.Eq(tip, revParse(t, dstRepo, "refs/heads/dev"), "dev must exist on the destination at the shared commit")
+}
+
+// The destination's requested branch is at an older commit while ANOTHER
+// destination head holds the source tip: the branch must fast-forward, not be
+// reported up to date.
+func TestRepoSyncFastForwardsBranchWhileAnotherHeadHoldsTheTip(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newRepoSyncFixture(t)
+
+	srcRepo := filepath.Join(f.src.root, "repo")
+	older := initRepo(t, srcRepo, "main", "one.txt")
+	tip := commitFiles(t, srcRepo, "two.txt")
+
+	dstRepo := filepath.Join(f.dst.root, "repo")
+	gitExec(t, f.dst.root, "clone", "-q", srcRepo, dstRepo)
+	detach(t, dstRepo)
+	gitExec(t, dstRepo, "update-ref", "refs/heads/main", older)
+	gitExec(t, dstRepo, "branch", "other", tip)
+
+	res, err := f.sync(t, srcRepo, dstRepo, "main", false)
+	ck.Require().NoError(err, "main must fast-forward")
+	ck.False(res.UpToDate, "main is behind, so the relay is not up to date")
+	ck.Eq(older, res.OldOID, "main's old tip")
+	ck.Eq(tip, res.NewOID, "main's new tip")
+	ck.Eq(tip, revParse(t, dstRepo, "refs/heads/main"), "main must be fast-forwarded to the tip")
+}
+
+// --- same-executor refusal --------------------------------------------------
+
+func TestRepoSyncRefusesSameExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	client, root := newTreeSyncExecutor(t)
+	obs := &observingClient{ExecutorServiceClient: &repoScratchClient{t: t, ExecutorServiceClient: client, tmp: t.TempDir()}}
+	pool := newTreeSyncPool([]execpool.LiveExecutor{
+		treeSyncExecutor("exec-both", "u1", map[string]string{"machine": "both"}, "", true),
+	}, map[string]executorpbconnect.ExecutorServiceClient{"exec-both": obs})
+	_, p := newPathSyncFixture(t, pool)
+
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo, "main", "one.txt")
+
+	_, err := p.SyncRepo(t.Context(), users.Identity{UserID: "u1"}, "", protocol.SyncRepoRequest{
+		Src:    protocol.SyncEndpoint{Executor: "both", Path: repo},
+		Dst:    protocol.SyncEndpoint{Executor: "both", Path: repo},
+		Branch: "main",
+	})
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
+	ck.Eq("source and destination are the same executor", ce.Message, "message")
+
+	reads, writes := obs.counts()
+	ck.Eq(0, reads, "the refusal must precede every RPC")
+	ck.Eq(0, writes, "the refusal must precede every RPC")
+}
+
+// --- source/destination-controlled values -----------------------------------
+
+func TestRepoSyncRefusesUnusableSourceBundlePath(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	tip := strings.Repeat("a", 40)
+	for _, hostile := range []string{"", ".", "..", "/", "a/..", "a\x00b"} {
+		t.Run(fmt.Sprintf("%q", hostile), func(t *testing.T) {
+			f := newRepoSyncFixtureWith(t, func(c executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient {
+				return &repoScriptedBundleSource{ExecutorServiceClient: c, reply: &executorpb.GitBundleResponse{
+					BundlePath: hostile,
+					TipOid:     tip,
+				}}
+			}, nil)
+			initRepo(t, filepath.Join(f.src.root, "repo"), "main", "one.txt")
+
+			_, err := f.sync(t, filepath.Join(f.src.root, "repo"), filepath.Join(f.dst.root, "repo"), "main", false)
+			ce := controllerErr(t, err)
+			ck.Eq(protocol.ErrInvalidArgs, ce.Code, "bundle_path %q code", hostile)
+			ck.Eq("source returned an unusable bundle path", ce.Message, "bundle_path %q message", hostile)
+		})
+	}
+}
+
+func TestRepoSyncRefusesUnusableSourceTip(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	for _, bad := range []string{"", "nothex", strings.Repeat("a", 39), strings.Repeat("A", 40), strings.Repeat("g", 40)} {
+		t.Run(bad, func(t *testing.T) {
+			f := newRepoSyncFixtureWith(t, func(c executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient {
+				return &repoScriptedBundleSource{ExecutorServiceClient: c, reply: &executorpb.GitBundleResponse{
+					BundlePath: "ok.bundle",
+					TipOid:     bad,
+				}}
+			}, nil)
+			initRepo(t, filepath.Join(f.src.root, "repo"), "main", "one.txt")
+
+			_, err := f.sync(t, filepath.Join(f.src.root, "repo"), filepath.Join(f.dst.root, "repo"), "main", false)
+			ce := controllerErr(t, err)
+			ck.Eq(protocol.ErrInvalidArgs, ce.Code, "tip %q code", bad)
+			ck.Eq(fmt.Sprintf("src bundle: source returned an unusable tip oid %q", bad), ce.Message, "tip %q message", bad)
+		})
+	}
+}
+
+// A destination head with a malformed oid is dropped, not forwarded: the real
+// executor would refuse the whole GitBundle request otherwise.
+func TestRepoSyncExcludesMalformedDestinationHeads(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	rec := &repoRecordingSource{}
+	f := newRepoSyncFixtureWith(t,
+		func(c executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient {
+			rec.ExecutorServiceClient = c
+			return rec
+		},
+		func(c executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient {
+			return &repoScriptedRefsDestination{ExecutorServiceClient: c, rewrite: func(r *executorpb.GitRefsResponse) {
+				r.Heads = append(r.Heads, &executorpb.GitRef{Name: "bogus", Oid: "not-a-valid-oid"})
+			}}
+		})
+
+	dstRepo := filepath.Join(f.dst.root, "repo")
+	tip := initRepo(t, dstRepo, "main", "one.txt")
+	srcRepo := filepath.Join(f.src.root, "repo")
+	gitExec(t, f.src.root, "clone", "-q", dstRepo, srcRepo)
+
+	res, err := f.sync(t, srcRepo, dstRepo, "main", false)
+	ck.Require().NoError(err, "the malformed destination head must not fail the sync")
+	ck.True(res.UpToDate, "main is already at the tip")
+	ck.EqDeep([]string{tip}, rec.lastExcludes(), "only the valid destination head may be forwarded")
+}
+
+// More destination heads than the cap gets an empty exclude list — a full
+// bundle, never an unbounded GitBundle request; exactly the cap still forwards.
+func TestRepoSyncCapsDestinationExcludes(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fabricated := func(n int) []*executorpb.GitRef {
+		heads := make([]*executorpb.GitRef, 0, n)
+		for i := 0; i < n; i++ {
+			heads = append(heads, &executorpb.GitRef{Name: fmt.Sprintf("b%d", i), Oid: fmt.Sprintf("%040x", i+1)})
+		}
+		return heads
+	}
+	for _, tc := range []struct {
+		heads int
+		want  int
+	}{
+		{heads: 256, want: 256},
+		{heads: 257, want: 0},
+	} {
+		t.Run(fmt.Sprintf("%d-heads", tc.heads), func(t *testing.T) {
+			rec := &repoRecordingSource{}
+			f := newRepoSyncFixtureWith(t,
+				func(c executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient {
+					rec.ExecutorServiceClient = c
+					return rec
+				},
+				func(c executorpbconnect.ExecutorServiceClient) executorpbconnect.ExecutorServiceClient {
+					return &repoScriptedRefsDestination{ExecutorServiceClient: c, rewrite: func(r *executorpb.GitRefsResponse) {
+						r.Heads = fabricated(tc.heads)
+					}}
+				})
+
+			dstRepo := filepath.Join(f.dst.root, "repo")
+			initRepo(t, dstRepo, "main", "one.txt")
+			detach(t, dstRepo)
+			srcRepo := filepath.Join(f.src.root, "repo")
+			gitExec(t, f.src.root, "clone", "-q", dstRepo, srcRepo)
+
+			_, err := f.sync(t, srcRepo, dstRepo, "main", false)
+			ck.Require().NoError(err, "the sync must succeed with %d destination heads", tc.heads)
+			ck.Eq(tc.want, len(rec.lastExcludes()), "forwarded exclude count for %d heads", tc.heads)
+		})
+	}
 }
