@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
@@ -131,7 +132,20 @@ func sendTree(
 	tarBytes []byte,
 ) (*connect.Response[executorpb.WriteTreeResponse], error) {
 	t.Helper()
-	stream := client.WriteTree(context.Background())
+	return sendTreeCtx(context.Background(), t, client, start, tarBytes)
+}
+
+// sendTreeCtx is sendTree with a caller-supplied context, so a test can bound
+// the RPC instead of hanging when a guard is removed.
+func sendTreeCtx(
+	ctx context.Context,
+	t *testing.T,
+	client executorpbconnect.ExecutorServiceClient,
+	start *executorpb.WriteTreeStart,
+	tarBytes []byte,
+) (*connect.Response[executorpb.WriteTreeResponse], error) {
+	t.Helper()
+	stream := client.WriteTree(ctx)
 	if err := stream.Send(&executorpb.WriteTreeRequest{
 		Msg: &executorpb.WriteTreeRequest_Start{Start: start},
 	}); err != nil {
@@ -708,7 +722,11 @@ func TestWriteTreeFileTransferRejectsSymlink(t *testing.T) {
 	dest := filepath.Join(parent, "out")
 	payload := buildTar(t, tarEntry{name: "link", typeflag: tar.TypeSymlink, mode: 0o777, linkname: "/etc/passwd"})
 
-	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	// Bounded: if the "must be a regular file" check is removed this transfer
+	// must fail by assertion quickly, not hang.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := sendTreeCtx(ctx, t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
 	c.Error(err, "a file transfer must carry a regular file, not a symlink")
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
@@ -825,6 +843,10 @@ func TestCheckOverwritePath(t *testing.T) {
 		{"usr-bin", "/usr/bin", false},
 		{"etc-ssh", "/etc/ssh", false},
 		{"users-other", "/Users/other", false},
+		{"usr-upper", "/USR/bin", false},
+		{"users-upper", "/USERS/other", false},
+		{"system-library-lower", "/system/library", false},
+		{"private-upper", "/PRIVATE/etc", false},
 		{"root-itself", root, false},
 		{"ancestor-of-root", ancestorOfRoot, false},
 		{"home-itself", home, false},
@@ -934,4 +956,130 @@ func TestReadTreeWriteTreeRoundTripDirAndFile(t *testing.T) {
 		c.Require().NoError(rerr, "read dest")
 		c.Eq("one file", string(got), "content")
 	})
+}
+
+func TestWriteTreeCheckOverwritePathInvalidExemptionBase(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	root := filepath.Join(t.TempDir(), "root")
+	c.Require().NoError(os.MkdirAll(root, 0o755), "mkdir root")
+
+	// A home of "/" must not exempt anything: it is not a subtree.
+	for _, p := range []string{"/etc/ssh", "/usr/bin", "/Users/other", "/System/Library"} {
+		c.Error(checkOverwritePath(p, root, "/"), "home=/ must not exempt %q", p)
+	}
+
+	// A deny-list root used as the home base must not exempt its own tree.
+	c.Error(checkOverwritePath("/etc/ssh", root, "/etc"),
+		"a deny-list root as home must not exempt")
+
+	// A legitimate home still exempts its descendants, even under a denied
+	// prefix (/home is on the deny list).
+	c.NoError(checkOverwritePath("/home/tester/proj", root, "/home/tester"),
+		"a legitimate home must exempt its descendants")
+}
+
+func TestWriteTreeCheckOverwritePathDanglingSymlink(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	c.Require().NoError(os.MkdirAll(root, 0o755), "mkdir root")
+
+	// The dangling link sits under the exempt temp directory: without the
+	// dangling-symlink refusal it resolves to its own harmless-looking path and
+	// is allowed.
+	dangling := filepath.Join(base, "dangling")
+	c.Require().NoError(os.Symlink(filepath.Join(base, "does-not-exist"), dangling), "dangling symlink")
+
+	err := checkOverwritePath(dangling, root, filepath.Join(base, "home"))
+	c.Require().Error(err, "a dangling symlink destination must be refused")
+	c.StrContains(err.Error(), "dangling symlink", "the error names the dangling symlink")
+
+	client := treeTestServer(t, Options{Root: root, Version: "test"})
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
+	_, werr := sendTree(t, client, &executorpb.WriteTreeStart{Path: dangling, IsDir: true, Overwrite: true}, payload)
+	c.Error(werr, "WriteTree must refuse a dangling symlink destination")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(werr), "code")
+}
+
+func TestWriteTreeFilePublishNoClobber(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "out.txt")
+	orig := treeLink
+	treeLink = func(oldpath, newpath string) error {
+		// Simulate the destination appearing between the check and the publish.
+		if werr := os.WriteFile(newpath, []byte("appeared"), 0o644); werr != nil {
+			return werr
+		}
+		return os.Link(oldpath, newpath)
+	}
+	t.Cleanup(func() { treeLink = orig })
+
+	payload := buildTar(t, tarEntry{name: "out.txt", typeflag: tar.TypeReg, mode: 0o644, body: "new"})
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Error(err, "a destination that appeared must not be clobbered")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+
+	got, rerr := os.ReadFile(dest)
+	c.Require().NoError(rerr, "read dest")
+	c.Eq("appeared", string(got), "the appeared destination must be untouched")
+}
+
+func TestWriteTreeFilePublishFallsBackOnEPERM(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "out.txt")
+	orig := treeLink
+	treeLink = func(string, string) error { return unix.EPERM }
+	t.Cleanup(func() { treeLink = orig })
+
+	payload := buildTar(t, tarEntry{name: "out.txt", typeflag: tar.TypeReg, mode: 0o644, body: "new"})
+	resp, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: false}, payload)
+	c.Require().NoError(err, "a filesystem without hard links must still publish")
+	c.Eq(int64(1), resp.Msg.GetFiles(), "files")
+
+	got, rerr := os.ReadFile(dest)
+	c.Require().NoError(rerr, "read dest")
+	c.Eq("new", string(got), "content")
+}
+
+func TestWriteTreeFilePublishFallbackNeverClobbers(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "staged")
+	dest := filepath.Join(dir, "dest")
+	c.Require().NoError(os.WriteFile(staged, []byte("new"), 0o644), "staged")
+	c.Require().NoError(os.WriteFile(dest, []byte("existing"), 0o644), "dest")
+
+	orig := treeLink
+	treeLink = func(string, string) error { return unix.EPERM }
+	t.Cleanup(func() { treeLink = orig })
+
+	err := treePublishFile(staged, dest)
+	c.Require().Error(err, "the fallback must refuse an existing destination")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+
+	got, rerr := os.ReadFile(dest)
+	c.Require().NoError(rerr, "read dest")
+	c.Eq("existing", string(got), "the fallback must never clobber")
+}
+
+type treeFailingReader struct{ err error }
+
+func (r treeFailingReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestWriteTreeStreamIOErrorIsInternal(t *testing.T) {
+	c := assert.NewCollecting(t)
+	staging := t.TempDir()
+	sentinel := errors.New("stream broke")
+
+	_, _, err := extractTree(treeFailingReader{err: sentinel}, staging, staging, 0)
+	c.Require().Error(err, "a non-tar stream error must surface")
+	c.Eq(connect.CodeInternal, connect.CodeOf(err),
+		"a non-tar I/O error maps to Internal, not InvalidArgument")
 }

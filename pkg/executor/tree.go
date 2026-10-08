@@ -44,6 +44,9 @@ var (
 	treeRename = func(oldpath, newpath string) error {
 		return unix.Rename(oldpath, newpath)
 	}
+	// treeLink is os.Link, swappable so tests can drive the no-clobber publish
+	// and its hard-link-unavailable fallback.
+	treeLink      = os.Link
 	treeFreeBytes = func(dir string) (int64, error) {
 		var st unix.Statfs_t
 		if err := unix.Statfs(dir, &st); err != nil {
@@ -370,11 +373,7 @@ func (s *Server) WriteTree(
 		if start.GetIsDir() {
 			return treeRename(staged, dest)
 		}
-		if lerr := os.Link(staged, dest); lerr != nil {
-			return lerr
-		}
-		_ = os.Remove(staged)
-		return nil
+		return treePublishFile(staged, dest)
 	}
 
 	if !start.GetOverwrite() {
@@ -399,7 +398,7 @@ func (s *Server) WriteTree(
 			return nil, connect.NewError(connect.CodeInternal, lerr)
 		}
 		if err := publish(); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, treeInternalErr(err)
 		}
 	} else {
 		var oldAside string
@@ -419,7 +418,7 @@ func (s *Server) WriteTree(
 							err, rerr, oldAside))
 				}
 			}
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, treeInternalErr(err)
 		}
 		if oldAside != "" {
 			// The new tree is already in place; a failure to remove the old one
@@ -436,6 +435,42 @@ func (s *Server) WriteTree(
 		Files: res.files,
 		Bytes: res.bytes,
 	}), nil
+}
+
+// treePublishFile puts a staged regular file at dest with a hard link, which
+// cannot clobber: if dest appeared after the caller's checks, the link fails
+// instead of replacing it. Filesystems that cannot hard-link fall back to a
+// rename, but only after re-checking that dest is still absent — never to a
+// clobbering rename.
+func treePublishFile(staged, dest string) error {
+	lerr := treeLink(staged, dest)
+	switch {
+	case lerr == nil:
+		_ = os.Remove(staged)
+		return nil
+	case errors.Is(lerr, fs.ErrExist):
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("destination exists"))
+	case errors.Is(lerr, unix.EPERM), errors.Is(lerr, unix.ENOTSUP), errors.Is(lerr, unix.EXDEV):
+		if _, serr := os.Lstat(dest); serr == nil {
+			return connect.NewError(connect.CodeFailedPrecondition, errors.New("destination exists"))
+		} else if !os.IsNotExist(serr) {
+			return serr
+		}
+		return treeRename(staged, dest)
+	default:
+		return lerr
+	}
+}
+
+// treeInternalErr passes a Connect error through and classifies anything else
+// as an internal failure, so a typed refusal from publish is not flattened to
+// Internal by the wrapping at the call site.
+func treeInternalErr(err error) error {
+	var ce *connect.Error
+	if errors.As(err, &ce) {
+		return err
+	}
+	return connect.NewError(connect.CodeInternal, err)
 }
 
 // removeTreeAll removes a tree even when it contains read-only directories: it
@@ -692,40 +727,63 @@ func safeJoin(root, name string) (string, error) {
 // components is the floor, not three: /work/repo is a legitimate sandbox
 // target, while /work and / are not targets at all.
 func checkOverwritePath(target, root, home string) error {
-	resolved := treeResolvePath(target)
+	resolved, err := treeResolvePath(target)
+	if err != nil {
+		if errors.Is(err, errDanglingSymlink) {
+			return fmt.Errorf("destination is a dangling symlink: %s", target)
+		}
+		return err
+	}
 
 	homeResolved := ""
 	if home != "" {
-		homeResolved = treeResolvePath(home)
+		if r, herr := treeResolvePath(home); herr == nil {
+			homeResolved = r
+		} else {
+			slog.Warn("executor: home directory is unusable for the overwrite guard",
+				"home", home, "error", herr)
+		}
 	}
 	rootResolved := ""
 	if root != "" {
-		rootResolved = treeResolvePath(root)
+		if r, rerr := treeResolvePath(root); rerr == nil {
+			rootResolved = r
+		} else {
+			rootResolved = filepath.Clean(root)
+		}
 	}
-	tempResolved := treeResolvePath(os.TempDir())
+	tempResolved := filepath.Clean(os.TempDir())
+	if r, terr := treeResolvePath(os.TempDir()); terr == nil {
+		tempResolved = r
+	}
+
+	// An exemption base only means something when it is a real subtree: "/"
+	// would exempt everything, and a deny-list root used as a base would exempt
+	// the very tree the deny list exists to protect.
+	if homeResolved != "" && !treeUsableExemptionBase(homeResolved) {
+		slog.Warn("executor: home directory is not a usable overwrite-guard exemption base",
+			"home", homeResolved)
+		homeResolved = ""
+	}
 
 	// Exceptions, checked before the deny list: a path strictly under the
 	// user's home, under the process temp directory, or under the executor's
 	// own root is a legitimate target even when a denied prefix would
 	// otherwise cover it (/home, macOS's /private/var/folders, an executor
 	// rooted under /usr).
-	exemptFromDeny := treeStrictDescendant(resolved, tempResolved) ||
-		(homeResolved != "" && treeStrictDescendant(resolved, homeResolved)) ||
-		(root != "" && root != "/" && treeStrictDescendant(resolved, rootResolved))
+	exemptFromDeny :=
+		(treeUsableExemptionBase(tempResolved) && treeStrictDescendant(resolved, tempResolved)) ||
+			(homeResolved != "" && treeStrictDescendant(resolved, homeResolved)) ||
+			(treeUsableExemptionBase(rootResolved) && treeStrictDescendant(resolved, rootResolved))
 
-	components := 0
-	for _, part := range strings.Split(resolved, string(filepath.Separator)) {
-		if part != "" && part != "." {
-			components++
-		}
-	}
+	components := len(treeSplitPath(resolved))
 	if components < 2 {
 		return fmt.Errorf("refusing to overwrite %q: fewer than two path components", target)
 	}
 
 	if !exemptFromDeny {
 		for _, prefix := range treeOverwriteDenyPrefixes {
-			if resolved == prefix || strings.HasPrefix(resolved, prefix+string(filepath.Separator)) {
+			if treePathEqualOrUnder(resolved, prefix) {
 				return fmt.Errorf("refusing to overwrite %q (%s): protected system path", target, resolved)
 			}
 		}
@@ -743,10 +801,17 @@ func checkOverwritePath(target, root, home string) error {
 	return nil
 }
 
+// errDanglingSymlink reports a path whose longest existing ancestor is a
+// symlink that cannot be resolved.
+var errDanglingSymlink = errors.New("path is a dangling symlink")
+
 // treeResolvePath resolves the longest existing ancestor of p with
 // EvalSymlinks and re-joins the non-existent tail, so a rule applied to the
-// result sees through a symlink planted anywhere in the path.
-func treeResolvePath(p string) string {
+// result sees through a symlink planted anywhere in the path. It returns
+// errDanglingSymlink rather than the unresolved path when the existing
+// ancestor is a symlink with a missing target: judging the link's own name
+// instead of what it points at is exactly what the guard must not do.
+func treeResolvePath(p string) (string, error) {
 	clean := filepath.Clean(p)
 	existing := clean
 	var tail []string
@@ -761,10 +826,71 @@ func treeResolvePath(p string) string {
 		tail = append([]string{filepath.Base(existing)}, tail...)
 		existing = parent
 	}
-	if resolved, err := filepath.EvalSymlinks(existing); err == nil {
-		existing = resolved
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", errDanglingSymlink
+		}
+		return "", err
 	}
-	return filepath.Join(append([]string{existing}, tail...)...)
+	return filepath.Join(append([]string{resolved}, tail...)...), nil
+}
+
+// treeUsableExemptionBase reports whether a path may exempt its descendants
+// from the deny list: it must be a real subtree, not "/" and not itself a
+// deny-list root.
+func treeUsableExemptionBase(base string) bool {
+	if base == "" || base == string(filepath.Separator) {
+		return false
+	}
+	for _, prefix := range treeOverwriteDenyPrefixes {
+		if treePathEqual(base, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// treeSplitPath splits a path into its non-empty, non-"." components.
+func treeSplitPath(p string) []string {
+	var out []string
+	for _, part := range strings.Split(p, string(filepath.Separator)) {
+		if part != "" && part != "." {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// treePathEqual reports whether two paths are the same path, comparing
+// component-wise and case-insensitively so a deny-list root is not dodged by
+// case on a case-sensitive filesystem.
+func treePathEqual(a, b string) bool {
+	ap, bp := treeSplitPath(a), treeSplitPath(b)
+	if len(ap) != len(bp) {
+		return false
+	}
+	for i := range ap {
+		if !strings.EqualFold(ap[i], bp[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// treePathEqualOrUnder reports whether p is prefix itself or a path under it,
+// component-wise and case-insensitively.
+func treePathEqualOrUnder(p, prefix string) bool {
+	pp, dp := treeSplitPath(p), treeSplitPath(prefix)
+	if len(pp) < len(dp) {
+		return false
+	}
+	for i := range dp {
+		if !strings.EqualFold(pp[i], dp[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // treeStrictDescendant reports whether p is strictly under ancestor.
