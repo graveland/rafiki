@@ -28,10 +28,10 @@ import (
 //
 //   - core.fsmonitor=false -- TestGitFetchBundleIgnoresHostileRepoFsmonitor
 //     (a fetch runs the repo's fsmonitor on its index refresh).
-//   - core.hooksPath=/dev/null -- TestGitFetchBundleForcesHooksOffOnCheckout
-//     (the one git call that runs a hook is the checkout of a freshly
-//     initialized destination; the hostile hooksPath arrives through the
-//     executor's git config, since a repo created by this call carries none).
+//   - core.hooksPath=/dev/null -- TestGitFetchBundleIgnoresRepoReferenceTransactionHook
+//     (a fetch runs the repository's reference-transaction hook) and
+//     TestGitFetchBundleForcesHooksOffOnCheckout (the checkout of a freshly
+//     initialized destination runs post-checkout).
 //   - protocol.ext.allow=never -- TestGitFetchBundleRefusesExtInsteadOfRewrite
 //     (a repo-local url.*.insteadOf can route the bundle path through ext::).
 //   - core.sshCommand=false -- TestGitFetchBundleIgnoresHostileSSHCommand
@@ -54,6 +54,11 @@ const scratchBundleMaxAge = time.Hour
 // scratchDirEUID reports the effective uid the scratch directory must belong
 // to. A package variable so a test can pin the ownership refusal without root.
 var scratchDirEUID = os.Geteuid
+
+// repoMkdir creates the destination leaf directory. A package variable so a
+// test can pin the branch where the directory appeared between the inspection
+// and the create -- in which case this call did not create it.
+var repoMkdir = os.Mkdir
 
 // gitEnv returns the environment every git subprocess runs under: the
 // executor's pinned startup env (nil meaning this process's environment) with
@@ -227,9 +232,10 @@ func scratchDir() (string, error) {
 }
 
 // sweepStaleBundles removes regular *.bundle and *.bundle.lock files older
-// than scratchBundleMaxAge. Directories and other names are left alone, so a
-// caller's own bookkeeping in the scratch dir survives. Best effort: a failed
-// sweep must not fail the RPC that triggered it.
+// than scratchBundleMaxAge, and the .verify-* directories a crashed verify left
+// behind. Directories and other names are left alone, so a caller's own
+// bookkeeping in the scratch dir survives. Best effort: a failed sweep must not
+// fail the RPC that triggered it.
 func sweepStaleBundles(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -237,18 +243,25 @@ func sweepStaleBundles(dir string) {
 	}
 	cutoff := time.Now().Add(-scratchBundleMaxAge)
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
-			continue
-		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".bundle") && !strings.HasSuffix(name, ".bundle.lock") {
-			continue
-		}
+		path := filepath.Join(dir, name)
 		info, err := e.Info()
 		if err != nil || !info.ModTime().Before(cutoff) {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, name))
+		switch {
+		case info.Mode().IsRegular() &&
+			(strings.HasSuffix(name, ".bundle") || strings.HasSuffix(name, ".bundle.lock")):
+			_ = os.Remove(path)
+		case strings.HasPrefix(name, ".verify-"):
+			// Lstat, so a symlink named .verify-* is never followed: only a
+			// real directory left by a crashed verify is removed, and only the
+			// directory itself.
+			fi, lerr := os.Lstat(path)
+			if lerr == nil && fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
+				_ = os.RemoveAll(path)
+			}
+		}
 	}
 }
 
@@ -272,12 +285,24 @@ func (s *Server) resolveCommit(repo, rev string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// repoGitDir returns repo's resolved absolute git directory, requiring the
-// repository to be repo ITSELF: discovery is fenced at repo's parent and the
-// reported git dir must equal <repo>/.git (or, for a bare layout, <repo>). A
-// subdirectory of a repository is therefore not a repository. ok is false when
-// repo is not one.
+// repoGitDir returns repo's resolved absolute git directory when repo is a
+// repository, and false when it is not. Discovery is fenced at repo's parent
+// (GIT_CEILING_DIRECTORIES) so a subdirectory of a repository cannot be
+// mistaken for one, and the discovered repository must BE repo:
+//
+//   - a normal repository's git dir is <repo>/.git;
+//   - a bare repository's git dir is <repo> itself;
+//   - a linked worktree, a submodule, or a separate-git-dir checkout keeps its
+//     git dir elsewhere, but its working-tree root (--show-toplevel) is repo.
+//
+// The ceiling is defence in depth -- it is what stops ancestor discovery in the
+// ordinary case -- and the ownership check below is the guard that does not
+// depend on git's ceiling matching, so it is the authoritative one.
 func (s *Server) repoGitDir(repo string) (string, bool) {
+	resolvedRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		return "", false
+	}
 	out, err := s.gitRepo(repo, "rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return "", false
@@ -286,14 +311,43 @@ func (s *Server) repoGitDir(repo string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	resolvedRepo, err := filepath.EvalSymlinks(repo)
-	if err != nil {
-		return "", false
-	}
 	if got == filepath.Join(resolvedRepo, ".git") || got == resolvedRepo {
 		return got, true
 	}
-	return "", false
+	// A linked worktree's, submodule's or separate-git-dir checkout's git dir
+	// is elsewhere, but the work tree root is repo itself.
+	top, err := s.gitRepo(repo, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", false
+	}
+	resolvedTop, err := filepath.EvalSymlinks(strings.TrimSpace(string(top)))
+	if err != nil || resolvedTop != resolvedRepo {
+		return "", false
+	}
+	return got, true
+}
+
+// repoObjectsDir returns the object store of repo's repository. For a linked
+// worktree or a submodule that lives in the common git dir, not in the
+// worktree's own git dir (which has no objects/ at all), so it is resolved
+// through --git-common-dir rather than repoGitDir's result.
+func (s *Server) repoObjectsDir(repo string) string {
+	out, err := s.gitRepo(repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return ""
+	}
+	common := strings.TrimSpace(string(out))
+	if common == "" {
+		return ""
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(repo, common)
+	}
+	resolved, err := filepath.EvalSymlinks(common)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(resolved, "objects")
 }
 
 // GitRefs reports whether a repo exists on this executor and, if so, its
@@ -443,7 +497,8 @@ const (
 )
 
 // inspectDest reports what is at repo WITHOUT creating or modifying anything.
-// gitDir is the resolved absolute git directory when repo is a repository.
+// objectsDir is repo's object store when repo is a repository (empty when it
+// could not be resolved).
 func (s *Server) inspectDest(repo string) (destKind, string, error) {
 	fi, err := os.Lstat(repo)
 	switch {
@@ -461,11 +516,10 @@ func (s *Server) inspectDest(repo string) (destKind, string, error) {
 	if empty {
 		return destEmpty, "", nil
 	}
-	gitDir, ok := s.repoGitDir(repo)
-	if !ok {
+	if _, ok := s.repoGitDir(repo); !ok {
 		return destNotRepo, "", nil
 	}
-	return destRepo, gitDir, nil
+	return destRepo, s.repoObjectsDir(repo), nil
 }
 
 // verifyBundle runs `git bundle verify` against a throwaway BARE repository
@@ -535,7 +589,7 @@ func (s *Server) GitFetchBundle(
 
 	// Nothing is created or modified before this point. A non-empty directory
 	// that is not a repository is refused, never initialized over.
-	kind, gitDir, err := s.inspectDest(repo)
+	kind, objectsDir, err := s.inspectDest(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -548,25 +602,39 @@ func (s *Server) GitFetchBundle(
 	// half-created destination behind.
 	altObjects := ""
 	if kind == destRepo {
-		altObjects = filepath.Join(gitDir, "objects")
+		altObjects = objectsDir
 	}
 	if err := s.verifyBundle(scratch, bundlePath, altObjects); err != nil {
 		return nil, err
 	}
 
-	createdDir := kind == destAbsent
+	createdLeaf := false
 	createdRepo := false
 	cleanup := func() {
-		if createdDir {
-			_ = os.RemoveAll(repo)
-		} else if createdRepo {
+		if createdRepo {
 			_ = os.RemoveAll(filepath.Join(repo, ".git"))
+		}
+		if createdLeaf {
+			// os.Remove, never RemoveAll: only the leaf directory this call
+			// created, and only when it is now empty. A directory that already
+			// existed is not ours to remove, and parents created by MkdirAll
+			// are left in place.
+			_ = os.Remove(repo)
 		}
 	}
 	if kind != destRepo {
-		if createdDir {
-			if err := os.MkdirAll(repo, 0o755); err != nil {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create repo dir: %w", err))
+		if kind == destAbsent {
+			if err := os.MkdirAll(filepath.Dir(repo), 0o755); err != nil {
+				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create repo parent: %w", err))
+			}
+			if err := repoMkdir(repo, 0o755); err != nil {
+				if !os.IsExist(err) {
+					return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("create repo dir: %w", err))
+				}
+				// Something appeared between the inspection and here: this call
+				// did not create it, so it is never removed.
+			} else {
+				createdLeaf = true
 			}
 		}
 		if out, err := s.git("", "init", "-b", branch, "--", repo); err != nil {

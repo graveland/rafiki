@@ -16,6 +16,7 @@ import (
 	"connectrpc.com/connect"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"golang.org/x/sys/unix"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -624,21 +625,31 @@ func TestGitRefsSubdirectoryOfRepoIsNotARepo(t *testing.T) {
 
 // TestGitFetchBundleRefusesSubdirectoryOfRepo: a non-empty directory that is
 // only a subdirectory of a repository must not be adopted, and the ancestor
-// repository's refs must be left untouched.
+// repository's refs must be left untouched. The branch is one the parent does
+// NOT have, so a fetch that wrongly targeted the ancestor would create it and
+// change show-ref -- the test goes red when both the ceiling and the ownership
+// check are deleted.
 func TestGitFetchBundleRefusesSubdirectoryOfRepo(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := gitServer(t)
 	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
-	b := mustBundle(t, s, src, "main", nil)
+	gitRun(t, src, "checkout", "-q", "-b", "seed")
+	writeFile(t, src, "seed.txt", "seed\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "seed")
+	b := mustBundle(t, s, src, "seed", nil)
 
 	repo := gitFixture(t, map[string]string{"b.txt": "b\n"})
+	if out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "refs/heads/seed").CombinedOutput(); err == nil {
+		t.Fatalf("fixture: the parent repo already has refs/heads/seed: %s", out)
+	}
 	before := gitRun(t, repo, "show-ref")
 	sub := filepath.Join(repo, "sub")
 	c.Require().NoError(os.MkdirAll(sub, 0o755))
 	c.Require().NoError(os.WriteFile(filepath.Join(sub, "file.txt"), []byte("x"), 0o644))
 
 	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
-		Repo: sub, BundlePath: b.GetBundlePath(), Branch: "main",
+		Repo: sub, BundlePath: b.GetBundlePath(), Branch: "seed",
 	}))
 	c.Require().Error(err, "adopted a subdirectory of a repository")
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
@@ -736,9 +747,9 @@ func TestGitBundleUpToDateWhenBundleWouldBeEmpty(t *testing.T) {
 	c.Eq("", resp.Msg.GetBundlePath(), "bundle_path")
 }
 
-// TestScratchDirRefusesSymlink: a symlink at the scratch path must not be
+// TestGitScratchDirRefusesSymlink: a symlink at the scratch path must not be
 // followed or adopted.
-func TestScratchDirRefusesSymlink(t *testing.T) {
+func TestGitScratchDirRefusesSymlink(t *testing.T) {
 	c := assert.NewCollecting(t)
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
@@ -750,7 +761,7 @@ func TestScratchDirRefusesSymlink(t *testing.T) {
 	c.Require().Error(err, "adopted a symlinked scratch path")
 }
 
-func TestScratchDirRefusesNonDirectory(t *testing.T) {
+func TestGitScratchDirRefusesNonDirectory(t *testing.T) {
 	c := assert.NewCollecting(t)
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
@@ -760,9 +771,9 @@ func TestScratchDirRefusesNonDirectory(t *testing.T) {
 	c.Require().Error(err, "adopted a non-directory scratch path")
 }
 
-// TestScratchDirRefusesForeignOwner pins the ownership check via the uid seam,
+// TestGitScratchDirRefusesForeignOwner pins the ownership check via the uid seam,
 // since the test cannot chown.
-func TestScratchDirRefusesForeignOwner(t *testing.T) {
+func TestGitScratchDirRefusesForeignOwner(t *testing.T) {
 	c := assert.NewCollecting(t)
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
@@ -968,4 +979,292 @@ func TestGitFetchBundleReturnsNewOIDResolutionError(t *testing.T) {
 	}))
 	c.Require().Error(err, "a failed new_oid resolution must be returned, not silently emptied")
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+}
+
+// linkedWorktree creates a fresh repo and a linked worktree of it on branch,
+// returning the worktree path.
+func linkedWorktree(t *testing.T, branch string) string {
+	t.Helper()
+	main := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, main, "worktree", "add", "-q", wt, "-b", branch)
+	return wt
+}
+
+// TestGitRefsLinkedWorktreeIsARepo: the project's own sandboxes use linked
+// worktrees, whose git dir lives in the main checkout -- that must still count
+// as a repository at the worktree path.
+func TestGitRefsLinkedWorktreeIsARepo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	wt := linkedWorktree(t, "wtbranch")
+
+	resp, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: wt}))
+	c.Require().NoError(err, "GitRefs on a linked worktree")
+	c.True(resp.Msg.GetExists(), "a linked worktree reported exists=false")
+	names := map[string]bool{}
+	for _, h := range resp.Msg.GetHeads() {
+		names[h.GetName()] = true
+	}
+	c.True(names["wtbranch"], "heads = %v", resp.Msg.GetHeads())
+}
+
+// TestGitBundleFromLinkedWorktree: a linked worktree is a valid bundle source.
+func TestGitBundleFromLinkedWorktree(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	wt := linkedWorktree(t, "wtbranch")
+
+	b := mustBundle(t, s, wt, "wtbranch", nil)
+	c.NotEq("", b.GetBundlePath(), "bundle_path")
+	c.True(b.GetBytes() > 0, "bytes = %d", b.GetBytes())
+	c.Eq(strings.TrimSpace(gitRun(t, wt, "rev-parse", "refs/heads/wtbranch")), b.GetTipOid(), "tip_oid")
+}
+
+// TestGitFetchBundleIntoLinkedWorktree: a linked worktree is a valid fetch
+// destination, and the second, INCREMENTAL bundle only verifies because the
+// worktree's COMMON object store was found (its own git dir has no objects/).
+func TestGitFetchBundleIntoLinkedWorktree(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	wt := linkedWorktree(t, "wtbranch")
+
+	src := gitFixture(t, map[string]string{"s.txt": "one\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "seed")
+	writeFile(t, src, "seed.txt", "one\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "seed one")
+
+	full := mustBundle(t, s, src, "seed", nil)
+	first := mustFetch(t, s, wt, full.GetBundlePath(), "seed", false)
+	c.False(first.GetCreatedRepo(), "created_repo")
+	c.Eq(full.GetTipOid(), first.GetNewOid(), "new_oid")
+
+	writeFile(t, src, "seed.txt", "two\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "seed two")
+	incr := mustBundle(t, s, src, "seed", []string{full.GetTipOid()})
+	c.False(incr.GetUpToDate(), "up_to_date")
+
+	second := mustFetch(t, s, wt, incr.GetBundlePath(), "seed", false)
+	c.Eq(incr.GetTipOid(), second.GetNewOid(), "new_oid")
+}
+
+// TestGitRefsSeparateGitDirIsARepo: a submodule-style checkout keeps its git
+// dir outside the work tree; it is still a repository at that path.
+func TestGitRefsSeparateGitDirIsARepo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	gitdir := filepath.Join(t.TempDir(), "gitdir")
+	gitRun(t, filepath.Dir(repo), "init", "-q", "-b", "main", "--separate-git-dir="+gitdir, repo)
+	writeFile(t, repo, "a.txt", "a\n")
+	gitRun(t, repo, "add", "-A")
+	gitCommit(t, repo, "a")
+
+	resp, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: repo}))
+	c.Require().NoError(err, "GitRefs on a separate-git-dir checkout")
+	c.True(resp.Msg.GetExists(), "a separate-git-dir checkout reported exists=false")
+
+	b := mustBundle(t, s, repo, "main", nil)
+	c.NotEq("", b.GetBundlePath(), "bundle_path")
+}
+
+// TestGitRefsSymlinkedAncestorSubdirectoryIsNotARepo: reached through a
+// symlinked ancestor, a subdirectory of a repository must still be refused by
+// the ownership check, not by the ceiling alone.
+func TestGitRefsSymlinkedAncestorSubdirectoryIsNotARepo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	link := filepath.Join(t.TempDir(), "repo-link")
+	c.Require().NoError(os.Symlink(repo, link))
+	sub := filepath.Join(link, "sub")
+	c.Require().NoError(os.MkdirAll(sub, 0o755))
+
+	resp, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: sub}))
+	c.Require().NoError(err, "GitRefs")
+	c.False(resp.Msg.GetExists(), "a subdirectory reached through a symlinked ancestor reported exists=true")
+}
+
+// TestGitScratchDirForcesMode0700: a pre-created scratch directory is chmodded to
+// 0700, whatever mode it arrived with.
+func TestGitScratchDirForcesMode0700(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	dir := filepath.Join(tmp, scratchDirName)
+	c.Require().NoError(os.Mkdir(dir, 0o755))
+	c.Require().NoError(os.Chmod(dir, 0o755))
+
+	got, err := scratchDir()
+	c.Require().NoError(err, "scratchDir")
+	c.Eq(dir, got, "scratchDir path")
+	fi, err := os.Lstat(dir)
+	c.Require().NoError(err)
+	c.Eq(os.FileMode(0o700), fi.Mode().Perm(), "scratch dir mode")
+}
+
+// TestGitFetchBundleIgnoresRepoReferenceTransactionHook pins
+// `-c core.hooksPath=/dev/null` through the hook a FETCH itself runs: a
+// repo-local reference-transaction hook must not execute.
+func TestGitFetchBundleIgnoresRepoReferenceTransactionHook(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side")
+	marker := filepath.Join(t.TempDir(), "reference-transaction-marker")
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	c.Require().NoError(os.MkdirAll(hooks, 0o755))
+	c.Require().NoError(os.WriteFile(filepath.Join(hooks, "reference-transaction"),
+		[]byte("#!/bin/sh\necho ran >> "+marker+"\n"), 0o755))
+	gitRun(t, dest, "config", "core.hooksPath", hooks)
+
+	mustFetch(t, s, dest, b.GetBundlePath(), "side", true)
+
+	_, err := os.Stat(marker)
+	c.True(os.IsNotExist(err), "the destination repo's reference-transaction hook ran on fetch (err=%v)", err)
+}
+
+// TestGitScratchDirRemovesStaleVerifyDirs: the throwaway verify directories are
+// swept after an hour, but only real directories -- a symlink of that name is
+// never followed and its target survives.
+func TestGitScratchDirRemovesStaleVerifyDirs(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	dir := filepath.Join(tmp, scratchDirName)
+	c.Require().NoError(os.MkdirAll(dir, 0o700))
+
+	oldVerify := filepath.Join(dir, ".verify-old")
+	freshVerify := filepath.Join(dir, ".verify-fresh")
+	c.Require().NoError(os.MkdirAll(oldVerify, 0o700))
+	c.Require().NoError(os.MkdirAll(freshVerify, 0o700))
+
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target")
+	c.Require().NoError(os.WriteFile(target, []byte("x"), 0o600))
+	link := filepath.Join(dir, ".verify-link")
+	c.Require().NoError(os.Symlink(outside, link))
+
+	oldFile := filepath.Join(dir, ".verify-file")
+	c.Require().NoError(os.WriteFile(oldFile, []byte("x"), 0o600))
+
+	past := time.Now().Add(-2 * time.Hour)
+	ts := []unix.Timespec{unix.NsecToTimespec(past.UnixNano()), unix.NsecToTimespec(past.UnixNano())}
+	c.Require().NoError(unix.UtimesNanoAt(unix.AT_FDCWD, oldVerify, ts, 0))
+	c.Require().NoError(unix.UtimesNanoAt(unix.AT_FDCWD, oldFile, ts, 0))
+	// AT_SYMLINK_NOFOLLOW: give the SYMLINK itself an old mtime, so the sweep
+	// would remove it if it followed the name.
+	c.Require().NoError(unix.UtimesNanoAt(unix.AT_FDCWD, link, ts, unix.AT_SYMLINK_NOFOLLOW))
+
+	_, err := scratchDir()
+	c.Require().NoError(err, "scratchDir")
+
+	_, err = os.Stat(oldVerify)
+	c.True(os.IsNotExist(err), "a stale .verify-* directory survived the sweep (err=%v)", err)
+	_, err = os.Stat(freshVerify)
+	c.NoError(err, "a fresh .verify-* directory was removed")
+	_, err = os.Stat(link)
+	c.NoError(err, "a symlink named .verify-* was removed")
+	_, err = os.Stat(target)
+	c.NoError(err, "the sweep followed a symlink out of the scratch dir")
+	_, err = os.Stat(oldFile)
+	c.NoError(err, "a file named .verify-* was removed")
+}
+
+// TestGitFetchBundleLeavesPreexistingEmptyDirOnFailure: a destination directory
+// that already existed was not created by this call, so a later failure must
+// leave it in place.
+func TestGitFetchBundleLeavesPreexistingEmptyDirOnFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	b := mustBundle(t, s, src, "main", nil)
+
+	empty := t.TempDir()
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: empty, BundlePath: b.GetBundlePath(), Branch: "other",
+	}))
+	c.Require().Error(err, "fetched a branch the bundle does not contain")
+	_, serr := os.Stat(empty)
+	c.NoError(serr, "a pre-existing empty destination was removed")
+	entries, rerr := os.ReadDir(empty)
+	c.Require().NoError(rerr)
+	c.Eq(0, len(entries), "a pre-existing empty destination is no longer empty")
+}
+
+// TestGitFetchBundleLeavesCreatedParentsOnFailure: only the leaf this call
+// created is removed on failure; parents it created with MkdirAll stay.
+func TestGitFetchBundleLeavesCreatedParentsOnFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	b := mustBundle(t, s, src, "main", nil)
+
+	parent := filepath.Join(t.TempDir(), "parent")
+	leaf := filepath.Join(parent, "leaf")
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: leaf, BundlePath: b.GetBundlePath(), Branch: "other",
+	}))
+	c.Require().Error(err, "fetched a branch the bundle does not contain")
+	_, serr := os.Stat(parent)
+	c.NoError(serr, "a parent directory created by MkdirAll was removed")
+	_, serr = os.Stat(leaf)
+	c.True(os.IsNotExist(serr), "the leaf directory created by this call survived a failure (err=%v)", serr)
+}
+
+// TestGitFetchBundleLeavesDirCreatedByRacerOnFailure pins createdLeaf: if the
+// leaf already exists when the create runs, this call did not create it and
+// must not remove it on a later failure.
+func TestGitFetchBundleLeavesDirCreatedByRacerOnFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	b := mustBundle(t, s, src, "main", nil)
+
+	orig := repoMkdir
+	defer func() { repoMkdir = orig }()
+	leaf := filepath.Join(t.TempDir(), "leaf")
+	repoMkdir = func(path string, perm os.FileMode) error {
+		if err := os.Mkdir(path, perm); err != nil {
+			return err
+		}
+		// The directory now exists, but this call did not create it.
+		return os.ErrExist
+	}
+
+	_, err := s.GitFetchBundle(context.Background(), connect.NewRequest(&executorpb.GitFetchBundleRequest{
+		Repo: leaf, BundlePath: b.GetBundlePath(), Branch: "other",
+	}))
+	c.Require().Error(err, "fetched a branch the bundle does not contain")
+	_, serr := os.Stat(leaf)
+	c.NoError(serr, "a destination directory this call did not create was removed")
+}
+
+// TestGitRepoGitDirRejectsSymlinkedPathInsideRepo pins repoGitDir's ownership
+// check ALONE. The path is a symlink into a repository's SUBDIRECTORY, so the
+// ceiling (the symlink's parent) is not on the physical ancestor chain and is
+// ineffective: git discovers the enclosing repository. Only "the repository
+// must be repo itself" refuses it, so deleting that check turns this red while
+// the ceiling stays in place.
+func TestGitRepoGitDirRejectsSymlinkedPathInsideRepo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	repo := gitFixture(t, map[string]string{"a.txt": "a\n"})
+	inner := filepath.Join(repo, "sub", "inner")
+	c.Require().NoError(os.MkdirAll(inner, 0o755))
+	link := filepath.Join(t.TempDir(), "link")
+	c.Require().NoError(os.Symlink(inner, link))
+
+	if _, ok := s.repoGitDir(link); ok {
+		t.Errorf("repoGitDir accepted %q: a symlink into a repository's subdirectory is not a repository", link)
+	}
 }
