@@ -33,6 +33,11 @@ const (
 	// headers and padding costs disk work too, and counting only file content
 	// would let an empty-file flood run unbounded.
 	treeFreeCheckEvery int64 = 8 << 20
+	// treeTailMaxBytes bounds the all-zero padding accepted after a tar
+	// archive's end-of-archive marker. A tar writer pads to its record size (20
+	// blocks, 10 KiB, by default); 64 KiB leaves room for a writer with a
+	// larger blocking factor while still refusing a stream that never ends.
+	treeTailMaxBytes int64 = 64 << 10
 )
 
 // treeRename renames oldpath to newpath. It is a package variable so tests can
@@ -57,6 +62,12 @@ var (
 	// treeWalkDir is filepath.WalkDir, swappable so a test can inject a walk
 	// error mid-tree without depending on a filesystem permission failure.
 	treeWalkDir = filepath.WalkDir
+	// treeCreateMode derives the permission bits a tar entry is created with. It
+	// wraps treeExtractFileMode as a package variable so a test can observe that
+	// the extractor's write path actually asks for the mask: a call site that
+	// bypassed it (perm := uint32(hdr.Mode)) would never reach this seam, which
+	// a non-root chmod cannot reveal on macOS.
+	treeCreateMode = treeExtractFileMode
 )
 
 // treeOverwriteDenyPrefixes are the system paths a tree transfer may never
@@ -632,7 +643,7 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 			if err := os.Mkdir(target, 0o700); err != nil {
 				return files, w.total, treeExtractErr(err)
 			}
-			dirs = append(dirs, treeDirPerm{path: target, mode: treeExtractFileMode(hdr.Mode)})
+			dirs = append(dirs, treeDirPerm{path: target, mode: treeCreateMode(hdr.Mode)})
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return files, w.total, treeExtractErr(err)
@@ -647,15 +658,15 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 				return files, w.total, treeExtractErr(err)
 			}
 			// The mode goes to the kernel raw through unix.Open, so the mask
-			// in treeExtractFileMode is what keeps a setuid/setgid/sticky tar
-			// mode from becoming a setuid/setgid/sticky file. os.OpenFile
-			// would drop those bits itself, which is exactly why it is not
-			// used: a guard the standard library silently performs is a guard
-			// no test can pin. O_EXCL refuses a path that already exists,
-			// symlink or not; O_NOFOLLOW and O_CLOEXEC keep the final
-			// component from being a symlink and the descriptor from leaking
-			// into a spawned child.
-			perm := uint32(treeExtractFileMode(hdr.Mode))
+			// the treeCreateMode seam applies (treeExtractFileMode) is what
+			// keeps a setuid/setgid/sticky tar mode from becoming a
+			// setuid/setgid/sticky file. os.OpenFile would drop those bits
+			// itself, which is exactly why it is not used: a guard the standard
+			// library silently performs is a guard no test can pin. O_EXCL
+			// refuses a path that already exists, symlink or not; O_NOFOLLOW
+			// and O_CLOEXEC keep the final component from being a symlink and
+			// the descriptor from leaking into a spawned child.
+			perm := uint32(treeCreateMode(hdr.Mode))
 			fd, ferr := unix.Open(target,
 				unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
 			if ferr != nil {
@@ -679,7 +690,8 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 	// the client sent after it unread. Drain that tail to EOF: a valid archive
 	// is exactly one archive, and trailing non-zero bytes would otherwise ride
 	// along unexamined. All-zero padding (some writers pad the archive to a
-	// record size) is harmless.
+	// record size) is harmless, but only up to treeTailMaxBytes — see
+	// drainTarTail.
 	if derr := drainTarTail(sr); derr != nil {
 		return files, w.total, derr
 	}
@@ -712,11 +724,14 @@ func treeExtractErr(err error) error {
 }
 
 // drainTarTail reads the remainder of a tar stream to EOF after the reader has
-// reported the end-of-archive marker, refusing any non-zero byte. All-zero
-// padding is accepted; a non-zero tail is a malformed transfer, not a second
-// archive, and must not be silently ignored.
+// reported the end-of-archive marker. All-zero padding is accepted up to
+// treeTailMaxBytes; a non-zero tail, or more than treeTailMaxBytes of it, is a
+// malformed transfer, not a second archive, and must not be silently ignored.
+// Bounding the tail is what keeps a source that streams zeros forever from
+// holding the transfer open when max_bytes is unset.
 func drainTarTail(r io.Reader) error {
 	buf := make([]byte, 32<<10)
+	var total int64
 	for {
 		n, err := r.Read(buf)
 		for _, b := range buf[:n] {
@@ -724,6 +739,11 @@ func drainTarTail(r io.Reader) error {
 				return connect.NewError(connect.CodeInvalidArgument,
 					errors.New("stream carries non-zero bytes after the tar end marker"))
 			}
+		}
+		total += int64(n)
+		if total > treeTailMaxBytes {
+			return connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("stream carries more than %d bytes after the tar end marker", treeTailMaxBytes))
 		}
 		if err == io.EOF {
 			return nil

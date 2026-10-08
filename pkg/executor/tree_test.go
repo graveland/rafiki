@@ -1182,8 +1182,8 @@ func TestReadTreeWalkErrorAbortsStream(t *testing.T) {
 }
 
 // TestWriteTreeRejectsTrailingBytesAfterArchive pins that WriteTree drains the
-// stream to EOF after the tar end marker and refuses non-zero trailing bytes,
-// publishing nothing.
+// stream to EOF after the tar end marker and refuses even a single non-zero
+// trailing byte, publishing nothing.
 func TestWriteTreeRejectsTrailingBytesAfterArchive(t *testing.T) {
 	c := assert.NewCollecting(t)
 	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
@@ -1191,15 +1191,92 @@ func TestWriteTreeRejectsTrailingBytesAfterArchive(t *testing.T) {
 	parent := t.TempDir()
 	dest := filepath.Join(parent, "dest")
 	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
-	payload = append(payload, []byte("trailing-garbage")...)
+	payload = append(payload, 0x01)
 
 	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
-	c.Error(err, "bytes after the tar end marker must be refused")
+	c.Error(err, "a non-zero byte after the tar end marker must be refused")
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
 		t.Errorf("destination created despite trailing bytes after the archive")
 	}
 	assertNoLeftovers(t, parent)
+}
+
+// TestWriteTreeAcceptsTrailingZeroPadding pins that ordinary all-zero padding
+// after the tar end marker still publishes: a tar writer pads its archive to a
+// record size, and that padding must not be mistaken for a malformed stream.
+func TestWriteTreeAcceptsTrailingZeroPadding(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "hello"})
+	payload = append(payload, make([]byte, 10<<10)...)
+
+	resp, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Require().NoError(err, "10 KiB of zero padding must publish")
+	c.Eq(int64(1), resp.Msg.GetFiles(), "files")
+
+	got, rerr := os.ReadFile(filepath.Join(dest, "f.txt"))
+	c.Require().NoError(rerr, "read f.txt")
+	c.Eq("hello", string(got), "content")
+}
+
+// TestWriteTreeRejectsExcessiveTrailingPadding pins the bound on the drain: a
+// source that keeps sending all-zero bytes after the end marker is refused
+// rather than drained forever, and nothing is published. Removing the bound
+// turns this red, because the transfer would then publish.
+func TestWriteTreeRejectsExcessiveTrailingPadding(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
+	payload = append(payload, make([]byte, 70<<10)...)
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Error(err, "more than 64 KiB of zero padding must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created despite excessive trailing padding")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+// TestWriteTreeCreateModeSeamStripsSpecialBits pins the CALL SITE, not just the
+// pure mask: the extractor's write path must ask the treeCreateMode seam for the
+// header's raw mode. A call site that bypassed the seam (perm :=
+// uint32(hdr.Mode)) would leave the recorded list empty, which is the only way
+// to observe the difference on macOS, where a non-root create drops setuid
+// silently. The on-disk check is the belt to that braces.
+func TestWriteTreeCreateModeSeamStripsSpecialBits(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	orig := treeCreateMode
+	var asked []int64
+	treeCreateMode = func(hdrMode int64) os.FileMode {
+		asked = append(asked, hdrMode)
+		return orig(hdrMode)
+	}
+	t.Cleanup(func() { treeCreateMode = orig })
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	// An empty entry keeps the creation mode observable: writing content clears
+	// setuid.
+	payload := buildTar(t, tarEntry{name: "empty", typeflag: tar.TypeReg, mode: 0o4755})
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Require().NoError(err, "WriteTree")
+
+	c.EqDeep([]int64{0o4755}, asked, "the write path must ask treeCreateMode for the header's raw mode")
+	c.Eq(os.FileMode(0o755), orig(0o4755), "the seam's mask strips setuid and keeps exec")
+
+	fi, serr := os.Stat(filepath.Join(dest, "empty"))
+	c.Require().NoError(serr, "stat empty")
+	c.Zero(fi.Mode()&os.ModeSetuid, "the created file must not be setuid")
+	c.NotZero(fi.Mode().Perm()&0o100, "the exec bit must be kept")
 }
 
 // TestWriteTreePublishesCleanStream pins the other half of the drain: a clean
