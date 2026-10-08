@@ -30,9 +30,11 @@ func newSandboxCmd() *cobra.Command {
 		Short: "Create and manage sandboxes",
 		Long: `Create and manage sandboxes.
 
-  create   create a named sandbox and print it
-  ls       list sandboxes
-  rm       remove a sandbox by name or id
+  create     create a named sandbox and print it
+  ls         list sandboxes
+  rm         remove a sandbox by name or id
+  sync       copy a tree between two executors
+  sync-repo  move a git branch between two executors
 
 A named sandbox is a container running an executor, chosen with its own
 mounts, network and resource limits, reached directly by name or id. A
@@ -45,6 +47,8 @@ sandbox bound to a child as a spawn block is not managed by this command.`,
 		newSandboxCreateCmd(),
 		newSandboxListCmd(),
 		newSandboxRemoveCmd(),
+		newSandboxSyncCmd(),
+		newSandboxSyncRepoCmd(),
 	)
 	return cmd
 }
