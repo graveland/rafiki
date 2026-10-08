@@ -90,7 +90,7 @@ func TestRouteAdapterWritesThenReloads(t *testing.T) {
 
 	// The reload is the point: the in-memory resolver answers the new spec
 	// without a restart, and ListRoutes reads the reloaded view.
-	c.Eq(routing.SortPrice, policy.Resolve("openrouter/z-ai/glm-5.3-flash").Sort,
+	c.Eq(routing.SortPrice, policy.Resolve("openrouter/z-ai/glm-5.3").Sort,
 		"resolver reflects the write immediately")
 	rows, err := a.ListRoutes(ctx)
 	c.Require().NoError(err)
@@ -101,7 +101,7 @@ func TestRouteAdapterWritesThenReloads(t *testing.T) {
 	if _, err := a.SetRoute(ctx, "z-ai/glm-5.3", "sort=latency,quant=fp8+"); err != nil {
 		t.Fatal(err)
 	}
-	c.Eq(routing.SortLatency, policy.Resolve("openrouter/z-ai/glm-5.3-flash").Sort,
+	c.Eq(routing.SortLatency, policy.Resolve("openrouter/z-ai/glm-5.3").Sort,
 		"newest row wins in the resolver")
 	rows, _ = a.ListRoutes(ctx)
 	c.Eq(1, len(rows), "still one live row")
@@ -118,7 +118,7 @@ func TestRouteAdapterWritesThenReloads(t *testing.T) {
 	rows, err = a.ListRoutes(ctx)
 	c.Require().NoError(err)
 	c.Eq(0, len(rows), "no live rows after Delete")
-	c.True(policy.Resolve("openrouter/z-ai/glm-5.3-flash").IsZero(), "resolver is back to zero")
+	c.True(policy.Resolve("openrouter/z-ai/glm-5.3").IsZero(), "resolver is back to zero")
 
 	// A second delete of the same line is the sentinel too: the tombstone is
 	// itself the newest row.
