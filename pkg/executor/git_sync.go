@@ -22,10 +22,20 @@ import (
 // carries BEFORE its subcommand, as defense in depth against a hostile
 // .git/config: the executor runs git inside repositories it did not create,
 // and a repository's own configuration must not be able to run a hook, an
-// fsmonitor program, or a remote transport helper.
+// fsmonitor program, a remote transport helper, or a command git consults
+// while enumerating an alternate object store.
+//
+// These are command-line `-c` settings, which git exports to every child git
+// process through GIT_CONFIG_PARAMETERS, so a nested invocation (git's own
+// auto-maintenance, a submodule fetch if one ever happened) inherits them too.
 //
 // Each option is pinned by a test that fails when it is removed:
 //
+//   - core.alternateRefsCommand=true -- TestGitFetchBundleIgnoresHostileAlternateRefsCommand
+//     (a fetch's connectivity check enumerates the refs of an alternate object
+//     store by running this repository-local command). `true` and never an
+//     empty value: git treats an empty value as unset and would fall back to
+//     the repository's own command.
 //   - core.fsmonitor=false -- TestGitFetchBundleIgnoresHostileRepoFsmonitor
 //     (a fetch runs the repo's fsmonitor on its index refresh).
 //   - core.hooksPath=/dev/null -- TestGitFetchBundleIgnoresRepoReferenceTransactionHook
@@ -36,7 +46,34 @@ import (
 //     (a repo-local url.*.insteadOf can route the bundle path through ext::).
 //   - core.sshCommand=false -- TestGitFetchBundleIgnoresHostileSSHCommand
 //     (a repo-local url.*.insteadOf can route the bundle path through ssh://).
+//
+// The remaining repo-local keys that can name a program were audited with
+// probes (TestGitHardeningHostileRepoConfigAudit) and need no option:
+//
+//   - core.pager, core.editor, core.askPass, credential.helper: git runs them
+//     only for a terminal, an editor, or a credential prompt. Every call here
+//     captures output through a pipe, launches no editor, and fetches from a
+//     local bundle path that requests no credential -- and GIT_TERMINAL_PROMPT=0
+//     is forced.
+//   - gc.auto/gc.autoDetach: auto-maintenance may run after a fetch, but it is
+//     git's own binary; the only repository-supplied program in that path is
+//     the pre-auto-gc hook, which core.hooksPath=/dev/null disables.
+//   - uploadpack.*/receive.*: those hooks run in a serving upload-pack or
+//     receive-pack, and this file never serves a repository.
+//   - filter.*/diff.*/merge.* drivers: only a checkout consults them, and the
+//     only checkout here is of a repository this file just created with
+//     `git init`, which carries no .gitattributes and no driver config; an
+//     EXISTING repository is never checked out.
+//   - submodule.recurse/fetch.recurseSubmodules: a fetch from a bundle file has
+//     no remote to recurse into, so no submodule fetch is attempted.
+//   - include.path/includeIf: they read another config file, they run nothing,
+//     and every -c above is applied after all config files are read, so an
+//     included value cannot override it.
+//   - url.<x>.insteadOf: it can only redirect the bundle path to another
+//     transport, and the two transports that name a program (ext:: and ssh://)
+//     are covered by protocol.ext.allow=never and core.sshCommand=false.
 var gitHardening = []string{
+	"-c", "core.alternateRefsCommand=true",
 	"-c", "core.fsmonitor=false",
 	"-c", "core.hooksPath=/dev/null",
 	"-c", "protocol.ext.allow=never",

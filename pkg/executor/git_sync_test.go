@@ -1268,3 +1268,212 @@ func TestGitRepoGitDirRejectsSymlinkedPathInsideRepo(t *testing.T) {
 		t.Errorf("repoGitDir accepted %q: a symlink into a repository's subdirectory is not a repository", link)
 	}
 }
+
+// TestGitFetchBundleIgnoresHostileAlternateRefsCommand pins
+// `-c core.alternateRefsCommand=true`. A fetch's connectivity check enumerates
+// the refs of an alternate object store by running this repository-local
+// command, so a destination repository whose objects/info/alternates points
+// anywhere could otherwise run a program of the source's choosing on this
+// executor. `true` is a harmless no-op; an empty value is deliberately NOT
+// used because git treats it as unset and would fall back to the repository's
+// own command.
+func TestGitFetchBundleIgnoresHostileAlternateRefsCommand(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+	src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+	gitRun(t, src, "checkout", "-q", "-b", "side")
+	writeFile(t, src, "side.txt", "side\n")
+	gitRun(t, src, "add", "-A")
+	gitCommit(t, src, "side")
+	b := mustBundle(t, s, src, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side") // present, NOT checked out
+
+	// An alternate object store is what makes the fetch enumerate alternate
+	// refs, and therefore what makes it run core.alternateRefsCommand.
+	alt := t.TempDir()
+	gitRun(t, alt, "init", "-q", "--bare")
+	infoDir := filepath.Join(dest, ".git", "objects", "info")
+	c.Require().NoError(os.MkdirAll(infoDir, 0o755))
+	c.Require().NoError(os.WriteFile(filepath.Join(infoDir, "alternates"),
+		[]byte(filepath.Join(alt, "objects")+"\n"), 0o600))
+
+	marker := filepath.Join(t.TempDir(), "alternate-refs-marker")
+	prog := filepath.Join(t.TempDir(), "alternate-refs.sh")
+	c.Require().NoError(os.WriteFile(prog, []byte("#!/bin/sh\ntouch "+marker+"\nexit 0\n"), 0o755))
+	gitRun(t, dest, "config", "core.alternateRefsCommand", prog)
+
+	mustFetch(t, s, dest, b.GetBundlePath(), "side", true)
+
+	_, err := os.Stat(marker)
+	c.True(os.IsNotExist(err), "the destination repo's core.alternateRefsCommand ran on fetch (err=%v)", err)
+}
+
+// markerScript writes an executable that touches marker and returns its path.
+func markerScript(t *testing.T, marker string) string {
+	t.Helper()
+	prog := filepath.Join(t.TempDir(), "prog.sh")
+	assert.NewAborting(t).NoError(os.WriteFile(prog,
+		[]byte("#!/bin/sh\ntouch "+marker+"\nexit 0\n"), 0o755))
+	return prog
+}
+
+// hostileConfigProbe is one repository-local config key (or the config that
+// reaches it) that can name a program. plant receives the repository and the
+// path of a marker-writing script and must configure the repository so the key
+// names that script.
+type hostileConfigProbe struct {
+	name  string
+	plant func(t *testing.T, repo, script string)
+}
+
+// includeProbe returns a plant that smuggles a hostile core.alternateRefsCommand
+// and core.fsmonitor through a config include (key is "include.path" or
+// "includeIf.gitdir:**.path"), together with the alternate object store that
+// would make the smuggled command fire.
+func includeProbe(key string) func(t *testing.T, repo, script string) {
+	return func(t *testing.T, repo, script string) {
+		t.Helper()
+		c := assert.NewAborting(t)
+		included := filepath.Join(t.TempDir(), "included.cfg")
+		c.NoError(os.WriteFile(included,
+			[]byte("[core]\n\talternateRefsCommand = "+script+"\n\tfsmonitor = "+script+"\n"), 0o600))
+		alt := t.TempDir()
+		gitRun(t, alt, "init", "-q", "--bare")
+		infoDir := filepath.Join(repo, ".git", "objects", "info")
+		c.NoError(os.MkdirAll(infoDir, 0o755))
+		c.NoError(os.WriteFile(filepath.Join(infoDir, "alternates"),
+			[]byte(filepath.Join(alt, "objects")+"\n"), 0o600))
+		gitRun(t, repo, "config", key, included)
+	}
+}
+
+// TestGitHardeningHostileRepoConfigAudit is the PROBE-based audit behind the
+// comment on gitHardening: every other repository-local config key that can
+// name a program is planted in the repository an RPC operates on, pointing at
+// a marker-writing script, and the marker must not exist after every git RPC
+// in this file has run against it. The keys whose program would otherwise run
+// (core.fsmonitor, core.hooksPath, core.sshCommand, core.alternateRefsCommand)
+// are also covered by their named pin tests; this test is the evidence that
+// the rest are inert for the calls this file makes. The url.*.insteadOf
+// rewrite to ext::/ssh:// is covered by
+// TestGitFetchBundleRefusesExtInsteadOfRewrite and
+// TestGitFetchBundleIgnoresHostileSSHCommand.
+func TestGitHardeningHostileRepoConfigAudit(t *testing.T) {
+	probes := []hostileConfigProbe{
+		{"core.pager", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "core.pager", script)
+		}},
+		{"core.editor", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "core.editor", script)
+		}},
+		{"core.askPass", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "core.askPass", script)
+		}},
+		{"credential.helper", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "credential.helper", script)
+		}},
+		{"core.fsmonitor", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "core.fsmonitor", script)
+		}},
+		{"core.sshCommand", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "core.sshCommand", script)
+		}},
+		{"core.hooksPath", func(t *testing.T, repo, script string) {
+			hooks := t.TempDir()
+			c := assert.NewAborting(t)
+			c.NoError(os.Symlink(script, filepath.Join(hooks, "reference-transaction")))
+			c.NoError(os.Symlink(script, filepath.Join(hooks, "post-checkout")))
+			gitRun(t, repo, "config", "core.hooksPath", hooks)
+		}},
+		{"gc.auto with pre-auto-gc", func(t *testing.T, repo, script string) {
+			hooks := t.TempDir()
+			assert.NewAborting(t).NoError(os.Symlink(script, filepath.Join(hooks, "pre-auto-gc")))
+			gitRun(t, repo, "config", "gc.auto", "1")
+			gitRun(t, repo, "config", "gc.autoDetach", "false")
+			gitRun(t, repo, "config", "core.hooksPath", hooks)
+		}},
+		{"uploadpack.packObjectsHook", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "uploadpack.packObjectsHook", script)
+		}},
+		{"filter driver", func(t *testing.T, repo, script string) {
+			writeFile(t, repo, ".gitattributes", "* filter=evil\n")
+			gitRun(t, repo, "config", "filter.evil.clean", script)
+			gitRun(t, repo, "config", "filter.evil.smudge", script)
+		}},
+		{"diff driver", func(t *testing.T, repo, script string) {
+			writeFile(t, repo, ".gitattributes", "* diff=evil\n")
+			gitRun(t, repo, "config", "diff.evil.command", script)
+		}},
+		{"merge driver", func(t *testing.T, repo, script string) {
+			writeFile(t, repo, ".gitattributes", "* merge=evil\n")
+			gitRun(t, repo, "config", "merge.evil.driver", script)
+		}},
+		{"submodule.recurse", func(t *testing.T, repo, script string) {
+			gitRun(t, repo, "config", "submodule.recurse", "true")
+			gitRun(t, repo, "config", "fetch.recurseSubmodules", "yes")
+		}},
+		{"include.path", includeProbe("include.path")},
+		{"includeIf", includeProbe("includeIf.gitdir:**.path")},
+	}
+	for _, p := range probes {
+		t.Run(p.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			s := gitServer(t)
+			marker := filepath.Join(t.TempDir(), "marker")
+			script := markerScript(t, marker)
+
+			src := gitFixture(t, map[string]string{"a.txt": "base\n"})
+			gitRun(t, src, "checkout", "-q", "-b", "side")
+			writeFile(t, src, "side.txt", "side\n")
+			gitRun(t, src, "add", "-A")
+			gitCommit(t, src, "side")
+
+			dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+			gitRun(t, dest, "branch", "side")
+
+			p.plant(t, src, script)
+			p.plant(t, dest, script)
+
+			b := mustBundle(t, s, src, "side", nil)
+			_, err := s.GitRefs(context.Background(), connect.NewRequest(&executorpb.GitRefsRequest{Repo: src}))
+			c.Require().NoError(err, "GitRefs")
+			mustFetch(t, s, dest, b.GetBundlePath(), "side", true)
+
+			_, serr := os.Stat(marker)
+			c.True(os.IsNotExist(serr), "repo-local config %q executed a program (err=%v)", p.name, serr)
+		})
+	}
+}
+
+// TestGitFetchBundleDoesNotRecurseSubmodules pins the audit decision that
+// `fetch.recurseSubmodules=false`/`submodule.recurse=false` are NOT added: a
+// fetch from a bundle file has no remote to recurse into, so even a
+// destination configured to recurse fetches nothing for the gitlink a bundle
+// carries -- no .git/modules appears and no submodule working tree is written.
+func TestGitFetchBundleDoesNotRecurseSubmodules(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := gitServer(t)
+
+	sub := gitFixture(t, map[string]string{"s.txt": "s\n"})
+	super := gitFixture(t, map[string]string{"x.txt": "x\n"})
+	gitRun(t, super, "config", "protocol.file.allow", "always")
+	gitRun(t, super, "checkout", "-q", "-b", "side")
+	gitRun(t, super, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	gitRun(t, super, "add", "-A")
+	gitCommit(t, super, "super")
+	b := mustBundle(t, s, super, "side", nil)
+
+	dest := gitFixture(t, map[string]string{"d.txt": "d\n"})
+	gitRun(t, dest, "branch", "side")
+	gitRun(t, dest, "config", "fetch.recurseSubmodules", "yes")
+	gitRun(t, dest, "config", "submodule.recurse", "true")
+
+	mustFetch(t, s, dest, b.GetBundlePath(), "side", true)
+
+	_, err := os.Stat(filepath.Join(dest, ".git", "modules"))
+	c.True(os.IsNotExist(err), "the fetch recursed into a submodule (err=%v)", err)
+	_, err = os.Stat(filepath.Join(dest, "sub"))
+	c.True(os.IsNotExist(err), "the fetch wrote a submodule working tree (err=%v)", err)
+}
