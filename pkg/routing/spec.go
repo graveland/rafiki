@@ -127,6 +127,12 @@ func ParseModel(s string) (base string, spec Spec, err error) {
 // the flags nodata and zdr are bare. Any malformed or unknown item is an error
 // naming it: never ignored. The empty string is the zero Spec — a policy row
 // stores ” to mean "no spec".
+//
+// quant=, prefer= and only= with an EMPTY value are valid: they parse to a
+// non-nil empty slice, the "explicitly cleared" signal that Merge keeps when a
+// more general level set the key — a nil slice ("unset") inherits, a non-nil
+// empty one ("cleared") does not. sort= with an empty value remains an error:
+// sort inherit is expressed by omitting it.
 func ParseSpec(s string) (Spec, error) {
 	if s == "" {
 		return Spec{}, nil
@@ -139,8 +145,12 @@ func ParseSpec(s string) (Spec, error) {
 		}
 		key, val, hasVal := strings.Cut(item, "=")
 		switch key {
-		case "sort", "quant", "prefer", "only":
+		case "sort":
 			if !hasVal || val == "" {
+				return Spec{}, fmt.Errorf("routing spec %q: item %q: sort needs a value", s, item)
+			}
+		case "quant", "prefer", "only":
+			if !hasVal {
 				return Spec{}, fmt.Errorf("routing spec %q: item %q: %q needs a value", s, item, key)
 			}
 		case "nodata", "zdr":
@@ -168,21 +178,29 @@ func ParseSpec(s string) (Spec, error) {
 			}
 			spec.Quant = quant
 		case "prefer":
-			slugs := strings.Split(val, "|")
-			for _, slug := range slugs {
-				if slug == "" {
-					return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
+			if val == "" {
+				spec.Prefer = []string{}
+			} else {
+				slugs := strings.Split(val, "|")
+				for _, slug := range slugs {
+					if slug == "" {
+						return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
+					}
 				}
+				spec.Prefer = slugs
 			}
-			spec.Prefer = slugs
 		case "only":
-			slugs := strings.Split(val, "|")
-			for _, slug := range slugs {
-				if slug == "" {
-					return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
+			if val == "" {
+				spec.Only = []string{}
+			} else {
+				slugs := strings.Split(val, "|")
+				for _, slug := range slugs {
+					if slug == "" {
+						return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
+					}
 				}
+				spec.Only = slugs
 			}
-			spec.Only = slugs
 		case "nodata":
 			spec.NoData = true
 		case "zdr":
@@ -197,6 +215,9 @@ func ParseSpec(s string) (Spec, error) {
 // names (which may include "unknown"). Every name is validated here — an
 // unknown quantization is a parse error, not a silent pass-through.
 func parseQuantList(spec, item, val string) ([]string, error) {
+	if val == "" {
+		return []string{}, nil
+	}
 	els := strings.Split(val, "|")
 	for _, el := range els {
 		if el == "" {
@@ -280,13 +301,13 @@ func (s Spec) String() string {
 	if s.Sort != "" {
 		parts = append(parts, "sort="+string(s.Sort))
 	}
-	if len(s.Quant) > 0 {
+	if s.Quant != nil {
 		parts = append(parts, "quant="+strings.Join(s.Quant, "|"))
 	}
-	if len(s.Prefer) > 0 {
+	if s.Prefer != nil {
 		parts = append(parts, "prefer="+strings.Join(s.Prefer, "|"))
 	}
-	if len(s.Only) > 0 {
+	if s.Only != nil {
 		parts = append(parts, "only="+strings.Join(s.Only, "|"))
 	}
 	if s.NoData {
@@ -346,7 +367,7 @@ func (s Spec) Quantizations() []string {
 //     jointly.
 func (s Spec) Prefs(pinOnly, ignore []string) (ProviderPrefs, bool) {
 	var prefs ProviderPrefs
-	if len(s.Only) > 0 {
+	if s.Only != nil {
 		prefs.Only = copyList(s.Only)
 	} else {
 		prefs.Only = copyList(pinOnly)

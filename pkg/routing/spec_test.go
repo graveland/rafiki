@@ -128,6 +128,38 @@ func TestSpecParseEmpty(t *testing.T) {
 	}
 }
 
+// TestSpecParseClearedKeys pins that quant=, prefer=, only= parse to non-nil
+// empty slices — the "explicitly cleared" signal that Merge keeps.
+func TestSpecParseClearedKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		got  func(Spec) []string
+	}{
+		{"quant cleared", "quant=", func(s Spec) []string { return s.Quant }},
+		{"prefer cleared", "prefer=", func(s Spec) []string { return s.Prefer }},
+		{"only cleared", "only=", func(s Spec) []string { return s.Only }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := ParseSpec(tc.in)
+			if err != nil {
+				t.Fatalf("ParseSpec(%q) = %v, want success", tc.in, err)
+			}
+			got := tc.got(spec)
+			if got == nil {
+				t.Errorf("%s: slice is nil, want non-nil empty", tc.in)
+			}
+			if len(got) != 0 {
+				t.Errorf("%s: slice = %v, want empty", tc.in, got)
+			}
+		})
+	}
+	// sort= remains an error.
+	if _, err := ParseSpec("sort="); err == nil {
+		t.Error("ParseSpec(\"sort=\") must error: sort needs a value")
+	}
+}
+
 // TestQuantFloorTiers pins the quantization ladder: a floor admits its whole
 // tier and everything above, in tier order — fp8+ = int8 fp8 mxfp8 fp16 bf16
 // fp32 exactly, fp4+ starts with the T1 names, fp6+ excludes T1.
@@ -229,6 +261,35 @@ func TestSpecMergeDataFlagsMonotone(t *testing.T) {
 	}
 }
 
+// TestSpecMergeClearedQuant pins that a receiver with an explicitly cleared
+// quant (non-nil empty slice) does not inherit the lower level's quant — the
+// nil-vs-empty distinction Merge already reads.
+func TestSpecMergeClearedQuant(t *testing.T) {
+	receiver := Spec{Quant: []string{}}
+	lower := Spec{Quant: []string{"fp8+"}}
+	merged := receiver.Merge(lower)
+	if merged.Quant == nil {
+		t.Error("merged.Quant is nil, want non-nil empty (the cleared signal)")
+	}
+	if len(merged.Quant) != 0 {
+		t.Errorf("merged.Quant = %v, want empty (cleared)", merged.Quant)
+	}
+	// And the same for Prefer and Only.
+	prefMerged := Spec{Prefer: []string{}}.Merge(Spec{Prefer: []string{"fireworks"}})
+	if prefMerged.Prefer == nil || len(prefMerged.Prefer) != 0 {
+		t.Errorf("cleared Prefer after Merge = %v, want non-nil empty", prefMerged.Prefer)
+	}
+	onlyMerged := Spec{Only: []string{}}.Merge(Spec{Only: []string{"gmicloud"}})
+	if onlyMerged.Only == nil || len(onlyMerged.Only) != 0 {
+		t.Errorf("cleared Only after Merge = %v, want non-nil empty", onlyMerged.Only)
+	}
+	// A nil (unset) receiver still inherits as before.
+	inherited := Spec{}.Merge(lower)
+	if inherited.Quant == nil || len(inherited.Quant) != 1 || inherited.Quant[0] != "fp8+" {
+		t.Errorf("nil receiver should inherit; got %v", inherited.Quant)
+	}
+}
+
 // TestSpecStringRoundTrip pins the canonical form: fixed key order
 // (sort, quant, only, nodata, zdr), "|" lists, a floor kept as written,
 // sort=balanced emitted, unset keys omitted — and ParseSpec(String()) equal.
@@ -243,7 +304,11 @@ func TestSpecStringRoundTrip(t *testing.T) {
 		{"sort balanced is a decision", Spec{Sort: SortBalanced}, "sort=balanced"},
 		{"floor kept as written", Spec{Quant: []string{"fp8+"}}, "quant=fp8+"},
 		{"quant list", Spec{Quant: []string{"fp8", "bf16"}}, "quant=fp8|bf16"},
+		{"quant cleared", Spec{Quant: []string{}}, "quant="},
+		{"prefer list", Spec{Prefer: []string{"fireworks", "together"}}, "prefer=fireworks|together"},
+		{"prefer cleared", Spec{Prefer: []string{}}, "prefer="},
 		{"only list", Spec{Only: []string{"gmicloud", "novita"}}, "only=gmicloud|novita"},
+		{"only cleared", Spec{Only: []string{}}, "only="},
 		{"nodata", Spec{NoData: true}, "nodata"},
 		{"zdr", Spec{ZDR: true}, "zdr"},
 		{"everything", Spec{Sort: SortLatency, Quant: []string{"fp8+"}, Only: []string{"gmicloud"}, NoData: true, ZDR: true},
@@ -382,7 +447,7 @@ func TestPreferParsesAndRoundTrips(t *testing.T) {
 // repeated key is refused like every other valued key.
 func TestPreferRejectsEmptySlugAndRepeat(t *testing.T) {
 	ck := assert.NewAborting(t)
-	for _, in := range []string{"prefer=a||b", "prefer=", "prefer", "prefer=a,prefer=b"} {
+	for _, in := range []string{"prefer=a||b", "prefer", "prefer=a,prefer=b"} {
 		_, err := ParseSpec(in)
 		ck.Error(err, "ParseSpec(%q) must error", in)
 	}
