@@ -52,12 +52,6 @@ Environment={{unitq (printf "%s=%s" .Key .Value)}}
 WantedBy=default.target
 `
 
-type unitData struct {
-	serviceSpec
-	// Extra is ExtraEnv in deterministic order; see sortedEnv.
-	Extra []envKV
-}
-
 // unitQuote renders one Environment= assignment, quoting it when the value
 // needs it. systemd splits an unquoted assignment on whitespace, so a value
 // containing a space — RAFIKI_DEFAULT_LABELS, or any path under a directory
