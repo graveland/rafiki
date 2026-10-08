@@ -979,6 +979,16 @@ working tree is never touched and nothing the source planted (its
 enter a sandbox: it authenticates to the daemon with its own executor
 credential, and the daemon brokers both ends.
 
+Agents reach the same verbs as tools, on both the fundi and the MCP face:
+`sandbox_create`, `sandbox_list`, `sandbox_remove`, and the two transfer tools
+— `sandbox_sync` (`src_executor`, `src_path`, `dst_executor`, `dst_path`;
+optional `overwrite`, `max_bytes`) copies a file or directory between two
+executors, and `sandbox_sync_repo` (`src_executor`, `src_repo`, `dst_executor`,
+`dst_repo`, `branch`; optional `force`) fetches one committed git branch
+between two repositories. A child reaches only the executors and sandboxes
+`resolve` permits, and `overwrite` is allowed only on a container-isolated
+destination.
+
 A sandboxed child's working directory is a path **inside the container**: the
 executor runs in the container and cannot see a host path, so a spawn block's
 `cwd` is rewritten to the sandbox's `workdir` (the container root when the spec

@@ -645,6 +645,26 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   destination, and no credentials need enter the sandbox: the sandbox reaches
   the daemon through its own executor credential, and the client never dials a
   sandbox directly.
+- **The fundi and MCP faces expose the sandbox verbs as tools** — here, next to
+  each other, because neither face may drift from the other. `sandbox_create`,
+  `sandbox_list` and `sandbox_remove` manage sandboxes; the two transfer tools
+  mirror `SyncPath`/`SyncRepo`:
+  - `sandbox_sync` (`src_executor`, `src_path`, `dst_executor`, `dst_path`;
+    optional `overwrite`, `max_bytes`) copies a file or directory between two
+    executors;
+  - `sandbox_sync_repo` (`src_executor`, `src_repo`, `dst_executor`,
+    `dst_repo`, `branch`; optional `force`) fetches one committed git branch
+    between two repositories (fast-forward only unless `force`; a branch checked
+    out at the destination is refused).
+
+  The whole family materializes only when the daemon has a sandbox table (a nil
+  `sandboxStore` declines it), and every call is bound to the caller's own
+  child id and owner's NON-admin identity, so no tool argument can name another
+  caller's executor. A child reaches only the executors and sandboxes `resolve`
+  permits, and `overwrite` is allowed only when the destination executor's ROW
+  says `isolation=container`. Tool definitions live in
+  `pkg/fundi/tools/sandbox_sync.go`; the daemon bindings in
+  `cmd/rafikid/sandbox_tools.go` and `cmd/rafikid/mcp_sandbox.go`.
 
 #### `ExecutorSession`: the session-executor stream
 
