@@ -36,9 +36,9 @@ func TestEveryBlueprintHasATier(t *testing.T) {
 func TestWorkspaceTierMembership(t *testing.T) {
 	want := []string{
 		"bash", "bash_kill", "bash_output", "bash_start",
-		"edit", "glob", "grep", "ls",
+		"download", "edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
-		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+		"lsp_references", "lsp_rename", "lsp_replace_symbol", "lsp_restart", "lsp_symbols",
 		"pymodule_run", "read", "write",
 	}
 	got := WorkspaceTools()
@@ -52,18 +52,18 @@ func TestWorkspaceTierMembership(t *testing.T) {
 func TestRoutingLists(t *testing.T) {
 	c := assert.NewCollecting(t)
 	wantLocal := []string{
-		"bash", "edit", "glob", "grep", "ls",
+		"bash", "download", "edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
-		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+		"lsp_references", "lsp_rename", "lsp_replace_symbol", "lsp_restart", "lsp_symbols",
 		"pymodule_run", "read", "write",
 	}
 	c.EqDiff(wantLocal, ExecutorLocalTools(), "ExecutorLocalTools()")
 
 	wantRouted := []string{
 		"bash", "bash_kill", "bash_output", "bash_start",
-		"edit", "glob", "grep", "ls",
+		"download", "edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
-		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+		"lsp_references", "lsp_rename", "lsp_replace_symbol", "lsp_restart", "lsp_symbols",
 		"pymodule_run", "read", "write",
 	}
 	c.EqDiff(wantRouted, RoutedToExecutor(), "RoutedToExecutor()")
@@ -92,6 +92,8 @@ func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
 		Cwd:         t.TempDir(),
 		FileTracker: NewFileTracker(),
 		LSP:         &fakeLSPClient{},
+		// toolOptsFor sets Web (download's gate), so this must too.
+		Web: true,
 	}
 	got := registryNames(DefaultBlueprint.MaterializeOnly(opts, ExecutorLocalTools()))
 	for _, name := range ExecutorLocalTools() {

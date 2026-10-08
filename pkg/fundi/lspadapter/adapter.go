@@ -171,15 +171,20 @@ func (a *lspClientAdapter) DocumentSymbols(ctx context.Context, path string) ([]
 // the model a location for something it had no way to identify. path is
 // threaded in because documentSymbol results are relative to the requested
 // file and carry no URI of their own.
+//
+// The full Range end (not SelectionRange's) is carried too: lsp_replace_symbol
+// rewrites the whole symbol span, and SelectionRange covers only the name.
 func flattenSymbols(syms []lsp.DocumentSymbol, path string) []tools.LSPLocation {
 	var out []tools.LSPLocation
 	for _, s := range syms {
 		out = append(out, tools.LSPLocation{
-			URI:  path,
-			Line: s.SelectionRange.Start.Line,
-			Col:  s.SelectionRange.Start.Character,
-			Name: s.Name,
-			Kind: lsp.SymbolKindName(s.Kind),
+			URI:     path,
+			Line:    s.SelectionRange.Start.Line,
+			Col:     s.SelectionRange.Start.Character,
+			EndLine: s.Range.End.Line,
+			EndCol:  s.Range.End.Character,
+			Name:    s.Name,
+			Kind:    lsp.SymbolKindName(s.Kind),
 		})
 		out = append(out, flattenSymbols(s.Children, path)...)
 	}

@@ -30,9 +30,9 @@ func TestRoutedToolsGoToTheExecutor(t *testing.T) {
 func TestOnlyMachineLocalToolsAreRouted(t *testing.T) {
 	want := map[string]bool{
 		"read": true, "write": true, "edit": true, "glob": true, "grep": true,
-		"ls": true, "bash": true, "bash_start": true, "bash_output": true, "bash_kill": true,
+		"ls": true, "bash": true, "bash_start": true, "bash_output": true, "bash_kill": true, "download": true,
 		"lsp_call_hierarchy": true, "lsp_definition": true, "lsp_diagnostics": true,
-		"lsp_references": true, "lsp_rename": true, "lsp_restart": true, "lsp_symbols": true,
+		"lsp_references": true, "lsp_rename": true, "lsp_replace_symbol": true, "lsp_restart": true, "lsp_symbols": true,
 		"pymodule_run": true,
 	}
 	for _, name := range tools.RoutedToExecutor() {

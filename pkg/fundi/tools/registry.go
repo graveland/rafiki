@@ -134,6 +134,13 @@ type LSPLocation struct {
 	// primary mode.
 	Name string
 	Kind string
+	// EndLine and EndCol are the 0-based END of the symbol's full range, set
+	// for document-symbol results only. lsp_replace_symbol needs the whole
+	// symbol span, not just its start; a client that leaves them zero yields a
+	// zero-width range the tool widens to the start line rather than
+	// mis-editing.
+	EndLine int
+	EndCol  int
 }
 
 // FileChangeNotifier is told when a tool has written to a file, so a

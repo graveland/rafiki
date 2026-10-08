@@ -264,6 +264,14 @@ func toolOptsFor(opts Options, root string) tools.ToolOpts {
 		RTK:          opts.RTK,
 		OutputPolicy: tools.OutputPolicy{SpillDir: opts.SpillDir},
 		Env:          opts.Env,
+		// Web is set unconditionally: the executor has no web POLICY of its
+		// own — the daemon's ToolsWeb decides whether an agent's tools[]
+		// contains download, and this registry only materializes workspace
+		// tools (ExecutorLocalTools), so webfetch/websearch (daemon tier) are
+		// never built here. What the flag does buy is materializing download;
+		// whether it can actually reach the network is the host's business
+		// (a sandbox with network=none fails the dial, which is correct).
+		Web: true,
 	}
 }
 

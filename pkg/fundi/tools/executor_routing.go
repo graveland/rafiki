@@ -49,6 +49,12 @@ var tierByTool = map[string]Tier{
 	"ls":    TierWorkspace,
 	"bash":  TierWorkspace,
 
+	// Workspace — network AND filesystem. download's effect is a file on a
+	// specific host, so it runs where that file lives; the fetch happens
+	// there too, confined by that host's own egress (a sandbox with
+	// network=none fails the download, which is correct).
+	"download": TierWorkspace,
+
 	// Workspace — pymodules. pymodule_run executes a saved pymodule out of
 	// the executor's synced cache: it needs the executor's interpreter and
 	// corpus, though the run itself never touches workspace files.
@@ -68,6 +74,7 @@ var tierByTool = map[string]Tier{
 	"lsp_diagnostics":    TierWorkspace,
 	"lsp_references":     TierWorkspace,
 	"lsp_rename":         TierWorkspace,
+	"lsp_replace_symbol": TierWorkspace,
 	"lsp_restart":        TierWorkspace,
 	"lsp_symbols":        TierWorkspace,
 
