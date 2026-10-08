@@ -8,7 +8,7 @@ package protocol
 // pkg/connectapi and the mechanics (ReadTree/WriteTree, git bundle) in
 // pkg/executor and cmd/rafikid.
 
-// SyncEndpoint names one end of a transfer: an executor ref/selector and a
+// SyncEndpoint names one end of a transfer: an executor name or id and a
 // path on it. SyncRepo reads the path as the repository directory.
 type SyncEndpoint struct {
 	Executor string

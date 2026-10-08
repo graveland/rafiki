@@ -798,7 +798,7 @@ One-shot poll of a background job. Never blocks.
 
 Five RPCs move files and git branches between executors. They are the data path
 behind the daemon's `SyncPath`/`SyncRepo` verbs (`docs/reference/control-protocol.md`
-→ "Path and repo sync"): the daemon resolves which executors a caller may name
+→ "Verbs"): the daemon resolves which executors a caller may name
 and relays between two of them, so on this side they are ordinary typed RPCs
 that carry no caller identity.
 
@@ -905,7 +905,9 @@ than judged unresolved.
   rooted under `/usr`. An exemption base must be a real subtree: `/` itself,
   and a base that IS one of the denied trees, do not exempt. The HOME base is
   stricter than the other two: homes legitimately live under `/home`, `/Users`
-  and `/root`, so those prefixes are allowed, but a home reached through any
+  and `/root`, so a home must be a STRICT descendant of one of them —
+  `/Users/<name>` or `/home/<name>`, never `/Users` or `/home` themselves —
+  while `/root` is also valid as root's own home. A home reached through any
   OTHER denied tree (macOS's `/etc` → `/private/etc`) is not a usable base, and
   a home strictly under the process temp directory is.
 - **Root and home ancestry.** The resolved path must not be the executor's root
@@ -950,9 +952,11 @@ GitFetchBundle(GitFetchBundleRequest{repo, bundle_path, branch, force}) → GitF
 
 Unary. Fetches a bundle file into `repo`, creating it when absent. It is git's
 own fetch semantics: a checked-out branch is refused, and a non-fast-forward
-update is refused unless `force`. It never touches a working tree beyond
-checking out a freshly created repository, and it never reads the source's
-`.git/config` or hooks, so nothing the source planted can execute here. The
+update is refused unless `force`. A fetch never touches the working tree of an
+EXISTING repository; a repository that does not exist is created with the
+branch checked out. It never reads the source's `.git/config` or hooks, and a
+bundle carries objects and refs only — every git call the executor makes runs
+under `gitHardening` and a fixed environment. The
 bundle is verified (`git bundle verify`, against a throwaway bare repository in
 the scratch directory, with the destination's object store attached as an
 alternate when there is one) BEFORE anything is created, so a corrupt bundle
@@ -973,8 +977,9 @@ symlink (`GitFetchBundle` may create an absent one).
 
 Every invocation is prefixed with `gitHardening` — `-c core.fsmonitor=false`,
 `-c core.hooksPath=/dev/null`, `-c protocol.ext.allow=never`,
-`-c core.sshCommand=false` — as defense in depth against a hostile
-`.git/config` in a repository the executor did not create: a repository's own
+`-c core.sshCommand=false`, `-c core.alternateRefsCommand=true` — as defense in
+depth against a hostile `.git/config` in a repository the executor did not
+create: a repository's own
 configuration must not run a hook, an fsmonitor program, or a remote transport
 helper. Each option is pinned by a test that fails when it is removed
 (`pkg/executor/git_sync_test.go`).

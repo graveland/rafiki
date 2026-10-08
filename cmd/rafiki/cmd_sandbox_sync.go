@@ -28,14 +28,19 @@ func newSandboxSyncCmd() *cobra.Command {
 		Long: `Copy a tree (or a single file) from one executor to another.
 
 Each argument names an end as <executor>:<absolute path>: the executor is a
-ref or selector the daemon resolves to an executor row, and the path is
-absolute on that executor. The source is read and the destination written
-through the daemon; the client never dials an executor directly.
+name or id the daemon resolves to an executor row, and the path is absolute on
+that executor. The source is read and the destination written through the
+daemon; the client never dials an executor directly.
 
 --overwrite replaces the destination, and the daemon allows it only when the
 destination's executor row says isolation=container. --max-bytes caps the
-transfer; an omitted flag means no caller cap, and a supplied value must be
-positive.
+transfer; it counts the bytes of the tar stream (headers and padding included),
+not regular-file content. An omitted flag means no caller cap, and a supplied
+value must be positive.
+
+Do NOT use sync to copy a repository directory: its .git carries config, hooks
+and alternates the source planted, which would land at the destination. Use
+'sandbox sync-repo' for a repository.
 
 Table output is one line: "copied <files> files, <bytes> bytes". -o json/-j
 and -J print the response's canonical protojson instead.`,
@@ -43,7 +48,7 @@ and -J print the response's canonical protojson instead.`,
 		RunE: runSandboxSync,
 	}
 	cmd.Flags().Bool("overwrite", false, "Replace the destination (container-isolated destination only)")
-	cmd.Flags().Int64("max-bytes", 0, "Cap on the transferred bytes (default: no caller cap)")
+	cmd.Flags().Int64("max-bytes", 0, "Cap on the tar stream bytes, headers and padding included (default: no caller cap)")
 	return cmd
 }
 
@@ -103,9 +108,11 @@ func newSandboxSyncRepoCmd() *cobra.Command {
 
 Each endpoint names an executor and the repository directory on it, exactly as
 'sandbox sync' does. The branch is moved as a bundle — the source's refs are
-read, bundled, relayed and fetched at the destination — so nothing the source
-planted (config, hooks) can execute at the destination. It never touches a
-working tree.
+read, bundled, relayed and fetched at the destination — a bundle carries
+objects and refs only and every git call the executor makes runs under its git
+hardening and a fixed environment, so the source's config and hooks are never
+read or run. A fetch never touches the working tree of an existing repository;
+a repository that does not exist is created with the branch checked out.
 
 A checked-out branch and a non-fast-forward update are refused; --force allows
 the non-fast-forward rewrite. There is no overwrite: re-seeding an existing

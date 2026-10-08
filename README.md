@@ -971,11 +971,18 @@ rafiki sandbox sync-repo <executor>:<repo> <executor>:<repo> <branch>
 
 `sync` copies a tree (or a single file); `--overwrite` replaces the destination
 and is allowed only on a container-isolated destination, and `--max-bytes` caps
-the transfer. `sync-repo` moves only COMMITTED work: it bundles the branch on
-the source, relays the bundle and fetches it at the destination — a checked-out
-branch and a non-fast-forward update are refused unless `--force` — so a
-working tree is never touched and nothing the source planted (its
-`.git/config` or hooks) can execute at the destination. No credentials need
+the transfer — it counts the bytes of the tar STREAM (headers and padding
+included), while the `bytes` reported for a transfer is regular-file content.
+Do NOT use `sync` to copy a repository directory: its `.git` carries config,
+hooks and alternates the source planted, which would land at the destination —
+use `sync-repo` for a repository. `sync-repo` moves only COMMITTED work: it
+bundles the branch on the source, relays the bundle and fetches it at the
+destination — a checked-out branch and a non-fast-forward update are refused
+unless `--force`. A bundle carries objects and refs only, and every git call
+the executor makes runs under its git hardening and a fixed environment, so the
+source's config and hooks are never read or run. A fetch never touches the
+working tree of an existing repository; a repository that does not exist is
+created with the branch checked out. No credentials need
 enter a sandbox: it authenticates to the daemon with its own executor
 credential, and the daemon brokers both ends.
 
