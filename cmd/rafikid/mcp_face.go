@@ -423,6 +423,8 @@ var mcpBlueprints = []tools.Tool{
 	&tools.SandboxCreateBlueprint{},
 	&tools.SandboxListBlueprint{},
 	&tools.SandboxRemoveBlueprint{},
+	&tools.SandboxSyncBlueprint{},
+	&tools.SandboxSyncRepoBlueprint{},
 	&tools.TaskAddBlueprint{},
 	&tools.TaskUpdateBlueprint{},
 	&tools.TaskDropBlueprint{},

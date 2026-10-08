@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -29,7 +30,13 @@ type recordingSandboxControl struct {
 	info  protocol.SandboxInfo
 	list  []protocol.SandboxInfo
 	err   error
+	// sync is the path-sync backend the binding reaches through syncer(). nil
+	// models a daemon whose executor pool was never wired, which is the
+	// "path sync is not available" case.
+	sync *pathSyncer
 }
+
+func (r *recordingSandboxControl) syncer() *pathSyncer { return r.sync }
 
 func (r *recordingSandboxControl) SandboxCreate(_ context.Context, owner users.Identity, callerChild string, _ protocol.SandboxSpec) (protocol.SandboxInfo, error) {
 	r.calls = append(r.calls, recordedSandboxCall{verb: "create", owner: owner, callerChild: callerChild})
@@ -125,4 +132,58 @@ func TestSandboxToolBindingWiredIntoRuntimeOptions(t *testing.T) {
 	ro, err = ctrl.agentRuntimeOptions(req, "c_kid", false, "brent", "u-owner")
 	ck.Require().NoError(err, "agentRuntimeOptions with a sandbox store")
 	ck.NotNil(ro.Sandboxes, "a daemon with a sandbox table binds the sandbox tools")
+}
+
+// TestSandboxSyncToolBindingUnavailableWithoutSyncer pins the pool-less daemon:
+// a child-bound manager whose Controller has no path-sync backend answers both
+// transfer verbs with the explicit unavailable error, never a nil-pointer panic.
+func TestSandboxSyncToolBindingUnavailableWithoutSyncer(t *testing.T) {
+	c := assert.NewAborting(t)
+	m := &controllerSandboxes{c: &recordingSandboxControl{}, childID: "c_kid", ownerUserID: "u-owner"}
+
+	_, err := m.Sync(context.Background(), protocol.SyncPathRequest{})
+	ce := controllerErr(t, err)
+	c.Eq(protocol.ErrInternal, ce.Code, "Sync code")
+	c.Eq("path sync is not available on this daemon", ce.Message, "Sync message")
+
+	_, err = m.SyncRepo(context.Background(), protocol.SyncRepoRequest{})
+	ce = controllerErr(t, err)
+	c.Eq(protocol.ErrInternal, ce.Code, "SyncRepo code")
+	c.Eq("path sync is not available on this daemon", ce.Message, "SyncRepo message")
+}
+
+// TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity pins that Sync and
+// SyncRepo reach the syncer with the construction-time child id and the owner's
+// NON-admin identity — exactly the values Create passes. The fixture's "box" is
+// reachable only to c-child and exec-src only to u-owner, so the success and the
+// two refusals together pin both, and neither is a tool argument.
+func TestSandboxSyncToolBindingPassesChildAndNonAdminIdentity(t *testing.T) {
+	c := assert.NewAborting(t)
+	fx := newSandboxSyncFixture(t)
+
+	own := &controllerSandboxes{c: &recordingSandboxControl{sync: fx.p}, childID: "c-child", ownerUserID: "u-owner"}
+	c.False(own.owner().IsAdmin, "the bound owner identity must never be admin")
+
+	res, err := own.Sync(context.Background(), protocol.SyncPathRequest{
+		Src: protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "hello.txt")},
+		Dst: protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "copy")},
+	})
+	c.NoError(err, "the child that created the sandbox may sync into it")
+	c.Eq(int64(1), res.Files, "one file moved")
+
+	sibling := &controllerSandboxes{c: &recordingSandboxControl{sync: fx.p}, childID: "c-other", ownerUserID: "u-owner"}
+	_, err = sibling.Sync(context.Background(), protocol.SyncPathRequest{
+		Src: protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "hello.txt")},
+		Dst: protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "copy2")},
+	})
+	c.Error(err, "a sibling must not reach the sandbox")
+	c.StrContains(err.Error(), "not reachable", "sibling refusal")
+
+	stranger := &controllerSandboxes{c: &recordingSandboxControl{sync: fx.p}, childID: "c-child", ownerUserID: "u-stranger"}
+	_, err = stranger.Sync(context.Background(), protocol.SyncPathRequest{
+		Src: protocol.SyncEndpoint{Executor: "exec-src", Path: filepath.Join(fx.src, "hello.txt")},
+		Dst: protocol.SyncEndpoint{Executor: "box", Path: filepath.Join(fx.dst, "copy3")},
+	})
+	c.Error(err, "a stranger owner must not reach the executors")
+	c.StrContains(err.Error(), "not reachable", "owner refusal")
 }

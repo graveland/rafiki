@@ -29,6 +29,14 @@ type fakeSandboxManager struct {
 
 	removed   []string
 	removeErr error
+
+	syncReqs []protocol.SyncPathRequest
+	syncRes  protocol.SyncPathResult
+	syncErr  error
+
+	repoReqs []protocol.SyncRepoRequest
+	repoRes  protocol.SyncRepoResult
+	repoErr  error
 }
 
 func (f *fakeSandboxManager) Create(_ context.Context, spec protocol.SandboxSpec) (protocol.SandboxInfo, error) {
@@ -53,6 +61,22 @@ func (f *fakeSandboxManager) Remove(_ context.Context, ref string) error {
 	}
 	f.removed = append(f.removed, ref)
 	return nil
+}
+
+func (f *fakeSandboxManager) Sync(_ context.Context, req protocol.SyncPathRequest) (protocol.SyncPathResult, error) {
+	if f.syncErr != nil {
+		return protocol.SyncPathResult{}, f.syncErr
+	}
+	f.syncReqs = append(f.syncReqs, req)
+	return f.syncRes, nil
+}
+
+func (f *fakeSandboxManager) SyncRepo(_ context.Context, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error) {
+	if f.repoErr != nil {
+		return protocol.SyncRepoResult{}, f.repoErr
+	}
+	f.repoReqs = append(f.repoReqs, req)
+	return f.repoRes, nil
 }
 
 // sandboxSchemaJSON decodes a blueprint's input schema for structural checks.

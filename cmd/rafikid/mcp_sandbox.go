@@ -70,3 +70,25 @@ func (m *mcpSandboxManager) List(ctx context.Context) ([]protocol.SandboxInfo, e
 func (m *mcpSandboxManager) Remove(ctx context.Context, ref string) error {
 	return m.ctrl.SandboxRemove(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, ref)
 }
+
+// Sync relays a file or directory between two executors this caller may reach.
+// It passes the SAME owner and caller child Create does — the owner resolved
+// through sandboxOwnerIdentity, so a child of an admin acts as its owner's
+// NON-admin identity — and never a tool argument.
+func (m *mcpSandboxManager) Sync(ctx context.Context, req protocol.SyncPathRequest) (protocol.SyncPathResult, error) {
+	s := m.ctrl.syncer()
+	if s == nil {
+		return protocol.SyncPathResult{}, errPathSyncUnavailable()
+	}
+	return s.SyncPath(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, req)
+}
+
+// SyncRepo relays one git branch between two executors this caller may reach,
+// with the same construction-time owner and caller child as Create.
+func (m *mcpSandboxManager) SyncRepo(ctx context.Context, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error) {
+	s := m.ctrl.syncer()
+	if s == nil {
+		return protocol.SyncRepoResult{}, errPathSyncUnavailable()
+	}
+	return s.SyncRepo(ctx, sandboxOwnerIdentity(m.owner, m.callerChild), m.callerChild, req)
+}

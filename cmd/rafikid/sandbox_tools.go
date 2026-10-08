@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -20,6 +21,10 @@ type sandboxController interface {
 	SandboxCreate(ctx context.Context, owner users.Identity, callerChild string, spec protocol.SandboxSpec) (protocol.SandboxInfo, error)
 	SandboxList(owner users.Identity) ([]protocol.SandboxInfo, error)
 	SandboxRemove(ctx context.Context, owner users.Identity, callerChild, ref string) error
+	// syncer is the daemon's path-sync backend, nil until the executor pool is
+	// wired at boot. The child-bound manager takes it through this accessor so
+	// the binding stays the same object it uses for the other sandbox verbs.
+	syncer() *pathSyncer
 }
 
 var _ sandboxController = (*Controller)(nil)
@@ -36,8 +41,9 @@ var _ sandboxController = (*Controller)(nil)
 // child of an admin can never reach daemon-wide sandbox state.
 //
 // The two faces change together: this binding must grant a child the same
-// sandbox verbs the Connect gate (CreateSandbox/RemoveSandbox childScoped,
-// ListSandboxes ownerScoped) and the MCP face (newMCPSandboxes) grant it.
+// sandbox verbs the Connect gate (CreateSandbox/RemoveSandbox/SyncPath/SyncRepo
+// childScoped, ListSandboxes ownerScoped) and the MCP face (newMCPSandboxes)
+// grant it.
 type controllerSandboxes struct {
 	c           sandboxController
 	childID     string
@@ -81,4 +87,37 @@ func (m *controllerSandboxes) List(ctx context.Context) ([]protocol.SandboxInfo,
 
 func (m *controllerSandboxes) Remove(ctx context.Context, ref string) error {
 	return m.c.SandboxRemove(ctx, m.owner(), m.childID, ref)
+}
+
+// Sync relays a file or directory between two executors the bound child may
+// reach. The owner and the caller's child id are the SAME values Create passes,
+// closed over at construction and never taken from a tool argument.
+func (m *controllerSandboxes) Sync(ctx context.Context, req protocol.SyncPathRequest) (protocol.SyncPathResult, error) {
+	s := m.c.syncer()
+	if s == nil {
+		return protocol.SyncPathResult{}, errPathSyncUnavailable()
+	}
+	return s.SyncPath(ctx, m.owner(), m.childID, req)
+}
+
+// SyncRepo relays one git branch between two executors the bound child may
+// reach, with the same construction-time owner and child id as Create.
+func (m *controllerSandboxes) SyncRepo(ctx context.Context, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error) {
+	s := m.c.syncer()
+	if s == nil {
+		return protocol.SyncRepoResult{}, errPathSyncUnavailable()
+	}
+	return s.SyncRepo(ctx, m.owner(), m.childID, req)
+}
+
+// errPathSyncUnavailable is what a sandbox tool face returns when this daemon
+// has no path-sync backend (no executor pool at boot, so wirePathSync installed
+// nothing). It is a *connectapi.ControllerError with the same Code/Message on
+// both faces, so a caller learns the daemon cannot sync rather than that its
+// request was malformed.
+func errPathSyncUnavailable() error {
+	return &connectapi.ControllerError{
+		Code:    protocol.ErrInternal,
+		Message: "path sync is not available on this daemon",
+	}
 }

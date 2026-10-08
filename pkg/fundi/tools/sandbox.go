@@ -35,6 +35,14 @@ type SandboxManager interface {
 	List(ctx context.Context) ([]protocol.SandboxInfo, error)
 	// Remove tears down one sandbox by name or row id.
 	Remove(ctx context.Context, ref string) error
+	// Sync copies a file or a directory between two executors the bound caller
+	// may reach, brokered by the daemon. MaxBytes is the caller's cap; nil means
+	// no caller cap and a present value must be > 0 (the daemon refuses a
+	// present non-positive value).
+	Sync(ctx context.Context, req protocol.SyncPathRequest) (protocol.SyncPathResult, error)
+	// SyncRepo fetches one git branch from a repository on one executor into a
+	// repository on another as a bundle. Only committed state travels.
+	SyncRepo(ctx context.Context, req protocol.SyncRepoRequest) (protocol.SyncRepoResult, error)
 }
 
 // --- shared input parsing --------------------------------------------------

@@ -140,10 +140,14 @@ var tierByTool = map[string]Tier{
 	// Daemon — the sandbox verbs touch the daemon's sandbox table and the
 	// executor pool, never the caller's filesystem: the container they name
 	// runs on the launcher's machine, so the effect is the same wherever the
-	// agent runs.
-	"sandbox_create": TierDaemon,
-	"sandbox_list":   TierDaemon,
-	"sandbox_remove": TierDaemon,
+	// agent runs. sandbox_sync and sandbox_sync_repo are daemon-brokered
+	// transfers BETWEEN executors: the daemon relays them, so the verb's own
+	// effect is a network call on the daemon, not a file on the agent's host.
+	"sandbox_create":    TierDaemon,
+	"sandbox_list":      TierDaemon,
+	"sandbox_remove":    TierDaemon,
+	"sandbox_sync":      TierDaemon,
+	"sandbox_sync_repo": TierDaemon,
 }
 
 // notRoutedYet names workspace tools the parent does not forward to an executor.
