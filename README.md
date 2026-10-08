@@ -960,6 +960,25 @@ invisible to the CLI: `rafiki sandbox ls` shows spawn-block rows too (their
 spawning child, or any of its ancestors, may also remove it). A spawn block is
 unnamed and has no TTL.
 
+**Syncing code in and out.** Move a tree or a committed git branch between
+executors (a host executor and a sandbox, or two sandboxes) through the daemon
+— the client never dials an executor directly:
+
+```sh
+rafiki sandbox sync <executor>:<path> <executor>:<path>
+rafiki sandbox sync-repo <executor>:<repo> <executor>:<repo> <branch>
+```
+
+`sync` copies a tree (or a single file); `--overwrite` replaces the destination
+and is allowed only on a container-isolated destination, and `--max-bytes` caps
+the transfer. `sync-repo` moves only COMMITTED work: it bundles the branch on
+the source, relays the bundle and fetches it at the destination — a checked-out
+branch and a non-fast-forward update are refused unless `--force` — so a
+working tree is never touched and nothing the source planted (its
+`.git/config` or hooks) can execute at the destination. No credentials need
+enter a sandbox: it authenticates to the daemon with its own executor
+credential, and the daemon brokers both ends.
+
 A sandboxed child's working directory is a path **inside the container**: the
 executor runs in the container and cannot see a host path, so a spawn block's
 `cwd` is rewritten to the sandbox's `workdir` (the container root when the spec

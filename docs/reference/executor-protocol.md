@@ -794,6 +794,217 @@ One-shot poll of a background job. Never blocks.
 
 `Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
 
+## Tree and git sync
+
+Five RPCs move files and git branches between executors. They are the data path
+behind the daemon's `SyncPath`/`SyncRepo` verbs (`docs/reference/control-protocol.md`
+→ "Path and repo sync"): the daemon resolves which executors a caller may name
+and relays between two of them, so on this side they are ordinary typed RPCs
+that carry no caller identity.
+
+`DescribeResponse.tree_sync` (field 18) reports that this executor accepts
+ReadTree/WriteTree and the three `Git*` RPCs. It is a capability SELF-REPORT,
+safe for the same reason as `skills_sync`: it only ever narrows what the
+executor will do, so a wrong value costs a refused sync, never an admitted one.
+
+### ReadTree
+
+```
+ReadTree(ReadTreeRequest{path}) → stream ReadTreeResponse{oneof msg { TreeHeader header; bytes chunk }}
+TreeHeader{is_dir}
+```
+
+Server-streaming. `path` must be absolute and clean and must name a regular
+file or a directory — a symlink path, or anything else, is refused
+`InvalidArgument`. The stream starts with exactly one `TreeHeader`, then
+carries a tar stream in 256 KiB chunks: a file is one entry named
+`filepath.Base(path)`; a directory's entries follow, relative to it, and the
+root itself is not emitted. Symlinks are emitted verbatim (their targets are
+never resolved), and sockets, devices and fifos are skipped — they cannot be
+transferred and their contents would be meaningless on the far side.
+
+### WriteTree
+
+```
+WriteTree(stream WriteTreeRequest{oneof msg { WriteTreeStart start; bytes chunk }}) → WriteTreeResponse{files, bytes}
+WriteTreeStart{path, is_dir, overwrite, optional max_bytes}
+```
+
+Client-streaming. The first frame must be a `WriteTreeStart`; `path` must be
+absolute and clean. `max_bytes`, when present, must be greater than zero — the
+field is `optional` precisely so an explicit zero is refused rather than read
+as "unlimited".
+
+The tar is UNTRUSTED in this direction too: the caller may be a compromised
+sandbox and this side writes to a filesystem the daemon cares about. Every
+entry is validated before anything is created, and the transfer is extracted
+into a staging directory (`os.MkdirTemp(parent, ".rafiki-sync-")`, made 0755
+and removed on every failure path) beside the destination, then renamed into
+place, so a failed transfer leaves the destination untouched.
+
+Entry rules:
+
+- Absolute names, the empty name, a name resolving to the destination root,
+  and any `..` component are refused.
+- Only regular files, directories and symlinks are accepted. A hard link and
+  every other type (device, fifo, socket, …) are refused.
+- `safeJoin` Lstats every ancestor component of an entry's path and refuses any
+  entry whose parent traverses an EXISTING symlink — a symlink planted by an
+  earlier entry must not become a way out of the staging directory. Symlinks
+  are created verbatim and never followed while extracting.
+- Special mode bits are stripped: a regular file's mode goes to the kernel
+  through `unix.Open` masked to `0o777`, so a setuid/setgid/sticky tar mode
+  never becomes a setuid/setgid/sticky file on disk. The executable bit is
+  kept.
+- Directories are created `0o700` and chmodded to their header mode at the end,
+  deepest first, so the deepest `chmod` is never locked out by a parent.
+
+Resource guards count STREAM bytes — headers and padding included — not file
+content, so a flood of empty files, directories or symlinks cannot do
+unbounded disk work while the file counters never move. `max_bytes` caps that
+stream total, and the free-space floor is re-checked every 8 MiB of stream
+bytes.
+
+**Free-space floor.** 256 MiB must be free on the destination's filesystem
+before extraction starts, and again every 8 MiB of stream bytes consumed; below
+it the transfer is refused `ResourceExhausted`.
+
+A file transfer (`is_dir` false) must carry exactly one entry, and that entry
+must be a regular file.
+
+**Publish.** Without `overwrite`, an existing destination is refused
+(`FailedPrecondition`) unless it is an EMPTY directory and the transfer is a
+directory. A file is published with a hard link — which cannot clobber —
+falling back to rename only after re-checking that the destination is still
+absent. With `overwrite`, the old tree is renamed aside
+(`<parent>/.rafiki-old-<random>`), the staged tree is renamed in, and the old
+tree is then removed; a failure before the final rename restores the old tree
+(and, if even that fails, the error names the stranded path).
+
+**The overwrite path guard** (`checkOverwritePath`, `pkg/executor/tree.go`)
+runs only when `overwrite` is set. Every rule is applied to the
+symlink-RESOLVED path — the longest existing ancestor is `EvalSymlinks`'d and
+the non-existent tail re-joined — so a link pointing into `/etc` is judged as
+`/etc`, not by the link's own name. A path whose longest existing ancestor is a
+symlink with a missing target (a dangling symlink) is refused outright rather
+than judged unresolved.
+
+- **At least two components.** A destination with fewer than two path
+  components is refused. Two is the floor, not three: `/work/repo` is a
+  legitimate sandbox target, while `/work` and `/` are not targets at all.
+- **Deny list.** A path that IS, or is under, one of these top-level trees is
+  refused: `/bin`, `/boot`, `/dev`, `/etc`, `/lib`, `/lib32`, `/lib64`,
+  `/proc`, `/root`, `/sbin`, `/sys`, `/usr`, `/var`, `/System`, `/Library`,
+  `/Applications`, `/private`, `/Volumes`, `/Users`, `/home`, `/opt`. The
+  comparison is component-wise and case-INSENSITIVE, so a case variant on a
+  case-sensitive filesystem cannot slip past.
+- **Exemptions.** A path strictly under the executor's own `--root`, strictly
+  under the user's home, or strictly under the process temp directory
+  (`os.TempDir()`) is exempt from the deny list — a denied prefix would
+  otherwise cover `/home`, macOS's `/private/var/folders`, or an executor
+  rooted under `/usr`. An exemption base must be a real subtree: `/` itself,
+  and a base that IS one of the denied trees, do not exempt. The HOME base is
+  stricter than the other two: homes legitimately live under `/home`, `/Users`
+  and `/root`, so those prefixes are allowed, but a home reached through any
+  OTHER denied tree (macOS's `/etc` → `/private/etc`) is not a usable base, and
+  a home strictly under the process temp directory is.
+- **Root and home ancestry.** The resolved path must not be the executor's root
+  or the home directory, nor an ANCESTOR of either. Equality and ancestry are
+  decided with `os.SameFile` where both paths exist — a case-insensitive
+  filesystem or an alias cannot slip a path past — falling back to a string
+  comparison when the protected path does not exist yet (a synthetic or
+  uncreated executor root is still protected).
+
+### GitRefs
+
+```
+GitRefs(GitRefsRequest{repo}) → GitRefsResponse{exists, heads[{name, oid}], scratch_dir}
+```
+
+Unary. Reports whether `repo` is a git repository on this executor and, if so,
+its branch heads (`git for-each-ref refs/heads`) plus the executor's
+`scratch_dir`. An absent path, or one that is not a directory (Lstat, so a
+symlink is not followed), answers `exists=false` without an error — "there is
+nothing there" is a normal answer for a destination that is about to be seeded.
+
+### GitBundle
+
+```
+GitBundle(GitBundleRequest{repo, branch, exclude_oids}) → GitBundleResponse{up_to_date, bundle_path, bytes, tip_oid}
+```
+
+Unary. Writes one branch to a bundle file in the executor's scratch directory,
+skipping the objects named by `exclude_oids` (the objects the caller already
+has). If the branch tip is itself in the exclude set, or git refuses an
+otherwise empty bundle because every object it would carry is already a
+prerequisite, the reply is `up_to_date=true` with `tip_oid` set and no file.
+Prerequisites this repository cannot resolve are dropped before the bundle is
+created, so a caller may offer tips of a destination that is ahead of or
+unrelated to this source.
+
+### GitFetchBundle
+
+```
+GitFetchBundle(GitFetchBundleRequest{repo, bundle_path, branch, force}) → GitFetchBundleResponse{old_oid, new_oid, created_repo}
+```
+
+Unary. Fetches a bundle file into `repo`, creating it when absent. It is git's
+own fetch semantics: a checked-out branch is refused, and a non-fast-forward
+update is refused unless `force`. It never touches a working tree beyond
+checking out a freshly created repository, and it never reads the source's
+`.git/config` or hooks, so nothing the source planted can execute here. The
+bundle is verified (`git bundle verify`, against a throwaway bare repository in
+the scratch directory, with the destination's object store attached as an
+alternate when there is one) BEFORE anything is created, so a corrupt bundle
+cannot leave a half-created destination behind. A non-empty directory that is
+not a repository is refused, never initialized over. The bundle file is
+consumed exactly once and removed whatever the outcome.
+
+### Git hardening and scratch handling
+
+Every git operation is a typed RPC invoked with an ARGV array — never a shell
+and never a string concatenated into one argument. Values are validated before
+any subprocess runs: a leading-dash `branch`/`url`/`ref` is refused (git would
+parse it as an option), a branch name must be accepted by
+`git check-ref-format --branch` (and may not be empty, `HEAD`, or contain the
+reflog syntax `@{`), an object id must be 40 or 64 lowercase hex characters,
+and a `repo` must be an absolute, clean path whose final component is not a
+symlink (`GitFetchBundle` may create an absent one).
+
+Every invocation is prefixed with `gitHardening` — `-c core.fsmonitor=false`,
+`-c core.hooksPath=/dev/null`, `-c protocol.ext.allow=never`,
+`-c core.sshCommand=false` — as defense in depth against a hostile
+`.git/config` in a repository the executor did not create: a repository's own
+configuration must not run a hook, an fsmonitor program, or a remote transport
+helper. Each option is pinned by a test that fails when it is removed
+(`pkg/executor/git_sync_test.go`).
+
+The subprocess environment forces `LC_ALL=C` (locale-independent messages) and
+`GIT_TERMINAL_PROMPT=0` (git can never block on a terminal that does not
+exist), dropping any conflicting `LC_ALL`/`GIT_TERMINAL_PROMPT`/
+`GIT_CEILING_DIRECTORIES` from the pinned base before prepending them.
+
+Repository discovery is fenced by `GIT_CEILING_DIRECTORIES=<dir of repo>`, so a
+SUBDIRECTORY of a repository cannot be mistaken for one. The ceiling is defense
+in depth; the authoritative guard is the ownership check: the discovered git
+directory (via `--absolute-git-dir`) must be `<repo>/.git` or `<repo>` itself,
+or the working-tree root (`--show-toplevel`) must BE `repo` — which is how a
+LINKED WORKTREE, a git SUBMODULE or a separate-git-dir checkout counts as a
+repository. Objects for such a checkout are resolved through
+`--git-common-dir`, since the worktree's own git dir has no `objects/`.
+
+Fetches run with `-c transfer.fsckObjects=true`, so a bundle whose objects fail
+git's own fsck is refused.
+
+**Scratch directory.** Bundle files live only in `<os.TempDir()>/rafiki-sync`,
+created `0700` and swept on every call. It refuses to adopt anything it did not
+create: `Mkdir` (not `MkdirAll`) makes a pre-created path visible, a symlink or
+non-directory is refused, and the directory must be owned by this executor's
+effective uid, so a shared `/tmp` cannot have another user plant the path.
+Every call sweeps regular `*.bundle`/`*.bundle.lock` files and `.verify-*`
+directories older than one hour; other names are left alone, so a caller's own
+bookkeeping survives.
+
 ## AdminService: Launch, Reap and Status
 
 `rafiki.admin.v1.AdminService` is the machine-admin surface: starting and
