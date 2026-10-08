@@ -663,7 +663,7 @@ func (c *Cockpit) seedCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		resp, err := c.client.ListChildren(ctx,
-			connect.NewRequest(&rafikiv1.ListChildrenRequest{Statuses: rail.LiveStatuses()}))
+			connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
 		if err != nil {
 			return seedMsg{err: err}
 		}
@@ -973,6 +973,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case closedMsg:
 		return c, c.applyClosed(msg)
+
+	case resumedMsg:
+		return c, c.applyResumed(msg)
 
 	case budgetSetMsg:
 		c.applyBudgetSet(msg)
@@ -1384,6 +1387,8 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c, c.openSpawnForm()
 		case key.Matches(msg, k.EndAgent):
 			return c, c.endSelected()
+		case key.Matches(msg, k.Resume):
+			return c, c.resumeSelected()
 		case key.Matches(msg, k.EditBudget):
 			id := c.selected
 			if id == "" {
@@ -2456,7 +2461,7 @@ func (c *Cockpit) footerHints() string {
 	var bs []key.Binding
 	switch c.focus {
 	case focusRail:
-		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Escape}
+		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape}
 	default:
 		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort}
 	}
@@ -2504,7 +2509,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		k.ToggleImages, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
-		k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Escape)...)
+		k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape)...)
 	right = append(right, group("reading",
 		k.ScrollPageUp, k.ScrollTop, k.ScrollBottom,
 		key.NewBinding(key.WithKeys("up", "down"),

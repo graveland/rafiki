@@ -76,6 +76,7 @@ type keyMap struct {
 	Commit     key.Binding
 	NewAgent   key.Binding
 	EndAgent   key.Binding
+	Resume     key.Binding
 	EditBudget key.Binding
 
 	// Any pane: return to input.
@@ -183,6 +184,8 @@ func defaultKeyMap() keyMap {
 		// different stages: stop a live child, force one that will not stop,
 		// close one that already exited. Each is confirmed by a repeat.
 		EndAgent: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "stop/close")),
+		// Resume restarts an exited row; on a live one it only says so.
+		Resume: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "resume")),
 		// Bare letter, exactly like NewAgent/EndAgent: the rail swallows
 		// every unmatched key while it has focus, so this costs the textarea
 		// nothing and needs no textareaKeys collision check.

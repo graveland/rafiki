@@ -52,6 +52,12 @@ type killedMsg struct {
 	err         error
 }
 
+type resumedMsg struct {
+	childID string
+	name    string
+	err     error
+}
+
 type closedMsg struct {
 	childID string
 	name    string
@@ -186,6 +192,48 @@ func (c *Cockpit) killCmd(childID, name string, force, include bool) tea.Cmd {
 		}
 		return killedMsg{childID: childID, name: name, forced: force, descendants: len(resp.Msg.GetDescendantIds())}
 	}
+}
+
+// resumeCmd restarts an exited child.
+func (c *Cockpit) resumeCmd(childID, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
+		defer cancel()
+
+		_, err := c.client.Resume(ctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID}))
+		return resumedMsg{childID: childID, name: name, err: err}
+	}
+}
+
+// resumeSelected implements `r` on the agents pane. Only an exited row can be
+// resumed; anything else gets a notice rather than a daemon round trip.
+func (c *Cockpit) resumeSelected() tea.Cmd {
+	node, ok := c.rail.Get(c.selected)
+	if !ok {
+		return nil
+	}
+	name := node.Name
+	if name == "" {
+		name = node.ChildID
+	}
+	if !node.Exited {
+		c.setNotice(name + " is not exited")
+		return nil
+	}
+	c.setNotice("resuming " + name + "…")
+	return c.resumeCmd(node.ChildID, name)
+}
+
+// applyResumed reports the outcome of a resume. The row flips back to live on
+// the child's own agent_status event; the re-seed covers a missed one.
+func (c *Cockpit) applyResumed(m resumedMsg) tea.Cmd {
+	if m.err != nil {
+		c.setNotice("could not resume " + m.name + ": " + trimRPCError(m.err))
+		return nil
+	}
+	c.setNotice("resumed " + m.name)
+	c.reseeding = true
+	return c.maybeReseed(nil)
 }
 
 // closeCmd finalizes an exited child: it leaves the daemon's store and can

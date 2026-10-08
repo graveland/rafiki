@@ -44,16 +44,30 @@ func exited(id string, code, ord int32) *rafikiv1.Event {
 	}
 }
 
-func TestSeedSkipsExitedChildren(t *testing.T) {
+func TestSeedKeepsExitedChildrenMarkedExited(t *testing.T) {
 	c := assert.NewCollecting(t)
 	r := rail.New()
-	r.Seed([]*rafikiv1.ChildSummary{
-		summary("c_live", "coordinator", "", "idle", 3),
-		summary("c_dead", "old worker", "", "exited", 99),
-	})
-	c.Require().Eq(1, r.Len(), "Len")
-	_, ok := r.Get("c_dead")
-	c.False(ok, "c_dead must not be in the rail")
+	code := int32(137)
+	dead := summary("c_dead", "old worker", "", "exited", 99)
+	dead.ExitCode = &code
+	r.Seed([]*rafikiv1.ChildSummary{summary("c_live", "coordinator", "", "idle", 3), dead})
+	c.Require().Eq(2, r.Len(), "Len")
+	n, ok := r.Get("c_dead")
+	c.Require().True(ok, "c_dead must be in the rail: rafiki list shows it")
+	c.True(n.Exited, "Exited")
+	c.Require().NotNil(n.ExitCode, "ExitCode")
+	c.Eq(int32(137), *n.ExitCode, "ExitCode")
+}
+
+// A status event newer than the exit means the child was resumed.
+func TestStatusAfterExitMarksTheRowLiveAgain(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{summary("c1", "w", "", "exited", 10)})
+	r.Apply(statusEvt("c1", 11, "idle"))
+	n, _ := r.Get("c1")
+	c.False(n.Exited, "Exited")
+	c.Eq("idle", n.Status, "Status")
 }
 
 func TestSeedAcceptsEveryLiveStatus(t *testing.T) {

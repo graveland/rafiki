@@ -26,11 +26,9 @@ const ParentLabel = "rafiki/parent"
 const NativeSubagentLabel = "rafiki/native-subagent"
 
 // LiveStatuses is every protocol.Status except "exited" -- nine values, of
-// which "running" is a script child's steady state between spawn and exit (a
-// script never streams; its whole life is one run). This is the list the
-// cockpit sends as ListChildrenRequest.Statuses, so a status missing here is
-// a child the seed can never see: every event from it then trips the
-// reseed-on-unknown-child self-heal, which cannot find it either.
+// which "running" is a script child's steady state between spawn and exit.
+// The rail seeds from an unfiltered ListChildren (exited rows included); this
+// list is the set of states a row can be in while its child is up.
 func LiveStatuses() []string {
 	return []string{
 		"spawning", "idle", "streaming", "running", "tool_running",
@@ -233,18 +231,16 @@ func (r *Rail) Remove(childID string) {
 
 // Seed installs or refreshes membership from ListChildren.
 //
-// Callers pass every summary; Seed drops the exited ones itself, so the "never
-// resurrect a historical exit" rule lives in one place rather than at each call
-// site. It is idempotent and safe to call again on reconnect: a child already
+// Callers pass every summary, exited ones included: the rail shows what
+// `rafiki list` shows, so a killed child stays on screen (dimmed) where it can
+// be resumed or closed. It is idempotent and safe to call again on reconnect: a child already
 // in the rail keeps its watermark and badge, so re-seeding to discover children
 // spawned during a disconnect does not silently mark everything read.
 func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range summaries {
-		if s.GetStatus() == "exited" {
-			continue
-		}
+		exited := s.GetStatus() == "exited"
 		if existing, ok := r.nodes[s.GetChildId()]; ok {
 			// Refresh only what the daemon is authoritative for. Never touch
 			// Seen/CountedThrough/Attention -- those are this client's reading
@@ -257,6 +253,8 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			existing.SessionID = s.GetSessionId()
 			existing.Cwd = s.GetCwd()
 			existing.Status = s.GetStatus()
+			existing.Exited = exited
+			existing.ExitCode = s.ExitCode
 			existing.Kind = s.GetKind()
 			existing.MaxCost = s.GetMaxCost()
 			existing.ContextWindow = int(s.GetContextWindow())
@@ -267,6 +265,8 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			Name:          s.GetName(),
 			ParentID:      s.GetLabels()[ParentLabel],
 			Status:        s.GetStatus(),
+			Exited:        exited,
+			ExitCode:      s.ExitCode,
 			Kind:          s.GetKind(),
 			Native:        s.GetLabels()[NativeSubagentLabel] == "1",
 			SessionID:     s.GetSessionId(),
@@ -361,6 +361,11 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 	case *rafikiv1.Event_AgentStatus:
 		if statusOrdinalAdmits(n, ev) {
 			n.Status = p.AgentStatus.GetState()
+			if n.Exited && n.Status != "exited" && ev.Ordinal != nil {
+				// A status newer than the exit means the child was resumed.
+				n.Exited = false
+				n.ExitCode = nil
+			}
 			// Any status transition means the retry resolved one way or the other.
 			n.Retrying = false
 		}

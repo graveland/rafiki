@@ -397,3 +397,30 @@ func TestBudgetFormPlaceholderRenderWidth(t *testing.T) {
 	stripped := ansi.Strip(rendered)
 	assert.NewCollecting(t).StrContains(stripped, "(unlimited)", "rendered view missing full placeholder '(unlimited)':\n")
 }
+
+// ── resume ───────────────────────────────────────────────────────────────────
+
+func TestResumeKeyOnlyActsOnAnExitedRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+
+	ck.Nil(press(c, "r"), "r on a live row issued a command")
+	ck.StrContains(c.notice, "not exited", "notice")
+
+	exitChild(c, "c_1")
+	ck.NotNil(press(c, "r"), "r on an exited row issued no resume")
+	ck.StrContains(c.notice, "resuming", "notice")
+}
+
+func TestResumeFailureIsReportedAndSuccessReseeds(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+
+	c.Update(resumedMsg{childID: "c_1", name: "one", err: errors.New("boom")})
+	ck.StrContains(c.notice, "could not resume", "notice")
+	ck.False(c.reseedInFlight, "a failed resume must not reseed")
+
+	c.Update(resumedMsg{childID: "c_1", name: "one"})
+	ck.StrContains(c.notice, "resumed one", "notice")
+	ck.True(c.reseedInFlight, "a resume must reseed")
+}
