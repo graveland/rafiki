@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -188,7 +189,9 @@ func readTreeAll(
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return isDir, nil, err
+		// Return the bytes received so far: a test asserting that an aborted
+		// stream is NOT a complete archive needs to inspect the partial payload.
+		return isDir, buf.Bytes(), err
 	}
 	return isDir, buf.Bytes(), nil
 }
@@ -1130,4 +1133,167 @@ func TestWriteTreeCheckOverwritePathHomeBase(t *testing.T) {
 	// A legitimate home still exempts its descendants.
 	c.NoError(checkOverwritePath("/Users/tester/proj", root, "/Users/tester"),
 		"a legitimate home must exempt its descendants")
+}
+
+// TestReadTreeWalkErrorAbortsStream pins that a walk error mid-tree aborts the
+// pipe with the error instead of writing a valid end-of-archive trailer. With
+// the trailer written, a truncated tree would look complete to the client and
+// only the RPC status would betray it; the payload here must instead be a
+// truncated archive.
+func TestReadTreeWalkErrorAbortsStream(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	src := t.TempDir()
+	c.Require().NoError(os.WriteFile(filepath.Join(src, "a.txt"), []byte("first"), 0o644), "a.txt")
+	c.Require().NoError(os.WriteFile(filepath.Join(src, "b.txt"), []byte("second"), 0o644), "b.txt")
+
+	orig := treeWalkDir
+	treeWalkDir = func(root string, fn fs.WalkDirFunc) error {
+		seen := 0
+		return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if p != root {
+				seen++
+				if seen == 2 {
+					return errors.New("injected mid-tree walk error")
+				}
+			}
+			return fn(p, d, err)
+		})
+	}
+	t.Cleanup(func() { treeWalkDir = orig })
+
+	// A complete archive of just the first entry is what the buggy path emits:
+	// tw.Close() writes the end-of-archive trailer even though the walk failed.
+	// archive/tar cannot tell that apart from a clean end (a stream that stops
+	// on a block boundary reads as io.EOF), so the pin is the byte count.
+	complete := buildTar(t, tarEntry{name: "a.txt", typeflag: tar.TypeReg, mode: 0o644, body: "first"})
+
+	_, data, err := readTreeAll(t, client, src)
+	c.Require().Error(err, "a walk error must surface as a stream error")
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "walk error code")
+	c.NotZero(len(data), "the first entry is streamed before the error")
+	c.True(len(data) < len(complete),
+		"a walk error must not emit the archive trailer: got %d bytes, a complete single-entry archive is %d",
+		len(data), len(complete))
+}
+
+// TestWriteTreeRejectsTrailingBytesAfterArchive pins that WriteTree drains the
+// stream to EOF after the tar end marker and refuses non-zero trailing bytes,
+// publishing nothing.
+func TestWriteTreeRejectsTrailingBytesAfterArchive(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "x"})
+	payload = append(payload, []byte("trailing-garbage")...)
+
+	_, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Error(err, "bytes after the tar end marker must be refused")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	if _, serr := os.Lstat(dest); !os.IsNotExist(serr) {
+		t.Errorf("destination created despite trailing bytes after the archive")
+	}
+	assertNoLeftovers(t, parent)
+}
+
+// TestWriteTreePublishesCleanStream pins the other half of the drain: a clean
+// stream still publishes, so draining to EOF did not turn a valid transfer into
+// a refusal.
+func TestWriteTreePublishesCleanStream(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "hello"})
+
+	resp, err := sendTree(t, client, &executorpb.WriteTreeStart{Path: dest, IsDir: true}, payload)
+	c.Require().NoError(err, "a clean stream must publish")
+	c.Eq(int64(1), resp.Msg.GetFiles(), "files")
+
+	got, rerr := os.ReadFile(filepath.Join(dest, "f.txt"))
+	c.Require().NoError(rerr, "read f.txt")
+	c.Eq("hello", string(got), "content")
+}
+
+// TestWriteTreeExtractFileModeStripsSpecialBits pins the mode derivation
+// directly, so the mask is observed on every platform: a non-root chmod drops
+// setuid silently, so a filesystem-level assertion cannot see the difference on
+// macOS. Changing the mask to 0o7777 turns this red.
+func TestWriteTreeExtractFileModeStripsSpecialBits(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cases := []struct {
+		in   int64
+		want os.FileMode
+	}{
+		{0o644, 0o644},
+		{0o755, 0o755},
+		{0o4755, 0o755}, // setuid stripped, exec kept
+		{0o2755, 0o755}, // setgid stripped, exec kept
+		{0o1777, 0o777}, // sticky stripped
+		{0o7777, 0o777}, // combined special bits stripped
+		{0o4644, 0o644}, // setuid with no exec
+		{0o0000, 0o0000},
+	}
+	for _, tc := range cases {
+		got := treeExtractFileMode(tc.in)
+		c.Eq(tc.want, got, "treeExtractFileMode(%#o)", tc.in)
+	}
+	c.NotZero(treeExtractFileMode(0o755)&0o100, "the owner exec bit must be kept")
+}
+
+// TestWriteTreeCheckOverwritePathSharedHomeParent pins that a bare /Users or
+// /home is not a usable home base: HOME=/Users must not exempt every other
+// user's home, while a real home under it still does.
+func TestWriteTreeCheckOverwritePathSharedHomeParent(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	cases := []struct {
+		base string
+		want bool
+	}{
+		{"/Users", false},
+		{"/home", false},
+		{"/Users/tester", true},
+		{"/home/tester", true},
+		{"/root", true},
+		{"/root/sub", true},
+	}
+	for _, tc := range cases {
+		c.Eq(tc.want, treeUsableHomeBase(tc.base, "/tmp"),
+			"treeUsableHomeBase(%q, %q)", tc.base, "/tmp")
+	}
+
+	root := filepath.Join(t.TempDir(), "root")
+	c.Require().NoError(os.MkdirAll(root, 0o755), "mkdir root")
+
+	// HOME=/Users is not a home base, so it must not exempt /Users/other/repo.
+	c.Error(checkOverwritePath("/Users/other/repo", root, "/Users"),
+		"a bare /Users home must not exempt every other user's home")
+	c.Error(checkOverwritePath("/home/other/repo", root, "/home"),
+		"a bare /home home must not exempt every other user's home")
+	// A real home still exempts its descendants.
+	c.NoError(checkOverwritePath("/Users/tester/repo", root, "/Users/tester"),
+		"a real home must still exempt its descendants")
+}
+
+// TestWriteTreeMaxBytesExactFitPublishes pins that a stream which ends exactly
+// at max_bytes is within budget. The tail drain performs one more read, and that
+// read must not turn a legitimate in-budget transfer into a refusal.
+func TestWriteTreeMaxBytesExactFitPublishes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client := treeTestServer(t, Options{Root: t.TempDir(), Version: "test"})
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	payload := buildTar(t, tarEntry{name: "f.txt", typeflag: tar.TypeReg, mode: 0o644, body: "hello"})
+
+	resp, err := sendTree(t, client,
+		&executorpb.WriteTreeStart{Path: dest, IsDir: true, MaxBytes: int64p(int64(len(payload)))}, payload)
+	c.Require().NoError(err, "a stream exactly at max_bytes is within budget")
+	c.Eq(int64(1), resp.Msg.GetFiles(), "files")
 }

@@ -54,6 +54,9 @@ var (
 		}
 		return int64(st.Bavail) * int64(st.Bsize), nil
 	}
+	// treeWalkDir is filepath.WalkDir, swappable so a test can inject a walk
+	// error mid-tree without depending on a filesystem permission failure.
+	treeWalkDir = filepath.WalkDir
 )
 
 // treeOverwriteDenyPrefixes are the system paths a tree transfer may never
@@ -114,12 +117,20 @@ func (s *Server) ReadTree(
 	go func() {
 		tw := tar.NewWriter(pw)
 		werr := treeWriteTar(ctx, tw, p, fi)
-		if werr == nil {
-			werr = tw.Close()
-		} else {
-			_ = tw.Close()
+		if werr != nil {
+			// Do NOT Close the tar writer on a walk error: Close writes the
+			// two-block end-of-archive trailer, which would make a truncated
+			// tree indistinguishable from a complete one. Aborting the pipe
+			// with the error is what turns a partial archive into a client
+			// stream error.
+			_ = pw.CloseWithError(werr)
+			return
 		}
-		_ = pw.CloseWithError(werr)
+		if cerr := tw.Close(); cerr != nil {
+			_ = pw.CloseWithError(cerr)
+			return
+		}
+		_ = pw.Close()
 	}()
 
 	buf := make([]byte, treeChunkSize)
@@ -149,7 +160,7 @@ func treeWriteTar(ctx context.Context, tw *tar.Writer, root string, fi os.FileIn
 	if !fi.IsDir() {
 		return treeWriteFileEntry(tw, filepath.Base(root), root, fi)
 	}
-	return filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
+	return treeWalkDir(root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
@@ -528,8 +539,18 @@ func (s *treeStreamReader) Read(p []byte) (int, error) {
 	if s.maxBytes > 0 {
 		remaining := s.maxBytes - s.total
 		if remaining <= 0 {
-			return 0, connect.NewError(connect.CodeResourceExhausted,
-				fmt.Errorf("tree stream exceeds max_bytes %d", s.maxBytes))
+			// At the budget. A further byte would exceed it, but a stream that
+			// ends EXACTLY at max_bytes is within budget, so probe one byte
+			// before refusing: the tail drain always performs one more read,
+			// and a legitimate archive that fills the budget exactly must not
+			// be rejected.
+			var probe [1]byte
+			n, err := s.r.Read(probe[:])
+			if n > 0 {
+				return 0, connect.NewError(connect.CodeResourceExhausted,
+					fmt.Errorf("tree stream exceeds max_bytes %d", s.maxBytes))
+			}
+			return 0, err
 		}
 		if int64(len(p)) > remaining {
 			p = p[:remaining]
@@ -549,6 +570,16 @@ func (s *treeStreamReader) Read(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// treeExtractFileMode derives the permission bits a tar entry is created with.
+// Only the nine low bits survive: setuid (0o4000), setgid (0o2000) and the
+// sticky bit (0o1000) are stripped, while the exec bits are kept. It is a pure
+// function so the mask is pinned by a unit test on every platform — a non-root
+// chmod silently drops setuid, so a filesystem-level assertion cannot observe
+// the mask on macOS.
+func treeExtractFileMode(hdrMode int64) os.FileMode {
+	return os.FileMode(hdrMode) & os.FileMode(0o777)
 }
 
 // extractTree reads a tar stream and materialises it under staging. It returns
@@ -601,7 +632,7 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 			if err := os.Mkdir(target, 0o700); err != nil {
 				return files, w.total, treeExtractErr(err)
 			}
-			dirs = append(dirs, treeDirPerm{path: target, mode: os.FileMode(hdr.Mode).Perm()})
+			dirs = append(dirs, treeDirPerm{path: target, mode: treeExtractFileMode(hdr.Mode)})
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return files, w.total, treeExtractErr(err)
@@ -615,15 +646,16 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return files, w.total, treeExtractErr(err)
 			}
-			// The mode goes to the kernel raw through unix.Open, so masking it
-			// to 0o777 is what keeps a setuid/setgid/sticky tar mode from
-			// becoming a setuid/setgid/sticky file. os.OpenFile would drop
-			// those bits itself, which is exactly why it is not used: a guard
-			// the standard library silently performs is a guard no test can
-			// pin. O_EXCL refuses a path that already exists, symlink or not;
-			// O_NOFOLLOW and O_CLOEXEC keep the final component from being a
-			// symlink and the descriptor from leaking into a spawned child.
-			perm := uint32(hdr.Mode) & 0o777
+			// The mode goes to the kernel raw through unix.Open, so the mask
+			// in treeExtractFileMode is what keeps a setuid/setgid/sticky tar
+			// mode from becoming a setuid/setgid/sticky file. os.OpenFile
+			// would drop those bits itself, which is exactly why it is not
+			// used: a guard the standard library silently performs is a guard
+			// no test can pin. O_EXCL refuses a path that already exists,
+			// symlink or not; O_NOFOLLOW and O_CLOEXEC keep the final
+			// component from being a symlink and the descriptor from leaking
+			// into a spawned child.
+			perm := uint32(treeExtractFileMode(hdr.Mode))
 			fd, ferr := unix.Open(target,
 				unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
 			if ferr != nil {
@@ -641,6 +673,15 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 			}
 			files++
 		}
+	}
+
+	// The tar reader stops at the end-of-archive marker and leaves anything
+	// the client sent after it unread. Drain that tail to EOF: a valid archive
+	// is exactly one archive, and trailing non-zero bytes would otherwise ride
+	// along unexamined. All-zero padding (some writers pad the archive to a
+	// record size) is harmless.
+	if derr := drainTarTail(sr); derr != nil {
+		return files, w.total, derr
 	}
 
 	// Deepest first, so a parent's mode never locks a child out of the chmod.
@@ -668,6 +709,29 @@ func treeExtractErr(err error) error {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	return connect.NewError(connect.CodeInternal, err)
+}
+
+// drainTarTail reads the remainder of a tar stream to EOF after the reader has
+// reported the end-of-archive marker, refusing any non-zero byte. All-zero
+// padding is accepted; a non-zero tail is a malformed transfer, not a second
+// archive, and must not be silently ignored.
+func drainTarTail(r io.Reader) error {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		for _, b := range buf[:n] {
+			if b != 0 {
+				return connect.NewError(connect.CodeInvalidArgument,
+					errors.New("stream carries non-zero bytes after the tar end marker"))
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return treeExtractErr(err)
+		}
+	}
 }
 
 // cleanEntryName validates a tar entry name and returns its slash-cleaned
@@ -853,11 +917,14 @@ func treeUsableExemptionBase(base string) bool {
 }
 
 // treeUsableHomeBase reports whether the home directory may exempt its
-// descendants from the deny list. Homes legitimately live under /home, /Users
-// and /root, so those prefixes are allowed; any OTHER denied tree is not a
-// usable home base, because a deny-list tree reached through an alias (macOS's
-// /etc -> /private/etc) would otherwise exempt the tree the deny list exists to
-// protect.
+// descendants from the deny list. A home legitimately lives UNDER /home,
+// /Users or /root — the home itself must be /Users/<name>, /home/<name> or
+// /root/<name>, so a bare /Users or /home (every other user's home) is NOT a
+// usable base and cannot exempt its whole tree. /root is the exception: it is
+// root's own home, so it is accepted exactly as well as strictly under it. Any
+// OTHER denied tree is not a usable home base either, because a deny-list tree
+// reached through an alias (macOS's /etc -> /private/etc) would otherwise
+// exempt the tree the deny list exists to protect.
 func treeUsableHomeBase(base, tempResolved string) bool {
 	if base == "" || base == string(filepath.Separator) {
 		return false
@@ -868,11 +935,16 @@ func treeUsableHomeBase(base, tempResolved string) bool {
 	if treeUsableExemptionBase(tempResolved) && treeStrictDescendant(base, tempResolved) {
 		return true
 	}
-	for _, prefix := range treeOverwriteDenyPrefixes {
-		switch prefix {
-		case "/home", "/Users", "/root":
+	// The three directories a home legitimately lives under. The comparison is
+	// component-wise, so a case variant is judged with its tree.
+	for _, parent := range []string{"/home", "/Users", "/root"} {
+		if !treePathEqualOrUnder(base, parent) {
 			continue
 		}
+		// Strictly under the parent, or /root exactly (root's own home).
+		return len(treeSplitPath(base)) > len(treeSplitPath(parent)) || treePathEqual(base, "/root")
+	}
+	for _, prefix := range treeOverwriteDenyPrefixes {
 		if treePathEqualOrUnder(base, prefix) {
 			return false
 		}
