@@ -42,7 +42,7 @@ import (
 // test is DB-backed, so recall is wired (startRecall runs unconditionally on
 // a pool) and the six recall/memory tools materialize — with no
 // [embeddings]/[summaries] config they answer BM25-only, which still makes
-// them real tools. The same DB is why the three sandbox tools materialize: the
+// them real tools. The same DB is why the five sandbox tools materialize: the
 // sandbox verbs need only the sandbox table (cmd/rafikid's sandboxStore), and
 // they decline on a DB-less daemon — the same nil-means-decline rule the
 // preset tools follow.
@@ -58,6 +58,8 @@ var mcpToolNames = []string{
 	"sandbox_create",
 	"sandbox_list",
 	"sandbox_remove",
+	"sandbox_sync",
+	"sandbox_sync_repo",
 	"task_add",
 	"task_update",
 	"task_drop",
