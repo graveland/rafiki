@@ -434,7 +434,7 @@ func extractTree(r io.Reader, staging, parentDir string, maxBytes int64) (int64,
 			return files, w.total, connect.NewError(connect.CodeInvalidArgument, nerr)
 		}
 		switch hdr.Typeflag {
-		case tar.TypeReg, tar.TypeRegA, tar.TypeDir, tar.TypeSymlink:
+		case tar.TypeReg, tar.TypeDir, tar.TypeSymlink:
 			// The only entry kinds a tree may carry.
 		case tar.TypeLink:
 			return files, w.total, connect.NewError(connect.CodeInvalidArgument,
