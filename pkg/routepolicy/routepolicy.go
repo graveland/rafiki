@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -66,7 +67,9 @@ type postgresStore struct{ pool *pgxpool.Pool }
 // validModelLine rejects lines that can never match: modelLineOf reduces
 // three-segment ids by stripping their provider segment, so a stored line with
 // three or more "/"-separated segments is compared only against reduced ids
-// and can never equal or prefix-match one — a silently dead row.
+// and can never equal or match one — a silently dead row. A line whose glob
+// metacharacters form a malformed pattern (e.g. "z-ai/[bad") is also refused:
+// it would never match at resolve time.
 func validModelLine(line string) error {
 	if line == "" {
 		return errors.New("routepolicy: model line must not be empty")
@@ -74,6 +77,11 @@ func validModelLine(line string) error {
 	if strings.Count(line, "/") > 1 {
 		return fmt.Errorf("routepolicy: model line %q: a line names at most <model>/<id> — "+
 			"the provider segment is not part of a policy line", line)
+	}
+	if strings.ContainsAny(line, "*?[") {
+		if _, err := filepath.Match(line, "x"); err != nil {
+			return fmt.Errorf("routepolicy: model line %q: malformed glob: %w", line, err)
+		}
 	}
 	return nil
 }
@@ -193,10 +201,13 @@ func (p *Policy) Load(rows []Row) error {
 // Model-line matching: the id is first reduced to its line by stripping a
 // leading <provider>/ segment when it has exactly three "/"-separated
 // segments (openrouter/z-ai/glm-5.3-flash → z-ai/glm-5.3-flash; two-segment
-// ids and anything else pass through unchanged). A row then matches when the
-// reduced id equals the line or extends it with "-" (line "z-ai/glm-5.3"
-// matches "z-ai/glm-5.3" and "z-ai/glm-5.3-flash", not "z-ai/glm-5.3f" or
-// "z-ai/other-model"). When several line rows match, the LONGEST line wins
+// ids and anything else pass through unchanged). A reduced id matches a row
+// when it equals the line, or — if the line contains glob metacharacters (*,
+// ? or [) — when filepath.Match succeeds. filepath.Match's * never crosses
+// "/", so "z-ai/*" matches "z-ai/glm-5.3" but not "z-ai/x/y". A line with no
+// glob metacharacters matches only by exact equality (the old "-" prefix
+// family rule has been removed in favour of explicit globs like
+// "z-ai/glm-5.3*"). When several line rows match, the LONGEST line wins
 // and only that row participates — shorter rows do not fill its gaps.
 func (p *Policy) Resolve(modelID string) routing.Spec {
 	line := modelLineOf(modelID)
@@ -212,7 +223,7 @@ func (p *Policy) Resolve(modelID string) routing.Spec {
 		if l == routing.AllModelLines || len(l) <= bestLen {
 			continue
 		}
-		if line == l || strings.HasPrefix(line, l+"-") {
+		if line == l || (globMatch(l, line)) {
 			best, bestLen = spec, len(l)
 		}
 	}
@@ -230,6 +241,23 @@ func (p *Policy) Rows() []Row {
 	out := make([]Row, len(p.list))
 	copy(out, p.list)
 	return out
+}
+
+// globMatch reports whether a row line containing glob metacharacters matches
+// the reduced id via filepath.Match. A line without metacharacters (or the
+// bare global "*", which Resolve skips anyway) is not a glob: exact equality
+// is handled by Resolve's first arm, so globMatch can be strict. filepath.Match
+// errors are impossible here for lines validModelLine admitted (a malformed
+// pattern is refused at Set/Load), so a false is returned if one ever occurs.
+func globMatch(pattern, s string) bool {
+	if pattern == routing.AllModelLines || !strings.ContainsAny(pattern, "*?[") {
+		return false
+	}
+	ok, err := filepath.Match(pattern, s)
+	if err != nil {
+		return false
+	}
+	return ok
 }
 
 // modelLineOf reduces a model id to the line policy rows are keyed by: when

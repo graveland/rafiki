@@ -47,12 +47,14 @@ keys a spawn/preset spec leaves unset (a spawn's "[...]" beats a preset's,
 which beats these rows), and nodata/zdr ALWAYS hold — they reach running
 children too, so a row set after a spawn governs that child's later requests.
 
-A policy line is a "-" prefix FAMILY: a row's line matches a model id equal to
-it or extending it with "-" — "z-ai/glm-5.3" also governs "z-ai/glm-5.3-flash"
-and stamped releases — unlike the cache guard's stamp-exact model lines. A line
-names at most <model>/<id>: the provider segment is not part of a policy line,
-and the store refuses longer shapes. Reading the rows is open to any caller;
-writing one (set, delete) requires a user credential or the local socket.
+A policy line is a two-segment MODEL line, and may use filepath.Match glob
+metacharacters: "z-ai/*" governs every model under z-ai/, "z-ai/glm-5.3*"
+governs the glm-5.3 family, and "*" alone is the global line that fills every
+gap (a line's spec merges over the global row's, per key). "*" in a line never
+crosses "/", so "z-ai/*" does not match a three-segment id. A line names at
+most <model>/<id>: the provider segment is not part of a policy line, and the
+store refuses longer shapes. Reading the rows is open to any caller; writing
+one (set, delete) requires a user credential or the local socket.
 
 The SPEC grammar (comma-separated, order-free):
   sort=price|throughput|latency|balanced

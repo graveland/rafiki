@@ -108,38 +108,40 @@ func TestRoutePolicyStoreDeleteMissing(t *testing.T) {
 
 // TestPolicyResolveLineOverGlobal is the merge the daemon depends on: the
 // line row's quant rides on top of the global row's sort and nodata — all
-// three keys in one resolved spec.
+// three keys in one resolved spec. The line uses a glob to match both the
+// base id and its stamp variant.
 func TestPolicyResolveLineOverGlobal(t *testing.T) {
 	c := assert.NewCollecting(t)
 	p := NewPolicy()
 	c.Require().NoError(p.Load([]Row{
 		{ModelLine: "*", Spec: "sort=price,nodata"},
-		{ModelLine: "z-ai/glm-5.3", Spec: "quant=fp8+"},
+		{ModelLine: "z-ai/glm-5.3*", Spec: "quant=fp8+"},
 	}), "Load")
 
-	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "line over global (prefix match)",
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "glob matches stamp variant",
 		routing.SortPrice, []string{"fp8+"}, nil, true, false)
-	checkSpec(c, p.Resolve("z-ai/glm-5.3"), "line over global (exact match)",
+	checkSpec(c, p.Resolve("z-ai/glm-5.3"), "glob matches base id too",
 		routing.SortPrice, []string{"fp8+"}, nil, true, false)
 }
 
 // TestPolicyResolveLongestLineWins proves the longest matching line wins
-// outright: the shorter matching row does not fill the winner's gaps, and an
-// id that only shares the vendor segment matches nothing.
+// outright: a vendor glob is beaten by a more specific glob, and an id that
+// does not match the vendor glob resolves to zero (no gap-fill from globs —
+// only the global "*" fills gaps).
 func TestPolicyResolveLongestLineWins(t *testing.T) {
 	c := assert.NewCollecting(t)
 	p := NewPolicy()
 	c.Require().NoError(p.Load([]Row{
-		{ModelLine: "z-ai", Spec: "sort=price,quant=int8"},
-		{ModelLine: "z-ai/glm-5.3", Spec: "sort=latency"},
+		{ModelLine: "z-ai/*", Spec: "sort=price,quant=int8"},
+		{ModelLine: "z-ai/glm-5.3*", Spec: "sort=latency"},
 	}), "Load")
 
-	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "longest line wins, no gap-fill from z-ai",
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "specific glob wins over vendor glob",
 		routing.SortLatency, nil, nil, false, false)
-	checkSpec(c, p.Resolve("z-ai/glm-5.3"), "exact match on the longest line",
+	checkSpec(c, p.Resolve("z-ai/glm-5.3"), "specific glob matches base id",
 		routing.SortLatency, nil, nil, false, false)
-	checkSpec(c, p.Resolve("z-ai/other-model"), `a vendor/ id does not match the bare line "z-ai"`,
-		routing.SortInherit, nil, nil, false, false)
+	checkSpec(c, p.Resolve("z-ai/other-model"), `vendor glob "z-ai/*" covers the rest`,
+		routing.SortPrice, []string{"int8"}, nil, false, false)
 }
 
 // TestPolicyResolveNoRows proves the zero outcome: no policy at all, or rows
@@ -161,7 +163,7 @@ func TestPolicyResolveNoRows(t *testing.T) {
 func TestPolicyResolveStripsProviderSegment(t *testing.T) {
 	c := assert.NewCollecting(t)
 	p := NewPolicy()
-	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3", Spec: "quant=fp8+"}}), "Load")
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3*", Spec: "quant=fp8+"}}), "Load")
 
 	checkSpec(c, p.Resolve("openrouter/z-ai/glm-5.3-flash"), "three segments: provider stripped",
 		routing.SortInherit, []string{"fp8+"}, nil, false, false)
@@ -180,11 +182,11 @@ func TestPolicyResolveStripsProviderSegment(t *testing.T) {
 func TestPolicyLoadRejectsBadSpec(t *testing.T) {
 	c := assert.NewCollecting(t)
 	p := NewPolicy()
-	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3", Spec: "sort=price"}}), "good Load")
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3*", Spec: "sort=price"}}), "good Load")
 
-	err := p.Load([]Row{{ModelLine: "z-ai/glm-5.3", Spec: "bogus=1"}})
+	err := p.Load([]Row{{ModelLine: "z-ai/glm-5.3*", Spec: "bogus=1"}})
 	c.Require().Error(err, "Load with an unparseable spec")
-	c.ErrorContains(err, "z-ai/glm-5.3", "the error names the offending line")
+	c.ErrorContains(err, "z-ai/glm-5.3*", "the error names the offending line")
 
 	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "failed load left the old view",
 		routing.SortPrice, nil, nil, false, false)
@@ -283,7 +285,7 @@ func TestPolicyLoadRefusesBadLineShape(t *testing.T) {
 
 // TestPolicyResolveStripsBatchSuffix pins modelLineOf's :batch strip: the row
 // z-ai/glm-5.3-flash governs a parked call of z-ai/glm-5.3-flash:batch —
-// exact-equality and the -prefix family both see the base id's line, so the
+// exact-equality and the glob arm both see the base id's line, so the
 // refusal gate and the policy rows agree with the live path.
 func TestPolicyResolveStripsBatchSuffix(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -294,8 +296,63 @@ func TestPolicyResolveStripsBatchSuffix(t *testing.T) {
 		routing.SortInherit, []string{"fp8+"}, nil, false, false)
 	checkSpec(c, p.Resolve("openrouter/z-ai/glm-5.3-flash:batch"), "provider-prefixed :batch id",
 		routing.SortInherit, []string{"fp8+"}, nil, false, false)
-	// The family arm still works below the stripped suffix's base.
-	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3", Spec: "sort=price"}}), "Load family")
-	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash:batch"), "family line over a :batch id",
+	// The glob arm also works below the stripped suffix's base.
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3*", Spec: "sort=price"}}), "Load glob")
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash:batch"), "glob line over a :batch id",
 		routing.SortPrice, nil, nil, false, false)
+}
+
+// TestPolicyResolveGlobVendor pins vendor-level glob matching: z-ai/* catches
+// every two-segment id under z-ai/.
+func TestPolicyResolveGlobVendor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := NewPolicy()
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/*", Spec: "quant=fp8+"}}), "Load")
+
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "z-ai/* catches a flash id",
+		routing.SortInherit, []string{"fp8+"}, nil, false, false)
+	checkSpec(c, p.Resolve("z-ai/deepseek-chat"), "z-ai/* catches any second segment",
+		routing.SortInherit, []string{"fp8+"}, nil, false, false)
+	c.True(p.Resolve("x/y").IsZero(), "different vendor does not match")
+}
+
+// TestPolicyResolveGlobMultipleStars pins that multiple * in a glob work —
+// deepseek/*flash* matches deepseek/deepseek-flash and
+// deepseek/deepseek-flash-turbo but not deepseek/deepseek-chat.
+func TestPolicyResolveGlobMultipleStars(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := NewPolicy()
+	c.Require().NoError(p.Load([]Row{{ModelLine: "deepseek/*flash*", Spec: "sort=price"}}), "Load")
+
+	checkSpec(c, p.Resolve("deepseek/deepseek-flash"), "bare flash id matches",
+		routing.SortPrice, nil, nil, false, false)
+	checkSpec(c, p.Resolve("deepseek/deepseek-flash-turbo"), "flash variant matches",
+		routing.SortPrice, nil, nil, false, false)
+	c.True(p.Resolve("deepseek/deepseek-chat").IsZero(), "different deepseek model does not match")
+}
+
+// TestPolicyResolveGlobDoesNotCrossSlash pins filepath.Match's / boundary: a *
+// matches only within one "/"-separated segment, so a glob cannot match across
+// the vendor/model separator of a reduced id.
+func TestPolicyResolveGlobDoesNotCrossSlash(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := NewPolicy()
+	c.Require().NoError(p.Load([]Row{{ModelLine: "deepseek*", Spec: "sort=price"}}), "Load")
+
+	// deepseek* matches "deepseek" alone (one segment), but the reduced id
+	// "deepseek/deepseek-chat" carries "/" in the middle, which * cannot span.
+	c.True(p.Resolve("deepseek/deepseek-chat").IsZero(), "* must not cross /")
+}
+
+// TestPolicyResolveGlobQuestionMark pins that ? matches a single character.
+func TestPolicyResolveGlobQuestionMark(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := NewPolicy()
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3-flas?", Spec: "sort=price"}}), "Load")
+
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash"), "? matches the final char",
+		routing.SortPrice, nil, nil, false, false)
+	// flas? matches flas plus exactly one more char; flas is 4 chars so 5 needed.
+	c.True(p.Resolve("z-ai/glm-5.3-flas").IsZero(), "? needs exactly one char, flas (4 chars) is too short")
+	c.True(p.Resolve("z-ai/glm-5.3-flashy").IsZero(), "? matches exactly one char, flashy (6) is too long")
 }
