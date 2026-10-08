@@ -16,6 +16,10 @@ import (
 )
 
 func main() {
+	if code, ok := reapAsInit(); ok {
+		os.Exit(code)
+	}
+
 	// The one context.Background() for the whole process, wrapped in the one
 	// signal.NotifyContext — every command reaches it via cmdCtx(cmd), rather
 	// than a subcommand that needs cancellation building its own local
