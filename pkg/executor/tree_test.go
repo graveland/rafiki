@@ -1083,3 +1083,46 @@ func TestWriteTreeStreamIOErrorIsInternal(t *testing.T) {
 	c.Eq(connect.CodeInternal, connect.CodeOf(err),
 		"a non-tar I/O error maps to Internal, not InvalidArgument")
 }
+
+func TestWriteTreeCheckOverwritePathHomeBase(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	// Homes legitimately live under /home, /Users and /root; every other denied
+	// tree is not a usable home base, whether it is the deny root itself or a
+	// path under it (the alias shape: macOS /etc -> /private/etc).
+	cases := []struct {
+		base string
+		want bool
+	}{
+		{"/", false},
+		{"/etc", false},
+		{"/private/etc", false},
+		{"/usr/local", false},
+		{"/var/root", false},
+		{"/home/tester", true},
+		{"/Users/tester", true},
+		{"/root", true},
+	}
+	for _, tc := range cases {
+		c.Eq(tc.want, treeUsableHomeBase(tc.base), "treeUsableHomeBase(%q)", tc.base)
+	}
+
+	root := filepath.Join(t.TempDir(), "root")
+	c.Require().NoError(os.MkdirAll(root, 0o755), "mkdir root")
+
+	// The explicit alias case, runnable on every platform.
+	c.Error(checkOverwritePath("/etc/ssh", root, "/private/etc"),
+		"a home base under a denied prefix must not exempt")
+
+	// Targets that live under an invalid base: these go red on Linux too when
+	// the home check reverts to the looser exemption-base rule, because the
+	// old rule accepts /private/etc and /usr/local as bases.
+	c.Error(checkOverwritePath("/private/etc/ssh", root, "/private/etc"),
+		"a home base under /private must not exempt its own tree")
+	c.Error(checkOverwritePath("/usr/local/share", root, "/usr/local"),
+		"a home base under /usr must not exempt its own tree")
+
+	// A legitimate home still exempts its descendants.
+	c.NoError(checkOverwritePath("/home/tester/proj", root, "/home/tester"),
+		"a legitimate home must exempt its descendants")
+}

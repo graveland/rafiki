@@ -758,9 +758,10 @@ func checkOverwritePath(target, root, home string) error {
 	}
 
 	// An exemption base only means something when it is a real subtree: "/"
-	// would exempt everything, and a deny-list root used as a base would exempt
-	// the very tree the deny list exists to protect.
-	if homeResolved != "" && !treeUsableExemptionBase(homeResolved) {
+	// would exempt everything, and a base under a denied tree would exempt the
+	// very tree the deny list exists to protect. The home base is stricter
+	// than the others — see treeUsableHomeBase.
+	if homeResolved != "" && !treeUsableHomeBase(homeResolved) {
 		slog.Warn("executor: home directory is not a usable overwrite-guard exemption base",
 			"home", homeResolved)
 		homeResolved = ""
@@ -845,6 +846,28 @@ func treeUsableExemptionBase(base string) bool {
 	}
 	for _, prefix := range treeOverwriteDenyPrefixes {
 		if treePathEqual(base, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// treeUsableHomeBase reports whether the home directory may exempt its
+// descendants from the deny list. Homes legitimately live under /home, /Users
+// and /root, so those prefixes are allowed; any OTHER denied tree is not a
+// usable home base, because a deny-list tree reached through an alias (macOS's
+// /etc -> /private/etc) would otherwise exempt the tree the deny list exists to
+// protect.
+func treeUsableHomeBase(base string) bool {
+	if base == "" || base == string(filepath.Separator) {
+		return false
+	}
+	for _, prefix := range treeOverwriteDenyPrefixes {
+		switch prefix {
+		case "/home", "/Users", "/root":
+			continue
+		}
+		if treePathEqualOrUnder(base, prefix) {
 			return false
 		}
 	}
