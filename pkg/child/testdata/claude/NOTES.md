@@ -85,6 +85,15 @@ across turns and exits only when stdin is closed (Shutdown) — matching pi.
   assistant(text "pong"), result(success). 6 lines.
 - `turn_with_tool.jsonl`: hook_started, hook_response, init, assistant(tool_use Bash),
   rate_limit_event, user(tool_result), assistant(text), result(success). 8 lines.
+- `clear_reset.jsonl`: a `/clear` mid-stream. hook_started, hook_response,
+  init(session A), status/commands_changed/thinking_tokens, assistant(thinking),
+  assistant(text "one"), rate_limit_event, result(success), **conversation_reset**
+  (session A), hook_started, hook_response, init(session B), result(success, empty),
+  init(session B), assistant(thinking), assistant(text "two"), result(success).
+  22 lines. Captured 2026-10-09 from Claude Code **2.1.290**. Records that a
+  `/clear` changes the session id (A → B) and that `conversation_reset` is ignored
+  by `BusFrames` (its `default:` case). The fixture is scrubbed the same way as the
+  other two; it is a record for replay, not yet wired into a test.
 
 ## Plan refinements surfaced by this capture (apply during implementation)
 
