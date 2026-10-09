@@ -300,6 +300,20 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 	})
 }
 
+// MarkClearPending flags the conversation whose external_ref is externalRef
+// (a claude child's main-thread conversation is linked by external_ref =
+// child id) so the next divergent request head is recorded as a clear
+// boundary. No such conversation is not an error: a child that has captured
+// nothing has nothing to clear.
+func (s *CaptureStore) MarkClearPending(ctx context.Context, externalRef string) error {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE conversations.conversation SET clear_pending=true WHERE external_ref=$1`,
+		externalRef); err != nil {
+		return fmt.Errorf("mark clear pending: %w", err)
+	}
+	return nil
+}
+
 type TurnIntent struct {
 	ID             string // optional pre-minted turn id (UUID); empty keeps the DB default (uuidv7())
 	ConversationID string
@@ -444,7 +458,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 		for i, m := range req.Messages {
 			contents[i] = m.Content
 		}
-		horizon, isNewBoundary, herr := s.resolveHorizon(ctx, convID, contents)
+		horizon, boundary, herr := s.resolveHorizon(ctx, convID, contents)
 		if herr != nil {
 			return fmt.Errorf("decompose: resolve horizon: %w", herr)
 		}
@@ -455,24 +469,27 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 			}
 			var kind any
 			var inTok *int64
-			if i == 0 && isNewBoundary {
-				kind = "compaction_summary"
-				// The approximate size of the context this boundary replaced:
-				// the PREVIOUS turn's input_tokens. This turn's own
-				// CompleteTurn already ran earlier in streamAndCapture, so
-				// excluding it by created_at is what selects the prior turn
-				// rather than this one.
-				var prevIn int64
-				perr := s.pool.QueryRow(ctx,
-					`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
-					  WHERE conversation_id=$1 AND created_at < $2
-					  ORDER BY created_at DESC, id DESC LIMIT 1`,
-					convID, createdAt).Scan(&prevIn)
-				if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-					return fmt.Errorf("decompose: prior turn input_tokens: %w", perr)
-				}
-				if prevIn > 0 {
-					inTok = &prevIn
+			if i == 0 && boundary != "" {
+				kind = boundary
+				if boundary == "compaction_summary" {
+					// The approximate size of the context this boundary replaced:
+					// the PREVIOUS turn's input_tokens. This turn's own
+					// CompleteTurn already ran earlier in streamAndCapture, so
+					// excluding it by created_at is what selects the prior turn
+					// rather than this one. A clear boundary carries no size, so
+					// this lookup is skipped for it.
+					var prevIn int64
+					perr := s.pool.QueryRow(ctx,
+						`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
+						  WHERE conversation_id=$1 AND created_at < $2
+						  ORDER BY created_at DESC, id DESC LIMIT 1`,
+						convID, createdAt).Scan(&prevIn)
+					if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+						return fmt.Errorf("decompose: prior turn input_tokens: %w", perr)
+					}
+					if prevIn > 0 {
+						inTok = &prevIn
+					}
 				}
 			}
 			if err := s.appendMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, nil, nil, kind); err != nil {
@@ -486,22 +503,26 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 }
 
 // resolveHorizon determines the ordinal offset (horizon) this request's
-// messages should be inserted at, and whether request message 0 is a NEW
-// compaction boundary that must be tagged kind='compaction_summary'. See
-// docs/plans/2026-09-09-claude-compaction-design.md §3-4.
+// messages should be inserted at, and whether request message 0 opens a NEW
+// boundary that must be tagged: kind='compaction_summary' when it reads as a
+// Claude Code compaction summary, kind='clear' when the daemon accepted a
+// /clear for this conversation (clear_pending) and this is the first request
+// whose head diverges from the stored head. boundary is "" when no boundary is
+// recorded. See docs/plans/2026-09-09-claude-compaction-design.md §3-4.
 //
 // Comparison is Postgres JSONB equality (content = $n::jsonb), not a Go-side
 // byte or struct compare -- it is whitespace/key-order-insensitive, which a
 // re-serialized request is not guaranteed to be.
-func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messages []json.RawMessage) (horizon int, isNewBoundary bool, err error) {
+func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messages []json.RawMessage) (horizon int, boundary string, err error) {
 	var h int
+	var clearPending bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1::uuid`,
-		convID).Scan(&h); err != nil {
-		return 0, false, fmt.Errorf("resolve horizon: read conversation: %w", err)
+		`SELECT coalesce(resume_from_ordinal,0), clear_pending FROM conversations.conversation WHERE id=$1::uuid`,
+		convID).Scan(&h, &clearPending); err != nil {
+		return 0, "", fmt.Errorf("resolve horizon: read conversation: %w", err)
 	}
 	if len(messages) == 0 {
-		return h, false, nil
+		return h, "", nil
 	}
 	msg0 := nonEmptyJSON(messages[0])
 
@@ -510,23 +531,27 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2),
 		        EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2 AND content=$3::jsonb)`,
 		convID, h, jsonbSafe(msg0)).Scan(&rowExists, &matches); err != nil {
-		return 0, false, fmt.Errorf("resolve horizon: read anchor: %w", err)
+		return 0, "", fmt.Errorf("resolve horizon: read anchor: %w", err)
 	}
 	if !rowExists || matches {
 		// Bootstrap (no anchor row yet -- the conversation's first-ever
 		// request) or stable prefix: proceed unchanged. These two cases are
-		// deliberately not distinguished; both mean "insert at h, no tag."
-		return h, false, nil
+		// deliberately not distinguished; both mean "insert at h, no tag." A
+		// matching head leaves clear_pending untouched: the clear has not
+		// happened yet, or the new head equals the old one.
+		return h, "", nil
 	}
 
-	// Divergence. Try the re-anchor guard before recording a new boundary.
-	if len(messages) >= 2 {
+	// Divergence. Try the re-anchor guard before recording a new boundary, but
+	// skip it when a /clear is pending: a short fresh post-clear history can
+	// positionally match old rows, and the clear must override that re-anchor.
+	if !clearPending && len(messages) >= 2 {
 		reanchored, ok, rerr := s.reanchorHorizon(ctx, convID, msg0, nonEmptyJSON(messages[1]))
 		if rerr != nil {
-			return 0, false, fmt.Errorf("resolve horizon: re-anchor: %w", rerr)
+			return 0, "", fmt.Errorf("resolve horizon: re-anchor: %w", rerr)
 		}
 		if ok {
-			return reanchored, false, nil
+			return reanchored, "", nil
 		}
 	}
 
@@ -537,24 +562,35 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 	// attempt's anchor read finds !rowExists at the (already-bumped) H' and
 	// takes the branch above, re-running the insert loop at the correct
 	// horizon via the existing ON CONFLICT DO NOTHING idempotency -- at the
-	// cost of losing the kind='compaction_summary' tag on that one retry.
+	// cost of losing the boundary tag on that one retry.
 	// That degraded outcome is acceptable; a torn write that bumped nothing
 	// while a marker row existed would not be, which is why the horizon bump
 	// itself is transactional.
 	if !looksLikeCompactionSummary(msg0) {
-		// Structurally divergent but not a summary: a new thread's preamble, or
-		// a client that rewrote its head. Insert at the existing horizon
-		// untagged rather than moving the resume point onto it. The divergent
-		// head itself is NOT captured (its inserts DO NOTHING against the rows
-		// at the horizon) and nothing re-anchors later: the append never wrote
-		// it, so reanchorHorizon cannot match it. That is still the safe
-		// direction: no false resume point, no readable history lost. The warn
-		// is the only signal this happened, so a marker list gone stale shows
-		// up in the log instead of only in a manual DB scan.
+		if clearPending {
+			// A /clear the daemon accepted: record the clear boundary and
+			// consume the flag in the same transaction.
+			hPrime, berr := s.bumpHorizon(ctx, convID, true)
+			if berr != nil {
+				return 0, "", berr
+			}
+			return hPrime, "clear", nil
+		}
+		// Structurally divergent but not a summary and no clear pending: a new
+		// thread's preamble, or a client that rewrote its head. Insert at the
+		// existing horizon untagged rather than moving the resume point onto
+		// it. The divergent head itself is NOT captured (its inserts DO NOTHING
+		// against the rows at the horizon) and nothing re-anchors later: the
+		// append never wrote it, so reanchorHorizon cannot match it. That is
+		// still the safe direction: no false resume point, no readable history
+		// lost. The warn is the only signal this happened, so a marker list
+		// gone stale shows up in the log instead of only in a manual DB scan.
 		// The stored occupant is named beside the request's head: a fresh
-		// client session landing in an old conversation (a /clear, a relaunch
-		// without --resume) looks identical to a rewritten head from this side,
-		// and the two heads side by side are what tells them apart.
+		// client session landing in an old conversation (a relaunch without
+		// --resume) looks identical to a rewritten head from this side, and the
+		// two heads side by side are what tells them apart. A /clear the daemon
+		// accepted is distinguished by clear_pending and takes the branch
+		// above; without the flag a fresh head is still dropped here.
 		var storedHead string
 		if qerr := s.pool.QueryRow(ctx,
 			`SELECT left(content::text, 120) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
@@ -564,28 +600,45 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 		slog.Warn("capture: divergent message 0 is not a compaction summary; its messages will be dropped and the response will collide",
 			"conversation", convID, "horizon", h, "request_messages", len(messages),
 			"request_head_first_120", string(msg0[:min(len(msg0), 120)]), "stored_head_first_120", storedHead)
-		return h, false, nil
+		return h, "", nil
 	}
+	// A divergent head that reads as a compaction summary takes the compaction
+	// path and leaves clear_pending as it is.
+	hPrime, berr := s.bumpHorizon(ctx, convID, false)
+	if berr != nil {
+		return 0, "", berr
+	}
+	return hPrime, "compaction_summary", nil
+}
+
+// bumpHorizon computes H' (the max stored ordinal + 1) and moves the
+// conversation's resume horizon onto it in one transaction. clearPending
+// additionally consumes the clear_pending flag in the same statement, so a
+// /clear boundary is recorded atomically with the flag it was waiting on; the
+// compaction path passes false and leaves the flag untouched.
+func (s *CaptureStore) bumpHorizon(ctx context.Context, convID string, clearPending bool) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, false, fmt.Errorf("resolve horizon: begin: %w", err)
+		return 0, fmt.Errorf("resolve horizon: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var hPrime int
 	if err := tx.QueryRow(ctx,
 		`SELECT coalesce(max(ordinal),-1)+1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
 		convID).Scan(&hPrime); err != nil {
-		return 0, false, fmt.Errorf("resolve horizon: compute H': %w", err)
+		return 0, fmt.Errorf("resolve horizon: compute H': %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE conversations.conversation SET resume_from_ordinal=$2 WHERE id=$1::uuid`,
-		convID, hPrime); err != nil {
-		return 0, false, fmt.Errorf("resolve horizon: bump horizon: %w", err)
+	update := `UPDATE conversations.conversation SET resume_from_ordinal=$2 WHERE id=$1::uuid`
+	if clearPending {
+		update = `UPDATE conversations.conversation SET resume_from_ordinal=$2, clear_pending=false WHERE id=$1::uuid`
+	}
+	if _, err := tx.Exec(ctx, update, convID, hPrime); err != nil {
+		return 0, fmt.Errorf("resolve horizon: bump horizon: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, false, fmt.Errorf("resolve horizon: commit: %w", err)
+		return 0, fmt.Errorf("resolve horizon: commit: %w", err)
 	}
-	return hPrime, true, nil
+	return hPrime, nil
 }
 
 // compactionMarkers are the phrases Claude Code's own compaction summary opens
