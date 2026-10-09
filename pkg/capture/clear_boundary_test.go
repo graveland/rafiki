@@ -85,9 +85,13 @@ func TestClearBoundaryWritesClearRow(t *testing.T) {
 	c.Eq(4, storedHorizon(t, ctx, pool, convID), "resume_from_ordinal")
 	c.False(clearPendingOf(t, ctx, pool, convID), "clear_pending must be consumed by the boundary write")
 
-	kind, role, _, content := requireKindRow(t, ctx, pool, convID, 4)
+	kind, role, inTok, content := requireKindRow(t, ctx, pool, convID, 4)
 	c.False(kind == nil || *kind != "clear", "ordinal 4 kind = %v, want clear", kind)
 	c.False(role == nil || *role != "user", "ordinal 4 role = %v, want user", role)
+	// A /clear boundary replaces the context, it does not summarise it, so the
+	// boundary row carries no size: the prior-turn input_tokens lookup is gated
+	// on kind='compaction_summary' and must stay nil here.
+	c.Nil(inTok, "ordinal 4 input_tokens = %v, want nil (a /clear carries no size)", inTok)
 	requireJSONEqual(t, content, `"fresh after clear"`)
 
 	// Old rows 0..3 are untouched.
