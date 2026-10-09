@@ -148,6 +148,23 @@ non-`Succeeded` End event, and the ground truth is the DB: no
 `conversation_turn` with `source='compaction'` at the ordinal the summary row
 lands on, so insights' `turnMetricsByOrdinal` attributes it to that row.
 
+A failed proactive attempt is not retried on the next tool iteration:
+`Conversation.compactSuppressBelow` defers the next proactive attempt until the
+working set has grown by half the headroom buffer (`HeadroomBuffer/2`), cleared
+on success. The reactive overflow net is armed regardless.
+
+### Known limitations
+
+- A `:batch` child whose compaction leaves a working set with no assistant row —
+  an empty tail, or a tail of only tool_result-free user rows — re-parks its next
+  turn as though it were the conversation's first call (`firstCall`,
+  `pkg/llm/batch.go`): a long unexpected wait, not corruption. Narrow in
+  practice: `NoTail` is never set in production, and `cutTail` normally keeps an
+  assistant row.
+- The daemon-side ERROR line for a failed compaction (`Engine.onCompaction`)
+  names only the trigger, not the child or conversation.
+
+
 ## Events
 
 A compaction is observable two ways:
