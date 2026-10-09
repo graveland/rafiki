@@ -205,6 +205,8 @@ func (e *Emitter) publishNative(payload any) {
 		ev.Payload = &rafikiv1.Event_ToolExecutionStart{ToolExecutionStart: p}
 	case *rafikiv1.ToolExecutionEnd:
 		ev.Payload = &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: p}
+	case *rafikiv1.CompactionBoundary:
+		ev.Payload = &rafikiv1.Event_CompactionBoundary{CompactionBoundary: p}
 	default:
 		return
 	}

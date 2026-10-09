@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/child"
@@ -104,6 +105,30 @@ func (e *Emitter) BatchWaitStart() {
 // result and the turn resumes.
 func (e *Emitter) BatchWaitEnd() {
 	e.fe.Emit(map[string]any{"type": "batch_wait_end"})
+}
+
+// CompactionStart emits {"type":"compaction_start"}: the child's older context
+// is being summarised. pkg/child's state machine pushes the `compacting` status
+// on this frame and pops it on compaction_end, so the pair must stay balanced —
+// llm guarantees an End for every Start, even when the summary fails.
+func (e *Emitter) CompactionStart() {
+	e.fe.Emit(map[string]any{"type": "compaction_start"})
+}
+
+// CompactionEnd emits {"type":"compaction_end"} and, when the attempt actually
+// replaced tokens, publishes the native CompactionBoundary — the durable record
+// a reattached viewer would otherwise only get synthesized from the stored
+// compaction_summary row. A failed attempt (PreTokens 0) emits the frame alone:
+// it wrote nothing, so there is no boundary to record.
+func (e *Emitter) CompactionEnd(ev llm.CompactionEvent) {
+	e.fe.Emit(map[string]any{"type": "compaction_end"})
+	if ev.PreTokens > 0 {
+		e.publishNative(&rafikiv1.CompactionBoundary{
+			Trigger:    ev.Trigger,
+			PreTokens:  proto.Int32(int32(ev.PreTokens)),
+			PostTokens: proto.Int32(int32(ev.PostTokens)),
+		})
+	}
 }
 
 // UserMessage emits the message_start/message_end pair for an accepted

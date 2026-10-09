@@ -311,6 +311,11 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	if cfg.NativeSink != nil {
 		e.em.SetNativeSink(cfg.NativeSink)
 	}
+	// The compaction observer: llm reports every compaction boundary on the
+	// conversation, and the engine turns each into a pi frame pair (which
+	// pkg/child's state machine renders as the `compacting` status) plus the
+	// durable native boundary. Registered here, where both conv and em exist.
+	conv.OnCompaction(e.onCompaction)
 	// fe's Handler is wired here rather than by the caller: Engine and
 	// Frontend are the same package, but BuildEngine (cmd/rafikid's entry
 	// point, per the import-direction constraint) constructs fe before the
@@ -354,6 +359,25 @@ func catalogOf(c *llm.Client) *routing.ModelCatalog {
 		return nil
 	}
 	return c.Catalog()
+}
+
+// compactionContextWindow returns the context window compaction is measured
+// against: the catalog's figure for the child's model when it knows it, else 0.
+//
+// 0 is deliberate and is NOT prefillFallbackContext. The policy reads a
+// non-positive window as "unknown", which never triggers proactive compaction —
+// a guessed window would summarise a healthy conversation, and an overflow the
+// model genuinely cannot hold is handled reactively by the overflow net. modelID
+// must be the provider-local id (EngineConfig.ModelID), the same value
+// prefillContextWindow needs: the catalog indexes OpenRouter-native ids, so a
+// provider-qualified id never matches.
+func compactionContextWindow(client *llm.Client, modelID string) int {
+	if cat := catalogOf(client); cat != nil {
+		if ctxLen, _, ok := cat.ContextWindow(modelID); ok {
+			return ctxLen
+		}
+	}
+	return 0
 }
 
 // pricerFor derives the turn pricer from the client's model catalog.
@@ -1137,6 +1161,21 @@ func costGuardrail(runningTotal, maxCost float64) (bool, string) {
 			runningTotal, maxCost)
 	}
 	return false, ""
+}
+
+// onCompaction is the conversation's compaction observer: llm calls it on the
+// turn goroutine (compact runs inside Continue), so it shares recoverEmit's
+// guard with the other emission callbacks — a panicking emitter must not fail
+// the turn. Start and End frames stay balanced because llm fires End on every
+// path out of compact, including a failed or empty summary (with zero tokens).
+func (e *Engine) onCompaction(ev llm.CompactionEvent) {
+	defer recoverEmit("OnCompaction", "")
+	switch ev.Phase {
+	case llm.CompactionStart:
+		e.em.CompactionStart()
+	case llm.CompactionEnd:
+		e.em.CompactionEnd(ev)
+	}
 }
 
 // recoverEmit contains a panic raised inside one of the observation callbacks

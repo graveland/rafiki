@@ -303,6 +303,15 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 			ModelID:         c.Model,
 			Workspace:       c.Workspace,
 		})),
+		// Proactive compaction: when the child's context nears the model's
+		// window, summarise older history rather than let the request overflow.
+		// modelID is the provider-local id — the same value prefillContextWindow
+		// documents it needs, since the catalog indexes OpenRouter-native ids.
+		// An unknown window resolves to 0, which the policy reads as "no
+		// proactive trigger" (overflow still handled reactively).
+		llm.WithCompaction(llm.CompactionPolicy{
+			ContextWindowFn: func() int { return compactionContextWindow(client, modelID) },
+		}),
 	}
 	if c.Ref != "" {
 		convOpts = append(convOpts, llm.ByExternalRef(c.Ref))
