@@ -39,6 +39,22 @@ type Conversation struct {
 	// mem holds history when the client has no store: same loop semantics,
 	// no capture and no Resume (both need the DB). CLI-mode hosts use this.
 	mem []store.Message
+
+	// usedTokens is the total token count the last successful response
+	// reported (input + cache read + cache creation + output); 0 means "not
+	// known yet", which the compaction trigger reads as "estimate from bytes
+	// instead".
+	usedTokens int
+	// memHorizon is the index into mem of the current compaction summary row
+	// (0 = no compaction). loadHistory returns mem[memHorizon:], the working
+	// set; the DB path uses conversation.resume_from_ordinal instead.
+	memHorizon int
+	// onCompact observes compaction boundaries; nil means no observer.
+	//
+	// usedTokens, memHorizon and onCompact are UNSYNCHRONISED: a Conversation
+	// is owned by one goroutine at a time (mem has the same property), so a
+	// caller must never run two sends concurrently.
+	onCompact func(CompactionEvent)
 }
 
 type convConfig struct {
@@ -62,6 +78,7 @@ type convConfig struct {
 	authorKind     string
 	rateLimit      RateLimitPolicy
 	cache          *CachePolicy
+	compaction     *CompactionPolicy
 }
 
 type ConvOption func(*convConfig)
@@ -180,6 +197,21 @@ func WithCache(p CachePolicy) ConvOption {
 		c.cache = &q
 	}
 }
+
+// WithCompaction enables context compaction with p's policy (zero fields take
+// their documented defaults). Each application resolves and stores its own
+// defaulted copy: an unresolved zero policy would mean "window unknown, no
+// tail cap", not "defaults".
+func WithCompaction(p CompactionPolicy) ConvOption {
+	return func(c *convConfig) {
+		d := p.withDefaults()
+		c.compaction = &d
+	}
+}
+
+// OnCompaction registers fn to observe compaction boundaries. It is not safe to
+// call concurrently with a send on the same Conversation.
+func (conv *Conversation) OnCompaction(fn func(CompactionEvent)) { conv.onCompact = fn }
 
 // Conversation loads or creates a conversation. With WithStore it is
 // DB-backed (captured, resumable); without, it degrades to an in-memory
@@ -397,13 +429,46 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 		return nil, errors.New("llm: Continue on an empty conversation (nothing to send)")
 	}
 
-	resp, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), mergeForRequest(history), scfg)
+	if p := conv.cfg.compaction; p != nil && len(history) >= minCompactableRows && p.shouldCompact(conv.usedForCheck(history)) {
+		if ok, err := conv.compact(ctx, span, history, scfg, "threshold"); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			conv.client.logger.Warn("compaction failed; continuing with unchanged history", "conversation", conv.ID, "error", err)
+		} else if ok {
+			if history, err = conv.loadHistory(ctx); err != nil {
+				return nil, fmt.Errorf("llm: %w", err)
+			}
+		}
+	}
+
+	// The reactive overflow net: if the API rejects the request as too large and
+	// compaction is available, summarise once and retry on the compacted history
+	// before falling back to the destructive trim policy.
+	var onOverflow func() (int, []Message, bool)
+	if conv.cfg.compaction != nil && len(history) >= minCompactableRows {
+		onOverflow = func() (int, []Message, bool) {
+			ok, err := conv.compact(ctx, span, history, scfg, "overflow")
+			if err != nil || !ok {
+				return 0, nil, false
+			}
+			h, err := conv.loadHistory(ctx)
+			if err != nil {
+				return 0, nil, false
+			}
+			return nextOrdinal(h), mergeForRequest(h), true
+		}
+	}
+
+	resp, ordinal, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), mergeForRequest(history), scfg, onOverflow)
 	if err != nil {
 		return nil, err
 	}
 
+	conv.usedTokens = int(resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.OutputTokens)
+
 	assistant := resp.ToParam()
-	if err := conv.appendMessage(ctx, nextOrdinal(history), assistant,
+	if err := conv.appendMessage(ctx, ordinal, assistant,
 		&store.AssistantMeta{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens,
 			StopReason: string(resp.StopReason)}); err != nil {
 		// The turn is already captured; a failed message append must be loud —
@@ -418,8 +483,8 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 // auto-bump the cap when a turn is truncated.
 func (conv *Conversation) OutputCap() int64 { return conv.cfg.maxTokens }
 
-// History returns the stored messages (ordinal order) — the agent loop's
-// orphan-analysis input.
+// History returns the stored WORKING set: rows from the compaction horizon
+// onward — the agent loop's orphan-analysis input.
 func (conv *Conversation) History(ctx context.Context) ([]store.Message, error) {
 	return conv.loadHistory(ctx)
 }
@@ -466,12 +531,15 @@ func (conv *Conversation) RetractTailUser(ctx context.Context, ordinal int) erro
 	return store.DeleteTailUserMessage(ctx, conv.client.pool, conv.ID, ordinal)
 }
 
-// loadHistory reads history through the storage seam (DB rows or in-memory).
+// loadHistory reads the WORKING set through the storage seam (DB rows bounded
+// at the resume horizon, or the in-memory slice from the compaction horizon).
+// store.Messages.Load is deliberately not called here: it returns the full
+// pre-compaction history and only GetHistory/rafiki logs want that.
 func (conv *Conversation) loadHistory(ctx context.Context) ([]store.Message, error) {
 	if conv.client.messages == nil {
-		return conv.mem, nil
+		return conv.mem[conv.memHorizon:], nil
 	}
-	return conv.client.messages.Load(ctx, conv.ID)
+	return conv.client.messages.LoadWorking(ctx, conv.ID)
 }
 
 // appendMessage writes through the storage seam, preserving the store's
@@ -575,13 +643,69 @@ func replaceEmptyToolUses(param anthropic.MessageParam) []anthropic.ContentBlock
 	return out
 }
 
-// sendWithTrim issues the call, applying the trim policy on prompt-too-large
-// (max 3 attempts). Trimming reshapes only the request message list — stored
-// rows and the system/tools prefix are untouched, so the cached prefix
-// survives every retry (prefix_hash equality across attempts is the
-// regression test).
-func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ordinal int, reqMsgs []Message, scfg sendConfig) (*anthropic.Message, error) {
-	meta := SendMeta{
+// sendWithTrim issues the call, applying the compaction overflow net and the
+// trim policy on prompt-too-large (max 4 attempts). Trimming reshapes only the
+// request message list — stored rows and the system/tools prefix are untouched,
+// so the cached prefix survives every retry (prefix_hash equality across
+// attempts is the regression test).
+//
+// onOverflow, when non-nil, is given ONE chance (before any trim) to compact the
+// conversation and hand back a fresh ordinal and message list; it returns
+// ok=false when it could not (too few rows, a failed summary call). The
+// returned ordinal is where the caller must append the assistant reply, which
+// differs from the input when compaction moved the horizon.
+func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ordinal int, reqMsgs []Message, scfg sendConfig, onOverflow func() (int, []Message, bool)) (*anthropic.Message, int, error) {
+	meta := conv.sendMeta(ordinal, scfg)
+	trimAttempt := 0
+	compacted := false
+	for try := 0; try < 4; try++ {
+		params := conv.assemble(reqMsgs, scfg)
+		resp, delivered, err := conv.sendAttempt(ctx, meta, params, scfg.streamHandler)
+		if err == nil {
+			return resp, ordinal, nil
+		}
+		if delivered {
+			// Structural trim-retry guard: at least one event already reached
+			// scfg.streamHandler for THIS attempt. Retrying now would open a
+			// second, independent stream for the same logical send with no way
+			// for the caller to know the first was abandoned mid-flight — never
+			// safe, regardless of what err turns out to be (isPromptTooLarge or
+			// not). So this is checked before, and independent of, the
+			// isPromptTooLarge check below.
+			return nil, 0, err
+		}
+		if !isPromptTooLarge(err) {
+			return nil, 0, err
+		}
+		if !compacted && onOverflow != nil {
+			compacted = true
+			if newOrdinal, newMsgs, ok := onOverflow(); ok {
+				ordinal, reqMsgs = newOrdinal, newMsgs
+				continue
+			}
+		}
+		trimmed, ok := conv.cfg.trim.Trim(reqMsgs, trimAttempt)
+		if !ok {
+			return nil, 0, err
+		}
+		span.AddEvent("trim", trace.WithAttributes(
+			attribute.Int("rafiki.trim.attempt", trimAttempt),
+			attribute.Int("rafiki.trim.before", len(reqMsgs)),
+			attribute.Int("rafiki.trim.after", len(trimmed)),
+		))
+		conv.client.logger.Warn("prompt too large; trimmed history for retry",
+			"conversation", conv.ID, "attempt", trimAttempt, "messages_before", len(reqMsgs), "messages_after", len(trimmed))
+		reqMsgs = trimmed
+		trimAttempt++
+	}
+	return nil, 0, errors.New("llm: prompt still too large after trim retries")
+}
+
+// sendMeta builds the per-send capture attribution and routing selection. It is
+// the ONE literal, shared by the normal send path and the compaction summary
+// call so their prefix metadata cannot drift.
+func (conv *Conversation) sendMeta(ordinal int, scfg sendConfig) SendMeta {
+	return SendMeta{
 		ConversationID:   conv.ID,
 		OriginEntrypoint: conv.cfg.entrypoint,
 		DrivenBy:         store.DrivenByServer,
@@ -597,39 +721,28 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		Primary:          conv.cfg.primary,
 		Fallback:         conv.cfg.fallback,
 	}
-	for attempt := 0; attempt < 3; attempt++ {
-		params := conv.assemble(reqMsgs, scfg)
-		resp, delivered, err := conv.sendAttempt(ctx, meta, params, scfg.streamHandler)
-		if err == nil {
-			return resp, nil
+}
+
+// usedForCheck is the token count the proactive trigger compares against the
+// window. After a response it is that response's reported total plus an
+// estimate of the rows appended since it (tool results and steers not yet
+// sent); before any response (fresh or resumed) it is a byte estimate of the
+// working set plus the system prompt, since no usage figure exists yet.
+func (conv *Conversation) usedForCheck(history []store.Message) int {
+	if conv.usedTokens > 0 {
+		last := -1
+		for i, m := range history {
+			if m.Param.Role == anthropic.MessageParamRoleAssistant {
+				last = i
+			}
 		}
-		if delivered {
-			// Structural trim-retry guard: at least one event already reached
-			// scfg.streamHandler for THIS attempt. Retrying now would open a
-			// second, independent stream for the same logical send with no way
-			// for the caller to know the first was abandoned mid-flight — never
-			// safe, regardless of what err turns out to be (isPromptTooLarge or
-			// not). So this is checked before, and independent of, the
-			// isPromptTooLarge check below.
-			return nil, err
-		}
-		if !isPromptTooLarge(err) {
-			return nil, err
-		}
-		trimmed, ok := conv.cfg.trim.Trim(reqMsgs, attempt)
-		if !ok {
-			return nil, err
-		}
-		span.AddEvent("trim", trace.WithAttributes(
-			attribute.Int("rafiki.trim.attempt", attempt),
-			attribute.Int("rafiki.trim.before", len(reqMsgs)),
-			attribute.Int("rafiki.trim.after", len(trimmed)),
-		))
-		conv.client.logger.Warn("prompt too large; trimmed history for retry",
-			"conversation", conv.ID, "attempt", attempt, "messages_before", len(reqMsgs), "messages_after", len(trimmed))
-		reqMsgs = trimmed
+		return conv.usedTokens + estimateHistoryTokens(history[last+1:])
 	}
-	return nil, errors.New("llm: prompt still too large after trim retries")
+	systemLen := 0
+	for _, b := range conv.cfg.system {
+		systemLen += len(b.Text)
+	}
+	return estimateHistoryTokens(history) + systemLen/4
 }
 
 // sendAttempt issues ONE request attempt, streaming through handler when set
