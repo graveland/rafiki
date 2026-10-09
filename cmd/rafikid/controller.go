@@ -116,6 +116,12 @@ type Controller struct {
 	// restarts.
 	stopping atomic.Bool
 
+	// sessionIDEnded holds the ids of claude children already being ended for
+	// reporting a different session id, so a second report during the same
+	// launch ends nothing twice. activateLiveChild clears the entry when the
+	// child is relaunched.
+	sessionIDEnded sync.Map
+
 	// leases gates who may WRITE to a conversation. Nil under the same
 	// condition as children.
 	leases *store.LeaseStore
@@ -907,12 +913,17 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 		// TURN: claudeProvider.Parse reports metadata on every `result` frame,
 		// not only on `system/init`. Guarded, it writes once per child.
 		changed := false
+		held := ""
 		if err := c.st.Update(childID, func(s *childstore.Session) {
-			if s.SessionID != md.SessionID {
+			held = s.SessionID
+			if s.SessionID != md.SessionID && (s.Kind != protocol.KindClaude || s.SessionID == "") {
 				s.SessionID = md.SessionID
 				changed = true
 			}
 		}); err != nil {
+			return
+		}
+		if c.refuseClaudeSessionIDChange(childID, held, md.SessionID) {
 			return
 		}
 		if !changed {
@@ -2225,6 +2236,7 @@ func (c *Controller) activateLiveChild(
 	resumeSession string,
 	forkSession string,
 ) (protocol.SpawnResponseData, error) {
+	c.sessionIDEnded.Delete(childID)
 	stalled := false
 	select {
 	case <-ch.Idle():
@@ -2370,6 +2382,7 @@ func (c *Controller) activateLiveChild(
 	resumeLabels["rafiki/cwd"] = snap.Cwd
 	resumeLabels["rafiki/pid"] = strconv.Itoa(ch.PID())
 	resumeLabels["rafiki/kind"] = spawnKindLabel(snap.Kind)
+	delete(resumeLabels, "rafiki/session-error")
 	if snap.ConfigDir != "" {
 		resumeLabels["rafiki/config_dir"] = snap.ConfigDir
 	}
@@ -2384,6 +2397,15 @@ func (c *Controller) activateLiveChild(
 		delete(resumeLabels, "rafiki/model")
 	}
 
+	// A claude child is silent until prompted, so a freshly resumed process has
+	// reported no session id yet. Keep the one it was resumed from: the next
+	// relaunch before the first turn would otherwise have no --resume token and
+	// start a brand-new conversation under the same child.
+	sessionID := meta.SessionID
+	if sessionID == "" {
+		sessionID = snap.SessionID
+	}
+
 	sess := &childstore.Session{
 		ChildID:            childID,
 		OwnerUserID:        snap.OwnerUserID,
@@ -2395,7 +2417,7 @@ func (c *Controller) activateLiveChild(
 		Provider:           provider,
 		Model:              model,
 		Thinking:           snap.Thinking,
-		SessionID:          meta.SessionID,
+		SessionID:          sessionID,
 		SessionFile:        meta.SessionFile,
 		Status:             ch.Status(),
 		StartedAt:          now,
@@ -2477,7 +2499,7 @@ func (c *Controller) activateLiveChild(
 
 	return protocol.SpawnResponseData{
 		ChildID:     childID,
-		SessionID:   meta.SessionID,
+		SessionID:   sessionID,
 		SessionFile: meta.SessionFile,
 		Model:       joinModel(provider, model),
 	}, nil
@@ -2552,6 +2574,24 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		req.Model = joinModel(snap.Provider, snap.Model)
 	}
 	return req
+}
+
+// checkClaudeResumeToken refuses a claude resume that would start a brand-new
+// session under a child that already has captured history. A claude child
+// resumes by --resume <session id>; with no id there is nothing to name, claude
+// starts fresh, and its first request lands in the old child's conversation
+// (the capture layer cannot tell the two histories apart). hasHistory is
+// whether the child already has a captured conversation — a child that never
+// reached a turn has none and resumes fresh harmlessly.
+func checkClaudeResumeToken(snap childstore.Snapshot, hasHistory bool) error {
+	if snap.Kind != protocol.KindClaude || snap.SessionID != "" || !hasHistory {
+		return nil
+	}
+	return &connectapi.ControllerError{
+		Code: protocol.ErrNotResumable,
+		Message: "claude child has a captured conversation but no recorded session id, so a resume would " +
+			"start a new session inside the old conversation; forget it and spawn a new child instead",
+	}
 }
 
 // childClaimSet is a per-childID mutual-exclusion set guarding the
@@ -2755,6 +2795,14 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 			Code:    protocol.ErrNotResumable,
 			Message: "script children cannot be resumed: a script's exit is its result; spawn it again",
 		}
+	}
+
+	if kind == protocol.KindClaude {
+		hasHistory := snap.SessionID == "" && c.conversationIDForChild(snap) != ""
+		if err := checkClaudeResumeToken(snap, hasHistory); err != nil {
+			return protocol.SpawnResponseData{}, err
+		}
+		slog.Info("resuming claude child", "childId", childID, "resumeSession", snap.SessionID, "autoResume", autoResume)
 	}
 
 	req := resumeRequestFromSnapshot(snap, apiKey)
@@ -4079,7 +4127,15 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			// at spawn and only surface on the first turn's init; without this the
 			// store would keep the empty session id captured at activate time and
 			// resume could not re-attach.
-			if (md.SessionID != "" && md.SessionID != lastKnownSessionID) ||
+			//
+			// A claude child already holding an id is a different case: the id
+			// it reports now naming another session means the process started a
+			// new conversation under this child. That ends the child rather
+			// than overwriting the id, so the row keeps pointing at the
+			// original conversation and a resume goes back to it.
+			if md.SessionID != "" && md.SessionID != lastKnownSessionID && c.refuseClaudeSessionIDChange(childID, lastKnownSessionID, md.SessionID) {
+				// Neither id nor file is synced from a process being ended.
+			} else if (md.SessionID != "" && md.SessionID != lastKnownSessionID) ||
 				(md.SessionFile != "" && md.SessionFile != lastKnownSessionFile) {
 				c.handleSessionMetaChange(childID, md.SessionID, md.SessionFile)
 				lastKnownSessionID = md.SessionID
@@ -4258,6 +4314,54 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 	})
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after model change", "childId", childID, "error", err)
+	}
+}
+
+// refuseClaudeSessionIDChange reports whether reported is a CHANGE of the
+// session id a claude child already holds, and if so ends the child (once per
+// launch). A pi child's session id legitimately changes (new_session,
+// switch_session), every other kind has none, and a child holding no id yet
+// simply adopts its first one — so only a claude child with a held id can
+// trip it. Callers must not store a refused id.
+func (c *Controller) refuseClaudeSessionIDChange(childID, held, reported string) bool {
+	if held == "" || reported == "" || held == reported {
+		return false
+	}
+	snap, ok := c.st.Get(childID)
+	if !ok || snap.Kind != protocol.KindClaude {
+		return false
+	}
+	if _, already := c.sessionIDEnded.LoadOrStore(childID, struct{}{}); !already {
+		go c.endChildOnSessionIDChange(childID, held, reported)
+	}
+	return true
+}
+
+// endChildOnSessionIDChange ends a claude child whose process reported a
+// session id other than the one it holds. The stored id is left alone on
+// purpose, and the reason goes on the row, so the failure is visible and the
+// original conversation is still the one a resume returns to. A broken child
+// now is better than a conversation silently split across sessions: capture
+// keys on the child, so a second session would write over the first's history.
+//
+// It runs on its own goroutine: Kill waits for monitorChild's handleChildExit
+// to remove the child, and the caller IS monitorChild.
+func (c *Controller) endChildOnSessionIDChange(childID, was, now string) {
+	reason := fmt.Sprintf("claude session id changed from %s to %s; the child was ended instead of continuing in a different conversation", was, now)
+	slog.Error("claude child reported a different session id; ending it", "childId", childID, "was", was, "now", now)
+	_ = c.st.Update(childID, func(s *childstore.Session) {
+		if s.Labels == nil {
+			s.Labels = make(map[string]string)
+		}
+		s.Labels["rafiki/session-error"] = reason
+	})
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record after session id change", "childId", childID, "error", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := c.Kill(ctx, childID, 5*time.Second, 5*time.Second); err != nil {
+		slog.Error("end child after session id change", "childId", childID, "error", err)
 	}
 }
 

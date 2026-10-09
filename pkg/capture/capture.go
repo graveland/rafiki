@@ -551,8 +551,19 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 		// direction: no false resume point, no readable history lost. The warn
 		// is the only signal this happened, so a marker list gone stale shows
 		// up in the log instead of only in a manual DB scan.
-		slog.Warn("capture: divergent message 0 is not a compaction summary; leaving the horizon untagged",
-			"conversation", convID, "head_first_120", string(msg0[:min(len(msg0), 120)]))
+		// The stored occupant is named beside the request's head: a fresh
+		// client session landing in an old conversation (a /clear, a relaunch
+		// without --resume) looks identical to a rewritten head from this side,
+		// and the two heads side by side are what tells them apart.
+		var storedHead string
+		if qerr := s.pool.QueryRow(ctx,
+			`SELECT left(content::text, 120) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
+			convID, h).Scan(&storedHead); qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
+			storedHead = "unreadable: " + qerr.Error()
+		}
+		slog.Warn("capture: divergent message 0 is not a compaction summary; its messages will be dropped and the response will collide",
+			"conversation", convID, "horizon", h, "request_messages", len(messages),
+			"request_head_first_120", string(msg0[:min(len(msg0), 120)]), "stored_head_first_120", storedHead)
 		return h, false, nil
 	}
 	tx, err := s.pool.Begin(ctx)

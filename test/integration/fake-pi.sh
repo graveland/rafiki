@@ -4,6 +4,8 @@
 #   - On any get_state command, replies with a canned response immediately.
 #   - On set_session_name, replies with success.
 #   - On `__emit_event:<json>` command, echoes the JSON to stdout as an event.
+#   - On a user message whose text is `__claude_init:<id>`, emits a claude
+#     system/init carrying <id> and an assistant frame.
 #   - On `__exit:<code>`, exits with that code.
 #   - On `{"type":"__ctrl_test_emit",...}`, emits a test event then acks.
 #   - On `{"type":"__ctrl_test_burst"}`, emits $FAKE_PI_BURST_TURNS complete
@@ -83,6 +85,15 @@ while IFS= read -r line; do
     __emit_event:*)
       json="${line#__emit_event:}"
       printf '%s\n' "$json"
+      ;;
+    '{"type":"user"'*'__claude_init:'*)
+      # A claude-protocol user message whose text is `__claude_init:<id>`: report
+      # a claude system/init carrying <id>, then the first frame of a turn.
+      # claude children only forward prompt/steer frames, so this is the way a
+      # test makes a claude-kind fake report a session id.
+      sid=$(printf '%s' "$line" | sed -E 's/.*__claude_init:([^"]+)".*/\1/')
+      printf '{"type":"system","subtype":"init","session_id":"%s","model":"claude-test"}\n' "$sid"
+      printf '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n'
       ;;
     __exit:*)
       code="${line#__exit:}"
