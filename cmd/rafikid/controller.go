@@ -122,6 +122,17 @@ type Controller struct {
 	// child is relaunched.
 	sessionIDEnded sync.Map
 
+	// clearExpected holds the ids of children whose process is about to change
+	// session id on purpose, because a /clear was accepted for them. The next
+	// id such a child reports is adopted rather than treated as a change.
+	// activateLiveChild clears the entry, so a relaunch inherits no arm.
+	clearExpected sync.Map
+
+	// clearMarker flags a child's main conversation for capture when a /clear
+	// is accepted. Nil when there is no database (the same pool gate as
+	// captureStore), where capture is disabled entirely.
+	clearMarker clearMarker
+
 	// leases gates who may WRITE to a conversation. Nil under the same
 	// condition as children.
 	leases *store.LeaseStore
@@ -707,6 +718,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	// the only thing between a supervisor hook and a panic.
 	if pool != nil {
 		c.captureStore = capture.NewCaptureStore(pool)
+		c.clearMarker = c.captureStore
 	}
 	c.bound = make(map[string]*boundExecutor)
 	c.jobs = c.newControllerJobWatcher()
@@ -2237,6 +2249,7 @@ func (c *Controller) activateLiveChild(
 	forkSession string,
 ) (protocol.SpawnResponseData, error) {
 	c.sessionIDEnded.Delete(childID)
+	c.clearExpected.Delete(childID)
 	stalled := false
 	select {
 	case <-ch.Idle():
@@ -3711,7 +3724,17 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := c.acceptAndDeliver(ctx, in)
+	// The command layer classifies BEFORE the message is persisted: /exit acts
+	// synchronously and queues nothing, while /clear and /compact do their side
+	// effects and then fall through to the normal persist-and-deliver path.
+	handled, err := c.handleSlashCommand(ctx, in)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
+	_, err = c.acceptAndDeliver(ctx, in)
 	return err
 }
 
@@ -4319,16 +4342,30 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 
 // refuseClaudeSessionIDChange reports whether reported is a CHANGE of the
 // session id a claude child already holds, and if so ends the child (once per
-// launch). A pi child's session id legitimately changes (new_session,
-// switch_session), every other kind has none, and a child holding no id yet
-// simply adopts its first one — so only a claude child with a held id can
-// trip it. Callers must not store a refused id.
+// launch). A claude child whose /clear was accepted adopts the next id it
+// reports, once, and any other id change ends the child. Every other kind has
+// none, and a child holding no id yet simply adopts its first one — so only a
+// claude child with a held id can trip it. Callers must not store a refused id.
 func (c *Controller) refuseClaudeSessionIDChange(childID, held, reported string) bool {
 	if held == "" || reported == "" || held == reported {
 		return false
 	}
 	snap, ok := c.st.Get(childID)
 	if !ok || snap.Kind != protocol.KindClaude {
+		return false
+	}
+	// The other call site already adopted reported: its `held` is stale, but
+	// the store now carries the reported id, so this is not a change.
+	if cur, ok := c.st.Get(childID); ok && cur.SessionID == reported {
+		return false
+	}
+	// A /clear was accepted for this child, so the next id it reports is the
+	// intentional one. Adopt it once and persist it.
+	if _, armed := c.clearExpected.LoadAndDelete(childID); armed {
+		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = reported })
+		if err := c.writeRecord(childID); err != nil {
+			slog.Warn("write state record (after /clear session id)", "childId", childID, "error", err)
+		}
 		return false
 	}
 	if _, already := c.sessionIDEnded.LoadOrStore(childID, struct{}{}); !already {

@@ -420,6 +420,18 @@ func (a connectAccepter) Accept(ctx context.Context, in inbox.Inbound) (string, 
 	if in.Mode == inbox.ModeAbort && a.c.isClaudeAbortTarget(in.ChildID) {
 		return "", a.c.handleClaudeAbort(in.ChildID)
 	}
+	// The command layer classifies BEFORE the message is persisted, exactly as
+	// the claude-abort branch above does: a /exit must not become a row, and a
+	// /clear must arm the session-id guard before its prompt is queued.
+	handled, err := a.c.handleSlashCommand(ctx, in)
+	if err != nil {
+		return "", err
+	}
+	if handled {
+		// Nothing durable was written, so there is no row id to quote back —
+		// the same reason the abort branch returns an empty id.
+		return "", nil
+	}
 	// acceptAndDeliver, not a bare Accept: the framed path gives a submitter
 	// persist-then-deliver, and a Connect submitter whose prompt only got
 	// persisted would wait for the child's next idle transition to see it —
