@@ -326,7 +326,7 @@ defined under "Who may call what" below; each row names its own.
 |---|---|---|
 | `GetHistory` | unary · childScoped | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming · childScoped | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
-| `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see "`Send` and the durable inbox" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
+| `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child or a `/exit` slash command (see "`Send` and the durable inbox" and "Slash commands in a prompt" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
 | `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child); answers only the caller's own subtree |
 | `GetChild` | unary · childScoped | Get one child's summary by id (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost`). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
 | `Spawn` | unary · childScoped | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. Fields 15–29 are operator-only (§"Spawn's operator-only fields" below) |
@@ -1145,6 +1145,44 @@ rather than a message, and it is never persisted. It still aborts; the RPC
 returns success with an **empty `message_id`**, because there is no row to
 name and an invented id would resolve to nothing. Storing it would risk
 replaying a cancellation into an unrelated later turn.
+
+### Slash commands in a prompt
+
+A `PROMPT` whose trimmed text begins with a registered `/command` is a **slash
+command**, interpreted by the daemon before the message is queued:
+`handleSlashCommand` (`cmd/rafikid/slash_commands.go`) runs from both
+`connectAccepter.Accept` (`cmd/rafikid/inbox_wiring.go`, the Connect `Send`
+path) and `Controller.Send` (`cmd/rafikid/controller.go`, the framed path
+`SendFrame` uses and the path the spawners deliver a spawn's initial `prompt`
+through), before anything is persisted. Only `PROMPT` text is interpreted;
+`STEER` and `ABORT` never are. The name is matched exactly and case-sensitively
+against the registered set — `clear`, `compact`, `exit` — so an unregistered
+`/foo` is an ordinary prompt, and a registered command a child kind does not
+support is `InvalidArgument` (`protocol.ErrInvalidArgs`). There is no escape: a
+prompt beginning with a registered name is interpreted, never delivered as
+inert literal text, and a `claude` child would interpret a leading `/` itself
+regardless.
+
+| command | claude | fundi | script |
+|---|---|---|---|
+| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | `InvalidArgument` | `InvalidArgument` |
+| `/compact [text]` | forward the text as a user message | `InvalidArgument` | `InvalidArgument` |
+| `/exit` | `Kill` | `Kill` | `Kill` |
+
+`/exit` calls `Kill` synchronously (resumable — it never sets `closed_at`, the
+same `childScoped` rule as the `Kill` verb) and queues nothing, so the
+response's `message_id` is empty, exactly as for a claude abort. `/clear` and
+`/compact` do their side effects and fall through to the ordinary
+persist-and-deliver path, so their `message_id` names the queued row.
+
+`/clear` on a claude child marks the child's main conversation
+(`conversation.clear_pending`, migration 0049) and arms the session-id guard for
+one intentional change (`Controller.clearExpected`); the guard and capture's
+boundary are in the daemon-state-and-recovery skill.
+
+Because the command layer sits inside `Controller.Send`, a spawn's initial
+`prompt` is classified too: `agent_spawn` with `prompt: "/exit"` kills the child
+it just spawned.
 
 ### `Send` steps
 
