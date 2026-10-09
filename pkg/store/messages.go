@@ -48,16 +48,19 @@ type Message struct {
 	Param      anthropic.MessageParam
 	ToolUseIDs []string
 	StopReason string // assistant rows: stop reason of the turn that produced it
-	// Kind tags a row as something other than an ordinary turn message. Both
-	// "compaction_summary" and "clear" are written today (by pkg/capture's
-	// boundary-write path). A "compaction_summary" row is Claude Code's own
-	// summary message inserted at a rebase boundary; a "clear" row is message 0
-	// of the post-clear request (a real user message, not a summary). Nil on
-	// every ordinary row.
+	// Kind tags a row as something other than an ordinary turn message. Three
+	// values are written today, all by a boundary path: "compaction_summary"
+	// (the summary inserted at a rebase boundary, by pkg/capture or by fundi's
+	// compaction), "compaction_tail" (the post-compaction tail fundi appends —
+	// copies of earlier rows, which every full-history reader must skip; see
+	// docs/reference/fundi-compaction.md) and "clear" (message 0 of the
+	// post-clear request, a real user message, not a summary). Nil on every
+	// ordinary row.
 	Kind *string
 	// InputTokens is set only on a kind='compaction_summary' row: the
 	// approximate size of the context that boundary replaced. Nil otherwise
-	// (including on a kind='clear' row, which carries no size).
+	// (including on a kind='clear' or kind='compaction_tail' row, which carry
+	// no size).
 	InputTokens *int
 }
 
