@@ -342,7 +342,8 @@ type segment struct {
 
 // buildSegments slices messages into segments of at most one segment budget's
 // worth of characters (runes), cutting at every compaction summary and
-// truncating a single over-budget message to the budget.
+// truncating a single over-budget message to the budget. Compaction tail
+// copies neither flush a segment nor contribute text.
 func (s *Summarizer) buildSegments(msgs []Message) []segment {
 	budgetChars := s.SegmentBudgetTokens() * CharsPerToken
 	extracted := ExtractAll(msgs)
@@ -359,6 +360,9 @@ func (s *Summarizer) buildSegments(msgs []Message) []segment {
 	for i, em := range extracted {
 		if msgs[i].Kind == "compaction_summary" {
 			flush()
+			continue
+		}
+		if msgs[i].Kind == "compaction_tail" {
 			continue
 		}
 		if em.Skip {

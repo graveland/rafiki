@@ -17,6 +17,9 @@ import (
 func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event {
 	out := make([]*rafikiv1.Event, 0, len(msgs))
 	for _, m := range msgs {
+		if m.Kind != nil && *m.Kind == "compaction_tail" {
+			continue
+		}
 		ev := &rafikiv1.Event{
 			ChildId: childID,
 			Ordinal: proto.Int32(int32(m.Ordinal)),

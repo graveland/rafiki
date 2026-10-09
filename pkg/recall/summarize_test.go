@@ -408,6 +408,34 @@ func TestSummarizerCutsAtCompactionBoundary(t *testing.T) {
 	}
 }
 
+// A kind='compaction_tail' row duplicates a message that already sits before
+// the summary, so it must neither flush a segment nor contribute text: the
+// pre-summary segment still ends at the original and the post-summary segment
+// starts at the next real message.
+func TestCompactionRecallSegmentsIgnoreTail(t *testing.T) {
+	c := assert.NewAborting(t)
+	bText := "second turn body"
+	s := summarizerWith(SummarizerOptions{Completer: summarizerCompleter("m")})
+	msgs := []Message{
+		summarizerMsg("c1", 0, "user", "first turn body"),
+		summarizerMsg("c1", 1, "assistant", bText),
+		summarizerCompaction("c1", 2),
+		{ConversationID: "c1", Ordinal: 3, Role: "assistant", Kind: "compaction_tail",
+			Content: json.RawMessage(strconv.Quote(bText))},
+		summarizerMsg("c1", 4, "user", "third turn body"),
+	}
+
+	segs := s.buildSegments(msgs)
+
+	c.Len(segs, 2, "got %d segments, want 2", len(segs))
+	c.False(segs[0].from != 0 || segs[0].to != 1, "first segment spans %d-%d, want 0-1", segs[0].from, segs[0].to)
+	c.False(segs[1].from != 4 || segs[1].to != 4, "second segment spans %d-%d, want 4-4", segs[1].from, segs[1].to)
+	c.NotStrContains(segs[1].text, bText, "the tail copy leaked into the post-summary segment")
+	if got := strings.Count(segs[0].text+"\n"+segs[1].text, bText); got != 1 {
+		t.Fatalf("tail copy's text appears %d times, want 1 (only the original)", got)
+	}
+}
+
 func TestSummarizerIncrementalOnlyNewTail(t *testing.T) {
 	c := assert.NewAborting(t)
 	store := summarizerStore()

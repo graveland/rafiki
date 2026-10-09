@@ -20,13 +20,14 @@ type ExtractedMessage struct {
 // joined with "\n", prefixed "role: ". Tool results, thinking blocks and
 // unknown block types are dropped; tool_use arguments are compacted and
 // truncated to ToolArgMaxChars; images and documents become markers. A
-// compaction summary extracts to the empty string.
+// compaction summary or tail copy extracts to the empty string.
 func Extract(m Message) string {
 	return renderMessage(m, false)
 }
 
-// ExtractAll extracts every message in order. Compaction summaries and
-// messages with no extractable text (e.g. tool results only) are marked Skip.
+// ExtractAll extracts every message in order. Compaction summaries, tail
+// copies and messages with no extractable text (e.g. tool results only) are
+// marked Skip.
 func ExtractAll(ms []Message) []ExtractedMessage {
 	out := make([]ExtractedMessage, len(ms))
 	for i, m := range ms {
@@ -51,7 +52,7 @@ func RenderContext(ms []Message) string {
 // renderMessage extracts a message's text; with resultSizes, tool_result
 // blocks render as "→ result (<size>)" markers instead of being dropped.
 func renderMessage(m Message, resultSizes bool) string {
-	if m.Kind == "compaction_summary" {
+	if m.Kind == "compaction_summary" || m.Kind == "compaction_tail" {
 		return ""
 	}
 	parts := blockTexts(m.Content, resultSizes)

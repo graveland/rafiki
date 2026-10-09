@@ -124,3 +124,35 @@ func TestEventsFromMessagesCompactionSummaryWithoutTokens(t *testing.T) {
 		t.Fatalf("pre_tokens=%v post_tokens=%v, want both unset", cb.PreTokens, cb.PostTokens)
 	}
 }
+
+// kind='compaction_tail' rows are stored duplicates of rows that already sit
+// before the compaction horizon, so the full-history reader must drop them
+// entirely — no event, no ordinal — leaving the summary's boundary and the
+// pre-horizon messages behind.
+func TestCompactionEventsFromMessagesSkipsTail(t *testing.T) {
+	c := assert.NewAborting(t)
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
+		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi")), StopReason: "end_turn"},
+		{Ordinal: 2, Kind: ptr("compaction_summary"), InputTokens: ptr(900),
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))},
+		{Ordinal: 3, Kind: ptr("compaction_tail"),
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
+		{Ordinal: 4, Kind: ptr("compaction_tail"),
+			Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi")), StopReason: "end_turn"},
+	}
+
+	evs := eventconv.EventsFromMessages("c_test", msgs)
+
+	c.Len(evs, 3, "got %d events, want 3", len(evs))
+	c.Eq(0, evs[0].GetOrdinal(), "event 0 ordinal")
+	c.Eq(1, evs[1].GetOrdinal(), "event 1 ordinal")
+	c.Eq(2, evs[2].GetOrdinal(), "event 2 ordinal")
+	c.NotNil(evs[0].GetUserMessage(), "event 0 is %T, want an ordinary user message", evs[0].Payload)
+	c.NotNil(evs[1].GetAssistantMessage(), "event 1 is %T, want an ordinary assistant message", evs[1].Payload)
+	cb := evs[2].GetCompactionBoundary()
+	c.NotNil(cb, "event 2 is %T, want Event_CompactionBoundary", evs[2].Payload)
+	if cb.PreTokens == nil || cb.GetPreTokens() != 900 {
+		t.Fatalf("pre_tokens = %v, want 900", cb.PreTokens)
+	}
+}

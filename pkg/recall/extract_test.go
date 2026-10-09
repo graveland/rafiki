@@ -70,6 +70,22 @@ func TestExtractSkipsCompactionAndThinking(t *testing.T) {
 	}
 }
 
+// A kind='compaction_tail' row is a stored duplicate of a message that already
+// sits before the horizon; like a compaction summary it must extract to
+// nothing and be marked Skip, so no window is ever built from it.
+func TestCompactionRecallExtractSkipsTail(t *testing.T) {
+	c := assert.NewAborting(t)
+	tail := Message{
+		ConversationID: "c", Ordinal: 3, Role: "user", Kind: "compaction_tail",
+		Content: testBlocks(t, map[string]any{"type": "text", "text": "a copy of an earlier turn"}),
+	}
+	c.Eq("", Extract(tail), "compaction_tail extract")
+	all := ExtractAll([]Message{tail})
+	if !all[0].Skip || all[0].Text != "" || all[0].Ordinal != 3 {
+		t.Fatalf("compaction_tail not skipped: %+v", all[0])
+	}
+}
+
 func TestExtractStringContent(t *testing.T) {
 	m := Message{
 		ConversationID: "c", Ordinal: 3, Role: "user",
