@@ -58,12 +58,33 @@ type Message struct {
 	InputTokens *int
 }
 
-// Load returns the conversation's messages in ordinal order.
+// Load returns the conversation's FULL message history in ordinal order. It is
+// deliberately not filtered by the resume horizon: GetHistory, `rafiki logs` and
+// fundi's own loadHistory all need the pre-compaction history too. The
+// horizon-bounded read is LoadWorking.
 func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, error) {
-	rows, err := m.pool.Query(ctx, `
+	return m.load(ctx, conversationID, false)
+}
+
+// load reads the conversation's messages in ordinal order. With workingOnly the
+// read is bounded at the resume horizon: only rows at or after
+// conversations.conversation.resume_from_ordinal (NULL meaning 0, i.e. full
+// replay) are returned. Everything after the query — scan, wire assembly,
+// decode — is shared between the two reads.
+func (m *Messages) load(ctx context.Context, conversationID string, workingOnly bool) ([]Message, error) {
+	query := `
 		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens
 		  FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid ORDER BY ordinal`, conversationID)
+		 WHERE conversation_id = $1::uuid ORDER BY ordinal`
+	if workingOnly {
+		query = `
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens
+		  FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid
+		   AND ordinal >= coalesce((SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid), 0)
+		 ORDER BY ordinal`
+	}
+	rows, err := m.pool.Query(ctx, query, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
 	}
