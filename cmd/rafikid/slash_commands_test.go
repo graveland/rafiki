@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -268,4 +269,70 @@ func TestActivateLiveChildClearsTheArm(t *testing.T) {
 	if _, armed := ctrl.clearExpected.Load(id); armed {
 		t.Errorf("a relaunch inherited a /clear arm; activateLiveChild must clear it")
 	}
+}
+
+// A slash command sent through the framed Controller.Send path is intercepted
+// too, not only through the Connect accepter. Deleting the handleSlashCommand
+// call from Controller.Send makes this queue a row and leave the child running.
+func TestSendSlashExitViaFramedPathKillsAndQueuesNothing(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl, rec, _ := slashFixture(t)
+	id := spawnTestChild(t, ctrl, nil)
+
+	ck.Require().NoError(ctrl.Send(id, json.RawMessage(`{"type":"prompt","message":"/exit"}`)), "Send(/exit)")
+	ck.Empty(rec.accepted(), "a /exit via the framed path must queue nothing")
+	waitForExited(t, ctrl.st, id, 10*time.Second)
+}
+
+// The OnMeta hook and monitorChild both report the same system/init. Their
+// concurrent calls to the guard must not let the stale report kill a child
+// whose /clear was just adopted: exactly one adoption, no kill, the row ends
+// on the new id and the arm is consumed. Fails without sessionIDMu serializing
+// the store-holds check, the adoption and the store Update.
+func TestClaudeClearConcurrentReportsAdoptOnceAndDoNotKill(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+
+	const orig, next = "7bd6b824-5b45-455f-95f7-36f7b34fc7aa", "ec3af0b5-dc54-49e9-8b61-addfeb680cbb"
+	ctrl.st.Insert(&childstore.Session{ChildID: "c_clear", Kind: protocol.KindClaude, Status: protocol.StatusIdle, SessionID: orig})
+
+	for i := 0; i < 200; i++ {
+		ck.Require().NoError(ctrl.st.Update("c_clear", func(s *childstore.Session) { s.SessionID = orig }), "reset row")
+		ctrl.sessionIDEnded.Delete("c_clear")
+		ctrl.clearExpected.Store("c_clear", struct{}{})
+
+		var wg sync.WaitGroup
+		var a, b bool
+		wg.Add(2)
+		go func() { defer wg.Done(); a = ctrl.refuseClaudeSessionIDChange("c_clear", orig, next) }()
+		go func() { defer wg.Done(); b = ctrl.refuseClaudeSessionIDChange("c_clear", orig, next) }()
+		wg.Wait()
+
+		ck.False(a || b, "iteration %d: a concurrent duplicate report was treated as a change", i)
+		snap, ok := ctrl.st.Get("c_clear")
+		ck.Require().True(ok, "iteration %d: row vanished", i)
+		ck.Eq(next, snap.SessionID, "iteration %d: the armed /clear must adopt the new id", i)
+		ck.False(snap.Status == protocol.StatusExited, "iteration %d: a concurrent duplicate report killed the child", i)
+		if _, armed := ctrl.clearExpected.Load("c_clear"); armed {
+			t.Fatalf("iteration %d: the arm was not consumed", i)
+		}
+	}
+}
+
+// The store-holds early return also holds with no arm present: a report the
+// store already carries is not a change and must not end the child.
+func TestClaudeClearStoreAlreadyHoldsReportedIsNotAChange(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+
+	const orig, next = "7bd6b824-5b45-455f-95f7-36f7b34fc7aa", "ec3af0b5-dc54-49e9-8b61-addfeb680cbb"
+	ctrl.st.Insert(&childstore.Session{ChildID: "c_holds", Kind: protocol.KindClaude, Status: protocol.StatusIdle, SessionID: next})
+
+	ck.False(ctrl.refuseClaudeSessionIDChange("c_holds", orig, next), "a report the store already holds must not be a change")
+
+	time.Sleep(100 * time.Millisecond)
+	snap, ok := ctrl.st.Get("c_holds")
+	ck.Require().True(ok, "row vanished")
+	ck.Eq(next, snap.SessionID, "the store-held id was overwritten")
+	ck.False(snap.Status == protocol.StatusExited, "the store-held report ended the child")
 }

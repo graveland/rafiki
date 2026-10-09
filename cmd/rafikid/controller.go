@@ -122,6 +122,13 @@ type Controller struct {
 	// child is relaunched.
 	sessionIDEnded sync.Map
 
+	// sessionIDMu serializes refuseClaudeSessionIDChange. The OnMeta hook and
+	// monitorChild both report the same system/init, and the store-holds check,
+	// the /clear arm adoption and the store Update must run as one critical
+	// section — otherwise the second report can pass the check before the first
+	// writes the adopted id, then end a child whose /clear was just accepted.
+	sessionIDMu sync.Mutex
+
 	// clearExpected holds the ids of children whose process is about to change
 	// session id on purpose, because a /clear was accepted for them. The next
 	// id such a child reports is adopted rather than treated as a change.
@@ -4346,17 +4353,24 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 // reports, once, and any other id change ends the child. Every other kind has
 // none, and a child holding no id yet simply adopts its first one — so only a
 // claude child with a held id can trip it. Callers must not store a refused id.
+//
+// Serialized by sessionIDMu: the two call sites (the OnMeta hook and
+// monitorChild) both report the same system/init, and the store-holds check,
+// the arm adoption and the store Update must be atomic together.
 func (c *Controller) refuseClaudeSessionIDChange(childID, held, reported string) bool {
 	if held == "" || reported == "" || held == reported {
 		return false
 	}
+	c.sessionIDMu.Lock()
+	defer c.sessionIDMu.Unlock()
+
 	snap, ok := c.st.Get(childID)
 	if !ok || snap.Kind != protocol.KindClaude {
 		return false
 	}
 	// The other call site already adopted reported: its `held` is stale, but
 	// the store now carries the reported id, so this is not a change.
-	if cur, ok := c.st.Get(childID); ok && cur.SessionID == reported {
+	if snap.SessionID == reported {
 		return false
 	}
 	// A /clear was accepted for this child, so the next id it reports is the
