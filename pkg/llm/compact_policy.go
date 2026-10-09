@@ -35,6 +35,13 @@ type CompactionEvent struct {
 	Trigger    string // "threshold" or "overflow"
 	PreTokens  int    // set on CompactionEnd: tokens the summary replaced
 	PostTokens int    // set on CompactionEnd: estimated tokens of the new working set
+	// Succeeded reports whether this event marks a compaction that actually
+	// wrote a boundary. It is false on Start and on every End from a failed or
+	// no-op attempt (a failed summary call, a truncated or absent summary).
+	// Gate anything that records a boundary on this, never on a token count:
+	// a sender may legitimately report a zero usage figure, so PreTokens > 0 is
+	// not a success signal.
+	Succeeded bool
 }
 
 // minCompactableRows is the fewest rows worth compacting: below it a summary
@@ -133,17 +140,26 @@ func isLegalCut(m store.Message) bool {
 // len(history) means an empty tail. Index 0 is never a tail start: the oldest
 // row is always part of what the summary replaces. It picks the earliest legal
 // start whose suffix fits the budget, or the empty tail when nothing fits.
+//
+// O(n): each row's estimateTokens is computed once and the suffix size is
+// accumulated walking backward from the end. Suffix sizes only GROW as the
+// start index decreases, so once the accumulated suffix exceeds the budget no
+// smaller index can fit and the walk stops; the last legal index seen within
+// budget is therefore the earliest such start.
 func cutTail(history []store.Message, budgetTokens int) int {
 	if budgetTokens <= 0 {
 		return len(history)
 	}
-	for i := 1; i < len(history); i++ {
-		if !isLegalCut(history[i]) {
-			continue
+	best := len(history) // empty tail until a legal, fitting start is seen
+	suffix := 0
+	for i := len(history) - 1; i >= 1; i-- {
+		suffix += estimateTokens(history[i])
+		if suffix > budgetTokens {
+			break
 		}
-		if estimateHistoryTokens(history[i:]) <= budgetTokens {
-			return i
+		if isLegalCut(history[i]) {
+			best = i
 		}
 	}
-	return len(history)
+	return best
 }

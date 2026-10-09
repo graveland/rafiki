@@ -6,6 +6,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/store"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -204,6 +206,61 @@ func TestDBToPiFrames_AgentEndCarriesMessages(t *testing.T) {
 		c.Require().NoError(json.Unmarshal(m, &msg), "message %d", i)
 		c.NotEq("", msg.Role, "message %d: role empty", i)
 	}
+}
+
+// TestDBToPiFramesMessages_SkipsTailAndRendersBoundary pins the full-history
+// reader contract for the agent_view path: a compaction_tail copy must be
+// dropped (the tail shows once, through its original row), and the
+// compaction_summary row must render as a compaction_boundary divider rather
+// than as a plain user prompt.
+func TestDBToPiFramesMessages_SkipsTailAndRendersBoundary(t *testing.T) {
+	c := assert.NewCollecting(t)
+	kind := func(k string) *string { return &k }
+	pre := 123
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
+		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a1"))},
+		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p2"))},
+		{Ordinal: 3, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a2"))},
+		{Ordinal: 4, Kind: kind(store.KindCompactionSummary), InputTokens: &pre,
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("SUMMARY-TEXT"))},
+		{Ordinal: 5, Kind: kind(store.KindCompactionTail),
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p2"))},
+		{Ordinal: 6, Kind: kind(store.KindCompactionTail),
+			Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a2"))},
+	}
+
+	var boundary, p2, summary int
+	for _, f := range DBToPiFramesMessages(msgs) {
+		var env struct {
+			Type      string `json:"type"`
+			PreTokens *int   `json:"preTokens"`
+			Message   struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		c.Require().NoError(json.Unmarshal(f, &env), "frame %s", f)
+		switch env.Type {
+		case "compaction_boundary":
+			boundary++
+			c.Require().NotNil(env.PreTokens, "boundary frame carries no preTokens")
+			c.Eq(123, *env.PreTokens, "boundary preTokens")
+		case "message_end":
+			var text string
+			if json.Unmarshal(env.Message.Content, &text) != nil {
+				continue
+			}
+			switch text {
+			case "p2":
+				p2++
+			case "SUMMARY-TEXT":
+				summary++
+			}
+		}
+	}
+	c.Eq(1, boundary, "compaction_boundary frames")
+	c.Eq(1, p2, "the tail marker must appear once (tail copy skipped, original kept)")
+	c.Eq(0, summary, "the summary row must not render as a plain user message")
 }
 
 // TestAppendPiMsg_SkipsNilRawMessage guards the fix for appendPiMsg's dead

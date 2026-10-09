@@ -99,7 +99,8 @@ func (i *Insights) Export(ctx context.Context, scope Scope, conversationID strin
 	rows, err := i.pool.Query(ctx, `
 		SELECT ordinal, role, content
 		  FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid ORDER BY ordinal`, conversationID)
+		 WHERE conversation_id = $1::uuid AND kind IS DISTINCT FROM 'compaction_tail'
+		 ORDER BY ordinal`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("export: load messages: %w", err)
 	}

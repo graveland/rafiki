@@ -28,10 +28,10 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	if conv.onCompact != nil {
 		conv.onCompact(CompactionEvent{Phase: CompactionStart, Trigger: trigger})
 	}
-	pre, post := 0, 0
+	pre, post, succeeded := 0, 0, false
 	defer func() {
 		if conv.onCompact != nil {
-			conv.onCompact(CompactionEvent{Phase: CompactionEnd, Trigger: trigger, PreTokens: pre, PostTokens: post})
+			conv.onCompact(CompactionEvent{Phase: CompactionEnd, Trigger: trigger, PreTokens: pre, PostTokens: post, Succeeded: succeeded})
 		}
 	}()
 
@@ -122,8 +122,13 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 		attribute.Int("rafiki.compaction.tail_rows", len(tail)),
 	))
 	conv.usedTokens = 0
+	// A successful compaction clears any proactive-retry suppression: the
+	// working set is fresh and small, so a stale suppression threshold from an
+	// earlier failure must not block the next legitimate compaction.
+	conv.compactSuppressBelow = 0
 	pre = replaced
 	post = estimateTokens(summaryRow) + estimateHistoryTokens(tail)
+	succeeded = true
 	return true, nil
 }
 

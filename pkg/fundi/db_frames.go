@@ -8,6 +8,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // DBToPiFrames converts persisted conversation messages (from
@@ -50,6 +51,68 @@ func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
 	out = appendFrame(out, child.PiAgentEnd(piMsgs, nil))
 
 	return out
+}
+
+// DBToPiFramesMessages is DBToPiFrames for stored rows: it drops
+// compaction_tail copies (their originals still exist earlier in the table, so
+// the tail is shown exactly once) and renders the compaction_summary row as a
+// boundary divider rather than a plain user prompt. It mirrors
+// eventconv.EventsFromMessages, which skips the same copies and synthesises a
+// CompactionBoundary from the same summary row — the full-history reader
+// contract (docs/reference/fundi-compaction.md).
+func DBToPiFramesMessages(msgs []store.Message) []json.RawMessage {
+	params := make([]anthropic.MessageParam, 0, len(msgs))
+	for _, m := range msgs {
+		if hasKind(m, store.KindCompactionTail) {
+			continue
+		}
+		params = append(params, m.Param)
+	}
+	uses, resolved := toolUseMap(params)
+
+	out := make([]json.RawMessage, 0, len(params)*3+2)
+	piMsgs := make([]json.RawMessage, 0, len(params))
+
+	out = appendFrame(out, child.PiAgentStart())
+
+	for _, m := range msgs {
+		if hasKind(m, store.KindCompactionTail) {
+			continue
+		}
+		if hasKind(m, store.KindCompactionSummary) {
+			out = appendFrame(out, compactionBoundaryFrame(m.InputTokens))
+			continue
+		}
+		switch m.Param.Role {
+		case "user":
+			frames, piMsgsFor := dbUserFramesWithTools(m.Param, uses)
+			out = append(out, frames...)
+			piMsgs = append(piMsgs, piMsgsFor...)
+		case "assistant":
+			frames, piMsg := dbAssistantFramesWithTools(m.Param, uses, resolved)
+			out = append(out, frames...)
+			piMsgs = appendPiMsg(piMsgs, piMsg)
+		}
+	}
+
+	out = appendFrame(out, child.PiAgentEnd(piMsgs, nil))
+	return out
+}
+
+// hasKind reports whether m carries the given compaction kind.
+func hasKind(m store.Message, kind string) bool {
+	return m.Kind != nil && *m.Kind == kind
+}
+
+// compactionBoundaryFrame is the pi-vocabulary divider DBToPiFramesMessages
+// emits in place of a compaction_summary row. preTokens is the replaced-context
+// size (InputTokens on the row); it is omitted when the row carries none.
+func compactionBoundaryFrame(preTokens *int) json.RawMessage {
+	f := map[string]any{"type": "compaction_boundary"}
+	if preTokens != nil {
+		f["preTokens"] = *preTokens
+	}
+	return mustFrame(f)
 }
 
 // toolUseInfo carries the fields a tool_execution_end frame needs to pair a

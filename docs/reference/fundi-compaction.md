@@ -25,16 +25,29 @@ Two triggers, both gated on a `CompactionPolicy` being configured and on at
 least `minCompactableRows` (4) working rows (`pkg/llm/compact_policy.go`):
 
 - **Proactive (threshold).** `Conversation.Continue` compacts when
-  `ContextWindow − used ≤ HeadroomBuffer` (`shouldCompact`). `used` is the last
-  response's reported total — input + cache read + cache creation + output —
-  plus an estimate of the rows appended since it (tool results and steers not
-  yet sent), via `usedForCheck`. The default buffer is 40k tokens and is raised
-  to at least `SummaryMaxTokens + 4000` so the summary call's own output and
-  prompt fit beneath it (`withDefaults`).
+  `ContextWindow − used ≤ HeadroomBuffer` (`shouldCompact`). After a response
+  `used` is the last response's reported total — input + cache read + cache
+  creation + output — plus an estimate of the rows appended since it (tool
+  results and steers not yet sent). Before any response in this process (fresh,
+  resumed, or just compacted, so `usedTokens == 0`) it is a byte estimate of the
+  whole working set plus `system/4`; tool definitions are NOT counted, so this
+  under-estimates until the first response (the overflow net covers the gap).
+  The default buffer is 40k tokens and is raised to at least
+  `SummaryMaxTokens + 4000` so the summary call's own output and prompt fit
+  beneath it (`withDefaults`).
 - **Reactive (overflow).** If the API rejects the request as too large
   (`isPromptTooLarge`, an input-size error) and compaction is available, rafiki
   gets exactly ONE chance to compact and retry on the compacted history before
   falling back to the destructive trim policy (`sendWithTrim`'s `onOverflow`).
+  This net is MECHANICS-ONLY: an input-size 400 recurs on the summary call
+  itself (the summary call carries the same oversized history), so a model whose
+  catalog window is unknown effectively never compacts and still gets the trim.
+
+A failed proactive attempt (a failed summary call, a truncated or absent
+summary) is NOT retried on every tool iteration: `Continue` suppresses the next
+proactive attempt until `usedForCheck` has grown by half the headroom buffer
+since the failure (`compactSuppressBelow`), cleared on a successful compaction.
+The reactive overflow net stays armed regardless.
 
 An unknown context window (`ContextWindowFn` nil, or returning ≤ 0) disables the
 proactive trigger entirely — only overflow can compact it. Fewer than 4 working
@@ -70,13 +83,18 @@ uses is the whole point:
   `resume_from_ordinal`. `llm.Conversation.loadHistory` (and so `History`,
   `agentloop.Resume`, orphan repair and `classifyPrefill`) reads only this.
 - **Full history** — `store.Messages.Load` is deliberately NOT filtered by the
-  horizon. `GetHistory`, `Controller.dbRecent` (which serves `rafiki logs`) and
-  recall read every row.
+  horizon. `GetHistory` (which serves `rafiki logs`), `Controller.dbRecent`
+  (which serves GetRecent / the `agent_view` tool) and recall read every row.
 
 A full-history reader must skip `kind='compaction_tail'` rows or it shows the
 tail twice: `eventconv.EventsFromMessages` skips them and synthesises a
-`CompactionBoundary` from the summary row instead, and `pkg/recall` skips them
-in both its extraction and summariser paths.
+`CompactionBoundary` from the summary row instead; `pkg/fundi.DBToPiFramesMessages`
+(the agent_view path) skips them and renders the same boundary divider; the
+`pkg/insights` readers (the export query and the tools/skills/sizes/classes
+catalogue CTEs) skip them; and `pkg/recall` skips them in both its extraction
+and summariser paths. `pkg/recall` also skips the `compaction_summary` row in
+its extraction (`extract.go`) and cuts windows at summaries (`summarize.go`), so
+a summary is never re-summarised as ordinary conversation.
 
 ## Tail rule
 
@@ -107,11 +125,28 @@ rows — while tools and system stay cached.
 
 ## Failure
 
+The summary call is **NON-STREAMING** (`Conversation.compact` clears
+`streamHandler`): a fake Anthropic seat must answer it with a plain JSON body,
+not SSE, or it silently no-ops — a plain-JSON 200 parses as an empty message,
+which has no `<summary>` and writes nothing. This is the one non-streaming
+request a fundi turn makes; ordinary turns stream.
+
 A failed summary call, a summary truncated by `max_tokens`, or a response with
 no extractable `<summary>` block writes nothing: `compact` returns `ok=false`
 and the turn proceeds on the unchanged history (`Conversation.compact`,
-`extractSummary`). An unclosed `<summary>` tag is never stored — a truncated
-handover would otherwise be accepted downstream as complete.
+`extractSummary`). A summary cut off by `max_tokens` is never stored — an
+unclosed handover would otherwise be accepted downstream as complete — but an
+unclosed `<summary>` tag on a normal stop IS taken verbatim to the end of the
+text.
+
+A compaction failure is **invisible at the default log level**: the child's own
+`llm.Client` logs at ERROR, so pkg/llm's Warn on a failed compaction is dropped.
+The daemon-side diagnostic is `Engine.onCompaction` logging an ERROR for a
+non-`Succeeded` End event, and the ground truth is the DB: no
+`conversation_message` row at `resume_from_ordinal` with
+`kind='compaction_summary'`. The summary call is itself captured as a
+`conversation_turn` with `source='compaction'` at the ordinal the summary row
+lands on, so insights' `turnMetricsByOrdinal` attributes it to that row.
 
 ## Events
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -46,13 +45,16 @@ func (c *Controller) conversationIDForChild(snap childstore.Snapshot) string {
 }
 
 // dbRecent loads a conversation's persisted messages and converts them to pi
-// vocabulary. Serves BOTH fundi and claude children: DBToPiFrames emits exactly
-// the message_start/message_end/tool_execution_* events that renderTranscript
-// and the CLI's renderPiEvent consume, so one path serves agent_view,
-// rafiki logs and rafiki tail.
+// vocabulary. Serves BOTH fundi and claude children: DBToPiFramesMessages emits
+// exactly the message_start/message_end/tool_execution_* events that
+// renderTranscript and the CLI's renderPiEvent consume, so one path serves
+// agent_view, rafiki logs and rafiki tail.
 //
 // Not filtered by the compaction horizon, deliberately: callers render the
-// full history with the boundary inline.
+// full history with the boundary inline. It IS filtered by row kind, though:
+// DBToPiFramesMessages drops compaction_tail copies (the tail shows once, via
+// its original row) and renders the compaction_summary row as a boundary
+// divider rather than a plain user prompt.
 //
 // Honours q.Limit only. q.Since cannot be honoured here (DBToPiFrames stamps
 // render-time timestamps, not capture time), q.Rendered has no raw alternative
@@ -68,7 +70,7 @@ func (c *Controller) dbRecent(conversationID string, q recentQuery) []ring.Event
 		slog.Warn("dbRecent: load failed", "conversationID", conversationID, "error", err)
 		return nil
 	}
-	frames := fundi.DBToPiFrames(messageParams(msgs))
+	frames := fundi.DBToPiFramesMessages(msgs)
 
 	if q.Limit > 0 && len(frames) > q.Limit {
 		frames = frames[len(frames)-q.Limit:]
@@ -77,15 +79,6 @@ func (c *Controller) dbRecent(conversationID string, q recentQuery) []ring.Event
 	out := make([]ring.Event, len(frames))
 	for i, f := range frames {
 		out[i] = ring.Event{Bytes: f}
-	}
-	return out
-}
-
-// messageParams extracts the Param field from each store.Message.
-func messageParams(msgs []store.Message) []anthropic.MessageParam {
-	out := make([]anthropic.MessageParam, len(msgs))
-	for i, m := range msgs {
-		out[i] = m.Param
 	}
 	return out
 }

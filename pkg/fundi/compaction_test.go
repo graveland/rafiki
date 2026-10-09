@@ -36,7 +36,7 @@ func TestCompactionEmitterFramesAndNativeEvent(t *testing.T) {
 	em, out, sink := newCompactionEmitter(t)
 
 	em.CompactionStart()
-	em.CompactionEnd(llm.CompactionEvent{Trigger: "threshold", PreTokens: 900_000, PostTokens: 60_000})
+	em.CompactionEnd(llm.CompactionEvent{Trigger: "threshold", PreTokens: 900_000, PostTokens: 60_000, Succeeded: true})
 
 	assertFrameTypes(t, out.String(), []string{"compaction_start", "compaction_end"})
 
@@ -49,8 +49,8 @@ func TestCompactionEmitterFramesAndNativeEvent(t *testing.T) {
 }
 
 // TestCompactionEndWithoutPreTokensPublishesNoNativeEvent pins that a FAILED
-// attempt (which replaced nothing) still emits both frames — keeping the
-// status stack balanced — but records no boundary, because there is none.
+// attempt (which wrote nothing) still emits both frames — keeping the status
+// stack balanced — but records no boundary, because there is none.
 func TestCompactionEndWithoutPreTokensPublishesNoNativeEvent(t *testing.T) {
 	c := assert.NewCollecting(t)
 	em, out, sink := newCompactionEmitter(t)
@@ -60,6 +60,22 @@ func TestCompactionEndWithoutPreTokensPublishesNoNativeEvent(t *testing.T) {
 
 	assertFrameTypes(t, out.String(), []string{"compaction_start", "compaction_end"})
 	c.Len(sink.events, 0, "a failed attempt must publish no native boundary; got %+v", sink.events)
+}
+
+// TestCompactionEndSucceededPublishesWithZeroPreTokens pins the gate: a
+// SUCCESSFUL compaction whose sender reported a zero usage figure (a legitimate
+// "not reported") still publishes the native boundary. Gating on PreTokens > 0
+// would silently drop it.
+func TestCompactionEndSucceededPublishesWithZeroPreTokens(t *testing.T) {
+	c := assert.NewCollecting(t)
+	em, _, sink := newCompactionEmitter(t)
+
+	em.CompactionEnd(llm.CompactionEvent{Trigger: "threshold", PreTokens: 0, PostTokens: 0, Succeeded: true})
+
+	c.Require().Len(sink.events, 1, "a successful compaction must publish its boundary even with zero reported tokens")
+	cb := sink.events[0].GetCompactionBoundary()
+	c.Require().NotNil(cb, "event is not a CompactionBoundary")
+	c.Eq(int32(0), cb.GetPreTokens(), "pre_tokens")
 }
 
 // TestCompactionStatusPushesAndPops feeds the emitter's OWN frames through

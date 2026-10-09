@@ -86,7 +86,7 @@ WITH tu AS (
   FROM conversations.conversation_message m,
        LATERAL jsonb_array_elements(
          CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END) b
-  WHERE b->>'type' = 'tool_use'
+  WHERE b->>'type' = 'tool_use' AND m.kind IS DISTINCT FROM 'compaction_tail'
 ), cls AS (
   SELECT cid,
     bool_or(tool IN ('agent_spawn', 'agent')) AS dispatches,

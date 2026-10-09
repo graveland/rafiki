@@ -55,6 +55,16 @@ type Conversation struct {
 	// is owned by one goroutine at a time (mem has the same property), so a
 	// caller must never run two sends concurrently.
 	onCompact func(CompactionEvent)
+
+	// compactSuppressBelow is the usedForCheck value below which proactive
+	// compaction stays suppressed after a FAILED attempt. A persistently
+	// failing summary (e.g. truncated at SummaryMaxTokens) would otherwise be
+	// retried on every tool iteration — each retry a full-context call. After
+	// a failure it is set to usedAtFailure + HeadroomBuffer/2, so the next
+	// proactive attempt waits until the working set has grown by at least half
+	// the headroom buffer. Cleared on a successful compaction. The reactive
+	// overflow net is unaffected: it is armed regardless of this value.
+	compactSuppressBelow int
 }
 
 type convConfig struct {
@@ -429,14 +439,25 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 		return nil, errors.New("llm: Continue on an empty conversation (nothing to send)")
 	}
 
-	if p := conv.cfg.compaction; p != nil && len(history) >= minCompactableRows && p.shouldCompact(conv.usedForCheck(history)) {
-		if ok, err := conv.compact(ctx, span, history, scfg, "threshold"); err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+	if p := conv.cfg.compaction; p != nil && len(history) >= minCompactableRows {
+		used := conv.usedForCheck(history)
+		// The proactive trigger stays suppressed until the working set has
+		// grown past compactSuppressBelow (set by a prior failed attempt), so a
+		// persistently failing summary is not retried every iteration.
+		if p.shouldCompact(used) && used >= conv.compactSuppressBelow {
+			ok, cerr := conv.compact(ctx, span, history, scfg, "threshold")
+			if cerr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				conv.client.logger.Warn("compaction failed; continuing with unchanged history", "conversation", conv.ID, "error", cerr)
 			}
-			conv.client.logger.Warn("compaction failed; continuing with unchanged history", "conversation", conv.ID, "error", err)
-		} else if ok {
-			if history, err = conv.loadHistory(ctx); err != nil {
+			if !ok {
+				// Any failed proactive attempt (call error, truncation, no
+				// extractable summary) defers the next one until the working
+				// set has grown by half the headroom buffer.
+				conv.compactSuppressBelow = used + p.HeadroomBuffer/2
+			} else if history, err = conv.loadHistory(ctx); err != nil {
 				return nil, fmt.Errorf("llm: %w", err)
 			}
 		}
@@ -681,6 +702,10 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 			compacted = true
 			if newOrdinal, newMsgs, ok := onOverflow(); ok {
 				ordinal, reqMsgs = newOrdinal, newMsgs
+				// Rebuild meta: the overflow compaction moved the ordinal, so
+				// the stale meta would attribute this turn's capture to the
+				// summary row's ordinal.
+				meta = conv.sendMeta(ordinal, scfg)
 				continue
 			}
 		}

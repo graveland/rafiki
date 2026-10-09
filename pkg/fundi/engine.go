@@ -1174,6 +1174,15 @@ func (e *Engine) onCompaction(ev llm.CompactionEvent) {
 	case llm.CompactionStart:
 		e.em.CompactionStart()
 	case llm.CompactionEnd:
+		// A failed attempt writes nothing and is otherwise invisible: the
+		// child's own llm.Client logger is ERROR-level, so the Warn pkg/llm
+		// emits on a failed compaction is dropped. Surface it here at ERROR so
+		// the daemon's log carries it (the DB — no compaction_summary row at
+		// resume_from_ordinal — remains the ground-truth diagnostic).
+		if !ev.Succeeded {
+			slog.Error("compaction attempt failed; history unchanged",
+				"trigger", ev.Trigger)
+		}
 		e.em.CompactionEnd(ev)
 	}
 }

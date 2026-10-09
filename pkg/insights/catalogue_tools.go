@@ -40,6 +40,10 @@ func init() {
 // Since/Until stay on the tool_use message's created_at (message grain, the
 // same as every other filter here): the outcome split reports what happened
 // to the calls MADE in the window, not what was answered in it.
+//
+// compaction_tail rows are copies of earlier rows (a compaction appends, it
+// never deletes), so counting them would double every tool_use the tail
+// carried; both CTEs skip them.
 func queryTools(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFilter) (QueryResult, error) {
 	if err := f.Path.validate(); err != nil {
 		return QueryResult{}, err
@@ -72,7 +76,7 @@ WITH usage AS (
     , LATERAL jsonb_array_elements(
         CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END
       ) b
-    WHERE b->>'type' = 'tool_use' AND ` + strings.Join(conds, " AND ") + `
+    WHERE b->>'type' = 'tool_use' AND m.kind IS DISTINCT FROM 'compaction_tail' AND ` + strings.Join(conds, " AND ") + `
 ), outcomes AS (
     SELECT m.conversation_id AS conv_id, b->>'tool_use_id' AS use_id,
            bool_or(COALESCE((b->>'is_error')::boolean, false)) AS is_err
@@ -80,7 +84,7 @@ WITH usage AS (
     , LATERAL jsonb_array_elements(
         CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END
       ) b
-    WHERE b->>'type' = 'tool_result'
+    WHERE b->>'type' = 'tool_result' AND m.kind IS DISTINCT FROM 'compaction_tail'
     GROUP BY 1, 2
 )
 SELECT mode() WITHIN GROUP (ORDER BY u.tool) AS tool,

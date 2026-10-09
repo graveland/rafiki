@@ -51,7 +51,8 @@ JOIN conversations.conversation c ON c.id = m.conversation_id
 , LATERAL jsonb_array_elements(
     CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END
   ) b
-WHERE b->>'type' = 'tool_use' AND lower(b->>'name') = 'skill' AND ` + strings.Join(conds, " AND ") + `
+WHERE b->>'type' = 'tool_use' AND lower(b->>'name') = 'skill'
+AND m.kind IS DISTINCT FROM 'compaction_tail' AND ` + strings.Join(conds, " AND ") + `
 GROUP BY 1
 ORDER BY 2 DESC, 1`
 

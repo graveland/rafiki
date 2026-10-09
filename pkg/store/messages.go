@@ -59,9 +59,10 @@ type Message struct {
 }
 
 // Load returns the conversation's FULL message history in ordinal order. It is
-// deliberately not filtered by the resume horizon: GetHistory, `rafiki logs` and
-// fundi's own loadHistory all need the pre-compaction history too. The
-// horizon-bounded read is LoadWorking.
+// deliberately not filtered by the resume horizon: GetHistory, `rafiki logs`
+// and `Controller.dbRecent` (agent_view) all render the pre-compaction history
+// with the boundary inline. The horizon-bounded read — the working set every
+// send, orphan repair and prefill classifier uses — is LoadWorking.
 func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, error) {
 	return m.load(ctx, conversationID, false)
 }

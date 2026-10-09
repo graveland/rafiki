@@ -116,13 +116,15 @@ func (e *Emitter) CompactionStart() {
 }
 
 // CompactionEnd emits {"type":"compaction_end"} and, when the attempt actually
-// replaced tokens, publishes the native CompactionBoundary — the durable record
-// a reattached viewer would otherwise only get synthesized from the stored
-// compaction_summary row. A failed attempt (PreTokens 0) emits the frame alone:
-// it wrote nothing, so there is no boundary to record.
+// wrote a boundary, publishes the native CompactionBoundary — the durable
+// record a reattached viewer would otherwise only get synthesized from the
+// stored compaction_summary row. A failed attempt emits the frame alone: it
+// wrote nothing, so there is no boundary to record. The gate is Succeeded, not
+// PreTokens: a sender may report a zero usage figure ("not reported"), which
+// must not suppress a boundary that really was written.
 func (e *Emitter) CompactionEnd(ev llm.CompactionEvent) {
 	e.fe.Emit(map[string]any{"type": "compaction_end"})
-	if ev.PreTokens > 0 {
+	if ev.Succeeded {
 		e.publishNative(&rafikiv1.CompactionBoundary{
 			Trigger:    ev.Trigger,
 			PreTokens:  proto.Int32(int32(ev.PreTokens)),

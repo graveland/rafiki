@@ -17,14 +17,14 @@ import (
 func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event {
 	out := make([]*rafikiv1.Event, 0, len(msgs))
 	for _, m := range msgs {
-		if m.Kind != nil && *m.Kind == "compaction_tail" {
+		if m.Kind != nil && *m.Kind == store.KindCompactionTail {
 			continue
 		}
 		ev := &rafikiv1.Event{
 			ChildId: childID,
 			Ordinal: proto.Int32(int32(m.Ordinal)),
 		}
-		if m.Kind != nil && *m.Kind == "compaction_summary" {
+		if m.Kind != nil && *m.Kind == store.KindCompactionSummary {
 			cb := &rafikiv1.CompactionBoundary{}
 			if m.InputTokens != nil {
 				pre := int32(*m.InputTokens)

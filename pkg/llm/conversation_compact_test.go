@@ -784,6 +784,7 @@ func TestCompactionStartEndEventsBalanced(t *testing.T) {
 	ck.Eq("threshold", ok[0].Trigger, "event 0 trigger")
 	ck.Eq(CompactionEnd, ok[1].Phase, "event 1 phase")
 	ck.Greater(0, ok[1].PreTokens, "PreTokens on success")
+	ck.True(ok[1].Succeeded, "a successful compaction's End event must report Succeeded")
 
 	failed := run(t, respondErr(errors.New("boom")))
 	ck.Require().Len(failed, 2, "events on failure")
@@ -791,6 +792,47 @@ func TestCompactionStartEndEventsBalanced(t *testing.T) {
 	ck.Eq(CompactionEnd, failed[1].Phase, "failed event 1 phase")
 	ck.Eq(0, failed[1].PreTokens, "failed PreTokens")
 	ck.Eq(0, failed[1].PostTokens, "failed PostTokens")
+	ck.False(failed[1].Succeeded, "a failed compaction's End event must report Succeeded=false")
+}
+
+// TestCompactionFailedSummaryNotRetriedEveryIteration pins the cooldown: a
+// summary that keeps failing must NOT be re-attempted on every tool iteration.
+// After the first failure proactive compaction is suppressed until the working
+// set has grown by half the headroom buffer, so a run of iterations that keeps
+// the reported usage roughly constant triggers exactly ONE summary call.
+func TestCompactionFailedSummaryNotRetriedEveryIteration(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		func(p anthropic.MessageNewParams) (*anthropic.Message, error) {
+			if isSummaryReq(p) {
+				return nil, errors.New("summary backend down")
+			}
+			return respondUsage(90_000, 5, 0, 0, "reply")(p)
+		},
+	}}
+	c := memClient(t, sender)
+	ctx := context.Background()
+	conv, err := c.Conversation(ctx, NewConversation("", "test"),
+		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 100_000 }}))
+	ck.Require().NoError(err)
+	conv.mem = append(conv.mem,
+		textRow(0, anthropic.MessageParamRoleUser, "a"),
+		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
+		textRow(2, anthropic.MessageParamRoleUser, "c"),
+		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+
+	// The proactive trigger sits on the window's edge: 100k window, 40k buffer,
+	// 90k reported usage leaves 10k headroom. The buffer's half is 20k, so the
+	// suppression threshold (90k + 20k = 110k) is never reached while the reply
+	// keeps reporting ~90k.
+	conv.usedTokens = 90_000
+	for i := 0; i < 5; i++ {
+		if _, err := conv.Continue(ctx); err != nil {
+			t.Fatalf("continue %d: %v", i, err)
+		}
+	}
+
+	ck.Eq(1, countSummaryReqs(sender), "a persistently-failing summary must be attempted once, not every iteration")
 }
 
 func TestCompactionStoreLoadStaysFull(t *testing.T) {
