@@ -5,7 +5,11 @@
 #   - On set_session_name, replies with success.
 #   - On `__emit_event:<json>` command, echoes the JSON to stdout as an event.
 #   - On a user message whose text is `__claude_init:<id>`, emits a claude
-#     system/init carrying <id> and an assistant frame.
+#     system/init carrying <id> and an assistant frame, and adopts <id> as the
+#     session it holds.
+#   - On a user message whose text is exactly `/clear`, emits a claude
+#     system/init carrying `<held id>-cleared` and an assistant frame, and
+#     adopts that as the session it now holds.
 #   - On `__exit:<code>`, exits with that code.
 #   - On `{"type":"__ctrl_test_emit",...}`, emits a test event then acks.
 #   - On `{"type":"__ctrl_test_burst"}`, emits $FAKE_PI_BURST_TURNS complete
@@ -90,10 +94,21 @@ while IFS= read -r line; do
       # A claude-protocol user message whose text is `__claude_init:<id>`: report
       # a claude system/init carrying <id>, then the first frame of a turn.
       # claude children only forward prompt/steer frames, so this is the way a
-      # test makes a claude-kind fake report a session id.
+      # test makes a claude-kind fake report a session id. The fake ADOPTS <id>
+      # so a later `/clear` derives its new id from the id the daemon now holds.
       sid=$(printf '%s' "$line" | sed -E 's/.*__claude_init:([^"]+)".*/\1/')
+      SESSION_ID="$sid"
       printf '{"type":"system","subtype":"init","session_id":"%s","model":"claude-test"}\n' "$sid"
       printf '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n'
+      ;;
+    '{"type":"user"'*'"content":"/clear"'*)
+      # A claude `/clear`: claude starts a NEW session, so report a claude
+      # system/init carrying a new id derived deterministically from the one the
+      # fake holds, then the first frame of a turn so the daemon's bus sync
+      # wakes. A test asserts the child ADOPTS this id (no rafiki/session-error).
+      SESSION_ID="${SESSION_ID}-cleared"
+      printf '{"type":"system","subtype":"init","session_id":"%s","model":"claude-test"}\n' "$SESSION_ID"
+      printf '{"type":"assistant","message":{"content":[{"type":"text","text":"cleared"}]}}\n'
       ;;
     __exit:*)
       code="${line#__exit:}"
