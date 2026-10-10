@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/multigres/testkit/assert"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestClaudeProvider_Bootstrap_IsNil(t *testing.T) {
@@ -196,4 +198,29 @@ func TestClaudeProvider_OutboundEchoNativeCarriesImages(t *testing.T) {
 	c.Eq("image/png", blocks[0].GetImage().GetMediaType(), "media type")
 	c.Eq(int32(1), blocks[1].GetIndex(), "text index follows the image")
 	c.Eq("what is this", blocks[1].GetText().GetText(), "text")
+}
+
+func TestClaudeProvider_Parse_StatusFramesBracketCompaction(t *testing.T) {
+	c := assert.NewAborting(t)
+	start := ClaudeProvider{}.Parse([]byte(`{"type":"system","subtype":"status","status":"compacting","session_id":"s"}`))
+	c.Eq(1, len(start.Events), "compacting status events")
+	c.Eq("compaction_start", start.Events[0].Type, "compacting status")
+	c.False(start.FirstResponse, "a status frame is not readiness")
+
+	end := ClaudeProvider{}.Parse([]byte(`{"type":"system","subtype":"status","status":null,"session_id":"s"}`))
+	c.Eq(1, len(end.Events), "null status events")
+	c.Eq("compaction_end", end.Events[0].Type, "null status")
+}
+
+func TestStateMachine_ClaudeCompactionHeartbeatDoesNotStack(t *testing.T) {
+	c := assert.NewAborting(t)
+	sm := NewStateMachine()
+	sm.OnFirstResponse()
+	sm.OnPiEvent("compaction_start", nil)
+	sm.OnPiEvent("compaction_start", nil)
+	c.Eq(protocol.StatusCompacting, sm.Current(), "compacting")
+	sm.OnPiEvent("compaction_end", nil)
+	c.Eq(protocol.StatusIdle, sm.Current(), "one end restores the pre-compaction status")
+	sm.OnPiEvent("compaction_end", nil)
+	c.Eq(protocol.StatusIdle, sm.Current(), "an unmatched end is a no-op")
 }

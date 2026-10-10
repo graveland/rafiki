@@ -171,10 +171,18 @@ func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (chan
 		}
 
 	case "compaction_start":
-		sm.push(protocol.StatusCompacting)
+		// Claude re-announces compacting on a heartbeat; only the first
+		// announcement enters the modal state.
+		if sm.current != protocol.StatusCompacting {
+			sm.push(protocol.StatusCompacting)
+		}
 
 	case "compaction_end":
-		sm.pop()
+		// Claude reports the end of compaction as a status of null, which it
+		// also sends when no compaction ever began.
+		if sm.current == protocol.StatusCompacting {
+			sm.pop()
+		}
 
 	case "batch_wait_start":
 		// Modal like compaction: a fundi child's LLM call is parked in a

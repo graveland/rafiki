@@ -45,6 +45,7 @@ func (ClaudeProvider) BusFrames(_ []byte, _ int64) [][]byte { return nil }
 type claudeFrame struct {
 	Type          string   `json:"type"`
 	Subtype       string   `json:"subtype,omitempty"`
+	Status        string   `json:"status,omitempty"`
 	SessionID     string   `json:"session_id,omitempty"`
 	Model         string   `json:"model,omitempty"`
 	SlashCommands []string `json:"slash_commands,omitempty"`
@@ -66,6 +67,9 @@ func (ClaudeProvider) Normalizes() bool { return true }
 //   - assistant (with content)    → agent_start, then one tool_execution_start
 //     per tool_use content block
 //   - user (with tool_result)     → one tool_execution_end per tool_result block
+//   - system/status               → compaction_start while claude reports
+//     "compacting" (re-sent every 30s as a heartbeat), compaction_end once it
+//     reports null
 //   - result                      → agent_end (+ session id)
 func (ClaudeProvider) Parse(line []byte) ParseResult {
 	var res ParseResult
@@ -81,6 +85,13 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 		// process-up (ReadyOnSpawn), fired by the Child on launch. init arrives
 		// only with the first turn; FirstResponse here is harmless (the child is
 		// already idle) and is kept so a future non-ReadyOnSpawn path still works.
+		if f.Subtype == "status" {
+			if f.Status == "compacting" {
+				res.Events = append(res.Events, ParsedEvent{Type: "compaction_start"})
+			} else {
+				res.Events = append(res.Events, ParsedEvent{Type: "compaction_end"})
+			}
+		}
 		if f.Subtype == "init" {
 			res.FirstResponse = true
 			if f.SessionID != "" || f.Model != "" || len(f.SlashCommands) > 0 {
