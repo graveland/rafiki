@@ -156,3 +156,21 @@ func TestCompactionEventsFromMessagesSkipsTail(t *testing.T) {
 		t.Fatalf("pre_tokens = %v, want 900", cb.PreTokens)
 	}
 }
+
+func TestEventsFromMessagesRendersFundiClearAsBoundary(t *testing.T) {
+	c := assert.NewAborting(t)
+	clear := store.KindClear
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("before"))},
+		{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText)), Kind: &clear},
+		// A claude clear row is the real first message of the new head.
+		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("real head")), Kind: &clear},
+	}
+
+	evs := eventconv.EventsFromMessages("c_test", msgs)
+
+	c.Require().Len(evs, 3, "events")
+	c.NotNil(evs[0].GetUserMessage(), "ordinary row")
+	c.Eq("clear", evs[1].GetCompactionBoundary().GetTrigger(), "synthetic clear row renders as a divider")
+	c.NotNil(evs[2].GetUserMessage(), "a claude clear row stays a message")
+}

@@ -445,7 +445,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 		// grown past compactSuppressBelow (set by a prior failed attempt), so a
 		// persistently failing summary is not retried every iteration.
 		if p.shouldCompact(used) && used >= conv.compactSuppressBelow {
-			ok, cerr := conv.compact(ctx, span, history, scfg, "threshold")
+			ok, cerr := conv.compact(ctx, span, history, scfg, "threshold", "")
 			if cerr != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
@@ -469,7 +469,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	var onOverflow func() (int, []Message, bool)
 	if conv.cfg.compaction != nil && len(history) >= minCompactableRows {
 		onOverflow = func() (int, []Message, bool) {
-			ok, err := conv.compact(ctx, span, history, scfg, "overflow")
+			ok, err := conv.compact(ctx, span, history, scfg, "overflow", "")
 			if err != nil || !ok {
 				return 0, nil, false
 			}

@@ -358,7 +358,7 @@ func (s *Summarizer) buildSegments(msgs []Message) []segment {
 		cur, curChars = nil, 0
 	}
 	for i, em := range extracted {
-		if msgs[i].Kind == "compaction_summary" {
+		if msgs[i].Kind == "compaction_summary" || isClearBoundary(msgs[i]) {
 			flush()
 			continue
 		}

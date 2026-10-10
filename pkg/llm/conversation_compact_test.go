@@ -911,3 +911,90 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 	ck.Eq(2, total, "turn rows: the summary call and the following real call")
 	ck.Eq(1, compaction, "summary turns")
 }
+
+// Compact summarises on demand: no threshold, no headroom, trigger "manual", and
+// the instructions ride the summary prompt.
+func TestCompactManualSummarisesBelowThreshold(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
+	}}
+	c := memClient(t, sender)
+	ctx := context.Background()
+	conv, err := c.Conversation(ctx, NewConversation("", "test"),
+		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
+	ck.Require().NoError(err)
+	conv.mem = append(conv.mem,
+		textRow(0, anthropic.MessageParamRoleUser, "a"),
+		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
+		textRow(2, anthropic.MessageParamRoleUser, "c"),
+		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	var trigger string
+	conv.OnCompaction(func(ev CompactionEvent) { trigger = ev.Trigger })
+
+	ok, err := conv.Compact(ctx, "keep the schema")
+	ck.Require().NoError(err)
+	ck.True(ok, "Compact reported nothing written")
+	ck.Eq("manual", trigger, "trigger")
+	ck.Require().Len(sender.lastReq, 1, "requests")
+	last := sender.lastReq[0].Messages
+	got := last[len(last)-1].Content[len(last[len(last)-1].Content)-1].OfText.Text
+	ck.StrContains(got, "keep the schema", "instructions must ride the summary prompt")
+	ck.Eq(4, conv.memHorizon, "memHorizon moved onto the summary")
+}
+
+func TestCompactManualNeedsPolicyAndRows(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := memClient(t, &scriptedSender{})
+	ctx := context.Background()
+
+	bare, err := c.Conversation(ctx, NewConversation("", "test"))
+	ck.Require().NoError(err)
+	_, err = bare.Compact(ctx, "")
+	ck.ErrorIs(err, ErrCompactionDisabled, "Compact without a policy")
+
+	short, err := c.Conversation(ctx, NewConversation("", "test"),
+		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
+	ck.Require().NoError(err)
+	short.mem = append(short.mem, textRow(0, anthropic.MessageParamRoleUser, "a"))
+	ok, err := short.Compact(ctx, "")
+	ck.NoError(err, "too few rows is not an error")
+	ck.False(ok, "too few rows must write nothing")
+}
+
+// Clear restarts the working set at the boundary row and keeps every earlier row.
+func TestClearRestartsWorkingSet(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondUsage(10, 5, 0, 0, "reply"),
+	}}
+	c := memClient(t, sender)
+	ctx := context.Background()
+	conv, err := c.Conversation(ctx, NewConversation("", "test"))
+	ck.Require().NoError(err)
+	conv.mem = append(conv.mem,
+		textRow(0, anthropic.MessageParamRoleUser, "a"),
+		textRow(1, anthropic.MessageParamRoleAssistant, "b"))
+	conv.usedTokens = 999
+
+	ck.Require().NoError(conv.Clear(ctx))
+	ck.Eq(0, conv.usedTokens, "usedTokens must reset")
+	ck.Len(conv.mem, 3, "no row is deleted")
+	hist, err := conv.History(ctx)
+	ck.Require().NoError(err)
+	ck.Require().Len(hist, 1, "working set is the boundary alone")
+	ck.True(store.IsClearBoundary(hist[0]), "working set row 0 is the clear boundary")
+	ck.Eq(2, hist[0].Ordinal, "boundary ordinal")
+
+	_, err = conv.Send(ctx, UserText("fresh"))
+	ck.Require().NoError(err)
+	ck.Require().Len(sender.lastReq, 1)
+	req := sender.lastReq[0].Messages
+	ck.Require().Len(req, 1, "user rows merge into one request message")
+	ck.Len(req[0].Content, 2, "boundary text + the new prompt")
+
+	empty, err := c.Conversation(ctx, NewConversation("", "test"))
+	ck.Require().NoError(err)
+	ck.NoError(empty.Clear(ctx), "Clear on an empty conversation is a no-op")
+	ck.Empty(empty.mem, "nothing written")
+}

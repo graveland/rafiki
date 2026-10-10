@@ -2,6 +2,7 @@ package fundi
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -292,4 +293,50 @@ func TestAppendPiMsg_AppendsNonNilValues(t *testing.T) {
 	}{Role: "assistant"})
 	c.Require().Len(out, 1, "got %d entries, want 1 for a plain struct", len(out))
 	c.Eq(`{"role":"assistant"}`, string(out[0]), "entry = %s, want marshaled struct", out[0])
+}
+
+// A fundi /clear's synthetic boundary row renders as a divider, not as a user
+// prompt carrying the boundary text.
+func TestDBToPiFramesMessages_RendersClearAsBoundary(t *testing.T) {
+	c := assert.NewCollecting(t)
+	clear := store.KindClear
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
+		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a1"))},
+		{Ordinal: 2, Kind: &clear, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText))},
+	}
+	var boundary, leaked int
+	for _, f := range DBToPiFramesMessages(msgs) {
+		if strings.Contains(string(f), store.ClearBoundaryText) {
+			leaked++
+		}
+		var env struct {
+			Type string `json:"type"`
+		}
+		c.Require().NoError(json.Unmarshal(f, &env), "frame %s", f)
+		if env.Type == "compaction_boundary" {
+			boundary++
+		}
+	}
+	c.Eq(1, boundary, "compaction_boundary frames")
+	c.Eq(0, leaked, "the boundary text must not render as a prompt")
+}
+
+func TestDBToPiFramesMessages_ClearBoundaryFrameCarriesTrigger(t *testing.T) {
+	clear := store.KindClear
+	frames := DBToPiFramesMessages([]store.Message{
+		{Ordinal: 0, Kind: &clear, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText))},
+	})
+	var trigger string
+	for _, f := range frames {
+		var env struct {
+			Type    string `json:"type"`
+			Trigger string `json:"trigger"`
+		}
+		assert.NewAborting(t).NoError(json.Unmarshal(f, &env), "frame %s", f)
+		if env.Type == "compaction_boundary" {
+			trigger = env.Trigger
+		}
+	}
+	assert.NewCollecting(t).Eq("clear", trigger, "the divider frame's trigger")
 }

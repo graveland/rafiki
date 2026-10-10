@@ -33,7 +33,6 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/rpcreason"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -209,31 +208,4 @@ func TestSlashClearAdoptsTheNewSessionID(t *testing.T) {
 	ck.NotEq(string(protocol.StatusExited), summary.GetStatus(), "the /clear child was ended instead of adopting the new id")
 	ck.Eq("", summary.GetLabels()["rafiki/session-error"],
 		"adopting a /clear session id must not label the row a session error")
-}
-
-// TestSlashClearOnFundiIsRefused: /clear applies to claude children only. On a
-// fundi child the Send is refused InvalidArgument (reason invalid_args) and
-// NOTHING is queued — no inbox row is written, so there is nothing for the
-// child's idle drain to deliver later.
-func TestSlashClearOnFundiIsRefused(t *testing.T) {
-	t.Parallel()
-	ck := assert.NewAborting(t)
-
-	d := bootDaemonDB(t, nextDaemonID(), noRealProviderEnv()...)
-	t.Cleanup(func() { os.RemoveAll(d.homeDir) })
-
-	child := d.spawnChild(t)
-	client := d.control(t)
-
-	err := sendSlashPrompt(t, client, child, "/clear")
-	ck.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "Send(/clear) on a fundi child = %v, want %v", err, connect.CodeInvalidArgument)
-	ck.Eq(protocol.ErrInvalidArgs, rpcreason.Reason(err), "Send(/clear) reason = %q, want %q", rpcreason.Reason(err), protocol.ErrInvalidArgs)
-
-	pool := openPool(t, os.Getenv("RAFIKI_TEST_DSN"))
-	defer pool.Close()
-	var n int
-	ck.NoError(pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM conversations.agent_inbox WHERE child_id = $1`, child).Scan(&n),
-		"count inbox rows for the fundi child")
-	ck.Eq(0, n, "a refused /clear must queue no inbox row; found %d", n)
 }

@@ -651,6 +651,8 @@ func ImagePlaceholder(img *rafikiv1.ImageBlock) string {
 func formatCompactionBoundary(cb *rafikiv1.CompactionBoundary) string {
 	pre, post := cb.PreTokens, cb.PostTokens
 	switch {
+	case cb.Trigger == "clear":
+		return "— context cleared —"
 	case pre != nil && post != nil:
 		return fmt.Sprintf("— context compacted · %dk → %dk tokens —", *pre/1000, *post/1000)
 	case pre != nil:

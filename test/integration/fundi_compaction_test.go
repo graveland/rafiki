@@ -821,3 +821,85 @@ func startLocalExecutor(t *testing.T, d *daemon, dsn, root string) {
 	}
 	t.Fatalf("local executor never became live\nexecutor stderr:\n%s", stderr.tail(4000))
 }
+
+// waitHorizonKind polls until the row at the conversation's resume horizon has
+// the given kind (a manual /compact or /clear is asynchronous: the prompt is
+// queued behind the engine's turn queue).
+func waitHorizonKind(t *testing.T, dsn, conversationID, kind string) int {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		horizon, got := compactionHorizon(t, dsn, conversationID)
+		if got == kind {
+			return horizon
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("horizon row kind = %q after 30s; want %q", got, kind)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestSlashCompactAndClearOnFundiChild drives /compact then /clear through a
+// real daemon: /compact makes one summary request and moves the horizon onto a
+// compaction_summary row without a turn; /clear moves it onto a kind='clear'
+// row, after which the next turn's request carries none of the earlier text,
+// while the full history still shows every prompt.
+func TestSlashCompactAndClearOnFundiChild(t *testing.T) {
+	ck := assert.NewAborting(t)
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+
+	marker := uniqueSuffix()
+	seat := newCompactionSeat(t, marker)
+	seat.realUsageInput = 1_000 // never trips the proactive trigger
+	cacheHome := t.TempDir()
+	writeCompactionCatalog(t, cacheHome, compactionModel, compactionWindow)
+	providers := writeCompactionProviders(t, seat.srv.URL)
+
+	d := bootDaemonDB(t, nextDaemonID(), compactionEnv(providers, cacheHome)...)
+	childID := spawnCompactionChild(t, d, t.TempDir(), nil)
+	waitForStatus(t, d, childID, "idle", 30*time.Second)
+	cs := openCompactionStream(t, d, childID)
+
+	for i := 1; i <= 3; i++ {
+		before := seat.requestCount()
+		promptCompactionChild(t, d, childID, fmt.Sprintf("u%d", i), fmt.Sprintf("prompt-%d-%s", i, marker))
+		waitSeatRequests(t, seat, before+1, 30*time.Second)
+		cs.waitIdle(t, childID)
+	}
+	ck.Eq(0, seat.compactionCount(), "no compaction before /compact:\n%s", seat.dump())
+	convID := resumeConversationID(t, dsn, childID)
+
+	requestsBefore := seat.requestCount()
+	promptCompactionChild(t, d, childID, "c1", "/compact")
+	waitHorizonKind(t, dsn, convID, "compaction_summary")
+	cs.waitBoundary(t)
+	ck.Eq(1, seat.compactionCount(), "/compact must make exactly one summary request:\n%s", seat.dump())
+	ck.Eq(requestsBefore+1, seat.requestCount(), "/compact must not run a turn:\n%s", seat.dump())
+
+	promptCompactionChild(t, d, childID, "c2", "/clear")
+	horizon := waitHorizonKind(t, dsn, convID, "clear")
+	ck.NotEq(0, horizon, "the clear horizon must move off 0")
+
+	before := seat.requestCount()
+	promptCompactionChild(t, d, childID, "u4", "after-clear-"+marker)
+	waitSeatRequests(t, seat, before+1, 30*time.Second)
+	cs.waitIdle(t, childID)
+	reqs := seat.snapshot()
+	last := reqs[len(reqs)-1]
+	ck.False(last.isCompaction, "the request after /clear must be a real turn")
+	for _, m := range last.msgs {
+		for _, text := range m.texts {
+			ck.False(strings.Contains(text, "prompt-1-"+marker) || strings.Contains(text, "SUMMARY-"+marker),
+				"a request after /clear must carry nothing from before it:\n%s", seat.dump())
+		}
+	}
+	ck.StrContains(last.firstText(), "cleared", "the post-clear request must open with the clear boundary:\n%s", seat.dump())
+
+	events := getHistoryEvents(t, d.control(t), childID)
+	ck.Eq(1, countHistoryText(events, "prompt-1-"+marker), "pre-clear history must stay readable")
+	ck.Eq(1, countHistoryText(events, "after-clear-"+marker), "the post-clear prompt must appear once")
+}

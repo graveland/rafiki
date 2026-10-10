@@ -133,6 +133,13 @@ func (e *Emitter) CompactionEnd(ev llm.CompactionEvent) {
 	}
 }
 
+// ClearBoundary publishes the native CompactionBoundary, trigger "clear", for a
+// /clear that wrote its boundary row. No pi frames: nothing is being summarised,
+// so the child never shows the `compacting` status.
+func (e *Emitter) ClearBoundary() {
+	e.publishNative(&rafikiv1.CompactionBoundary{Trigger: "clear"})
+}
+
 // UserMessage emits the message_start/message_end pair for an accepted
 // prompt or steer, and accumulates the echoed user message for the eventual
 // agent_end frame. Images ride the native event only; the pi frames stay text.

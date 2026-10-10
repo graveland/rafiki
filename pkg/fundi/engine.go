@@ -19,6 +19,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/slashcmd"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
@@ -229,6 +231,11 @@ type queued struct {
 	// the turn is built (see llm.UserContent) — the common shape is a
 	// screenshot followed by a question about it.
 	attachments []llm.UserImage
+	// command marks an entry that arrived as a PROMPT frame, the only kind the
+	// daemon classifies as a slash command. A steer that fell back to a prompt
+	// while idle, and the orphaned-steer rejoin, are never commands: the daemon
+	// does not interpret steer text, so neither may the engine.
+	command bool
 }
 
 // idSlice wraps a frame id for a queued entry. An empty id means "no inbox row
@@ -401,7 +408,7 @@ func (e *Engine) HandleSteer(text string) { e.HandleSteerID("", text) }
 // HandlePromptID queues text as a turn and returns immediately — the Handler
 // contract. Queued turns run in order, one at a time.
 func (e *Engine) HandlePromptID(id, text string) {
-	e.enqueue(queued{ids: idSlice(id), text: text})
+	e.enqueue(queued{ids: idSlice(id), text: text, command: true})
 }
 
 // HandlePromptWithAttachments queues a prompt carrying non-text payloads.
@@ -410,7 +417,7 @@ func (e *Engine) HandlePromptID(id, text string) {
 // far the common one, it has several callers that will never have an
 // attachment, and widening every one of them to pass nil buys nothing.
 func (e *Engine) HandlePromptWithAttachments(id, text string, images []llm.UserImage) {
-	e.enqueue(queued{ids: idSlice(id), text: text, attachments: images})
+	e.enqueue(queued{ids: idSlice(id), text: text, attachments: images, command: true})
 }
 
 // enqueue appends q to the turn queue and wakes the worker. It is the only
@@ -457,7 +464,7 @@ func (e *Engine) HandleSteerWithAttachments(id, text string, images []llm.UserIm
 		return
 	}
 	e.mu.Unlock()
-	e.HandlePromptWithAttachments(id, text, images)
+	e.enqueue(queued{ids: idSlice(id), text: text, attachments: images})
 }
 
 // consume reports that ids have entered a turn and their inbox rows may be
@@ -593,6 +600,13 @@ func (e *Engine) worker() {
 				slog.Info("agent: skipping startup resume; no persisted messages",
 					"conversation", e.conv.ID)
 				resume = false
+			} else if endsAtBoundary(history) {
+				// A /clear, or a /compact that kept no tail, leaves the working
+				// set ending on its boundary row with nothing for the model to
+				// answer; resuming would bill a turn nobody asked for.
+				slog.Info("agent: skipping startup resume; working set ends at a boundary",
+					"conversation", e.conv.ID)
+				resume = false
 			}
 		}
 	}
@@ -641,7 +655,7 @@ func (e *Engine) worker() {
 			//    loud failure beats an infinite loop.
 			e.consume(q.ids)
 
-			if !e.runTurnGuarded(q.text, q.attachments) {
+			if !e.runTurnGuarded(q) {
 				return // fatal() has already been called; this child is ending
 			}
 		}
@@ -712,7 +726,7 @@ func (e *Engine) startupResume() {
 // dangling tool_use that the API rejects outright on the next request. A child
 // that keeps accepting prompts and fails every one of them is worse than a
 // child that exits and can be resumed.
-func (e *Engine) runTurnGuarded(text string, images []llm.UserImage) (ok bool) {
+func (e *Engine) runTurnGuarded(q queued) (ok bool) {
 	defer func() {
 		// Unconditional, and deliberately before the recover: this turn is
 		// over either way, and nothing else will ever call Done for it.
@@ -724,8 +738,84 @@ func (e *Engine) runTurnGuarded(text string, images []llm.UserImage) (ok bool) {
 			ok = false
 		}
 	}()
-	e.runTurn(text, images)
+	if q.command && e.runSlash(q.text, q.attachments) {
+		return true
+	}
+	e.runTurn(q.text, q.attachments)
 	return true
+}
+
+// runSlash executes a /compact or /clear prompt against the conversation
+// instead of running a turn, and reports whether it consumed the prompt.
+//
+// The daemon already vetted the command (slashcmd.Supports) before the prompt
+// was persisted; the engine interprets the text itself so the command rides the
+// ordinary durable inbox path and runs in queue order — strictly after any turn
+// in flight, which holds the conversation lease and the working set. /exit
+// never reaches here (the daemon kills the child), and a prompt carrying
+// attachments is never a command. Neither command produces a turn, so neither
+// reports turnEnded.
+func (e *Engine) runSlash(text string, images []llm.UserImage) bool {
+	if len(images) > 0 {
+		return false
+	}
+	cmd, args, ok := slashcmd.Parse(text)
+	if !ok {
+		return false
+	}
+	switch cmd {
+	case slashcmd.Compact:
+		// Abortable like a turn: the summary call over a near-full context can
+		// take minutes. Steers arriving meanwhile buffer in steerBuf (cancel is
+		// non-nil) and are requeued below, exactly as runTurn does.
+		ctx, cancel := context.WithCancel(e.baseCtx)
+		e.mu.Lock()
+		e.cancel = cancel
+		e.mu.Unlock()
+
+		// Only the tool definitions matter for the cached prefix: Compact drops
+		// the stream and batch hooks a turn's options would add.
+		done, err := e.conv.Compact(ctx, args, llm.WithTools(e.tools.Definitions()))
+		aborted := errors.Is(ctx.Err(), context.Canceled)
+
+		e.mu.Lock()
+		e.cancel = nil
+		orphanedSteers := e.steerBuf
+		e.steerBuf = nil
+		e.mu.Unlock()
+		cancel()
+
+		switch {
+		case err != nil && aborted:
+			slog.Info("agent: /compact aborted", "conversation", e.conv.ID)
+		case err != nil:
+			slog.Error("agent: /compact failed", "conversation", e.conv.ID, "error", err)
+			e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+		case !done:
+			slog.Info("agent: /compact wrote nothing", "conversation", e.conv.ID)
+		}
+		e.requeueSteers(orphanedSteers)
+		return true
+	case slashcmd.Clear:
+		if err := e.conv.Clear(e.baseCtx); err != nil {
+			slog.Error("agent: /clear failed", "conversation", e.conv.ID, "error", err)
+			e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+			return true
+		}
+		e.em.ClearBoundary()
+		return true
+	}
+	return false
+}
+
+// endsAtBoundary reports whether the working set's last row is a clear or
+// compaction-summary boundary: nothing after it for the model to answer.
+func endsAtBoundary(history []store.Message) bool {
+	if len(history) == 0 {
+		return false
+	}
+	last := history[len(history)-1]
+	return store.IsClearBoundary(last) || (last.Kind != nil && *last.Kind == store.KindCompactionSummary)
 }
 
 // turnEnded reports how the turn just finished. Nil-safe: most callers
@@ -893,9 +983,14 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	}
 	e.em.AgentEnd()
 
-	// Mirror drainSteers: join orphaned steers into ONE requeued prompt so a
-	// multi-line steer batch that missed the last PendingUser poll becomes
-	// one extra turn, not one turn per buffered line.
+	e.requeueSteers(orphanedSteers)
+}
+
+// requeueSteers mirrors drainSteers: it joins steers that missed the last
+// PendingUser poll into ONE requeued prompt, so a multi-line steer batch becomes
+// one extra turn, not one turn per buffered line. The entry is never a slash
+// command (see queued.command).
+func (e *Engine) requeueSteers(orphanedSteers []queued) {
 	if len(orphanedSteers) > 0 {
 		var texts, ids []string
 		var images []llm.UserImage

@@ -11,6 +11,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"go.graveland.dev/rafiki/pkg/slashcmd"
 )
 
 // Kinds written by the compaction boundary path. A compaction appends a
@@ -19,7 +21,29 @@ import (
 const (
 	KindCompactionSummary = "compaction_summary"
 	KindCompactionTail    = "compaction_tail"
+	// KindClear marks the row a /clear opens a fresh working set with. For a
+	// fundi conversation it is a synthetic user row written by AppendClear;
+	// for a claude conversation capture tags the first divergent head with it.
+	KindClear = "clear"
 )
+
+// ClearBoundaryText is the content of the synthetic user row a fundi /clear
+// opens the fresh working set with. The working set must be non-empty (Continue
+// refuses an empty one, and the next ordinal derives from it), and a user turn
+// is what the next prompt merges into at request assembly. It lives in
+// slashcmd, a stdlib-only package, so pgx-free readers (pkg/recall) can match it.
+const ClearBoundaryText = slashcmd.ClearBoundaryText
+
+// IsClearBoundary reports whether m is the synthetic row AppendClear writes, as
+// opposed to a claude clear row, which is the real first message of the new head
+// and shares the kind. Full-history readers render the former as a divider.
+func IsClearBoundary(m Message) bool {
+	if m.Kind == nil || *m.Kind != KindClear || m.Param.Role != "user" || len(m.Param.Content) != 1 {
+		return false
+	}
+	t := m.Param.Content[0].OfText
+	return t != nil && t.Text == ClearBoundaryText
+}
 
 // LoadWorking returns the conversation's working set: the messages at and after
 // the resume horizon, in ordinal order. It is the only horizon-filtered read;
@@ -38,6 +62,25 @@ func (m *Messages) LoadWorking(ctx context.Context, conversationID string) ([]Me
 // lease guard when a lease is held. Any error rolls back, leaving the horizon
 // and the row set exactly as they were.
 func (m *Messages) AppendCompaction(ctx context.Context, conversationID string, summary anthropic.MessageParam, replacedTokens int, tail []Message) (int, error) {
+	return m.appendBoundary(ctx, conversationID, KindCompactionSummary, summary, &replacedTokens, tail)
+}
+
+// AppendClear writes a clear boundary: boundary at the next ordinal, tagged
+// KindClear, with the resume horizon moved onto it so the working set restarts
+// there. It is AppendCompaction with no summary content and no tail — nothing is
+// deleted or renumbered, and the whole write is one lease-fenced transaction.
+// It returns the boundary's ordinal.
+//
+// boundary must carry real content: an empty working set cannot be continued,
+// and the next AppendUser would take ordinal 0 over a row that already exists.
+func (m *Messages) AppendClear(ctx context.Context, conversationID string, boundary anthropic.MessageParam) (int, error) {
+	return m.appendBoundary(ctx, conversationID, KindClear, boundary, nil, nil)
+}
+
+// appendBoundary is the shared transaction behind AppendCompaction and
+// AppendClear: a boundary row of the given kind at the next ordinal, copies of
+// tail after it, and the horizon moved onto the boundary.
+func (m *Messages) appendBoundary(ctx context.Context, conversationID, kind string, boundary anthropic.MessageParam, replacedTokens *int, tail []Message) (int, error) {
 	tx, err := m.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("append compaction: begin: %w", err)
@@ -60,12 +103,16 @@ func (m *Messages) AppendCompaction(ctx context.Context, conversationID string, 
 		return 0, fmt.Errorf("append compaction: next ordinal: %w", err)
 	}
 
-	summaryContent, err := json.Marshal(summary.Content)
+	summaryContent, err := json.Marshal(boundary.Content)
 	if err != nil {
 		return 0, fmt.Errorf("append compaction: marshal summary: %w", err)
 	}
-	if err := m.compactInsert(ctx, tx, conversationID, summaryOrdinal, string(summary.Role),
-		jsonbSafe(summaryContent), toolUseIDs(summary), replacedTokens, nil, nil, KindCompactionSummary); err != nil {
+	var inTok any
+	if replacedTokens != nil {
+		inTok = *replacedTokens
+	}
+	if err := m.compactInsert(ctx, tx, conversationID, summaryOrdinal, string(boundary.Role),
+		jsonbSafe(summaryContent), toolUseIDs(boundary), inTok, nil, nil, kind); err != nil {
 		return 0, err
 	}
 

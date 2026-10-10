@@ -34,6 +34,14 @@ func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event 
 			out = append(out, ev)
 			continue
 		}
+		if store.IsClearBoundary(m) {
+			// A fundi /clear's synthetic boundary row renders as the same
+			// divider the live stream published; a claude clear row is a
+			// real message and falls through.
+			ev.Payload = &rafikiv1.Event_CompactionBoundary{CompactionBoundary: &rafikiv1.CompactionBoundary{Trigger: "clear"}}
+			out = append(out, ev)
+			continue
+		}
 		blocks := BlocksFromParam(m.Param)
 		if m.Param.Role == "assistant" {
 			ev.Payload = &rafikiv1.Event_AssistantMessage{

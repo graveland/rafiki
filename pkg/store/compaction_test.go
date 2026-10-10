@@ -369,3 +369,51 @@ func TestCompactionLoadIsUnfiltered(t *testing.T) {
 	// The pre-compaction rows are still ordinary (untagged) rows.
 	c.False(full[0].Kind != nil, "pre-compaction row kind = %v, want nil", full[0].Kind)
 }
+
+// TestAppendClearWritesBoundaryAndMovesHorizon: a clear appends one kind='clear'
+// row, moves the horizon onto it, touches nothing else, and the working set is
+// exactly that row.
+func TestAppendClearWritesBoundaryAndMovesHorizon(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+	appendRows(t, pool, conv, 3)
+
+	ord, err := NewMessages(pool).AppendClear(ctx, conv, userMessage(ClearBoundaryText))
+	c.NoError(err, "AppendClear")
+	c.Eq(3, ord, "boundary ordinal")
+	c.Eq(4, rowCount(t, pool, conv), "no row is deleted or duplicated")
+	k := rowKind(t, pool, conv, ord)
+	c.Require().NotNil(k, "boundary kind")
+	c.Eq(KindClear, *k, "boundary kind")
+	h, ok := horizon(t, pool, conv)
+	c.False(!ok || h != ord, "horizon = (%d,%v), want %d", h, ok, ord)
+
+	working, err := NewMessages(pool).LoadWorking(ctx, conv)
+	c.NoError(err, "LoadWorking")
+	c.Require().Len(working, 1, "working set")
+	c.True(IsClearBoundary(working[0]), "the working set must be the synthetic boundary row")
+}
+
+// TestAppendClearFencedLeaseLostWritesNothing mirrors the compaction fence.
+func TestAppendClearFencedLeaseLostWritesNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ls := NewLeases(pool)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+	appendRows(t, pool, conv, 2)
+
+	stale, ok, err := ls.Acquire(ctx, conv, "daemon-a", -time.Minute)
+	c.False(err != nil || !ok, "acquire stale: ok=%v err=%v", ok, err)
+	if _, ok, err := ls.Acquire(ctx, conv, "daemon-b", 5*time.Minute); err != nil || !ok {
+		t.Fatalf("takeover: ok=%v err=%v", ok, err)
+	}
+
+	_, err = NewMessages(pool).WithLease(stale).AppendClear(ctx, conv, userMessage(ClearBoundaryText))
+	c.ErrorIs(err, ErrLeaseLost, "AppendClear error")
+	c.Eq(2, rowCount(t, pool, conv), "a refused clear writes nothing")
+	_, ok = horizon(t, pool, conv)
+	c.False(ok, "a refused clear must not move the horizon")
+}

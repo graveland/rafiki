@@ -4256,6 +4256,10 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// otherwise ride a later settle fragment (notifySubagentSettled carries
 	// whatever Result is stored at settle time). Clear it when a new turn
 	// starts — the transition out of a non-working status into a working one.
+	// A compaction entered from idle (a manual /compact) is not a turn: it runs
+	// no model turn of its own, so it must not discard a result the parent has
+	// not read yet. Compaction mid-turn is working → working and never reaches
+	// here.
 	// Script children are exempt: their result is the work product of the whole
 	// run, not of one turn. The check lives inside the Update closure, not in a
 	// preceding Get: SetResult runs on a Connect handler goroutine, and a result
@@ -4263,7 +4267,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// means the clear mutates only when a result was actually present, so the
 	// ordinary per-turn status churn costs no extra row write — persistence is
 	// this function's unconditional tail writeRecord, not a second one here.
-	if ok && !isWorkingStatus(storePrev) && isWorkingStatus(newStatus) {
+	if ok && !isWorkingStatus(storePrev) && isWorkingStatus(newStatus) && newStatus != protocol.StatusCompacting {
 		if err := c.st.Update(childID, func(s *childstore.Session) {
 			if s.Kind != protocol.KindScript && s.Result != "" {
 				s.Result = ""

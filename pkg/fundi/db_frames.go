@@ -80,7 +80,11 @@ func DBToPiFramesMessages(msgs []store.Message) []json.RawMessage {
 			continue
 		}
 		if hasKind(m, store.KindCompactionSummary) {
-			out = appendFrame(out, compactionBoundaryFrame(m.InputTokens))
+			out = appendFrame(out, compactionBoundaryFrame(m.InputTokens, ""))
+			continue
+		}
+		if store.IsClearBoundary(m) {
+			out = appendFrame(out, compactionBoundaryFrame(nil, "clear"))
 			continue
 		}
 		switch m.Param.Role {
@@ -107,10 +111,14 @@ func hasKind(m store.Message, kind string) bool {
 // compactionBoundaryFrame is the pi-vocabulary divider DBToPiFramesMessages
 // emits in place of a compaction_summary row. preTokens is the replaced-context
 // size (InputTokens on the row); it is omitted when the row carries none.
-func compactionBoundaryFrame(preTokens *int) json.RawMessage {
+// trigger is "clear" for a /clear boundary and empty for a compaction.
+func compactionBoundaryFrame(preTokens *int, trigger string) json.RawMessage {
 	f := map[string]any{"type": "compaction_boundary"}
 	if preTokens != nil {
 		f["preTokens"] = *preTokens
+	}
+	if trigger != "" {
+		f["trigger"] = trigger
 	}
 	return mustFrame(f)
 }

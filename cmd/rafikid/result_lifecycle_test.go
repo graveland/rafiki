@@ -135,3 +135,25 @@ func TestResultSetDuringTurnRidesThatTurnsSettle(t *testing.T) {
 	ck.StrContains(frag, "final result of c_w1: MID-TURN", "the mid-turn result must ride the settle; got %q", frag)
 	ck.False(strings.Contains(frag, "stale"), "the earlier turn's result must be gone; got %q", frag)
 }
+
+// TestResultSurvivesManualCompaction pins that a compaction entered from idle
+// (a manual /compact) is not a turn start: idle → compacting keeps the stored
+// result, while a real turn start right after it still clears it.
+func TestResultSurvivesManualCompaction(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, _, _, _ := prResultFixture(t)
+	prInsertChild(t, c, "c_fundi", protocol.KindFundi)
+	_ = c.st.Update("c_fundi", func(s *childstore.Session) { s.Result = `{"unread":true}` })
+
+	c.handleStatusChange("c_fundi", protocol.StatusCompacting, protocol.StatusIdle)
+	snap, _ := c.st.Get("c_fundi")
+	ck.Eq(`{"unread":true}`, snap.Result, "idle → compacting must not discard the result")
+
+	c.handleStatusChange("c_fundi", protocol.StatusIdle, protocol.StatusCompacting)
+	snap, _ = c.st.Get("c_fundi")
+	ck.Eq(`{"unread":true}`, snap.Result, "compacting → idle must not discard the result")
+
+	c.handleStatusChange("c_fundi", protocol.StatusStreaming, protocol.StatusIdle)
+	snap, _ = c.st.Get("c_fundi")
+	ck.Eq("", snap.Result, "a real turn start still clears the result")
+}

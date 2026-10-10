@@ -42,6 +42,12 @@ func (c *Controller) handleSlashCommand(ctx context.Context, in inbox.Inbound) (
 		_, err := c.Kill(ctx, in.ChildID, 5*time.Second, 5*time.Second)
 		return true, err
 	case slashcmd.Clear:
+		if snap.Kind != protocol.KindClaude {
+			// A fundi engine owns its history and moves its own horizon when the
+			// prompt reaches it (pkg/fundi Engine.runSlash); there is no session
+			// id to adopt and no capture boundary to flag.
+			return false, nil
+		}
 		// Mark first, arm second: a failed mark must leave nothing armed, or
 		// the next unrelated session id change would be adopted as a clear.
 		if c.clearMarker != nil {
@@ -52,8 +58,9 @@ func (c *Controller) handleSlashCommand(ctx context.Context, in inbox.Inbound) (
 		c.clearExpected.Store(in.ChildID, struct{}{})
 		return false, nil
 	case slashcmd.Compact:
-		// claude passthrough: /compact does not change the session id, so the
-		// prompt falls through to the normal path with no side effects.
+		// claude passthrough, or the fundi engine's own manual compaction:
+		// either way the prompt falls through to the normal path with no side
+		// effects here.
 		return false, nil
 	}
 	return false, nil

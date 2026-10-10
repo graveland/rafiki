@@ -1165,8 +1165,8 @@ regardless.
 
 | command | claude | fundi | script |
 |---|---|---|---|
-| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | `InvalidArgument` | `InvalidArgument` |
-| `/compact [text]` | forward the text as a user message | `InvalidArgument` | `InvalidArgument` |
+| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | queue the text; the engine moves the resume horizon onto a `kind='clear'` boundary row | `InvalidArgument` |
+| `/compact [text]` | forward the text as a user message | queue the text; the engine runs a manual compaction (`text` = extra summary instructions) | `InvalidArgument` |
 | `/exit` | `Kill` | `Kill` | `Kill` |
 
 `/exit` calls `Kill` synchronously (resumable — it never sets `closed_at`, the
@@ -1174,6 +1174,10 @@ same `childScoped` rule as the `Kill` verb) and queues nothing, so the
 response's `message_id` is empty, exactly as for a claude abort. `/clear` and
 `/compact` do their side effects and fall through to the ordinary
 persist-and-deliver path, so their `message_id` names the queued row.
+
+For a fundi child the daemon does no side effect: the queued prompt reaches
+`Engine.runSlash` (`pkg/fundi/engine.go`), which runs it against the
+conversation instead of starting a turn (`docs/reference/fundi-compaction.md`).
 
 `/clear` on a claude child marks the child's main conversation
 (`conversation.clear_pending`, migration 0049) and arms the session-id guard for

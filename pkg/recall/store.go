@@ -12,7 +12,7 @@ type Message struct {
 	ConversationID string
 	Ordinal        int
 	Role           string          // "user" | "assistant"
-	Kind           string          // "" | "compaction_summary" | "compaction_tail"
+	Kind           string          // "" | "compaction_summary" | "compaction_tail" | "clear"
 	Content        json.RawMessage // Anthropic content blocks array (or a JSON string)
 	CreatedAt      time.Time
 }

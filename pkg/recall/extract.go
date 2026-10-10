@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"go.graveland.dev/rafiki/pkg/slashcmd"
 )
 
 // ExtractedMessage is one message's extraction result, ready for windowing.
@@ -52,7 +54,7 @@ func RenderContext(ms []Message) string {
 // renderMessage extracts a message's text; with resultSizes, tool_result
 // blocks render as "→ result (<size>)" markers instead of being dropped.
 func renderMessage(m Message, resultSizes bool) string {
-	if m.Kind == "compaction_summary" || m.Kind == "compaction_tail" {
+	if m.Kind == "compaction_summary" || m.Kind == "compaction_tail" || isClearBoundary(m) {
 		return ""
 	}
 	parts := blockTexts(m.Content, resultSizes)
@@ -158,4 +160,11 @@ func humanSize(n int) string {
 	default:
 		return fmt.Sprintf("%.1fMB", float64(n)/(1024*1024))
 	}
+}
+
+// isClearBoundary reports whether m is the synthetic row a fundi /clear writes
+// (store.AppendClear). A claude clear row shares the kind but is a real message,
+// so the kind alone is not enough.
+func isClearBoundary(m Message) bool {
+	return m.Kind == "clear" && bytes.Contains(m.Content, []byte(slashcmd.ClearBoundaryText))
 }

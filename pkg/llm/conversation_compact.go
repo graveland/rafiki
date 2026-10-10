@@ -4,6 +4,8 @@ package llm
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -23,7 +25,7 @@ import (
 // appended at fresh ordinals and only the horizon moves. A failed attempt
 // leaves no partial state; an End event is still emitted so observers stay
 // balanced with the Start event (with zero tokens on failure).
-func (conv *Conversation) compact(ctx context.Context, span trace.Span, history []store.Message, scfg sendConfig, trigger string) (bool, error) {
+func (conv *Conversation) compact(ctx context.Context, span trace.Span, history []store.Message, scfg sendConfig, trigger, instructions string) (bool, error) {
 	p := *conv.cfg.compaction
 	if conv.onCompact != nil {
 		conv.onCompact(CompactionEvent{Phase: CompactionStart, Trigger: trigger})
@@ -39,12 +41,16 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	// send, then append the prompt to the trailing user message. Clone before
 	// appending: the trailing row's Content shares its backing array with the
 	// stored history.
+	prompt := compactionPrompt
+	if instructions != "" {
+		prompt += "\n\nAdditional instructions for the summary:\n" + instructions
+	}
 	reqMsgs := mergeForRequest(history)
 	last := &reqMsgs[len(reqMsgs)-1]
 	if last.Role == anthropic.MessageParamRoleUser {
-		last.Content = append(slices.Clone(last.Content), anthropic.NewTextBlock(compactionPrompt))
+		last.Content = append(slices.Clone(last.Content), anthropic.NewTextBlock(prompt))
 	} else {
-		reqMsgs = append(reqMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(compactionPrompt)))
+		reqMsgs = append(reqMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)))
 	}
 
 	// The summary call keeps the previous turn's tools, system prompt and
@@ -134,3 +140,65 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 
 // ptr returns a pointer to a copy of v, for the optional store.Message fields.
 func ptr[T any](v T) *T { return &v }
+
+// ErrCompactionDisabled is returned by Compact on a Conversation built without
+// WithCompaction.
+var ErrCompactionDisabled = errors.New("llm: compaction is not configured for this conversation")
+
+// Compact summarises the working set now, whatever the thresholds say, with
+// trigger "manual". opts must carry the same send options a real turn uses
+// (tools, system prompt, thinking) so the summary call hits the cached prefix.
+// instructions, when non-empty, is appended to the summary prompt.
+//
+// ok=false with a nil error means nothing was written: fewer than
+// minCompactableRows working rows, or a summary that failed or was truncated
+// (the Warn is logged by compact). It does not touch the proactive-retry
+// suppression a failed threshold attempt sets.
+func (conv *Conversation) Compact(ctx context.Context, instructions string, opts ...SendOption) (bool, error) {
+	if conv.cfg.compaction == nil {
+		return false, ErrCompactionDisabled
+	}
+	scfg := sendConfig{maxTokens: conv.cfg.maxTokens}
+	for _, opt := range opts {
+		opt(&scfg)
+	}
+	ctx, span := conv.client.tracer.Start(ctx, "llm.conversation.compact",
+		trace.WithAttributes(attribute.String("rafiki.conversation", conv.ID)))
+	defer span.End()
+
+	history, err := conv.loadHistory(ctx)
+	if err != nil {
+		return false, fmt.Errorf("llm: %w", err)
+	}
+	if len(history) < minCompactableRows {
+		return false, nil
+	}
+	return conv.compact(ctx, span, history, scfg, "manual", instructions)
+}
+
+// Clear restarts the working set at a fresh boundary row: nothing is deleted or
+// renumbered, only the resume horizon moves. It is a no-op on a conversation
+// with no working rows.
+func (conv *Conversation) Clear(ctx context.Context) error {
+	history, err := conv.loadHistory(ctx)
+	if err != nil {
+		return fmt.Errorf("llm: %w", err)
+	}
+	if len(history) == 0 {
+		return nil
+	}
+	boundary := anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText))
+	if conv.client.messages == nil {
+		conv.memHorizon = len(conv.mem)
+		conv.mem = append(conv.mem, store.Message{
+			Ordinal: nextOrdinal(conv.mem),
+			Param:   boundary,
+			Kind:    ptr(store.KindClear),
+		})
+	} else if _, err := conv.client.messages.AppendClear(ctx, conv.ID, boundary); err != nil {
+		return fmt.Errorf("llm: clear: %w", err)
+	}
+	conv.usedTokens = 0
+	conv.compactSuppressBelow = 0
+	return nil
+}

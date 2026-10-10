@@ -35,6 +35,16 @@ least `minCompactableRows` (4) working rows (`pkg/llm/compact_policy.go`):
   The default buffer is 40k tokens and is raised to at least
   `SummaryMaxTokens + 4000` so the summary call's own output and prompt fit
   beneath it (`withDefaults`).
+- **Manual (`/compact [instructions]`).** A slash-command prompt reaches
+  `Engine.runSlash`, which calls `Conversation.Compact` with trigger `"manual"`:
+  no threshold, no suppression check, still gated on `minCompactableRows` and on
+  a configured policy. It runs in the turn queue (strictly after any turn in
+  flight, which holds the lease), builds its send options exactly as a turn does
+  so the summary call keeps the cached prefix, and produces no turn. It is
+  abortable like a turn (`runSlash` publishes `Engine.cancel`), and steers that
+  arrive meanwhile are buffered and requeued afterwards. Any text
+  after the command is appended to the summary prompt. A failure is logged and
+  surfaced as an `agent_error` frame; too few rows is a logged no-op.
 - **Reactive (overflow).** If the API rejects the request as too large
   (`isPromptTooLarge`, an input-size error) and compaction is available, rafiki
   gets exactly ONE chance to compact and retry on the compacted history before
@@ -73,6 +83,34 @@ fencing every insert on the held conversation lease:
 
 Nothing is deleted or renumbered; the call only appends. Any error rolls back,
 leaving the horizon and the row set exactly as they were.
+
+## Clear
+
+`/clear` is the same horizon move with no summary: `Conversation.Clear` →
+`store.Messages.AppendClear` appends ONE synthetic user row
+(`store.ClearBoundaryText`, `kind='clear'`) at the next ordinal and sets
+`resume_from_ordinal` onto it, in one lease-fenced transaction. The working set
+is then that row alone, so the next prompt merges into it at request assembly;
+nothing is deleted or renumbered, and `usedTokens` resets. The row must carry
+content because an empty working set cannot be continued and would hand the next
+`AppendUser` ordinal 0. `Engine.runSlash` then publishes a native
+`CompactionBoundary{trigger:"clear"}`.
+
+A claude `/clear` shares `kind='clear'` but its row is the real first message of
+the new head; readers tell them apart with `store.IsClearBoundary` (kind AND the
+exact boundary text). Full-history readers render the synthetic row as a
+divider: `eventconv.EventsFromMessages`, `pkg/fundi.DBToPiFramesMessages`;
+`pkg/recall` extracts nothing from it and cuts summariser windows at it.
+
+Only a PROMPT frame is ever a command (`queued.command`): a steer that falls
+back to a prompt while idle, and the rejoined orphaned-steer batch, run as
+ordinary turns, matching the daemon, which never interprets steer text. A prompt
+carrying attachments is likewise a literal turn. A restart's auto-resume skips a
+working set that ends at a boundary row (`endsAtBoundary`: a clear boundary or a
+`compaction_summary` with no tail), since there is nothing for the model to
+answer. Live and stored boundaries render as "context cleared" when the trigger
+is `clear` (`session.formatCompactionBoundary`, the pi `compaction_boundary`
+frame's `trigger`).
 
 ## Working set vs full history
 

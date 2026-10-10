@@ -526,6 +526,7 @@ func renderTranscript(events []json.RawMessage, maxEntries, maxBytes int) string
 			} `json:"message"`
 			ToolName  string `json:"toolName"`
 			PreTokens *int   `json:"preTokens"`
+			Trigger   string `json:"trigger"`
 			Result    struct {
 				Content []struct {
 					Text string `json:"text"`
@@ -544,7 +545,9 @@ func renderTranscript(events []json.RawMessage, maxEntries, maxBytes int) string
 		case "compaction_boundary":
 			// The divider pkg/fundi.DBToPiFramesMessages emits for a stored
 			// compaction_summary row, mirroring the TUI's boundary block.
-			if env.PreTokens != nil {
+			if env.Trigger == "clear" {
+				lines = append(lines, "— context cleared —")
+			} else if env.PreTokens != nil {
 				lines = append(lines, fmt.Sprintf("— context compacted · ~%dk tokens —", *env.PreTokens/1000))
 			} else {
 				lines = append(lines, "— context compacted —")

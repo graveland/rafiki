@@ -11,6 +11,11 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
+// ClearBoundaryText is the content of the synthetic user row a fundi /clear
+// writes (store.AppendClear). Readers that cannot import pkg/store without
+// linking postgres match it from here.
+const ClearBoundaryText = "The conversation was cleared. Nothing from before this point is available."
+
 // Command is a registered slash command name.
 type Command string
 
@@ -53,7 +58,7 @@ func Parse(text string) (cmd Command, args string, ok bool) {
 // the table handles none.
 var supported = map[string]map[Command]bool{
 	protocol.KindClaude: {Clear: true, Compact: true, Exit: true},
-	protocol.KindFundi:  {Exit: true},
+	protocol.KindFundi:  {Clear: true, Compact: true, Exit: true},
 	protocol.KindScript: {Exit: true},
 }
 

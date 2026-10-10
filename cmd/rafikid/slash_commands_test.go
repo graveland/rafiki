@@ -100,19 +100,25 @@ func TestSlashClearMarkErrorArmsNothing(t *testing.T) {
 	ck.Empty(rec.accepted(), "a failed mark must queue nothing; store holds")
 }
 
-func TestSlashClearOnFundiRefused(t *testing.T) {
-	ck := assert.NewAborting(t)
-	ctrl, rec, marker := slashFixture(t)
-	ctrl.st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi, Status: protocol.StatusIdle})
+// A fundi engine clears its own history when the prompt reaches it, so the
+// daemon queues /clear untouched: no capture mark, no session-id arm.
+func TestSlashClearAndCompactOnFundiQueueUntouched(t *testing.T) {
+	for _, text := range []string{"/clear", "/compact", "/compact keep the schema"} {
+		t.Run(text, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			ctrl, rec, marker := slashFixture(t)
+			ctrl.st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi, Status: protocol.StatusIdle})
 
-	_, err := ctrl.connectInbox().Accept(t.Context(), inbox.Inbound{ChildID: "c_fundi", Mode: inbox.ModePrompt, Text: "/clear"})
-	var ce *connectapi.ControllerError
-	ck.False(!errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs,
-		"Accept(/clear) for a fundi child = %v; want a coded invalid_args error", err)
-	ck.Empty(rec.accepted(), "a refused /clear must queue nothing")
-	ck.Empty(marker.called(), "a refused /clear must not mark")
-	if _, armed := ctrl.clearExpected.Load("c_fundi"); armed {
-		t.Errorf("a refused /clear must not arm the session-id guard")
+			_, err := ctrl.connectInbox().Accept(t.Context(), inbox.Inbound{ChildID: "c_fundi", Mode: inbox.ModePrompt, Text: text})
+			ck.Require().NoError(err, "Accept(%s) for a fundi child", text)
+			rows := rec.accepted()
+			ck.Require().Eq(1, len(rows), "queued rows = %+v; want one prompt", rows)
+			ck.Eq(text, rows[0].Text, "the prompt must reach the engine verbatim")
+			ck.Empty(marker.called(), "a fundi %s must not mark capture", text)
+			if _, armed := ctrl.clearExpected.Load("c_fundi"); armed {
+				t.Errorf("a fundi %s must not arm the session-id guard", text)
+			}
+		})
 	}
 }
 
