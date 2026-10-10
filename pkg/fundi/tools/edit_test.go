@@ -448,3 +448,43 @@ func TestEditToolTildeExpansion(t *testing.T) {
 	_, err := readTool.Execute(context.Background(), ToolInput(`{"path":"~/a.txt"}`))
 	c.NoError(err, "read via ~ failed")
 }
+
+func TestEditToolMissingNewStringIsRefused(t *testing.T) {
+	for name, tmpl := range map[string]string{
+		"legacy":     `{"path":%q,"old_string":"world"}`,
+		"edits":      `{"path":%q,"edits":[{"old_string":"world"}]}`,
+		"replaceAll": `{"path":%q,"old_string":"world","replace_all":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			p := filepath.Join(t.TempDir(), "a.txt")
+			c.NoError(os.WriteFile(p, []byte("hello world"), 0o644))
+			tr := NewFileTracker()
+			readTool := testReadTool(t, tr, "")
+			editTool := testEditTool(t, tr, "")
+			_, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+			c.NoError(err)
+			_, err = editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(tmpl, p)))
+			c.False(err == nil || !strings.Contains(err.Error(), "new_string"), "expected a missing-new_string error, got %v", err)
+			got, rerr := os.ReadFile(p)
+			c.NoError(rerr)
+			c.Eq("hello world", string(got))
+		})
+	}
+}
+
+func TestEditToolExplicitEmptyNewStringDeletes(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := filepath.Join(t.TempDir(), "a.txt")
+	c.NoError(os.WriteFile(p, []byte("hello world"), 0o644))
+	tr := NewFileTracker()
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	_, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	c.NoError(err)
+	_, err = editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":" world","new_string":""}`, p)))
+	c.NoError(err)
+	got, rerr := os.ReadFile(p)
+	c.NoError(rerr)
+	c.Eq("hello", string(got))
+}

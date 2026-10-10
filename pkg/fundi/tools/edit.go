@@ -84,9 +84,18 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		return ToolResult{}, fmt.Errorf("edit: %w", err)
 	}
 
-	edits := in.Edits
+	var edits []editPair
+	for i, e := range in.Edits {
+		if e.NewString == nil {
+			return ToolResult{}, fmt.Errorf("edit: edits[%d] is missing new_string (use \"\" to delete the text)", i)
+		}
+		edits = append(edits, editPair{OldString: e.OldString, NewString: *e.NewString})
+	}
 	if len(edits) == 0 && in.OldString != "" {
-		edits = []editPair{{OldString: in.OldString, NewString: in.NewString}}
+		if in.NewString == nil {
+			return ToolResult{}, fmt.Errorf("edit: old_string given without new_string (use \"\" to delete the text)")
+		}
+		edits = []editPair{{OldString: in.OldString, NewString: *in.NewString}}
 	}
 	if len(edits) == 0 {
 		return ToolResult{}, fmt.Errorf("edit: at least one edit in edits[] or old_string is required")
@@ -114,7 +123,10 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 
 	if in.ReplaceAll && in.OldString != "" {
 		lfOld := normalizeToLF(in.OldString)
-		lfNew := normalizeToLF(in.NewString)
+		if in.NewString == nil {
+			return ToolResult{}, fmt.Errorf("edit: old_string given without new_string (use \"\" to delete the text)")
+		}
+		lfNew := normalizeToLF(*in.NewString)
 		count := strings.Count(lfContent, lfOld)
 		if count == 0 {
 			msg := fmt.Sprintf("old_string not found in %s", absPath)
@@ -166,11 +178,18 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 type editInput struct {
 	Path       string     `json:"path"`
 	FilePath   string     `json:"file_path"`
-	Edits      []editPair `json:"edits"`
+	Edits      []editWire `json:"edits"`
 	OldString  string     `json:"old_string"`
-	NewString  string     `json:"new_string"`
+	NewString  *string    `json:"new_string"`
 	ReplaceAll bool       `json:"replace_all"`
 	Sequential bool       `json:"sequential"`
+}
+
+// editWire is editPair as decoded off the wire: a pointer NewString tells an
+// omitted field apart from an intentional empty replacement.
+type editWire struct {
+	OldString string  `json:"old_string"`
+	NewString *string `json:"new_string"`
 }
 
 type editPair struct {
