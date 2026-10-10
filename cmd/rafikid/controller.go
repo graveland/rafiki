@@ -2403,6 +2403,7 @@ func (c *Controller) activateLiveChild(
 	resumeLabels["rafiki/pid"] = strconv.Itoa(ch.PID())
 	resumeLabels["rafiki/kind"] = spawnKindLabel(snap.Kind)
 	delete(resumeLabels, "rafiki/session-error")
+	delete(resumeLabels, darajaStateLabel)
 	if snap.ConfigDir != "" {
 		resumeLabels["rafiki/config_dir"] = snap.ConfigDir
 	}

@@ -47,6 +47,39 @@ func TestResumedClaudeChildKeepsItsSessionIDBeforeTheFirstTurn(t *testing.T) {
 		"the resumed row dropped the session id, so the next relaunch has no --resume token")
 }
 
+// A resumed child has a live daraja by the time its row is rebuilt, so the
+// unreachable mark the previous incarnation's disconnect left on the row must
+// not survive the resume.
+func TestResumedChildDropsTheStaleDarajaUnreachableLabel(t *testing.T) {
+	ck := assert.NewAborting(t)
+
+	ctrl := newTestController(t)
+	ctx := t.Context()
+
+	res, err := ctrl.Spawn(ctx, protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Cwd:       t.TempDir(),
+		PiBinary:  fakePiBin(t),
+		NoSession: true,
+	}, users.Identity{})
+	ck.Require().NoError(err, "spawn")
+
+	_, err = ctrl.st.SetLabels(res.ChildID, map[string]string{darajaStateLabel: "unreachable"}, nil)
+	ck.Require().NoError(err, "mark unreachable")
+
+	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = ctrl.Kill(killCtx, res.ChildID, 2*time.Second, 500*time.Millisecond)
+	ck.Require().NoError(err, "kill")
+	waitForExited(t, ctrl.st, res.ChildID, 5*time.Second)
+
+	_, err = ctrl.Resume(ctx, res.ChildID, "")
+	ck.Require().NoError(err, "resume")
+
+	ck.Eq("", mustSnapshot(t, ctrl, res.ChildID).Labels[darajaStateLabel],
+		"the resumed row still reads unreachable though its daraja is connected")
+}
+
 // resumedClaudeChild spawns a claude child, gives it session id sid, kills it
 // and resumes it, so monitorChild starts with sid as the id it expects.
 func resumedClaudeChild(t *testing.T, ctrl *Controller, sid string) string {
