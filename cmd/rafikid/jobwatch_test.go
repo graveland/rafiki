@@ -100,6 +100,10 @@ func replayCompleteEvent(executorID string) execpool.JobEvent {
 	return execpool.JobEvent{ExecutorID: executorID, Kind: execpool.JobEventReplayComplete}
 }
 
+func jobReplayStartEvent(executorID string) execpool.JobEvent {
+	return execpool.JobEvent{ExecutorID: executorID, Kind: execpool.JobEventReplayStart}
+}
+
 // The no-loss rule, pinned directly: the exit fragment must be accepted by the
 // buffer BEFORE the executor is acked. Reversing them means a crash between the
 // two loses the notification the ack promised was delivered.
@@ -139,11 +143,13 @@ func TestJobEventReplayCompleteReportsGoneHandles(t *testing.T) {
 	c, clk, cap, _ := jobEventFixture(t)
 
 	// First replay: h1 and h2 are both running.
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
 	c.handleJobEvent(jobRunningEvent("exec-1", "h1", "c_coord", "make check"))
 	c.handleJobEvent(jobRunningEvent("exec-1", "h2", "c_coord", "npm test"))
 	c.handleJobEvent(replayCompleteEvent("exec-1"))
 
 	// A later replay reports only h1 still running: h2 is gone.
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
 	c.handleJobEvent(jobRunningEvent("exec-1", "h1", "c_coord", "make check"))
 	c.handleJobEvent(replayCompleteEvent("exec-1"))
 	clk.Advance(6 * time.Second)
@@ -165,6 +171,7 @@ func TestJobEventReplayCompleteReportsGoneHandles(t *testing.T) {
 func TestJobEventFirstReplayReportsNothingGone(t *testing.T) {
 	c, clk, cap, _ := jobEventFixture(t)
 
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
 	c.handleJobEvent(replayCompleteEvent("exec-1"))
 	clk.Advance(6 * time.Second)
 
@@ -177,6 +184,7 @@ func TestJobEventFirstReplayReportsNothingGone(t *testing.T) {
 func TestJobEventRunningLearnedThisReplayIsNotGone(t *testing.T) {
 	c, clk, cap, _ := jobEventFixture(t)
 
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
 	c.handleJobEvent(jobRunningEvent("exec-1", "h1", "c_coord", "make check"))
 	c.handleJobEvent(replayCompleteEvent("exec-1"))
 	clk.Advance(6 * time.Second)
@@ -191,6 +199,7 @@ func TestJobEventSelfKillIsNotReportedGone(t *testing.T) {
 	c, clk, cap, _ := jobEventFixture(t)
 
 	// h1 is running on exec-1, learned in a first replay.
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
 	c.handleJobEvent(jobRunningEvent("exec-1", "h1", "c_coord", "make check"))
 	c.handleJobEvent(replayCompleteEvent("exec-1"))
 
@@ -200,10 +209,41 @@ func TestJobEventSelfKillIsNotReportedGone(t *testing.T) {
 
 	// The next replay reports nothing running. Without the kill dropping the
 	// entry, h1 would be reported gone.
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
 	c.handleJobEvent(replayCompleteEvent("exec-1"))
 	clk.Advance(6 * time.Second)
 
 	assert.NewAborting(t).Empty(cap.batches(), "a self-killed job must never be reported gone")
+}
+
+// A job started LIVE (after a subscription's ReplayComplete) that is missing
+// from the NEXT replay is gone. This is F2's scenario: without an explicit
+// replay phase the live Running leaks into the seen-set, so the next replay
+// skips the lost handle and never reports it — for a whole reconnect cycle.
+func TestJobEventLiveJobMissingFromNextReplayIsGone(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, _ := jobEventFixture(t)
+
+	// Replay 1: the executor reports h1 running.
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
+	c.handleJobEvent(jobRunningEvent("exec-1", "h1", "c_coord", "make check"))
+	c.handleJobEvent(replayCompleteEvent("exec-1"))
+
+	// h2 starts LIVE, after the replay: not a replayed event.
+	c.handleJobEvent(jobRunningEvent("exec-1", "h2", "c_coord", "npm test"))
+
+	// Replay 2: the executor reports only h1 — it has lost h2.
+	c.handleJobEvent(jobReplayStartEvent("exec-1"))
+	c.handleJobEvent(jobRunningEvent("exec-1", "h1", "c_coord", "make check"))
+	c.handleJobEvent(replayCompleteEvent("exec-1"))
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	ck.Len(batches, 1, "want exactly one gone fragment, got")
+	ck.Len(batches[0].fragments, 1, "want exactly one fragment, got")
+	frag := batches[0].fragments[0]
+	ck.StrContains(frag, "h2", "the live-started, now-lost handle must be reported gone")
+	ck.NotStrContains(frag, "h1", "the still-running handle must not be reported gone")
 }
 
 // A repeated exit collapses on the (child, source, handle) key while the first

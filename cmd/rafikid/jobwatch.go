@@ -46,15 +46,31 @@ type jobAckSeam interface {
 // events and a ReplayComplete marker, and the daemon keeps just enough state —
 // which handles it believes are running — to tell a job that finished from one
 // an executor restart lost. No timer, no JobOutput poll, no per-job goroutine.
+//
+// Replay phase is tracked explicitly because the same Running/Exited kinds
+// arrive BOTH during a subscription's replay and live afterwards. Only events
+// seen while replaying belong in the replay's seen-set; a live event that leaked
+// in would make its handle look "seen" at the NEXT replay, and a job the
+// executor had since lost would never be reported gone.
 func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 	switch ev.Kind {
-	case execpool.JobEventRunning:
-		// A running job is recorded, and marked as seen THIS replay so the
-		// ReplayComplete that closes the replay cannot call it gone.
+	case execpool.JobEventReplayStart:
+		// A fresh subscription is open and the executor is about to replay what
+		// it already holds. Enter the replay phase and clear the seen-set: from
+		// here until ReplayComplete, Running/Exited are replayed, not live.
 		c.jobRunningMu.Lock()
-		running := c.jobRunningForLocked(ev.ExecutorID)
-		running[ev.Handle] = jobRef{owner: ev.Owner, command: ev.Command}
-		c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
+		c.setJobReplayingLocked(ev.ExecutorID, true)
+		delete(c.jobReplay, ev.ExecutorID)
+		c.jobRunningMu.Unlock()
+
+	case execpool.JobEventRunning:
+		// A running job is recorded, and — only while replaying — marked as seen
+		// THIS replay, so the ReplayComplete that closes it cannot call it gone.
+		c.jobRunningMu.Lock()
+		c.jobRunningForLocked(ev.ExecutorID)[ev.Handle] = jobRef{owner: ev.Owner, command: ev.Command}
+		if c.isJobReplayingLocked(ev.ExecutorID) {
+			c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
+		}
 		c.jobRunningMu.Unlock()
 
 	case execpool.JobEventExited:
@@ -62,7 +78,9 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 		if running := c.jobRunning[ev.ExecutorID]; running != nil {
 			delete(running, ev.Handle)
 		}
-		c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
+		if c.isJobReplayingLocked(ev.ExecutorID) {
+			c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
+		}
 		c.jobRunningMu.Unlock()
 
 		// Push BEFORE ack — the no-loss rule, never the reverse. A repeated
@@ -79,11 +97,11 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 	case execpool.JobEventReplayComplete:
 		// Every handle still believed running that was NOT seen during THIS
 		// replay is gone: the executor that held it no longer knows it, and
-		// neither its output nor its exit survives. The replay set guards the
-		// graceful case — the first subscription after a daemon start has an
-		// empty jobRunning, so nothing is reported gone; a handle learned from
-		// this replay's own Running is in the set, so an executor that kept a
-		// job is not misreported as having lost it.
+		// neither its output nor its exit survives. The seen-set was filled only
+		// by replayed events (see JobEventReplayStart), so a LIVE-started job
+		// missing from this replay is correctly reported gone, while a handle
+		// the executor just replayed is not. The first subscription after a
+		// daemon start has an empty jobRunning, so nothing is reported gone.
 		c.jobRunningMu.Lock()
 		running := c.jobRunning[ev.ExecutorID]
 		seen := c.jobReplay[ev.ExecutorID]
@@ -100,6 +118,7 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 			delete(running, handle)
 		}
 		delete(c.jobReplay, ev.ExecutorID)
+		c.setJobReplayingLocked(ev.ExecutorID, false)
 		c.jobRunningMu.Unlock()
 
 		for _, g := range gone {
@@ -140,6 +159,26 @@ func (c *Controller) jobReplayForLocked(executorID string) map[string]bool {
 		c.jobReplay[executorID] = s
 	}
 	return s
+}
+
+// isJobReplayingLocked reports whether executorID is currently inside a
+// subscription replay (between a ReplayStart and its ReplayComplete). Caller
+// holds c.jobRunningMu.
+func (c *Controller) isJobReplayingLocked(executorID string) bool {
+	return c.jobReplaying[executorID]
+}
+
+// setJobReplayingLocked enters or leaves the replay phase for executorID.
+// Caller holds c.jobRunningMu.
+func (c *Controller) setJobReplayingLocked(executorID string, on bool) {
+	if c.jobReplaying == nil {
+		c.jobReplaying = make(map[string]bool)
+	}
+	if on {
+		c.jobReplaying[executorID] = true
+		return
+	}
+	delete(c.jobReplaying, executorID)
 }
 
 // forgetRunningJob drops a handle from the running set for an executor. The

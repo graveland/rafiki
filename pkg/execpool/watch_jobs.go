@@ -22,6 +22,15 @@ const (
 	JobEventRunning
 	JobEventExited
 	JobEventReplayComplete
+	// JobEventReplayStart is emitted by watchJobs at each successful WatchJobs
+	// open, BEFORE any replay event is delivered. It lets the handler tell a
+	// REPLAYED Running/Exited (the executor recalling what it already held) from
+	// a LIVE one (a job starting or finishing now): only replayed events belong
+	// in the current replay's seen-set, or a live-started handle would look
+	// "seen" at the next replay and never be reported gone. Appended LAST so the
+	// existing kinds' values stay stable. Go-side only — the wire oneof is
+	// unchanged.
+	JobEventReplayStart
 )
 
 // JobEvent is one job event from an executor, routed by Owner.
@@ -157,6 +166,12 @@ func (p *Pool) subscribeJobs(id string, lc *liveConn, handler func(JobEvent)) (b
 		return false, err
 	}
 	defer stream.Close()
+
+	// The subscription is open: announce the replay phase BEFORE any replayed
+	// event reaches the handler. It is a synthetic event, not a stream message,
+	// and deliberately does NOT set got — a stream that opens and immediately
+	// dies must still back off.
+	handler(JobEvent{ExecutorID: id, Kind: JobEventReplayStart})
 
 	got := false
 	for stream.Receive() {

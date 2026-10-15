@@ -325,17 +325,19 @@ func isLivenessFailure(err error) bool {
 //
 // Every call carries the child's id as the executor call's owner
 // (execpool.WithOwner): the executor attributes a background job to the child
-// that started it and echoes the owner on every job event. Wrapping here, in
-// the ONE path every bound call takes, is what keeps a new call site from
-// silently dropping the attribution.
-func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn func(tools.ExecutorClient) (T, error)) (T, error) {
+// that started it and echoes the owner on every job event. The wrapped ctx is
+// passed TO fn — fn takes the ctx as a parameter for exactly this reason: a
+// closure that closed over the CALLER's ctx instead would silently drop the
+// owner, because the wrap only rebinds callBound's local copy. Both attempts
+// (the first call and the recover retry) receive the wrapped ctx.
+func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn func(context.Context, tools.ExecutorClient) (T, error)) (T, error) {
 	ctx = execpool.WithOwner(ctx, b.childID)
 	var zero T
 	cl, stale, err := b.clientFor(ctx)
 	if err != nil {
 		return zero, err
 	}
-	out, err := fn(cl)
+	out, err := fn(ctx, cl)
 	if err == nil {
 		return out, nil
 	}
@@ -346,11 +348,11 @@ func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn
 	if err2 != nil {
 		return zero, err
 	}
-	return fn(cl2)
+	return fn(ctx, cl2)
 }
 
 func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
-	return callBound(ctx, b, isIdempotentTool(tool), func(cl tools.ExecutorClient) (toolmeta.Result, error) {
+	return callBound(ctx, b, isIdempotentTool(tool), func(ctx context.Context, cl tools.ExecutorClient) (toolmeta.Result, error) {
 		return cl.Execute(ctx, tool, input)
 	})
 }
@@ -361,13 +363,13 @@ func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.Raw
 // (Controller.handleJobEvent) routes them by owner, so a successful start
 // needs no bookkeeping on this side.
 func (b *boundExecutor) StartJob(ctx context.Context, command string) (string, error) {
-	return callBound(ctx, b, false, func(cl tools.ExecutorClient) (string, error) {
+	return callBound(ctx, b, false, func(ctx context.Context, cl tools.ExecutorClient) (string, error) {
 		return cl.StartJob(ctx, command)
 	})
 }
 
 func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int64) (tools.JobSnapshot, error) {
-	return callBound(ctx, b, true, func(cl tools.ExecutorClient) (tools.JobSnapshot, error) {
+	return callBound(ctx, b, true, func(ctx context.Context, cl tools.ExecutorClient) (tools.JobSnapshot, error) {
 		return cl.JobOutput(ctx, handle, since)
 	})
 }
@@ -378,7 +380,7 @@ func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int6
 // the agent resolved the job on purpose, so a later ReplayComplete must not
 // report it "gone" — gone means an executor restart lost it.
 func (b *boundExecutor) KillJob(ctx context.Context, handle string) error {
-	_, err := callBound(ctx, b, false, func(cl tools.ExecutorClient) (struct{}, error) {
+	_, err := callBound(ctx, b, false, func(ctx context.Context, cl tools.ExecutorClient) (struct{}, error) {
 		return struct{}{}, cl.KillJob(ctx, handle)
 	})
 	if err == nil {
@@ -390,7 +392,7 @@ func (b *boundExecutor) KillJob(ctx context.Context, handle string) error {
 }
 
 func (b *boundExecutor) Ping(ctx context.Context) error {
-	_, err := callBound(ctx, b, true, func(cl tools.ExecutorClient) (struct{}, error) {
+	_, err := callBound(ctx, b, true, func(ctx context.Context, cl tools.ExecutorClient) (struct{}, error) {
 		return struct{}{}, cl.Ping(ctx)
 	})
 	return err
@@ -402,7 +404,7 @@ func (b *boundExecutor) Ping(ctx context.Context) error {
 // that cannot answer yields the zero value and no error, matching
 // fetchProjectContext's existing contract.
 func (b *boundExecutor) ProjectContext(ctx context.Context) (string, error) {
-	return callBound(ctx, b, true, func(cl tools.ExecutorClient) (string, error) {
+	return callBound(ctx, b, true, func(ctx context.Context, cl tools.ExecutorClient) (string, error) {
 		pf, ok := cl.(interface {
 			ProjectContext(context.Context) (string, error)
 		})
@@ -414,7 +416,7 @@ func (b *boundExecutor) ProjectContext(ctx context.Context) (string, error) {
 }
 
 func (b *boundExecutor) ProjectSkills(ctx context.Context) ([]skills.SkillMeta, error) {
-	return callBound(ctx, b, true, func(cl tools.ExecutorClient) ([]skills.SkillMeta, error) {
+	return callBound(ctx, b, true, func(ctx context.Context, cl tools.ExecutorClient) ([]skills.SkillMeta, error) {
 		pf, ok := cl.(interface {
 			ProjectSkills(context.Context) ([]skills.SkillMeta, error)
 		})
@@ -427,7 +429,7 @@ func (b *boundExecutor) ProjectSkills(ctx context.Context) ([]skills.SkillMeta, 
 
 func (b *boundExecutor) SkillBody(ctx context.Context, name string) (string, string, error) {
 	type pair struct{ body, dir string }
-	p, err := callBound(ctx, b, true, func(cl tools.ExecutorClient) (pair, error) {
+	p, err := callBound(ctx, b, true, func(ctx context.Context, cl tools.ExecutorClient) (pair, error) {
 		pf, ok := cl.(interface {
 			SkillBody(context.Context, string) (string, string, error)
 		})

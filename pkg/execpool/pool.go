@@ -776,7 +776,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 		InputJson:      input,
 		Timeout:        durationpb.New(executorCallTimeout),
 		WorkspaceId:    c.workspaceID,
-		Owner:          ownerFrom(ctx),
+		Owner:          OwnerFrom(ctx),
 		AutoBackground: tool == "bash",
 	}))
 	if err != nil {
@@ -807,7 +807,7 @@ func (c *workspaceClient) StartJob(ctx context.Context, command string) (string,
 		InputJson:   input,
 		Background:  true,
 		WorkspaceId: c.workspaceID,
-		Owner:       ownerFrom(ctx),
+		Owner:       OwnerFrom(ctx),
 	}))
 	if err != nil {
 		return "", fmt.Errorf("executor start job: %w: %w", err, ErrDialFailed)
@@ -1033,7 +1033,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 		Tool:           tool,
 		InputJson:      input,
 		Timeout:        durationpb.New(executorCallTimeout),
-		Owner:          ownerFrom(ctx),
+		Owner:          OwnerFrom(ctx),
 		AutoBackground: tool == "bash",
 	}))
 	if err != nil {
@@ -1063,7 +1063,7 @@ func (c *executorClient) StartJob(ctx context.Context, command string) (string, 
 		Tool:       "bash",
 		InputJson:  input,
 		Background: true,
-		Owner:      ownerFrom(ctx),
+		Owner:      OwnerFrom(ctx),
 	}))
 	if err != nil {
 		return "", fmt.Errorf("executor start job: %w: %w", err, ErrDialFailed)

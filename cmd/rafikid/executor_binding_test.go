@@ -143,6 +143,11 @@ type fakeBinder struct {
 	// Provision RPC open to prove a caller (recover) isn't holding
 	// boundExecutor's lock across it.
 	onProvision func()
+
+	// clientOverride, when non-nil, is what ProvisionOn returns instead of a
+	// registered fakeExec. The owner-propagation test needs a client that
+	// records the ctx each bound call is made with, not a scripted tool exec.
+	clientOverride tools.ExecutorClient
 }
 
 func newFakeBinder(execs ...*fakeExec) *fakeBinder {
@@ -209,6 +214,11 @@ func (f *fakeBinder) ProvisionOn(_ context.Context, id string) (string, tools.Ex
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.provisions++
+	if f.clientOverride != nil {
+		ws := fmt.Sprintf("ws-%s-%d", id, f.provisions)
+		f.lastWorkspace = ws
+		return ws, f.clientOverride, nil
+	}
 	e, ok := f.execs[id]
 	if !ok {
 		return "", nil, fmt.Errorf("no such executor %q", id)
@@ -505,4 +515,101 @@ func TestFailedKillJobForgetsNothing(t *testing.T) {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	c.Empty(fb.forgotRunning, "forgotRunning")
+}
+
+// ownerRecorderExec is a tools.ExecutorClient that records the owner carried by
+// each call's context, via the exported execpool.OwnerFrom. It is the pin F1
+// needed: the daemon must tag EVERY bound executor call with the child's id —
+// if callBound wraps only its own ctx copy while a closure closes over the
+// caller's ctx, OwnerFrom here reads "" and the feature is silently dead.
+type ownerRecorderExec struct {
+	mu     sync.Mutex
+	owners []string
+	errs   []error // scripted per-call errors, consumed in order
+}
+
+func (f *ownerRecorderExec) record(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.owners = append(f.owners, execpool.OwnerFrom(ctx))
+	if len(f.errs) == 0 {
+		return nil
+	}
+	e := f.errs[0]
+	f.errs = f.errs[1:]
+	return e
+}
+
+func (f *ownerRecorderExec) Execute(ctx context.Context, _ string, _ json.RawMessage) (toolmeta.Result, error) {
+	return toolmeta.Result{Text: "ok"}, f.record(ctx)
+}
+func (f *ownerRecorderExec) StartJob(ctx context.Context, _ string) (string, error) {
+	if err := f.record(ctx); err != nil {
+		return "", err
+	}
+	return "job-1", nil
+}
+func (f *ownerRecorderExec) JobOutput(ctx context.Context, _ string, _ int64) (tools.JobSnapshot, error) {
+	if err := f.record(ctx); err != nil {
+		return tools.JobSnapshot{}, err
+	}
+	return tools.JobSnapshot{Found: true}, nil
+}
+func (f *ownerRecorderExec) KillJob(ctx context.Context, _ string) error { return f.record(ctx) }
+func (f *ownerRecorderExec) Ping(ctx context.Context) error              { return f.record(ctx) }
+
+func (f *ownerRecorderExec) recordedOwners() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.owners...)
+}
+
+// Every bound method must carry the child as the executor call's owner. This is
+// the end-to-end pin at the boundExecutor level: it would have caught the bug
+// where callBound tagged its own ctx copy while each closure used the caller's
+// untagged ctx (OwnerFrom read "" on every production call).
+func TestBoundExecutorCallCarriesTheOwnerOnEveryMethod(t *testing.T) {
+	ck := assert.NewAborting(t)
+	rec := &ownerRecorderExec{}
+	fb := newFakeBinder()
+	fb.clientOverride = rec
+	b := newBoundExecutor("child-owner", fb)
+	ctx := context.Background()
+
+	if _, err := b.Execute(ctx, "read", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, err := b.StartJob(ctx, "ls"); err != nil {
+		t.Fatalf("StartJob: %v", err)
+	}
+	if _, err := b.JobOutput(ctx, "job-1", 0); err != nil {
+		t.Fatalf("JobOutput: %v", err)
+	}
+	if err := b.KillJob(ctx, "job-1"); err != nil {
+		t.Fatalf("KillJob: %v", err)
+	}
+
+	owners := rec.recordedOwners()
+	ck.Len(owners, 4, "one recorded owner per call")
+	for i, o := range owners {
+		ck.Eq("child-owner", o, "call %d must carry the child as the executor call's owner", i)
+	}
+}
+
+// The owner must also ride the recover RETRY, not just the first attempt.
+func TestBoundExecutorRetryCarriesTheOwner(t *testing.T) {
+	ck := assert.NewAborting(t)
+	rec := &ownerRecorderExec{errs: []error{fmt.Errorf("gone: %w", execpool.ErrExecutorLost)}}
+	fb := newFakeBinder()
+	fb.clientOverride = rec
+	b := newBoundExecutor("child-retry", fb)
+
+	// "read" is idempotent, so a liveness failure triggers exactly one retry
+	// against the re-provisioned (same, live) executor.
+	if _, err := b.Execute(context.Background(), "read", nil); err != nil {
+		t.Fatalf("the idempotent read must succeed on the retry: %v", err)
+	}
+
+	ck.EqDeep([]string{"child-retry", "child-retry"}, rec.recordedOwners(),
+		"both the first attempt and the recover retry must carry the owner")
 }

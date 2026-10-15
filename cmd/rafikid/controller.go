@@ -300,11 +300,14 @@ type Controller struct {
 	// and is what lets a ReplayComplete tell a job that finished from one an
 	// executor restart lost. jobReplay holds the handles seen during the
 	// CURRENT replay of an executor's subscription, so a Running learned this
-	// replay is never misreported gone by the ReplayComplete that closes it.
-	// Both maps are guarded by jobRunningMu.
+	// replay is never misreported gone by the ReplayComplete that closes it;
+	// jobReplaying marks whether an executor is inside a replay right now, so a
+	// LIVE event after ReplayComplete does not leak into jobReplay and hide a
+	// lost job from the next replay. All three maps are guarded by jobRunningMu.
 	jobRunningMu sync.Mutex
 	jobRunning   map[string]map[string]jobRef
 	jobReplay    map[string]map[string]bool
+	jobReplaying map[string]bool
 
 	// jobAcks delivers job-exit acknowledgements to executors (*execpool.Pool
 	// in production). Nil in hand-built Controllers, where acks are inert.

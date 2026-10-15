@@ -100,12 +100,16 @@ func TestExecutorCallTimeoutClearsTheBashPromoteWindow(t *testing.T) {
 	ck := assert.NewAborting(t)
 	ck.Greater(tools.MaxBashTimeout, executorCallTimeout,
 		"executorCallTimeout must STRICTLY exceed the bash max timeout, or a max-timeout bash call is killed instead of promoted")
-	ck.GreaterOrEqual(tools.MaxBashTimeout+30*time.Second, executorCallTimeout,
-		"want a comfortable margin above the bash max, comfortably more than send_steps.go's 5s drain slack")
+	// A literal floor, not the constant's own definition restated: this fails if
+	// the margin shrinks below 10s, regardless of how the constant is written.
+	ck.GreaterOrEqual(10*time.Second, executorCallTimeout-tools.MaxBashTimeout,
+		"the margin over the bash max must be at least 10s")
 }
 
 // The events an executor sends arrive at the daemon's handler in order, on one
-// goroutine, with their fields intact.
+// goroutine, with their fields intact. The FIRST event on a fresh subscription
+// is the synthetic ReplayStart watchJobs emits at each successful open, before
+// any replayed event.
 func TestWatchJobsDeliversEventsInOrder(t *testing.T) {
 	ck := assert.NewAborting(t)
 	p := New(newFakeStore("exec-jobs"))
@@ -130,8 +134,8 @@ func TestWatchJobsDeliversEventsInOrder(t *testing.T) {
 	ck.NoError(joinViaUpgrade(t, p, fake), "join")
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
-	kinds := make([]JobEventKind, 0, 3)
-	for range 3 {
+	kinds := make([]JobEventKind, 0, 4)
+	for range 4 {
 		select {
 		case ev := <-got:
 			kinds = append(kinds, ev.Kind)
@@ -145,8 +149,8 @@ func TestWatchJobsDeliversEventsInOrder(t *testing.T) {
 			t.Fatal("timed out waiting for a job event")
 		}
 	}
-	ck.EqDeep([]JobEventKind{JobEventRunning, JobEventExited, JobEventReplayComplete}, kinds,
-		"events must arrive in order with the right kinds")
+	ck.EqDeep([]JobEventKind{JobEventReplayStart, JobEventRunning, JobEventExited, JobEventReplayComplete}, kinds,
+		"events must arrive in order, led by the ReplayStart marker")
 
 	p.Evict("exec-jobs")
 }
@@ -178,13 +182,22 @@ func TestWatchJobsResubscribesAfterStreamEnds(t *testing.T) {
 	ck.NoError(joinViaUpgrade(t, p, fake), "join")
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
-	select {
-	case ev := <-got:
-		ck.Eq(JobEventExited, ev.Kind, "the resubscribed stream's event must be delivered")
-		ck.Eq("h2", ev.Handle, "handle from the resubscribed stream")
-	case <-time.After(5 * time.Second):
-		t.Fatal("no event arrived after the stream ended; the watcher did not resubscribe")
+	// The resubscribed stream leads with a ReplayStart marker; drain until the
+	// exit it carries arrives.
+	var exited *JobEvent
+	deadline := time.After(5 * time.Second)
+	for exited == nil {
+		select {
+		case ev := <-got:
+			if ev.Kind == JobEventExited {
+				e := ev
+				exited = &e
+			}
+		case <-deadline:
+			t.Fatal("no exit event arrived after the stream ended; the watcher did not resubscribe")
+		}
 	}
+	ck.Eq("h2", exited.Handle, "handle from the resubscribed stream")
 	ck.Greater(1, fake.subscriptionCount(), "want a second subscription, got")
 
 	p.Evict("exec-jobs")

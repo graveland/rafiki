@@ -22,10 +22,16 @@ func WithOwner(ctx context.Context, owner string) context.Context {
 	return context.WithValue(ctx, ownerKey{}, owner)
 }
 
-// ownerFrom returns the owner WithOwner recorded, or "" when none was set. An
+// OwnerFrom returns the owner WithOwner recorded, or "" when none was set. An
 // untagged context is legitimate: the daemon's own calls (a claude child's
 // proxy traffic, health) are not jobs and carry no owner.
-func ownerFrom(ctx context.Context) string {
+//
+// Exported so a caller that must prove the owner actually reached its executor
+// call can read it back — the private context key means an out-of-package test
+// otherwise cannot observe what WithOwner set, which is exactly how a wrapper
+// that tags its own ctx copy while the callee closes over the caller's ctx went
+// unnoticed.
+func OwnerFrom(ctx context.Context) string {
 	s, _ := ctx.Value(ownerKey{}).(string)
 	return s
 }
