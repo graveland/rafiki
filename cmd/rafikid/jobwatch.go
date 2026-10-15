@@ -142,6 +142,10 @@ func (w *jobWatcher) forget(childID, handle string) {
 
 // arm (re)registers the watch's next poll on the scheduler. Replacing by key
 // is what stops a superseded registration from firing.
+//
+// The caller must either hold w.mu (tick) or have just published e into
+// w.jobs[k] (watch): the At lands a fresh timer under a key only this watch
+// owns at that moment.
 func (w *jobWatcher) arm(k jobKey, e *watchedJob) {
 	w.sched.At(jobWatchKey(k), w.clk.Now().Add(w.interval), func() { w.tick(k, e) })
 }
@@ -163,17 +167,20 @@ func (w *jobWatcher) tick(k jobKey, e *watchedJob) {
 		w.remove(k, e)
 		return
 	}
-	// Re-check ownership before re-arming, not only at the top: a watch
+	// Re-check ownership AND re-arm under ONE lock acquisition: a watch
 	// replaced (or forgotten) while this poll was in flight must not have its
-	// successor's registration clobbered by this stale one. This is the same
-	// "a replaced watch is never re-armed" rule the entry check enforces,
-	// extended across the poll's window.
+	// successor's registration clobbered by this stale one. Checking and
+	// arming separately would leave a window — a same-key watch landing
+	// between the check and the arm would publish a new watch and then have
+	// this stale arm overwrite its registration, and the successor's own
+	// later fire would decline to re-arm, stalling the watch for good. The
+	// lock order is w.mu -> sched.mu, and sched.run invokes callbacks with no
+	// scheduler lock held, so this nesting cannot invert.
 	w.mu.Lock()
-	ours = w.jobs[k] == e
-	w.mu.Unlock()
-	if ours {
+	if w.jobs[k] == e {
 		w.arm(k, e)
 	}
+	w.mu.Unlock()
 }
 
 // remove drops the map entry if it is still e.

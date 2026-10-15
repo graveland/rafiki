@@ -269,6 +269,65 @@ func TestJobWatchReplacedWatchIsNotPolledByStaleRegistration(t *testing.T) {
 	c.jobs.forget("c_run", "job-1")
 }
 
+// The stall guard, driven from inside the poll: a watch that replaces its own
+// key while a poll is in flight must survive. The stale tick re-checks
+// ownership under the lock that also arms the successor, so it cannot re-arm
+// over the successor's registration — if it could, the successor's own later
+// fire would decline to re-arm (it no longer owns the key) and the watch would
+// never poll again. Exactly one registration must remain, and the next tick
+// must poll the successor.
+func TestJobWatchReplacementDuringPollKeepsSuccessorRegistration(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _, _ := jobWatchFixture(t)
+
+	var polls atomic.Int64
+	var replaced atomic.Bool
+	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
+		polls.Add(1)
+		if replaced.CompareAndSwap(false, true) {
+			// Re-entrant same-key replacement, as a concurrent watch would do.
+			c.jobs.watch("c_run", "job-1", "make check")
+		}
+		return tools.JobSnapshot{Found: true}, nil
+	}
+	c.jobs.watch("c_run", "job-1", "make check")
+
+	clk.Advance(time.Second) // poll 1 replaces its own key mid-poll
+
+	ck.Len(c.sched.Pending(), 1, "the successor watch must keep exactly one registration")
+
+	clk.Advance(time.Second) // the successor's own tick must poll again
+	ck.Eq(int64(2), polls.Load(), "the stale tick clobbered the successor's registration; the watch stalled")
+
+	c.jobs.forget("c_run", "job-1")
+}
+
+// The forget flavour of the same guard: a watch forgotten while its poll is in
+// flight must leave no registration and must never poll again.
+func TestJobWatchForgetDuringPollLeavesNoRegistration(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _, _ := jobWatchFixture(t)
+
+	var polls atomic.Int64
+	var forgot atomic.Bool
+	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
+		polls.Add(1)
+		if forgot.CompareAndSwap(false, true) {
+			c.jobs.forget("c_run", "job-1")
+		}
+		return tools.JobSnapshot{Found: true}, nil
+	}
+	c.jobs.watch("c_run", "job-1", "make check")
+
+	clk.Advance(time.Second) // poll 1 forgets its own key mid-poll
+
+	ck.Empty(c.sched.Pending(), "a watch forgotten during its poll must leave no registration")
+	ck.Eq(int64(1), polls.Load(), "the forgotten watch must poll exactly once")
+
+	clk.Advance(time.Second)
+	ck.Eq(int64(1), polls.Load(), "the forgotten watch must never poll again")
+}
+
 // A cancelled base context stops the watch at the next tick without polling
 // and without re-arming: the daemon is shutting down, so there is nothing left
 // to say and nothing left to schedule.
