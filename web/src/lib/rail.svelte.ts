@@ -107,7 +107,9 @@ async function run(gen: number): Promise<void> {
       running = false
       return
     }
-    scheduleReconnect(gen)
+    // A failed seed leaves children/latest empty, so reconnecting the STREAM
+    // alone would follow a board that never got its rows. Retry the whole run.
+    scheduleReconnect(gen, true)
     return
   }
   if (gen !== generation) {
@@ -264,7 +266,9 @@ function patchRow(id: string, patch: Partial<ChildRow>): void {
   children.set(id, { ...row, ...patch })
 }
 
-function scheduleReconnect(gen: number): void {
+// reseed re-runs run() (seed then stream) instead of reopening the stream
+// alone; a seed failure must retry the seed, not follow an empty board.
+function scheduleReconnect(gen: number, reseed = false): void {
   if (gen !== generation) {
     return
   }
@@ -275,7 +279,7 @@ function scheduleReconnect(gen: number): void {
     if (gen !== generation) {
       return
     }
-    void openStream(gen)
+    void (reseed ? run(gen) : openStream(gen))
   }, delay)
 }
 

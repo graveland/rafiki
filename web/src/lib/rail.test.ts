@@ -28,6 +28,7 @@ interface StreamScript {
 
 class FakeControl {
   listCalls = 0
+  listFailures = 0
   streamReqs: StreamEventsRequest[] = []
   getChildCalls: string[] = []
   summaries: ChildSummary[] = []
@@ -36,6 +37,10 @@ class FakeControl {
 
   listChildren(): Promise<{ children: ChildSummary[] }> {
     this.listCalls++
+    if (this.listFailures > 0) {
+      this.listFailures--
+      return Promise.reject(new Error('list failed'))
+    }
     return Promise.resolve({ children: this.summaries })
   }
 
@@ -198,6 +203,24 @@ it('reconnects with current cursor', async () => {
 
   expect(fake.streamReqs.length).toBe(2)
   expect(fake.streamReqs[1].cursor?.ordinals).toEqual({ c_1: 7 })
+})
+
+it('re-seeds after a transient seed failure', async () => {
+  fake.summaries = [summary({ childId: 'c_1', latestOrdinal: 3 })]
+  fake.listFailures = 1
+
+  startRail()
+  await flush()
+  expect(fake.listCalls).toBe(1)
+  // A failed seed must not open a stream over an empty board.
+  expect(fake.streamReqs.length).toBe(0)
+
+  await vi.advanceTimersByTimeAsync(250)
+  await flush()
+  expect(fake.listCalls).toBe(2)
+  expect(fake.streamReqs.length).toBe(1)
+  expect(fake.streamReqs[0].cursor?.ordinals).toEqual({ c_1: 3 })
+  expect(children.get('c_1')?.status).toBe('idle')
 })
 
 it('stops on unauthenticated', async () => {

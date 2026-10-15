@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import {
+  GateRefusedError,
   getSecret,
   LinkUsedError,
   NoSessionError,
@@ -46,6 +47,14 @@ function okResponse(secret: string): Response {
 
 function usedResponse(): Response {
   return { status: 410, ok: false } as unknown as Response
+}
+
+function statusResponse(status: number, gate = false): Response {
+  return {
+    status,
+    ok: false,
+    headers: { get: (name: string) => (gate && name === 'rafiki-web-gate' ? 'refused' : null) },
+  } as unknown as Response
 }
 
 beforeEach(() => {
@@ -109,11 +118,36 @@ it('concurrent first calls exchange once', async () => {
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
-it('410 throws LinkUsedError', async () => {
+it('410 throws LinkUsedError and strips the fragment', async () => {
   window.location.hash = '#k=used'
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(usedResponse()))
 
   await expect(getSecret()).rejects.toBeInstanceOf(LinkUsedError)
+  expect(window.location.hash).toBe('#/agents')
+})
+
+it('a gate refusal maps to GateRefusedError and strips the fragment', async () => {
+  window.location.hash = '#k=abc'
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse(403, true)))
+
+  await expect(getSecret()).rejects.toBeInstanceOf(GateRefusedError)
+  expect(window.location.hash).toBe('#/agents')
+})
+
+it('another failure maps to NoSessionError and strips the fragment', async () => {
+  window.location.hash = '#k=abc'
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse(500)))
+
+  await expect(getSecret()).rejects.toBeInstanceOf(NoSessionError)
+  expect(window.location.hash).toBe('#/agents')
+})
+
+it('a network failure maps to NoSessionError and strips the fragment', async () => {
+  window.location.hash = '#k=abc'
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+
+  await expect(getSecret()).rejects.toBeInstanceOf(NoSessionError)
+  expect(window.location.hash).toBe('#/agents')
 })
 
 it('asks other tabs when no code', async () => {

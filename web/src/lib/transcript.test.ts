@@ -1,6 +1,6 @@
 import { create } from '@bufbuild/protobuf'
 import { Code, ConnectError } from '@connectrpc/connect'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { ChildSummarySchema } from '../gen/rafiki/v1/control_pb'
 import type { Event } from '../gen/rafiki/v1/event_pb'
 import {
@@ -12,6 +12,7 @@ import {
   ToolResultBlockSchema,
   UserMessageSchema,
 } from '../gen/rafiki/v1/event_pb'
+import { parseRoute, transcriptPanes } from './router'
 import { Conversation, type ControlClient } from './transcript.svelte'
 
 function textBlock(text: string) {
@@ -80,6 +81,21 @@ function replay(events: Event[], signal?: AbortSignal): AsyncIterable<Event> {
           }
           return idle(signal)[Symbol.asyncIterator]().next()
         },
+      }
+    },
+  }
+}
+
+/** A stream that ENDS after its events, so the pump reconnects. */
+function finite(events: Event[]): AsyncIterable<Event> {
+  let index = 0
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () =>
+          index < events.length
+            ? Promise.resolve({ done: false as const, value: events[index++] })
+            : Promise.resolve({ done: true as const, value: undefined }),
       }
     },
   }
@@ -182,6 +198,24 @@ it('delta then assistant_message supersedes', async () => {
   conversation.dispose()
 })
 
+it('an input_json delta opens no in-flight block', async () => {
+  const inputDelta = create(EventSchema, {
+    childId: 'c',
+    payload: {
+      case: 'contentBlockDelta',
+      value: create(ContentBlockDeltaSchema, {
+        delta: { case: 'inputJson', value: '{"x"' },
+      }),
+    },
+  })
+  const { control } = fakeControl({ stream: (_i, o) => replay([inputDelta], o?.signal) })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  await flush()
+  expect(conversation.blocks).toHaveLength(0)
+  conversation.dispose()
+})
+
 it('overlap duplicate trimmed', async () => {
   const history = [userEvent('c', 'hi')]
   const events = [userEvent('c', 'hi', 6)]
@@ -223,6 +257,89 @@ it('pause keeps cursor and resume reopens from it without history', async () => 
   expect(cursorOf(streamRequests[1])).toBe(7)
   expect(order.filter((name) => name === 'getHistory')).toHaveLength(1)
   conversation.dispose()
+})
+
+it('hidden during open opens no stream until resume', async () => {
+  const { control, streamRequests } = fakeControl({ stream: (_i, o) => idle(o?.signal) })
+  const conversation = new Conversation('c', { control })
+  conversation.pause()
+  await conversation.open()
+  expect(streamRequests).toHaveLength(0)
+  conversation.resume()
+  await flush()
+  expect(streamRequests).toHaveLength(1)
+  conversation.dispose()
+})
+
+it('dispose during the join opens no stream', async () => {
+  const { control, streamRequests } = fakeControl({ stream: (_i, o) => idle(o?.signal) })
+  const conversation = new Conversation('c', { control })
+  const opening = conversation.open()
+  conversation.dispose()
+  await opening
+  await flush()
+  expect(streamRequests).toHaveLength(0)
+})
+
+it('resume after a failed open re-runs the join, not a bare stream', async () => {
+  const { control, order, streamRequests } = fakeControl({
+    childError: new Error('boom'),
+    stream: (_i, o) => idle(o?.signal),
+  })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  expect(conversation.error).toBe('boom')
+  expect(streamRequests).toHaveLength(0)
+
+  conversation.pause()
+  conversation.resume()
+  await flush()
+  expect(order.filter((name) => name === 'getChild')).toHaveLength(2)
+  expect(streamRequests).toHaveLength(0)
+  conversation.dispose()
+})
+
+it('reconnect backoff resets on each delivered connection', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(Math, 'random').mockReturnValue(0)
+  try {
+    let calls = 0
+    const { control } = fakeControl({
+      stream: () => {
+        calls += 1
+        return finite([userEvent('c', 'x', calls)])
+      },
+    })
+    const conversation = new Conversation('c', { control })
+    await conversation.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(calls).toBe(1)
+    // Each reconnect that delivered an event must wait only the base 250ms, not
+    // the growing 500ms·2^n a stale attempt counter would produce.
+    for (let i = 0; i < 6; i += 1) {
+      await vi.advanceTimersByTimeAsync(250)
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(calls).toBe(7)
+    conversation.dispose()
+  } finally {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  }
+})
+
+it('router keeps the full id list and the transcript slices three panes', () => {
+  const route = parseRoute('#/c/a,b,c,d')
+  expect(route.name).toBe('transcript')
+  expect(route.ids).toEqual(['a', 'b', 'c', 'd'])
+
+  const overflow = transcriptPanes(route.ids)
+  expect(overflow.overflow).toBe(true)
+  expect(overflow.shown).toEqual(['a', 'b', 'c'])
+
+  const within = transcriptPanes(['a', 'b'])
+  expect(within.overflow).toBe(false)
+  expect(within.shown).toEqual(['a', 'b'])
 })
 
 it('a tool-result-only user message appends no block', async () => {

@@ -3,7 +3,7 @@ import { createConnectTransport } from '@connectrpc/connect-web'
 import type { Interceptor } from '@connectrpc/connect'
 import { Control } from '../gen/rafiki/v1/control_pb'
 import { setAuthState } from './authState'
-import { getSecret, LinkUsedError, NoSessionError } from './session'
+import { getSecret, GateRefusedError, LinkUsedError, NoSessionError } from './session'
 
 export const authInterceptor: Interceptor = (next) => async (req) => {
   let secret: string
@@ -12,6 +12,8 @@ export const authInterceptor: Interceptor = (next) => async (req) => {
   } catch (error) {
     if (error instanceof LinkUsedError) {
       setAuthState('link-used')
+    } else if (error instanceof GateRefusedError) {
+      setAuthState('gate-refused')
     } else if (error instanceof NoSessionError) {
       setAuthState('no-session')
     }

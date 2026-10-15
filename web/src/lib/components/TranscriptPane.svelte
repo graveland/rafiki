@@ -3,7 +3,7 @@
   import { control } from '../client'
   import { usd } from '../format'
   import { navigate, route } from '../router'
-  import { Conversation } from '../transcript.svelte'
+  import { Conversation, type TranscriptBlock } from '../transcript.svelte'
   import { SendQueue, type SendModeName } from '../sendQueue.svelte'
   import MessageBlock from './MessageBlock.svelte'
 
@@ -16,7 +16,6 @@
   const queue = new SendQueue(childId, { control })
 
   let draft = $state('')
-  let deliveredIndex = 0
 
   $effect(() => {
     void conversation.open()
@@ -35,20 +34,25 @@
     return () => document.removeEventListener('visibilitychange', onVisibility)
   })
 
+  // Match delivered user blocks by their identity, never by array index: the
+  // assistant in-flight block is filtered out on the next durable message,
+  // which shifts indices and would skip a user block. markDelivered itself
+  // matches the oldest queued entry by TEXT (FIFO).
+  const delivered = new WeakSet<TranscriptBlock>()
   $effect(() => {
-    const blocks = conversation.blocks
-    while (deliveredIndex < blocks.length) {
-      const block = blocks[deliveredIndex]
-      if (block.kind === 'user') {
+    for (const block of conversation.blocks) {
+      if (block.kind === 'user' && !delivered.has(block)) {
+        delivered.add(block)
         queue.markDelivered(block.text)
       }
-      deliveredIndex += 1
     }
   })
 
   function submit(mode: SendModeName): void {
     const text = draft.trim()
-    if (text === '') {
+    // Abort is the case where text matters least: it cancels the running turn
+    // and carries no content, so an empty composer still aborts.
+    if (text === '' && mode !== 'abort') {
       return
     }
     void queue.send(text, mode)
@@ -58,7 +62,9 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    // isComposing guards an IME confirm: Enter that commits a composition must
+    // not also send the message.
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
       submit('prompt')
     }

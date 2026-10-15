@@ -7,7 +7,20 @@ export interface Route {
   ids: string[]
 }
 
-const MAX_TRANSCRIPT_IDS = 3
+/** The at-most-3-live-panes budget the transcript renders; see transcriptPanes. */
+export const MAX_TRANSCRIPT_PANES = 3
+
+/**
+ * The router keeps the FULL id list; the transcript slices it for rendering.
+ * Separating the two is what makes the "too many panes" banner reachable —
+ * dropping the extras in the router would leave `ids.length > 3` never true.
+ */
+export function transcriptPanes(ids: string[]): { shown: string[]; overflow: boolean } {
+  return {
+    shown: ids.slice(0, MAX_TRANSCRIPT_PANES),
+    overflow: ids.length > MAX_TRANSCRIPT_PANES,
+  }
+}
 
 export function parseRoute(hash: string): Route {
   const raw = hash.replace(/^#/, '')
@@ -24,7 +37,6 @@ export function parseRoute(hash: string): Route {
         .split(',')
         .map((id) => id.trim())
         .filter((id) => id.length > 0)
-        .slice(0, MAX_TRANSCRIPT_IDS)
       if (ids.length === 0) {
         return { name: 'agents', ids: [] }
       }

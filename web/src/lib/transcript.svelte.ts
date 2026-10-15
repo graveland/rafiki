@@ -156,10 +156,12 @@ export class Conversation {
   /** Set from turn_end for the per-turn cost in the margin. */
   turnCostUsd = $state<number | undefined>(undefined)
 
-  private after = -1
   private trimming = false
   private recentHistory: string[] = []
   private paused = false
+  private disposed = false
+  /** True once the join succeeded, so resume() never streams without history. */
+  private opened = false
   private abort: AbortController | undefined
 
   constructor(childId: string, deps: ConversationDeps) {
@@ -181,7 +183,6 @@ export class Conversation {
       this.error = errorMessage(err)
       return
     }
-    this.after = after
 
     try {
       const resp = await this.deps.control.getHistory({ childId: this.childId })
@@ -194,6 +195,7 @@ export class Conversation {
       after = -1
     }
     this.cursor = after
+    this.opened = true
     this.openStream()
   }
 
@@ -204,21 +206,36 @@ export class Conversation {
     this.abort = undefined
   }
 
-  /** Reopen the stream from the cursor, without refetching history. */
+  /**
+   * Reopen the stream from the cursor, without refetching history. Before the
+   * join has succeeded (a failed open() left only an error banner) there is no
+   * cursor to replay from, so re-run open() rather than stream from -1.
+   */
   resume(): void {
     if (!this.paused) {
       return
     }
     this.paused = false
+    if (!this.opened) {
+      void this.open()
+      return
+    }
     this.openStream()
   }
 
   dispose(): void {
+    this.disposed = true
     this.abort?.abort()
     this.abort = undefined
   }
 
   private openStream(): void {
+    // A stream must not outlive its pane or run while the tab is hidden: either
+    // would leak one of the tab's three conversation streams until resume.
+    if (this.disposed || this.paused) {
+      return
+    }
+    this.abort?.abort()
     const controller = new AbortController()
     this.abort = controller
     void this.pump(controller.signal)
@@ -227,8 +244,16 @@ export class Conversation {
   private async pump(signal: AbortSignal): Promise<void> {
     let attempt = 0
     while (!signal.aborted) {
+      let received = false
       try {
-        await this.consume(signal)
+        await this.consume(signal, () => {
+          if (!received) {
+            received = true
+            // A connection that delivered an event was healthy: the next
+            // reconnect starts from a clean backoff, like the rail.
+            attempt = 0
+          }
+        })
       } catch (err) {
         if (signal.aborted) {
           return
@@ -246,7 +271,7 @@ export class Conversation {
     }
   }
 
-  private async consume(signal: AbortSignal): Promise<void> {
+  private async consume(signal: AbortSignal, onFirstEvent: () => void): Promise<void> {
     const stream = this.deps.control.streamEvents(
       {
         subject: { scope: { case: 'child', value: this.childId } },
@@ -255,7 +280,12 @@ export class Conversation {
       },
       { signal },
     )
+    let first = true
     for await (const event of stream) {
+      if (first) {
+        first = false
+        onFirstEvent()
+      }
       this.applyEvent(event, false)
     }
   }
@@ -328,7 +358,9 @@ export class Conversation {
       }
       case 'contentBlockDelta': {
         const delta = event.payload.value.delta
-        if (delta.case === undefined) {
+        // An input_json delta belongs to a tool_use fragment, not the assistant
+        // text: it must not open an empty in-flight block.
+        if (delta.case !== 'text' && delta.case !== 'thinking') {
           break
         }
         const value = delta.value
@@ -342,7 +374,7 @@ export class Conversation {
         }
         if (delta.case === 'text') {
           block.text += value
-        } else if (delta.case === 'thinking') {
+        } else {
           block.thinking += value
         }
         break
@@ -392,6 +424,8 @@ export class Conversation {
     }
     // Accepted edge: a genuinely repeated identical message right after the
     // join is dropped along with the join overlap it is indistinguishable from.
+    // A dropped message also never reaches markDelivered, so its queued send
+    // entry stays "queued" forever.
     if (this.recentHistory.includes(messageKey(role, content))) {
       return true
     }

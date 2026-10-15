@@ -19,6 +19,13 @@ export class NoSessionError extends Error {
   }
 }
 
+export class GateRefusedError extends Error {
+  constructor() {
+    super('the rafiki web session was refused by the gate')
+    this.name = 'GateRefusedError'
+  }
+}
+
 type ChannelMessage =
   | { type: 'want-secret' }
   | { type: 'secret'; secret: string }
@@ -70,16 +77,33 @@ function fragmentCode(): string | null {
 }
 
 async function exchangeCode(code: string): Promise<string> {
-  const response = await fetch('/_rafiki/session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code }),
-  })
-  if (response.status === 410) {
-    throw new LinkUsedError()
+  let response: Response
+  try {
+    response = await fetch('/_rafiki/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    })
+  } catch {
+    // A network failure must not leave the single-use code in the URL: the next
+    // request would re-POST it. Strip it and map to a plain no-session.
+    stripFragment()
+    throw new NoSessionError()
   }
   if (!response.ok) {
-    throw new Error(`session exchange failed with status ${response.status}`)
+    // Strip on every failure for the same reason: the code is single-use, and a
+    // retry against a pasted-from-URL code re-POSTs it.
+    stripFragment()
+    if (response.status === 410) {
+      throw new LinkUsedError()
+    }
+    // A gate refusal (Host/Origin) reads as gate-refused; anything else is a
+    // generic no-session. The gate stamps its refusals with the header, but a
+    // 403 alone is treated as a gate refusal too.
+    if (response.status === 403 || response.headers?.get('rafiki-web-gate') === 'refused') {
+      throw new GateRefusedError()
+    }
+    throw new NoSessionError()
   }
   const body = (await response.json()) as { secret: string }
   sessionStorage.setItem(SECRET_STORAGE_KEY, body.secret)
@@ -139,6 +163,9 @@ export function startSessionResponder(): void {
         channel.postMessage({ type: 'here' } satisfies ChannelMessage)
         break
       case 'here':
+        // Startup-only: this counts the tabs that answered THIS tab's one
+        // 'hello', so it is a snapshot taken at construction, never a live
+        // count, and it never decrements.
         otherTabs.update((count) => count + 1)
         break
       default:

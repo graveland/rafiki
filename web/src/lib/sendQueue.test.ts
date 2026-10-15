@@ -50,3 +50,13 @@ it('delivered matches oldest queued FIFO', async () => {
   expect(queue.entries[0].status).toBe('delivered')
   expect(queue.entries[1].status).toBe('queued')
 })
+
+it('an empty abort sends no blocks and reaches queued', async () => {
+  const send = vi.fn().mockResolvedValue({ messageId: 'm1' })
+  const queue = new SendQueue('c', { control: fakeControl(send) })
+  await queue.send('', 'abort')
+  expect(send).toHaveBeenCalledTimes(1)
+  const call = send.mock.calls[0][0] as { mode: number; blocks: unknown[] }
+  expect(call.blocks).toEqual([])
+  expect(queue.entries[0].status).toBe('queued')
+})

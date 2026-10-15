@@ -33,6 +33,15 @@ class FakeChannel {
   }
 }
 
+interface FakePopup {
+  location: { href: string }
+  close: () => void
+}
+
+function fakePopup(): FakePopup {
+  return { location: { href: '' }, close: vi.fn() }
+}
+
 function beginOk(authorizeUrl: string): Response {
   return {
     status: 200,
@@ -50,7 +59,12 @@ function beginError(code: string, message: string): Response {
 }
 
 async function signalLoginComplete(): Promise<void> {
-  await vi.waitFor(() => expect(FakeChannel.registry.length).toBeGreaterThan(0))
+  // Wait until the login flow has registered its handler: the popup's broadcast
+  // is only delivered to a channel that is already listening.
+  await vi.waitFor(() => {
+    const target = FakeChannel.registry.find((c) => c.name === SESSION_CHANNEL && c.onmessage)
+    expect(target).toBeDefined()
+  })
   const popup = new FakeChannel(SESSION_CHANNEL)
   popup.postMessage({ type: 'login-complete' })
 }
@@ -71,7 +85,7 @@ it('begin posts with secret header', async () => {
   sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
   const fetchMock = vi.fn().mockResolvedValue(beginOk('http://idp/auth'))
   vi.stubGlobal('fetch', fetchMock)
-  vi.stubGlobal('open', vi.fn())
+  vi.stubGlobal('open', vi.fn(() => fakePopup()))
 
   const promise = startLogin()
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
@@ -87,28 +101,40 @@ it('begin posts with secret header', async () => {
   await expect(promise).resolves.toBeUndefined()
 })
 
-it('opens popup with authorize_url', async () => {
+it('opens the popup synchronously and then navigates it', async () => {
   sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
-  const openMock = vi.fn()
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(beginOk('http://idp/auth?a=1')))
+  const popup = fakePopup()
+  const openMock = vi.fn(() => popup)
   vi.stubGlobal('open', openMock)
+  const fetchMock = vi.fn().mockResolvedValue(beginOk('http://idp/auth?a=1'))
+  vi.stubGlobal('fetch', fetchMock)
 
   const promise = startLogin()
-  await vi.waitFor(() => expect(openMock).toHaveBeenCalledTimes(1))
-  expect(openMock).toHaveBeenCalledWith(
-    'http://idp/auth?a=1',
-    'rafiki-login',
-    'popup,width=520,height=720',
-  )
+  // Synchronous: open runs before the first await, preserving the click's user
+  // gesture. The popup is navigated only once begin resolves.
+  expect(openMock).toHaveBeenCalledWith('about:blank', 'rafiki-login', 'popup,width=520,height=720')
 
+  await vi.waitFor(() => expect(popup.location.href).toBe('http://idp/auth?a=1'))
   await signalLoginComplete()
   await expect(promise).resolves.toBeUndefined()
+})
+
+it('a blocked popup rejects and settles the promise', async () => {
+  sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
+  vi.stubGlobal('open', vi.fn(() => null))
+  const fetchMock = vi.fn()
+  vi.stubGlobal('fetch', fetchMock)
+
+  const error = await startLogin().catch((reason: unknown) => reason)
+  expect(error).toBeInstanceOf(LoginError)
+  expect((error as LoginError).code).toBe('popup-blocked')
+  expect(fetchMock).not.toHaveBeenCalled()
 })
 
 it('resolves on login-complete broadcast', async () => {
   sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(beginOk('http://idp/auth')))
-  vi.stubGlobal('open', vi.fn())
+  vi.stubGlobal('open', vi.fn(() => fakePopup()))
 
   const promise = startLogin()
   await signalLoginComplete()
@@ -119,6 +145,7 @@ it('resolves on login-complete broadcast', async () => {
 
 it('begin error surfaces server message', async () => {
   sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
+  vi.stubGlobal('open', vi.fn(() => fakePopup()))
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue(beginError('failed_precondition', 'OIDC is not configured')),
@@ -128,4 +155,14 @@ it('begin error surfaces server message', async () => {
   expect(error).toBeInstanceOf(LoginError)
   expect((error as LoginError).code).toBe('failed_precondition')
   expect((error as LoginError).message).toBe('OIDC is not configured')
+})
+
+it('closes its channel when begin fails', async () => {
+  sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
+  vi.stubGlobal('open', vi.fn(() => fakePopup()))
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(beginError('failed_precondition', 'nope')))
+
+  await expect(startLogin()).rejects.toBeInstanceOf(LoginError)
+  expect(FakeChannel.registry).toHaveLength(1)
+  expect(FakeChannel.registry[0].closed).toBe(true)
 })

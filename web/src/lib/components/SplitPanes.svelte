@@ -1,7 +1,12 @@
 <script lang="ts">
   import type { Snippet } from 'svelte'
 
-  let { panes }: { panes: Snippet[] } = $props()
+  interface Pane {
+    id: string
+    snippet: Snippet
+  }
+
+  let { panes }: { panes: Pane[] } = $props()
 
   const MIN_FRACTION = 0.1
 
@@ -53,9 +58,9 @@
 <svelte:window onpointermove={onDragMove} onpointerup={endDrag} />
 
 <div class="flex h-full w-full" bind:this={containerEl}>
-  {#each panes as pane, index (index)}
+  {#each panes as pane, index (pane.id)}
     <div class="min-w-0 overflow-auto" style="flex: {sizes[index] ?? 1 / panes.length} 1 0%">
-      {@render pane()}
+      {@render pane.snippet()}
     </div>
     {#if index < panes.length - 1}
       <div

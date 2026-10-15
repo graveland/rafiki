@@ -26,21 +26,56 @@ interface ChannelMessage {
   type: 'login-complete'
 }
 
+// One channel per login flow, reused across the awaits below and closed when the
+// flow settles: creating a fresh BroadcastChannel on every sign-in click (and
+// never closing one whose begin failed) leaks one channel per click.
+let loginChannel: SessionChannel | null = null
+
+function acquireChannel(): SessionChannel {
+  if (loginChannel === null) {
+    loginChannel = channelFactory(SESSION_CHANNEL)
+  }
+  return loginChannel
+}
+
+function releaseChannel(): void {
+  loginChannel?.close()
+  loginChannel = null
+}
+
 export async function startLogin(): Promise<void> {
-  const secret = await getSecret()
-  const response = await fetch('/_rafiki/login/begin', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Rafiki-Web': secret },
-    body: JSON.stringify({}),
-  })
-  if (!response.ok) {
-    throw await beginError(response)
+  // Open the popup SYNCHRONOUSLY, inside the click's user gesture: Safari and
+  // strict blockers drop the gesture across the awaits below, and a popup opened
+  // then is refused. It is navigated to authorize_url once begin resolves.
+  const popup = window.open('about:blank', POPUP_NAME, POPUP_FEATURES)
+  if (!popup) {
+    throw new LoginError(
+      'popup-blocked',
+      'rafiki web: the sign-in popup was blocked; allow popups for this site and try again',
+    )
   }
-  const body = (await response.json()) as { authorize_url?: string }
-  if (!body.authorize_url) {
-    throw new LoginError('internal', 'rafiki web: login begin returned no authorize_url')
+  const channel = acquireChannel()
+  try {
+    const secret = await getSecret()
+    const response = await fetch('/_rafiki/login/begin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Rafiki-Web': secret },
+      body: JSON.stringify({}),
+    })
+    if (!response.ok) {
+      throw await beginError(response)
+    }
+    const body = (await response.json()) as { authorize_url?: string }
+    if (!body.authorize_url) {
+      throw new LoginError('internal', 'rafiki web: login begin returned no authorize_url')
+    }
+    popup.location.href = body.authorize_url
+    return await awaitLoginComplete(channel)
+  } catch (error) {
+    popup.close()
+    releaseChannel()
+    throw error
   }
-  return await awaitLoginComplete(body.authorize_url)
 }
 
 async function beginError(response: Response): Promise<LoginError> {
@@ -60,19 +95,17 @@ async function beginError(response: Response): Promise<LoginError> {
   return new LoginError(code, message)
 }
 
-function awaitLoginComplete(authorizeUrl: string): Promise<void> {
-  const channel = channelFactory(SESSION_CHANNEL)
-  const complete = new Promise<void>((resolve) => {
+function awaitLoginComplete(channel: SessionChannel): Promise<void> {
+  return new Promise<void>((resolve) => {
     channel.onmessage = (event: MessageEvent) => {
       const message = event.data as ChannelMessage
       if (!message || message.type !== 'login-complete') {
         return
       }
       channel.close()
+      loginChannel = null
       setAuthState('ok')
       resolve()
     }
   })
-  window.open(authorizeUrl, POPUP_NAME, POPUP_FEATURES)
-  return complete
 }

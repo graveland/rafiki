@@ -62,7 +62,7 @@ export class SendQueue {
     }
     this.nextId += 1
     this.entries = [...this.entries, entry]
-    await this.dispatch(entry)
+    await this.dispatch(entry.id)
   }
 
   /** The only retry path; user-triggered, never automatic. */
@@ -71,7 +71,7 @@ export class SendQueue {
     if (!entry || entry.status !== 'failed') {
       return
     }
-    await this.dispatch(entry)
+    await this.dispatch(id)
   }
 
   /** Mark the oldest queued entry delivered when its text matches, FIFO. */
@@ -82,18 +82,33 @@ export class SendQueue {
     }
   }
 
-  private async dispatch(entry: SendEntry): Promise<void> {
+  /**
+   * dispatch mutates the entry THROUGH the $state array: a status change on the
+   * raw object pushed into this.entries never reaches the UI. Looking the entry
+   * up here returns the reactive proxy, so sending→queued/failed is observed.
+   */
+  private async dispatch(id: number): Promise<void> {
+    const entry = this.entries.find((candidate) => candidate.id === id)
+    if (!entry) {
+      return
+    }
     entry.status = 'sending'
     entry.error = undefined
     try {
       const resp = await this.deps.control.send({
         childId: this.childId,
         mode: MODE_ENUM[entry.mode],
-        blocks: [
-          create(ContentBlockSchema, {
-            block: { case: 'text', value: create(TextBlockSchema, { text: entry.text }) },
-          }),
-        ],
+        // ABORT carries no content by design; the daemon ignores the blocks, so
+        // an abort with an empty composer sends an empty list rather than a
+        // blank text block.
+        blocks:
+          entry.text === ''
+            ? []
+            : [
+                create(ContentBlockSchema, {
+                  block: { case: 'text', value: create(TextBlockSchema, { text: entry.text }) },
+                }),
+              ],
       })
       entry.status = 'queued'
       entry.messageId = resp.messageId
