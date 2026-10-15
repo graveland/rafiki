@@ -262,10 +262,29 @@ message ScriptOutput {
   string text = 2;
 }
 
+// OperatorState is the operator-facing display state of a child changing —
+// derived server-side, the same value GetChild/ListChildren report as
+// ChildSummary.display_state. It is DURABLE so the rail (which subscribes
+// durable-only) receives it and replay dedupes it by ordinal. The
+// agent_status event remains the machine status and is unchanged.
+//
+// The deriving rule lives in cmd/rafikid: working/waiting/failed/idle/exited,
+// with waiting_on carrying why a waiting child is waiting.
+message OperatorState {
+  // display_state is one of working/waiting/failed/idle/exited. A string, not
+  // an enum, so the set may grow without regenerating clients.
+  string display_state = 1;
+  // waiting_on is set only when display_state == "waiting":
+  // operator/schedule/job/children/events.
+  string waiting_on = 2;
+  // msg is the human sentence explaining the state, rendered verbatim.
+  string msg = 3;
+}
+
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — fourteen durable types as of the
-// script-output work, not the thirteen this comment named before it and not
+// ordinal is set on DURABLE-tier events — fifteen durable types as of the
+// operator-status work, not the fourteen this comment named before it and not
 // the two this comment originally named. pkg/eventlog/tier.go is the authority.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
@@ -308,5 +327,6 @@ message Event {
     CompactionBoundary compaction_boundary = 22;
     ScriptReport script_report = 23;
     ScriptOutput script_output = 24;
+    OperatorState operator_state = 26;
   }
 }

@@ -662,6 +662,35 @@ class ScriptOutput:
         return obj
 
 @dataclasses.dataclass
+class OperatorState:
+    display_state: str = ""
+    waiting_on: str = ""
+    msg: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.display_state != "":
+            out["displayState"] = self.display_state
+        if self.waiting_on != "":
+            out["waitingOn"] = self.waiting_on
+        if self.msg != "":
+            out["msg"] = self.msg
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "OperatorState":
+        obj = cls()
+        _v = _d.get("displayState")
+        if _v is not None:
+            obj.display_state = _v
+        _v = _d.get("waitingOn")
+        if _v is not None:
+            obj.waiting_on = _v
+        _v = _d.get("msg")
+        if _v is not None:
+            obj.msg = _v
+        return obj
+
+@dataclasses.dataclass
 class Event:
     child_id: str = ""
     ordinal: Optional[int] = None
@@ -681,6 +710,7 @@ class Event:
     compaction_boundary: Optional[CompactionBoundary] = None
     script_report: Optional[ScriptReport] = None
     script_output: Optional[ScriptOutput] = None
+    operator_state: Optional[OperatorState] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -690,7 +720,7 @@ class Event:
             out["ordinal"] = self.ordinal
         if self.ts is not None:
             out["ts"] = _ts_out(self.ts)
-        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output) if x is not None]
+        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
         if self.user_message is not None:
@@ -723,6 +753,8 @@ class Event:
             out["scriptReport"] = self.script_report.to_dict()
         if self.script_output is not None:
             out["scriptOutput"] = self.script_output.to_dict()
+        if self.operator_state is not None:
+            out["operatorState"] = self.operator_state.to_dict()
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Event":
@@ -781,6 +813,9 @@ class Event:
         _v = _d.get("scriptOutput")
         if _v is not None:
             obj.script_output = ScriptOutput.from_dict(_v)
+        _v = _d.get("operatorState")
+        if _v is not None:
+            obj.operator_state = OperatorState.from_dict(_v)
         return obj
 
 

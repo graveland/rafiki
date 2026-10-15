@@ -1552,7 +1552,20 @@ type ChildSummary struct {
 	// routing is the child's resolved routing spec in canonical form
 	// (routing.Spec.String()), empty when none. The model field stays the base
 	// id: the bracketed spec form is never folded into it.
-	Routing       string `protobuf:"bytes,22,opt,name=routing,proto3" json:"routing,omitempty"`
+	Routing string `protobuf:"bytes,22,opt,name=routing,proto3" json:"routing,omitempty"`
+	// display_state is the SERVER-DERIVED operator-facing state, one of
+	// working/waiting/failed/idle/exited. It is a string, not an enum, for the
+	// same reason status is: the set may grow without regenerating clients. It
+	// is distinct from status, which is recovery's resume signal and is never
+	// rendered as a display value.
+	DisplayState string `protobuf:"bytes,25,opt,name=display_state,json=displayState,proto3" json:"display_state,omitempty"`
+	// waiting_on is the reason a child is in display_state "waiting": one of
+	// operator/schedule/job/children/events (the set may grow). It is empty in
+	// every other state, so an empty waiting_on means "not waiting".
+	WaitingOn string `protobuf:"bytes,26,opt,name=waiting_on,json=waitingOn,proto3" json:"waiting_on,omitempty"`
+	// display_msg is the human sentence explaining the display state, rendered
+	// verbatim. Empty when there is nothing to say.
+	DisplayMsg    string `protobuf:"bytes,27,opt,name=display_msg,json=displayMsg,proto3" json:"display_msg,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1737,6 +1750,27 @@ func (x *ChildSummary) GetMaxCompletionTokens() int32 {
 func (x *ChildSummary) GetRouting() string {
 	if x != nil {
 		return x.Routing
+	}
+	return ""
+}
+
+func (x *ChildSummary) GetDisplayState() string {
+	if x != nil {
+		return x.DisplayState
+	}
+	return ""
+}
+
+func (x *ChildSummary) GetWaitingOn() string {
+	if x != nil {
+		return x.WaitingOn
+	}
+	return ""
+}
+
+func (x *ChildSummary) GetDisplayMsg() string {
+	if x != nil {
+		return x.DisplayMsg
 	}
 	return ""
 }
@@ -15003,7 +15037,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10SetResultRequest\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\"\x13\n" +
-	"\x11SetResultResponse\"\x90\a\n" +
+	"\x11SetResultResponse\"\xf5\a\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -15030,7 +15064,12 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"exitSignal\x12%\n" +
 	"\x0eslash_commands\x18\x14 \x03(\tR\rslashCommands\x122\n" +
 	"\x15max_completion_tokens\x18\x15 \x01(\x05R\x13maxCompletionTokens\x12\x18\n" +
-	"\arouting\x18\x16 \x01(\tR\arouting\x1a9\n" +
+	"\arouting\x18\x16 \x01(\tR\arouting\x12#\n" +
+	"\rdisplay_state\x18\x19 \x01(\tR\fdisplayState\x12\x1d\n" +
+	"\n" +
+	"waiting_on\x18\x1a \x01(\tR\twaitingOn\x12\x1f\n" +
+	"\vdisplay_msg\x18\x1b \x01(\tR\n" +
+	"displayMsg\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +

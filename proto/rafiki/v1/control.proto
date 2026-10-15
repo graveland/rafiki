@@ -306,6 +306,19 @@ message ChildSummary {
   // (routing.Spec.String()), empty when none. The model field stays the base
   // id: the bracketed spec form is never folded into it.
   string routing = 22;
+  // display_state is the SERVER-DERIVED operator-facing state, one of
+  // working/waiting/failed/idle/exited. It is a string, not an enum, for the
+  // same reason status is: the set may grow without regenerating clients. It
+  // is distinct from status, which is recovery's resume signal and is never
+  // rendered as a display value.
+  string display_state = 25;
+  // waiting_on is the reason a child is in display_state "waiting": one of
+  // operator/schedule/job/children/events (the set may grow). It is empty in
+  // every other state, so an empty waiting_on means "not waiting".
+  string waiting_on = 26;
+  // display_msg is the human sentence explaining the display state, rendered
+  // verbatim. Empty when there is nothing to say.
+  string display_msg = 27;
 }
 
 message ListChildrenRequest {

@@ -185,6 +185,8 @@ func TypeName(ev *rafikiv1.Event) string {
 		return "script_report"
 	case *rafikiv1.Event_ScriptOutput:
 		return "script_output"
+	case *rafikiv1.Event_OperatorState:
+		return "operator_state"
 	case *rafikiv1.Event_Error:
 		return "error"
 	case *rafikiv1.Event_Retry:

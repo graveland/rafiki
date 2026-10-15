@@ -366,8 +366,8 @@ defined under "Who may call what" below; each row names its own.
 | `GetHistory` | unary · childScoped | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming · childScoped | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child or a `/exit` slash command (see "`Send` and the durable inbox" and "Slash commands in a prompt" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
-| `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child); answers only the caller's own subtree |
-| `GetChild` | unary · childScoped | Get one child's summary by id (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost`). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
+| `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child, plus the server-derived display fields `display_state`/`waiting_on`/`display_msg` — see "Operator display state"); answers only the caller's own subtree |
+| `GetChild` | unary · childScoped | Get one child's summary by id (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost`, plus the server-derived display fields `display_state`/`waiting_on`/`display_msg` — see "Operator display state"). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
 | `Spawn` | unary · childScoped | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. Fields 15–29 are operator-only (§"Spawn's operator-only fields" below) |
 | `Kill` | unary · childScoped | Stop a child gracefully, escalating to SIGKILL if necessary. `shutdown_timeout`/`kill_timeout` (Durations) bound the graceful window and the SIGTERM→SIGKILL escalation; each unset or zero selects the daemon default (2 s / 30 s — a kill interrupts, it does not wait out a turn). `include_descendants` first stops every live descendant, all at once (the sweep costs the slowest child, not the sum; reported in `descendant_ids`), then the target; a descendant that cannot be stopped leaves the target alone. Off, the subtree is left running |
 | `Close` | unary · childScoped | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped. An error for a live child — closing is never an implicit kill. `include_descendants` closes every descendant first, deepest first, each of which must already be exited (reported in `descendant_ids`). A descendant that cannot be ended aborts before the parent is touched, so no child is orphaned; one already exited or gone is skipped. Native Task subagents are never listed: they end and close with their parent. The daemon never refuses a parent for having descendants; the CLI and cockpit ask first |
@@ -1316,12 +1316,67 @@ Every event payload is classified into a tier:
 | `Error` | durable | Turn or engine level error event |
 | `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
 | `ScriptOutput` | durable | One coalesced chunk of a script child's stdout or stderr. Fields: `stream` (`"stdout"`/`"stderr"`) and `text` — the newline-terminated lines or split pieces carried verbatim. Produced by the daemon's per-child coalescer (`cmd/rafikid/script_output.go`); see "Script output" below |
+| `OperatorState` | durable | The operator-facing display state of a child changed (see "Operator display state" below). Fields: `display_state` (working/waiting/failed/idle/exited), `waiting_on` (set only when `display_state` is `waiting`: operator/schedule/job/children/events) and `msg` (the human sentence). Server-derived and deduplicated: published only when the (state, waiting_on, msg) tuple differs from the last published one. `AgentStatus` remains the machine status and is unchanged |
 | `ContentBlockDelta` | ephemeral | Live token/text streaming delta |
 
-Fourteen payload types today: thirteen above plus `ScriptReport` (the
-`Report` verb's stored payload — it reaches a child's own event log only
-when the top-level script has no parent to push to). The count is prose, not
-enforcement; the wire's `Event` oneof is.
+Sixteen payload types today: fifteen durable (the fourteen durable rows above
+plus `ScriptReport`, the `Report` verb's stored payload — it reaches a child's
+own event log only when the top-level script has no parent to push to) and one
+ephemeral (`ContentBlockDelta`). The count is prose, not enforcement; the
+wire's `Event` oneof is.
+
+### Operator display state
+
+`GetChild` and `ListChildren` report three SERVER-DERIVED display fields on
+every `ChildSummary`, and a change in them is published as a durable
+`OperatorState` event. They answer "what is this child doing, from an
+operator's point of view" — a question the machine status (`Status`, the
+recovery resume signal) deliberately does not answer. The machinery is
+additive to the wire (three new fields, one new event payload) and needs no
+epoch bump.
+
+| Field | Meaning |
+|---|---|
+| `display_state` | One of `working`, `waiting`, `failed`, `idle`, `exited`. A string, not an enum, so the set may grow without regenerating clients — the same rule `status` follows. Empty is never a value: a server that cannot derive a state omits it |
+| `waiting_on` | The reason a child is `waiting`: `operator`, `schedule`, `job`, `children` or `events` (the set may grow). Set only when `display_state == "waiting"`; empty means "not waiting" |
+| `display_msg` | The human sentence explaining the state, rendered verbatim. Empty when there is nothing to say |
+
+The derivation is one function's answer, consumed by `list`, the rail and the
+OSC emitter — no consumer re-derives it:
+
+- `working` — the machine status is a working status (the same
+  `isWorkingStatus` the state machine uses). It outranks every other state.
+- `waiting` — the turn ended and the child expects to be woken; `waiting_on`
+  says by what. A foreground `bash` or `pymodule_run` blocks the turn, so the
+  child is `working`, never `waiting`.
+- `failed` — an idle child whose last turn failed. Today only fundi children
+  have a turn outcome (claude children have none), so v1 derives `failed` for
+  fundi turn errors only.
+- `idle` — the turn ended and nothing is expected.
+- `exited` — dead.
+
+`waiting_on` sources, most actionable first:
+
+| `waiting_on` | Set when |
+|---|---|
+| `operator` | The child asked a question and is waiting on the operator, or it is budget-halted. Only a TOP-LEVEL child ever becomes `waiting_on: operator` — a mid-tree question goes to its parent and sets nothing |
+| `schedule` | A pending wakeup or cron job |
+| `events` | News is queued in the event buffer and not yet delivered (a settle fragment held for its debounce) |
+| `job` | A background job is running |
+| `children` | A descendant (any depth, script children included) is not idle/exited. A descendant's own wait does not propagate upward |
+
+Precedence when several hold: `operator` > `failed` > `children` > `events` >
+`job` > `schedule`. `working` outranks all of them, and `waiting` only ever
+applies to a child whose machine status is `idle`.
+
+`done` is NOT a daemon state: a finished child is `idle`, and "unseen" is a
+viewer property (a front-end concern, not the wire).
+
+**The event.** A change in the (display_state, waiting_on, msg) tuple is
+published as a durable `operator_state` event (tier: `durable` — see the event
+vocabulary above). It is durable so the rail, which subscribes durable-only,
+receives it and replay dedupes it by ordinal. `agent_status` remains the
+machine status and is unchanged.
 
 ### Script output
 

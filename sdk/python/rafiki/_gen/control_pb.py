@@ -626,6 +626,9 @@ class ChildSummary:
     slash_commands: list[str] = dataclasses.field(default_factory=list)
     max_completion_tokens: int = 0
     routing: str = ""
+    display_state: str = ""
+    waiting_on: str = ""
+    display_msg: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -673,6 +676,12 @@ class ChildSummary:
             out["maxCompletionTokens"] = self.max_completion_tokens
         if self.routing != "":
             out["routing"] = self.routing
+        if self.display_state != "":
+            out["displayState"] = self.display_state
+        if self.waiting_on != "":
+            out["waitingOn"] = self.waiting_on
+        if self.display_msg != "":
+            out["displayMsg"] = self.display_msg
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSummary":
@@ -743,6 +752,15 @@ class ChildSummary:
         _v = _d.get("routing")
         if _v is not None:
             obj.routing = _v
+        _v = _d.get("displayState")
+        if _v is not None:
+            obj.display_state = _v
+        _v = _d.get("waitingOn")
+        if _v is not None:
+            obj.waiting_on = _v
+        _v = _d.get("displayMsg")
+        if _v is not None:
+            obj.display_msg = _v
         return obj
 
 @dataclasses.dataclass
