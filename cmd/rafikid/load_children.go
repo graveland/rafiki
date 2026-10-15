@@ -253,11 +253,15 @@ func stripStaleWorkspace(labels map[string]string) map[string]string {
 // With no database pool, children live in memory only and do not survive a
 // restart — the store starts empty.
 func (c *Controller) loadChildren(ctx context.Context) {
-	// The seed must run on EVERY exit path below, before anything else may
-	// resume a child: rows land in c.st during the walk, and a tree already
-	// over budget must be marked breached (not re-steered) before its
-	// recovered rows start working again. Deferred, not called inline — see
-	// seedBudgetBreaches.
+	// The deferred seed runs at function END — after the walk, by which point
+	// launchRecoveryResume may already have launched a resumed child's first
+	// turn. That residual lag is accepted by design: the steer for a tree
+	// already over budget was delivered by the previous incarnation (it rides
+	// the durable inbox), so nothing is owed, and a marked breach stops all
+	// future tool work through the MCP gate and the fundi Halted hook. What
+	// the seed guarantees is that every exit path leaves c.breaches populated
+	// before this function returns, so no later turn escapes the budget gate.
+	// It must stay the FIRST statement so the defer covers every return below.
 	defer c.seedBudgetBreaches(ctx)
 	if c.children == nil {
 		return

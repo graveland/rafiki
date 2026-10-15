@@ -119,3 +119,38 @@ func TestSeedBudgetBreachesSkipsUnbudgeted(t *testing.T) {
 	c.seedBudgetBreaches(context.Background())
 	ck.False(c.breaches.has("c_coord"), "an unbudgeted node must never be marked")
 }
+
+// seedChildStore fronts the boot walk with rows to recover: a
+// childstore.ChildStore whose List returns a fixed set.
+type seedChildStore struct {
+	stubChildStore
+	recs []childstore.ChildRecord
+}
+
+func (s *seedChildStore) List(context.Context) ([]childstore.ChildRecord, error) {
+	return s.recs, nil
+}
+
+// The seed rides loadChildren's defer, not a separate boot step — so the
+// binding must be pinned where deleting the defer fails: a full loadChildren
+// walk over a record that the database says is over budget must leave the
+// breach marked when the function returns.
+func TestSeedBudgetBreachesOnLoadChildren(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap := settleFixture(t)
+	c.coster = fakeCoster{spend: 99}
+	c.children = &seedChildStore{recs: []childstore.ChildRecord{{
+		ChildID: "c_coord", Kind: protocol.KindFundi,
+		Status:  string(protocol.StatusExited), // planStayExited: no resume machinery in a unit test
+		MaxCost: 10, SpawnedAt: time.Now(),
+	}}}
+
+	c.loadChildren(context.Background())
+	ck.True(c.breaches.has("c_coord"),
+		"loadChildren's seed must mark an over-budget recovered root; deleting the defer fails here")
+
+	// Marking only: no steer was (re-)sent for a breach the previous
+	// incarnation already delivered.
+	clk.Advance(10 * time.Second) // past the 5s debounce
+	ck.Len(cap.batches(), 0, "the boot seed must not push any event")
+}

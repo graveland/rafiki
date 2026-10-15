@@ -57,7 +57,7 @@ func TestMCPBudgetGateRefusesChildToolsExceptReportAndResult(t *testing.T) {
 		idx := i + 1
 		res, err := gated[idx].Execute(context.Background(), tools.ToolInput(`{}`))
 		ck.NoError(err, "%s must stay callable while halted", want)
-		ck.Eq("ran "+want, res.Text, "%s result")
+		ck.Eq("ran "+want, res.Text, want)
 	}
 	ck.Eq(1, report.calls, "agent_report calls")
 	ck.Eq(1, result.calls, "agent_result calls")
@@ -77,7 +77,7 @@ func TestMCPBudgetGateLiftsWhenNotHalted(t *testing.T) {
 	for i, want := range []string{"agent_spawn", "agent_report", "agent_result"} {
 		res, err := gated[i].Execute(context.Background(), tools.ToolInput(`{}`))
 		ck.NoError(err, "%s must run when not halted", want)
-		ck.Eq("ran "+want, res.Text, "%s result")
+		ck.Eq("ran "+want, res.Text, want)
 	}
 	ck.Eq(1, spawn.calls, "agent_spawn calls")
 	ck.Eq(1, report.calls, "agent_report calls")
