@@ -1344,8 +1344,9 @@ epoch bump.
 The derivation is one function's answer, consumed by `list`, the rail and the
 OSC emitter — no consumer re-derives it:
 
-- `working` — the machine status is a working status (the same
-  `isWorkingStatus` the state machine uses). It outranks every other state.
+- `working` — the machine status is anything that is neither `idle` nor
+  `exited` (streaming, tool_running, …, `spawning`, `shutting_down`, and any
+  status the deriver does not recognise). It outranks every other state.
 - `waiting` — the turn ended and the child expects to be woken; `waiting_on`
   says by what. A foreground `bash` or `pymodule_run` blocks the turn, so the
   child is `working`, never `waiting`.
@@ -1355,7 +1356,7 @@ OSC emitter — no consumer re-derives it:
 - `idle` — the turn ended and nothing is expected.
 - `exited` — dead.
 
-`waiting_on` sources, most actionable first:
+`waiting_on` sources:
 
 | `waiting_on` | Set when |
 |---|---|
