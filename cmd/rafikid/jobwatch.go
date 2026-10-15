@@ -4,13 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/clock"
-	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/sched"
 )
 
 // jobEventSource is the event-buffer source name for background-job news.
@@ -19,286 +16,176 @@ import (
 // rather than interleaved with subagent settles or budget warnings.
 const jobEventSource = "jobs"
 
-const (
-	// jobWatchInterval is how often the watcher asks the executor whether a
-	// job has exited. The watcher exists so the AGENT never has to poll; a
-	// few seconds of latency between a job's exit and the injected frame is
-	// nothing next to a turn the agent would otherwise have spent re-reading
-	// an unchanged 20k-char tail.
-	jobWatchInterval = 5 * time.Second
+// jobAckTimeout bounds one AckJobExits call. An ack is idempotent on the
+// executor and an unacked exit is replayed on the next subscribe, so a lost
+// ack costs a duplicate event, not a lost notification.
+const jobAckTimeout = 5 * time.Second
 
-	// jobPollTimeout bounds one JobOutput RPC. The watcher polls the CURRENT
-	// binding only (see boundExecutor.peekJob), so this bounds a single call,
-	// not a rebind ladder.
-	jobPollTimeout = 10 * time.Second
-)
-
-// jobKey scopes a watch to the child that started the job. Handles are
-// minted per executor workspace, so the childID half is what keeps two
-// children's coincidentally equal handles apart.
-type jobKey struct {
-	childID string
-	handle  string
-}
-
-// watchedJob is one in-flight watch.
-type watchedJob struct {
+// jobRef is what the daemon remembers about a job it believes is running: who
+// started it (to route the news) and what command it ran (to name it in the
+// gone fragment — a handle alone reads as nothing).
+type jobRef struct {
+	owner   string
 	command string
 }
 
-// jobWatcher polls the executor for a background job's exit and pushes a
-// fragment into the starting child's event buffer, so the agent learns a job
-// finished the way it learns a subagent settled: as an injected frame between
-// turns, not by polling in a loop.
+// jobAckSeam delivers a job-exit acknowledgement to the executor that emitted
+// it. It is the narrow interface the daemon needs from the executor pool for
+// the ack half of the push contract — *execpool.Pool satisfies it — kept
+// separate from executorPool so the ack is testable with a recording stub and
+// does not bloat every fake pool with a method only this path calls.
+type jobAckSeam interface {
+	AckJobExits(ctx context.Context, executorID string, handles []string) error
+}
+
+// handleJobEvent is the daemon's job-event handler, wired once at startup via
+// execPool.SetJobEventHandler. It runs on the pool's per-connection goroutine,
+// so events for one executor arrive in order and are processed synchronously.
 //
-// It is the same division notifySubagentSettled rests on: the watcher says
-// SOMETHING happened; what the job printed is read from the job's retained
-// output with bash_output. A fragment that tried to carry the output would
-// duplicate the retention budget the executor already enforces.
-//
-// A watch is ONE scheduler registration per job, not a ticker plus a goroutine
-// per job: each poll re-arms the same key on the shared scheduler, and a watch
-// that ends simply leaves no registration behind.
-type jobWatcher struct {
-	mu   sync.Mutex
-	jobs map[jobKey]*watchedJob
+// It replaces the poll loop wholesale: the executor PUSHES running/exited
+// events and a ReplayComplete marker, and the daemon keeps just enough state —
+// which handles it believes are running — to tell a job that finished from one
+// an executor restart lost. No timer, no JobOutput poll, no per-job goroutine.
+func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
+	switch ev.Kind {
+	case execpool.JobEventRunning:
+		// A running job is recorded, and marked as seen THIS replay so the
+		// ReplayComplete that closes the replay cannot call it gone.
+		c.jobRunningMu.Lock()
+		running := c.jobRunningForLocked(ev.ExecutorID)
+		running[ev.Handle] = jobRef{owner: ev.Owner, command: ev.Command}
+		c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
+		c.jobRunningMu.Unlock()
 
-	// poll reads a job's state. Overridable so tests script it; the
-	// controller wiring resolves the child's boundExecutor and calls
-	// peekJob — the CURRENT binding, deliberately never recover (a
-	// re-provisioned workspace has no such job, so recovering for a poll
-	// would buy a Found=false from the new workspace at the price of a
-	// migration).
-	poll func(ctx context.Context, childID, handle string) (tools.JobSnapshot, error)
-
-	// push delivers a fragment; c.evbuf.Push, or nothing when the buffer is
-	// disabled. Nil-safe like every other evbuf consumer.
-	push func(childID, source, key, fragment string)
-
-	// alive reports whether childID can still receive an injected frame. A
-	// child that exited (its workspace — and its jobs — were released with
-	// it) or was closed ends its watches silently: there is nobody to tell.
-	alive func(childID string) bool
-
-	interval time.Duration
-	baseCtx  context.Context
-
-	// sched is the shared deadline scheduler the watch re-arms on, and clk is
-	// the clock those deadlines are measured against. Both default to usable
-	// values; a nil sched makes every arm a no-op (a test-constructed watcher
-	// without a controller simply never ticks).
-	sched *sched.Scheduler
-	clk   clock.Clock
-}
-
-func newJobWatcher() *jobWatcher {
-	return &jobWatcher{
-		jobs:     make(map[jobKey]*watchedJob),
-		interval: jobWatchInterval,
-		baseCtx:  context.Background(),
-		clk:      clock.RealClock(),
-		sched:    nil,
-	}
-}
-
-// jobWatchKey is the scheduler key for a watch. Re-watching a (child, handle)
-// re-arms the same key, which is what makes a repeat watch REPLACE rather than
-// double-fire.
-func jobWatchKey(k jobKey) string {
-	return "job:" + k.childID + ":" + k.handle
-}
-
-// watch begins polling handle on childID's behalf. A repeat watch for the
-// same (child, handle) replaces the first — defensive; StartJob mints a fresh
-// handle every time. The replacement re-arms the same scheduler key, so the
-// replaced watch's timer is stopped and never polls.
-func (w *jobWatcher) watch(childID, handle, command string) {
-	if w == nil {
-		return
-	}
-	k := jobKey{childID, handle}
-	e := &watchedJob{command: command}
-
-	w.mu.Lock()
-	w.jobs[k] = e
-	w.mu.Unlock()
-
-	w.arm(k, e)
-}
-
-// forget drops a watch WITHOUT notifying: the agent itself resolved the job
-// (bash_kill), so a "finished" fragment would be news it already has. It is
-// also the test's way to stop a watch that would otherwise tick forever.
-func (w *jobWatcher) forget(childID, handle string) {
-	if w == nil {
-		return
-	}
-	k := jobKey{childID, handle}
-	w.mu.Lock()
-	delete(w.jobs, k)
-	w.mu.Unlock()
-	w.sched.Cancel(jobWatchKey(k))
-}
-
-// arm (re)registers the watch's next poll on the scheduler. Replacing by key
-// is what stops a superseded registration from firing.
-//
-// The caller must either hold w.mu (tick) or have just published e into
-// w.jobs[k] (watch): the At lands a fresh timer under a key only this watch
-// owns at that moment.
-func (w *jobWatcher) arm(k jobKey, e *watchedJob) {
-	w.sched.At(jobWatchKey(k), w.clk.Now().Add(w.interval), func() { w.tick(k, e) })
-}
-
-// tick runs one scheduled poll. remove-if-still-ours FIRST: a watch replaced
-// since this registration was armed must not be polled or re-armed by the
-// stale registration.
-func (w *jobWatcher) tick(k jobKey, e *watchedJob) {
-	w.mu.Lock()
-	ours := w.jobs[k] == e
-	w.mu.Unlock()
-	if !ours {
-		return
-	}
-	if w.baseCtx.Err() != nil {
-		return
-	}
-	if !w.pollOnce(k, e) {
-		w.remove(k, e)
-		return
-	}
-	// Re-check ownership AND re-arm under ONE lock acquisition: a watch
-	// replaced (or forgotten) while this poll was in flight must not have its
-	// successor's registration clobbered by this stale one. Checking and
-	// arming separately would leave a window — a same-key watch landing
-	// between the check and the arm would publish a new watch and then have
-	// this stale arm overwrite its registration, and the successor's own
-	// later fire would decline to re-arm, stalling the watch for good. The
-	// lock order is w.mu -> sched.mu, and sched.run invokes callbacks with no
-	// scheduler lock held, so this nesting cannot invert.
-	w.mu.Lock()
-	if w.jobs[k] == e {
-		w.arm(k, e)
-	}
-	w.mu.Unlock()
-}
-
-// remove drops the map entry if it is still e.
-func (w *jobWatcher) remove(k jobKey, e *watchedJob) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.jobs[k] == e {
-		delete(w.jobs, k)
-	}
-}
-
-// pollOnce runs one poll and reports whether the watch continues. Only a
-// definitive answer ends it — exited, gone, or a child that can no longer
-// receive the news. An error keeps the watch: an executor blip must not
-// silently drop a notification the agent is now waiting for (the same
-// transient/terminal split refreshRow applies).
-func (w *jobWatcher) pollOnce(k jobKey, e *watchedJob) bool {
-	// BEFORE the poll, not only after a successful one. A child that can no
-	// longer receive the news ends its watch on EVERY path, because the two
-	// conditions arrive together: Close drops the binding pollJob resolves
-	// through, so from that moment every poll errors and a liveness check
-	// reachable only past a successful poll is never reached at all. That
-	// left a closed child's loop ticking for the daemon's lifetime.
-	if !w.alive(k.childID) {
-		return false
-	}
-
-	ctx, cancel := context.WithTimeout(w.baseCtx, jobPollTimeout)
-	snap, err := w.poll(ctx, k.childID, k.handle)
-	cancel()
-	if err != nil {
-		// Shutdown is judged on baseCtx, NOT on ctx: cancel() above has
-		// already made ctx.Err() non-nil by the time we get here, so reading
-		// it would classify every transient error as shutdown and end the
-		// watch on the first executor blip.
-		if w.baseCtx.Err() != nil {
-			return false // the daemon itself is shutting down
+	case execpool.JobEventExited:
+		c.jobRunningMu.Lock()
+		if running := c.jobRunning[ev.ExecutorID]; running != nil {
+			delete(running, ev.Handle)
 		}
-		slog.Debug("job watch poll failed; will retry",
-			"child", k.childID, "handle", k.handle, "error", err)
-		return true
-	}
+		c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
+		c.jobRunningMu.Unlock()
 
-	// Again after the poll: the RPC can take jobPollTimeout, and a child that
-	// exited inside that window must not be pushed to.
-	if !w.alive(k.childID) {
-		return false
-	}
-	switch {
-	case snap.Exited:
-		w.push(k.childID, jobEventSource, k.handle, fmt.Sprintf(
-			"background job %s (%s) finished with exit code %d. Read what it printed with bash_output {\"handle\":%q}.",
-			k.handle, e.command, snap.ExitCode, k.handle))
-		return false
-	case !snap.Found:
-		// The executor no longer knows the handle. Three things produce that
-		// answer — the workspace was released, the executor restarted and lost
-		// its in-memory registry, or the job finished and enforceBudget evicted
-		// it (which deletes the registry entry, not just the output file) — and
-		// a poll cannot tell them apart, so the fragment names none of them.
-		// Whichever it was, the exit code and the output are unrecoverable and
-		// the advice is the same.
-		w.push(k.childID, jobEventSource, k.handle, fmt.Sprintf(
-			"background job %s (%s) is no longer on its executor: neither what it printed nor "+
-				"how it ended can be recovered. Re-run the command if you still need the result.",
-			k.handle, e.command))
-		return false
-	}
-	return true
-}
+		// Push BEFORE ack — the no-loss rule, never the reverse. A repeated
+		// exit (the executor replayed an unacked one while our ack was in
+		// flight) collapses on the (child, source, handle) key while the first
+		// fragment is still pending, so the child sees it once.
+		if c.jobDeliverable(ev.Owner) {
+			c.evbuf.Push(ev.Owner, jobEventSource, ev.Handle, fmt.Sprintf(
+				"background job %s (%s) finished with exit code %d. Read what it printed with bash_output {\"handle\":%q}.",
+				ev.Handle, ev.Command, ev.ExitCode, ev.Handle))
+		}
+		c.ackJobExit(ev.ExecutorID, ev.Handle)
 
-// newControllerJobWatcher wires the watcher to this controller's store,
-// buffer and per-child bindings. Split from newJobWatcher so the collision
-// between "test constructs Controller{} literal" and "nil map deref" stays
-// impossible: every controllerBinder entry point nil-checks c.jobs.
-func (c *Controller) newControllerJobWatcher() *jobWatcher {
-	w := newJobWatcher()
-	if c.baseCtx != nil {
-		w.baseCtx = c.baseCtx
-	}
-	if c.sched != nil {
-		w.sched = c.sched
-	}
-	if c.clk != nil {
-		w.clk = c.clk
-	}
-	w.poll = c.pollJob
-	w.push = func(childID, source, key, fragment string) {
-		if c.evbuf != nil {
-			c.evbuf.Push(childID, source, key, fragment)
+	case execpool.JobEventReplayComplete:
+		// Every handle still believed running that was NOT seen during THIS
+		// replay is gone: the executor that held it no longer knows it, and
+		// neither its output nor its exit survives. The replay set guards the
+		// graceful case — the first subscription after a daemon start has an
+		// empty jobRunning, so nothing is reported gone; a handle learned from
+		// this replay's own Running is in the set, so an executor that kept a
+		// job is not misreported as having lost it.
+		c.jobRunningMu.Lock()
+		running := c.jobRunning[ev.ExecutorID]
+		seen := c.jobReplay[ev.ExecutorID]
+		type goneJob struct {
+			handle string
+			ref    jobRef
+		}
+		var gone []goneJob
+		for handle, ref := range running {
+			if seen[handle] {
+				continue
+			}
+			gone = append(gone, goneJob{handle: handle, ref: ref})
+			delete(running, handle)
+		}
+		delete(c.jobReplay, ev.ExecutorID)
+		c.jobRunningMu.Unlock()
+
+		for _, g := range gone {
+			if !c.jobDeliverable(g.ref.owner) {
+				continue
+			}
+			c.evbuf.Push(g.ref.owner, jobEventSource, g.handle, fmt.Sprintf(
+				"background job %s (%s) is no longer on its executor: neither what it printed nor "+
+					"how it ended can be recovered. Re-run the command if you still need the result.",
+				g.handle, g.ref.command))
 		}
 	}
-	w.alive = func(childID string) bool {
-		snap, ok := c.st.Get(childID)
-		// Exited is the only terminal status (pkg/protocol/types.go), and a
-		// child's workspace release kills its jobs with it — the watch would
-		// only ever discover a job that is already gone, to an agent that is
-		// already gone.
-		return ok && snap.Status != protocol.StatusExited
-	}
-	return w
 }
 
-// pollJob is the watcher's production poll: resolve the child's retained
-// binding and read the job through it. A child with no retained binding has
-// nothing to poll — the watch keeps ticking until the child goes terminal.
-func (c *Controller) pollJob(ctx context.Context, childID, handle string) (tools.JobSnapshot, error) {
-	be := c.boundExecutorFor(childID)
-	if be == nil {
-		return tools.JobSnapshot{}, fmt.Errorf("no executor bound for child %s", childID)
+// jobRunningForLocked returns the executor's running-jobs map, creating it if
+// needed. Caller holds c.jobRunningMu.
+func (c *Controller) jobRunningForLocked(executorID string) map[string]jobRef {
+	if c.jobRunning == nil {
+		c.jobRunning = make(map[string]map[string]jobRef)
 	}
-	return be.peekJob(ctx, handle)
+	m := c.jobRunning[executorID]
+	if m == nil {
+		m = make(map[string]jobRef)
+		c.jobRunning[executorID] = m
+	}
+	return m
 }
 
-// noteBoundExecutor retains the child's boundExecutor for the job watcher.
+// jobReplayForLocked returns the executor's current-replay handle set,
+// creating it if needed. Caller holds c.jobRunningMu.
+func (c *Controller) jobReplayForLocked(executorID string) map[string]bool {
+	if c.jobReplay == nil {
+		c.jobReplay = make(map[string]map[string]bool)
+	}
+	s := c.jobReplay[executorID]
+	if s == nil {
+		s = make(map[string]bool)
+		c.jobReplay[executorID] = s
+	}
+	return s
+}
+
+// forgetRunningJob drops a handle from the running set for an executor. The
+// agent's bash_kill resolved the job on purpose, so a later ReplayComplete must
+// never report it gone — gone means "lost to an executor restart", not "you
+// killed it". Nil-safe: a Controller with no executor plane has an empty map.
+func (c *Controller) forgetRunningJob(executorID, handle string) {
+	c.jobRunningMu.Lock()
+	defer c.jobRunningMu.Unlock()
+	if m := c.jobRunning[executorID]; m != nil {
+		delete(m, handle)
+	}
+}
+
+// jobDeliverable reports whether owner can still receive an injected frame:
+// the same rule the settle path uses. A child that exited (its workspace — and
+// its jobs — were released with it) or was closed ends its watches silently:
+// there is nobody to tell.
+func (c *Controller) jobDeliverable(owner string) bool {
+	if c.evbuf == nil || c.st == nil || owner == "" {
+		return false
+	}
+	snap, ok := c.st.Get(owner)
+	return ok && snap.Status != protocol.StatusExited
+}
+
+// ackJobExit tells the executor a job exit is delivered, logging a failure at
+// Warn. Never fatal: the next subscribe replays the unacked exit, and the
+// duplicate collapses on the key while the first fragment is still pending.
+func (c *Controller) ackJobExit(executorID, handle string) {
+	if c.jobAcks == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.controlContext(), jobAckTimeout)
+	defer cancel()
+	if err := c.jobAcks.AckJobExits(ctx, executorID, []string{handle}); err != nil {
+		slog.Warn("could not ack a job exit; the executor will replay it on the next subscribe",
+			"executor", executorID, "handle", handle, "error", err)
+	}
+}
+
+// noteBoundExecutor retains the child's boundExecutor, so a per-call consumer
+// (and the teardown that drops it) has a handle on the child's current binding.
 // agentRuntimeOptions creates it per child and otherwise hands it only to the
-// fundi runtime; without this retention the watcher would have no client to
-// poll through. A resume replaces the entry (recovery rebuilds the binding).
+// fundi runtime; without this retention the binding would be unreachable. A
+// resume replaces the entry (recovery rebuilds the binding).
 func (c *Controller) noteBoundExecutor(childID string, be *boundExecutor) {
 	c.boundMu.Lock()
 	defer c.boundMu.Unlock()
@@ -318,4 +205,13 @@ func (c *Controller) boundExecutorFor(childID string) *boundExecutor {
 	c.boundMu.Lock()
 	defer c.boundMu.Unlock()
 	return c.bound[childID]
+}
+
+// controlContext is the daemon's base context, or Background when a
+// hand-built Controller left it nil.
+func (c *Controller) controlContext() context.Context {
+	if c.baseCtx != nil {
+		return c.baseCtx
+	}
+	return context.Background()
 }

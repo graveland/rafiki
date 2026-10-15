@@ -55,6 +55,11 @@ type Pool struct {
 	onLost    func(executorID string) // fired when a park expires; see SetOnLost
 	onConnect func(executorID string) // fired after a connection is installed; see SetOnConnect
 
+	// jobEventHandler receives background-job lifecycle events from every
+	// executor connection; see SetJobEventHandler. Nil disables the WatchJobs
+	// subscription entirely.
+	jobEventHandler func(JobEvent)
+
 	// evicted holds ids whose owning control connection closed while the
 	// executor's handleConn was still running. Between Redeem (early) and
 	// installLive/installTransient (late) sits the Describe join timeout, so
@@ -461,8 +466,10 @@ func (p *Pool) serve(conn *upgradeconn.Conn, a admission) {
 
 	slog.Info("execpool: executor joined", "id", e.ID, "machine", e.Labels["machine"], "tools", desc.Msg.Tools)
 
-	// Poll Health every 30s.
+	// Poll Health every 30s, and hold ONE WatchJobs subscription for this
+	// connection's lifetime (see watchJobs).
 	go p.healthLoop(ctx, e.ID, lc)
+	go p.watchJobs(e.ID, lc)
 
 	p.fireOnConnect(e.ID)
 
@@ -749,10 +756,12 @@ type workspaceClient struct {
 func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	defer c.inflight.enter()()
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-		Tool:        tool,
-		InputJson:   input,
-		Timeout:     durationpb.New(10 * time.Minute),
-		WorkspaceId: c.workspaceID,
+		Tool:           tool,
+		InputJson:      input,
+		Timeout:        durationpb.New(10 * time.Minute),
+		WorkspaceId:    c.workspaceID,
+		Owner:          ownerFrom(ctx),
+		AutoBackground: tool == "bash",
 	}))
 	if err != nil {
 		return toolmeta.Result{}, fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
@@ -782,6 +791,7 @@ func (c *workspaceClient) StartJob(ctx context.Context, command string) (string,
 		InputJson:   input,
 		Background:  true,
 		WorkspaceId: c.workspaceID,
+		Owner:       ownerFrom(ctx),
 	}))
 	if err != nil {
 		return "", fmt.Errorf("executor start job: %w: %w", err, ErrDialFailed)
@@ -1004,9 +1014,11 @@ type executorClient struct {
 func (c *executorClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
 	defer c.inflight.enter()()
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-		Tool:      tool,
-		InputJson: input,
-		Timeout:   durationpb.New(10 * time.Minute),
+		Tool:           tool,
+		InputJson:      input,
+		Timeout:        durationpb.New(10 * time.Minute),
+		Owner:          ownerFrom(ctx),
+		AutoBackground: tool == "bash",
 	}))
 	if err != nil {
 		return toolmeta.Result{}, fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
@@ -1035,6 +1047,7 @@ func (c *executorClient) StartJob(ctx context.Context, command string) (string, 
 		Tool:       "bash",
 		InputJson:  input,
 		Background: true,
+		Owner:      ownerFrom(ctx),
 	}))
 	if err != nil {
 		return "", fmt.Errorf("executor start job: %w: %w", err, ErrDialFailed)

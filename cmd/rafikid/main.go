@@ -644,6 +644,13 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool
 		ctrl.execPoolConn = execPool
+		// The job-lifecycle push wiring: the pool opens ONE WatchJobs stream per
+		// executor connection and delivers its running/exited/replay-complete
+		// events to the controller, which routes them to the owning child and
+		// acks each exit back through the pool. Registered before any executor
+		// can connect (the listener starts below), so no event is missed.
+		ctrl.jobAcks = execPool
+		execPool.SetJobEventHandler(ctrl.handleJobEvent)
 		// The sandbox Docker Engine reaches a launcher's docker proxy through
 		// the pool: one transport per launcher, built lazily per call.
 		ctrl.sandboxEngine = func(launcherID string) *sandbox.Engine {

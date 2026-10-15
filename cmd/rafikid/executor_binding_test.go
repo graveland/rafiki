@@ -115,10 +115,10 @@ type fakeBinder struct {
 	migrations int
 	lastSteer  string
 
-	// watched/forgetJobs record WatchJob/ForgetJob calls, as "childID|handle|command"
-	// triples in call order.
-	watched    []string
-	forgetJobs []string
+	// forgotRunning records ForgetRunningJob calls, as "executorID|handle"
+	// pairs in call order. The daemon prunes a self-killed job from its running
+	// set through this so a later ReplayComplete never calls it "gone".
+	forgotRunning []string
 
 	// failWith/failTimes script a failure returned by a freshly synthesized
 	// executor's client (Execute/StartJob), for tests that want a scripted
@@ -258,16 +258,10 @@ func (f *fakeBinder) NotifyMigrated(_, _, _ string) {
 	f.lastSteer = rescheduleSteer
 }
 
-func (f *fakeBinder) WatchJob(childID, handle, command string) {
+func (f *fakeBinder) ForgetRunningJob(executorID, handle string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.watched = append(f.watched, childID+"|"+handle+"|"+command)
-}
-
-func (f *fakeBinder) ForgetJob(childID, handle string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.forgetJobs = append(f.forgetJobs, childID+"|"+handle)
+	f.forgotRunning = append(f.forgotRunning, executorID+"|"+handle)
 }
 
 func TestBoundExecutorBindsLazilyAndSticks(t *testing.T) {
@@ -478,60 +472,30 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
-// A successful bash_start is what arms the exit notification; the tool
-// description's promise ("you are notified when the job finishes") rests on
-// this call landing.
-func TestStartJobArmsAWatchThroughTheBinder(t *testing.T) {
-	fb := newFakeBinder()
-	b := newBoundExecutor("child-1", fb)
-
-	handle, err := b.StartJob(context.Background(), "npm run dev")
-	assert.NewAborting(t).NoError(err)
-
-	fb.mu.Lock()
-	defer fb.mu.Unlock()
-	if len(fb.watched) != 1 || fb.watched[0] != "child-1|"+handle+"|npm run dev" {
-		t.Fatalf("watched = %v, want exactly [child-1|%s|npm run dev]", fb.watched, handle)
-	}
-}
-
-// A failed start started nothing: a watch on a handle that does not exist
-// would poll forever and eventually report a job gone that never ran.
-func TestFailedStartJobArmsNothing(t *testing.T) {
-	c := assert.NewAborting(t)
-	fb := newFakeBinder()
-	fb.failWith = errors.New("no such executor")
-	b := newBoundExecutor("child-1", fb)
-
-	_, err := b.StartJob(context.Background(), "npm run dev")
-	c.Error(err, "expected the scripted failure")
-	fb.mu.Lock()
-	defer fb.mu.Unlock()
-	c.Empty(fb.watched, "watched")
-}
-
-// bash_kill resolved the job on purpose: the watch is dropped so the exit
-// never injects a turn's worth of old news.
-func TestKillJobForgetsTheWatch(t *testing.T) {
+// A successful kill drops the job from the daemon's running set so a later
+// ReplayComplete never reports the job the agent killed as "gone" — gone means
+// an executor restart lost it, not "you killed it".
+func TestKillJobForgetsTheRunningJob(t *testing.T) {
 	c := assert.NewAborting(t)
 	fb := newFakeBinder()
 	b := newBoundExecutor("child-1", fb)
 
 	handle, err := b.StartJob(context.Background(), "npm run dev")
 	c.NoError(err)
+	execID, _, bound := b.Current()
+	c.True(bound, "StartJob must leave the child bound")
 	c.NoError(b.KillJob(context.Background(), handle))
 
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
-	if len(fb.forgetJobs) != 1 || fb.forgetJobs[0] != "child-1|"+handle {
-		t.Fatalf("forgetJobs = %v, want exactly [child-1|%s]", fb.forgetJobs, handle)
+	if len(fb.forgotRunning) != 1 || fb.forgotRunning[0] != execID+"|"+handle {
+		t.Fatalf("forgotRunning = %v, want exactly [%s|%s]", fb.forgotRunning, execID, handle)
 	}
-	c.Len(fb.watched, 1, "watched")
 }
 
 // A kill that never landed (the stream broke) drops nothing: the job may
 // still be running, and its exit is still news.
-func TestFailedKillJobKeepsTheWatch(t *testing.T) {
+func TestFailedKillJobForgetsNothing(t *testing.T) {
 	c := assert.NewAborting(t)
 	fb := newFakeBinder()
 	fb.failWith = errors.New("stream broken")
@@ -540,5 +504,5 @@ func TestFailedKillJobKeepsTheWatch(t *testing.T) {
 	c.Error(b.KillJob(context.Background(), "job-1"), "expected the scripted failure")
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
-	c.Empty(fb.forgetJobs, "forgetJobs")
+	c.Empty(fb.forgotRunning, "forgotRunning")
 }

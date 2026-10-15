@@ -53,16 +53,11 @@ type executorBinder interface {
 	// left them and reports work as done that no longer exists.
 	NotifyMigrated(childID, fromExec, toExec string)
 
-	// WatchJob arranges for childID to be NOTIFIED when the background job
-	// it just started finishes, the same injected-frame path subagent
-	// settlements ride. command is retained only to name the job in the
-	// fragment — a handle alone reads as nothing.
-	WatchJob(childID, handle, command string)
-
-	// ForgetJob drops the watch for a job the agent's bash_kill just
-	// resolved. The agent knows; a "finished" fragment would be news it
-	// already has, costing a turn to read.
-	ForgetJob(childID, handle string)
+	// ForgetRunningJob drops a job the agent's bash_kill just resolved from the
+	// daemon's running-jobs set for executorID, so a later ReplayComplete never
+	// reports a self-killed job as "gone" — gone means lost to an executor
+	// restart, not "you killed it".
+	ForgetRunningJob(executorID, handle string)
 }
 
 // boundExecutor is a child's handle on "an executor", as opposed to a handle
@@ -327,7 +322,14 @@ func isLivenessFailure(err error) bool {
 // idempotent tells recover whether fn is safe to re-dispatch after a stream
 // broke mid-call, when the tool MAY have already run on the executor -- see
 // retryable and idempotentTools.
+//
+// Every call carries the child's id as the executor call's owner
+// (execpool.WithOwner): the executor attributes a background job to the child
+// that started it and echoes the owner on every job event. Wrapping here, in
+// the ONE path every bound call takes, is what keeps a new call site from
+// silently dropping the attribution.
 func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn func(tools.ExecutorClient) (T, error)) (T, error) {
+	ctx = execpool.WithOwner(ctx, b.childID)
 	var zero T
 	cl, stale, err := b.clientFor(ctx)
 	if err != nil {
@@ -354,17 +356,14 @@ func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.Raw
 }
 
 // StartJob is never retried after a stream break: retrying it launches the
-// job twice. A successful start is what arms the job watcher, whose exit
-// notification is the reason bash_start's description may promise one.
+// job twice. The exit notification is no longer armed here — the executor
+// pushes job lifecycle events over WatchJobs and the daemon's handler
+// (Controller.handleJobEvent) routes them by owner, so a successful start
+// needs no bookkeeping on this side.
 func (b *boundExecutor) StartJob(ctx context.Context, command string) (string, error) {
-	handle, err := callBound(ctx, b, false, func(cl tools.ExecutorClient) (string, error) {
+	return callBound(ctx, b, false, func(cl tools.ExecutorClient) (string, error) {
 		return cl.StartJob(ctx, command)
 	})
-	if err != nil {
-		return "", err
-	}
-	b.binder.WatchJob(b.childID, handle, command)
-	return handle, nil
 }
 
 func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int64) (tools.JobSnapshot, error) {
@@ -373,35 +372,19 @@ func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int6
 	})
 }
 
-// peekJob reads a job's state from the CURRENT binding and nothing else.
-// The job watcher polls through this deliberately rather than through
-// JobOutput: recover machinery would turn a background poll into a workspace
-// re-provision — heavy, and useless here, because a job lives on the executor
-// workspace it started on and a freshly provisioned one can only ever answer
-// Found=false. An agent's own bash_output keeps the recover path; a watcher
-// that exists to save the agent a turn must not be able to trigger a
-// migration behind its back.
-func (b *boundExecutor) peekJob(ctx context.Context, handle string) (tools.JobSnapshot, error) {
-	b.mu.Lock()
-	cl := b.cl
-	b.mu.Unlock()
-	if cl == nil {
-		return tools.JobSnapshot{}, execpool.ErrExecutorGone
-	}
-	return cl.JobOutput(ctx, handle, 0)
-}
-
 // KillJob is never retried after a stream break: the kill signal may already
 // have landed, and there is no way to tell that apart from the stream just
-// dying. A successful kill also drops the job's watcher entry: the agent
-// resolved the job on purpose, so an exit notification would be a turn spent
-// learning nothing.
+// dying. A successful kill also drops the job from the daemon's running set:
+// the agent resolved the job on purpose, so a later ReplayComplete must not
+// report it "gone" — gone means an executor restart lost it.
 func (b *boundExecutor) KillJob(ctx context.Context, handle string) error {
 	_, err := callBound(ctx, b, false, func(cl tools.ExecutorClient) (struct{}, error) {
 		return struct{}{}, cl.KillJob(ctx, handle)
 	})
 	if err == nil {
-		b.binder.ForgetJob(b.childID, handle)
+		if execID, _, bound := b.Current(); bound {
+			b.binder.ForgetRunningJob(execID, handle)
+		}
 	}
 	return err
 }

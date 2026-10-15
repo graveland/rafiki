@@ -294,15 +294,27 @@ type Controller struct {
 	// cost one model turn instead of N. Nil means the buffer is disabled.
 	evbuf *eventbuf.Buffer
 
-	// jobs watches the background jobs children start through their bound
-	// executor and pushes an exit fragment into the starting child's buffer,
-	// the same injection path subagent settles ride. Nil only in tests that
-	// build a Controller by hand and never bind an executor.
-	jobs *jobWatcher
+	// jobRunning tracks the background jobs the daemon believes are running on
+	// each executor, keyed executor id -> handle -> {owner, command}. It is
+	// populated from the executor's WatchJobs events (cmd/rafikid/jobwatch.go)
+	// and is what lets a ReplayComplete tell a job that finished from one an
+	// executor restart lost. jobReplay holds the handles seen during the
+	// CURRENT replay of an executor's subscription, so a Running learned this
+	// replay is never misreported gone by the ReplayComplete that closes it.
+	// Both maps are guarded by jobRunningMu.
+	jobRunningMu sync.Mutex
+	jobRunning   map[string]map[string]jobRef
+	jobReplay    map[string]map[string]bool
 
-	// bound retains each child's boundExecutor for the job watcher: the
-	// executor client handed to the fundi runtime at spawn is otherwise held
-	// nowhere the daemon can reach, and a watch needs it to poll JobOutput.
+	// jobAcks delivers job-exit acknowledgements to executors (*execpool.Pool
+	// in production). Nil in hand-built Controllers, where acks are inert.
+	jobAcks jobAckSeam
+
+	// bound retains each child's boundExecutor, keyed by child id. The executor
+	// client handed to the fundi runtime at spawn is otherwise held nowhere the
+	// daemon can reach; it is kept here so a per-call consumer (and the
+	// teardown that drops it) has a handle on the child's current binding. It is
+	// NOT a polling registry — job lifecycle is push-based now (jobwatch.go).
 	boundMu sync.Mutex
 	bound   map[string]*boundExecutor
 
@@ -754,7 +766,6 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		c.clearMarker = c.captureStore
 	}
 	c.bound = make(map[string]*boundExecutor)
-	c.jobs = c.newControllerJobWatcher()
 
 	if id, source, err := paths.DaemonID(); err != nil {
 		// Not fatal: a daemon with no writable data dir and no env var can

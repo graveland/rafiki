@@ -215,17 +215,10 @@ func (b *controllerBinder) NotifyMigrated(childID, fromExec, toExec string) {
 	b.c.sendSteer(childID, rescheduleSteer)
 }
 
-// WatchJob arms the background-job exit notification. Nil-safe like every
-// evbuf consumer: a hand-built Controller (tests, a bufferless daemon) simply
-// gets no job notifications, which is today's behaviour.
-func (b *controllerBinder) WatchJob(childID, handle, command string) {
-	if b.c.jobs != nil {
-		b.c.jobs.watch(childID, handle, command)
-	}
-}
-
-func (b *controllerBinder) ForgetJob(childID, handle string) {
-	if b.c.jobs != nil {
-		b.c.jobs.forget(childID, handle)
-	}
+// ForgetRunningJob drops a job the agent's bash_kill resolved from the
+// daemon's running-jobs set, so a later ReplayComplete never reports a
+// self-killed job as gone. Nil-safe: a hand-built Controller simply has no
+// running set to prune.
+func (b *controllerBinder) ForgetRunningJob(executorID, handle string) {
+	b.c.forgetRunningJob(executorID, handle)
 }
