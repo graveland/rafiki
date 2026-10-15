@@ -57,16 +57,29 @@ class ConnectError(Exception):
     :attr:`unavailable` convenience) instead of catching subclasses.
     """
 
-    def __init__(self, code: str, message: str = "", status: int | None = None):
+    def __init__(self, code: str, message: str = "", status: int | None = None, reason: str = ""):
         self.code = code
         self.message = message
         self.status = status
+        # The daemon's machine-readable reason (the ErrorInfo.reason a Connect
+        # error carries, e.g. "at_capacity"); "" when the error carries none.
+        # Match on this, not on message text.
+        self.reason = reason
         super().__init__("%s%s: %s" % (code, " (http %d)" % status if status else "", message))
 
     @property
     def unavailable(self) -> bool:
         """True when this error is the one signal the SDK retries on."""
         return self.code == CODE_UNAVAILABLE
+
+
+def _reason_of(parsed: dict) -> str:
+    """The ErrorInfo reason inside a Connect error body's details, or ""."""
+    for d in parsed.get("details") or []:
+        debug = d.get("debug") if isinstance(d, dict) else None
+        if isinstance(debug, dict) and debug.get("reason"):
+            return str(debug["reason"])
+    return ""
 
 
 def error_from_http(status: int, body: bytes | None) -> ConnectError:
@@ -81,7 +94,7 @@ def error_from_http(status: int, body: bytes | None) -> ConnectError:
         try:
             parsed = json.loads(body)
             if isinstance(parsed, dict) and parsed.get("code"):
-                return ConnectError(str(parsed["code"]), str(parsed.get("message", "")), status)
+                return ConnectError(str(parsed["code"]), str(parsed.get("message", "")), status, _reason_of(parsed))
         except (ValueError, TypeError):
             pass
     return ConnectError(_HTTP_TO_CODE.get(status, CODE_UNKNOWN), (body or b"").decode(errors="replace")[:200], status)

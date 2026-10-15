@@ -70,6 +70,13 @@ type turnMetrics struct {
 // Works for both paths: the proxy path decomposes requests into
 // conversation_message rows just as the in-process path does.
 func (i *Insights) Export(ctx context.Context, scope Scope, conversationID string) (*Transcript, error) {
+	if isChildID(conversationID) {
+		resolved, err := i.childRootConversation(ctx, scope, conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("export: %w", err)
+		}
+		conversationID = resolved
+	}
 	if err := checkConversationID(conversationID); err != nil {
 		return nil, fmt.Errorf("export: %w", err)
 	}
@@ -137,6 +144,40 @@ func (i *Insights) Export(ctx context.Context, scope Scope, conversationID strin
 		return nil, err
 	}
 	return tr, nil
+}
+
+// childRootConversation resolves a child id to the conversation holding its
+// main thread. Claude children leave child.conversation_id NULL; the proxy
+// correlates their turns on external_ref = child id (the root thread keeps the
+// bare id, subagent threads are "<child>:<thread>"), and the conversation's own
+// uuid is unrelated to the claude session id. Fundi children are linked
+// through conversations.child.conversation_id, the fallback arm. ErrNotFound is also what a child
+// that has not yet sent its first model request answers, so the message says
+// to retry.
+func (i *Insights) childRootConversation(ctx context.Context, scope Scope, childID string) (string, error) {
+	var a argList
+	ref := a.next(childID)
+	cond := scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")
+	linkCond := scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")
+	var id string
+	err := i.pool.QueryRow(ctx, `
+		SELECT id FROM (
+		  SELECT c.id::text AS id, 0 AS pri, c.created_at
+		    FROM conversations.conversation c
+		   WHERE c.external_ref = `+ref+` AND c.driven_by = 'client' AND `+cond+`
+		  UNION ALL
+		  SELECT c.id::text, 1, c.created_at
+		    FROM conversations.conversation c
+		    JOIN conversations.child ch ON ch.conversation_id = c.id
+		   WHERE ch.child_id = `+ref+` AND `+linkCond+`
+		) m ORDER BY pri, created_at LIMIT 1`, a.args...).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("child %s has no captured conversation yet (a child's conversation appears once its first model request is captured; retry): %w", childID, ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve child conversation: %w", err)
+	}
+	return id, nil
 }
 
 // turnMetricsByOrdinal maps the ordinal of each turn's produced assistant

@@ -280,7 +280,10 @@ class Client:
 
     def get(self, child_id: str) -> _gen.control_pb.ChildSummary:
         """One child's summary: status, cost, labels, latest_ordinal, and —
-        for a script child that called result() — its stored result JSON."""
+        for a script child that called result() — its stored result JSON.
+        ``result`` is a script-child field only: it is empty for fundi and
+        claude children, whose answer is the last assistant turn of
+        :meth:`export`."""
         return self._call("GetChild", _gen.control_pb.GetChildRequest(child_id=child_id), _gen.control_pb.GetChildResponse).child
 
     def list(self, *, statuses: "Iterable[str] | None" = None, labels: "dict | None" = None):
@@ -346,24 +349,20 @@ class Client:
         return self._call("Kill", req, _gen.control_pb.KillResponse, timeout_s)
 
     def export(self, child_id: str) -> _gen.control_pb.ConversationExportResponse:
-        """One child's decomposed transcript. ConversationExport speaks
-        conversation UUIDs, so the child's session id is resolved first —
-        which is exactly what claude children and script children lack (no
-        DB conversation), and the error says so rather than 404-ing."""
-        child = self.get(child_id)
-        session = child.session_id
-        if not session:
-            raise ConnectError(
-                "invalid_argument",
-                "child %s has no conversation to export (its session id is empty — "
-                "claude and script children have none)" % child_id,
-            )
-        return self.export_conversation(session)
+        """One child's decomposed transcript, by child id. Works for every
+        child that has a captured conversation, live or exited — fundi and
+        claude children alike (the daemon resolves the child id to its
+        conversation; a claude child's session id is claude's own and names no
+        conversation, so it is never used here). Only a child's main thread is
+        returned. A child that has not yet had a model request captured
+        answers not_found with a message saying to retry. Script children make
+        no model requests and have no conversation."""
+        return self.export_conversation(child_id)
 
     def export_conversation(self, conversation_id: str) -> _gen.control_pb.ConversationExportResponse:
         """One conversation's decomposed transcript, by conversation id (the
         ``id`` of a ``conversation_search`` row, or a recall hit's
-        ``conversation_id``). A user credential reads any of its owner's
+        ``conversation_id``) or by child id (see :meth:`export`). A user credential reads any of its owner's
         conversations; a child credential only its own subtree's, and a
         conversation outside it is not_found."""
         req = _gen.control_pb.ConversationExportRequest(conversation_id=conversation_id)
@@ -499,6 +498,19 @@ class Client:
         """Tombstone one of the caller's memories."""
         req = _gen.control_pb.DeleteMemoryRequest(path=path, name=name)
         self._call("DeleteMemory", req, _gen.control_pb.DeleteMemoryResponse)
+
+    # ── model catalog ────────────────────────────────────────────────────────
+
+    def list_models(self, provider: str = "", kind: str = "") -> "list":
+        """The daemon's model catalog as ``ModelRow``s (``id`` is the
+        ``provider/model`` string ``spawn`` takes). ``context_window`` and
+        ``max_completion_tokens`` are optional fields: test with
+        ``HasField("context_window")`` — absent means the daemon does not
+        know, not zero. ``provider`` narrows to one provider; ``kind`` scopes
+        which models that child kind can actually use ("" is the fundi
+        default; a "claude" child resolves only Anthropic ids)."""
+        req = _gen.control_pb.ListModelsRequest(provider=provider, kind=kind)
+        return self._call("ListModels", req, _gen.control_pb.ListModelsResponse).models
 
     # ── routing policy rows ──────────────────────────────────────────────────
 

@@ -62,7 +62,8 @@ for settle in c.settled([child]):         # yields Settle(child_id, state)
     print(settle)                         #   as each child reaches idle/exited
 states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
-transcript = c.export(child)              # the child's decomposed transcript
+transcript = c.export(child)              # the child's decomposed transcript (fundi or claude; last assistant turn = the answer)
+models = c.list_models()                 # catalog rows: context_window etc., before you spawn
 transcript = c.export_conversation(conv)  # any readable conversation, by its id
 rows = c.conversation_search(text="x", source="claude", limit=50)
                                           # conversations (id, name, turns, cost,
@@ -131,9 +132,12 @@ wire-breaking change (see "The protocol epoch" in
 
 ## Errors and the retry rule
 
-Every failure raises `ConnectError(code, message, status)` — the code is
+Every failure raises `ConnectError(code, message, status, reason)` — the code is
 one of Connect's (`"unavailable"`, `"permission_denied"`, ...), never a
-subclass hierarchy. Exactly one code is retried, with bounded exponential
+subclass hierarchy. `reason` is the daemon's machine-readable reason when the
+error carries one (e.g. a spawn past the live-children cap is
+`resource_exhausted` with `reason == "at_capacity"`); match it, not the message
+text. Exactly one code is retried, with bounded exponential
 backoff (6 attempts, 0.1 s base, 2 s cap — constructor-overridable via
 `max_attempts`): `unavailable`. That is the daemon-restarting signal the
 per-child socket's proxy answers with (HTTP 503 and a Connect body naming

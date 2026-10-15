@@ -41,6 +41,7 @@ from .errors import (
     CODE_UNAVAILABLE,
     ConnectError,
     StreamEnded,
+    _reason_of,
     error_from_http,
 )
 from ._gen import control_pb as _control_pb
@@ -372,7 +373,7 @@ class ConnectClient:
                         trailer = {}
                     err = trailer.get("error") if isinstance(trailer, dict) else None
                     if err:
-                        raise ConnectError(str(err.get("code", "unknown")), str(err.get("message", "")), 200)
+                        raise ConnectError(str(err.get("code", "unknown")), str(err.get("message", "")), 200, _reason_of(err))
                     return
                 mark_delivered()
                 if not chunk:

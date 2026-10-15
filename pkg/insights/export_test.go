@@ -5,6 +5,7 @@ package insights
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -168,7 +169,7 @@ func TestExport_MalformedIDIsNotFound(t *testing.T) {
 		c.ErrorIs(err, ErrNotFound, "Export(%q) err = %v, want ErrNotFound", id, err)
 	}
 	_, err := New(pool).Export(ctx, ScopeAll(), "c_01M3AC3TYYJAW3RX40DQ9GNYYN")
-	c.False(err == nil || !strings.Contains(err.Error(), "child id"), "a c_ id should be named as a child id, got %v", err)
+	c.False(err == nil || !strings.Contains(err.Error(), "retry"), "an unknown child id should say to retry, got %v", err)
 }
 
 // metricsOf renders a turn's metrics with nil shown as "null", so one string
@@ -303,4 +304,27 @@ func TestExportScopeMissReturnsNotFound(t *testing.T) {
 
 	_, err := New(pool).Export(ctx, ScopeOwner(bobID), carolConvID)
 	assert.NewCollecting(t).ErrorIs(err, ErrNotFound, "Export of another owner's conversation err")
+}
+
+func TestExport_ResolvesChildIDByExternalRef(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := insertConversation(t, pool, "client", "carol")
+	childID := "c_" + strings.ToUpper(strings.ReplaceAll(convID, "-", ""))[:20]
+	_, err := pool.Exec(ctx, `UPDATE conversations.conversation SET external_ref = $1 WHERE id = $2::uuid`, childID, convID)
+	c.Require().NoError(err, "set external_ref")
+	insertMessage(t, pool, convID, 0, "user", `[{"type":"text","text":"q"}]`)
+	insertMessage(t, pool, convID, 1, "assistant", `[{"type":"text","text":"the answer"}]`)
+
+	tr, err := New(pool).Export(ctx, ScopeAll(), childID)
+	c.Require().NoError(err, "export by child id")
+	c.Eq(convID, tr.ConversationID, "resolved conversation")
+	c.Eq(2, len(tr.Turns), "turns")
+
+	_, err = New(pool).Export(ctx, ScopeSubtree(SubtreeSelector{ExternalRefs: []string{"c_other"}}), childID)
+	c.True(errors.Is(err, ErrNotFound), "out-of-scope child must read as not found, got %v", err)
+
+	_, err = New(pool).Export(ctx, ScopeAll(), "c_NOSUCHCHILD")
+	c.True(errors.Is(err, ErrNotFound), "unknown child must be ErrNotFound, got %v", err)
 }

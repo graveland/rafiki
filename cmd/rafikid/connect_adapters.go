@@ -725,6 +725,12 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 	}
 	tr, err := a.c.ConversationExport(ctx, scope, conversationID)
 	if conversationReadNotFound(err) {
+		// A child id that resolves to nothing carries a remedy (retry once the
+		// child's first request is captured); a conversation id stays the
+		// bare "not found" so scope misses are indistinguishable from absence.
+		if strings.HasPrefix(conversationID, "c_") {
+			return connectapi.TranscriptRow{}, false, connectapi.ConnectErr(err)
+		}
 		return connectapi.TranscriptRow{}, false, nil
 	}
 	if err != nil {

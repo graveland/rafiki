@@ -34,6 +34,7 @@ package integration_test
 // SDK was never exercised" into a green that looks like a pass.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,8 +42,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"connectrpc.com/connect"
 
 	"github.com/multigres/testkit/assert"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // sdkPython returns the interpreter the SDK tests run: RAFIKI_TEST_SDK_PYTHON
@@ -96,7 +103,7 @@ func buildSDKVenv() (python, skip string) {
 // bootSDKDaemon boots a script-capable DB-backed daemon (the fake-LLM seat
 // and fast event buffer of bootScriptDaemon) whose script children run under
 // the SAME interpreter the drivers use, so a pymodule can import the SDK.
-func bootSDKDaemon(t *testing.T, python string) *scriptDaemon {
+func bootSDKDaemon(t *testing.T, python string, extraEnv ...string) *scriptDaemon {
 	t.Helper()
 	fake := fakeAnthropicServer(t)
 	providers := writeFakeProviders(t, fake.URL)
@@ -111,6 +118,7 @@ func bootSDKDaemon(t *testing.T, python string) *scriptDaemon {
 		// `import rafiki` on the interpreter that has httpx.
 		"RAFIKI_PYMODULE_PYTHON="+python,
 	)
+	extra = append(extra, extraEnv...)
 	d := bootDaemonDB(t, id, extra...)
 	t.Cleanup(func() {
 		d.stopDaemonNoRemove()
@@ -736,4 +744,87 @@ func TestPythonSDK_ScriptChild(t *testing.T) {
 	runSDKScript(t, py,
 		strings.ReplaceAll(sdkSupervisorDriver, "%SDKDIR%", filepath.Join(repoRoot, "sdk", "python")),
 		sdkDriverEnv(t, configDir, binDir))
+}
+
+// ─── 4. claude-child transcripts, the model catalog, the capacity reason ─────
+
+const sdkClaudeExportDriver = `
+import sys, traceback
+
+sys.path.insert(0, "%SDKDIR%")
+from rafiki import Client, ConnectError
+
+probe = sys.argv[sys.argv.index("--probe-out") + 1]
+def note(s):
+    with open(probe, "a") as f:
+        f.write(s + "\n")
+
+def run():
+    try:
+        c = Client.from_profile()
+        claude = sys.argv[sys.argv.index("--claude-child") + 1]
+        model = sys.argv[sys.argv.index("--model") + 1]
+
+        # A claude child's transcript is read by child id, though its session
+        # id names no conversation row; the last assistant turn is the answer.
+        tr = c.export(claude)
+        last = tr.turns[-1]
+        assert last.role == "assistant", last.role
+        assert b"forty-two" in last.content, last.content
+        note("export by claude child id OK")
+
+        # A child with no captured request yet is not_found and says to retry.
+        fresh = c.spawn(kind="claude", model="anthropic/sonnet-latest", cwd="/tmp")
+        try:
+            c.export(fresh)
+            raise AssertionError("export of an uncaptured claude child succeeded")
+        except ConnectError as e:
+            assert e.code == "not_found" and "retry" in e.message, e
+        note("export before capture OK")
+
+        # The catalog: context windows are visible before a spawn.
+        rows = c.list_models()
+        assert rows, "empty model catalog"
+        assert all(r.id for r in rows)
+        note("list_models OK: %d row(s)" % len(rows))
+
+        # The live-children cap carries a reason, not just text.
+        parent = c.spawn(name="cap-parent", model=model, max_children=1)
+        c.spawn(name="cap-1", model=model, parent_child_id=parent)
+        try:
+            c.spawn(name="cap-2", model=model, parent_child_id=parent)
+            raise AssertionError("spawn past the cap succeeded")
+        except ConnectError as e:
+            assert e.code == "resource_exhausted" and e.reason == "at_capacity", (e.code, e.reason, e)
+        note("SDK EXPORT PASS")
+    except Exception:
+        note(traceback.format_exc())
+        sys.exit(1)
+
+run()
+`
+
+func TestPythonSDK_ClaudeChildExportModelsAndCapacity(t *testing.T) {
+	t.Parallel()
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	py := sdkPython(t)
+	dumps := t.TempDir()
+	d := bootSDKDaemon(t, py, "CLAUDE_BINARY="+fakeClaudeBin(t), "FAKE_CLAUDE_DIR="+dumps)
+	token, configDir := scriptUser(t, d.daemon)
+	ck := assert.NewAborting(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd: "/tmp", Kind: protocol.KindClaude, Model: "anthropic/sonnet-latest",
+	}))
+	ck.NoError(err, "spawn claude child")
+	claude := resp.Msg.GetChildId()
+	waitClaudeDump(t, d.daemon, dumps, claude)
+	seedCapturedClaudeTurns(t, dsn, claude, "forty-two", token)
+
+	runSDKScript(t, py,
+		strings.ReplaceAll(sdkClaudeExportDriver, "%SDKDIR%", filepath.Join(repoRoot, "sdk", "python")),
+		sdkDriverEnv(t, configDir, sdkBinDir(t)),
+		"--claude-child", claude, "--model", "fakellm/mini")
 }

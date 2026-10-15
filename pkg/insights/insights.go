@@ -21,16 +21,21 @@ import (
 // (e.g. the gRPC handler) match it with errors.Is to map to a NotFound status.
 var ErrNotFound = errors.New("insights: conversation not found")
 
+// isChildID reports whether id has the shape of a child id rather than a
+// conversation uuid.
+func isChildID(id string) bool { return strings.HasPrefix(id, "c_") }
+
 // checkConversationID refuses an id that cannot name a conversation before it
 // reaches a ::uuid cast, which would otherwise fail as a Postgres syntax error
 // and surface as an internal error. A child id (c_…) is the usual mistake,
-// since the two sit side by side in every listing, so the error names it.
+// since the two sit side by side in every listing, so the error names it;
+// Export is the one verb that resolves it instead.
 func checkConversationID(conversationID string) error {
 	if _, err := uuid.Parse(conversationID); err == nil {
 		return nil
 	}
-	if strings.HasPrefix(conversationID, "c_") {
-		return fmt.Errorf("conversation %q: that is a child id; pass the child's session id: %w", conversationID, ErrNotFound)
+	if isChildID(conversationID) {
+		return fmt.Errorf("conversation %q: that is a child id, not a conversation id: %w", conversationID, ErrNotFound)
 	}
 	return fmt.Errorf("conversation %q: not a conversation id (conversation ids are UUIDs): %w", conversationID, ErrNotFound)
 }
