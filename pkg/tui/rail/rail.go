@@ -74,6 +74,16 @@ type Node struct {
 	ExitCode *int32
 	Retrying bool
 
+	// DisplayState/WaitingOn/DisplayMsg are the operator-facing display state
+	// from ChildSummary (protocol.DisplayState), seeded by Seed and updated by
+	// the operator_state event fold. They are DISTINCT from Status: Status is
+	// recovery's resume signal and the machine's own view, while these say what
+	// a human should see. WaitingOn is non-empty exactly when DisplayState is
+	// "waiting"; DisplayMsg is the one-line human sentence, "" otherwise.
+	DisplayState string
+	WaitingOn    string
+	DisplayMsg   string
+
 	// StatusThrough is the highest ordinal already folded into Status/Exited/
 	// ExitCode/Retrying, a SEPARATE watermark for the same reason CostThrough
 	// and CtxThrough are: the rail and focus subscriptions overlap on the
@@ -267,6 +277,9 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			existing.Kind = s.GetKind()
 			existing.MaxCost = s.GetMaxCost()
 			existing.ContextWindow = int(s.GetContextWindow())
+			existing.DisplayState = s.GetDisplayState()
+			existing.WaitingOn = s.GetWaitingOn()
+			existing.DisplayMsg = s.GetDisplayMsg()
 			continue
 		}
 		n := &Node{
@@ -283,6 +296,9 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			Model:         s.GetModel(),
 			MaxCost:       s.GetMaxCost(),
 			ContextWindow: int(s.GetContextWindow()),
+			DisplayState:  s.GetDisplayState(),
+			WaitingOn:     s.GetWaitingOn(),
+			DisplayMsg:    s.GetDisplayMsg(),
 		}
 		// Seeding is a CLEAN BOARD: everything that happened before you attached
 		// counts as read. Attaching is not a claim to have read anything; it is
@@ -302,7 +318,10 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 }
 
 // statusOrdinalAdmits reports whether ev is new enough to update n's
-// Status/Exited/ExitCode/Retrying fields, advancing StatusThrough when it is.
+// Status/Exited/ExitCode/Retrying fields AND its display fields (DisplayState/
+// WaitingOn/DisplayMsg): both families ride the same per-child ordinal order, so
+// one watermark keeps a stale delivery of either from folding over a newer one.
+// It advances StatusThrough when it admits.
 // An ordinal-less event is ephemeral and always admitted, matching how the
 // rest of Apply treats a missing ordinal (see TurnEnd's Usage reading below).
 func statusOrdinalAdmits(n *Node, ev *rafikiv1.Event) bool {
@@ -378,6 +397,15 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 			}
 			// Any status transition means the retry resolved one way or the other.
 			n.Retrying = false
+		}
+	case *rafikiv1.Event_OperatorState:
+		// operator_state is the display twin of agent_status and rides the same
+		// durable, per-child ordinal order; statusOrdinalAdmits is what keeps a
+		// replayed or out-of-order delivery from flipping the rails back.
+		if statusOrdinalAdmits(n, ev) {
+			n.DisplayState = p.OperatorState.GetDisplayState()
+			n.WaitingOn = p.OperatorState.GetWaitingOn()
+			n.DisplayMsg = p.OperatorState.GetMsg()
 		}
 	case *rafikiv1.Event_Retry:
 		if statusOrdinalAdmits(n, ev) {
@@ -455,6 +483,38 @@ func (r *Rail) Nodes() []Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.nodesLocked()
+}
+
+// TopLevelDisplay is one top-level child's display state, the shape the OSC
+// 7501 emitter consumes: only top-level children reach the terminal, workers
+// roll up into their coordinator and never emit a record of their own.
+type TopLevelDisplay struct {
+	ChildID      string
+	Name         string
+	DisplayState string
+	WaitingOn    string
+	DisplayMsg   string
+}
+
+// TopLevelDisplays returns every top-level (parentless) node in display order.
+func (r *Rail) TopLevelDisplays() []TopLevelDisplay {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	nodes := r.nodesLocked()
+	out := make([]TopLevelDisplay, 0, len(nodes))
+	for _, n := range nodes {
+		if n.ParentID != "" {
+			continue
+		}
+		out = append(out, TopLevelDisplay{
+			ChildID:      n.ChildID,
+			Name:         n.Name,
+			DisplayState: n.DisplayState,
+			WaitingOn:    n.WaitingOn,
+			DisplayMsg:   n.DisplayMsg,
+		})
+	}
+	return out
 }
 
 // SetCost seeds a child's spend from ListChildren.

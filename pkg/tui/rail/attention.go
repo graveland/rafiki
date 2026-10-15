@@ -15,7 +15,7 @@ import (
 // already bound replay exactly.
 const replayFloor = 24 * time.Hour
 
-// Types is the rail stream's type filter: six small messages.
+// Types is the rail stream's type filter: the small status-shaped messages.
 //
 // The exclusions are the design. assistant_message and user_message are out
 // because the rail needs to know a turn HAPPENED, not what it said -- carrying
@@ -25,6 +25,10 @@ const replayFloor = 24 * time.Hour
 // vocabulary. content_block_delta needs no exclusion here: it is ephemeral and
 // the rail subscribes at tier=DURABLE.
 //
+// operator_state joins agent_status as the small message that moves a row's
+// glyph and badge: the daemon publishes it, durable, when a child's display
+// state changes, and every byte of it is a display value, not content.
+//
 // This is what answers "the rail's filter set is a guess until measured" by
 // construction: what remains is bounded by turns and status transitions, not by
 // tokens.
@@ -32,6 +36,7 @@ func Types() []string {
 	return []string{
 		"turn_end",
 		"agent_status",
+		"operator_state",
 		"error",
 		"retry",
 		"child_spawned",
@@ -52,13 +57,16 @@ func Notable(ev *rafikiv1.Event) bool {
 	case *rafikiv1.Event_ChildExited:
 		return true
 	case *rafikiv1.Event_AgentStatus:
-		switch p.AgentStatus.GetState() {
-		case "idle":
-			return true // settled and waiting on you
-		case "blocked_ui":
-			return true // explicitly blocked on a human
-		}
-		return false
+		// blocked_ui is retired as a notable status: the daemon no longer sets
+		// it, and a child blocked on a human now says so through operator_state
+		// (below), which is the one signal that means "come back to me".
+		return p.AgentStatus.GetState() == "idle"
+	case *rafikiv1.Event_OperatorState:
+		// Only a human-blocked wait or a failure is "a human should look":
+		// waiting on a job, a schedule, children or queued events is progress
+		// this client did not ask to be interrupted by.
+		return p.OperatorState.GetDisplayState() == "failed" ||
+			(p.OperatorState.GetDisplayState() == "waiting" && p.OperatorState.GetWaitingOn() == "operator")
 	}
 	// Retry is deliberately NOT notable: transient-error retry exists so that a
 	// recoverable stream error is not a human's problem. child_spawned is not

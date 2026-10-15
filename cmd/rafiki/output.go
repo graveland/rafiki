@@ -289,11 +289,31 @@ func formatStatus(status string, exitCode *int32, exitSignal string, useColor bo
 // that nothing is behind an "idle" row.
 const darajaStateLabel = "rafiki/daraja-state"
 
+// statusCell is the STATUS cell's status string for a child row. A machine
+// status is carried through unchanged, EXCEPT an idle child whose
+// daemon-derived display state says it is waiting or failed: there the cell
+// says what the child is waiting on ("waiting:<reason>") or that its last turn
+// failed ("failed"), so a bare "idle" stops conflating "quiet and fine" with
+// "stuck until you act". Every other machine status keeps its granularity
+// (streaming, tool_running, ...) -- display state only ever refines an idle row.
+func statusCell(cs *rafikiv1.ChildSummary) string {
+	if cs.GetStatus() != "idle" {
+		return cs.GetStatus()
+	}
+	switch cs.GetDisplayState() {
+	case "waiting":
+		return "waiting:" + cs.GetWaitingOn()
+	case "failed":
+		return "failed"
+	}
+	return cs.GetStatus()
+}
+
 // formatChildStatus is formatStatus for a whole summary: a live child whose
 // daraja is unreachable reads "<status> (unreachable)" instead of a bare
 // status nothing is backing.
 func formatChildStatus(ch *rafikiv1.ChildSummary, useColor bool) string {
-	out := formatStatus(ch.GetStatus(), ch.ExitCode, ch.GetExitSignal(), useColor)
+	out := formatStatus(statusCell(ch), ch.ExitCode, ch.GetExitSignal(), useColor)
 	if ch.GetStatus() == "exited" || ch.GetLabels()[darajaStateLabel] != "unreachable" {
 		return out
 	}

@@ -50,6 +50,23 @@ func Glyph(n Node) string {
 	case "spawning":
 		return "◌"
 	case "idle":
+		// An idle row's glyph follows the DISPLAY state, not just the machine
+		// status: "idle" is the machine's "not mid-turn", while the display
+		// state says whether that idleness is worth a human's attention.
+		switch {
+		case n.DisplayState == "failed":
+			// The same error mark the rail uses for a nonzero exit -- a failed
+			// turn and a failed process are both "something went wrong".
+			return "✗"
+		case n.DisplayState == "waiting" && n.WaitingOn == "operator":
+			// A child blocked on the operator reuses blocked_ui's glyph: it is
+			// the same fact (a human must act) under the display vocabulary.
+			return "‼"
+		case n.DisplayState == "waiting":
+			// Waiting on a job, a schedule, children or queued events: lighter
+			// than the solid ○ so it reads as "pending, but nobody to wake".
+			return "◌"
+		}
 		return "○"
 	case "streaming":
 		return "◐"

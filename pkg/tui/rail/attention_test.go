@@ -69,10 +69,13 @@ func TestStreamingAndToolRunningAreNotAttention(t *testing.T) {
 	assert.NewAborting(t).Eq(0, attentionOf(t, r, "c_1"), "attention")
 }
 
-func TestBlockedUIIsNotable(t *testing.T) {
+// blocked_ui is retired: the daemon no longer sets the status, and a child
+// blocked on a human now says so through operator_state, which is what earns
+// the badge (TestRailDisplayNotable).
+func TestBlockedUIIsNoLongerNotable(t *testing.T) {
 	r := seeded(t)
 	r.Apply(status("c_1", "blocked_ui", 1))
-	assert.NewAborting(t).Eq(1, attentionOf(t, r, "c_1"), "attention")
+	assert.NewAborting(t).Eq(0, attentionOf(t, r, "c_1"), "attention")
 }
 
 func TestRetryIsNotNotable(t *testing.T) {
@@ -187,16 +190,16 @@ func TestCursorUsesRailCursorNotSeen(t *testing.T) {
 		"entirely inside a disconnect is indistinguishable from a brand new one")
 }
 
-func TestTypesIsTheSixSmallTypes(t *testing.T) {
+func TestTypesIsTheSmallStatusSet(t *testing.T) {
 	c := assert.NewCollecting(t)
 	got := rail.Types()
 	want := map[string]bool{
-		"turn_end": true, "agent_status": true, "error": true,
-		"retry": true, "child_spawned": true, "child_exited": true,
+		"turn_end": true, "agent_status": true, "operator_state": true,
+		"error": true, "retry": true, "child_spawned": true, "child_exited": true,
 	}
-	c.Require().Len(got, len(want), "Types() = %v, want the six in %v", got, want)
+	c.Require().Len(got, len(want), "Types() = %v, want the small set in %v", got, want)
 	for _, ty := range got {
-		c.False(!want[ty], "Types() contains %q, which is not one of the six", ty)
+		c.False(!want[ty], "Types() contains %q, which is not one of the small set", ty)
 		c.False(ty == "assistant_message" || ty == "user_message", "the rail must not carry message content to a pane a few glyphs wide")
 		c.NotEq("content_block_delta", ty, "content_block_delta is ephemeral and excluded by tier, not by filter")
 	}
@@ -206,12 +209,13 @@ func TestTypesIsTheSixSmallTypes(t *testing.T) {
 // or the filter is paying for bytes nobody reads.
 func TestEveryRequestedTypeIsConsumed(t *testing.T) {
 	consumed := map[string]bool{
-		"turn_end":      true, // Notable
-		"agent_status":  true, // Node.Status + Notable
-		"error":         true, // Notable
-		"retry":         true, // Node.Retrying
-		"child_spawned": true, // introduces a row
-		"child_exited":  true, // Node.Exited + Notable
+		"turn_end":       true, // Notable
+		"agent_status":   true, // Node.Status + Notable
+		"operator_state": true, // Node.DisplayState + Notable
+		"error":          true, // Notable
+		"retry":          true, // Node.Retrying
+		"child_spawned":  true, // introduces a row
+		"child_exited":   true, // Node.Exited + Notable
 	}
 	for _, ty := range rail.Types() {
 		assert.NewCollecting(t).False(!consumed[ty], "rail asks for %q but nothing in the rail consumes it", ty)

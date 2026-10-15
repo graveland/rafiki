@@ -17,9 +17,9 @@ import (
 // The rail must never subscribe at tier=ALL: that is content_block_delta for
 // every child in the subtree, which is the load the rail/focus split exists to
 // avoid.
-func TestRailAsksForDurableTierAndSixTypes(t *testing.T) {
+func TestRailAsksForDurableTierAndSmallTypes(t *testing.T) {
 	c := assert.NewAborting(t)
-	c.Len(rail.Types(), 6, "rail.Types()")
+	c.Len(rail.Types(), 7, "rail.Types()")
 	c.NotEq(rafikiv1.EventTier_EVENT_TIER_ALL, rafikiv1.EventTier_EVENT_TIER_DURABLE, "tier constants collapsed")
 }
 

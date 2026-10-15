@@ -1382,6 +1382,11 @@ run and is never cleared this way.
 `done` is NOT a daemon state: a finished child is `idle`, and "unseen" is a
 viewer property (a front-end concern, not the wire).
 
+`rafiki list` renders the mapping in its STATUS cell: an `idle` child shows
+`waiting:<waiting_on>` or `failed` instead of `idle`, while every other machine
+status (`streaming`, `tool_running`, …) is shown unchanged. The `--status`
+filter stays on the machine status, not the display state.
+
 **The event.** A change in the (display_state, waiting_on, msg) tuple is
 published as a durable `operator_state` event (tier: `durable` — see the event
 vocabulary above). It is durable so the rail, which subscribes durable-only,
