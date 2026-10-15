@@ -4219,13 +4219,13 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 
 		case <-ch.StatusChanged():
 			// A transition was recorded without a bus frame following it — the
-			// last one of a turn, or one made off the readStdout goroutine.
-			// Without this wake it would sit in the queue until the next frame
-			// arrived, which for a child that has gone quiet is never.
+			// last one of a turn. Without this wake it would sit in the queue
+			// until the next frame arrived, which for a child that has gone
+			// quiet is never.
 			//
-			// Which is the shape that bites: the burst tests do NOT cover this
-			// case and pass with this branch deleted, because readStdout records
-			// before monitorChild consumes the frame that caused it.
+			// This is the shape that bites: the burst tests do NOT cover this
+			// case and pass with this branch deleted, because readStdout
+			// records before monitorChild consumes the frame that caused it.
 			drainStatus()
 
 		case <-ch.Done():

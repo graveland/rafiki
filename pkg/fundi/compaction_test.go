@@ -95,7 +95,7 @@ func TestCompactionStatusPushesAndPops(t *testing.T) {
 	c.Eq(protocol.StatusIdle, sm.Current(), "status before compaction")
 
 	for _, ft := range frameTypes(t, out.String()) {
-		sm.OnPiEvent(ft, nil)
+		sm.OnPiEvent(ft)
 		switch ft {
 		case "compaction_start":
 			c.Eq(protocol.StatusCompacting, sm.Current(), "status on compaction_start")

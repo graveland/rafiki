@@ -23,13 +23,6 @@ type Transition struct {
 	To   protocol.Status
 }
 
-// PiUIRequestMeta carries the minimum fields needed from an
-// extension_ui_request event to make the dialog/fire-and-forget decision.
-type PiUIRequestMeta struct {
-	ID     string
-	Method string
-}
-
 // Counters holds informational statistics updated by pi events.
 // None of the counter updates cause a state transition.
 type Counters struct {
@@ -110,9 +103,8 @@ func (sm *StateMachine) OnFirstResponse() (changed bool, prev protocol.Status) {
 }
 
 // OnPiEvent processes a pi-RPC event. eventType is the "type" field from the
-// event JSON. meta carries payload data for event types that need it to
-// classify the request; no event type requires it today.
-func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (changed bool, prev protocol.Status) {
+// event JSON.
+func (sm *StateMachine) OnPiEvent(eventType string) (changed bool, prev protocol.Status) {
 	prev = sm.current
 	// A script child has no pi events: its output (script_output) is liveness
 	// only, and the turn machinery below is unreachable by construction. The

@@ -39,7 +39,7 @@ func TestScriptStatusRunningUntilExit(t *testing.T) {
 
 	// Many output events: none transitions anything.
 	for i := range 50 {
-		changed, prev := sm.OnPiEvent("script_output", nil)
+		changed, prev := sm.OnPiEvent("script_output")
 		c.False(changed, "output %d must not transition (changed=%v prev=%s)", i, changed, prev)
 	}
 	c.Eq(protocol.StatusRunning, sm.Current(), "status after 50 output events")
@@ -47,7 +47,7 @@ func TestScriptStatusRunningUntilExit(t *testing.T) {
 	// The first-response signal is liveness only; output after it changes nothing.
 	changed, _ := sm.OnFirstResponse()
 	c.False(changed, "OnFirstResponse must not move a script child out of running")
-	changed, _ = sm.OnPiEvent("script_output", nil)
+	changed, _ = sm.OnPiEvent("script_output")
 	c.False(changed, "output after the first response must not transition")
 	c.Eq(protocol.StatusRunning, sm.Current(), "status after first response and more output")
 
@@ -57,7 +57,7 @@ func TestScriptStatusRunningUntilExit(t *testing.T) {
 	c.Eq(protocol.StatusExited, sm.Current(), "status after exit")
 
 	// Output after exit does not revive a working status.
-	changed, _ = sm.OnPiEvent("script_output", nil)
+	changed, _ = sm.OnPiEvent("script_output")
 	c.False(changed, "output after exit must not revive the status")
 	c.Eq(protocol.StatusExited, sm.Current(), "status after output following exit")
 }
@@ -79,7 +79,7 @@ func TestScriptProviderThroughStateMachine(t *testing.T) {
 	c.True(res.FirstResponse, "FirstResponse must be set for every stdout line of a script child")
 	changed, _ := sm.OnFirstResponse()
 	c.False(changed, "the first response must not transition: the status was set at spawn")
-	changed, _ = sm.OnPiEvent(res.Events[0].Type, nil)
+	changed, _ = sm.OnPiEvent(res.Events[0].Type)
 	c.False(changed, "script_output must not transition")
 
 	// Repeated lines are no-ops: every Parse call reports the same result, and
@@ -89,7 +89,7 @@ func TestScriptProviderThroughStateMachine(t *testing.T) {
 		c.True(res.FirstResponse, "line %q: FirstResponse unset", line)
 		changed, _ = sm.OnFirstResponse()
 		c.False(changed, "line %q: OnFirstResponse must be inert for a script child", line)
-		changed, _ = sm.OnPiEvent(res.Events[0].Type, nil)
+		changed, _ = sm.OnPiEvent(res.Events[0].Type)
 		c.False(changed, "line %q: a script_output event must not record a transition", line)
 	}
 	c.Eq(protocol.StatusRunning, sm.Current(), "status after repeated output lines")

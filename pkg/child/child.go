@@ -981,7 +981,7 @@ func (c *Child) handleFrame(line []byte) {
 			// Informational only; OnAutoRetryStart makes no transition.
 			c.sm.OnAutoRetryStart(e.RetryError)
 		default:
-			c.recordTransition(c.sm.OnPiEvent(e.Type, nil))
+			c.recordTransition(c.sm.OnPiEvent(e.Type))
 		}
 	}
 
