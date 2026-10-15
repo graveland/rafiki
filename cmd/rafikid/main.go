@@ -45,6 +45,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/sandbox"
 	"go.graveland.dev/rafiki/pkg/sandboxdb"
+	"go.graveland.dev/rafiki/pkg/schedulesdb"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -612,6 +613,13 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.SetCatalog(catalog)
 	ctrl.SetProviderGuard(guard)
 	ctrl.SetRoutePolicy(routePolicy)
+	// The schedule table: DB-only, like every other Postgres-backed store. A
+	// DSN-less daemon leaves it nil, so the schedule tools decline and no fire
+	// timer is ever armed. Wired before loadChildren, whose schedule gate seeds
+	// the budget set before draining recovered catch-up registrations.
+	if pool != nil {
+		ctrl.SetScheduleStore(schedulesdb.New(pool))
+	}
 	if batcherOK {
 		ctrl.SetBatcher(batcher)
 		go batcher.Start(baseCtx)

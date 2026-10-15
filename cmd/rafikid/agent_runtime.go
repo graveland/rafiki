@@ -484,6 +484,12 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// agent_result report from THIS child's position in the tree, through the
 	// same hub the Connect verbs run.
 	ro.Parent = newParentReporter(c, childID)
+	// The schedule tools are bound to THIS child, the same per-child rule as
+	// Parent above: the tool methods take no child id. A DB-less daemon has no
+	// schedule store, so the four tools decline.
+	if c.schedules != nil {
+		ro.Schedules = newScheduleBinding(c, childID)
+	}
 	// The owner's user id, resolved by the caller: owner.UserID at a fresh
 	// spawn (from the authenticated caller's users.Identity), and on resume
 	// snap.OwnerUserID — or, for rows predating that column, the owner's

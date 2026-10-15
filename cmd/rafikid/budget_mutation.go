@@ -93,6 +93,9 @@ func (c *Controller) applyBudgetChange(childID string, newCap float64) error {
 
 	if wasBreached {
 		c.notifyBudgetRaised(childID, newCap)
+		// The tree is no longer halted: deliver the fires that were held while
+		// it was over budget, one fragment per job.
+		c.releaseHeldSchedules(childID)
 	}
 	return nil
 }

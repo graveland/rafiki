@@ -63,6 +63,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/sandbox"
 	"go.graveland.dev/rafiki/pkg/sched"
+	"go.graveland.dev/rafiki/pkg/schedules"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -351,6 +352,17 @@ type Controller struct {
 
 	// breaches bounds the budget sweep to one steer per breach.
 	breaches budgetBreaches
+
+	// schedules is the durable schedule table. Nil on a DB-less daemon: the
+	// schedule tools decline and no fire timer is ever armed. See schedules.go.
+	schedules schedules.Store
+	// daemonZone is the daemon's own IANA zone, resolved once at startup
+	// (SetScheduleStore). It is the fallback for a job whose owner has no
+	// timezone; "" means neither resolved and CronCreate refuses.
+	daemonZone string
+	// schedGate serializes the boot walk's catch-up registrations with the
+	// budget seed — see scheduleGate.
+	schedGate scheduleGate
 
 	// rateWatch is the claude rate-limit auto-resume watch: per-child 429
 	// marks, reset times and at most one pending resume timer. In-memory on
@@ -2743,7 +2755,14 @@ func (c *Controller) resolveUsernameToUserID(ctx context.Context, username strin
 }
 
 func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (protocol.SpawnResponseData, error) {
-	return c.resumeInternal(ctx, childID, apiKey, false)
+	resp, err := c.resumeInternal(ctx, childID, apiKey, false)
+	if err == nil {
+		// A manual resume re-arms the child's open jobs; an overdue recurring
+		// job is skipped to its next future occurrence rather than firing a
+		// catch-up burst.
+		c.registerSchedules(ctx, childID, false)
+	}
+	return resp, err
 }
 
 // resumeClaimedWithAutoRecovery is the auto-recovery version of Resume: it
@@ -3464,6 +3483,14 @@ func (c *Controller) Close(childID string) error {
 		if err := c.children.Delete(ctx, childID); err != nil {
 			slog.Warn("delete child row", "childId", childID, "error", err)
 		}
+		// A closed child's schedules go with it: tombstone every open job so a
+		// stale timer finds a closed row rather than firing for a child that no
+		// longer exists.
+		if c.schedules != nil {
+			if err := c.schedules.CloseForChild(ctx, childID); err != nil {
+				slog.Warn("close schedules", "childId", childID, "error", err)
+			}
+		}
 		if err := c.stampConversationsClosed(ctx, childID); err != nil {
 			slog.Warn("stamp conversation closed", "childId", childID, "error", err)
 		}
@@ -3638,6 +3665,11 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.children.Delete(ctx, s.ChildID); err != nil {
 				slog.Warn("delete child row", "childId", s.ChildID, "error", err)
+			}
+			if c.schedules != nil {
+				if err := c.schedules.CloseForChild(ctx, s.ChildID); err != nil {
+					slog.Warn("close schedules", "childId", s.ChildID, "error", err)
+				}
 			}
 			cancel()
 		}

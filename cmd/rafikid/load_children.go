@@ -259,10 +259,11 @@ func (c *Controller) loadChildren(ctx context.Context) {
 	// already over budget was delivered by the previous incarnation (it rides
 	// the durable inbox), so nothing is owed, and a marked breach stops all
 	// future tool work through the MCP gate and the fundi Halted hook. What
-	// the seed guarantees is that every exit path leaves c.breaches populated
-	// before this function returns, so no later turn escapes the budget gate.
-	// It must stay the FIRST statement so the defer covers every return below.
-	defer c.seedBudgetBreaches(ctx)
+	// openScheduleGate guarantees is that every exit path leaves c.breaches
+	// populated AND drains any catch-up schedule registrations queued while the
+	// walk ran (the seed is its first step). It must stay the FIRST statement
+	// so the defer covers every return below.
+	defer c.openScheduleGate(ctx)
 	if c.children == nil {
 		return
 	}

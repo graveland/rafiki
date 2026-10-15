@@ -265,6 +265,12 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// same nil-means-decline rule Agents follows).
 	if isChild {
 		opts.Parent = newParentReporter(ctrl, id.ChildID)
+		// The schedule tools, bound to THIS child like Parent above — the
+		// tool methods take no child id. The budget gate earlier in this
+		// function already wraps them.
+		if ctrl.schedules != nil {
+			opts.Schedules = newScheduleBinding(ctrl, id.ChildID)
+		}
 	}
 	// Presets need only the database: unlike the pymodule tools they are the
 	// same for every caller and every executor state. A child-token caller
@@ -432,6 +438,10 @@ var mcpBlueprints = []tools.Tool{
 	&tools.AgentModelsBlueprint{},
 	&tools.AgentReportBlueprint{},
 	&tools.AgentResultBlueprint{},
+	&tools.CronCreateBlueprint{},
+	&tools.CronDeleteBlueprint{},
+	&tools.CronListBlueprint{},
+	&tools.ScheduleWakeupBlueprint{},
 	&tools.SandboxCreateBlueprint{},
 	&tools.SandboxListBlueprint{},
 	&tools.SandboxRemoveBlueprint{},

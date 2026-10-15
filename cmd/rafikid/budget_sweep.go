@@ -81,7 +81,11 @@ func (c *Controller) sweepBudgets(ctx context.Context) {
 			continue
 		}
 		if spent < snap.MaxCost {
-			c.breaches.clear(snap.ChildID)
+			if c.breaches.has(snap.ChildID) {
+				c.breaches.clear(snap.ChildID)
+				// The subtree left the breach: release its held schedule fires.
+				c.releaseHeldSchedules(snap.ChildID)
+			}
 			continue
 		}
 		if !c.breaches.mark(snap.ChildID) {

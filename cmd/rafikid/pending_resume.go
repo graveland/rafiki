@@ -266,6 +266,10 @@ func (c *Controller) spawnRecoveryResume(pr pendingResume) {
 			// deliberately leaves alone.
 			rctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel2()
+			// Arm this child's open jobs before the replay: a schedule fire is
+			// an inbox fragment like any other, and a catch-up registration is
+			// queued until the boot walk finishes if it runs this early.
+			c.registerSchedules(rctx2, id, true)
 			c.replayInbox(rctx2, id)
 			return
 		}
@@ -298,6 +302,7 @@ func (c *Controller) spawnRecoveryResume(pr pendingResume) {
 		}
 		rctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel2()
+		c.registerSchedules(rctx2, id, true)
 		c.replayInbox(rctx2, id)
 	}()
 }
