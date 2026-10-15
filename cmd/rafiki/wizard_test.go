@@ -16,15 +16,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newTestWizard builds a non-interactive wizard over a fresh cobra command:
-// the flag layer is the only one under test, so stdin/stdout are harmless
-// buffers and interactive stays false.
+// newTestWizard builds a non-interactive wizard via the production constructor
+// newWizard over a fresh cobra command: the flag layer is the only one under
+// test, so the wizard's stdin/stdout are replaced with harmless buffers and
+// interactive is forced false (a test binary's stdin is not a terminal anyway).
 func newTestWizard(t *testing.T, flags func(*cobra.Command)) *wizard {
 	t.Helper()
 	cmd := &cobra.Command{Use: "setup", RunE: func(*cobra.Command, []string) error { return nil }}
 	cmd.Flags().Bool("yes", false, "")
 	flags(cmd)
-	return &wizard{cmd: cmd, in: &bytes.Buffer{}, out: &bytes.Buffer{}, interactive: false}
+	w := newWizard(cmd)
+	w.in = &bytes.Buffer{}
+	w.out = &bytes.Buffer{}
+	w.interactive = false
+	return w
 }
 
 func TestWizardPrecedence(t *testing.T) {
@@ -124,6 +129,38 @@ func TestWizardMultiPrecedenceAndOrder(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "edit" {
 		t.Errorf("askMulti with flag set = %v, want [edit]", got)
+	}
+}
+
+// TestWizardConfirmRun pins confirmRun's non-interactive contract: it prints
+// the joined argv line and, with no terminal, agrees only when --yes was given.
+func TestWizardConfirmRun(t *testing.T) {
+	for _, yes := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without --yes", true: "with --yes"}[yes], func(t *testing.T) {
+			cmd := &cobra.Command{Use: "setup", RunE: func(*cobra.Command, []string) error { return nil }}
+			cmd.Flags().Bool("yes", false, "")
+			if yes {
+				if err := cmd.Flags().Set("yes", "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := newWizard(cmd)
+			var out bytes.Buffer
+			w.in = &bytes.Buffer{}
+			w.out = &out
+			w.interactive = false
+
+			got, err := w.confirmRun([]string{"brew", "install", "x"})
+			if err != nil {
+				t.Fatalf("confirmRun: %v", err)
+			}
+			if got != yes {
+				t.Errorf("confirmRun (--yes=%v) = %v, want %v", yes, got, yes)
+			}
+			if !strings.Contains(out.String(), "brew install x") {
+				t.Errorf("confirmRun did not print the command line; out = %q", out.String())
+			}
+		})
 	}
 }
 
