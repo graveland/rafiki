@@ -209,6 +209,9 @@ message ExecuteRequest {
   google.protobuf.Duration timeout = 8;
   // auto_background: for tool "bash", a command still running at its own
   // timeout is moved to the background as a job instead of being killed.
+  // The executor does NOT apply this request's `timeout` to such a call
+  // (bash owns its own deadline), so a caller's `timeout` need only exceed the
+  // call's own timeout_ms as a transport bound, not to bound the job.
   bool auto_background = 9;
   // owner is the daemon's id for the agent making this call. Opaque to the
   // executor; stored on any job the call creates and returned on its events.

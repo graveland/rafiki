@@ -587,6 +587,9 @@ type ExecuteRequest struct {
 	Timeout *durationpb.Duration `protobuf:"bytes,8,opt,name=timeout,proto3" json:"timeout,omitempty"`
 	// auto_background: for tool "bash", a command still running at its own
 	// timeout is moved to the background as a job instead of being killed.
+	// The executor does NOT apply this request's `timeout` to such a call
+	// (bash owns its own deadline), so a caller's `timeout` need only exceed the
+	// call's own timeout_ms as a transport bound, not to bound the job.
 	AutoBackground bool `protobuf:"varint,9,opt,name=auto_background,json=autoBackground,proto3" json:"auto_background,omitempty"`
 	// owner is the daemon's id for the agent making this call. Opaque to the
 	// executor; stored on any job the call creates and returned on its events.

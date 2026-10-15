@@ -512,10 +512,21 @@ func (s *Server) Execute(
 		return ctx.Err()
 	}
 
-	// Honour the client's deadline. Without it CODE_TIMEOUT — one of four
-	// documented failure codes, with its own retry semantics — can never be
-	// produced, and a read or grep on a pathological tree runs forever.
-	if d := msg.GetTimeout().AsDuration(); d > 0 {
+	// A bash call eligible for auto-background OWNS its own deadline, so the
+	// caller's msg.Timeout must NOT be imposed on it. runAuto's promote timer
+	// fires at the call's timeout_ms and the call ends at promote; wrapping ctx
+	// with msg.Timeout would let a caller deadline that is not comfortably
+	// greater than timeout_ms pre-empt (or race) the promote, and the
+	// DeadlineExceeded check below would then override a live, promoted job with
+	// CODE_TIMEOUT — orphaning a job whose exit event still arrives for a call
+	// the daemon counts as failed. Every registry this server builds carries a
+	// Backgrounder (registryFor), so the flag alone decides the auto path.
+	bashAuto := msg.Tool == "bash" && msg.AutoBackground
+
+	// Honour the client's deadline, EXCEPT on the auto path: there bash's own
+	// promote timer is the deadline (see bashAuto above), and the executor must
+	// not add a second one that could fire first.
+	if d := msg.GetTimeout().AsDuration(); d > 0 && !bashAuto {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
@@ -548,12 +559,12 @@ func (s *Server) Execute(
 		}
 	}
 
-	// An auto-background-eligible bash call is marked on the context before
-	// the tool runs: the bash tool reads the flag (and the owner) from the
-	// context to decide whether a command still running at its own timeout is
-	// promoted to a job or killed. It is per-CALL, so only the calls whose
-	// daemon asked for it take the job path.
-	if msg.Tool == "bash" && msg.AutoBackground {
+	// Mark an auto-background-eligible bash call on the context before the tool
+	// runs: the bash tool reads the flag (and the owner) from the context to
+	// decide whether a command still running at its own timeout is promoted to a
+	// job or killed. It is per-CALL, so only the calls whose daemon asked for it
+	// take the job path.
+	if bashAuto {
 		ctx = tools.WithAutoBackground(ctx, msg.Owner)
 	}
 
@@ -566,7 +577,12 @@ func (s *Server) Execute(
 	// error, so err == nil is not proof the deadline held. Once our own
 	// timeout has elapsed the call is CODE_TIMEOUT regardless of what the
 	// tool itself reports.
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	//
+	// Gated on !bashAuto: on the auto path ctx carries no executor deadline at
+	// all (the wrapper above was skipped), so a done ctx there means only
+	// Canceled — a client disconnect, which runAuto has already discarded on.
+	// A DeadlineExceeded can never describe the auto path.
+	if !bashAuto && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
 				Failed: &executorpb.Failure{

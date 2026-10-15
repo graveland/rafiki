@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -44,14 +45,30 @@ func (p jobProvisional) Done() <-chan struct{} { return p.j.done }
 // reported. waitErr is read without j.mu because Done being closed is the
 // happens-before edge: wait() records it under the mutex and only then closes
 // done, so a reader that saw done closed sees the write.
+//
+// all()'s error is NOT discarded: a failed read (most often os.ErrClosed, when
+// a workspace Release removed the file while the command was finishing) must
+// not masquerade as a successful empty run. When the command itself succeeded
+// (waitErr == nil) the read error becomes the result's error; when it failed,
+// waitErr — the real cause — wins.
 func (p jobProvisional) Result() (combined, stderrHead string, err error) {
-	b, _ := p.j.out.all()
-	return string(b), p.j.stderrHead.String(), p.j.waitErr
+	b, readErr := p.j.out.all()
+	err = p.j.waitErr
+	if readErr != nil && err == nil {
+		err = readErr
+	}
+	return string(b), p.j.stderrHead.String(), err
 }
 
+// Snapshot is the merged output so far, with a bracketed note replacing it when
+// the output could not be read (e.g. a racing Release removed the file).
 func (p jobProvisional) Snapshot() (string, time.Time) {
-	b, _ := p.j.out.all()
-	return string(b), p.j.out.lastWriteAt()
+	b, readErr := p.j.out.all()
+	last := p.j.out.lastWriteAt()
+	if readErr != nil {
+		return fmt.Sprintf("[output unavailable: %v]", readErr), last
+	}
+	return string(b), last
 }
 
 func (p jobProvisional) Promote() string { return p.r.promote(p.j) }
