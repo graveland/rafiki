@@ -4,6 +4,7 @@ package schedules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -233,8 +234,12 @@ func (m *Memory) Advance(ctx context.Context, id string, next time.Time, firedAt
 
 // RecordHeld adds n to HeldCount, sets HeldFirstDue to due if it was nil,
 // sets HeldLastDue = due, and sets NextFireAt = *next when next != nil.
-// ErrNotFound when id is not an open job, like Advance.
+// ErrNotFound when id is not an open job, like Advance. n must be >= 1: a
+// non-positive n is refused with a plain error before the row is touched.
 func (m *Memory) RecordHeld(ctx context.Context, id string, due time.Time, n int, next *time.Time) error {
+	if n <= 0 {
+		return errors.New("schedules: held count must be positive")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	row, ok := m.open(id)

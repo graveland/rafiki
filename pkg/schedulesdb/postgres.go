@@ -245,8 +245,13 @@ func (s *Store) Advance(ctx context.Context, id string, next time.Time, firedAt 
 
 // RecordHeld adds n to HeldCount, sets HeldFirstDue to due if it was nil, sets
 // HeldLastDue = due, and sets NextFireAt = *next when next != nil. ErrNotFound
-// when id is not an open job.
+// when id is not an open job. n must be >= 1: a non-positive n is refused with
+// a plain error up front rather than tripping the held-count CHECK as a raw
+// SQLSTATE.
 func (s *Store) RecordHeld(ctx context.Context, id string, due time.Time, n int, next *time.Time) error {
+	if n <= 0 {
+		return errors.New("schedules: held count must be positive")
+	}
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE conversations.schedule
 		    SET held_count = held_count + $3,

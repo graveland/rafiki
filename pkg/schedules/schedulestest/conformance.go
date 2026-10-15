@@ -42,6 +42,7 @@ func RunConformance(t *testing.T, newStore newStoreFunc) {
 	t.Run("DeleteIsScopedToChild", func(t *testing.T) { testDeleteIsScopedToChild(t, newStore) })
 	t.Run("AdvanceClearsHeld", func(t *testing.T) { testAdvanceClearsHeld(t, newStore) })
 	t.Run("RecordHeldAccumulates", func(t *testing.T) { testRecordHeldAccumulates(t, newStore) })
+	t.Run("RecordHeldRejectsNonPositiveCount", func(t *testing.T) { testRecordHeldRejectsNonPositiveCount(t, newStore) })
 	t.Run("TombstoneIsIdempotent", func(t *testing.T) { testTombstoneIsIdempotent(t, newStore) })
 	t.Run("CloseForChildClosesOnlyThatChild", func(t *testing.T) { testCloseForChildClosesOnlyThatChild(t, newStore) })
 	t.Run("ListHeldFiltersByChildAndCount", func(t *testing.T) { testListHeldFiltersByChildAndCount(t, newStore) })
@@ -304,6 +305,29 @@ func testRecordHeldAccumulates(t *testing.T, newStore newStoreFunc) {
 	c.NoError(s.RecordHeld(ctx, id, due2, 1, &next), "RecordHeld with next")
 	row = mustGet(t, s, id)
 	eqTime(c, next, row.Job.NextFireAt, "RecordHeld set NextFireAt = next")
+}
+
+// testRecordHeldRejectsNonPositiveCount pins the n >= 1 precondition both
+// stores must enforce: a non-positive count is refused and the row is left
+// untouched (in particular it must not trip the held-count CHECK as a raw
+// database error).
+func testRecordHeldRejectsNonPositiveCount(t *testing.T, newStore newStoreFunc) {
+	c := assert.NewAborting(t)
+	s, prefix := newStore(t)
+	a := prefix + "a"
+	ctx := context.Background()
+
+	create(t, s, newCronJob(prefix, a, "j1", base))
+	id := prefix + "j1"
+
+	c.Error(s.RecordHeld(ctx, id, base.Add(10*time.Minute), 0, nil), "RecordHeld n=0 must be refused")
+	c.Error(s.RecordHeld(ctx, id, base.Add(10*time.Minute), -1, nil), "RecordHeld n=-1 must be refused")
+
+	row := mustGet(t, s, id)
+	c.Eq(0, row.Job.HeldCount, "a refused RecordHeld must not change HeldCount")
+	c.True(row.Job.HeldFirstDue == nil, "a refused RecordHeld must not set HeldFirstDue")
+	c.True(row.Job.HeldLastDue == nil, "a refused RecordHeld must not set HeldLastDue")
+	eqTime(c, base, row.Job.NextFireAt, "a refused RecordHeld must not move NextFireAt")
 }
 
 func testTombstoneIsIdempotent(t *testing.T, newStore newStoreFunc) {

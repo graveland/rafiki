@@ -119,6 +119,8 @@ type Store interface {
 	Advance(ctx context.Context, id string, next time.Time, firedAt *time.Time) error
 	// RecordHeld adds n to HeldCount, sets HeldFirstDue to due if it was nil,
 	// sets HeldLastDue = due, and sets NextFireAt = *next when next != nil.
+	// n must be >= 1 (a fire is one occurrence at minimum); a non-positive n is
+	// refused with an error and leaves the row unchanged.
 	RecordHeld(ctx context.Context, id string, due time.Time, n int, next *time.Time) error
 	// ClearHeld zeroes HeldCount and nils both held instants.
 	ClearHeld(ctx context.Context, id string) error
