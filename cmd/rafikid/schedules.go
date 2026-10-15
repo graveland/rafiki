@@ -233,7 +233,9 @@ func (c *Controller) fireSchedule(id string) {
 	}
 	if !row.ChildFound || row.ChildClosed {
 		// The child is gone for good: tombstone and stop, never re-arm.
-		_ = c.schedules.Tombstone(ctx, id, nil)
+		if err := c.schedules.Tombstone(ctx, id, nil); err != nil {
+			slog.Warn("schedule: tombstone failed", "id", id, "error", err)
+		}
 		return
 	}
 	if c.daemonID != "" && row.ChildDaemonID != c.daemonID {
@@ -262,7 +264,9 @@ func (c *Controller) fireSchedule(id string) {
 		if perr != nil {
 			// An unparseable stored row can never fire; tombstone it.
 			slog.Warn("schedule: stored cron unparseable; tombstoning", "id", id, "error", perr)
-			_ = c.schedules.Tombstone(ctx, id, &due)
+			if err := c.schedules.Tombstone(ctx, id, &due); err != nil {
+				slog.Warn("schedule: tombstone failed", "id", id, "error", err)
+			}
 			return
 		}
 		missed, lastMissed = spec.CountThrough(due, now, 10000)
@@ -271,14 +275,27 @@ func (c *Controller) fireSchedule(id string) {
 
 	if root, halted := c.budgetHalted(j.ChildID); halted {
 		if j.Recurring {
-			_ = c.schedules.RecordHeld(ctx, id, due, 1+missed, &next)
+			// A zero next means the stored expression has no future occurrence;
+			// hold without moving NextFireAt (a nil next leaves it untouched)
+			// rather than writing a zero instant.
+			var nextPtr *time.Time
+			if !next.IsZero() {
+				nextPtr = &next
+			}
+			if err := c.schedules.RecordHeld(ctx, id, due, 1+missed, nextPtr); err != nil {
+				slog.Warn("schedule: record held failed", "id", id, "error", err)
+			}
 			if !next.IsZero() {
 				j.NextFireAt = next
 				c.armSchedule(j)
 			}
 		} else if j.HeldCount == 0 {
 			// A re-armed held one-shot is the same single fire, not a new one.
-			_ = c.schedules.RecordHeld(ctx, id, due, 1, nil)
+			if err := c.schedules.RecordHeld(ctx, id, due, 1, nil); err != nil {
+				// A failed hold on a one-shot leaves it unheld and unarmed until
+				// the next boot; this warn is its only visible trace.
+				slog.Warn("schedule: record held failed", "id", id, "error", err)
+			}
 		}
 		slog.Info("schedule: fire held; agent tree over budget", "id", id, "childId", j.ChildID, "root", root)
 		return
@@ -467,12 +484,16 @@ func (c *Controller) registerSchedules(ctx context.Context, childID string, catc
 			spec, perr := schedules.Parse(j.Cron, j.TZ)
 			if perr != nil {
 				slog.Warn("schedule: stored cron unparseable on resume; tombstoning", "id", j.ID, "error", perr)
-				_ = c.schedules.Tombstone(ctx, j.ID, nil)
+				if err := c.schedules.Tombstone(ctx, j.ID, nil); err != nil {
+					slog.Warn("schedule: resume tombstone failed", "id", j.ID, "error", err)
+				}
 				continue
 			}
 			next := spec.Next(now)
 			if next.IsZero() {
-				_ = c.schedules.Tombstone(ctx, j.ID, nil)
+				if err := c.schedules.Tombstone(ctx, j.ID, nil); err != nil {
+					slog.Warn("schedule: resume tombstone failed", "id", j.ID, "error", err)
+				}
 				continue
 			}
 			if err := c.schedules.Advance(ctx, j.ID, next, nil); err != nil {

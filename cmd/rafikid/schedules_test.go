@@ -237,11 +237,14 @@ func TestScheduleDeletedJobDoesNotFire(t *testing.T) {
 	info, err := b.CronCreate(ctx, "*/5 * * * *", "hello", true)
 	ck.Require().NoError(err)
 	ck.Require().NoError(b.CronDelete(ctx, info.ID))
+	// CronDelete cancels the timer, so drive the stale fire by hand — exactly
+	// the state a fire callback races into when it outlives a delete.
+	c.fireSchedule(info.ID)
 
-	clk.Advance(5*time.Minute + time.Second)
 	clk.Advance(6 * time.Second)
 
 	ck.Len(cap.batches(), 0, "a deleted job must not deliver")
+	ck.False(schedulePending(c, info.ID), "a deleted job must not be re-armed")
 	row, err := mem.Get(ctx, info.ID)
 	ck.Require().NoError(err)
 	ck.True(row.Job.ClosedAt != nil, "the deleted row stays tombstoned")
@@ -282,6 +285,7 @@ func TestScheduleForeignOwnedChildDoesNotDeliver(t *testing.T) {
 
 	clk.Advance(5 * time.Minute)
 	c.fireSchedule(info.ID)
+	clk.Advance(6 * time.Second) // flush the debounce: a missing guard would deliver here
 
 	ck.Len(cap.batches(), 0, "another daemon's child must not receive this fire")
 	row, err := mem.Get(ctx, info.ID)
@@ -594,4 +598,233 @@ func TestCatchUpRegistrationWaitsForScheduleGate(t *testing.T) {
 
 	c.openScheduleGate(ctx)
 	ck.True(schedulePending(c, id), "opening the gate must drain the queued catch-up registration")
+}
+
+// --- additional guard and release coverage ---
+
+// failGetStore wraps Memory and injects a fixed number of Get failures.
+type failGetStore struct {
+	*schedules.Memory
+	mu       sync.Mutex
+	failures int
+}
+
+func (s *failGetStore) Get(ctx context.Context, id string) (schedules.FireRow, error) {
+	s.mu.Lock()
+	if s.failures > 0 {
+		s.failures--
+		s.mu.Unlock()
+		return schedules.FireRow{}, errors.New("injected get failure")
+	}
+	s.mu.Unlock()
+	return s.Memory.Get(ctx, id)
+}
+
+// F2: openScheduleGate must SEED the budget set before it DRAINS the queued
+// catch-up registrations. Deleting the seed leaves the breach unmarked but
+// still arms the job, which is what this pins.
+func TestOpenScheduleGateSeedsBeforeDraining(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _, mem := scheduleFixture(t)
+	ctx := context.Background()
+
+	// A budgeted child already over its cap: the seed must mark it.
+	c.coster = fakeCoster{spend: 99}
+	_ = c.st.Update("c_coord", func(s *childstore.Session) { s.MaxCost = 10 })
+
+	id := "sch_gate_seed"
+	_, err := mem.Create(ctx, schedules.Job{
+		ID: id, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "*/5 * * * *",
+		TZ: "UTC", Prompt: "hello", Recurring: true, NextFireAt: clk.Now().Add(time.Hour),
+	})
+	ck.Require().NoError(err)
+
+	c.schedGate.open = false
+	c.registerSchedules(ctx, "c_w1", true) // queued: the gate is closed
+	ck.False(schedulePending(c, id), "a registration queued while the gate is closed must not arm")
+
+	c.openScheduleGate(ctx)
+
+	ck.True(c.breaches.has("c_coord"), "openScheduleGate must run the budget seed")
+	ck.True(schedulePending(c, id), "openScheduleGate must drain the queued catch-up registration")
+}
+
+// F3(a)/(b): release clears a recurring job's hold, and tombstones a one-shot
+// rather than leaving it open to redeliver on the next boot.
+func TestScheduleReleaseClearsRecurringHoldAndTombstonesOneShot(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _, mem := scheduleFixture(t)
+	ctx := context.Background()
+
+	recID, oneID := "sch_rec_clear", "sch_one_close"
+	_, err := mem.Create(ctx, schedules.Job{
+		ID: recID, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "*/5 * * * *",
+		TZ: "UTC", Prompt: "recurring", Recurring: true, NextFireAt: clk.Now().Add(time.Hour),
+	})
+	ck.Require().NoError(err)
+	_, err = mem.Create(ctx, schedules.Job{
+		ID: oneID, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "3 * * * *",
+		TZ: "UTC", Prompt: "one-shot", Recurring: false, NextFireAt: clk.Now().Add(time.Hour),
+	})
+	ck.Require().NoError(err)
+	for _, id := range []string{recID, oneID} {
+		ck.Require().NoError(mem.RecordHeld(ctx, id, clk.Now(), 1, nil))
+	}
+
+	c.releaseHeldSchedules("c_w1")
+	clk.Advance(6 * time.Second)
+
+	rec, err := mem.Get(ctx, recID)
+	ck.Require().NoError(err)
+	ck.Eq(0, rec.Job.HeldCount, "a released recurring job's hold must clear")
+	ck.True(rec.Job.HeldFirstDue == nil && rec.Job.HeldLastDue == nil, "held instants must clear")
+	ck.True(rec.Job.ClosedAt == nil, "a released recurring job stays open")
+
+	one, err := mem.Get(ctx, oneID)
+	ck.Require().NoError(err)
+	ck.True(one.Job.ClosedAt != nil, "a released one-shot must be tombstoned or it redelivers on the next boot")
+	ck.False(schedulePending(c, oneID), "release must not arm a released one-shot")
+}
+
+// F3(c): a held job whose child belongs to another daemon is skipped.
+func TestScheduleReleaseSkipsForeignOwnedJob(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, mem := scheduleFixture(t)
+	ctx := context.Background()
+	c.daemonID = "this-daemon"
+
+	id := "sch_foreign"
+	_, err := mem.Create(ctx, schedules.Job{
+		ID: id, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "*/5 * * * *",
+		TZ: "UTC", Prompt: "foreign", Recurring: true, NextFireAt: clk.Now().Add(time.Hour),
+	})
+	ck.Require().NoError(err)
+	ck.Require().NoError(mem.RecordHeld(ctx, id, clk.Now(), 1, nil))
+	mem.SetChild("c_w1", false, "other-daemon")
+
+	c.releaseHeldSchedules("c_w1")
+	clk.Advance(6 * time.Second)
+
+	ck.Len(fragmentsContaining(cap, "were held"), 0, "a foreign-owned held job must not be released")
+	row, err := mem.Get(ctx, id)
+	ck.Require().NoError(err)
+	ck.Eq(1, row.Job.HeldCount, "the foreign job's hold must be left intact")
+}
+
+// F5(a): a load (Get) failure arms a retry and delivers exactly once.
+func TestScheduleLoadFailureRetries(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, mem := scheduleFixture(t)
+	ctx := context.Background()
+	c.schedules = &failGetStore{Memory: mem, failures: 1}
+
+	b := newScheduleBinding(c, "c_w1")
+	info, err := b.CronCreate(ctx, "*/5 * * * *", "hello", true)
+	ck.Require().NoError(err)
+
+	clk.Advance(5*time.Minute + time.Second) // fire: the load fails once
+	ck.True(schedulePending(c, info.ID), "a load failure must arm a retry")
+	ck.Eq(0, totalFragments(cap), "a failed load must deliver nothing")
+
+	clk.Advance(time.Minute + 6*time.Second) // the retry loads, fires, and pushes
+	clk.Advance(6 * time.Second)             // flush
+	ck.Eq(1, totalFragments(cap), "the retry must deliver exactly once")
+}
+
+// F5(b): a timer that fires before the row's NextFireAt re-arms, delivering
+// nothing.
+func TestScheduleEarlyTimerRearmsAtRowDeadline(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, mem := scheduleFixture(t)
+	ctx := context.Background()
+	b := newScheduleBinding(c, "c_w1")
+
+	info, err := b.CronCreate(ctx, "*/5 * * * *", "hello", true)
+	ck.Require().NoError(err)
+	c.cancelTimer(scheduleKey(info.ID)) // drive the timer by hand, while it is early
+
+	later := clk.Now().Add(time.Hour)
+	ck.Require().NoError(mem.Advance(ctx, info.ID, later, nil)) // the row moved on
+
+	c.fireSchedule(info.ID) // now is before the row's NextFireAt
+	clk.Advance(6 * time.Second)
+
+	ck.Eq(0, totalFragments(cap), "an early timer must not deliver")
+	var pending bool
+	for _, e := range c.sched.Pending() {
+		if e.Key == scheduleKey(info.ID) {
+			pending = true
+			ck.True(e.Deadline.Equal(later), "an early timer must re-arm at the row's NextFireAt; got %v want %v", e.Deadline, later)
+		}
+	}
+	ck.True(pending, "an early timer must be re-armed")
+}
+
+// F5(c): an unparseable stored cron is tombstoned.
+func TestScheduleUnparseableStoredCronIsTombstoned(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, mem := scheduleFixture(t)
+	ctx := context.Background()
+
+	id := "sch_bad"
+	_, err := mem.Create(ctx, schedules.Job{
+		ID: id, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "not a cron",
+		TZ: "UTC", Prompt: "bad", Recurring: true, NextFireAt: clk.Now(),
+	})
+	ck.Require().NoError(err)
+
+	c.fireSchedule(id)
+	clk.Advance(6 * time.Second)
+
+	ck.Len(cap.batches(), 0, "an unparseable schedule must not deliver")
+	row, err := mem.Get(ctx, id)
+	ck.Require().NoError(err)
+	ck.True(row.Job.ClosedAt != nil, "an unparseable schedule must be tombstoned")
+	ck.False(schedulePending(c, id), "an unparseable schedule must not be re-armed")
+}
+
+// F6: Close and CloseAllExited tombstone a closed child's open schedules.
+func TestCloseAndCloseAllExitedTombstoneSchedules(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctx := context.Background()
+
+	// Close.
+	c, _, _, mem := scheduleFixture(t)
+	c.children = stubChildStore{}
+	_, err := mem.Create(ctx, schedules.Job{
+		ID: "sch_close", ChildID: "c_w1", Kind: schedules.KindCron, Cron: "*/5 * * * *",
+		TZ: "UTC", Prompt: "p", Recurring: true, NextFireAt: time.Unix(10, 0),
+	})
+	ck.Require().NoError(err)
+	c.st.SetStatus("c_w1", protocol.StatusExited)
+	ck.Require().NoError(c.Close("c_w1"))
+
+	jobs, err := mem.ListOpen(ctx, "c_w1")
+	ck.Require().NoError(err)
+	ck.Len(jobs, 0, "Close must tombstone the child's open schedules")
+	row, err := mem.Get(ctx, "sch_close")
+	ck.Require().NoError(err)
+	ck.True(row.Job.ClosedAt != nil, "the closed child's row must be tombstoned")
+
+	// CloseAllExited.
+	c2, _, _, mem2 := scheduleFixture(t)
+	c2.children = stubChildStore{}
+	for _, id := range []string{"c_w1", "c_w2"} {
+		_, err := mem2.Create(ctx, schedules.Job{
+			ID: "sch_" + id, ChildID: id, Kind: schedules.KindCron, Cron: "*/5 * * * *",
+			TZ: "UTC", Prompt: "p", Recurring: true, NextFireAt: time.Unix(10, 0),
+		})
+		ck.Require().NoError(err)
+		c2.st.SetStatus(id, protocol.StatusExited)
+	}
+	_, err = c2.CloseAllExited(0)
+	ck.Require().NoError(err)
+	for _, id := range []string{"c_w1", "c_w2"} {
+		jobs, err := mem2.ListOpen(ctx, id)
+		ck.Require().NoError(err)
+		ck.Len(jobs, 0, "CloseAllExited must tombstone %s's open schedules", id)
+		row, err := mem2.Get(ctx, "sch_"+id)
+		ck.Require().NoError(err)
+		ck.True(row.Job.ClosedAt != nil, "%s's row must be tombstoned", id)
+	}
 }
