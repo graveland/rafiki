@@ -2108,10 +2108,6 @@ deliberately unimplemented RPC answers `CodeUnimplemented` directly, unmapped.
   child. Each receives events in publish order. A slow subscriber may drop
   events (per-subscriber bounded channel) but never backpressures the child
   or other subscribers; the cursor replay covers the gap.
-- **Extension UI.** A child's `extension_ui_request` events are forwarded to
-  all matching subscribers. The first client to answer (via `SendFrame` for a
-  child that speaks a frame protocol, or the child's own tool surface) wins;
-  the runtime drops subsequent responses by id mismatch.
 
 ## 6. State machine
 
@@ -2140,8 +2136,6 @@ and the daemon's lifecycle actions.
   modal (stack):                                           ▼
     compacting ─── on compaction_start, push; on compaction_end, pop.
     batch_wait ─── on batch_wait_start, push; on batch_wait_end, pop.
-    blocked_ui ─── on extension_ui_request (dialog method), push;
-                   on matching response, pop.
 
               shutting_down ──── on Kill or daemon shutdown. Closes stdin,
                                  then waits, escalates SIGTERM/SIGKILL.
@@ -2167,8 +2161,6 @@ and the daemon's lifecycle actions.
 | `compacting`          | `compaction_end` (pop)                                       | previous state  |
 | `streaming` or `tool_running` or `idle` | `batch_wait_start` (push)                 | `batch_wait`    |
 | `batch_wait`          | `batch_wait_end` (pop)                                       | previous state  |
-| `streaming` or `tool_running` or `idle` | `extension_ui_request` (dialog only) (push)| `blocked_ui`    |
-| `blocked_ui`          | matching response (pop)                                      | previous state  |
 | any except `exited` and `shutting_down` | `Kill` or daemon shutdown starts           | `shutting_down` |
 | `shutting_down`       | the child process exits (reap)                               | `exited`        |
 | `shutting_down`       | `Send` to the child                                          | rejected (`child_shutting_down`) |
@@ -2196,10 +2188,10 @@ update per-child counters without a status change; they are visible through
 
 ### The modal stack
 
-`compacting`, `batch_wait` and `blocked_ui` are *modal* states implemented
+`compacting` and `batch_wait` are *modal* states implemented
 with a small state stack: push on entry, pop on the matching exit event,
-handling arbitrary nesting (e.g. an extension UI dialog during compaction
-during tool execution) without per-pair restoration logic. Defensive: if a
+handling arbitrary nesting (e.g. a batch wait during compaction during tool
+execution) without per-pair restoration logic. Defensive: if a
 pop arrives with an empty stack (lost prior event, daemon restart mid-flight,
 etc.), the current state is preserved and a warning is logged — the state
 machine does not get stuck in a modal forever.
@@ -2214,10 +2206,9 @@ Notes:
   parallel. State enters `tool_running` on the *first* start and returns to
   `streaming` on the *last* end; `activeTools` resets on `agent_end` as a
   sanity guard.
-- **`blocked_ui` is dialog-only**: the `extension_ui_request` event covers
-  both blocking dialogs and fire-and-forget notifications; only dialogs
-  enter the modal state. Pending dialog ids are matched in a capped map
-  (default 64 entries).
+- **`blocked_ui` is a legacy value**: the extension UI dialog machinery that
+  produced it is removed and nothing emits it any more, but a stored row may
+  carry it, so it remains a recognised working status for recovery.
 - **Compaction is observed, never initiated** by the daemon: the child
   runtime compacts (manually or on threshold) and the daemon records the
   boundary.
