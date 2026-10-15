@@ -24,6 +24,10 @@ import (
 // the command's exit.
 const webShutdownGrace = 5 * time.Second
 
+// webServe runs the proxy's http.Server on ln. A variable so a test can force a
+// pre-cancellation Serve failure and pin that runWeb surfaces it.
+var webServe = func(srv *http.Server, ln net.Listener) error { return srv.Serve(ln) }
+
 // newWebCmd builds `rafiki web`.
 func newWebCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -39,7 +43,8 @@ func newWebCmd() *cobra.Command {
 }
 
 // runWeb serves the browser UI through a 127.0.0.1-only proxy in front of the
-// daemon's Connect control plane, and blocks until the process is signalled.
+// daemon's Connect control plane, and blocks until the process is signalled or
+// the server stops on its own.
 //
 // The upstream is resolved lazily (webResolver), the way the proxy wants it:
 // the daemon is not dialled until the browser's first Control request, and a
@@ -89,19 +94,28 @@ func runWeb(cmd *cobra.Command, _ []string) error {
 
 	srv := s.HTTPServer()
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	go func() { serveErr <- webServe(srv, ln) }()
 
-	<-cmdCtx(cmd).Done()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), webShutdownGrace)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	// The server can stop without a signal (a Serve failure, say); surface that
+	// error promptly instead of blocking until the process is signalled.
+	select {
+	case <-cmdCtx(cmd).Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), webShutdownGrace)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			_ = srv.Close()
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case err := <-serveErr:
 		_ = srv.Close()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	}
-	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
 }
 
 // webResolver resolves the proxy's upstream from an already-resolved profile.

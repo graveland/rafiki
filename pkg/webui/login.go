@@ -47,8 +47,14 @@ type loginState struct {
 
 	beginM sync.Mutex // serialises begins, which share the pinned callback port
 
-	mu      sync.Mutex
-	pending *pendingLogin
+	mu sync.Mutex
+	// pending is the current login, nil if none. completing is a pending whose
+	// callback has taken it and is running Complete — it is cleared from pending
+	// so a second callback gets 404, but kept here so a begin arriving during the
+	// (up to 30s) Complete can still release its pinned listener before binding
+	// the same port again.
+	pending    *pendingLogin
+	completing *pendingLogin
 }
 
 // pendingLogin is at most one in-flight login.
@@ -113,6 +119,9 @@ func (l *loginState) serveCallback(w http.ResponseWriter, r *http.Request) {
 	l.mu.Lock()
 	p := l.pending
 	l.pending = nil
+	if p != nil {
+		l.completing = p
+	}
 	l.mu.Unlock()
 	if p == nil {
 		writeJSON(w, http.StatusNotFound, errorBody{
@@ -144,7 +153,10 @@ func (l *loginState) serveCallback(w http.ResponseWriter, r *http.Request) {
 			if err := p.server.Shutdown(ctx); err != nil {
 				_ = p.server.Close()
 			}
+			l.clearCompleting(p)
 		}()
+	} else {
+		l.clearCompleting(p)
 	}
 }
 
@@ -169,14 +181,29 @@ func (l *loginState) pinnedCallback(pinned uint32) http.Handler {
 	})
 }
 
-// replacePending drops any pending login, closing its pinned listener so the
-// caller can bind the same port again.
+// replacePending drops any pending login and any login whose callback is
+// mid-Complete, closing their pinned listeners so the caller can bind the same
+// port again. Closing a listener twice is safe, so a begin racing a callback's
+// own shutdown is not a hazard.
 func (l *loginState) replacePending() {
 	l.mu.Lock()
 	old := l.pending
 	l.pending = nil
+	completing := l.completing
+	l.completing = nil
 	l.mu.Unlock()
 	discardLogin(old)
+	discardLogin(completing)
+}
+
+// clearCompleting forgets p once its callback has finished shutting its pinned
+// listener down, unless a newer begin has already replaced it.
+func (l *loginState) clearCompleting(p *pendingLogin) {
+	l.mu.Lock()
+	if l.completing == p {
+		l.completing = nil
+	}
+	l.mu.Unlock()
 }
 
 // expire clears p if it is still the pending login (the 10 minute lifetime).
@@ -191,7 +218,10 @@ func (l *loginState) expire(p *pendingLogin) {
 	discardLogin(p)
 }
 
-// discardLogin stops a pending login's timer and releases its socket.
+// discardLogin stops a pending login's timer and releases its socket. The
+// listener is closed directly as well as through the server: a server whose
+// Serve goroutine has not started yet tracks no listeners, so Close on it alone
+// would leave the port bound.
 func discardLogin(p *pendingLogin) {
 	if p == nil {
 		return
@@ -201,7 +231,8 @@ func discardLogin(p *pendingLogin) {
 	}
 	if p.server != nil {
 		_ = p.server.Close()
-	} else if p.listener != nil {
+	}
+	if p.listener != nil {
 		_ = p.listener.Close()
 	}
 }

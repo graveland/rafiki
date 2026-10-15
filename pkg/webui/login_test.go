@@ -29,6 +29,12 @@ type fakeLoginBackend struct {
 	completes   []completeCall
 	completeUp  Upstream
 	completeErr error
+
+	// completeStarted is signalled once when Complete is entered; completeGate,
+	// when non-nil, blocks Complete until it is closed. Together they let a test
+	// hold a callback inside Complete while it exercises the begin path.
+	completeStarted chan struct{}
+	completeGate    chan struct{}
 }
 
 type beginResult struct {
@@ -52,12 +58,21 @@ func (f *fakeLoginBackend) Begin(_ context.Context, redirectPort uint32) (string
 
 func (f *fakeLoginBackend) Complete(_ context.Context, loginID, query string) (Upstream, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.completes = append(f.completes, completeCall{LoginID: loginID, Query: query})
-	if f.completeErr != nil {
-		return Upstream{}, f.completeErr
+	up, err := f.completeUp, f.completeErr
+	started, gate := f.completeStarted, f.completeGate
+	f.mu.Unlock()
+
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
 	}
-	return f.completeUp, nil
+	if gate != nil {
+		<-gate
+	}
+	return up, err
 }
 
 func (f *fakeLoginBackend) seenBeginPorts() []uint32 {
@@ -201,10 +216,7 @@ func TestWebuiLoginBeginReplacesPending(t *testing.T) {
 func TestWebuiLoginPinnedPortListens(t *testing.T) {
 	ck := assert.NewCollecting(t)
 
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	ck.NoError(err, "probe listen")
-	pinned := probe.Addr().(*net.TCPAddr).Port
-	ck.NoError(probe.Close(), "probe close")
+	pinned := freeLoopbackPort(t)
 
 	s := New(Config{Port: testPort, Assets: testAssets()})
 	fb := &fakeLoginBackend{
@@ -230,8 +242,20 @@ func TestWebuiLoginPinnedPortListens(t *testing.T) {
 	waitForDialRefused(t, ck, pinned)
 }
 
-// waitForDialRefused blocks until a TCP dial to 127.0.0.1:port fails, within a
-// 5s deadline and on a 10ms ticker. A socket close carries no notification.
+// freeLoopbackPort grabs a currently-free loopback port and releases it.
+func freeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("probe close: %v", err)
+	}
+	return port
+}
+
 func waitForDialRefused(t *testing.T, ck *assert.C, port int) {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -250,6 +274,110 @@ func waitForDialRefused(t *testing.T, ck *assert.C, port int) {
 			}
 			_ = conn.Close()
 		}
+	}
+}
+
+// beginPinnedAndStartBlockedCallback runs begin(A) pinning `pinned`, then fires
+// callback A in a goroutine, blocking inside Complete until the returned gate is
+// closed. A must be the only login that could hold a listener on `pinned`.
+func beginPinnedAndStartBlockedCallback(t *testing.T, s *Server, fb *fakeLoginBackend, secret string, pinned int) (done chan int, gate chan struct{}) {
+	t.Helper()
+	gate = make(chan struct{})
+	started := make(chan struct{}, 1)
+	fb.mu.Lock()
+	fb.completeUp = Upstream{Client: &http.Client{}, BaseURL: "http://up.invalid"}
+	fb.completeStarted = started
+	fb.completeGate = gate
+	fb.begin = beginResult{loginID: "A", authorizeURL: "ua", pinnedPort: uint32(pinned)}
+	fb.mu.Unlock()
+
+	if code := serve(s, loginBeginReq(secret)).Code; code != http.StatusOK {
+		t.Fatalf("begin A status = %d", code)
+	}
+	done = make(chan int, 1)
+	go func() { done <- serve(s, loginCallbackReq("/oidc/callback?code=a")).Code }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback A never reached Complete")
+	}
+	return done, gate
+}
+
+func TestWebuiLoginDiscardClosesPinnedListener(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ck.NoError(err, "listen")
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	// A listener whose Serve goroutine has not started yet: http.Server.Close
+	// alone is a no-op on it, so discardLogin must close the listener directly.
+	p := &pendingLogin{listener: ln, server: &http.Server{}}
+	discardLogin(p)
+
+	reln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	ck.NoError(err, "the pinned port must be released by discardLogin")
+	if reln != nil {
+		ck.NoError(reln.Close(), "close rebound listener")
+	}
+
+	// Idempotent: a second discard must not panic or error.
+	discardLogin(p)
+}
+
+func TestWebuiLoginBeginDuringCompleteBindsSamePinnedPort(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pinned := freeLoopbackPort(t)
+
+	s := New(Config{Port: testPort, Assets: testAssets()})
+	fb := &fakeLoginBackend{}
+	s.EnableLogin(fb)
+	secret := addSecret(s, "f2-same-port-secret")
+
+	done, gate := beginPinnedAndStartBlockedCallback(t, s, fb, secret, pinned)
+
+	fb.mu.Lock()
+	fb.begin = beginResult{loginID: "B", authorizeURL: "ub", pinnedPort: uint32(pinned)}
+	fb.mu.Unlock()
+	ck.Eq(http.StatusOK, serve(s, loginBeginReq(secret)).Code, "begin B must rebind the pinned port")
+
+	close(gate)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback A never finished")
+	}
+}
+
+func TestWebuiLoginBeginDuringCompleteLeavesNoListenerFromOld(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pinned := freeLoopbackPort(t)
+
+	s := New(Config{Port: testPort, Assets: testAssets()})
+	fb := &fakeLoginBackend{}
+	s.EnableLogin(fb)
+	secret := addSecret(s, "f2-invariant-secret")
+
+	done, gate := beginPinnedAndStartBlockedCallback(t, s, fb, secret, pinned)
+
+	// B pins nothing, so any listener still on `pinned` is A's.
+	fb.mu.Lock()
+	fb.begin = beginResult{loginID: "B", authorizeURL: "ub"}
+	fb.mu.Unlock()
+	ck.Eq(http.StatusOK, serve(s, loginBeginReq(secret)).Code, "begin B status")
+
+	if conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", pinned)); err == nil {
+		_ = conn.Close()
+		ck.Fail("a listener from A is still bound on the pinned port after begin(B)")
+	}
+
+	close(gate)
+	select {
+	case code := <-done:
+		ck.Eq(http.StatusFound, code, "callback A status")
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback A never finished")
 	}
 }
 

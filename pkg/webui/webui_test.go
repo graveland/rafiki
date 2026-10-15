@@ -553,6 +553,8 @@ func TestWebuiHTTPServerHasNoWriteTimeout(t *testing.T) {
 
 func TestWebuiHasUI(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	ck.True(hasUI(testAssets()), "assets with index.html")
-	ck.False(HasUI(), "real embed ships only .gitkeep")
+	// Pin the rule against in-memory trees only: the real embed is build output
+	// (a `make web` before `go test` flips it), so it is never asserted here.
+	ck.True(hasUI(testAssets()), "a tree with index.html reports a UI")
+	ck.False(hasUI(fstest.MapFS{}), "a tree without index.html reports no UI")
 }

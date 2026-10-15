@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -25,9 +26,9 @@ import (
 
 // A Go-only build embeds only pkg/webui/dist/.gitkeep, so HasUI is false and
 // `rafiki web` must refuse with the make-web hint. Guarded: if `make web` has
-// been run in this checkout HasUI is true (index.html is embedded), and the
-// no-UI path is then covered by pkg/webui's own HasUI/index.html test rather
-// than here.
+// been run in this checkout HasUI is true (index.html is embedded), so there is
+// no no-UI build to exercise here. The skip guard still makes sense — HasUI
+// reads the real embed, which this test cannot control.
 func TestWebRefusesWithoutUI(t *testing.T) {
 	c := assert.NewAborting(t)
 	isolateProfiles(t)
@@ -137,5 +138,36 @@ func TestWebPrintsURLFirstLine(t *testing.T) {
 		c.Require().NoError(err, "RunE after the context was cancelled")
 	case <-time.After(10 * time.Second):
 		t.Fatal("rafiki web did not stop after its context was cancelled")
+	}
+}
+
+// A Serve failure before the context is cancelled must surface promptly rather
+// than block until a signal. webServe is stubbed so the failure is deterministic.
+func TestWebServeErrorReturnsPromptly(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+
+	saved := webServe
+	webServe = func(*http.Server, net.Listener) error { return errors.New("serve boom") }
+	t.Cleanup(func() { webServe = saved })
+
+	cmd := newWebCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background()) // never cancelled
+	c.Require().NoError(cmd.Flags().Set("no-open", "true"), "set --no-open")
+	c.Require().NoError(cmd.Flags().Set("dev-assets", "http://127.0.0.1:1"), "set --dev-assets")
+	c.Require().NoError(cmd.Flags().Set("port", "0"), "set --port")
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.RunE(cmd, nil) }()
+
+	select {
+	case err := <-done:
+		c.Require().Error(err, "runWeb must surface the serve error")
+		c.StrContains(err.Error(), "serve boom", "serve error text")
+	case <-time.After(10 * time.Second):
+		t.Fatal("rafiki web did not return after a pre-cancellation serve failure")
 	}
 }
