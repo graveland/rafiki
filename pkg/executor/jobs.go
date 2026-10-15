@@ -248,8 +248,13 @@ func (r *jobRegistry) start(command, handle, workspaceID, dir string) (string, e
 	// PWD is pinned to the job's directory: a non-nil Env suppresses exec's
 	// automatic PWD=Dir, and the inherited PWD would name the executor's own
 	// directory, changing what `pwd` reports (see runSubprocess in
-	// pkg/fundi/tools/bash.go for the same trap).
-	cmd.Env = tools.MergeEnv(tools.NonInteractiveEnv(nil), []string{"PWD=" + cmd.Dir})
+	// pkg/fundi/tools/bash.go for the same trap). The pin is guarded on a
+	// non-empty dir, matching runSubprocess — an empty dir leaves exec's
+	// default rather than setting PWD=.
+	cmd.Env = tools.NonInteractiveEnv(nil)
+	if cmd.Dir != "" {
+		cmd.Env = tools.MergeEnv(cmd.Env, []string{"PWD=" + cmd.Dir})
+	}
 	// Own session AND process group, so kill can signal the whole tree: a
 	// background `bash -c "npm run dev"` spawns children that outlive a bare
 	// Process.Kill on the bash itself. Setsid rather than Setpgid: a new

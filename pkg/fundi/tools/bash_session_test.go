@@ -37,6 +37,19 @@ func TestSessionCommandHasNoControllingTerminal(t *testing.T) {
 	c.False(hasStandaloneLine(out, "TTY"), "spawned command reached a controlling terminal, got %q", out)
 }
 
+// TestSubprocessUsesANewSession asserts runSubprocess's session semantics
+// directly on its SysProcAttr, because the /dev/tty probe cannot tell Setsid
+// from Setpgid when the test process has no controlling terminal (the case
+// under `make check`). Setsid makes the child a session leader with no
+// controlling terminal; Setpgid must NOT also be set (the two conflict with
+// EPERM).
+func TestSubprocessUsesANewSession(t *testing.T) {
+	c := assert.NewAborting(t)
+	attr := subprocessSysProcAttr()
+	c.True(attr.Setsid, "runSubprocess must start a new session (Setsid), got %+v", attr)
+	c.False(attr.Setpgid, "Setsid and Setpgid must not both be set (the child gets EPERM), got %+v", attr)
+}
+
 // TestBashToolSetsNonInteractiveEnv checks the bash tool's Materialize applies
 // nonInteractiveDefaults to the pinned environment: the interpreter's env
 // carries GIT_TERMINAL_PROMPT=0 and PAGER=cat even though the caller pinned

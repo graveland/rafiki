@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,6 +34,22 @@ func TestJobSessionHasNoControllingTerminal(t *testing.T) {
 	handle, err := r.start(`if : </dev/tty 2>/dev/null; then echo TTY; else echo NOTTY; fi`,
 		"h-tty", "ws-tty", "")
 	c.NoError(err, "start")
+
+	// The /dev/tty probe cannot tell Setsid from Setpgid when THIS process has
+	// no controlling terminal (the case under `make check`), so assert the
+	// session on the job's own process: it must be a session leader (sid ==
+	// pid) in a session other than the test's. Getsid works on darwin and
+	// Linux. start() returns with the process already exec'd and running.
+	r.mu.Lock()
+	j := r.jobs[handle]
+	r.mu.Unlock()
+	pid := j.cmd.Process.Pid
+	sid, err := syscall.Getsid(pid)
+	c.NoError(err, "Getsid(job pid %d)", pid)
+	c.Eq(pid, sid, "job must be a session leader (its session id should equal its pid)")
+	selfSid, err := syscall.Getsid(os.Getpid())
+	c.NoError(err, "Getsid(self)")
+	c.False(sid == selfSid, "job shares the test process's session (sid %d); it did not start a new session", sid)
 
 	// Read until exited — a test may loop on a short sleep here; the
 	// no-polling rule is for production code.

@@ -60,7 +60,10 @@ func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		p:             opts.OutputPolicy,
 		cwd:           opts.Cwd,
 		rtkMode:       opts.RTK,
-		env:           NonInteractiveEnv(opts.Env),
+		// NonInteractiveEnv snapshots os.Environ() when opts.Env is nil, so a
+		// nil env is pinned here at Materialize time, not inherited live at
+		// each call.
+		env: NonInteractiveEnv(opts.Env),
 	}
 	// Resolve the interpreter NOW, against the environment as it stands when
 	// the registry is built. exec.Command resolves a bare name against the
@@ -227,12 +230,8 @@ func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, nam
 			cmd.Env = MergeEnv(env, []string{"PWD=" + cwd})
 		}
 	}
-	// Setsid rather than Setpgid: a new session has no controlling terminal,
-	// so a program that opens /dev/tty (sudo, ssh, gpg) gets ENXIO and exits
-	// rather than stopping on SIGTTIN. A session leader also leads its own
-	// process group, so the group kill below (syscall.Kill(-pid, ...)) is
-	// unchanged.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// Setsid rather than Setpgid (see subprocessSysProcAttr).
+	cmd.SysProcAttr = subprocessSysProcAttr()
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
@@ -253,6 +252,18 @@ func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, nam
 	cmd.Stderr = io.MultiWriter(combinedBuf, &stderrBuf)
 	err = cmd.Run()
 	return combinedBuf.String(), stderrBuf.String(), err
+}
+
+// subprocessSysProcAttr is the process attribute every tool subprocess runs
+// under: a new SESSION (Setsid), not merely a new process group. A new session
+// has no controlling terminal, so a program that opens /dev/tty (sudo, ssh,
+// gpg) gets ENXIO and exits rather than stopping on SIGTTIN. A session leader
+// also leads its own process group, so the group kill in runSubprocess's
+// cmd.Cancel (syscall.Kill(-pid, ...)) is unchanged. Extracted so a test can
+// assert the session semantics directly: a /dev/tty probe cannot tell Setsid
+// from Setpgid when the test process has no controlling terminal.
+func subprocessSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
 }
 
 // interpreter is the bash binary this tool spawns: the absolute path resolved
