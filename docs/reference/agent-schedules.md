@@ -35,8 +35,9 @@ another child's jobs (`cmd/rafikid/schedules.go`, `scheduleBinding`).
 Constraints, enforced on every create:
 
 - a recurring expression whose next 32 consecutive occurrences contain any two
-  closer than 5 minutes (`schedules.MinGap`) is refused — `CheckMinGap` over
-  `gapSamples = 32` (`pkg/schedules/cron.go`), called from `CronCreate`
+  closer than 5 minutes (`schedules.MinGap`) is refused — `CheckMinGap`
+  (`pkg/schedules/cron.go`) over `gapSamples = 32`
+  (`pkg/schedules/schedules.go`), called from `CronCreate`
   (`cmd/rafikid/schedules.go`) only when `recurring` is true; an expression
   that never fires is `ErrNeverFires`.
 - at most 50 open jobs per child of either kind (`schedules.MaxOpenPerChild`),
@@ -52,8 +53,10 @@ A job's zone is resolved once at `CronCreate` and snapshotted onto the row
 (`Job.TZ`), so editing a zone does not shift existing jobs — recreate to move
 one. Resolution (`scheduleBinding.zone`, `cmd/rafikid/schedules.go`):
 
-1. the child's owner's `users.timezone`, when that row names one
-   (`schedules.Store.OwnerTimezone`); else
+1. the child's owner's `users.timezone`, when the owner row names one
+   (`schedules.Store.OwnerTimezone`); else — including when that lookup
+   ERRORS (a store outage), not just when the row is absent or its zone NULL,
+   the binding silently falls back —
 2. the daemon's own zone, resolved once at startup (`schedules.DaemonZone`):
    `$TZ` (with a leading `:` stripped), else the IANA name after `zoneinfo/`
    in the `/etc/localtime` symlink target.
@@ -72,7 +75,8 @@ pseudo-zone are refused (`schedules.ValidateTimezone`).
 DST is pinned in `pkg/schedules/cron.go`: a wall clock skipped by
 spring-forward does not fire that day, and a wall clock repeated by fall-back
 fires once — `(*Spec).Next` steps past a candidate whose local date + hour +
-minute equals the previous occurrence's.
+minute equals `after`'s, the time the occurrence is asked from (`after` is the
+spec's own previous occurrence at every re-arm, so the two agree in practice).
 
 ## Firing
 
@@ -81,8 +85,9 @@ A due job becomes an inbox fragment from the event-buffer source `schedule`
 row and its child's durable state first, so fire-time checks decide what
 happens:
 
-- **closed child or tombstoned row** → tombstone and return, without
-  re-arming.
+- **tombstoned row** → return, without re-arming (no tombstone call; the row
+  is already closed).
+- **missing or closed child** → tombstone and return, without re-arming.
 - **child exited, or `child.daemon_id` is not this daemon** → return without
   re-arming and without touching the row; registration at the next resume picks
   it up.
@@ -108,7 +113,7 @@ on this daemon (`registerSchedules`, `cmd/rafikid/schedules.go`):
 |---|---|---|
 | daemon restart, auto-resume (catch-up on) | one wake naming N missed fires, then normal cadence | fires once |
 | manual `rafiki resume` (catch-up off) | skips missed fires, advancing to the next FUTURE occurrence | fires once if overdue |
-| child killed (status `exited`) | paused; nothing registered | stays pending |
+| child killed (status `exited`) | no delivery — Kill cancels no schedule timer, so an armed timer fires, sees the child exited, and returns without re-arming or tombstoning; the next resume re-registers | stays pending |
 | killed child auto-closed by the grace window | rows tombstoned | tombstoned |
 | child closed | rows tombstoned (`CloseForChild`) | tombstoned |
 
@@ -118,7 +123,11 @@ The grace window defaults to 7 days and is overridden with `RAFIKI_GRACE_HOURS`
 (`Controller.Close` → `CloseForChild`). The rationale: a daemon outage is not
 the user's choice, so it delays the schedule; a kill is, so it pauses it — for
 at most the grace window, after which the child closes and its jobs go with it.
-A rate-limited child is not killed, so its fires simply queue.
+A rate-limited child is not killed by the rate-limit path — the daemon
+schedules an auto-resume for the reset instead (`cmd/rafikid/ratelimit_resume.go`),
+so its fires follow the ordinary live-child rules: delivered while it is live,
+and skipped-and-re-registered if its process has exited (the auto-resume
+relaunches it via `Resume`).
 
 A scheduled fire into a `claude` child's inbox is an ordinary stdin write; a
 fire pushed but not yet written when the daemon dies is lost, the same narrow
