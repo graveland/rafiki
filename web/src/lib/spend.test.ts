@@ -6,7 +6,15 @@ import {
   type ConversationQueryResponse,
   type QueryValue,
 } from '../gen/rafiki/v1/control_pb'
-import { byGroup, decodeRows, totals } from './spend'
+import {
+  byGroup,
+  decodeRows,
+  legendEntries,
+  soloKey,
+  toggleKey,
+  totals,
+  visibleRows,
+} from './spend'
 
 type Kind = 'str' | 'int' | 'float'
 
@@ -105,4 +113,54 @@ it('groups by provider with empty as unknown', () => {
   ])
 
   expect(totals(rows)).toEqual({ costUsd: 4, anyUnpriced: false })
+})
+
+const COLS = ['day', 'model', 'provider', 'cost_usd', 'priced']
+
+function sample() {
+  return decodeRows(
+    response(COLS, [
+      { day: '2026-02-03', model: 'cheap', provider: 'a', cost_usd: 1, priced: 1 },
+      { day: '2026-02-04', model: 'cheap', provider: '', cost_usd: 1, priced: 1 },
+      { day: '2026-02-03', model: 'dear', provider: 'b', cost_usd: 5, priced: 1 },
+      { day: '2026-02-03', model: 'mystery', provider: 'b', cost_usd: 0, priced: 0 },
+    ]),
+  )
+}
+
+it('legend entries sort by cost and keep unpriced series as unknown', () => {
+  expect(legendEntries(sample(), 'model')).toEqual([
+    { key: 'dear', costUsd: 5, priced: true },
+    { key: 'cheap', costUsd: 2, priced: true },
+    { key: 'mystery', costUsd: 0, priced: false },
+  ])
+  expect(legendEntries(sample(), 'provider').map((e) => e.key)).toEqual(['b', 'a', 'unknown'])
+})
+
+it('hidden series are dropped from stacks and totals', () => {
+  const rows = visibleRows(sample(), 'model', new Set(['dear']))
+  expect(byGroup(rows, 'model').map((p) => p.key)).toEqual(['cheap', 'cheap'])
+  expect(totals(rows)).toEqual({ costUsd: 2, anyUnpriced: true })
+})
+
+it('hiding unknown provider drops empty-provider rows', () => {
+  const rows = visibleRows(sample(), 'provider', new Set(['unknown']))
+  expect(rows.some((r) => r.provider === '')).toBe(false)
+  expect(rows).toHaveLength(3)
+})
+
+it('a hidden name absent from the rows is ignored', () => {
+  expect(visibleRows(sample(), 'model', new Set(['gone']))).toHaveLength(4)
+})
+
+it('toggleKey flips one series', () => {
+  expect([...toggleKey(new Set(), 'a')]).toEqual(['a'])
+  expect([...toggleKey(new Set(['a', 'b']), 'a')]).toEqual(['b'])
+})
+
+it('soloKey shows only the series, and again shows all', () => {
+  const keys = ['a', 'b', 'c']
+  const solo = soloKey(new Set(['a', 'gone']), keys, 'a')
+  expect([...solo].sort()).toEqual(['b', 'c', 'gone'])
+  expect([...soloKey(solo, keys, 'a')]).toEqual(['gone'])
 })

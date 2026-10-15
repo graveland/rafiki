@@ -113,3 +113,69 @@ export function totals(rows: readonly SpendRow[]): SpendTotals {
   }
   return { costUsd, anyUnpriced }
 }
+
+/** One legend series: its label, its priced cost over the rows, and whether any of its cost is known. */
+export interface LegendEntry {
+  key: string
+  costUsd: number
+  priced: boolean
+}
+
+/**
+ * Every series in rows, most expensive first (ties by name), so the legend and
+ * the color domain share one stable order. A series with only unpriced rows is
+ * still listed, with priced=false: its cost is unknown, not zero.
+ */
+export function legendEntries(rows: readonly SpendRow[], key: GroupKey): LegendEntry[] {
+  const byKey = new Map<string, LegendEntry>()
+  for (const row of rows) {
+    const label = groupLabel(row, key)
+    const entry = byKey.get(label) ?? { key: label, costUsd: 0, priced: false }
+    if (row.priced) {
+      entry.costUsd += row.costUsd
+      entry.priced = true
+    }
+    byKey.set(label, entry)
+  }
+  return [...byKey.values()].sort((a, b) => b.costUsd - a.costUsd || a.key.localeCompare(b.key))
+}
+
+/** The rows whose series is not hidden. */
+export function visibleRows(
+  rows: readonly SpendRow[],
+  key: GroupKey,
+  hidden: ReadonlySet<string>,
+): SpendRow[] {
+  return rows.filter((row) => !hidden.has(groupLabel(row, key)))
+}
+
+/** hidden with key flipped. */
+export function toggleKey(hidden: ReadonlySet<string>, key: string): Set<string> {
+  const next = new Set(hidden)
+  if (!next.delete(key)) {
+    next.add(key)
+  }
+  return next
+}
+
+/**
+ * Shows only key; if key is already the only visible series, shows everything.
+ * Names hidden but absent from keys are kept, so a series that drops out of the
+ * current range stays hidden when it comes back.
+ */
+export function soloKey(hidden: ReadonlySet<string>, keys: readonly string[], key: string): Set<string> {
+  const others = keys.filter((k) => k !== key)
+  const alreadySolo = !hidden.has(key) && others.every((k) => hidden.has(k))
+  const next = new Set(hidden)
+  if (alreadySolo) {
+    for (const k of others) {
+      next.delete(k)
+    }
+    return next
+  }
+  next.delete(key)
+  for (const k of others) {
+    next.add(k)
+  }
+  return next
+}
