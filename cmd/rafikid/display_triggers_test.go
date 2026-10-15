@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/fundi"
@@ -43,6 +44,37 @@ func TestDisplayTriggerScheduleCreateAndDelete(t *testing.T) {
 	last, ok = displayLastOf(c, "c_1")
 	a.Require().True(ok, "deleting a schedule publishes a display state")
 	a.Eq(protocol.DisplayIdle, last.state, "with no open schedule the child is idle")
+	a.Eq(protocol.WaitingOn(""), last.on, "idle waits on nothing")
+}
+
+// TestDisplayTriggerWakeupCancelClears: cancelling an open wakeup closes the
+// child's only open schedule, so the schedule wait clears.
+func TestDisplayTriggerWakeupCancelClears(t *testing.T) {
+	a := assert.NewCollecting(t)
+	c := displayServiceController(t)
+	insertDisplayChild(c.st, "c_1", "", "", protocol.StatusIdle)
+	c.schedules = schedules.NewMemory()
+	c.daemonZone = "UTC"
+
+	b := newScheduleBinding(c, "c_1")
+	if _, err := b.ScheduleWakeup(context.Background(), 5*time.Minute, "wake me"); err != nil {
+		t.Fatal(err)
+	}
+
+	c.drainDisplayRefresh()
+	last, ok := displayLastOf(c, "c_1")
+	a.Require().True(ok, "scheduling a wakeup publishes a display state")
+	a.Eq(protocol.DisplayWaiting, last.state, "a child with an open wakeup is waiting")
+	a.Eq(protocol.WaitingOnSchedule, last.on, "waiting on the schedule")
+
+	found, err := b.CancelWakeup(context.Background())
+	a.NoError(err, "cancel the wakeup")
+	a.True(found, "the wakeup was open")
+
+	c.drainDisplayRefresh()
+	last, ok = displayLastOf(c, "c_1")
+	a.Require().True(ok, "cancelling a wakeup publishes a display state")
+	a.Eq(protocol.DisplayIdle, last.state, "with the wakeup cancelled the child is idle")
 	a.Eq(protocol.WaitingOn(""), last.on, "idle waits on nothing")
 }
 

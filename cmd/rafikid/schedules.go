@@ -154,7 +154,16 @@ func (b *scheduleBinding) ScheduleWakeup(ctx context.Context, delay time.Duratio
 }
 
 func (b *scheduleBinding) CancelWakeup(ctx context.Context) (bool, error) {
-	return b.c.schedules.CancelWakeup(ctx, b.childID)
+	found, err := b.c.schedules.CancelWakeup(ctx, b.childID)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		// A cancelled wakeup closes an open schedule: its owner no longer
+		// waits on it.
+		b.c.refreshDisplayState(b.childID)
+	}
+	return found, nil
 }
 
 func (b *scheduleBinding) CronDelete(ctx context.Context, id string) error {
@@ -372,6 +381,13 @@ func (c *Controller) retryTombstone(id string, firedAt time.Time) {
 	if err := c.schedules.Tombstone(ctx, id, &firedAt); err != nil {
 		slog.Warn("schedule: tombstone retry failed", "id", id, "error", err)
 		c.at(scheduleKey(id), c.now().Add(time.Minute), func() { c.retryTombstone(id, firedAt) })
+		return
+	}
+	// The one-shot is now closed (the first attempt failed before any refresh
+	// ran): its owning child no longer waits on it. The closed row still
+	// carries the child id.
+	if row, err := c.schedules.Get(ctx, id); err == nil {
+		c.refreshDisplayState(row.Job.ChildID)
 	}
 }
 
@@ -501,6 +517,9 @@ func (c *Controller) releaseHeldSchedules(rootID string) {
 			// tombstone retry, which never re-pushes.
 			slog.Warn("schedule: release tombstone failed; retrying", "id", j.ID, "error", err)
 			c.at(scheduleKey(j.ID), c.now().Add(time.Minute), func() { c.retryTombstone(j.ID, now) })
+		} else {
+			// The released one-shot is closed: its owner no longer waits on it.
+			c.refreshDisplayState(j.ChildID)
 		}
 	}
 }
