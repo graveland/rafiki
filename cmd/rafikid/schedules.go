@@ -35,6 +35,11 @@ const scheduleEventSource = "schedule"
 // cancelTimer both key off it, so a re-arm replaces the pending fire.
 func scheduleKey(id string) string { return "schedule:" + id }
 
+// holdClearKey is the scheduler key for a held-clear bookkeeping retry. It is
+// deliberately DISTINCT from scheduleKey(id): the retry must never replace the
+// job's independently armed next-fire timer.
+func holdClearKey(id string) string { return "schedule-holdclear:" + id }
+
 // scheduleGate serializes the boot walk's catch-up registrations with the
 // budget seed. A catch-up registration that arrives before openScheduleGate
 // runs is queued; openScheduleGate seeds the breach set, then drains the queue,
@@ -360,6 +365,39 @@ func (c *Controller) retryTombstone(id string, firedAt time.Time) {
 	}
 }
 
+// retryClearHeld retries a failed held-clear WITHOUT re-pushing: the release
+// frame was already delivered when ClearHeld failed, so only the row's held
+// state is cleared. It runs under holdClearKey — distinct from the job's
+// next-fire key — so it never touches an independently armed fire timer. It
+// first re-reads the row and stops when the row is gone or closed: a row
+// closed in between has no held state left to clear.
+func (c *Controller) retryClearHeld(id string) {
+	if c.schedules == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	row, err := c.schedules.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, schedules.ErrNotFound) {
+			return // gone; nothing to clear
+		}
+		slog.Warn("schedule: held-clear retry load failed", "id", id, "error", err)
+		c.at(holdClearKey(id), c.now().Add(time.Minute), func() { c.retryClearHeld(id) })
+		return
+	}
+	if row.Job.ClosedAt != nil {
+		return // closed in between; nothing to clear
+	}
+	if err := c.schedules.ClearHeld(ctx, id); err != nil {
+		if errors.Is(err, schedules.ErrNotFound) {
+			return
+		}
+		slog.Warn("schedule: clear held retry failed", "id", id, "error", err)
+		c.at(holdClearKey(id), c.now().Add(time.Minute), func() { c.retryClearHeld(id) })
+	}
+}
+
 // renderScheduleFrame renders the inbox fragment a fire delivers: a header
 // naming the job, the prompt, then optional notes for missed occurrences and
 // held fires. loc falls back to UTC when the stored zone cannot be loaded — a
@@ -426,6 +464,7 @@ func (c *Controller) releaseHeldSchedules(rootID string) {
 		}
 		row, err := c.schedules.Get(ctx, j.ID)
 		if err != nil {
+			slog.Warn("schedule: release load failed; skipping", "id", j.ID, "childId", j.ChildID, "error", err)
 			continue
 		}
 		if c.daemonID != "" && row.ChildDaemonID != c.daemonID {
@@ -442,10 +481,16 @@ func (c *Controller) releaseHeldSchedules(rootID string) {
 		c.evbuf.Push(j.ChildID, scheduleEventSource, key, renderScheduleFrame(j, lastDue, 0, time.Time{}))
 		if j.Recurring {
 			if err := c.schedules.ClearHeld(ctx, j.ID); err != nil {
-				slog.Warn("schedule: clear held failed", "id", j.ID, "error", err)
+				// Bookkeeping-only retry under a key DISTINCT from the job's
+				// next-fire timer, so it can never replace that timer.
+				slog.Warn("schedule: clear held failed; retrying", "id", j.ID, "error", err)
+				c.at(holdClearKey(j.ID), c.now().Add(time.Minute), func() { c.retryClearHeld(j.ID) })
 			}
 		} else if err := c.schedules.Tombstone(ctx, j.ID, &now); err != nil {
-			slog.Warn("schedule: release tombstone failed", "id", j.ID, "error", err)
+			// The held one-shot's release tombstone: reuse the ordinary
+			// tombstone retry, which never re-pushes.
+			slog.Warn("schedule: release tombstone failed; retrying", "id", j.ID, "error", err)
+			c.at(scheduleKey(j.ID), c.now().Add(time.Minute), func() { c.retryTombstone(j.ID, now) })
 		}
 	}
 }

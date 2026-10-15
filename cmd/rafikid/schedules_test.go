@@ -828,3 +828,123 @@ func TestCloseAndCloseAllExitedTombstoneSchedules(t *testing.T) {
 		ck.True(row.Job.ClosedAt != nil, "%s's row must be tombstoned", id)
 	}
 }
+
+// failClearHeldStore wraps Memory and injects a fixed number of ClearHeld
+// failures — the store error F1 turns into a bookkeeping-only retry.
+type failClearHeldStore struct {
+	*schedules.Memory
+	mu       sync.Mutex
+	failures int
+}
+
+func (s *failClearHeldStore) ClearHeld(ctx context.Context, id string) error {
+	s.mu.Lock()
+	if s.failures > 0 {
+		s.failures--
+		s.mu.Unlock()
+		return errors.New("injected clear-held failure")
+	}
+	s.mu.Unlock()
+	return s.Memory.ClearHeld(ctx, id)
+}
+
+// failTombstoneStore wraps Memory and injects a fixed number of Tombstone
+// failures, for a released one-shot's tombstone retry.
+type failTombstoneStore struct {
+	*schedules.Memory
+	mu       sync.Mutex
+	failures int
+}
+
+func (s *failTombstoneStore) Tombstone(ctx context.Context, id string, firedAt *time.Time) error {
+	s.mu.Lock()
+	if s.failures > 0 {
+		s.failures--
+		s.mu.Unlock()
+		return errors.New("injected tombstone failure")
+	}
+	s.mu.Unlock()
+	return s.Memory.Tombstone(ctx, id, firedAt)
+}
+
+// schedulePendingUnderKey reports whether the scheduler holds a job for key.
+func schedulePendingUnderKey(c *Controller, key string) bool {
+	for _, e := range c.sched.Pending() {
+		if e.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// F1(a): a transient ClearHeld failure on a released recurring job must arm a
+// BOOKKEEPING-ONLY retry under a key distinct from the job's next-fire key. The
+// retry must not replace the next-fire timer, must not re-push, and once it
+// succeeds the held state clears with exactly one fragment delivered.
+func TestScheduleReleaseClearHeldFailureRetriesWithoutRepushing(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, mem := scheduleFixture(t)
+	ctx := context.Background()
+	c.schedules = &failClearHeldStore{Memory: mem, failures: 1}
+
+	id := "sch_clear_retry"
+	job, err := mem.Create(ctx, schedules.Job{
+		ID: id, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "*/5 * * * *",
+		TZ: "UTC", Prompt: "recurring", Recurring: true, NextFireAt: clk.Now().Add(time.Hour),
+	})
+	ck.Require().NoError(err)
+	c.armSchedule(job) // the job's independently armed next-fire timer
+	ck.Require().NoError(mem.RecordHeld(ctx, id, clk.Now(), 1, nil))
+
+	c.releaseHeldSchedules("c_w1")
+	clk.Advance(6 * time.Second) // flush the one release push
+
+	ck.Len(fragmentsContaining(cap, "were held"), 1, "exactly one held fragment; got %+v", cap.batches())
+
+	// The next-fire timer survives; the retry is armed under the distinct key.
+	ck.True(schedulePending(c, id), "the clear-held retry must not replace the next-fire timer")
+	ck.True(schedulePendingUnderKey(c, holdClearKey(id)), "the retry must be armed under the distinct holdClearKey")
+
+	row, err := mem.Get(ctx, id)
+	ck.Require().NoError(err)
+	ck.Eq(1, row.Job.HeldCount, "the failed clear leaves the hold in place")
+
+	clk.Advance(time.Minute + 6*time.Second) // the retry runs; ClearHeld succeeds
+	row, err = mem.Get(ctx, id)
+	ck.Require().NoError(err)
+	ck.Eq(0, row.Job.HeldCount, "the retry must clear the hold")
+	ck.True(row.Job.HeldFirstDue == nil && row.Job.HeldLastDue == nil, "the retry must clear the held instants")
+	ck.True(row.Job.ClosedAt == nil, "a released recurring job stays open")
+	ck.Len(fragmentsContaining(cap, "were held"), 1, "the retry must not push a second fragment")
+}
+
+// F1(b): a transient Tombstone failure on a released one-shot must reuse the
+// ordinary tombstone retry: exactly one fragment, tombstoned after the retry.
+func TestScheduleReleaseTombstoneFailureRetriesWithoutRepushing(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, mem := scheduleFixture(t)
+	ctx := context.Background()
+	c.schedules = &failTombstoneStore{Memory: mem, failures: 1}
+
+	id := "sch_tomb_retry"
+	_, err := mem.Create(ctx, schedules.Job{
+		ID: id, ChildID: "c_w1", Kind: schedules.KindCron, Cron: "3 * * * *",
+		TZ: "UTC", Prompt: "one-shot", Recurring: false, NextFireAt: clk.Now().Add(time.Hour),
+	})
+	ck.Require().NoError(err)
+	ck.Require().NoError(mem.RecordHeld(ctx, id, clk.Now(), 1, nil))
+
+	c.releaseHeldSchedules("c_w1")
+	clk.Advance(6 * time.Second)
+
+	ck.Len(fragmentsContaining(cap, "were held"), 1, "exactly one held fragment; got %+v", cap.batches())
+	row, err := mem.Get(ctx, id)
+	ck.Require().NoError(err)
+	ck.True(row.Job.ClosedAt == nil, "the failed release tombstone leaves the row open")
+
+	clk.Advance(time.Minute + 6*time.Second) // the retry tombstones without re-pushing
+	row, err = mem.Get(ctx, id)
+	ck.Require().NoError(err)
+	ck.True(row.Job.ClosedAt != nil, "the retry must tombstone the released one-shot")
+	ck.Len(fragmentsContaining(cap, "were held"), 1, "the retry must not push a second fragment")
+}
