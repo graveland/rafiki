@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -506,6 +507,28 @@ func TestWebuiControlHostMismatchRefused(t *testing.T) {
 	w := serve(s, r)
 	ck.Eq(http.StatusForbidden, w.Code, "status")
 	ck.Eq("refused", w.Header().Get(gatedHeader), "gate header")
+}
+
+func TestWebuiDevAssetsStripsResponseHeaders(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	// The fake Vite dev server emits CORS, the gate marker and a cookie: the
+	// dev-assets proxy must strip them the same way the Control proxy does.
+	up := fakeUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set(gatedHeader, "refused")
+		w.Header().Set("Set-Cookie", "sid=vite")
+		_, _ = io.WriteString(w, "<html>dev</html>")
+	})
+	base, err := url.Parse(up.URL)
+	ck.NoError(err, "parse dev-assets url")
+	s := New(Config{Port: testPort, DevAssets: base})
+
+	w := serve(s, newReq(http.MethodGet, "/app.js", loopbackHost(testPort), ""))
+	ck.Eq(http.StatusOK, w.Code, "status")
+	ck.Eq("<html>dev</html>", w.Body.String(), "dev body")
+	assertNoAccessControl(t, w.Header())
+	ck.Eq("", w.Header().Get(gatedHeader), "upstream gate marker stripped")
+	ck.Eq("", w.Header().Get("Set-Cookie"), "upstream Set-Cookie stripped")
 }
 
 func TestWebuiSecurityHeaders(t *testing.T) {
