@@ -181,6 +181,17 @@ type Session struct {
 	// result never rides a later settle fragment; a script child's result is
 	// the work product of its whole run and is never cleared this way.
 	Result string
+
+	// PendingQuestion is the operator-facing question the child is blocked on,
+	// set by a top-level agent_report kind=question. Empty means unset. Cleared
+	// when the child's next turn starts, so it always describes a turn that is
+	// current or just ended.
+	PendingQuestion string
+
+	// LastTurnError is why the child's last turn failed, written from
+	// fundi.TurnOutcome at settle. Empty means unset (the turn did not fail, or
+	// no turn has settled). Cleared when the child's next turn starts.
+	LastTurnError string
 }
 
 // Snapshot is a defensive copy used at every boundary.
@@ -283,6 +294,12 @@ type Snapshot struct {
 
 	// Result mirrors Session.Result — see its doc comment.
 	Result string
+
+	// PendingQuestion mirrors Session.PendingQuestion — see its doc comment.
+	PendingQuestion string
+
+	// LastTurnError mirrors Session.LastTurnError — see its doc comment.
+	LastTurnError string
 }
 
 // Snapshot returns a deep copy of the session's fields. The caller may freely
@@ -346,6 +363,8 @@ func (s *Session) Snapshot() Snapshot {
 		Labels:           copyLabels(s.Labels),
 		SlashCommands:    copyStrings(s.SlashCommands),
 		Result:           s.Result,
+		PendingQuestion:  s.PendingQuestion,
+		LastTurnError:    s.LastTurnError,
 	}
 }
 

@@ -75,6 +75,14 @@ type ChildRecord struct {
 	// Result is the child's final result (Connect SetResult): verbatim JSON,
 	// empty when unset. See childstore.Session.Result for the per-turn rule.
 	Result string
+
+	// PendingQuestion is the operator-facing question the child is blocked on.
+	// Empty when unset (stored as SQL NULL). See childstore.Session.PendingQuestion.
+	PendingQuestion string
+
+	// LastTurnError is why the child's last turn failed. Empty when unset
+	// (stored as SQL NULL). See childstore.Session.LastTurnError.
+	LastTurnError string
 }
 
 // ChildConfig is the spawn configuration that only matters on resume. It is
@@ -199,7 +207,9 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 		},
 		Labels: snap.Labels,
 
-		Result: snap.Result,
+		Result:          snap.Result,
+		PendingQuestion: snap.PendingQuestion,
+		LastTurnError:   snap.LastTurnError,
 	}
 }
 
@@ -271,6 +281,8 @@ func SessionFromRecord(rec ChildRecord) *Session {
 
 		Labels: rec.Labels,
 
-		Result: rec.Result,
+		Result:          rec.Result,
+		PendingQuestion: rec.PendingQuestion,
+		LastTurnError:   rec.LastTurnError,
 	}
 }
