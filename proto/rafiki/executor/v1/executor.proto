@@ -3,6 +3,7 @@ syntax = "proto3";
 package rafiki.executor.v1;
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "go.graveland.dev/rafiki/pkg/executorpb;executorpb";
 
@@ -10,8 +11,19 @@ service ExecutorService {
   rpc Describe(DescribeRequest) returns (DescribeResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc Execute(ExecuteRequest) returns (stream ExecuteResponse);
-  rpc Attach(AttachRequest) returns (stream AttachResponse);
   rpc Cancel(CancelRequest) returns (CancelResponse);
+  // WatchJobs is the push channel for background-job lifecycle events. One
+  // stream per daemon connection covers every job on this executor: on
+  // subscribe the executor replays a JobRunning for every running job and a
+  // JobExited for every finished, retained, UNACKED one, then ReplayComplete,
+  // then streams live events. A subscriber that cannot keep up is ended with
+  // CodeUnavailable rather than silently skipped, and its resubscribe replays
+  // everything unacked.
+  rpc WatchJobs(WatchJobsRequest) returns (stream WatchJobsResponse);
+  // AckJobExits tells the executor these finished jobs have been delivered.
+  // An unacked finished job is replayed on every subscribe and is never
+  // evicted.
+  rpc AckJobExits(AckJobExitsRequest) returns (AckJobExitsResponse);
   rpc JobOutput(JobOutputRequest) returns (JobOutputResponse);
   // Provision prepares a workspace for one child and returns a handle every
   // later Execute carries. A native executor answers with its pinned root and
@@ -195,6 +207,12 @@ message ExecuteRequest {
   // timeout bounds one tool call. Unset or zero means no timeout, exactly as
   // the old timeout_ms=0 did.
   google.protobuf.Duration timeout = 8;
+  // auto_background: for tool "bash", a command still running at its own
+  // timeout is moved to the background as a job instead of being killed.
+  bool auto_background = 9;
+  // owner is the daemon's id for the agent making this call. Opaque to the
+  // executor; stored on any job the call creates and returned on its events.
+  string owner = 10;
 }
 
 message ExecuteResponse {
@@ -223,13 +241,23 @@ message Failure {
   string message = 2;
 }
 
-message AttachRequest { string handle = 1; }
-message AttachResponse {
+// WatchJobsRequest is empty: one subscription covers every job on this
+// executor, and the executor carries each job's owner on its events so the
+// daemon routes an event to its child with no handle bookkeeping of its own.
+message WatchJobsRequest {}
+message WatchJobsResponse {
   oneof event {
-    OutputChunk output = 1;
-    int32       exit_code = 2;
+    JobRunning     running         = 1;
+    JobExited      exited          = 2;
+    ReplayComplete replay_complete = 3;
   }
 }
+message JobRunning { string handle = 1; string workspace_id = 2; string owner = 3; string command = 4; }
+message JobExited  { string handle = 1; string workspace_id = 2; string owner = 3; string command = 4;
+                     int32 exit_code = 5; google.protobuf.Timestamp finished_at = 6; }
+message ReplayComplete {}
+message AckJobExitsRequest  { repeated string handles = 1; }
+message AckJobExitsResponse {}
 
 message CancelRequest { string call_id = 1; }
 message CancelResponse {}
@@ -325,9 +353,9 @@ message SkillBodyResponse {
   string dir = 2;
 }
 
-// JobOutput is the one-shot poll behind bash_output. Attach is a stream and
-// draining it to answer "what has this printed so far" means either blocking
-// until exit or racing a deadline.
+// JobOutput is the one-shot read behind bash_output: it answers "what has this
+// printed so far" from the retained output as it stands, without blocking until
+// exit or racing a deadline.
 message JobOutputRequest {
   string handle = 1;
   // Byte offset into the job's lifetime output. 0 means "from whatever is

@@ -40,10 +40,14 @@ const (
 	ExecutorServiceHealthProcedure = "/rafiki.executor.v1.ExecutorService/Health"
 	// ExecutorServiceExecuteProcedure is the fully-qualified name of the ExecutorService's Execute RPC.
 	ExecutorServiceExecuteProcedure = "/rafiki.executor.v1.ExecutorService/Execute"
-	// ExecutorServiceAttachProcedure is the fully-qualified name of the ExecutorService's Attach RPC.
-	ExecutorServiceAttachProcedure = "/rafiki.executor.v1.ExecutorService/Attach"
 	// ExecutorServiceCancelProcedure is the fully-qualified name of the ExecutorService's Cancel RPC.
 	ExecutorServiceCancelProcedure = "/rafiki.executor.v1.ExecutorService/Cancel"
+	// ExecutorServiceWatchJobsProcedure is the fully-qualified name of the ExecutorService's WatchJobs
+	// RPC.
+	ExecutorServiceWatchJobsProcedure = "/rafiki.executor.v1.ExecutorService/WatchJobs"
+	// ExecutorServiceAckJobExitsProcedure is the fully-qualified name of the ExecutorService's
+	// AckJobExits RPC.
+	ExecutorServiceAckJobExitsProcedure = "/rafiki.executor.v1.ExecutorService/AckJobExits"
 	// ExecutorServiceJobOutputProcedure is the fully-qualified name of the ExecutorService's JobOutput
 	// RPC.
 	ExecutorServiceJobOutputProcedure = "/rafiki.executor.v1.ExecutorService/JobOutput"
@@ -93,8 +97,19 @@ type ExecutorServiceClient interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
 	Health(context.Context, *connect.Request[executorpb.HealthRequest]) (*connect.Response[executorpb.HealthResponse], error)
 	Execute(context.Context, *connect.Request[executorpb.ExecuteRequest]) (*connect.ServerStreamForClient[executorpb.ExecuteResponse], error)
-	Attach(context.Context, *connect.Request[executorpb.AttachRequest]) (*connect.ServerStreamForClient[executorpb.AttachResponse], error)
 	Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error)
+	// WatchJobs is the push channel for background-job lifecycle events. One
+	// stream per daemon connection covers every job on this executor: on
+	// subscribe the executor replays a JobRunning for every running job and a
+	// JobExited for every finished, retained, UNACKED one, then ReplayComplete,
+	// then streams live events. A subscriber that cannot keep up is ended with
+	// CodeUnavailable rather than silently skipped, and its resubscribe replays
+	// everything unacked.
+	WatchJobs(context.Context, *connect.Request[executorpb.WatchJobsRequest]) (*connect.ServerStreamForClient[executorpb.WatchJobsResponse], error)
+	// AckJobExits tells the executor these finished jobs have been delivered.
+	// An unacked finished job is replayed on every subscribe and is never
+	// evicted.
+	AckJobExits(context.Context, *connect.Request[executorpb.AckJobExitsRequest]) (*connect.Response[executorpb.AckJobExitsResponse], error)
 	JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error)
 	// Provision prepares a workspace for one child and returns a handle every
 	// later Execute carries. A native executor answers with its pinned root and
@@ -206,16 +221,22 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("Execute")),
 			connect.WithClientOptions(opts...),
 		),
-		attach: connect.NewClient[executorpb.AttachRequest, executorpb.AttachResponse](
-			httpClient,
-			baseURL+ExecutorServiceAttachProcedure,
-			connect.WithSchema(executorServiceMethods.ByName("Attach")),
-			connect.WithClientOptions(opts...),
-		),
 		cancel: connect.NewClient[executorpb.CancelRequest, executorpb.CancelResponse](
 			httpClient,
 			baseURL+ExecutorServiceCancelProcedure,
 			connect.WithSchema(executorServiceMethods.ByName("Cancel")),
+			connect.WithClientOptions(opts...),
+		),
+		watchJobs: connect.NewClient[executorpb.WatchJobsRequest, executorpb.WatchJobsResponse](
+			httpClient,
+			baseURL+ExecutorServiceWatchJobsProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("WatchJobs")),
+			connect.WithClientOptions(opts...),
+		),
+		ackJobExits: connect.NewClient[executorpb.AckJobExitsRequest, executorpb.AckJobExitsResponse](
+			httpClient,
+			baseURL+ExecutorServiceAckJobExitsProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("AckJobExits")),
 			connect.WithClientOptions(opts...),
 		),
 		jobOutput: connect.NewClient[executorpb.JobOutputRequest, executorpb.JobOutputResponse](
@@ -316,8 +337,9 @@ type executorServiceClient struct {
 	describe              *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
 	health                *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
 	execute               *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
-	attach                *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
 	cancel                *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	watchJobs             *connect.Client[executorpb.WatchJobsRequest, executorpb.WatchJobsResponse]
+	ackJobExits           *connect.Client[executorpb.AckJobExitsRequest, executorpb.AckJobExitsResponse]
 	jobOutput             *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
 	provision             *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
 	release               *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
@@ -350,14 +372,19 @@ func (c *executorServiceClient) Execute(ctx context.Context, req *connect.Reques
 	return c.execute.CallServerStream(ctx, req)
 }
 
-// Attach calls rafiki.executor.v1.ExecutorService.Attach.
-func (c *executorServiceClient) Attach(ctx context.Context, req *connect.Request[executorpb.AttachRequest]) (*connect.ServerStreamForClient[executorpb.AttachResponse], error) {
-	return c.attach.CallServerStream(ctx, req)
-}
-
 // Cancel calls rafiki.executor.v1.ExecutorService.Cancel.
 func (c *executorServiceClient) Cancel(ctx context.Context, req *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error) {
 	return c.cancel.CallUnary(ctx, req)
+}
+
+// WatchJobs calls rafiki.executor.v1.ExecutorService.WatchJobs.
+func (c *executorServiceClient) WatchJobs(ctx context.Context, req *connect.Request[executorpb.WatchJobsRequest]) (*connect.ServerStreamForClient[executorpb.WatchJobsResponse], error) {
+	return c.watchJobs.CallServerStream(ctx, req)
+}
+
+// AckJobExits calls rafiki.executor.v1.ExecutorService.AckJobExits.
+func (c *executorServiceClient) AckJobExits(ctx context.Context, req *connect.Request[executorpb.AckJobExitsRequest]) (*connect.Response[executorpb.AckJobExitsResponse], error) {
+	return c.ackJobExits.CallUnary(ctx, req)
 }
 
 // JobOutput calls rafiki.executor.v1.ExecutorService.JobOutput.
@@ -440,8 +467,19 @@ type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
 	Health(context.Context, *connect.Request[executorpb.HealthRequest]) (*connect.Response[executorpb.HealthResponse], error)
 	Execute(context.Context, *connect.Request[executorpb.ExecuteRequest], *connect.ServerStream[executorpb.ExecuteResponse]) error
-	Attach(context.Context, *connect.Request[executorpb.AttachRequest], *connect.ServerStream[executorpb.AttachResponse]) error
 	Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error)
+	// WatchJobs is the push channel for background-job lifecycle events. One
+	// stream per daemon connection covers every job on this executor: on
+	// subscribe the executor replays a JobRunning for every running job and a
+	// JobExited for every finished, retained, UNACKED one, then ReplayComplete,
+	// then streams live events. A subscriber that cannot keep up is ended with
+	// CodeUnavailable rather than silently skipped, and its resubscribe replays
+	// everything unacked.
+	WatchJobs(context.Context, *connect.Request[executorpb.WatchJobsRequest], *connect.ServerStream[executorpb.WatchJobsResponse]) error
+	// AckJobExits tells the executor these finished jobs have been delivered.
+	// An unacked finished job is replayed on every subscribe and is never
+	// evicted.
+	AckJobExits(context.Context, *connect.Request[executorpb.AckJobExitsRequest]) (*connect.Response[executorpb.AckJobExitsResponse], error)
 	JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error)
 	// Provision prepares a workspace for one child and returns a handle every
 	// later Execute carries. A native executor answers with its pinned root and
@@ -549,16 +587,22 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("Execute")),
 		connect.WithHandlerOptions(opts...),
 	)
-	executorServiceAttachHandler := connect.NewServerStreamHandler(
-		ExecutorServiceAttachProcedure,
-		svc.Attach,
-		connect.WithSchema(executorServiceMethods.ByName("Attach")),
-		connect.WithHandlerOptions(opts...),
-	)
 	executorServiceCancelHandler := connect.NewUnaryHandler(
 		ExecutorServiceCancelProcedure,
 		svc.Cancel,
 		connect.WithSchema(executorServiceMethods.ByName("Cancel")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceWatchJobsHandler := connect.NewServerStreamHandler(
+		ExecutorServiceWatchJobsProcedure,
+		svc.WatchJobs,
+		connect.WithSchema(executorServiceMethods.ByName("WatchJobs")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceAckJobExitsHandler := connect.NewUnaryHandler(
+		ExecutorServiceAckJobExitsProcedure,
+		svc.AckJobExits,
+		connect.WithSchema(executorServiceMethods.ByName("AckJobExits")),
 		connect.WithHandlerOptions(opts...),
 	)
 	executorServiceJobOutputHandler := connect.NewUnaryHandler(
@@ -659,10 +703,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceHealthHandler.ServeHTTP(w, r)
 		case ExecutorServiceExecuteProcedure:
 			executorServiceExecuteHandler.ServeHTTP(w, r)
-		case ExecutorServiceAttachProcedure:
-			executorServiceAttachHandler.ServeHTTP(w, r)
 		case ExecutorServiceCancelProcedure:
 			executorServiceCancelHandler.ServeHTTP(w, r)
+		case ExecutorServiceWatchJobsProcedure:
+			executorServiceWatchJobsHandler.ServeHTTP(w, r)
+		case ExecutorServiceAckJobExitsProcedure:
+			executorServiceAckJobExitsHandler.ServeHTTP(w, r)
 		case ExecutorServiceJobOutputProcedure:
 			executorServiceJobOutputHandler.ServeHTTP(w, r)
 		case ExecutorServiceProvisionProcedure:
@@ -714,12 +760,16 @@ func (UnimplementedExecutorServiceHandler) Execute(context.Context, *connect.Req
 	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Execute is not implemented"))
 }
 
-func (UnimplementedExecutorServiceHandler) Attach(context.Context, *connect.Request[executorpb.AttachRequest], *connect.ServerStream[executorpb.AttachResponse]) error {
-	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Attach is not implemented"))
-}
-
 func (UnimplementedExecutorServiceHandler) Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Cancel is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) WatchJobs(context.Context, *connect.Request[executorpb.WatchJobsRequest], *connect.ServerStream[executorpb.WatchJobsResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.WatchJobs is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) AckJobExits(context.Context, *connect.Request[executorpb.AckJobExitsRequest]) (*connect.Response[executorpb.AckJobExitsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.AckJobExits is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error) {

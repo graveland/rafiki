@@ -32,7 +32,7 @@ func TestJobSessionHasNoControllingTerminal(t *testing.T) {
 	t.Cleanup(func() { r.releaseWorkspace("ws-tty") })
 
 	handle, err := r.start(`if : </dev/tty 2>/dev/null; then echo TTY; else echo NOTTY; fi`,
-		"h-tty", "ws-tty", "")
+		"h-tty", "ws-tty", "", "")
 	c.NoError(err, "start")
 
 	// The /dev/tty probe cannot tell Setsid from Setpgid when THIS process has
@@ -85,7 +85,7 @@ func TestJobKillStillKillsTheGroup(t *testing.T) {
 	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-kill") })
 
-	handle, err := r.start("sleep 30 & sleep 30", "h-kill", "ws-kill", "")
+	handle, err := r.start("sleep 30 & sleep 30", "h-kill", "ws-kill", "", "")
 	c.NoError(err, "start")
 
 	c.NoError(r.kill(handle), "kill")

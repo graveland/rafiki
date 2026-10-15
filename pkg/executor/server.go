@@ -20,6 +20,8 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
@@ -633,7 +635,7 @@ func (s *Server) startBackground(
 	if ws != nil && ws.workdir != "" {
 		dir = ws.workdir
 	}
-	handle, err := s.jobs.start(in.Command, msg.CallId, wsID, dir)
+	handle, err := s.jobs.start(in.Command, msg.CallId, wsID, dir, msg.Owner)
 	if err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
@@ -650,45 +652,97 @@ func (s *Server) startBackground(
 	})
 }
 
-func (s *Server) Attach(
+// WatchJobs streams background-job lifecycle events for this executor. One
+// stream per daemon connection covers every job: the replay (a JobRunning for
+// every running job, a JobExited for every finished unacked one) is sent first,
+// then ReplayComplete marks its end, then live events follow. A subscriber that
+// falls behind is ended with CodeUnavailable rather than silently skipped; the
+// daemon resubscribes and the replay covers everything unacked.
+func (s *Server) WatchJobs(
 	ctx context.Context,
-	req *connect.Request[executorpb.AttachRequest],
-	stream *connect.ServerStream[executorpb.AttachResponse],
+	_ *connect.Request[executorpb.WatchJobsRequest],
+	stream *connect.ServerStream[executorpb.WatchJobsResponse],
 ) error {
-	handle := req.Msg.Handle
+	// Subscribe BEFORE snapshotting: an event that happens in between is then
+	// delivered twice rather than lost, and the daemon is idempotent.
+	ch, cancel := s.jobs.subscribe()
+	defer cancel()
 
-	// cursor is a byte offset into the job's lifetime output, not a length:
-	// the ring drops old bytes, so comparing lengths would replay or skip.
-	var cursor int64
-
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
+	running, exited := s.jobs.snapshot()
+	for _, ev := range running {
+		if err := stream.Send(jobRunningResponse(ev)); err != nil {
+			return err
+		}
+	}
+	for _, ev := range exited {
+		if err := stream.Send(jobExitedResponse(ev)); err != nil {
+			return err
+		}
+	}
+	if err := stream.Send(&executorpb.WatchJobsResponse{
+		Event: &executorpb.WatchJobsResponse_ReplayComplete{ReplayComplete: &executorpb.ReplayComplete{}},
+	}); err != nil {
+		return err
+	}
 
 	for {
-		data, total, exited, code, found := s.jobs.output(handle, cursor)
-		if !found {
-			return connect.NewError(connect.CodeNotFound, fmt.Errorf("no such handle: %s", handle))
-		}
-		if len(data) > 0 {
-			if err := stream.Send(&executorpb.AttachResponse{
-				Event: &executorpb.AttachResponse_Output{
-					Output: &executorpb.OutputChunk{Data: data},
-				},
-			}); err != nil {
-				return err
-			}
-			cursor = total
-		}
-		if exited {
-			return stream.Send(&executorpb.AttachResponse{
-				Event: &executorpb.AttachResponse_ExitCode{ExitCode: int32(code)},
-			})
-		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+			// The daemon went away; a fresh subscribe replays everything
+			// unacked. Not an error.
+			return nil
+		case ev, ok := <-ch:
+			if !ok {
+				// The registry closed the channel because this subscriber
+				// could not keep up. Signal a resubscribe rather than pretend
+				// the stream is still healthy.
+				return connect.NewError(connect.CodeUnavailable,
+					errors.New("job event subscriber fell behind; resubscribe"))
+			}
+			msg := jobRunningResponse(ev)
+			if !ev.running {
+				msg = jobExitedResponse(ev)
+			}
+			if err := stream.Send(msg); err != nil {
+				return err
+			}
 		}
+	}
+}
+
+// AckJobExits records that finished jobs' exits have been delivered, so they
+// stop being replayed and become eligible for byte-budget eviction.
+func (s *Server) AckJobExits(
+	_ context.Context,
+	req *connect.Request[executorpb.AckJobExitsRequest],
+) (*connect.Response[executorpb.AckJobExitsResponse], error) {
+	s.jobs.ack(req.Msg.Handles)
+	return connect.NewResponse(&executorpb.AckJobExitsResponse{}), nil
+}
+
+// jobRunningResponse renders a running-job event.
+func jobRunningResponse(ev jobEvent) *executorpb.WatchJobsResponse {
+	return &executorpb.WatchJobsResponse{
+		Event: &executorpb.WatchJobsResponse_Running{Running: &executorpb.JobRunning{
+			Handle:      ev.handle,
+			WorkspaceId: ev.workspaceID,
+			Owner:       ev.owner,
+			Command:     ev.command,
+		}},
+	}
+}
+
+// jobExitedResponse renders an exited-job event.
+func jobExitedResponse(ev jobEvent) *executorpb.WatchJobsResponse {
+	return &executorpb.WatchJobsResponse{
+		Event: &executorpb.WatchJobsResponse_Exited{Exited: &executorpb.JobExited{
+			Handle:      ev.handle,
+			WorkspaceId: ev.workspaceID,
+			Owner:       ev.owner,
+			Command:     ev.command,
+			ExitCode:    int32(ev.exitCode),
+			FinishedAt:  timestamppb.New(ev.finishedAt),
+		}},
 	}
 }
 

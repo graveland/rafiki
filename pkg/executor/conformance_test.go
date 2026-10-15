@@ -134,22 +134,13 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		c.Require().NotEq("", handle, "background execute must yield a handle")
 		c.Require().LessOrEqual(2*time.Second, time.Since(start), "returned after")
 
-		// Attach and wait for completion.
-		attachStream, err := client.Attach(ctx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
-		c.Require().NoError(err)
-		var exitCode int32 = -1
-		for attachStream.Receive() {
-			if ev, ok := attachStream.Msg().Event.(*executorpb.AttachResponse_ExitCode); ok {
-				exitCode = ev.ExitCode
-			}
-		}
-		_ = attachStream.Err()
-		c.Eq(0, exitCode, "exit code")
+		// The exit arrives on WatchJobs; Attach is deleted.
+		code := waitJobExit(t, client, handle, 10*time.Second)
+		c.Eq(int32(0), code, "exit code")
 	})
 
-	t.Run("a dropped Attach does not kill the job", func(t *testing.T) {
+	t.Run("a dropped WatchJobs subscription does not kill the job", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		// Start a background job.
 		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 			CallId: "bg-2", Tool: "bash", Background: true,
 			InputJson: []byte(`{"command":"sleep 2; echo survived"}`),
@@ -165,31 +156,23 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		_ = stream.Err()
 		c.NotEq("", handle, "no handle")
 
-		// Attach, cancel it, then attache again — the job must survive.
-		ctx1, cancel1 := context.WithCancel(ctx)
-		attachStream1, err := client.Attach(ctx1, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		// Subscribe, read one event, then drop the subscription — the job must
+		// survive it.
+		sctx, cancel := context.WithCancel(ctx)
+		sub, err := client.WatchJobs(sctx, connect.NewRequest(&executorpb.WatchJobsRequest{}))
 		c.NoError(err)
-		// Read one event then cancel.
-		attachStream1.Receive()
-		cancel1()
+		sub.Receive()
+		cancel()
 
-		// Wait past the job's natural completion.
+		// Wait past the job's natural completion; a fresh subscription must
+		// still deliver the unacked exit — a dropped subscription loses
+		// nothing.
 		time.Sleep(3 * time.Second)
-
-		// Attach again and confirm completion.
-		attachStream2, err := client.Attach(ctx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
-		c.NoError(err)
-		var exited bool
-		for attachStream2.Receive() {
-			if _, ok := attachStream2.Msg().Event.(*executorpb.AttachResponse_ExitCode); ok {
-				exited = true
-			}
-		}
-		_ = attachStream2.Err()
-		c.True(exited, "job did not complete — a dropped Attach must not kill the job")
+		code := waitJobExit(t, client, handle, 10*time.Second)
+		c.Eq(int32(0), code, "job did not complete — a dropped subscription must not kill the job")
 	})
 
-	t.Run("Attach streams output while the job is still running", func(t *testing.T) {
+	t.Run("JobOutput reads a running job's output before it exits", func(t *testing.T) {
 		c := assert.NewAborting(t)
 		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 			CallId: "bg-live", Tool: "bash", Background: true,
@@ -206,23 +189,15 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		_ = stream.Err()
 		c.NotEq("", handle, "no handle")
 
-		attachCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		attach, err := client.Attach(attachCtx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		// The output written so far is readable BEFORE exit — the entire point
+		// of a background handle.
+		time.Sleep(700 * time.Millisecond)
+		resp, err := client.JobOutput(ctx, connect.NewRequest(&executorpb.JobOutputRequest{Handle: handle}))
 		c.NoError(err)
-		var got []byte
-		for attach.Receive() {
-			if ev, ok := attach.Msg().Event.(*executorpb.AttachResponse_Output); ok {
-				got = append(got, ev.Output.Data...)
-			}
-		}
-		_ = attach.Err()
-
-		// The 2s deadline expires while the job is still sleeping, so this
-		// asserts output arrived BEFORE exit — which is the entire point of
-		// a background handle.
-		c.StrContains(string(got), "first", "Attach delivered %q before the job exited; want it to contain", got)
-		c.NotStrContains(string(got), "second", "the job cannot have finished yet; got %q", got)
+		c.True(resp.Msg.Found, "Found=false for a running handle")
+		c.False(resp.Msg.Exited, "the job cannot have finished yet")
+		c.StrContains(string(resp.Msg.Data), "first", "output before exit = %q, want it to contain", resp.Msg.Data)
+		c.NotStrContains(string(resp.Msg.Data), "second", "the job cannot have finished yet: %q", resp.Msg.Data)
 	})
 
 	t.Run("Health lists running handles", func(t *testing.T) {
@@ -320,6 +295,26 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 			t.Fatal("the grandchild survived Cancel — kill signalled only the direct child")
 		}
 	})
+}
+
+// waitJobExit subscribes to WatchJobs and returns handle's exit code once its
+// exited event arrives, or -1 if none arrives within `within`.
+func waitJobExit(t *testing.T, client executorpbconnect.ExecutorServiceClient, handle string, within time.Duration) int32 {
+	t.Helper()
+	c := assert.NewAborting(t)
+	wctx, cancel := context.WithTimeout(context.Background(), within)
+	defer cancel()
+	stream, err := client.WatchJobs(wctx, connect.NewRequest(&executorpb.WatchJobsRequest{}))
+	c.NoError(err, "WatchJobs")
+	code := int32(-1)
+	for stream.Receive() {
+		if ev, ok := stream.Msg().Event.(*executorpb.WatchJobsResponse_Exited); ok && ev.Exited.Handle == handle {
+			code = ev.Exited.ExitCode
+			break
+		}
+	}
+	_ = stream.Err()
+	return code
 }
 
 // textOf extracts the concatenated text from a Result's content blocks.

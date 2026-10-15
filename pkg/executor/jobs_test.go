@@ -41,7 +41,7 @@ func TestAJobLeavingAGrandchildOnThePipeStillReportsExited(t *testing.T) {
 	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
 
-	handle, err := r.start("sleep 300 & echo started; exit 0", "h1", "ws-1", "")
+	handle, err := r.start("sleep 300 & echo started; exit 0", "h1", "ws-1", "", "")
 	c.Require().NoError(err, "start")
 	c.Eq(0, waitForExit(t, r, handle, 15*time.Second), "exit code")
 }
@@ -67,7 +67,7 @@ func TestALingeringGrandchildDoesNotCorruptTheExitCode(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewCollecting(t)
-			handle, err := r.start(tc.script, "", "ws-1", "")
+			handle, err := r.start(tc.script, "", "ws-1", "", "")
 			c.Require().NoError(err, "start")
 			c.Eq(tc.want, waitForExit(t, r, handle, 15*time.Second), "exit code")
 		})
@@ -89,7 +89,7 @@ func TestOutputBeyondTheReadCapIsStillOnDisk(t *testing.T) {
 
 	// One distinctive early line, then enough noise to push it past the cap.
 	script := fmt.Sprintf("echo NEEDLE_AT_THE_START; for i in $(seq 1 %d); do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done", (maxJobResponse/49)+200)
-	handle, err := r.start(script, "", "ws-1", "")
+	handle, err := r.start(script, "", "ws-1", "", "")
 	c.Require().NoError(err, "start")
 	waitForExit(t, r, handle, 20*time.Second)
 
@@ -115,6 +115,10 @@ func TestOutputBeyondTheReadCapIsStillOnDisk(t *testing.T) {
 // end and resume hours later, so a job that finished 30 seconds in would be
 // unreadable by the time anyone came back for it. Finished jobs are evicted
 // oldest-first only when the workspace exceeds its byte budget.
+//
+// Each job is acked (as a delivered exit would be) so it is eligible for
+// eviction: an UNACKED finished job is never evicted (see
+// TestUnackedFinishedJobSurvivesEviction).
 func TestFinishedJobsAreEvictedByByteBudgetOldestFirst(t *testing.T) {
 	c := assert.NewCollecting(t)
 	const budget = 64 << 10
@@ -123,9 +127,10 @@ func TestFinishedJobsAreEvictedByByteBudgetOldestFirst(t *testing.T) {
 
 	var handles []string
 	for i := range 8 {
-		h, err := r.start(fmt.Sprintf("for i in $(seq 1 400); do echo job%d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done", i), "", "ws-1", "")
+		h, err := r.start(fmt.Sprintf("for i in $(seq 1 400); do echo job%d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done", i), "", "ws-1", "", "")
 		c.Require().NoError(err, "start")
 		waitForExit(t, r, h, 15*time.Second)
+		r.ack([]string{h})
 		handles = append(handles, h)
 	}
 
@@ -145,10 +150,10 @@ func TestARunningJobIsNeverEvicted(t *testing.T) {
 	r := newJobRegistry(t.TempDir(), t.TempDir(), budget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
 
-	live, err := r.start("echo live-marker; sleep 300", "", "ws-1", "")
+	live, err := r.start("echo live-marker; sleep 300", "", "ws-1", "", "")
 	c.Require().NoError(err, "start")
 	for range 6 {
-		h, err := r.start("for i in $(seq 1 400); do echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; done", "", "ws-1", "")
+		h, err := r.start("for i in $(seq 1 400); do echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; done", "", "ws-1", "", "")
 		c.Require().NoError(err, "start")
 		waitForExit(t, r, h, 15*time.Second)
 	}
@@ -166,7 +171,7 @@ func TestReleasingAWorkspaceRemovesItsJobsAndFiles(t *testing.T) {
 	dir := t.TempDir()
 	r := newJobRegistry(dir, dir, defaultJobBudget)
 
-	h, err := r.start("echo done", "", "ws-1", "")
+	h, err := r.start("echo done", "", "ws-1", "", "")
 	c.Require().NoError(err, "start")
 	waitForExit(t, r, h, 15*time.Second)
 	path := r.outputPath(h)
@@ -190,9 +195,9 @@ func TestReleasingOneWorkspaceLeavesAnothersJobsAlone(t *testing.T) {
 	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-2") })
 
-	a, err := r.start("echo a", "", "ws-1", "")
+	a, err := r.start("echo a", "", "ws-1", "", "")
 	c.NoError(err, "start")
-	b, err := r.start("echo b", "", "ws-2", "")
+	b, err := r.start("echo b", "", "ws-2", "", "")
 	c.NoError(err, "start")
 	waitForExit(t, r, a, 15*time.Second)
 	waitForExit(t, r, b, 15*time.Second)

@@ -42,11 +42,11 @@ func TestClientSendsEpochAndRejectsAnOldDaemon(t *testing.T) {
 	c.Eq(strconv.Itoa(protocol.Epoch), gotReq, "every request must carry the epoch")
 	c.Error(err, "a daemon that omits the response epoch must be rejected")
 	c.StrContains(err.Error(),
-		"daemon speaks rafiki protocol none; this client speaks 2 — upgrade the daemon",
+		"daemon speaks rafiki protocol none; this client speaks 3 — upgrade the daemon",
 		"old-daemon error")
 
 	futureDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(protocol.EpochHeader, "3")
+		w.Header().Set(protocol.EpochHeader, "4")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer futureDaemon.Close()
@@ -55,9 +55,9 @@ func TestClientSendsEpochAndRejectsAnOldDaemon(t *testing.T) {
 	if resp != nil {
 		_ = resp.Body.Close()
 	}
-	c.Error(err, "a daemon speaking epoch 3 must be rejected")
+	c.Error(err, "a daemon speaking epoch 4 must be rejected")
 	c.StrContains(err.Error(),
-		"daemon speaks rafiki protocol 3; this client speaks 2 — upgrade the daemon",
+		"daemon speaks rafiki protocol 4; this client speaks 3 — upgrade the daemon",
 		"wrong-epoch error")
 }
 
@@ -73,7 +73,7 @@ func TestClientDoesNotMaskAProtocolMismatchError(t *testing.T) {
 	// must not mask.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		err := rpcreason.Attach(connect.NewError(connect.CodeFailedPrecondition,
-			errors.New("this daemon speaks rafiki protocol 2; upgrade your rafiki client (peer sent none)")),
+			errors.New("this daemon speaks rafiki protocol 3; upgrade your rafiki client (peer sent none)")),
 			protocol.ErrProtocolMismatch)
 		_ = connect.NewErrorWriter().Write(w, r, err)
 	}))

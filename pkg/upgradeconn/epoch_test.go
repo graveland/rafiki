@@ -64,7 +64,7 @@ func TestUpgradeEpochMismatchIsAPlain400AndNeverHijacks(t *testing.T) {
 		peer  string
 	}{
 		{"missing header is epoch 1", "", "none"},
-		{"wrong value", "3", "3"},
+		{"wrong value", "2", "2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := rawUpgradeRequest(t, addr, tc.epoch)
@@ -117,7 +117,7 @@ func TestDialRejectsA101WithTheWrongEpoch(t *testing.T) {
 	var ref *Refused
 	c.Require().True(errors.As(err, &ref), "want *Refused, got %v", err)
 	c.Eq(http.StatusBadRequest, ref.Status, "status: 400 is terminal for the reconnect loops")
-	c.StrContains(ref.Reason, "rafiki protocol mismatch: this side speaks 2", "reason")
+	c.StrContains(ref.Reason, "rafiki protocol mismatch: this side speaks 3", "reason")
 }
 
 // TestDialSendsTheEpoch pins that the epoch is set inside Dial, so no caller
