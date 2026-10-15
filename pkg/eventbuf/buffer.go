@@ -72,13 +72,14 @@ type perKey struct {
 //
 // A zero-value Config is not usable; construct via New.
 type Buffer struct {
-	mu    sync.Mutex
-	cfg   Config
-	clk   clock.Clock
-	state map[bufKey]*perKey
-	flush FlushFn
-	busy  BusyFn
-	acc   inbox.Accepter
+	mu       sync.Mutex
+	cfg      Config
+	clk      clock.Clock
+	state    map[bufKey]*perKey
+	flush    FlushFn
+	busy     BusyFn
+	onChange func(childID string)
+	acc      inbox.Accepter
 }
 
 // New returns a Buffer using the given clock. Config fields that are zero are
@@ -112,6 +113,29 @@ func (b *Buffer) SetBusy(fn BusyFn) {
 	b.busy = fn
 }
 
+// SetOnChange registers fn, called with childID whenever Pending(childID) may
+// have changed: after a fragment is accepted (Push, PushNow, PushSteer) and
+// after a flush clears a batch (fire, DrainIdle, Forget). fn must not block;
+// the owner passes an enqueue. Must be called before any Push.
+func (b *Buffer) SetOnChange(fn func(childID string)) {
+	b.onChange = fn
+}
+
+// Pending reports whether childID has queued news not yet delivered: any
+// perKey for the child that is dirty, whether it is waiting out its debounce
+// or deferred because the child was busy. It is also true while an orphan is
+// queued, since an orphan is news that never reached the store.
+func (b *Buffer) Pending(childID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for bk, pk := range b.state {
+		if bk.childID == childID && (pk.dirty || len(pk.orphans) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetAccepter attaches the durable inbox. Until it is set, every Push is an
 // orphan: still delivered, never persisted. That is the pre-durable-inbox
 // behaviour and is what a unit test with no store gets.
@@ -137,6 +161,7 @@ func (b *Buffer) Push(childID, source, key, fragment string) {
 	b.mu.Lock()
 	b.armLocked(childID, source)
 	b.mu.Unlock()
+	b.notify(childID)
 }
 
 // PushNow bypasses the DEBOUNCE but not the busy gate: a child mid-turn keeps
@@ -151,6 +176,7 @@ func (b *Buffer) PushNow(childID, source, fragment string) {
 	}
 	b.accept(childID, source, "", fragment, inbox.ModePrompt)
 	b.fire(bufKey{childID, source}, false)
+	b.notify(childID)
 }
 
 // PushSteer bypasses BOTH the debounce and the busy gate, and is accepted as a
@@ -167,6 +193,7 @@ func (b *Buffer) PushSteer(childID, source, fragment string) {
 	}
 	b.accept(childID, source, "", fragment, inbox.ModeSteer)
 	b.fire(bufKey{childID, source}, true)
+	b.notify(childID)
 }
 
 // DrainIdle flushes every batch DEFERRED because childID was busy. Call it on
@@ -236,6 +263,7 @@ func (b *Buffer) Forget(childID string) {
 			flush(childID, f.source, f.orphans)
 		}
 	}
+	b.notify(childID)
 }
 
 // --- internal ---
@@ -252,6 +280,16 @@ func validSource(childID, source, op string) bool {
 		return false
 	}
 	return true
+}
+
+// notify invokes the registered change callback with b.mu released. fn may
+// re-enter the buffer (Pending, even Push) without deadlocking; that is why it
+// runs outside the lock. onChange is written only by SetOnChange, which is
+// documented to run before any Push, so reading it here needs no lock.
+func (b *Buffer) notify(childID string) {
+	if fn := b.onChange; fn != nil {
+		fn(childID)
+	}
 }
 
 // accept persists one fragment. A store failure is logged and the whole
@@ -363,6 +401,9 @@ func (b *Buffer) fire(bk bufKey, forced bool) {
 	if flush != nil {
 		flush(bk.childID, bk.source, orphans)
 	}
+	// A batch was cleared, so Pending may have changed — notify after the
+	// lock is released, same rule as flush.
+	b.notify(bk.childID)
 }
 
 // truncate cuts s to maxBytes with a visible "…(truncated)" suffix.
