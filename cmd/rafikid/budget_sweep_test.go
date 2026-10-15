@@ -69,7 +69,7 @@ func TestUnderBudgetSweepDoesNothing(t *testing.T) {
 	assert.NewAborting(t).Empty(cap.batches(), "an under-budget subtree must be silent")
 }
 
-// The sweep must not re-block and re-steer on every tick. Once told, an agent
+// The sweep must not re-block and re-steer on every fire. Once told, an agent
 // stays told until the budget is raised.
 func TestBudgetSweepIsIdempotentWhileStillOverBudget(t *testing.T) {
 	c, _, cap := settleFixture(t)

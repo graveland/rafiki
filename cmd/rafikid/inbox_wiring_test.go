@@ -486,7 +486,7 @@ func TestConnectAbortToAFundiChildStillQueues(t *testing.T) {
 	}
 }
 
-// --- lifecycle: drain on idle, reset on exit, drop on forget, sweep on the tick ---
+// --- lifecycle: drain on idle, reset on exit, drop on forget, sweep on the scheduler job ---
 
 // TestExitResetsSentRowsRatherThanDroppingThem pins the asymmetry the whole
 // lifecycle rests on. An exit is NOT the moment a row becomes unrunnable: the

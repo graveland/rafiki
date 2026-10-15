@@ -21,12 +21,12 @@ const heartbeatEventSource = "subagents-heartbeat"
 // defaultHeartbeatInterval is how long a child works continuously before its
 // parent gets a check-in. Overridable with RAFIKI_HEARTBEAT_INTERVAL.
 //
-// The heartbeat is a deadline on the scheduler (see armHeartbeat), not a tick
-// sweep: the first check-in of a spell lands at exactly this interval after
-// the spell started, not at the next coarse reconciliation tick. The value is
-// chosen for how stale a coordinator's view of subagent spend may get, not
-// for any prompt-cache TTL — see CLAUDE.md on why the cache reading of this
-// number does not survive contact with the data.
+// The heartbeat is a deadline on the scheduler (see armHeartbeat), not a
+// periodic sweep: the first check-in of a spell lands at exactly this interval
+// after the spell started, not coarsely quantized to a shared cadence. The
+// value is chosen for how stale a coordinator's view of subagent spend may
+// get, not for any prompt-cache TTL — see CLAUDE.md on why the cache reading
+// of this number does not survive contact with the data.
 const defaultHeartbeatInterval = 4 * time.Minute
 
 // heartbeatState tracks, per child, when its current unbroken working spell

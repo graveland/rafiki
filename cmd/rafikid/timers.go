@@ -98,26 +98,32 @@ func (c *Controller) startPeriodicSweeps(ctx context.Context) {
 	c.at(inboxSweepKey, c.now().Add(inboxSweepInterval), func() { c.runInboxSweep(ctx) })
 }
 
-// runBudgetSweep is one fire of the budget-reconciliation job: sweep the
-// budgeted subtrees, then re-arm one interval out. A fire after ctx ends stops
-// instead of re-arming. sweepBudgets runs under a bounded child context so a
-// stalled subtreeSpend query cannot outlive budgetSweepTimeout.
+// runBudgetSweep is one fire of the budget-reconciliation job. It re-arms
+// BEFORE doing the work so a panic in the sweep cannot end the job for the
+// daemon's life: pkg/sched recovers a callback panic and returns, so a re-arm
+// placed last would simply never run and budget enforcement would stop
+// silently. sched.run deletes this fire's pending entry before invoking the
+// callback and At replaces by key, so arming here cannot stack a second job.
+// The ctx check is FIRST: a cancelled context neither sweeps nor re-arms.
+// sweepBudgets runs under a bounded child context so a stalled subtreeSpend
+// query cannot outlive budgetSweepTimeout.
 func (c *Controller) runBudgetSweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	sctx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
-	c.sweepBudgets(sctx)
-	cancel()
 	c.at(budgetSweepKey, c.now().Add(budgetSweepInterval), func() { c.runBudgetSweep(ctx) })
+	sctx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
+	defer cancel()
+	c.sweepBudgets(sctx)
 }
 
 // runInboxSweep is one fire of the inbox-retention job, and re-arms exactly
-// like runBudgetSweep: it stops at the first fire after ctx ends.
+// like runBudgetSweep — before the work, so a panic in the sweep still leaves
+// the job armed: it stops at the first fire after ctx ends.
 func (c *Controller) runInboxSweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	c.sweepInbox()
 	c.at(inboxSweepKey, c.now().Add(inboxSweepInterval), func() { c.runInboxSweep(ctx) })
+	c.sweepInbox()
 }

@@ -699,8 +699,8 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 			gw = time.Duration(n * float64(time.Hour))
 		}
 	}
-	// The heartbeat is a deadline on the scheduler, not a tick: the first
-	// check-in of a spell lands at exactly this interval after the spell
+	// The heartbeat is a deadline on the scheduler, not a periodic sweep: the
+	// first check-in of a spell lands at exactly this interval after the spell
 	// started. See defaultHeartbeatInterval.
 	hb := defaultHeartbeatInterval
 	if h := paths.Get(paths.HeartbeatInterval); h != "" {
@@ -3594,10 +3594,10 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 		// Persist before forgetting: the upsert carries the child's session_id
 		// to conversations.child before the tombstone stamps closed_at. A child
 		// whose lineage could not be recorded must not silently drop out of its
-		// ancestors' spend, so skip it (leave it for the next tick), log the
-		// child id, and count the failure to surface in the result. Only for a
-		// row this daemon owns — another daemon's recovered row is not ours to
-		// write (nor to tombstone below).
+		// ancestors' spend, so skip it (leave the row for a later CloseAllExited
+		// call), log the child id, and count the failure to surface in the
+		// result. Only for a row this daemon owns — another daemon's recovered
+		// row is not ours to write (nor to tombstone below).
 		if owns {
 			if err := c.writeRecord(s.ChildID); err != nil {
 				slog.Warn("close-all-exited: child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))

@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/sched"
 	"go.graveland.dev/rafiki/pkg/tasks"
 
@@ -73,4 +74,55 @@ func TestPeriodicBudgetSweepSteersOnce(t *testing.T) {
 		}
 	}
 	ck.Eq(1, n, "steer batches to c_w1 = %d; mark() must dedupe across fires", n)
+}
+
+// panicThenCountCoster panics on its first SubtreeCost call and returns a
+// normal spend afterwards, counting calls. It is the seam the panic-survival
+// test uses to force a sweep body to panic exactly once.
+type panicThenCountCoster struct{ calls *int }
+
+func (p panicThenCountCoster) SubtreeCost(context.Context, insights.SubtreeSelector) (float64, error) {
+	*p.calls++
+	if *p.calls == 1 {
+		panic("periodic sweep panic (test)")
+	}
+	return 99, nil
+}
+
+func (p panicThenCountCoster) CostsByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationCost, error) {
+	return nil, nil
+}
+
+// TestPeriodicSweepJobSurvivesAPanickingSweep pins the re-arm-before-work
+// ordering: pkg/sched recovers a callback panic and returns, so a re-arm
+// placed last would leave the job dead for the daemon's life and budget
+// enforcement would stop silently. Here the first fire's sweep panics; the job
+// must still be armed and must run again on the next fire.
+func TestPeriodicSweepJobSurvivesAPanickingSweep(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _ := settleFixture(t)
+	c.clk = clk
+	c.sched = sched.New(clk, time.Second)
+	c.tasks = tasks.NewMemoryStore()
+	calls := 0
+	c.coster = panicThenCountCoster{calls: &calls}
+	_ = c.st.Update("c_coord", func(s *childstore.Session) { s.MaxCost = 10.00 })
+
+	c.startPeriodicSweeps(t.Context())
+
+	// First fire: the sweep body panics (sched recovers it).
+	clk.Advance(budgetSweepInterval)
+	ck.Eq(1, calls, "the panicking sweep must have run once")
+
+	armed := false
+	for _, e := range c.sched.Pending() {
+		if e.Key == budgetSweepKey {
+			armed = true
+		}
+	}
+	ck.True(armed, "a panic in the sweep must not end the job: %q must still be armed", budgetSweepKey)
+
+	// The re-armed job fires again — this time the sweep returns normally.
+	clk.Advance(budgetSweepInterval)
+	ck.Eq(2, calls, "the re-armed job must fire again after a panicking sweep")
 }
