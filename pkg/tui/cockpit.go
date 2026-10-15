@@ -383,6 +383,11 @@ type Cockpit struct {
 	// and a newer tick owns the action. A counter, not a timestamp: "the
 	// cursor rested" must not depend on the tick firing at 150.0ms exactly.
 	selectedSeq int
+	// collapsed holds the rail rows whose descendants are hidden. Session
+	// state only: a relaunch opens every row. railTop is the first rail row
+	// drawn when the tree is taller than the pane (see railWindow).
+	collapsed map[string]bool
+	railTop   int
 	// historyInFlight marks a GetHistory already running, per child. History is
 	// not deduplicated -- ApplyHistory deliberately bypasses the ordinal cursor
 	// because the two ordinal spaces are unrelated -- so two responses for one
@@ -693,7 +698,7 @@ func (c *Cockpit) openSpawnForm() tea.Cmd {
 // back to it. Only a real choice lands on the rail, with the first row
 // already under the cursor so ↑/↓ and ⏎ work without a priming keystroke.
 func (c *Cockpit) landRailFirst() tea.Cmd {
-	nodes := c.rail.Nodes()
+	nodes := c.railNodes()
 	switch len(nodes) {
 	case 0:
 		return c.openSpawnForm()
@@ -1376,6 +1381,18 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd = c.moveSelection(-1)
 		case key.Matches(msg, k.SelectDown):
 			cmd = c.moveSelection(+1)
+		case key.Matches(msg, k.ScrollPageUp):
+			cmd = c.moveSelection(-c.railPage())
+		case key.Matches(msg, k.ScrollPageDown):
+			cmd = c.moveSelection(+c.railPage())
+		case key.Matches(msg, k.ScrollTop):
+			cmd = c.selectRow(func(int, int) int { return 0 })
+		case key.Matches(msg, k.ScrollBottom):
+			cmd = c.selectRow(func(_, rows int) int { return rows - 1 })
+		case key.Matches(msg, k.FoldLeft):
+			cmd = c.collapseSelected()
+		case key.Matches(msg, k.FoldRight):
+			c.expandSelected()
 		case key.Matches(msg, k.Commit):
 			// Commit is what FOCUS moves: hop opens the target's focus
 			// subscription and leaveRail hands the keys to the input. The arrows
@@ -1736,7 +1753,11 @@ func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedA
 // left, keeps its transcript, and opens the new child's stream from wherever
 // that session's cursor left off -- so only the delta replays.
 func (c *Cockpit) hop(childID string) tea.Cmd {
-	if childID == "" || childID == c.focused() {
+	if childID == "" {
+		return nil
+	}
+	c.reveal(childID)
+	if childID == c.focused() {
 		return nil
 	}
 	if old := c.focused(); old != "" {
@@ -2000,7 +2021,14 @@ func (c *Cockpit) leaveRail() tea.Cmd {
 // selection starts from the focused child, so tabbing into the rail begins
 // where you are looking rather than at the top.
 func (c *Cockpit) moveSelection(delta int) tea.Cmd {
-	nodes := c.rail.Nodes()
+	return c.selectRow(func(idx, _ int) int { return idx + delta })
+}
+
+// selectRow moves the cursor to the row pick chooses from (current index,
+// row count), clamped to the list, with the same preview and seq bump as any
+// other cursor move.
+func (c *Cockpit) selectRow(pick func(idx, rows int) int) tea.Cmd {
+	nodes := c.railNodes()
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -2014,13 +2042,7 @@ func (c *Cockpit) moveSelection(delta int) tea.Cmd {
 			break
 		}
 	}
-	idx += delta
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(nodes) {
-		idx = len(nodes) - 1
-	}
+	idx = min(max(pick(idx, len(nodes)), 0), len(nodes)-1)
 	c.selected = nodes[idx].ChildID
 	c.selectedSeq++
 	return c.previewCmd(c.selected)
@@ -2115,7 +2137,7 @@ func (c *Cockpit) fetchHistoryOnce(childID string) tea.Cmd {
 }
 
 func (c *Cockpit) neighbour(delta int) string {
-	nodes := c.rail.Nodes()
+	nodes := c.railNodes()
 	if len(nodes) == 0 {
 		return ""
 	}
@@ -2134,7 +2156,7 @@ func (c *Cockpit) neighbour(delta int) string {
 // closing a row never moves the cursor anywhere but where the row was.
 // neighbour is no substitute: it counts from the committed agent, not from id.
 func (c *Cockpit) successor(id string) string {
-	nodes := c.rail.Nodes()
+	nodes := c.railNodes()
 	for i, n := range nodes {
 		if n.ChildID != id {
 			continue
@@ -2225,7 +2247,7 @@ func (c *Cockpit) railCols() int {
 		c.rail.Len() == 0 || (c.rail.Len() < 2 && !c.railPeek) {
 		return 0
 	}
-	return railWidthFor(c.rail.Nodes(), c.width, c.currency)
+	return railWidthFor(c.railNodes(), c.width, c.currency)
 }
 
 // agentIdentity renders the viewed agent's name and working directory for
@@ -2461,7 +2483,7 @@ func (c *Cockpit) footerHints() string {
 	var bs []key.Binding
 	switch c.focus {
 	case focusRail:
-		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape}
+		bs = []key.Binding{k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape}
 	default:
 		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort}
 	}
@@ -2509,7 +2531,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		k.ToggleImages, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
-		k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape)...)
+		k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape)...)
 	right = append(right, group("reading",
 		k.ScrollPageUp, k.ScrollTop, k.ScrollBottom,
 		key.NewBinding(key.WithKeys("up", "down"),
@@ -2549,8 +2571,25 @@ func (c *Cockpit) View() tea.View {
 	railCols := c.railCols()
 	railText := ""
 	if railCols > 0 {
-		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railCols,
+		rows := c.railNodes()
+		cursor := c.focused()
+		if c.focus == focusRail && c.selected != "" {
+			cursor = c.selected
+		}
+		idx := -1
+		for i, n := range rows {
+			if n.ChildID == cursor {
+				idx = i
+				break
+			}
+		}
+		top, vis := railWindow(len(rows), idx, c.railTop, c.bodyHeight())
+		c.railTop = top
+		railText = renderRail(rows[top:top+vis], c.focused(), c.selected, railCols,
 			c.focus == focusRail, c.currency, c.frame)
+		if vis < len(rows) {
+			railText = railMarker("↑", top) + railText + railMarker("↓", len(rows)-top-vis)
+		}
 	}
 
 	bodyHeight := c.bodyHeight()

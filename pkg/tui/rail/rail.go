@@ -161,6 +161,10 @@ type Node struct {
 	ContextWindow int
 
 	Attention int
+
+	// Folded is set only by Fold: the row is collapsed over hidden descendants,
+	// and Attention then carries the whole subtree's count.
+	Folded bool
 }
 
 // TotalCost is what should be DISPLAYED: settled cost from completed turns

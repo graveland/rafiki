@@ -73,6 +73,8 @@ type keyMap struct {
 	// Rail pane.
 	SelectUp   key.Binding
 	SelectDown key.Binding
+	FoldLeft   key.Binding
+	FoldRight  key.Binding
 	Commit     key.Binding
 	NewAgent   key.Binding
 	EndAgent   key.Binding
@@ -172,6 +174,8 @@ func defaultKeyMap() keyMap {
 
 		SelectUp:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up")),
 		SelectDown: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "down")),
+		FoldLeft:   key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "fold/parent")),
+		FoldRight:  key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "unfold")),
 		Commit:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "open")),
 		// Bare letters, and they cost the textarea NOTHING: the rail swallows
 		// every unmatched key, so these live entirely inside a pane where no
