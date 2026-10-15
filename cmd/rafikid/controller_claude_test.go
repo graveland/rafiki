@@ -59,7 +59,9 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 		"--resume", "sess-abc",
 		"--append-system-prompt", claudeargv.CoordinationPrompt + "\n\nbe brief",
 		"--dangerously-skip-permissions",
-		"--disallowedTools", "AskUserQuestion",
+		// A proxied child carries the MCP surface, so Build also disallows
+		// Claude Code's native schedulers (pkg/claudeargv.NativeSchedulerTools).
+		"--disallowedTools", "AskUserQuestion,CronCreate,CronDelete,CronList,ScheduleWakeup",
 		"--foo",
 	}
 	assert.NewAborting(t).EqDiff(want, got, "argv")

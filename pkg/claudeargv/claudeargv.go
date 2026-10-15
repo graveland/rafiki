@@ -50,7 +50,15 @@ const CoordinationPrompt = "You are running under rafiki, which exposes its agen
 	"handle to agent_spawn." +
 	" If recall tools (recall, recall_context, memory_get/memory_put) are listed, search your " +
 	"owner's past conversations and saved memories with recall before non-trivial work, expand " +
-	"a promising hit with recall_context, and save durable facts with memory_put."
+	"a promising hit with recall_context, and save durable facts with memory_put." +
+	" For timed work — a reminder, a recurring check, waking yourself later — use rafiki's CronCreate, CronDelete, CronList and ScheduleWakeup tools: their jobs persist with this conversation and survive daemon restarts."
+
+// NativeSchedulerTools are Claude Code's own scheduling tools. A daemon-managed
+// child that carries the MCP surface gets rafiki's same-named tools instead
+// (mcp__rafiki__CronCreate etc.), which persist with the conversation; the
+// native ones are session-only. Disallowing them leaves the model exactly one
+// scheduler, so a skill that says "CronCreate" maps onto the only one on offer.
+var NativeSchedulerTools = []string{"CronCreate", "CronDelete", "CronList", "ScheduleWakeup"}
 
 // WithCoordinationPrompt prepends CoordinationPrompt to s when the child
 // carries the MCP agent-control surface (mcpAgentControl), else returns s
@@ -183,6 +191,11 @@ func Build(p Params) []string {
 		// channel. Disallow the dead tool so it never wastes a turn attempting
 		// it — always, regardless of what the caller passes in DisallowedTools.
 		disallowed := append([]string{"AskUserQuestion"}, p.DisallowedTools...)
+		// Both launch paths set the MCP config — inline (ParamsFromSpawnRequest)
+		// or staged (Stage) — so gate on either field; see NativeSchedulerTools.
+		if p.MCPConfig != "" || p.MCPConfigFile != "" {
+			disallowed = append(disallowed, NativeSchedulerTools...)
+		}
 		argv = append(argv, "--disallowedTools", strings.Join(disallowed, ","))
 	}
 	argv = append(argv, p.ExtraArgs...)

@@ -77,6 +77,31 @@ func TestBuildAlwaysDisallowsAskUserQuestion(t *testing.T) {
 	assertPair(t, Build(Params{DisallowedTools: []string{"Bash"}}), "--disallowedTools", "AskUserQuestion,Bash")
 }
 
+// A daemon-managed claude child that carries the MCP surface gets rafiki's
+// same-named scheduling tools (mcp__rafiki__CronCreate etc.), which persist
+// with the conversation, so Claude Code's session-only native schedulers must
+// be disallowed — the model should see exactly one scheduler. The gate is the
+// MCP config because BOTH launch paths set it: ParamsFromSpawnRequest inline,
+// daraja/host.go on an executor, and Stage then moves it to MCPConfigFile —
+// hence both fields are gated.
+func TestBuildDisallowsNativeSchedulersWithInlineMCPConfig(t *testing.T) {
+	assertPair(t, Build(Params{MCPConfig: "{}"}), "--disallowedTools",
+		"AskUserQuestion,CronCreate,CronDelete,CronList,ScheduleWakeup")
+}
+
+func TestBuildDisallowsNativeSchedulersWithStagedMCPConfig(t *testing.T) {
+	assertPair(t,
+		Build(Params{MCPConfigFile: "/tmp/x.json", DisallowedTools: []string{"Bash"}}),
+		"--disallowedTools", "AskUserQuestion,Bash,CronCreate,CronDelete,CronList,ScheduleWakeup")
+}
+
+// Without the MCP surface the native schedulers stay callable: a child without
+// rafiki's MCP tools has no other scheduler, and interactive `rafiki claude`
+// sessions emit no --disallowedTools at all.
+func TestBuildKeepsNativeSchedulersWithoutMCP(t *testing.T) {
+	assertPair(t, Build(Params{Model: "x"}), "--disallowedTools", "AskUserQuestion")
+}
+
 // A daemon-managed child has no human to answer an interactive permission
 // prompt, so the empty (unset) PermissionMode must default to bypass, not to
 // "ask and hang forever".
@@ -326,6 +351,16 @@ func TestStageNeverWritesTheTokenPlaceholderExpanded(t *testing.T) {
 func TestCoordinationPromptMentionsRecall(t *testing.T) {
 	c := assert.NewCollecting(t)
 	for _, want := range []string{"recall", "memory_put"} {
+		c.StrContains(CoordinationPrompt, want, "CoordinationPrompt")
+	}
+}
+
+// The scheduler steer is the prompt's newest clause: it must name rafiki's
+// scheduling tools so a child picks the persistent ones over its own
+// session-only schedulers.
+func TestCoordinationPromptNamesRafikiSchedulers(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, want := range []string{"CronCreate", "ScheduleWakeup"} {
 		c.StrContains(CoordinationPrompt, want, "CoordinationPrompt")
 	}
 }
