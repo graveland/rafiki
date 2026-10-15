@@ -54,3 +54,9 @@ go.work.sum
 # Python
 __pycache__/
 *.pyc
+
+# web UI: dependencies, generated client and built assets are never committed
+/web/node_modules/
+/web/src/gen/
+/pkg/webui/dist/*
+!/pkg/webui/dist/.gitkeep

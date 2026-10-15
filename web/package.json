@@ -1,0 +1,38 @@
+{
+  "name": "rafiki-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "gen": "mkdir -p src/gen && protoc --plugin=protoc-gen-es=node_modules/.bin/protoc-gen-es --es_out=src/gen --es_opt=target=ts --proto_path=../proto ../proto/rafiki/v1/control.proto ../proto/rafiki/v1/event.proto ../proto/rafiki/daraja/v1/daraja.proto",
+    "build": "vite build",
+    "check": "svelte-check --fail-on-warnings && tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.16.0",
+    "@connectrpc/connect": "^2.2.0",
+    "@connectrpc/connect-web": "^2.2.0",
+    "@observablehq/plot": "^0.6.17",
+    "svelte": "^5.57.2"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "^2.16.0",
+    "@eslint/js": "^10.0.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "daisyui": "^5.7.50",
+    "eslint": "^9.39.5",
+    "eslint-plugin-svelte": "^3.23.1",
+    "globals": "^17.13.0",
+    "jsdom": "^30.1.2",
+    "svelte-check": "^4.7.6",
+    "svelte-eslint-parser": "^1.9.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.4"
+  }
+}

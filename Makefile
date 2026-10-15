@@ -248,6 +248,17 @@ proto: bin/protoc-gen-go bin/protoc-gen-connect-go bin/protoc-gen-rafikipy ## Re
 		proto/rafiki/v1/control.proto proto/rafiki/v1/event.proto proto/rafiki/daraja/v1/daraja.proto
 	$(MAKE) fmt
 
+##@ Web
+
+.PHONY: web
+web: ## Build the web UI into pkg/webui/dist (needs node + pnpm + protoc).
+	cd web && pnpm install --frozen-lockfile && pnpm run gen && pnpm run build
+	touch pkg/webui/dist/.gitkeep
+
+.PHONY: check-web
+check-web: ## Typecheck, lint and test the web UI (needs node + pnpm + protoc).
+	cd web && pnpm install --frozen-lockfile && pnpm run gen && pnpm run check && pnpm run lint && pnpm run test
+
 .PHONY: check
 check: vet lint test ## Run vet + lint + tests (the full local gate).
 
