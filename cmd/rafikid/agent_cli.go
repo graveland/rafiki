@@ -215,7 +215,7 @@ func newAgentExportCmd() *cobra.Command {
 func newAgentQueryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query <name>",
-		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage) over persisted history",
+		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage, spend) over persisted history",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runAgentQuery,
 	}

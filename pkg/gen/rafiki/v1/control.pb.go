@@ -4099,7 +4099,7 @@ func (x *ConversationExportResponse) GetAvailableSkills() []string {
 // authenticated identity.
 type ConversationQueryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // "tools" | "skills" | "classes" | "models" | "sizes" | "coverage"
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // "tools" | "skills" | "classes" | "models" | "sizes" | "coverage" | "spend"
 	// since/until are unset or the epoch for unbounded (the old *_unix = 0).
 	Since         *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=since,proto3" json:"since,omitempty"`
 	Until         *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=until,proto3" json:"until,omitempty"`

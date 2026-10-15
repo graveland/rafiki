@@ -55,7 +55,7 @@ func (p Path) DrivenBy() string {
 // step by TestCatalogueMatchesSharedQueryNames, which fails on any query
 // registered in pkg/insights without an entry here (or a list entry with no
 // query behind it).
-var QueryNames = []string{"tools", "skills", "classes", "models", "sizes", "coverage"}
+var QueryNames = []string{"tools", "skills", "classes", "models", "sizes", "coverage", "spend"}
 
 // argList accumulates positional query arguments and hands back the $N
 // placeholder for each, so a dynamic WHERE stays parameterized.

@@ -764,7 +764,7 @@ message ConversationExportResponse {
 // layer-design.md §3) -- the daemon derives it from the caller's own
 // authenticated identity.
 message ConversationQueryRequest {
-  string name = 1; // "tools" | "skills" | "classes" | "models" | "sizes" | "coverage"
+  string name = 1; // "tools" | "skills" | "classes" | "models" | "sizes" | "coverage" | "spend"
   // since/until are unset or the epoch for unbounded (the old *_unix = 0).
   google.protobuf.Timestamp since = 9;
   google.protobuf.Timestamp until = 10;

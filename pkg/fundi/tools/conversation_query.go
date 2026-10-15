@@ -267,9 +267,10 @@ const conversationQueryDescription = "Run a named catalogue query over your own 
 	"most common spelling, sorted by calls descending), \"skills\" (skill invocations, namespace-normalized), " +
 	"\"classes\" (behavioral breakdown: coordinator/brainstorming/planning/worker), " +
 	"\"models\" (served-model distribution), \"sizes\" (turn-count histogram per class), " +
-	"\"coverage\" (child-row instrumentation coverage by week, agent-kind conversations only). " +
+	"\"coverage\" (child-row instrumentation coverage by week, agent-kind conversations only), " +
+	"\"spend\" (cost and tokens per UTC day by model and served provider; priced=0 means unpriced). " +
 	"Time filters are per query: tools and skills filter message time, models filters turn " +
-	"time, classes and sizes filter turn activity, coverage filters conversation creation week. " +
+	"time, classes and sizes filter turn activity, coverage filters conversation creation week, spend filters turn time. " +
 	"Results are scoped to conversations you own, same as conversation_search."
 
 type ConversationQueryBlueprint struct{}
@@ -280,7 +281,7 @@ func (ConversationQueryBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "name", Type: "string", Description: "One of: tools, skills, classes, models, sizes, coverage."},
+			{Name: "name", Type: "string", Description: "One of: tools, skills, classes, models, sizes, coverage, spend."},
 			{Name: "since", Type: "string", Description: "RFC3339 time lower bound (meaning varies by query -- see its description)."},
 			{Name: "until", Type: "string", Description: "RFC3339 time upper bound."},
 			{Name: "model", Type: "string", Description: "Filter by served model id (ignored by queries with no per-turn model)."},

@@ -382,7 +382,7 @@ func transcriptFromProto(resp *rafikiv1.ConversationExportResponse) *insightstyp
 func newConversationsQueryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query <name>",
-		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage)",
+		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage, spend)",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runConversationsQuery,
 	}

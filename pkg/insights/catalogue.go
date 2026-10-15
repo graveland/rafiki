@@ -77,10 +77,14 @@ const (
 	ClassAdminOnly
 )
 
-// catalogQuery is one registered named query.
+// catalogQuery is one registered named query. pricedRun, when set, is the
+// query body for a query that prices its own rows: Query calls it instead of
+// run, handing it the caller's Pricer so the query can price after releasing
+// its cursor.
 type catalogQuery struct {
-	class Class
-	run   func(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFilter) (QueryResult, error)
+	class     Class
+	run       func(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFilter) (QueryResult, error)
+	pricedRun func(ctx context.Context, pool *pgxpool.Pool, pricer Pricer, scope Scope, f StatsFilter) (QueryResult, error)
 }
 
 // catalogue holds every registered named query, keyed by name. Query files
@@ -98,6 +102,19 @@ func registerQuery(name string, class Class, run func(ctx context.Context, pool 
 		panic("insights: duplicate query registration: " + name)
 	}
 	catalogue[name] = catalogQuery{class: class, run: run}
+}
+
+// registerPricedQuery adds one priced named query to the catalogue. It is the
+// priced counterpart of registerQuery -- same duplicate panic, same
+// from-init()-only contract -- and exists because some queries price their rows
+// in Go after the query's cursor is released, which only the Insights receiver
+// (holding the injected Pricer) can do; a plain run closure is handed the pool
+// and scope but not the Pricer.
+func registerPricedQuery(name string, class Class, run func(ctx context.Context, pool *pgxpool.Pool, pricer Pricer, scope Scope, f StatsFilter) (QueryResult, error)) {
+	if _, exists := catalogue[name]; exists {
+		panic("insights: duplicate query registration: " + name)
+	}
+	catalogue[name] = catalogQuery{class: class, pricedRun: run}
 }
 
 // Query is the ONE admission-checked entry point for the named-query
@@ -127,6 +144,9 @@ func (i *Insights) Query(ctx context.Context, scope Scope, name string, f StatsF
 		}
 	default:
 		return QueryResult{}, fmt.Errorf("query %q: %w", name, ErrNotFound)
+	}
+	if q.pricedRun != nil {
+		return q.pricedRun(ctx, i.pool, i.pricer, scope, f)
 	}
 	return q.run(ctx, i.pool, scope, f)
 }
