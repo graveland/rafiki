@@ -504,12 +504,14 @@ func scanEnvDefs(lines []string) []envLineDef {
 // SetEnvFile makes path define exactly vars' values for vars' keys, and
 // touches nothing else: every other line (comments, blank lines, keys not in
 // vars, malformed lines) is preserved byte for byte, in order. A key in vars
-// that the file already defines has that ONE line rewritten in place; a key
-// defined more than once has its LAST definition rewritten (the one
-// LoadEnvFile honours) and the earlier ones left alone. New keys are appended
-// after a "# <comment>" line. The file is created 0600 if absent, and tightened
-// to 0600 before any write if it is looser. The write is atomic (temp file in
-// the same directory, fsync, rename).
+// that the file already defines has its FIRST definition rewritten in place;
+// a key defined more than once keeps its later duplicates verbatim (deleting
+// lines is out of scope), because LoadEnvFile applies assignments with
+// fill-gaps precedence, so the FIRST definition is the one that lands in the
+// process environment. New keys are appended after a "# <comment>" line. The
+// file is created 0600 if absent, and tightened to 0600 before any write if it
+// is looser. The write is atomic (temp file in the same directory, fsync,
+// rename).
 //
 // This is the SETUP writer, the counterpart to MergeEnvFile's append-only one:
 // MergeEnvFile refuses to touch a key that already exists, which is right for a
@@ -561,9 +563,14 @@ func SetEnvFile(path string, vars map[string]string, comment string) (SetResult,
 	lines := strings.Split(string(existing), "\n")
 	defs := scanEnvDefs(lines)
 
-	lastIdx := make(map[string]int, len(defs))
+	// firstIdx keeps the EARLIEST line defining each key: LoadEnvFile fills gaps
+	// (applyEnv skips a key already present), so for a duplicated key the first
+	// definition is the one that lands in the environment.
+	firstIdx := make(map[string]int, len(defs))
 	for i, d := range defs {
-		lastIdx[d.key] = i
+		if _, seen := firstIdx[d.key]; !seen {
+			firstIdx[d.key] = i
+		}
 	}
 
 	// repl maps a line index to its replacement; skip marks continuation lines
@@ -571,7 +578,7 @@ func SetEnvFile(path string, vars map[string]string, comment string) (SetResult,
 	repl := make(map[int]string)
 	skip := make(map[int]bool)
 	for _, k := range keys {
-		i, present := lastIdx[k]
+		i, present := firstIdx[k]
 		if !present {
 			res.Added = append(res.Added, k)
 			continue

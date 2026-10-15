@@ -79,20 +79,27 @@ func TestSetEnvFileReplacesInPlacePreservingOthers(t *testing.T) {
 	c.Eq("# hand\nA=1\n\nB=\"new\"\nC=3\n", readFileT(t, p), "only B's line changed")
 }
 
-func TestSetEnvFileLastDefinitionWins(t *testing.T) {
+func TestSetEnvFileFirstDefinitionWins(t *testing.T) {
 	c := assert.NewCollecting(t)
 	p := filepath.Join(t.TempDir(), "service.env")
 	writeEnvMode(t, p, "A=1\nA=2\n", 0o600)
+	unsetEnv(t, "A")
 
 	res, err := SetEnvFile(p, map[string]string{"A": "3"}, "rafiki setup")
 	c.Require().NoError(err, "SetEnvFile")
 	c.ElementsMatch([]string{"A"}, res.Replaced, "Replaced")
 
-	// The LAST definition is the one rewritten; the earlier one is left
-	// byte-identical. The writer always double-quotes (escapeEnvValue), so the
-	// fresh line renders as A="3". This bytes assertion is the guard: rewriting
-	// the FIRST definition would instead yield A="3"\nA=2\n.
-	c.Eq("A=1\nA=\"3\"\n", readFileT(t, p), "last definition rewritten")
+	// The FIRST definition is the one rewritten (LoadEnvFile fills gaps, so it
+	// is the one that lands); the later duplicate is left byte-identical. The
+	// writer always double-quotes (escapeEnvValue), so the fresh line renders
+	// as A="3". This bytes assertion is the guard: rewriting the LAST
+	// definition would instead yield A=1\nA="3"\n.
+	c.Eq("A=\"3\"\nA=2\n", readFileT(t, p), "first definition rewritten")
+
+	unsetEnv(t, "A")
+	_, _, err = LoadEnvFile(p)
+	c.Require().NoError(err, "LoadEnvFile")
+	c.Eq("3", os.Getenv("A"), "A read back after LoadEnvFile")
 }
 
 func TestSetEnvFileUnchangedDoesNotWrite(t *testing.T) {
