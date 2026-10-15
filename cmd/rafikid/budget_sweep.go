@@ -13,8 +13,8 @@ import (
 )
 
 // budgetBreaches records which budgeted roots are currently over. It exists so
-// the sweep steers ONCE per breach: a periodic sweep that re-injected on every
-// tick would interrupt a turn every interval for as long as the budget stayed
+// the sweep steers ONCE per breach: a periodic fire that re-injected on every
+// interval would interrupt a turn every interval for as long as the budget stayed
 // exhausted, which is a denial of service the daemon inflicts on itself.
 type budgetBreaches struct {
 	mu sync.Mutex
@@ -89,7 +89,7 @@ func (c *Controller) sweepBudgets(ctx context.Context) {
 			continue
 		}
 		if !c.breaches.mark(snap.ChildID) {
-			continue // already reported; do not re-steer every tick
+			continue // already reported; do not re-steer on every fire
 		}
 		c.applyBudgetBreach(ctx, snap, spent)
 	}

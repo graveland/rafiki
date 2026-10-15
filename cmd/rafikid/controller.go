@@ -811,59 +811,13 @@ func eventLogStore(pool *pgxpool.Pool) eventlog.Store {
 	return eventlogdb.New(pool)
 }
 
-// sweepTickInterval is how often sweepTick runs. It now carries only the
-// budget sweep and the inbox retention sweep: grace windows and heartbeat
-// check-ins are deadlines on the scheduler (timers.go, heartbeat_sweep.go),
-// so nothing about them is quantized to this tick any more.
-//
-// Not finer than this without more thought: the tick itself is free, but the
-// work is not — sweepBudgets runs a subtreeSpend query per over-budget
-// subtree, so the DB load scales with 1/interval.
-const sweepTickInterval = time.Minute
-
-// startSweeper launches a background goroutine that periodically runs the
-// budget and inbox reconciliation tick (sweepTick). It stops when ctx is
-// cancelled. Call Stop() to wait for the goroutine to exit.
-func (c *Controller) startSweeper(ctx context.Context) {
-	c.sweeperWg.Add(1)
-	go func() {
-		defer c.sweeperWg.Done()
-		ticker := time.NewTicker(sweepTickInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				c.sweepTick(ctx)
-			}
-		}
-	}()
-}
-
-// sweepTick is one pass of the periodic reconciliation: budget breaches and
-// the inbox's terminal rows.
-//
-// Budget breaches and the inbox sweep ride the same tick: both are periodic
-// reconciliations of stored state, and a ticker of their own would be one
-// more thing to reason about at shutdown. Grace windows and heartbeat
-// check-ins are NO LONGER here — they are deadlines on the scheduler (see
-// timers.go and heartbeat_sweep.go), so nothing about them is quantized to
-// this tick. Extracted from startSweeper so what the tick does is testable
-// without waiting a minute for one.
-//
-// sweepBudgets runs under a bounded sweepCtx: a stalled subtreeSpend query
-// must not hang the shared sweep goroutine.
-func (c *Controller) sweepTick(ctx context.Context) {
-	sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
-	c.sweepBudgets(sweepCtx)
-	cancel()
-	c.sweepInbox()
-}
-
-// Stop waits for background goroutines (the sweeper and the recall indexer)
-// to exit. The caller is responsible for cancelling the context passed to
-// startSweeper AND to startRecall before calling Stop.
+// Stop waits for background goroutines to exit: the lease-renewal and sandbox
+// sweeper loops (sweeperWg) and the recall indexer (recallWg). The caller is
+// responsible for cancelling the context passed to startLeaseRenewal,
+// startSandboxSweeper and startRecall before calling Stop. The two periodic
+// reconciliations (startPeriodicSweeps) are scheduler jobs, not goroutines:
+// sched.Stop below drains them, and cancelling their context stops them at
+// their next fire.
 func (c *Controller) Stop() {
 	// Close the scheduler to new registration FIRST: a grace/heartbeat
 	// callback that fires during the drain must not arm a successor. Then

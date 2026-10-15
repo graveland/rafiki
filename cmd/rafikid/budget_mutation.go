@@ -32,7 +32,7 @@ import (
 // spawn's grant, since the caller cannot hand out more room than it itself
 // has left. A lower has no check at all: a coordinator may always tighten
 // its own grant, and if the new cap already sits below current spend, the
-// next sweepBudgets tick (or the child's own live cost guardrail) breaches
+// next budget sweep (or the child's own live cost guardrail) breaches
 // it normally — no special case is needed here for that.
 func (c *Controller) SetChildBudget(ctx context.Context, callerChildID, childID string, newCap float64) error {
 	if newCap < 0 {

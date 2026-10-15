@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -67,4 +68,56 @@ func (c *Controller) armGrace(childID string, exitedAt time.Time) {
 		}
 		slog.Info("grace window expired; closed child", "childId", childID)
 	})
+}
+
+// The two periodic reconciliations — the budget sweep and the inbox retention
+// sweep — are scheduler jobs, not a ticker. Each re-arms itself under a fixed
+// key one interval after it fires, so a single scheduler drives them alongside
+// every deadline timer. Not finer than this without more thought: the interval
+// itself is free, but the work is not — sweepBudgets runs a subtreeSpend query
+// per over-budget subtree, so the DB load scales with 1/interval.
+const (
+	budgetSweepInterval = time.Minute
+	inboxSweepInterval  = time.Minute
+)
+
+// Scheduler keys for the periodic jobs. Fixed strings so re-arming replaces
+// the pending job rather than stacking a second one.
+const (
+	budgetSweepKey = "sweep:budgets"
+	inboxSweepKey  = "sweep:inbox"
+)
+
+// startPeriodicSweeps arms the two periodic reconciliations as self-re-arming
+// scheduler jobs. Each re-arms only while ctx is live, so cancelling main's
+// context stops them at the next fire — the moment the old ticker goroutine
+// returned — without waiting for Controller.Stop. Both first fire one interval
+// after start.
+func (c *Controller) startPeriodicSweeps(ctx context.Context) {
+	c.at(budgetSweepKey, c.now().Add(budgetSweepInterval), func() { c.runBudgetSweep(ctx) })
+	c.at(inboxSweepKey, c.now().Add(inboxSweepInterval), func() { c.runInboxSweep(ctx) })
+}
+
+// runBudgetSweep is one fire of the budget-reconciliation job: sweep the
+// budgeted subtrees, then re-arm one interval out. A fire after ctx ends stops
+// instead of re-arming. sweepBudgets runs under a bounded child context so a
+// stalled subtreeSpend query cannot outlive budgetSweepTimeout.
+func (c *Controller) runBudgetSweep(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
+	c.sweepBudgets(sctx)
+	cancel()
+	c.at(budgetSweepKey, c.now().Add(budgetSweepInterval), func() { c.runBudgetSweep(ctx) })
+}
+
+// runInboxSweep is one fire of the inbox-retention job, and re-arms exactly
+// like runBudgetSweep: it stops at the first fire after ctx ends.
+func (c *Controller) runInboxSweep(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	c.sweepInbox()
+	c.at(inboxSweepKey, c.now().Add(inboxSweepInterval), func() { c.runInboxSweep(ctx) })
 }

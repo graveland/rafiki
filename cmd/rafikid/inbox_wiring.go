@@ -624,8 +624,8 @@ func (c *Controller) replayInbox(ctx context.Context, childID string) {
 	}
 }
 
-// sweepInbox deletes terminal rows older than inboxRetention. Called from the
-// existing 5-minute sweeper tick, so it needs no timer of its own.
+// sweepInbox deletes terminal rows older than inboxRetention. Run as a
+// self-re-arming scheduler job by startPeriodicSweeps (timers.go).
 func (c *Controller) sweepInbox() {
 	if c.inbox == nil {
 		return

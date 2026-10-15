@@ -970,7 +970,7 @@ const sandboxInitialSweepDelay = 5 * time.Second
 
 // startSandboxSweeper runs sweepSandboxes once shortly after boot and then on
 // every SandboxCfg.SweepInterval, on the daemon's lifecycle context. It joins
-// sweeperWg so Stop waits for it, the same contract as startSweeper.
+// sweeperWg so Stop waits for it, the same contract as startLeaseRenewal.
 func (c *Controller) startSandboxSweeper(ctx context.Context) {
 	if c.sandboxStore == nil {
 		return

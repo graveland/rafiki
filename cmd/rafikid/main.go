@@ -925,7 +925,7 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	ctrl.startSweeper(ctx)
+	ctrl.startPeriodicSweeps(ctx)
 	ctrl.startLeaseRenewal(ctx)
 	ctrl.startSandboxSweeper(ctx)
 

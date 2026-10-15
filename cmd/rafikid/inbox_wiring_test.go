@@ -15,10 +15,12 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sched"
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
@@ -938,23 +940,33 @@ func (r *sweepRecorder) seen() []time.Time {
 	return append([]time.Time(nil), r.cutoffs...)
 }
 
-// TestSweepTickSweepsTheInboxWithTheRetentionWindow pins the fourth hook to
-// the tick that already exists, and pins the cutoff it asks for. A sweep with
-// a "now" cutoff would delete a row the operator is still asking about.
-func TestSweepTickSweepsTheInboxWithTheRetentionWindow(t *testing.T) {
+// TestPeriodicSweepSweepsTheInboxWithTheRetentionWindow pins the inbox
+// retention reconciliation as a self-re-arming scheduler job, and pins the
+// cutoff it asks for. A sweep with a "now" cutoff would delete a row the
+// operator is still asking about.
+func TestPeriodicSweepSweepsTheInboxWithTheRetentionWindow(t *testing.T) {
 	ctrl := newTestController(t)
+	clk := clock.NewFakeClock(time.Now())
+	ctrl.clk = clk
+	ctrl.sched = sched.New(clk, time.Second)
 	rec := &sweepRecorder{Store: inbox.NewMemory()}
 	ctrl.inbox = ctrl.newInboxQueue(rec)
 
 	before := time.Now()
-	ctrl.sweepTick(t.Context())
+	ctrl.startPeriodicSweeps(t.Context())
 
+	// First fire: exactly one sweep, one interval after start.
+	clk.Advance(inboxSweepInterval)
 	got := rec.seen()
-	assert.NewAborting(t).Len(got, 1, "Sweep calls = %d; want exactly 1 from the periodic tick", len(got))
+	assert.NewAborting(t).Len(got, 1, "Sweep calls = %d; want exactly 1 after one interval", len(got))
 	want := before.Add(-inboxRetention)
 	if d := got[0].Sub(want); d < 0 || d > 5*time.Second {
 		t.Errorf("sweep cutoff = %v; want ~%v (now - inboxRetention)", got[0], want)
 	}
+
+	// Re-arm: a second interval fires a second sweep.
+	clk.Advance(inboxSweepInterval)
+	assert.NewAborting(t).Len(rec.seen(), 2, "Sweep calls = %d; want 2 — the job must re-arm itself", len(rec.seen()))
 }
 
 // TestStaleClaudeAbortRowIsRetiredNotReplayed closes the last path by which a

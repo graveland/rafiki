@@ -38,7 +38,8 @@ func fakePiBin(t *testing.T) string {
 }
 
 // newTestController creates a Controller wired with temp directories. It does
-// not start the sweeper — callers that need it must call startSweeper manually.
+// not start the periodic sweeps — callers that need them must call
+// startPeriodicSweeps manually.
 func newTestController(t *testing.T) *Controller {
 	t.Helper()
 	dir := testSocketDir(t)
