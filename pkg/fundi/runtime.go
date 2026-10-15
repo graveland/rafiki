@@ -255,6 +255,9 @@ type RuntimeOptions struct {
 	// fundi` process, which has no parent to report to.
 	Parent tools.ParentReporter
 
+	// Schedules backs the four schedule tools; nil declines them.
+	Schedules tools.ScheduleManager
+
 	// Sandboxes, when non-nil, gives this child the sandbox_create/list/remove
 	// tools. Supplied by the daemon as a per-child adapter over the Controller,
 	// bound to the child's id and its owner's NON-admin identity; nil when no
@@ -708,6 +711,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Agents:             opts.Agents,
 		Sandboxes:          opts.Sandboxes,
 		Parent:             opts.Parent,
+		Schedules:          opts.Schedules,
 		Quota:              opts.Quota,
 		Conversations:      opts.Conversations,
 		PyModules:          opts.PyModules,

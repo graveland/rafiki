@@ -342,6 +342,10 @@ type ToolOpts struct {
 	// Parent, when non-nil, gives this caller agent_report and agent_result.
 	Parent ParentReporter
 
+	// Schedules backs CronCreate/CronDelete/CronList/ScheduleWakeup, bound
+	// to this agent's own child id by the daemon. Nil declines all four.
+	Schedules ScheduleManager
+
 	// RemoteSkillBody fetches a skill body from the child's executor. nil when
 	// the child has no executor, in which case no SkillMeta carries Remote.
 	//

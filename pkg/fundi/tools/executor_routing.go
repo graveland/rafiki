@@ -134,6 +134,14 @@ var tierByTool = map[string]Tier{
 	"memory_tree":    TierDaemon,
 	"memory_delete":  TierDaemon,
 
+	// Daemon — the schedule verbs create and read rows in the daemon's
+	// schedule table through the per-child ScheduleManager; nothing in the
+	// workspace is touched, and the child binding lives on the daemon.
+	"CronCreate":     TierDaemon,
+	"CronDelete":     TierDaemon,
+	"CronList":       TierDaemon,
+	"ScheduleWakeup": TierDaemon,
+
 	// Daemon — annotates the executor's own database row.
 	"executor_annotate": TierDaemon,
 
