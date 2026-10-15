@@ -55,6 +55,7 @@ The administrative verbs output JSON.`,
 		// subject, and `serve` does not collide with any verb above.
 		newExecutorServeCmd(),
 		newExecutorServiceCmd(),
+		newExecutorSetupCmd(),
 		// bridge is the foothold container's entry point, not a user verb: it is
 		// hidden and registered here so the foothold image's fixed argv
 		// (`rafiki executor bridge …`) resolves in the same binary.

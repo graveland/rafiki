@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,11 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/version"
 )
+
+// executorServiceBackendFor is newExecutorServiceBackend, indirected through a
+// package var so tests in this package can substitute a fake. Production never
+// replaces it.
+var executorServiceBackendFor = newExecutorServiceBackend
 
 // `rafiki executor service …` manages the EXECUTOR as a per-user service, the
 // same way `rafiki service` manages the daemon. It is for pets — a laptop, a
@@ -98,34 +104,97 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 	return cmd
 }
 
+// executorInstallOptions is the resolved input to installExecutorService. It is
+// filled from cobra flags by `rafiki executor service install` and directly by
+// the `rafiki executor setup` wizard; keeping the flag reads out of the install
+// body is what lets both verbs share one implementation.
+type executorInstallOptions struct {
+	Connect, ConnectSocket, EnrollToken, Credential, CredentialFile        string
+	Root, PinCert, ServerName, RTK, SpillDir, RelayDir, RelayFootholdImage string
+	Binary, PathEnv                                                        string
+	Concurrency                                                            int
+	JobOutputBudgetMB                                                      int64
+	Proxy, Launch, SandboxMountRoots                                       []string
+	// EnvNames nil = today's behaviour (capture the whole shell, append-only
+	// MergeEnvFile). Non-nil = carry exactly these names, values read from the
+	// current environment, written with paths.SetEnvFile so a replay updates
+	// them; names absent from the environment are reported, not written.
+	EnvNames []string
+}
+
 func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	connect, _ := cmd.Flags().GetString("connect")
 	connectSocket, _ := cmd.Flags().GetString("connect-socket")
-	connect, connectSocket, err := resolveExecutorConnectFlags(connect, connectSocket)
-	if err != nil {
-		return err
-	}
 	enrollToken, _ := cmd.Flags().GetString("enroll-token")
 	credential, _ := cmd.Flags().GetString("credential")
 	credentialFile, _ := cmd.Flags().GetString("credential-file")
+	root, _ := cmd.Flags().GetString("root")
+	pinCert, _ := cmd.Flags().GetString("pin-cert")
+	serverName, _ := cmd.Flags().GetString("server-name")
+	rtk, _ := cmd.Flags().GetString("rtk")
+	spillDir, _ := cmd.Flags().GetString("spill-dir")
+	relayDir, _ := cmd.Flags().GetString("relay-dir")
+	relayFootholdImage, _ := cmd.Flags().GetString("relay-foothold-image")
+	binary, _ := cmd.Flags().GetString("binary")
+	pathEnv, _ := cmd.Flags().GetString("path-env")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	jobOutputBudgetMB, _ := cmd.Flags().GetInt64("job-output-budget-mb")
+	proxy, _ := cmd.Flags().GetStringArray("proxy")
+	launch, _ := cmd.Flags().GetStringArray("launch")
+	sandboxMountRoots, _ := cmd.Flags().GetStringArray("sandbox-mount-root")
 
+	return installExecutorService(executorInstallOptions{
+		Connect:            connect,
+		ConnectSocket:      connectSocket,
+		EnrollToken:        enrollToken,
+		Credential:         credential,
+		CredentialFile:     credentialFile,
+		Root:               root,
+		PinCert:            pinCert,
+		ServerName:         serverName,
+		RTK:                rtk,
+		SpillDir:           spillDir,
+		RelayDir:           relayDir,
+		RelayFootholdImage: relayFootholdImage,
+		Binary:             binary,
+		PathEnv:            pathEnv,
+		Concurrency:        concurrency,
+		JobOutputBudgetMB:  jobOutputBudgetMB,
+		Proxy:              proxy,
+		Launch:             launch,
+		SandboxMountRoots:  sandboxMountRoots,
+		// EnvNames nil: `service install` keeps capturing the whole shell.
+	}, os.Stdout)
+}
+
+// installExecutorService is the whole install: validate, build the unit argv,
+// write the environment file, enrol once if a token was given, then hand a
+// serviceSpec to the per-OS backend. It is what `rafiki executor service
+// install` and `rafiki executor setup` both call. Progress goes to out; the
+// VALUES of carried variables are never written to it.
+func installExecutorService(opts executorInstallOptions, out io.Writer) error {
+	connect, connectSocket, err := resolveExecutorConnectFlags(opts.Connect, opts.ConnectSocket)
+	if err != nil {
+		return err
+	}
+	credential := opts.Credential
+	credentialFile := opts.CredentialFile
 	if credentialFile == "" && credential == "" {
 		credentialFile = filepath.Join(paths.DataDir(), "executor.cred")
 	}
 	// Refuse an install that cannot possibly authenticate rather than one that
 	// installs cleanly and then fails in a log file nobody is watching.
-	if enrollToken == "" && credential == "" && !credFileExists(credentialFile) {
+	if opts.EnrollToken == "" && credential == "" && !credFileExists(credentialFile) {
 		return fmt.Errorf("nothing to authenticate with: pass --enroll-token for a first install, "+
 			"or --credential for a machine that keeps no file (no credential file at %s)", credentialFile)
 	}
 
-	root, _ := cmd.Flags().GetString("root")
-	resolvedRoot, err := resolveRoot(root)
+	resolvedRoot, err := resolveRoot(opts.Root)
 	if err != nil {
 		return err
 	}
 
-	binary, _ := cmd.Flags().GetString("binary")
+	binary := opts.Binary
 	if binary == "" {
 		binary, err = os.Executable()
 		if err != nil {
@@ -154,27 +223,27 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	if credentialFile != "" {
 		args = append(args, "--credential-file", credentialFile)
 	}
-	for flag, dest := range map[string]string{
-		"pin-cert": "--pin-cert", "server-name": "--server-name",
-		"rtk": "--rtk", "spill-dir": "--spill-dir",
+	for _, kv := range []struct{ flag, val string }{
+		{"--pin-cert", opts.PinCert},
+		{"--server-name", opts.ServerName},
+		{"--rtk", opts.RTK},
+		{"--spill-dir", opts.SpillDir},
 	} {
-		if v, _ := cmd.Flags().GetString(flag); v != "" {
-			args = append(args, dest, v)
+		if kv.val != "" {
+			args = append(args, kv.flag, kv.val)
 		}
 	}
-	if c, _ := cmd.Flags().GetInt("concurrency"); c > 0 && c != 6 {
-		args = append(args, "--concurrency", fmt.Sprint(c))
+	if opts.Concurrency > 0 && opts.Concurrency != 6 {
+		args = append(args, "--concurrency", fmt.Sprint(opts.Concurrency))
 	}
-	if b, _ := cmd.Flags().GetInt64("job-output-budget-mb"); b > 0 {
-		args = append(args, "--job-output-budget-mb", fmt.Sprint(b))
+	if opts.JobOutputBudgetMB > 0 {
+		args = append(args, "--job-output-budget-mb", fmt.Sprint(opts.JobOutputBudgetMB))
 	}
-	proxyArgs, _ := cmd.Flags().GetStringArray("proxy")
-	args, err = appendProxyArgs(args, proxyArgs)
+	args, err = appendProxyArgs(args, opts.Proxy)
 	if err != nil {
 		return err
 	}
-	launchKinds, _ := cmd.Flags().GetStringArray("launch")
-	if len(launchKinds) > 0 {
+	if len(opts.Launch) > 0 {
 		// Same check `serve` makes at construction time (cmd_executor_serve.go) —
 		// fail the install rather than a supervised unit that restarts forever
 		// against a binary that was never there.
@@ -182,45 +251,42 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
 		}
 	}
-	for _, k := range launchKinds {
+	for _, k := range opts.Launch {
 		args = append(args, "--launch", k)
 	}
 
 	// Sandbox exposure is validated identically to serve's own flags, before
 	// the unit is written, so an install cannot bake in a root that does not
 	// exist or a relay with no daemon to forward to.
-	relayDirFlag, _ := cmd.Flags().GetString("relay-dir")
-	relayDir, err := resolveSandboxRelayDir(relayDirFlag)
+	relayDir, err := resolveSandboxRelayDir(opts.RelayDir)
 	if err != nil {
 		return err
 	}
-	relayFootholdImage, _ := cmd.Flags().GetString("relay-foothold-image")
-	proxies, err := executor.ParseProxyFlags(proxyArgs)
+	proxies, err := executor.ParseProxyFlags(opts.Proxy)
 	if err != nil {
 		return err
 	}
-	if err := validateRelayFoothold(relayFootholdImage, relayDirFlag, cmd.Flags().Changed("relay-dir"), proxies); err != nil {
+	if err := validateRelayFoothold(opts.RelayFootholdImage, opts.RelayDir, opts.RelayDir != "", proxies); err != nil {
 		return err
 	}
-	sandboxRoots, _ := cmd.Flags().GetStringArray("sandbox-mount-root")
-	args, err = appendSandboxMountRootArgs(args, sandboxRoots)
+	args, err = appendSandboxMountRootArgs(args, opts.SandboxMountRoots)
 	if err != nil {
 		return err
 	}
 	if relayDir != "" {
 		args = append(args, "--relay-dir", relayDir)
 	}
-	if relayFootholdImage != "" {
-		args = append(args, "--relay-foothold-image", relayFootholdImage)
+	if opts.RelayFootholdImage != "" {
+		args = append(args, "--relay-foothold-image", opts.RelayFootholdImage)
 	}
 
-	pathEnv, _ := cmd.Flags().GetString("path-env")
+	pathEnv := opts.PathEnv
 	if pathEnv == "" {
 		pathEnv = executorPathEnv()
 	}
 	home, _ := os.UserHomeDir()
 
-	b := newExecutorServiceBackend()
+	b := executorServiceBackendFor()
 	spec := serviceSpec{
 		DaemonBinary: binary,
 		Args:         args,
@@ -232,7 +298,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 		spec.ExtraEnv = map[string]string{"RAFIKI_EXECUTOR_CREDENTIAL": credential}
 	}
 
-	// Capture this shell's environment into the executor's environment file.
+	// Write this shell's environment into the executor's environment file.
 	// launchd provides no login shell, so without this the supervised executor
 	// runs with nothing but HOME, PATH and (when --credential is given) a
 	// credential — and every bash/git/language-server call it serves inherits
@@ -240,9 +306,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	// the breadth lives in a 0600 file serve applies at startup. See
 	// captureExecutorEnv for what is excluded and why.
 	envFile := paths.ExecutorEnvFile()
-	captured := captureExecutorEnv(os.Environ())
-	res, mergeErr := paths.MergeEnvFile(envFile, captured,
-		"added by rafiki executor service install on "+time.Now().Format("2006-01-02"))
+	report := writeExecutorEnvFile(envFile, opts.EnvNames)
 	// The override must be baked into the unit whether or not anything was
 	// written: an operator who pointed RAFIKI_EXECUTOR_ENV_FILE somewhere
 	// custom needs serve to resolve THAT file, not the default — exactly the
@@ -258,24 +322,82 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	// unit starts. Otherwise the first supervised run consumes the token, and a
 	// restart before that run finishes writing the file leaves the machine with
 	// a consumed token and no credential — recoverable only by minting another.
-	if enrollToken != "" && !credFileExists(credentialFile) {
-		fmt.Println("Enrolling once before installing the service…")
-		if err := enrollOnce(connect, connectSocket, cmd, enrollToken, credentialFile, resolvedRoot); err != nil {
+	if opts.EnrollToken != "" && !credFileExists(credentialFile) {
+		fmt.Fprintln(out, "Enrolling once before installing the service…")
+		if err := enrollOnce(connect, connectSocket, opts.PinCert, opts.ServerName, opts.EnrollToken, credentialFile, resolvedRoot); err != nil {
 			return fmt.Errorf("enroll: %w", err)
 		}
-		fmt.Printf("Enrolled. Credential: %s\n", credentialFile)
+		fmt.Fprintf(out, "Enrolled. Credential: %s\n", credentialFile)
 	}
 
 	if err := b.Install(spec); err != nil {
 		// The env file write already happened on disk regardless, so the report
 		// is still true — print it before the failure, same reasoning as the
 		// daemon's installReport.
-		fmt.Print(executorEnvReport(envFile, captured, res, mergeErr))
+		fmt.Fprint(out, report)
 		return err
 	}
-	fmt.Print(executorEnvReport(envFile, captured, res, mergeErr))
-	fmt.Printf("rafiki executor service installed.\nLog: %s\n", b.LogPath())
+	fmt.Fprint(out, report)
+	fmt.Fprintf(out, "rafiki executor service installed.\nLog: %s\n", b.LogPath())
 	return nil
+}
+
+// writeExecutorEnvFile writes the executor's environment file and returns the
+// report text the caller prints. With names nil it keeps the legacy behaviour —
+// capture the whole shell and append-only MergeEnvFile — and returns
+// executorEnvReport. With names non-nil it carries exactly those names,
+// re-reading each value so a replay (after a rotated key or a changed editor)
+// updates the file in place through paths.SetEnvFile; a name absent from the
+// environment is reported, not written. Values never appear in the report: a
+// terminal scrollback is readable and much of this environment is not.
+func writeExecutorEnvFile(envFile string, names []string) string {
+	if names == nil {
+		captured := captureExecutorEnv(os.Environ())
+		res, mergeErr := paths.MergeEnvFile(envFile, captured,
+			"added by rafiki executor service install on "+time.Now().Format("2006-01-02"))
+		return executorEnvReport(envFile, captured, res, mergeErr)
+	}
+
+	vars := make(map[string]string, len(names))
+	var missing []string
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			vars[n] = v
+		} else {
+			missing = append(missing, n)
+		}
+	}
+
+	res, err := paths.SetEnvFile(envFile, vars,
+		"carried by rafiki executor setup on "+time.Now().Format("2006-01-02"))
+
+	var b strings.Builder
+	if len(res.Added) > 0 {
+		fmt.Fprintf(&b, "\nWritten to %s (0600):\n", envFile)
+		for _, k := range res.Added {
+			fmt.Fprintf(&b, "  %s\n", k)
+		}
+	}
+	if len(res.Replaced) > 0 {
+		fmt.Fprintf(&b, "\nUpdated in %s (0600):\n", envFile)
+		for _, k := range res.Replaced {
+			fmt.Fprintf(&b, "  %s\n", k)
+		}
+	}
+	if len(res.Unchanged) > 0 {
+		fmt.Fprintf(&b, "\nAlready in %s with the same value (%d variables), left alone.\n", envFile, len(res.Unchanged))
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		fmt.Fprintf(&b, "\nNot set in this shell, so not written: %s\n", strings.Join(missing, ", "))
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(&b, "\nWarning: %s\n", w)
+	}
+	if err != nil {
+		fmt.Fprintf(&b, "\nCould not write %s: %v\n", envFile, err)
+	}
+	return b.String()
 }
 
 // executorEnvReport renders what `executor service install` tells the operator
@@ -325,10 +447,7 @@ func executorEnvReport(envFile string, captured map[string]string, res paths.Mer
 // the token is one-time, so if the service manager restarts the unit before
 // that run has written the credential file, the machine is left holding a
 // consumed token and no credential — recoverable only by minting another.
-func enrollOnce(connect, connectSocket string, cmd *cobra.Command, token, credentialFile, root string) error {
-	pinCert, _ := cmd.Flags().GetString("pin-cert")
-	serverName, _ := cmd.Flags().GetString("server-name")
-
+func enrollOnce(connect, connectSocket, pinCert, serverName, token, credentialFile, root string) error {
 	srv := executor.NewServer(executor.Options{
 		Root:        root,
 		Concurrency: 1,
@@ -336,7 +455,7 @@ func enrollOnce(connect, connectSocket string, cmd *cobra.Command, token, creden
 	})
 	defer func() { _ = srv.Close() }()
 
-	ctx, cancel := context.WithCancel(cmdCtx(cmd))
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	connErr := make(chan error, 1)
