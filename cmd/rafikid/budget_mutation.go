@@ -90,6 +90,8 @@ func (c *Controller) applyBudgetChange(childID string, newCap float64) error {
 		return fmt.Errorf("set budget: %w", err)
 	}
 	c.breaches.clear(childID)
+	// The node is no longer halted by its own cap: recompute its display state.
+	c.refreshDisplayState(childID)
 
 	if wasBreached {
 		c.notifyBudgetRaised(childID, newCap)

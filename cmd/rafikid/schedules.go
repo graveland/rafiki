@@ -124,6 +124,7 @@ func (b *scheduleBinding) CronCreate(ctx context.Context, cron, prompt string, r
 		return tools.ScheduleInfo{}, wrapScheduleCreateErr(err)
 	}
 	b.c.armSchedule(job)
+	b.c.refreshDisplayState(b.childID)
 	return scheduleInfo(job), nil
 }
 
@@ -148,6 +149,7 @@ func (b *scheduleBinding) ScheduleWakeup(ctx context.Context, delay time.Duratio
 		return tools.ScheduleInfo{}, wrapScheduleCreateErr(err)
 	}
 	b.c.armSchedule(job)
+	b.c.refreshDisplayState(b.childID)
 	return scheduleInfo(job), nil
 }
 
@@ -163,6 +165,7 @@ func (b *scheduleBinding) CronDelete(ctx context.Context, id string) error {
 		return err
 	}
 	b.c.cancelTimer(scheduleKey(id))
+	b.c.refreshDisplayState(b.childID)
 	return nil
 }
 
@@ -240,6 +243,8 @@ func (c *Controller) fireSchedule(id string) {
 		// The child is gone for good: tombstone and stop, never re-arm.
 		if err := c.schedules.Tombstone(ctx, id, nil); err != nil {
 			slog.Warn("schedule: tombstone failed", "id", id, "error", err)
+		} else {
+			c.refreshDisplayState(j.ChildID)
 		}
 		return
 	}
@@ -271,6 +276,8 @@ func (c *Controller) fireSchedule(id string) {
 			slog.Warn("schedule: stored cron unparseable; tombstoning", "id", id, "error", perr)
 			if err := c.schedules.Tombstone(ctx, id, &due); err != nil {
 				slog.Warn("schedule: tombstone failed", "id", id, "error", err)
+			} else {
+				c.refreshDisplayState(j.ChildID)
 			}
 			return
 		}
@@ -325,11 +332,14 @@ func (c *Controller) fireSchedule(id string) {
 		}
 		j.NextFireAt = next
 		c.armSchedule(j)
+		c.refreshDisplayState(j.ChildID)
 		return
 	}
 	if err := c.schedules.Tombstone(ctx, id, &now); err != nil {
 		slog.Warn("schedule: tombstone failed; retrying", "id", id, "error", err)
 		c.at(scheduleKey(id), now.Add(time.Minute), func() { c.retryTombstone(id, now) })
+	} else {
+		c.refreshDisplayState(j.ChildID)
 	}
 }
 

@@ -419,9 +419,12 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 
 	// Coordinator-notification seam: the settle path (handleStatusChange)
-	// reads this back via settleReason at the moment the child goes idle.
+	// reads this back via settleReason at the moment the child goes idle. An
+	// unclean outcome is also written onto the row (LastTurnError) so the
+	// operator display state can show it; a clean one writes nothing. No
+	// refresh call here: the settle's handleStatusChange runs next and does it.
 	ro.OnTurnEnded = func(outcome fundi.TurnOutcome) {
-		c.turnOutcomes.set(childID, outcome)
+		c.recordTurnOutcome(childID, outcome)
 	}
 
 	// req.Env is forwarded-caller-environment, default-on via
@@ -867,4 +870,38 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		ToolsWeb:           toolsWebValue(f.toolsWeb, f.toolsWebSet),
 		NoLSP:              f.noLSP || paths.Get(paths.LSPDisable) == "1",
 	}, nil
+}
+
+// recordTurnOutcome stores a turn's outcome for the settle-reason seam and,
+// when the turn did not end cleanly, records why on the child's row so the
+// operator display state can surface it (computeDisplayState reads
+// LastTurnError as "failed"). A clean outcome writes nothing to the row: there
+// is no error to show, and the next turn's start (handleStatusChange) clears
+// any stale value. The row write is best-effort, warned and not returned, the
+// same contract SetResult uses — the in-memory store still holds the value.
+func (c *Controller) recordTurnOutcome(childID string, outcome fundi.TurnOutcome) {
+	c.turnOutcomes.set(childID, outcome)
+	if outcome.Clean {
+		return
+	}
+	if err := c.st.Update(childID, func(s *childstore.Session) {
+		s.LastTurnError = turnErrorText(outcome)
+	}); err != nil {
+		slog.Warn("record turn error", "childId", childID, "error", err)
+		return
+	}
+	if err := c.writeRecord(childID); err != nil {
+		// The session holds the value; the row write is the durability half.
+		// Warn, don't fail: the next ordinary writeRecord carries it.
+		slog.Warn("persist turn error", "childId", childID, "error", err)
+	}
+}
+
+// turnErrorText is the one-line reason an unclean turn stopped: the concrete
+// error when there is one, otherwise the guardrail's limit reason.
+func turnErrorText(o fundi.TurnOutcome) string {
+	if o.Err != nil {
+		return o.Err.Error()
+	}
+	return o.LimitReason
 }

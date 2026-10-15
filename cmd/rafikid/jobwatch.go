@@ -72,6 +72,10 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 			c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
 		}
 		c.jobRunningMu.Unlock()
+		// The running-job count feeds waiting_on: recompute the owner's display
+		// state (and its ancestors') after the map is updated. Not while holding
+		// jobRunningMu — refreshDisplayState's worker takes it itself.
+		c.refreshDisplayState(ev.Owner)
 
 	case execpool.JobEventExited:
 		c.jobRunningMu.Lock()
@@ -82,6 +86,8 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 			c.jobReplayForLocked(ev.ExecutorID)[ev.Handle] = true
 		}
 		c.jobRunningMu.Unlock()
+		// The job is no longer running for its owner: recompute after the unlock.
+		c.refreshDisplayState(ev.Owner)
 
 		// Push BEFORE ack — the no-loss rule, never the reverse. A repeated
 		// exit (the executor replayed an unacked one while our ack was in
@@ -122,6 +128,10 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 		c.jobRunningMu.Unlock()
 
 		for _, g := range gone {
+			// A job gone from its executor is no longer running for its owner; its
+			// waiting_on/job may clear. Refresh regardless of deliverability: the
+			// running-job fact changed, whether or not the owner can be told.
+			c.refreshDisplayState(g.ref.owner)
 			if !c.jobDeliverable(g.ref.owner) {
 				continue
 			}

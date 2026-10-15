@@ -83,6 +83,8 @@ func (c *Controller) sweepBudgets(ctx context.Context) {
 		if spent < snap.MaxCost {
 			if c.breaches.has(snap.ChildID) {
 				c.breaches.clear(snap.ChildID)
+				// The subtree left the breach: its operators no longer wait on it.
+				c.refreshDisplayState(snap.ChildID)
 				// The subtree left the breach: release its held schedule fires.
 				c.releaseHeldSchedules(snap.ChildID)
 			}
@@ -91,6 +93,9 @@ func (c *Controller) sweepBudgets(ctx context.Context) {
 		if !c.breaches.mark(snap.ChildID) {
 			continue // already reported; do not re-steer on every fire
 		}
+		// A newly-breached budget node holds its operators: recompute the display
+		// state now that c.breaches records it.
+		c.refreshDisplayState(snap.ChildID)
 		c.applyBudgetBreach(ctx, snap, spent)
 	}
 }
