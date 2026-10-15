@@ -16,19 +16,20 @@
   let filter = $state('')
   let dialog = $state<DialogKind | null>(null)
   let target = $state<ChildRow | null>(null)
-  let budgetInput = $state('')
+  let budgetInput = $state<number | null | undefined>(undefined)
   let labelsInput = $state('')
 
   const rows = $derived([...childRows.values()])
 
-  // The set-budget dialog's value. max_cost 0 is the daemon's documented
-  // "unlimited" sentinel (control.proto SetBudgetRequest), so an EMPTY field —
-  // Number('') === 0 — must never be read as an accidental unlimited. Require a
-  // typed value: the Set button is disabled (and confirmDialog re-checks) until
-  // the input is a non-negative number, and a typed 0 is labelled "unlimited".
-  const budgetValue = $derived(Number(budgetInput))
+  // The set-budget dialog's value. The field is `type="number"`, so Svelte's
+  // bind:value writes a number into budgetInput — or null/undefined when the
+  // field is cleared — never a string. Validate that real runtime type (a
+  // `.trim()` on a number throws and crashes the dialog). max_cost 0 is the
+  // daemon's documented "unlimited" sentinel (SetBudgetRequest), so an EMPTY
+  // field must never be read as an accidental unlimited: Set stays disabled
+  // until the input is a non-negative number, and a typed 0 is labelled.
   const budgetValid = $derived(
-    budgetInput.trim() !== '' && Number.isFinite(budgetValue) && budgetValue >= 0,
+    budgetInput != null && Number.isFinite(budgetInput) && budgetInput >= 0,
   )
 
   onMount(() => {
@@ -95,7 +96,7 @@
     dialog = kind
     target = row ?? null
     if (kind === 'budget' && row) {
-      budgetInput = row.maxCost !== undefined ? String(row.maxCost) : ''
+      budgetInput = row.maxCost
     }
     if (kind === 'labels' && row) {
       labelsInput = editableLabels(row)
@@ -105,6 +106,7 @@
   function closeDialog(): void {
     dialog = null
     target = null
+    budgetInput = undefined
   }
 
   function errorText(error: unknown): string {
@@ -173,7 +175,7 @@
           })
           return
         }
-        const value = budgetValue
+        const value = budgetInput as number
         if (
           row &&
           (await withRetry('set budget', () =>
@@ -352,7 +354,7 @@
       <p class="py-2 text-sm opacity-70">Spend cap in USD for {target?.name ?? ''}.</p>
       <input type="number" min="0" step="0.01" class="input w-full" bind:value={budgetInput} />
       <p class="py-1 text-xs opacity-70">
-        {#if budgetValid && budgetValue === 0}
+        {#if budgetValid && budgetInput === 0}
           Unlimited — no spend cap.
         {:else if !budgetValid}
           Enter a non-negative number; 0 means unlimited.
