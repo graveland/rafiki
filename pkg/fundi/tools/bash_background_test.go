@@ -173,6 +173,7 @@ func TestAutoBackgroundPromotesAtThreshold(t *testing.T) {
 	c.NoError(err)
 	c.StrContains(res.Text, "moved to the background as job h1", "expected the handoff naming the job, got")
 	c.StrContains(res.Text, `bash_output {"handle":"h1"}`, "expected a bash_output hint, got")
+	c.StrContains(res.Text, "still running after 50ms", "expected the raw, unrounded timeout in the handoff, got")
 	c.False(!p.wasPromoted(), "Promote must be called at the threshold")
 	c.False(p.wasDiscarded(), "a promoted job must not be discarded")
 }

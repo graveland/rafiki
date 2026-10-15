@@ -26,7 +26,10 @@ type Provisional interface {
 	// Snapshot is the merged output so far and when it was last written
 	// (zero if nothing has been).
 	Snapshot() (combined string, lastOutput time.Time)
-	// Promote makes it a visible job and returns its handle.
+	// Promote makes it a visible job and returns its handle. Promoting an
+	// already-exited provisional still yields a visible, already-finished
+	// job AND still delivers its exit event, so the caller is never left
+	// telling the model to expect a message that never arrives.
 	Promote() string
 	// Discard kills it if still running and removes every trace.
 	Discard()
@@ -77,14 +80,27 @@ func (bt *bashTool) runAuto(ctx context.Context, timeout time.Duration, argv []s
 	if err != nil {
 		return autoRun{err: err}
 	}
+	finish := func() autoRun {
+		combined, stderrHead, runErr := p.Result()
+		p.Discard()
+		return autoRun{out: combined, stderr: stderrHead, err: runErr}
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-p.Done():
-		combined, stderrHead, runErr := p.Result()
-		p.Discard()
-		return autoRun{out: combined, stderr: stderrHead, err: runErr}
+		return finish()
 	case <-timer.C:
+		// Done and timer.C can both be ready (the process exited at the
+		// instant of the timeout); Go's select picks at random. One
+		// non-blocking check — an event test, not a poll — prefers the
+		// finished result. It narrows, but cannot close, the window, which
+		// is why Promote must tolerate an already-exited job.
+		select {
+		case <-p.Done():
+			return finish()
+		default:
+		}
 		snap, last := p.Snapshot()
 		handle := p.Promote()
 		return autoRun{promoted: true, snap: snap, last: last, handle: handle}
@@ -100,7 +116,7 @@ func (bt *bashTool) runAuto(ctx context.Context, timeout time.Duration, argv []s
 // output only appears once it exits.
 func (bt *bashTool) backgroundHandoff(r autoRun, timeout time.Duration, rtkApplied bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[still running after %s; moved to the background as job %s]\n", timeout.Round(time.Second), r.handle)
+	fmt.Fprintf(&b, "[still running after %s; moved to the background as job %s]\n", timeout, r.handle)
 	b.WriteString(bt.p.Clip(r.snap, "bash-"+r.handle))
 	b.WriteString("\n")
 	if r.last.IsZero() {

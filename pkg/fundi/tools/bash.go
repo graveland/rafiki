@@ -184,7 +184,10 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 
 	if runErr != nil {
 		switch {
-		case errors.Is(cctx.Err(), context.DeadlineExceeded):
+		case !useAuto && errors.Is(cctx.Err(), context.DeadlineExceeded):
+			// The auto path never kills at its timeout — it promotes — so a
+			// DeadlineExceeded here would mislabel a process that exited
+			// nonzero in the shadow of the deadline as "killed".
 			out += fmt.Sprintf("\n[bash: command timed out after %s and was killed]\n", timeout)
 		case errors.Is(cctx.Err(), context.Canceled):
 			out += "\n[bash: command was canceled and killed]\n"
