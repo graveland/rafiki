@@ -415,3 +415,257 @@ func MergeEnvFile(path string, vars map[string]string, comment string) (MergeRes
 	}
 	return res, f.Close()
 }
+
+// SetResult reports what a SetEnvFile call did. Key names only, never values.
+type SetResult struct {
+	Added     []string // keys appended, sorted
+	Replaced  []string // keys whose line was rewritten with a new value, sorted
+	Unchanged []string // keys already present with the same value, sorted
+	Warnings  []string
+	Tightened os.FileMode // the file's permission bits before SetEnvFile chmod'ed it to 0600, or 0 if untouched
+}
+
+// envLineDef locates one assignment within a file's lines: the key, the value
+// parseEnvFile would read for it, and the [start,end] line indices it spans.
+// A multi-line double-quoted value spans more than one line; everything else
+// spans exactly one. end is only meaningful once the value has closed.
+type envLineDef struct {
+	key        string
+	value      string
+	start, end int
+}
+
+// scanEnvDefs walks lines and reports every assignment it defines, in file
+// order, using the exact grammar parseEnvFile uses (comments, blank lines,
+// `export `, double/single quotes, and multi-line double-quoted values), so
+// the positions it returns line up with what LoadEnvFile reads. It is the
+// position-aware sibling of parseEnvFile — parseEnvFile yields values but no
+// line numbers, and SetEnvFile needs both.
+func scanEnvDefs(lines []string) []envLineDef {
+	var (
+		defs    []envLineDef
+		pending strings.Builder
+		inMulti bool
+	)
+	for i, line := range lines {
+		if inMulti {
+			if rest, closed := closeQuoted(line); closed {
+				pending.WriteString(rest)
+				defs[len(defs)-1].value = unescape(pending.String())
+				defs[len(defs)-1].end = i
+				inMulti = false
+				pending.Reset()
+			} else {
+				pending.WriteString(line)
+				pending.WriteByte('\n')
+			}
+			continue
+		}
+
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		trimmed = strings.TrimPrefix(trimmed, "export ")
+
+		k, v, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(v, `"`):
+			if rest, closed := closeQuoted(v[1:]); closed {
+				defs = append(defs, envLineDef{key: k, value: unescape(rest), start: i, end: i})
+			} else {
+				inMulti = true
+				pending.WriteString(v[1:])
+				pending.WriteByte('\n')
+				// end is filled in when the multi-line value closes.
+				defs = append(defs, envLineDef{key: k, start: i, end: i})
+			}
+		case strings.HasPrefix(v, `'`):
+			if end := strings.LastIndex(v, `'`); end > 0 {
+				defs = append(defs, envLineDef{key: k, value: v[1:end], start: i, end: i})
+			}
+			// Unterminated single quote: parseEnvFile drops the assignment, so
+			// we do too — no def to rewrite.
+		default:
+			defs = append(defs, envLineDef{key: k, value: strings.TrimSpace(v), start: i, end: i})
+		}
+	}
+	return defs
+}
+
+// SetEnvFile makes path define exactly vars' values for vars' keys, and
+// touches nothing else: every other line (comments, blank lines, keys not in
+// vars, malformed lines) is preserved byte for byte, in order. A key in vars
+// that the file already defines has that ONE line rewritten in place; a key
+// defined more than once has its LAST definition rewritten (the one
+// LoadEnvFile honours) and the earlier ones left alone. New keys are appended
+// after a "# <comment>" line. The file is created 0600 if absent, and tightened
+// to 0600 before any write if it is looser. The write is atomic (temp file in
+// the same directory, fsync, rename).
+//
+// This is the SETUP writer, the counterpart to MergeEnvFile's append-only one:
+// MergeEnvFile refuses to touch a key that already exists, which is right for a
+// hand-maintained operator file and wrong for the keys install owns (a rotated
+// API key, a changed bind address). Those keys are re-derived on every run, so
+// the fresh value must replace the stale one rather than sit beside it.
+//
+// An empty value is an error: to the daemon an empty value means "configured
+// but broken" (see captureDaemonEnv's doc), and deleting a key is out of scope
+// here, so there is nothing sensible to do with one. When every key is already
+// present with the value asked for, nothing is written and the file's
+// permissions are only observed — with the same loose-permission warning
+// MergeEnvFile's observe-only path emits.
+func SetEnvFile(path string, vars map[string]string, comment string) (SetResult, error) {
+	var res SetResult
+
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if vars[k] == "" {
+			return res, fmt.Errorf("SetEnvFile: empty value for %s", k)
+		}
+	}
+
+	var existing []byte
+	var loosePerm os.FileMode
+	existing, err := os.ReadFile(path) //nolint:gosec // operator-supplied path, by design
+	switch {
+	case err == nil:
+		if fi, statErr := os.Stat(path); statErr == nil {
+			if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+				loosePerm = perm
+			}
+		}
+		_, warnings, parseErr := parseEnvFile(bytes.NewReader(existing), path)
+		res.Warnings = append(res.Warnings, warnings...)
+		if parseErr != nil {
+			return res, parseErr
+		}
+	case os.IsNotExist(err):
+		existing = nil
+	default:
+		return res, err
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	defs := scanEnvDefs(lines)
+
+	lastIdx := make(map[string]int, len(defs))
+	for i, d := range defs {
+		lastIdx[d.key] = i
+	}
+
+	// repl maps a line index to its replacement; skip marks continuation lines
+	// of a rewritten multi-line value that should be dropped.
+	repl := make(map[int]string)
+	skip := make(map[int]bool)
+	for _, k := range keys {
+		i, present := lastIdx[k]
+		if !present {
+			res.Added = append(res.Added, k)
+			continue
+		}
+		d := defs[i]
+		if d.value == vars[k] {
+			res.Unchanged = append(res.Unchanged, k)
+			continue
+		}
+		res.Replaced = append(res.Replaced, k)
+		repl[d.start] = k + "=" + escapeEnvValue(vars[k])
+		for j := d.start + 1; j <= d.end; j++ {
+			skip[j] = true
+		}
+	}
+	sort.Strings(res.Added)
+	sort.Strings(res.Replaced)
+	sort.Strings(res.Unchanged)
+
+	if len(res.Added) == 0 && len(res.Replaced) == 0 {
+		// Nothing to write: this call only observed the file, so leave its
+		// permissions alone too — just warn, the same way MergeEnvFile does.
+		if loosePerm != 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"%s is mode %04o; it holds credentials and should be 0600 (chmod 600 %s)", path, loosePerm, path))
+		}
+		return res, nil
+	}
+
+	outLines := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if skip[i] {
+			continue
+		}
+		if nl, ok := repl[i]; ok {
+			outLines = append(outLines, nl)
+			continue
+		}
+		outLines = append(outLines, line)
+	}
+	out := strings.Join(outLines, "\n")
+	if len(res.Added) > 0 {
+		var ab strings.Builder
+		if len(existing) > 0 {
+			// Unconditional blank line, matching MergeEnvFile: it separates
+			// blocks readably and tolerates a file whose last line has no
+			// trailing newline.
+			ab.WriteString("\n")
+		}
+		ab.WriteString("# " + comment + "\n")
+		for _, k := range res.Added {
+			ab.WriteString(k + "=" + escapeEnvValue(vars[k]) + "\n")
+		}
+		out += ab.String()
+	}
+
+	// Tightening is reported whenever the incoming file was loose and we wrote:
+	// the atomic rename installs a fresh 0600 file regardless of the old mode.
+	if loosePerm != 0 {
+		res.Tightened = loosePerm
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return res, err
+	}
+	// The temp name must not look like an env file to parseEnvFile; an explicit
+	// ".envfile-*" prefix (not "*") keeps it clear of *.env / service.env.
+	tmp, err := os.CreateTemp(dir, ".envfile-*")
+	if err != nil {
+		return res, err
+	}
+	tmpName := tmp.Name()
+	fail := func(err error) (SetResult, error) {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return res, err
+	}
+	if _, err := tmp.WriteString(out); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return res, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return res, err
+	}
+	return res, nil
+}
