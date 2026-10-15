@@ -206,7 +206,7 @@ class H(BaseHTTPRequestHandler):
         # Every response carries the protocol epoch, as the real daemon's
         # RequireEpoch gate does; the SDK now refuses a response without it.
         super().send_response(*a, **k)
-        self.send_header("Rafiki-Protocol", "2")
+        self.send_header("Rafiki-Protocol", "3")
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))

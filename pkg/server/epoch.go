@@ -27,7 +27,7 @@ const connectPathPrefix = "/rafiki.v1."
 // credential-less caller is exactly who Login exists to serve, but it must
 // still speak the current wire.
 //
-// For a /rafiki.v1.* request it sets Rafiki-Protocol: 2 on the response
+// For a /rafiki.v1.* request it sets Rafiki-Protocol: 3 on the response
 // unconditionally (refusals included, so a client can always read the
 // daemon's epoch) and passes the request through only when its own
 // Rafiki-Protocol header is exactly the daemon's epoch. A missing header is an
