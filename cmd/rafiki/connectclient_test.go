@@ -9,6 +9,8 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/profile"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -60,4 +62,18 @@ func TestDiagnoseUnauthenticatedSuggestsLogin(t *testing.T) {
 	c.StrContains(msg, "rafiki login", "want the login hint in the message, got: %s", msg)
 	c.StrContains(msg, "https://rafiki.example.net", "want the endpoint named, got: %s", msg)
 	c.StrContains(msg, "invalid auth token", "want the daemon's reason preserved, got: %s", msg)
+}
+
+// connectEndpointFor must wrap errRemoteNoToken so a caller (the web proxy) can
+// tell "no credential — sign in" apart from any other resolve failure.
+func TestConnectEndpointForRemoteNoTokenWrapsSentinel(t *testing.T) {
+	c := assert.NewAborting(t)
+	_, err := connectEndpointFor(profile.Resolved{
+		Profile: profile.Profile{Name: "remote", URL: "https://rafiki.example.net"},
+	})
+	c.Require().Error(err, "a tokenless remote profile must not resolve")
+	c.True(errors.Is(err, errRemoteNoToken), "error must wrap errRemoteNoToken, got %v", err)
+	c.StrContains(err.Error(),
+		`profile "remote" names a remote daemon but has no token`,
+		"the original message prefix must still be present")
 }

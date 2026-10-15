@@ -210,8 +210,24 @@ func isRemoteURL(raw string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
-// newConnectEndpoint resolves where the Connect control plane lives, from the
-// profile and nothing else.
+// errRemoteNoToken marks a tokenless remote profile. The control plane has no
+// bootstrap mode, so every authenticated verb refuses before the round trip;
+// the web proxy maps this sentinel to webui.ErrNoCredential so the UI offers a
+// login instead of surfacing a daemon error.
+var errRemoteNoToken = errors.New("remote profile has no token")
+
+// newConnectEndpoint resolves the process's profile and then the Connect
+// control-plane endpoint.
+func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
+	p, err := resolveProfile(cmd)
+	if err != nil {
+		return connectEndpoint{}, err
+	}
+	return connectEndpointFor(p)
+}
+
+// connectEndpointFor resolves where the Connect control plane lives, from an
+// already-resolved profile and nothing else.
 //
 // The profile's Socket IS the Connect socket: the daemon serves its control
 // plane on paths.SocketPath, the one path profiles store. It is deliberately
@@ -222,12 +238,7 @@ func isRemoteURL(raw string) bool {
 // daemon with no users refuses every connection — so an absent credential can
 // only ever produce an Unauthenticated, and saying so here beats saying so
 // after a round trip.
-func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
-	p, err := resolveProfile(cmd)
-	if err != nil {
-		return connectEndpoint{}, err
-	}
-
+func connectEndpointFor(p profile.Resolved) (connectEndpoint, error) {
 	if p.URL == "" {
 		sock := p.Socket
 		httpClient := connectHTTPClient(sock)
@@ -251,8 +262,8 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	if p.Token == "" {
 		return connectEndpoint{}, fmt.Errorf(
 			"profile %q names a remote daemon but has no token: write one to %s "+
-				"(or recreate it with `rafiki profile add %s --url %s --token …`)",
-			p.Name, profile.TokenFile(p.Name), p.Name, p.URL)
+				"(or recreate it with `rafiki profile add %s --url %s --token …`): %w",
+			p.Name, profile.TokenFile(p.Name), p.Name, p.URL, errRemoteNoToken)
 	}
 
 	// Plain net/http rather than an explicit http2.Transport: the shared TLS
@@ -272,8 +283,9 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	}, nil
 }
 
-// newLoginEndpoint resolves where the Login service lives: the same profile
-// resolution as newConnectEndpoint, minus the credential.
+// newLoginEndpoint resolves the process's profile and then the Login
+// endpoint; loginEndpointFor holds the endpoint derivation. The Login endpoint
+// is the same profile resolution as the control plane, minus the credential.
 //
 // The difference is deliberate, not sloppy. The Login service is served
 // OUTSIDE authentication on both planes (the UDS and the remote https URL) —
@@ -290,7 +302,12 @@ func newLoginEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	if err != nil {
 		return connectEndpoint{}, err
 	}
+	return loginEndpointFor(p), nil
+}
 
+// loginEndpointFor resolves where the Login service lives, from an
+// already-resolved profile.
+func loginEndpointFor(p profile.Resolved) connectEndpoint {
 	if p.URL == "" {
 		sock := p.Socket
 		return connectEndpoint{
@@ -298,7 +315,7 @@ func newLoginEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 			baseURL:    connectUDSBaseURL,
 			describe:   sock,
 			identity:   "unix:" + sock,
-		}, nil
+		}
 	}
 
 	return connectEndpoint{
@@ -306,7 +323,7 @@ func newLoginEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 		baseURL:    p.URL,
 		describe:   p.URL,
 		identity:   p.URL,
-	}, nil
+	}
 }
 
 // control returns a Connect client for the endpoint.

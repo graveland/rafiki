@@ -163,22 +163,35 @@ func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui l
 		return err
 	}
 
-	complete, err := ep.login().CompleteLogin(ctx, connect.NewRequest(&rafikiv1.CompleteLoginRequest{
-		LoginId:       begin.Msg.GetLoginId(),
+	complete, err := completeLogin(ctx, ep, p, begin.Msg.GetLoginId(), query)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(ui.stderr, "logged in as %s (profile %s), token expires %s\n",
+		complete.GetUsername(), p.Name, tokenExpiryText(complete.GetExpiresAt()))
+	return nil
+}
+
+// completeLogin exchanges the IdP's callback query for a token, writes the
+// token to the profile, and returns the daemon's response. It is the token
+// exchange both `rafiki login` and `rafiki web` share: the difference between
+// them is only what they do with the result, so the refusal of an empty token
+// and the profile write live here, once.
+func completeLogin(ctx context.Context, ep connectEndpoint, p profile.Resolved, loginID, query string) (*rafikiv1.CompleteLoginResponse, error) {
+	resp, err := ep.login().CompleteLogin(ctx, connect.NewRequest(&rafikiv1.CompleteLoginRequest{
+		LoginId:       loginID,
 		CallbackQuery: query,
 	}))
 	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+		return nil, diagnoseConnectError(err, ep.describe)
 	}
-	if complete.Msg.GetToken() == "" {
-		return errors.New("the daemon completed the login but returned no token; try again")
+	if resp.Msg.GetToken() == "" {
+		return nil, errors.New("the daemon completed the login but returned no token; try again")
 	}
-	if err := profile.WriteToken(p.Name, complete.Msg.GetToken()); err != nil {
-		return fmt.Errorf("write token to profile %q: %w", p.Name, err)
+	if err := profile.WriteToken(p.Name, resp.Msg.GetToken()); err != nil {
+		return nil, fmt.Errorf("write token to profile %q: %w", p.Name, err)
 	}
-	fmt.Fprintf(ui.stderr, "logged in as %s (profile %s), token expires %s\n",
-		complete.Msg.GetUsername(), p.Name, tokenExpiryText(complete.Msg.GetExpiresAt()))
-	return nil
+	return resp.Msg, nil
 }
 
 // shutdownLoginServer stops the callback server. Shutdown is preferred over a

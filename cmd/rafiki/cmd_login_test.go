@@ -118,9 +118,11 @@ func (f *fakeLogin) authHeadersSnapshot(t *testing.T) []string {
 	return append([]string(nil), f.authHeaders...)
 }
 
-// loginEndpointFor mounts fake on an httptest server and returns an endpoint
-// aimed at it, the way a resolved remote profile would (minus TLS).
-func loginEndpointFor(t *testing.T, fake *fakeLogin) connectEndpoint {
+// fakeLoginEndpoint mounts fake on an httptest server and returns an endpoint
+// aimed at it, the way a resolved remote profile would (minus TLS). Named
+// apart from production's loginEndpointFor(p), which derives an endpoint from a
+// resolved profile.
+func fakeLoginEndpoint(t *testing.T, fake *fakeLogin) connectEndpoint {
 	t.Helper()
 	mux := http.NewServeMux()
 	path, handler := rafikiv1connect.NewLoginHandler(fake)
@@ -247,7 +249,7 @@ func TestLoginListenerCallbackPathEndToEnd(t *testing.T) {
 		&rafikiv1.BeginLoginResponse{LoginId: "l-1", AuthorizeUrl: "https://idp.example.net/authorize?client_id=rafiki"},
 		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-listener", Username: "ada", ExpiresAt: timestamppb.New(expires)},
 	)
-	ep := loginEndpointFor(t, fake)
+	ep := fakeLoginEndpoint(t, fake)
 
 	var stderr bytes.Buffer
 	done := runLoginAsync(t, ep, &stderr)
@@ -294,7 +296,7 @@ func TestLoginRebindsToTheDaemonPinnedPort(t *testing.T) {
 		&rafikiv1.BeginLoginResponse{LoginId: "l-2", AuthorizeUrl: "https://idp.example.net/authorize", RedirectPort: uint32(pinned)},
 		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-pin", Username: "grace"},
 	)
-	ep := loginEndpointFor(t, fake)
+	ep := fakeLoginEndpoint(t, fake)
 
 	var stderr bytes.Buffer
 	done := runLoginAsync(t, ep, &stderr)
@@ -356,7 +358,7 @@ func TestLoginPinnedPortInUseNamesThePort(t *testing.T) {
 		&rafikiv1.BeginLoginResponse{LoginId: "l-3", AuthorizeUrl: "https://idp.example.net/authorize", RedirectPort: uint32(port)},
 		nil,
 	)
-	ep := loginEndpointFor(t, fake)
+	ep := fakeLoginEndpoint(t, fake)
 
 	var stderr bytes.Buffer
 	err = loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
@@ -383,7 +385,7 @@ func TestLoginPastePathEndToEnd(t *testing.T) {
 		&rafikiv1.BeginLoginResponse{LoginId: "l-4", AuthorizeUrl: "https://idp.example.net/authorize?client_id=rafiki"},
 		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-paste", Username: "linus", ExpiresAt: timestamppb.New(time.Unix(1735689600, 0))},
 	)
-	ep := loginEndpointFor(t, fake)
+	ep := fakeLoginEndpoint(t, fake)
 
 	var stderr bytes.Buffer
 	err := loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
@@ -412,7 +414,7 @@ func TestLoginIgnoresAMalformedPaste(t *testing.T) {
 		&rafikiv1.BeginLoginResponse{LoginId: "l-5", AuthorizeUrl: "https://idp.example.net/authorize"},
 		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-ok", Username: "ada"},
 	)
-	ep := loginEndpointFor(t, fake)
+	ep := fakeLoginEndpoint(t, fake)
 
 	var stderr bytes.Buffer
 	err := loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
@@ -451,7 +453,7 @@ func TestLoginBrowserOpeningHonorsNoBrowser(t *testing.T) {
 		&rafikiv1.BeginLoginResponse{LoginId: "l-8", AuthorizeUrl: "https://idp.example.net/authorize?client_id=rafiki"},
 		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-browser", Username: "ada"},
 	)
-	ep := loginEndpointFor(t, fake)
+	ep := fakeLoginEndpoint(t, fake)
 	paste := "http://localhost:1/oidc/callback?code=b&state=s\n"
 
 	// Without --no-browser the opener runs, with the authorize URL as argv.
@@ -608,4 +610,23 @@ func TestLoginCommandEndToEndThroughRootCmd(t *testing.T) {
 	out := stderr.String()
 	c.StrContains(out, "https://idp.example.net/authorize", "authorize URL on stderr")
 	c.StrContains(out, "logged in as root-user (profile sso)", "success line")
+}
+
+// completeLogin is the token exchange `rafiki login` and `rafiki web` share: a
+// nonempty token is written to the profile and the daemon's response returned.
+func TestLoginCompleteWritesToken(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	fake := newFakeLogin(nil, &rafikiv1.CompleteLoginResponse{Token: "sk-complete-1", Username: "ada"})
+	ep := fakeLoginEndpoint(t, fake)
+
+	resp, err := completeLogin(context.Background(), ep,
+		profile.Resolved{Profile: profile.Profile{Name: "test"}}, "l-c", "code=one&state=s")
+	c.Require().NoError(err, "completeLogin")
+	c.Eq("sk-complete-1", resp.GetToken(), "the token is returned")
+	c.Eq("sk-complete-1", profile.ReadToken("test"), "the token is written to the profile")
+	calls := fake.completeCallsSnapshot(t)
+	c.Len(calls, 1, "CompleteLogin calls")
+	c.Eq("l-c", calls[0].GetLoginId(), "login id")
+	c.Eq("code=one&state=s", calls[0].GetCallbackQuery(), "callback query")
 }
