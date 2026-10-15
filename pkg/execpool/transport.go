@@ -53,6 +53,19 @@ const maxExecutorStreams = 250
 // differently.
 var ALPNProtocols = []string{"http/1.1"}
 
+// newInvertedServer builds the HTTP/2 server side of the inverted transport.
+//
+// The stream limit is a parameter rather than baked in so a test can pin the
+// wait-rather-than-fail behaviour against a small limit while production passes
+// maxExecutorStreams.
+//
+// The explicit MaxConcurrentStreams names the number rather than changing
+// behaviour: http2.Server already defaults to 250 streams when the field is 0,
+// which is exactly maxExecutorStreams.
+func newInvertedServer(limit uint32) *http2.Server {
+	return &http2.Server{MaxConcurrentStreams: limit}
+}
+
 // ServeInverted runs an HTTP/2 server on a connection this process DIALLED,
 // until ctx is done or the connection ends on its own. Executor side.
 //
@@ -65,15 +78,6 @@ var ALPNProtocols = []string{"http/1.1"}
 // conn, which unblocks the pending Read with an error and lets ServeConn's
 // internal serve() return. Passing ctx through as Context too is still worth
 // doing — it cancels any in-flight handler that checks r.Context().Done().
-// newInvertedServer builds the HTTP/2 server side of the inverted transport.
-//
-// The stream limit is a parameter rather than baked in so a test can pin the
-// wait-rather-than-fail behaviour against a small limit while production passes
-// maxExecutorStreams.
-func newInvertedServer(limit uint32) *http2.Server {
-	return &http2.Server{MaxConcurrentStreams: limit}
-}
-
 func ServeInverted(ctx context.Context, conn net.Conn, handler http.Handler) error {
 	return serveInvertedOn(ctx, conn, handler, newInvertedServer(maxExecutorStreams))
 }

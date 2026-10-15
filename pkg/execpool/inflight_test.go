@@ -25,6 +25,15 @@ func warnCount(buf *bytes.Buffer) int {
 	return strings.Count(buf.String(), "in-flight calls past the warning threshold")
 }
 
+// TestInFlightWarnAtBelowStreamLimit ties the warning threshold to the stream
+// limit: the threshold must sit below it so the warning is visible before
+// callers start waiting, and the pairing cannot silently rot if either number
+// moves.
+func TestInFlightWarnAtBelowStreamLimit(t *testing.T) {
+	assert.NewCollecting(t).Greater(inFlightWarnAt, maxExecutorStreams,
+		"the HTTP/2 stream limit must sit above the in-flight warning threshold")
+}
+
 func TestInFlightWarnsOncePerCrossing(t *testing.T) {
 	c := assert.NewCollecting(t)
 	buf := captureLogs(t)
