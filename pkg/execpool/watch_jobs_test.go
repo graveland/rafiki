@@ -12,6 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -86,6 +87,21 @@ func (f *jobWatchFake) subscriptionCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+// The executor call deadline must clear the bash tool's promote window. The
+// executor applies ExecuteRequest.Timeout as the call's context deadline, and a
+// bash call that reaches its clamped timeout_ms is promoted by a timer firing
+// at exactly that timeout: a deadline at or below it races the promote (the
+// select's coin-flip), so a command that should become a background job gets
+// killed instead. Pin executorCallTimeout STRICTLY above the bash max, with a
+// comfortable margin (not merely send_steps.go's 5s drain slack).
+func TestExecutorCallTimeoutClearsTheBashPromoteWindow(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ck.Greater(tools.MaxBashTimeout, executorCallTimeout,
+		"executorCallTimeout must STRICTLY exceed the bash max timeout, or a max-timeout bash call is killed instead of promoted")
+	ck.GreaterOrEqual(tools.MaxBashTimeout+30*time.Second, executorCallTimeout,
+		"want a comfortable margin above the bash max, comfortably more than send_steps.go's 5s drain slack")
 }
 
 // The events an executor sends arrive at the daemon's handler in order, on one

@@ -23,6 +23,16 @@ const (
 	maxBashTimeout     = 600 * time.Second
 	bashWaitDelay      = 5 * time.Second
 
+	// MaxBashTimeout is the largest a bash call's timeout_ms can select
+	// (bashTimeout clamps to it). Exported because a caller that imposes its
+	// OWN deadline on an executor RPC must keep that deadline ABOVE this: a
+	// bash call that reaches its timeout is PROMOTED to a background job by a
+	// timer firing at exactly this value, and if the call's context deadline is
+	// at or below it the two fire together and the select may take ctx.Done() —
+	// discarding and killing a command that should have been promoted. See
+	// pkg/execpool's executorCallTimeout.
+	MaxBashTimeout = maxBashTimeout
+
 	bashDescription = "Run a shell command via `bash -c` in the working directory. " +
 		"stdout and stderr are merged into one result. A non-zero exit code is " +
 		"reported as text in the result, not as a tool error. Waits up to " +

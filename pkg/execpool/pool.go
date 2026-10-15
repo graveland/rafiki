@@ -32,6 +32,22 @@ import (
 // construction.
 const parkTimeout = 5 * time.Minute
 
+// executorCallTimeout bounds ONE executor RPC from the caller's side (Execute --
+// the daemon has no other timeout to hand it). The executor applies this as the
+// call's context deadline, and a bash call that reaches its timeout_ms is
+// PROMOTED to a background job by a timer firing at exactly timeout_ms. The two
+// must therefore NOT fire together: a deadline at or below the bash timeout
+// makes ctx.Done() and the promote timer ready at once, and the select's
+// coin-flip then sometimes takes ctx.Done() — killing a command the design says
+// is no longer killed at the threshold. So the bound STRICTLY exceeds the bash
+// tool's own clamped maximum (tools.MaxBashTimeout) by a comfortable margin
+// (30s, comfortably more than send_steps.go's 5s drain slack, so the promote
+// path has room to convert the process to a job before any deadline). This
+// matters only on the auto-background path (a bash Execute that sets
+// AutoBackground, which pkg/execpool does); pkg/executorclient stays
+// kill-at-timeout and so is unaffected by its own flat 10-minute bound.
+const executorCallTimeout = tools.MaxBashTimeout + 30*time.Second
+
 const (
 	// defaultHealthInterval is how often a live executor is polled.
 	defaultHealthInterval = 30 * time.Second
@@ -758,7 +774,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:           tool,
 		InputJson:      input,
-		Timeout:        durationpb.New(10 * time.Minute),
+		Timeout:        durationpb.New(executorCallTimeout),
 		WorkspaceId:    c.workspaceID,
 		Owner:          ownerFrom(ctx),
 		AutoBackground: tool == "bash",
@@ -1016,7 +1032,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:           tool,
 		InputJson:      input,
-		Timeout:        durationpb.New(10 * time.Minute),
+		Timeout:        durationpb.New(executorCallTimeout),
 		Owner:          ownerFrom(ctx),
 		AutoBackground: tool == "bash",
 	}))
