@@ -1,0 +1,87 @@
+version: 2
+
+project_name: rafiki
+
+before:
+  hooks:
+    # pkg/webui/dist is gitignored and embedded via `//go:embed all:dist`, so
+    # without this the release would ship an empty web UI. Needs node + pnpm +
+    # protoc on PATH (the release workflow installs them).
+    - make web
+
+builds:
+  - id: rafiki
+    main: ./cmd/rafiki
+    binary: rafiki
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X go.graveland.dev/rafiki/pkg/version.Version={{.Tag}}
+  - id: rafikid
+    main: ./cmd/rafikid
+    binary: rafikid
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X go.graveland.dev/rafiki/pkg/version.Version={{.Tag}}
+
+archives:
+  # Both binaries ride ONE tarball per platform.
+  - ids: [rafiki, rafikid]
+    formats: [tar.gz]
+    name_template: "rafiki_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: graveland
+    name: rafiki
+  extra_files:
+    - glob: scripts/install.sh
+
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+      notarize:
+        issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
+        key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
+        key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true
+
+homebrew_casks:
+  - name: rafiki
+    repository:
+      owner: graveland
+      name: homebrew-rafiki
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    binaries: [rafiki, rafikid]
+    dependencies:
+      - formula: ripgrep
+    homepage: https://github.com/graveland/rafiki
+    description: "Agent daemon, proxy and cockpit"
+    caveats: |
+      Run `rafiki setup` to finish installing (needs Docker or OrbStack, and a Claude login).
+
+changelog:
+  use: github
