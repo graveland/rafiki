@@ -25,6 +25,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/prometheus/client_golang v1.24.0
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/sourcegraph/jsonrpc2 v0.2.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
