@@ -129,7 +129,7 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	// auto path) or as a plain kill-at-timeout subprocess. A non-empty
 	// handoff means the command was promoted to a visible job and the caller
 	// must surface that text verbatim.
-	runArgv := func(rtk bool, name string, args []string) (out, stderrText string, runErr error, handoff string) {
+	runArgv := func(rtk bool, name string, args []string) (out, stderrText, handoff string, runErr error) {
 		if useAuto {
 			argv := append([]string{name}, args...)
 			// The CALLER's ctx, not cctx: the timer owns the promote
@@ -137,15 +137,15 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 			// context would race the timer at exactly timeout).
 			r := bt.runAuto(ctx, timeout, argv, in.Command, owner)
 			if r.promoted {
-				return "", "", nil, bt.backgroundHandoff(r, timeout, rtk)
+				return "", "", bt.backgroundHandoff(r, timeout, rtk), nil
 			}
-			return r.out, r.stderr, r.err, ""
+			return r.out, r.stderr, "", r.err
 		}
 		out, stderrText, runErr = bt.run(cctx, name, args)
-		return out, stderrText, runErr, ""
+		return out, stderrText, "", runErr
 	}
 
-	out, stderrText, runErr, handoff := runArgv(rtkApplied, argv0, argvRest)
+	out, stderrText, handoff, runErr := runArgv(rtkApplied, argv0, argvRest)
 	if handoff != "" {
 		return NewTextResult(handoff), nil
 	}
@@ -176,7 +176,7 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	if rtkApplied && isNonZeroExit(runErr) && rtkRefused(stderrText) {
 		slog.Warn("agent/tools: bash: rtk refused the rewritten command, falling back to plain bash",
 			"command", in.Command, "rtk_stderr", stderrText)
-		out, _, runErr, handoff = runArgv(false, bt.interpreter(), []string{"-c", in.Command})
+		out, _, handoff, runErr = runArgv(false, bt.interpreter(), []string{"-c", in.Command})
 		if handoff != "" {
 			return NewTextResult(handoff), nil
 		}
