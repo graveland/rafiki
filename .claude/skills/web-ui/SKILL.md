@@ -76,3 +76,4 @@ Same discipline as CLAUDE.md: rule + where it's enforced, no incident narration.
   is the one way to run without `make web`). Verify with
   `make check check-web` — `make check` is Go-only and can stay green while the
   generated TS client breaks the web build.
+- Svelte `bind:value` on `<input type="number">` writes `number | null` — validate that type, never call string methods on it (pinned by AgentsBudgetDialog.test.ts).
