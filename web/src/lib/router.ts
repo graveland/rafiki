@@ -11,6 +11,15 @@ export interface Route {
 export const MAX_TRANSCRIPT_PANES = 3
 
 /**
+ * The id charset allowed in a route id. Ids come off the URL fragment — typed at
+ * the pane "+" prompt or navigated to from a search hit — and become each-block
+ * keys in SplitPanes, so a stray slash/space/control char must not reach it.
+ * Child ids are `c_<ULID>` (Crockford base32, uppercase alnum) and search may
+ * hand through a dashed uuid.
+ */
+const ID_PATTERN = /^[A-Za-z0-9_-]+$/
+
+/**
  * The router keeps the FULL id list; the transcript slices it for rendering.
  * Separating the two is what makes the "too many panes" banner reachable —
  * dropping the extras in the router would leave `ids.length > 3` never true.
@@ -33,10 +42,19 @@ export function parseRoute(hash: string): Route {
   }
   switch (segments[0]) {
     case 'c': {
-      const ids = (segments[1] ?? '')
-        .split(',')
-        .map((id) => id.trim())
-        .filter((id) => id.length > 0)
+      // Drop repeats (a duplicate each-key throws each_key_duplicate in dev and
+      // is undefined behaviour in prod — the "+" prompt accepts the id already
+      // in the route) and any garbage the typed segment carries.
+      const seen = new Set<string>()
+      const ids: string[] = []
+      for (const candidate of (segments[1] ?? '').split(',')) {
+        const id = candidate.trim()
+        if (id === '' || !ID_PATTERN.test(id) || seen.has(id)) {
+          continue
+        }
+        seen.add(id)
+        ids.push(id)
+      }
       if (ids.length === 0) {
         return { name: 'agents', ids: [] }
       }

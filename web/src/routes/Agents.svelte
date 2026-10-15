@@ -21,6 +21,16 @@
 
   const rows = $derived([...childRows.values()])
 
+  // The set-budget dialog's value. max_cost 0 is the daemon's documented
+  // "unlimited" sentinel (control.proto SetBudgetRequest), so an EMPTY field —
+  // Number('') === 0 — must never be read as an accidental unlimited. Require a
+  // typed value: the Set button is disabled (and confirmDialog re-checks) until
+  // the input is a non-negative number, and a typed 0 is labelled "unlimited".
+  const budgetValue = $derived(Number(budgetInput))
+  const budgetValid = $derived(
+    budgetInput.trim() !== '' && Number.isFinite(budgetValue) && budgetValue >= 0,
+  )
+
   onMount(() => {
     startRail()
     return () => stopRail()
@@ -154,11 +164,16 @@
         return
       }
       case 'budget': {
-        const value = Number(budgetInput)
-        if (!Number.isFinite(value) || value < 0) {
-          pushToast({ kind: 'error', text: 'budget must be a non-negative number' })
+        // Re-check here as well as on the disabled button: an empty field is not
+        // a valid budget (0 = unlimited must be typed, not defaulted).
+        if (!budgetValid) {
+          pushToast({
+            kind: 'error',
+            text: 'budget must be a non-negative number (0 means unlimited)',
+          })
           return
         }
+        const value = budgetValue
         if (
           row &&
           (await withRetry('set budget', () =>
@@ -336,9 +351,25 @@
       <h3 class="text-lg font-bold">Set budget</h3>
       <p class="py-2 text-sm opacity-70">Spend cap in USD for {target?.name ?? ''}.</p>
       <input type="number" min="0" step="0.01" class="input w-full" bind:value={budgetInput} />
+      <p class="py-1 text-xs opacity-70">
+        {#if budgetValid && budgetValue === 0}
+          Unlimited — no spend cap.
+        {:else if !budgetValid}
+          Enter a non-negative number; 0 means unlimited.
+        {:else}
+          0 means unlimited.
+        {/if}
+      </p>
       <div class="modal-action">
         <button type="button" class="btn" onclick={closeDialog}>Cancel</button>
-        <button type="button" class="btn btn-primary" onclick={() => void confirmDialog()}>Set</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          disabled={!budgetValid}
+          onclick={() => void confirmDialog()}
+        >
+          Set
+        </button>
       </div>
     </div>
   </div>

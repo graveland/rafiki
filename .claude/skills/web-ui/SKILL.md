@@ -14,6 +14,13 @@ Same discipline as CLAUDE.md: rule + where it's enforced, no incident narration.
   `control.proto`/`event.proto`), Vitest + jsdom for tests, and Observable Plot
   on the Spend screen. Generated `web/src/gen/`, `web/node_modules/` and
   `pkg/webui/dist/*` (except `.gitkeep`) are never committed.
+- **The pane snippet contract** (`SplitPanes.svelte`, `Transcript.svelte`).
+  SplitPanes renders each pane as `{@render pane.snippet(id)}` — ONE stable
+  snippet shared by every pane, never a fresh bound closure per id and never a
+  raw value. The render tag wraps the argument as a getter (Svelte 5 snippet
+  params are getters), so a per-id closure both changes the function — tearing
+  the pane's each-block down on every route change — and passes a raw id where a
+  getter is expected. Enforced by `SplitPanes.test.ts`.
 - **The gate and the session model.** `rafiki web` binds `127.0.0.1` only
   (`cmd/rafiki/cmd_web.go`); rafikid never serves the UI. Every request —
   static assets included — must carry `Host: 127.0.0.1:<port>` or
@@ -33,6 +40,13 @@ Same discipline as CLAUDE.md: rule + where it's enforced, no incident narration.
   refused` response → `gate-refused` (the session is gone). Check the Connect
   code, not HTTP 401. `LinkUsedError`/`GateRefusedError`/`NoSessionError` map to
   their own auth states.
+- **The login flow.** `BeginLogin` opens a popup at the daemon's OIDC URL → the
+  daemon redirects the popup to `#/login-done` at the PINNED callback port
+  (`pkg/webui/login.go`, hard-coded `127.0.0.1`) → `LoginDone` signals completion
+  over a BroadcastChannel (origin-scoped) → the opener swaps its upstream. A tab
+  the user opened at `localhost:<port>` (the gate allows it) never hears
+  login-complete — the channel is origin-scoped: the token is saved and the
+  upstream swapped, so a reload recovers, but its banner sticks.
 - **The connection budget.** Browsers allow ~6 HTTP/1.1 connections per origin.
   Spend it deliberately: **1 rail stream + ≤3 live conversation streams per
   tab** (`router.transcriptPanes`, `MAX_TRANSCRIPT_PANES = 3`; the overflow ids
@@ -49,7 +63,9 @@ Same discipline as CLAUDE.md: rule + where it's enforced, no incident narration.
   `assistant_message` supersedes the in-flight delta block; a `user_message`
   carrying only tool results routes into its `tool_use` instead of opening a
   turn. `resume()` never streams before the join succeeded (`opened`), and an
-  in-flight `open()` (`opening`) blocks a duplicate join.
+  in-flight `open()` (`opening`) blocks a duplicate join. A tool duration is
+  `seconds*1000 + nanos/1e6`, and a zero/unset proto duration means "start never
+  seen" and renders `-` (`toolDurationMs`).
 - **Send-queue rules** (`sendQueue.svelte.ts`): `Send` is not idempotent, so it
   is never auto-retried — a failed entry persists and only a user-triggered
   `resend` re-issues it. Status changes must go through the `$state` entry (the

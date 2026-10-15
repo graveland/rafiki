@@ -1,4 +1,5 @@
 import { create } from '@bufbuild/protobuf'
+import { DurationSchema } from '@bufbuild/protobuf/wkt'
 import { Code, ConnectError } from '@connectrpc/connect'
 import { expect, it, vi } from 'vitest'
 import { ChildSummarySchema } from '../gen/rafiki/v1/control_pb'
@@ -13,7 +14,7 @@ import {
   UserMessageSchema,
 } from '../gen/rafiki/v1/event_pb'
 import { parseRoute, transcriptPanes } from './router'
-import { Conversation, type ControlClient } from './transcript.svelte'
+import { Conversation, toolDurationMs, type ControlClient } from './transcript.svelte'
 
 function textBlock(text: string) {
   return create(ContentBlockSchema, {
@@ -398,4 +399,26 @@ it('stops on unauthenticated', async () => {
   expect(conversation.error).toContain('unauthorized')
   expect(order.filter((name) => name === 'streamEvents')).toHaveLength(1)
   conversation.dispose()
+})
+
+it('tool duration folds nanos, and zero or unset is undefined (never 0ms)', () => {
+  // Unset duration: the start event was never seen.
+  expect(toolDurationMs(undefined)).toBeUndefined()
+  // The proto's ZERO value is the "start never seen" sentinel, not a 0ms tool.
+  expect(toolDurationMs(create(DurationSchema, { seconds: 0n, nanos: 0 }))).toBeUndefined()
+  // Whole seconds and sub-second nanos both survive the conversion.
+  expect(toolDurationMs(create(DurationSchema, { seconds: 2n, nanos: 0 }))).toBe(2000)
+  expect(toolDurationMs(create(DurationSchema, { seconds: 0n, nanos: 500_000_000 }))).toBe(500)
+  expect(toolDurationMs(create(DurationSchema, { seconds: 1n, nanos: 250_000_000 }))).toBe(1250)
+})
+
+it('router dedupes repeated ids, preserving order, and drops garbage', () => {
+  const route = parseRoute('#/c/a,a,b')
+  expect(route.name).toBe('transcript')
+  expect(route.ids).toEqual(['a', 'b'])
+
+  // A segment carrying a non-id character (space, slash, %) is not a pane key.
+  expect(parseRoute('#/c/a , b%2Fc').ids).toEqual(['a'])
+  // All-garbage/all-duplicate collapses to the agents route.
+  expect(parseRoute('#/c/,/').name).toBe('agents')
 })

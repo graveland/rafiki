@@ -1,6 +1,7 @@
 import { toJson } from '@bufbuild/protobuf'
 import type { Client } from '@connectrpc/connect'
 import { Code, ConnectError } from '@connectrpc/connect'
+import type { Duration } from '@bufbuild/protobuf/wkt'
 import type { ChildSummary, Control } from '../gen/rafiki/v1/control_pb'
 import { EventTier } from '../gen/rafiki/v1/control_pb'
 import type {
@@ -52,6 +53,20 @@ const TRIM_WINDOW = 8
 export function backoffDelay(attempt: number, rand: number = Math.random()): number {
   const capped = Math.min(30_000, 500 * 2 ** Math.max(0, attempt))
   return capped * (0.5 + rand / 2)
+}
+
+/**
+ * A tool execution's duration in milliseconds, or undefined when the start was
+ * never seen. The proto's `duration` is a google.protobuf.Duration whose ZERO
+ * value means "start never seen" (a turn resumed mid-tool, event.proto:180) — so
+ * both an absent duration and a zero one render as `-` in ToolCall, never `0ms`.
+ * Nanos are folded in, so a sub-second tool does not read as `0ms` either.
+ */
+export function toolDurationMs(duration: Duration | undefined): number | undefined {
+  if (duration === undefined || (duration.seconds === 0n && duration.nanos === 0)) {
+    return undefined
+  }
+  return Number(duration.seconds) * 1000 + duration.nanos / 1e6
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -491,7 +506,7 @@ export class Conversation {
       call.running = false
       call.hasResult = true
       call.isError = end.isError
-      call.durationMs = end.duration === undefined ? undefined : Number(end.duration.seconds) * 1000
+      call.durationMs = toolDurationMs(end.duration)
     })
   }
 
