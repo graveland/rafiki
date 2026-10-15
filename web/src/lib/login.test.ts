@@ -59,10 +59,12 @@ function beginError(code: string, message: string): Response {
 }
 
 async function signalLoginComplete(): Promise<void> {
-  // Wait until the login flow has registered its handler: the popup's broadcast
-  // is only delivered to a channel that is already listening.
+  // Wait until the LIVE login flow has registered its handler: the popup's
+  // broadcast is only delivered to a channel that is open and listening.
   await vi.waitFor(() => {
-    const target = FakeChannel.registry.find((c) => c.name === SESSION_CHANNEL && c.onmessage)
+    const target = FakeChannel.registry.find(
+      (c) => c.name === SESSION_CHANNEL && !c.closed && c.onmessage,
+    )
     expect(target).toBeDefined()
   })
   const popup = new FakeChannel(SESSION_CHANNEL)
@@ -165,4 +167,20 @@ it('closes its channel when begin fails', async () => {
   await expect(startLogin()).rejects.toBeInstanceOf(LoginError)
   expect(FakeChannel.registry).toHaveLength(1)
   expect(FakeChannel.registry[0].closed).toBe(true)
+})
+
+it('a second sign-in supersedes the first pending promise', async () => {
+  sessionStorage.setItem(SECRET_STORAGE_KEY, 'sec')
+  vi.stubGlobal('open', vi.fn(() => fakePopup()))
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(beginOk('http://idp/auth')))
+
+  const first = startLogin()
+  const second = startLogin()
+
+  const firstError = await first.catch((reason: unknown) => reason)
+  expect(firstError).toBeInstanceOf(LoginError)
+  expect((firstError as LoginError).code).toBe('superseded')
+
+  await signalLoginComplete()
+  await expect(second).resolves.toBeUndefined()
 })

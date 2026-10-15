@@ -9,6 +9,12 @@ export default defineConfig({
     emptyOutDir: true,
     assetsDir: 'assets',
   },
+  resolve: {
+    // Vitest resolves package "exports" with node-like conditions, which selects
+    // svelte's SERVER build and makes `mount()` throw in a jsdom test. These are
+    // Vite's own default CLIENT conditions, so the real build is unchanged.
+    conditions: ['module', 'browser', 'development|production'],
+  },
   test: {
     environment: 'jsdom',
   },

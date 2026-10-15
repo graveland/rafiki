@@ -299,6 +299,26 @@ it('resume after a failed open re-runs the join, not a bare stream', async () =>
   conversation.dispose()
 })
 
+it('resume during an in-flight open does not duplicate history', async () => {
+  const { control, order, streamRequests } = fakeControl({
+    latest: 3,
+    history: [userEvent('c', 'hi', 3)],
+    stream: (_i, o) => idle(o?.signal),
+  })
+  const conversation = new Conversation('c', { control })
+  const opening = conversation.open()
+  // Hidden then shown while the join is still awaiting GetChild/GetHistory: a
+  // second open() here would apply history twice.
+  conversation.pause()
+  conversation.resume()
+  await opening
+  await flush()
+  expect(order.filter((name) => name === 'getHistory')).toHaveLength(1)
+  expect(conversation.blocks).toHaveLength(1)
+  expect(streamRequests).toHaveLength(1)
+  conversation.dispose()
+})
+
 it('reconnect backoff resets on each delivered connection', async () => {
   vi.useFakeTimers()
   vi.spyOn(Math, 'random').mockReturnValue(0)

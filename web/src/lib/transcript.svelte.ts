@@ -162,6 +162,8 @@ export class Conversation {
   private disposed = false
   /** True once the join succeeded, so resume() never streams without history. */
   private opened = false
+  /** The in-flight join, so a concurrent resume()/open() cannot duplicate it. */
+  private opening: Promise<void> | undefined
   private abort: AbortController | undefined
 
   constructor(childId: string, deps: ConversationDeps) {
@@ -169,7 +171,17 @@ export class Conversation {
     this.deps = deps
   }
 
-  async open(): Promise<void> {
+  open(): Promise<void> {
+    if (this.opening) {
+      return this.opening
+    }
+    this.opening = this.doOpen().finally(() => {
+      this.opening = undefined
+    })
+    return this.opening
+  }
+
+  private async doOpen(): Promise<void> {
     this.error = undefined
     let after: number
     try {
@@ -216,6 +228,11 @@ export class Conversation {
       return
     }
     this.paused = false
+    // A join is still in flight; it opens the stream on completion (paused is
+    // now false), so a second open() here would duplicate the history.
+    if (this.opening) {
+      return
+    }
     if (!this.opened) {
       void this.open()
       return

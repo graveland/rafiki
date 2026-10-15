@@ -3,7 +3,7 @@
 
   interface Pane {
     id: string
-    snippet: Snippet
+    snippet: Snippet<[string]>
   }
 
   let { panes }: { panes: Pane[] } = $props()
@@ -60,7 +60,7 @@
 <div class="flex h-full w-full" bind:this={containerEl}>
   {#each panes as pane, index (pane.id)}
     <div class="min-w-0 overflow-auto" style="flex: {sizes[index] ?? 1 / panes.length} 1 0%">
-      {@render pane.snippet()}
+      {@render pane.snippet(pane.id)}
     </div>
     {#if index < panes.length - 1}
       <div
