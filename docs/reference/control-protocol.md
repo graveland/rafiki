@@ -317,6 +317,45 @@ subscription hears about every descendant and never about the child itself — a
 focus stream is `child`-scoped, the transcript looks correct right up until you hop away and
 watch that row freeze.
 
+### Browser clients (`rafiki web`)
+
+The web UI (`web/`, built by `make web` and embedded into `pkg/webui/dist`) is a
+Connect client too, but a browser is a narrower transport than the Go or Python
+client. `@connectrpc/connect-web` speaks **unary and server-streaming only** —
+`fetch`/`XMLHttpRequest` cannot do bidi or client streaming — and the API has
+none: every RPC here is unary or server-streaming, so the web client reaches all
+of it. Do not add a bidi RPC expecting a browser to call it.
+
+**The connection budget.** A browser allows about six concurrent HTTP/1.1
+connections per origin, and a server stream holds one for its lifetime. The UI
+spends them deliberately: **1 rail stream + at most 3 live conversation streams
+per tab** (`router.transcriptPanes`/`MAX_TRANSCRIPT_PANES`; ids beyond the cap
+stay in the route and a banner says so). A hidden pane (`document.visibilityState`,
+`TranscriptPane`) closes its stream and KEEPS its cursor, resuming by replay from
+it. A second tab draws on the same origin's budget, so the shell warns when it
+sees one (`session.startSessionResponder`'s `otherTabs` snapshot).
+
+**`Send` is not idempotent, and the browser must not paper over that.**
+`SendRequest` carries no idempotency key, so a retry after a timeout can queue
+the prompt twice. The web client therefore never auto-retries a `Send` — a failed
+send stays visible and only a user-triggered resend re-issues it
+(`sendQueue.svelte.ts`). Kill/close/set-budget/set-labels may retry; `Send` may
+not.
+
+**`UserMessage` carries no message id**, so a client cannot match a streamed user
+message to the send that produced it. The web client reconciles its pending sends
+by TEXT — the oldest queued entry whose text matches the delivered user block is
+marked delivered, FIFO (`SendQueue.markDelivered`).
+
+**The `rafiki web` proxy stamps the epoch and the bearer itself.** The browser
+never holds a daemon credential: it presents only its per-tab `X-Rafiki-Web`
+session secret, which the proxy strips along with `Authorization` and `Cookie`
+before forwarding, and the outbound `Authorization` and `Rafiki-Protocol` epoch
+come from the proxy's own `*http.Client` (`cmd/rafiki`'s `bearerTransport`, held on
+`pkg/webui.Upstream.Client`). So the epoch gate (§"The protocol epoch") is
+satisfied on the browser's behalf — the browser neither sets nor reads
+`Rafiki-Protocol`.
+
 ### Verbs
 
 Policy classes (`userOnly`/`anyCaller`/`childScoped`/`ownerScoped`) are

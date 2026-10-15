@@ -563,6 +563,10 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 | `rafikid` | the daemon. Runs `fundi`-kind children as goroutines inside itself; `claude` children route through daraja on an executor when one is configured for it, else run as local subprocesses. `rafikid fundi` is a standalone one-child-on-stdio mode |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
 
+**The web UI is the third client.** `rafiki web [--port N] [--no-open] [--dev-assets URL]` serves a browser UI from the `rafiki` binary itself: a `127.0.0.1`-only reverse proxy in front of the daemon's Connect control plane (rafikid never serves the UI). It prints a single-use link (`http://127.0.0.1:<port>/#k=<code>`) and opens it; the fragment code is exchanged for a per-tab session secret held in `sessionStorage` and sent as `X-Rafiki-Web` — no cookies, no CORS headers. A Connect `Unauthenticated` on any call the localhost gate did not refuse triggers in-browser sign-in through the daemon's OIDC login (a popup). The proxy forwards `/rafiki.v1.Control/*` verbatim — its own upstream transport adds the bearer and the protocol epoch — and never `/rafiki.v1.Login/*`. On a remote machine, forward the port with `ssh -L <port>:127.0.0.1:<port>`. See `docs/reference/control-protocol.md` §"Browser clients".
+
+`make web` builds the UI into `pkg/webui/dist` and embeds it into the `rafiki` binary; a binary built without it refuses `rafiki web` (the one exception is `--dev-assets`, below). `make check-web` typechecks, lints and tests the UI under `web/`; both targets need node + pnpm + protoc on `PATH`. Dev loop: run `pnpm dev` in `web/`, then `rafiki web --dev-assets http://localhost:5173` to reverse-proxy static assets to the Vite dev server.
+
 ## Recall and memory
 
 The daemon indexes what it captures into a searchable recall index: every
