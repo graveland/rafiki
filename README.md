@@ -741,10 +741,11 @@ explicitly and get a handle immediately:
 Completion is **pushed, not polled** — the executor pushes every job's
 lifecycle over one `WatchJobs` stream per connection, and the daemon injects a
 fragment into the child's next turn when a job exits, through the same
-coalescing path subagent settlements use. An exit is acked only AFTER that
-fragment lands in the child's inbox, and an unacked exit is replayed on the next
-subscribe, so a daemon restart does not lose it. Output is written to a file on
-the executor with a per-workspace byte budget
+coalescing path subagent settlements use. An exit is acked only AFTER the
+fragment is handed to the event buffer, which persists it to the inbox, and an
+unacked exit is replayed on the next subscribe, so a daemon crash does not lose
+it — a graceful stop, by contrast, tears the job down and acks it. Output is
+written to a file on the executor with a per-workspace byte budget
 (`--job-output-budget-mb`, default 256 MB, drop-oldest-finished-first) and
 **no time-based expiry** — a turn can end and resume hours later, so a job's
 output lives until its workspace is released, not until a wall-clock window

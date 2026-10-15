@@ -76,6 +76,11 @@ type Pool struct {
 	// subscription entirely.
 	jobEventHandler func(JobEvent)
 
+	// jobEventGate, when non-nil, holds the FIRST WatchJobs subscription on
+	// every executor connection until it is closed; see HoldJobEventsUntil. Nil
+	// (the zero value, and how a component-only pool is built) means no hold.
+	jobEventGate <-chan struct{}
+
 	// evicted holds ids whose owning control connection closed while the
 	// executor's handleConn was still running. Between Redeem (early) and
 	// installLive/installTransient (late) sits the Describe join timeout, so

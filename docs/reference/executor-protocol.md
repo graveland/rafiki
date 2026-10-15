@@ -450,10 +450,12 @@ skipped, and its resubscribe replays everything unacked.
 
 `AckJobExits` (unary) tells the executor these finished jobs' exits have been
 delivered, so they stop being replayed and become eligible for byte-budget
-eviction. The daemon calls it only AFTER the exit's fragment is accepted into
-the durable inbox — **push before ack**, never the reverse. An unacked finished
+eviction. The daemon calls it only AFTER the exit's fragment has been handed to
+the event buffer, which persists it to the durable inbox — **push before ack**,
+never the reverse. An unacked finished
 job is replayed on every subscribe and is NEVER evicted, so a crash between the
-two costs a duplicate event (which the inbox coalesces), never a lost
+two costs a duplicate event (which the inbox coalesces while the first fragment
+is still pending), never a lost
 notification. A job the agent killed is acked at kill time by the executor
 itself (`jobRegistry.kill`), so its exit publishes no event to ack.
 

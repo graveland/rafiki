@@ -73,6 +73,36 @@ func (p *Pool) jobHandler() func(JobEvent) {
 	return p.jobEventHandler
 }
 
+// HoldJobEventsUntil delays the FIRST WatchJobs subscription on every executor
+// connection until ch is closed. The daemon closes it once its recovery walk
+// (loadChildren) has populated the child store, because the local executor unix
+// listener accepts connections BEFORE that walk runs: an executor that
+// reconnects over the local socket could otherwise replay an unacked job exit
+// before its owner is loaded, and the handler would drop the fragment and then
+// ack it — losing the only copy, exactly in the restart case the no-loss
+// contract exists to cover.
+//
+// Holding the stream open is not a poll: the watcher waits on a channel the
+// daemon closes at a known point, and an exit that finishes during the hold
+// stays unacked (nothing is subscribed) and replays when the stream opens, so
+// nothing is lost. Called once at startup, before Serve.
+//
+// A nil channel (the zero value, and how a component-only pool is built) means
+// no hold: a pool with no daemon recovery to wait for must not block forever on
+// a channel that is never closed.
+func (p *Pool) HoldJobEventsUntil(ch <-chan struct{}) {
+	p.mu.Lock()
+	p.jobEventGate = ch
+	p.mu.Unlock()
+}
+
+// jobEventGateChan reads the recovery gate under the lock.
+func (p *Pool) jobEventGateChan() <-chan struct{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.jobEventGate
+}
+
 // AckJobExits tells executorID its exits for handles are delivered. An unacked
 // exit is replayed on every resubscribe and is never evicted, so acking is what
 // lets the executor drop it — and it MUST follow the daemon accepting the exit
@@ -110,6 +140,18 @@ func (p *Pool) watchJobs(id string, lc *liveConn) {
 	handler := p.jobHandler()
 	if handler == nil {
 		return
+	}
+
+	// Hold the FIRST open until the daemon's recovery walk is done, so no
+	// replayed exit can reach the handler before its owner is deliverable. A
+	// nil gate is no hold; the gate never re-opens, so this wait happens once
+	// per connection, before the loop.
+	if gate := p.jobEventGateChan(); gate != nil {
+		select {
+		case <-gate:
+		case <-lc.done:
+			return
+		}
 	}
 
 	backoff := jobWatchBackoffInitial

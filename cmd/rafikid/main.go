@@ -638,6 +638,16 @@ func runDaemon(opts runDaemonOpts) error {
 	// plane and the executor link share one port and one certificate — and the
 	// executor link inherits GetCertificate, which its own listener never had
 	// (a cert-manager rotation used to need a pod restart to reach it).
+	// recoveryDone closes once loadChildren has populated the child store. The
+	// local executor unix listener below accepts connections BEFORE that walk,
+	// so the pool holds the first WatchJobs subscription on every connection
+	// until this closes: otherwise an executor reconnecting over the local
+	// socket could replay an unacked job exit before its owner is loaded, and
+	// the handler would drop the fragment and ack it, losing the only copy.
+	// loadChildren is synchronous, so closing right after it covers every return
+	// path (including the early ones that leave the store empty).
+	recoveryDone := make(chan struct{})
+
 	var execPool *execpool.Pool
 	if execStore != nil {
 		execPool = execpool.New(execStore)
@@ -651,6 +661,7 @@ func runDaemon(opts runDaemonOpts) error {
 		// can connect (the listener starts below), so no event is missed.
 		ctrl.jobAcks = execPool
 		execPool.SetJobEventHandler(ctrl.handleJobEvent)
+		execPool.HoldJobEventsUntil(recoveryDone)
 		// The sandbox Docker Engine reaches a launcher's docker proxy through
 		// the pool: one transport per launcher, built lazily per call.
 		ctrl.sandboxEngine = func(launcherID string) *sandbox.Engine {
@@ -918,6 +929,8 @@ func runDaemon(opts runDaemonOpts) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	ctrl.loadChildren(baseCtx)
+	// Recovery is done: release the WatchJobs hold so executors may subscribe.
+	close(recoveryDone)
 
 	if face != nil && face.Control != nil {
 		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, streamRevoke, socketPath); err != nil {

@@ -45,6 +45,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -288,6 +289,49 @@ func openChildEventsAll(t *testing.T, g *grantDaemon, childID string) *eventStre
 	return g.openEvents(t, childEventsSubject(childID), map[string]int32{childID: -1}, 0)
 }
 
+// noEventWithin is the bounded NEGATIVE form of waitEvent: it fails if any live
+// buffered event matches predicate at any point within d, and returns otherwise.
+// A test that needs an event to be ABSENT before an action has no event to
+// subscribe to, so a bounded scan of the buffered stream is the only check —
+// this is a test assertion, not a production poll.
+func (es *eventStream) noEventWithin(t *testing.T, predicate func(*rafikiv1.Event) bool, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		es.mu.Lock()
+		for _, ev := range es.events {
+			if es.isLive(ev) && predicate(ev) {
+				dump := es.dumpLocked()
+				es.mu.Unlock()
+				t.Fatalf("a matching event was present within %v; buffered events:\n%s", d, dump)
+			}
+		}
+		es.mu.Unlock()
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// countLiveEventsWithin lets any in-flight events flush for d, then returns how
+// many live buffered events match predicate — the "exactly once" check.
+func (es *eventStream) countLiveEventsWithin(predicate func(*rafikiv1.Event) bool, d time.Duration) int {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	n := 0
+	for _, ev := range es.events {
+		if es.isLive(ev) && predicate(ev) {
+			n++
+		}
+	}
+	return n
+}
+
 // spawnAutoBgChild spawns an executor-bound fundi child driven by the given
 // fake-turns script.
 func spawnAutoBgChild(t *testing.T, g *grantDaemon, scriptPath string) string {
@@ -386,7 +430,11 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	g.waitForLiveExecutors(t, 1)
 
 	marker := "autobg-" + uniqueSuffix()
-	script := writeAutoBgTurns(t, "sleep 5; echo "+marker, 1000)
+	// The job runs comfortably longer than the ~1s handoff below, so the exit
+	// cannot happen before the SIGKILL even on a stalled host: the delivery
+	// after restart is a genuine REPLAY, never a live push the old daemon made
+	// and the first stream happened to miss.
+	script := writeAutoBgTurns(t, "sleep 8; echo "+marker, 1000)
 
 	childID := spawnAutoBgChild(t, g.grantDaemon, script)
 	dropAutoBgInboxRows(t, dsn, childID)
@@ -396,11 +444,17 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	promptAutoBgChild(t, g.grantDaemon, childID)
 	// Barrier: the handoff proves the command was promoted to a running job
 	// BEFORE the daemon is killed, so the restart test cannot pass by the call
-	// never having started. The job minimum (sleep 5, promoted at ~1s) then
+	// never having started. The job minimum (sleep 8, promoted at ~1s) then
 	// outlives the kill below with room to spare.
 	es.waitEvent(t, userTextContains(childID, "moved to the background as job"), 30*time.Second)
 
-	// SIGKILL the daemon before the job (sleep 5, promoted at ~1s) can exit:
+	// The exit fragment must NOT have reached the first daemon's stream before
+	// the kill: if it had, the post-restart delivery could be that same live
+	// push replayed from the log rather than the executor's unacked replay, and
+	// the test would pass without exercising the no-loss property at all.
+	es.noEventWithin(t, userTextContainsAll(childID, "finished with exit code 0", marker), time.Second)
+
+	// SIGKILL the daemon before the job (sleep 8, promoted at ~1s) can exit:
 	// no handleChildExit, no workspace release, no job teardown, and no ack,
 	// so the executor keeps the exit unacked.
 	g.kill(t)
@@ -408,14 +462,130 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	// Let the job finish while the daemon is down: this is what makes the
 	// delivery below a REPLAY of an unacked exit rather than a live push. A
 	// bounded wait for an external process — the executor's job is unreachable
-	// from here, so there is no event to subscribe to, only its own 5s runtime.
-	time.Sleep(6 * time.Second)
+	// from here, so there is no event to subscribe to, only its own 8s runtime.
+	time.Sleep(10 * time.Second)
 
 	// The successor recovers the child, the executor reconnects and replays the
-	// unacked exit, and the daemon lands the fragment in the child's inbox.
+	// unacked exit, and the daemon hands the fragment to the event buffer.
 	g.bootSuccessor(t)
 	waitForStatus(t, g.daemon, childID, "idle", 60*time.Second)
 	es2 := openChildEventsAll(t, g.grantDaemon, childID)
 	frag := es2.waitEvent(t, userTextContainsAll(childID, "finished with exit code 0", marker), 30*time.Second)
 	assert.NewAborting(t).NotNil(frag, "the replayed job-exit fragment never reached the child's inbox after restart")
+
+	// EXACTLY once: an exit acked after delivery must not be replayed again on
+	// the next subscribe. The window is far shorter than the resumed child's
+	// own new job (sleep 8), so a second occurrence can only be a duplicate of
+	// THIS exit.
+	mark := userTextContainsAll(childID, "finished with exit code 0", marker)
+	ck := assert.NewAborting(t)
+	ck.Eq(1, es2.countLiveEventsWithin(mark, time.Second),
+		"the replayed exit fragment must arrive exactly once")
+}
+
+// enrollExecutorUDS is enrollExecutor with a native `rafiki executor serve`
+// that reverse-dials the daemon's EXECUTOR UNIX SOCKET instead of the TLS
+// listener. The unix listener accepts connections BEFORE the recovery walk
+// (cmd/rafikid/main.go), so this is the transport on which an executor can
+// reconnect before loadChildren has populated its child's owner — the window a
+// TLS-connected executor cannot reach, because that listener starts only after
+// recovery.
+func (g *autoBgDaemon) enrollExecutorUDS(t *testing.T) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+
+	marker := "t" + uniqueSuffix()
+	token, err := g.store.MintToken(context.Background(), executors.NewToken{
+		Labels:        map[string]string{"env": "home", "test-run": marker},
+		Isolation:     "none",
+		WorkspaceMode: "pinned",
+		ExpiresAt:     time.Now().Add(time.Hour),
+	})
+	c.NoError(err, "mint token")
+
+	execSock := filepath.Join(g.homeDir, "rafiki", "executor.sock")
+	execHome := t.TempDir()
+	credFile := filepath.Join(t.TempDir(), "cred")
+	root := t.TempDir()
+	cmd := exec.Command(cliBinary(), "executor", "serve",
+		"--connect-socket", execSock,
+		"--enroll-token", token,
+		"--credential-file", credFile,
+		"--root", root,
+	)
+	cmd.Env = append(os.Environ(),
+		"HOME="+execHome,
+		"XDG_RUNTIME_DIR="+execHome,
+		"XDG_STATE_HOME="+execHome,
+		"XDG_DATA_HOME="+execHome,
+		"XDG_CONFIG_HOME="+execHome,
+	)
+	c.NoError(cmd.Start(), "start executor (uds)")
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(os.Kill)
+		_ = cmd.Wait()
+	})
+
+	// Wait for the executor to enroll and go live — the same marker discipline as
+	// grantDaemon.enrollExecutor, so a stale row of a previous run is never
+	// mistaken for this one.
+	deadline := time.Now().Add(10 * time.Second)
+	var enrolledID string
+	for time.Now().Before(deadline) {
+		execs, _ := g.store.List(context.Background())
+		for _, e := range execs {
+			if e.Labels["test-run"] == marker && !e.LastSeenAt.IsZero() {
+				enrolledID = e.ID
+				break
+			}
+		}
+		if enrolledID != "" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	c.NotEq("", enrolledID, "executor (uds) never enrolled and became live")
+	return enrolledID
+}
+
+// TestAutoBackgroundExitDuringDaemonRestartOverUnixSocketIsDelivered is
+// TestAutoBackgroundExitDuringDaemonRestartIsDelivered with the executor on the
+// daemon's executor UNIX socket. The unix listener starts BEFORE loadChildren,
+// so an executor that reconnects over it can open WatchJobs before recovery has
+// populated the owner; the pool holds that first open until recovery completes,
+// so the replayed unacked exit is still delivered rather than dropped-and-acked.
+func TestAutoBackgroundExitDuringDaemonRestartOverUnixSocketIsDelivered(t *testing.T) {
+	t.Parallel()
+	dsn := requireExecutorDB(t)
+	g := bootAutoBgDaemon(t, dsn)
+	g.enrollExecutorUDS(t)
+	g.waitForLiveExecutors(t, 1)
+
+	marker := "autobg-" + uniqueSuffix()
+	script := writeAutoBgTurns(t, "sleep 8; echo "+marker, 1000)
+
+	childID := spawnAutoBgChild(t, g.grantDaemon, script)
+	dropAutoBgInboxRows(t, dsn, childID)
+	waitForStatus(t, g.daemon, childID, "idle", 20*time.Second)
+	es := openChildEventsAll(t, g.grantDaemon, childID)
+
+	promptAutoBgChild(t, g.grantDaemon, childID)
+	es.waitEvent(t, userTextContains(childID, "moved to the background as job"), 30*time.Second)
+	// The fragment must not have been delivered live before the kill; see the
+	// TLS variant's comment for why this guards the no-loss claim.
+	es.noEventWithin(t, userTextContainsAll(childID, "finished with exit code 0", marker), time.Second)
+
+	g.kill(t)
+	// The job (sleep 8, promoted at ~1s) finishes while the daemon is down.
+	time.Sleep(10 * time.Second)
+
+	g.bootSuccessor(t)
+	waitForStatus(t, g.daemon, childID, "idle", 60*time.Second)
+	es2 := openChildEventsAll(t, g.grantDaemon, childID)
+	frag := es2.waitEvent(t, userTextContainsAll(childID, "finished with exit code 0", marker), 30*time.Second)
+	assert.NewAborting(t).NotNil(frag, "the replayed job-exit fragment never reached the child's inbox after a unix-socket restart")
+
+	mark := userTextContainsAll(childID, "finished with exit code 0", marker)
+	assert.NewAborting(t).Eq(1, es2.countLiveEventsWithin(mark, time.Second),
+		"the replayed exit fragment must arrive exactly once over the unix socket")
 }

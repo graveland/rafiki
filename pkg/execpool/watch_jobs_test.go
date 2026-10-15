@@ -324,3 +324,69 @@ func TestOwnerRidesExecuteAndStartJob(t *testing.T) {
 
 	p.Evict("exec-owner")
 }
+
+// The recovery gate holds the FIRST WatchJobs open until the daemon closes it.
+// Without the hold, an executor reconnecting over the local unix socket (which
+// accepts before loadChildren) could replay an unacked exit before its owner is
+// loaded, and the handler would drop the fragment and ack it — losing the only
+// copy. The gate is not a poll: the watcher waits on a channel the daemon
+// closes, and the exit delivered after it opens is the replayed one.
+func TestWatchJobsHoldsFirstOpenUntilGateOpens(t *testing.T) {
+	ck := assert.NewAborting(t)
+	p := New(newFakeStore("exec-jobs"))
+
+	gate := make(chan struct{})
+	p.HoldJobEventsUntil(gate)
+
+	got := make(chan JobEvent, 16)
+	p.SetJobEventHandler(func(ev JobEvent) { got <- ev })
+
+	fake := &jobWatchFake{executorID: "exec-jobs", subs: make(chan int, 8)}
+	fake.onSubscribe = func(ctx context.Context, _ int, stream *connect.ServerStream[executorpb.WatchJobsResponse]) error {
+		if err := stream.Send(watchExited("h1", "c1", "make check", 0)); err != nil {
+			return err
+		}
+		<-ctx.Done() // hold the stream open
+		return ctx.Err()
+	}
+	ck.NoError(joinViaUpgrade(t, p, fake), "join")
+	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
+
+	// With the gate held closed, NO WatchJobs subscription may open and no event
+	// may reach the handler.
+	select {
+	case n := <-fake.subs:
+		t.Fatalf("WatchJobs opened (subscription %d) while the recovery gate was closed", n)
+	case <-time.After(300 * time.Millisecond):
+	}
+	ck.Eq(0, fake.subscriptionCount(), "no subscription may open while the gate is held")
+	select {
+	case ev := <-got:
+		t.Fatalf("a job event (kind %d) was consumed while the recovery gate was closed", ev.Kind)
+	default:
+	}
+
+	// Opening the gate lets the subscription open and the replay arrive.
+	close(gate)
+	select {
+	case <-fake.subs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchJobs never opened after the recovery gate closed")
+	}
+	var exited *JobEvent
+	deadline := time.After(5 * time.Second)
+	for exited == nil {
+		select {
+		case ev := <-got:
+			if ev.Kind == JobEventExited {
+				e := ev
+				exited = &e
+			}
+		case <-deadline:
+			t.Fatal("no exit event arrived after the gate opened")
+		}
+	}
+	ck.Eq("h1", exited.Handle, "handle from the exit delivered after the gate opened")
+
+	p.Evict("exec-jobs")
+}
