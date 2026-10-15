@@ -18,7 +18,7 @@ import (
 //
 // It implements [connect.Interceptor] so it handles unary RPCs (Describe,
 // Health, Cancel, JobOutput, Provision, Release, ProjectContext, ProjectSkills,
-// SkillBody), server-streaming RPCs (Execute, Attach), and bidirectional
+// SkillBody), server-streaming RPCs (Execute, WatchJobs), and bidirectional
 // streaming (Proxy) — without needing per-method wiring.
 type RPCLogInterceptor struct{}
 

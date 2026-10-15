@@ -275,7 +275,7 @@ func TestAutoBackgroundHandoffSaysNoOutputYet(t *testing.T) {
 	ctx := WithAutoBackground(context.Background(), "owner-1")
 	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"sleep 5","timeout_ms":50}`)))
 	c.NoError(err)
-	c.StrContains(res.Text, "[no output yet]", "expected the no-output-yet marker, got")
+	c.StrContains(res.Text, "[no output for ", "expected the no-output marker, got")
 }
 
 // TestBashDescriptionMentionsBackgroundAndKill pins the contract change in the

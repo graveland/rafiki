@@ -459,6 +459,16 @@ is still pending), never a lost
 notification. A job the agent killed is acked at kill time by the executor
 itself (`jobRegistry.kill`), so its exit publishes no event to ack.
 
+**Undeliverable owners.** The daemon pushes an exit only to an owner that can
+still receive it (`jobDeliverable`, `cmd/rafikid/jobwatch.go`: a known child
+whose status is not `exited`); an exit for any other owner is acked and dropped,
+because nobody is left to tell. That includes a recovered child during the
+window between daemon recovery and its asynchronous resume, when the store still
+reads `exited`: a replayed exit that lands in that window is dropped and acked,
+not held. The watch stream's first open waits for the recovery walk
+(`Pool.HoldJobEventsUntil`), which closes the earlier window in which no owner
+was loaded at all, but it does not wait for resumes.
+
 ### Provision
 
 ```

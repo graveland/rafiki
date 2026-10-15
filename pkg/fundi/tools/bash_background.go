@@ -120,7 +120,7 @@ func (bt *bashTool) backgroundHandoff(r autoRun, timeout time.Duration, rtkAppli
 	b.WriteString(bt.p.Clip(r.snap, "bash-"+r.handle))
 	b.WriteString("\n")
 	if r.last.IsZero() {
-		b.WriteString("[no output yet]\n")
+		fmt.Fprintf(&b, "[no output for %s]\n", timeout)
 	} else {
 		fmt.Fprintf(&b, "[last output %s ago]\n", time.Since(r.last).Round(time.Second))
 	}

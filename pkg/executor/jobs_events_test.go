@@ -369,3 +369,25 @@ func TestReleaseWorkspacePublishesNoExit(t *testing.T) {
 		t.Error("a released provisional job is still readable")
 	}
 }
+
+// TestProvisionalResultNotesTruncatedHead: an auto-path command that wrote past
+// the retention window must not hand the model its retained tail as though it
+// were the whole output.
+func TestProvisionalResultNotesTruncatedHead(t *testing.T) {
+	c := assert.NewAborting(t)
+	out, err := newJobOutput(t.TempDir() + "/job.log")
+	c.NoError(err, "newJobOutput")
+	defer out.remove()
+	chunk := []byte(strings.Repeat("x", 1<<20))
+	for range 13 { // past spillCompactAt (12 MiB), so the head is compacted away
+		_, err := out.Write(chunk)
+		c.NoError(err, "write")
+	}
+	p := jobProvisional{j: &job{out: out, stderrHead: newHeadBuffer(stderrHeadSize)}}
+
+	combined, _, err := p.Result()
+	c.NoError(err, "Result")
+	c.StrContains(combined, "[earlier output truncated:", "Result must say the head was dropped, got prefix")
+	snap, _ := p.Snapshot()
+	c.StrContains(snap, "[earlier output truncated:", "Snapshot must say the head was dropped, got prefix")
+}

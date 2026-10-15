@@ -57,7 +57,17 @@ func (p jobProvisional) Result() (combined, stderrHead string, err error) {
 	if readErr != nil && err == nil {
 		err = readErr
 	}
-	return string(b), p.j.stderrHead.String(), err
+	return p.truncationNote() + string(b), p.j.stderrHead.String(), err
+}
+
+// truncationNote says so when the job wrote more than the registry retains: all()
+// hands back only the tail, and a silently clipped head would read as the whole
+// output. Empty when nothing was dropped.
+func (p jobProvisional) truncationNote() string {
+	if n := p.j.out.droppedBytes(); n > 0 {
+		return fmt.Sprintf("[earlier output truncated: the first %d bytes were not retained]\n", n)
+	}
+	return ""
 }
 
 // Snapshot is the merged output so far, with a bracketed note replacing it when
@@ -68,7 +78,7 @@ func (p jobProvisional) Snapshot() (string, time.Time) {
 	if readErr != nil {
 		return fmt.Sprintf("[output unavailable: %v]", readErr), last
 	}
-	return string(b), last
+	return p.truncationNote() + string(b), last
 }
 
 func (p jobProvisional) Promote() string { return p.r.promote(p.j) }

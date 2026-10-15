@@ -224,6 +224,14 @@ func (o *jobOutput) all() ([]byte, error) {
 	return buf, nil
 }
 
+// droppedBytes is how many leading bytes compaction has discarded, so a reader
+// of all() can tell the retained tail from the whole record.
+func (o *jobOutput) droppedBytes() int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.base
+}
+
 // lastWriteAt is when the job last wrote output, zero if it never has.
 func (o *jobOutput) lastWriteAt() time.Time {
 	o.mu.Lock()

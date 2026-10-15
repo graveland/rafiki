@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -396,4 +397,38 @@ func TestAutoBackgroundProvisionalInvisibleInHealth(t *testing.T) {
 	// Stop the still-running job now that it has been promoted.
 	_, err = client.Cancel(ctx, connect.NewRequest(&executorpb.CancelRequest{CallId: handle}))
 	c.Require().NoError(err, "Cancel")
+}
+
+// TestAutoBackgroundIgnoresCallerTimeout pins that a bash call carrying BOTH
+// ExecuteRequest.Timeout and auto_background is bounded by bash's own promote
+// timer, not by the caller deadline: a Timeout shorter than timeout_ms must not
+// turn a live command into CODE_TIMEOUT.
+func TestAutoBackgroundIgnoresCallerTimeout(t *testing.T) {
+	c := assert.NewCollecting(t)
+	srv := executor.NewServer(executor.Options{
+		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: t.TempDir(),
+	})
+	client := newTestClient(t, srv)
+
+	stream, err := client.Execute(context.Background(), connect.NewRequest(&executorpb.ExecuteRequest{
+		Tool:           "bash",
+		InputJson:      []byte(`{"command":"sleep 5","timeout_ms":600}`),
+		Timeout:        durationpb.New(100 * time.Millisecond),
+		AutoBackground: true,
+		Owner:          "c_owner",
+	}))
+	c.Require().NoError(err, "Execute")
+	var text string
+	for stream.Receive() {
+		switch ev := stream.Msg().Event.(type) {
+		case *executorpb.ExecuteResponse_Result:
+			for _, b := range ev.Result.Content {
+				text += b.GetText()
+			}
+		case *executorpb.ExecuteResponse_Failed:
+			c.Require().Fail("caller Timeout pre-empted the promote timer: " + ev.Failed.Message)
+		}
+	}
+	c.NoError(stream.Err(), "stream")
+	c.StrContains(text, "moved to the background as job", "expected the handoff, got")
 }
