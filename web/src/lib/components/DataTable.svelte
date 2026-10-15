@@ -1,10 +1,13 @@
 <script lang="ts" generics="T">
+  import type { Snippet } from 'svelte'
+
   interface Column {
     key: string
     label: string
     sortable?: boolean
     align?: 'left' | 'center' | 'right'
     render?: (row: T) => string
+    cell?: Snippet<[T]>
   }
 
   let {
@@ -144,7 +147,11 @@
         >
           {#each columns as column, index (column.key)}
             <td class={alignClass(column)} style={index === 0 ? indentStyle(row) : undefined}>
-              {cellText(row, column)}
+              {#if column.cell}
+                {@render column.cell(row)}
+              {:else}
+                {cellText(row, column)}
+              {/if}
             </td>
           {/each}
         </tr>
