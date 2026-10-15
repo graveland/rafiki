@@ -484,6 +484,17 @@ type ChildSummary struct {
 	// resolved to no spec. Session.Model, unlike this field, is the base id:
 	// the spec lives only here and in the rafiki/routing label.
 	Routing string `json:"routing,omitempty"`
+	// DisplayState/WaitingOn/DisplayMsg are the child's operator-facing display
+	// state: what the child is doing right now, computed by the daemon from the
+	// child's own status and outstanding work (see protocol.DisplayState). They
+	// are distinct from Status, which exists for recovery. DisplayState is
+	// omitted when no state was computed rather than rendered as the empty
+	// string (its zero value is invalid); WaitingOn is non-empty exactly when
+	// DisplayState is "waiting"; DisplayMsg is the one-line human message, ""
+	// when there is nothing useful to say.
+	DisplayState DisplayState `json:"displayState,omitempty"`
+	WaitingOn    WaitingOn    `json:"waitingOn,omitempty"`
+	DisplayMsg   string       `json:"displayMsg,omitempty"`
 }
 
 // SpawnResponseData is the data payload of a Spawn/Resume answer (§6.3).

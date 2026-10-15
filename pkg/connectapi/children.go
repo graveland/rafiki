@@ -77,6 +77,9 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 	out.SlashCommands = c.SlashCommands
 	out.Routing = c.Routing
 	out.MaxCompletionTokens = int32(c.MaxCompletionTokens)
+	out.DisplayState = string(c.DisplayState)
+	out.WaitingOn = string(c.WaitingOn)
+	out.DisplayMsg = c.DisplayMsg
 	if elog != nil && ctx != nil {
 		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {
 			out.LatestOrdinal = &latest

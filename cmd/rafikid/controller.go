@@ -467,6 +467,22 @@ type Controller struct {
 	// same contract as sweeperWg.
 	recallWg sync.WaitGroup
 
+	// display-state refresh worker (see display_state_service.go). displayWake
+	// is nil on a hand-built Controller that never ran NewController, which is
+	// what makes refreshDisplayState a no-op there. displayMu guards the
+	// coalescing enqueue set (displayPending) and the last published tuple per
+	// child (displayLast). displayDrain carries a barrier to the worker so
+	// drainDisplayRefresh can block until the queue is empty without spinning;
+	// displayDone closes when the worker exits. displayCancel stops the worker;
+	// Stop cancels it and waits through sweeperWg.
+	displayMu      sync.Mutex
+	displayPending map[string]struct{}
+	displayWake    chan struct{}
+	displayLast    map[string]displayValue
+	displayDrain   chan chan struct{}
+	displayDone    chan struct{}
+	displayCancel  context.CancelFunc
+
 	// gitpymoduleStore is the owner-scoped git-source backend (the `repo`
 	// scopes the pymodule tool surface addresses). Nil when the daemon has no
 	// database: `rafiki python repo` answers that the backend is not wired,
@@ -770,6 +786,27 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	}
 	c.bound = make(map[string]*boundExecutor)
 
+	// The display-state refresh worker: one goroutine, fed by a coalescing
+	// enqueue set and a buffered wake. It rides a context derived from baseCtx
+	// so a daemon teardown stops it, and Stop cancels it explicitly and waits
+	// through sweeperWg — see display_state_service.go.
+	c.displayPending = make(map[string]struct{})
+	c.displayWake = make(chan struct{}, 1)
+	c.displayLast = make(map[string]displayValue)
+	c.displayDrain = make(chan chan struct{})
+	c.displayDone = make(chan struct{})
+	displayParent := baseCtx
+	if displayParent == nil {
+		displayParent = context.Background()
+	}
+	displayCtx, displayCancel := context.WithCancel(displayParent)
+	c.displayCancel = displayCancel
+	c.sweeperWg.Add(1)
+	go func() {
+		defer c.sweeperWg.Done()
+		c.displayStateWorker(displayCtx)
+	}()
+
 	if id, source, err := paths.DaemonID(); err != nil {
 		// Not fatal: a daemon with no writable data dir and no env var can
 		// still run, it just cannot hold a lease, so it will not auto-resume
@@ -837,6 +874,13 @@ func (c *Controller) Stop() {
 	// callback that fires during the drain must not arm a successor. Then
 	// drain — a callback already running is bounded by schedAbandonAfter.
 	c.sched.Stop()
+	// Flush any queued operator-state publish, then stop the display worker.
+	// It rides sweeperWg, so the Wait below proves it gone. Order matters:
+	// drain while the worker is still alive, then cancel.
+	if c.displayCancel != nil {
+		c.drainDisplayRefresh()
+		c.displayCancel()
+	}
 	c.sweeperWg.Wait()
 	c.recallWg.Wait()
 }
@@ -4274,8 +4318,18 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// this function's unconditional tail writeRecord, not a second one here.
 	if ok && !isWorkingStatus(storePrev) && isWorkingStatus(newStatus) && newStatus != protocol.StatusCompacting {
 		if err := c.st.Update(childID, func(s *childstore.Session) {
-			if s.Kind != protocol.KindScript && s.Result != "" {
-				s.Result = ""
+			// A new turn consumes whatever the previous turn left for the
+			// operator — a pending question and the last turn's error go with
+			// the result — for EVERY kind, so a fundi/claude/script child all
+			// clear on turn start. Only mutate when something is present, so
+			// ordinary status churn costs no extra row write; the script-exempt
+			// Result clear keeps its own guard.
+			if (s.Kind != protocol.KindScript && s.Result != "") || s.PendingQuestion != "" || s.LastTurnError != "" {
+				if s.Kind != protocol.KindScript {
+					s.Result = ""
+				}
+				s.PendingQuestion = ""
+				s.LastTurnError = ""
 			}
 		}); err != nil {
 			slog.Warn("clear turn result", "childId", childID, "error", err)
@@ -4336,6 +4390,10 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after status change", "childId", childID, "error", err)
 	}
+	// Refresh this child's operator display state (and its ancestors') after
+	// the transition is persisted. A non-blocking enqueue: the surrounding code
+	// is explicit that a database round trip must not hold up this status path.
+	c.refreshDisplayState(childID)
 }
 
 // handleModelChange updates the store's Provider/Model fields and the
@@ -4729,6 +4787,15 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	if relaunch != nil {
 		c.relaunchLostDaraja(*relaunch)
 	}
+
+	// handleChildExit never reaches handleStatusChange — it sets the exited
+	// status with MarkExited directly — so this is the only place a child's
+	// exit refreshes its operator display state. The exited child is still in
+	// the live store (only Close deletes it), so the walk publishes exited for
+	// it and recomputes every ancestor: a descendant's exit drops it from
+	// LiveDescendants, which is what releases a coordinator from waiting on
+	// children.
+	c.refreshDisplayState(childID)
 }
 
 // ─── persistence ─────────────────────────────────────────────────────────────

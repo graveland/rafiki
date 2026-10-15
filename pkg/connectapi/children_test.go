@@ -185,3 +185,25 @@ func TestGetChildRejectsEmptyID(t *testing.T) {
 		connect.NewRequest(&rafikiv1.GetChildRequest{}))
 	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
+
+// TestChildSummaryCarriesDisplayState pins the operator display tuple onto the
+// wire: the daemon's protocol.ChildSummary display fields must all reach the
+// client's proto ChildSummary.
+func TestChildSummaryCarriesDisplayState(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	s := connectapi.NewServer(nil)
+	s.SetChildLister(&fakeLister{all: []protocol.ChildSummary{{
+		ChildID: "c_1", Status: "idle",
+		DisplayState: protocol.DisplayWaiting,
+		WaitingOn:    protocol.WaitingOnOperator,
+		DisplayMsg:   "proceed?",
+	}}})
+
+	resp, err := s.ListChildren(context.Background(),
+		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+	ck.Require().NoError(err, "ListChildren")
+	c := resp.Msg.GetChildren()[0]
+	ck.Eq("waiting", c.GetDisplayState(), "DisplayState")
+	ck.Eq("operator", c.GetWaitingOn(), "WaitingOn")
+	ck.Eq("proceed?", c.GetDisplayMsg(), "DisplayMsg")
+}

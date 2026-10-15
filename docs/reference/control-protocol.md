@@ -1370,6 +1370,15 @@ Precedence when several hold: `operator` > `failed` > `children` > `events` >
 `job` > `schedule`. `working` outranks all of them, and `waiting` only ever
 applies to a child whose machine status is `idle`.
 
+`operator` and `failed` are carried by two per-child stored facts
+(`conversations.child.pending_question` and `last_turn_error`). They are
+per-turn: when a new turn starts the daemon clears both — and, for a non-script
+child, the stored `result` — so a question or failure from an earlier turn
+never rides a later turn's display. An ordinary status transition with nothing
+to clear costs no extra row write. A manual `/compact` from idle is not a turn
+and keeps all three; a script child's `result` is the work product of its whole
+run and is never cleared this way.
+
 `done` is NOT a daemon state: a finished child is `idle`, and "unseen" is a
 viewer property (a front-end concern, not the wire).
 

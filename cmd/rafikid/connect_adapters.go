@@ -93,7 +93,7 @@ func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSu
 	// display numbers that must not hold up the list they decorate.
 	out := make([]protocol.ChildSummary, 0, len(kept))
 	for _, s := range kept {
-		sum := snapshotToSummary(s, c.ContextWindow)
+		sum := snapshotToSummary(s, c.ContextWindow, c.displayStateFor)
 		if s.Kind == protocol.KindScript {
 			sum.CostUSD = c.scriptSpend(ctx, s.ChildID)
 		} else if cost, ok := costs[s.ChildID]; ok {
@@ -110,7 +110,7 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 	if !ok {
 		return protocol.ChildSummary{}, false
 	}
-	sum := snapshotToSummary(snap, c.ContextWindow)
+	sum := snapshotToSummary(snap, c.ContextWindow, c.displayStateFor)
 	if snap.Kind != protocol.KindScript {
 		ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
 		defer cancel()
@@ -152,7 +152,10 @@ func (c *Controller) scriptSpend(ctx context.Context, childID string) *float64 {
 // so callers (and tests) need not depend on pkg/routing; callers pass
 // Controller.ContextWindow bound to the real implementation. A nil func or a
 // false ok leaves both fields at their zero value (omitted on the wire).
-func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string) (contextLen, maxCompletion int, ok bool)) protocol.ChildSummary {
+//
+// displayState, when non-nil, fills the operator-facing display tuple; callers
+// pass Controller.displayStateFor. A nil func leaves the three fields empty.
+func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string) (contextLen, maxCompletion int, ok bool), displayState func(childID string) (protocol.DisplayState, protocol.WaitingOn, string)) protocol.ChildSummary {
 	model := snap.Model
 	if snap.Provider != "" && snap.Model != "" {
 		model = snap.Provider + "/" + snap.Model
@@ -179,6 +182,9 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 		// the BASE id — the spec lives only here and in the rafiki/routing
 		// label.
 		Routing: snap.Routing,
+	}
+	if displayState != nil {
+		cs.DisplayState, cs.WaitingOn, cs.DisplayMsg = displayState(snap.ChildID)
 	}
 	if len(snap.Labels) > 0 {
 		cs.Labels = snap.Labels

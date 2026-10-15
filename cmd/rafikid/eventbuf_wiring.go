@@ -54,6 +54,11 @@ func (c *Controller) wireEventBuffer() {
 	}
 	c.evbuf.SetAccepter(c.inbox)
 	c.evbuf.SetFlush(c.flushInboxSource)
+	// The buffer's accept and flush are exactly when a parent's
+	// waiting_on=events starts and stops, so refresh the display state on every
+	// change. refreshDisplayState is a non-blocking enqueue, which is what makes
+	// it safe as the callback.
+	c.evbuf.SetOnChange(c.refreshDisplayState)
 	c.evbuf.SetBusy(func(childID string) bool { return childIsBusy(c.st, childID) })
 }
 
