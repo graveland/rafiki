@@ -49,7 +49,8 @@ type Scheduler struct {
 }
 
 // New returns a Scheduler on clk. abandonAfter bounds how long Stop waits for
-// running callbacks.
+// running callbacks; an abandonAfter <= 0 abandons them immediately, with no
+// grace period.
 func New(clk clock.Clock, abandonAfter time.Duration) *Scheduler {
 	return &Scheduler{
 		clk:          clk,
@@ -127,6 +128,9 @@ func (s *Scheduler) Pending() []Entry {
 //
 // The abandon timeout deliberately uses the real clock, not the injected one:
 // shutdown must not depend on a FakeClock being advanced.
+//
+// A Stop called from inside a running callback waits on itself for the full
+// abandonAfter and then logs its own key as abandoned.
 func (s *Scheduler) Stop() {
 	if s == nil {
 		return

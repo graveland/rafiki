@@ -5,6 +5,7 @@ package sched
 import (
 	"bytes"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,6 +57,49 @@ func TestStaleTimerOfReplacedJobDoesNotRun(t *testing.T) {
 	// while the replacement takes over. run must refuse it by identity.
 	s.run(first)
 	ck.Eq(1, calls.Load(), "a stale job's run must not invoke its callback")
+}
+
+// The stale-timer guard pinned through the clock itself, not by calling run
+// directly: within one Advance batch, an earlier callback that invalidates a
+// later-due job cannot stop the clock from invoking the stale timer's fn —
+// fireElapsed has already marked it due — so run's identity check is the only
+// thing keeping the invalidated job from firing.
+func TestCancelFromAnEarlierCallbackSilencesTheStaleTimer(t *testing.T) {
+	ck := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	s := New(clk, time.Second)
+	var aCalls, bCalls atomic.Int32
+
+	s.At("a", time.Unix(0, 0).Add(time.Second), func() {
+		aCalls.Add(1)
+		s.Cancel("b")
+	})
+	s.At("b", time.Unix(0, 0).Add(2*time.Second), func() { bCalls.Add(1) })
+
+	clk.Advance(10 * time.Second) // both deadlines in one batch; a runs first
+	ck.Eq(1, aCalls.Load(), "a must fire once")
+	ck.Eq(0, bCalls.Load(), "b was cancelled by a's callback, but its timer was already marked due: only the identity guard keeps it from firing")
+}
+
+// The replace flavour of the same path: re-Atting the later job's key from
+// inside the earlier callback must not let the replaced job's timer fire.
+func TestReplaceFromAnEarlierCallbackSilencesTheStaleTimer(t *testing.T) {
+	ck := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	s := New(clk, time.Second)
+	var aCalls, staleCalls, newCalls atomic.Int32
+
+	s.At("a", time.Unix(0, 0).Add(time.Second), func() {
+		aCalls.Add(1)
+		s.At("b", clk.Now().Add(6*time.Second), func() { newCalls.Add(1) })
+	})
+	s.At("b", time.Unix(0, 0).Add(2*time.Second), func() { staleCalls.Add(1) })
+
+	clk.Advance(10 * time.Second) // a runs first and replaces b; the stale b timer is already due
+	ck.Eq(1, aCalls.Load(), "a must fire once")
+	ck.Eq(0, staleCalls.Load(), "the replaced b's timer was already marked due: only the identity guard keeps it from firing")
+	clk.Advance(6 * time.Second)
+	ck.Eq(1, newCalls.Load(), "the replacement must fire exactly once")
 }
 
 // 2. Callbacks run with no scheduler lock held: a callback that re-arms
@@ -207,6 +251,145 @@ func TestStopWaitsForARunningCallback(t *testing.T) {
 
 	s.Stop()
 	ck.True(finished.Load(), "Stop returned before the running callback finished")
+}
+
+// Stop closes registration FIRST, then drains. A periodic job that re-arms
+// itself from inside its own callback while Stop is draining must have that
+// At refused: the successor must never be registered, let alone fire.
+//
+// Two properties pin the ordering. The witness's pending entry makes the gate
+// below a synchronizer — it empties exactly when Stop's registration-closing
+// critical section has run, so the release lands inside the drain — and under
+// a Stop whose cleanup moved after the drain the witness never clears at all,
+// so the gate fails. Empty pending after Stop pins the refusal itself: the
+// fire-time closed guard in run would otherwise mask a registration-order
+// bug, because it refuses a closed scheduler's jobs just as well.
+func TestStopDropsASuccessorRegisteredDuringTheDrain(t *testing.T) {
+	ck := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	s := New(clk, 5*time.Second)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	advanceDone := make(chan struct{})
+	stopDone := make(chan struct{})
+	var calls atomic.Int32
+	var once sync.Once
+	var fn func()
+	fn = func() {
+		calls.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		s.At("k", clk.Now().Add(time.Second), fn) // must be dropped: closed
+	}
+
+	s.At("k", time.Unix(0, 0).Add(time.Second), fn)
+	// The witness's pending entry is what makes s.Pending() a usable signal:
+	// it empties exactly when Stop's registration-closing critical section has
+	// run, so releasing the callback deterministically lands inside the drain
+	// rather than before Stop started.
+	s.At("w", time.Unix(0, 0).Add(time.Hour), func() {})
+
+	go func() { defer close(advanceDone); clk.Advance(time.Second) }() // fires k; fn hangs on release
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the callback never started")
+	}
+
+	go func() { defer close(stopDone); s.Stop() }()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(s.Pending()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("Stop never emptied pending")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release) // the callback re-arms itself inside the drain
+
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return; the drain did not complete")
+	}
+	select {
+	case <-advanceDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Advance never returned")
+	}
+
+	clk.Advance(time.Hour) // the successor, had it survived, fires here
+	ck.Eq(1, calls.Load(), "the successor registered during the drain must never fire")
+	// The fire-time guard alone cannot pin the ordering: run also refuses a
+	// job whose scheduler is closed, so a Stop that drained before closing
+	// registration would still never fire the successor — it would just leak
+	// it into pending. Empty pending after Stop is what pins that the At was
+	// refused at REGISTRATION time, because registration closed first.
+	ck.Empty(s.Pending(), "Stop must leave no pending jobs: a successor registered during the drain means registration was still open while the drain ran")
+}
+
+// The sharp end of the same ordering: a registration that lands during the
+// drain with an ALREADY-REACHED deadline must not merely be refused at fire
+// time — where run's closed guard would hide the ordering bug — it must never
+// run at all. The hung callback keeps the drain (and with it, in a reordered
+// Stop, `closed`) parked, so if registration were still open this job would
+// run the moment the clock looks at it, inside Advance(0).
+func TestStopRefusesAReachedDeadlineRegisteredDuringTheDrain(t *testing.T) {
+	ck := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	s := New(clk, 5*time.Second)
+
+	started := make(chan struct{})
+	holdA := make(chan struct{})
+	advanceDone := make(chan struct{})
+	stopDone := make(chan struct{})
+	var aCalls, bCalls atomic.Int32
+	var closeHold sync.Once
+	t.Cleanup(func() { closeHold.Do(func() { close(holdA) }) })
+
+	s.At("a", time.Unix(0, 0).Add(time.Second), func() {
+		aCalls.Add(1)
+		close(started)
+		<-holdA // keeps the drain parked for the whole window below
+	})
+	s.At("w", time.Unix(0, 0).Add(time.Hour), func() {}) // gate witness, as above
+
+	go func() { defer close(advanceDone); clk.Advance(time.Second) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the callback never started")
+	}
+
+	go func() { defer close(stopDone); s.Stop() }()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(s.Pending()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("Stop never emptied pending")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The drain is now parked on a. In a Stop that drained before closing
+	// registration, this At — an already-reached deadline, the shape of a
+	// periodic job's immediate re-arm — would register and RUN below.
+	s.At("b", clk.Now().Add(-time.Second), func() { bCalls.Add(1) })
+	clk.Advance(0)
+	ck.Eq(0, bCalls.Load(), "a job registered during the drain must never run, even with an already-reached deadline")
+
+	closeHold.Do(func() { close(holdA) })
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return; the drain did not complete")
+	}
+	select {
+	case <-advanceDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Advance never returned")
+	}
+	ck.Eq(1, aCalls.Load(), "a must have fired exactly once")
+	ck.Empty(s.Pending(), "Stop must leave no pending jobs")
 }
 
 // Pending is introspection: sorted by deadline then key, reflecting
