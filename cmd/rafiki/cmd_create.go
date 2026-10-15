@@ -684,6 +684,94 @@ func collectCallerEnv() map[string]string {
 	return out
 }
 
+// Seams for the missing-executor prompt in resolveCreateExecutor, so a test can
+// drive it without a terminal, a live executor catalog, or a real
+// `rafiki executor setup`. Declared here (the file that owns the prompt) rather
+// than in executors_cli.go, which keeps no prompt state of its own.
+var (
+	// createRunExecutorSetup is the interactive executor wizard — exactly the
+	// code `rafiki executor setup` runs.
+	createRunExecutorSetup = runExecutorSetup
+	// createIsInteractive reports whether this caller can answer a prompt: not
+	// --yes, and stdin is a terminal.
+	createIsInteractive = func(cmd *cobra.Command) bool { return newWizard(cmd).interactive }
+	// createResolveLaunchExecutor resolves a launch-required kind's executor
+	// from the daemon's live catalog.
+	createResolveLaunchExecutor = resolveLaunchExecutor
+)
+
+// resolveCreateExecutor resolves the executor reference for a kind that must be
+// LAUNCHED (anything but fundi) when the caller named neither --executor nor
+// --executor-selector, so the daemon never silently picks among several
+// candidates. It is the client-side half of
+// docs/plans/2026-09-06-executor-selection-design.md §1 and §5.
+//
+// A fundi child needs none of this (runCreate's session-executor fallback
+// covers it), and a caller who named an executor or a selector has already
+// answered the question — both pass flagExecutor straight through.
+//
+// A script child does not NEED an executor: the daemon hosts it locally when
+// none can launch it, and a daemon with no pool at all hosts locally by design
+// — so a lister that cannot answer is not a reason to refuse the spawn. Leave
+// the field blank and let Spawn's own routing decide, exactly like the
+// zero-eligible case below. AMBIGUITY is not tolerated: several eligible
+// executors with no --executor would let the daemon silently pick one, the
+// exact thing this pre-flight exists to prevent.
+//
+// For a claude child, auto == "" means zero executors support the kind; leave
+// it blank so Spawn's own clear refusal explains why, rather than duplicating
+// that message here. A claude child is the one kind the caller can usually fix
+// on the spot, so an interactive caller is offered `rafiki executor setup`
+// first and the resolution retried.
+func resolveCreateExecutor(ctx context.Context, cmd *cobra.Command, profileName, kind, flagExecutor, selector string, out io.Writer) (string, error) {
+	if kind == protocol.KindFundi || flagExecutor != "" || selector != "" {
+		return flagExecutor, nil
+	}
+	if kind == protocol.KindScript {
+		auto, ambiguous, lerr := resolveLaunchExecutorDetailed(ctx, cmd, profileName, kind)
+		if ambiguous != "" {
+			return "", errors.New(ambiguous)
+		}
+		_ = lerr // tolerated: see above
+		return auto, nil
+	}
+	auto, err := createResolveLaunchExecutor(ctx, cmd, profileName, kind)
+	if err != nil {
+		return "", err
+	}
+	if auto == "" && kind == protocol.KindClaude {
+		auto, err = promptForExecutorSetup(ctx, cmd, profileName, kind, out)
+		if err != nil {
+			return "", err
+		}
+	}
+	return auto, nil
+}
+
+// promptForExecutorSetup offers to run `rafiki executor setup` on this machine
+// when nothing in the daemon's pool can launch a claude child, then re-resolves
+// and returns the ref. A caller who declines falls through to Spawn's own
+// refusal (""); a non-interactive caller — no one to ask — gets an error naming
+// the command to run instead. Extracted from resolveCreateExecutor so the
+// prompt and its retry are testable without a terminal or a real setup run.
+func promptForExecutorSetup(ctx context.Context, cmd *cobra.Command, profileName, kind string, out io.Writer) (string, error) {
+	if !createIsInteractive(cmd) {
+		return "", errors.New("no executor on this daemon can launch claude agents; run `rafiki executor setup` on the machine that should host them")
+	}
+	fmt.Fprintln(out, "No executor on this daemon can launch claude agents.")
+	yes, err := newWizard(cmd).askConfirm("Set one up on this machine now?", "", nil, true)
+	if err != nil {
+		return "", err
+	}
+	if !yes {
+		return "", nil
+	}
+	if err := createRunExecutorSetup(ctx, newWizard(cmd), os.Stdout); err != nil {
+		return "", err
+	}
+	return createResolveLaunchExecutor(ctx, cmd, profileName, kind)
+}
+
 func runCreate(cmd *cobra.Command, args []string) error {
 	// Resolve the mode before doing anything: -j and -J together is a
 	// user-input error and must not spawn a child first.
@@ -765,39 +853,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// A kind that must be LAUNCHED (anything but fundi) can never be served by
-	// the local session executor below -- it never advertises any
-	// LaunchKinds, which is the bug this whole plan exists to fix. For such a
-	// kind, resolve via the daemon's live executor catalog BEFORE ever
-	// touching --executor-selector's precedence, unless the caller already
-	// gave an explicit --executor or --executor-selector of their own. See
-	// docs/plans/2026-09-06-executor-selection-design.md §1 and §5.
-	if req.Kind != protocol.KindFundi && flagExecutor == "" && req.ExecutorSelector == "" {
-		if req.Kind == protocol.KindScript {
-			// A script child does not NEED an executor: the daemon hosts it
-			// locally when none can launch it, and a daemon with no pool at
-			// all hosts locally by design — so a lister that cannot answer
-			// is not a reason to refuse the spawn. Leave the field blank
-			// and let Spawn's own routing decide, exactly like the
-			// zero-eligible case below. AMBIGUITY is not tolerated: several
-			// eligible executors with no --executor would let the daemon
-			// silently pick one, the exact thing this pre-flight exists to
-			// prevent.
-			auto, ambiguous, lerr := resolveLaunchExecutorDetailed(cmdCtx(cmd), cmd, p.Name, req.Kind)
-			if ambiguous != "" {
-				return errors.New(ambiguous)
-			}
-			_ = lerr // tolerated: see above
-			flagExecutor = auto
-		} else {
-			auto, err := resolveLaunchExecutor(cmdCtx(cmd), cmd, p.Name, req.Kind)
-			if err != nil {
-				return err
-			}
-			// auto == "" means zero executors support this kind; leave it
-			// blank so Spawn's own clear refusal explains why, rather than
-			// duplicating that message here.
-			flagExecutor = auto
-		}
+	// the local session executor below -- it never advertises any LaunchKinds,
+	// which is the bug this whole plan exists to fix. resolveCreateExecutor
+	// carries the whole rule, its rationale, and the missing-executor prompt.
+	flagExecutor, err = resolveCreateExecutor(cmdCtx(cmd), cmd, p.Name, req.Kind, flagExecutor, req.ExecutorSelector, os.Stdout)
+	if err != nil {
+		return err
 	}
 
 	// By this point flagExecutor is already fully resolved for a
