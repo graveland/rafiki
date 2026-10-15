@@ -727,8 +727,10 @@ hand-maintained file, `<config dir>/executor-overrides.env`, sets variables
 wrong, like launchd's per-session `SSH_AUTH_SOCK`. See `.env.example` and
 `RAFIKI_EXECUTOR_ENV_FILE`/`RAFIKI_EXECUTOR_OVERRIDES_FILE`.
 
-**Background execution** is the immediate win over plain `bash`, which is
-synchronous with a 600s ceiling in-process:
+**Background execution** is the immediate win over plain `bash`: a long-running
+`bash` call is PROMOTED to a background job instead of being killed at its
+timeout, so work is not lost to a timeout. An agent can also start a job
+explicitly and get a handle immediately:
 
 | Tool | Purpose |
 |---|---|
@@ -736,15 +738,17 @@ synchronous with a 600s ceiling in-process:
 | `bash_output` | read everything the job has printed; reports running/exited and exit code |
 | `bash_kill` | stop the job and its whole process group |
 
-Completion is **pushed, not polled** — the daemon watches every job a child
-starts and injects a fragment into that child's next turn when it exits,
-through the same coalescing path subagent settlements use. Output is written
-to a file on the executor with a per-workspace byte budget
+Completion is **pushed, not polled** — the executor pushes every job's
+lifecycle over one `WatchJobs` stream per connection, and the daemon injects a
+fragment into the child's next turn when a job exits, through the same
+coalescing path subagent settlements use. An exit is acked only AFTER that
+fragment lands in the child's inbox, and an unacked exit is replayed on the next
+subscribe, so a daemon restart does not lose it. Output is written to a file on
+the executor with a per-workspace byte budget
 (`--job-output-budget-mb`, default 256 MB, drop-oldest-finished-first) and
 **no time-based expiry** — a turn can end and resume hours later, so a job's
 output lives until its workspace is released, not until a wall-clock window
-elapses. Watches are in-memory and not re-armed across a daemon restart. See
-`docs/reference/executor-protocol.md` for the full wire protocol.
+elapses. See `docs/reference/executor-protocol.md` for the full wire protocol.
 
 ### The executor relay
 

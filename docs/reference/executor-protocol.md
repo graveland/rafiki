@@ -186,11 +186,11 @@ GET /executor/connect HTTP/1.1
 Upgrade: rafiki-executor
 Connection: Upgrade
 Authorization: Bearer <credential>
-Rafiki-Protocol: 2
+Rafiki-Protocol: 3
         ↓
 HTTP/1.1 101 Switching Protocols
 Rafiki-Executor-Id: …
-Rafiki-Protocol: 2
+Rafiki-Protocol: 3
         ↓
 HTTP/2, roles inverted
 ```
@@ -225,6 +225,13 @@ Two consequences worth knowing:
   each other — see pkg/execpool's package comment.
 - **Codec:** Binary protobuf by default; JSON also supported (Connect's
   auto-negotiation).
+- **Streams:** one inverted HTTP/2 connection carries up to
+  `maxExecutorStreams` (250) concurrent streams. The daemon's client sets
+  `StrictMaxConcurrentStreams`, so a call past the limit WAITS for a free
+  stream rather than failing (`pkg/execpool/transport.go`);
+  `pkg/execpool/inflight.go` logs one warning per upward crossing of
+  `inFlightWarnAt` (200) — below the limit, so pressure is visible before
+  callers start queueing.
 
 ## Authentication on the upgrade request
 
@@ -238,14 +245,14 @@ side effect of the exchange (a spent token, a rotated credential) has happened
 or needs undoing, and the socket closes after the response.
 
 **The epoch gate runs before `authorize`.** The dialing side sets
-`Rafiki-Protocol: 2` on the Upgrade request (`upgradeconn.Dial` sets it and
+`Rafiki-Protocol: 3` on the Upgrade request (`upgradeconn.Dial` sets it and
 callers cannot override it), and `upgradeconn.Handler` refuses a missing or
 different value with a **plain 400** whose body names both epochs, BEFORE any
 credential is touched. That ordering is what stops a stale peer from spending
 a one-shot `Enroll` token or ticket on an exchange the far side cannot finish;
 the 400 is terminal by the 400/401/403 rule below, so a mismatched executor
 fails at once rather than retrying forever. The 101 carries `Rafiki-Protocol:
-2`, and the dialer reports a 101 without it (an old peer) or with another value
+3`, and the dialer reports a 101 without it (an old peer) or with another value
 as a 400 `Refused`, terminal the same way. See `control-protocol.md` "The
 protocol epoch" for the full rule.
 
@@ -372,12 +379,15 @@ Health() → { load, runningHandles[], diskFree, draining }
 ```
 
 Unary. Liveness and load snapshot. `runningHandles` names every non-exited
-background job; the daemon polls this to surface what's long-running.
+background job. It is a point-in-time snapshot of what is running, NOT how the
+daemon learns an exit happened: exits are pushed over `WatchJobs` (below), never
+polled.
 
 ### Execute
 
 ```
-Execute(callId, tool, inputJSON, timeout, expectMtime, background, workspaceId)
+Execute(callId, tool, inputJSON, timeout, expectMtime, background, workspaceId,
+        autoBackground, owner)
   → stream { Output(chunk) | Result(content[], isError, observedMtime)
             | Failed(code, msg) | handle }
 ```
@@ -389,6 +399,20 @@ workspace this call runs in — empty means the executor's own root, the
 pre-phase-08 behaviour kept as a compatibility path so an executor and a
 daemon of different vintages still interoperate.
 
+**`timeout` bounds a NON-auto call only.** `autoBackground` (set for `bash`
+calls) makes a command still running at its own tool timeout a background job
+instead of a kill, so such a call OWNS its deadline — the bash tool's own
+promote timer, not the caller's `timeout` (the executor does not wrap the call
+in `timeout` when `autoBackground` is set). A caller's `timeout` need therefore
+only STRICTLY exceed the bash tool's clamped maximum: `pkg/execpool`'s
+`executorCallTimeout` (`tools.MaxBashTimeout + 30s`) is the enforcement, so the
+promote always wins the race against a caller deadline.
+
+`owner` is the daemon's id for the agent making the call, opaque here. It is
+stored on any job the call creates and rides every `WatchJobs` event for that
+job, so the daemon routes an event to the right child with no handle bookkeeping
+of its own.
+
 The normal path is:
 
 1. The server checks `expectMtime` — if any path's current on-disk mtime
@@ -396,26 +420,42 @@ The normal path is:
 2. If `background=true` and `tool=bash`, the server starts the command as
    a background job and streams only the handle.
 3. Otherwise, the tool runs synchronously; the server streams
-   `Result{content[], observedMtime}` on success or `Failed{…}` on error.
+   `Result{content[], observedMtime}` on success or `Failed{…}` on error. An
+   `autoBackground` bash call that reaches its own timeout takes this same path
+   with a handoff `Result` naming the promoted job's handle.
 
 **Result carries typed content**, not a bare string. `content[]` holds
 `ContentBlock` entries that may be text or images — a `read` of a PNG on the
 executor returns an `ImageBlock` here, and the parent reconstructs it as image
 content rather than dropping it.
 
-### Attach
+### WatchJobs and AckJobExits
 
 ```
-Attach(handle) → stream { Output(chunk) | exitCode }
+WatchJobs() → stream { JobRunning(handle, workspaceId, owner, command)
+                   | JobExited(handle, workspaceId, owner, command, exitCode, finishedAt)
+                   | ReplayComplete }
+AckJobExits(handles[]) → {}
 ```
 
-`Attach` streams a job's output from the beginning of what is still retained,
-then incremental deltas every 200ms, then a final `exit_code`. A single reply
-carries at most 100 KB, taken from the END — a poll wants the newest output —
-and a reply that had to clip is prefixed with a note naming the FILE holding
-the fuller record, which the model can `read` or `grep` on the same executor.
-An unknown handle is `CodeNotFound`. Dropping the connection does not kill the
-job — reattaching resumes from what is still retained.
+`WatchJobs` is the push channel for background-job lifecycle events — the
+notification path, where a poll used to be. **ONE stream per daemon
+connection** covers every job on the executor, and the executor carries each
+job's `owner` on its events so the daemon routes an event to its child with no
+handle bookkeeping of its own. On subscribe the executor first sends a
+`JobRunning` for every running job and a `JobExited` for every finished,
+retained, **UNACKED** one, then `ReplayComplete`, then live events. A subscriber
+that cannot keep up is ended with `CodeUnavailable` rather than silently
+skipped, and its resubscribe replays everything unacked.
+
+`AckJobExits` (unary) tells the executor these finished jobs' exits have been
+delivered, so they stop being replayed and become eligible for byte-budget
+eviction. The daemon calls it only AFTER the exit's fragment is accepted into
+the durable inbox — **push before ack**, never the reverse. An unacked finished
+job is replayed on every subscribe and is NEVER evicted, so a crash between the
+two costs a duplicate event (which the inbox coalesces), never a lost
+notification. A job the agent killed is acked at kill time by the executor
+itself (`jobRegistry.kill`), so its exit publishes no event to ack.
 
 ### Provision
 
@@ -792,7 +832,8 @@ One-shot poll of a background job. Never blocks.
 | `exit_code` | ← | meaningful only when `exited` |
 | `found` | ← | false when the handle is unknown, or its output was evicted by the workspace's byte budget |
 
-`Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
+`WatchJobs` tells you a job exited; `JobOutput` (the `bash_output` tool)
+returns what it printed. Use `JobOutput` for a snapshot read.
 
 ## Tree and git sync
 
@@ -1262,20 +1303,21 @@ different retry decision for each code:
 **`bash` exit ≠ 0 in a synchronous call is a `Result` (with `is_error=true`),
 not a `Failure`.** That is existing behaviour and the protocol preserves it.
 A non-zero exit inside a background job is reported via the exit code in
-`AttachResponse`.
+the `JobExited` `WatchJobs` event.
 
 ## Background-handle lifecycle
 
 ```
-Start: Execute(background=true, tool=bash) → stream { handle }
-Run:   Attach(handle) → stream { Output*, ExitCode }
-Kill:  Cancel(callId) → {}
+Start:    Execute(background=true, tool=bash) → stream { handle }
+Notified: WatchJobs → JobExited(handle, exitCode)   (pushed, never polled)
+Read:     JobOutput(handle, since) → { data, total, exited, exit_code }
+Kill:     Cancel(callId) → {}
 ```
 
 - A handle is the `callId` from `ExecuteRequest`. The parent picks it.
 - A job's output goes to a FILE on the executor, retained with drop-oldest at
   8 MB, and a single reply returns at most 100 KB of it from the end. Byte
-  offsets are tracked against a monotonic total, so a re-`Attach` after data
+  offsets are tracked against a monotonic total, so a re-read after data
   has been dropped can tell the caller it missed output rather than silently
   replaying or skipping bytes — and unlike the in-memory ring this replaces,
   what it missed usually still exists, at a path the reply names. That is the
@@ -1288,13 +1330,14 @@ Kill:  Cancel(callId) → {}
   that started the job was still alive and idle. Memory is bounded instead by
   a per-workspace BYTE budget (256 MB by default, `--job-output-budget-mb`),
   evicting the oldest FINISHED job first. Running jobs are never evicted:
-  their output is a live stream, not an archive.
+  their output is a live stream, not an archive. An UNACKED finished job is
+  never evicted either — its exit has not been delivered yet.
 - Background commands are never rewritten through `rtk`, whatever `--rtk` says.
   The rewrite is only safe because the foreground path can watch stderr after
   the command exits and re-run the original when rtk itself refused; a
   long-running job offers no exit to inspect and no output it could take back.
-- A job survives a dropped `Attach` connection — the parent may re-attach
-  at any time.
+- A job survives a dropped `WatchJobs` connection — the daemon re-subscribes
+  and the replay covers it; its output is read at any time with `JobOutput`.
 - `Health().runningHandles` lists every handle whose process has not yet
   exited.
 
