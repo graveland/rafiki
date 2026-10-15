@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -19,175 +21,127 @@ const heartbeatEventSource = "subagents-heartbeat"
 // defaultHeartbeatInterval is how long a child works continuously before its
 // parent gets a check-in. Overridable with RAFIKI_HEARTBEAT_INTERVAL.
 //
-// It must stay strictly coarser than sweepTickInterval (controller.go), which
-// quantizes delivery. The value is chosen for how stale a coordinator's view of
-// subagent spend may get, not for any prompt-cache TTL — see CLAUDE.md on why
-// the cache reading of this number does not survive contact with the data.
+// The heartbeat is a deadline on the scheduler (see armHeartbeat), not a tick
+// sweep: the first check-in of a spell lands at exactly this interval after
+// the spell started, not at the next coarse reconciliation tick. The value is
+// chosen for how stale a coordinator's view of subagent spend may get, not
+// for any prompt-cache TTL — see CLAUDE.md on why the cache reading of this
+// number does not survive contact with the data.
 const defaultHeartbeatInterval = 4 * time.Minute
 
-// heartbeatState tracks, per child, whether it is currently in an unbroken
-// working spell, when it last got a heartbeat pushed to its parent, and when
-// the current spell was first observed. Guarded by its own mutex, matching
-// budgetBreaches and turnOutcomeStore.
+// heartbeatState tracks, per child, when its current unbroken working spell
+// started. A spell is a run of consecutive working statuses; the elapsed time
+// a check-in reports is measured from its start. Guarded by its own mutex,
+// matching budgetBreaches and turnOutcomeStore.
 type heartbeatState struct {
-	mu      sync.Mutex
-	working map[string]struct{}
-
-	// lastSent advances on every real fire — see due().
-	lastSent map[string]time.Time
-
-	// spellSince is seeded at the SAME moment as lastSent's first entry for a
-	// child (due()'s lazy-seed branch) but, unlike lastSent, is NEVER
-	// overwritten again for that spell — it stays fixed at the spell's start
-	// until stopWorking clears it. sweepHeartbeats reads it to report elapsed
-	// time in the check-in fragment.
+	mu         sync.Mutex
 	spellSince map[string]time.Time
 }
 
-// startWorking marks a child as being in a working spell. Called from
-// handleStatusChange on a transition INTO a working status; a call for a
-// child already in the map is a no-op (a stray extra transition between two
-// working statuses, e.g. streaming -> tool_running, must not reset the
-// window).
-func (h *heartbeatState) startWorking(childID string) {
+// startWorking records the start of a working spell at now and reports
+// whether it is NEW (a working→working transition must not reset it). A false
+// return means the child was already in a spell, so the caller must NOT arm a
+// fresh deadline under it.
+func (h *heartbeatState) startWorking(childID string, now time.Time) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.working == nil {
-		h.working = make(map[string]struct{})
+	if h.spellSince == nil {
+		h.spellSince = make(map[string]time.Time)
 	}
-	h.working[childID] = struct{}{}
-}
-
-// stopWorking clears a child's working spell and heartbeat history. Called on
-// a transition OUT of a working status (back to idle), so the next spell
-// starts its own window rather than inheriting a stale one.
-func (h *heartbeatState) stopWorking(childID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.working, childID)
-	delete(h.lastSent, childID)
-	delete(h.spellSince, childID)
-}
-
-// due reports whether childID, currently tracked as working, has gone at
-// least interval since it was last observed by a sweep — and if so, records
-// now as its new lastSent.
-//
-// working (set by startWorking) gates only PRESENCE — "is this child in a
-// spell we are tracking at all." It deliberately carries no timestamp: the
-// elapsed-time arithmetic is measured entirely in sweepHeartbeats' own
-// caller-supplied clock, seeded lazily on the FIRST sweep that notices a
-// newly (re)tracked child (below), rather than from workingSince/whenever
-// handleStatusChange happened to run. This costs real precision — a spell's
-// very first heartbeat fires up to one extra sweep tick later than a true
-// elapsed-since-start design would give it, regardless of how short
-// heartbeatInterval is configured, because that first sweep only starts the
-// clock rather than measuring against it — but it is the only way this stays
-// correct: sweepHeartbeats is driven by whatever `now` its caller passes
-// (real time.Now() from sweepTick in production, a manually-advanced test
-// clock in tests), while handleStatusChange's startWorking has no access to
-// that same clock and must not pretend to.
-func (h *heartbeatState) due(childID string, now time.Time, interval time.Duration) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, tracked := h.working[childID]; !tracked {
+	if _, tracked := h.spellSince[childID]; tracked {
 		return false
 	}
-	if h.lastSent == nil {
-		h.lastSent = make(map[string]time.Time)
-	}
-	last, sent := h.lastSent[childID]
-	if !sent {
-		h.lastSent[childID] = now
-		// Seeded once, at this same first-observation moment, and never
-		// touched again until stopWorking clears it alongside lastSent —
-		// see spellSince's doc.
-		if h.spellSince == nil {
-			h.spellSince = make(map[string]time.Time)
-		}
-		h.spellSince[childID] = now
-		return false
-	}
-	if now.Sub(last) < interval {
-		return false
-	}
-	h.lastSent[childID] = now
+	h.spellSince[childID] = now
 	return true
 }
 
-// since reports when childID's current working spell was first observed —
-// see spellSince's doc. Returns the zero Time if childID has no tracked
-// spell (never seen by due(), or one that has already gone idle). Callers
-// must diff it against their OWN caller-supplied clock, never time.Now(),
-// for the same reason due() takes now as a parameter.
-func (h *heartbeatState) since(childID string) time.Time {
+// stopWorking clears a child's working spell. Called on a transition OUT of a
+// working status (back to idle) and on exit, so the next spell starts its own
+// window rather than inheriting a stale one.
+func (h *heartbeatState) stopWorking(childID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.spellSince[childID]
+	delete(h.spellSince, childID)
 }
 
-// sweepHeartbeats pushes one coalesced check-in fragment to each working
-// child's parent, for every child that has been continuously working past
-// c.heartbeatInterval since its last one. Zero interval disables the feature
-// entirely (see NewController's flag wiring).
-//
-// This rides the same 5-minute reconciliation tick as sweepBudgets and
-// sweepExpired (see sweepTick) rather than a ticker of its own: all three are
-// periodic reconciliations of stored state, and a fourth ticker would be a
-// fourth thing to reason about at shutdown.
-//
-// ctx bounds the subtreeSpend query below, exactly as sweepBudgets is
-// bounded — sweepTick passes the SAME sweepCtx (budgetSweepTimeout) into
-// both, so a stalled cost query here cannot hang the shared sweep goroutine
-// any more than one in the budget sweep already could.
-func (c *Controller) sweepHeartbeats(ctx context.Context, now time.Time) {
+// since reports when childID's current working spell started. The bool is
+// false when the child has no tracked spell (never started one, or one that
+// has already gone idle), which is distinct from a zero Time.
+func (h *heartbeatState) since(childID string) (time.Time, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, ok := h.spellSince[childID]
+	return t, ok
+}
+
+// armHeartbeat registers childID's next check-in one heartbeatInterval from
+// now. Top-level children have nobody to check in with and are never armed.
+// Zero interval disables the feature entirely (see NewController's flag
+// wiring), as does a missing event buffer.
+func (c *Controller) armHeartbeat(childID string) {
 	if c.heartbeatInterval <= 0 || c.evbuf == nil {
 		return
 	}
-	for _, snap := range c.st.List() {
-		if !isWorkingStatus(snap.Status) {
-			continue
-		}
-		parent, ok := c.st.ParentOf(snap.ChildID)
-		if !ok || parent == "" {
-			continue // top-level: nobody to check in with
-		}
-		if !c.heartbeats.due(snap.ChildID, now, c.heartbeatInterval) {
-			continue
-		}
-
-		// Build the parenthetical from whatever data is actually available.
-		// Elapsed time comes from the sweep's OWN clock (now), never
-		// time.Now() — see heartbeatState.since's doc. A failed or
-		// unconfigured cost query OMITS the cost clause entirely rather than
-		// asserting a false "$0.00", mirroring sweepBudgets' own
-		// best-effort handling of the identical situation (budget_sweep.go).
-		var parts []string
-		if since := c.heartbeats.since(snap.ChildID); !since.IsZero() {
-			parts = append(parts, now.Sub(since).Round(time.Minute).String()+" so far")
-		}
-		if c.coster != nil {
-			if spent, err := c.subtreeSpend(ctx, snap.ChildID); err == nil {
-				parts = append(parts, fmt.Sprintf("this agent and its subagents have spent $%.2f", spent))
-			} else {
-				// The cost clause is omitted, not asserted as $0.00 — but a
-				// persistent unreadable spend (lineage blind) must be visible, so
-				// warn rather than swallow it.
-				slog.Warn("heartbeat sweep: spend unreadable", "childId", snap.ChildID, "errorType", fmt.Sprintf("%T", err))
-			}
-		}
-		var detail string
-		if len(parts) > 0 {
-			detail = " (" + strings.Join(parts, "; ") + ")"
-		}
-
-		name := snap.Name
-		if name == "" {
-			name = "unnamed"
-		}
-		frag := fmt.Sprintf(
-			"agent %s (%s) is still working%s. No action needed unless you want to check in.",
-			snap.ChildID, name, detail)
-		c.evbuf.Push(parent, heartbeatEventSource, snap.ChildID, frag)
+	if parent, ok := c.st.ParentOf(childID); !ok || parent == "" {
+		return // top-level: nobody to check in with
 	}
+	c.at(heartbeatKey(childID), c.now().Add(c.heartbeatInterval), func() {
+		c.fireHeartbeat(childID)
+	})
+}
+
+// fireHeartbeat pushes one check-in to childID's parent and re-arms, unless
+// the child has vanished or stopped working (then it returns WITHOUT
+// re-arming — the vanished-subject rule: a timer for a subject that is gone
+// must not keep rescheduling itself).
+//
+// The parenthetical is built from whatever data is actually available.
+// Elapsed time comes from the spell's recorded start, measured on the
+// controller's clock. A failed or unconfigured cost query OMITS the cost
+// clause entirely rather than asserting a false "$0.00", mirroring
+// sweepBudgets' own best-effort handling of the identical situation
+// (budget_sweep.go).
+func (c *Controller) fireHeartbeat(childID string) {
+	snap, ok := c.st.Get(childID)
+	if !ok || !isWorkingStatus(snap.Status) {
+		return
+	}
+	since, tracked := c.heartbeats.since(childID)
+	if !tracked {
+		return
+	}
+	parent, ok := c.st.ParentOf(childID)
+	if !ok || parent == "" {
+		return
+	}
+
+	var parts []string
+	parts = append(parts, c.now().Sub(since).Round(time.Minute).String()+" so far")
+	if c.coster != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), budgetSweepTimeout)
+		spent, err := c.subtreeSpend(ctx, childID)
+		cancel()
+		if err == nil {
+			parts = append(parts, fmt.Sprintf("this agent and its subagents have spent $%.2f", spent))
+		} else {
+			// The cost clause is omitted, not asserted as $0.00 — but a
+			// persistent unreadable spend (lineage blind) must be visible, so
+			// warn rather than swallow it.
+			slog.Warn("heartbeat sweep: spend unreadable", "childId", childID, "errorType", fmt.Sprintf("%T", err))
+		}
+	}
+	detail := " (" + strings.Join(parts, "; ") + ")"
+
+	name := snap.Name
+	if name == "" {
+		name = "unnamed"
+	}
+	frag := fmt.Sprintf(
+		"agent %s (%s) is still working%s. No action needed unless you want to check in.",
+		snap.ChildID, name, detail)
+	c.evbuf.Push(parent, heartbeatEventSource, childID, frag)
+
+	// Re-arm for the next interval: only a child still working and still
+	// present reaches here, and the next fire re-checks both.
+	c.armHeartbeat(childID)
 }

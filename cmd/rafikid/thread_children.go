@@ -210,6 +210,9 @@ func (c *Controller) exitNativeChild(childID string) bool {
 	if !c.st.MarkExited(childID, now, 0, "", nil, nil) {
 		return false
 	}
+	// Arm the same grace deadline a real exit gets: the synthetic child is
+	// closed (deleted) once the window expires, exactly as a real one is.
+	c.armGrace(childID, now)
 
 	var code int32
 	c.publishEvent(childID, &rafikiv1.Event{

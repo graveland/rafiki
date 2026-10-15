@@ -1,17 +1,30 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sched"
 
 	"github.com/multigres/testkit/assert"
 )
 
-// heartbeatBatches counts only the batches pushed by the heartbeat sweep,
+// heartbeatFixture builds the settleFixture with a fake-clock scheduler wired
+// in, so heartbeat deadlines can be driven deterministically. The four-minute
+// interval matches defaultHeartbeatInterval.
+func heartbeatFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush) {
+	t.Helper()
+	c, clk, cap := settleFixture(t)
+	c.clk = clk
+	c.sched = sched.New(clk, time.Second)
+	c.heartbeatInterval = 4 * time.Minute
+	return c, clk, cap
+}
+
+// heartbeatBatches counts only the batches pushed by heartbeat check-ins,
 // filtering out unrelated traffic on the same evbuf (chiefly the pre-existing
 // settle notification, which a working->idle transition fires regardless of
 // anything heartbeat-related).
@@ -25,163 +38,139 @@ func heartbeatBatches(cap *capturedFlush) int {
 	return n
 }
 
-// A child continuously working past the interval gets exactly one heartbeat,
-// naming elapsed time and cost — not the settle-notification's message shape.
-func TestHeartbeatFiresOnceThePastTheInterval(t *testing.T) {
+// The first check-in of a working spell lands at EXACTLY the interval after
+// the spell started. Fails if arming ever falls back to the old lazy seed,
+// which pushed the first check-in out by a whole extra interval.
+func TestHeartbeatFirstCheckInLandsAtExactlyTheInterval(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c, clk, cap := settleFixture(t)
-	c.heartbeatInterval = 5 * time.Minute
-	c.coster = fakeCoster{spend: 2.50}
+	c, clk, cap := heartbeatFixture(t)
 
 	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
-	c.sweepHeartbeats(context.Background(), clk.Now())
-	ck.Require().Empty(cap.batches(), "heartbeat fired before the interval elapsed")
 
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now())
-	clk.Advance(6 * time.Second) // let the debounced push flush
+	// Just short of the interval: nothing has fired, and no debounce can flush
+	// what was never pushed.
+	clk.Advance(4*time.Minute - time.Second)
+	ck.Require().Empty(cap.batches(), "a check-in fired before the interval elapsed")
+
+	// Cross the deadline, then let the 5s debounce flush.
+	clk.Advance(time.Second)
+	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()
-	ck.Require().Len(batches, 1, "want 1 heartbeat, got %d", len(batches))
-	ck.Eq("c_coord", batches[0].childID, "heartbeat went to")
-	ck.StrContains(batches[0].fragments[0], "$2.50", "heartbeat fragment must name running cost")
-	// The sweep fires exactly 6 minutes (clk-time) after the child was first
-	// observed working — see heartbeatState.since's doc — so the fragment
-	// must name that elapsed time too, not just cost: cost alone conveys
-	// nothing for an unpriced local model, which always reads $0.00.
-	ck.StrContains(batches[0].fragments[0], "6m0s so far", "heartbeat fragment must name elapsed time")
+	ck.Require().Len(batches, 1, "want exactly 1 check-in at the interval, got %d", len(batches))
+	ck.Eq("c_coord", batches[0].childID, "check-in went to")
+	ck.StrContains(batches[0].fragments[0], "c_w1", "check-in must name the working child")
 }
 
-// When no coster is configured, the fragment must not assert a false
-// "$0.00" — it should simply omit the cost clause, mirroring sweepBudgets'
-// own best-effort handling of the identical situation. Elapsed time, which
-// does not depend on the coster, must still be reported.
+// A continuously working child gets one check-in per interval.
+func TestHeartbeatRepeatsEachInterval(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c, clk, cap := heartbeatFixture(t)
+
+	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
+
+	clk.Advance(4 * time.Minute)
+	clk.Advance(6 * time.Second)
+	ck.Require().Eq(1, heartbeatBatches(cap), "setup: want 1 check-in after the first interval, got")
+
+	clk.Advance(4 * time.Minute)
+	clk.Advance(6 * time.Second)
+	ck.Eq(2, heartbeatBatches(cap), "want a second check-in one interval later")
+}
+
+// Going idle cancels the pending check-in deadline AND the fire-time status
+// re-check refuses to push. Both halves are asserted: the batch count proves
+// the re-check, and Pending emptiness proves the cancellation.
+func TestHeartbeatStopsWhenChildGoesIdle(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c, clk, cap := heartbeatFixture(t)
+
+	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
+	clk.Advance(1 * time.Minute)
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+
+	ck.Require().Empty(c.sched.Pending(), "the idle transition must cancel the child's deadline; pending=%v", c.sched.Pending())
+
+	clk.Advance(10 * time.Minute)
+	ck.Eq(0, heartbeatBatches(cap), "an idle child must not get a check-in")
+}
+
+// A child with no parent (top-level) has nobody to heartbeat to, so no
+// deadline is ever armed under it.
+func TestHeartbeatSkipsTopLevelChildren(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c, clk, cap := heartbeatFixture(t)
+
+	c.handleStatusChange("c_coord", protocol.StatusStreaming, protocol.StatusIdle)
+
+	ck.Require().Empty(c.sched.Pending(), "a top-level child must never arm a check-in deadline")
+	clk.Advance(10 * time.Minute)
+	ck.Eq(0, heartbeatBatches(cap), "a top-level child got a check-in")
+}
+
+// A child that vanishes before its deadline fires must not re-arm: the timer
+// is one-shot, and a subject that is gone must not reschedule itself.
+func TestHeartbeatVanishedChildDoesNotRearm(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c, clk, cap := heartbeatFixture(t)
+
+	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
+	c.st.Delete("c_w1")
+
+	clk.Advance(10 * time.Minute)
+	ck.Eq(0, heartbeatBatches(cap), "a vanished child got a check-in")
+	ck.Require().Empty(c.sched.Pending(), "a vanished child's deadline must not re-arm")
+}
+
+// With no coster configured, the fragment must not assert a false "$0.00" —
+// it omits the cost clause and still names elapsed time.
 func TestHeartbeatOmitsCostClauseWithNoCoster(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c, clk, cap := settleFixture(t)
-	c.heartbeatInterval = 5 * time.Minute
+	c, clk, cap := heartbeatFixture(t)
 	c.coster = nil
 
 	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
-	c.sweepHeartbeats(context.Background(), clk.Now())
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(4 * time.Minute)
 	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()
-	ck.Require().Len(batches, 1, "want 1 heartbeat, got %d", len(batches))
+	ck.Require().Len(batches, 1, "want 1 check-in, got %d", len(batches))
 	frag := batches[0].fragments[0]
-	ck.NotStrContains(frag, "$", "heartbeat asserted a cost figure with no coster configured")
-	ck.StrContains(frag, "so far", "heartbeat must still name elapsed time")
+	ck.NotStrContains(frag, "$", "check-in asserted a cost figure with no coster configured")
+	ck.StrContains(frag, "so far", "check-in must still name elapsed time")
 }
 
-// A coster that errors on the query must degrade the same way as a missing
-// coster: no cost clause, no false $0.00.
+// A coster that errors degrades the same way as a missing one: the cost clause
+// is omitted, not asserted as $0.00.
 func TestHeartbeatOmitsCostClauseOnQueryError(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c, clk, cap := settleFixture(t)
-	c.heartbeatInterval = 5 * time.Minute
+	c, clk, cap := heartbeatFixture(t)
 	c.coster = fakeCoster{err: errors.New("db unreachable")}
 
 	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
-	c.sweepHeartbeats(context.Background(), clk.Now())
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(4 * time.Minute)
 	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()
-	ck.Require().Len(batches, 1, "want 1 heartbeat, got %d", len(batches))
+	ck.Require().Len(batches, 1, "want 1 check-in, got %d", len(batches))
 	frag := batches[0].fragments[0]
-	ck.NotStrContains(frag, "$0.00", "heartbeat asserted $0.00 on a failed cost query")
-	// due()'s lastSent bookkeeping must still have advanced despite the
-	// failed cost query — only the message content degrades.
-	ck.StrContains(frag, "so far", "heartbeat must still fire and name elapsed time")
+	ck.NotStrContains(frag, "$0.00", "check-in asserted $0.00 on a failed cost query")
+	ck.StrContains(frag, "so far", "check-in must still fire and name elapsed time")
 }
 
-// A second sweep before the interval elapses again must not re-push.
-//
-// The first sweepHeartbeats call for any (re)tracked child only lazy-seeds
-// its baseline and never fires (see heartbeatState.due) — so this test forces
-// a GENUINE fire first (mirroring TestHeartbeatFiresOnceThePastTheInterval's
-// proven two-call shape) before checking that a sweep still inside the
-// interval doesn't push again. Without the genuine fire, "does not repeat"
-// would be checking nothing: both counts would trivially be zero.
-func TestHeartbeatDoesNotRepeatWithinTheInterval(t *testing.T) {
+// A working→working transition (streaming -> tool_running) is not a new spell:
+// it must not reset the deadline, so the check-in still lands one interval
+// after the spell STARTED, not after the transition.
+func TestHeartbeatWorkingToWorkingDoesNotReset(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c, clk, cap := settleFixture(t)
-	c.heartbeatInterval = 5 * time.Minute
-	c.coster = fakeCoster{spend: 1.0}
+	c, clk, cap := heartbeatFixture(t)
 
 	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
-	c.sweepHeartbeats(context.Background(), clk.Now()) // first observation: lazy-seeds, no fire
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now()) // genuine fire
-	clk.Advance(6 * time.Second)
-	first := heartbeatBatches(cap)
-	ck.Require().Eq(1, first, "setup: want 1 genuine heartbeat before the repeat check, got")
+	clk.Advance(3 * time.Minute)
+	c.handleStatusChange("c_w1", protocol.StatusToolRunning, protocol.StatusStreaming)
 
-	clk.Advance(1 * time.Minute) // still under a second full interval
-	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(1 * time.Minute) // reaches the ORIGINAL 4m deadline
 	clk.Advance(6 * time.Second)
 
-	ck.Eq(first, heartbeatBatches(cap), "a second sweep inside the interval pushed again")
-}
-
-// A child with no parent (top-level) has nobody to heartbeat to.
-func TestHeartbeatSkipsTopLevelChildren(t *testing.T) {
-	c, clk, cap := settleFixture(t)
-	c.heartbeatInterval = 5 * time.Minute
-	c.coster = fakeCoster{spend: 1.0}
-
-	c.handleStatusChange("c_coord", protocol.StatusStreaming, protocol.StatusIdle)
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now())
-	clk.Advance(6 * time.Second)
-
-	assert.NewCollecting(t).Eq(0, len(cap.batches()), "a top-level child got a heartbeat")
-}
-
-// Going idle clears the working-since window, so a later working spell
-// starts its own interval rather than inheriting the old one.
-//
-// This must exercise a REAL leak, not just an absence of firing: a naive
-// version of this test that never forces a genuine fire during the first
-// spell is vacuous, because heartbeatState.due's first observation of any
-// (re)tracked child always lazy-seeds and returns false regardless of
-// whether stopWorking actually reset anything — a completely broken (no-op)
-// stopWorking would produce the identical "0 heartbeats" result. So: force a
-// genuine fire in the first spell (leaving a real lastSent entry behind),
-// reset via the idle/re-working transition, then advance the clock by MORE
-// than the interval measured from that first spell's fire. A correct reset
-// makes this the new spell's first observation (lazy-seed, no fire); a
-// broken stopWorking would see the stale lastSent as "interval elapsed" and
-// fire immediately — that's what distinguishes the two.
-func TestHeartbeatWindowResetsOnGoingIdle(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	c, clk, cap := settleFixture(t)
-	c.heartbeatInterval = 5 * time.Minute
-	c.coster = fakeCoster{spend: 1.0}
-
-	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
-	c.sweepHeartbeats(context.Background(), clk.Now()) // first observation: lazy-seeds, no fire
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now()) // genuine fire, leaves lastSent behind
-	clk.Advance(6 * time.Second)
-	firstSpell := heartbeatBatches(cap)
-	ck.Require().Eq(1, firstSpell, "setup: want 1 genuine heartbeat from the first spell, got")
-
-	// The transition below is a genuine settle (working -> idle), so it also
-	// fires the pre-existing settle notification (subagentEventSource) —
-	// unrelated to heartbeats, and not what this test is about.
-	// heartbeatBatches filters it out.
-	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
-	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
-
-	// More than the interval since the FIRST spell's fire: enough for a
-	// leaked, un-reset lastSent to look overdue.
-	clk.Advance(6 * time.Minute)
-	c.sweepHeartbeats(context.Background(), clk.Now())
-	clk.Advance(6 * time.Second)
-
-	ck.Eq(firstSpell, heartbeatBatches(cap), "a leaked pre-reset heartbeat state fired on the new spell")
+	ck.Eq(1, heartbeatBatches(cap), "working->working must not move the deadline; want 1 check-in at 4m, got")
 }

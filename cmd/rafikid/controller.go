@@ -34,6 +34,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/claudeargv"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
@@ -61,6 +62,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/sandbox"
+	"go.graveland.dev/rafiki/pkg/sched"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -81,6 +83,15 @@ type Controller struct {
 	stateDir    string
 	graceWindow time.Duration
 	sweeperWg   sync.WaitGroup
+
+	// clk is the controller's time source and the clock the deadline
+	// scheduler runs on. A zero-value Controller (a test fixture) has none,
+	// and now() reads the wall clock in that case.
+	clk clock.Clock
+	// sched fires grace-window and heartbeat deadlines, replacing by key.
+	// Nil-safe: every method is a no-op on a nil *sched.Scheduler, so a
+	// fixture that never sets it never panics.
+	sched *sched.Scheduler
 
 	// pool is the daemon's shared database pool, handed to every in-process
 	// agent child (fundi.RuntimeOptions.Pool). Nil means every agent
@@ -347,8 +358,9 @@ type Controller struct {
 	// before the feature). See ratelimit_resume.go.
 	rateWatch rateLimitWatch
 
-	// heartbeats tracks long-running children's working spells for
-	// sweepHeartbeats. See heartbeat_sweep.go.
+	// heartbeats tracks long-running children's working spells, so each
+	// spell's scheduled check-in can name its elapsed time. See
+	// heartbeat_sweep.go.
 	heartbeats heartbeatState
 	// heartbeatInterval is how long a child must be continuously working
 	// before its parent gets a check-in push. Zero disables the feature.
@@ -675,19 +687,21 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 			gw = time.Duration(n * float64(time.Hour))
 		}
 	}
-	// Strictly coarser than sweepTickInterval, which quantizes delivery — see
-	// that constant. At a 1m tick the lazy seed in heartbeatState.due costs one
-	// tick rather than one full interval, so the first check-in of a spell now
-	// lands around 5m instead of around 10m.
+	// The heartbeat is a deadline on the scheduler, not a tick: the first
+	// check-in of a spell lands at exactly this interval after the spell
+	// started. See defaultHeartbeatInterval.
 	hb := defaultHeartbeatInterval
 	if h := paths.Get(paths.HeartbeatInterval); h != "" {
 		if d, err := time.ParseDuration(h); err == nil && d >= 0 {
 			hb = d
 		}
 	}
+	clk := clock.RealClock()
 	c := &Controller{
 		st:                st,
 		cm:                newChildManager(),
+		clk:               clk,
+		sched:             sched.New(clk, schedAbandonAfter),
 		dumper:            dumper,
 		startedAt:         time.Now(),
 		socketPath:        socketPath,
@@ -785,24 +799,19 @@ func eventLogStore(pool *pgxpool.Pool) eventlog.Store {
 	return eventlogdb.New(pool)
 }
 
-// sweepTickInterval is how often sweepTick runs. It bounds the resolution of
-// everything riding the tick, so it must stay strictly finer than
-// heartbeatInterval: delivery is quantized to it, and a tick EQUAL to the
-// interval is the worst case of all — due() fires on `elapsed >= interval`, so
-// with the two equal the cadence flips between one and two ticks on drift of
-// microseconds. It was 5m alongside a 5m heartbeat default, which is exactly
-// that.
+// sweepTickInterval is how often sweepTick runs. It now carries only the
+// budget sweep and the inbox retention sweep: grace windows and heartbeat
+// check-ins are deadlines on the scheduler (timers.go, heartbeat_sweep.go),
+// so nothing about them is quantized to this tick any more.
 //
 // Not finer than this without more thought: the tick itself is free, but the
-// work is not — sweepBudgets and sweepHeartbeats each run a subtreeSpend query
-// per working child, so the DB load scales with 1/interval. The real fix is a
-// deadline-scheduler that wakes only when something is actually due; this
-// constant is the interim.
+// work is not — sweepBudgets runs a subtreeSpend query per over-budget
+// subtree, so the DB load scales with 1/interval.
 const sweepTickInterval = time.Minute
 
-// startSweeper launches a background goroutine that periodically forgets
-// exited children whose age exceeds the configured grace window. It stops
-// when ctx is cancelled. Call Stop() to wait for the goroutine to exit.
+// startSweeper launches a background goroutine that periodically runs the
+// budget and inbox reconciliation tick (sweepTick). It stops when ctx is
+// cancelled. Call Stop() to wait for the goroutine to exit.
 func (c *Controller) startSweeper(ctx context.Context) {
 	c.sweeperWg.Add(1)
 	go func() {
@@ -820,24 +829,22 @@ func (c *Controller) startSweeper(ctx context.Context) {
 	}()
 }
 
-// sweepTick is one pass of the periodic reconciliation: children whose grace
-// window has expired, budget breaches, long-running heartbeat check-ins, and
+// sweepTick is one pass of the periodic reconciliation: budget breaches and
 // the inbox's terminal rows.
 //
-// Budget breaches, heartbeats, and the inbox sweep ride the expiry tick
-// rather than timers of their own: all four are periodic reconciliations of
-// stored state, and a separate ticker for any one of them would be a
-// separate thing to reason about at shutdown. Extracted from startSweeper so
-// what the tick does is testable without waiting five minutes for one.
+// Budget breaches and the inbox sweep ride the same tick: both are periodic
+// reconciliations of stored state, and a ticker of their own would be one
+// more thing to reason about at shutdown. Grace windows and heartbeat
+// check-ins are NO LONGER here — they are deadlines on the scheduler (see
+// timers.go and heartbeat_sweep.go), so nothing about them is quantized to
+// this tick. Extracted from startSweeper so what the tick does is testable
+// without waiting a minute for one.
 //
-// sweepHeartbeats shares sweepBudgets' bounded sweepCtx (not
-// context.Background()): both do a subtreeSpend query, and a stalled DB call
-// in either must not hang the shared sweep goroutine indefinitely.
+// sweepBudgets runs under a bounded sweepCtx: a stalled subtreeSpend query
+// must not hang the shared sweep goroutine.
 func (c *Controller) sweepTick(ctx context.Context) {
-	c.sweepExpired()
 	sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
 	c.sweepBudgets(sweepCtx)
-	c.sweepHeartbeats(sweepCtx, time.Now())
 	cancel()
 	c.sweepInbox()
 }
@@ -846,26 +853,12 @@ func (c *Controller) sweepTick(ctx context.Context) {
 // to exit. The caller is responsible for cancelling the context passed to
 // startSweeper AND to startRecall before calling Stop.
 func (c *Controller) Stop() {
+	// Close the scheduler to new registration FIRST: a grace/heartbeat
+	// callback that fires during the drain must not arm a successor. Then
+	// drain — a callback already running is bounded by schedAbandonAfter.
+	c.sched.Stop()
 	c.sweeperWg.Wait()
 	c.recallWg.Wait()
-}
-
-// sweepExpired closes all exited children whose ExitedAt is older than
-// graceWindow. Called periodically by the sweeper goroutine.
-func (c *Controller) sweepExpired() {
-	cutoff := time.Now().Add(-c.graceWindow)
-	var toClose []string
-	for _, s := range c.st.FindByStatus(protocol.StatusExited) {
-		if !s.ExitedAt.IsZero() && s.ExitedAt.Before(cutoff) {
-			toClose = append(toClose, s.ChildID)
-		}
-	}
-	for _, id := range toClose {
-		_ = c.Close(id)
-	}
-	if len(toClose) > 0 {
-		slog.Info("sweep: closed expired children", "count", len(toClose))
-	}
 }
 
 // ─── Control-plane queries and lifecycle ─────────────────────────────────────
@@ -3611,11 +3604,11 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 			closed = append(closed, s.ChildID)
 			continue
 		}
-		// Gated on ownsChildRow, same reasoning as Forget above: sweepExpired
-		// calls ForgetAllExited on the daemon's own grace-window tick, and a
-		// recovered record — including one belonging to a still-live OTHER
-		// daemon's child — carries its old ExitedAt, so this is not merely a
-		// hypothetical race.
+		// Gated on ownsChildRow, same reasoning as Forget above: the grace
+		// deadline (armGrace, timers.go) closes an exited child after the
+		// configured window, and a recovered record — including one belonging
+		// to a still-live OTHER daemon's child — carries its old ExitedAt, so
+		// this is not merely a hypothetical race.
 		owns := c.ownsChildRow(s)
 		// Persist before forgetting: the upsert carries the child's session_id
 		// to conversations.child before the tombstone stamps closed_at. A child
@@ -4229,11 +4222,11 @@ func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {
-	// now feeds only the transition announcement's timestamp; it
-	// is NOT threaded into startWorking/heartbeats, which track elapsed time
-	// entirely on sweepHeartbeats' own caller-supplied clock (see
-	// heartbeatState.due's doc) — hoisted here only because that is where
-	// every other status-change timestamp in this function is captured.
+	// now feeds only the transition announcement's timestamp — hoisted here
+	// because that is where every other status-change timestamp in this
+	// function is captured. A working spell's start and its heartbeat deadline
+	// are measured on the controller's own clock (c.now()), never this
+	// wall-clock reading.
 	now := time.Now()
 	storePrev, ok := c.st.SetStatus(childID, newStatus)
 	// Publish onto the native/rafiki-v1 event stream so the TUI rail can
@@ -4293,6 +4286,10 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		// round trip.
 		go c.drainInbox(c.inbox, childID)
 		c.heartbeats.stopWorking(childID)
+		// The spell is over: its check-in deadline must not outlive it (the
+		// fire-time status re-check is the belt; this cancellation is the
+		// braces).
+		c.cancelTimer(heartbeatKey(childID))
 		// The turn just settled: if the upstream's latest verdict for this
 		// child was a 429, that verdict is what killed it — schedule the
 		// auto-resume (claude children only; the gate is inside). In-memory
@@ -4300,7 +4297,12 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		c.maybeRateLimitResume(childID)
 	}
 	if ok && isWorkingStatus(newStatus) {
-		c.heartbeats.startWorking(childID)
+		// A working→working transition (streaming → tool_running) is not a
+		// new spell: startWorking reports false and the deadline is left
+		// where it was. Only a genuinely new spell arms a check-in.
+		if c.heartbeats.startWorking(childID, c.now()) {
+			c.armHeartbeat(childID)
+		}
 	}
 	// A graceful shutdown overwrites EVERY live child's status with
 	// shutting_down — idle and mid-turn alike — and status is recovery's only
@@ -4495,6 +4497,9 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
 	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot, renderEvents)
+	// The grace clock starts now: this exit's timestamp is what the deadline
+	// and the callback's staleness guard are both derived from.
+	c.armGrace(childID, now)
 
 	// A dead child's per-child MCP secret stops resolving (the proxy face
 	// consults it on every request). handleChildExit is already the one place
@@ -4664,6 +4669,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// first (an engine fatal, an operator kill) — handleStatusChange's own
 	// idle-transition cleanup never runs for those.
 	c.heartbeats.stopWorking(childID)
+	c.cancelTimer(heartbeatKey(childID))
 	c.turnOutcomes.take(childID)
 
 	// Sweep this child's unfinished work to orphaned BEFORE cm.Remove.

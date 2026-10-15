@@ -2173,7 +2173,9 @@ artifacts.
 Default 7 days (`RAFIKI_GRACE_HOURS` overrides). Exited children stay in the
 store with status `exited` so their history stays replayable via
 `StreamEvents`/`GetHistory`, they can be `Resume`d explicitly, and a
-background sweeper removes entries older than the window. `Close` and
+per-child deadline closes an entry once the window expires past its
+`ExitedAt`; the deadline is re-derived at daemon startup from the stored
+`ExitedAt`, so a restart never strands an expired entry. `Close` and
 `CloseAllExited` are the manual cleanup.
 
 ### State records (resume support)

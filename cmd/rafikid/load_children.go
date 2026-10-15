@@ -343,6 +343,16 @@ func (c *Controller) loadChildren(ctx context.Context) {
 		slog.Info("children waiting for their executor to auto-resume",
 			"count", n, "note", "the sweep fires on every executor connection")
 	}
+
+	// Re-derive every recovered exited child's grace deadline from its stored
+	// ExitedAt: the deadline lived in the previous daemon's memory, so a
+	// restart otherwise strands exited rows short of their close forever. The
+	// callback re-reads the child, so a row that resumes later (its status is
+	// no longer exited) is skipped and a row already past its window fires on
+	// the next scheduler wake.
+	for _, s := range c.st.FindByStatus(protocol.StatusExited) {
+		c.armGrace(s.ChildID, s.ExitedAt)
+	}
 }
 
 // recoverOne loads a single record into the store and decides whether to resume.
