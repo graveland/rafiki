@@ -64,6 +64,11 @@ func (f *fakeRunner) scriptErr(argv []string, err error) {
 	f.scripts[runKey(argv)] = fakeScript{err: err}
 }
 
+// scriptFail registers a failing Run response that carries stderr.
+func (f *fakeRunner) scriptFail(argv []string, err error, stderr string) {
+	f.scripts[runKey(argv)] = fakeScript{stderr: []byte(stderr), err: err}
+}
+
 func (f *fakeRunner) LookPath(name string) (string, error) {
 	if p, ok := f.paths[name]; ok && p != "" {
 		return p, nil
@@ -270,6 +275,9 @@ func TestSetupPrereqOptionalChosenInstalled(t *testing.T) {
 
 func TestSetupPrereqDarwinWithoutBrewStops(t *testing.T) {
 	r := newFakeRunner()
+	r.scriptErr([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, errors.New("exit 1"))
+	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
+	r.paths["rg"] = "/usr/local/bin/rg"
 	w := newSetupWizard(t)
 
 	_, err := checkPrereqs(context.Background(), r, w, "darwin", nil)
@@ -278,6 +286,61 @@ func TestSetupPrereqDarwinWithoutBrewStops(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "homebrew is required") {
 		t.Errorf("error %q must explain Homebrew is required", err.Error())
+	}
+}
+
+func TestSetupPrereqDarwinWithoutBrewNoInstallNeeded(t *testing.T) {
+	r := newFakeRunner()
+	r.script([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, "26.0")
+	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
+	r.paths["rg"] = "/usr/local/bin/rg"
+	w := newSetupWizard(t)
+
+	chosen, err := checkPrereqs(context.Background(), r, w, "darwin", nil)
+	if err != nil {
+		t.Fatalf("a fully-provisioned Mac with no brew must not be blocked: %v", err)
+	}
+	if len(chosen) != 0 {
+		t.Errorf("chosen = %v, want none", chosen)
+	}
+}
+
+func TestWizardSecretPrecedence(t *testing.T) {
+	w := newTestWizard(t, func(cmd *cobra.Command) {
+		cmd.Flags().String("api-key", "", "")
+	})
+	if err := w.cmd.Flags().Set("api-key", "from-flag"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := w.askSecret("API key", "api-key", "saved", "detected", true)
+	if err != nil {
+		t.Fatalf("askSecret: %v", err)
+	}
+	if got != "from-flag" {
+		t.Errorf("askSecret = %q, want the flag value", got)
+	}
+
+	w2 := newTestWizard(t, func(cmd *cobra.Command) {
+		cmd.Flags().String("api-key", "", "")
+	})
+	got2, err := w2.askSecret("API key", "api-key", "saved", "detected", true)
+	if err != nil {
+		t.Fatalf("askSecret: %v", err)
+	}
+	if got2 != "saved" {
+		t.Errorf("askSecret = %q, want the saved value", got2)
+	}
+}
+
+func TestWizardSecretRequiredMissingUnderYes(t *testing.T) {
+	w := newTestWizard(t, func(cmd *cobra.Command) {
+		cmd.Flags().String("api-key", "", "")
+	})
+	w.yes = true
+
+	_, err := w.askSecret("API key", "api-key", "", "", true)
+	if err == nil || !strings.Contains(err.Error(), "--api-key") {
+		t.Errorf("askSecret required-empty: err = %v, want it to name --api-key", err)
 	}
 }
 

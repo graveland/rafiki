@@ -86,6 +86,31 @@ func (w *wizard) askString(title, flag, saved, detected string, required bool) (
 	return v, nil
 }
 
+// askSecret is askString with the value masked (password echo mode), for
+// prompts whose value is a secret: a DSN or an API key. Precedence is
+// identical to askString: flag Changed > saved > detected, and a required
+// empty value under non-interactive mode is an error naming the flag.
+func (w *wizard) askSecret(title, flag, saved, detected string, required bool) (string, error) {
+	v := w.resolveString(flag, saved, detected)
+	if !w.interactive {
+		if required && v == "" {
+			return "", missingFlagError(flag)
+		}
+		return v, nil
+	}
+
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewInput().Title(title).Value(&v).EchoMode(huh.EchoModePassword),
+	)).WithInput(w.in).WithOutput(w.out)
+	if err := form.Run(); err != nil {
+		return "", err
+	}
+	if required && v == "" {
+		return "", missingFlagError(flag)
+	}
+	return v, nil
+}
+
 // askConfirm resolves a bool with the same precedence; saved is nil when the
 // answer has never been asked for.
 func (w *wizard) askConfirm(title, flag string, saved *bool, detected bool) (bool, error) {

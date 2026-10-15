@@ -141,11 +141,56 @@ func TestSetupDBVolumeWithoutPasswordRefuses(t *testing.T) {
 	}
 }
 
+func TestSetupDBVolumeInspectErrorRefuses(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	r.scriptErr(stateInspectKey(), errExit())
+	r.scriptFail([]string{"docker", "volume", "inspect", managedPGVolume}, errExit(), "Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, "")
+	if err == nil {
+		t.Fatal("a transient volume inspect error must not be read as volume-absent")
+	}
+	if !strings.Contains(err.Error(), "volume inspect") {
+		t.Errorf("error %q must be the wrapped inspect failure", err.Error())
+	}
+	if findCall(r.runCalls, "docker", "run") != nil {
+		t.Error("a transient inspect error must not lead to docker run")
+	}
+}
+
+func TestSetupDBVolumeWithUnusablePasswordRefuses(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	r.scriptErr(stateInspectKey(), errExit())
+	r.script([]string{"docker", "volume", "inspect", managedPGVolume}, "[]")
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	saved := "postgres://rafiki@127.0.0.1:5432/rafiki" // userinfo without a password
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	if err == nil {
+		t.Fatal("want a refusal when the saved DSN has no usable password")
+	}
+	if !strings.Contains(err.Error(), "no usable password") {
+		t.Errorf("error %q must explain the missing password", err.Error())
+	}
+	if findCall(r.runCalls, "docker", "run") != nil {
+		t.Error("must not run docker with an empty password")
+	}
+}
+
 func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 	isolatedDBTest(t)
 	r := newFakeRunner()
 	r.scriptErr(stateInspectKey(), errExit())
-	r.scriptErr([]string{"docker", "volume", "inspect", managedPGVolume}, errExit())
+	r.scriptFail([]string{"docker", "volume", "inspect", managedPGVolume}, errExit(), "Error: No such volume: rafiki-pgdata")
 	r.script(healthInspectKey(), "starting\n")
 	r.streams[runKey(eventsKey())] = fakeStreamScript{lines: []string{"health_status: healthy"}}
 	w := newSetupWizard(t)

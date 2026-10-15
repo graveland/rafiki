@@ -181,10 +181,6 @@ func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optiona
 	if _, err := r.LookPath("brew"); err == nil {
 		hasBrew = true
 	}
-	if goos == "darwin" && !hasBrew {
-		return nil, fmt.Errorf("homebrew is required to install missing tools on macOS; install it with:\n  %s", homebrewInstallOneLiner)
-	}
-
 	chosen, err := w.askMulti("Optional tools", "with", optionalPrereqNames(), optional, nil)
 	if err != nil {
 		return nil, err
@@ -204,11 +200,11 @@ func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optiona
 
 		switch {
 		case p.Name == "docker":
-			if err := installDocker(ctx, r, w, goos, detail); err != nil {
+			if err := installDocker(ctx, r, w, goos, hasBrew, detail); err != nil {
 				return nil, err
 			}
 		case p.Name == "claude" && detail == detailLoggedOut:
-			if err := runInstallCommand(ctx, r, w, p.Name, []string{"claude", "auth", "login"}); err != nil {
+			if err := runInstallCommand(ctx, r, w, p.Name, []string{"claude", "auth", "login"}, goos, hasBrew); err != nil {
 				return nil, err
 			}
 		default:
@@ -221,7 +217,7 @@ func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optiona
 				continue
 			}
 			for _, argv := range cmds {
-				if err := runInstallCommand(ctx, r, w, p.Name, argv); err != nil {
+				if err := runInstallCommand(ctx, r, w, p.Name, argv, goos, hasBrew); err != nil {
 					return nil, err
 				}
 			}
@@ -232,7 +228,7 @@ func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optiona
 
 // installDocker offers the platform's docker install. On linux the daemon and
 // group are set up but the user must re-login, so it stops with a message.
-func installDocker(ctx context.Context, r runner, w *wizard, goos, detail string) error {
+func installDocker(ctx context.Context, r runner, w *wizard, goos string, hasBrew bool, detail string) error {
 	if detail == detailDaemonDown {
 		if goos == "darwin" {
 			return errors.New("docker is installed but the daemon is not running; start it with: open -a OrbStack")
@@ -249,13 +245,13 @@ func installDocker(ctx context.Context, r runner, w *wizard, goos, detail string
 		if runtime == "docker-desktop" {
 			cask = "docker-desktop"
 		}
-		return runInstallCommand(ctx, r, w, "docker", []string{"brew", "install", "--cask", cask})
+		return runInstallCommand(ctx, r, w, "docker", []string{"brew", "install", "--cask", cask}, goos, hasBrew)
 	case "linux":
 		for _, argv := range [][]string{
 			{"sudo", "apt-get", "install", "-y", "docker.io"},
 			{"sudo", "usermod", "-aG", "docker", os.Getenv("USER")},
 		} {
-			if err := runInstallCommand(ctx, r, w, "docker", argv); err != nil {
+			if err := runInstallCommand(ctx, r, w, "docker", argv, goos, hasBrew); err != nil {
 				return err
 			}
 		}
@@ -267,7 +263,13 @@ func installDocker(ctx context.Context, r runner, w *wizard, goos, detail string
 // runInstallCommand offers one install command through confirmRun and then runs
 // it attached to the terminal (installers prompt for sudo/brew). A decline or a
 // failed command stops with a message naming the exact command.
-func runInstallCommand(ctx context.Context, r runner, w *wizard, name string, argv []string) error {
+func runInstallCommand(ctx context.Context, r runner, w *wizard, name string, argv []string, goos string, hasBrew bool) error {
+	// A brew-gated install on a Mac without Homebrew cannot proceed; stop with
+	// the one-liner rather than offer a command that will fail. Non-brew
+	// installers (e.g. the claude curl script) still work.
+	if goos == "darwin" && !hasBrew && len(argv) > 0 && argv[0] == "brew" {
+		return fmt.Errorf("homebrew is required to install missing tools on macOS; install it with:\n  %s", homebrewInstallOneLiner)
+	}
 	ok, err := w.confirmRun(argv)
 	if err != nil {
 		return err

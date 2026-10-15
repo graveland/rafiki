@@ -46,7 +46,7 @@ func setupDatabase(ctx context.Context, r runner, w *wizard, st installstate.DB,
 	}
 
 	if mode == installstate.DBModeDSN {
-		dsn, err := w.askString("Database DSN", "dsn", savedDSN, "", true)
+		dsn, err := w.askSecret("Database DSN", "dsn", savedDSN, "", true)
 		if err != nil {
 			return st, dbResult{}, err
 		}
@@ -70,9 +70,13 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 
 	if inspectErr != nil {
 		// No such container. An existing volume means a prior install's data.
-		volumeExists := false
-		if _, _, verr := r.Run(ctx, nil, "docker", "volume", "inspect", managedPGVolume); verr == nil {
-			volumeExists = true
+		// A volume inspect error is only "absent" when docker says so; any
+		// other error must not be read as absence, or setup would run a fresh
+		// container against existing data with a wrong password.
+		_, vstderr, verr := r.Run(ctx, nil, "docker", "volume", "inspect", managedPGVolume)
+		volumeExists := verr == nil
+		if verr != nil && !isNoSuchVolume(string(vstderr)) {
+			return st, dbResult{}, fmt.Errorf("docker volume inspect %s: %w: %s", managedPGVolume, verr, strings.TrimSpace(string(vstderr)))
 		}
 		if volumeExists && savedDSN == "" {
 			return st, dbResult{}, fmt.Errorf("volume %s exists but its password is not in service.env; restore RAFIKI_DB there or pass --dsn", managedPGVolume)
@@ -90,6 +94,9 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 		var pw string
 		if volumeExists {
 			pw = passwordFromDSN(savedDSN)
+			if pw == "" {
+				return st, dbResult{}, fmt.Errorf("volume %s exists but the saved RAFIKI_DB has no usable password; restore a valid RAFIKI_DB in service.env or pass --dsn", managedPGVolume)
+			}
 		} else {
 			p, err := randomPassword()
 			if err != nil {
@@ -228,6 +235,14 @@ func passwordFromDSN(dsn string) string {
 	}
 	pw, _ := u.User.Password()
 	return pw
+}
+
+// isNoSuchVolume reports whether a docker volume inspect stderr means the
+// volume does not exist. Any other failure (e.g. the daemon is unreachable)
+// must not be treated as absence.
+func isNoSuchVolume(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	return strings.Contains(lower, "no such volume")
 }
 
 // randomPassword returns 24 random bytes hex-encoded.
