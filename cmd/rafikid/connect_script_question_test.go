@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -154,4 +155,60 @@ func TestAgentReportDescriptionMentionsOperatorOnMCPSurface(t *testing.T) {
 	ck.True(desc != "", "the MCP surface overrides agent_report")
 	ck.True(strings.Contains(desc, questionSentence),
 		"the MCP agent_report text must carry the operator sentence; got %q", desc)
+}
+
+// TestReportQuestionParentedChildWithoutBufferSetsNothing pins the LOAD-BEARING
+// parent clause of the guard. A PARENTED fundi child whose controller has no
+// event buffer falls through to the script_report publish (the nil-buffer
+// fallback), so `(!hasParent || parent == "")` is the ONLY thing keeping it from
+// setting the field on that path. Assert the field stays empty AND the report
+// still publishes durably.
+func TestReportQuestionParentedChildWithoutBufferSetsNothing(t *testing.T) {
+	ck := assert.NewAborting(t)
+	elog := eventlog.NewMemory()
+	c := &Controller{st: childstore.New(), cm: newChildManager(), evlog: elog}
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_coord", Name: "coord", Status: protocol.StatusIdle,
+		Kind: protocol.KindFundi, StartedAt: time.Now(),
+	})
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_kid", Name: "kid", Status: protocol.StatusStreaming,
+		Kind: protocol.KindFundi, StartedAt: time.Now(),
+		Labels: map[string]string{
+			childstore.LabelParent: "c_coord",
+			childstore.LabelRoot:   "c_coord",
+		},
+	})
+
+	hub := c.connectScriptHub()
+	ck.NoError(hub.Report(context.Background(), "c_kid", "question", `"help?"`), "Report")
+
+	snap, _ := c.st.Get("c_kid")
+	ck.Eq("", snap.PendingQuestion, "a parented child with no buffer must not set the field")
+
+	recs, err := elog.Read(context.Background(), "c_kid", -1, 10)
+	ck.NoError(err, "event log read")
+	ck.Len(recs, 1, "the script_report is still published")
+}
+
+// TestReportQuestionEmptyPayloadKeepsStoredQuestion: an empty rendered question
+// is not a question — it must not CLEAR a pending question already on the row.
+// The durable script_report still publishes either way.
+func TestReportQuestionEmptyPayloadKeepsStoredQuestion(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, _, _, _ := scriptHubFixture(t)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_top", Name: "top", Status: protocol.StatusStreaming,
+		Kind: protocol.KindFundi, StartedAt: time.Now(),
+	})
+
+	hub := c.connectScriptHub()
+	ctx := context.Background()
+	ck.NoError(hub.Report(ctx, "c_top", "question", `"are you there?"`), "first question")
+	snap, _ := c.st.Get("c_top")
+	ck.Eq("are you there?", snap.PendingQuestion, "the first question is stored")
+
+	ck.NoError(hub.Report(ctx, "c_top", "question", `""`), "empty question")
+	snap, _ = c.st.Get("c_top")
+	ck.Eq("are you there?", snap.PendingQuestion, "an empty question must not clear the stored one")
 }

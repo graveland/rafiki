@@ -108,22 +108,29 @@ func (h scriptHub) Report(ctx context.Context, callerID, kind, dataJSON string) 
 	// sets it: a parented child's question was pushed to its parent above, and
 	// a script child has no turns to clear the field on.
 	if kind == "question" && snap.Kind != protocol.KindScript && (!hasParent || parent == "") {
-		if err := h.c.st.Update(callerID, func(s *childstore.Session) {
-			s.PendingQuestion = renderJSONPayload(dataJSON)
-		}); err != nil {
-			if errors.Is(err, childstore.ErrNotFound) {
-				return connect.NewError(connect.CodeNotFound,
-					fmt.Errorf("unknown child %q", callerID))
+		// An empty rendered question is not a question: a degenerate `""` (or a
+		// payload renderJSONPayload cannot decode) must not CLEAR a question
+		// already stored on the row, so the write is skipped entirely and the
+		// stored value survives. The durable script_report above published
+		// either way.
+		if q := renderJSONPayload(dataJSON); q != "" {
+			if err := h.c.st.Update(callerID, func(s *childstore.Session) {
+				s.PendingQuestion = q
+			}); err != nil {
+				if errors.Is(err, childstore.ErrNotFound) {
+					return connect.NewError(connect.CodeNotFound,
+						fmt.Errorf("unknown child %q", callerID))
+				}
+				return connect.NewError(connect.CodeInternal,
+					fmt.Errorf("store question: %w", err))
 			}
-			return connect.NewError(connect.CodeInternal,
-				fmt.Errorf("store question: %w", err))
+			if err := h.c.writeRecord(callerID); err != nil {
+				// The session holds the question; the row write is the durability
+				// half. Warn, don't fail: the next ordinary writeRecord carries it.
+				slog.Warn("persist pending question", "childId", callerID, "error", err)
+			}
+			h.c.refreshDisplayState(callerID)
 		}
-		if err := h.c.writeRecord(callerID); err != nil {
-			// The session holds the question; the row write is the durability
-			// half. Warn, don't fail: the next ordinary writeRecord carries it.
-			slog.Warn("persist pending question", "childId", callerID, "error", err)
-		}
-		h.c.refreshDisplayState(callerID)
 	}
 	return nil
 }
