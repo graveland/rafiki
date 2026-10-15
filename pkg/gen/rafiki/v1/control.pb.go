@@ -2413,7 +2413,7 @@ type KillRequest struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
 	// shutdown_timeout bounds the graceful window before escalation to SIGTERM.
-	// Unset or zero selects the daemon default (180s), exactly as the old
+	// Unset or zero selects the daemon default (2s), exactly as the old
 	// shutdown_timeout_ms = 0 did.
 	ShutdownTimeout *durationpb.Duration `protobuf:"bytes,5,opt,name=shutdown_timeout,json=shutdownTimeout,proto3" json:"shutdown_timeout,omitempty"`
 	// kill_timeout bounds the window between SIGTERM and SIGKILL. Unset or zero

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -37,16 +38,40 @@ func descendantsOf(lc ChildLifecycle, childID string) ([]string, error) {
 	return dl.DescendantIDs(childID), nil
 }
 
-// cascade runs op over ids in order and returns the ids it ended. An id op
-// says is already gone (already exited, or no longer present) counts as done
-// but is not reported: nothing was ended by this call. Every other failure is
-// collected and the sweep carries on, so one stuck descendant does not strand
-// the rest of the subtree; the caller must not end the parent when the
-// returned error is non-nil.
-func cascade(ids []string, op func(id string) error) (ended []string, _ error) {
+// cascade runs op over ids in order and returns the ids it ended. See
+// cascadeAll for the accounting.
+func cascade(ids []string, op func(id string) error) ([]string, error) {
+	errs := make([]error, len(ids))
+	for i, id := range ids {
+		errs[i] = op(id)
+	}
+	return cascadeAll(ids, errs)
+}
+
+// cascadeParallel is cascade with every op running at once. Used where an op
+// WAITS (a kill rides out the kill ladder), so a subtree of n children costs
+// the slowest one rather than the sum. Ordering between ids is lost, which is
+// only acceptable because no id's op depends on another's: the parent is still
+// ended after the whole sweep returns.
+func cascadeParallel(ids []string, op func(id string) error) ([]string, error) {
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Go(func() { errs[i] = op(id) })
+	}
+	wg.Wait()
+	return cascadeAll(ids, errs)
+}
+
+// cascadeAll turns per-id results into the sweep's outcome. An id op says is
+// already gone (already exited, or no longer present) counts as done but is not
+// reported: nothing was ended by this call. Every other failure is collected,
+// so one stuck descendant does not strand the rest of the subtree; the caller
+// must not end the parent when the returned error is non-nil.
+func cascadeAll(ids []string, errs []error) (ended []string, _ error) {
 	var failed []string
-	for _, id := range ids {
-		err := op(id)
+	for i, id := range ids {
+		err := errs[i]
 		if err == nil {
 			ended = append(ended, id)
 			continue
@@ -79,13 +104,14 @@ func cascadeErr(err error) error {
 	return ConnectErr(err)
 }
 
-// cascadeKill ends childID's live descendants and returns the ids it ended.
+// cascadeKill ends childID's live descendants concurrently and returns the ids
+// it ended.
 func cascadeKill(ctx context.Context, lc ChildLifecycle, childID string, shutdownTimeout, killTimeout time.Duration) ([]string, error) {
 	ids, err := descendantsOf(lc, childID)
 	if err != nil {
 		return nil, err
 	}
-	return cascade(ids, func(id string) error {
+	return cascadeParallel(ids, func(id string) error {
 		_, err := lc.Kill(ctx, id, shutdownTimeout, killTimeout)
 		return err
 	})

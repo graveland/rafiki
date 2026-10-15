@@ -46,7 +46,7 @@ func TestKillTimeoutsRoundTrip(t *testing.T) {
 }
 
 // Unset OR an explicit zero Duration reaches the seam as 0, which the daemon
-// reads as its 180s/30s defaults (TestKillTimeoutDefaults) -- exactly the old
+// reads as its 2s/30s defaults (TestKillTimeoutDefaults) -- exactly the old
 // shutdown_timeout_ms = 0.
 func TestKillUnsetOrZeroTimeoutsAreZero(t *testing.T) {
 	c := assert.NewCollecting(t)

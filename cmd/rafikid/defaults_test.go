@@ -11,11 +11,8 @@ import (
 // values when the caller passes 0 for both timeout arguments.
 func TestKillTimeoutDefaults(t *testing.T) {
 	c := assert.NewAborting(t)
-	const wantShutdown = 180 * time.Second
-	const wantKill = 30 * time.Second
-
-	c.Eq(wantShutdown, durOrDefault(0, wantShutdown), "shutdownTimeout default: got")
-	c.Eq(wantKill, durOrDefault(0, wantKill), "killTimeout default: got")
+	c.Eq(2*time.Second, durOrDefault(0, defaultKillShutdown), "shutdownTimeout default: got")
+	c.Eq(30*time.Second, durOrDefault(0, defaultKillTimeout), "killTimeout default: got")
 }
 
 // TestDurOrDefault verifies that explicit non-zero values are honoured.

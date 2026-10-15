@@ -3069,6 +3069,15 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 	return false
 }
 
+// Kill's defaults when the caller names no timeout. A kill is an interrupt: it
+// does not wait out a turn in flight, so the graceful window is seconds, not
+// the minutes a polite shutdown might want. A caller that does want to wait
+// passes shutdown_timeout.
+const (
+	defaultKillShutdown = 2 * time.Second
+	defaultKillTimeout  = 30 * time.Second
+)
+
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (protocol.KillResponseData, error) {
 	// Revoke the daraja's reconnect credential so a dead child cannot
 	// re-authenticate on a later port scan or stale-connection replay. The
@@ -3129,8 +3138,8 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, 
 		c.handleStatusChange(childID, protocol.StatusShuttingDown, prev)
 	}
 
-	shutdown := durOrDefault(shutdownTimeout, 180*time.Second)
-	kill := durOrDefault(killTimeout, 30*time.Second)
+	shutdown := durOrDefault(shutdownTimeout, defaultKillShutdown)
+	kill := durOrDefault(killTimeout, defaultKillTimeout)
 
 	res, err := ch.Shutdown(shutdown, kill)
 	if err != nil {

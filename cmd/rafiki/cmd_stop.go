@@ -40,7 +40,7 @@ A target with running subagents is refused until you say what to do with them:
 		RunE: runStop,
 	}
 	addIncludeSubagentsFlag(cmd, "stop")
-	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
+	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (default 2s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return completeChildrenByState(cmd, toComplete, func(ch completionChild) bool {

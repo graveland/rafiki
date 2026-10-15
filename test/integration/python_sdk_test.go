@@ -444,7 +444,7 @@ def run():
         note("8 routes OK")
 
         # 9. stop(): the per-call read timeout covers the daemon's two kill
-        # windows plus slack — defaults included (180 s + 30 s + 30 s, the
+        # windows plus slack — defaults included (2 s + 30 s + 30 s, the
         # cmd/rafikid Kill-handler defaults) — and explicit budgets shrink it.
         # The timeout is not on the wire, so it is spied on the transport.
         captured_kill = {}
@@ -455,7 +455,7 @@ def run():
         c._conn._unary_once = spy_unary
         kid = c.stop("c_stop")
         assert kid.child_id == "c_stop" and kid.exit_code == 0 and kid.duration == datetime.timedelta(milliseconds=12), kid
-        assert captured_kill["Kill"] == 240.0, captured_kill
+        assert captured_kill["Kill"] == 62.0, captured_kill
         kid = c.stop("c_stop", shutdown_timeout=datetime.timedelta(seconds=5), kill_timeout=3)
         assert captured_kill["Kill"] == 38.0, captured_kill
         note("9 stop-timeout OK")
@@ -481,7 +481,7 @@ def run():
         t = captured_to["timeout"]
         assert isinstance(t, httpx.Timeout), t
         assert t.connect == c._conn._timeout == 30.0, (t.connect, c._conn._timeout)
-        assert t.read == 240.0, t.read
+        assert t.read == 62.0, t.read
         note("10 connect-timeout-unchanged OK")
         srv.shutdown()
         note("TRANSPORT PASS")

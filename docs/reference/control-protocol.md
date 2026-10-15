@@ -369,7 +369,7 @@ defined under "Who may call what" below; each row names its own.
 | `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child); answers only the caller's own subtree |
 | `GetChild` | unary · childScoped | Get one child's summary by id (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost`). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
 | `Spawn` | unary · childScoped | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. Fields 15–29 are operator-only (§"Spawn's operator-only fields" below) |
-| `Kill` | unary · childScoped | Stop a child gracefully, escalating to SIGKILL if necessary. `shutdown_timeout`/`kill_timeout` (Durations) bound the graceful window and the SIGTERM→SIGKILL escalation; each unset or zero selects the daemon default (180 s / 30 s). `include_descendants` first stops every live descendant, deepest first (reported in `descendant_ids`); off, the subtree is left running |
+| `Kill` | unary · childScoped | Stop a child gracefully, escalating to SIGKILL if necessary. `shutdown_timeout`/`kill_timeout` (Durations) bound the graceful window and the SIGTERM→SIGKILL escalation; each unset or zero selects the daemon default (2 s / 30 s — a kill interrupts, it does not wait out a turn). `include_descendants` first stops every live descendant, all at once (the sweep costs the slowest child, not the sum; reported in `descendant_ids`), then the target; a descendant that cannot be stopped leaves the target alone. Off, the subtree is left running |
 | `Close` | unary · childScoped | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped. An error for a live child — closing is never an implicit kill. `include_descendants` closes every descendant first, deepest first, each of which must already be exited (reported in `descendant_ids`). A descendant that cannot be ended aborts before the parent is touched, so no child is orphaned; one already exited or gone is skipped. Native Task subagents are never listed: they end and close with their parent. The daemon never refuses a parent for having descendants; the CLI and cockpit ask first |
 | `SetBudget` | unary · childScoped | Change one child's `max_cost` (0 = unlimited). A user credential acts with operator authority — any child, no lineage or remaining-grant check; a per-child credential gets `agent_set_budget`'s rule — a direct child only, bounded by the caller's own remaining grant |
 | `SetRouting` | unary · childScoped | Merge a routing-spec delta over one child's stored spec, effective on its next OpenRouter request (§"Route policy"). `delta` is the bracket-free spec string (`prefer=fireworks`, `sort=throughput,quant=fp8+`); the merge is delta-over-stored per key (`routing.Spec.Merge`), so a key the delta names wins and every other stored key stays. An empty `child_id` or `delta` is `CodeInvalidArgument`, as is a parse failure or a provider slug the directory does not know. Authority: a user credential may set any key and target any child; a per-child credential is bounded to its own subtree and may set only `prefer`, `sort` and `quant` — it may not set or change `only=`, and may not clear an operator's `only`/`nodata`/`zdr` (`CodePermissionDenied`). Returns the stored canonical spec after the merge |
@@ -932,8 +932,7 @@ anything else `failed`, and the parent's settle fragment carries the stored
 SIGTERM/SIGKILL rungs after the caller's timeouts); a script holding an open
 `Receive` stream sees the `shutting_down` stop within one poll interval and
 can exit before the signal rungs. A script that holds NO stream is told
-nothing before the signals — the default 180 s graceful window applies, so
-callers that want a prompt death pass explicit timeouts.
+nothing before the signals — the default 2 s graceful window applies.
 
 **Cost.** On `ListChildren`/`GetChild`, a script child's `cost_usd` is its
 SUBTREE's spend — the script drives no LLM turns of its own, but the fundi
@@ -953,17 +952,12 @@ partial sum of the priced children beneath it.
 
 **What a kill contains, and what it does not.** Killing a script child
 signals its process group: the script's own subprocesses die with it. Its
-DAEMON-MANAGED descendants — the fundi children it spawned through its
-per-child socket — are NOT swept, and this is deliberate, the same boundary
-every kind has: there is no daemon-level descendant sweep for any kind, so
-adding one only for scripts would make kill semantics kind-dependent without
-a design that answers recursion, ordering and the budget accounting of the
-sweep itself. A surviving worker keeps its budget fence, stays visible in
-`rafiki list`, and can be killed by name; its settle fragment becomes a
-pending row in the dead parent's inbox (the inbox is dropped when the parent
-is forgotten, and the retention sweep reaches terminal rows only). If
-subtree teardown ever lands, it is a decision about ALL kinds at once, not a
-script-only patch.
+DAEMON-MANAGED descendants — the children it spawned through its per-child
+socket — are swept only when the kill carries `include_descendants`, the same
+rule every kind follows. Without it a surviving worker keeps its budget fence,
+stays visible in `rafiki list`, and can be killed by name; its settle fragment
+becomes a pending row in the dead parent's inbox (the inbox is dropped when the
+parent is forgotten, and the retention sweep reaches terminal rows only).
 
 **Restart.** A LOCALLY hosted script dies with its daemon. Recovery loads
 its still-live row as exited and settles it `failed` with the reason

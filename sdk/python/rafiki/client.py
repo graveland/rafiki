@@ -48,11 +48,11 @@ from .errors import (
 REMOTE_IDLE_CEILING = 60.0
 
 # The daemon's Kill-handler defaults (cmd/rafikid/controller.go: Kill passes
-# durOrDefault(shutdownTimeout, 180*time.Second) and
-# durOrDefault(killTimeout, 30*time.Second); pinned by
+# durOrDefault(shutdownTimeout, defaultKillShutdown) and
+# durOrDefault(killTimeout, defaultKillTimeout); pinned by
 # TestKillTimeoutDefaults in cmd/rafikid). stop() mirrors them so its per-call
 # read timeout covers exactly the work the daemon may do before answering.
-DEFAULT_SHUTDOWN = datetime.timedelta(seconds=180)
+DEFAULT_SHUTDOWN = datetime.timedelta(seconds=2)
 DEFAULT_KILL = datetime.timedelta(seconds=30)
 
 # Slack on top of the two windows above: the daemon answers only after the
@@ -326,7 +326,7 @@ class Client:
 
         ``shutdown_timeout`` and ``kill_timeout`` are each a ``timedelta`` or a
         number of seconds; None (or zero) leaves the daemon's own default —
-        180 s graceful, then 30 s to kill. The call carries a per-call read
+        2 s graceful, then 30 s to kill. The call carries a per-call read
         timeout of ``(shutdown_timeout or DEFAULT_SHUTDOWN) +
         (kill_timeout or DEFAULT_KILL) + STOP_TIMEOUT_SLACK`` — the daemon may
         legitimately spend the whole graceful window on a child that cannot

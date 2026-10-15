@@ -453,7 +453,7 @@ message SpawnResponse {
 message KillRequest {
   string child_id = 1;
   // shutdown_timeout bounds the graceful window before escalation to SIGTERM.
-  // Unset or zero selects the daemon default (180s), exactly as the old
+  // Unset or zero selects the daemon default (2s), exactly as the old
   // shutdown_timeout_ms = 0 did.
   google.protobuf.Duration shutdown_timeout = 5;
   // kill_timeout bounds the window between SIGTERM and SIGKILL. Unset or zero
