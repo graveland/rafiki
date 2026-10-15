@@ -228,6 +228,7 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 		RTK:            st.Executor.RTK,
 		Launch:         launch,
 		EnvNames:       chosen,
+		Context:        ctx,
 	}, out); err != nil {
 		return err
 	}

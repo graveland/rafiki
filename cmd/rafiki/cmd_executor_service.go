@@ -115,6 +115,12 @@ type executorInstallOptions struct {
 	Concurrency                                                            int
 	JobOutputBudgetMB                                                      int64
 	Proxy, Launch, SandboxMountRoots                                       []string
+	// Context carries the command's (or wizard's) cancellable context so the
+	// one-time enrollment exchange is interrupted by SIGINT exactly as it was
+	// before the refactor. A nil Context falls back to context.Background()
+	// inside installExecutorService, so a struct built directly by a test does
+	// not panic.
+	Context context.Context
 	// EnvNames nil = today's behaviour (capture the whole shell, append-only
 	// MergeEnvFile). Non-nil = carry exactly these names, values read from the
 	// current environment, written with paths.SetEnvFile so a replay updates
@@ -163,6 +169,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 		Proxy:              proxy,
 		Launch:             launch,
 		SandboxMountRoots:  sandboxMountRoots,
+		Context:            cmd.Context(),
 		// EnvNames nil: `service install` keeps capturing the whole shell.
 	}, os.Stdout)
 }
@@ -324,7 +331,11 @@ func installExecutorService(opts executorInstallOptions, out io.Writer) error {
 	// a consumed token and no credential — recoverable only by minting another.
 	if opts.EnrollToken != "" && !credFileExists(credentialFile) {
 		fmt.Fprintln(out, "Enrolling once before installing the service…")
-		if err := enrollOnce(connect, connectSocket, opts.PinCert, opts.ServerName, opts.EnrollToken, credentialFile, resolvedRoot); err != nil {
+		ctx := opts.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := enrollOnce(ctx, connect, connectSocket, opts.PinCert, opts.ServerName, opts.EnrollToken, credentialFile, resolvedRoot); err != nil {
 			return fmt.Errorf("enroll: %w", err)
 		}
 		fmt.Fprintf(out, "Enrolled. Credential: %s\n", credentialFile)
@@ -447,7 +458,7 @@ func executorEnvReport(envFile string, captured map[string]string, res paths.Mer
 // the token is one-time, so if the service manager restarts the unit before
 // that run has written the credential file, the machine is left holding a
 // consumed token and no credential — recoverable only by minting another.
-func enrollOnce(connect, connectSocket, pinCert, serverName, token, credentialFile, root string) error {
+func enrollOnce(ctx context.Context, connect, connectSocket, pinCert, serverName, token, credentialFile, root string) error {
 	srv := executor.NewServer(executor.Options{
 		Root:        root,
 		Concurrency: 1,
@@ -455,7 +466,7 @@ func enrollOnce(connect, connectSocket, pinCert, serverName, token, credentialFi
 	})
 	defer func() { _ = srv.Close() }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	connErr := make(chan error, 1)
