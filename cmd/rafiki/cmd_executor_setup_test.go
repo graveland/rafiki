@@ -17,10 +17,13 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// isolateSetup points every XDG directory at a fresh temp dir (so an executor
+// isolateSetup points every XDG directory at a fresh temp dir so an executor
 // setup test never reads or writes the developer's real profiles, install.toml
-// or executor.env) and clears the profile selector so resolveProfile bootstraps
-// into that temp dir rather than inheriting a real one.
+// or executor.env, and redirects every executor-related environment variable
+// the setup flow consults into that same temp dir, so an operator's exported
+// RAFIKI_EXECUTOR_ENV_FILE / RAFIKI_EXECUTOR_NAME cannot leak in and steer a
+// test's writes at their real files. It also clears the profile selector so
+// resolveProfile bootstraps into the temp dir rather than inheriting a real one.
 func isolateSetup(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -29,6 +32,12 @@ func isolateSetup(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("RAFIKI_PROFILE", "")
+	// The executor commands resolve these outside the XDG dirs; an ambient value
+	// would point a test at the developer's own files.
+	t.Setenv(paths.ExecutorEnvFileEnv, filepath.Join(t.TempDir(), "executor.env"))
+	t.Setenv(paths.ExecutorOverridesFileEnv, filepath.Join(t.TempDir(), "executor-overrides.env"))
+	t.Setenv(paths.ExecutorName, "rafiki-setup-test-host")
+	t.Setenv("RAFIKI_EXECUTOR_CREDENTIAL", "")
 }
 
 // seedExecutorCredential writes a non-empty credential file, so the setup flow
@@ -245,6 +254,40 @@ func TestExecutorSetupSavesAnswers(t *testing.T) {
 	c.True(containsString(st.Executor.Launch, "claude"), "launch must contain claude, got %v", st.Executor.Launch)
 	c.True(containsString(st.Executor.Env, "LANG"), "env must contain LANG, got %v", st.Executor.Env)
 	c.True(containsString(st.Executor.Env, "EDITOR"), "env must contain EDITOR, got %v", st.Executor.Env)
+}
+
+// TestExecutorSetupIgnoresAmbientExecutorEnvFile pins the isolation guard: even
+// when the developer's shell points RAFIKI_EXECUTOR_ENV_FILE at a real file,
+// isolateSetup must redirect the write into a temp dir, so a test never modifies
+// the developer's executor.env. Against an un-isolated setup the run would write
+// to the sentinel and the equality check would fail.
+func TestExecutorSetupIgnoresAmbientExecutorEnvFile(t *testing.T) {
+	// Simulate a developer whose shell names their real executor environment
+	// file — the exact leak isolateSetup exists to defeat.
+	sentinel := filepath.Join(t.TempDir(), "real-executor.env")
+	const knownLine = "KNOWN_OPERATOR_SETTING=line\n"
+	if err := os.WriteFile(sentinel, []byte(knownLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(paths.ExecutorEnvFileEnv, sentinel)
+
+	isolateSetup(t) // must override the ambient value with a temp path
+	seedExecutorCredential(t)
+	seedMachineName(t, "test-box")
+	stubExecutorSetup(t)
+
+	if _, err := runExecutorSetupForTest(t, "--yes"); err != nil {
+		t.Fatalf("runExecutorSetup: %v", err)
+	}
+
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	c := assert.NewCollecting(t)
+	c.Eq(knownLine, string(got), "the ambient executor.env must be left untouched")
+	c.NotStrContains(readExecutorEnvFile(t), "KNOWN_OPERATOR_SETTING",
+		"the run must write to the isolated file, not the ambient one")
 }
 
 // TestInstallExecutorServiceNilEnvNamesKeepsLegacyCapture pins that EnvNames
