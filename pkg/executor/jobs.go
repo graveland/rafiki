@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
 
 const (
@@ -240,10 +242,22 @@ func (r *jobRegistry) start(command, handle, workspaceID, dir string) (string, e
 	}
 	cmd.Stdout = out
 	cmd.Stderr = out
-	// Own process group, so kill can signal the whole tree: a background
-	// `bash -c "npm run dev"` spawns children that outlive a bare
-	// Process.Kill on the bash itself.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Jobs inherit the executor's environment (a nil env means the process
+	// environment, the registry's existing contract), plus the
+	// non-interactive defaults so a command that would prompt fails instead.
+	// PWD is pinned to the job's directory: a non-nil Env suppresses exec's
+	// automatic PWD=Dir, and the inherited PWD would name the executor's own
+	// directory, changing what `pwd` reports (see runSubprocess in
+	// pkg/fundi/tools/bash.go for the same trap).
+	cmd.Env = tools.MergeEnv(tools.NonInteractiveEnv(nil), []string{"PWD=" + cmd.Dir})
+	// Own session AND process group, so kill can signal the whole tree: a
+	// background `bash -c "npm run dev"` spawns children that outlive a bare
+	// Process.Kill on the bash itself. Setsid rather than Setpgid: a new
+	// session has no controlling terminal, so a program that opens /dev/tty
+	// (sudo, ssh, gpg) gets ENXIO and exits rather than stopping on SIGTTIN;
+	// a session leader still leads its own process group, so the group kill
+	// is unchanged.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.WaitDelay = jobWaitDelay
 
 	if err := cmd.Start(); err != nil {
@@ -394,7 +408,8 @@ func (r *jobRegistry) workspaceBytes(workspaceID string) int64 {
 //
 // It signals the process GROUP, not the process: a background
 // `bash -c "npm run dev"` spawns children that a bare Process.Kill leaves
-// running. start() sets Setpgid so the group id equals the pid.
+// running. start() sets Setsid so the job leads its own session and process
+// group, making the group id equal the pid.
 func (r *jobRegistry) kill(handle string) error {
 	r.mu.Lock()
 	j, ok := r.jobs[handle]

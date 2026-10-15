@@ -60,7 +60,7 @@ func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		p:             opts.OutputPolicy,
 		cwd:           opts.Cwd,
 		rtkMode:       opts.RTK,
-		env:           opts.Env,
+		env:           NonInteractiveEnv(opts.Env),
 	}
 	// Resolve the interpreter NOW, against the environment as it stands when
 	// the registry is built. exec.Command resolves a bare name against the
@@ -207,14 +207,14 @@ func (w *syncWriter) String() string {
 
 // runSubprocess execs name(args...) under ctx with process-group
 // kill-on-cancel and the given WaitDelay, in cwd. Shared between bashTool
-// (which always passes bashWaitDelay and a nil env) and pymodule_run (which
-// does the same, with an env carrying PYTHONPATH for the run -- named
-// modules' code dirs plus the site-packages of any entry with a venv),
-// since both are "run one process to completion and collect its output"
-// with no other difference. A nil env inherits the process environment,
-// the same as exec.Cmd's zero value. Returns merged stdout+stderr and
-// stderr alone -- see syncWriter's doc comment for why this isn't just
-// CombinedOutput plus a tee.
+// (which always passes bashWaitDelay and an env carrying the non-interactive
+// defaults) and pymodule_run (which does the same, with an env carrying
+// PYTHONPATH for the run -- named modules' code dirs plus the site-packages
+// of any entry with a venv), since both are "run one process to completion
+// and collect its output" with no other difference. A nil env inherits the
+// process environment, the same as exec.Cmd's zero value. Returns merged
+// stdout+stderr and stderr alone -- see syncWriter's doc comment for why this
+// isn't just CombinedOutput plus a tee.
 func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, name string, args []string, env []string) (combined, stderrOnly string, err error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = cwd
@@ -227,7 +227,12 @@ func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, nam
 			cmd.Env = MergeEnv(env, []string{"PWD=" + cwd})
 		}
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Setsid rather than Setpgid: a new session has no controlling terminal,
+	// so a program that opens /dev/tty (sudo, ssh, gpg) gets ENXIO and exits
+	// rather than stopping on SIGTTIN. A session leader also leads its own
+	// process group, so the group kill below (syscall.Kill(-pid, ...)) is
+	// unchanged.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
