@@ -126,8 +126,9 @@ at most the grace window, after which the child closes and its jobs go with it.
 A rate-limited child is not killed by the rate-limit path — the daemon
 schedules an auto-resume for the reset instead (`cmd/rafikid/ratelimit_resume.go`),
 so its fires follow the ordinary live-child rules: delivered while it is live,
-and skipped-and-re-registered if its process has exited (the auto-resume
-relaunches it via `Resume`).
+and skipped-and-re-registered if its process has DIED (the auto-resume then
+relaunches it via `Resume`). An operator Kill is different: it drops the pending
+rate-limit watch, so a Killed child is not relaunched this way.
 
 A scheduled fire into a `claude` child's inbox is an ordinary stdin write; a
 fire pushed but not yet written when the daemon dies is lost, the same narrow
