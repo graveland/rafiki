@@ -81,14 +81,20 @@ var mcpToolNames = []string{
 }
 
 // mcpChildToolNames is what a per-child credential's session lists: exactly
-// mcpToolNames PLUS the two child→parent verbs. The child surface equals the
+// mcpToolNames PLUS the child-only verbs. The child surface equals the
 // operator surface — recall and memory included — because a child's recall
 // identity is its OWNER's non-admin identity on every face: the six
 // recall/memory tools bind to the owner's own rows (see newRecallBinding /
-// recallOwner), never to a per-child namespace. The two extra verbs are the
-// child's alone: agent_report and agent_result, a child reporting to its own
-// parent, which an operator session has no parent to do.
-var mcpChildToolNames = append(slices.Clone(mcpToolNames), "agent_report", "agent_result")
+// recallOwner), never to a per-child namespace. The extra verbs are the
+// child's alone: agent_report and agent_result report to the child's own
+// parent, and the four schedule tools (CronCreate/CronDelete/CronList/
+// ScheduleWakeup) are bound to THIS child by mcp_face, which sets
+// ToolOpts.Schedules only when isChild — an operator session has no parent to
+// report to and no position in the tree to schedule from. Listed in
+// mcpBlueprints registration order (after AgentResult, before SandboxCreate).
+var mcpChildToolNames = append(slices.Clone(mcpToolNames),
+	"agent_report", "agent_result",
+	"CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────
 

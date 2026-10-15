@@ -11,8 +11,9 @@ package integration_test
 // subprocess over real HTTP and a REAL child process:
 //   - the token a real spawn actually delivered to a real child authenticates
 //     a real MCP session, and tools/list is exactly the child tool set
-//     mcpChildToolNames pins (the operator set plus agent_report/agent_result,
-//     recall and memory included — bound to the child's owner);
+//     mcpChildToolNames pins (the operator set plus agent_report/agent_result
+//     and the four schedule tools, recall and memory included — bound to the
+//     child's owner);
 //   - that session binds a CONTROLLER spawner scoped to the child's own
 //     subtree, not a user spawner with daemon-wide scope (coordinator
 //     amendment A1) — the regression the unit tests cannot see;
