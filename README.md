@@ -4,6 +4,50 @@ An LLM proxy and conversation-capture store, an agent library built on it, and
 a daemon (`rafikid`) that hosts coding-agent children — driven from a CLI/TUI
 client (`rafiki`).
 
+## Install
+
+**macOS.** `brew install graveland/rafiki/rafiki`, then `rafiki setup`.
+
+**Linux (Debian/Ubuntu).**
+
+```sh
+curl -fsSL https://github.com/graveland/rafiki/releases/latest/download/install.sh | sh
+```
+
+That installs `rafiki` and `rafikid` into `~/.local/bin` and runs `rafiki setup`.
+
+**What setup needs:** Docker (or OrbStack) and a Claude login (plus
+`ripgrep`/`rg`, which the fundi runtime requires on `PATH`). API keys are
+optional.
+
+**What `rafiki setup` does**, in order:
+
+1. Load any saved answers and detect how rafiki was installed.
+2. Prerequisites: Docker (or OrbStack) and a logged-in Claude Code.
+3. Database: a `rafiki-pg` container, or `--dsn` for a bring-your-own postgres.
+4. Migrate the schema.
+5. Optional OpenRouter / Anthropic API keys.
+6. Daemon service, bound to loopback unless you answer yes to network access.
+7. Your admin user and profile.
+8. The local executor.
+9. A smoke-test agent.
+
+**Re-running.** Setup is safe to re-run: answers are saved in
+`~/.config/rafiki/install.toml`, with secrets (the database DSN and your API
+keys) in `service.env`/`executor.env` (0600). `rafiki setup --yes` replays it
+headless.
+
+**The executor alone.** `rafiki executor setup`.
+
+### Other deployments
+
+The [`Dockerfile`](Dockerfile) builds a daemon image for a server, which is
+not what `rafiki setup` targets. A server or Kubernetes install needs
+`RAFIKI_DAEMON_ID` set, a superuser to `CREATE EXTENSION` `vector` and
+`pg_textsearch` (see [Environment](#environment)), and TLS on the control
+listener (`RAFIKI_CONTROL_TLS_CERT`/`RAFIKI_CONTROL_TLS_KEY`) before a remote
+executor can connect. A public Helm chart is planned.
+
 ## Naming
 
 Three Swahili words, three roles:
@@ -1450,6 +1494,8 @@ the run still reports success.
 
 ## Running locally
 
+This section builds rafiki from source; if you installed a release, see [Install](#install) instead.
+
 ```bash
 cp .env.example .env   # fill in ANTHROPIC_API_KEY (+ OPENROUTER_API_KEY), and RAFIKI_DB
 set -a; . ./.env; set +a
@@ -1516,8 +1562,10 @@ API-key auth over OAuth); `off` always bills the daemon's key; `auto` picks
 (rejected outright against a non-Anthropic model, with OpenRouter failover
 disabled for these requests too) and fails closed on every ambiguous case —
 no rafiki token, no forwardable credential, a typoed flag value — never
-silently falling back to the daemon's key. Only `rafiki claude` supports it;
-daemon-spawned `--kind claude` children can't unset the daemon's own key.
+silently falling back to the daemon's key. Daemon-spawned `--kind claude`
+children take the same switch (`passthrough_auth` on Spawn, resolved by
+`proxyenv.PassthroughAuthFor` in `cmd/rafikid/agent_runtime.go`), so on a
+laptop with no API key they run on the operator's own Claude login.
 
 Every passthrough response carries Anthropic's `anthropic-ratelimit-unified-*`
 headers (your subscription's 5h/7d utilization), captured best-effort into a
