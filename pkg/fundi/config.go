@@ -211,6 +211,10 @@ type Config struct {
 	// above is fixed for the engine's lifetime.
 	CurrentMaxCost func() float64
 
+	// Halted is handed straight to EngineConfig.Halted; see its doc comment.
+	// Optional.
+	Halted func() (bool, string)
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -337,6 +341,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		OnTurnEnded:    c.OnTurnEnded,
 		MaxCost:        c.MaxCost,
 		CurrentMaxCost: c.CurrentMaxCost,
+		Halted:         c.Halted,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)

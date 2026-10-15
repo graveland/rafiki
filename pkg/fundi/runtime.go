@@ -234,6 +234,10 @@ type RuntimeOptions struct {
 	// lifetime — the behavior every existing caller keeps.
 	CurrentMaxCost func() float64
 
+	// Halted is handed straight to EngineConfig.Halted; see its doc comment.
+	// Optional.
+	Halted func() (bool, string)
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
@@ -821,6 +825,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		RawTrace:               opts.RawTrace,
 		MaxCost:                opts.MaxCost,
 		CurrentMaxCost:         opts.CurrentMaxCost,
+		Halted:                 opts.Halted,
 	}
 
 	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)

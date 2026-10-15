@@ -343,6 +343,17 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 		return ro.MaxCost
 	}
+	// Halted consults the budget-tree predicate on every ShouldStop check, so
+	// a child breached only through an ANCESTOR's subtree budget — or a claude
+	// child with no own guardrail call at all — stops working too. childID is
+	// closed over here, like CurrentMaxCost above.
+	ro.Halted = func() (bool, string) {
+		root, halted := c.budgetHalted(childID)
+		if !halted {
+			return false, ""
+		}
+		return true, "agent tree budget exhausted on " + root
+	}
 	// liveRoutingSource makes this child's llm.Client read its CURRENT stored
 	// routing spec on every request, so an operator's steering write
 	// (Controller.SetChildRouting) reaches the next request instead of being

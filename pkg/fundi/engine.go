@@ -149,6 +149,13 @@ type EngineConfig struct {
 	// MaxCost above, unchanged for the engine's lifetime" — the behavior
 	// every existing caller keeps with no changes required of it.
 	CurrentMaxCost func() float64
+
+	// Halted, when set, is consulted by ShouldStop BEFORE the cost guardrail:
+	// true ends the turn through the same wrap-up path (tools refused, a
+	// text-only reply forced), with the returned reason. cmd/rafikid wires it
+	// to its budget-tree predicate so a child breached only through an
+	// ancestor's budget stops working too. Nil means never halted.
+	Halted func() (bool, string)
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -193,6 +200,9 @@ type Engine struct {
 	// currentMaxCost, when non-nil, is consulted by effectiveMaxCost INSTEAD
 	// of the fixed maxCost field above. See EngineConfig.CurrentMaxCost.
 	currentMaxCost func() float64
+	// halted, when non-nil, is consulted by stopReason BEFORE the cost
+	// guardrail. See EngineConfig.Halted.
+	halted func() (bool, string)
 
 	mu       sync.Mutex
 	pending  []queued           // FIFO of queued prompts awaiting execution
@@ -305,6 +315,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		onTurnEnded:    cfg.OnTurnEnded,
 		maxCost:        cfg.MaxCost,
 		currentMaxCost: cfg.CurrentMaxCost,
+		halted:         cfg.Halted,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -1205,7 +1216,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 		},
 		PendingUser: e.drainSteers,
 		ShouldStop: func() (bool, string) {
-			return costGuardrail(runningTotal, e.effectiveMaxCost())
+			return stopReason(e.halted, runningTotal, e.effectiveMaxCost())
 		},
 	}
 	// The batch-wait bracket: a :batch FIRST call is handed to the daemon's
@@ -1239,6 +1250,17 @@ func (e *Engine) effectiveMaxCost() float64 {
 		return e.currentMaxCost()
 	}
 	return e.maxCost
+}
+
+// stopReason is ShouldStop's decision: the halt check first, then the cost
+// guardrail.
+func stopReason(halted func() (bool, string), runningTotal, maxCost float64) (bool, string) {
+	if halted != nil {
+		if stop, why := halted(); stop {
+			return true, why
+		}
+	}
+	return costGuardrail(runningTotal, maxCost)
 }
 
 // costGuardrail decides whether a turn's running cost has reached its

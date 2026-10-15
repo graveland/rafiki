@@ -335,8 +335,20 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		}
 	}
 
+	// A per-child caller's tools are budget-gated: budgetHalted walks the
+	// caller's ancestors over c.breaches, so a child breached only through an
+	// ANCESTOR's subtree budget is refused non-reporting tools too, and its
+	// id is closed over here so the halt is evaluated per call, not at server
+	// build time. A user credential is never gated — it has no position in a
+	// budget tree.
+	toolset := mcpToolset(opts, f.logger)
+	if isChild {
+		childID := id.ChildID
+		toolset = gateToolsOnBudget(toolset, func() (string, bool) { return ctrl.budgetHalted(childID) })
+	}
+
 	return mcpserver.New(mcpserver.Options{
-		Tools:        mcpToolset(opts, f.logger),
+		Tools:        toolset,
 		Descriptions: mcpToolDescriptions,
 		ResolveConversationID: func(ctx context.Context) (string, error) {
 			return f.ledger.ConversationID(ctx, owner)

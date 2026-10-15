@@ -253,6 +253,12 @@ func stripStaleWorkspace(labels map[string]string) map[string]string {
 // With no database pool, children live in memory only and do not survive a
 // restart — the store starts empty.
 func (c *Controller) loadChildren(ctx context.Context) {
+	// The seed must run on EVERY exit path below, before anything else may
+	// resume a child: rows land in c.st during the walk, and a tree already
+	// over budget must be marked breached (not re-steered) before its
+	// recovered rows start working again. Deferred, not called inline — see
+	// seedBudgetBreaches.
+	defer c.seedBudgetBreaches(ctx)
 	if c.children == nil {
 		return
 	}
