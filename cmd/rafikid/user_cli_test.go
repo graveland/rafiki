@@ -364,3 +364,102 @@ func TestUserTokenRevokeHelpPinsDaemonScope(t *testing.T) {
 		c.StrContains(cmd.Long, want, "revoke help missing %q:\n%s", want, cmd.Long)
 	}
 }
+
+// fakeTimezoneStore drives runUserSetTimezoneCLI: it records the arguments the
+// core handed SetTimezone, so a test can prove validation refused a zone
+// BEFORE the store was ever called.
+type fakeTimezoneStore struct {
+	setFn func(username string, tz *string) error
+}
+
+func (f fakeTimezoneStore) SetTimezone(_ context.Context, username string, tz *string) error {
+	return f.setFn(username, tz)
+}
+
+// TestUserSetTimezoneValidatesBeforeWriting pins that a bad zone is refused
+// before the store is touched: validation must not depend on a round trip,
+// and a refused input must leave the user's zone alone.
+func TestUserSetTimezoneValidatesBeforeWriting(t *testing.T) {
+	c := assert.NewCollecting(t)
+	called := false
+	store := fakeTimezoneStore{setFn: func(string, *string) error {
+		called = true
+		return nil
+	}}
+
+	var out bytes.Buffer
+	err := runUserSetTimezoneCLI(context.Background(), &out, store, "alice", "Mars/Olympus", false)
+	c.Require().Error(err, "an unknown zone was accepted")
+	c.False(called, "SetTimezone was called for a zone ValidateTimezone rejects")
+	c.Eq(0, out.Len(), "output on refusal = %q, want nothing written", out.String())
+}
+
+// TestUserSetTimezoneRefusesEmpty pins that the empty zone is refused, not
+// stored: an empty zone means "the machine's zone", which is exactly what a
+// schedule must never resolve to.
+func TestUserSetTimezoneRefusesEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
+	called := false
+	store := fakeTimezoneStore{setFn: func(string, *string) error {
+		called = true
+		return nil
+	}}
+
+	var out bytes.Buffer
+	err := runUserSetTimezoneCLI(context.Background(), &out, store, "alice", "", false)
+	c.Require().Error(err, "an empty zone was accepted")
+	c.False(called, "SetTimezone was called with an empty zone")
+	c.Eq(0, out.Len(), "output on refusal = %q, want nothing written", out.String())
+}
+
+// TestUserSetTimezoneUnknownUser pins the unknown-user refusal naming the
+// input, with nothing written.
+func TestUserSetTimezoneUnknownUser(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := fakeTimezoneStore{setFn: func(string, *string) error { return users.ErrNotFound }}
+
+	var out bytes.Buffer
+	err := runUserSetTimezoneCLI(context.Background(), &out, store, "zed", "UTC", false)
+	c.Require().Error(err, "timezone set for an unknown user succeeded")
+	c.StrContains(err.Error(), "zed", "err = %v, want the username named", err)
+	c.Eq(0, out.Len(), "output on refusal = %q, want nothing written", out.String())
+}
+
+// TestUserSetTimezoneClearPassesNil pins --clear: the store receives a NIL
+// timezone (the SQL NULL the timezone column reserves for "unset"), not an
+// empty string, and the output states the unset outcome.
+func TestUserSetTimezoneClearPassesNil(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var gotName string
+	var gotTZ *string
+	store := fakeTimezoneStore{setFn: func(username string, tz *string) error {
+		gotName, gotTZ = username, tz
+		return nil
+	}}
+
+	var out bytes.Buffer
+	c.Require().NoError(runUserSetTimezoneCLI(context.Background(), &out, store, "alice", "", true), "clear")
+	c.Eq("alice", gotName, "username the store received")
+	c.Nil(gotTZ, "clearing must pass a nil timezone, not an empty string")
+	c.StrContains(out.String(), "timezone for alice: (unset", "clear output:\n%s", out.String())
+}
+
+// TestUserSetTimezoneSetsZone pins the happy-path output naming the user and
+// the zone, with the zone reaching the store.
+func TestUserSetTimezoneSetsZone(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var gotName, gotZone string
+	store := fakeTimezoneStore{setFn: func(username string, tz *string) error {
+		gotName = username
+		if tz != nil {
+			gotZone = *tz
+		}
+		return nil
+	}}
+
+	var out bytes.Buffer
+	c.Require().NoError(runUserSetTimezoneCLI(context.Background(), &out, store, "alice", "Europe/Paris", false), "set")
+	c.Eq("alice", gotName, "username the store received")
+	c.Eq("Europe/Paris", gotZone, "zone the store received")
+	c.Eq("timezone for alice: Europe/Paris\n", out.String(), "set output")
+}

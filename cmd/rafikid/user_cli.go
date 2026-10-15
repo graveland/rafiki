@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/schedules"
 	"go.graveland.dev/rafiki/pkg/table"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/usersdb"
@@ -37,7 +38,7 @@ func newUserCmd() *cobra.Command {
 		def = os.Getenv("RAFIKI_TEST_DSN")
 	}
 	cmd.PersistentFlags().StringVar(&dbDSN, "db", def, "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
-	cmd.AddCommand(newUserCreateCLICmd(&dbDSN), newUserUpdateCLICmd(&dbDSN), newUserTokenCmd(&dbDSN))
+	cmd.AddCommand(newUserCreateCLICmd(&dbDSN), newUserUpdateCLICmd(&dbDSN), newUserSetTimezoneCLICmd(&dbDSN), newUserTokenCmd(&dbDSN))
 	return cmd
 }
 
@@ -189,6 +190,74 @@ func runUserUpdateCLI(ctx context.Context, out io.Writer, store users.Store, use
 		addr = "(none)"
 	}
 	fmt.Fprintf(out, "username: %s\nemail: %s\n", u.Username, addr)
+	return nil
+}
+
+func newUserSetTimezoneCLICmd(dbDSN *string) *cobra.Command {
+	var clear bool
+
+	cmd := &cobra.Command{
+		Use:   "set-timezone <name> [<iana-zone>]",
+		Short: "Set the IANA timezone a user's agents evaluate cron schedules in",
+		Long: `Sets the timezone CronCreate uses for this user's agents by opening the DSN
+directly — no running daemon is contacted. Existing jobs keep the zone they
+were created in; recreate them to move them. --clear unsets it, and the
+daemon's own zone applies again.`,
+		Args: func(_ *cobra.Command, args []string) error {
+			want := 2
+			if clear {
+				want = 1
+			}
+			if len(args) != want {
+				return errors.New("usage: rafikid user set-timezone <name> <iana-zone>, or <name> --clear")
+			}
+			return nil
+		},
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			zone := ""
+			if !clear {
+				zone = args[1]
+			}
+			ctx := context.Background()
+			pool, _, err := openUserStore(ctx, *dbDSN)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			return runUserSetTimezoneCLI(ctx, cmd.OutOrStdout(), usersdb.NewTimezoneStore(pool), args[0], zone, clear)
+		},
+	}
+
+	cmd.Flags().BoolVar(&clear, "clear", false, "unset the timezone, so the daemon's own zone applies again")
+
+	return cmd
+}
+
+// runUserSetTimezoneCLI is the DSN-agnostic core of `rafikid user set-timezone`.
+// A non-clearing call validates the zone BEFORE touching the store, so a bad
+// zone is refused without a round trip; ErrNotFound becomes a message naming
+// the user.
+func runUserSetTimezoneCLI(ctx context.Context, out io.Writer, store usersdb.TimezoneStore, name, zone string, clear bool) error {
+	var tz *string
+	if !clear {
+		if err := schedules.ValidateTimezone(zone); err != nil {
+			return err
+		}
+		tz = &zone
+	}
+	if err := store.SetTimezone(ctx, name, tz); err != nil {
+		if errors.Is(err, users.ErrNotFound) {
+			return fmt.Errorf("no user named %q", name)
+		}
+		return err
+	}
+	if clear {
+		fmt.Fprintf(out, "timezone for %s: (unset — the daemon's zone applies)\n", name)
+		return nil
+	}
+	fmt.Fprintf(out, "timezone for %s: %s\n", name, zone)
 	return nil
 }
 

@@ -21,6 +21,34 @@ import (
 // NewPostgresStore creates a users.Store backed by pool.
 func NewPostgresStore(pool *pgxpool.Pool) users.Store { return &pgStore{pool: pool} }
 
+// TimezoneStore sets a user's schedule timezone. Separate from users.Store so
+// adding it forces no stub onto every users.Store fake.
+type TimezoneStore interface {
+	// SetTimezone stores tz on the named ACTIVE user; nil clears it to NULL.
+	// Unknown or tombstoned username is users.ErrNotFound.
+	SetTimezone(ctx context.Context, username string, tz *string) error
+}
+
+// NewTimezoneStore returns a TimezoneStore backed by pool.
+func NewTimezoneStore(pool *pgxpool.Pool) TimezoneStore { return &pgStore{pool: pool} }
+
+// SetTimezone stores tz on the named ACTIVE user; a nil tz clears the column to
+// NULL. A tombstoned or unknown username is ErrNotFound — the partial WHERE
+// covers active rows only, so the zero-rows answer is exactly "no such active
+// user". It does not validate the zone; the CLI does.
+func (s *pgStore) SetTimezone(ctx context.Context, username string, tz *string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE conversations.users SET timezone = $2
+		  WHERE username = $1 AND deleted_at IS NULL`, username, tz)
+	if err != nil {
+		return fmt.Errorf("set timezone for %q: %w", username, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return users.ErrNotFound
+	}
+	return nil
+}
+
 type pgStore struct {
 	pool *pgxpool.Pool
 }
