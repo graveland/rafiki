@@ -569,6 +569,12 @@ func (r *jobRegistry) wait(j *job, cmd *exec.Cmd, out *jobOutput, workspaceID st
 func (r *jobRegistry) promote(j *job) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A job released or discarded between the tool's provisional start and its
+	// promote is no longer registered: promoting it would surface a Running
+	// event for a handle output/snapshot already answer unknown.
+	if r.jobs[j.handle] != j {
+		return j.handle
+	}
 	if !j.provisional {
 		return j.handle
 	}
@@ -643,9 +649,29 @@ func (r *jobRegistry) subscribe() (<-chan jobEvent, func()) {
 	r.mu.Lock()
 	r.subs[ch] = struct{}{}
 	r.mu.Unlock()
+	return ch, r.cancelSub(ch)
+}
 
+// subscribeSnapshot registers a subscriber AND builds the running/exited replay
+// under ONE r.mu hold, so the channel carries only strictly-later events: an
+// event that happened before the snapshot is in the replay, one after it is
+// live — never both, never reordered (no Running after Exited, no duplicate
+// Exited, no lone Running for a job killed between the two).
+func (r *jobRegistry) subscribeSnapshot() (ch <-chan jobEvent, running, exited []jobEvent, cancel func()) {
+	c := make(chan jobEvent, subscriberCapacity)
+	r.mu.Lock()
+	r.subs[c] = struct{}{}
+	running, exited = r.snapshotLocked()
+	r.mu.Unlock()
+	return c, running, exited, r.cancelSub(c)
+}
+
+// cancelSub returns an idempotent cancel for a subscriber channel: it removes
+// the subscriber and closes the channel, tolerating a registry-side close (the
+// overflow path) that already removed it.
+func (r *jobRegistry) cancelSub(ch chan jobEvent) func() {
 	var once sync.Once
-	cancel := func() {
+	return func() {
 		once.Do(func() {
 			r.mu.Lock()
 			if _, ok := r.subs[ch]; ok {
@@ -655,7 +681,6 @@ func (r *jobRegistry) subscribe() (<-chan jobEvent, func()) {
 			r.mu.Unlock()
 		})
 	}
-	return ch, cancel
 }
 
 // publish fans an event out to every subscriber. A non-blocking send; a full
@@ -672,11 +697,10 @@ func (r *jobRegistry) publish(ev jobEvent) {
 	}
 }
 
-// snapshot returns every visible running job and every visible finished,
-// unacked job, for the replay a WatchJobs subscriber gets on subscribe.
-func (r *jobRegistry) snapshot() (running, exited []jobEvent) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// snapshotLocked returns every visible running job and every visible finished,
+// unacked job, for the replay a WatchJobs subscriber gets on subscribe. Caller
+// holds r.mu so it can be built atomically with the subscription.
+func (r *jobRegistry) snapshotLocked() (running, exited []jobEvent) {
 	for _, j := range r.jobs {
 		if j.provisional {
 			continue
@@ -850,7 +874,15 @@ func (r *jobRegistry) kill(handle string) error {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
-		return j.cmd.Process.Kill()
+		if kerr := j.cmd.Process.Kill(); kerr != nil {
+			// Nothing was signalled and the job is still alive, so the exit it
+			// will produce naturally must NOT be suppressed: undo the ack.
+			r.mu.Lock()
+			j.acked = false
+			r.mu.Unlock()
+			return kerr
+		}
+		return nil
 	}
 	return nil
 }
@@ -865,7 +897,7 @@ func (r *jobRegistry) ack(handles []string) {
 	affected := make(map[string]struct{})
 	for _, h := range handles {
 		j, ok := r.jobs[h]
-		if !ok {
+		if !ok || j.provisional {
 			continue
 		}
 		j.mu.Lock()
@@ -920,6 +952,10 @@ func (r *jobRegistry) releaseWorkspace(workspaceID string) {
 		if j.workspaceID != workspaceID {
 			continue
 		}
+		// Ack BEFORE signalling, same rule as kill/discard: the exit this
+		// teardown causes must publish nothing, or the daemon is told a job it
+		// tore down "finished" for a handle output/snapshot now answer unknown.
+		j.acked = true
 		if j.cmd.Process != nil {
 			_ = syscall.Kill(-j.cmd.Process.Pid, syscall.SIGKILL)
 		}

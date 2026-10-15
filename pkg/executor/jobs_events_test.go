@@ -334,3 +334,38 @@ func TestProvisionalCapturesStderrHead(t *testing.T) {
 	c.NoError(err, "out.all")
 	c.StrContains(string(combined), "on-stdout", "stdout was not captured into the output file")
 }
+
+// Releasing a workspace is teardown, not a job finishing: the kills it causes
+// publish NOTHING, and a provisional job's promote after release publishes
+// nothing either — its handle answers like an unknown one.
+func TestReleaseWorkspacePublishesNoExit(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
+
+	ch, cancel := r.subscribe()
+	defer cancel()
+
+	handle, err := r.start("sleep 30", "h-rel", "ws-1", "", "")
+	c.NoError(err, "start")
+	running := recvEvent(t, ch, 5*time.Second)
+	c.True(running.running, "start must publish a running event")
+
+	// A provisional job in the same workspace, for the promote-after-release leg.
+	j, err := r.startProvisional([]string{"bash", "-c", "sleep 30"}, nil, "", "ws-1", "owner-1", "sleep 30")
+	c.NoError(err, "startProvisional")
+
+	r.releaseWorkspace("ws-1")
+
+	assertNoEvent(t, ch, 300*time.Millisecond, "releaseWorkspace must publish no event at all")
+
+	// A released provisional job must not surface as Running.
+	r.promote(j)
+	assertNoEvent(t, ch, 200*time.Millisecond, "promote-after-release published an event")
+
+	if _, _, _, _, found := r.output(handle, 0); found {
+		t.Error("a released workspace's job is still readable")
+	}
+	if _, _, _, _, found := r.output(j.handle, 0); found {
+		t.Error("a released provisional job is still readable")
+	}
+}

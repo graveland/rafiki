@@ -663,12 +663,12 @@ func (s *Server) WatchJobs(
 	_ *connect.Request[executorpb.WatchJobsRequest],
 	stream *connect.ServerStream[executorpb.WatchJobsResponse],
 ) error {
-	// Subscribe BEFORE snapshotting: an event that happens in between is then
-	// delivered twice rather than lost, and the daemon is idempotent.
-	ch, cancel := s.jobs.subscribe()
+	// Register the subscriber and build the replay in ONE critical section, so
+	// an event is either in the replay or on the live channel, never both and
+	// never reordered.
+	ch, running, exited, cancel := s.jobs.subscribeSnapshot()
 	defer cancel()
 
-	running, exited := s.jobs.snapshot()
 	for _, ev := range running {
 		if err := stream.Send(jobRunningResponse(ev)); err != nil {
 			return err
