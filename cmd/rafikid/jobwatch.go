@@ -7,8 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sched"
 )
 
 // jobEventSource is the event-buffer source name for background-job news.
@@ -42,7 +44,6 @@ type jobKey struct {
 // watchedJob is one in-flight watch.
 type watchedJob struct {
 	command string
-	stop    chan struct{} // closed to end the loop with no notification
 }
 
 // jobWatcher polls the executor for a background job's exit and pushes a
@@ -54,6 +55,10 @@ type watchedJob struct {
 // SOMETHING happened; what the job printed is read from the job's retained
 // output with bash_output. A fragment that tried to carry the output would
 // duplicate the retention budget the executor already enforces.
+//
+// A watch is ONE scheduler registration per job, not a ticker plus a goroutine
+// per job: each poll re-arms the same key on the shared scheduler, and a watch
+// that ends simply leaves no registration behind.
 type jobWatcher struct {
 	mu   sync.Mutex
 	jobs map[jobKey]*watchedJob
@@ -77,6 +82,13 @@ type jobWatcher struct {
 
 	interval time.Duration
 	baseCtx  context.Context
+
+	// sched is the shared deadline scheduler the watch re-arms on, and clk is
+	// the clock those deadlines are measured against. Both default to usable
+	// values; a nil sched makes every arm a no-op (a test-constructed watcher
+	// without a controller simply never ticks).
+	sched *sched.Scheduler
+	clk   clock.Clock
 }
 
 func newJobWatcher() *jobWatcher {
@@ -84,68 +96,87 @@ func newJobWatcher() *jobWatcher {
 		jobs:     make(map[jobKey]*watchedJob),
 		interval: jobWatchInterval,
 		baseCtx:  context.Background(),
+		clk:      clock.RealClock(),
+		sched:    nil,
 	}
+}
+
+// jobWatchKey is the scheduler key for a watch. Re-watching a (child, handle)
+// re-arms the same key, which is what makes a repeat watch REPLACE rather than
+// double-fire.
+func jobWatchKey(k jobKey) string {
+	return "job:" + k.childID + ":" + k.handle
 }
 
 // watch begins polling handle on childID's behalf. A repeat watch for the
 // same (child, handle) replaces the first — defensive; StartJob mints a fresh
-// handle every time.
+// handle every time. The replacement re-arms the same scheduler key, so the
+// replaced watch's timer is stopped and never polls.
 func (w *jobWatcher) watch(childID, handle, command string) {
 	if w == nil {
 		return
 	}
 	k := jobKey{childID, handle}
-	e := &watchedJob{command: command, stop: make(chan struct{})}
+	e := &watchedJob{command: command}
 
 	w.mu.Lock()
-	if prev, ok := w.jobs[k]; ok {
-		close(prev.stop)
-	}
 	w.jobs[k] = e
 	w.mu.Unlock()
 
-	go w.loop(k, e)
+	w.arm(k, e)
 }
 
 // forget drops a watch WITHOUT notifying: the agent itself resolved the job
 // (bash_kill), so a "finished" fragment would be news it already has. It is
-// also the test's way to stop a loop that would otherwise tick forever.
+// also the test's way to stop a watch that would otherwise tick forever.
 func (w *jobWatcher) forget(childID, handle string) {
 	if w == nil {
 		return
 	}
+	k := jobKey{childID, handle}
 	w.mu.Lock()
-	e, ok := w.jobs[jobKey{childID, handle}]
-	delete(w.jobs, jobKey{childID, handle})
+	delete(w.jobs, k)
 	w.mu.Unlock()
-	if ok {
-		close(e.stop)
+	w.sched.Cancel(jobWatchKey(k))
+}
+
+// arm (re)registers the watch's next poll on the scheduler. Replacing by key
+// is what stops a superseded registration from firing.
+func (w *jobWatcher) arm(k jobKey, e *watchedJob) {
+	w.sched.At(jobWatchKey(k), w.clk.Now().Add(w.interval), func() { w.tick(k, e) })
+}
+
+// tick runs one scheduled poll. remove-if-still-ours FIRST: a watch replaced
+// since this registration was armed must not be polled or re-armed by the
+// stale registration.
+func (w *jobWatcher) tick(k jobKey, e *watchedJob) {
+	w.mu.Lock()
+	ours := w.jobs[k] == e
+	w.mu.Unlock()
+	if !ours {
+		return
+	}
+	if w.baseCtx.Err() != nil {
+		return
+	}
+	if !w.pollOnce(k, e) {
+		w.remove(k, e)
+		return
+	}
+	// Re-check ownership before re-arming, not only at the top: a watch
+	// replaced (or forgotten) while this poll was in flight must not have its
+	// successor's registration clobbered by this stale one. This is the same
+	// "a replaced watch is never re-armed" rule the entry check enforces,
+	// extended across the poll's window.
+	w.mu.Lock()
+	ours = w.jobs[k] == e
+	w.mu.Unlock()
+	if ours {
+		w.arm(k, e)
 	}
 }
 
-func (w *jobWatcher) loop(k jobKey, e *watchedJob) {
-	// remove-if-still-ours, not forget: a watch replaced mid-poll must not
-	// have its replacement's stop channel closed by a stale loop exiting.
-	defer w.remove(k, e)
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-e.stop:
-			return
-		case <-w.baseCtx.Done():
-			return
-		case <-ticker.C:
-		}
-		if !w.pollOnce(k, e) {
-			return
-		}
-	}
-}
-
-// remove drops the map entry if it is still e. It never closes anything: the
-// loop is the goroutine that reads e.stop, so it is the one place that may
-// let it be garbage.
+// remove drops the map entry if it is still e.
 func (w *jobWatcher) remove(k jobKey, e *watchedJob) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -222,6 +253,12 @@ func (c *Controller) newControllerJobWatcher() *jobWatcher {
 	w := newJobWatcher()
 	if c.baseCtx != nil {
 		w.baseCtx = c.baseCtx
+	}
+	if c.sched != nil {
+		w.sched = c.sched
+	}
+	if c.clk != nil {
+		w.clk = c.clk
 	}
 	w.poll = c.pollJob
 	w.push = func(childID, source, key, fragment string) {

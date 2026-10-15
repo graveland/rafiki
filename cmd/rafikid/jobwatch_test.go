@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,15 +16,18 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sched"
 
 	"github.com/multigres/testkit/assert"
 )
 
 // jobWatchFixture is a controller with a job watcher wired to a real event
-// buffer on a manual clock. The watcher's poll is scripted by the test via
-// the returned channel; interval is 1ms so a loop test runs in real time
-// while the buffer's debounce stays deterministic on the fake clock.
-func jobWatchFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush, chan jobPoll) {
+// buffer on a manual clock and a manual scheduler. Polls and re-arms run
+// synchronously inside clk.Advance, so a test drives the watch a tick at a
+// time; the buffer's debounce also lives on the same clock, so a flush is one
+// more Advance. interval is one second, so each Advance(time.Second) is one
+// poll and Advance(5*time.Second) both flushes and (were a watch live) ticks.
+func jobWatchFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush, *jobPollScript) {
 	t.Helper()
 	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
@@ -32,22 +37,21 @@ func jobWatchFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlus
 
 	c := &Controller{st: childstore.New(), cm: newChildManager(), evbuf: buf}
 	c.bound = make(map[string]*boundExecutor)
+	c.clk = clk
+	c.sched = sched.New(clk, time.Second)
 	c.jobs = c.newControllerJobWatcher()
-	c.jobs.interval = time.Millisecond
+	c.jobs.interval = time.Second
 
-	polls := make(chan jobPoll, 16)
-	c.jobs.poll = func(_ context.Context, _, _ string) (tools.JobSnapshot, error) {
-		p := <-polls
-		return p.snap, p.err
-	}
+	script := &jobPollScript{}
+	c.jobs.poll = script.poll
 
 	c.st.Insert(&childstore.Session{ChildID: "c_run", Status: protocol.StatusIdle, StartedAt: time.Now()})
-	return c, clk, cap, polls
+	return c, clk, cap, script
 }
 
 // restorePoll puts the controller's real poll wiring back after the fixture
-// scripted it. Call it BEFORE arming any watch: the loop goroutine reads
-// w.poll, so swapping it under a running watch is a data race.
+// scripted it, for the wiring tests that need to poll through the child's
+// binding rather than a scripted answer.
 func restorePoll(c *Controller) {
 	c.jobs.poll = c.pollJob
 }
@@ -57,49 +61,44 @@ type jobPoll struct {
 	err  error
 }
 
-// waitJobGone waits until the watcher has dropped the entry — the
-// synchronization point for "the loop saw the definitive answer and exited".
-func waitJobGone(t *testing.T, w *jobWatcher, childID, handle string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		w.mu.Lock()
-		_, ok := w.jobs[jobKey{childID, handle}]
-		w.mu.Unlock()
-		if !ok {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("the watcher never dropped its entry")
+// jobPollScript scripts the watcher's poll with a fixed sequence: each call
+// returns the next step, then repeats the last one forever. Polls run
+// synchronously inside FakeClock.Advance, so no locking is needed.
+type jobPollScript struct {
+	steps []jobPoll
+	i     int
 }
 
-func waitBatches(t *testing.T, cap *capturedFlush, n int) []capturedBatch {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if got := cap.batches(); len(got) >= n {
-			return got
-		}
-		time.Sleep(time.Millisecond)
+func (s *jobPollScript) poll(context.Context, string, string) (tools.JobSnapshot, error) {
+	if s.i < len(s.steps) {
+		p := s.steps[s.i]
+		s.i++
+		return p.snap, p.err
 	}
-	return cap.batches()
+	if len(s.steps) == 0 {
+		return tools.JobSnapshot{}, nil
+	}
+	last := s.steps[len(s.steps)-1]
+	return last.snap, last.err
 }
 
 // The whole point: the agent learns the job finished as an injected frame,
-// without calling bash_output once.
-func TestJobWatchNotifiesOnExit(t *testing.T) {
+// without calling bash_output once. The watch polls once while the job runs,
+// then polls the exit and ends.
+func TestJobWatchPushesOnExit(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c, clk, cap, polls := jobWatchFixture(t)
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{
+		{snap: tools.JobSnapshot{Found: true}}, // still running
+		{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 3}},
+	}
 	c.jobs.watch("c_run", "job-1", "make check")
 
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true}} // still running
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 3}}
+	clk.Advance(time.Second)     // poll: running; re-arm
+	clk.Advance(time.Second)     // poll: exited; push and stop
+	clk.Advance(5 * time.Second) // let the buffer's debounce flush
 
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	clk.Advance(6 * time.Second)
-
-	batches := waitBatches(t, cap, 1)
+	batches := cap.batches()
 	ck.Require().Len(batches, 1, "want exactly 1 batch, got")
 	if batches[0].childID != "c_run" || batches[0].source != jobEventSource {
 		t.Fatalf("batch went to (%s, %s), want (c_run, %s)", batches[0].childID, batches[0].source, jobEventSource)
@@ -111,79 +110,91 @@ func TestJobWatchNotifiesOnExit(t *testing.T) {
 	// The buffer says something happened; the output says what. The fragment
 	// must point at bash_output rather than carry the tail itself.
 	ck.LessOrEqual(400, len(frag), "fragment is trying to be the ledger (%d bytes): %q", len(frag), frag)
+	// A definitive answer leaves no registration behind.
+	ck.Empty(c.sched.Pending(), "an exited job must leave no pending registration")
 }
 
 // An exit-0 finish is still news worth one fragment.
 func TestJobWatchNotifiesOnCleanExit(t *testing.T) {
-	c, clk, cap, polls := jobWatchFixture(t)
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 0}}}
 	c.jobs.watch("c_run", "job-1", "go build ./...")
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 0}}
 
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	clk.Advance(6 * time.Second)
+	clk.Advance(time.Second)
+	clk.Advance(5 * time.Second)
 
-	batches := waitBatches(t, cap, 1)
+	batches := cap.batches()
+	assert.NewAborting(t).False(len(batches) != 1, "want exactly 1 batch, got %+v", batches)
 	assert.NewAborting(t).StrContains(batches[0].fragments[0], "exit code 0", "got")
 }
 
 // Polling while the job runs must stay silent — that silence is what the
 // agent is told it can rely on.
 func TestJobWatchStaysQuietWhileRunning(t *testing.T) {
-	c, clk, cap, polls := jobWatchFixture(t)
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{{snap: tools.JobSnapshot{Found: true}}}
 	c.jobs.watch("c_run", "job-1", "npm run dev")
-	for range 5 {
-		polls <- jobPoll{snap: tools.JobSnapshot{Found: true}}
-	}
-	time.Sleep(20 * time.Millisecond)
-	clk.Advance(6 * time.Second)
+
+	clk.Advance(time.Second)
+	clk.Advance(time.Second)
+	clk.Advance(time.Second)
 	assert.NewAborting(t).Empty(cap.batches(), "a running job must not notify")
 	c.jobs.forget("c_run", "job-1")
 }
 
 // bash_kill resolved the job on purpose: no fragment, or the agent spends a
 // turn learning something it did itself.
-func TestForgetDropsTheWatchSilently(t *testing.T) {
-	c, clk, cap, polls := jobWatchFixture(t)
+func TestJobWatchForgetCancelsWithoutPush(t *testing.T) {
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 1}}}
 	c.jobs.watch("c_run", "job-1", "make check")
 	c.jobs.forget("c_run", "job-1")
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 1}}
-	time.Sleep(20 * time.Millisecond)
-	clk.Advance(6 * time.Second)
+
+	clk.Advance(time.Second)     // no poll: the registration was cancelled
+	clk.Advance(5 * time.Second) // nothing to flush
+
 	assert.NewAborting(t).Empty(cap.batches(), "a killed job must not notify")
+	assert.NewAborting(t).Empty(c.sched.Pending(), "forget must cancel the scheduler registration")
 }
 
 // A handle the executor no longer knows (workspace released, executor
 // restarted) is definitive: the agent is told once, then the watch ends.
-func TestJobWatchNotifiesOnceForAGoneJob(t *testing.T) {
+func TestJobWatchPushesWhenHandleIsGone(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, clk, cap, polls := jobWatchFixture(t)
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{{snap: tools.JobSnapshot{Found: false}}}
 	c.jobs.watch("c_run", "job-1", "make check")
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: false}}
 
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	clk.Advance(6 * time.Second)
+	clk.Advance(time.Second)
+	clk.Advance(5 * time.Second)
 
-	batches := waitBatches(t, cap, 1)
+	batches := cap.batches()
+	ck.False(len(batches) != 1, "want exactly 1 batch, got %+v", batches)
 	frag := batches[0].fragments[0]
 	ck.StrContains(frag, "no longer on its executor", "fragment must say the job is gone, not finished")
 	ck.NotStrContains(frag, "exit code", "a gone job has no exit code to report")
+	ck.Empty(c.sched.Pending(), "a gone job must leave no pending registration")
 }
 
 // An executor blip is transient, not an answer: the watch must survive it and
 // deliver the exit when the executor can be asked again. Ending the watch on
 // the first error would strand every notification across a reconnect.
-func TestJobWatchSurvivesTransientErrors(t *testing.T) {
+func TestJobWatchKeepsWatchingThroughTransientErrors(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, clk, cap, polls := jobWatchFixture(t)
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{
+		{err: execpool.ErrExecutorLost},
+		{err: errors.New("connection reset")},
+		{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 2}},
+	}
 	c.jobs.watch("c_run", "job-1", "make check")
-	polls <- jobPoll{err: execpool.ErrExecutorLost}
-	polls <- jobPoll{err: errors.New("connection reset")}
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 2}}
 
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	clk.Advance(6 * time.Second)
+	clk.Advance(time.Second) // transient; re-arm
+	clk.Advance(time.Second) // transient; re-arm
+	clk.Advance(time.Second) // exit; push and stop
+	clk.Advance(5 * time.Second)
 
-	batches := waitBatches(t, cap, 1)
+	batches := cap.batches()
 	ck.Len(batches, 1, "want exactly 1 batch after transient errors, got")
 	ck.StrContains(batches[0].fragments[0], "exit code 2", "the watch must deliver after transient errors: %+v", batches)
 }
@@ -191,95 +202,30 @@ func TestJobWatchSurvivesTransientErrors(t *testing.T) {
 // An exited child cannot receive a turn; its workspace release already killed
 // the job. Nothing to say, and nothing to keep polling.
 func TestJobWatchSkipsAnExitedChild(t *testing.T) {
-	c, clk, cap, polls := jobWatchFixture(t)
-	c.st.SetStatus("c_run", protocol.StatusExited)
-	c.jobs.watch("c_run", "job-1", "make check")
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 0}}
-
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	clk.Advance(6 * time.Second)
-	assert.NewAborting(t).Empty(cap.batches(), "an exited child must not be notified")
-}
-
-// Two jobs finishing together ride one coalesced frame — the same property
-// the subagent settle path is pinned on.
-func TestTwoJobsFinishAsOneBatch(t *testing.T) {
-	c, clk, cap, polls := jobWatchFixture(t)
-	c.jobs.watch("c_run", "job-1", "make check")
-	c.jobs.watch("c_run", "job-2", "npm test")
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 0}}
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 1}}
-
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	waitJobGone(t, c.jobs, "c_run", "job-2")
-	clk.Advance(6 * time.Second)
-
-	batches := waitBatches(t, cap, 1)
-	assert.NewAborting(t).False(len(batches) != 1 || len(batches[0].fragments) != 2, "want 1 coalesced batch of 2 fragments, got %+v", batches)
-}
-
-// --- wiring through controllerBinder and boundExecutor ---
-
-// The daemon path end to end: boundExecutor.StartJob arms a watch on the
-// controller's watcher, and the watch polls through peekJob (the CURRENT
-// binding), never recover.
-func TestStartJobWiresTheWatcherEndToEnd(t *testing.T) {
-	ck := assert.NewAborting(t)
 	c, clk, cap, _ := jobWatchFixture(t)
-	fb := newFakeBinder()
-	c.noteBoundExecutor("c_run", newBoundExecutor("c_run", fb))
+	c.st.SetStatus("c_run", protocol.StatusExited)
+	var polls atomic.Int64
+	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
+		polls.Add(1)
+		return tools.JobSnapshot{Found: true, Exited: true, ExitCode: 0}, nil
+	}
+	c.jobs.watch("c_run", "job-1", "make check")
 
-	// The loop polls through the child's boundExecutor. Its fakeExec answers
-	// Found: true forever, so the watch stays quiet — and the poll proving it
-	// ran is the fakeExec's own call counter. The fixture's scripted poll is
-	// restored to the controller's real wiring FIRST, before the watch is
-	// armed: the loop goroutine reads w.poll.
-	restorePoll(c)
-	cb := &controllerBinder{c: c}
-	cb.WatchJob("c_run", "job-1", "make check")
-
-	c.jobs.mu.Lock()
-	_, ok := c.jobs.jobs[jobKey{"c_run", "job-1"}]
-	c.jobs.mu.Unlock()
-	ck.True(ok, "WatchJob did not arm a watch")
-
-	be := c.boundExecutorFor("c_run")
-	cl, _, err := be.clientFor(context.Background())
-	ck.NoError(err)
-	fe := cl.(*fakeExec)
-	time.Sleep(20 * time.Millisecond)
-	fe.mu.Lock()
-	polled := fe.calls
-	fe.mu.Unlock()
-	ck.NotEq(0, polled, "the watcher never polled the child's binding")
-	// The fake answers Found:true forever, so the watch would tick forever.
-	c.jobs.forget("c_run", "job-1")
-	clk.Advance(6 * time.Second)
-	ck.Empty(cap.batches(), "a running job must stay quiet")
-}
-
-// peekJob is the watcher's read, and it must NOT rebind: a re-provisioned
-// workspace cannot resurrect a job, so recovering for a poll would spend a
-// migration to learn the job is gone.
-func TestPeekJobNeverRecovers(t *testing.T) {
-	c := assert.NewAborting(t)
-	fb := newFakeBinder()
-	fb.failWith = execpool.ErrExecutorLost // liveness failure: recover WOULD trigger on JobOutput
-	be := newBoundExecutor("child-1", fb)
-
-	_, err := be.peekJob(context.Background(), "job-1")
-	c.Error(err, "peekJob against an unbound child must fail; there is nothing to poll")
-	c.Eq(0, fb.provisions, "peekJob provisioned")
+	clk.Advance(time.Second)
+	clk.Advance(5 * time.Second)
+	assert.NewAborting(t).Empty(cap.batches(), "an exited child must not be notified")
+	assert.NewAborting(t).Eq(int64(0), polls.Load(), "an exited child must not be polled")
 }
 
 // A child that can no longer receive the news ends its watch even when the
 // poll never succeeds again — which is exactly the state Close leaves behind,
-// since it drops the binding pollJob resolves through. Checking alive only
-// after a successful poll left the loop ticking forever: 199 polls in 200ms
-// at the test interval, one every 5s in production, for the daemon's life.
-func TestJobWatchEndsWhenItsChildIsGoneAndPollsKeepFailing(t *testing.T) {
+// since it drops the binding pollJob resolves through. The liveness check sits
+// BEFORE the poll, so no poll ever happens and no registration survives; a
+// check reachable only after a successful poll left the watch polling forever:
+// one every 5s in production, for the daemon's life.
+func TestJobWatchEndsWhenChildNotAlive(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, _, cap, _ := jobWatchFixture(t)
+	c, clk, cap, _ := jobWatchFixture(t)
 
 	var polls atomic.Int64
 	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
@@ -295,24 +241,156 @@ func TestJobWatchEndsWhenItsChildIsGoneAndPollsKeepFailing(t *testing.T) {
 	c.st.Delete("c_run")
 	c.forgetBoundExecutor("c_run")
 
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	before := polls.Load()
-	time.Sleep(50 * time.Millisecond)
-	ck.Eq(before, polls.Load(), "the loop kept polling after it dropped its entry")
+	clk.Advance(3 * time.Second)
+
+	ck.Eq(int64(0), polls.Load(), "the pre-poll liveness check must run before the poll")
+	ck.Empty(c.sched.Pending(), "a watch for a gone child must leave no registration")
 	ck.Empty(cap.batches(), "a child that is gone must not be pushed to")
+}
+
+// Re-watching the same (child, handle) replaces the first watch, and the
+// replaced registration must never poll: one scheduler entry per job means
+// the second watch's At stops the first's timer.
+func TestJobWatchReplacedWatchIsNotPolledByStaleRegistration(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _, _ := jobWatchFixture(t)
+
+	var polls atomic.Int64
+	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
+		polls.Add(1)
+		return tools.JobSnapshot{Found: true}, nil
+	}
+	c.jobs.watch("c_run", "job-1", "make check")
+	c.jobs.watch("c_run", "job-1", "make check") // replaces the first
+
+	clk.Advance(time.Second)
+
+	ck.Eq(int64(1), polls.Load(), "a re-watched job must be polled once, not once per registration")
+	c.jobs.forget("c_run", "job-1")
+}
+
+// A cancelled base context stops the watch at the next tick without polling
+// and without re-arming: the daemon is shutting down, so there is nothing left
+// to say and nothing left to schedule.
+func TestJobWatchStopsOnBaseContextCancel(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, _, _ := jobWatchFixture(t)
+
+	var polls atomic.Int64
+	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
+		polls.Add(1)
+		return tools.JobSnapshot{Found: true}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.jobs.baseCtx = ctx
+	c.jobs.watch("c_run", "job-1", "make check")
+	cancel()
+
+	clk.Advance(time.Second)
+
+	ck.Eq(int64(0), polls.Load(), "a cancelled base context must stop the watch before it polls")
+	ck.Empty(c.sched.Pending(), "a cancelled watch must not re-arm")
+}
+
+// A watch is one scheduler registration, not a goroutine per job. Fifty
+// watches on a shared scheduler must not grow the goroutine count.
+func TestJobWatchSpawnsNoGoroutinePerJob(t *testing.T) {
+	c, _, _, _ := jobWatchFixture(t)
+
+	before := runtime.NumGoroutine()
+	for i := range 50 {
+		c.jobs.watch("c_run", fmt.Sprintf("job-%d", i), "make check")
+	}
+	after := runtime.NumGoroutine()
+	assert.NewAborting(t).True(after-before < 5,
+		"watching 50 jobs grew the goroutine count by %d; a watch must be a scheduler registration, not a goroutine", after-before)
+}
+
+// Two jobs finishing together ride one coalesced frame — the same property
+// the subagent settle path is pinned on.
+func TestTwoJobsFinishAsOneBatch(t *testing.T) {
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{
+		{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 0}},
+		{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 1}},
+	}
+	c.jobs.watch("c_run", "job-1", "make check")
+	c.jobs.watch("c_run", "job-2", "npm test")
+
+	clk.Advance(time.Second)     // both exit
+	clk.Advance(5 * time.Second) // one coalesced flush
+
+	batches := cap.batches()
+	assert.NewAborting(t).False(len(batches) != 1 || len(batches[0].fragments) != 2, "want 1 coalesced batch of 2 fragments, got %+v", batches)
 }
 
 // The pre-poll check must not cost a live child its notification: a child
 // still able to receive a turn is polled and told, as before.
 func TestJobWatchStillNotifiesALiveChild(t *testing.T) {
-	c, clk, cap, polls := jobWatchFixture(t)
+	c, clk, cap, script := jobWatchFixture(t)
+	script.steps = []jobPoll{{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 7}}}
 	c.jobs.watch("c_run", "job-1", "make check")
-	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 7}}
 
-	waitJobGone(t, c.jobs, "c_run", "job-1")
-	clk.Advance(6 * time.Second)
-	batches := waitBatches(t, cap, 1)
+	clk.Advance(time.Second)
+	clk.Advance(5 * time.Second)
+
+	batches := cap.batches()
 	assert.NewAborting(t).False(len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exit code 7"), "a live child must still be notified: %+v", batches)
+}
+
+// --- wiring through controllerBinder and boundExecutor ---
+
+// The daemon path end to end: boundExecutor.StartJob arms a watch on the
+// controller's watcher, and the watch polls through peekJob (the CURRENT
+// binding), never recover.
+func TestStartJobWiresTheWatcherEndToEnd(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap, _ := jobWatchFixture(t)
+	fb := newFakeBinder()
+	c.noteBoundExecutor("c_run", newBoundExecutor("c_run", fb))
+
+	// The watch polls through the child's boundExecutor, so restore the
+	// controller's real wiring before arming it.
+	restorePoll(c)
+	cb := &controllerBinder{c: c}
+	cb.WatchJob("c_run", "job-1", "make check")
+
+	c.jobs.mu.Lock()
+	_, ok := c.jobs.jobs[jobKey{"c_run", "job-1"}]
+	c.jobs.mu.Unlock()
+	ck.True(ok, "WatchJob did not arm a watch")
+
+	// peekJob reads the binding's client; clientFor is what binds it, so bind
+	// before the tick that polls.
+	be := c.boundExecutorFor("c_run")
+	cl, _, err := be.clientFor(context.Background())
+	ck.NoError(err)
+	fe := cl.(*fakeExec)
+
+	clk.Advance(time.Second) // one tick, polling the child's binding
+
+	fe.mu.Lock()
+	polled := fe.calls
+	fe.mu.Unlock()
+	ck.NotEq(0, polled, "the watcher never polled the child's binding")
+	// The fake answers Found:true forever, so the watch would tick forever.
+	c.jobs.forget("c_run", "job-1")
+	clk.Advance(5 * time.Second)
+	ck.Empty(cap.batches(), "a running job must stay quiet")
+}
+
+// peekJob is the watcher's read, and it must NOT rebind: a re-provisioned
+// workspace cannot resurrect a job, so recovering for a poll would spend a
+// migration to learn the job is gone.
+func TestPeekJobNeverRecovers(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder()
+	fb.failWith = execpool.ErrExecutorLost // liveness failure: recover WOULD trigger on JobOutput
+	be := newBoundExecutor("child-1", fb)
+
+	_, err := be.peekJob(context.Background(), "job-1")
+	c.Error(err, "peekJob against an unbound child must fail; there is nothing to poll")
+	c.Eq(0, fb.provisions, "peekJob provisioned")
 }
 
 // A child's binding must not outlive the child. Close already dropped it, but
