@@ -84,3 +84,35 @@ func TestGraceIgnoresAStaleDeadlineAfterALaterExit(t *testing.T) {
 	_, ok = c.st.Get("c_g3")
 	ck.False(ok, "the child must close once its own later deadline expires")
 }
+
+// TestArmRecoveredGraceArmsEveryExitedRow pins the helper every loadChildren
+// path calls — including the lease-failure early return, which loads rows as
+// exited but would otherwise return before arming anything. A row with no
+// ExitedAt is skipped (nothing to measure from); a non-exited row is skipped.
+func TestArmRecoveredGraceArmsEveryExitedRow(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk := graceFixture(t)
+	exitedAt := clk.Now()
+	c.st.Insert(&childstore.Session{ChildID: "c_e1", Status: protocol.StatusExited, ExitedAt: exitedAt})
+	c.st.Insert(&childstore.Session{ChildID: "c_e2", Status: protocol.StatusExited, ExitedAt: exitedAt.Add(time.Minute)})
+	c.st.Insert(&childstore.Session{ChildID: "c_z", Status: protocol.StatusExited}) // no ExitedAt: nothing to arm
+	c.st.Insert(&childstore.Session{ChildID: "c_live", Status: protocol.StatusStreaming})
+
+	c.armRecoveredGrace()
+
+	pending := map[string]bool{}
+	for _, e := range c.sched.Pending() {
+		pending[e.Key] = true
+	}
+	ck.True(pending[graceKey("c_e1")], "c_e1's grace deadline must be armed")
+	ck.True(pending[graceKey("c_e2")], "c_e2's grace deadline must be armed")
+	ck.False(pending[graceKey("c_z")], "a row with no ExitedAt must not be armed")
+	ck.False(pending[graceKey("c_live")], "a non-exited row must not be armed")
+
+	// And it actually closes: past the later deadline, both exited rows close.
+	clk.Advance(61 * time.Minute)
+	for _, id := range []string{"c_e1", "c_e2"} {
+		_, ok := c.st.Get(id)
+		ck.False(ok, "%s must be closed once its window expires", id)
+	}
+}
