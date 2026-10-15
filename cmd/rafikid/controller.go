@@ -1500,6 +1500,17 @@ func (c *Controller) ConversationSearch(ctx context.Context, scope insights.Scop
 	return rows, nil
 }
 
+// agentRunnerError classifies a runner-construction failure: a hosting
+// precondition the operator can fix is failed_precondition (its message
+// carries the remedy), anything else a spawn failure.
+func agentRunnerError(err error) *connectapi.ControllerError {
+	code := protocol.ErrSpawnFailed
+	if errors.Is(err, errScriptHosting) {
+		code = protocol.ErrFailedPrecondition
+	}
+	return &connectapi.ControllerError{Code: code, Message: "agent runner: " + err.Error()}
+}
+
 func (c *Controller) ConversationExport(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error) {
 	tr, err := c.insights.Export(ctx, scope, id)
 	if err != nil {
@@ -1975,10 +1986,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID, nil)
 	if err != nil {
-		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "agent runner: " + err.Error(),
-		}
+		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
 	if req.Kind == protocol.KindClaude {
 		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
@@ -2836,10 +2844,7 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 	// is what attributes the resumed conversation and feeds quota_status.
 	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
 	if err != nil {
-		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "agent runner: " + err.Error(),
-		}
+		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
 	if req.Kind == protocol.KindClaude {
 		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
@@ -2976,10 +2981,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// the users store).
 	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
 	if err != nil {
-		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "agent runner: " + err.Error(),
-		}
+		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
 	if req.Kind == protocol.KindClaude {
 		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {

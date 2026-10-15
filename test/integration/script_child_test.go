@@ -979,3 +979,26 @@ func TestLogsExitedScriptMustReturn(t *testing.T) {
 		t.Fatal("rafiki logs on an exited script HUNG — the replay was never bounded")
 	}
 }
+
+// A git-source script on a daemon with no executor that advertises the script
+// launch kind is a precondition the operator can fix, not an internal failure:
+// failed_precondition, and the message names the flag that fixes it.
+func TestScriptChildGitSourceWithoutScriptExecutorIsAPrecondition(t *testing.T) {
+	t.Parallel()
+	c := assert.NewCollecting(t)
+	sd := bootScriptDaemon(t)
+	token, _ := scriptUser(t, sd.daemon)
+	client := faceClient(t, sd.daemon, token)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := client.Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:  "/tmp",
+		Kind: protocol.KindScript,
+		Script: &rafikiv1.SpawnRequest_ScriptSpec{
+			Repo: "some-git-source", Script: "s",
+		},
+	}))
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "spawn error code: %v", err)
+	c.True(err != nil && strings.Contains(err.Error(), "--launch script"), "error should name the remedy: %v", err)
+}

@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -542,4 +543,5 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		Script: &protocol.ScriptSpec{Repo: "somegit", Script: "s"},
 	}, "c_x", "", "owner")
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "git source"), "want the git-source refusal, got %v", err)
+	assert.NewAborting(t).True(errors.Is(err, errScriptHosting) && strings.Contains(err.Error(), "--launch script"), "refusal must be a hosting precondition naming the remedy, got %v", err)
 }

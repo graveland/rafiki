@@ -866,6 +866,11 @@ The executor-hosted path:
   `pkg/child.ScriptEnvStripPrefixes`), plus the forwarded `env`, the resolved
   `PYTHONPATH`, and the one channel: `RAFIKI_CHILD_CONNECT`.
 
+A script spawn the local fallback cannot host — a git-source `repo`, or a
+script/module declaring `# pymodule-requirements:` — is refused
+`CodeFailedPrecondition` (reason `failed_precondition`) with a message naming the
+fix: start an executor with `rafiki executor serve --launch script`.
+
 The locally hosted fallback (no executor pool route, or no executor declares
 the kind) forks on the daemon's own host, in its own process group, from the
 daemon's state dir (`script-host/<childID>/`, 0700). Its environment is the

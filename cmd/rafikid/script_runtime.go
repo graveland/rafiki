@@ -344,6 +344,12 @@ func (r *scriptRunner) Terminate() error { return r.inner.Terminate() }
 func (r *scriptRunner) Kill() error      { return r.inner.Kill() }
 func (r *scriptRunner) Interrupt() error { return r.inner.Interrupt() }
 
+// errScriptHosting marks a script spawn the daemon cannot host as configured —
+// a precondition the operator can fix (declare the script launch kind on an
+// executor), not an internal failure. agentRunnerError maps it to
+// failed_precondition.
+var errScriptHosting = errors.New("script hosting unavailable")
+
 // materializeScript writes the script and its named modules into the child's
 // host directory the way pymodule_run consumes them: one directory per name
 // (script at <dir>/<script>/<script>.py — sys.path[0] for the run — each
@@ -360,8 +366,8 @@ func (c *Controller) materializeScript(spec *protocol.ScriptSpec, childID, owner
 		// its own. Wave 4 hosts scripts on executors, where that cache
 		// exists. Refuse rather than half-simulate it locally.
 		return scriptMaterialization{}, fmt.Errorf(
-			"script child: repo %q is a git source: locally hosted children run only the owner's own saved modules (repo %q); host it on an executor or use repo %q",
-			spec.Repo, pymodules.LocalRepo, pymodules.LocalRepo)
+			"script child: repo %q is a git source and no live executor advertises the script launch kind; start one with `rafiki executor serve --launch script` (locally hosted children run only the owner's own saved modules, repo %q): %w",
+			spec.Repo, pymodules.LocalRepo, errScriptHosting)
 	}
 	if c.pymoduleStore == nil {
 		return scriptMaterialization{}, errors.New("script children need the pymodule store: this daemon has no database")
@@ -414,7 +420,7 @@ func (c *Controller) materializeScript(spec *protocol.ScriptSpec, childID, owner
 		// an executor's synced cache. Refuse rather than run against missing
 		// imports.
 		return scriptMaterialization{}, fmt.Errorf(
-			"script child: script or modules declare dependencies (# pymodule-requirements:) and locally hosted children have no venv; host the script on an executor or drop the requirements block")
+			"script child: script or modules declare dependencies (# pymodule-requirements:) and locally hosted children have no venv; start an executor with `rafiki executor serve --launch script` or drop the requirements block: %w", errScriptHosting)
 	}
 
 	return scriptMaterialization{
