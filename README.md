@@ -1048,6 +1048,24 @@ the child is registered, and settlement lands as one coalesced digest per
 parent turn regardless of how many descendants finished together. Background
 jobs (`bash_start`) settle the same way.
 
+### Scheduling
+
+Four tools let an agent run a prompt later — once or on a recurring schedule —
+bound to the calling child, on the same agent-control surface as the verbs
+above: native tools for a `fundi` child, and `mcp__rafiki__CronCreate` etc. for
+a `claude` child over the injected MCP face.
+
+| Tool | Purpose |
+|---|---|
+| `CronCreate` | schedule a prompt on a 5-field cron expression, evaluated in the owner's zone; `recurring: false` for a one-shot; returns a job id |
+| `CronDelete` | cancel a job by id |
+| `CronList` | your own pending jobs |
+| `ScheduleWakeup` | wake yourself later (delay clamped to 5–60 min); `stop: true` cancels it |
+
+A job survives daemon restarts, fires into the child's inbox queue whether or
+not the child is busy, never expires, and is held while the agent tree is over
+budget. See `docs/reference/agent-schedules.md` for the full contract.
+
 ### Claude Code's own subagents
 
 A `--kind claude` agent still has its native `Task` tool available, and
@@ -1216,7 +1234,7 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | postgres URL for conversation persistence; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it |
 | `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated on first run); **required in Kubernetes**, where the pod filesystem is ephemeral |
-| `RAFIKI_HEARTBEAT_INTERVAL` | how often a continuously-working child's parent gets a coalesced check-in (Go duration, default 5m; `0` disables) |
+| `RAFIKI_HEARTBEAT_INTERVAL` | how long a continuously-working child runs before its parent gets a coalesced check-in (Go duration, default 4m; `0` disables). A deadline on the scheduler, not a tick — the first check-in lands exactly one interval into a working spell |
 | `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane. Unset = UDS only. Requires `RAFIKI_DB` |
 | `RAFIKI_CONTROL_TLS_CERT` / `RAFIKI_CONTROL_TLS_KEY` | PEM cert/key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_URL` / `RAFIKI_TOKEN` | **daemon-side only.** Points a `rafikid`-spawned `claude` child at an external rafiki instance instead of the embedded proxy face, plus its bearer token. Client-side both names are hard errors (a profile names the daemon instead) except for `rafiki executor serve`/`service install`, which still derive `--connect` from `RAFIKI_URL` |

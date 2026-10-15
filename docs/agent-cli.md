@@ -108,6 +108,25 @@ token file before suspecting the daemon — and mint the replacement with
 `rafikid user create` answers "already exists"); the host CLI never
 authenticates at all.
 
+## `rafikid user`
+
+The direct-DSN identity verbs — the recovery path for identity work when no
+daemon is reachable (`cmd/rafikid/user_cli.go`). Each opens the DSN itself
+(`--db`, else `RAFIKI_DB`, then `RAFIKI_TEST_DSN`) and talks to Postgres
+directly, so none contacts a running daemon or needs a credential. Alongside
+`create`, `update`, `token mint`/`ls`/`revoke`:
+
+```
+rafikid user set-timezone <name> <iana-zone>   # set the zone the user's agents evaluate cron schedules in
+rafikid user set-timezone <name> --clear       # unset it; the daemon's own zone applies again
+```
+
+It sets `users.timezone`, which is the zone `CronCreate` resolves for that
+user's agents before falling back to the daemon's own zone. Existing jobs keep
+the zone they were created in, so recreate one to move it. The zone is
+validated as an IANA name before the store is touched. See
+`docs/reference/agent-schedules.md`.
+
 ## `stats`
 
 Global stats, or stats for one conversation if given a positional id.
