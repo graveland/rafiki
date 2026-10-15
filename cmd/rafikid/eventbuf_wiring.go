@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -76,7 +77,7 @@ func loadEventBufConfig() eventbuf.Config {
 // never binds the buffer effectively disables it).
 func newEventBuffer() *eventbuf.Buffer {
 	cfg := loadEventBufConfig()
-	return eventbuf.New(cfg, eventbuf.RealClock())
+	return eventbuf.New(cfg, clock.RealClock())
 }
 
 func envInt(name string, def int) int {

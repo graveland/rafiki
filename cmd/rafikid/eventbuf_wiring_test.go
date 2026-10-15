@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -65,7 +66,7 @@ func TestIsBusyExemptsScriptChildren(t *testing.T) {
 // deliver.
 func TestBufferFlushCarriesOrphansWithTheirMode(t *testing.T) {
 	c := assert.NewCollecting(t)
-	clk := eventbuf.NewFakeClock(now())
+	clk := clock.NewFakeClock(now())
 
 	var (
 		gotChildID string

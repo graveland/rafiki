@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/inbox"
@@ -49,9 +50,9 @@ func (c *capturedFlush) batches() []capturedBatch {
 
 // settleFixture: one coordinator with five workers, a manual clock so the
 // debounce is deterministic, and a busy function that reports idle.
-func settleFixture(t *testing.T) (*Controller, *eventbuf.FakeClock, *capturedFlush) {
+func settleFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush) {
 	t.Helper()
-	clk := eventbuf.NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
 	cap := &capturedFlush{}
 	buf.SetFlush(cap.fn)

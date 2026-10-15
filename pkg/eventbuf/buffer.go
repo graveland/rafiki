@@ -1,3 +1,6 @@
+// Package eventbuf coalesces externally-injected agent events — subagent
+// transitions, budget warnings, executor loss — into debounced, batched frames
+// so N events cost one model turn instead of N.
 package eventbuf
 
 import (
@@ -7,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/inbox"
 )
 
@@ -50,7 +54,7 @@ type bufKey struct {
 
 type perKey struct {
 	firstPushAt time.Time
-	timer       Timer
+	timer       clock.Timer
 	dirty       bool            // something was accepted since the last flush
 	deferred    bool            // a flush was withheld because the child was busy
 	orphans     []inbox.Inbound // messages the store refused; delivered without durability
@@ -70,7 +74,7 @@ type perKey struct {
 type Buffer struct {
 	mu    sync.Mutex
 	cfg   Config
-	clk   Clock
+	clk   clock.Clock
 	state map[bufKey]*perKey
 	flush FlushFn
 	busy  BusyFn
@@ -80,7 +84,7 @@ type Buffer struct {
 // New returns a Buffer using the given clock. Config fields that are zero are
 // set to documented defaults. The returned buffer has no delivery function;
 // call SetFlush, SetBusy and SetAccepter before use.
-func New(cfg Config, clk Clock) *Buffer {
+func New(cfg Config, clk clock.Clock) *Buffer {
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = 5 * time.Second
 	}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/inbox"
 
 	"github.com/multigres/testkit/assert"
@@ -68,9 +69,9 @@ func (r *flushRecorder) call(i int) flushCall {
 	return r.calls[i]
 }
 
-func newTestBuffer(t *testing.T) (*Buffer, *FakeClock, *flushRecorder, *inbox.Memory) {
+func newTestBuffer(t *testing.T) (*Buffer, *clock.FakeClock, *flushRecorder, *inbox.Memory) {
 	t.Helper()
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	b := New(Config{
@@ -114,7 +115,7 @@ func TestFiveEventsInWindowProduceOneFlush(t *testing.T) {
 // window used to lose the batch outright.
 func TestPushPersistsBeforeArming(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	var flushes atomic.Int32
 	b := New(Config{Debounce: time.Second}, clk)
@@ -146,7 +147,7 @@ func TestMaxWaitCeilingPreventsStarvation(t *testing.T) {
 // hidden poller doing the work.
 func TestFlushDefersWhileBusyAndReleasesOnIdle(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	var busy atomic.Bool
@@ -191,7 +192,7 @@ func TestPushNowBypassesDebounceAndDrainsPendingFirst(t *testing.T) {
 // caps moved to inbox.Coalesce and are tested there.)
 func TestPerFragmentTruncationIsVisibleInThePersistedRow(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	b := New(Config{Debounce: time.Second, MaxBytesPerFrag: 20}, clk)
 	b.SetAccepter(inbox.NewQueue(inbox.QueueConfig{Store: st}))
@@ -226,7 +227,7 @@ func TestSourceWithDoubleColonIsRejected(t *testing.T) {
 // event, whether or not the turn it lands in is invalidated by it.
 func TestPushNowDefersWhileBusy(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	var busy atomic.Bool
@@ -253,7 +254,7 @@ func TestPushNowDefersWhileBusy(t *testing.T) {
 // group containing a steer deliver as a steer.
 func TestPushSteerBypassesTheBusyGate(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	b := New(Config{}, clk)
@@ -273,7 +274,7 @@ func TestPushSteerBypassesTheBusyGate(t *testing.T) {
 // which is the cost this package exists to remove.
 func TestDrainIdleReleasesOnlyDeferredBatches(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	b := New(Config{Debounce: 5 * time.Second}, clk)
@@ -293,7 +294,7 @@ func TestDrainIdleReleasesOnlyDeferredBatches(t *testing.T) {
 // write, and a producer that pushes from inside that path would deadlock on a
 // re-entrant acquire.
 func TestFlushRunsWithoutHoldingTheLock(t *testing.T) {
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	b := New(Config{Debounce: time.Second}, clk)
 	b.SetBusy(func(string) bool { return false })
 	done := make(chan struct{}, 1)
@@ -328,7 +329,7 @@ func TestFlushRunsWithoutHoldingTheLock(t *testing.T) {
 // completes (the batch freshly deferred) — never the torn state in between.
 func TestFireBusyCheckAndDeferralAreAtomicWithDrainIdle(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	b := New(Config{}, clk)
@@ -396,7 +397,7 @@ func TestFireBusyCheckAndDeferralAreAtomicWithDrainIdle(t *testing.T) {
 // exit, Drop when the child is forgotten for good) — not this package's.
 func TestForgetStopsTimersButLeavesMessagesForTheController(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
 	b := New(Config{Debounce: 5 * time.Second}, clk)
@@ -431,7 +432,7 @@ func TestForgetStopsTimersButLeavesMessagesForTheController(t *testing.T) {
 // save, silently and without error.
 func TestForgetFlushesOrphansRatherThanDroppingThem(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
 	st := failingStore{inbox.NewMemory()}
 	b := New(Config{Debounce: 5 * time.Second}, clk)
@@ -472,7 +473,7 @@ var _ inbox.Store = failingStore{}
 func TestAcceptFailureDeliversTheFragmentAsAnOrphan(t *testing.T) {
 	c := assert.NewAborting(t)
 	quietLogs(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
 	st := failingStore{inbox.NewMemory()}
 	b := New(Config{Debounce: time.Second}, clk)
@@ -495,7 +496,7 @@ func TestAcceptFailureDeliversTheFragmentAsAnOrphan(t *testing.T) {
 // is an orphan: still delivered, never persisted.
 func TestNoAccepterMakesEveryPushAnOrphan(t *testing.T) {
 	c := assert.NewAborting(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
 	b := New(Config{Debounce: time.Second}, clk)
 	b.SetFlush(rec.record)
@@ -519,7 +520,7 @@ func TestNoAccepterMakesEveryPushAnOrphan(t *testing.T) {
 func TestSteerSurvivesTheOrphanPath(t *testing.T) {
 	c := assert.NewAborting(t)
 	quietLogs(t)
-	clk := NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
 	st := failingStore{inbox.NewMemory()}
 	b := New(Config{}, clk)

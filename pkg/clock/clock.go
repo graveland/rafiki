@@ -1,7 +1,6 @@
-// Package eventbuf coalesces externally-injected agent events — subagent
-// transitions, budget warnings, executor loss — into debounced, batched frames
-// so N events cost one model turn instead of N.
-package eventbuf
+// Package clock is the daemon's time source: a Clock with a timer factory, and a deterministic
+// FakeClock for tests.
+package clock
 
 import (
 	"sort"

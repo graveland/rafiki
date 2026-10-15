@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -93,10 +94,10 @@ func TestSelfKillDispositionFor(t *testing.T) {
 // in, the same technique settleFixture uses for the in-memory Controller, so
 // a real handleChildExit's notifySubagentSettled call can be observed
 // synchronously instead of racing a live debounce timer.
-func killNoticeFixture(t *testing.T) (*Controller, *eventbuf.FakeClock, *capturedFlush) {
+func killNoticeFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush) {
 	t.Helper()
 	ctrl := newTestController(t)
-	clk := eventbuf.NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
 	cap := &capturedFlush{}
 	buf.SetFlush(cap.fn)

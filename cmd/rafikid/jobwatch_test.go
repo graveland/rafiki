@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -21,9 +22,9 @@ import (
 // buffer on a manual clock. The watcher's poll is scripted by the test via
 // the returned channel; interval is 1ms so a loop test runs in real time
 // while the buffer's debounce stays deterministic on the fake clock.
-func jobWatchFixture(t *testing.T) (*Controller, *eventbuf.FakeClock, *capturedFlush, chan jobPoll) {
+func jobWatchFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush, chan jobPoll) {
 	t.Helper()
-	clk := eventbuf.NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
 	cap := &capturedFlush{}
 	buf.SetFlush(cap.fn)

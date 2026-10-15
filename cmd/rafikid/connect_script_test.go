@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -26,9 +27,9 @@ import (
 // scriptHubFixture: one controller with an in-memory childstore, a capturing
 // event buffer (the capturedFlush fixture from subagent_events_test.go), and
 // a durable in-memory event log for the top-level-report path.
-func scriptHubFixture(t *testing.T) (*Controller, *capturedFlush, *eventlog.Memory, *eventbuf.FakeClock) {
+func scriptHubFixture(t *testing.T) (*Controller, *capturedFlush, *eventlog.Memory, *clock.FakeClock) {
 	t.Helper()
-	clk := eventbuf.NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
 	cap := &capturedFlush{}
 	buf.SetFlush(cap.fn)

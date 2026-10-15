@@ -1,4 +1,4 @@
-package eventbuf
+package clock
 
 import (
 	"sync/atomic"

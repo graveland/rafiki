@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -19,9 +20,9 @@ import (
 // recordingChildStore (shared with shutdown_test.go), with a capturing event
 // buffer and a manual clock — everything a result-lifecycle test needs to see
 // both the store and the settle fragment.
-func prResultFixture(t *testing.T) (*Controller, *recordingChildStore, *eventbuf.FakeClock, *capturedFlush) {
+func prResultFixture(t *testing.T) (*Controller, *recordingChildStore, *clock.FakeClock, *capturedFlush) {
 	t.Helper()
-	clk := eventbuf.NewFakeClock(time.Unix(0, 0))
+	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
 	cap := &capturedFlush{}
 	buf.SetFlush(cap.fn)
