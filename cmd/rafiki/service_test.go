@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -14,6 +15,51 @@ import (
 
 	"github.com/multigres/testkit/assert"
 )
+
+// fakeServiceBackend records what it was asked to do, so the install seam can
+// be exercised without touching launchd/systemd.
+type fakeServiceBackend struct {
+	installed serviceSpec
+	restarted bool
+	status    serviceStatus
+}
+
+func (f *fakeServiceBackend) Install(spec serviceSpec) error { f.installed = spec; return nil }
+func (f *fakeServiceBackend) Uninstall() error               { return nil }
+func (f *fakeServiceBackend) Start() error                   { return nil }
+func (f *fakeServiceBackend) Stop() error                    { return nil }
+func (f *fakeServiceBackend) Restart() error                 { f.restarted = true; return nil }
+func (f *fakeServiceBackend) Status() (serviceStatus, error) { return f.status, nil }
+func (f *fakeServiceBackend) LogPath() string                { return "/tmp/fake-service.log" }
+
+// stubServiceBackend replaces serviceBackendFor for the duration of a test.
+func stubServiceBackend(t *testing.T, b serviceBackend) {
+	t.Helper()
+	orig := serviceBackendFor
+	t.Cleanup(func() { serviceBackendFor = orig })
+	serviceBackendFor = func() serviceBackend { return b }
+}
+
+// serviceEnvFixture isolates the profile and returns the fixture home dir plus
+// the path service.env would occupy under it.
+func serviceEnvFixture(t *testing.T) (home, envFile string) {
+	t.Helper()
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	return home, filepath.Join(home, "config", "rafiki", "service.env")
+}
+
+// A daemon binary the install can point its unit at without a real build.
+func writeFakeDaemonBinary(t *testing.T, home string) string {
+	t.Helper()
+	bin := filepath.Join(home, "rafikid")
+	if err := os.WriteFile(bin, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
 
 // TestFindDaemonBinaryFromSibling verifies that a daemon binary sitting next to
 // the specified "self" path is returned without falling through to PATH.
@@ -486,4 +532,125 @@ func TestRunServiceInstall_PrintsReportEvenWhenInstallFails(t *testing.T) {
 	c.StrContains(out, "RAFIKI_DB", "installReport output did not reach the operator on the Install-failure path:\n")
 	c.NotStrContains(out, "hunter2", "report leaked a secret VALUE, not just its name")
 	c.NotStrContains(out, "rafiki service installed", "success banner printed despite Install failing")
+}
+
+// ─── installDaemonService (the setup-facing seam) ───────────────────────────────
+
+// `rafiki setup` writes every daemon setting to service.env itself, so its
+// install must not depend on the invoking shell at all: with CaptureShellEnv
+// unset, a RAFIKI_DB and RAFIKI_PROXY_LISTEN exported in the shell must reach
+// neither the unit nor service.env.
+func TestInstallDaemonServiceWithoutShellEnvCapturesNothing(t *testing.T) {
+	c := assert.NewCollecting(t)
+	home, envFile := serviceEnvFixture(t)
+	t.Setenv("RAFIKI_ENV_FILE", "")
+	t.Setenv("RAFIKI_DB", "postgres://x")
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:1")
+
+	fb := &fakeServiceBackend{}
+	stubServiceBackend(t, fb)
+
+	var out bytes.Buffer
+	err := installDaemonService(daemonServiceOptions{
+		DaemonBinary: writeFakeDaemonBinary(t, home),
+		PathEnv:      "/usr/bin",
+	}, &out)
+	c.Require().NoError(err, "installDaemonService")
+
+	c.Empty(fb.installed.ExtraEnv, "ExtraEnv captured from the shell despite CaptureShellEnv=false")
+	c.Empty(fb.installed.SecretEnv, "SecretEnv captured from the shell despite CaptureShellEnv=false")
+	if _, statErr := os.Stat(envFile); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("service.env was created with CaptureShellEnv=false: stat err = %v", statErr)
+	}
+}
+
+// With CaptureShellEnv the install behaves exactly as `rafiki service install`
+// always has: the address lands in the unit, the DSN in service.env.
+func TestInstallDaemonServiceWithShellEnvMatchesOldBehaviour(t *testing.T) {
+	c := assert.NewCollecting(t)
+	home, envFile := serviceEnvFixture(t)
+	t.Setenv("RAFIKI_ENV_FILE", "")
+	t.Setenv("RAFIKI_DB", "postgres://u:hunter2@localhost/rafiki")
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:1")
+
+	fb := &fakeServiceBackend{}
+	stubServiceBackend(t, fb)
+
+	var out bytes.Buffer
+	err := installDaemonService(daemonServiceOptions{
+		DaemonBinary:    writeFakeDaemonBinary(t, home),
+		PathEnv:         "/usr/bin",
+		CaptureShellEnv: true,
+	}, &out)
+	c.Require().NoError(err, "installDaemonService")
+
+	c.Eq("127.0.0.1:1", fb.installed.ExtraEnv["RAFIKI_PROXY_LISTEN"], "RAFIKI_PROXY_LISTEN did not reach the unit")
+	if _, ok := fb.installed.ExtraEnv["RAFIKI_DB"]; ok {
+		t.Error("RAFIKI_DB was baked into the world-readable unit")
+	}
+	got, readErr := os.ReadFile(envFile)
+	c.Require().NoError(readErr, "service.env was not written")
+	c.StrContains(string(got), "RAFIKI_DB", "service.env does not hold the DSN")
+}
+
+// RAFIKI_ENV_FILE is a path override, not a credential, and stays in the unit
+// even without shell capture — otherwise the daemon would resolve the default
+// service.env while setup wrote the custom path. See unitEnvVars' doc comment.
+func TestInstallDaemonServiceKeepsEnvFileOverride(t *testing.T) {
+	c := assert.NewCollecting(t)
+	home, _ := serviceEnvFixture(t)
+	t.Setenv("RAFIKI_ENV_FILE", "/custom/service.env")
+
+	fb := &fakeServiceBackend{}
+	stubServiceBackend(t, fb)
+
+	var out bytes.Buffer
+	err := installDaemonService(daemonServiceOptions{
+		DaemonBinary: writeFakeDaemonBinary(t, home),
+		PathEnv:      "/usr/bin",
+	}, &out)
+	c.Require().NoError(err, "installDaemonService")
+
+	c.Eq("/custom/service.env", fb.installed.ExtraEnv[paths.EnvFile], "RAFIKI_ENV_FILE override did not reach the unit")
+}
+
+// The `pi` child kind is retired, so buildPathEnv must not warn about it — this
+// warning was the first thing a tester saw on install.
+func TestBuildPathEnvNoPiWarning(t *testing.T) {
+	c := assert.NewCollecting(t)
+	t.Setenv("PATH", "") // nothing on PATH, so any lookup fails silently
+
+	r, w, err := os.Pipe()
+	c.Require().NoError(err)
+	orig := os.Stderr
+	os.Stderr = w
+	buildPathEnv()
+	w.Close()
+	os.Stderr = orig
+
+	var buf bytes.Buffer
+	_, copyErr := io.Copy(&buf, r)
+	c.Require().NoError(copyErr)
+	c.NotStrContains(buf.String(), "pi", "buildPathEnv still warns about the retired `pi` kind:\n%s", buf.String())
+}
+
+// ─── setup-facing service helpers ──────────────────────────────────────────────
+
+func TestRestartDaemonServiceDelegates(t *testing.T) {
+	c := assert.NewCollecting(t)
+	fb := &fakeServiceBackend{}
+	stubServiceBackend(t, fb)
+
+	c.Require().NoError(restartDaemonService(), "restartDaemonService")
+	c.True(fb.restarted, "restartDaemonService did not call the backend's Restart")
+}
+
+func TestDaemonServiceInstalledReportsStatus(t *testing.T) {
+	c := assert.NewCollecting(t)
+	fb := &fakeServiceBackend{status: serviceStatus{Installed: true}}
+	stubServiceBackend(t, fb)
+
+	got, err := daemonServiceInstalled()
+	c.Require().NoError(err, "daemonServiceInstalled")
+	c.True(got, "daemonServiceInstalled did not surface Status().Installed")
 }

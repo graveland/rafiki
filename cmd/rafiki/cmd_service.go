@@ -30,6 +30,11 @@ type serviceBackend interface {
 	LogPath() string
 }
 
+// serviceBackendFor returns the per-OS backend. A var, not a direct call to
+// newServiceBackend (which is defined per OS in service_darwin.go /
+// service_linux.go / service_unsupported.go), so tests can substitute a stub.
+var serviceBackendFor = newServiceBackend
+
 // serviceSpec carries the information needed to write the service unit.
 type serviceSpec struct {
 	DaemonBinary string
@@ -299,29 +304,57 @@ func newServiceTailCmd() *cobra.Command {
 // --- run functions ---
 
 func runServiceInstall(cmd *cobra.Command, _ []string) error {
-	spec, err := buildServiceSpec(cmd)
+	daemonBinary, _ := cmd.Flags().GetString("daemon-binary")
+	pathEnv, _ := cmd.Flags().GetString("path-env")
+	return installDaemonService(daemonServiceOptions{
+		DaemonBinary:    daemonBinary,
+		PathEnv:         pathEnv,
+		CaptureShellEnv: true,
+	}, os.Stdout)
+}
+
+// daemonServiceOptions is what installDaemonService needs. CaptureShellEnv is
+// true for `rafiki service install` (today's behaviour) and false for
+// `rafiki setup`, which has already written every daemon setting to
+// service.env (the daemon applies every key in it at startup, loadServiceEnv)
+// and must not depend on the invoking shell.
+type daemonServiceOptions struct {
+	DaemonBinary    string // "" = findDaemonBinary()
+	PathEnv         string // "" = buildPathEnv()
+	CaptureShellEnv bool
+}
+
+// installDaemonService writes the daemon's service unit and, when
+// opts.CaptureShellEnv is set, merges this shell's secrets into service.env
+// first.
+func installDaemonService(opts daemonServiceOptions, out io.Writer) error {
+	spec, err := buildServiceSpec(opts)
 	if err != nil {
 		return err
 	}
 
-	// Write secrets to service.env BEFORE starting the daemon. b.Install below
-	// bootstraps the launchd job (RunAtLoad) or runs `systemctl enable --now`,
-	// either of which spawns the daemon immediately — and the daemon reads
-	// service.env once, at startup (loadServiceEnv, very early in
-	// cmd/rafikid/main.go). Merging after install would mean the freshly
-	// spawned daemon reads the file before this call ever writes it, so on a
-	// clean machine it comes up with no DSN: in-memory conversations, no
-	// per-turn cost, until the next restart. A merge failure still does not
-	// fail the install (see installReport's mergeErr handling below) — by
-	// writing first we get to report a failure AND still let the install
-	// proceed, rather than trading one for the other.
 	envFile := paths.ServiceEnvFile()
-	res, mergeErr := paths.MergeEnvFile(envFile, spec.SecretEnv, "added by rafiki service install on "+time.Now().Format("2006-01-02"))
+	var res paths.MergeResult
+	var mergeErr error
+	if opts.CaptureShellEnv {
+		// Write secrets to service.env BEFORE starting the daemon. b.Install below
+		// bootstraps the launchd job (RunAtLoad) or runs `systemctl enable --now`,
+		// either of which spawns the daemon immediately — and the daemon reads
+		// service.env once, at startup (loadServiceEnv, very early in
+		// cmd/rafikid/main.go). Merging after install would mean the freshly
+		// spawned daemon reads the file before this call ever writes it, so on a
+		// clean machine it comes up with no DSN: in-memory conversations, no
+		// per-turn cost, until the next restart. A merge failure still does not
+		// fail the install (see installReport's mergeErr handling below) — by
+		// writing first we get to report a failure AND still let the install
+		// proceed, rather than trading one for the other.
+		res, mergeErr = paths.MergeEnvFile(envFile, spec.SecretEnv, "added by rafiki service install on "+time.Now().Format("2006-01-02"))
+	}
 
-	b := newServiceBackend()
+	b := serviceBackendFor()
 	installErr := b.Install(spec)
 	if installErr == nil {
-		fmt.Printf("rafiki service installed.\nLog: %s\n", b.LogPath())
+		fmt.Fprintf(out, "rafiki service installed.\nLog: %s\n", b.LogPath())
 	}
 
 	// Print the report even when Install failed: the unit file and secret
@@ -329,11 +362,28 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	// (including a service.env chmod tightening — a real, already-applied
 	// permission change) and the operator must not lose that record just
 	// because the reload itself came back with an error.
-	fmt.Print(installReport(spec, envFile, res, mergeErr))
+	fmt.Fprint(out, installReport(spec, envFile, res, mergeErr))
 	if installErr != nil {
 		return fmt.Errorf("install service: %w", installErr)
 	}
 	return nil
+}
+
+// restartDaemonService restarts the installed daemon service. A thin wrapper
+// over the backend so `rafiki setup` can restart without touching the per-OS
+// constructors directly.
+func restartDaemonService() error {
+	return serviceBackendFor().Restart()
+}
+
+// daemonServiceInstalled reports whether the daemon service is installed.
+// `rafiki setup` uses it to decide whether there is anything to restart.
+func daemonServiceInstalled() (bool, error) {
+	st, err := serviceBackendFor().Status()
+	if err != nil {
+		return false, err
+	}
+	return st.Installed, nil
 }
 
 // installReport renders what `service install` tells the operator: where each
@@ -560,12 +610,13 @@ func streamLogFile(ctx context.Context, logPath string, follow bool) error {
 
 // --- spec helpers ---
 
-// buildServiceSpec constructs a serviceSpec from command flags and defaults.
-func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
+// buildServiceSpec constructs a serviceSpec from the install options and
+// defaults.
+func buildServiceSpec(opts daemonServiceOptions) (serviceSpec, error) {
 	spec := serviceSpec{}
 
-	if v, _ := cmd.Flags().GetString("daemon-binary"); v != "" {
-		spec.DaemonBinary = v
+	if opts.DaemonBinary != "" {
+		spec.DaemonBinary = opts.DaemonBinary
 	} else {
 		bin, err := findDaemonBinary()
 		if err != nil {
@@ -580,12 +631,25 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 	}
 	spec.HomeEnv = home
 	spec.LogPath = paths.ServiceLogPath()
-	var skipped []string
-	spec.ExtraEnv, spec.SecretEnv, skipped = captureDaemonEnv(os.Environ())
-	spec.SkippedEnv = skipped
 
-	if v, _ := cmd.Flags().GetString("path-env"); v != "" {
-		spec.PathEnv = v
+	if opts.CaptureShellEnv {
+		var skipped []string
+		spec.ExtraEnv, spec.SecretEnv, skipped = captureDaemonEnv(os.Environ())
+		spec.SkippedEnv = skipped
+	} else {
+		// `rafiki setup` has already written every daemon setting to service.env,
+		// which the daemon applies at startup (loadServiceEnv), so it must not
+		// depend on the invoking shell. The one exception is paths.EnvFile: the
+		// path override still belongs in the unit for the reason unitEnvVars'
+		// doc comment gives — the daemon must resolve the same file setup wrote.
+		spec.ExtraEnv = make(map[string]string)
+		if v := os.Getenv(paths.EnvFile); v != "" {
+			spec.ExtraEnv[paths.EnvFile] = v
+		}
+	}
+
+	if opts.PathEnv != "" {
+		spec.PathEnv = opts.PathEnv
 	} else {
 		spec.PathEnv = buildPathEnv()
 	}
@@ -624,17 +688,17 @@ func findDaemonBinaryFrom(self string) (string, error) {
 }
 
 // buildPathEnv builds the PATH string for the service environment. It
-// prepends the directories containing the child backends the daemon spawns by
-// name — `pi` and `claude` — and appends a set of standard directories.
+// prepends the directory containing `claude`, the child backend the daemon
+// spawns by name, and appends a set of standard directories.
 //
-// claude is here for the same reason pi is, and is easier to miss: it is
-// commonly installed under ~/.local/bin (as a symlink into a versioned
-// directory), which is on nobody's default service PATH. Worse, in an
-// interactive shell `claude` is often a shell function, so it appears to be
-// "on PATH" when checked by hand while launchd has no equivalent and cannot
-// find it at all — --kind claude children then fail to spawn under the service
-// while working perfectly when rafikid is run from a terminal. exec.LookPath
-// resolves the real executable, which is exactly what the daemon needs.
+// claude is here because it is commonly installed under ~/.local/bin (as a
+// symlink into a versioned directory), which is on nobody's default service
+// PATH. Worse, in an interactive shell `claude` is often a shell function, so
+// it appears to be "on PATH" when checked by hand while launchd has no
+// equivalent and cannot find it at all — --kind claude children then fail to
+// spawn under the service while working perfectly when rafikid is run from a
+// terminal. exec.LookPath resolves the real executable, which is exactly what
+// the daemon needs.
 func buildPathEnv() string {
 	standard := []string{
 		"/usr/local/bin",
@@ -646,11 +710,6 @@ func buildPathEnv() string {
 	var dirs []string
 	if claudePath, err := exec.LookPath("claude"); err == nil {
 		dirs = append(dirs, filepath.Dir(claudePath))
-	}
-	if piPath, err := exec.LookPath("pi"); err == nil {
-		dirs = append(dirs, filepath.Dir(piPath))
-	} else {
-		fmt.Fprintln(os.Stderr, "warning: `pi` not found on PATH; the daemon may not be able to spawn pi until PATH is configured")
 	}
 	dirs = append(dirs, standard...)
 
