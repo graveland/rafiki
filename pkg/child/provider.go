@@ -90,15 +90,14 @@ type ParseResult struct {
 	// Events are normalized state-machine events applied in order. Type strings
 	// match the StateMachine vocabulary: agent_start, agent_end,
 	// tool_execution_start, tool_execution_end, compaction_start,
-	// compaction_end, extension_ui_request, auto_retry_start, extension_error.
+	// compaction_end, auto_retry_start, extension_error.
 	Events []ParsedEvent
 }
 
 // ParsedEvent is one normalized state-machine event.
 type ParsedEvent struct {
 	Type       string
-	UI         *PiUIRequestMeta // non-nil only for extension_ui_request
-	RetryError string           // set only for auto_retry_start
+	RetryError string // set only for auto_retry_start
 	// Text carries the raw line, set only for script_output events: a script
 	// child's stdout is free-form text, not a JSONL protocol, so the line IS
 	// the payload and the daemon publishes it (coalesced) as the child's

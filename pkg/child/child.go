@@ -685,16 +685,6 @@ func (c *Child) StderrSnapshot() []byte {
 	return b
 }
 
-// NotifyExtensionUIResponse updates the state machine when the controller
-// forwards an extension_ui_response to the child. If this was the last
-// pending dialog, the SM transitions from blocked_ui back to the prior state.
-// The status change is observed by monitorChild on the next bus event.
-func (c *Child) NotifyExtensionUIResponse(id string) {
-	c.metaMu.Lock()
-	defer c.metaMu.Unlock()
-	c.recordTransition(c.sm.OnExtensionUIResponse(id))
-}
-
 // Metadata returns the most recently sniffed session/model metadata.
 // Safe to call concurrently.
 func (c *Child) Metadata() SnifferMetadata {
@@ -990,8 +980,6 @@ func (c *Child) handleFrame(line []byte) {
 		case "auto_retry_start":
 			// Informational only; OnAutoRetryStart makes no transition.
 			c.sm.OnAutoRetryStart(e.RetryError)
-		case "extension_ui_request":
-			c.recordTransition(c.sm.OnPiEvent(e.Type, e.UI))
 		default:
 			c.recordTransition(c.sm.OnPiEvent(e.Type, nil))
 		}

@@ -39,11 +39,6 @@ func TestIdentityProvider_Parse_AutoRetryCarriesError(t *testing.T) {
 	assert.NewAborting(t).False(len(res.Events) != 1 || res.Events[0].Type != "auto_retry_start" || res.Events[0].RetryError != "429 overloaded", "events = %+v", res.Events)
 }
 
-func TestIdentityProvider_Parse_UIRequestCarriesMeta(t *testing.T) {
-	res := IdentityProvider{}.Parse([]byte(`{"type":"extension_ui_request","id":"u1","method":"confirm"}`))
-	assert.NewAborting(t).False(len(res.Events) != 1 || res.Events[0].Type != "extension_ui_request" || res.Events[0].UI == nil || res.Events[0].UI.ID != "u1" || res.Events[0].UI.Method != "confirm", "events = %+v", res.Events)
-}
-
 func TestIdentityProvider_Parse_Garbage(t *testing.T) {
 	res := IdentityProvider{}.Parse([]byte(`not json`))
 	assert.NewAborting(t).False(res.FirstResponse || res.HasMeta || len(res.Events) != 0, "garbage should be a no-op, got %+v", res)

@@ -3821,18 +3821,6 @@ func (c *Controller) sendFrame(childID string, frame json.RawMessage) error {
 		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 
-	// Detect extension_ui_response frames and update the SM so the blocked_ui
-	// state is cleared when the last pending dialog is resolved (spec §10).
-	var uiResp struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
-	}
-	if json.Unmarshal(frame, &uiResp) == nil &&
-		uiResp.Type == "extension_ui_response" &&
-		uiResp.ID != "" {
-		ch.NotifyExtensionUIResponse(uiResp.ID)
-	}
-
 	if err := ch.Send(frame); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "backpressure") {
@@ -4231,13 +4219,11 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 
 		case <-ch.StatusChanged():
 			// A transition was recorded without a bus frame following it — the
-			// last one of a turn, or one made off the readStdout goroutine
-			// (NotifyExtensionUIResponse). Without this wake it would sit in the
-			// queue until the next frame arrived, which for a child that has gone
-			// quiet is never.
+			// last one of a turn, or one made off the readStdout goroutine.
+			// Without this wake it would sit in the queue until the next frame
+			// arrived, which for a child that has gone quiet is never.
 			//
-			// Guarded by TestMonitorChild_UIResponseTransition_NeedsNoBusFrame,
-			// which is the shape that bites: the burst tests do NOT cover this
+			// Which is the shape that bites: the burst tests do NOT cover this
 			// case and pass with this branch deleted, because readStdout records
 			// before monitorChild consumes the frame that caused it.
 			drainStatus()

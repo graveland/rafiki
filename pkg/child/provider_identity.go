@@ -42,8 +42,6 @@ func (IdentityProvider) Parse(line []byte) ParseResult {
 	var hdr struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
-		Method  string `json:"method,omitempty"`
-		ID      string `json:"id,omitempty"`
 	}
 	if err := json.Unmarshal(line, &hdr); err != nil {
 		return res
@@ -65,8 +63,6 @@ func (IdentityProvider) Parse(line []byte) ParseResult {
 			}
 			_ = json.Unmarshal(line, &payload)
 			res.Events = append(res.Events, ParsedEvent{Type: "auto_retry_start", RetryError: payload.ErrorMessage})
-		case "extension_ui_request":
-			res.Events = append(res.Events, ParsedEvent{Type: "extension_ui_request", UI: &PiUIRequestMeta{ID: hdr.ID, Method: hdr.Method}})
 		default:
 			res.Events = append(res.Events, ParsedEvent{Type: hdr.Type})
 		}

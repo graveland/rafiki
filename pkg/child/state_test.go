@@ -1,7 +1,6 @@
 package child_test
 
 import (
-	"fmt"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/child"
@@ -106,29 +105,6 @@ func TestStateMachineBatchWaitPushPop(t *testing.T) {
 	}
 }
 
-func TestStateMachine_DialogUI_Push_OnlyForDialogMethods(t *testing.T) {
-	c := assert.NewAborting(t)
-	sm := child.NewStateMachine()
-	sm.OnFirstResponse()
-	sm.OnPiEvent("agent_start", nil)
-
-	// fire-and-forget: no transition.
-	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
-		ID: "u1", Method: "notify",
-	})
-	c.Eq(protocol.StatusStreaming, sm.Current(), "notify must not block")
-
-	// dialog: push.
-	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
-		ID: "u2", Method: "confirm",
-	})
-	c.Eq(protocol.StatusBlockedUI, sm.Current(), "confirm must block")
-
-	// Response: pop.
-	sm.OnExtensionUIResponse("u2")
-	c.Eq(protocol.StatusStreaming, sm.Current(), "response did not pop")
-}
-
 func TestStateMachine_ExtensionError_Counter_NoTransition(t *testing.T) {
 	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
@@ -167,67 +143,6 @@ func TestStateMachine_AutoRetryStart_SetsCountersAndError(t *testing.T) {
 	c := sm.Counters()
 	ck.Eq(1, c.AutoRetries, "AutoRetries: got")
 	ck.Eq("529 overloaded_error: Overloaded", c.LastRetryError, "LastRetryError: got")
-}
-
-func TestStateMachine_MultipleConcurrentDialogs_ResolveCleanly(t *testing.T) {
-	c := assert.NewAborting(t)
-	sm := child.NewStateMachine()
-	sm.OnFirstResponse()
-	sm.OnPiEvent("agent_start", nil)
-	// Now in streaming.
-
-	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
-		ID: "u1", Method: "confirm",
-	})
-	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after u1")
-
-	// Second concurrent dialog while still in blocked_ui.
-	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
-		ID: "u2", Method: "confirm",
-	})
-	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after u2")
-
-	// Resolve in arbitrary order.
-	sm.OnExtensionUIResponse("u2")
-	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after u2 resp (u1 still pending)")
-	sm.OnExtensionUIResponse("u1")
-	// Now both resolved; should be back to streaming.
-	c.Eq(protocol.StatusStreaming, sm.Current(), "after all resolved")
-}
-
-func TestStateMachine_DialogOverCap_SilentlyDropped(t *testing.T) {
-	c := assert.NewAborting(t)
-	sm := child.NewStateMachine()
-	sm.OnFirstResponse()
-	sm.OnPiEvent("agent_start", nil)
-
-	// Fill the pendingUI cap with 64 dialog requests.
-	for i := 0; i < 64; i++ {
-		sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
-			ID:     fmt.Sprintf("u%d", i),
-			Method: "confirm",
-		})
-	}
-	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after 64 dialogs")
-
-	// The 65th request — over cap. Should NOT push.
-	// We can't directly observe "didn't push", but we can verify by
-	// resolving the 64 tracked dialogs and confirming we return to streaming
-	// (rather than getting stuck in blocked_ui with an orphan push).
-	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
-		ID: "overflow", Method: "confirm",
-	})
-
-	for i := 0; i < 64; i++ {
-		sm.OnExtensionUIResponse(fmt.Sprintf("u%d", i))
-	}
-	// After resolving all 64 tracked, should be back to streaming.
-	// If the overflow had pushed, we'd be stuck in blocked_ui.
-	c.Eq(protocol.StatusStreaming, sm.Current(), "after resolving all tracked")
-
-	// The overflow response should be a no-op.
-	sm.OnExtensionUIResponse("overflow")
-	c.Eq(protocol.StatusStreaming, sm.Current(), "overflow response changed state")
 }
 
 func TestStateMachine_DefensivePopOnEmptyStack(t *testing.T) {
