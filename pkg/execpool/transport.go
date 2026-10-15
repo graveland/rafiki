@@ -34,6 +34,11 @@ import (
 // connection was handed in.
 var ErrRedialed = errors.New("execpool: transport requested a second connection; the executor connection is gone")
 
+// maxExecutorStreams is the executor server's HTTP/2 concurrent-stream limit.
+// Stated here rather than left to the library default so the warning threshold
+// below has a number to sit under.
+const maxExecutorStreams = 250
+
 // ALPNProtocols is what BOTH sides advertise on the shared TLS listener.
 //
 // It is http/1.1, not h2, and that is not a downgrade: the connection starts as
@@ -60,7 +65,23 @@ var ALPNProtocols = []string{"http/1.1"}
 // conn, which unblocks the pending Read with an error and lets ServeConn's
 // internal serve() return. Passing ctx through as Context too is still worth
 // doing — it cancels any in-flight handler that checks r.Context().Done().
+// newInvertedServer builds the HTTP/2 server side of the inverted transport.
+//
+// The stream limit is a parameter rather than baked in so a test can pin the
+// wait-rather-than-fail behaviour against a small limit while production passes
+// maxExecutorStreams.
+func newInvertedServer(limit uint32) *http2.Server {
+	return &http2.Server{MaxConcurrentStreams: limit}
+}
+
 func ServeInverted(ctx context.Context, conn net.Conn, handler http.Handler) error {
+	return serveInvertedOn(ctx, conn, handler, newInvertedServer(maxExecutorStreams))
+}
+
+// serveInvertedOn is ServeInverted with the HTTP/2 server supplied, so a test
+// can pin the stream-limit behaviour against a small MaxConcurrentStreams while
+// production passes maxExecutorStreams.
+func serveInvertedOn(ctx context.Context, conn net.Conn, handler http.Handler, srv *http2.Server) error {
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -71,7 +92,6 @@ func ServeInverted(ctx context.Context, conn net.Conn, handler http.Handler) err
 		}
 	}()
 
-	srv := &http2.Server{}
 	srv.ServeConn(conn, &http2.ServeConnOpts{
 		Handler: handler,
 		Context: ctx,
@@ -90,6 +110,11 @@ func ClientForConn(conn net.Conn) (*http.Client, error) {
 	var handedOver atomic.Bool
 	tr := &http2.Transport{
 		AllowHTTP: true,
+		// One connection per executor, and the dial hook refuses a second:
+		// without this, call #251 tries to redial and fails. With it, the
+		// transport makes callers wait for a free stream (its documented
+		// behaviour).
+		StrictMaxConcurrentStreams: true,
 		DialTLSContext: func(context.Context, string, string, *tls.Config) (net.Conn, error) {
 			if handedOver.Swap(true) {
 				return nil, ErrRedialed

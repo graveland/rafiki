@@ -440,7 +440,7 @@ func (p *Pool) serve(conn *upgradeconn.Conn, a admission) {
 	lc := &liveConn{
 		executor:    e,
 		describe:    desc.Msg,
-		client:      &executorClient{inner: cl},
+		client:      &executorClient{inner: cl, inflight: &inFlight{id: e.ID}},
 		httpCli:     httpClient,
 		remoteAddr:  remote,
 		network:     conn.RemoteAddr().Network(),
@@ -747,6 +747,7 @@ type workspaceClient struct {
 }
 
 func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
+	defer c.inflight.enter()()
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:        tool,
 		InputJson:   input,
@@ -774,6 +775,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 }
 
 func (c *workspaceClient) StartJob(ctx context.Context, command string) (string, error) {
+	defer c.inflight.enter()()
 	input, _ := json.Marshal(map[string]string{"command": command})
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:        "bash",
@@ -805,6 +807,7 @@ func (c *workspaceClient) StartJob(ctx context.Context, command string) (string,
 // executorClient because it needs a workspace id, and only a workspace-scoped
 // client carries one.
 func (c *workspaceClient) ProjectContext(ctx context.Context) (string, error) {
+	defer c.inflight.enter()()
 	resp, err := c.inner.ProjectContext(ctx, connect.NewRequest(&executorpb.ProjectContextRequest{
 		WorkspaceId: c.workspaceID,
 	}))
@@ -818,6 +821,7 @@ func (c *workspaceClient) ProjectContext(ctx context.Context) (string, error) {
 // It belongs here for the same reason ProjectContext does: it needs a
 // workspace id, and only a workspace-scoped client carries one.
 func (c *workspaceClient) ProjectSkills(ctx context.Context) ([]skills.SkillMeta, error) {
+	defer c.inflight.enter()()
 	resp, err := c.inner.ProjectSkills(ctx, connect.NewRequest(&executorpb.ProjectSkillsRequest{
 		WorkspaceId: c.workspaceID,
 	}))
@@ -844,6 +848,7 @@ func (c *workspaceClient) ProjectSkills(ctx context.Context) ([]skills.SkillMeta
 // SkillBody returns one project skill's body, resolved by NAME against the
 // executor's own discovery.
 func (c *workspaceClient) SkillBody(ctx context.Context, name string) (body, dir string, err error) {
+	defer c.inflight.enter()()
 	resp, err := c.inner.SkillBody(ctx, connect.NewRequest(&executorpb.SkillBodyRequest{
 		WorkspaceId: c.workspaceID,
 		Name:        name,
@@ -989,9 +994,15 @@ var _ tools.ExecutorClient = (*executorClient)(nil)
 
 type executorClient struct {
 	inner executorpbconnect.ExecutorServiceClient
+	// inflight counts RPCs open on this executor's single connection so
+	// pressure on the HTTP/2 stream limit is visible before callers start
+	// waiting. Shared by every workspaceClient built off this client, and nil
+	// for a client constructed without one (enter is nil-safe).
+	inflight *inFlight
 }
 
 func (c *executorClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
+	defer c.inflight.enter()()
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:      tool,
 		InputJson: input,
@@ -1018,6 +1029,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 }
 
 func (c *executorClient) StartJob(ctx context.Context, command string) (string, error) {
+	defer c.inflight.enter()()
 	input, _ := json.Marshal(map[string]string{"command": command})
 	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:       "bash",
@@ -1044,6 +1056,7 @@ func (c *executorClient) StartJob(ctx context.Context, command string) (string, 
 }
 
 func (c *executorClient) JobOutput(ctx context.Context, handle string, since int64) (tools.JobSnapshot, error) {
+	defer c.inflight.enter()()
 	resp, err := c.inner.JobOutput(ctx, connect.NewRequest(&executorpb.JobOutputRequest{
 		Handle: handle, Since: since,
 	}))
@@ -1060,6 +1073,7 @@ func (c *executorClient) JobOutput(ctx context.Context, handle string, since int
 }
 
 func (c *executorClient) KillJob(ctx context.Context, handle string) error {
+	defer c.inflight.enter()()
 	if _, err := c.inner.Cancel(ctx, connect.NewRequest(&executorpb.CancelRequest{
 		CallId: handle,
 	})); err != nil {
@@ -1069,6 +1083,7 @@ func (c *executorClient) KillJob(ctx context.Context, handle string) error {
 }
 
 func (c *executorClient) Ping(ctx context.Context) error {
+	defer c.inflight.enter()()
 	_, err := c.inner.Describe(ctx, connect.NewRequest(&executorpb.DescribeRequest{}))
 	if err != nil {
 		return fmt.Errorf("executor ping: %w", err)

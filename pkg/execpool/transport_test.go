@@ -91,3 +91,69 @@ func TestPoolNoExecutors(t *testing.T) {
 	c.False(pool.HasUDSEnrolled(), "HasUDSEnrolled should be false when no executors are live")
 	c.False(pool.IsEnrolledViaUDS("any"), "IsEnrolledViaUDS should be false for any id when none are live")
 }
+
+// TestStreamLimitWaitsRatherThanFails pins the fix for call #251 on a single
+// executor connection: there is ONE connection per executor and the dial hook
+// refuses a second, so once the server's MaxConcurrentStreams is reached the
+// transport must make an additional caller WAIT for a free stream rather than
+// open a second connection. Without StrictMaxConcurrentStreams the transport
+// takes the latter path, the hook answers ErrRedialed, and the call fails.
+//
+// The server is built with the same construction as production
+// (newInvertedServer) but with a two-stream limit so the third concurrent call
+// is the one that must wait.
+func TestStreamLimitWaitsRatherThanFails(t *testing.T) {
+	c := assert.NewCollecting(t)
+	client, server := net.Pipe()
+	defer client.Close()
+
+	block := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/warm", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		<-block
+		w.WriteHeader(http.StatusOK)
+	})
+
+	go func() { _ = serveInvertedOn(t.Context(), server, mux, newInvertedServer(2)) }()
+
+	httpClient, err := ClientForConn(client)
+	c.NoError(err, "ClientForConn")
+
+	// Warm the connection first, so the client has processed the server's
+	// SETTINGS frame (MaxConcurrentStreams: 2) before the three calls race for
+	// streams.
+	warm, err := httpClient.Get("http://executor/warm")
+	c.NoError(err, "warmup request")
+	warm.Body.Close()
+
+	type result struct{ err error }
+	results := make(chan result, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			resp, err := httpClient.Get("http://executor/")
+			if err == nil {
+				resp.Body.Close()
+			}
+			results <- result{err}
+		}()
+	}
+
+	// Two calls hold the two stream slots; the third must be waiting for one to
+	// free, not failing. If StrictMaxConcurrentStreams were removed the third
+	// would already have failed with ErrRedialed by now.
+	select {
+	case r := <-results:
+		t.Fatalf("a call returned before the handler was released: err=%v", r.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(block)
+
+	for i := 0; i < 3; i++ {
+		r := <-results
+		c.NoError(r.err, "call after release")
+	}
+}
