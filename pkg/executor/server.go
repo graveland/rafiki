@@ -158,7 +158,12 @@ func NewServer(opts Options) *Server {
 	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
 	// executor the parent's credentialed tools and a nil task store.
 	tracker := tools.NewFileTracker()
-	reg, lspMgr := registryFor(opts, opts.Root, tracker)
+	// The job registry is built BEFORE the root registry so the registry's
+	// bash tool can be handed its Backgrounder: the auto-background seam is
+	// wired at Materialize time, and a backgrounder over a registry that does
+	// not exist yet would be a nil one.
+	jobs := newJobRegistry(opts.SpillDir, opts.Root, opts.JobOutputBudget)
+	reg, lspMgr := registryFor(opts, opts.Root, tracker, &registryBackgrounder{r: jobs, workspaceID: ""})
 	return &Server{
 		id:   randomID(),
 		opts: opts,
@@ -167,7 +172,7 @@ func NewServer(opts Options) *Server {
 		},
 		reg:     reg,
 		tracker: tracker,
-		jobs:    newJobRegistry(opts.SpillDir, opts.Root, opts.JobOutputBudget),
+		jobs:    jobs,
 		sem:     make(chan struct{}, opts.Concurrency),
 		wsReg:   newWorkspaceRegistry(),
 		lsp:     lspMgr,
@@ -184,9 +189,16 @@ func NewServer(opts Options) *Server {
 // tracker is shared across every registry this server ever builds: the
 // read-before-edit invariant is per-path, and two workspaces can touch the
 // same file when one workdir contains the other.
-func registryFor(opts Options, root string, tracker *tools.FileTracker) (*tools.Registry, *lsp.Manager) {
+//
+// bg is the tools.Backgrounder the registry's bash tool gets: the executor's
+// job registry scoped to the workspace this registry serves ("" for the
+// executor's root). It is wired here rather than left nil because bash only
+// auto-backgrounds when BOTH the call opted in AND a backgrounder was
+// provided; a missing one silently keeps kill-at-timeout.
+func registryFor(opts Options, root string, tracker *tools.FileTracker, bg tools.Backgrounder) (*tools.Registry, *lsp.Manager) {
 	opt := toolOptsFor(opts, root)
 	opt.FileTracker = tracker
+	opt.Backgrounder = bg
 
 	// Language servers run HERE because the files are here. A manager started
 	// in the daemon would index the daemon's filesystem and answer about files
@@ -366,9 +378,13 @@ func (s *Server) Provision(
 	// driving them and which child it is.
 	wsOpts := s.opts
 	wsOpts.Env = tools.AgentEnv(s.opts.Env, req.Msg.GetChildId())
-	reg, lspMgr := registryFor(wsOpts, workdir, s.tracker)
+	// The id is minted BEFORE the registry is built so the backgrounder the
+	// registry's bash tool gets is scoped to this workspace: a job started
+	// through it must carry this workspace's id, or Release would not end it.
+	id := randomID()
+	reg, lspMgr := registryFor(wsOpts, workdir, s.tracker, &registryBackgrounder{r: s.jobs, workspaceID: id})
 	ws := &workspace{
-		id:      randomID(),
+		id:      id,
 		workdir: workdir,
 		roots:   []string{s.opts.Root},
 		reg:     reg,
@@ -530,6 +546,15 @@ func (s *Server) Execute(
 				},
 			})
 		}
+	}
+
+	// An auto-background-eligible bash call is marked on the context before
+	// the tool runs: the bash tool reads the flag (and the owner) from the
+	// context to decide whether a command still running at its own timeout is
+	// promoted to a job or killed. It is per-CALL, so only the calls whose
+	// daemon asked for it take the job path.
+	if msg.Tool == "bash" && msg.AutoBackground {
+		ctx = tools.WithAutoBackground(ctx, msg.Owner)
 	}
 
 	toolRes, err := reg.Execute(ctx, msg.Tool, json.RawMessage(msg.InputJson))
