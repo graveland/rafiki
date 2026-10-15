@@ -25,8 +25,12 @@ const (
 
 	bashDescription = "Run a shell command via `bash -c` in the working directory. " +
 		"stdout and stderr are merged into one result. A non-zero exit code is " +
-		"reported as text in the result, not as a tool error. Defaults to a " +
-		"120s timeout; pass timeout_ms to override, up to a 600s maximum. " +
+		"reported as text in the result, not as a tool error. Waits up to " +
+		"120s by default; pass timeout_ms to change that, up to 600s. A " +
+		"command still running when that time is up is moved to the " +
+		"background as a job — you get its output so far and a handle, a " +
+		"message when it exits, and can stop it with bash_kill — or, when " +
+		"this agent has no executor process, killed. " +
 		"Large output is clipped (head and tail kept, middle elided) with the " +
 		"full output spilled to a file whose path is named in the result. " +
 		"Each call is a fresh shell that starts in your working directory (named " +
@@ -60,6 +64,7 @@ func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		p:             opts.OutputPolicy,
 		cwd:           opts.Cwd,
 		rtkMode:       opts.RTK,
+		bg:            opts.Backgrounder,
 		// NonInteractiveEnv snapshots os.Environ() when opts.Env is nil, so a
 		// nil env is pinned here at Materialize time, not inherited live at
 		// each call.
@@ -84,6 +89,7 @@ type bashTool struct {
 	cwd      string
 	rtkMode  RTKMode
 	env      []string
+	bg       Backgrounder
 	bashPath string
 	fallback atomic.Int64
 }
@@ -113,7 +119,36 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		argv0, argvRest = bt.interpreter(), []string{"-c", in.Command}
 	}
 
-	out, stderrText, runErr := bt.run(cctx, argv0, argvRest)
+	// Auto-background is opt-in per CALL (WithAutoBackground, set by an
+	// executor that can own a job) and per TOOL (a Backgrounder was wired).
+	// Without both, this is byte-for-byte the old kill-at-timeout path.
+	owner, bgEligible := autoBackground(ctx)
+	useAuto := bt.bg != nil && bgEligible
+
+	// runArgv executes one argv either as a provisional background job (the
+	// auto path) or as a plain kill-at-timeout subprocess. A non-empty
+	// handoff means the command was promoted to a visible job and the caller
+	// must surface that text verbatim.
+	runArgv := func(rtk bool, name string, args []string) (out, stderrText string, runErr error, handoff string) {
+		if useAuto {
+			argv := append([]string{name}, args...)
+			// The CALLER's ctx, not cctx: the timer owns the promote
+			// deadline, so a done ctx means genuine cancellation (a timed
+			// context would race the timer at exactly timeout).
+			r := bt.runAuto(ctx, timeout, argv, in.Command, owner)
+			if r.promoted {
+				return "", "", nil, bt.backgroundHandoff(r, timeout, rtk)
+			}
+			return r.out, r.stderr, r.err, ""
+		}
+		out, stderrText, runErr = bt.run(cctx, name, args)
+		return out, stderrText, runErr, ""
+	}
+
+	out, stderrText, runErr, handoff := runArgv(rtkApplied, argv0, argvRest)
+	if handoff != "" {
+		return NewTextResult(handoff), nil
+	}
 
 	// rtk's rewrite-guard design note says a REFUSAL TO REWRITE costs
 	// nothing — it always falls back to plain bash. But once a command has
@@ -141,7 +176,10 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	if rtkApplied && isNonZeroExit(runErr) && rtkRefused(stderrText) {
 		slog.Warn("agent/tools: bash: rtk refused the rewritten command, falling back to plain bash",
 			"command", in.Command, "rtk_stderr", stderrText)
-		out, _, runErr = bt.run(cctx, bt.interpreter(), []string{"-c", in.Command})
+		out, _, runErr, handoff = runArgv(false, bt.interpreter(), []string{"-c", in.Command})
+		if handoff != "" {
+			return NewTextResult(handoff), nil
+		}
 	}
 
 	if runErr != nil {

@@ -266,7 +266,11 @@ type ToolOpts struct {
 	// and children of different callers cannot see each other's forwarded
 	// variables. See cmd/rafiki/cmd_executor_serve.go's loadExecutorEnv for
 	// the executor-side construction.
-	Env    []string
+	Env []string
+
+	// Backgrounder lets bash hand a long command off as a job (executor only).
+	Backgrounder Backgrounder
+
 	Skills []skillspkg.SkillMeta
 	// InlineSkillBody fetches a database-backed skill's body by namespace and
 	// name, on the turn the model asks for it. nil means no inline skill can
