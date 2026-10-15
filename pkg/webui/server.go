@@ -100,7 +100,7 @@ func (s *Server) Handler() http.Handler {
 	return s.gate(mux)
 }
 
-// HTTPServer returns an *http.Server for ln with ReadHeaderTimeout 10s and
+// HTTPServer returns an *http.Server with ReadHeaderTimeout 10s and
 // IdleTimeout 120s, and NO WriteTimeout (the UI streams responses).
 func (s *Server) HTTPServer() *http.Server {
 	return &http.Server{
@@ -129,6 +129,14 @@ func (s *Server) currentUpstream() (Upstream, error) {
 	if err != nil {
 		return Upstream{}, err
 	}
-	s.upstream.Store(&u)
+	// Compare-and-swap so a lazy resolve can never overwrite a concurrent
+	// SetUpstream (a login landing while the first request was in flight). If
+	// the swap loses, keep what was set.
+	if s.upstream.CompareAndSwap(nil, &u) {
+		return u, nil
+	}
+	if existing := s.upstream.Load(); existing != nil {
+		return *existing, nil
+	}
 	return u, nil
 }

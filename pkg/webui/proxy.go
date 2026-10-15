@@ -61,10 +61,28 @@ func (s *Server) controlProxy(base *url.URL, client *http.Client) *httputil.Reve
 			h.Del("X-Rafiki-Web")
 			h.Del("Origin")
 		},
-		Transport:     transport,
-		FlushInterval: -1,
-		ErrorHandler:  writeProxyError,
+		Transport:      transport,
+		FlushInterval:  -1,
+		ModifyResponse: stripUpstreamResponseHeaders,
+		ErrorHandler:   writeProxyError,
 	}
+}
+
+// stripUpstreamResponseHeaders removes headers the browser must never see from
+// an upstream response: CORS (there is no Access-Control-* header on any
+// response, ever, dev mode included), the gate marker (a response the daemon
+// produced never carries it, even against a lying upstream), and Set-Cookie
+// (there are no cookies anywhere).
+func stripUpstreamResponseHeaders(resp *http.Response) error {
+	h := resp.Header
+	for name := range h {
+		if strings.HasPrefix(name, "Access-Control-") {
+			h.Del(name)
+		}
+	}
+	h.Del(gatedHeader)
+	h.Del("Set-Cookie")
+	return nil
 }
 
 // writeProxyError answers a transport error. A Connect error carries its own
@@ -137,7 +155,8 @@ func (s *Server) serveDevAssets(w http.ResponseWriter, r *http.Request) {
 			pr.SetURL(base)
 			pr.Out.Header.Del("X-Rafiki-Web")
 		},
-		FlushInterval: -1,
+		FlushInterval:  -1,
+		ModifyResponse: stripUpstreamResponseHeaders,
 	}
 	proxy.ServeHTTP(w, r)
 }

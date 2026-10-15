@@ -415,6 +415,33 @@ func TestWebuiUpstreamConnectErrorMapped(t *testing.T) {
 	ck.Eq("failed_precondition", body.Code, "body code")
 }
 
+func TestWebuiLazyResolveDoesNotOverwriteSetUpstream(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	var aHits, bHits int32
+	a := fakeUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&aHits, 1)
+		_, _ = io.WriteString(w, "a")
+	})
+	b := fakeUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&bHits, 1)
+		_, _ = io.WriteString(w, "b")
+	})
+	s := New(Config{Port: testPort, Assets: testAssets()})
+	// A login (SetUpstream) lands while the first request is resolving; the
+	// lazy resolve must lose to it rather than stomp it.
+	s.cfg.Resolve = func() (Upstream, error) {
+		s.SetUpstream(Upstream{Client: &http.Client{}, BaseURL: b.URL})
+		return Upstream{Client: &http.Client{}, BaseURL: a.URL}, nil
+	}
+	secret := addSecret(s, "cas-secret")
+
+	w := serve(s, controlReq(http.MethodPost, "/rafiki.v1.Control/X", secret, loopbackOrigin(testPort)))
+	ck.Eq(http.StatusOK, w.Code, "status")
+	ck.Eq("b", w.Body.String(), "set upstream wins")
+	ck.Eq(int32(1), atomic.LoadInt32(&bHits), "upstream b requests")
+	ck.Eq(int32(0), atomic.LoadInt32(&aHits), "upstream a requests")
+}
+
 func TestWebuiSetUpstreamSwaps(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	var aHits, bHits int32
@@ -441,7 +468,13 @@ func TestWebuiSetUpstreamSwaps(t *testing.T) {
 
 func TestWebuiNoCORSHeaders(t *testing.T) {
 	ck := assert.NewCollecting(t)
+	// The upstream deliberately emits CORS, the gate marker and a cookie: none
+	// may reach the browser.
 	up := fakeUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set(gatedHeader, "refused")
+		w.Header().Set("Set-Cookie", "sid=upstream")
 		_, _ = io.WriteString(w, "ok")
 	})
 	s := New(Config{
@@ -457,7 +490,22 @@ func TestWebuiNoCORSHeaders(t *testing.T) {
 
 	proxied := serve(s, controlReq(http.MethodPost, "/rafiki.v1.Control/X", secret, loopbackOrigin(testPort)))
 	ck.Eq(http.StatusOK, proxied.Code, "proxied status")
+	ck.Eq("ok", proxied.Body.String(), "proxied body")
 	assertNoAccessControl(t, proxied.Header())
+	ck.Eq("", proxied.Header().Get(gatedHeader), "upstream gate marker stripped")
+	ck.Eq("", proxied.Header().Get("Set-Cookie"), "upstream Set-Cookie stripped")
+}
+
+func TestWebuiControlHostMismatchRefused(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	s := New(Config{Port: testPort, Assets: testAssets()})
+	secret := addSecret(s, "control-host-secret")
+
+	r := newReq(http.MethodPost, "/rafiki.v1.Control/X", "evil.example:8099", loopbackOrigin(testPort))
+	r.Header.Set("X-Rafiki-Web", secret)
+	w := serve(s, r)
+	ck.Eq(http.StatusForbidden, w.Code, "status")
+	ck.Eq("refused", w.Header().Get(gatedHeader), "gate header")
 }
 
 func TestWebuiSecurityHeaders(t *testing.T) {
