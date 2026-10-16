@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func testSpec() serviceSpec {
 }
 
 func TestRenderUnit_ContainsSpecFields(t *testing.T) {
-	content, err := renderServiceConfig(testSpec())
+	content, err := renderServiceConfig(testSpec(), "rafiki daemon")
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestRenderUnit_ContainsSpecFields(t *testing.T) {
 }
 
 func TestRenderUnit_Format(t *testing.T) {
-	content, err := renderServiceConfig(testSpec())
+	content, err := renderServiceConfig(testSpec(), "rafiki daemon")
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestRenderUnit_IncludesCapturedEnv(t *testing.T) {
 	spec.ExtraEnv = map[string]string{
 		"RAFIKI_URL": "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
 	}
-	out, err := renderServiceConfig(spec)
+	out, err := renderServiceConfig(spec, "rafiki daemon")
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestRenderUnit_IncludesCapturedEnv(t *testing.T) {
 func TestRenderUnit_QuotesValuesWithSpaces(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{"RAFIKI_INSTRUCTIONS": "/home/u/My Docs/instructions.md"}
-	out, err := renderServiceConfig(spec)
+	out, err := renderServiceConfig(spec, "rafiki daemon")
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -123,42 +124,69 @@ func TestUnitPath_UsesSystemdUnitName(t *testing.T) {
 	}
 }
 
-// TestSystemctlCommands_UseSystemdUnitName asserts every systemctl
-// invocation a linuxBackend method issues names the unit via the
-// systemdUnitName constant, by stubbing runOSCmd and inspecting the args.
-func TestSystemctlCommands_UseSystemdUnitName(t *testing.T) {
-	orig := runOSCmd
-	defer func() { runOSCmd = orig }()
-
-	var calls [][]string
-	runOSCmd = func(name string, args ...string) (string, error) {
-		call := append([]string{name}, args...)
-		calls = append(calls, call)
-		return "", nil
-	}
-
-	// Status() is deliberately excluded: it short-circuits on os.Stat(unitPath)
-	// before ever calling runOSCmd, so whether it contributes a call depends on
-	// whether this machine happens to have the unit file installed for real.
-	b := &linuxBackend{unit: systemdUnitName + ".service", logPath: paths.ServiceLogPath()}
-	_ = b.Start()
-	_ = b.Stop()
-	_ = b.Restart()
-
-	if len(calls) == 0 {
-		t.Fatal("no systemctl commands were issued")
-	}
-	for _, call := range calls {
-		found := false
-		for _, arg := range call {
-			if arg == systemdUnitName {
-				found = true
-				break
+// TestSystemctlCommands_UseTheBackendsUnit asserts every systemctl call a
+// backend issues names THAT backend's unit — the executor's backend once ran
+// `enable --now`, stop, restart, disable and status against the daemon's
+// unit, so installing the executor never enabled it and restarting it
+// restarted the daemon. Install, Status, Start, Stop, Restart and Uninstall are all
+// driven against a temporary HOME.
+func TestSystemctlCommands_UseTheBackendsUnit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend func() serviceBackend
+		unit    string
+		desc    string
+	}{
+		{"daemon", newServiceBackend, systemdUnitName + ".service", "Description=rafiki daemon"},
+		{"executor", newExecutorServiceBackend, systemdExecutorUnitName + ".service", "Description=rafiki executor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			orig := runOSCmd
+			defer func() { runOSCmd = orig }()
+			var calls [][]string
+			runOSCmd = func(name string, args ...string) (string, error) {
+				calls = append(calls, append([]string{name}, args...))
+				return "", nil
 			}
-		}
-		if !found {
-			t.Errorf("systemctl call %v does not reference systemdUnitName %q", call, systemdUnitName)
-		}
+
+			b := tc.backend()
+			spec := testSpec()
+			spec.LogPath = filepath.Join(home, "svc.log")
+			if err := b.Install(spec); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			unit, err := os.ReadFile(filepath.Join(home, ".config", "systemd", "user", tc.unit))
+			if err != nil {
+				t.Fatalf("read installed unit: %v", err)
+			}
+			if !strings.Contains(string(unit), tc.desc) {
+				t.Errorf("installed unit lacks %q:\n%s", tc.desc, unit)
+			}
+			_, _ = b.Status()
+			_ = b.Start()
+			_ = b.Stop()
+			_ = b.Restart()
+			_ = b.Uninstall()
+
+			enabled := false
+			for _, call := range calls {
+				if len(call) == 3 && call[2] == "daemon-reload" {
+					continue
+				}
+				last := call[len(call)-1]
+				if last != tc.unit {
+					t.Errorf("systemctl call %v does not target %q", call, tc.unit)
+				}
+				if len(call) >= 4 && call[2] == "enable" {
+					enabled = true
+				}
+			}
+			if !enabled {
+				t.Errorf("Install never enabled %s; calls: %v", tc.unit, calls)
+			}
+		})
 	}
 }
 
@@ -175,7 +203,7 @@ func TestRenderUnit_NeverContainsADSN(t *testing.T) {
 		LogPath:      "/tmp/rafiki.log",
 		ExtraEnv:     unit,
 		SecretEnv:    secret,
-	})
+	}, "rafiki daemon")
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -192,12 +220,12 @@ func TestRenderUnit_NeverContainsADSN(t *testing.T) {
 func TestRenderUnit_Deterministic(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{"RAFIKI_URL": "url", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi"}
-	first, err := renderServiceConfig(spec)
+	first, err := renderServiceConfig(spec, "rafiki daemon")
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
 	for range 20 {
-		again, err := renderServiceConfig(spec)
+		again, err := renderServiceConfig(spec, "rafiki daemon")
 		if err != nil {
 			t.Fatalf("renderServiceConfig: %v", err)
 		}

@@ -15,10 +15,9 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// systemdUnitName is the service identity: it names the unit file, and
-// `systemctl` addresses the service by it. It is a constant rather than a
-// literal in each call site so the unit path, the enable/disable commands and
-// the status query cannot drift apart.
+// systemdUnitName is the DAEMON's unit name. Backend methods never use it
+// directly — they use linuxBackend.unit — so the executor's backend cannot
+// enable, stop or restart the daemon by mistake.
 const systemdUnitName = "rafiki"
 
 // systemdExecutorUnitName names the EXECUTOR's unit. Separate from the daemon's
@@ -28,7 +27,7 @@ const systemdExecutorUnitName = "rafiki-executor"
 
 // unitTemplate is the systemd user service unit for the rafiki daemon.
 const unitTemplate = `[Unit]
-Description={{.UnitName}} daemon
+Description={{.Description}}
 After=default.target
 
 [Service]
@@ -66,8 +65,9 @@ func unitQuote(assignment string) string {
 	return `"` + r.Replace(assignment) + `"`
 }
 
-// renderServiceConfig renders the systemd unit file content for the given spec.
-func renderServiceConfig(spec serviceSpec) (string, error) {
+// renderServiceConfig renders the systemd unit file content for the given spec,
+// with description as the unit's Description=.
+func renderServiceConfig(spec serviceSpec, description string) (string, error) {
 	tmpl, err := template.New("unit").Funcs(template.FuncMap{"unitq": unitQuote}).Parse(unitTemplate)
 	if err != nil {
 		return "", err
@@ -75,9 +75,9 @@ func renderServiceConfig(spec serviceSpec) (string, error) {
 	var buf bytes.Buffer
 	data := struct {
 		serviceSpec
-		Extra    []envKV
-		UnitName string
-	}{serviceSpec: spec, Extra: sortedEnv(spec.ExtraEnv), UnitName: systemdUnitName}
+		Extra       []envKV
+		Description string
+	}{serviceSpec: spec, Extra: sortedEnv(spec.ExtraEnv), Description: description}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", err
 	}
@@ -87,19 +87,23 @@ func renderServiceConfig(spec serviceSpec) (string, error) {
 type linuxBackend struct {
 	// unit is the systemd unit name, held on the backend so the daemon's and
 	// the executor's units are managed by the same code with distinct
-	// identities.
+	// identities. Every systemctl call goes through it: a method naming
+	// systemdUnitName directly would act on the DAEMON from the executor's
+	// backend.
 	unit string
+	// description is the unit's Description=.
+	description string
 	// logPath is where this unit's stdout/stderr go; see the darwin backend.
 	logPath string
 }
 
 func newServiceBackend() serviceBackend {
-	return &linuxBackend{unit: systemdUnitName + ".service", logPath: paths.ServiceLogPath()}
+	return &linuxBackend{unit: systemdUnitName + ".service", description: "rafiki daemon", logPath: paths.ServiceLogPath()}
 }
 
 // newExecutorServiceBackend manages the executor's unit rather than the daemon's.
 func newExecutorServiceBackend() serviceBackend {
-	return &linuxBackend{unit: systemdExecutorUnitName + ".service", logPath: paths.ExecutorServiceLogPath()}
+	return &linuxBackend{unit: systemdExecutorUnitName + ".service", description: "rafiki executor", logPath: paths.ExecutorServiceLogPath()}
 }
 
 func (b *linuxBackend) unitPath() (string, error) {
@@ -124,7 +128,7 @@ func (b *linuxBackend) Install(spec serviceSpec) error {
 		return fmt.Errorf("create log directory %s: %w", logDir, err)
 	}
 
-	content, err := renderServiceConfig(spec)
+	content, err := renderServiceConfig(spec, b.description)
 	if err != nil {
 		return fmt.Errorf("render unit file: %w", err)
 	}
@@ -138,8 +142,8 @@ func (b *linuxBackend) Install(spec serviceSpec) error {
 	if out, err := runOSCmd("systemctl", "--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %s", strings.TrimSpace(out))
 	}
-	if out, err := runOSCmd("systemctl", "--user", "enable", "--now", systemdUnitName); err != nil {
-		return fmt.Errorf("systemctl enable --now %s: %s", systemdUnitName, strings.TrimSpace(out))
+	if out, err := runOSCmd("systemctl", "--user", "enable", "--now", b.unit); err != nil {
+		return fmt.Errorf("systemctl enable --now %s: %s", b.unit, strings.TrimSpace(out))
 	}
 	return nil
 }
@@ -151,7 +155,7 @@ func (b *linuxBackend) Uninstall() error {
 	}
 
 	// Best-effort disable+stop; ignore errors (service might not be loaded).
-	_, _ = runOSCmd("systemctl", "--user", "disable", "--now", systemdUnitName)
+	_, _ = runOSCmd("systemctl", "--user", "disable", "--now", b.unit)
 
 	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove unit file %s: %w", unitPath, err)
@@ -172,7 +176,7 @@ func (b *linuxBackend) Start() error {
 }
 
 func (b *linuxBackend) Stop() error {
-	out, err := runOSCmd("systemctl", "--user", "stop", systemdUnitName)
+	out, err := runOSCmd("systemctl", "--user", "stop", b.unit)
 	if err != nil {
 		return fmt.Errorf("systemctl stop: %s", strings.TrimSpace(out))
 	}
@@ -180,7 +184,7 @@ func (b *linuxBackend) Stop() error {
 }
 
 func (b *linuxBackend) Restart() error {
-	out, err := runOSCmd("systemctl", "--user", "restart", systemdUnitName)
+	out, err := runOSCmd("systemctl", "--user", "restart", b.unit)
 	if err != nil {
 		return fmt.Errorf("systemctl restart: %s", strings.TrimSpace(out))
 	}
@@ -198,13 +202,13 @@ func (b *linuxBackend) Status() (serviceStatus, error) {
 		return serviceStatus{Installed: false}, nil
 	}
 
-	activeOut, _ := runOSCmd("systemctl", "--user", "is-active", systemdUnitName)
+	activeOut, _ := runOSCmd("systemctl", "--user", "is-active", b.unit)
 	running := strings.TrimSpace(activeOut) == "active"
 
 	st := serviceStatus{Installed: true, Running: running}
 
 	if running {
-		pidOut, _ := runOSCmd("systemctl", "--user", "show", systemdUnitName, "--property=MainPID")
+		pidOut, _ := runOSCmd("systemctl", "--user", "show", b.unit, "--property=MainPID")
 		if m := systemdPIDRe.FindStringSubmatch(pidOut); m != nil {
 			pid, _ := strconv.Atoi(m[1])
 			if pid > 0 {
