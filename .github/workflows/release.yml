@@ -8,6 +8,13 @@ on:
 permissions:
   contents: write
 
+# Serialize releases: two runs must never race on the same Homebrew tap
+# (each clones, commits and pushes graveland/homebrew-tap). Queue, never
+# cancel - a cancelled run can leave a half-published release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-latest
