@@ -51,6 +51,8 @@ type setupStubControl struct {
 	sendErr      error
 	events       []*rafikiv1.Event
 
+	spawnReqs []*rafikiv1.SpawnRequest
+
 	statusCalls int
 	spawnCalls  int
 	sendCalls   int
@@ -70,10 +72,11 @@ func (s *setupStubControl) Status(context.Context, *connect.Request[rafikiv1.Sta
 	}), nil
 }
 
-func (s *setupStubControl) Spawn(_ context.Context, _ *connect.Request[rafikiv1.SpawnRequest]) (*connect.Response[rafikiv1.SpawnResponse], error) {
+func (s *setupStubControl) Spawn(_ context.Context, req *connect.Request[rafikiv1.SpawnRequest]) (*connect.Response[rafikiv1.SpawnResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.spawnCalls++
+	s.spawnReqs = append(s.spawnReqs, req.Msg)
 	if s.spawnErr != nil {
 		return nil, s.spawnErr
 	}

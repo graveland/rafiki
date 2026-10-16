@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	// doctorPrompt asks for any reply at all — the check is that a claude
-	// agent answers, not that it answers a particular word.
+	// doctorPrompt asks for any reply at all — the check is that an agent
+	// answers, not that it answers a particular word.
 	doctorPrompt = "Reply with a short greeting."
 	// doctorAgentDeadline bounds the whole spawn-send-follow cycle.
 	doctorAgentDeadline = 3 * time.Minute
@@ -29,34 +29,93 @@ const (
 )
 
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that rafiki works end to end on this machine",
-		Long: `Check three things against the current profile: the daemon answers, a
-live executor can launch claude agents, and a claude agent replies to one
-prompt.
+		Long: `Check, against the current profile: the daemon answers, a live executor
+can launch claude agents (only when a claude agent is checked), and each
+requested agent replies to one prompt.
 
-The agent check spawns a claude child — it costs tokens on your Claude login or
-provider — waits up to 3 minutes for its first reply, then closes it. Each
-check prints ok or FAIL and, on failure, the next thing to look at; doctor
-exits non-zero if any check failed.`,
+--agent picks the agents (repeatable): "claude" (the default) spawns a claude
+child; "fundi:<provider/model>" spawns a fundi child on that model, e.g.
+--agent fundi:openrouter/~deepseek/deepseek-flash-latest.
+
+Each agent check costs tokens on your Claude login or provider, waits up to 3
+minutes for the first reply, then closes the child. Each check prints ok or
+FAIL and, on failure, the next thing to look at; doctor exits non-zero if any
+check failed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runDoctor(cmdCtx(cmd), cmd, cmd.OutOrStdout())
 		},
 	}
+	cmd.Flags().StringSlice("agent", []string{"claude"}, `agent to check (repeatable): "claude" or "fundi:<provider/model>"`)
+	return cmd
 }
 
-// runDoctor runs three checks in order against the current profile
+// doctorAgent is one parsed --agent value.
+type doctorAgent struct {
+	kind  string
+	model string // fundi only
+}
+
+// label names the agent in doctor's output: "agent" for claude, so the default
+// run reads as it always has, and "agent fundi:<model>" otherwise.
+func (a doctorAgent) label() string {
+	if a.kind == protocol.KindClaude {
+		return "agent"
+	}
+	return "agent " + a.kind + ":" + a.model
+}
+
+// parseDoctorAgents parses --agent values: "claude", or "fundi:<model>" with a
+// non-empty model (the daemon itself refuses an unqualified one).
+func parseDoctorAgents(specs []string) ([]doctorAgent, error) {
+	agents := make([]doctorAgent, 0, len(specs))
+	for _, spec := range specs {
+		switch {
+		case spec == protocol.KindClaude:
+			agents = append(agents, doctorAgent{kind: protocol.KindClaude})
+		case strings.HasPrefix(spec, protocol.KindFundi+":") && len(spec) > len(protocol.KindFundi)+1:
+			agents = append(agents, doctorAgent{kind: protocol.KindFundi, model: strings.TrimPrefix(spec, protocol.KindFundi+":")})
+		default:
+			return nil, fmt.Errorf("invalid --agent %q: want claude or fundi:<provider/model>", spec)
+		}
+	}
+	return agents, nil
+}
+
+// runDoctor runs its checks in order against the current profile
 // (newConnectEndpoint(cmd)), printing one line per check, and returns
-// fmt.Errorf("doctor: %d check(s) failed", n) when any failed.
+// fmt.Errorf("doctor: %d check(s) failed", n) when any failed. A failed daemon
+// check skips everything after it; a failed executor check skips only the
+// claude agents, since a fundi agent needs no launch executor.
 func runDoctor(ctx context.Context, cmd *cobra.Command, out io.Writer) error {
+	specs, _ := cmd.Flags().GetStringSlice("agent")
+	agents, err := parseDoctorAgents(specs)
+	if err != nil {
+		return err
+	}
+	wantClaude := false
+	for _, a := range agents {
+		if a.kind == protocol.KindClaude {
+			wantClaude = true
+		}
+	}
+	skipAll := func(executor bool) {
+		if executor && wantClaude {
+			fmt.Fprintln(out, "skip  executor")
+		}
+		for _, a := range agents {
+			fmt.Fprintf(out, "skip  %s\n", a.label())
+		}
+	}
+
 	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		fmt.Fprintf(out, "FAIL  daemon: %v\n", err)
 		fmt.Fprintln(out, "      next: rafiki service status")
-		fmt.Fprintln(out, "skip  executor")
-		fmt.Fprintln(out, "skip  agent")
+		skipAll(true)
 		return fmt.Errorf("doctor: %d check(s) failed", 1)
 	}
 	client := ep.control()
@@ -64,37 +123,49 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, out io.Writer) error {
 	if _, err := client.Status(ctx, connect.NewRequest(&rafikiv1.StatusRequest{})); err != nil {
 		fmt.Fprintf(out, "FAIL  daemon: %v\n", err)
 		fmt.Fprintln(out, "      next: rafiki service status")
-		fmt.Fprintln(out, "skip  executor")
-		fmt.Fprintln(out, "skip  agent")
+		skipAll(true)
 		return fmt.Errorf("doctor: %d check(s) failed", 1)
 	}
 	fmt.Fprintln(out, "ok    daemon: answering")
 
-	ref, err := resolveLaunchExecutor(ctx, cmd, "", protocol.KindClaude)
-	if err != nil {
-		fmt.Fprintf(out, "FAIL  executor: %v\n", err)
-		fmt.Fprintln(out, "      next: rafiki executor setup")
-		fmt.Fprintln(out, "skip  agent")
-		return fmt.Errorf("doctor: %d check(s) failed", 1)
+	failed := 0
+	executorOK := true
+	if wantClaude {
+		ref, err := resolveLaunchExecutor(ctx, cmd, "", protocol.KindClaude)
+		switch {
+		case err != nil:
+			fmt.Fprintf(out, "FAIL  executor: %v\n", err)
+		case ref == "":
+			fmt.Fprintln(out, "FAIL  executor: no executor can launch claude agents")
+		default:
+			fmt.Fprintf(out, "ok    executor: %s can launch claude agents\n", ref)
+		}
+		if err != nil || ref == "" {
+			fmt.Fprintln(out, "      next: rafiki executor setup")
+			executorOK = false
+			failed++
+		}
 	}
-	if ref == "" {
-		fmt.Fprintln(out, "FAIL  executor: no executor can launch claude agents")
-		fmt.Fprintln(out, "      next: rafiki executor setup")
-		fmt.Fprintln(out, "skip  agent")
-		return fmt.Errorf("doctor: %d check(s) failed", 1)
-	}
-	fmt.Fprintf(out, "ok    executor: %s can launch claude agents\n", ref)
 
-	if err := runDoctorAgent(ctx, client, out); err != nil {
-		return fmt.Errorf("doctor: %d check(s) failed", 1)
+	for _, a := range agents {
+		if a.kind == protocol.KindClaude && !executorOK {
+			fmt.Fprintf(out, "skip  %s\n", a.label())
+			continue
+		}
+		if err := runDoctorAgent(ctx, client, out, a); err != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("doctor: %d check(s) failed", failed)
 	}
 	return nil
 }
 
-// runDoctorAgent is doctor's third check: spawn a claude child, ask it for a
-// short greeting, and pass when its first turn produces any non-empty reply.
-// The child is closed on every path.
-func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, out io.Writer) error {
+// runDoctorAgent is doctor's agent check: spawn a child of a's kind (and
+// model), ask it for a short greeting, and pass when its first turn produces
+// any non-empty reply. The child is closed on every path.
+func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, out io.Writer, a doctorAgent) error {
 	// ONE deadline for the whole spawn -> send -> follow sequence: a hung
 	// daemon must not block `rafiki doctor` forever. The deferred Close below
 	// uses its own context, so it still runs when this one is done.
@@ -103,12 +174,13 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 
 	home, _ := os.UserHomeDir()
 	spawnResp, err := client.Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
-		Kind:   protocol.KindClaude,
+		Kind:   a.kind,
+		Model:  a.model,
 		Cwd:    home,
 		Labels: map[string]string{"rafiki-doctor": "agent"},
 	}))
 	if err != nil {
-		fmt.Fprintf(out, "FAIL  agent: %v\n", err)
+		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
 		return err
 	}
 	childID := spawnResp.Msg.GetChildId()
@@ -125,7 +197,7 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
 	}))
 	if err != nil {
-		fmt.Fprintf(out, "FAIL  agent: %v\n", err)
+		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
 		return err
 	}
 	defer func() { _ = stream.Close() }()
@@ -139,22 +211,22 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 			Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: doctorPrompt}},
 		}},
 	})); err != nil {
-		fmt.Fprintf(out, "FAIL  agent: %v\n", err)
+		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
 		return err
 	}
 
 	text, err := followFirstTurn(ctx, stream)
 	if err != nil {
-		fmt.Fprintf(out, "FAIL  agent: %v\n", err)
+		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
 		fmt.Fprintf(out, "      next: rafiki logs %s\n", childID)
 		return err
 	}
 	if strings.TrimSpace(text) == "" {
-		fmt.Fprintf(out, "FAIL  agent: no reply (child %s)\n", childID)
+		fmt.Fprintf(out, "FAIL  %s: no reply (child %s)\n", a.label(), childID)
 		fmt.Fprintf(out, "      next: rafiki logs %s\n", childID)
 		return fmt.Errorf("agent %s did not reply", childID)
 	}
-	fmt.Fprintln(out, "ok    agent: replied")
+	fmt.Fprintf(out, "ok    %s: replied\n", a.label())
 	return nil
 }
 

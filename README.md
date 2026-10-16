@@ -31,7 +31,9 @@ optional.
 7. Your admin user and profile.
 8. The local executor.
 
-`rafiki doctor` checks the daemon, an executor, and one claude agent end to end.
+`rafiki doctor` checks the daemon, an executor, and one claude agent end to end;
+`--agent fundi:<provider/model>` (repeatable) checks a fundi agent on that model
+instead or as well.
 
 **Re-running.** Setup is safe to re-run: answers are saved in
 `~/.config/rafiki/install.toml`, with secrets (the database DSN and your API
