@@ -241,11 +241,10 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	anthropicKey := paths.Get("ANTHROPIC_API_KEY")
 	openrouterKey := paths.Get("OPENROUTER_API_KEY")
 	if anthropicKey == "" {
-		// Not fatal, but the face cannot reach Anthropic without it. Say so
-		// once, loudly, naming the fix — the alternative is a child that
-		// spawns fine and fails on its first turn with an upstream 401.
-		logger.Warn("no ANTHROPIC_API_KEY in the daemon's environment; the proxy face will fail upstream. "+
-			"Put it in the environment file, which is not world-readable",
+		// A keyless daemon is a supported setup: claude children forward
+		// their own Claude login (passthrough auth). Only requests routed to
+		// anthropic WITHOUT passthrough auth need this key.
+		logger.Info("no ANTHROPIC_API_KEY in the daemon's environment; requests routed to anthropic without passthrough auth will fail upstream (claude children using passthrough auth are unaffected)",
 			"env_file", paths.ServiceEnvFile())
 	}
 
