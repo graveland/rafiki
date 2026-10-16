@@ -46,12 +46,16 @@ func prereqs() []prereq {
 			Name:     "docker",
 			Required: true,
 			Present: func(ctx context.Context, r runner) (bool, string, error) {
-				_, stderr, err := r.Run(ctx, nil, "docker", "info", "--format", "{{.ServerVersion}}")
+				// Probe with plain `docker info`: --format would replace the real
+				// failure (e.g. "permission denied ...") with a Go template error,
+				// which names no cause. Classify from the raw output instead.
+				stdout, stderr, err := r.Run(ctx, nil, "docker", "info")
 				if err != nil {
 					// Not being in the docker group reads as a dead daemon; it is
 					// a permission problem with a different remedy (add the user
 					// to the group, then re-login). Prefer that diagnosis.
-					if strings.Contains(strings.ToLower(string(stderr)), detailDockerPermission) {
+					combined := strings.ToLower(string(stdout) + string(stderr))
+					if strings.Contains(combined, detailDockerPermission) {
 						return false, detailDockerPermission, nil
 					}
 					// The binary may be installed with the daemon merely stopped.

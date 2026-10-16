@@ -183,7 +183,7 @@ func TestExecRunnerRunInteractive(t *testing.T) {
 func TestSetupPrereqDockerMissingDarwinOffersOrbstack(t *testing.T) {
 	r := newFakeRunner()
 	r.paths["brew"] = "/opt/homebrew/bin/brew"
-	r.scriptErr([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, errors.New("exit 1"))
+	r.scriptErr([]string{"docker", "info"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
 
 	if _, err := checkPrereqs(context.Background(), r, w, "darwin", nil); err == nil {
@@ -196,7 +196,7 @@ func TestSetupPrereqDockerMissingDarwinOffersOrbstack(t *testing.T) {
 
 func TestSetupPrereqDeclineStopsWithCommand(t *testing.T) {
 	r := newFakeRunner()
-	r.script([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, "26.0")
+	r.script([]string{"docker", "info"}, "26.0")
 	r.scriptErr([]string{"claude", "auth", "status", "--json"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
 
@@ -214,7 +214,7 @@ func TestSetupPrereqDeclineStopsWithCommand(t *testing.T) {
 func TestSetupPrereqClaudeLoggedOutOffersLogin(t *testing.T) {
 	r := newFakeRunner()
 	r.paths["claude"] = "/usr/local/bin/claude"
-	r.script([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, "26.0")
+	r.script([]string{"docker", "info"}, "26.0")
 	r.scriptErr([]string{"claude", "auth", "status", "--json"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
 
@@ -229,7 +229,7 @@ func TestSetupPrereqClaudeLoggedOutOffersLogin(t *testing.T) {
 
 func TestSetupPrereqLinuxDockerGroupStops(t *testing.T) {
 	r := newFakeRunner()
-	r.scriptErr([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, errors.New("exit 1"))
+	r.scriptErr([]string{"docker", "info"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
 	w.yes = true // accept the offered commands so the group step is reached
 
@@ -259,7 +259,7 @@ func TestSetupPrereqLinuxDockerGroupStops(t *testing.T) {
 // systemctl start docker" — the wrong remedy. It must name the group fix.
 func TestSetupPrereqDockerPermissionDeniedNamesGroup(t *testing.T) {
 	r := newFakeRunner()
-	r.scriptFail([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, errors.New("exit 1"),
+	r.scriptFail([]string{"docker", "info"}, errors.New("exit 1"),
 		"Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")
 	w := newSetupWizard(t)
 
@@ -275,11 +275,57 @@ func TestSetupPrereqDockerPermissionDeniedNamesGroup(t *testing.T) {
 	}
 }
 
+// A genuinely stopped daemon must still read as daemon-down (and get the
+// "start it" remedy), not as a permission or install problem.
+func TestSetupPrereqDockerDaemonDownNamesStart(t *testing.T) {
+	r := newFakeRunner()
+	r.paths["docker"] = "/usr/bin/docker"
+	r.scriptFail([]string{"docker", "info"}, errors.New("exit 1"),
+		"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?")
+	w := newSetupWizard(t)
+
+	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
+	if err == nil {
+		t.Fatal("checkPrereqs: want the daemon-down stop, got nil")
+	}
+	if !strings.Contains(err.Error(), "daemon is not running") {
+		t.Errorf("error %q must be the daemon-down message", err.Error())
+	}
+	if strings.Contains(err.Error(), "usermod -aG docker") {
+		t.Errorf("error %q must not be the permission message", err.Error())
+	}
+}
+
+// A reachable daemon yields the present result and no error.
+func TestSetupPrereqDockerPresent(t *testing.T) {
+	r := newFakeRunner()
+	r.script([]string{"docker", "info"}, "Server Version: 26.0")
+
+	var docker *prereq
+	for _, p := range prereqs() {
+		if p.Name == "docker" {
+			p := p
+			docker = &p
+			break
+		}
+	}
+	if docker == nil {
+		t.Fatal("no docker prereq registered")
+	}
+	ok, detail, err := docker.Present(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	if !ok || detail != "" {
+		t.Errorf("Present = (%v, %q), want (true, \"\")", ok, detail)
+	}
+}
+
 func TestSetupPrereqOptionalChosenInstalled(t *testing.T) {
 	r := newFakeRunner()
 	r.paths["brew"] = "/opt/homebrew/bin/brew"
 	r.paths["uv"] = "/opt/homebrew/bin/uv"
-	r.script([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, "26.0")
+	r.script([]string{"docker", "info"}, "26.0")
 	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
 	r.paths["rg"] = "/opt/homebrew/bin/rg"
 	w := newSetupWizard(t)
@@ -296,7 +342,7 @@ func TestSetupPrereqOptionalChosenInstalled(t *testing.T) {
 
 func TestSetupPrereqDarwinWithoutBrewStops(t *testing.T) {
 	r := newFakeRunner()
-	r.scriptErr([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, errors.New("exit 1"))
+	r.scriptErr([]string{"docker", "info"}, errors.New("exit 1"))
 	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
 	r.paths["rg"] = "/usr/local/bin/rg"
 	w := newSetupWizard(t)
@@ -312,7 +358,7 @@ func TestSetupPrereqDarwinWithoutBrewStops(t *testing.T) {
 
 func TestSetupPrereqDarwinWithoutBrewNoInstallNeeded(t *testing.T) {
 	r := newFakeRunner()
-	r.script([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, "26.0")
+	r.script([]string{"docker", "info"}, "26.0")
 	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
 	r.paths["rg"] = "/usr/local/bin/rg"
 	w := newSetupWizard(t)
