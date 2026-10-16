@@ -43,8 +43,25 @@ func runIdentityStep(ctx context.Context, w *wizard, r runner, out io.Writer, st
 	// Already done? A token on disk that the daemon accepts means there is
 	// nothing to mint.
 	if profile.ReadToken(profileName) != "" && statusOK(ctx, profileName) {
-		if err := upsertSetupProfile(profileName); err != nil {
-			return "", err
+		// The profile already carries a working credential. upsertSetupProfile is
+		// a read-modify-write that rewrites socket/url/proxy/kind, so calling it
+		// on an existing profile would silently repoint one the operator may have
+		// aimed at a remote daemon. Only upsert when the profile does not exist
+		// yet (a first run); otherwise leave it exactly as it is.
+		set, lerr := profile.Load()
+		exists := false
+		switch {
+		case lerr == nil:
+			_, exists = set.Get(profileName)
+		case errors.Is(lerr, profile.ErrNoManifest):
+			// No profiles file at all: nothing exists yet, so upsert.
+		default:
+			return "", lerr
+		}
+		if !exists {
+			if err := upsertSetupProfile(profileName); err != nil {
+				return "", err
+			}
 		}
 		if err := profile.SavePointer(profileName); err != nil {
 			return "", err

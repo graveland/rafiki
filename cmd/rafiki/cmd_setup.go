@@ -213,11 +213,19 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	if expose {
 		listen = setupProxyListenAll
 	}
-	setRes, err = paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{"RAFIKI_PROXY_LISTEN": listen}, "rafiki setup")
-	if err != nil {
-		return err
+	// An operator may have hand-set RAFIKI_PROXY_LISTEN to something of their
+	// own (a non-loopback interface, a different port). Setup owns only its two
+	// canonical values, so it writes only when the file is silent or already
+	// carries one of them — never silently repointing a deliberate choice.
+	if cur := savedEnv["RAFIKI_PROXY_LISTEN"]; cur != "" && cur != setupProxyListenLoopback && cur != setupProxyListenAll {
+		fmt.Fprintf(out, "    note: keeping RAFIKI_PROXY_LISTEN=%s\n", cur)
+	} else {
+		setRes, err = paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{"RAFIKI_PROXY_LISTEN": listen}, "rafiki setup")
+		if err != nil {
+			return err
+		}
+		track(setRes)
 	}
-	track(setRes)
 	st.Daemon.Expose = &expose
 	if expose {
 		fmt.Fprintf(out, "    warning: %s\n", exposeWarning)
@@ -279,10 +287,14 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 			return err
 		}
 		// runExecutorSetup saved its own state; pick it back up so the step
-		// record and the executor fields stay in sync.
-		if s, _, lerr := installstate.Load(); lerr == nil {
-			st = s
+		// record and the executor fields stay in sync. A failed reload must not
+		// be swallowed: writing the stale pre-executor `st` would clobber the
+		// answers the executor step just saved.
+		s, _, lerr := installstate.Load()
+		if lerr != nil {
+			return lerr
 		}
+		st = s
 	}
 	if err := saveStep(st, stepExecutor); err != nil {
 		return err

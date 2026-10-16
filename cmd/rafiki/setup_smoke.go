@@ -62,6 +62,18 @@ func runSmokeStep(ctx context.Context, w *wizard, out io.Writer, profileName str
 	// keep costing money and clutter the fleet.
 	defer closeSetupChild(client, childID)
 
+	// Open the durable event stream BEFORE Send: with no cursor there is no
+	// replay, so a turn that finished before we subscribed would be missed
+	// entirely. Subscribe first, then send, then read.
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+	}))
+	if err != nil {
+		return fmt.Errorf("smoke stream: %w", err)
+	}
+	defer func() { _ = stream.Close() }()
+
 	if _, err := client.Send(ctx, connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: childID,
 		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
@@ -73,7 +85,7 @@ func runSmokeStep(ctx context.Context, w *wizard, out io.Writer, profileName str
 		return fmt.Errorf("smoke send: %w", err)
 	}
 
-	passed, err := followFirstTurn(ctx, client, childID)
+	passed, err := followFirstTurn(ctx, stream)
 	if err != nil {
 		return err
 	}
@@ -94,19 +106,10 @@ func closeSetupChild(client rafikiv1connect.ControlClient, childID string) {
 	_, _ = client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
 }
 
-// followFirstTurn follows a single child's durable event stream until its first
-// turn completes and returns whether the assistant text contains "OK". It uses
-// the same StreamEvents stream `rafiki tail` follows — never a Get poll.
-func followFirstTurn(ctx context.Context, client rafikiv1connect.ControlClient, childID string) (bool, error) {
-	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
-		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
-		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
-	}))
-	if err != nil {
-		return false, fmt.Errorf("smoke stream: %w", err)
-	}
-	defer func() { _ = stream.Close() }()
-
+// followFirstTurn reads an already-open child event stream until the first turn
+// completes and returns whether the assistant text contains "OK". The caller
+// opens the stream BEFORE Send (so no event is missed) and owns closing it.
+func followFirstTurn(ctx context.Context, stream *connect.ServerStreamForClient[rafikiv1.Event]) (bool, error) {
 	var text strings.Builder
 	for stream.Receive() {
 		ev := stream.Msg()

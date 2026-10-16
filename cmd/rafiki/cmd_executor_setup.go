@@ -195,7 +195,7 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 					return fmt.Errorf("could not mint an enrollment token with profile %q (%v); pass --enroll-token from an admin", p.Name, err)
 				}
 				fmt.Fprintln(out, "Could not mint a token with this profile; paste one printed by `rafiki executor enroll` on a machine with admin access.")
-				if token, err = w.askString("Enrollment token", "enroll-token", "", "", true); err != nil {
+				if token, err = w.askSecret("Enrollment token", "enroll-token", "", "", true); err != nil {
 					return err
 				}
 			} else {

@@ -37,6 +37,11 @@ optional.
 keys) in `service.env`/`executor.env` (0600). `rafiki setup --yes` replays it
 headless.
 
+**Secrets and history.** Passing `--dsn`, `--openrouter-key`, or
+`--anthropic-key` on the command line writes those secrets into your shell
+history; omit them to answer masked prompts instead, or pre-write `service.env`
+yourself.
+
 **The executor alone.** `rafiki executor setup`.
 
 ### Other deployments

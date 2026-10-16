@@ -441,9 +441,13 @@ type envLineDef struct {
 // the positions it returns line up with what LoadEnvFile reads. It is the
 // position-aware sibling of parseEnvFile — parseEnvFile yields values but no
 // line numbers, and SetEnvFile needs both.
-func scanEnvDefs(lines []string) []envLineDef {
+//
+// The second result is true when a double-quoted value was opened but never
+// closed (the condition parseEnvFile warns about). SetEnvFile refuses such a
+// file: the open quote swallows every following line, so rewriting it would
+// report keys "inside" the open quote that are not really defined.
+func scanEnvDefs(lines []string) (defs []envLineDef, unterminated bool) {
 	var (
-		defs    []envLineDef
 		pending strings.Builder
 		inMulti bool
 	)
@@ -498,7 +502,7 @@ func scanEnvDefs(lines []string) []envLineDef {
 			defs = append(defs, envLineDef{key: k, value: strings.TrimSpace(v), start: i, end: i})
 		}
 	}
-	return defs
+	return defs, inMulti
 }
 
 // SetEnvFile makes path define exactly vars' values for vars' keys, and
@@ -561,7 +565,13 @@ func SetEnvFile(path string, vars map[string]string, comment string) (SetResult,
 	}
 
 	lines := strings.Split(string(existing), "\n")
-	defs := scanEnvDefs(lines)
+	defs, unterminated := scanEnvDefs(lines)
+	if unterminated {
+		// A double-quoted value opened but never closed swallows the rest of the
+		// file, so any key "after" it is really inside the open quote. Refuse
+		// rather than rewrite a file we cannot read faithfully; write nothing.
+		return res, fmt.Errorf("%s: unterminated double-quoted value; refusing to rewrite", path)
+	}
 
 	// firstIdx keeps the EARLIEST line defining each key: LoadEnvFile fills gaps
 	// (applyEnv skips a key already present), so for a duplicated key the first

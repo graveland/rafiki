@@ -83,6 +83,55 @@ func TestExposeNilSurvivesRoundTrip(t *testing.T) {
 	c.True(got.Daemon.Expose == nil, "a never-asked Expose must survive as nil, got %v", got.Daemon.Expose)
 }
 
+// TestSaveRejectsInvalidState: Save validates before writing, so an invalid
+// State is refused AND leaves no file behind — a later Load must not read back
+// something Save would have refused.
+func TestSaveRejectsInvalidState(t *testing.T) {
+	isolate(t)
+	c := assert.NewCollecting(t)
+
+	err := Save(State{DB: DB{Port: 70000}})
+	c.Error(err, "Save must refuse an out-of-range db.port")
+	c.NoFileExists(Path(), "a refused Save must write nothing")
+}
+
+// TestValidatePortBounds pins DB.Port's accepted range: 0 (unset) and 1..65535
+// are valid; -1 and 65536 are not.
+func TestValidatePortBounds(t *testing.T) {
+	isolate(t)
+	c := assert.NewCollecting(t)
+
+	ok := []int{0, 1, 65535}
+	for _, port := range ok {
+		c.NoError(State{DB: DB{Port: port}}.Validate(), "db.port %d must be valid", port)
+	}
+	bad := []int{-1, 65536}
+	for _, port := range bad {
+		c.Error(State{DB: DB{Port: port}}.Validate(), "db.port %d must be refused", port)
+	}
+}
+
+// TestEnvNilVsEmptyRoundTrip pins the tri-state: a never-asked Env is nil, a
+// deliberately-empty one is a non-nil empty slice, and both survive a
+// Save/Load round trip distinctly.
+func TestEnvNilVsEmptyRoundTrip(t *testing.T) {
+	isolate(t)
+	c := assert.NewCollecting(t)
+
+	c.NoError(Save(State{Executor: Executor{Env: []string{}}}), "Save with an explicit empty Env")
+	got, ok, err := Load()
+	c.Require().NoError(err, "Load")
+	c.True(ok, "ok")
+	c.True(got.Executor.Env != nil, "an explicit empty Env must stay non-nil, got %v", got.Executor.Env)
+	c.Empty(got.Executor.Env, "an explicit empty Env must stay empty")
+
+	c.NoError(Save(State{}), "Save with a nil Env")
+	got, ok, err = Load()
+	c.Require().NoError(err, "Load")
+	c.True(ok, "ok")
+	c.True(got.Executor.Env == nil, "a never-asked Env must stay nil, got %v", got.Executor.Env)
+}
+
 func TestLoadRejectsUnknownKey(t *testing.T) {
 	isolate(t)
 	c := assert.NewCollecting(t)

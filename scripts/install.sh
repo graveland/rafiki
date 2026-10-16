@@ -95,7 +95,7 @@ rm -rf "$tmp"
 if [ "${RAFIKI_NO_SETUP:-}" != "1" ]; then
 	if [ -t 0 ]; then
 		exec "$PREFIX/rafiki" setup
-	elif [ -r /dev/tty ]; then
+	elif (: </dev/tty) 2>/dev/null; then
 		# curl | sh consumed stdin, so reattach the controlling terminal.
 		exec "$PREFIX/rafiki" setup </dev/tty
 	fi

@@ -170,3 +170,18 @@ func TestSetEnvFileRejectsEmptyValue(t *testing.T) {
 	c.ErrorContains(err, "SetEnvFile: empty value for A", "empty value")
 	c.NoFileExists(p, "no file written for a rejected call")
 }
+
+// TestSetEnvFileRefusesUnterminatedQuote: an unterminated double quote makes
+// parseEnvFile swallow the rest of the file, so any key "after" it is really
+// inside the open quote. SetEnvFile must refuse and leave the file untouched
+// rather than report keys it only imagined were defined.
+func TestSetEnvFileRefusesUnterminatedQuote(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := filepath.Join(t.TempDir(), "service.env")
+	original := "A=1\nB=\"open\nC=3\n"
+	writeEnvMode(t, p, original, 0o600)
+
+	_, err := SetEnvFile(p, map[string]string{"C": "9"}, "rafiki setup")
+	c.ErrorContains(err, "unterminated", "an unterminated double quote must be refused")
+	c.Eq(original, readFileT(t, p), "the file must be left byte-identical")
+}

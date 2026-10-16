@@ -94,8 +94,8 @@ type Executor struct {
 	PinCert    string          `toml:"pin_cert"`    // tcp only
 	ServerName string          `toml:"server_name"` // tcp only
 	Root       string          `toml:"root"`
-	Launch     []string        `toml:"launch"`
-	Env        []string        `toml:"env"` // NAMES only; values are re-read at replay
+	Launch     []string        `toml:"launch"` // nil = never asked; empty = none chosen.
+	Env        []string        `toml:"env"`    // nil = never asked; empty = none chosen. NAMES only; values are re-read at replay
 	RTK        string          `toml:"rtk"`
 }
 
@@ -173,6 +173,9 @@ func validateEnum(field, value string, allowed []string) error {
 // error it is removed so a failed write leaves no litter.
 func Save(s State) (err error) {
 	s.Version = SchemaVersion
+	if err := s.Validate(); err != nil {
+		return err
+	}
 
 	path := Path()
 	dir := filepath.Dir(path)
