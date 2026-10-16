@@ -144,3 +144,15 @@ func TestGlyphBatchWaitIsStaticHourglass(t *testing.T) {
 		c.Eq("⧖", got, "AnimatedGlyph(batch_wait, tick=%d) = %q, want the static ⧖", tick, got)
 	}
 }
+
+func TestWaitingGlyphIsStaticAndDistinctFromSpawning(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, on := range []string{"children", "events", "job", "schedule"} {
+		n := rail.Node{Status: "idle", DisplayState: "waiting", WaitingOn: on}
+		c.Eq("ω", rail.Glyph(n), "Glyph waiting on %s", on)
+		for tick := range 3 {
+			c.Eq("ω", rail.AnimatedGlyph(n, tick), "AnimatedGlyph waiting on %s", on)
+		}
+	}
+	c.NotEq(rail.Glyph(rail.Node{Status: "spawning"}), rail.Glyph(rail.Node{Status: "idle", DisplayState: "waiting", WaitingOn: "job"}))
+}

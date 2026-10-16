@@ -63,9 +63,9 @@ func Glyph(n Node) string {
 			// the same fact (a human must act) under the display vocabulary.
 			return "‼"
 		case n.DisplayState == "waiting":
-			// Waiting on a job, a schedule, children or queued events: lighter
-			// than the solid ○ so it reads as "pending, but nobody to wake".
-			return "◌"
+			// Waiting on a job, a schedule, children or queued events: a
+			// static "w", distinct from spawning's ◌ and never animated.
+			return "ω"
 		}
 		return "○"
 	case "streaming":
