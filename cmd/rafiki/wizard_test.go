@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multigres/testkit/assert"
 	"github.com/spf13/cobra"
 )
 
@@ -300,4 +301,27 @@ func TestRequireTerminalOrNonInteractive(t *testing.T) {
 	if !strings.Contains(err.Error(), "--non-interactive") {
 		t.Errorf("error %q must mention --non-interactive", err.Error())
 	}
+}
+
+// TestWaitForSocketSeesARenamedSocket: rafikid publishes its socket by renaming
+// an already-listening socket into place; the watcher must see that rename as
+// the socket's arrival (inotify IN_MOVED_TO / kqueue directory write).
+func TestWaitForSocketSeesARenamedSocket(t *testing.T) {
+	c := assert.NewAborting(t)
+	dir, err := os.MkdirTemp("", "ws")
+	c.NoError(err, "MkdirTemp")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "controller.sock")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- waitForSocket(ctx, path) }()
+
+	ln, err := net.Listen("unix", path+".tmp")
+	c.NoError(err, "listen on the temporary name")
+	defer ln.Close()
+	c.NoError(os.Rename(path+".tmp", path), "rename into place")
+
+	c.NoError(<-done, "waitForSocket must return once the renamed socket appears")
 }

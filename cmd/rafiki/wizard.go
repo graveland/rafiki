@@ -279,9 +279,10 @@ func containsString(haystack []string, needle string) bool {
 // connection, or ctx is done. It watches filepath.Dir(path) with fsnotify
 // (creating the directory 0700 if absent so the watch can be placed), checks
 // once after the watch is armed (so a socket created before the watch is not
-// missed), and re-checks on each Create event for path. A dial that fails
-// right after the Create (bind before listen) is retried on the next event
-// only.
+// missed), and re-checks on each Create event for path. rafikid publishes its
+// sockets by renaming an already-listening socket into place
+// (listenUnixReady), so a Create of path means it accepts; a dial that still
+// fails is retried on the next event only.
 func waitForSocket(ctx context.Context, path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -62,13 +61,10 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 		return nil, fmt.Errorf("create socket directory: %w", err)
 	}
 
-	// Umask before bind, not chmod after: chmod leaves a window in which
-	// another local user can connect.
-	old := syscall.Umask(0o177)
-	ln, err := net.Listen("unix", path)
-	syscall.Umask(old)
+	// 0600, and published only once it accepts: see listenUnixReady.
+	ln, err := listenUnixReady(path)
 	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", path, err)
+		return nil, err
 	}
 
 	mux := http.NewServeMux()
