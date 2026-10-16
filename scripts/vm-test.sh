@@ -15,6 +15,7 @@
 # Read from .env (single lines, never sourced — .env holds other secrets):
 #   ANTHROPIC_API_KEY, OPENROUTER_API_KEY  forwarded into the VM's service.env
 #   VMTEST_MODEL                           model for `rafiki doctor --agent fundi:…`
+#     (an exported VMTEST_MODEL wins over .env)
 #     (default: openrouter/~deepseek/deepseek-flash-latest with an OpenRouter
 #     key, else anthropic/haiku-latest)
 # With no key, doctor is skipped: the VM's Claude login is fake.
@@ -172,7 +173,7 @@ if [ -z "$keys" ]; then
 elif ! vmrun 'rafiki doctor --help' 2>/dev/null | grep -q -- '--agent'; then
 	echo "skip  $version's doctor has no --agent"
 else
-	model=$(envval VMTEST_MODEL)
+	model=${VMTEST_MODEL:-$(envval VMTEST_MODEL)}
 	if [ -z "$model" ]; then
 		if [ -n "$openrouter_key" ]; then model=openrouter/~deepseek/deepseek-flash-latest; else model=anthropic/haiku-latest; fi
 	fi
