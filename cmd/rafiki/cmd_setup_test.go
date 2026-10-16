@@ -49,14 +49,23 @@ type setupStubControl struct {
 	spawnErr     error
 	spawnChildID string
 	sendErr      error
+	closeErr     error
 	events       []*rafikiv1.Event
 
 	spawnReqs []*rafikiv1.SpawnRequest
+
+	// latestOrdinal is what GetChild reports; nil = unset.
+	latestOrdinal *int32
+	// calls records the order of Spawn, GetChild, Send and StreamEvents;
+	// streamReqs every StreamEvents request.
+	calls      []string
+	streamReqs []*rafikiv1.StreamEventsRequest
 
 	statusCalls int
 	spawnCalls  int
 	sendCalls   int
 	closeCalls  int
+	killCalls   int
 	listCalls   int
 }
 
@@ -77,6 +86,7 @@ func (s *setupStubControl) Spawn(_ context.Context, req *connect.Request[rafikiv
 	defer s.mu.Unlock()
 	s.spawnCalls++
 	s.spawnReqs = append(s.spawnReqs, req.Msg)
+	s.calls = append(s.calls, "Spawn")
 	if s.spawnErr != nil {
 		return nil, s.spawnErr
 	}
@@ -87,20 +97,40 @@ func (s *setupStubControl) Spawn(_ context.Context, req *connect.Request[rafikiv
 	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: id}), nil
 }
 
+func (s *setupStubControl) GetChild(_ context.Context, req *connect.Request[rafikiv1.GetChildRequest]) (*connect.Response[rafikiv1.GetChildResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "GetChild")
+	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
+		ChildId: req.Msg.GetChildId(), LatestOrdinal: s.latestOrdinal,
+	}}), nil
+}
+
 func (s *setupStubControl) Send(_ context.Context, _ *connect.Request[rafikiv1.SendRequest]) (*connect.Response[rafikiv1.SendResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sendCalls++
+	s.calls = append(s.calls, "Send")
 	if s.sendErr != nil {
 		return nil, s.sendErr
 	}
 	return connect.NewResponse(&rafikiv1.SendResponse{}), nil
 }
 
+func (s *setupStubControl) Kill(_ context.Context, req *connect.Request[rafikiv1.KillRequest]) (*connect.Response[rafikiv1.KillResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.killCalls++
+	return connect.NewResponse(&rafikiv1.KillResponse{}), nil
+}
+
 func (s *setupStubControl) Close(_ context.Context, req *connect.Request[rafikiv1.CloseRequest]) (*connect.Response[rafikiv1.CloseResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeCalls++
+	if s.closeErr != nil {
+		return nil, s.closeErr
+	}
 	return connect.NewResponse(&rafikiv1.CloseResponse{ChildId: req.Msg.GetChildId()}), nil
 }
 
@@ -111,8 +141,10 @@ func (s *setupStubControl) ListExecutors(context.Context, *connect.Request[rafik
 	return connect.NewResponse(&rafikiv1.ListExecutorsResponse{Rows: s.executors}), nil
 }
 
-func (s *setupStubControl) StreamEvents(_ context.Context, _ *connect.Request[rafikiv1.StreamEventsRequest], stream *connect.ServerStream[rafikiv1.Event]) error {
+func (s *setupStubControl) StreamEvents(_ context.Context, req *connect.Request[rafikiv1.StreamEventsRequest], stream *connect.ServerStream[rafikiv1.Event]) error {
 	s.mu.Lock()
+	s.calls = append(s.calls, "StreamEvents")
+	s.streamReqs = append(s.streamReqs, req.Msg)
 	events := append([]*rafikiv1.Event(nil), s.events...)
 	s.mu.Unlock()
 	for _, ev := range events {

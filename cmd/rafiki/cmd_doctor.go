@@ -24,8 +24,8 @@ const (
 	doctorPrompt = "Reply with a short greeting."
 	// doctorAgentDeadline bounds the whole spawn-send-follow cycle.
 	doctorAgentDeadline = 3 * time.Minute
-	// doctorCloseTimeout bounds the best-effort Close.
-	doctorCloseTimeout = 10 * time.Second
+	// doctorCloseTimeout bounds the best-effort kill and close.
+	doctorCloseTimeout = 30 * time.Second
 )
 
 func newDoctorCmd() *cobra.Command {
@@ -187,20 +187,23 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 
 	// Close the child no matter how the check ends — a leftover child would
 	// keep costing money and clutter the fleet.
-	defer closeDoctorChild(client, childID)
+	defer closeDoctorChild(client, childID, out)
 
-	// Open the durable event stream BEFORE Send: with no cursor there is no
-	// replay, so a turn that finished before we subscribed would be missed
-	// entirely. Subscribe first, then send, then read.
-	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
-		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
-		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
-	}))
+	// Read the child's latest ordinal BEFORE Send, then stream from it with a
+	// cursor: the daemon replays everything after the floor, so the prompt's
+	// turn is seen however fast it runs. Subscribing first and sending second
+	// deadlocks instead: StreamEvents returns only once the daemon sends
+	// response headers, which it does with the first event — and a freshly
+	// spawned child emits none until it is prompted.
+	got, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 	if err != nil {
 		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
 		return err
 	}
-	defer func() { _ = stream.Close() }()
+	cursor := &rafikiv1.EventCursor{}
+	if got.Msg.GetChild().LatestOrdinal != nil {
+		cursor.Ordinals = map[string]int32{childID: got.Msg.GetChild().GetLatestOrdinal()}
+	}
 
 	fmt.Fprintln(out, "      waiting for the agent's first reply (up to 3m)…")
 	if _, err := client.Send(ctx, connect.NewRequest(&rafikiv1.SendRequest{
@@ -214,6 +217,18 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
 		return err
 	}
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+		Cursor:  cursor,
+	}))
+	if err != nil {
+		fmt.Fprintf(out, "FAIL  %s: %v\n", a.label(), err)
+		fmt.Fprintf(out, "      next: rafiki logs %s\n", childID)
+		return err
+	}
+	defer func() { _ = stream.Close() }()
 
 	text, err := followFirstTurn(ctx, stream)
 	if err != nil {
@@ -230,18 +245,22 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 	return nil
 }
 
-// closeDoctorChild closes a child with its own short-lived context, so a
-// cancelled or timed-out parent context still closes it. Errors are
-// deliberately ignored: this is best-effort cleanup.
-func closeDoctorChild(client rafikiv1connect.ControlClient, childID string) {
+// closeDoctorChild stops and closes a child exactly as `rafiki close` does
+// (closeChildConnect: the daemon refuses Close on a running child), with its
+// own context so a cancelled or timed-out parent context still closes it. A
+// failure does not fail the check, but it is reported: a child left running
+// keeps costing money.
+func closeDoctorChild(client rafikiv1connect.ControlClient, childID string, out io.Writer) {
 	ctx, cancel := context.WithTimeout(context.Background(), doctorCloseTimeout)
 	defer cancel()
-	_, _ = client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
+	if err := closeChildConnect(ctx, client, childID, false, 0, 0); err != nil {
+		fmt.Fprintf(out, "      warning: could not close child %s (%v); close it with: rafiki close %s\n", childID, err, childID)
+	}
 }
 
-// followFirstTurn reads an already-open child event stream until the first turn
-// completes and returns the accumulated assistant text. The caller opens the
-// stream BEFORE Send (so no event is missed) and owns closing it.
+// followFirstTurn reads a child event stream, opened from a cursor taken before
+// the prompt was sent, until the first turn completes and returns the
+// accumulated assistant text. The caller owns closing the stream.
 func followFirstTurn(ctx context.Context, stream *connect.ServerStreamForClient[rafikiv1.Event]) (string, error) {
 	var text strings.Builder
 	for stream.Receive() {

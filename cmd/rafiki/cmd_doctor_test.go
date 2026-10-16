@@ -5,7 +5,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
+
+	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -28,6 +31,7 @@ func TestDoctorAllPass(t *testing.T) {
 	c.StrContains(out, "ok    executor", "the executor check line is missing:\n")
 	c.StrContains(out, "ok    agent", "the agent check line is missing:\n")
 	c.Eq(1, f.stub.closeCalls, "the doctor child must be closed")
+	c.Eq(1, f.stub.killCalls, "a running child must be killed before Close (the daemon refuses Close on it)")
 }
 
 // TestDoctorAgentNoReplyFailsAndCloses: a turn that ends with no assistant text
@@ -131,4 +135,39 @@ func TestDoctorNoExecutorStillRunsFundiAgent(t *testing.T) {
 	c.StrContains(out, "skip  agent\n", "the claude agent must be skipped:\n")
 	c.StrContains(out, "FAIL  agent fundi:anthropic/haiku-latest: no reply", "the fundi agent must still run:\n")
 	c.Eq(1, f.stub.spawnCalls, "only the fundi agent spawns")
+}
+
+// TestDoctorSendsBeforeStreamingFromTheFloor: doctor reads the child's latest
+// ordinal, sends the prompt, and only then streams with a cursor at that
+// floor. Subscribing first deadlocked against the real daemon: StreamEvents
+// returns only once a first event is sent, and an unprompted child emits none.
+func TestDoctorSendsBeforeStreamingFromTheFloor(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	floor := int32(1)
+	f.stub.latestOrdinal = &floor
+	f.stub.spawnChildID = "c_order"
+	f.stub.events = []*rafikiv1.Event{assistantEvent("c_order", "hi"), turnEndEvent("c_order")}
+
+	var buf bytes.Buffer
+	c.NoError(runDoctor(context.Background(), newDoctorCmd(), &buf), "doctor")
+	c.True(len(f.stub.calls) >= 4, "calls = %v", f.stub.calls)
+	c.EqDeep([]string{"Spawn", "GetChild", "Send", "StreamEvents"}, f.stub.calls[:4], "call order up to the stream (the close's own GetChild follows)")
+	c.Eq(1, len(f.stub.streamReqs), "stream count")
+	c.EqDeep(map[string]int32{"c_order": 1}, f.stub.streamReqs[0].GetCursor().GetOrdinals(), "stream cursor")
+}
+
+// TestDoctorReportsAFailedClose: a Close the daemon refuses is reported with
+// the command to run, rather than silently leaving the child running.
+func TestDoctorReportsAFailedClose(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.stub.spawnChildID = "c_close"
+	f.stub.closeErr = connect.NewError(connect.CodeUnavailable, errors.New("busy"))
+	f.stub.events = []*rafikiv1.Event{assistantEvent("c_close", "hi"), turnEndEvent("c_close")}
+
+	var buf bytes.Buffer
+	c.NoError(runDoctor(context.Background(), newDoctorCmd(), &buf), "a failed close does not fail the check")
+	c.StrContains(buf.String(), "warning: could not close child c_close", "the close failure must be reported:\n")
+	c.StrContains(buf.String(), "rafiki close c_close", "the remedy must be named:\n")
 }
