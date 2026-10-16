@@ -150,6 +150,14 @@ func newSetupFixture(t *testing.T) *setupFixture {
 	t.Cleanup(func() { os.RemoveAll(runDir) })
 	t.Setenv("XDG_RUNTIME_DIR", runDir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(runDir, "state"))
+	// Point setup's providers.toml at the scratch dir: paths.Get(paths.Providers)
+	// reads RAFIKI_PROVIDERS first, and a developer's exported value would send
+	// the step's writes to their real file.
+	t.Setenv("RAFIKI_PROVIDERS", filepath.Join(runDir, "providers.toml"))
+	// Never let a probe reach a real local Ollama.
+	origOllama := ollamaBaseURL
+	ollamaBaseURL = "http://127.0.0.1:1"
+	t.Cleanup(func() { ollamaBaseURL = origOllama })
 	c.NoError(os.MkdirAll(filepath.Dir(paths.SocketPath()), 0o700), "MkdirAll socket dir")
 
 	f := &setupFixture{t: t, cmd: newSetupCmd(), run: newFakeRunner()}
@@ -375,15 +383,19 @@ func TestSetupKeyValidIsWritten(t *testing.T) {
 
 	c.NoError(f.runSetup(), "setup with a valid key")
 	c.StrContains(f.serviceEnvBytes(), "OPENROUTER_API_KEY", "a valid key must be written to service.env:\n")
+
+	pb, err := os.ReadFile(paths.ProvidersFile())
+	c.NoError(err, "read providers.toml")
+	c.StrContains(string(pb), `default_provider = "openrouter"`, "an openrouter-only install must default to openrouter:\n")
 }
 
-// TestSetupNoKeyPrintsNote: with neither key, the operator sees the exact note.
-func TestSetupNoKeyPrintsNote(t *testing.T) {
+// TestSetupNoProviderPrintsNote: with no provider, the operator sees the exact note.
+func TestSetupNoProviderPrintsNote(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newSetupFixture(t)
 
-	c.NoError(f.runSetup(), "setup with no key")
-	c.StrContains(f.out.String(), noKeyNote, "the no-key note is missing or altered:\n")
+	c.NoError(f.runSetup(), "setup with no provider")
+	c.StrContains(f.out.String(), noProviderNote, "the no-provider note is missing or altered:\n")
 }
 
 // TestSetupExposeDefaultsToLoopback: without --expose the proxy binds loopback.
@@ -524,4 +536,21 @@ func TestSetupUnchangedKeyNotValidated(t *testing.T) {
 	c.NoError(f.runSetup(), "a re-run with an unchanged key must not fail")
 	c.Eq(int64(0), count.Load(), "an unchanged saved key must not be validated with a live call")
 	c.StrContains(f.serviceEnvBytes(), "OPENROUTER_API_KEY", "the saved key must survive the re-run:\n")
+}
+
+// TestSetupProvidersChangeRestartsDaemon: a new provider key rewrites service.env
+// (and providers.toml) through the providers step, which must ride the existing
+// envChanged → restart path.
+func TestSetupProvidersChangeRestartsDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.seedServiceEnv(map[string]string{
+		"RAFIKI_DB":           constSetupDSN,
+		"RAFIKI_PROXY_LISTEN": setupProxyListenLoopback,
+	})
+	f.setFlag("openrouter-key", "sk-good")
+	stubKeyServer(t, http.StatusOK)
+
+	c.NoError(f.runSetup(), "setup adding a provider key")
+	c.True(f.fb.restarted, "a provider change must restart the installed daemon")
 }

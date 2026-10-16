@@ -48,7 +48,7 @@ func isBuiltinProvider(name string) bool {
 
 // runProvidersStep writes providers.toml and the provider keys in service.env,
 // owning the file only while it is byte-identical to what setup last wrote. It
-// is not wired into runSetup yet.
+// is step 5 of runSetup.
 func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, st *installstate.State, savedEnv map[string]string) (providersResult, error) {
 	var res providersResult
 	path := paths.ProvidersFile()

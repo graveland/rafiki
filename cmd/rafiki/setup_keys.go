@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"time"
-
-	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // The setup flags that carry a provider key.
@@ -30,42 +28,6 @@ var keyCheckBaseURLs = map[string]string{
 var keyTitles = map[string]string{
 	"openrouter": "OpenRouter API key (optional)",
 	"anthropic":  "Anthropic API key (optional)",
-}
-
-// runKeysStep resolves and validates the two provider keys, writing the valid
-// ones to service.env. It returns (a) whether service.env changed and (b)
-// whether any key is set (so the final line can offer a fundi model). With
-// neither key set it prints the exact note.
-func runKeysStep(ctx context.Context, w *wizard, out io.Writer, savedEnv map[string]string) (changed, haveKey bool, err error) {
-	orKey, err := resolveValidKey(ctx, w, out, "openrouter", keyOpenRouterFlag, openrouterAPIKeyEnv, savedEnv)
-	if err != nil {
-		return false, false, err
-	}
-	anKey, err := resolveValidKey(ctx, w, out, "anthropic", keyAnthropicFlag, anthropicAPIKeyEnv, savedEnv)
-	if err != nil {
-		return false, false, err
-	}
-
-	vars := map[string]string{}
-	if orKey != "" {
-		vars[openrouterAPIKeyEnv] = orKey
-	}
-	if anKey != "" {
-		vars[anthropicAPIKeyEnv] = anKey
-	}
-	if len(vars) > 0 {
-		res, err := paths.SetEnvFile(paths.ServiceEnvFile(), vars, "rafiki setup")
-		if err != nil {
-			return false, false, err
-		}
-		if len(res.Added) > 0 || len(res.Replaced) > 0 {
-			changed = true
-		}
-	}
-	if orKey == "" && anKey == "" {
-		fmt.Fprintln(out, noKeyNote)
-	}
-	return changed, orKey != "" || anKey != "", nil
 }
 
 // resolveValidKey asks for one provider's key and, when a NEW or CHANGED

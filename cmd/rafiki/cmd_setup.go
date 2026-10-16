@@ -28,22 +28,19 @@ import (
 // name in install.toml's last_step, so a failure leaves a resumable record and
 // a re-run knows how far it got.
 const (
-	stepLoad     = "load"
-	stepPrereq   = "prerequisites"
-	stepDatabase = "database"
-	stepMigrate  = "migrate"
-	stepKeys     = "keys"
-	stepDaemon   = "daemon"
-	stepIdentity = "identity"
-	stepExecutor = "executor"
+	stepLoad      = "load"
+	stepPrereq    = "prerequisites"
+	stepDatabase  = "database"
+	stepMigrate   = "migrate"
+	stepProviders = "providers"
+	stepDaemon    = "daemon"
+	stepIdentity  = "identity"
+	stepExecutor  = "executor"
 )
 
 // exposeWarning is printed when the proxy face is bound to every interface, and
 // is folded into the prompt title so it is read before the question is answered.
 const exposeWarning = "the proxy face is plain HTTP — every token (CLI, MCP, claude children) crosses the network in cleartext; only expose on networks you trust"
-
-// noKeyNote is printed verbatim when neither provider key is available.
-const noKeyNote = "    note: no API key — claude-kind agents run on your Claude login; fundi agents and recall summaries need an OpenRouter or Anthropic key (re-run rafiki setup to add one)"
 
 // setupSocketTimeout bounds the wait for the daemon's socket to accept a
 // connection. A package var so tests can shorten it.
@@ -60,8 +57,7 @@ func newSetupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "Set up rafiki on this machine",
-		Long: `Set up rafiki on this machine: prerequisites, a database, the daemon
-service, your identity, and a local executor.
+		Long: `Set up rafiki on this machine: prerequisites, a database, LLM providers (providers.toml), the daemon service, your identity, and a local executor.
 
 It is safe to re-run. Every answer is saved to ` + installstate.FileName + ` and
 every secret (the database DSN and your API keys) to ` + filepath.Base(paths.ServiceEnvFile()) + ` (0600),
@@ -148,7 +144,9 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	fmt.Fprintf(out, "    ok (optional: %s)\n", joinOrNone(optional))
 
 	// envChanged accumulates across steps 3, 5 and 6: an already-installed
-	// daemon is restarted only when one of them actually rewrote service.env.
+	// daemon is restarted only when one of them actually rewrote service.env
+	// or providers.toml — a rewritten providers.toml also needs a restart, as
+	// the daemon reads it once at startup.
 	envChanged := false
 	track := func(res paths.SetResult) {
 		if len(res.Added) > 0 || len(res.Replaced) > 0 {
@@ -187,22 +185,22 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	}
 	fmt.Fprintln(out, "    ok (schema up to date)")
 
-	// ── 5. keys ─────────────────────────────────────────────────────────────
-	step(out, stepKeys)
-	keyChanged, haveKey, err := runKeysStep(ctx, w, out, savedEnv)
+	// ── 5. providers ────────────────────────────────────────────────────────
+	step(out, stepProviders)
+	prov, err := runProvidersStep(ctx, w, r, out, &st, savedEnv)
 	if err != nil {
 		return err
 	}
-	if keyChanged {
+	if prov.Changed {
 		envChanged = true
 	}
-	if err := saveStep(st, stepKeys); err != nil {
+	if err := saveStep(st, stepProviders); err != nil {
 		return err
 	}
-	if haveKey {
-		fmt.Fprintln(out, "    ok (provider key set)")
+	if len(prov.Providers) == 0 {
+		fmt.Fprintln(out, "    ok (no providers; claude agents use your Claude login)")
 	} else {
-		fmt.Fprintln(out, "    ok (no provider key)")
+		fmt.Fprintf(out, "    ok (%s; default %s)\n", strings.Join(prov.Providers, ", "), prov.Default)
 	}
 
 	// ── 6. daemon ───────────────────────────────────────────────────────────
@@ -306,7 +304,10 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "rafiki is ready. Try: rafiki create")
-	if haveKey {
+	switch {
+	case prov.OllamaModel != "":
+		fmt.Fprintf(out, "  (or a local model: rafiki create --kind fundi --model ollama/%s)\n", prov.OllamaModel)
+	case len(prov.Providers) > 0:
 		fmt.Fprintln(out, "  (or: rafiki create --kind fundi --model <model>)")
 	}
 	return nil

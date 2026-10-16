@@ -26,16 +26,18 @@ optional.
 2. Prerequisites: Docker (or OrbStack) and a logged-in Claude Code.
 3. Database: a `rafiki-pg` container, or `--dsn` for a bring-your-own postgres.
 4. Migrate the schema.
-5. Optional OpenRouter / Anthropic API keys.
+5. LLM providers: Anthropic / OpenRouter keys, a local Ollama, or any OpenAI-compatible endpoint, written to `providers.toml` (plus optional recall summaries and embeddings).
 6. Daemon service, bound to loopback unless you answer yes to network access.
 7. Your admin user and profile.
 8. The local executor.
-9. A smoke-test agent.
+
+`rafiki doctor` checks the daemon, an executor, and one claude agent end to end.
 
 **Re-running.** Setup is safe to re-run: answers are saved in
 `~/.config/rafiki/install.toml`, with secrets (the database DSN and your API
-keys) in `service.env`/`executor.env` (0600). `rafiki setup --yes` replays it
-headless.
+keys) in `service.env`/`executor.env` (0600). `rafiki setup --non-interactive`
+replays it with no prompts; without a terminal, setup refuses to run unless that
+flag is given.
 
 **Secrets and history.** Passing `--dsn`, `--openrouter-key`, or
 `--anthropic-key` on the command line writes those secrets into your shell
@@ -662,6 +664,13 @@ dimensions = 1536
 model = "openrouter/<model>"
 # max_segment_tokens = 200000
 ```
+
+`rafiki setup` writes `providers.toml` and owns it while it is unchanged since
+setup wrote it (the SHA-256 is kept in `install.toml`); a re-run rewrites an
+owned file only when its answers change. Once you edit the file, setup leaves it
+alone — it validates it and asks for the keys it references, and offers to
+replace it (backing the old file up as `providers.toml.<timestamp>.bak`). Keys
+are never written to `providers.toml`; they live in `service.env`.
 
 Without `[embeddings]` search is keyword-only (BM25); without `[summaries]`
 there are no conversation summaries. Historical conversations are never
