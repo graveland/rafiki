@@ -32,7 +32,15 @@ func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that rafiki works end to end on this machine",
-		Args:  cobra.NoArgs,
+		Long: `Check three things against the current profile: the daemon answers, a
+live executor can launch claude agents, and a claude agent replies to one
+prompt.
+
+The agent check spawns a claude child — it costs tokens on your Claude login or
+provider — waits up to 3 minutes for its first reply, then closes it. Each
+check prints ok or FAIL and, on failure, the next thing to look at; doctor
+exits non-zero if any check failed.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runDoctor(cmdCtx(cmd), cmd, cmd.OutOrStdout())
 		},

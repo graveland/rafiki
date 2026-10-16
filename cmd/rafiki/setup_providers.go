@@ -210,7 +210,7 @@ func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, s
 	if err := chooseSummaries(w, set, base, ollamaModel); err != nil {
 		return res, err
 	}
-	if err := chooseEmbeddings(ctx, w, r, out, set, base, vars); err != nil {
+	if err := chooseEmbeddings(ctx, w, r, out, set, base, vars, savedEnv); err != nil {
 		return res, err
 	}
 
@@ -605,8 +605,27 @@ func askProviderName(w *wizard, out io.Writer, set *providers.Set) (string, erro
 			}
 			continue
 		}
+		if env := customProviderKeyEnv(name); envVarCollides(set, name, env) {
+			fmt.Fprintf(out, "    %q would share the key variable %s with another endpoint\n", name, env)
+			if !w.interactive {
+				return "", fmt.Errorf("endpoint name %q collides on %s", name, env)
+			}
+			continue
+		}
 		return name, nil
 	}
+}
+
+// envVarCollides reports whether another endpoint already maps to env, so two
+// names that differ only in - vs _ (my-ep / my_ep) cannot silently share one
+// service.env key.
+func envVarCollides(set *providers.Set, name, env string) bool {
+	for existing := range set.Providers {
+		if existing != name && customProviderKeyEnv(existing) == env {
+			return true
+		}
+	}
+	return false
 }
 
 // askProviderBaseURL prompts for a custom endpoint's base URL, re-asking
@@ -736,7 +755,7 @@ type embeddingsPick struct {
 // chooseEmbeddings offers embeddings when an embeddings-capable provider is
 // configured, probes the endpoint, and stores it on set. Under
 // --non-interactive the owned file's embeddings are copied unprobed.
-func chooseEmbeddings(ctx context.Context, w *wizard, r runner, out io.Writer, set *providers.Set, base *providers.Set, vars map[string]string) error {
+func chooseEmbeddings(ctx context.Context, w *wizard, r runner, out io.Writer, set *providers.Set, base *providers.Set, vars, savedEnv map[string]string) error {
 	if !embeddingsEligible(set) {
 		return nil
 	}
@@ -762,8 +781,14 @@ func chooseEmbeddings(ctx context.Context, w *wizard, r runner, out io.Writer, s
 		choices = append(choices, choice{Value: "keep", Label: "keep the current: " + base.Embeddings.Model})
 	}
 
+	// Preselect the owned embeddings so a bare Enter on an interactive re-run
+	// keeps them instead of falling through to "skip" and dropping them.
+	savedSel := ""
+	if base != nil && base.Embeddings != nil {
+		savedSel = "keep"
+	}
 	for {
-		sel, err := w.askSelect("Embeddings (vector recall)", "", choices, "", "skip")
+		sel, err := w.askSelect("Embeddings (vector recall)", "", choices, savedSel, "skip")
 		if err != nil {
 			return err
 		}
@@ -775,7 +800,7 @@ func chooseEmbeddings(ctx context.Context, w *wizard, r runner, out io.Writer, s
 			set.Embeddings = &e
 			return nil
 		}
-		pick, err := resolveEmbeddingsChoice(ctx, w, r, set, vars, sel)
+		pick, err := resolveEmbeddingsChoice(ctx, w, r, set, vars, savedEnv, sel)
 		if err != nil {
 			return err
 		}
@@ -796,12 +821,12 @@ func chooseEmbeddings(ctx context.Context, w *wizard, r runner, out io.Writer, s
 
 // resolveEmbeddingsChoice resolves one embeddings selection to a concrete
 // endpoint, pulling an Ollama embedding model when it is missing.
-func resolveEmbeddingsChoice(ctx context.Context, w *wizard, r runner, set *providers.Set, vars map[string]string, sel string) (embeddingsPick, error) {
+func resolveEmbeddingsChoice(ctx context.Context, w *wizard, r runner, set *providers.Set, vars, savedEnv map[string]string, sel string) (embeddingsPick, error) {
 	if sel == "openrouter" {
 		return embeddingsPick{
 			URL:       openrouterEmbeddingsURL,
 			APIKeyEnv: openrouterAPIKeyEnv,
-			KeyValue:  vars[openrouterAPIKeyEnv],
+			KeyValue:  keyValue(vars, savedEnv, openrouterAPIKeyEnv),
 			Model:     openrouterSuggestedEmbedModel,
 		}, nil
 	}
@@ -829,9 +854,22 @@ func resolveEmbeddingsChoice(ctx context.Context, w *wizard, r runner, set *prov
 	return embeddingsPick{
 		URL:       strings.TrimRight(p.BaseURL, "/") + "/embeddings",
 		APIKeyEnv: p.APIKeyEnv,
-		KeyValue:  vars[p.APIKeyEnv],
+		KeyValue:  keyValue(vars, savedEnv, p.APIKeyEnv),
 		Model:     model,
 	}, nil
+}
+
+// keyValue resolves an env name to a key value: a key just entered this run
+// wins, else the one already saved in service.env. A kept custom endpoint's key
+// is only in savedEnv, so without this its embeddings probe is unauthenticated.
+func keyValue(vars, savedEnv map[string]string, env string) string {
+	if env == "" {
+		return ""
+	}
+	if v := vars[env]; v != "" {
+		return v
+	}
+	return savedEnv[env]
 }
 
 // embeddingsEligible reports whether a configured provider can back embeddings:
