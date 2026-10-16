@@ -3,9 +3,12 @@
 # and run the canned installation test. A developer tool: it assumes OrbStack
 # (orb/orbctl on PATH), a git checkout, and this repo's .env.
 #
-#   scripts/vm-test.sh [--keep] [VERSION]
+#   scripts/vm-test.sh [--keep] [VERSION | --local]
 #
-# VERSION defaults to the newest v* tag. The machine is rafiki-vmtest-<version>;
+# VERSION defaults to the newest v* tag. --local instead cross-compiles the
+# working tree for linux, packs it like a release into dist/vmtest/, and runs
+# the working tree's install.sh against it (RAFIKI_DOWNLOAD_BASE=file://…).
+# The machine is rafiki-vmtest-<version>;
 # an existing one is deleted first. It is deleted again on success unless
 # --keep; on failure it is always kept for inspection (orb -m <name>).
 #
@@ -19,18 +22,24 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 keep=0
+local=0
 version=""
 for arg in "$@"; do
 	case "$arg" in
 	--keep) keep=1 ;;
+	--local) local=1 ;;
 	-h | --help)
-		sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*) version=$arg ;;
 	esac
 done
-[ -n "$version" ] || version=$(git -C "$repo" tag --list 'v*' --sort=-v:refname | head -1)
+if [ "$local" = 1 ]; then
+	version=local
+elif [ -z "$version" ]; then
+	version=$(git -C "$repo" tag --list 'v*' --sort=-v:refname | head -1)
+fi
 [ -n "$version" ] || { echo "no v* tag found; pass a version" >&2; exit 1; }
 
 vm="rafiki-vmtest-${version//./-}"
@@ -54,10 +63,29 @@ fail() {
 	exit 1
 }
 
-stage "release $version"
-curl -fsS -o /dev/null "https://api.github.com/repos/graveland/rafiki/releases/tags/$version" ||
-	fail "release $version is not published on GitHub yet"
-pass "release $version exists"
+if [ "$local" = 1 ]; then
+	stage "build the working tree"
+	case "$(uname -m)" in arm64 | aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
+	# dist/ is gitignored and under /Users, which OrbStack mounts into the VM.
+	dist="$repo/dist/vmtest"
+	built="local-$(git -C "$repo" rev-parse --short HEAD)$(git -C "$repo" diff --quiet HEAD || echo -dirty)"
+	rm -rf "$dist" && mkdir -p "$dist/local/pkg"
+	for bin in rafiki rafikid; do
+		(cd "$repo" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build \
+			-ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$built" \
+			-o "$dist/local/pkg/$bin" "./cmd/$bin") >"$logdir/build.log" 2>&1 || fail "go build $bin (see build.log)"
+	done
+	# The archive name install.sh derives for tag "local": rafiki_<ver>_<os>_<arch>.tar.gz.
+	tarball="rafiki_local_linux_$arch.tar.gz"
+	tar -czf "$dist/local/$tarball" -C "$dist/local/pkg" rafiki rafikid
+	(cd "$dist/local" && shasum -a 256 "$tarball" >checksums.txt)
+	pass "built $built for linux/$arch"
+else
+	stage "release $version"
+	curl -fsS -o /dev/null "https://api.github.com/repos/graveland/rafiki/releases/tags/$version" ||
+		fail "release $version is not published on GitHub yet"
+	pass "release $version exists"
+fi
 
 stage "machine $vm"
 if orbctl list -q 2>/dev/null | grep -qx "$vm"; then
@@ -87,11 +115,18 @@ else
 fi
 
 stage "install.sh ($version)"
-git -C "$repo" show "$version:scripts/install.sh" |
-	vmrun "RAFIKI_VERSION=$version RAFIKI_NO_SETUP=1 sh" >"$logdir/install.log" 2>&1 ||
-	fail "install.sh (see install.log)"
+if [ "$local" = 1 ]; then
+	vmrun "RAFIKI_VERSION=local RAFIKI_DOWNLOAD_BASE=file://$dist RAFIKI_NO_SETUP=1 sh" \
+		<"$repo/scripts/install.sh" >"$logdir/install.log" 2>&1 || fail "install.sh (see install.log)"
+	want=$built
+else
+	git -C "$repo" show "$version:scripts/install.sh" |
+		vmrun "RAFIKI_VERSION=$version RAFIKI_NO_SETUP=1 sh" >"$logdir/install.log" 2>&1 ||
+		fail "install.sh (see install.log)"
+	want=${version#v}
+fi
 got=$(vmrun 'rafiki --version' 2>&1) || fail "rafiki --version: $got"
-case "$got" in *"${version#v}"*) pass "installed: $got" ;; *) fail "installed version: $got" ;; esac
+case "$got" in *"$want"*) pass "installed: $got" ;; *) fail "installed version: $got (want $want)" ;; esac
 
 stage "rafiki setup --non-interactive"
 # The first pass installs docker and adds the user to the docker group, then
