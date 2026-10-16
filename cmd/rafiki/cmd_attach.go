@@ -183,7 +183,8 @@ func imagesFlag(cmd *cobra.Command) (string, error) {
 	}
 }
 
-// releaseTUIImages frees every Kitty image the cockpit transmitted and folds
+// releaseTUIImages frees every Kitty image the cockpit transmitted, clears its
+// OSC 7501 records, and folds
 // any failure into runErr, the TUI's own outcome: the sequences are terminal
 // state that outlives the alt screen, so a TUI that failed must still release
 // what it sent, and a release that failed must not be silent either way.
@@ -192,7 +193,7 @@ func releaseTUIImages(m *tui.Cockpit, runErr error) error {
 	if runErr != nil {
 		out = fmt.Errorf("tui: %w", runErr)
 	}
-	cleanup := m.ImageCleanup()
+	cleanup := m.ImageCleanup() + m.OSCCleanup()
 	if cleanup == "" {
 		return out
 	}

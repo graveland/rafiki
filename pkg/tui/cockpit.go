@@ -652,6 +652,11 @@ func (c *Cockpit) observeCaps(msg tea.Msg) tea.Cmd {
 // terminal after the program exits, whichever way it exited.
 func (c *Cockpit) ImageCleanup() string { return c.images.cleanup() }
 
+// OSCCleanup returns the OSC 7501 sequences clearing every record this cockpit
+// emitted, or "" when it emitted none. The caller writes it after the program
+// exits, whichever way it exited.
+func (c *Cockpit) OSCCleanup() string { return c.osc7501.cleanup() }
+
 // viewing is the child whose transcript the conversation pane renders: the
 // rail cursor while the rail holds focus, the committed agent otherwise.
 //

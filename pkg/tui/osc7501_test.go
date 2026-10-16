@@ -236,9 +236,9 @@ func TestOSC7501OffUnderTmux(t *testing.T) {
 		"off under tmux even after a reply")
 }
 
-// TestOSC7501QuitEmitsNothing pins that there is no teardown emission: on quit
-// the cockpit simply stops syncing, and the terminal drops working/blocked
-// records itself while keeping done/error.
+// TestOSC7501QuitEmitsNothing pins that Sync itself never tears down: a quit
+// stops syncing, and the clear comes from cleanup, which the caller writes
+// after the program exits.
 func TestOSC7501QuitEmitsNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	e := supportedEmitter()
@@ -247,6 +247,25 @@ func TestOSC7501QuitEmitsNothing(t *testing.T) {
 	ck.NotEmpty(e.Sync(d), "work")
 	ck.Eq("", e.Sync(d), "a repeated sync is silent")
 	ck.Eq("", e.Sync(nil), "an empty display set emits nothing, not a clear")
+}
+
+// TestOSC7501CleanupClearsEveryLiveRecord pins the exit teardown: every id with
+// a record gets a clear, in id order, ids already cleared are skipped, and an
+// emitter that never wrote anything has nothing to clear.
+func TestOSC7501CleanupClearsEveryLiveRecord(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	ck.Eq("", supportedEmitter().cleanup(), "nothing emitted, nothing to clear")
+
+	e := supportedEmitter()
+	a, b, gone := dsp(protocol.DisplayWorking, "", ""), dsp(protocol.DisplayFailed, "", "boom"), dsp(protocol.DisplayWorking, "", "")
+	a.ChildID, b.ChildID, gone.ChildID = "c_b", "c_a", "c_gone"
+	e.Sync([]rail.TopLevelDisplay{a, b, gone})
+	gone.DisplayState = string(protocol.DisplayExited)
+	e.Sync([]rail.TopLevelDisplay{a, b, gone})
+
+	ck.Eq(osc7501(osc7501Clear, "c_a")+osc7501(osc7501Clear, "c_b"), e.cleanup(),
+		"live and errored records are cleared; the already-cleared one is skipped")
 }
 
 // TestOSC7501ClearOnExit pins that an exiting child clears its record, and

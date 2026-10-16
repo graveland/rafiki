@@ -5,6 +5,7 @@ package tui
 import (
 	"encoding/base64"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -306,6 +307,25 @@ func (e *osc7501Emitter) pendingDelay() (time.Duration, bool) {
 		}
 	}
 	return best, found
+}
+
+// cleanup returns a clear record for every id whose last emitted record is not
+// already a clear, or "" when there is nothing to clear. The terminal keeps
+// done and error records on its own after the program exits, so the cockpit's
+// caller writes this once the program has returned, whichever way it quit.
+func (e *osc7501Emitter) cleanup() string {
+	ids := make([]string, 0, len(e.lastState))
+	for id, st := range e.lastState {
+		if st != osc7501Clear {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	var out strings.Builder
+	for _, id := range ids {
+		out.WriteString(osc7501(osc7501Clear, id))
+	}
+	return out.String()
 }
 
 // prune drops bookkeeping for ids no longer in the display set. A child removed
