@@ -89,7 +89,7 @@ func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, s
 	if state == providersFileOwned {
 		base, err = providers.Parse(cur)
 		if err != nil {
-			return res, err
+			return res, fmt.Errorf("%s: %w", path, err)
 		}
 	}
 
@@ -552,14 +552,18 @@ func configureCustomProviders(ctx context.Context, w *wizard, r runner, out io.W
 		env := ""
 		if key != "" {
 			env = customProviderKeyEnv(name)
-			vars[env] = key
 		}
 		keep, err := validateEndpointWithRetry(ctx, w, out, baseURL, key)
 		if err != nil {
 			return err
 		}
 		if !keep {
+			// Do not store the key for an endpoint the operator skipped: an
+			// orphan service.env entry outlives the provider it belonged to.
 			continue
+		}
+		if key != "" {
+			vars[env] = key
 		}
 		set.Providers[name] = providers.Provider{Kind: providers.KindOpenAI, BaseURL: baseURL, APIKeyEnv: env}
 		kept++
@@ -662,10 +666,26 @@ func validateEndpointWithRetry(ctx context.Context, w *wizard, out io.Writer, ba
 // set. Under --non-interactive the owned file's model is kept when it is one of
 // the offered choices, else summaries are skipped.
 func chooseSummaries(w *wizard, set *providers.Set, base *providers.Set, ollamaModel string) error {
+	var savedCfg *providers.SummariesConfig
 	saved := ""
 	if base != nil && base.Summaries != nil {
+		savedCfg = base.Summaries
 		saved = base.Summaries.Model
 	}
+
+	// A non-interactive re-run must keep what setup already wrote: copy the
+	// owned [summaries] verbatim rather than re-deriving it from a choice list
+	// that may not contain the model (a custom id, or ollama/<m> whose chat
+	// model is not re-chosen non-interactively — ollamaModel is "" then). A
+	// re-derivation there would silently drop [summaries] and rewrite the file.
+	if !w.interactive {
+		if savedCfg != nil {
+			c := *savedCfg
+			set.Summaries = &c
+		}
+		return nil
+	}
+
 	choices := []choice{{Value: "skip", Label: "skip — no conversation summaries"}}
 	if _, ok := set.Providers["anthropic"]; ok {
 		choices = append(choices, choice{Value: "anthropic/claude-haiku-4-5", Label: "anthropic/claude-haiku-4-5"})
@@ -675,6 +695,11 @@ func chooseSummaries(w *wizard, set *providers.Set, base *providers.Set, ollamaM
 	}
 	if ollamaModel != "" {
 		choices = append(choices, choice{Value: "ollama/" + ollamaModel, Label: "ollama/" + ollamaModel})
+	}
+	// Keep the owned model reachable even when it is none of the suggestions,
+	// so a bare Enter preserves it instead of silently dropping it.
+	if saved != "" && !choiceHas(choices, saved) {
+		choices = append(choices, choice{Value: saved, Label: "keep the current: " + saved})
 	}
 	choices = append(choices, choice{Value: "type", Label: "type a provider/model id"})
 
@@ -692,8 +717,8 @@ func chooseSummaries(w *wizard, set *providers.Set, base *providers.Set, ollamaM
 		return nil
 	}
 	cfg := &providers.SummariesConfig{Model: m}
-	if base != nil && base.Summaries != nil && base.Summaries.Model == m {
-		cfg.MaxSegmentTokens = base.Summaries.MaxSegmentTokens
+	if savedCfg != nil && savedCfg.Model == m {
+		cfg.MaxSegmentTokens = savedCfg.MaxSegmentTokens
 	}
 	set.Summaries = cfg
 	return nil

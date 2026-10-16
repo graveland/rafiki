@@ -43,6 +43,9 @@ func newProvidersFixture(t *testing.T) *providersFixture {
 	path := filepath.Join(dir, "providers.toml")
 	t.Setenv("RAFIKI_PROVIDERS", path)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// ServiceEnvFile() honours RAFIKI_ENV_FILE first; blank it so a key never
+	// reaches a developer's real service.env.
+	t.Setenv(paths.EnvFile, "")
 
 	origOllama := ollamaBaseURL
 	ollamaBaseURL = "http://127.0.0.1:1"
@@ -318,4 +321,36 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return b
+}
+
+func TestProvidersStepOwnedKeepsSummariesModel(t *testing.T) {
+	// A non-interactive re-run must not drop a [summaries] model setup already
+	// wrote, even one not in the offered suggestions: a custom provider/model
+	// id, or ollama/<m> whose chat model is not re-chosen non-interactively.
+	for _, model := range []string{"my-custom/model", "ollama/qwen3.5:9b"} {
+		t.Run(model, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			f := newProvidersFixture(t)
+			owned := &providers.Set{
+				DefaultProvider: "openrouter",
+				Providers: map[string]providers.Provider{
+					"openrouter": {Kind: providers.KindAnthropicOpenRouter, APIKeyEnv: openrouterAPIKeyEnv},
+				},
+				Summaries: &providers.SummariesConfig{Model: model, MaxSegmentTokens: 4321},
+			}
+			b, err := renderProviders(owned)
+			c.NoError(err, "render owned file")
+			c.NoError(os.WriteFile(f.path, b, 0o644), "write owned file")
+			f.st.Providers.FileSHA256 = sha256Hex(b)
+
+			_, err = f.run(map[string]string{openrouterAPIKeyEnv: "sk-x"})
+			c.NoError(err, "providers step")
+
+			c.Eq(string(b), string(f.fileBytes()), "an owned summaries model must survive a non-interactive re-run byte-identically")
+			set := f.parse()
+			c.Require().NotNil(set.Summaries, "summaries preserved")
+			c.Eq(model, set.Summaries.Model, "summaries model")
+			c.Eq(4321, set.Summaries.MaxSegmentTokens, "max_segment_tokens preserved")
+		})
+	}
 }
