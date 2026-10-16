@@ -486,6 +486,12 @@ type Cockpit struct {
 	imagesHidden bool
 	imagesDirty  bool
 	capsLogged   bool
+
+	// osc7501 emits per-top-level-child records to an iTerm2 3.7.5+ terminal's
+	// tab status. It stays off under tmux and off until the terminal answers
+	// its support query; the cockpit folds every message into it for that
+	// decision and re-syncs it after each rail fold.
+	osc7501 *osc7501Emitter
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -543,6 +549,7 @@ func NewCockpit(opts Options) *Cockpit {
 		historyInFlight:          make(map[string]bool),
 		caps:                     newTermCaps(opts.Images, os.Getenv),
 		images:                   newImageStore(nil),
+		osc7501:                  newOSC7501Emitter(os.Getenv),
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
@@ -591,6 +598,17 @@ func (c *Cockpit) retransmitCmd() tea.Cmd {
 		return nil
 	}
 	if s := c.images.transmits(); s != "" {
+		return tea.Raw(s)
+	}
+	return nil
+}
+
+// syncOSC maps the rail's current top-level displays to OSC 7501 records and
+// returns them as one tea.Raw, or nil when nothing changed. It is called after
+// every fold of the rail, because the rail is where the display state that the
+// terminal mirrors actually lives.
+func (c *Cockpit) syncOSC() tea.Cmd {
+	if s := c.osc7501.Sync(c.rail.TopLevelDisplays()); s != "" {
 		return tea.Raw(s)
 	}
 	return nil
@@ -649,6 +667,13 @@ func (c *Cockpit) Init() tea.Cmd {
 	// answers — and with them this session's images — are guesses. Raw: these
 	// are queries for the terminal, not cells for the grid.
 	if q := c.caps.queries(); q != "" {
+		cmds = append(cmds, tea.Raw(q))
+	}
+	// The OSC 7501 support probe goes out with the capability queries, for the
+	// same reason: before anything is drawn, so the emitter is not guessing.
+	// An unsupporting terminal ignores it, and the reply is what turns the
+	// emitter on.
+	if q := c.osc7501.query(); q != "" {
 		cmds = append(cmds, tea.Raw(q))
 	}
 	if c.form != nil {
@@ -842,13 +867,13 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// `attach <id>` on an agent that already has a ledger showed no
 				// box until a task_* call happened to complete, which is the
 				// case the box exists for.
-				return c, tea.Batch(c.openFocus(f), c.fetchTasks(f))
+				return c, tea.Batch(c.openFocus(f), c.fetchTasks(f), c.syncOSC())
 			}
-			return c, c.landRailFirst()
+			return c, tea.Batch(c.landRailFirst(), c.syncOSC())
 		}
 		// A re-seed request that arrived while this RPC was in flight must
 		// not be dropped -- maybeReseed picks it up.
-		return c, c.maybeReseed(nil)
+		return c, tea.Batch(c.maybeReseed(nil), c.syncOSC())
 
 	case seedRetryMsg:
 		// The timer fired. If a seed is already running -- an unknown-child
@@ -875,7 +900,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			c.applyRailEvent(ev)
 		}
-		return c, tea.Batch(waitForRailEvent(c.railCh), c.maybeReseed(nil))
+		return c, tea.Batch(waitForRailEvent(c.railCh), c.maybeReseed(nil), c.syncOSC())
 
 	case eventMsg:
 		for _, ev := range msg.evs {
@@ -889,7 +914,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// and the task box shows viewing()'s ledger.
 			cmd = c.fetchTasks(c.viewing())
 		}
-		return c, tea.Batch(waitForEvent(c.focusCh), c.maybeReseed(cmd))
+		return c, tea.Batch(waitForEvent(c.focusCh), c.maybeReseed(cmd), c.syncOSC())
 
 	case historyMsg:
 		delete(c.historyInFlight, msg.childID)
@@ -1035,6 +1060,17 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.ColorProfileMsg:
 		return c, c.observeCaps(msg)
+
+	case uv.UnknownOscEvent:
+		// The OSC 7501 support reply is what turns the emitter on (step 0).
+		// A first reply re-syncs immediately, so a state that changed before
+		// support resolved is not left unshown.
+		wasSupported := c.osc7501.supported
+		c.osc7501.observe(msg)
+		if c.osc7501.supported && !wasSupported {
+			return c, c.syncOSC()
+		}
+		return c, nil
 
 	case previewTickMsg:
 		return c, c.previewSettle(msg.seq)
