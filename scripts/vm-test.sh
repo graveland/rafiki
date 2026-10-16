@@ -44,7 +44,7 @@ fi
 
 vm="rafiki-vmtest-${version//./-}"
 logdir="${TMPDIR:-/tmp}/rafiki-vmtest/$version"
-mkdir -p "$logdir"
+rm -rf "$logdir" && mkdir -p "$logdir"
 
 envval() { # envval NAME — the last NAME= line of .env, unquoted; empty if absent
 	[ -f "$repo/.env" ] || return 0
@@ -57,9 +57,22 @@ vmrun() { orb -m "$vm" bash -lc "export PATH=\$HOME/.local/bin:\$PATH; $1"; }
 
 stage() { printf '\n==> %s\n' "$*"; }
 pass() { printf 'PASS  %s\n' "$*"; }
+# collect copies the VM's rafiki state (daemon + executor logs, units, the
+# executor list) into $logdir/vm/ — first thing on failure, before anything
+# else can restart the machine and truncate them.
+collect() {
+	orbctl list -q 2>/dev/null | grep -qx "$vm" || return 0
+	mkdir -p "$logdir/vm"
+	vmrun 'tar -C ~ -czf - .local/state/rafiki .config/rafiki/install.toml .config/rafiki/providers.toml .config/systemd/user 2>/dev/null' \
+		>"$logdir/vm/state.tgz" 2>/dev/null || true
+	vmrun 'systemctl --user status "rafiki*" --no-pager; systemctl --user list-unit-files "rafiki*" --no-pager; rafiki executor list; rafiki ls' \
+		>"$logdir/vm/status.txt" 2>&1 || true
+}
+
 fail() {
 	printf 'FAIL  %s\n' "$*"
-	echo "      logs: $logdir   machine kept: orb -m $vm"
+	collect
+	echo "      logs: $logdir (VM state in vm/)   machine kept: orb -m $vm"
 	exit 1
 }
 
