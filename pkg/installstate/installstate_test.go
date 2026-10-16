@@ -70,6 +70,21 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	c.EqDiff(want, got, "round trip")
 }
 
+// TestProvidersSHARoundTrip pins that the providers step's recorded file hash
+// survives a Save/Load round trip, so a re-run can recognize its own file.
+func TestProvidersSHARoundTrip(t *testing.T) {
+	isolate(t)
+	c := assert.NewCollecting(t)
+
+	want := State{Version: SchemaVersion, Channel: ChannelSource, Providers: Providers{FileSHA256: "abc123def456"}}
+	c.NoError(Save(want), "Save")
+
+	got, ok, err := Load()
+	c.Require().NoError(err, "Load")
+	c.True(ok, "Load of a saved file reports ok == true")
+	c.Eq(want.Providers.FileSHA256, got.Providers.FileSHA256, "FileSHA256 must survive")
+}
+
 func TestExposeNilSurvivesRoundTrip(t *testing.T) {
 	isolate(t)
 	c := assert.NewCollecting(t)

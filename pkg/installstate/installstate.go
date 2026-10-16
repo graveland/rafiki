@@ -56,14 +56,15 @@ const (
 
 // State is the whole install-state document.
 type State struct {
-	Version  int      `toml:"version"`
-	Channel  Channel  `toml:"channel"`
-	LastStep string   `toml:"last_step"`
-	DB       DB       `toml:"db"`
-	Daemon   Daemon   `toml:"daemon"`
-	Identity Identity `toml:"identity"`
-	Executor Executor `toml:"executor"`
-	Optional []string `toml:"optional"`
+	Version   int       `toml:"version"`
+	Channel   Channel   `toml:"channel"`
+	LastStep  string    `toml:"last_step"`
+	DB        DB        `toml:"db"`
+	Daemon    Daemon    `toml:"daemon"`
+	Identity  Identity  `toml:"identity"`
+	Executor  Executor  `toml:"executor"`
+	Optional  []string  `toml:"optional"`
+	Providers Providers `toml:"providers"`
 }
 
 // DB is the [db] section.
@@ -73,6 +74,13 @@ type DB struct {
 	Volume    string `toml:"volume"`
 	Port      int    `toml:"port"`
 	Image     string `toml:"image"`
+}
+
+// Providers is the providers step's state. FileSHA256 is the hex SHA-256 of
+// the providers.toml bytes setup last wrote: setup owns the file only while
+// its bytes still hash to this. Empty = setup has never written it.
+type Providers struct {
+	FileSHA256 string `toml:"file_sha256"`
 }
 
 // Daemon is the [daemon] section.
