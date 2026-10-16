@@ -171,3 +171,39 @@ func TestProbeEmbeddingsSendsBearer(t *testing.T) {
 	ck.Eq("Bearer k", auths[0], "first call Authorization")
 	ck.Eq("Bearer k", auths[1], "second call Authorization")
 }
+
+func TestOllamaAnswering(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	orig := ollamaBaseURL
+	t.Cleanup(func() { ollamaBaseURL = orig })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ollamaBaseURL = srv.URL
+	ck.True(ollamaAnswering(context.Background()), "an answering Ollama is detected")
+
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	ollamaBaseURL = deadURL
+	ck.False(ollamaAnswering(context.Background()), "a closed Ollama is not answering")
+}
+
+// TestSetupEndpointDefaults pins the design-chosen suggestions and endpoint so a
+// silent drift in the constants is caught.
+func TestSetupEndpointDefaults(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ck.Eq("https://openrouter.ai/api/v1/embeddings", openrouterEmbeddingsURL, "openrouter embeddings URL")
+	ck.Eq("openai/text-embedding-3-small", openrouterSuggestedEmbedModel, "openrouter suggested embed model")
+	ck.Eq("qwen3.5:9b", ollamaSuggestedChatModel, "ollama suggested chat model")
+	ck.Eq("nomic-embed-text:v1.5", ollamaSuggestedEmbedModel, "ollama suggested embed model")
+	ck.Eq(2000, maxEmbeddingDims, "pgvector HNSW dimension cap")
+}
