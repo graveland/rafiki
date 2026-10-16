@@ -5,6 +5,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -25,10 +26,23 @@ func osc7501ReplyFrame() uv.UnknownOscEvent {
 }
 
 // supportedEmitter is an emitter that has already learned the terminal
-// supports OSC 7501 from a reply.
+// supports OSC 7501 from a reply. The production done-settle delay is disabled
+// so these tests pin the raw edge-trigger mapping; the settle has its own
+// tests below (settlingEmitter).
 func supportedEmitter() *osc7501Emitter {
 	e := newOSC7501Emitter(env(nil))
 	e.observe(osc7501ReplyFrame())
+	e.doneDelay = 0
+	return e
+}
+
+// settlingEmitter is a supported emitter carrying the real done settle delay
+// and a controllable clock. Hold the clock still to keep a held done pending,
+// or advance it past osc7501DoneDelay to let the done go out -- no real timer.
+func settlingEmitter(now func() time.Time) *osc7501Emitter {
+	e := newOSC7501Emitter(env(nil))
+	e.observe(osc7501ReplyFrame())
+	e.now = now
 	return e
 }
 
@@ -257,4 +271,79 @@ func TestOSC7501CockpitWiresSupport(t *testing.T) {
 	ck.False(c.osc7501.supported, "off before any reply")
 	c.Update(osc7501ReplyFrame())
 	ck.True(c.osc7501.supported, "the reply reaches the emitter through Update")
+}
+
+// TestOSC7501DoneHeldForSettleDelay pins F1: an idle after work does NOT emit
+// done immediately -- it is held for the settle delay, and only goes out once
+// the delay elapses with the child still idle. A coordinator whose pending fact
+// just flushed would otherwise flash done before its status flips to working.
+func TestOSC7501DoneHeldForSettleDelay(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	now := time.Unix(1_000, 0)
+	e := settlingEmitter(func() time.Time { return now })
+
+	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}),
+		"work emits immediately")
+	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}),
+		"idle after work does NOT emit done immediately")
+
+	now = now.Add(osc7501DoneDelay - time.Millisecond)
+	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}),
+		"still inside the settle delay emits nothing")
+
+	now = now.Add(2 * time.Millisecond)
+	ck.Eq(osc7501(osc7501Done, testChildID),
+		e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}),
+		"the held done is emitted once the settle delay elapses")
+}
+
+// TestOSC7501NewStateCancelsHeldDone pins that a non-idle state arriving inside
+// the settle delay cancels the held done and is processed normally, so no done
+// is ever emitted for the transient idle -- the F1 wake-up case.
+func TestOSC7501NewStateCancelsHeldDone(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	cases := []struct {
+		name string
+		next rail.TopLevelDisplay
+		want string
+	}{
+		{
+			name: "working is edge-equal to the last emitted working",
+			next: dsp(protocol.DisplayWorking, "", ""),
+			want: "",
+		},
+		{
+			name: "blocked replaces the held done",
+			next: dsp(protocol.DisplayWaiting, protocol.WaitingOnOperator, "q"),
+			want: osc7501(osc7501Blocked, testChildID,
+				kv{"kind", "question"},
+				kv{"msg", osc7501Value("q", osc7501MaxMsg)},
+				kv{"title", osc7501Value("alice", osc7501MaxTitle)}),
+		},
+		{
+			name: "error replaces the held done",
+			next: dsp(protocol.DisplayFailed, "", "boom"),
+			want: osc7501(osc7501Error, testChildID,
+				kv{"msg", osc7501Value("boom", osc7501MaxMsg)},
+				kv{"title", osc7501Value("alice", osc7501MaxTitle)}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Unix(3_000, 0)
+			e := settlingEmitter(func() time.Time { return now })
+
+			ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "work")
+			ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}), "idle holds a done")
+			ck.Eq(tc.want, e.Sync([]rail.TopLevelDisplay{tc.next}),
+				"a non-idle state inside the delay cancels the held done and is processed")
+
+			// Even long after the delay, no done is emitted for the first idle.
+			now = now.Add(10 * time.Second)
+			ck.Eq("", e.Sync([]rail.TopLevelDisplay{tc.next}),
+				"no done ever follows the cancelled hold")
+		})
+	}
 }

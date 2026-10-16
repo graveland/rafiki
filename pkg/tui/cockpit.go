@@ -608,10 +608,25 @@ func (c *Cockpit) retransmitCmd() tea.Cmd {
 // every fold of the rail, because the rail is where the display state that the
 // terminal mirrors actually lives.
 func (c *Cockpit) syncOSC() tea.Cmd {
+	var cmds []tea.Cmd
 	if s := c.osc7501.Sync(c.rail.TopLevelDisplays()); s != "" {
-		return tea.Raw(s)
+		cmds = append(cmds, tea.Raw(s))
 	}
-	return nil
+	// A held `done` (the settle delay that keeps a waking coordinator from
+	// flashing done) is emitted only once its delay elapses, so arm a tick for
+	// it: with no further state arriving to re-sync, that tick is what emits it.
+	if d, ok := c.osc7501.pendingDelay(); ok {
+		cmds = append(cmds, osc7501SettleTick(d))
+	}
+	return tea.Batch(cmds...)
+}
+
+// osc7501SettleMsg fires when a held done's settle delay has elapsed; the
+// cockpit re-syncs the emitter so it can emit the done.
+type osc7501SettleMsg struct{}
+
+func osc7501SettleTick(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return osc7501SettleMsg{} })
 }
 
 // observeCaps folds one terminal-capability message into the resolver. A
@@ -1071,6 +1086,11 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.syncOSC()
 		}
 		return c, nil
+
+	case osc7501SettleMsg:
+		// A held done's settle delay elapsed; re-sync so it is emitted unless
+		// a newer state superseded it in the meantime.
+		return c, c.syncOSC()
 
 	case previewTickMsg:
 		return c, c.previewSettle(msg.seq)

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -33,6 +34,14 @@ const (
 	osc7501MaxMsg = 2048
 	// osc7501MaxTitle is the byte limit on the DECODED `title` value.
 	osc7501MaxTitle = 192
+
+	// osc7501DoneDelay is how long a would-be `done` is held before it is
+	// emitted. An idle that lands in the gap between a fact flushing (or a
+	// schedule firing) and the child's status flipping to working would
+	// otherwise flash `done` for a coordinator that is waking: the hold lets
+	// any following working/blocked/error supersede it, and only a child that
+	// stays idle for the whole delay settles to done.
+	osc7501DoneDelay = 1500 * time.Millisecond
 )
 
 // The state= values a record can carry. They are deliberately NOT
@@ -157,6 +166,14 @@ func osc7501StateOf(seq string) string {
 	return rest
 }
 
+// pendingDone is a held `done`: the exact sequence to emit and the earliest
+// time it may go out. A later Sync that maps the child to anything else drops
+// it, so a transient idle never reaches the terminal as done.
+type pendingDone struct {
+	seq string
+	at  time.Time
+}
+
 // osc7501Emitter owns the edge-triggered per-child state. It is not safe for
 // concurrent use: the cockpit drives it from the bubbletea goroutine only.
 type osc7501Emitter struct {
@@ -179,6 +196,17 @@ type osc7501Emitter struct {
 	// done is emitted, so an idle child that never worked produces no record
 	// and a done is never re-sent without new work.
 	worked map[string]bool
+
+	// doneDelay is how long a would-be done is held before emission. A
+	// non-positive value emits done immediately (the edge semantics the
+	// golden tests pin); production uses osc7501DoneDelay.
+	doneDelay time.Duration
+	// now returns the current time. It is a field rather than a direct
+	// time.Now call so tests can tick the settle deterministically.
+	now func() time.Time
+	// pending holds a would-be done per id until its deadline, so an idle in
+	// the flush-to-working gap is not shown as done.
+	pending map[string]pendingDone
 }
 
 // newOSC7501Emitter builds the emitter. getenv is os.Getenv in production and a
@@ -189,6 +217,9 @@ func newOSC7501Emitter(getenv func(string) string) *osc7501Emitter {
 		lastEmitted: map[string]string{},
 		lastState:   map[string]string{},
 		worked:      map[string]bool{},
+		doneDelay:   osc7501DoneDelay,
+		now:         time.Now,
+		pending:     map[string]pendingDone{},
 	}
 }
 
@@ -257,6 +288,25 @@ func (e *osc7501Emitter) Sync(displays []rail.TopLevelDisplay) string {
 	return out.String()
 }
 
+// pendingDelay reports how long until the earliest held done may be emitted,
+// or (0, false) when none is held. The cockpit arms a tea.Tick for it so a done
+// that settles with no further state still reaches the terminal.
+func (e *osc7501Emitter) pendingDelay() (time.Duration, bool) {
+	now := e.now()
+	var best time.Duration
+	found := false
+	for _, p := range e.pending {
+		d := p.at.Sub(now)
+		if d < 0 {
+			d = 0
+		}
+		if !found || d < best {
+			best, found = d, true
+		}
+	}
+	return best, found
+}
+
 // record maps one display to a record, or "" when it maps to nothing or maps
 // to the same bytes it last emitted. It is edge-triggered per id.
 func (e *osc7501Emitter) record(d rail.TopLevelDisplay) string {
@@ -265,12 +315,39 @@ func (e *osc7501Emitter) record(d rail.TopLevelDisplay) string {
 	if !osc7501IDPattern.MatchString(d.ChildID) {
 		return ""
 	}
+	id := d.ChildID
 	s := e.sequence(d)
-	if s == "" || s == e.lastEmitted[d.ChildID] {
+
+	// Hold a would-be done for the settle delay (F1): a fact flushing or a
+	// schedule firing drops the pending fact to zero before the child's status
+	// flips to working, so an idle that lands in that gap would otherwise flash
+	// done for a coordinator that is waking. Any later mapping supersedes the
+	// held done; only an idle that stays idle for the whole delay is emitted.
+	if osc7501StateOf(s) == osc7501Done && e.doneDelay > 0 {
+		p, held := e.pending[id]
+		if !held || p.seq != s {
+			e.pending[id] = pendingDone{seq: s, at: e.now().Add(e.doneDelay)}
+			return ""
+		}
+		if e.now().Before(p.at) {
+			return ""
+		}
+		delete(e.pending, id)
+	} else {
+		// Any other mapping supersedes a held done.
+		delete(e.pending, id)
+	}
+
+	if s == "" || s == e.lastEmitted[id] {
 		return ""
 	}
-	e.lastEmitted[d.ChildID] = s
-	e.lastState[d.ChildID] = osc7501StateOf(s)
+	e.lastEmitted[id] = s
+	e.lastState[id] = osc7501StateOf(s)
+	// Clear worked only once the done actually goes out, so the held record
+	// still maps to done on the timer re-sync.
+	if osc7501StateOf(s) == osc7501Done {
+		e.worked[id] = false
+	}
 	return s
 }
 
@@ -321,7 +398,8 @@ func (e *osc7501Emitter) sequence(d rail.TopLevelDisplay) string {
 		if !e.worked[id] {
 			return ""
 		}
-		e.worked[id] = false
+		// worked is cleared by record when the done is actually emitted, not
+		// here, so a done held for the settle delay still maps to done.
 		return osc7501(osc7501Done, id)
 	case protocol.DisplayExited:
 		if _, emitted := e.lastEmitted[id]; !emitted {
