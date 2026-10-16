@@ -32,13 +32,13 @@ var keyTitles = map[string]string{
 
 // resolveValidKey asks for one provider's key and, when a NEW or CHANGED
 // non-empty answer is given, validates it with a live call. An invalid key
-// re-prompts interactively; under --yes (or a piped stdin) it is an error. An
+// re-prompts interactively; under --non-interactive (or a piped stdin) it is an error. An
 // empty answer (no key configured) is not an error.
 //
 // A key UNCHANGED from the value already saved in service.env is NOT
 // re-validated: setup must be safe to re-run, and a live HTTP call on every
 // run would require the network on a second run and hard-fail an offline
-// machine (or a revoked-but-unchanged key) under --yes. Anything the operator
+// machine (or a revoked-but-unchanged key) under --non-interactive. Anything the operator
 // just supplied is still validated.
 func resolveValidKey(ctx context.Context, w *wizard, out io.Writer, provider, flag, envName string, savedEnv map[string]string) (string, error) {
 	savedValue := savedEnv[envName]

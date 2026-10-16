@@ -215,7 +215,7 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 	}
 
 	// Summary before installing — names only, never values. Interactive asks to
-	// confirm; --yes and a piped stdin take confirmRun's answer.
+	// confirm; --non-interactive and a piped stdin take confirmRun's answer.
 	fmt.Fprint(out, executorSetupSummary(connectAddr, connectSocket, root, launch, savedEnv))
 	confirmed, err := w.confirmRun([]string{"rafiki", "executor", "service", "install"})
 	if err != nil {
