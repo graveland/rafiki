@@ -8,9 +8,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/multigres/testkit/assert"
 
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
@@ -346,4 +348,132 @@ func TestOSC7501NewStateCancelsHeldDone(t *testing.T) {
 				"no done ever follows the cancelled hold")
 		})
 	}
+}
+
+// cmdRaws runs a tea.Cmd and concatenates every RawMsg payload it produces,
+// flattening one level of tea.BatchMsg. Tests only pass commands that are pure
+// Raw writes: a settle tick is never invoked this way (it would sleep), so a
+// command still holding only a tick is asserted on by inspecting the emitter.
+func cmdRaws(cmd tea.Cmd) string {
+	if cmd == nil {
+		return ""
+	}
+	var out strings.Builder
+	switch m := cmd().(type) {
+	case tea.RawMsg:
+		if s, ok := m.Msg.(string); ok {
+			out.WriteString(s)
+		}
+	case tea.BatchMsg:
+		for _, sub := range m {
+			if sub == nil {
+				continue
+			}
+			if rm, ok := sub().(tea.RawMsg); ok {
+				if s, ok := rm.Msg.(string); ok {
+					out.WriteString(s)
+				}
+			}
+		}
+	}
+	return out.String()
+}
+
+// TestOSC7501RemovedChildPrunesHeldDone pins F1-R1: a child removed from the
+// display set while its done is held must not leave a stale pending entry,
+// whose expired deadline pendingDelay clamps to 0 and which would re-arm a
+// zero-delay settle tick on every sync -- an unbounded Update loop.
+func TestOSC7501RemovedChildPrunesHeldDone(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	now := time.Unix(6_000, 0)
+	e := settlingEmitter(func() time.Time { return now })
+
+	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "work")
+	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}), "idle holds a done")
+	d, ok := e.pendingDelay()
+	ck.True(ok && d > 0, "the held done has a positive remaining delay")
+
+	// The child is removed from the rail: it is gone from the display set.
+	ck.Eq("", e.Sync(nil), "a vanished child emits nothing")
+
+	_, held := e.pendingDelay()
+	ck.False(held, "the held done is pruned, so no settle tick is armed")
+	ck.Eq(0, len(e.pending), "pending is empty after the prune")
+	ck.Eq(0, len(e.lastEmitted), "lastEmitted is pruned too")
+	ck.Eq(0, len(e.worked), "worked is pruned too")
+}
+
+// TestOSC7501CockpitSettleTickEmitsHeldDone exercises the real cockpit path:
+// syncOSC arming the settle tick while a done is held, the osc7501SettleMsg
+// handler emitting the held done once the delay elapses, and a new state
+// arriving inside the delay cancelling it. The emitter's clock is injected, so
+// nothing sleeps the real 1.5s.
+func TestOSC7501CockpitSettleTickEmitsHeldDone(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	now := time.Unix(7_000, 0)
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", ChildID: testChildID})
+	c.osc7501.now = func() time.Time { return now }
+	c.osc7501.supported = true
+	seed := func(state, waiting, msg string) {
+		c.rail.Seed([]*rafikiv1.ChildSummary{{
+			ChildId:      testChildID,
+			Name:         "alice",
+			Status:       "idle",
+			DisplayState: state,
+			WaitingOn:    waiting,
+			DisplayMsg:   msg,
+			Labels:       map[string]string{},
+		}})
+	}
+
+	// Work emits immediately and holds nothing.
+	seed(string(protocol.DisplayWorking), "", "")
+	ck.Eq(osc7501(osc7501Working, testChildID), cmdRaws(c.syncOSC()), "working emits immediately")
+	_, held := c.osc7501.pendingDelay()
+	ck.False(held, "nothing is held after working")
+
+	// Idle after work holds the done and arms the settle tick.
+	seed(string(protocol.DisplayIdle), "", "")
+	ck.NotNil(c.syncOSC(), "a settle tick is armed for the held done")
+	d, held := c.osc7501.pendingDelay()
+	ck.True(held && d > 0, "the done is held with a positive remaining delay")
+	ck.Eq(osc7501(osc7501Working, testChildID), c.osc7501.lastEmitted[testChildID],
+		"the held done has not replaced working yet")
+
+	// A settle tick inside the delay emits nothing and keeps holding.
+	_, tickCmd := c.Update(osc7501SettleMsg{})
+	ck.NotNil(tickCmd, "the tick re-arms while the done is still held")
+	_, held = c.osc7501.pendingDelay()
+	ck.True(held, "still held inside the delay")
+	ck.Eq(osc7501(osc7501Working, testChildID), c.osc7501.lastEmitted[testChildID],
+		"no done was emitted inside the delay")
+
+	// Past the delay the settle handler emits the held done.
+	now = now.Add(osc7501DoneDelay + time.Second)
+	_, emitCmd := c.Update(osc7501SettleMsg{})
+	ck.Eq(osc7501(osc7501Done, testChildID), cmdRaws(emitCmd),
+		"the settle tick after the delay emits the held done")
+	_, held = c.osc7501.pendingDelay()
+	ck.False(held, "the hold is cleared once emitted")
+
+	// Cancellation: work, hold a done, then blocked arrives inside the delay.
+	seed(string(protocol.DisplayWorking), "", "")
+	c.syncOSC()
+	seed(string(protocol.DisplayIdle), "", "")
+	c.syncOSC()
+	seed(string(protocol.DisplayWaiting), string(protocol.WaitingOnOperator), "q")
+	ck.Eq(osc7501(osc7501Blocked, testChildID,
+		kv{"kind", "question"},
+		kv{"msg", osc7501Value("q", osc7501MaxMsg)},
+		kv{"title", osc7501Value("alice", osc7501MaxTitle)}),
+		cmdRaws(c.syncOSC()),
+		"a blocked inside the delay cancels the held done and is emitted")
+	_, held = c.osc7501.pendingDelay()
+	ck.False(held, "the held done was cancelled")
+
+	// Long after the delay, no done is emitted for the first idle.
+	now = now.Add(10 * time.Second)
+	_, lateCmd := c.Update(osc7501SettleMsg{})
+	ck.Eq("", cmdRaws(lateCmd), "no done ever follows the cancelled hold")
 }
