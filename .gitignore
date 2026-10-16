@@ -60,3 +60,7 @@ __pycache__/
 /web/src/gen/
 /pkg/webui/dist/*
 !/pkg/webui/dist/.gitkeep
+
+# GoReleaser output at the repo root (release artifacts; distinct from the
+# web UI's pkg/webui/dist above, which has its own rules).
+/dist/
