@@ -6,7 +6,7 @@ client (`rafiki`).
 
 ## Install
 
-**macOS.** `brew install graveland/rafiki/rafiki`, then `rafiki setup`.
+**macOS.** `brew install graveland/tap/rafiki`, then `rafiki setup`.
 
 **Linux (Debian/Ubuntu).**
 

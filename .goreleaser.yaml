@@ -73,7 +73,7 @@ homebrew_casks:
   - name: rafiki
     repository:
       owner: graveland
-      name: homebrew-rafiki
+      name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     binaries: [rafiki, rafikid]
     dependencies:
