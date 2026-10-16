@@ -227,7 +227,7 @@ func (f *setupFixture) setFlag(name, value string) {
 }
 
 // run drives runSetup with a non-interactive wizard built AFTER the test set
-// its flags (newWizard reads --yes at construction).
+// its flags (newWizard reads --non-interactive at construction).
 func (f *setupFixture) runSetup() error {
 	w := newWizard(f.cmd)
 	w.in = &bytes.Buffer{}
@@ -353,17 +353,17 @@ func TestSetupSavesProgressPerStep(t *testing.T) {
 	c.Eq(stepDatabase, f.lastStep(), "last_step after failing at migrate")
 }
 
-// TestSetupKeyInvalidUnderYesFails: a rejected key is fatal when there is no
+// TestSetupKeyInvalidUnderNonInteractiveFails: a rejected key is fatal when there is no
 // terminal to re-prompt.
-func TestSetupKeyInvalidUnderYesFails(t *testing.T) {
+func TestSetupKeyInvalidUnderNonInteractiveFails(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newSetupFixture(t)
-	f.setFlag("yes", "true")
+	f.setFlag("non-interactive", "true")
 	f.setFlag("openrouter-key", "bad-key")
 	stubKeyServer(t, http.StatusUnauthorized)
 
 	err := f.runSetup()
-	c.Error(err, "an invalid key under --yes must fail")
+	c.Error(err, "an invalid key under --non-interactive must fail")
 	c.StrContains(err.Error(), "invalid", "the error must say the key is invalid:\n")
 }
 
@@ -407,7 +407,7 @@ func TestSetupExposeWarnsCleartext(t *testing.T) {
 	f := newSetupFixture(t)
 	f.seedServiceEnv(map[string]string{"RAFIKI_DB": constSetupDSN})
 	f.setFlag("expose", "true")
-	f.setFlag("yes", "true")
+	f.setFlag("non-interactive", "true")
 	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup --expose")
@@ -544,7 +544,7 @@ func TestSetupValidateKeyAnthropic(t *testing.T) {
 
 // TestSetupUnchangedKeyNotValidated: a saved key that is not changed must not
 // trigger a live validation call — a second run must not need the network, and
-// must not hard-fail under --yes on an offline machine. The server answers 500,
+// must not hard-fail under --non-interactive on an offline machine. The server answers 500,
 // so a validation call would also fail the run.
 func TestSetupUnchangedKeyNotValidated(t *testing.T) {
 	c := assert.NewAborting(t)

@@ -693,7 +693,7 @@ var (
 	// code `rafiki executor setup` runs.
 	createRunExecutorSetup = runExecutorSetup
 	// createIsInteractive reports whether this caller can answer a prompt: not
-	// --yes, and stdin is a terminal.
+	// --non-interactive, and stdin is a terminal.
 	createIsInteractive = func(cmd *cobra.Command) bool { return newWizard(cmd).interactive }
 	// createResolveLaunchExecutor resolves a launch-required kind's executor
 	// from the daemon's live catalog.

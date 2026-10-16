@@ -23,7 +23,7 @@ import (
 func newTestWizard(t *testing.T, flags func(*cobra.Command)) *wizard {
 	t.Helper()
 	cmd := &cobra.Command{Use: "setup", RunE: func(*cobra.Command, []string) error { return nil }}
-	cmd.Flags().Bool("yes", false, "")
+	cmd.Flags().Bool("non-interactive", false, "")
 	flags(cmd)
 	w := newWizard(cmd)
 	w.in = &bytes.Buffer{}
@@ -66,15 +66,15 @@ func TestWizardPrecedence(t *testing.T) {
 	}
 }
 
-func TestWizardRequiredMissingUnderYes(t *testing.T) {
+func TestWizardRequiredMissingUnderNonInteractive(t *testing.T) {
 	w := newTestWizard(t, func(cmd *cobra.Command) {
 		cmd.Flags().String("name", "", "")
 	})
-	w.yes = true
+	w.nonInteractive = true
 
 	_, err := w.askString("Name", "name", "", "", true)
 	if err == nil {
-		t.Fatal("askString with a required empty value under --yes: want error, got nil")
+		t.Fatal("askString with a required empty value under --non-interactive: want error, got nil")
 	}
 	if !strings.Contains(err.Error(), "--name") {
 		t.Errorf("error %q must name the flag --name", err.Error())
@@ -133,14 +133,14 @@ func TestWizardMultiPrecedenceAndOrder(t *testing.T) {
 }
 
 // TestWizardConfirmRun pins confirmRun's non-interactive contract: it prints
-// the joined argv line and, with no terminal, agrees only when --yes was given.
+// the joined argv line and, with no terminal, agrees only when --non-interactive was given.
 func TestWizardConfirmRun(t *testing.T) {
-	for _, yes := range []bool{false, true} {
-		t.Run(map[bool]string{false: "without --yes", true: "with --yes"}[yes], func(t *testing.T) {
+	for _, nonInteractive := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without --non-interactive", true: "with --non-interactive"}[nonInteractive], func(t *testing.T) {
 			cmd := &cobra.Command{Use: "setup", RunE: func(*cobra.Command, []string) error { return nil }}
-			cmd.Flags().Bool("yes", false, "")
-			if yes {
-				if err := cmd.Flags().Set("yes", "true"); err != nil {
+			cmd.Flags().Bool("non-interactive", false, "")
+			if nonInteractive {
+				if err := cmd.Flags().Set("non-interactive", "true"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -154,8 +154,8 @@ func TestWizardConfirmRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("confirmRun: %v", err)
 			}
-			if got != yes {
-				t.Errorf("confirmRun (--yes=%v) = %v, want %v", yes, got, yes)
+			if got != nonInteractive {
+				t.Errorf("confirmRun (--non-interactive=%v) = %v, want %v", nonInteractive, got, nonInteractive)
 			}
 			if !strings.Contains(out.String(), "brew install x") {
 				t.Errorf("confirmRun did not print the command line; out = %q", out.String())
@@ -231,5 +231,73 @@ func TestWaitForSocketContextDeadline(t *testing.T) {
 	err = waitForSocket(ctx, path)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waitForSocket with nothing listening = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestWizardSelectPrecedence(t *testing.T) {
+	choices := []choice{{Value: "a", Label: "A"}, {Value: "b", Label: "B"}}
+	tests := []struct {
+		name     string
+		setFlag  bool
+		flagVal  string
+		saved    string
+		detected string
+		want     string
+	}{
+		{name: "flag wins over saved and detected", setFlag: true, flagVal: "b", saved: "a", detected: "a", want: "b"},
+		{name: "saved wins over detected", saved: "b", detected: "a", want: "b"},
+		{name: "saved not among the choices falls back to detected", saved: "z", detected: "a", want: "a"},
+		{name: "detected when nothing else", detected: "a", want: "a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newTestWizard(t, func(cmd *cobra.Command) {
+				cmd.Flags().String("pick", "", "")
+				if tt.setFlag {
+					if err := cmd.Flags().Set("pick", tt.flagVal); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			got, err := w.askSelect("Pick", "pick", choices, tt.saved, tt.detected)
+			if err != nil {
+				t.Fatalf("askSelect: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("askSelect = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRequireTerminalOrNonInteractive pins each guard clause: removing the
+// terminal check, the flag check, or the refusal breaks one of these cases.
+func TestRequireTerminalOrNonInteractive(t *testing.T) {
+	cmdWith := func(nonInteractive bool) *cobra.Command {
+		cmd := &cobra.Command{Use: "setup", RunE: func(*cobra.Command, []string) error { return nil }}
+		cmd.Flags().Bool("non-interactive", false, "")
+		if nonInteractive {
+			if err := cmd.Flags().Set("non-interactive", "true"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return cmd
+	}
+
+	// (a) a terminal needs no flag.
+	if err := requireTerminalOrNonInteractive(cmdWith(false), true); err != nil {
+		t.Errorf("terminal without the flag: want nil, got %v", err)
+	}
+	// (b) no terminal is fine with the flag.
+	if err := requireTerminalOrNonInteractive(cmdWith(true), false); err != nil {
+		t.Errorf("no terminal with the flag: want nil, got %v", err)
+	}
+	// (c) no terminal and no flag is refused.
+	err := requireTerminalOrNonInteractive(cmdWith(false), false)
+	if !errors.Is(err, errNoTerminal) {
+		t.Fatalf("no terminal without the flag: want errNoTerminal, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "--non-interactive") {
+		t.Errorf("error %q must mention --non-interactive", err.Error())
 	}
 }

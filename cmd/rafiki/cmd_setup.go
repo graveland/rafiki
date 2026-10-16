@@ -14,6 +14,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/installstate"
@@ -67,14 +68,19 @@ It is safe to re-run. Every answer is saved to ` + installstate.FileName + ` and
 every secret (the database DSN and your API keys) to ` + filepath.Base(paths.ServiceEnvFile()) + ` (0600),
 so a re-run resumes from where it got to and only asks for what changed.
 
-With --yes every question takes its default (or a saved answer or flag), which
-is the path a script or a reinstall uses.`,
+With --non-interactive no question is asked: every answer comes from a flag, a
+saved answer, or the default — the path a script, a reinstall, or a config
+upgrade uses. Without a terminal, setup refuses to run unless --non-interactive
+is given.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireTerminalOrNonInteractive(cmd, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
+				return err
+			}
 			return runSetup(cmdCtx(cmd), cmd, newWizard(cmd), execRunner{}, cmdOut(cmd))
 		},
 	}
-	cmd.Flags().Bool("yes", false, "Accept every default without prompting")
+	cmd.Flags().Bool("non-interactive", false, "Never prompt; use flags, saved answers, then defaults")
 	cmd.Flags().String("dsn", "", "Database DSN (postgres://...) instead of a managed container")
 	cmd.Flags().String("user", "", "Your rafiki user name")
 	cmd.Flags().String(keyOpenRouterFlag, "", "OpenRouter API key")

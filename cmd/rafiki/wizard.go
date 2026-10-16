@@ -22,31 +22,32 @@ import (
 //
 // The rule for every prompt: it has a flag, a saved answer, and a detected
 // default, and the precedence is flag (if Changed) > saved > detected.
-// Interactive mode shows a form prefilled with that value; --yes (or any
-// non-terminal stdin) skips the form and takes the value, and a required
-// value still empty there is an error naming the flag.
+// Interactive mode shows a form prefilled with that value; --non-interactive
+// (or any non-terminal stdin) skips the form and takes the value, and a
+// required value still empty there is an error naming the flag.
 type wizard struct {
-	cmd *cobra.Command
-	yes bool      // --yes: never show a form
-	in  io.Reader // os.Stdin in production
-	out io.Writer // os.Stdout in production
+	cmd            *cobra.Command
+	nonInteractive bool      // --non-interactive: never show a form
+	in             io.Reader // os.Stdin in production
+	out            io.Writer // os.Stdout in production
 
-	// interactive is computed by newWizard: not --yes and stdin is a
-	// terminal. When false, no form is ever shown and answers are taken as-is.
+	// interactive is computed by newWizard: not --non-interactive and stdin is
+	// a terminal. When false, no form is ever shown and answers are taken as-is.
 	interactive bool
 }
 
-// newWizard reads the "yes" bool flag from cmd. The caller registers it; a
-// missing flag simply reads as false. It decides interactivity once, here, so
-// a form is never shown under --yes or a piped stdin.
+// newWizard reads the "non-interactive" bool flag from cmd. The caller
+// registers it; a missing flag simply reads as false. It decides interactivity
+// once, here, so a form is never shown under --non-interactive or a piped
+// stdin.
 func newWizard(cmd *cobra.Command) *wizard {
-	yes, _ := cmd.Flags().GetBool("yes")
+	nonInteractive, _ := cmd.Flags().GetBool("non-interactive")
 	return &wizard{
-		cmd:         cmd,
-		yes:         yes,
-		in:          os.Stdin,
-		out:         os.Stdout,
-		interactive: !yes && term.IsTerminal(int(os.Stdin.Fd())),
+		cmd:            cmd,
+		nonInteractive: nonInteractive,
+		in:             os.Stdin,
+		out:            os.Stdout,
+		interactive:    !nonInteractive && term.IsTerminal(int(os.Stdin.Fd())),
 	}
 }
 
@@ -184,11 +185,11 @@ func (w *wizard) askMulti(title, flag string, options, saved, detected []string)
 }
 
 // confirmRun prints the exact command line and asks "Run it?". Non-interactive
-// mode returns true only when --yes was given.
+// mode returns true only when --non-interactive was given.
 func (w *wizard) confirmRun(argv []string) (bool, error) {
 	fmt.Fprintln(w.out, strings.Join(argv, " "))
 	if !w.interactive {
-		return w.yes, nil
+		return w.nonInteractive, nil
 	}
 
 	v := true
@@ -202,7 +203,67 @@ func (w *wizard) confirmRun(argv []string) (bool, error) {
 }
 
 func missingFlagError(flag string) error {
-	return fmt.Errorf("missing --%s (required with --yes or without a terminal)", flag)
+	return fmt.Errorf("missing --%s (required with --non-interactive or without a terminal)", flag)
+}
+
+// errNoTerminal is returned by requireTerminalOrNonInteractive.
+var errNoTerminal = errors.New("no terminal to ask questions on; pass --non-interactive to use flags, saved answers and defaults")
+
+// requireTerminalOrNonInteractive refuses a setup run that has no terminal to
+// prompt on unless --non-interactive was given explicitly, so nothing (an
+// agent, a pipe) silently takes every default. It lives at the setup
+// commands' entry, not in newWizard: rafiki create builds wizards too and
+// must keep working piped.
+func requireTerminalOrNonInteractive(cmd *cobra.Command, stdinIsTerminal bool) error {
+	if stdinIsTerminal {
+		return nil
+	}
+	if ni, _ := cmd.Flags().GetBool("non-interactive"); ni {
+		return nil
+	}
+	return errNoTerminal
+}
+
+// choice is one askSelect option: Value is returned, Label is shown.
+type choice struct{ Value, Label string }
+
+// askSelect resolves one of choices' Values: flag (GetString, if Changed) >
+// saved (when it is one of the Values) > detected. Interactive mode shows an
+// huh Select preselected on that value; non-interactive returns it.
+func (w *wizard) askSelect(title, flag string, choices []choice, saved, detected string) (string, error) {
+	v := detected
+	switch {
+	case w.cmd.Flags().Changed(flag):
+		v, _ = w.cmd.Flags().GetString(flag)
+	case saved != "" && choiceHas(choices, saved):
+		v = saved
+	}
+
+	if !w.interactive {
+		return v, nil
+	}
+
+	opts := make([]huh.Option[string], 0, len(choices))
+	for _, c := range choices {
+		opts = append(opts, huh.NewOption(c.Label, c.Value))
+	}
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title(title).Options(opts...).Value(&v),
+	)).WithInput(w.in).WithOutput(w.out)
+	if err := form.Run(); err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+// choiceHas reports whether value is one of choices' Values.
+func choiceHas(choices []choice, value string) bool {
+	for _, c := range choices {
+		if c.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func containsString(haystack []string, needle string) bool {

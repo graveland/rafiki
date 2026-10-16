@@ -231,7 +231,7 @@ func TestSetupPrereqLinuxDockerGroupStops(t *testing.T) {
 	r := newFakeRunner()
 	r.scriptErr([]string{"docker", "info"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
-	w.yes = true // accept the offered commands so the group step is reached
+	w.nonInteractive = true // accept the offered commands so the group step is reached
 
 	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
 	if err == nil {
@@ -329,7 +329,7 @@ func TestSetupPrereqOptionalChosenInstalled(t *testing.T) {
 	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
 	r.paths["rg"] = "/opt/homebrew/bin/rg"
 	w := newSetupWizard(t)
-	w.yes = true
+	w.nonInteractive = true
 
 	chosen, err := checkPrereqs(context.Background(), r, w, "darwin", []string{"uv", "rtk"})
 	if err != nil {
@@ -399,11 +399,11 @@ func TestWizardSecretPrecedence(t *testing.T) {
 	}
 }
 
-func TestWizardSecretRequiredMissingUnderYes(t *testing.T) {
+func TestWizardSecretRequiredMissingUnderNonInteractive(t *testing.T) {
 	w := newTestWizard(t, func(cmd *cobra.Command) {
 		cmd.Flags().String("api-key", "", "")
 	})
-	w.yes = true
+	w.nonInteractive = true
 
 	_, err := w.askSecret("API key", "api-key", "", "", true)
 	if err == nil || !strings.Contains(err.Error(), "--api-key") {

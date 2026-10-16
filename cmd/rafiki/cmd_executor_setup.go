@@ -14,6 +14,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -38,15 +39,19 @@ func newExecutorSetupCmd() *cobra.Command {
 	replay them, and the executor is installed as a per-user service (the same
 	unit ` + "`rafiki executor service install`" + ` writes).
 
-	With --yes every question takes its default (or the value a saved answer or
-	flag supplies) and no form is shown, which is the path a script or a
-	reinstall uses.`,
+	With --non-interactive no question is asked: every answer comes from a flag,
+	a saved answer, or the default — the path a script, a reinstall, or a config
+	upgrade uses. Without a terminal, setup refuses to run unless
+	--non-interactive is given.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireTerminalOrNonInteractive(cmd, term.IsTerminal(int(os.Stdin.Fd()))); err != nil {
+				return err
+			}
 			return runExecutorSetup(cmdCtx(cmd), newWizard(cmd), os.Stdout)
 		},
 	}
-	cmd.Flags().Bool("yes", false, "Accept every default without prompting")
+	cmd.Flags().Bool("non-interactive", false, "Never prompt; use flags, saved answers, then defaults")
 	cmd.Flags().String("connect", "", "daemon to connect to (host:port; blank means this machine's daemon)")
 	cmd.Flags().String("root", "", "directory agents may work in")
 	cmd.Flags().StringSlice("launch", nil, "agent kinds this machine hosts (repeatable)")

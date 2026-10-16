@@ -154,7 +154,7 @@ func TestExecutorSetupDefaultsNameToHostname(t *testing.T) {
 		t.Skipf("hostname %q sanitises to empty on this machine", host)
 	}
 
-	out, err := runExecutorSetupForTest(t, "--yes")
+	out, err := runExecutorSetupForTest(t, "--non-interactive")
 	if err != nil {
 		t.Fatalf("runExecutorSetup: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestExecutorSetupKeepsConfiguredName(t *testing.T) {
 	t.Setenv(paths.ExecutorName, "")
 	seedMachineName(t, "configured-box")
 
-	out, err := runExecutorSetupForTest(t, "--yes")
+	out, err := runExecutorSetupForTest(t, "--non-interactive")
 	if err != nil {
 		t.Fatalf("runExecutorSetup: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestExecutorSetupKeepsConfiguredName(t *testing.T) {
 	c.Eq("configured-box", got, "a configured name must be left untouched")
 }
 
-// TestExecutorSetupEnvNamesNotSnapshot pins that an unattended --yes run carries
+// TestExecutorSetupEnvNamesNotSnapshot pins that an unattended --non-interactive run carries
 // only the detected default names, not a snapshot of every variable in the
 // installing shell: a secret-shaped variable that happens to be set must not
 // reach the file.
@@ -200,7 +200,7 @@ func TestExecutorSetupEnvNamesNotSnapshot(t *testing.T) {
 	t.Setenv("SECRET_THING", "hunter2")
 	t.Setenv("EDITOR", "vi")
 
-	if _, err := runExecutorSetupForTest(t, "--yes"); err != nil {
+	if _, err := runExecutorSetupForTest(t, "--non-interactive"); err != nil {
 		t.Fatalf("runExecutorSetup: %v", err)
 	}
 
@@ -222,12 +222,12 @@ func TestExecutorSetupReplayRereadsValues(t *testing.T) {
 	stubExecutorSetup(t)
 	t.Setenv("EDITOR", "vi")
 
-	if _, err := runExecutorSetupForTest(t, "--yes"); err != nil {
+	if _, err := runExecutorSetupForTest(t, "--non-interactive"); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 
 	t.Setenv("EDITOR", "nano")
-	if _, err := runExecutorSetupForTest(t, "--yes"); err != nil {
+	if _, err := runExecutorSetupForTest(t, "--non-interactive"); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 
@@ -249,7 +249,7 @@ func TestExecutorSetupNeverPrintsValues(t *testing.T) {
 	t.Setenv("EDITOR", canary)
 	t.Setenv("SECRET_THING", "pr1nt-canary-secret-value")
 
-	out, err := runExecutorSetupForTest(t, "--yes")
+	out, err := runExecutorSetupForTest(t, "--non-interactive")
 	if err != nil {
 		t.Fatalf("runExecutorSetup: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestExecutorSetupNeverPrintsValues(t *testing.T) {
 
 // TestExecutorSetupYesWithoutTokenOrMintFails pins the unattended failure: no
 // credential file, no --enroll-token, and a token mint refused for lack of
-// admin, so --yes must error with the remedy (pass --enroll-token) rather than
+// admin, so --non-interactive must error with the remedy (pass --enroll-token) rather than
 // hanging on a form.
 func TestExecutorSetupYesWithoutTokenOrMintFails(t *testing.T) {
 	isolateSetup(t)
@@ -270,7 +270,7 @@ func TestExecutorSetupYesWithoutTokenOrMintFails(t *testing.T) {
 	stubExecutorSetup(t)
 	stubEnroll(t, "", connect.NewError(connect.CodePermissionDenied, errors.New("not an admin")))
 
-	_, err := runExecutorSetupForTest(t, "--yes")
+	_, err := runExecutorSetupForTest(t, "--non-interactive")
 	if err == nil {
 		t.Fatal("expected an error when the token cannot be minted and none was given")
 	}
@@ -292,7 +292,7 @@ func TestExecutorSetupSavesAnswers(t *testing.T) {
 	root := t.TempDir()
 
 	if _, err := runExecutorSetupForTest(t,
-		"--yes", "--root", root, "--launch", "claude",
+		"--non-interactive", "--root", root, "--launch", "claude",
 		"--env", "LANG", "--env", "EDITOR"); err != nil {
 		t.Fatalf("runExecutorSetup: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestExecutorSetupIgnoresAmbientExecutorEnvFile(t *testing.T) {
 	seedMachineName(t, "test-box")
 	stubExecutorSetup(t)
 
-	if _, err := runExecutorSetupForTest(t, "--yes"); err != nil {
+	if _, err := runExecutorSetupForTest(t, "--non-interactive"); err != nil {
 		t.Fatalf("runExecutorSetup: %v", err)
 	}
 
