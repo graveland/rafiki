@@ -454,8 +454,19 @@ func installReport(spec serviceSpec, envFile string, res paths.MergeResult, merg
 	// to in-memory with no per-turn cost recorded, and the only visible symptom
 	// is a "mem-" session id where a UUIDv7 belongs. Warn only when it is in
 	// neither the shell nor the file — a DSN already in service.env is fine.
+	//
+	// res.Defined only carries keys the merge categorized, and with
+	// CaptureShellEnv=false no merge runs, so the file must be read directly:
+	// `rafiki setup` writes RAFIKI_DB there itself and the daemon loads it, and
+	// warning it is missing is false.
 	_, inShell := spec.SecretEnv[paths.DB]
-	if !inShell && !slices.Contains(res.Defined, paths.DB) {
+	inFile := slices.Contains(res.Defined, paths.DB)
+	if !inFile {
+		if fileVars, ferr := readEnvFile(envFile); ferr == nil {
+			_, inFile = fileVars[paths.DB]
+		}
+	}
+	if !inShell && !inFile {
 		fmt.Fprintf(&b, "\nNo %s in this shell's environment or in %s — agent\n"+
 			"conversations will be in-memory and no per-turn cost will be recorded.\n"+
 			"Export it (or source your .env) and re-run `rafiki service install`.\n",

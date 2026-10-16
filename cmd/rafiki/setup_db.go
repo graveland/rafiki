@@ -23,6 +23,11 @@ const (
 	// managedPGImage is pinned to an exact tag so a release that bumps it is how
 	// `rafiki update` learns the container needs replacing.
 	managedPGImage = "timescale/timescaledb-ha:pg18.6-ts2.30.2"
+	// initCompleteMarker is printed by the docker-entrypoint after its TEMPORARY
+	// init server stops and before the real server starts. Waiting for it is what
+	// closes the first-run race: pg_isready reports healthy during the temp phase,
+	// so a health wait alone lets migrate race the entrypoint's restart.
+	initCompleteMarker = "PostgreSQL init process complete"
 )
 
 // dbResult is the resolved database connection.
@@ -110,6 +115,14 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 			return st, dbResult{}, fmt.Errorf("docker run %s: %s", managedPGContainer, strings.TrimSpace(string(stderr)))
 		}
 		st.Port = port
+		// Only a fresh volume runs initdb; the entrypoint's temp server stops and
+		// restarts before the real one is ready, so wait for its marker before the
+		// health wait (which the temp server already satisfies).
+		if !volumeExists {
+			if err := waitForInitComplete(ctx, r); err != nil {
+				return st, dbResult{}, err
+			}
+		}
 		if err := waitForHealthy(ctx, r); err != nil {
 			return st, dbResult{}, err
 		}
@@ -196,6 +209,34 @@ func waitForHealthy(ctx context.Context, r runner) error {
 		return fmt.Errorf("timed out waiting for %s to become healthy: %w\n%s", managedPGContainer, ctx.Err(), lastDockerLogs(ctx, r))
 	}
 	return fmt.Errorf("docker events stream ended before %s became healthy\n%s", managedPGContainer, lastDockerLogs(ctx, r))
+}
+
+// waitForInitComplete blocks until the postgres entrypoint reports that its
+// TEMPORARY init server has stopped and the real one is about to start. On a
+// fresh volume that temp server satisfies pg_isready, so waitForHealthy alone
+// returns while the real server is still restarting and migrate races it. The
+// stream is `docker logs -f` (never a poll): the marker arrives when init is
+// done, and the stream is otherwise killed by the context.
+func waitForInitComplete(ctx context.Context, r runner) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	reader, err := r.Stream(ctx, "docker", "logs", "-f", managedPGContainer)
+	if err != nil {
+		return fmt.Errorf("docker logs -f %s: %w", managedPGContainer, err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), initCompleteMarker) {
+			return nil
+		}
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("timed out waiting for %s to finish initdb: %w\n%s", managedPGContainer, ctx.Err(), lastDockerLogs(ctx, r))
+	}
+	return fmt.Errorf("docker logs stream ended before %s finished initdb\n%s", managedPGContainer, lastDockerLogs(ctx, r))
 }
 
 // lastDockerLogs returns the tail of the container's logs for a failure

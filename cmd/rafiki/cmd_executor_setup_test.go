@@ -136,6 +136,57 @@ func readExecutorEnvFile(t *testing.T) string {
 	return string(data)
 }
 
+// A fresh machine has no executor name. The executor step must default it to a
+// sanitised hostname and persist that, rather than stopping the install on a raw
+// "no executor name" error.
+func TestExecutorSetupDefaultsNameToHostname(t *testing.T) {
+	isolateSetup(t)
+	seedExecutorCredential(t)
+	stubExecutorSetup(t)
+	t.Setenv(paths.ExecutorName, "") // no env name; no name file either (fresh XDG data dir)
+
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	derived := sanitizeExecutorName(host)
+	if derived == "" {
+		t.Skipf("hostname %q sanitises to empty on this machine", host)
+	}
+
+	out, err := runExecutorSetupForTest(t, "--yes")
+	if err != nil {
+		t.Fatalf("runExecutorSetup: %v", err)
+	}
+
+	c := assert.NewCollecting(t)
+	c.StrContains(out, "no executor name set", "a defaulting run must print the note:\n%s", out)
+	got, _, err := paths.MachineName()
+	c.Require().NoError(err, "the defaulted name must have been persisted, so MachineName resolves it")
+	c.Eq(derived, got, "persisted executor name")
+}
+
+// A configured name is declared, not inferred: the run must keep it and print no
+// defaulting note.
+func TestExecutorSetupKeepsConfiguredName(t *testing.T) {
+	isolateSetup(t)
+	seedExecutorCredential(t)
+	stubExecutorSetup(t)
+	t.Setenv(paths.ExecutorName, "")
+	seedMachineName(t, "configured-box")
+
+	out, err := runExecutorSetupForTest(t, "--yes")
+	if err != nil {
+		t.Fatalf("runExecutorSetup: %v", err)
+	}
+
+	c := assert.NewCollecting(t)
+	c.NotStrContains(out, "no executor name set", "a configured name must not trigger the defaulting note:\n%s", out)
+	got, _, err := paths.MachineName()
+	c.Require().NoError(err)
+	c.Eq("configured-box", got, "a configured name must be left untouched")
+}
+
 // TestExecutorSetupEnvNamesNotSnapshot pins that an unattended --yes run carries
 // only the detected default names, not a snapshot of every variable in the
 // installing shell: a secret-shaped variable that happens to be set must not

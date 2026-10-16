@@ -34,6 +34,22 @@ func logsKey() []string {
 	return []string{"docker", "logs", "--tail", "20", managedPGContainer}
 }
 
+func initLogsKey() []string {
+	return []string{"docker", "logs", "-f", managedPGContainer}
+}
+
+// findStream returns the first stream call whose full argv equals argv (exact
+// match, unlike findCall's prefix match).
+func findStream(calls []fakeCall, argv ...string) *fakeCall {
+	want := runKey(argv)
+	for i := range calls {
+		if runKey(calls[i].argv) == want {
+			return &calls[i]
+		}
+	}
+	return nil
+}
+
 func findCall(calls []fakeCall, argv ...string) *fakeCall {
 	for i := range calls {
 		if len(calls[i].argv) < len(argv) {
@@ -193,6 +209,7 @@ func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 	r.scriptFail([]string{"docker", "volume", "inspect", managedPGVolume}, errExit(), "Error: No such volume: rafiki-pgdata")
 	r.script(healthInspectKey(), "starting\n")
 	r.streams[runKey(eventsKey())] = fakeStreamScript{lines: []string{"health_status: healthy"}}
+	r.streams[runKey(initLogsKey())] = fakeStreamScript{lines: []string{initCompleteMarker}}
 	w := newSetupWizard(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -332,6 +349,58 @@ func TestSetupDBHealthDeadline(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q must contain %q", err.Error(), want)
 		}
+	}
+}
+
+// A fresh volume runs the timescaledb-ha entrypoint's TEMPORARY init server,
+// which satisfies pg_isready while the real server is still restarting. The
+// create path must therefore stream the entrypoint's logs and wait for the
+// post-init marker before the health wait, or migrate races the restart.
+func TestSetupDBFreshCreateWaitsForInitComplete(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	r.scriptErr(stateInspectKey(), errExit())
+	r.scriptFail([]string{"docker", "volume", "inspect", managedPGVolume}, errExit(), "Error: No such volume: rafiki-pgdata")
+	r.script(healthInspectKey(), "starting\n")
+	r.streams[runKey(eventsKey())] = fakeStreamScript{lines: []string{"health_status: healthy"}}
+	r.streams[runKey(initLogsKey())] = fakeStreamScript{lines: []string{
+		"running bootstrap script",
+		initCompleteMarker,
+		"server started",
+	}}
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, _, err := setupDatabase(ctx, r, w, installstate.DB{}, ""); err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if findStream(r.streamCalls, initLogsKey()...) == nil {
+		t.Errorf("the fresh path must stream `docker logs -f` to observe initdb completion; stream calls = %v", r.streamCalls)
+	}
+}
+
+// An existing volume runs no initdb, so the create path must not pay for a logs
+// stream it has nothing to wait for.
+func TestSetupDBExistingVolumeSkipsInitWait(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	r.scriptErr(stateInspectKey(), errExit())
+	r.script([]string{"docker", "volume", "inspect", managedPGVolume}, "[]")
+	r.script(healthInspectKey(), "starting\n")
+	r.streams[runKey(eventsKey())] = fakeStreamScript{lines: []string{"health_status: healthy"}}
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	saved := "postgres://postgres:secretpw@127.0.0.1:5432/rafiki?sslmode=disable"
+	if _, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved); err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if findStream(r.streamCalls, initLogsKey()...) != nil {
+		t.Error("an existing volume runs no initdb, so `docker logs -f` must not be streamed")
 	}
 }
 

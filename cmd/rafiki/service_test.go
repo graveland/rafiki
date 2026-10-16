@@ -634,6 +634,50 @@ func TestBuildPathEnvNoPiWarning(t *testing.T) {
 	c.NotStrContains(buf.String(), "pi", "buildPathEnv still warns about the retired `pi` kind:\n%s", buf.String())
 }
 
+// `rafiki setup` writes RAFIKI_DB to service.env itself and installs the daemon
+// with CaptureShellEnv=false, so no merge runs and res.Defined is empty. The
+// missing-DSN warning must read the file directly or it fires falsely on the one
+// install path that always has a DSN.
+func TestInstallDaemonServiceNoWarningWhenEnvFileHasDSN(t *testing.T) {
+	c := assert.NewCollecting(t)
+	home, envFile := serviceEnvFixture(t)
+	t.Setenv("RAFIKI_ENV_FILE", "")
+	t.Setenv("RAFIKI_DB", "")
+	c.Require().NoError(os.MkdirAll(filepath.Dir(envFile), 0o700))
+	c.Require().NoError(os.WriteFile(envFile, []byte("RAFIKI_DB=postgres://u@h/db\n"), 0o600))
+
+	fb := &fakeServiceBackend{}
+	stubServiceBackend(t, fb)
+
+	var out bytes.Buffer
+	err := installDaemonService(daemonServiceOptions{
+		DaemonBinary: writeFakeDaemonBinary(t, home),
+		PathEnv:      "/usr/bin",
+	}, &out)
+	c.Require().NoError(err, "installDaemonService")
+	c.NotStrContains(out.String(), "in-memory", "warned about a DSN that service.env already defines:\n%s", out.String())
+}
+
+// The other half: when neither the shell nor service.env has the DSN, the
+// warning must still appear.
+func TestInstallDaemonServiceWarnsWhenNoDSNAnywhere(t *testing.T) {
+	c := assert.NewCollecting(t)
+	home, _ := serviceEnvFixture(t)
+	t.Setenv("RAFIKI_ENV_FILE", "")
+	t.Setenv("RAFIKI_DB", "")
+
+	fb := &fakeServiceBackend{}
+	stubServiceBackend(t, fb)
+
+	var out bytes.Buffer
+	err := installDaemonService(daemonServiceOptions{
+		DaemonBinary: writeFakeDaemonBinary(t, home),
+		PathEnv:      "/usr/bin",
+	}, &out)
+	c.Require().NoError(err, "installDaemonService")
+	c.StrContains(out.String(), "in-memory", "no missing-DSN warning when neither the shell nor the file has it:\n%s", out.String())
+}
+
 // ─── setup-facing service helpers ──────────────────────────────────────────────
 
 func TestRestartDaemonServiceDelegates(t *testing.T) {

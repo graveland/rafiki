@@ -254,6 +254,27 @@ func TestSetupPrereqLinuxDockerGroupStops(t *testing.T) {
 	}
 }
 
+// A user who is not in the docker group gets `permission denied` from
+// `docker info`, which used to be reported as "the daemon is not running; sudo
+// systemctl start docker" — the wrong remedy. It must name the group fix.
+func TestSetupPrereqDockerPermissionDeniedNamesGroup(t *testing.T) {
+	r := newFakeRunner()
+	r.scriptFail([]string{"docker", "info", "--format", "{{.ServerVersion}}"}, errors.New("exit 1"),
+		"Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")
+	w := newSetupWizard(t)
+
+	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
+	if err == nil {
+		t.Fatal("checkPrereqs: want the permission stop, got nil")
+	}
+	if !strings.Contains(err.Error(), "usermod -aG docker") {
+		t.Errorf("error %q must name the docker-group fix", err.Error())
+	}
+	if strings.Contains(err.Error(), "daemon is not running") {
+		t.Errorf("error %q must not be the misleading daemon-down message", err.Error())
+	}
+}
+
 func TestSetupPrereqOptionalChosenInstalled(t *testing.T) {
 	r := newFakeRunner()
 	r.paths["brew"] = "/opt/homebrew/bin/brew"

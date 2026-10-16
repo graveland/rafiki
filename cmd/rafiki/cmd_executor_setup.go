@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -114,6 +115,13 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 		return fmt.Errorf("%s: %w", installstate.Path(), err)
 	}
 
+	// Resolve the executor name ONCE, so the token minted below and the live
+	// selector waited on later both use the same value.
+	name, err := resolveExecutorName(out)
+	if err != nil {
+		return err
+	}
+
 	// Connect target. Blank means this machine's own daemon, reached over its
 	// executor socket; a host:port means a remote daemon over TLS.
 	connectAddr, err := w.askString("Daemon to connect to (blank = this machine's daemon)", "connect", st.Executor.Address, "", false)
@@ -180,10 +188,6 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 	enrollToken, _ := w.cmd.Flags().GetString("enroll-token")
 	credentialFile := filepath.Join(paths.DataDir(), "executor.cred")
 	if enrollToken == "" && !credFileExists(credentialFile) {
-		name, _, err := paths.MachineName()
-		if err != nil {
-			return err
-		}
 		token, err := executorEnrollClient(ctx, w.cmd, name, []string{root})
 		if err != nil {
 			if code := connect.CodeOf(err); code == connect.CodePermissionDenied || code == connect.CodeUnauthenticated {
@@ -235,10 +239,6 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 
 	// Wait until the executor the unit started reports live, so the operator
 	// learns immediately if it cannot connect rather than at the first spawn.
-	name, _, err := paths.MachineName()
-	if err != nil {
-		return err
-	}
 	if err := executorSetupWaitLive(ctx, w.cmd, "machine="+name); err != nil {
 		return err
 	}
@@ -251,6 +251,58 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 	}
 	fmt.Fprintln(out, "\nExecutor ready.")
 	return nil
+}
+
+// resolveExecutorName returns this machine's executor name, defaulting it to a
+// sanitised hostname and persisting it when none is configured. A fresh machine
+// has no name, and the executor step must not stop a first install on a raw "no
+// executor name" error for a name it can derive itself. A set-but-invalid name
+// (a corrupt file or a bad RAFIKI_EXECUTOR_NAME) is surfaced rather than
+// overwritten: the operator declared it.
+func resolveExecutorName(out io.Writer) (string, error) {
+	name, _, err := paths.MachineName()
+	if err == nil {
+		return name, nil
+	}
+	if !errors.Is(err, paths.ErrNoMachineName) {
+		return "", err
+	}
+	host, herr := os.Hostname()
+	if herr != nil {
+		return "", err
+	}
+	derived := sanitizeExecutorName(host)
+	if derived == "" {
+		return "", err
+	}
+	if serr := paths.SetMachineName(derived); serr != nil {
+		return "", serr
+	}
+	fmt.Fprintf(out, "    note: no executor name set; using the hostname %q (override with `rafiki executor name <name>`)\n", derived)
+	return derived, nil
+}
+
+// sanitizeExecutorName maps a hostname onto the character set
+// paths.ValidateMachineName accepts, every other rune becoming '-'. It asks
+// ValidateMachineName itself (a lone rune is non-empty and never over the
+// length cap, so the probe is exactly the charset rule) rather than restating
+// the set, and the final name must pass the same rule — so the persisted value
+// and the hostname-derived one are validated identically. A hostname that still
+// fails (empty, or over the length cap) yields "".
+func sanitizeExecutorName(host string) string {
+	var b strings.Builder
+	for _, r := range host {
+		if paths.ValidateMachineName(string(r)) == nil {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	name := strings.Trim(b.String(), "-_.")
+	if paths.ValidateMachineName(name) != nil {
+		return ""
+	}
+	return name
 }
 
 // executorSetupSummary renders the pre-install summary: the target, root, launch

@@ -16,9 +16,10 @@ import (
 // present prereq returns ("", ok=true); an absent one names *why* so the
 // right remedy is offered (start the daemon vs. install the tool vs. log in).
 const (
-	detailNotInstalled = "not installed"
-	detailDaemonDown   = "daemon not running"
-	detailLoggedOut    = "logged out"
+	detailNotInstalled     = "not installed"
+	detailDaemonDown       = "daemon not running"
+	detailLoggedOut        = "logged out"
+	detailDockerPermission = "permission denied"
 )
 
 // prereq is one external tool `rafiki setup` checks for and can install.
@@ -45,7 +46,14 @@ func prereqs() []prereq {
 			Name:     "docker",
 			Required: true,
 			Present: func(ctx context.Context, r runner) (bool, string, error) {
-				if _, _, err := r.Run(ctx, nil, "docker", "info", "--format", "{{.ServerVersion}}"); err != nil {
+				_, stderr, err := r.Run(ctx, nil, "docker", "info", "--format", "{{.ServerVersion}}")
+				if err != nil {
+					// Not being in the docker group reads as a dead daemon; it is
+					// a permission problem with a different remedy (add the user
+					// to the group, then re-login). Prefer that diagnosis.
+					if strings.Contains(strings.ToLower(string(stderr)), detailDockerPermission) {
+						return false, detailDockerPermission, nil
+					}
 					// The binary may be installed with the daemon merely stopped.
 					if _, lerr := r.LookPath("docker"); lerr == nil {
 						return false, detailDaemonDown, nil
@@ -229,6 +237,12 @@ func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optiona
 // installDocker offers the platform's docker install. On linux the daemon and
 // group are set up but the user must re-login, so it stops with a message.
 func installDocker(ctx context.Context, r runner, w *wizard, goos string, hasBrew bool, detail string) error {
+	if detail == detailDockerPermission {
+		if goos == "darwin" {
+			return errors.New("your user cannot reach the Docker daemon socket; check Docker/OrbStack's permission settings")
+		}
+		return errors.New("docker is installed but your user cannot reach the Docker daemon socket; run: sudo usermod -aG docker $USER — then log out and back in and re-run rafiki setup")
+	}
 	if detail == detailDaemonDown {
 		if goos == "darwin" {
 			return errors.New("docker is installed but the daemon is not running; start it with: open -a OrbStack")
