@@ -36,7 +36,6 @@ const (
 	stepDaemon   = "daemon"
 	stepIdentity = "identity"
 	stepExecutor = "executor"
-	stepSmoke    = "smoke"
 )
 
 // exposeWarning is printed when the proxy face is bound to every interface, and
@@ -62,7 +61,7 @@ func newSetupCmd() *cobra.Command {
 		Use:   "setup",
 		Short: "Set up rafiki on this machine",
 		Long: `Set up rafiki on this machine: prerequisites, a database, the daemon
-service, your identity, and a local executor — then a smoke test.
+service, your identity, and a local executor.
 
 It is safe to re-run. Every answer is saved to ` + installstate.FileName + ` and
 every secret (the database DSN and your API keys) to ` + filepath.Base(paths.ServiceEnvFile()) + ` (0600),
@@ -88,7 +87,6 @@ is given.`,
 	cmd.Flags().Bool("expose", false, "Make the daemon reachable from other machines on your network")
 	cmd.Flags().StringSlice("with", nil, "Optional components to install (uv, ollama, rtk)")
 	cmd.Flags().String("container-runtime", "", "Container runtime: orbstack|docker-desktop (macOS)")
-	cmd.Flags().Bool("no-smoke", false, "Skip the end-to-end smoke test")
 
 	// The executor-setup flags, registered here under the same names so
 	// runExecutorSetup reads them from this command's flags. Kept in sync with
@@ -303,15 +301,6 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 		st = s
 	}
 	if err := saveStep(st, stepExecutor); err != nil {
-		return err
-	}
-
-	// ── 9. smoke ────────────────────────────────────────────────────────────
-	step(out, stepSmoke)
-	if err := runSmokeStep(ctx, w, out, profileName); err != nil {
-		return err
-	}
-	if err := saveStep(st, stepSmoke); err != nil {
 		return err
 	}
 

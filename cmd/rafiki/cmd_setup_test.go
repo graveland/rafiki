@@ -178,7 +178,7 @@ func newSetupFixture(t *testing.T) *setupFixture {
 	c.NoError(installstate.Save(installstate.State{
 		Version:  installstate.SchemaVersion,
 		Channel:  installstate.ChannelSource,
-		LastStep: stepSmoke,
+		LastStep: stepExecutor,
 		DB:       installstate.DB{Mode: installstate.DBModeManaged, Container: managedPGContainer, Volume: managedPGVolume, Image: managedPGImage},
 		Daemon:   installstate.Daemon{Expose: &no},
 		Identity: installstate.Identity{User: "bob", Profile: "default"},
@@ -319,7 +319,6 @@ func stubKeyServerCounting(t *testing.T, status int) *atomic.Int64 {
 func TestSetupSecondRunIsNoop(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newSetupFixture(t)
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "a second setup run must succeed")
 
@@ -371,7 +370,6 @@ func TestSetupKeyInvalidUnderNonInteractiveFails(t *testing.T) {
 func TestSetupKeyValidIsWritten(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newSetupFixture(t)
-	f.setFlag("no-smoke", "true")
 	f.setFlag("openrouter-key", "sk-good")
 	stubKeyServer(t, http.StatusOK)
 
@@ -383,7 +381,6 @@ func TestSetupKeyValidIsWritten(t *testing.T) {
 func TestSetupNoKeyPrintsNote(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newSetupFixture(t)
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup with no key")
 	c.StrContains(f.out.String(), noKeyNote, "the no-key note is missing or altered:\n")
@@ -394,7 +391,6 @@ func TestSetupExposeDefaultsToLoopback(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newSetupFixture(t)
 	f.seedServiceEnv(map[string]string{"RAFIKI_DB": constSetupDSN})
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup")
 	c.StrContains(f.serviceEnvBytes(), "RAFIKI_PROXY_LISTEN=\"127.0.0.1:8035\"", "the default bind must be loopback:\n")
@@ -408,7 +404,6 @@ func TestSetupExposeWarnsCleartext(t *testing.T) {
 	f.seedServiceEnv(map[string]string{"RAFIKI_DB": constSetupDSN})
 	f.setFlag("expose", "true")
 	f.setFlag("non-interactive", "true")
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup --expose")
 	c.StrContains(f.serviceEnvBytes(), "RAFIKI_PROXY_LISTEN=\":8035\"", "an exposed bind must be all-interfaces:\n")
@@ -424,7 +419,6 @@ func TestSetupIdentityExistingUserMintsToken(t *testing.T) {
 	f.run.scriptFail([]string{f.rafikid, "user", "create", "bob", "--admin", "--token"},
 		errors.New("exit 1"), `user "bob" already exists`)
 	f.run.script([]string{f.rafikid, "user", "token", "mint", "bob"}, "token: sk-minted\n")
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup with an existing user")
 	c.True(f.ranRunKey(f.rafikid+" user token mint bob"), "mint was not called after create reported an existing user")
@@ -438,7 +432,6 @@ func TestSetupTokenNeverPrinted(t *testing.T) {
 	f.seedProfile("default", "")
 	f.run.script([]string{f.rafikid, "user", "create", "bob", "--admin", "--token"},
 		"username: bob\ntoken: sk-secret-token\n")
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup")
 	c.NotStrContains(f.out.String(), "sk-secret-token", "the token leaked to stdout:\n")
@@ -451,7 +444,6 @@ func TestSetupIdentityDSNNotInArgv(t *testing.T) {
 	f.seedProfile("default", "")
 	f.run.script([]string{f.rafikid, "user", "create", "bob", "--admin", "--token"},
 		"username: bob\ntoken: sk-created\n")
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup")
 
@@ -477,37 +469,10 @@ func TestSetupRestartWarnsAboutLiveChildren(t *testing.T) {
 	f := newSetupFixture(t)
 	f.seedServiceEnv(map[string]string{"RAFIKI_DB": constSetupDSN}) // no proxy-listen yet → change
 	f.stub.liveChildren = 2
-	f.setFlag("no-smoke", "true")
 
 	c.NoError(f.runSetup(), "setup")
 	c.StrContains(f.out.String(), "restarting rafikid will interrupt 2 running agent(s)", "the live-children warning is missing:\n")
 	c.True(f.fb.restarted, "the daemon was not restarted after a service.env change")
-}
-
-// TestSetupSmokePassesAndCloses: a child replying OK passes, and is closed.
-func TestSetupSmokePassesAndCloses(t *testing.T) {
-	c := assert.NewAborting(t)
-	f := newSetupFixture(t)
-	f.stub.spawnChildID = "c_smoke"
-	f.stub.events = []*rafikiv1.Event{assistantEvent("c_smoke", "OK"), turnEndEvent("c_smoke")}
-
-	c.NoError(f.runSetup(), "setup with a passing smoke test")
-	c.Eq(1, f.stub.spawnCalls, "the smoke test must spawn exactly one child")
-	c.Eq(1, f.stub.closeCalls, "the smoke child must be closed")
-	c.StrContains(f.out.String(), "agent replied OK", "the smoke success line is missing:\n")
-}
-
-// TestSetupSmokeFailureStillCloses: a smoke failure still closes the child.
-func TestSetupSmokeFailureStillCloses(t *testing.T) {
-	c := assert.NewAborting(t)
-	f := newSetupFixture(t)
-	f.stub.spawnChildID = "c_smoke"
-	f.stub.events = []*rafikiv1.Event{assistantEvent("c_smoke", "nope"), turnEndEvent("c_smoke")}
-
-	err := f.runSetup()
-	c.Error(err, "a smoke failure must surface as an error")
-	c.Eq(1, f.stub.closeCalls, "the smoke child must be closed even on failure")
-	c.StrContains(f.out.String(), "rafiki logs c_smoke", "the failure must point at `rafiki logs <id>`:\n")
 }
 
 // TestSetupLastServiceLogLines: the timeout path prints the log tail, and a
@@ -554,46 +519,9 @@ func TestSetupUnchangedKeyNotValidated(t *testing.T) {
 		"RAFIKI_PROXY_LISTEN": setupProxyListenLoopback,
 		"OPENROUTER_API_KEY":  "sk-unchanged",
 	})
-	f.setFlag("no-smoke", "true")
 	count := stubKeyServerCounting(t, http.StatusInternalServerError)
 
 	c.NoError(f.runSetup(), "a re-run with an unchanged key must not fail")
 	c.Eq(int64(0), count.Load(), "an unchanged saved key must not be validated with a live call")
 	c.StrContains(f.serviceEnvBytes(), "OPENROUTER_API_KEY", "the saved key must survive the re-run:\n")
-}
-
-// TestSetupSmokeBROKENDoesNotPass: a reply containing the letters O-K is not a
-// pass — the prompt asks for the word OK.
-func TestSetupSmokeBROKENDoesNotPass(t *testing.T) {
-	c := assert.NewAborting(t)
-	f := newSetupFixture(t)
-	f.stub.spawnChildID = "c_smoke"
-	f.stub.events = []*rafikiv1.Event{assistantEvent("c_smoke", "BROKEN"), turnEndEvent("c_smoke")}
-
-	err := f.runSetup()
-	c.Error(err, "a BROKEN reply must not pass the smoke test")
-	c.Eq(1, f.stub.closeCalls, "the smoke child must still be closed")
-}
-
-// TestAssistantSaidOK pins the word-boundary rule directly.
-func TestAssistantSaidOK(t *testing.T) {
-	c := assert.NewCollecting(t)
-	cases := map[string]bool{
-		"OK":     true,
-		"ok":     true,
-		" OK \n": true,
-		"Ok.":    true,
-		"OK!":    true,
-		"the OK": false,
-		"BROKEN": false,
-		"TOKEN":  false,
-		"NOT OK": false,
-		"nope":   false,
-		"":       false,
-		"OKAY":   false,
-		"BOOK":   false,
-	}
-	for in, want := range cases {
-		c.Eq(want, assistantSaidOK(in), "assistantSaidOK(%q)", in)
-	}
 }

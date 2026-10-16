@@ -154,6 +154,7 @@ func newRootCmd() *cobra.Command {
 		newMemoryCmd(),
 		newServiceCmd(),
 		newSetupCmd(),
+		newDoctorCmd(),
 		newCompletionCmd(),
 		newClaudeCmd(),
 		newExecutorCmd(),
