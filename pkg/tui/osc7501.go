@@ -312,10 +312,10 @@ func (e *osc7501Emitter) pendingDelay() (time.Duration, bool) {
 // from the rail while its done is held would otherwise leave a stale pending
 // entry whose expired deadline pendingDelay clamps to 0, re-arming a zero-delay
 // settle tick on every sync -- an unbounded tick/Update/re-render loop.
-// lastEmitted and worked are pruned the same way, so a vanished child leaves
-// nothing behind its record.
+// lastState, lastEmitted and worked are pruned the same way, so a vanished child
+// leaves nothing behind its record.
 func (e *osc7501Emitter) prune(displays []rail.TopLevelDisplay) {
-	if len(e.lastEmitted) == 0 && len(e.pending) == 0 && len(e.worked) == 0 {
+	if len(e.lastState) == 0 && len(e.lastEmitted) == 0 && len(e.pending) == 0 && len(e.worked) == 0 {
 		return
 	}
 	present := make(map[string]bool, len(displays))
@@ -325,6 +325,11 @@ func (e *osc7501Emitter) prune(displays []rail.TopLevelDisplay) {
 	for id := range e.lastEmitted {
 		if !present[id] {
 			delete(e.lastEmitted, id)
+		}
+	}
+	for id := range e.lastState {
+		if !present[id] {
+			delete(e.lastState, id)
 		}
 	}
 	for id := range e.pending {
