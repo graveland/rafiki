@@ -187,6 +187,10 @@ func bootDaemon(t *testing.T) *daemon {
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
+	// No real provider credentials, whatever the developer's .env exports: a
+	// key changes daemon behaviour (an OPENROUTER_API_KEY wires the live
+	// OpenRouter provider directory, which then refuses made-up slugs).
+	cmd.Env = append(cmd.Env, noRealProviderEnv()...)
 	// Uncomment to stream daemon logs during debugging:
 	// cmd.Stderr = os.Stderr
 

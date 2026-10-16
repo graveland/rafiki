@@ -160,6 +160,9 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
+	// No real provider credentials by default (see bootDaemon); a test that
+	// needs a key passes it in extraEnv, which appends last and wins.
+	cmd.Env = append(cmd.Env, noRealProviderEnv()...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
 	if err := cmd.Start(); err != nil {
