@@ -163,6 +163,23 @@ func TestExecRunnerStream(t *testing.T) {
 	}
 }
 
+// TestExecRunnerStreamIncludesStderr: `docker logs -f` replays a container's
+// stderr on its own stderr, and postgres's real server logs its "ready" line
+// there — a stdout-only Stream never delivers it.
+func TestExecRunnerStreamIncludesStderr(t *testing.T) {
+	rc, err := execRunner{}.Stream(context.Background(), "sh", "-c", "echo out; echo err >&2")
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer rc.Close()
+	b, _ := io.ReadAll(rc)
+	for _, want := range []string{"out", "err"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("Stream output %q lacks %q", b, want)
+		}
+	}
+}
+
 func TestExecRunnerLookPath(t *testing.T) {
 	if _, err := (execRunner{}).LookPath("sh"); err != nil {
 		t.Errorf("LookPath(sh): %v", err)

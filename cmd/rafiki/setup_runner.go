@@ -17,8 +17,11 @@ type runner interface {
 	// Run executes argv with extra env appended to os.Environ(); stdout and
 	// stderr are returned separately. A non-zero exit is an *exec.ExitError.
 	Run(ctx context.Context, env []string, argv ...string) (stdout, stderr []byte, err error)
-	// Stream starts argv and returns its stdout as a line reader; the process
-	// is killed when ctx is done. Used for `docker events`.
+	// Stream starts argv and returns its stdout and stderr, interleaved, as a
+	// line reader; the process is killed when ctx is done. Used for `docker
+	// events` and `docker logs -f` — and docker logs replays the container's
+	// stderr on its own stderr (postgres's real server logs there), so a
+	// stdout-only reader would never see those lines.
 	Stream(ctx context.Context, argv ...string) (io.ReadCloser, error)
 	LookPath(name string) (string, error)
 	// RunInteractive runs argv attached to this process's terminal
@@ -48,8 +51,10 @@ func (execRunner) Stream(ctx context.Context, argv ...string) (io.ReadCloser, er
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	// A bare `docker events` on a TTY buffers; --format is passed by callers.
 	pr, pw := io.Pipe()
+	// The same writer for both: exec then uses one pipe for the pair, so
+	// lines are not split between two copy goroutines.
 	cmd.Stdout = pw
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
