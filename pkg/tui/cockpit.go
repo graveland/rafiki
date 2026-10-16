@@ -2402,6 +2402,20 @@ func (c *Cockpit) costReadout() string {
 	return ""
 }
 
+// modelReadout is the footer's model id ("provider/model") for the viewed
+// agent, empty until the rail has seeded it.
+func (c *Cockpit) modelReadout() string {
+	f := c.viewing()
+	if f == "" {
+		return ""
+	}
+	n, ok := c.rail.Get(f)
+	if !ok {
+		return ""
+	}
+	return n.Model
+}
+
 // contextReadout is the footer's context-window usage for the focused agent:
 // the prompt size implied by its last completed turn (Node.CtxTokens), against
 // the model's context window when the daemon reported one. Empty until a turn
@@ -2684,24 +2698,29 @@ func (c *Cockpit) View() tea.View {
 	if c.showProfileBadge {
 		footer += "  " + styleFocusBadge.Render(" "+c.profileName+" ")
 	}
-	footer += "  " + c.footerHints()
 	// Position goes bottom-RIGHT, on its own end of the line: a scroll readout
 	// that shares the left edge with the key hints moves every time the hints
 	// change, and a number that moves is a number you have to hunt for. The
 	// old marker said only "↓ more below", which answers whether you are at the
-	// bottom and not where you are.
-	readout := c.costReadout()
-	if ctx := c.contextReadout(); ctx != "" {
-		if readout != "" {
-			readout += "  "
+	// bottom and not where you are. The model is the rightmost cell with cost
+	// immediately to its left.
+	var parts []string
+	for _, r := range []string{c.scrollPosition(), c.contextReadout(), c.costReadout(), c.modelReadout()} {
+		if r != "" {
+			parts = append(parts, r)
 		}
-		readout += ctx
 	}
-	if pos := c.scrollPosition(); pos != "" {
-		if readout != "" {
-			readout += "  "
-		}
-		readout += pos
+	readout := strings.Join(parts, "  ")
+	// The key hints are the sacrificial cell: they clip to make room for the
+	// readout, never the other way round, since the hints are reachable via ^G
+	// and the readout is not.
+	hints := c.footerHints()
+	if readout != "" {
+		room := c.width - ansi.StringWidth(ansi.Strip(footer)) - 2 - ansi.StringWidth(readout) - 2
+		hints = clip(hints, room)
+	}
+	if hints != "" {
+		footer += "  " + hints
 	}
 	if readout != "" {
 		gap := c.width - ansi.StringWidth(ansi.Strip(footer)) - ansi.StringWidth(readout) - 1

@@ -2621,3 +2621,23 @@ func TestCascadingCloseForgetsTheSubtree(t *testing.T) {
 	ck.Eq(1, c.rail.Len(), "only zulu remains")
 	ck.Eq("c_z", c.selected, "cursor lands on the row that took the subtree's place")
 }
+
+// The model id is the footer's rightmost cell, cost immediately to its left.
+func TestFooterShowsModelRightOfCost(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "a", Status: "idle", Labels: map[string]string{}, Model: "openrouter/z-ai/glm-5.3-flash"},
+	})
+	c.rail.SetCost("c_1", 1.23)
+
+	ck := assert.NewCollecting(t)
+	ck.Eq("openrouter/z-ai/glm-5.3-flash", c.modelReadout(), "modelReadout()")
+	view := ansi.Strip(c.View().Content)
+	cost := strings.Index(view, "1.23")
+	model := strings.Index(view, "openrouter/z-ai/glm-5.3-flash")
+	ck.True(cost >= 0 && model > cost, "view must show cost then model; cost@%d model@%d", cost, model)
+
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	ck.StrContains(ansi.Strip(c.View().Content), "glm-5.3-flash", "the key hints clip to keep the model visible:\n")
+}

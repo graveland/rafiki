@@ -96,6 +96,10 @@ type Node struct {
 	// path re-seeds from ListChildren.
 	Cwd string
 
+	// Model is the child's model id as the daemon reports it ("provider/model"),
+	// from ListChildren. Empty until seeded.
+	Model string
+
 	// Latest is the highest ordinal known to exist for this child; it drives the
 	// activity indicator. RailCursor is the highest ordinal RECEIVED on the rail
 	// stream and is the reconnect resume point. Seen is the highest delivered to
@@ -256,6 +260,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			existing.Native = s.GetLabels()[NativeSubagentLabel] == "1"
 			existing.SessionID = s.GetSessionId()
 			existing.Cwd = s.GetCwd()
+			existing.Model = s.GetModel()
 			existing.Status = s.GetStatus()
 			existing.Exited = exited
 			existing.ExitCode = s.ExitCode
@@ -275,6 +280,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			Native:        s.GetLabels()[NativeSubagentLabel] == "1",
 			SessionID:     s.GetSessionId(),
 			Cwd:           s.GetCwd(),
+			Model:         s.GetModel(),
 			MaxCost:       s.GetMaxCost(),
 			ContextWindow: int(s.GetContextWindow()),
 		}
