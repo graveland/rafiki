@@ -28,6 +28,11 @@ const (
 	// closes the first-run race: pg_isready reports healthy during the temp phase,
 	// so a health wait alone lets migrate race the entrypoint's restart.
 	initCompleteMarker = "PostgreSQL init process complete"
+	// readyMarker is postgres's own "accepting" line. The temporary init server
+	// prints it too, so only the first one AFTER initCompleteMarker means the
+	// real server is up — the container's health status is already "healthy"
+	// from the temporary phase and cannot tell the two apart.
+	readyMarker = "database system is ready to accept connections"
 )
 
 // dbResult is the resolved database connection.
@@ -211,12 +216,14 @@ func waitForHealthy(ctx context.Context, r runner) error {
 	return fmt.Errorf("docker events stream ended before %s became healthy\n%s", managedPGContainer, lastDockerLogs(ctx, r))
 }
 
-// waitForInitComplete blocks until the postgres entrypoint reports that its
-// TEMPORARY init server has stopped and the real one is about to start. On a
-// fresh volume that temp server satisfies pg_isready, so waitForHealthy alone
-// returns while the real server is still restarting and migrate races it. The
-// stream is `docker logs -f` (never a poll): the marker arrives when init is
-// done, and the stream is otherwise killed by the context.
+// waitForInitComplete blocks until the postgres entrypoint's TEMPORARY init
+// server has stopped and the real one accepts connections: initCompleteMarker,
+// then the next readyMarker. On a fresh volume the temp server satisfies
+// pg_isready (and so the container's health check), so waiting for health —
+// or for the init marker alone — returns while the real server is still
+// starting and migrate fails with "the database system is starting up". The
+// stream is `docker logs -f` (never a poll): the lines arrive as postgres
+// prints them, and the stream is otherwise killed by the context.
 func waitForInitComplete(ctx context.Context, r runner) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -228,8 +235,13 @@ func waitForInitComplete(ctx context.Context, r runner) error {
 	defer func() { _ = reader.Close() }()
 
 	scanner := bufio.NewScanner(reader)
+	initDone := false
 	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), initCompleteMarker) {
+		line := scanner.Text()
+		switch {
+		case strings.Contains(line, initCompleteMarker):
+			initDone = true
+		case initDone && strings.Contains(line, readyMarker):
 			return nil
 		}
 	}

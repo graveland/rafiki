@@ -209,7 +209,7 @@ func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 	r.scriptFail([]string{"docker", "volume", "inspect", managedPGVolume}, errExit(), "Error: No such volume: rafiki-pgdata")
 	r.script(healthInspectKey(), "starting\n")
 	r.streams[runKey(eventsKey())] = fakeStreamScript{lines: []string{"health_status: healthy"}}
-	r.streams[runKey(initLogsKey())] = fakeStreamScript{lines: []string{initCompleteMarker}}
+	r.streams[runKey(initLogsKey())] = fakeStreamScript{lines: []string{initCompleteMarker, readyMarker}}
 	w := newSetupWizard(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -367,6 +367,7 @@ func TestSetupDBFreshCreateWaitsForInitComplete(t *testing.T) {
 		"running bootstrap script",
 		initCompleteMarker,
 		"server started",
+		readyMarker,
 	}}
 	w := newSetupWizard(t)
 
@@ -378,6 +379,34 @@ func TestSetupDBFreshCreateWaitsForInitComplete(t *testing.T) {
 	}
 	if findStream(r.streamCalls, initLogsKey()...) == nil {
 		t.Errorf("the fresh path must stream `docker logs -f` to observe initdb completion; stream calls = %v", r.streamCalls)
+	}
+}
+
+// The temporary init server also prints readyMarker, and the init marker
+// alone comes before the real server accepts: neither may end the wait — only
+// a ready line AFTER the init marker. A wait that returned early would succeed
+// where each negative case must time out.
+func TestWaitForInitCompleteNeedsReadyAfterInit(t *testing.T) {
+	for name, lines := range map[string][]string{
+		"temp server ready only": {readyMarker, "shutting down"},
+		"init marker only":       {readyMarker, initCompleteMarker, "starting PostgreSQL"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeRunner()
+			r.streams[runKey(initLogsKey())] = fakeStreamScript{lines: lines}
+			// The fake stream stays open after its lines, as `docker logs -f`
+			// does; a short deadline ends the wait the lines never satisfy.
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			if err := waitForInitComplete(ctx, r); err == nil {
+				t.Fatalf("waitForInitComplete returned before the real server was ready; lines = %q", lines)
+			}
+		})
+	}
+	r := newFakeRunner()
+	r.streams[runKey(initLogsKey())] = fakeStreamScript{lines: []string{readyMarker, initCompleteMarker, readyMarker}}
+	if err := waitForInitComplete(context.Background(), r); err != nil {
+		t.Fatalf("a ready line after the init marker must end the wait: %v", err)
 	}
 }
 
