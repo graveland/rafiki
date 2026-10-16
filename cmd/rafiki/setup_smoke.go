@@ -41,6 +41,12 @@ func runSmokeStep(ctx context.Context, w *wizard, out io.Writer, profileName str
 	}
 	client := ep.control()
 
+	// ONE deadline for the whole spawn -> send -> follow sequence: a hung
+	// daemon must not block `rafiki setup` forever. The deferred Close below
+	// uses its own context, so it still runs when this one is done.
+	ctx, cancel := context.WithTimeout(ctx, smokeDeadline)
+	defer cancel()
+
 	home, _ := os.UserHomeDir()
 	spawnResp, err := client.Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
 		Kind:   protocol.KindClaude,
@@ -92,9 +98,6 @@ func closeSetupChild(client rafikiv1connect.ControlClient, childID string) {
 // turn completes and returns whether the assistant text contains "OK". It uses
 // the same StreamEvents stream `rafiki tail` follows — never a Get poll.
 func followFirstTurn(ctx context.Context, client rafikiv1connect.ControlClient, childID string) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, smokeDeadline)
-	defer cancel()
-
 	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
 		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
@@ -124,8 +127,34 @@ func followFirstTurn(ctx context.Context, client rafikiv1connect.ControlClient, 
 	return assistantSaidOK(text.String()), nil
 }
 
-// assistantSaidOK reports whether the trimmed, upper-cased assistant text
-// contains "OK".
+// assistantSaidOK reports whether the assistant's reply IS the word OK — the
+// prompt asks the child to reply with exactly that word. A reply that merely
+// contains the letters O-K, or that carries any other word ("BROKEN", "TOKEN",
+// "NOT OK"), must not pass. Surrounding punctuation and whitespace are
+// ignored, so "OK." passes but "OK then" does not.
 func assistantSaidOK(text string) bool {
-	return strings.Contains(strings.ToUpper(strings.TrimSpace(text)), "OK")
+	upper := strings.ToUpper(text)
+	var tokens []string
+	var cur strings.Builder
+	for i := 0; i < len(upper); i++ {
+		if isASCIIWordByte(upper[i]) {
+			cur.WriteByte(upper[i])
+			continue
+		}
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+	return len(tokens) == 1 && tokens[0] == "OK"
+}
+
+// isASCIIWordByte reports whether b is an ASCII letter or digit — the bytes a
+// token boundary must be free of. upper is already upper-cased, so only A-Z
+// need checking.
+func isASCIIWordByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }

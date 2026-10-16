@@ -266,7 +266,13 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 
 	// ── 8. executor ─────────────────────────────────────────────────────────
 	step(out, stepExecutor)
-	if ref, lerr := resolveLaunchExecutor(ctx, cmd, profileName, protocol.KindClaude); lerr == nil && ref != "" {
+	ref, lerr := resolveLaunchExecutor(ctx, cmd, profileName, protocol.KindClaude)
+	if lerr != nil {
+		// A real lookup failure (daemon down, auth) must not read as "no
+		// executor exists": say so before falling back to setup.
+		fmt.Fprintf(out, "    note: could not check for a live executor (%v); continuing to executor setup\n", lerr)
+	}
+	if lerr == nil && ref != "" {
 		fmt.Fprintf(out, "    ok (executor %s is live)\n", ref)
 	} else {
 		if err := runExecutorSetup(ctx, w, out); err != nil {
@@ -310,19 +316,20 @@ func saveStep(st installstate.State, name string) error {
 	return installstate.Save(st)
 }
 
-// awaitSocket waits for the daemon to accept connections on its socket, and on
-// timeout prints the tail of the service log rather than failing outright —
-// the daemon may simply be slow, and the steps that follow will surface a real
-// problem with a better message.
+// awaitSocket waits for the daemon to accept connections on its socket. A
+// daemon that never comes up is a FAILURE, not a warning: marking the daemon
+// step done would send the operator into the next step's opaque "did not
+// accept the new token" instead of at the daemon they need to look at. The
+// service log tail and the log path are printed so the cause is visible.
 func awaitSocket(ctx context.Context, out io.Writer) error {
 	wctx, cancel := context.WithTimeout(ctx, setupSocketTimeout)
 	defer cancel()
 	if err := waitForSocket(wctx, paths.SocketPath()); err != nil {
-		fmt.Fprintf(out, "    warning: the daemon did not answer on %s: %v\n", paths.SocketPath(), err)
 		if tail := lastServiceLogLines(20); tail != "" {
 			fmt.Fprintln(out, tail)
 		}
-		return nil
+		return fmt.Errorf("the daemon did not answer on %s within %s: %w\ncheck its log at %s",
+			paths.SocketPath(), setupSocketTimeout, err, paths.ServiceLogPath())
 	}
 	fmt.Fprintln(out, "    ok (daemon socket is up)")
 	return nil

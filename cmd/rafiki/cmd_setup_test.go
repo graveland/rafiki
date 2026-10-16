@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -295,6 +296,22 @@ func stubKeyServer(t *testing.T, status int) {
 	keyCheckBaseURLs = map[string]string{"openrouter": srv.URL, "anthropic": srv.URL}
 }
 
+// stubKeyServerCounting points keyCheckBaseURLs at a counting server that
+// answers status, and returns the request counter.
+func stubKeyServerCounting(t *testing.T, status int) *atomic.Int64 {
+	t.Helper()
+	var count atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		count.Add(1)
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(srv.Close)
+	orig := keyCheckBaseURLs
+	t.Cleanup(func() { keyCheckBaseURLs = orig })
+	keyCheckBaseURLs = map[string]string{"openrouter": srv.URL, "anthropic": srv.URL}
+	return &count
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 // TestSetupSecondRunIsNoop: a fully-configured machine spawns nothing, mints
@@ -523,4 +540,60 @@ func TestSetupValidateKeyAnthropic(t *testing.T) {
 	c.Error(validateKey(context.Background(), "anthropic", "sk-ant"), "a non-200 must not validate")
 
 	c.Error(validateKey(context.Background(), "nope", "k"), "an unknown provider must error")
+}
+
+// TestSetupUnchangedKeyNotValidated: a saved key that is not changed must not
+// trigger a live validation call — a second run must not need the network, and
+// must not hard-fail under --yes on an offline machine. The server answers 500,
+// so a validation call would also fail the run.
+func TestSetupUnchangedKeyNotValidated(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.seedServiceEnv(map[string]string{
+		"RAFIKI_DB":           constSetupDSN,
+		"RAFIKI_PROXY_LISTEN": setupProxyListenLoopback,
+		"OPENROUTER_API_KEY":  "sk-unchanged",
+	})
+	f.setFlag("no-smoke", "true")
+	count := stubKeyServerCounting(t, http.StatusInternalServerError)
+
+	c.NoError(f.runSetup(), "a re-run with an unchanged key must not fail")
+	c.Eq(int64(0), count.Load(), "an unchanged saved key must not be validated with a live call")
+	c.StrContains(f.serviceEnvBytes(), "OPENROUTER_API_KEY", "the saved key must survive the re-run:\n")
+}
+
+// TestSetupSmokeBROKENDoesNotPass: a reply containing the letters O-K is not a
+// pass — the prompt asks for the word OK.
+func TestSetupSmokeBROKENDoesNotPass(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.stub.spawnChildID = "c_smoke"
+	f.stub.events = []*rafikiv1.Event{assistantEvent("c_smoke", "BROKEN"), turnEndEvent("c_smoke")}
+
+	err := f.runSetup()
+	c.Error(err, "a BROKEN reply must not pass the smoke test")
+	c.Eq(1, f.stub.closeCalls, "the smoke child must still be closed")
+}
+
+// TestAssistantSaidOK pins the word-boundary rule directly.
+func TestAssistantSaidOK(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cases := map[string]bool{
+		"OK":     true,
+		"ok":     true,
+		" OK \n": true,
+		"Ok.":    true,
+		"OK!":    true,
+		"the OK": false,
+		"BROKEN": false,
+		"TOKEN":  false,
+		"NOT OK": false,
+		"nope":   false,
+		"":       false,
+		"OKAY":   false,
+		"BOOK":   false,
+	}
+	for in, want := range cases {
+		c.Eq(want, assistantSaidOK(in), "assistantSaidOK(%q)", in)
+	}
 }
