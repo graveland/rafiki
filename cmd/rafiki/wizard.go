@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -295,7 +296,7 @@ func waitForSocket(ctx context.Context, path string) error {
 	}
 	defer watcher.Close()
 
-	if err := watcher.Add(dir); err != nil {
+	if err := addDirWatch(watcher, dir); err != nil {
 		return err
 	}
 
@@ -322,9 +323,32 @@ func waitForSocket(ctx context.Context, path string) error {
 			if !ok {
 				return errors.New("fsnotify watcher closed")
 			}
+			// kqueue (darwin) lstats each new directory entry to watch it; an
+			// entry renamed away first — rafikid's temporary socket, renamed
+			// into place by listenUnixReady — reports not-exist. That is a
+			// file coming and going, not a broken watch.
+			if !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			if socketReady(path) {
+				return nil
+			}
+		}
+	}
+}
+
+// addDirWatch adds dir to watcher. kqueue (darwin) lists dir and lstats every
+// entry while adding; an entry renamed away mid-listing — rafikid's temporary
+// socket — fails the add with not-exist. That is a raced listing, not a missing
+// dir, so the add is retried at once, a bounded number of times.
+func addDirWatch(watcher *fsnotify.Watcher, dir string) error {
+	var err error
+	for range 5 {
+		if err = watcher.Add(dir); err == nil || !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
+	return err
 }
 
 // socketReady reports whether path is a unix socket that accepts a dial.
