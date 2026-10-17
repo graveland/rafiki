@@ -125,6 +125,9 @@ func TestSwapLeavesNoBackupsOrTempFiles(t *testing.T) {
 	c.EqDeep([]string{"rafiki", "rafikid"}, swapDirNames(t, dir), "directory after swap")
 }
 
+// A rollback leaves both Live paths present: the first pair's Live is restored
+// from its backup, and the second pair's Live — whose forward rename failed —
+// is untouched.
 func TestSwapSecondRenameFailureRestoresFirst(t *testing.T) {
 	c := assert.NewCollecting(t)
 	dir := t.TempDir()
@@ -134,7 +137,10 @@ func TestSwapSecondRenameFailureRestoresFirst(t *testing.T) {
 
 	err := swapBinaries([]swapPair{a, b})
 	c.Error(err, "second rename must fail")
+	c.True(swapFileExists(t, a.Live), "first live still present")
 	c.Eq("old-rafikid", readSwapFile(t, a.Live), "first live restored")
+	c.True(swapFileExists(t, b.Live), "second live still present")
+	c.Eq("old-rafiki", readSwapFile(t, b.Live), "second live untouched")
 	c.Eq(0, len(swapBackups(t, dir)), "no .old. backups remain")
 	c.True(swapFileExists(t, a.Staged), "first staged file survives")
 	c.True(swapFileExists(t, b.Staged), "second staged file survives")
@@ -192,6 +198,7 @@ func TestSwapFallsBackToCopyWhenLinkFails(t *testing.T) {
 	b2 := writeSwapPair(t, dir2, "rafiki", true)
 	injectSwapRename(t, func(src string) bool { return src == b2.Staged }, errors.New("boom"))
 	c.Error(swapBinaries([]swapPair{a2, b2}), "second rename must fail")
+	c.True(swapFileExists(t, a2.Live), "first live still present")
 	c.Eq("old-rafikid", readSwapFile(t, a2.Live), "restored from copied backup")
 }
 
@@ -219,6 +226,9 @@ func TestSwapRejectsRelativePaths(t *testing.T) {
 	c.True(swapFileExists(t, a.Staged), "staged untouched")
 }
 
+// The restore rename fails: the backup survives, Live still exists (holding the
+// new binary, since the old one could not be put back), and both failures are
+// reported.
 func TestSwapKeepsBackupWhenRestoreFails(t *testing.T) {
 	c := assert.NewCollecting(t)
 	dir := t.TempDir()
@@ -232,6 +242,8 @@ func TestSwapKeepsBackupWhenRestoreFails(t *testing.T) {
 	c.Error(err, "swap must fail")
 	backups := swapBackups(t, dir)
 	c.Eq(1, len(backups), "the backup whose restore failed survives")
+	c.True(swapFileExists(t, a.Live), "live is never left missing")
+	c.Eq("new-rafikid", readSwapFile(t, a.Live), "live holds the new binary")
 	c.ErrorContains(err, "boom", "error carries the restore failure")
 	c.ErrorContains(err, b.Live, "error names the failing rename")
 }

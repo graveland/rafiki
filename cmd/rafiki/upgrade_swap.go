@@ -43,18 +43,27 @@ func swapBinaries(pairs []swapPair) error {
 
 	// rollback undoes every swap already done, newest first: the new binary
 	// goes back to its staged path, then the old one is restored from the
-	// backup. A backup whose restore fails is left in place.
+	// backup. Live is never unlinked: with a backup the new binary is linked
+	// (or copied) to Staged while Live stays in place, so the failure window
+	// always has a binary at Live. A backup whose restore fails is left in
+	// place.
 	rollback := func() []error {
 		var errs []error
 		for i := len(done) - 1; i >= 0; i-- {
 			st := done[i]
-			if err := renameFile(st.live, st.staged); err != nil {
-				errs = append(errs, fmt.Errorf("rollback %s: %w", st.live, err))
-			}
 			if st.hasBackup {
+				if err := restoreStaged(st.live, st.staged); err != nil {
+					errs = append(errs, fmt.Errorf("rollback %s: %w", st.live, err))
+				}
 				if err := renameFile(st.backup, st.live); err != nil {
 					errs = append(errs, fmt.Errorf("restore %s: %w", st.live, err))
 				}
+				continue
+			}
+			// A fresh install: absence is the pre-state, so moving Live back
+			// to Staged leaves nothing at Live.
+			if err := renameFile(st.live, st.staged); err != nil {
+				errs = append(errs, fmt.Errorf("rollback %s: %w", st.live, err))
 			}
 		}
 		return errs
@@ -99,6 +108,19 @@ func swapBinaries(pairs []swapPair) error {
 	return errors.Join(errs...)
 }
 
+// restoreStaged puts the new binary (currently at live) back at staged as a
+// second hard link, leaving live in place; without hardlinks it copies instead.
+func restoreStaged(live, staged string) error {
+	info, err := os.Stat(live)
+	if err != nil {
+		return err
+	}
+	if err := linkFile(live, staged); err == nil {
+		return nil
+	}
+	return copyFile(live, staged, info.Mode())
+}
+
 // backupFile hardlinks live to a fresh ".old.<random>" name beside it, falling
 // back to a copy when the filesystem has no hardlinks.
 func backupFile(live string) (string, error) {
@@ -113,25 +135,34 @@ func backupFile(live string) (string, error) {
 	if err := linkFile(live, name); err == nil {
 		return name, nil
 	}
-	src, err := os.Open(live)
-	if err != nil {
-		return "", err
-	}
-	defer src.Close()
-	dst, err := os.OpenFile(name, os.O_EXCL|os.O_CREATE|os.O_WRONLY, info.Mode())
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = dst.Close()
-		_ = os.Remove(name)
-		return "", err
-	}
-	if err := dst.Close(); err != nil {
-		_ = os.Remove(name)
+	if err := copyFile(live, name, info.Mode()); err != nil {
 		return "", err
 	}
 	return name, nil
+}
+
+// copyFile creates dst with mode and copies src's contents into it, removing a
+// partial dst on any error.
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_EXCL|os.O_CREATE|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return nil
 }
 
 func swapBackupName(live string) (string, error) {
