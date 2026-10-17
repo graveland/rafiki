@@ -589,3 +589,21 @@ func TestSetupProvidersChangeRestartsDaemon(t *testing.T) {
 	c.NoError(f.runSetup(), "setup adding a provider key")
 	c.True(f.fb.restarted, "a provider change must restart the installed daemon")
 }
+
+// TestSetupInstallCapturesShellDaemonEnv: launchd and systemd run the daemon
+// without a login shell, so a fresh service install carries the invoking shell's
+// daemon settings into the unit, while setup's own service.env answers stay.
+func TestSetupInstallCapturesShellDaemonEnv(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.fb.status = serviceStatus{Installed: false}
+	t.Setenv("RAFIKI_DEFAULT_MODEL", "some/model")
+	t.Setenv("RAFIKI_DB", "postgres://shell@elsewhere/other")
+
+	c.NoError(f.runSetup(), "setup")
+
+	c.Eq("some/model", f.fb.installed.ExtraEnv["RAFIKI_DEFAULT_MODEL"])
+	vars, err := readEnvFile(paths.ServiceEnvFile())
+	c.NoError(err, "readEnvFile")
+	c.Eq(constSetupDSN, vars["RAFIKI_DB"])
+}

@@ -313,11 +313,11 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	}, os.Stdout)
 }
 
-// daemonServiceOptions is what installDaemonService needs. CaptureShellEnv is
-// true for `rafiki service install` (today's behaviour) and false for
-// `rafiki setup`, which has already written every daemon setting to
-// service.env (the daemon applies every key in it at startup, loadServiceEnv)
-// and must not depend on the invoking shell.
+// daemonServiceOptions is what installDaemonService needs. CaptureShellEnv
+// carries the invoking shell's daemon settings into the unit and service.env,
+// since launchd and systemd run the daemon without a login shell. Both
+// `rafiki service install` and `rafiki setup` set it; setup writes its own
+// answers to service.env first, and the append-only merge never overrides them.
 type daemonServiceOptions struct {
 	DaemonBinary    string // "" = findDaemonBinary()
 	PathEnv         string // "" = buildPathEnv()

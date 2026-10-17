@@ -236,7 +236,7 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	}
 	switch {
 	case !installed:
-		if err := installDaemonService(daemonServiceOptions{CaptureShellEnv: false}, out); err != nil {
+		if err := installDaemonService(daemonServiceOptions{CaptureShellEnv: true}, out); err != nil {
 			return err
 		}
 		fmt.Fprintln(out, "    ok (service installed)")
