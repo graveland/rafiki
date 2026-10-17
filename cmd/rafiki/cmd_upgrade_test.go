@@ -360,6 +360,28 @@ func TestUpgradeRefreshFailureIsReportedAfterSwap(t *testing.T) {
 	assertNewInstall(t, dir, "v0.2.0")
 }
 
+func TestUpgradeConversionRecordsChannelWhenRefreshFails(t *testing.T) {
+	isolateProfiles(t)
+	c := assert.NewCollecting(t)
+	tr := newTestRelease(t, "v0.2.0", runtime.GOOS, runtime.GOARCH, testReleaseOpts{})
+	r := newFakeRunner()
+	vr := versionRunner{fakeRunner: r, versionTag: "v0.2.0"}
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	r.scriptErr([]string{filepath.Join(bin, "rafiki"), "service", "refresh"}, errors.New("refresh boom"))
+
+	deps, _, _ := upgradeDepsFor(t, tr, vr, "/tmp/x/rafiki", "abc1234-dirty", home)
+	err := runUpgrade(context.Background(), deps, upgradeOpts{Force: true})
+
+	c.Require().Error(err, "a service refresh failure must be reported")
+	c.StrContains(err.Error(), "service refresh failed", "the error must name the refresh failure")
+	assertNewInstall(t, bin, "v0.2.0")
+	st, ok, err := installstate.Load()
+	c.Require().NoError(err, "installstate.Load")
+	c.True(ok, "the install state must exist after a conversion")
+	c.Eq(installstate.ChannelTarball, st.Channel, "the channel must be recorded even when the refresh fails")
+}
+
 func TestUpgradeDownloadBaseRequiresVersion(t *testing.T) {
 	isolateProfiles(t)
 	c := assert.NewCollecting(t)

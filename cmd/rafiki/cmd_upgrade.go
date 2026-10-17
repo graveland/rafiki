@@ -180,14 +180,6 @@ func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
 		return err
 	}
 
-	fmt.Fprintln(d.Out, "restarting services")
-	stdout, stderr, err := d.Runner.Run(ctx, nil, filepath.Join(dest, "rafiki"), "service", "refresh")
-	fmt.Fprint(d.Out, string(stdout))
-	fmt.Fprint(d.Err, string(stderr))
-	if err != nil {
-		return fmt.Errorf("upgraded to %s, but service refresh failed: %w\nrun: %s service refresh", tag, err, filepath.Join(dest, "rafiki"))
-	}
-
 	if channel != installstate.ChannelTarball {
 		st, _, err := installstate.Load()
 		if err != nil {
@@ -197,6 +189,17 @@ func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
 		if err := installstate.Save(st); err != nil {
 			return fmt.Errorf("installed %s, but could not record the channel: %w", tag, err)
 		}
+	}
+
+	fmt.Fprintln(d.Out, "restarting services")
+	stdout, stderr, err := d.Runner.Run(ctx, nil, filepath.Join(dest, "rafiki"), "service", "refresh")
+	fmt.Fprint(d.Out, string(stdout))
+	fmt.Fprint(d.Err, string(stderr))
+	if err != nil {
+		return fmt.Errorf("upgraded to %s, but service refresh failed: %w\nrun: %s service refresh", tag, err, filepath.Join(dest, "rafiki"))
+	}
+
+	if channel != installstate.ChannelTarball {
 		if p, err := d.Runner.LookPath("rafiki"); err == nil && p != filepath.Join(dest, "rafiki") {
 			fmt.Fprintf(d.Err, "warning: 'rafiki' on PATH resolves to %s, not %s\n", p, filepath.Join(dest, "rafiki"))
 		}
