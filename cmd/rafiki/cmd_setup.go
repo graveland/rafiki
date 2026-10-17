@@ -81,7 +81,7 @@ is given.`,
 	cmd.Flags().String(keyOpenRouterFlag, "", "OpenRouter API key")
 	cmd.Flags().String(keyAnthropicFlag, "", "Anthropic API key")
 	cmd.Flags().Bool("expose", false, "Make the daemon reachable from other machines on your network")
-	cmd.Flags().StringSlice("with", nil, "Optional components to install (uv, ollama, rtk)")
+	cmd.Flags().StringSlice("with", nil, "Optional tools to install if missing (docker, claude, uv, ollama, rtk)")
 
 	// The local executor-setup flags, registered under the same names as
 	// newExecutorSetupCmd's so runExecutorSetup reads them from this command's

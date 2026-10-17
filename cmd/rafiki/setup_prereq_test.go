@@ -202,8 +202,8 @@ func TestSetupPrereqDockerMissingDarwinOffersOrbstack(t *testing.T) {
 	r.scriptErr([]string{"docker", "info"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
 
-	if _, err := checkPrereqs(context.Background(), r, w, "darwin", nil); err == nil {
-		t.Fatal("checkPrereqs: want error on declined install, got nil")
+	if err := ensureDocker(context.Background(), r, w, "darwin"); err == nil {
+		t.Fatal("ensureDocker: want error on declined install, got nil")
 	}
 	if got := w.out.(*bytes.Buffer).String(); !strings.Contains(got, "brew install --cask orbstack") {
 		t.Errorf("output %q must offer the orbstack cask", got)
@@ -212,9 +212,11 @@ func TestSetupPrereqDockerMissingDarwinOffersOrbstack(t *testing.T) {
 
 func TestSetupPrereqDeclineStopsWithCommand(t *testing.T) {
 	r := newFakeRunner()
-	r.script([]string{"docker", "info"}, "26.0")
-	r.scriptErr([]string{"claude", "auth", "status", "--json"}, errors.New("exit 1"))
+	r.paths["rg"] = "/usr/bin/rg"
 	w := newSetupWizard(t)
+	if err := w.cmd.Flags().Set("with", "claude"); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
 	if err == nil {
@@ -227,19 +229,23 @@ func TestSetupPrereqDeclineStopsWithCommand(t *testing.T) {
 	}
 }
 
-func TestSetupPrereqClaudeLoggedOutOffersLogin(t *testing.T) {
+// claude is optional: installed but logged out is a note, never a stop.
+func TestSetupPrereqClaudeLoggedOutIsANote(t *testing.T) {
 	r := newFakeRunner()
+	r.paths["rg"] = "/usr/bin/rg"
 	r.paths["claude"] = "/usr/local/bin/claude"
-	r.script([]string{"docker", "info"}, "26.0")
 	r.scriptErr([]string{"claude", "auth", "status", "--json"}, errors.New("exit 1"))
 	w := newSetupWizard(t)
 
-	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
-	if err == nil {
-		t.Fatal("checkPrereqs: want error on declined login, got nil")
+	chosen, err := checkPrereqs(context.Background(), r, w, "linux", nil)
+	if err != nil {
+		t.Fatalf("checkPrereqs: a logged-out optional claude must not stop setup: %v", err)
+	}
+	if !containsString(chosen, "claude") {
+		t.Errorf("chosen = %v, want the installed claude", chosen)
 	}
 	if got := w.out.(*bytes.Buffer).String(); !strings.Contains(got, "claude auth login") {
-		t.Errorf("output %q must offer `claude auth login`", got)
+		t.Errorf("output %q must tell the user to run `claude auth login`", got)
 	}
 }
 
@@ -249,9 +255,9 @@ func TestSetupPrereqLinuxDockerGroupStops(t *testing.T) {
 	w := newSetupWizard(t)
 	w.nonInteractive = true // accept the offered commands so the group step is reached
 
-	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
+	err := ensureDocker(context.Background(), r, w, "linux")
 	if err == nil {
-		t.Fatal("checkPrereqs: want the group stop, got nil")
+		t.Fatal("ensureDocker: want the group stop, got nil")
 	}
 	if !strings.Contains(err.Error(), "log out and back in") {
 		t.Errorf("error %q must tell the user to log out and back in", err.Error())
@@ -279,9 +285,9 @@ func TestSetupPrereqDockerPermissionDeniedNamesGroup(t *testing.T) {
 		"Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")
 	w := newSetupWizard(t)
 
-	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
+	err := ensureDocker(context.Background(), r, w, "linux")
 	if err == nil {
-		t.Fatal("checkPrereqs: want the permission stop, got nil")
+		t.Fatal("ensureDocker: want the permission stop, got nil")
 	}
 	if !strings.Contains(err.Error(), "usermod -aG docker") {
 		t.Errorf("error %q must name the docker-group fix", err.Error())
@@ -300,9 +306,9 @@ func TestSetupPrereqDockerDaemonDownNamesStart(t *testing.T) {
 		"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?")
 	w := newSetupWizard(t)
 
-	_, err := checkPrereqs(context.Background(), r, w, "linux", nil)
+	err := ensureDocker(context.Background(), r, w, "linux")
 	if err == nil {
-		t.Fatal("checkPrereqs: want the daemon-down stop, got nil")
+		t.Fatal("ensureDocker: want the daemon-down stop, got nil")
 	}
 	if !strings.Contains(err.Error(), "daemon is not running") {
 		t.Errorf("error %q must be the daemon-down message", err.Error())
@@ -337,30 +343,56 @@ func TestSetupPrereqDockerPresent(t *testing.T) {
 	}
 }
 
-func TestSetupPrereqOptionalChosenInstalled(t *testing.T) {
+// Everything installed: nothing is asked, nothing is installed, and the
+// installed optional tools are the chosen set.
+func TestSetupPrereqInstalledOptionalToolsAreChosenWithoutAsking(t *testing.T) {
 	r := newFakeRunner()
-	r.paths["brew"] = "/opt/homebrew/bin/brew"
-	r.paths["uv"] = "/opt/homebrew/bin/uv"
-	r.script([]string{"docker", "info"}, "26.0")
+	for _, n := range []string{"brew", "rg", "docker", "claude", "uv", "ollama", "rtk"} {
+		r.paths[n] = "/opt/homebrew/bin/" + n
+	}
 	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
-	r.paths["rg"] = "/opt/homebrew/bin/rg"
 	w := newSetupWizard(t)
-	w.nonInteractive = true
 
-	chosen, err := checkPrereqs(context.Background(), r, w, "darwin", []string{"uv", "rtk"})
+	chosen, err := checkPrereqs(context.Background(), r, w, "darwin", nil)
 	if err != nil {
 		t.Fatalf("checkPrereqs: %v", err)
 	}
-	if !containsString(chosen, "uv") || !containsString(chosen, "rtk") {
-		t.Errorf("chosen = %v, want uv and rtk", chosen)
+	if got := strings.Join(chosen, ","); got != "docker,claude,uv,ollama,rtk" {
+		t.Errorf("chosen = %q, want every installed optional tool", got)
+	}
+	if len(r.interCalls) != 0 {
+		t.Errorf("installed tools must not be reinstalled, got %v", r.interCalls)
 	}
 }
 
-func TestSetupPrereqDarwinWithoutBrewStops(t *testing.T) {
+// A missing optional tool is installed only when picked; an installed one is
+// chosen regardless and is never offered.
+func TestSetupPrereqOnlyMissingToolsAreOffered(t *testing.T) {
 	r := newFakeRunner()
-	r.scriptErr([]string{"docker", "info"}, errors.New("exit 1"))
-	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
-	r.paths["rg"] = "/usr/local/bin/rg"
+	r.paths["brew"] = "/opt/homebrew/bin/brew"
+	r.paths["rg"] = "/opt/homebrew/bin/rg"
+	r.paths["uv"] = "/opt/homebrew/bin/uv"
+	w := newSetupWizard(t)
+	w.nonInteractive = true
+
+	chosen, err := checkPrereqs(context.Background(), r, w, "darwin", []string{"rtk", "uv"})
+	if err != nil {
+		t.Fatalf("checkPrereqs: %v", err)
+	}
+	if got := strings.Join(chosen, ","); got != "uv,rtk" {
+		t.Errorf("chosen = %q, want the installed uv and the picked rtk", got)
+	}
+	var installs []string
+	for _, c := range r.interCalls {
+		installs = append(installs, runKey(c.argv))
+	}
+	if len(installs) != 1 || installs[0] != "brew install rtk" {
+		t.Errorf("installs = %v, want only brew install rtk", installs)
+	}
+}
+
+func TestSetupPrereqDarwinWithoutBrewStopsWhenARequiredToolIsMissing(t *testing.T) {
+	r := newFakeRunner()
 	w := newSetupWizard(t)
 
 	_, err := checkPrereqs(context.Background(), r, w, "darwin", nil)
@@ -372,16 +404,16 @@ func TestSetupPrereqDarwinWithoutBrewStops(t *testing.T) {
 	}
 }
 
-func TestSetupPrereqDarwinWithoutBrewNoInstallNeeded(t *testing.T) {
+// No docker, no claude and no brew is a fine machine for a bring-your-own
+// database and an OpenRouter key: setup is not blocked.
+func TestSetupPrereqWithoutDockerOrClaudeIsNotBlocked(t *testing.T) {
 	r := newFakeRunner()
-	r.script([]string{"docker", "info"}, "26.0")
-	r.script([]string{"claude", "auth", "status", "--json"}, `{"loggedIn":true}`)
 	r.paths["rg"] = "/usr/local/bin/rg"
 	w := newSetupWizard(t)
 
 	chosen, err := checkPrereqs(context.Background(), r, w, "darwin", nil)
 	if err != nil {
-		t.Fatalf("a fully-provisioned Mac with no brew must not be blocked: %v", err)
+		t.Fatalf("a machine without docker or claude must not be blocked: %v", err)
 	}
 	if len(chosen) != 0 {
 		t.Errorf("chosen = %v, want none", chosen)
@@ -431,19 +463,5 @@ func TestShellJoinQuotesSpaces(t *testing.T) {
 	got := shellJoin([]string{"bash", "-c", "curl x | bash"})
 	if got != "bash -c 'curl x | bash'" {
 		t.Errorf("shellJoin = %q", got)
-	}
-}
-
-func TestDetectOptionalPrereqsFindsInstalledTools(t *testing.T) {
-	r := newFakeRunner()
-	r.paths["uv"] = "/usr/bin/uv"
-	r.paths["ollama"] = "/usr/bin/ollama"
-
-	got, err := detectOptionalPrereqs(context.Background(), r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(got, ",") != "uv,ollama" {
-		t.Fatalf("detected = %v, want [uv ollama]", got)
 	}
 }

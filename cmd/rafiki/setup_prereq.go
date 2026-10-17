@@ -38,34 +38,36 @@ var errDockerGroup = errors.New("log out and back in so your user can reach dock
 // one to install a required tool.
 const homebrewInstallOneLiner = `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`
 
+// dockerPresent probes the docker daemon with plain `docker info`: --format
+// would replace the real failure (e.g. "permission denied ...") with a Go
+// template error, which names no cause. It classifies from the raw output.
+func dockerPresent(ctx context.Context, r runner) (bool, string, error) {
+	stdout, stderr, err := r.Run(ctx, nil, "docker", "info")
+	if err != nil {
+		// Not being in the docker group reads as a dead daemon; it is a
+		// permission problem with a different remedy (add the user to the
+		// group, then re-login). Prefer that diagnosis.
+		combined := strings.ToLower(string(stdout) + string(stderr))
+		if strings.Contains(combined, detailDockerPermission) {
+			return false, detailDockerPermission, nil
+		}
+		// The binary may be installed with the daemon merely stopped.
+		if _, lerr := r.LookPath("docker"); lerr == nil {
+			return false, detailDaemonDown, nil
+		}
+		return false, detailNotInstalled, nil
+	}
+	return true, "", nil
+}
+
 // prereqs is the ordered list of tools setup checks. Required tools block the
-// install when missing; the optional ones are offered through askMulti.
+// install when missing; the optional ones are offered through askMulti, and only
+// when they are not already installed.
 func prereqs() []prereq {
 	return []prereq{
 		{
-			Name:     "docker",
-			Required: true,
-			Present: func(ctx context.Context, r runner) (bool, string, error) {
-				// Probe with plain `docker info`: --format would replace the real
-				// failure (e.g. "permission denied ...") with a Go template error,
-				// which names no cause. Classify from the raw output instead.
-				stdout, stderr, err := r.Run(ctx, nil, "docker", "info")
-				if err != nil {
-					// Not being in the docker group reads as a dead daemon; it is
-					// a permission problem with a different remedy (add the user
-					// to the group, then re-login). Prefer that diagnosis.
-					combined := strings.ToLower(string(stdout) + string(stderr))
-					if strings.Contains(combined, detailDockerPermission) {
-						return false, detailDockerPermission, nil
-					}
-					// The binary may be installed with the daemon merely stopped.
-					if _, lerr := r.LookPath("docker"); lerr == nil {
-						return false, detailDaemonDown, nil
-					}
-					return false, detailNotInstalled, nil
-				}
-				return true, "", nil
-			},
+			Name:    "docker",
+			Present: dockerPresent,
 			Install: func(goos string, hasBrew bool) [][]string {
 				switch goos {
 				case "darwin":
@@ -80,8 +82,7 @@ func prereqs() []prereq {
 			},
 		},
 		{
-			Name:     "claude",
-			Required: true,
+			Name: "claude",
 			Present: func(ctx context.Context, r runner) (bool, string, error) {
 				out, _, err := r.Run(ctx, nil, "claude", "auth", "status", "--json")
 				if err != nil {
@@ -182,15 +183,22 @@ func prereqs() []prereq {
 // optionalPrereqNames is the ordered option list askMulti presents and the
 // values it returns.
 func optionalPrereqNames() []string {
-	return []string{"uv", "ollama", "rtk"}
+	return []string{"docker", "claude", "uv", "ollama", "rtk"}
 }
 
-// detectOptionalPrereqs returns the optional tools already installed, so a
-// first run preselects what the machine has instead of offering to install it.
-func detectOptionalPrereqs(ctx context.Context, r runner) ([]string, error) {
-	var found []string
+// checkPrereqs installs any missing required tool, then settles the optional
+// ones: the tools already on this machine are chosen without asking, and the
+// question lists only those that are missing (it is skipped when none are).
+// It returns every chosen optional tool, installed or newly picked, to be saved
+// to install-state.
+func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optional []string) ([]string, error) {
+	hasBrew := false
+	if _, err := r.LookPath("brew"); err == nil {
+		hasBrew = true
+	}
+
 	for _, p := range prereqs() {
-		if p.Required || !containsString(optionalPrereqNames(), p.Name) {
+		if !p.Required {
 			continue
 		}
 		ok, _, err := p.Present(ctx, r)
@@ -198,67 +206,98 @@ func detectOptionalPrereqs(ctx context.Context, r runner) ([]string, error) {
 			return nil, err
 		}
 		if ok {
-			found = append(found, p.Name)
+			continue
+		}
+		cmds := p.Install(goos, hasBrew)
+		if len(cmds) == 0 {
+			return nil, fmt.Errorf("%s is required; install it manually for %s", p.Name, goos)
+		}
+		for _, argv := range cmds {
+			if err := runInstallCommand(ctx, r, w, p.Name, argv, goos, hasBrew); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return found, nil
+
+	var installed, missing []string
+	for _, name := range optionalPrereqNames() {
+		if _, err := r.LookPath(name); err == nil {
+			installed = append(installed, name)
+		} else {
+			missing = append(missing, name)
+		}
+	}
+	var picked []string
+	if len(missing) > 0 {
+		var err error
+		if picked, err = w.askMulti("Install optional tools", "with", missing, optional, nil); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, p := range prereqs() {
+		if p.Required || !containsString(picked, p.Name) {
+			continue
+		}
+		if p.Name == "docker" {
+			if err := installDocker(ctx, r, w, goos, hasBrew, detailNotInstalled); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		cmds := p.Install(goos, hasBrew)
+		if len(cmds) == 0 {
+			fmt.Fprintf(w.out, "note: %s has no automatic installer on %s; see its README\n", p.Name, goos)
+			continue
+		}
+		for _, argv := range cmds {
+			if err := runInstallCommand(ctx, r, w, p.Name, argv, goos, hasBrew); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	chosen := make([]string, 0, len(installed)+len(picked))
+	for _, name := range optionalPrereqNames() {
+		if containsString(installed, name) || containsString(picked, name) {
+			chosen = append(chosen, name)
+		}
+	}
+	noteClaudeLoggedOut(ctx, r, w, chosen)
+	return chosen, nil
 }
 
-// checkPrereqs verifies every required tool is present — and every chosen
-// optional tool — installing what it can, and returns the optional tools the
-// user chose (to be saved to install-state).
-func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optional []string) ([]string, error) {
+// noteClaudeLoggedOut says so when claude is a chosen tool but not logged in.
+// claude is optional, so it is a note and never a stop.
+func noteClaudeLoggedOut(ctx context.Context, r runner, w *wizard, chosen []string) {
+	if !containsString(chosen, "claude") {
+		return
+	}
+	for _, p := range prereqs() {
+		if p.Name != "claude" {
+			continue
+		}
+		if ok, detail, err := p.Present(ctx, r); !ok || err != nil {
+			if detail == detailLoggedOut || err != nil {
+				fmt.Fprintln(w.out, "note: claude is installed but not logged in; run: claude auth login")
+			}
+		}
+	}
+}
+
+// ensureDocker is for the one step that needs docker: running the managed
+// postgres container. A missing docker is offered an install; a stopped daemon
+// or a missing group membership is a stop that names the remedy.
+func ensureDocker(ctx context.Context, r runner, w *wizard, goos string) error {
+	ok, detail, err := dockerPresent(ctx, r)
+	if err != nil || ok {
+		return err
+	}
 	hasBrew := false
 	if _, err := r.LookPath("brew"); err == nil {
 		hasBrew = true
 	}
-	detected, err := detectOptionalPrereqs(ctx, r)
-	if err != nil {
-		return nil, err
-	}
-	chosen, err := w.askMulti("Optional tools", "with", optionalPrereqNames(), optional, detected)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, p := range prereqs() {
-		if !p.Required && !containsString(chosen, p.Name) {
-			continue
-		}
-		ok, detail, err := p.Present(ctx, r)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			continue
-		}
-
-		switch {
-		case p.Name == "docker":
-			if err := installDocker(ctx, r, w, goos, hasBrew, detail); err != nil {
-				return nil, err
-			}
-		case p.Name == "claude" && detail == detailLoggedOut:
-			if err := runInstallCommand(ctx, r, w, p.Name, []string{"claude", "auth", "login"}, goos, hasBrew); err != nil {
-				return nil, err
-			}
-		default:
-			cmds := p.Install(goos, hasBrew)
-			if len(cmds) == 0 {
-				if p.Required {
-					return nil, fmt.Errorf("%s is required; install it manually for %s", p.Name, goos)
-				}
-				fmt.Fprintf(w.out, "note: %s has no automatic installer on %s; see its README\n", p.Name, goos)
-				continue
-			}
-			for _, argv := range cmds {
-				if err := runInstallCommand(ctx, r, w, p.Name, argv, goos, hasBrew); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	return chosen, nil
+	return installDocker(ctx, r, w, goos, hasBrew, detail)
 }
 
 // installDocker offers the platform's docker install. On linux the daemon and

@@ -91,7 +91,7 @@ homebrew_casks:
     homepage: https://github.com/graveland/rafiki
     description: "Agent daemon, proxy and cockpit"
     caveats: |
-      Run `rafiki setup` to finish installing (needs Docker or OrbStack, and a Claude login).
+      Run `rafiki setup` to configure and start rafiki.
 
 changelog:
   use: github

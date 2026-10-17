@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 
@@ -62,6 +63,9 @@ func setupDatabase(ctx context.Context, r runner, w *wizard, st installstate.DB,
 		}
 		st.Mode = installstate.DBModeDSN
 		return st, dbResult{DSN: dsn, Mode: installstate.DBModeDSN}, nil
+	}
+	if err := ensureDocker(ctx, r, w, runtime.GOOS); err != nil {
+		return st, dbResult{}, err
 	}
 	return setupManagedDatabase(ctx, r, w, st, savedDSN)
 }
