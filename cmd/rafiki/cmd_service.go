@@ -202,6 +202,9 @@ type serviceStatus struct {
 	Running   bool
 	PID       int
 	Detail    string
+	// Unloaded marks a unit whose definition is on disk but which the service
+	// manager has no job for (a reload that failed after the bootout).
+	Unloaded bool
 	// Binary is the program the installed unit launches ("" when unknown).
 	Binary string
 }

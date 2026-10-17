@@ -424,6 +424,13 @@ func (b *darwinBackend) Restart() error {
 	if !before.Installed {
 		return fmt.Errorf("restart: %s is not installed", b.label)
 	}
+	if before.Unloaded {
+		plistPath, err := b.plistPath()
+		if err != nil {
+			return err
+		}
+		return b.reload(plistPath)
+	}
 	if !before.Running || before.PID <= 0 {
 		// Nothing to signal. Ask launchd to start it rather than assuming
 		// KeepAlive already has it in flight — it may be sitting out a
@@ -527,6 +534,11 @@ func (b *darwinBackend) Status() (serviceStatus, error) {
 	out, err := runOSCmd("launchctl", "print", b.serviceTarget())
 	if err != nil {
 		if isServiceNotFoundOutput(out) {
+			if plistPath, perr := b.plistPath(); perr == nil {
+				if _, serr := os.Stat(plistPath); serr == nil {
+					return serviceStatus{Installed: true, Unloaded: true, Detail: "plist on disk, job not loaded", Binary: b.installedBinary()}, nil
+				}
+			}
 			return serviceStatus{Installed: false}, nil
 		}
 		// Ambiguous error. Check if the plist file exists to distinguish

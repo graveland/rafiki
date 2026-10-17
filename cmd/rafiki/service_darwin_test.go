@@ -625,6 +625,55 @@ func TestDarwinRestart_NotInstalledIsAnError(t *testing.T) {
 	assert.NewAborting(t).Error(b.Restart(), "Restart: got nil error, want an error — the service was never installed")
 }
 
+// A reload that dies after its bootout leaves the plist on disk with no job in
+// launchd. That is installed-but-unloaded, not "not installed": refresh must
+// still act on it, and Restart must bootstrap it (kickstart needs a loaded job).
+func TestDarwinRestart_UnloadedWithPlistOnDiskBootstraps(t *testing.T) {
+	c := assert.NewCollecting(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	c.Require().NoError(os.MkdirAll(plistDir, 0755))
+	c.Require().NoError(os.WriteFile(filepath.Join(plistDir, launchdLabel+".plist"), []byte("<plist/>"), 0644))
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	var calls []string
+	loaded := false
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		calls = append(calls, args[0])
+		switch args[0] {
+		case "print":
+			if !loaded {
+				return "Could not find service", errors.New("exit status 113")
+			}
+			return "pid = 4242", nil
+		case "bootout":
+			return "Could not find service", errors.New("exit status 3")
+		case "bootstrap":
+			loaded = true
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	st, err := b.Status()
+	c.Require().NoError(err, "Status")
+	c.True(st.Installed, "plist on disk must count as installed")
+	c.True(st.Unloaded, "no launchd job: Unloaded")
+	c.False(st.Running, "Running")
+
+	c.Require().NoError(b.Restart(), "Restart")
+	c.True(loaded, "Restart must bootstrap the unloaded job")
+	for _, call := range calls {
+		c.False(call == "kickstart", "kickstart cannot start an unloaded job")
+	}
+}
+
 // --- Uninstall tests ---
 
 // Happy path: bootout succeeds, the poll confirms the job gone, and only
