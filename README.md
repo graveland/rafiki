@@ -8,7 +8,7 @@ client (`rafiki`).
 
 **macOS.** `brew install graveland/tap/rafiki`, then `rafiki setup`.
 
-`brew upgrade --cask rafiki` also applies the upgrade to a machine that already runs the services: it
+`brew upgrade rafiki` also applies the upgrade to a machine that already runs the services: it
 runs `rafiki service refresh`, which migrates the database, then restarts the daemon and executor
 services (interrupting live agents; they recover on restart). Run `rafiki service refresh` yourself
 after upgrading any other way. If the migration fails nothing is restarted.
