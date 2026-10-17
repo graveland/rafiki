@@ -185,6 +185,25 @@ func optionalPrereqNames() []string {
 	return []string{"uv", "ollama", "rtk"}
 }
 
+// detectOptionalPrereqs returns the optional tools already installed, so a
+// first run preselects what the machine has instead of offering to install it.
+func detectOptionalPrereqs(ctx context.Context, r runner) ([]string, error) {
+	var found []string
+	for _, p := range prereqs() {
+		if p.Required || !containsString(optionalPrereqNames(), p.Name) {
+			continue
+		}
+		ok, _, err := p.Present(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			found = append(found, p.Name)
+		}
+	}
+	return found, nil
+}
+
 // checkPrereqs verifies every required tool is present — and every chosen
 // optional tool — installing what it can, and returns the optional tools the
 // user chose (to be saved to install-state).
@@ -193,7 +212,11 @@ func checkPrereqs(ctx context.Context, r runner, w *wizard, goos string, optiona
 	if _, err := r.LookPath("brew"); err == nil {
 		hasBrew = true
 	}
-	chosen, err := w.askMulti("Optional tools", "with", optionalPrereqNames(), optional, nil)
+	detected, err := detectOptionalPrereqs(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	chosen, err := w.askMulti("Optional tools", "with", optionalPrereqNames(), optional, detected)
 	if err != nil {
 		return nil, err
 	}

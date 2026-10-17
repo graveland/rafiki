@@ -434,3 +434,17 @@ func TestShellJoinQuotesSpaces(t *testing.T) {
 		t.Errorf("shellJoin = %q", got)
 	}
 }
+
+func TestDetectOptionalPrereqsFindsInstalledTools(t *testing.T) {
+	r := newFakeRunner()
+	r.paths["uv"] = "/usr/bin/uv"
+	r.paths["ollama"] = "/usr/bin/ollama"
+
+	got, err := detectOptionalPrereqs(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "uv,ollama" {
+		t.Fatalf("detected = %v, want [uv ollama]", got)
+	}
+}
