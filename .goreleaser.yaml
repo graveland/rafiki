@@ -60,6 +60,9 @@ release:
 notarize:
   macos:
     - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      # Unset, ids defaults to the project-named build only, leaving rafikid
+      # ad-hoc signed and rejected by Gatekeeper.
+      ids: [rafiki, rafikid]
       sign:
         certificate: "{{.Env.MACOS_SIGN_P12}}"
         password: "{{.Env.MACOS_SIGN_PASSWORD}}"
