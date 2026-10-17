@@ -110,6 +110,88 @@ func TestStartupResumeSurvivesAFailedResume(t *testing.T) {
 	eng.Close()
 }
 
+// blockFirstSender parks its first call until the request's context is
+// cancelled, then delegates every later call.
+type blockFirstSender struct {
+	inner   llm.Sender
+	once    sync.Once
+	started chan struct{}
+}
+
+func (s *blockFirstSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	block := false
+	s.once.Do(func() { block = true })
+	if block {
+		close(s.started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.inner.New(ctx, params)
+}
+
+// TestStartupResumeIsAbortable pins that a turn re-issued by startup resume
+// registers its cancel like any other turn: an abort that lands while it is in
+// flight must stop it rather than be logged as "no turn running".
+func TestStartupResumeIsAbortable(t *testing.T) {
+	c := assert.NewAborting(t)
+	silenceSlog(t)
+	pool, _ := dbTestPool(t)
+	ctx := context.Background()
+	const ref = "startup-resume-abortable"
+
+	seed, err := llm.NewClient(
+		llm.WithProviderSender("anthropic", scriptedSender(t, sampleEndTurn)),
+		llm.WithStore(pool),
+		llm.WithDefaultModel("claude-x"))
+	c.NoError(err)
+	conv1, err := seed.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
+	c.NoError(err)
+	c.NoError(conv1.AppendUser(ctx, llm.UserText("interrupted work")))
+
+	sender := &blockFirstSender{inner: scriptedSender(t, sampleEndTurn), started: make(chan struct{})}
+	client, err := llm.NewClient(
+		llm.WithProviderSender("anthropic", sender),
+		llm.WithStore(pool),
+		llm.WithDefaultModel("claude-x"))
+	c.NoError(err)
+	out := &syncBuffer{}
+	fe := NewFrontend(strings.NewReader(""), out, nil)
+	eng, err := NewEngine(EngineConfig{
+		Client:     client,
+		Tools:      fakeToolSet{},
+		Provider:   "anthropic",
+		ModelID:    "claude-x",
+		Name:       "w1",
+		AutoResume: true,
+		ConvOpts:   []llm.ConvOption{llm.Entrypoint("agent"), llm.ByExternalRef(ref)},
+	}, fe)
+	c.NoError(err)
+	eng.Start()
+	fe.handler = eng
+
+	select {
+	case <-sender.started:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("startup resume never reached the model; out:\n%s", out.String())
+	}
+
+	eng.HandleAbort()
+
+	deadline := time.Now().Add(10 * time.Second)
+	ended := false
+	for !ended && !time.Now().After(deadline) {
+		ended = frameSeqHasAfter(frameTypes(t, out.String()), "agent_start", "agent_end")
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.Require().True(ended, "an abort during startup resume must end the resumed turn; out:\n%s", out.String())
+
+	eng.HandlePrompt("still there?")
+	eng.Wait()
+	c.True(frameSeqHas(frameTypes(t, out.String()), "agent_settled"),
+		"the child must keep working after an aborted startup resume")
+	eng.Close()
+}
+
 func frameSeqHas(seq []string, typ string) bool {
 	for _, t := range seq {
 		if t == typ {

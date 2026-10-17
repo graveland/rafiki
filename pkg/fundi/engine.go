@@ -693,15 +693,35 @@ func (e *Engine) worker() {
 // cap exceeded marks the conversation failed durably, so re-attempting it on
 // every boot is noise, not recovery.
 func (e *Engine) startupResume() {
+	// Abortable like a turn: the cancel is published before anything can block,
+	// or an abort during a resumed turn finds e.cancel nil and is dropped.
+	ctx, cancel := context.WithCancel(e.baseCtx)
+	e.mu.Lock()
+	e.cancel = cancel
+	e.mu.Unlock()
+
 	e.em.AgentStart()
 	events, sendOpts := e.events()
-	result, err := agentloop.Resume(context.Background(), e.conv, e.tools, events, sendOpts...)
+	result, err := agentloop.Resume(ctx, e.conv, e.tools, events, sendOpts...)
+	aborted := errors.Is(ctx.Err(), context.Canceled)
+
+	e.mu.Lock()
+	e.cancel = nil
+	orphanedSteers := e.steerBuf
+	e.steerBuf = nil
+	e.mu.Unlock()
+	cancel()
+
 	switch {
 	case errors.Is(err, agentloop.ErrResumeCapExceeded):
 		slog.Error("agent: startup resume exceeded its attempt cap; ending this child",
 			"conversation", e.conv.ID, "error", err)
 		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
 		e.fatal(err)
+	case err != nil && aborted:
+		repaired := e.repairAfterAbort()
+		slog.Info("agent: startup resume cancelled", "conversation", e.conv.ID, "error", err, "orphans_repaired", repaired)
+		e.em.AgentEnd()
 	case err != nil:
 		slog.Error("agent: startup resume failed; the child stays live", "conversation", e.conv.ID, "error", err)
 		e.em.publishError(err)
@@ -719,6 +739,7 @@ func (e *Engine) startupResume() {
 		e.turnEnded(TurnOutcome{Clean: true})
 		e.em.AgentEnd()
 	}
+	e.requeueSteers(orphanedSteers)
 }
 
 // runTurnGuarded runs one turn and reports whether the worker may continue.
@@ -953,22 +974,7 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 
 	switch {
 	case err != nil && aborted:
-		// A cancelled turn can leave the trailing assistant message's tool_use
-		// blocks unresolved (no tool_result yet appended); the next turn's
-		// request would then carry that dangling tool_use and the API would
-		// reject it outright. Repair on its own short-lived context, NOT
-		// e.baseCtx and not the turn's own (already cancelled) ctx — the
-		// repair itself must not be aborted by the very cancellation it
-		// exists to clean up after. This matters even more now that baseCtx
-		// can be a signal.NotifyContext: a SIGINT-triggered abort would
-		// otherwise cancel baseCtx and the repair together, leaving the
-		// orphan behind for the process's next start.
-		repairCtx, repairCancel := context.WithTimeout(context.Background(), repairTimeout)
-		repaired, rErr := RepairOrphans(repairCtx, e.conv)
-		repairCancel()
-		if rErr != nil {
-			slog.Error("agent: orphan repair failed after abort", "conversation", e.conv.ID, "error", rErr)
-		}
+		repaired := e.repairAfterAbort()
 		slog.Info("agent: turn cancelled", "conversation", e.conv.ID, "error", err, "orphans_repaired", repaired)
 	case err != nil:
 		slog.Error("agent: turn failed", "conversation", e.conv.ID, "error", err)
@@ -995,6 +1001,26 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	e.em.AgentEnd()
 
 	e.requeueSteers(orphanedSteers)
+}
+
+// repairAfterAbort resolves the tool_use blocks a cancelled turn left without a
+// tool_result and returns how many it repaired. A dangling tool_use would make
+// the next request carry an orphan the API rejects outright.
+//
+// It runs on its own short-lived context, NOT e.baseCtx and not the turn's own
+// (already cancelled) ctx — the repair itself must not be aborted by the very
+// cancellation it exists to clean up after. This matters even more now that
+// baseCtx can be a signal.NotifyContext: a SIGINT-triggered abort would
+// otherwise cancel baseCtx and the repair together, leaving the orphan behind
+// for the process's next start.
+func (e *Engine) repairAfterAbort() int {
+	repairCtx, repairCancel := context.WithTimeout(context.Background(), repairTimeout)
+	defer repairCancel()
+	repaired, err := RepairOrphans(repairCtx, e.conv)
+	if err != nil {
+		slog.Error("agent: orphan repair failed after abort", "conversation", e.conv.ID, "error", err)
+	}
+	return repaired
 }
 
 // requeueSteers mirrors drainSteers: it joins steers that missed the last
