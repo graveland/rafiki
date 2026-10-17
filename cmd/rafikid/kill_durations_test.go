@@ -32,10 +32,10 @@ func TestProductionKillGracePeriods(t *testing.T) {
 		{"respawn kill", respawnKillGrace, 500 * time.Millisecond},
 		{"abort shutdown", abortShutdownGrace, time.Second},
 		{"abort kill", abortKillGrace, 500 * time.Millisecond},
-		{"lease-loss shutdown", leaseLossShutdownGrace, 5 * time.Second},
-		{"lease-loss kill", leaseLossKillGrace, 5 * time.Second},
-		{"failChild shutdown", failChildShutdownGrace, 5 * time.Second},
-		{"failChild kill", failChildKillGrace, time.Second},
+		{"lease-loss shutdown", leaseLossShutdownGrace, 2 * time.Second},
+		{"lease-loss kill", leaseLossKillGrace, 2500 * time.Millisecond},
+		{"failChild shutdown", failChildShutdownGrace, 2 * time.Second},
+		{"failChild kill", failChildKillGrace, 2500 * time.Millisecond},
 	} {
 		c.Eq(tc.want, tc.got, "%s grace", tc.name)
 	}

@@ -152,6 +152,13 @@ type StdinStopper interface {
 	StopsOnClose() bool
 }
 
+// TermGrace is how long a host that owns a child's process (the executor's
+// reap, a daraja host, a darajapool Terminate) waits between SIGTERM and
+// SIGKILL. The daemon's own SIGTERM-to-SIGKILL window must outlast it, so the
+// host's escalation lands and reports before the daemon force-kills what the
+// host is already reaping (cmd/rafikid's agentKillGrace).
+const TermGrace = 2 * time.Second
+
 // abandonTimeout bounds the terminal `<-c.done` wait in Shutdown — how long we
 // wait for runner.Wait() to return AFTER Kill() has already cancelled the
 // child's context and closed its pipe ends.
@@ -175,10 +182,10 @@ type StdinStopper interface {
 //     just cancelled. That is milliseconds in practice, so 10s is three to
 //     four orders of magnitude of headroom.
 //   - Short enough to keep `fundi kill` responsive: it is additive to the
-//     caller's own ladder, and 10s on top of a 30s kill rung is noise next to
-//     the alternative of never returning at all.
+//     caller's own ladder, and it is bounded rather than the alternative of
+//     never returning at all.
 //   - It keeps the whole per-child ladder inside the daemon's global bound:
-//     120s stdin-close + 30s kill + 10s abandon = 160s < the 180s
+//     2s stdin-close + 2.5s kill + 10s abandon = 14.5s < the 20s
 //     globalTimeout in cmd/rafikid/main.go, so ShutdownAllChildren still
 //     reports every child's outcome instead of tripping its own deadline first
 //     and reporting nothing.

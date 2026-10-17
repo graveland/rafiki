@@ -1045,25 +1045,18 @@ func runDaemon(opts runDaemonOpts) error {
 
 	cancel() // stop the background sweeper
 
-	// Shut down all live children gracefully before closing the server. This
-	// prevents children from dying via pipe-death (broken stdin/SIGPIPE) when
-	// launchd or systemd stops the daemon.
+	// Stop every live child with the one agent stop policy (agentShutdownGrace,
+	// then agentKillGrace, then SIGKILL) before closing the server, so none dies
+	// by pipe-death when launchd or systemd stops the daemon. Children are
+	// resumed from their rows on the next start, so nothing waits for a turn in
+	// flight or a final compaction.
 	//
-	// pi's own shutdown can involve LLM calls (final compaction, summarisation
-	// on session_before_shutdown extension events, etc.), which can take tens
-	// of seconds.  The per-child timeouts are picked to give that real work a
-	// chance to finish without exceeding the platform-level stop timeouts that
-	// the service plist/unit advertises (ExitTimeOut / TimeoutStopSec).
-	//
-	// The 180s global bound matches the platform stop-timeout we install; if
-	// users have an older plist/unit (default 20s on launchd, 90s on systemd),
-	// the platform will SIGKILL us first — they should re-run `rafiki service
-	// uninstall && rafiki service install` to pick up the new timeouts.
-	const (
-		childShutdownTimeout = 120 * time.Second
-		childKillTimeout     = 30 * time.Second
-		globalTimeout        = 180 * time.Second
-	)
+	// globalTimeout bounds the whole drain, a margin above the ladder and the
+	// kill-reap wait. The pool close and broadcast shutdown after it keep the
+	// worst case under the service's stop timeout (ExitTimeOut /
+	// TimeoutStopSec, 45s); a unit installed before that value changed keeps the
+	// old one until it is reinstalled.
+	const globalTimeout = 20 * time.Second
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), globalTimeout)
 	defer shutdownCancel()
 	// Stop the Connect control plane BEFORE draining children: face.Close's
@@ -1076,7 +1069,7 @@ func runDaemon(opts runDaemonOpts) error {
 	if face != nil && face.Control != nil {
 		face.Control.Stop()
 	}
-	if err := ctrl.ShutdownAllChildren(shutdownCtx, childShutdownTimeout, childKillTimeout); err != nil {
+	if err := ctrl.ShutdownAllChildren(shutdownCtx, agentShutdownGrace, agentKillGrace); err != nil {
 		slog.Warn("child shutdown errors", "error", err)
 	}
 
@@ -1136,7 +1129,7 @@ func wirePathSync(ctrl *Controller, execPool *execpool.Pool, srv *connectapi.Ser
 }
 
 // poolCloseTimeout bounds the wait on pgxpool.Pool.Close at daemon exit. Sized
-// well under the 180s platform stop timeout the service unit advertises, and
+// well under the 45s platform stop timeout the service unit advertises, and
 // generous next to the milliseconds a normal close takes once baseCtx is
 // cancelled.
 const poolCloseTimeout = 15 * time.Second

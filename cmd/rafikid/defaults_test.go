@@ -12,7 +12,7 @@ import (
 func TestKillTimeoutDefaults(t *testing.T) {
 	c := assert.NewAborting(t)
 	c.Eq(2*time.Second, durOrDefault(0, defaultKillShutdown), "shutdownTimeout default: got")
-	c.Eq(30*time.Second, durOrDefault(0, defaultKillTimeout), "killTimeout default: got")
+	c.Eq(2500*time.Millisecond, durOrDefault(0, defaultKillTimeout), "killTimeout default: got")
 }
 
 // TestDurOrDefault verifies that explicit non-zero values are honoured.

@@ -75,7 +75,7 @@ that pass a fixed flag set.`,
 	addIncludeSubagentsFlag(cmd, "close")
 	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout when a target must be stopped first (default 2s)")
-	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when a target must be stopped first (e.g. 30s)")
+	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when a target must be stopped first (default 2.5s)")
 	// Any child is a valid target now: close stops a live one first, so
 	// completion is not restricted to already-exited children the way it was
 	// before close learned to do that.

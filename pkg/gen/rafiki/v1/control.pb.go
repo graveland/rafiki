@@ -2451,7 +2451,7 @@ type KillRequest struct {
 	// shutdown_timeout_ms = 0 did.
 	ShutdownTimeout *durationpb.Duration `protobuf:"bytes,5,opt,name=shutdown_timeout,json=shutdownTimeout,proto3" json:"shutdown_timeout,omitempty"`
 	// kill_timeout bounds the window between SIGTERM and SIGKILL. Unset or zero
-	// selects the daemon default (30s), exactly as the old kill_timeout_ms = 0.
+	// selects the daemon default (2.5s), exactly as the old kill_timeout_ms = 0.
 	KillTimeout *durationpb.Duration `protobuf:"bytes,6,opt,name=kill_timeout,json=killTimeout,proto3" json:"kill_timeout,omitempty"`
 	// include_descendants also kills every live descendant of child_id, deepest
 	// first, before child_id itself. Off (the default) it ends child_id alone and

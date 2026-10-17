@@ -277,7 +277,7 @@ func (r *Runner) Wait() (exitCode int, signal string) {
 // plan's Task 7).
 func (r *Runner) PID() int { return 0 }
 
-func (r *Runner) Terminate() error { return r.shutdown(3 * time.Second) }
+func (r *Runner) Terminate() error { return r.shutdown(child.TermGrace) }
 func (r *Runner) Kill() error      { return r.shutdown(0) }
 
 func (r *Runner) shutdown(grace time.Duration) error {

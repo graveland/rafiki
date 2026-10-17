@@ -23,7 +23,7 @@ import (
 
 // defaultGrace is how long Restart and Shutdown wait after the first signal
 // before escalating to a hard kill.
-const defaultGrace = 3 * time.Second
+const defaultGrace = child.TermGrace
 
 // defaultRespawnLimit bounds consecutive respawns after unexpected exits. A
 // deterministically-failing child — a bad --resume, a binary that is gone —

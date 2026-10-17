@@ -48,12 +48,10 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
-	<!-- launchd default ExitTimeOut is 20s.  the daemon's own graceful
-	     shutdown needs longer because pi children may do final LLM calls
-	     (compaction, summarisation) before exiting.  Match the daemon's
-	     internal 180s global shutdown bound. -->
+	<!-- launchd default ExitTimeOut is 20s.  the daemon stops agents in a few
+	     seconds; this covers its worst case (20s drain, then pool close). -->
 	<key>ExitTimeOut</key>
-	<integer>200</integer>
+	<integer>45</integer>
 	<key>StandardOutPath</key>
 	<string>{{.LogPath}}</string>
 	<key>StandardErrorPath</key>
@@ -125,14 +123,13 @@ type darwinBackend struct {
 	restartGrace time.Duration
 }
 
-// daemonRestartGrace matches the plist's own ExitTimeOut. rafikid's internal
-// graceful-shutdown budget is 180s (cmd/rafikid/main.go's globalTimeout — pi
-// and claude children may need to finish a final LLM call, e.g. compaction,
-// before the daemon exits), and ExitTimeOut is set 20s above that. Restart
-// owns this timeout directly now instead of leaning on launchd's enforcement
-// of it, so it must match that number, not invent a smaller one that would
-// SIGKILL a live agent turn on every routine restart.
-const daemonRestartGrace = 200 * time.Second
+// daemonRestartGrace matches the plist's own ExitTimeOut. rafikid's drain is
+// bounded at 20s (cmd/rafikid/main.go's globalTimeout) and a typical stop takes
+// a few seconds; the pool close and broadcast shutdown after it keep the worst
+// case under this. Restart owns this timeout directly instead of leaning on
+// launchd's enforcement of it, so it must match that number, not a smaller one
+// that would SIGKILL a daemon still closing its pool.
+const daemonRestartGrace = 45 * time.Second
 
 // executorRestartGrace is far shorter: the executor's own shutdown is bounded
 // by AdminServer.Close's sequential per-hosted-child reap (defaultReapGrace,

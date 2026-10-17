@@ -34,11 +34,9 @@ After=default.target
 ExecStart={{.DaemonBinary}}{{range .Args}} {{unitq .}}{{end}}
 Restart=on-failure
 RestartSec=2
-# systemd default TimeoutStopSec is 90s.  the daemon's own graceful
-# shutdown needs longer because pi children may do final LLM calls
-# (compaction, summarisation) before exiting.  Match the daemon's internal
-# 180s global shutdown bound.
-TimeoutStopSec=200
+# systemd default TimeoutStopSec is 90s.  the daemon stops agents in a few
+# seconds; this covers its worst case (20s drain, then pool close).
+TimeoutStopSec=45
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment={{unitq (printf "HOME=%s" .HomeEnv)}}

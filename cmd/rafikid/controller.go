@@ -3113,13 +3113,24 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 	return false
 }
 
-// Kill's defaults when the caller names no timeout. A kill is an interrupt: it
-// does not wait out a turn in flight, so the graceful window is seconds, not
-// the minutes a polite shutdown might want. A caller that does want to wait
-// passes shutdown_timeout.
+// The one stop policy for an agent: close its stdin and give it agentShutdownGrace
+// to exit, then SIGTERM and give it agentKillGrace, then SIGKILL. There is no
+// polite wait for a turn in flight or a final compaction; the daemon's own
+// shutdown, Kill's defaults, lease loss and failChild all use it. A caller that
+// wants longer passes shutdown_timeout / kill_timeout.
+//
+// agentKillGrace is child.TermGrace plus a margin: a host that owns the process
+// (an executor, a daraja) runs its own SIGTERM-to-SIGKILL of child.TermGrace
+// after the daemon's SIGTERM, and the daemon's SIGKILL must not land first.
 const (
-	defaultKillShutdown = 2 * time.Second
-	defaultKillTimeout  = 30 * time.Second
+	agentShutdownGrace = 2 * time.Second
+	agentKillGrace     = child.TermGrace + 500*time.Millisecond
+)
+
+// Kill's defaults when the caller names no timeout.
+const (
+	defaultKillShutdown = agentShutdownGrace
+	defaultKillTimeout  = agentKillGrace
 )
 
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (protocol.KillResponseData, error) {
@@ -5364,10 +5375,10 @@ const (
 	respawnKillGrace       = 500 * time.Millisecond
 	abortShutdownGrace     = time.Second
 	abortKillGrace         = 500 * time.Millisecond
-	leaseLossShutdownGrace = 5 * time.Second
-	leaseLossKillGrace     = 5 * time.Second
-	failChildShutdownGrace = 5 * time.Second
-	failChildKillGrace     = time.Second
+	leaseLossShutdownGrace = agentShutdownGrace
+	leaseLossKillGrace     = agentKillGrace
+	failChildShutdownGrace = agentShutdownGrace
+	failChildKillGrace     = agentKillGrace
 )
 
 func framePassesTypeFilter(frame []byte, include, exclude []string) bool {

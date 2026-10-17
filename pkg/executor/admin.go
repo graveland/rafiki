@@ -31,8 +31,8 @@ import (
 )
 
 // defaultReapGrace is the window between SIGTERM and SIGKILL, matching
-// daraja's own stopLocked rather than inventing a second policy.
-const defaultReapGrace = 3 * time.Second
+// daraja's own stopLocked.
+const defaultReapGrace = child.TermGrace
 
 // truncateMarker is appended to an oversized stderr line's kept first
 // fragment, marking what the relay discarded.
