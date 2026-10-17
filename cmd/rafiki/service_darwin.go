@@ -235,7 +235,7 @@ func (b *darwinBackend) reload(plistPath string) error {
 	// the service sat completely unloaded. So: if bootout succeeded (or
 	// failed ambiguously — anything other than a clean "wasn't loaded"), the
 	// job may still be draining and we poll `launchctl print` until it is
-	// gone, capped at ~2s. Skip the poll only on the fast path where bootout
+	// gone, capped at installPollCap. Skip the poll only on the fast path where bootout
 	// itself reports the job was never loaded (a clean machine). Whether or
 	// not the cap expires, we always fall through to bootstrap below — never
 	// give up and leave the machine unloaded. The real gate is the
@@ -299,7 +299,11 @@ var sleepFn = time.Sleep
 
 const (
 	installPollInterval = 50 * time.Millisecond
-	installPollCap      = 2 * time.Second
+	// installPollCap must cover the daemon's whole drain: launchd keeps the old
+	// job listed until it exits, up to the plist's ExitTimeOut. A shorter cap
+	// bootstraps against the still-departing job and fails with EIO. The poll
+	// returns the moment the job is gone, so the common case costs nothing.
+	installPollCap = daemonRestartGrace + 5*time.Second
 )
 
 // waitForUnload polls `launchctl print` for the service target until it
