@@ -77,8 +77,10 @@ signs:
     artifacts: checksum
     cmd: go
     args: [run, ./cmd/relsign, sign, "${artifact}"]
-    env:
-      - RELSIGN_KEY={{ .Env.RELSIGN_KEY }}
+    # No env block: a signs entry's env is rendered with an empty .Env map, so
+    # `RELSIGN_KEY={{ .Env.RELSIGN_KEY }}` fails to parse, and the sign command
+    # already inherits the goreleaser process's environment. The workflow sets
+    # RELSIGN_KEY on the goreleaser step.
     output: true
 
 homebrew_casks:
