@@ -148,6 +148,29 @@ func (b *linuxBackend) Install(spec serviceSpec) error {
 	return nil
 }
 
+// Repoint swaps the ExecStart program in the installed unit and restarts it.
+func (b *linuxBackend) Repoint(binary string) error {
+	unitPath, err := b.unitPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		return fmt.Errorf("read unit file %s: %w", unitPath, err)
+	}
+	updated, ok := replaceUnitExecStart(data, binary)
+	if !ok {
+		return fmt.Errorf("unit file %s has no ExecStart to repoint", unitPath)
+	}
+	if err := os.WriteFile(unitPath, updated, 0644); err != nil {
+		return fmt.Errorf("write unit file %s: %w", unitPath, err)
+	}
+	if out, err := runOSCmd("systemctl", "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %s", strings.TrimSpace(out))
+	}
+	return b.Restart()
+}
+
 func (b *linuxBackend) Uninstall() error {
 	unitPath, err := b.unitPath()
 	if err != nil {
@@ -206,6 +229,9 @@ func (b *linuxBackend) Status() (serviceStatus, error) {
 	running := strings.TrimSpace(activeOut) == "active"
 
 	st := serviceStatus{Installed: true, Running: running}
+	if data, err := os.ReadFile(unitPath); err == nil {
+		st.Binary = unitExecStart(data)
+	}
 
 	if running {
 		pidOut, _ := runOSCmd("systemctl", "--user", "show", b.unit, "--property=MainPID")

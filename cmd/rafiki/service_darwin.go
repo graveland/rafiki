@@ -194,6 +194,31 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 		return fmt.Errorf("write plist %s: %w", plistPath, err)
 	}
 
+	return b.reload(plistPath)
+}
+
+// Repoint swaps the program in the installed plist and reloads the job.
+func (b *darwinBackend) Repoint(binary string) error {
+	plistPath, err := b.plistPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(plistPath)
+	if err != nil {
+		return fmt.Errorf("read plist %s: %w", plistPath, err)
+	}
+	updated, ok := replacePlistProgram(data, binary)
+	if !ok {
+		return fmt.Errorf("plist %s has no ProgramArguments to repoint", plistPath)
+	}
+	if err := os.WriteFile(plistPath, updated, 0644); err != nil {
+		return fmt.Errorf("write plist %s: %w", plistPath, err)
+	}
+	return b.reload(plistPath)
+}
+
+// reload replaces the loaded job with the plist on disk.
+func (b *darwinBackend) reload(plistPath string) error {
 	// Best-effort bootout before bootstrap. `launchctl bootstrap` fails with
 	// "service already loaded" against a job that is already bootstrapped —
 	// which is exactly the case on a reinstall — and in that failure it does
@@ -482,6 +507,19 @@ func terminateGracefully(pid int, grace time.Duration) error {
 	return nil
 }
 
+// installedBinary reads the program out of the plist on disk, "" if unreadable.
+func (b *darwinBackend) installedBinary() string {
+	plistPath, err := b.plistPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(plistPath)
+	if err != nil {
+		return ""
+	}
+	return plistProgram(data)
+}
+
 var launchdPIDRe = regexp.MustCompile(`\bpid\s*=\s*(\d+)`)
 
 func (b *darwinBackend) Status() (serviceStatus, error) {
@@ -494,12 +532,12 @@ func (b *darwinBackend) Status() (serviceStatus, error) {
 		// "installed but not running" from "not installed".
 		plistPath, _ := b.plistPath()
 		if _, serr := os.Stat(plistPath); serr == nil {
-			return serviceStatus{Installed: true, Running: false, Detail: strings.TrimSpace(out)}, nil
+			return serviceStatus{Installed: true, Running: false, Detail: strings.TrimSpace(out), Binary: b.installedBinary()}, nil
 		}
 		return serviceStatus{}, fmt.Errorf("launchctl print: %w: %s", err, strings.TrimSpace(out))
 	}
 
-	st := serviceStatus{Installed: true}
+	st := serviceStatus{Installed: true, Binary: b.installedBinary()}
 	if m := launchdPIDRe.FindStringSubmatch(out); m != nil {
 		pid, _ := strconv.Atoi(m[1])
 		if pid > 0 {

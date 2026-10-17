@@ -230,12 +230,26 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 		fmt.Fprintf(out, "    warning: %s\n", exposeWarning)
 	}
 
-	installed, err := daemonServiceInstalled()
+	svc, err := daemonServiceStatus()
 	if err != nil {
 		return err
 	}
 	switch {
-	case !installed:
+	case svc.Installed && svc.Binary != "" && !sameBinary(svc.Binary, rafikidPath):
+		fmt.Fprintf(out, "    the installed service runs %s, not %s\n", svc.Binary, rafikidPath)
+		reinstall, err := confirmRestart(ctx, w, out)
+		if err != nil {
+			return err
+		}
+		if !reinstall {
+			fmt.Fprintln(out, "    ok (service left on the old binary)")
+			break
+		}
+		if err := installDaemonService(daemonServiceOptions{DaemonBinary: rafikidPath, CaptureShellEnv: true}, out); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "    ok (service reinstalled)")
+	case !svc.Installed:
 		if err := installDaemonService(daemonServiceOptions{CaptureShellEnv: true}, out); err != nil {
 			return err
 		}
@@ -273,6 +287,9 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 
 	// ── 8. executor ─────────────────────────────────────────────────────────
 	step(out, stepExecutor)
+	if err := repointExecutorService(w, out); err != nil {
+		return err
+	}
 	ref, lerr := resolveLaunchExecutor(ctx, cmd, profileName, protocol.KindClaude)
 	if lerr != nil {
 		// A real lookup failure (daemon down, auth) must not read as "no
@@ -307,6 +324,42 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	case len(prov.Providers) > 0:
 		fmt.Fprintln(out, "  (or: rafiki create --kind fundi --model <model>)")
 	}
+	return nil
+}
+
+// repointExecutorService moves an installed executor unit onto this binary when
+// it launches a different one (a source install replaced by a release). The
+// unit's arguments and environment are kept: the root, launch kinds and
+// credential file cannot be rebuilt from here, so only the program changes.
+func repointExecutorService(w *wizard, out io.Writer) error {
+	b := executorServiceBackendFor()
+	svc, err := b.Status()
+	if err != nil {
+		return err
+	}
+	if !svc.Installed || svc.Binary == "" {
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot determine this binary's path: %w", err)
+	}
+	if sameBinary(svc.Binary, self) {
+		return nil
+	}
+	fmt.Fprintf(out, "    the installed executor service runs %s, not %s\n", svc.Binary, self)
+	ok, err := w.confirmRun([]string{"rafiki", "executor", "service", "restart"})
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Fprintln(out, "    ok (executor service left on the old binary)")
+		return nil
+	}
+	if err := b.Repoint(self); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "    ok (executor service repointed)")
 	return nil
 }
 

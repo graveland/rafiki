@@ -21,6 +21,7 @@ import (
 type fakeServiceBackend struct {
 	installed serviceSpec
 	restarted bool
+	repointed string
 	status    serviceStatus
 }
 
@@ -29,6 +30,7 @@ func (f *fakeServiceBackend) Uninstall() error               { return nil }
 func (f *fakeServiceBackend) Start() error                   { return nil }
 func (f *fakeServiceBackend) Stop() error                    { return nil }
 func (f *fakeServiceBackend) Restart() error                 { f.restarted = true; return nil }
+func (f *fakeServiceBackend) Repoint(bin string) error       { f.repointed = bin; return nil }
 func (f *fakeServiceBackend) Status() (serviceStatus, error) { return f.status, nil }
 func (f *fakeServiceBackend) LogPath() string                { return "/tmp/fake-service.log" }
 
@@ -689,12 +691,62 @@ func TestRestartDaemonServiceDelegates(t *testing.T) {
 	c.True(fb.restarted, "restartDaemonService did not call the backend's Restart")
 }
 
-func TestDaemonServiceInstalledReportsStatus(t *testing.T) {
+func TestDaemonServiceStatusReportsStatus(t *testing.T) {
 	c := assert.NewCollecting(t)
-	fb := &fakeServiceBackend{status: serviceStatus{Installed: true}}
+	fb := &fakeServiceBackend{status: serviceStatus{Installed: true, Binary: "/x/rafikid"}}
 	stubServiceBackend(t, fb)
 
-	got, err := daemonServiceInstalled()
-	c.Require().NoError(err, "daemonServiceInstalled")
-	c.True(got, "daemonServiceInstalled did not surface Status().Installed")
+	got, err := daemonServiceStatus()
+	c.Require().NoError(err, "daemonServiceStatus")
+	c.True(got.Installed, "daemonServiceStatus did not surface Installed")
+	c.Eq("/x/rafikid", got.Binary)
+}
+
+func TestPlistProgramReadsProgramArguments(t *testing.T) {
+	c := assert.NewCollecting(t)
+	plist := "<dict>\n\t<key>Label</key>\n\t<string>x</string>\n\t<key>ProgramArguments</key>\n\t<array>\n" +
+		"\t\t<string>/Users/a&amp;b/bin/rafikid</string>\n\t\t<string>--flag</string>\n\t</array>\n</dict>"
+	c.Eq("/Users/a&b/bin/rafikid", plistProgram([]byte(plist)))
+	c.Eq("", plistProgram([]byte("<plist/>")))
+}
+
+func TestUnitExecStartReadsExecStart(t *testing.T) {
+	c := assert.NewCollecting(t)
+	unit := "[Service]\nExecStart=/opt/rafikid --flag \"x y\"\nRestart=on-failure\n"
+	c.Eq("/opt/rafikid", unitExecStart([]byte(unit)))
+	c.Eq("", unitExecStart([]byte("[Service]\n")))
+}
+
+func TestSameBinaryFollowsSymlinks(t *testing.T) {
+	c := assert.NewCollecting(t)
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	link := filepath.Join(dir, "link")
+	c.Require().NoError(os.WriteFile(real, []byte("x"), 0o755))
+	c.Require().NoError(os.Symlink(real, link))
+	c.True(sameBinary(link, real), "a symlink and its target are the same binary")
+	c.False(sameBinary(filepath.Join(dir, "gone"), real), "a missing path is a different binary")
+}
+
+func TestReplacePlistProgramKeepsTheRest(t *testing.T) {
+	c := assert.NewCollecting(t)
+	plist := "<dict>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/old/rafiki</string>\n" +
+		"\t\t<string>executor</string>\n\t</array>\n\t<key>Label</key>\n\t<string>/old/rafiki</string>\n</dict>"
+	got, ok := replacePlistProgram([]byte(plist), "/new & dir/rafiki")
+	c.True(ok, "program not found")
+	c.Eq("/new & dir/rafiki", plistProgram(got))
+	c.StrContains(string(got), "<string>executor</string>")
+	c.StrContains(string(got), "<key>Label</key>\n\t<string>/old/rafiki</string>")
+	_, ok = replacePlistProgram([]byte("<plist/>"), "/x")
+	c.False(ok, "a plist with no program must not be rewritten")
+}
+
+func TestReplaceUnitExecStartKeepsArguments(t *testing.T) {
+	c := assert.NewCollecting(t)
+	unit := "[Service]\nExecStart=/old/rafiki executor serve --root \"/a b\"\nRestart=on-failure\n"
+	got, ok := replaceUnitExecStart([]byte(unit), "/new/rafiki")
+	c.True(ok, "ExecStart not found")
+	c.Eq("[Service]\nExecStart=/new/rafiki executor serve --root \"/a b\"\nRestart=on-failure\n", string(got))
+	_, ok = replaceUnitExecStart([]byte("[Service]\n"), "/x")
+	c.False(ok, "a unit with no ExecStart must not be rewritten")
 }

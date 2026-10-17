@@ -70,6 +70,7 @@ func (f *fakeExecutorBackend) Uninstall() error          { return nil }
 func (f *fakeExecutorBackend) Start() error              { return nil }
 func (f *fakeExecutorBackend) Stop() error               { return nil }
 func (f *fakeExecutorBackend) Restart() error            { return nil }
+func (f *fakeExecutorBackend) Repoint(string) error      { return nil }
 func (f *fakeExecutorBackend) Status() (serviceStatus, error) {
 	return serviceStatus{}, nil
 }

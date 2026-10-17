@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -26,6 +28,9 @@ type serviceBackend interface {
 	Start() error
 	Stop() error
 	Restart() error
+	// Repoint rewrites the installed unit to launch binary instead, keeping its
+	// arguments and environment, and reloads it so the running job follows.
+	Repoint(binary string) error
 	Status() (serviceStatus, error)
 	LogPath() string
 }
@@ -197,6 +202,8 @@ type serviceStatus struct {
 	Running   bool
 	PID       int
 	Detail    string
+	// Binary is the program the installed unit launches ("" when unknown).
+	Binary string
 }
 
 func newServiceCmd() *cobra.Command {
@@ -376,14 +383,77 @@ func restartDaemonService() error {
 	return serviceBackendFor().Restart()
 }
 
-// daemonServiceInstalled reports whether the daemon service is installed.
-// `rafiki setup` uses it to decide whether there is anything to restart.
-func daemonServiceInstalled() (bool, error) {
-	st, err := serviceBackendFor().Status()
-	if err != nil {
-		return false, err
+// daemonServiceStatus reports the daemon service's state. `rafiki setup` uses
+// it to decide whether to install, restart, or repoint the unit.
+func daemonServiceStatus() (serviceStatus, error) {
+	return serviceBackendFor().Status()
+}
+
+var plistProgramRe = regexp.MustCompile(`(?s)<key>ProgramArguments</key>\s*<array>\s*<string>([^<]*)</string>`)
+
+// plistProgram returns the program a launchd plist launches, or "".
+func plistProgram(plist []byte) string {
+	m := plistProgramRe.FindSubmatch(plist)
+	if m == nil {
+		return ""
 	}
-	return st.Installed, nil
+	return html.UnescapeString(string(m[1]))
+}
+
+// replacePlistProgram returns plist with its program swapped for binary, and
+// whether it found one to swap.
+func replacePlistProgram(plist []byte, binary string) ([]byte, bool) {
+	loc := plistProgramRe.FindSubmatchIndex(plist)
+	if loc == nil {
+		return nil, false
+	}
+	out := append([]byte{}, plist[:loc[2]]...)
+	out = append(out, html.EscapeString(binary)...)
+	return append(out, plist[loc[3]:]...), true
+}
+
+// replaceUnitExecStart returns unit with its ExecStart program swapped for
+// binary, and whether it found one to swap.
+func replaceUnitExecStart(unit []byte, binary string) ([]byte, bool) {
+	lines := strings.Split(string(unit), "\n")
+	for i, line := range lines {
+		rest, ok := strings.CutPrefix(line, "ExecStart=")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			return nil, false
+		}
+		lines[i] = "ExecStart=" + binary + strings.TrimPrefix(rest, f[0])
+		return []byte(strings.Join(lines, "\n")), true
+	}
+	return nil, false
+}
+
+// unitExecStart returns the program a systemd unit's ExecStart launches, or "".
+func unitExecStart(unit []byte) string {
+	for _, line := range strings.Split(string(unit), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart="); ok {
+			if f := strings.Fields(rest); len(f) > 0 {
+				return f[0]
+			}
+		}
+	}
+	return ""
+}
+
+// sameBinary reports whether two program paths name the same file. A path that
+// no longer resolves is compared as written, so a unit pointing at a deleted
+// install reads as different from the live one.
+func sameBinary(a, b string) bool {
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // installReport renders what `service install` tells the operator: where each

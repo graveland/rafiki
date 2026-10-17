@@ -22,6 +22,7 @@ func (b *unsupportedBackend) Uninstall() error            { return errUnsupporte
 func (b *unsupportedBackend) Start() error                { return errUnsupportedOS }
 func (b *unsupportedBackend) Stop() error                 { return errUnsupportedOS }
 func (b *unsupportedBackend) Restart() error              { return errUnsupportedOS }
+func (b *unsupportedBackend) Repoint(string) error        { return errUnsupportedOS }
 func (b *unsupportedBackend) Status() (serviceStatus, error) {
 	return serviceStatus{}, errUnsupportedOS
 }

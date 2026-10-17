@@ -163,6 +163,7 @@ type setupFixture struct {
 	out     bytes.Buffer
 	run     *fakeRunner
 	fb      *fakeServiceBackend
+	execFB  *fakeServiceBackend
 	stub    *setupStubControl
 	rafikid string
 }
@@ -210,6 +211,14 @@ func newSetupFixture(t *testing.T) *setupFixture {
 
 	f.fb = &fakeServiceBackend{status: serviceStatus{Installed: true}}
 	stubServiceBackend(t, f.fb)
+
+	// The executor unit is a separate service; without this stub the real
+	// launchd/systemd unit on the developer's machine would be read, and
+	// repointed.
+	f.execFB = &fakeServiceBackend{}
+	origExec := executorServiceBackendFor
+	executorServiceBackendFor = func() serviceBackend { return f.execFB }
+	t.Cleanup(func() { executorServiceBackendFor = origExec })
 
 	f.stub = &setupStubControl{executors: []*rafikiv1.ExecutorRow{{
 		Id: "ex1", Machine: "machine", Eligible: true, LaunchKinds: []string{"claude"},
@@ -606,4 +615,60 @@ func TestSetupInstallCapturesShellDaemonEnv(t *testing.T) {
 	vars, err := readEnvFile(paths.ServiceEnvFile())
 	c.NoError(err, "readEnvFile")
 	c.Eq(constSetupDSN, vars["RAFIKI_DB"])
+}
+
+// TestSetupReinstallsServicePointingAtAnotherBinary: an installed unit whose
+// program is not the rafikid next to this client (a source install replaced by a
+// release) is rewritten, with the shell's daemon env captured, rather than left
+// running the old binary.
+func TestSetupReinstallsServicePointingAtAnotherBinary(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.fb.status = serviceStatus{Installed: true, Binary: "/old/source/rafikid"}
+	t.Setenv("RAFIKI_DEFAULT_MODEL", "some/model")
+
+	c.NoError(f.runSetup(), "setup")
+
+	c.Eq(f.rafikid, f.fb.installed.DaemonBinary)
+	c.Eq("some/model", f.fb.installed.ExtraEnv["RAFIKI_DEFAULT_MODEL"])
+}
+
+// TestSetupLeavesServiceOnCurrentBinaryAlone: a unit already pointing at this
+// rafikid is not rewritten.
+func TestSetupLeavesServiceOnCurrentBinaryAlone(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.fb.status = serviceStatus{Installed: true, Binary: f.rafikid}
+
+	c.NoError(f.runSetup(), "setup")
+
+	c.Eq("", f.fb.installed.DaemonBinary)
+}
+
+// TestSetupRepointsExecutorServiceOnAnotherBinary: an installed executor unit
+// that launches a different rafiki is moved onto this one, args untouched.
+func TestSetupRepointsExecutorServiceOnAnotherBinary(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.execFB.status = serviceStatus{Installed: true, Binary: "/old/source/rafiki"}
+	c.NoError(f.cmd.Flags().Set("non-interactive", "true"), "set flag")
+
+	c.NoError(f.runSetup(), "setup")
+
+	self, err := os.Executable()
+	c.NoError(err, "os.Executable")
+	c.Eq(self, f.execFB.repointed)
+}
+
+// TestSetupLeavesExecutorServiceOnThisBinaryAlone: nothing to repoint.
+func TestSetupLeavesExecutorServiceOnThisBinaryAlone(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	self, err := os.Executable()
+	c.NoError(err, "os.Executable")
+	f.execFB.status = serviceStatus{Installed: true, Binary: self}
+
+	c.NoError(f.runSetup(), "setup")
+
+	c.Eq("", f.execFB.repointed)
 }
