@@ -13,6 +13,16 @@ runs `rafiki service refresh`, which migrates the database, then restarts the da
 services (interrupting live agents; they recover on restart). Run `rafiki service refresh` yourself
 after upgrading any other way. If the migration fails nothing is restarted.
 
+**Self-managed installs** (the `install.sh` route, and source builds) update with
+`rafiki upgrade`: it downloads the latest release, verifies its signature against
+keys built into the binary, replaces `rafiki` and `rafikid` in place, then runs
+`rafiki service refresh`. `rafiki upgrade --check` only reports whether an update
+exists; `--version vX.Y.Z` installs a specific tag (the only way to downgrade).
+A Homebrew or source install is refused unless you pass `--force`, which installs
+a self-managed copy in `~/.local/bin` (and tells you to `brew uninstall rafiki`).
+Releases before the first signed one cannot be upgraded this way: re-run
+`install.sh`, or `brew upgrade rafiki`, once.
+
 **Linux (Debian/Ubuntu).**
 
 ```sh
