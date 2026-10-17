@@ -72,6 +72,15 @@ notarize:
         key: "{{.Env.MACOS_NOTARY_KEY}}"
         wait: true
 
+signs:
+  - id: checksums
+    artifacts: checksum
+    cmd: go
+    args: [run, ./cmd/relsign, sign, "${artifact}"]
+    env:
+      - RELSIGN_KEY={{ .Env.RELSIGN_KEY }}
+    output: true
+
 homebrew_casks:
   - name: rafiki
     repository:
