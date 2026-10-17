@@ -79,6 +79,13 @@ homebrew_casks:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     binaries: [rafiki, rafikid]
+    hooks:
+      post:
+        # Apply an upgrade to a machine that already runs the services: migrate,
+        # then restart. A no-op on a first install. Run from the staged copy so
+        # it is this version's binary whether or not the bin/ links have moved.
+        install: |
+          system_command "#{staged_path}/rafiki", args: ["service", "refresh"], must_succeed: false
     dependencies:
       - formula: ripgrep
     homepage: https://github.com/graveland/rafiki
