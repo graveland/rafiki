@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"charm.land/glamour/v2"
+	glamouransi "charm.land/glamour/v2/ansi"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/ansi/kitty"
@@ -377,9 +379,19 @@ type renderer struct {
 	smallIDs   bool
 }
 
+// proseStyle is glamour's dark style without the document margin and code
+// block indent: assistant prose carries no leading columns, so copying it
+// yields the text as written.
+func proseStyle() glamouransi.StyleConfig {
+	st := styles.DarkStyleConfig
+	st.Document.Margin = nil
+	st.CodeBlock.Margin = nil
+	return st
+}
+
 func newRenderer() *renderer {
 	r, _ := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStyles(proseStyle()),
 		glamour.WithWordWrap(0), // let terminal wrap
 	)
 	return &renderer{md: r}
@@ -422,12 +434,11 @@ var (
 			Background(lipgloss.Color("6")).Bold(true)
 	styleFocusEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 
-	// The transcript's three weights, by GUTTER rather than by background.
-	// pi backgrounds its tool calls, which on a working agent is most of the
-	// screen; the scarce thing is the agent's own prose, so that gets the solid
-	// bar, thinking gets a dotted one, and tool calls get none at all.
-	styleAssistantBar = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	styleThinkBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	// The transcript's weights, by GUTTER rather than by background. pi
+	// backgrounds its tool calls, which on a working agent is most of the
+	// screen. Everything that is not the agent's prose carries a prefix; the
+	// prose, the scarce thing, carries none and stands out by that absence.
+	styleThinkBar = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 // renderBlock converts one block into its styled string.
@@ -624,19 +635,12 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	}
 
 	if b.Text != "" || len(b.Images) > 0 {
-		// The agent's own prose is the scarce thing on this screen. A bar on
-		// every text line alone was too quiet to find while scrolling, so the
-		// block is given room and the gutter is given HEIGHT: a blank line
-		// separates it from what came before, and the bar runs one row above
-		// and one below the text. That turns a colour difference — which the
-		// eye has to look for — into a shape, which it does not.
-		//
-		// Vertical space is cheap now that PgUp/PgDn reach the transcript from
-		// the input box; before that, every row spent on framing was a row of
-		// conversation someone had to tab away to recover.
-		bar := styleAssistantBar.Render("▌ ")
-		edge := styleAssistantBar.Render("▌")
-		sb.WriteString("\n" + edge + "\n")
+		// The agent's prose is the one block with NO prefix: every other kind
+		// carries a gutter, so its absence is the marker, and a selection copies
+		// out as clean text. A blank line above and below separates it from
+		// what surrounds it; the bar rows that used to frame it are gone.
+		const bar = ""
+		sb.WriteString("\n")
 		// Prose is sanitized on the way IN — glamour's own styling is added on
 		// the way out and must survive; what must not survive is an escape
 		// sequence the model quoted out of a tool result.
@@ -664,7 +668,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				r.writeWrapped(&sb, bar, imageLine(img))
 			}
 		}
-		sb.WriteString(edge + "\n")
+		sb.WriteString("\n")
 	}
 
 	// Only a stop reason worth reading. end_turn is the normal ending and
@@ -780,13 +784,14 @@ func (r *renderer) writeWrapped(sb *strings.Builder, prefix, text string) {
 }
 
 // blockLines splits one rendered block into display lines, dropping the
-// trailing empty element a block's final newline produces.
+// trailing empty element a block's final newline produces. Only that one
+// terminator goes: a block that ends in a blank line (assistant prose) keeps
+// it as its bottom margin.
 func blockLines(s string) []string {
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
+	if strings.Trim(s, "\n") == "" {
 		return nil
 	}
-	return strings.Split(s, "\n")
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
 func durStr(ms int64) string {

@@ -124,8 +124,8 @@ func TestImageRowsDrawPixelsUnderTheToolGutter(t *testing.T) {
 	assert.NewCollecting(t).StrContains(ansi.Strip(out), "exit 0", "the result text must still render")
 }
 
-// An assistant block's image draws pixels under the same bar as its prose.
-func TestImageRowsDrawPixelsUnderTheAssistantBar(t *testing.T) {
+// An assistant block's image draws pixels with no gutter, like its prose.
+func TestImageRowsDrawPixelsWithoutAGutterInAssistantBlock(t *testing.T) {
 	st, img := readyStore(t)
 	r := newRenderer()
 	r.images, r.drawImages = st, true
@@ -134,7 +134,7 @@ func TestImageRowsDrawPixelsUnderTheAssistantBar(t *testing.T) {
 		Images: []*rafikiv1.ImageBlock{img},
 	}}, 1, 100), "\n")
 
-	checkPixelRows(t, out, "▌ ", 32, 12)
+	checkPixelRows(t, out, "", 32, 12)
 }
 
 // Before the thumbnail is ready (or when it failed), the image renders the

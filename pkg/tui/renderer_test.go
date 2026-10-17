@@ -313,13 +313,11 @@ func TestTranscriptWeightsAreDistinguishable(t *testing.T) {
 		}
 	}
 	c.Require().False(prose == "" || think == "" || tool == "", "missing a weight: prose=%q think=%q tool=%q", prose, think, tool)
-	if !strings.HasPrefix(prose, "▌") {
-		t.Errorf("assistant prose lacks the solid gutter: %q", prose)
-	}
+	c.Eq("the prose", prose, "assistant prose must carry no prefix")
 	if !strings.HasPrefix(think, "┊") {
 		t.Errorf("thinking lacks the dotted gutter: %q", think)
 	}
-	c.False(strings.HasPrefix(tool, "▌") || strings.HasPrefix(tool, "┊"), "tool calls must stay unadorned: %q", tool)
+	c.False(strings.HasPrefix(tool, "▌") || strings.HasPrefix(tool, "┊"), "tool calls must not borrow another kind's gutter: %q", tool)
 }
 
 // A "── tool_use" rule under every block of a tool-calling turn — which is
@@ -755,7 +753,7 @@ func TestAssistantProseRendersBeforeItsImage(t *testing.T) {
 	c.Require().True(proseAt < imgAt, "the prose must render before its image: prose at row %d, image at row %d:\n%s", proseAt, imgAt, joined)
 	for _, l := range strings.Split(joined, "\n") {
 		if strings.Contains(l, "image/png") {
-			c.StrContains(l, "▌", "the image row must carry the assistant bar: %q", l)
+			c.False(strings.HasPrefix(l, "▌"), "the image row must carry no assistant bar: %q", l)
 		}
 	}
 }
@@ -806,4 +804,42 @@ func TestImagePlaceholderLineIsSanitized(t *testing.T) {
 	c.StrContains(assistantOut, "image/png", "assistant block")
 	c.NotStrContains(assistantOut, "\x1b[2J", "assistant block must not leak the escape sequence:\n")
 	c.NotStrContains(assistantOut, "\r", "assistant block must not leak the carriage return:\n")
+}
+
+// Assistant prose is the one unprefixed kind, so a selection copies out as
+// written: no gutter, and no leading margin from the markdown renderer either.
+func TestAssistantProseHasNoLeadingColumns(t *testing.T) {
+	c := assert.NewCollecting(t)
+	lines := newRenderer().Lines([]session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		Text: "first paragraph\n\nsecond one\n\n```go\nfunc main() {}\n```\n\n- item",
+	}}, 1, 100)
+	for _, l := range lines {
+		p := ansi.Strip(l)
+		c.False(strings.HasPrefix(p, " "), "prose row has leading columns: %q", p)
+		c.False(strings.HasPrefix(p, "▌"), "prose row has a gutter: %q", p)
+	}
+}
+
+// Assistant prose is set off by a blank line above AND below, so the next
+// block's thinking or tool call never butts against it.
+func TestAssistantProseHasBlankLinesAboveAndBelow(t *testing.T) {
+	c := assert.NewCollecting(t)
+	lines := newRenderer().Lines([]session.Block{
+		{Kind: session.KindAssistant, Final: true, ThinkText: "first", Text: "prose one"},
+		{Kind: session.KindAssistant, Final: true, ThinkText: "second", Text: "prose two"},
+	}, 2, 100)
+	at := func(sub string) int {
+		for i, l := range lines {
+			if strings.Contains(ansi.Strip(l), sub) {
+				return i
+			}
+		}
+		return -1
+	}
+	one, two := at("prose one"), at("second")
+	c.Require().True(one > 0 && two > 0, "rows not found:\n%s", strings.Join(lines, "\n"))
+	c.Eq("", ansi.Strip(lines[one-1]), "no blank line above the prose")
+	c.Eq("", ansi.Strip(lines[one+1]), "no blank line below the prose")
+	c.Eq(one+2, two, "the next block must follow the single blank line")
 }
