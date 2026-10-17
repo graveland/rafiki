@@ -278,15 +278,7 @@ func installDocker(ctx context.Context, r runner, w *wizard, goos string, hasBre
 	}
 	switch goos {
 	case "darwin":
-		runtime, err := w.askString("Container runtime", "container-runtime", "", "orbstack", true)
-		if err != nil {
-			return err
-		}
-		cask := "orbstack"
-		if runtime == "docker-desktop" {
-			cask = "docker-desktop"
-		}
-		return runInstallCommand(ctx, r, w, "docker", []string{"brew", "install", "--cask", cask}, goos, hasBrew)
+		return runInstallCommand(ctx, r, w, "docker", []string{"brew", "install", "--cask", "orbstack"}, goos, hasBrew)
 	case "linux":
 		for _, argv := range [][]string{
 			{"sudo", "apt-get", "install", "-y", "docker.io"},

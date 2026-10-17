@@ -120,7 +120,6 @@ func newSetupWizard(t *testing.T) *wizard {
 	t.Helper()
 	return newTestWizard(t, func(cmd *cobra.Command) {
 		cmd.Flags().String("dsn", "", "")
-		cmd.Flags().String("container-runtime", "", "")
 		cmd.Flags().StringSlice("with", nil, "")
 	})
 }

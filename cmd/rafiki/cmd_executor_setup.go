@@ -53,13 +53,13 @@ func newExecutorSetupCmd() *cobra.Command {
 	}
 	cmd.Flags().Bool("non-interactive", false, "Never prompt; use flags, saved answers, then defaults")
 	cmd.Flags().String("connect", "", "daemon to connect to (host:port; blank means this machine's daemon)")
-	cmd.Flags().String("root", "", "directory agents may work in")
-	cmd.Flags().StringSlice("launch", nil, "agent kinds this machine hosts (repeatable)")
+	cmd.Flags().String("root", "", "default working directory for agents on this machine (not a sandbox; default: your home directory)")
+	cmd.Flags().StringSlice("launch", nil, "agent kinds this machine hosts: claude, script (repeatable; default: whichever of claude and python3 are on PATH)")
 	cmd.Flags().StringSlice("env", nil, "environment variable names the executor's tools inherit (repeatable)")
 	cmd.Flags().String("rtk", "", "rewrite known commands through rtk: auto|on|off")
 	cmd.Flags().String("pin-cert", "", "SHA-256 fingerprint of the daemon's leaf certificate")
-	cmd.Flags().String("server-name", "", "TLS server name (SNI), when it differs from the connect host")
-	cmd.Flags().String("enroll-token", "", "one-time enrollment token, for the first connect")
+	cmd.Flags().String("server-name", "", "TLS server name (SNI); only for a remote daemon whose certificate names a different host than --connect")
+	cmd.Flags().String("enroll-token", "", "one-time enrollment token; only needed when setup cannot mint one with your profile (non-admin, or a remote daemon)")
 	return cmd
 }
 
@@ -154,16 +154,19 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 	}
 
 	home, _ := os.UserHomeDir()
-	root, err := w.askString("Directory agents may work in", "root", st.Executor.Root, home, true)
+	root, err := w.askString("Default working directory for agents", "root", st.Executor.Root, home, true)
 	if err != nil {
 		return err
 	}
 
 	var launchDetected []string
 	if _, err := exec.LookPath("claude"); err == nil {
-		launchDetected = []string{"claude"}
+		launchDetected = append(launchDetected, "claude")
 	}
-	launch, err := w.askMulti("Agent kinds this machine hosts", "launch", []string{"claude"}, st.Executor.Launch, launchDetected)
+	if _, err := exec.LookPath("python3"); err == nil {
+		launchDetected = append(launchDetected, "script")
+	}
+	launch, err := w.askMulti("Agent kinds this machine hosts", "launch", []string{"claude", "script"}, st.Executor.Launch, launchDetected)
 	if err != nil {
 		return err
 	}

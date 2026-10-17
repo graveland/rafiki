@@ -82,19 +82,16 @@ is given.`,
 	cmd.Flags().String(keyAnthropicFlag, "", "Anthropic API key")
 	cmd.Flags().Bool("expose", false, "Make the daemon reachable from other machines on your network")
 	cmd.Flags().StringSlice("with", nil, "Optional components to install (uv, ollama, rtk)")
-	cmd.Flags().String("container-runtime", "", "Container runtime: orbstack|docker-desktop (macOS)")
 
-	// The executor-setup flags, registered here under the same names so
-	// runExecutorSetup reads them from this command's flags. Kept in sync with
-	// newExecutorSetupCmd, which registers the same set.
-	cmd.Flags().String("connect", "", "daemon to connect to (host:port; blank means this machine's daemon)")
-	cmd.Flags().String("root", "", "directory agents may work in")
-	cmd.Flags().StringSlice("launch", nil, "agent kinds this machine hosts (repeatable)")
+	// The local executor-setup flags, registered under the same names as
+	// newExecutorSetupCmd's so runExecutorSetup reads them from this command's
+	// flags. The remote-daemon flags (--connect, --pin-cert, --server-name,
+	// --enroll-token) are only on `rafiki executor setup`: this command sets up
+	// the executor for the daemon it just installed.
+	cmd.Flags().String("root", "", "default working directory for agents on this machine (not a sandbox; default: your home directory)")
+	cmd.Flags().StringSlice("launch", nil, "agent kinds this machine hosts: claude, script (repeatable; default: whichever of claude and python3 are on PATH)")
 	cmd.Flags().StringSlice("env", nil, "environment variable names the executor's tools inherit (repeatable)")
 	cmd.Flags().String("rtk", "", "rewrite known commands through rtk: auto|on|off")
-	cmd.Flags().String("pin-cert", "", "SHA-256 fingerprint of the daemon's leaf certificate")
-	cmd.Flags().String("server-name", "", "TLS server name (SNI), when it differs from the connect host")
-	cmd.Flags().String("enroll-token", "", "one-time enrollment token, for the first connect")
 	return cmd
 }
 
