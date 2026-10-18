@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -384,8 +385,12 @@ func runDaemon(opts runDaemonOpts) error {
 	// pool config is built, not after they are handed out.
 	tp, shutdownTracing, err := setupTracing(baseCtx, rcfg.Telemetry, daemonID)
 	if err != nil {
-		slog.Error("otlp tracing setup failed; continuing without tracing", "error", err)
-		tp = nil
+		// Tracing being unavailable must not switch the metrics off: the span
+		// observer is what carries the five turn/tool/cost metric families, and
+		// EnableTracing(nil) builds no observer. A noop provider (not nil) keeps
+		// the observer and its Prometheus Recorder live with spans going nowhere.
+		slog.Error("otlp tracing setup failed; continuing with noop tracing", "error", err)
+		tp = noop.NewTracerProvider()
 	} else {
 		defer shutdownTracing()
 	}
@@ -652,10 +657,10 @@ func runDaemon(opts runDaemonOpts) error {
 
 	// Tracing is wired once, here — after the Controller exists, before the
 	// proxy face can route a child, and long before loadChildren recovers one:
-	// EnableTracing's contract is "once, before any child spawns". setupTracing
-	// returns a NON-NIL noop provider when tracing is off, so the observer and
-	// its Prometheus recorder stay live with spans going nowhere; only a setup
-	// ERROR passes nil, and nil means tracing off throughout.
+	// EnableTracing's contract is "once, before any child spawns". tp is never
+	// nil: setupTracing returns a noop provider when tracing is off, and the
+	// error path above installs one too, so the observer and its Prometheus
+	// recorder always exist while spans may go nowhere.
 	tel, err := newConnectTracing(tp)
 	if err != nil {
 		slog.Error("Connect tracing setup failed", "error", err)

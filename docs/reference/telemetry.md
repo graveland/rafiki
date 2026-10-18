@@ -7,8 +7,10 @@ What `rafikid` exports, how to configure it, and what leaves the daemon.
 metrics stay on the `/metrics` pull endpoint and logs stay on stdout.
 
 Tracing is opt-in: with no OTLP endpoint configured the daemon runs a no-op
-tracer provider, so nothing is produced on the wire. Metrics are independent
-of tracing and are always recorded.
+tracer provider, so nothing is produced on the wire. Metrics do not depend on
+spans being exported: the five turn/tool/cost families below are recorded in
+every tracing state — off (no-op provider), on, and setup failure (the daemon
+falls back to a no-op provider so the observer and its Recorder stay live).
 
 ## Configuration
 
@@ -79,8 +81,9 @@ sample.
 One trace per turn. A turn is a root span; that turn's tool calls, LLM calls
 and postgres queries nest under it. Both child kinds produce the same shape:
 fundi emits `TurnStart` from its engine's `AgentStart`, and claude emits it at
-its first assistant frame; both flow through the daemon's single event-publish
-path, which feeds the span builder.
+prompt delivery (the prompt echo, before its first model request reaches the
+proxy); both flow through the daemon's single event-publish path, which feeds
+the span builder.
 
 | Span | When | Parent |
 |---|---|---|
@@ -89,7 +92,7 @@ path, which feeds the span builder.
 | `chat <model>` | one per LLM call: fundi through `pkg/llm`, claude through the proxy face | the enclosing span, else the child's open turn, else a root (daemon-own jobs) |
 | `llm.conversation.send` | the conversation wrapper around history load, compaction and send | the caller's span, else the child's open turn |
 | `llm.conversation.compact` | a compaction pass | as above |
-| Connect server span | every **unary** Control RPC, on both the unix socket and the TLS mount | the request's inbound `traceparent`, else root |
+| Connect server span | every **unary** Control RPC, on both the unix socket and the TLS mount | the request's inbound W3C `traceparent`, else root |
 | PostgreSQL query span | a query issued while a span is already active | that span |
 
 Connect **streaming** RPCs are deliberately not instrumented: their lifetime is
@@ -122,17 +125,27 @@ a failed result. A failed result sets status Error.
 
 ### `chat` span attributes
 
-`gen_ai.operation.name=chat`, `gen_ai.request.model`,
-`gen_ai.provider.name`, `gen_ai.response.model`,
+Every `chat` span carries `gen_ai.operation.name=chat`,
+`gen_ai.request.model`, `gen_ai.provider.name`,
 `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
-`gen_ai.usage.cache_read.input_tokens`,
-`gen_ai.usage.cache_creation.input_tokens`,
-`gen_ai.response.finish_reasons`, `rafiki.upstream`, `rafiki.protocol`, and on
-the fundi path `rafiki.model`, `rafiki.primary`, `rafiki.routing`,
-`rafiki.breaker.open`, `rafiki.entrypoint`. Token counts live **on `chat`
-spans only**: a turn's final usage is not a turn total, so summing cache reads
-onto the turn would overstate it. The turn carries `rafiki.cost_usd`, which is
-a real total. Retries and failovers are span events (`retry`, `failover`).
+`gen_ai.usage.cache_read.input_tokens` and
+`gen_ai.usage.cache_creation.input_tokens`. The two paths diverge beyond that:
+
+- **fundi (in-process `pkg/llm`)** — `rafiki.model`, `rafiki.primary`,
+  `rafiki.routing`, `rafiki.breaker.open`, `rafiki.entrypoint`,
+  `rafiki.upstream`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`.
+  Its retries and failovers are span events (`retry` on the turn span,
+  `failover` on the `chat` span).
+- **proxy face (claude)** — `gen_ai.agent.id`, `rafiki.thread`,
+  `rafiki.protocol`. It does NOT set `rafiki.upstream`,
+  `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `rafiki.model`,
+  `rafiki.routing` or `rafiki.entrypoint`, and it adds no retry/failover span
+  events; a failed request records the capped error (see below). Neither path
+  records tool arguments, prompts or replies on a `chat` span.
+
+Token counts live **on `chat` spans only**: a turn's final usage is not a turn
+total, so summing cache reads onto the turn would overstate it. The turn carries
+`rafiki.cost_usd`, which is a real total.
 
 ## Links and the agent tree
 
@@ -207,20 +220,27 @@ KiB, keeping the **first and last 32 KiB** with an elided-bytes marker between
 them, because the decisive line of an error is usually last, and a single
 multi-megabyte error would otherwise get the whole trace dropped by a
 backend's per-trace byte limit. Invalid UTF-8 is replaced with U+FFFD before
-the cap is measured. The true size is available as `rafiki.error.bytes`.
+the cap is measured. A **tool span** with a failed result also carries
+`rafiki.error.bytes`, the true (uncapped) result size; an `Error` event on the
+turn span and an LLM failure on a `chat` span carry no such attribute.
 
 What is covered:
 
 - a tool result with `is_error` (the tool span);
 - an LLM call failure — provider status plus response body — on `chat`;
 - an `Error` event during a turn (on the turn span);
-- a retry/failover reason (span events on `chat`);
+- a `failover` reason as a span event on a fundi-path `chat` span (proxy-face
+  `chat` spans add no such event); a `retry` reason as a span event on the turn
+  span, from the daemon's rate-limit auto-resume;
 - an interrupted turn — status Error and `rafiki.turn.interrupted=true`.
 
 ## Metrics
 
-Prometheus pull, served at `/metrics` with OpenMetrics enabled. These families
-are independent of tracing and are always recorded:
+Prometheus pull, served at `/metrics` with OpenMetrics enabled. These five
+families are recorded in every tracing state — tracing off (no-op provider),
+tracing on, and tracing setup failure (the daemon installs a no-op provider so
+the span observer and its Recorder still exist). They come from that Recorder,
+not from spans reaching a collector, so an exporter outage does not stop them:
 
 | Metric | Type | Labels |
 |---|---|---|

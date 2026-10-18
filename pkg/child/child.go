@@ -656,10 +656,10 @@ func (c *Child) outboundEchoNative(frame []byte, ts int64) []*rafikiv1.Event {
 // interrupt, or daraja's own crash-respawn) and if so resets the provider's
 // per-process state before the frame about to be processed reaches it.
 //
-// This is called from readStdout, the ONLY goroutine that touches
-// c.provider's non-message fields (see claudeState's own doc comment), so
-// the reset needs no lock beyond what ResetState already takes for the
-// fields the supervise goroutine also touches. The ordering that makes this
+// This is called from readStdout, which shares c.provider's state with the
+// supervise goroutine's prompt echo (see claudeState's own doc comment), so
+// the reset needs a lock for the fields the supervise goroutine also touches —
+// ResetState already takes it. The ordering that makes this
 // safe with no additional synchronization: darajapool.Runner sets its
 // pending-reset flag from the SAME goroutine, and in the SAME switch, that
 // later writes any post-restart stdout bytes to the pipe readStdout reads —

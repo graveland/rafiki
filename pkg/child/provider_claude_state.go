@@ -28,7 +28,8 @@ type claudeProvider struct {
 //   - messages: the ordered user/assistant/toolResult message list, pre-
 //     marshalled, replayed in full on every agent_end. Appended by BusFrames
 //     (readStdout goroutine) AND by OutboundEcho (supervise goroutine), so it is
-//     guarded by mu; the other fields are touched only by BusFrames.
+//     guarded by mu; the other fields are touched only by BusFrames, except
+//     nativeTurnActive, which the prompt echo raises (also under mu).
 //   - model/provider/api: captured from system/init, stamped on every
 //     synthesized assistant message.
 //   - turnActive: whether a turn (agent_start) is currently open, so the first
@@ -45,7 +46,11 @@ type claudeState struct {
 	// every line, so openTurn has already raised turnActive by the time the
 	// native translator sees the same frame. A native guard reading
 	// turnActive was therefore always false, which is why no TurnStart ever
-	// reached publishEvent. Open by openNativeTurn, cleared by nativeResult.
+	// reached publishEvent. It is raised by the prompt echo (OutboundEchoNative,
+	// on the supervise goroutine) so the turn is open before claude's first
+	// request reaches the proxy, and cleared by nativeResult. Because two
+	// goroutines touch it, every access is under mu — unlike the other state
+	// fields, which only BusFrames/ResetState touch.
 	nativeTurnActive bool
 }
 
@@ -143,6 +148,15 @@ func (p *claudeProvider) OutboundEcho(frame []byte, ts int64) [][]byte {
 // user text: that judgment (reject abort, set_session_name, empty messages)
 // exists once and a second copy would drift from it.
 //
+// It opens the native turn HERE, at prompt delivery, rather than waiting for
+// claude's first assistant frame. claude's first request reaches the proxy
+// before that frame arrives, so an assistant-frame open left the turn's first
+// `chat` span an orphan root (and a one-call turn with no nested chat span at
+// all). openNativeTurn's guard makes the first assistant frame a no-op, and a
+// second prompt/steer inside the same turn publishes no second TurnStart. The
+// model is left empty because no frame names one yet; the observer falls back
+// to the child's metadata model.
+//
 // It does NOT append to p.st.messages — OutboundEcho already did that for the
 // pi path, and both run on the supervise goroutine for the same frame, so
 // appending here would record the user's message twice.
@@ -167,10 +181,11 @@ func (p *claudeProvider) OutboundEchoNative(frame []byte, ts int64) []*rafikiv1.
 		Index: int32(len(blocks)),
 		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
 	})
-	return []*rafikiv1.Event{{
+	out := p.openNativeTurn("", ts)
+	return append(out, &rafikiv1.Event{
 		Ts:      timestamppb.New(time.UnixMilli(ts)),
 		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{Content: blocks}},
-	}}
+	})
 }
 
 // echoImageBlocks returns the frame's attachments as image blocks, in frame
@@ -470,15 +485,23 @@ func (p *claudeProvider) openTurn() [][]byte {
 // field documents: BusFrames has already opened the pi-path turn for this same
 // line, so sharing the flag would mean the native event never fires.
 //
+// The guard is raised by BOTH callers but is a single gate: OutboundEchoNative
+// opens at prompt delivery, and nativeAssistant calls this again on the first
+// assistant frame only to find it already open. The lock is taken because those
+// two callers run on different goroutines (supervise vs readStdout).
+//
 // frameModel is the model the opening frame names, and is left as given — a
-// frame that names none publishes an empty model rather than the last model
-// seen, mirroring fundi (whose turn opens before routing picks a model). A
-// consumer falls back to the child's model metadata.
+// prompt echo names none and publishes an empty model rather than the last
+// model seen, mirroring fundi (whose turn opens before routing picks a model).
+// A consumer falls back to the child's model metadata.
 func (p *claudeProvider) openNativeTurn(frameModel string, ts int64) []*rafikiv1.Event {
+	p.st.mu.Lock()
 	if p.st.nativeTurnActive {
+		p.st.mu.Unlock()
 		return nil
 	}
 	p.st.nativeTurnActive = true
+	p.st.mu.Unlock()
 	return []*rafikiv1.Event{{
 		Ts: timestamppb.New(time.UnixMilli(ts)),
 		Payload: &rafikiv1.Event_TurnStart{
@@ -688,10 +711,11 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 // The emitted vocabulary is deliberately IDENTICAL to fundi's — TurnStart, then
 // AssistantMessage, then ToolExecutionStart, then ToolExecutionEnd — because
 // pkg/tui/session reduces both with one code path and only that ordering is
-// correct there. A turn opens on its first assistant frame, which is the only
-// frame that names a model, and further assistant frames in the same turn do
-// not open it again (openNativeTurn's guard); nativeResult closes it so the
-// next turn opens a fresh one.
+// correct there. A turn is already open by the time this runs: OutboundEchoNative
+// opened it at prompt delivery, before claude's first request reached the proxy
+// (see openNativeTurn). This call is the fallback for a frame arriving with no
+// preceding echo, and its guard makes the ordinary case a no-op; nativeResult
+// closes the turn so the next prompt opens a fresh one.
 //
 // One event this deliberately does NOT emit:
 //
@@ -829,9 +853,12 @@ func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*ra
 
 func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1.Event {
 	p.st.turnActive = false
-	// Close the native turn too, or the next turn's first assistant frame
-	// would see nativeTurnActive still set and publish no TurnStart.
+	// Close the native turn too, or the next turn's prompt echo (or assistant
+	// frame) would see nativeTurnActive still set and publish no TurnStart.
+	// Under mu: the echo path reads and raises this from the supervise goroutine.
+	p.st.mu.Lock()
 	p.st.nativeTurnActive = false
+	p.st.mu.Unlock()
 
 	var usage *rafikiv1.Usage
 	if f.Usage != nil {

@@ -99,6 +99,12 @@ type childState struct {
 	parents map[string]string
 }
 
+// maxPendingLinks bounds a child's pending links: every send/steer to a busy
+// child appends one, so a coordinator looping sends at a long-open turn could
+// otherwise grow the slice without bound. The oldest links are kept because the
+// FIRST link is the one that sets rafiki.turn.trigger.
+const maxPendingLinks = 8
+
 type turnState struct {
 	span           trace.Span
 	ctx            context.Context
@@ -571,6 +577,11 @@ func (o *Observer) ObserveSubagent(childID, messageID, parentToolUseID string) {
 }
 
 // LinkNext records a span link for targetChildID's next turn.
+//
+// It keeps at most maxPendingLinks links per target: a caller that links
+// without the target ever opening a turn must not be able to grow the slice
+// without bound, and the FIRST link is the one that sets rafiki.turn.trigger,
+// so the oldest are the ones worth keeping.
 func (o *Observer) LinkNext(targetChildID string, sc trace.SpanContext, reason string) {
 	if o == nil || !sc.IsValid() {
 		return
@@ -578,6 +589,9 @@ func (o *Observer) LinkNext(targetChildID string, sc trace.SpanContext, reason s
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	cs := o.childLocked(targetChildID)
+	if len(cs.pendingLinks) >= maxPendingLinks {
+		return
+	}
 	if len(cs.pendingLinks) == 0 {
 		cs.pendingReason = reason
 	}

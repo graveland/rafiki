@@ -113,7 +113,44 @@ func TestConnectTracingUnaryTraced(t *testing.T) {
 	c.Eq(1, countServerSpans(rec.Ended()), "server spans for a unary call")
 }
 
-// TestConnectTracingStreamsExcluded: a server-streaming Control RPC produces no
+// TestConnectTracingInboundTraceparentContinuesTrace: a caller's W3C
+// traceparent is honoured by the server span, which is what the docs promise
+// (the Connect row names the inbound traceparent as the span's parent, and the
+// operator link points at that span). Without the daemon's propagator passed to
+// otelconnect this header is invisible; without WithTrustRemote the span is a
+// new root with a link, so this would still fail.
+func TestConnectTracingInboundTraceparentContinuesTrace(t *testing.T) {
+	c := assert.NewAborting(t)
+	tp, rec := newTraceObserver(t)
+	tel, err := newConnectTracing(tp)
+	c.NoError(err, "newConnectTracing")
+
+	client := tracingMount(t, tel)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const (
+		traceIDHex  = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentHex   = "00f067aa0ba902b7"
+		traceparent = "00-" + traceIDHex + "-" + parentHex + "-01"
+	)
+	req := connect.NewRequest(&rafikiv1.ListPresetsRequest{})
+	req.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	req.Header().Set("traceparent", traceparent)
+	_, _ = client.ListPresets(ctx, req)
+
+	var found bool
+	for _, s := range rec.Ended() {
+		if s.SpanKind() != trace.SpanKindServer {
+			continue
+		}
+		found = true
+		c.Eq(traceIDHex, s.SpanContext().TraceID().String(), "server span must continue the inbound trace id")
+		c.Eq(parentHex, s.Parent().SpanID().String(), "server span's parent must be the inbound traceparent's span")
+	}
+	c.True(found, "the request must produce a server span")
+}
+
 // span. A stream's lifetime belongs to its handler, so a span around it would
 // measure the client's patience, not the work — the filter excludes it.
 func TestConnectTracingStreamsExcluded(t *testing.T) {

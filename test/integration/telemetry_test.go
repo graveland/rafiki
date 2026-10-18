@@ -8,6 +8,7 @@ package integration_test
 // protobuf encoding and wire path are exercised, not stubbed.
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -71,7 +72,9 @@ func spawnTelemetryFundi(t *testing.T, d *daemon) string {
 // TestTelemetryFundiTurnExported boots a daemon pointed at the fixture
 // collector, drives one fundi turn, and asserts the turn arrived as a root
 // invoke_agent span with the child's id and — content defaulting off — no
-// prompt text.
+// prompt text. It also proves the fundi LLM call nests under that turn: a
+// `chat ...` span whose ancestry reaches the turn span (its direct parent is
+// the `llm.conversation.send` wrapper, itself the turn's child).
 func TestTelemetryFundiTurnExported(t *testing.T) {
 	t.Parallel()
 	c := assert.NewAborting(t)
@@ -98,11 +101,16 @@ func TestTelemetryFundiTurnExported(t *testing.T) {
 	childID := spawnTelemetryFundi(t, d)
 	sendPrompt(t, d.control(t), childID, "one telemetry turn")
 
+	// Keep every span seen while waiting: the chat span can be exported in the
+	// same batch as the turn (before or after it), and the shared disposable
+	// database means stale children export spans too.
+	var seen []*tracepb.Span
 	deadline := time.After(30 * time.Second)
 	var turnSpan *tracepb.Span
 	for turnSpan == nil {
 		select {
 		case sp := <-fixture.spans:
+			seen = append(seen, sp)
 			// Match the child id as well as the name: the disposable database
 			// is shared across runs, so a boot can adopt and resume a stale
 			// child from an earlier test and export its turn too.
@@ -120,6 +128,69 @@ func TestTelemetryFundiTurnExported(t *testing.T) {
 	c.Eq(0, len(turnSpan.GetParentSpanId()), "turn span must be a root span")
 	_, present := spanStringAttr(turnSpan, "rafiki.user_message")
 	c.False(present, "content defaults to off, so the turn must carry no rafiki.user_message")
+
+	// The fundi LLM call's chat span must be inside that turn. This is the
+	// end-to-end nesting proof the unit tests can only approximate. In this
+	// flow the chat span's DIRECT parent is the `llm.conversation.send`
+	// wrapper (the conversation path threads its span into the send context),
+	// and the wrapper is the turn's child — so assert ancestry, not a single
+	// hop: the chain from the chat span must reach the turn span id.
+	chatSpan := findDescendantSpan(seen, turnSpan.GetSpanId(), "chat ")
+	chatDeadline := time.After(30 * time.Second)
+	for chatSpan == nil {
+		select {
+		case sp := <-fixture.spans:
+			seen = append(seen, sp)
+			chatSpan = findDescendantSpan(seen, turnSpan.GetSpanId(), "chat ")
+		case <-chatDeadline:
+			for _, sp := range seen {
+				t.Logf("span %q trace=%x span=%x parent=%x", sp.GetName(), sp.GetTraceId(), sp.GetSpanId(), sp.GetParentSpanId())
+			}
+			t.Fatalf("no chat span nested under the turn (turn span id %x) exported within 30s; saw %d spans (daemon stderr:\n%s)",
+				turnSpan.GetSpanId(), len(seen), d.stderr.tail(4000))
+		}
+	}
+	c.True(spanDescendsFrom(seen, chatSpan, turnSpan.GetSpanId()), "chat span must descend from the turn span")
+	c.True(strings.HasPrefix(chatSpan.GetName(), "chat "), "chat span name = %q, want a chat span", chatSpan.GetName())
+}
+
+// findDescendantSpan returns the first span whose name starts with namePrefix
+// and whose ancestry reaches ancestorID, or nil.
+func findDescendantSpan(spans []*tracepb.Span, ancestorID []byte, namePrefix string) *tracepb.Span {
+	for _, sp := range spans {
+		if strings.HasPrefix(sp.GetName(), namePrefix) && spanDescendsFrom(spans, sp, ancestorID) {
+			return sp
+		}
+	}
+	return nil
+}
+
+// spanDescendsFrom reports whether sp's parent chain reaches ancestorID, using
+// the exported spans as the lookup table. An intermediate span missing from the
+// export ends the walk (false), so callers wait for more spans rather than
+// accepting an unproven chain.
+func spanDescendsFrom(spans []*tracepb.Span, sp *tracepb.Span, ancestorID []byte) bool {
+	byID := make(map[string]*tracepb.Span, len(spans))
+	for _, s := range spans {
+		byID[string(s.GetSpanId())] = s
+	}
+	visited := make(map[string]bool, len(spans))
+	for cur := sp; cur != nil; {
+		parentID := cur.GetParentSpanId()
+		if len(parentID) == 0 {
+			return false
+		}
+		if bytes.Equal(parentID, ancestorID) {
+			return true
+		}
+		key := string(parentID)
+		if visited[key] {
+			return false
+		}
+		visited[key] = true
+		cur = byID[key]
+	}
+	return false
 }
 
 // TestTelemetryOffByDefault boots a daemon with no OTLP endpoint anywhere (the

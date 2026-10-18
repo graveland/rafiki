@@ -47,10 +47,11 @@ func assertTypes(t *testing.T, got []string, want []string) {
 	}
 }
 
-// A text-only assistant frame opens its turn with a TurnStart, then produces
-// exactly one assistant_message. It produces no delta: claude frames are
-// complete messages, so a delta would duplicate the message and, on a later
-// turn, append its text to the PREVIOUS turn's finalized block.
+// A text-only assistant frame with no preceding prompt echo opens its turn with
+// a TurnStart, then produces exactly one assistant_message. (In production the
+// echo has already opened it; this pins the fallback.) It produces no delta:
+// claude frames are complete messages, so a delta would duplicate the message
+// and, on a later turn, append its text to the PREVIOUS turn's finalized block.
 func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
 	c := assert.NewAborting(t)
 	p := newClaudeProvider()
@@ -66,36 +67,73 @@ func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
 	c.Eq("hello", am.GetContent()[0].GetText().GetText(), "text")
 }
 
-// A turn opens exactly once, on its first assistant frame, and closes on the
-// result frame so the NEXT turn opens a fresh one. Two assistant frames in one
-// turn must not produce two TurnStarts: pkg/turntrace ends and restarts the
-// turn span on every TurnStart, so a duplicate would split one turn's tool
-// spans across two roots.
+// A turn opens exactly once, at prompt delivery, and closes on the result
+// frame so the NEXT turn opens a fresh one. A second prompt/steer inside the
+// same turn and the first assistant frame must not produce another TurnStart:
+// pkg/turntrace ends and restarts the turn span on every TurnStart, so a
+// duplicate would split one turn's tool spans across two roots.
 func TestNativeTurnStartOncePerTurn(t *testing.T) {
 	c := assert.NewAborting(t)
 	p := newClaudeProvider()
+	prompt := []byte(`{"type":"prompt","message":"one"}`)
 	assistant := func(text string) []byte {
 		return []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"` + text + `"}]}}`)
 	}
 
-	first := p.BusFramesNative(assistant("one"), 1000)
-	assertTypes(t, nativeTypeNames(first), []string{"turn_start", "assistant_message"})
+	first := p.OutboundEchoNative(prompt, 1000)
+	assertTypes(t, nativeTypeNames(first), []string{"turn_start", "user_message"})
 	start := first[0].GetTurnStart()
 	c.Require().NotNil(start, "first event is not a TurnStart")
-	c.Eq("claude-opus-5", start.GetModel(), "turn_start model")
-	c.Eq(int64(1000), first[0].GetTs().AsTime().UnixMilli(), "turn_start ts is the frame's")
+	c.Eq("", start.GetModel(), "the prompt echo names no model")
+	c.Eq(int64(1000), first[0].GetTs().AsTime().UnixMilli(), "turn_start ts is the echo's")
+
+	// A second prompt (a steer) and the first assistant frame are mid-turn.
+	steer := p.OutboundEchoNative([]byte(`{"type":"steer","message":"also"}`), 1001)
+	assertTypes(t, nativeTypeNames(steer), []string{"user_message"})
+	firstFrame := p.BusFramesNative(assistant("one"), 1002)
+	assertTypes(t, nativeTypeNames(firstFrame), []string{"assistant_message"})
 
 	// A second assistant frame in the same turn is mid-turn, not a new turn.
-	second := p.BusFramesNative(assistant("two"), 1001)
+	second := p.BusFramesNative(assistant("two"), 1003)
 	assertTypes(t, nativeTypeNames(second), []string{"assistant_message"})
 
 	// The result frame closes the turn...
+	result := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1004)
+	assertTypes(t, nativeTypeNames(result), []string{"turn_end"})
+
+	// ...so the next prompt opens its own.
+	next := p.OutboundEchoNative(prompt, 1005)
+	assertTypes(t, nativeTypeNames(next), []string{"turn_start", "user_message"})
+}
+
+// A claude turn's first chat span must nest under the turn, so the turn has to
+// be open BEFORE claude's first request reaches the proxy. That request
+// completes before claude emits its first assistant frame, so the TurnStart
+// belongs to the prompt echo — this pins the ordering directly: the echo owns
+// the only TurnStart, the assistant frame adds none, and the turn reopens after
+// the result.
+func TestNativeTurnStartOpensAtPromptEcho(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newClaudeProvider()
+	prompt := []byte(`{"type":"prompt","message":"do the thing"}`)
+	assistant := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"done"}]}}`)
+
+	echo := p.OutboundEchoNative(prompt, 1000)
+	assertTypes(t, nativeTypeNames(echo), []string{"turn_start", "user_message"})
+	c.NotNil(echo[0].GetTurnStart(), "the prompt echo must open the turn")
+
+	frame := p.BusFramesNative(assistant, 1001)
+	assertTypes(t, nativeTypeNames(frame), []string{"assistant_message"})
+	for _, ev := range frame {
+		c.True(ev.GetTurnStart() == nil,
+			"the first assistant frame published a second TurnStart: %v", nativeTypeNames(frame))
+	}
+
 	result := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1002)
 	assertTypes(t, nativeTypeNames(result), []string{"turn_end"})
 
-	// ...so the next turn opens its own.
-	next := p.BusFramesNative(assistant("three"), 1003)
-	assertTypes(t, nativeTypeNames(next), []string{"turn_start", "assistant_message"})
+	again := p.OutboundEchoNative(prompt, 1003)
+	assertTypes(t, nativeTypeNames(again), []string{"turn_start", "user_message"})
 }
 
 // A frame that names no model publishes an empty one rather than a stale value:
@@ -264,7 +302,8 @@ func TestNativeVocabularyExcludesContentBlockDelta(t *testing.T) {
 }
 
 // The user's prompt must reach the native stream. claude never echoes it on
-// stdout, so without this the cockpit shows replies with no prompts.
+// stdout, so without this the cockpit shows replies with no prompts. The same
+// echo opens the turn, before claude's first request reaches the proxy.
 func TestOutboundEchoNativeEmitsUserMessage(t *testing.T) {
 	c := assert.NewAborting(t)
 	p := newClaudeProvider()
@@ -272,9 +311,9 @@ func TestOutboundEchoNativeEmitsUserMessage(t *testing.T) {
 
 	evs := p.OutboundEchoNative(frame, 1000)
 
-	assertTypes(t, nativeTypeNames(evs), []string{"user_message"})
+	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "user_message"})
 
-	um := evs[0].GetUserMessage()
+	um := evs[1].GetUserMessage()
 	c.NotNil(um, "event is not a UserMessage")
 	c.Len(um.GetContent(), 1, "content blocks = %d, want 1", len(um.GetContent()))
 	c.Eq("do the thing", um.GetContent()[0].GetText().GetText(), "text")
