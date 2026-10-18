@@ -47,6 +47,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/sandbox"
 	"go.graveland.dev/rafiki/pkg/sandboxdb"
 	"go.graveland.dev/rafiki/pkg/schedulesdb"
+	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -422,6 +423,11 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	reg := prometheus.NewRegistry()
+	// The daemon's Prometheus instrumentation, built exactly ONCE: NewMetrics
+	// registers its metric families, so a second construction panics. The proxy
+	// face takes this instance through faceOptions and the span observer gets
+	// it as its turn/tool Recorder.
+	metrics := server.NewMetrics(reg)
 
 	// One catalog shared between the proxy face's llm.Client and the
 	// Controller (ChildSummary's ContextWindow field) — built here,
@@ -570,43 +576,6 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	// The daemon's own proxy face. pi and claude children are separate
-	// processes and can only speak HTTP, so they need an address — and making
-	// that a second daemon someone must remember to start is how a child ends
-	// up talking to a provider directly. Serving it here means it cannot be
-	// down while the daemon is up.
-	face, err := startProxyFace(baseCtx, faceOptions{
-		Pool:         pool,
-		Logger:       slog.Default(),
-		Tracer:       tp,
-		Registry:     reg,
-		Config:       opts.Config,
-		Listen:       opts.Listen,
-		Catalog:      catalog,
-		RawTrace:     rawTrace,
-		RawTraceAll:  rawTraceAll,
-		Users:        userStore,
-		Providers:    prov,
-		StreamRevoke: streamRevoke,
-		Guard:        guard,
-	})
-	if err != nil {
-		// Not fatal: agent children reach the library in-process and are
-		// unaffected, and killing the daemon would take them down for a face
-		// they never use.
-		slog.Error("could not start the proxy face; pi and claude children will not be routed through it",
-			"error", err)
-	}
-
-	// Daemon-side revocation must refuse the NEXT request, not the one after
-	// the auth cache's TTL: revokeToken/revokeUser purge the face's identity
-	// cache before cutting open streams. The face holds the one UserTokenAuth
-	// both Control mounts resolve through (proxy.go; the UDS mount via
-	// IdentifyStrict), so this hook is the whole wiring.
-	if face != nil {
-		streamRevoke.forget = face.TokenAuth
-	}
-
 	// OpenRouter OTLP broadcast receiver (opt-in, separate port).
 	broadcastSrv, err := startBroadcastListener(baseCtx, pool, slog.Default())
 	if err != nil {
@@ -679,6 +648,59 @@ func runDaemon(opts runDaemonOpts) error {
 	if pool != nil {
 		ctrl.reviewQ = newReviewQueue(pool, prov, catalog)
 		ctrl.reviewQ.start(baseCtx)
+	}
+
+	// Tracing is wired once, here — after the Controller exists, before the
+	// proxy face can route a child, and long before loadChildren recovers one:
+	// EnableTracing's contract is "once, before any child spawns". setupTracing
+	// returns a NON-NIL noop provider when tracing is off, so the observer and
+	// its Prometheus recorder stay live with spans going nowhere; only a setup
+	// ERROR passes nil, and nil means tracing off throughout.
+	tel, err := newConnectTracing(tp)
+	if err != nil {
+		slog.Error("Connect tracing setup failed", "error", err)
+		os.Exit(1)
+	}
+	obs := ctrl.EnableTracing(tp, rcfg.Telemetry.Policy(), metrics)
+
+	// The daemon's own proxy face. pi and claude children are separate
+	// processes and can only speak HTTP, so they need an address — and making
+	// that a second daemon someone must remember to start is how a child ends
+	// up talking to a provider directly. Serving it here means it cannot be
+	// down while the daemon is up.
+	face, err := startProxyFace(baseCtx, faceOptions{
+		Pool:         pool,
+		Logger:       slog.Default(),
+		Tracer:       tp,
+		Registry:     reg,
+		Config:       opts.Config,
+		Listen:       opts.Listen,
+		Catalog:      catalog,
+		RawTrace:     rawTrace,
+		RawTraceAll:  rawTraceAll,
+		Users:        userStore,
+		Providers:    prov,
+		StreamRevoke: streamRevoke,
+		Guard:        guard,
+		Metrics:      metrics,
+		SpanParent:   obs,
+		ConnectTrace: tel,
+	})
+	if err != nil {
+		// Not fatal: agent children reach the library in-process and are
+		// unaffected, and killing the daemon would take them down for a face
+		// they never use.
+		slog.Error("could not start the proxy face; pi and claude children will not be routed through it",
+			"error", err)
+	}
+
+	// Daemon-side revocation must refuse the NEXT request, not the one after
+	// the auth cache's TTL: revokeToken/revokeUser purge the face's identity
+	// cache before cutting open streams. The face holds the one UserTokenAuth
+	// both Control mounts resolve through (proxy.go; the UDS mount via
+	// IdentifyStrict), so this hook is the whole wiring.
+	if face != nil {
+		streamRevoke.forget = face.TokenAuth
 	}
 
 	// The executor pool no longer owns a listener. It is reached at a PATH on
@@ -999,7 +1021,7 @@ func runDaemon(opts runDaemonOpts) error {
 	close(recoveryDone)
 
 	if face != nil && face.Control != nil {
-		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, streamRevoke, socketPath); err != nil {
+		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, streamRevoke, tel, socketPath); err != nil {
 			// Fatal. This socket is how every local client reaches the daemon;
 			// a daemon serving no control plane looks alive and answers nothing.
 			slog.Error("cannot serve the local Connect control plane",

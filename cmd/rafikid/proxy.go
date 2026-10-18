@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -30,6 +31,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/turntrace"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -197,6 +199,18 @@ type faceOptions struct {
 	// built in main.go and shared with the Controller so in-process children
 	// carry the same bans and ejections. Nil = the face builds its own (tests).
 	Guard *routing.ProviderGuard
+	// Metrics is the daemon's Prometheus instrumentation, built ONCE in main.go
+	// and shared with the Controller's span observer (turn/tool metrics) and
+	// this face. NewMetrics registers its families, so constructing it twice
+	// panics; nil (tests) leaves the face to build its own when Registry is set.
+	Metrics *server.Metrics
+	// SpanParent is the daemon's span observer, used as the proxy's span-parent
+	// resolver for a child's proxied LLM calls. Nil = no resolver, so those
+	// spans stay roots unless the request already carries one.
+	SpanParent *turntrace.Observer
+	// ConnectTrace traces unary RPCs on the Control mount (newConnectTracing).
+	// Nil = tracing off; the route is still served, just untraced.
+	ConnectTrace connect.Interceptor
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -328,10 +342,17 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 			collectors.NewGoCollector(),
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)
-		metrics = server.NewMetrics(opts.Registry)
+		// One Metrics per process: main.go builds it and passes it down. The
+		// fallback keeps tests (and a caller that only hands a Registry) able
+		// to build the face without registering a second set of families.
+		metrics = opts.Metrics
+		if metrics == nil {
+			metrics = server.NewMetrics(opts.Registry)
+		}
 		metrics.WatchBreaker("anthropic", client.Breaker("anthropic"))
 		metrics.WatchProviderGuard(guard)
 		messages.SetMetrics(metrics)
+		messages.SetTracing(opts.Tracer, spanParentResolver(opts.SpanParent))
 	}
 
 	var chat *server.ChatCompletionsProxy
@@ -346,6 +367,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		if metrics != nil {
 			chat.SetMetrics(metrics)
 		}
+		chat.SetTracing(opts.Tracer, spanParentResolver(opts.SpanParent))
 	}
 
 	token, err := randomToken()
@@ -377,7 +399,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// per-child MCP secrets), and the policy table is what stops them at
 	// operator verbs; the registry is what lets a revocation cut an admitted
 	// stream.
-	h.ControlPath, h.Control = connectControlRoute(connectServer, opts.StreamRevoke)
+	h.ControlPath, h.Control = connectControlRoute(connectServer, opts.StreamRevoke, opts.ConnectTrace)
 	// Login mounts OUTSIDE the token middleware — Handler.Mount registers it
 	// without wrap, and here WITHOUT any interceptor either: Login is how a
 	// caller without a valid credential gets one, and wrap would 401 exactly
@@ -558,4 +580,15 @@ func randomToken() (string, error) {
 		return "", fmt.Errorf("generate proxy token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// spanParentResolver converts the optional observer into the proxy's
+// SpanParentResolver. A nil *turntrace.Observer must become a nil INTERFACE:
+// storing the typed nil would make the resolver non-nil, and although every
+// Observer method nil-checks today, the proxy seam should not depend on that.
+func spanParentResolver(obs *turntrace.Observer) server.SpanParentResolver {
+	if obs == nil {
+		return nil
+	}
+	return obs
 }

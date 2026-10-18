@@ -141,7 +141,7 @@ func TestConnectLifecycleForwardsDescendantIDs(t *testing.T) {
 func mountPathSyncRoute(t *testing.T, srv *connectapi.Server) rafikiv1connect.ControlClient {
 	t.Helper()
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv, newStreamRegistry())
+	h.ControlPath, h.Control = connectControlRoute(srv, newStreamRegistry(), nil)
 	mux := http.NewServeMux()
 	h.Mount(mux, nil) // nil wrap is pass-through (pkg/server/handler.go)
 	ts := httptest.NewServer(mux)

@@ -69,7 +69,7 @@ func TestLoginIsEpochGated(t *testing.T) {
 	srv := connectapi.NewServer(nil)
 	auth := server.NewUserTokenAuth(nil, "unused-child-secret", time.Minute)
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), nil, sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 

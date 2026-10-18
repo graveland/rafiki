@@ -272,18 +272,30 @@ func policyFor(procedure string) controlPolicy {
 }
 
 // connectControlRoute composes the Connect interceptors for a Control route:
-// the caller's interceptors first (admission, identity resolution), the policy
-// gate after them, where it sees the identity the earlier ones resolved, and
-// the stream-revocation interceptor innermost, behind the policy gate — so a
-// call the gate refuses never registers a stream, and only an admitted one
-// becomes cuttable. Every mount of the Control service goes through here —
-// proxy.go's proxy face, connect_uds.go's local socket, and the tests — so
-// there is exactly one place that decides what guards the plane, and no
-// second wiring that a future change can forget. reg is the daemon's one
-// stream registry, built in main.go and shared by both mounts and the
-// Controller; nil leaves the route served with no stream cut.
-func connectControlRoute(srv *connectapi.Server, reg *streamRegistry, before ...connect.Interceptor) (string, http.Handler) {
-	inters := make([]connect.Interceptor, 0, len(before)+2)
+// the tracing interceptor (tel) FIRST when present, then the caller's
+// interceptors (admission, identity resolution), the policy gate after them,
+// where it sees the identity the earlier ones resolved, and the
+// stream-revocation interceptor innermost, behind the policy gate — so a call
+// the gate refuses never registers a stream, and only an admitted one becomes
+// cuttable.
+//
+// tel sits before the policy gate on purpose: a refused call is exactly the
+// one an operator wants to see in a trace, and a tracer placed after the gate
+// would record only the calls that were already admitted. It is safe there
+// because it only observes — it reads no identity and cannot admit or refuse
+// anything.
+//
+// Every mount of the Control service goes through here — proxy.go's proxy
+// face, connect_uds.go's local socket, and the tests — so there is exactly one
+// place that decides what guards the plane, and no second wiring that a future
+// change can forget. reg is the daemon's one stream registry, built in main.go
+// and shared by both mounts and the Controller; nil leaves the route served
+// with no stream cut. tel may be nil, which is tracing off.
+func connectControlRoute(srv *connectapi.Server, reg *streamRegistry, tel connect.Interceptor, before ...connect.Interceptor) (string, http.Handler) {
+	inters := make([]connect.Interceptor, 0, len(before)+3)
+	if tel != nil {
+		inters = append(inters, tel)
+	}
 	inters = append(inters, before...)
 	inters = append(inters, connectPolicyInterceptor(), streamRevocationInterceptor(reg))
 	return srv.Routes(inters...)

@@ -769,7 +769,7 @@ func TestRevokeTokenCancelsOpenStream(t *testing.T) {
 	srv.SetExecutorSessions(stubSessions{})
 	srv.SetUserAdmin(connectUserAdmin{c: ctrl})
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv, reg)
+	h.ControlPath, h.Control = connectControlRoute(srv, reg, nil)
 	mux := http.NewServeMux()
 	h.Mount(mux, server.NewUserTokenAuth(ustore, proxyBootToken, server.DefaultAuthCacheTTL).Middleware)
 	ts := httptest.NewServer(mux)
@@ -822,7 +822,7 @@ func cutMount(t *testing.T, ustore *cutUserStore, reg *streamRegistry, auth *ser
 	srv.SetExecutorSessions(stubSessions{})
 	srv.SetUserAdmin(connectUserAdmin{c: ctrl})
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv, reg)
+	h.ControlPath, h.Control = connectControlRoute(srv, reg, nil)
 	mux := http.NewServeMux()
 	h.Mount(mux, auth.Middleware)
 	ts := httptest.NewServer(mux)

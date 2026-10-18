@@ -265,7 +265,7 @@ func TestStreamInterceptorAfterPolicy(t *testing.T) {
 
 	srv := connectapi.NewServer(store.NewMessages(nil))
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv, reg)
+	h.ControlPath, h.Control = connectControlRoute(srv, reg, nil)
 	mux := http.NewServeMux()
 	h.Mount(mux, auth.Middleware)
 	ts := httptest.NewServer(mux)
@@ -392,7 +392,7 @@ func TestExpiredTokenStreamContinues(t *testing.T) {
 	srv.SetEventSource(src)
 	srv.SetLineage(stubLineage{})
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv, reg)
+	h.ControlPath, h.Control = connectControlRoute(srv, reg, nil)
 	mux := http.NewServeMux()
 	h.Mount(mux, server.NewUserTokenAuth(ustore, proxyBootToken, server.DefaultAuthCacheTTL).Middleware)
 	ts := httptest.NewServer(mux)
