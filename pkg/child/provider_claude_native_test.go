@@ -47,11 +47,10 @@ func assertTypes(t *testing.T, got []string, want []string) {
 	}
 }
 
-// A text-only assistant frame produces exactly one assistant_message. No
-// TurnStart (the pi path's openTurn owns the shared turnActive flag and runs
-// first, so a native TurnStart never fires in production) and no delta (claude
-// frames are complete messages, so a delta would duplicate the message and, on
-// a later turn, append its text to the PREVIOUS turn's finalized block).
+// A text-only assistant frame opens its turn with a TurnStart, then produces
+// exactly one assistant_message. It produces no delta: claude frames are
+// complete messages, so a delta would duplicate the message and, on a later
+// turn, append its text to the PREVIOUS turn's finalized block.
 func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
 	c := assert.NewAborting(t)
 	p := newClaudeProvider()
@@ -59,12 +58,62 @@ func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
 
 	evs := p.BusFramesNative(line, 1000)
 
-	assertTypes(t, nativeTypeNames(evs), []string{"assistant_message"})
+	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "assistant_message"})
 
-	am := evs[0].GetAssistantMessage()
+	am := evs[1].GetAssistantMessage()
 	c.NotNil(am, "first event is not an AssistantMessage")
 	c.Len(am.GetContent(), 1, "content blocks = %d, want 1", len(am.GetContent()))
 	c.Eq("hello", am.GetContent()[0].GetText().GetText(), "text")
+}
+
+// A turn opens exactly once, on its first assistant frame, and closes on the
+// result frame so the NEXT turn opens a fresh one. Two assistant frames in one
+// turn must not produce two TurnStarts: pkg/turntrace ends and restarts the
+// turn span on every TurnStart, so a duplicate would split one turn's tool
+// spans across two roots.
+func TestNativeTurnStartOncePerTurn(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newClaudeProvider()
+	assistant := func(text string) []byte {
+		return []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"` + text + `"}]}}`)
+	}
+
+	first := p.BusFramesNative(assistant("one"), 1000)
+	assertTypes(t, nativeTypeNames(first), []string{"turn_start", "assistant_message"})
+	start := first[0].GetTurnStart()
+	c.Require().NotNil(start, "first event is not a TurnStart")
+	c.Eq("claude-opus-5", start.GetModel(), "turn_start model")
+	c.Eq(int64(1000), first[0].GetTs().AsTime().UnixMilli(), "turn_start ts is the frame's")
+
+	// A second assistant frame in the same turn is mid-turn, not a new turn.
+	second := p.BusFramesNative(assistant("two"), 1001)
+	assertTypes(t, nativeTypeNames(second), []string{"assistant_message"})
+
+	// The result frame closes the turn...
+	result := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1002)
+	assertTypes(t, nativeTypeNames(result), []string{"turn_end"})
+
+	// ...so the next turn opens its own.
+	next := p.BusFramesNative(assistant("three"), 1003)
+	assertTypes(t, nativeTypeNames(next), []string{"turn_start", "assistant_message"})
+}
+
+// A frame that names no model publishes an empty one rather than a stale value:
+// the model is what the OPENING frame says, and a consumer falls back to the
+// child's own metadata when it is empty (pkg/turntrace does).
+func TestNativeTurnStartModelComesFromTheOpeningFrame(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newClaudeProvider()
+
+	// A system/init frame captures claude-opus-5 in provider state...
+	p.BusFramesNative([]byte(`{"type":"system","subtype":"init","model":"claude-opus-5"}`), 1000)
+	// ...and an assistant frame that names no model still must not inherit it:
+	// the turn_start reports the frame's model, not the child's remembered one.
+	evs := p.BusFramesNative([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`), 1001)
+
+	start := evs[0].GetTurnStart()
+	c.Require().NotNil(start, "first event is not a TurnStart")
+	c.Eq("", start.GetModel(), "turn_start model")
 }
 
 // A tool_use frame emits the assistant message FIRST, then the execution start.
@@ -77,9 +126,9 @@ func TestNativeAssistantEmitsMessageBeforeToolStart(t *testing.T) {
 
 	evs := p.BusFramesNative(line, 1000)
 
-	assertTypes(t, nativeTypeNames(evs), []string{"assistant_message", "tool_execution_start"})
+	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "assistant_message", "tool_execution_start"})
 
-	assert.NewAborting(t).Eq("tu_1", evs[1].GetToolExecutionStart().GetToolUseId(), "tool_use_id")
+	assert.NewAborting(t).Eq("tu_1", evs[2].GetToolExecutionStart().GetToolUseId(), "tool_use_id")
 }
 
 // A user frame carries only tool_result blocks and must not open a turn. Each
@@ -190,8 +239,16 @@ func TestNativeUserToolResultCarriesImages(t *testing.T) {
 }
 
 // Guard the whole rule in one place: the native claude vocabulary is fundi's
-// vocabulary. Nothing in it may be a TurnStart or a ContentBlockDelta.
-func TestNativeVocabularyExcludesTurnStartAndDeltas(t *testing.T) {
+// vocabulary. Nothing in it may be a ContentBlockDelta.
+//
+// TurnStart was pinned out of this test when claude's vocabulary matched fundi's
+// only by NOT emitting it, which in turn was only because the shared turnActive
+// flag made the native guard unreachable. Both kinds publish a TurnStart now, so
+// the exclusion moved to TestNativeTurnStartOncePerTurn, which pins the count
+// and the model instead of the absence. The delta half stays: a synthesized
+// delta would still duplicate the frame's complete message and, on a later
+// turn, append its text to the PREVIOUS turn's finalized block.
+func TestNativeVocabularyExcludesContentBlockDelta(t *testing.T) {
 	lines := [][]byte{
 		[]byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"a"}]}}`),
 		[]byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"thinking","thinking":"t"}]}}`),
@@ -201,7 +258,7 @@ func TestNativeVocabularyExcludesTurnStartAndDeltas(t *testing.T) {
 	p := newClaudeProvider()
 	for _, line := range lines {
 		for _, name := range nativeTypeNames(p.BusFramesNative(line, 1000)) {
-			assert.NewAborting(t).False(name == "turn_start" || name == "content_block_delta", "native path emitted %q; the claude vocabulary must match fundi's", name)
+			assert.NewAborting(t).NotEq("content_block_delta", name, "native path emitted a delta; claude frames are complete messages")
 		}
 	}
 }

@@ -87,9 +87,14 @@ func NewEmitter(fe *Frontend, provider string, pricer Pricer) *Emitter {
 	return &Emitter{fe: fe, provider: provider, pricer: pricer, toolStarts: make(map[string]time.Time)}
 }
 
-// AgentStart emits {"type":"agent_start"}.
+// AgentStart emits {"type":"agent_start"} and then publishes the durable
+// native TurnStart. This is the one point a fundi turn opens: the Engine calls
+// it at the top of every turn (runTurn, startupResume) and nowhere else. The
+// pi frame goes first so an attached TUI sees the activity indicator before
+// anything that belongs to the turn.
 func (e *Emitter) AgentStart() {
 	e.fe.Emit(child.PiAgentStart())
+	e.publishTurnStart()
 }
 
 // BatchWaitStart emits {"type":"batch_wait_start"}: the child's first LLM

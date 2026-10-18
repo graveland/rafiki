@@ -40,6 +40,13 @@ type claudeState struct {
 	provider   string
 	api        string
 	turnActive bool
+	// nativeTurnActive tracks the same fact for the NATIVE path, and cannot
+	// share turnActive: readStdout runs BusFrames before BusFramesNative on
+	// every line, so openTurn has already raised turnActive by the time the
+	// native translator sees the same frame. A native guard reading
+	// turnActive was therefore always false, which is why no TurnStart ever
+	// reached publishEvent. Open by openNativeTurn, cleared by nativeResult.
+	nativeTurnActive bool
 }
 
 // newClaudeProvider constructs a fresh per-child claude translator.
@@ -70,6 +77,7 @@ func (p *claudeProvider) ResetState() {
 	p.st.provider = ""
 	p.st.api = ""
 	p.st.turnActive = false
+	p.st.nativeTurnActive = false
 }
 
 // snapshotMessages returns a copy of the accumulated messages under the lock,
@@ -454,6 +462,31 @@ func (p *claudeProvider) openTurn() [][]byte {
 	return [][]byte{mustFrame(PiAgentStart())}
 }
 
+// openNativeTurn is openTurn's native-plane counterpart: it returns the durable
+// TurnStart for a turn that is opening now, or nil when this turn's TurnStart
+// has already been published.
+//
+// It guards on nativeTurnActive rather than turnActive for the reason that
+// field documents: BusFrames has already opened the pi-path turn for this same
+// line, so sharing the flag would mean the native event never fires.
+//
+// frameModel is the model the opening frame names, and is left as given — a
+// frame that names none publishes an empty model rather than the last model
+// seen, mirroring fundi (whose turn opens before routing picks a model). A
+// consumer falls back to the child's model metadata.
+func (p *claudeProvider) openNativeTurn(frameModel string, ts int64) []*rafikiv1.Event {
+	if p.st.nativeTurnActive {
+		return nil
+	}
+	p.st.nativeTurnActive = true
+	return []*rafikiv1.Event{{
+		Ts: timestamppb.New(time.UnixMilli(ts)),
+		Payload: &rafikiv1.Event_TurnStart{
+			TurnStart: &rafikiv1.TurnStart{Model: frameModel},
+		},
+	}}
+}
+
 // toolNameFor recovers the tool name for a tool_use id from the accumulated
 // assistant messages so a tool_result frame (which lacks the name) can be paired.
 // Returns "" if no matching tool call has been seen.
@@ -652,21 +685,22 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 
 // nativeAssistant maps one claude assistant frame to rafiki-native events.
 //
-// The emitted vocabulary is deliberately IDENTICAL to fundi's — AssistantMessage
-// then ToolExecutionStart then ToolExecutionEnd — because pkg/tui/session
-// reduces both with one code path and only that ordering is correct there.
+// The emitted vocabulary is deliberately IDENTICAL to fundi's — TurnStart, then
+// AssistantMessage, then ToolExecutionStart, then ToolExecutionEnd — because
+// pkg/tui/session reduces both with one code path and only that ordering is
+// correct there. A turn opens on its first assistant frame, which is the only
+// frame that names a model, and further assistant frames in the same turn do
+// not open it again (openNativeTurn's guard); nativeResult closes it so the
+// next turn opens a fresh one.
 //
-// Two events this deliberately does NOT emit:
+// One event this deliberately does NOT emit:
 //
-//   - TurnStart. BusFrames runs before BusFramesNative on every line and its
-//     openTurn() already set the shared p.st.turnActive, so the guard here was
-//     always false and this never fired in production anyway.
 //   - ContentBlockDelta. claude's stream-json carries COMPLETE messages, so a
 //     synthesized delta duplicates the AssistantMessage below; worse, the
 //     cockpit appends delta text to LastAssistant(), which before the message
 //     arrives is the PREVIOUS turn's finalized block.
 func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel, parentToolUseID string, ts int64) []*rafikiv1.Event {
-	var out []*rafikiv1.Event
+	out := p.openNativeTurn(frameModel, ts)
 
 	// Build the content blocks for the assistant message.
 	var content []*rafikiv1.ContentBlock
@@ -795,6 +829,9 @@ func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*ra
 
 func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1.Event {
 	p.st.turnActive = false
+	// Close the native turn too, or the next turn's first assistant frame
+	// would see nativeTurnActive still set and publish no TurnStart.
+	p.st.nativeTurnActive = false
 
 	var usage *rafikiv1.Usage
 	if f.Usage != nil {

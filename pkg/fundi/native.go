@@ -111,6 +111,22 @@ func (e *Emitter) publishTurnEnd() {
 	})
 }
 
+// publishTurnStart opens the turn for durable consumers. It pairs with
+// publishTurnEnd: a consumer that needs to bracket an agent turn (the span
+// observer in pkg/turntrace is the first) has no other boundary, and until
+// this existed nothing in production published a TurnStart at all.
+//
+// model is deliberately empty: a fundi turn opens BEFORE its first request is
+// made (AgentStart runs at the top of runTurn), and the model that will serve
+// it is decided by routing at send time, not by the Emitter. Left unset rather
+// than guessed, a consumer falls back to the child's own model metadata; a
+// wrong id is worse than none. turn_id stays empty too — no producer mints one
+// and TurnEnd carries none either, so a fabricated id would only fail to match
+// its own turn's end.
+func (e *Emitter) publishTurnStart() {
+	e.publishNative(&rafikiv1.TurnStart{})
+}
+
 // publishError publishes a FAILED TURN as a durable native error event. It is
 // the native-plane counterpart of the framed agent_error, which reaches only
 // whatever is attached to the child's stdout — a Connect StreamEvents
@@ -195,6 +211,8 @@ func (e *Emitter) publishNative(payload any) {
 		ev.Payload = &rafikiv1.Event_UserMessage{UserMessage: p}
 	case *rafikiv1.AssistantMessage:
 		ev.Payload = &rafikiv1.Event_AssistantMessage{AssistantMessage: p}
+	case *rafikiv1.TurnStart:
+		ev.Payload = &rafikiv1.Event_TurnStart{TurnStart: p}
 	case *rafikiv1.TurnEnd:
 		ev.Payload = &rafikiv1.Event_TurnEnd{TurnEnd: p}
 	case *rafikiv1.ContentBlockDelta:
