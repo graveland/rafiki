@@ -192,3 +192,110 @@ func TestSyncRefusedWhenNotEnabled(t *testing.T) {
 	_, err := s.SyncSkills(context.Background(), connect.NewRequest(&executorpb.SyncSkillsRequest{}))
 	assert.NewCollecting(t).Eq(connect.CodePermissionDenied, connect.CodeOf(err), "got")
 }
+
+// syncWithFiles drives one sync of a single "rafiki" namespace holding one
+// skill, and returns the response so a test can read the change counters.
+func syncWithFiles(t *testing.T, s *Server, files []*executorpb.SkillFile) *executorpb.SyncSkillsResponse {
+	t.Helper()
+	return syncOnce(t, s, &executorpb.SyncSkillsRequest{
+		Namespaces: []*executorpb.SkillNamespace{{
+			Name: "rafiki",
+			Skills: []*executorpb.SyncSkill{{
+				Name: "supporting", Description: "has files", Body: "the body\n", Files: files,
+			}},
+		}},
+	})
+}
+
+func skillDirOf(t *testing.T, skillsDir string) string {
+	t.Helper()
+	return filepath.Join(skillsDir, "rafiki", "skills", "supporting")
+}
+
+// A skill's supporting files land beside SKILL.md with their modes intact: a
+// reference document is readable and a script is executable, and Claude Code
+// runs what it finds there.
+func TestSyncSkillsWritesFiles(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, skillsDir := syncServer(t)
+
+	syncWithFiles(t, s, []*executorpb.SkillFile{
+		{Path: "references/api.md", Mode: 0o644, Content: []byte("the api\n")},
+		{Path: "run.sh", Mode: 0o755, Content: []byte("#!/bin/sh\n")},
+	})
+
+	dir := skillDirOf(t, skillsDir)
+	doc, err := os.ReadFile(filepath.Join(dir, "references", "api.md"))
+	c.NoError(err, "nested reference file")
+	c.Eq("the api\n", string(doc), "reference content")
+
+	script := filepath.Join(dir, "run.sh")
+	info, err := os.Stat(script)
+	c.NoError(err, "script file")
+	c.Eq(os.FileMode(0o755), info.Mode().Perm(), "script mode")
+
+	// SKILL.md itself must still be there: writing the file set must not have
+	// replaced the skill's own document.
+	_, err = os.Stat(filepath.Join(dir, "SKILL.md"))
+	c.NoError(err, "SKILL.md")
+}
+
+// A traversal path refuses the WHOLE sync before anything is written. A
+// partial apply would leave a corpus no daemon published.
+func TestSyncSkillsRefusesTraversal(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, skillsDir := syncServer(t)
+
+	_, err := s.SyncSkills(context.Background(), connect.NewRequest(&executorpb.SyncSkillsRequest{
+		Namespaces: []*executorpb.SkillNamespace{{
+			Name: "rafiki",
+			Skills: []*executorpb.SyncSkill{{
+				Name: "supporting", Body: "x",
+				Files: []*executorpb.SkillFile{
+					{Path: "ok.md", Mode: 0o644, Content: []byte("fine")},
+					{Path: "../x", Mode: 0o644, Content: []byte("escape")},
+				},
+			}},
+		}},
+	}))
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.StrContains(err.Error(), "rafiki:supporting", "error must name namespace:skill")
+
+	// Nothing at all: the skills root itself is only created after validation.
+	_, statErr := os.Stat(skillsDir)
+	c.True(os.IsNotExist(statErr), "skills dir was created by a refused sync (err=%v)", statErr)
+	_, statErr = os.Stat(filepath.Join(filepath.Dir(skillsDir), "x"))
+	c.True(os.IsNotExist(statErr), "the traversal target was written (err=%v)", statErr)
+}
+
+// A file added, removed or edited is a change: the convergence check compares
+// the whole tree, not just SKILL.md.
+func TestSyncSkillsFileChangeIsChange(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, skillsDir := syncServer(t)
+
+	base := []*executorpb.SkillFile{
+		{Path: "references/api.md", Mode: 0o644, Content: []byte("one\n")},
+	}
+	c.Eq(int32(1), syncWithFiles(t, s, base).GetWritten(), "first sync writes")
+	c.Eq(int32(0), syncWithFiles(t, s, base).GetWritten(), "identical file set writes nothing")
+
+	added := append(append([]*executorpb.SkillFile{}, base...),
+		&executorpb.SkillFile{Path: "run.sh", Mode: 0o755, Content: []byte("#!/bin/sh\n")})
+	c.Eq(int32(1), syncWithFiles(t, s, added).GetWritten(), "an added file is a change")
+
+	edited := []*executorpb.SkillFile{
+		{Path: "references/api.md", Mode: 0o644, Content: []byte("two\n")},
+		{Path: "run.sh", Mode: 0o755, Content: []byte("#!/bin/sh\n")},
+	}
+	c.Eq(int32(1), syncWithFiles(t, s, edited).GetWritten(), "an edited file is a change")
+
+	removed := []*executorpb.SkillFile{
+		{Path: "references/api.md", Mode: 0o644, Content: []byte("two\n")},
+	}
+	c.Eq(int32(1), syncWithFiles(t, s, removed).GetWritten(), "a removed file is a change")
+
+	// The removal is real, not just counted.
+	_, err := os.Stat(filepath.Join(skillDirOf(t, skillsDir), "run.sh"))
+	c.True(os.IsNotExist(err), "run.sh survived its removal (err=%v)", err)
+}

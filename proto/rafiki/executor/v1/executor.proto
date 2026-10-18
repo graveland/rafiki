@@ -73,6 +73,18 @@ service ExecutorService {
   // to drift and no partial state to reconcile after a crash.
   rpc SyncSkills(SyncSkillsRequest) returns (SyncSkillsResponse);
 
+  // MaterializeSkill writes ONE skill's supporting-file tree into a
+  // content-addressed cache directory on this executor and returns its path.
+  //
+  // Addressed by tree_hash rather than by name: the daemon asks for a content
+  // address it already holds the bytes of, and the executor re-derives the
+  // hash from the bytes it was sent. A directory that already holds that tree
+  // is reused, so a second materialization of the same skill costs a stat.
+  //
+  // No opt-in flag, unlike SyncSkills: this writes only under the executor's
+  // own disposable cache directory, never into anything an operator owns.
+  rpc MaterializeSkill(MaterializeSkillRequest) returns (MaterializeSkillResponse);
+
   // SyncPyModules replaces this executor's rafiki-managed pymodule cache with
   // the corpus the daemon sends. Whole-corpus, not incremental, and
   // downward-only like SyncSkills: the executor rewrites one cache directory
@@ -410,6 +422,15 @@ message ProxyResponse {
   }
 }
 
+// SkillFile is one supporting file of a skill, besides SKILL.md.
+message SkillFile {
+  // path is relative to the skill directory, '/'-separated.
+  string path = 1;
+  // mode is 0644 or 0755 (decimal 420 or 493).
+  uint32 mode = 2;
+  bytes content = 3;
+}
+
 // SyncSkill is one skill's rendered content. The name is BARE: Claude Code
 // derives the "<namespace>:<name>" a model sees from the plugin directory,
 // so a prefix written here would be applied twice.
@@ -419,6 +440,9 @@ message SyncSkill {
   // body has already had its frontmatter stripped; the executor re-renders a
   // frontmatter block from name and description when it writes SKILL.md.
   string body = 3;
+  // files are the skill's supporting files, written under the skill's
+  // directory beside SKILL.md.
+  repeated SkillFile files = 4;
 }
 
 // SkillNamespace is one plugin directory's worth of skills.
@@ -446,6 +470,18 @@ message SyncSkillsResponse {
   // skills_dir is the directory the executor actually wrote into, so the
   // daemon can log where the corpus landed rather than guessing.
   string skills_dir = 3;
+}
+
+message MaterializeSkillRequest {
+  // tree_hash is skills.TreeHash(files); the executor recomputes and refuses
+  // a mismatch.
+  string tree_hash = 1;
+  repeated SkillFile files = 2;
+}
+
+message MaterializeSkillResponse {
+  // dir is the absolute path of the materialized skill directory.
+  string dir = 1;
 }
 
 // SyncPyModule is one owner's pymodule, at its latest version. The name is

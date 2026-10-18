@@ -68,6 +68,9 @@ const (
 	// ExecutorServiceSyncSkillsProcedure is the fully-qualified name of the ExecutorService's
 	// SyncSkills RPC.
 	ExecutorServiceSyncSkillsProcedure = "/rafiki.executor.v1.ExecutorService/SyncSkills"
+	// ExecutorServiceMaterializeSkillProcedure is the fully-qualified name of the ExecutorService's
+	// MaterializeSkill RPC.
+	ExecutorServiceMaterializeSkillProcedure = "/rafiki.executor.v1.ExecutorService/MaterializeSkill"
 	// ExecutorServiceSyncPyModulesProcedure is the fully-qualified name of the ExecutorService's
 	// SyncPyModules RPC.
 	ExecutorServiceSyncPyModulesProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModules"
@@ -156,6 +159,17 @@ type ExecutorServiceClient interface {
 	// namespace and rewrites it wholesale, so there is no per-path bookkeeping
 	// to drift and no partial state to reconcile after a crash.
 	SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error)
+	// MaterializeSkill writes ONE skill's supporting-file tree into a
+	// content-addressed cache directory on this executor and returns its path.
+	//
+	// Addressed by tree_hash rather than by name: the daemon asks for a content
+	// address it already holds the bytes of, and the executor re-derives the
+	// hash from the bytes it was sent. A directory that already holds that tree
+	// is reused, so a second materialization of the same skill costs a stat.
+	//
+	// No opt-in flag, unlike SyncSkills: this writes only under the executor's
+	// own disposable cache directory, never into anything an operator owns.
+	MaterializeSkill(context.Context, *connect.Request[executorpb.MaterializeSkillRequest]) (*connect.Response[executorpb.MaterializeSkillResponse], error)
 	// SyncPyModules replaces this executor's rafiki-managed pymodule cache with
 	// the corpus the daemon sends. Whole-corpus, not incremental, and
 	// downward-only like SyncSkills: the executor rewrites one cache directory
@@ -281,6 +295,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SyncSkills")),
 			connect.WithClientOptions(opts...),
 		),
+		materializeSkill: connect.NewClient[executorpb.MaterializeSkillRequest, executorpb.MaterializeSkillResponse](
+			httpClient,
+			baseURL+ExecutorServiceMaterializeSkillProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("MaterializeSkill")),
+			connect.WithClientOptions(opts...),
+		),
 		syncPyModules: connect.NewClient[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse](
 			httpClient,
 			baseURL+ExecutorServiceSyncPyModulesProcedure,
@@ -334,27 +354,28 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 
 // executorServiceClient implements ExecutorServiceClient.
 type executorServiceClient struct {
-	describe       *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
-	health         *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
-	execute        *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
-	cancel         *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
-	watchJobs      *connect.Client[executorpb.WatchJobsRequest, executorpb.WatchJobsResponse]
-	ackJobExits    *connect.Client[executorpb.AckJobExitsRequest, executorpb.AckJobExitsResponse]
-	jobOutput      *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
-	provision      *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
-	release        *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
-	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
-	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
-	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
-	syncSkills     *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
-	syncPyModules  *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
-	syncRepo       *connect.Client[executorpb.SyncRepoRequest, executorpb.SyncRepoResponse]
-	readTree       *connect.Client[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse]
-	writeTree      *connect.Client[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
-	gitRefs        *connect.Client[executorpb.GitRefsRequest, executorpb.GitRefsResponse]
-	gitBundle      *connect.Client[executorpb.GitBundleRequest, executorpb.GitBundleResponse]
-	gitFetchBundle *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
-	proxy          *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
+	describe         *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
+	health           *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
+	execute          *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
+	cancel           *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	watchJobs        *connect.Client[executorpb.WatchJobsRequest, executorpb.WatchJobsResponse]
+	ackJobExits      *connect.Client[executorpb.AckJobExitsRequest, executorpb.AckJobExitsResponse]
+	jobOutput        *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
+	provision        *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
+	release          *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
+	projectContext   *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
+	projectSkills    *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
+	skillBody        *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
+	syncSkills       *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
+	materializeSkill *connect.Client[executorpb.MaterializeSkillRequest, executorpb.MaterializeSkillResponse]
+	syncPyModules    *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
+	syncRepo         *connect.Client[executorpb.SyncRepoRequest, executorpb.SyncRepoResponse]
+	readTree         *connect.Client[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse]
+	writeTree        *connect.Client[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
+	gitRefs          *connect.Client[executorpb.GitRefsRequest, executorpb.GitRefsResponse]
+	gitBundle        *connect.Client[executorpb.GitBundleRequest, executorpb.GitBundleResponse]
+	gitFetchBundle   *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
+	proxy            *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -420,6 +441,11 @@ func (c *executorServiceClient) SkillBody(ctx context.Context, req *connect.Requ
 // SyncSkills calls rafiki.executor.v1.ExecutorService.SyncSkills.
 func (c *executorServiceClient) SyncSkills(ctx context.Context, req *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error) {
 	return c.syncSkills.CallUnary(ctx, req)
+}
+
+// MaterializeSkill calls rafiki.executor.v1.ExecutorService.MaterializeSkill.
+func (c *executorServiceClient) MaterializeSkill(ctx context.Context, req *connect.Request[executorpb.MaterializeSkillRequest]) (*connect.Response[executorpb.MaterializeSkillResponse], error) {
+	return c.materializeSkill.CallUnary(ctx, req)
 }
 
 // SyncPyModules calls rafiki.executor.v1.ExecutorService.SyncPyModules.
@@ -526,6 +552,17 @@ type ExecutorServiceHandler interface {
 	// namespace and rewrites it wholesale, so there is no per-path bookkeeping
 	// to drift and no partial state to reconcile after a crash.
 	SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error)
+	// MaterializeSkill writes ONE skill's supporting-file tree into a
+	// content-addressed cache directory on this executor and returns its path.
+	//
+	// Addressed by tree_hash rather than by name: the daemon asks for a content
+	// address it already holds the bytes of, and the executor re-derives the
+	// hash from the bytes it was sent. A directory that already holds that tree
+	// is reused, so a second materialization of the same skill costs a stat.
+	//
+	// No opt-in flag, unlike SyncSkills: this writes only under the executor's
+	// own disposable cache directory, never into anything an operator owns.
+	MaterializeSkill(context.Context, *connect.Request[executorpb.MaterializeSkillRequest]) (*connect.Response[executorpb.MaterializeSkillResponse], error)
 	// SyncPyModules replaces this executor's rafiki-managed pymodule cache with
 	// the corpus the daemon sends. Whole-corpus, not incremental, and
 	// downward-only like SyncSkills: the executor rewrites one cache directory
@@ -647,6 +684,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SyncSkills")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceMaterializeSkillHandler := connect.NewUnaryHandler(
+		ExecutorServiceMaterializeSkillProcedure,
+		svc.MaterializeSkill,
+		connect.WithSchema(executorServiceMethods.ByName("MaterializeSkill")),
+		connect.WithHandlerOptions(opts...),
+	)
 	executorServiceSyncPyModulesHandler := connect.NewUnaryHandler(
 		ExecutorServiceSyncPyModulesProcedure,
 		svc.SyncPyModules,
@@ -723,6 +766,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceSkillBodyHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncSkillsProcedure:
 			executorServiceSyncSkillsHandler.ServeHTTP(w, r)
+		case ExecutorServiceMaterializeSkillProcedure:
+			executorServiceMaterializeSkillHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncPyModulesProcedure:
 			executorServiceSyncPyModulesHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncRepoProcedure:
@@ -798,6 +843,10 @@ func (UnimplementedExecutorServiceHandler) SkillBody(context.Context, *connect.R
 
 func (UnimplementedExecutorServiceHandler) SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncSkills is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) MaterializeSkill(context.Context, *connect.Request[executorpb.MaterializeSkillRequest]) (*connect.Response[executorpb.MaterializeSkillResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.MaterializeSkill is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error) {

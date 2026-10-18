@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/skills"
 )
 
 // managedMarker names a file rafiki drops in every namespace directory it
@@ -127,6 +128,14 @@ func (s *Server) SyncSkills(
 				return nil, connect.NewError(connect.CodeInvalidArgument,
 					fmt.Errorf("skill in namespace %q: %w", ns.GetName(), err))
 			}
+			// The file set is validated here, with everything else, so a
+			// traversal path or an over-cap file refuses the whole sync before
+			// any directory is touched -- and so the error names the skill a
+			// skill author has to fix.
+			if err := skills.ValidateFiles(skillFiles(sk.GetFiles())); err != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("%s:%s: %w", ns.GetName(), sk.GetName(), err))
+			}
 		}
 	}
 
@@ -200,6 +209,9 @@ func (s *Server) writeNamespace(root string, ns *executorpb.SkillNamespace) (boo
 		}
 		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), content, 0o644); err != nil {
 			return false, fmt.Errorf("write %s/%s: %w", ns.GetName(), sk.GetName(), err)
+		}
+		if err := writeSkillFiles(dir, sk.GetFiles()); err != nil {
+			return false, fmt.Errorf("%s/%s: %w", ns.GetName(), sk.GetName(), err)
 		}
 	}
 
@@ -279,6 +291,41 @@ func pruneUnwantedNamespaces(root string, want map[string]bool) (int32, error) {
 	return pruned, nil
 }
 
+// skillFiles converts a wire file set into the domain type the validator and
+// the tree hash work on.
+func skillFiles(pb []*executorpb.SkillFile) []skills.File {
+	out := make([]skills.File, 0, len(pb))
+	for _, f := range pb {
+		out = append(out, skills.File{Path: f.GetPath(), Mode: f.GetMode(), Content: f.GetContent()})
+	}
+	return out
+}
+
+// writeSkillFiles writes one skill's supporting files under dir, creating
+// parent directories as needed.
+//
+// WriteFile then Chmod, rather than relying on the create mode: the umask
+// applies to a create, so a 0755 script would silently land without its
+// execute bits. The mode is part of what the tree hash covers, which means a
+// tree on disk that does not match its hash is not the tree the daemon sent.
+func writeSkillFiles(dir string, files []*executorpb.SkillFile) error {
+	for _, f := range files {
+		path := filepath.Join(dir, filepath.FromSlash(f.GetPath()))
+		if parent := filepath.Dir(path); parent != dir {
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", f.GetPath(), err)
+			}
+		}
+		if err := os.WriteFile(path, f.GetContent(), os.FileMode(f.GetMode())); err != nil {
+			return fmt.Errorf("write %s: %w", f.GetPath(), err)
+		}
+		if err := os.Chmod(path, os.FileMode(f.GetMode())); err != nil {
+			return fmt.Errorf("chmod %s: %w", f.GetPath(), err)
+		}
+	}
+	return nil
+}
+
 // treesIdentical reports whether the live tree already holds exactly the staged
 // content. Absent live tree is not identical.
 func treesIdentical(live, staged string) (bool, error) {
@@ -304,11 +351,19 @@ func treesIdentical(live, staged string) (bool, error) {
 	return true, nil
 }
 
-func collectTree(root string) (map[string]string, error) {
+// treeFile is one file as the on-disk comparison sees it: the content AND the
+// mode, because a skill's modes are part of its identity (skills.TreeHash
+// covers them). A mode-only change is a change.
+type treeFile struct {
+	mode    os.FileMode
+	content string
+}
+
+func collectTree(root string) (map[string]treeFile, error) {
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil, nil
 	}
-	out := map[string]string{}
+	out := map[string]treeFile{}
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -320,11 +375,15 @@ func collectTree(root string) (map[string]string, error) {
 		if err != nil {
 			return err
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		out[rel] = string(data)
+		out[rel] = treeFile{mode: info.Mode().Perm(), content: string(data)}
 		return nil
 	})
 	if err != nil {
