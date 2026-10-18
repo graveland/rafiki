@@ -42,7 +42,7 @@ func TestSyncCoreSkillsIsBoundedByATimeout(t *testing.T) {
 
 	done := make(chan error, 1)
 	start := time.Now()
-	go func() { done <- syncCoreSkills(context.Background(), blockOnCtxStore{}, "v-test") }()
+	go func() { done <- syncCoreSkills(context.Background(), blockOnCtxStore{}) }()
 
 	select {
 	case err := <-done:

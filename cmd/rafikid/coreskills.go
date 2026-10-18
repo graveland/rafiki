@@ -84,10 +84,7 @@ var coreSyncTimeout = 30 * time.Second
 // Never fatal: a daemon that cannot reach its store still serves children.
 // The timeout is part of that never-fatal contract — the sync runs on the
 // daemon's base context, which has no deadline of its own.
-//
-// The trailing version argument is no longer read. It stays in the signature
-// so main.go's startup call site is unchanged.
-func syncCoreSkills(ctx context.Context, st skills.Store, _ string) error {
+func syncCoreSkills(ctx context.Context, st skills.Store) error {
 	if st == nil {
 		return nil
 	}

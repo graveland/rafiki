@@ -482,10 +482,6 @@ func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]con
 type connectSkills struct {
 	st skills.Store
 
-	// version is the daemon's build version. No method reads it: it stays on
-	// the struct so main.go's wiring, which sets it, needs no change.
-	version string
-
 	// push refreshes the executor-facing skill corpus after a successful
 	// write (delete, enable/disable): push-on-write rather than a timer. Nil is
 	// legal — tests and any wiring constructed before the pusher existed — and

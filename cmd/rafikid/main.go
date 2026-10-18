@@ -434,7 +434,7 @@ func runDaemon(opts runDaemonOpts) error {
 	if pool != nil {
 		skillStore = skillsdb.NewPostgresStore(pool)
 	}
-	if err := syncCoreSkills(baseCtx, skillStore, version.String()); err != nil {
+	if err := syncCoreSkills(baseCtx, skillStore); err != nil {
 		// Not fatal: the daemon serves children from whatever the store
 		// already holds. Last-good-wins, exactly as the executor sync and
 		// sc's own reconcile behave.
@@ -828,7 +828,7 @@ func runDaemon(opts runDaemonOpts) error {
 				// Push-on-write: a skill edit reaches every eligible executor on
 				// the write itself, not on a reconnect or a timer.
 				face.Control.SetSkillManager(connectSkills{
-					st: skillStore, version: version.String(),
+					st: skillStore,
 					push: func(ctx context.Context) {
 						if ctrl.skillPusher != nil {
 							ctrl.skillPusher.pushAll(ctx)
