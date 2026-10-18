@@ -203,8 +203,13 @@ func newSkillsEnableCmds() []*cobra.Command {
 		},
 		{
 			Use:   "disable <namespace:name>",
-			Short: "Disable a skill; its name is then free for a replacement",
-			Args:  cobra.ExactArgs(1), RunE: run(false),
+			Short: "Disable a skill: the row stays but stops resolving",
+			Long: `Disable a skill: the row is kept and its enabled flag is cleared, so it stops
+being served. Disabling does NOT free the name — a disabled row still counts as
+present when layers are resolved, so it keeps hiding the same namespace/name
+beneath it. A name is freed by deleting the row (where its source allows that)
+or by the source going away.`,
+			Args: cobra.ExactArgs(1), RunE: run(false),
 			ValidArgsFunction: completeSkillArgs,
 		},
 	}
