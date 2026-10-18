@@ -194,6 +194,15 @@ func (f *pushFakeExecutor) lastSync() ([]*executorpb.SkillNamespace, bool) {
 	return f.sent[len(f.sent)-1].GetNamespaces(), true
 }
 
+// syncCount is how many syncs this executor has received. A skipped push shows
+// up here as an unchanged count, which is what makes "was it sent at all?"
+// assertable rather than inferred from the payload.
+func (f *pushFakeExecutor) syncCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sent)
+}
+
 // pushEnrollingStore admits an executor row per enroll token, so a pool can
 // hold several fake executors with different owners.
 type pushEnrollingStore struct {
@@ -384,4 +393,47 @@ func TestSkillPushOwnerlessGetsSharedOnly(t *testing.T) {
 	ck.EqDeep([]string{"core-skill"}, pushedNames(namespaceNamed(nss, "rafiki")), "shared core layer")
 	ck.EqDeep([]string{"shared-skill"}, pushedNames(namespaceNamed(nss, "shared")), "shared global layer")
 	ck.Nil(namespaceNamed(nss, "mine"), "an ownerless executor was sent a user layer")
+}
+
+// TestSkillPushAllDisabledStillPushes pins that the empty-corpus guard belongs
+// to the STORE READ, not to the resolved set.
+//
+// Resolving to nothing is an instruction, not a failed read: when every skill an
+// owner can see is disabled, the push must still happen so the executor prunes
+// the trees it holds. Skipping it would leave those skills ENABLED on the
+// machine they run on, so disabling a skill would never reach the place it
+// matters — the executor's copy would outlive the operator's decision.
+//
+// The store here is a fake, so no shared-database row is created or read: the
+// rows are the test's own and nothing outlives it.
+func TestSkillPushAllDisabledStillPushes(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const owner = "u-all-disabled"
+	row := func(enabled bool) skills.Record {
+		return skills.Record{
+			ID: "only", Namespace: "rafiki", Name: "only-skill", Body: "b",
+			Source: "repo:all-disabled", OwnerUserID: owner, Enabled: enabled,
+		}
+	}
+	store := &fakeSkillStore{rows: []skills.Record{row(true)}}
+	pool, fakes := pushTestPool(t, executors.Executor{ID: "e1", Enabled: true, OwnerUserID: owner})
+	sp := &skillPusher{pool: pool, store: store, version: "v-test"}
+	ctx := context.Background()
+
+	ck.Require().NoError(sp.pushTo(ctx, "e1"), "first push")
+	nss, ok := fakes["e1"].lastSync()
+	ck.Require().True(ok, "executor received no sync")
+	ck.EqDeep([]string{"only-skill"}, pushedNames(namespaceNamed(nss, "rafiki")), "first push carried")
+	ck.Eq(1, fakes["e1"].syncCount(), "syncs after the first push")
+
+	// The owner disables the only skill they can see. The READ still answers
+	// (the row exists, disabled), so the push must go out — carrying nothing.
+	store.rows = []skills.Record{row(false)}
+	ck.Require().NoError(sp.pushTo(ctx, "e1"), "push after disabling the only visible skill")
+
+	ck.Eq(2, fakes["e1"].syncCount(),
+		"the second push was skipped; the executor keeps the now-disabled skill enabled")
+	nss, ok = fakes["e1"].lastSync()
+	ck.Require().True(ok, "executor received no second sync")
+	ck.Len(nss, 0, "an all-disabled owner's push carried %d namespace(s), want none to prune with", len(nss))
 }

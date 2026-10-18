@@ -29,13 +29,19 @@ type skillPusher struct {
 	version string
 }
 
-// shouldPush refuses an empty corpus. An empty namespace list means "remove
-// every managed tree" on the executor, so a store read that legitimately
-// returns zero rows — a fresh install, or a blip that surfaced as an empty
-// result — would otherwise wipe the corpus off every machine at once. sc
-// encodes the same rule for the same reason: an empty bundle is content loss,
-// never a prune instruction.
-func shouldPush(recs []skills.Record) bool { return len(recs) > 0 }
+// shouldPush refuses to act on an EMPTY STORE READ. An empty namespace list
+// means "remove every managed tree" on the executor, so a store read that
+// legitimately returns zero rows — a fresh install, or a blip that surfaced as
+// an empty result — would otherwise wipe the corpus off every machine at once.
+// sc encodes the same rule for the same reason: an empty bundle is content
+// loss, never a prune instruction.
+//
+// The test is on the rows as READ, never on the resolved set. Resolving to
+// nothing is a legitimate INSTRUCTION — every skill this owner can see is
+// disabled — and skipping it would leave the executor's copy of those skills
+// enabled forever, so disabling a skill would never reach the machine it
+// matters on. An all-disabled owner's executor gets the empty corpus and prunes.
+func shouldPush(rows []skills.Record) bool { return len(rows) > 0 }
 
 // skillFileProtos renders a skill's stored files as the wire type. Order is the
 // store's (sorted by path), which is what the executor's tree comparison
@@ -189,14 +195,17 @@ func (sp *skillPusher) pushTo(ctx context.Context, executorID string) error {
 	if err != nil {
 		return err
 	}
-	recs := skills.Resolve(rows, owner)
-	if !shouldPush(recs) {
+	// Guard the READ, not the resolved set: a store that answered with rows has
+	// said something, even when every one of them resolves away (all disabled),
+	// and that answer is "prune".
+	if !shouldPush(rows) {
 		slog.Warn("skill corpus is empty; not syncing",
 			"executor", executorID,
 			"owner", owner,
 			"reason", "an empty payload would remove every managed tree on that machine")
 		return nil
 	}
+	recs := skills.Resolve(rows, owner)
 
 	files, err := sp.filesFor(rctx, recs)
 	if err != nil {
