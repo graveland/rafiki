@@ -234,6 +234,56 @@ func TestDiscoverSkillsLocalPath(t *testing.T) {
 	c.Eq("review-swarm:skills/one/SKILL.md", report.Skills[0].From, "from")
 }
 
+// A source directory that exists but ships no skills is legitimate — a pinned
+// engine version may ship none — so it stays silent rather than looking like a
+// broken declaration.
+func TestDiscoverSkillsLocalPathWithoutSkills(t *testing.T) {
+	c := assert.NewCollecting(t)
+	src := writeTree(t, map[string]string{
+		"README.md": "no skills in this one\n",
+	})
+	checkout := writeTree(t, map[string]string{})
+	writePyproject(t, checkout, []string{"review-swarm"}, []string{"review-swarm"})
+	directURL, err := json.Marshal(map[string]string{"url": "file://" + filepath.ToSlash(src)})
+	c.Require().NoError(err, "marshal direct_url.json")
+
+	venv := t.TempDir()
+	fakeVenv(t, venv, map[string]string{
+		"review_swarm-1.0.dist-info/METADATA":        distMetadata("review-swarm"),
+		"review_swarm-1.0.dist-info/direct_url.json": string(directURL),
+	})
+
+	report := DiscoverSkills(checkout, "corpus", venv)
+	c.Empty(report.Errors, "errors")
+	c.Empty(report.Skills, "skills")
+}
+
+// A source directory that no longer exists cannot be read at all, so it is an
+// error naming both the entry and the path: silence would let the user believe
+// skills they do not have are reaching their agents.
+func TestDiscoverSkillsLocalPathMissingDirectory(t *testing.T) {
+	c := assert.NewCollecting(t)
+	gone := filepath.Join(t.TempDir(), "deleted")
+	c.Require().NoError(os.MkdirAll(gone, 0o755), "mkdir the source directory")
+	checkout := writeTree(t, map[string]string{})
+	writePyproject(t, checkout, []string{"review-swarm"}, []string{"review-swarm"})
+	directURL, err := json.Marshal(map[string]string{"url": "file://" + filepath.ToSlash(gone)})
+	c.Require().NoError(err, "marshal direct_url.json")
+
+	venv := t.TempDir()
+	fakeVenv(t, venv, map[string]string{
+		"review_swarm-1.0.dist-info/METADATA":        distMetadata("review-swarm"),
+		"review_swarm-1.0.dist-info/direct_url.json": string(directURL),
+	})
+	c.Require().NoError(os.RemoveAll(gone), "remove the source directory")
+
+	report := DiscoverSkills(checkout, "corpus", venv)
+	c.Require().Len(report.Errors, 1, "got errors %q, want exactly 1", report.Errors)
+	c.Eq(`skill-sources entry "review-swarm": source directory `+gone+` does not exist`,
+		report.Errors[0], "error")
+	c.Empty(report.Skills, "skills")
+}
+
 // One qualified name from two places is ambiguous, so both are dropped and the
 // collision names both origins.
 func TestDiscoverSkillsDuplicate(t *testing.T) {

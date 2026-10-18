@@ -253,6 +253,14 @@ func resolveSkillSource(entry, venv string, errs *[]string) []DiscoveredSkill {
 	}
 
 	if dir, ok := localSourceDir(distInfo); ok {
+		// An entry that resolves to a source tree which is not there cannot be
+		// read at all. Silence would let the user believe skills they do not
+		// have are reaching their agents; a directory that IS there and holds
+		// no skills stays silent, because a pinned version may ship none.
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			*errs = append(*errs, fmt.Sprintf("skill-sources entry %q: source directory %s does not exist", entry, dir))
+			return nil
+		}
 		namespace, origin := pluginName(dir), dir
 		if namespace == "" {
 			namespace, origin = entry, entry
