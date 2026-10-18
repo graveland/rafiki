@@ -186,11 +186,11 @@ GET /executor/connect HTTP/1.1
 Upgrade: rafiki-executor
 Connection: Upgrade
 Authorization: Bearer <credential>
-Rafiki-Protocol: 3
+Rafiki-Protocol: 4
         ↓
 HTTP/1.1 101 Switching Protocols
 Rafiki-Executor-Id: …
-Rafiki-Protocol: 3
+Rafiki-Protocol: 4
         ↓
 HTTP/2, roles inverted
 ```
@@ -245,7 +245,7 @@ side effect of the exchange (a spent token, a rotated credential) has happened
 or needs undoing, and the socket closes after the response.
 
 **The epoch gate runs before `authorize`.** The dialing side sets
-`Rafiki-Protocol: 3` on the Upgrade request (`upgradeconn.Dial` sets it and
+`Rafiki-Protocol: 4` on the Upgrade request (`upgradeconn.Dial` sets it and
 callers cannot override it), and `upgradeconn.Handler` refuses a missing or
 different value with a **plain 400** whose body names both epochs, BEFORE any
 credential is touched. That ordering is what stops a stale peer from spending

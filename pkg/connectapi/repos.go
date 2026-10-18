@@ -63,7 +63,7 @@ func (s *Server) repoManager() (RepoManager, error) {
 	p := s.repos.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
-			errors.New("pymodule repos backend not yet wired"))
+			errors.New("repos backend not yet wired"))
 	}
 	return *p, nil
 }

@@ -199,22 +199,22 @@ the credential, and it reverse-proxies the daemon's whole proxy face.
 
 The wire carries a version so a stale peer fails loudly instead of silently
 exchanging fields the two sides no longer agree on. `protocol.Epoch` is the
-value — **3** today, and a peer that sends no header is an epoch-1 peer
+value — **4** today, and a peer that sends no header is an epoch-1 peer
 (`pkg/protocol/epoch.go`; the constant is bumped on every wire-breaking
 change). It rides the HTTP header **`Rafiki-Protocol`** (`protocol.EpochHeader`).
 
-**Connect (control plane).** Every client request carries `Rafiki-Protocol: 3`
+**Connect (control plane).** Every client request carries `Rafiki-Protocol: 4`
 — the Go client transport sets it in `bearerTransport` (`cmd/rafiki/connectclient.go`),
 unconditionally, token or not, and `rafiki-py` sets it in its own transport.
 The daemon gates every `/rafiki.v1.` request with `pkg/server.RequireEpoch`,
 applied at the OUTERMOST layer of BOTH mounts (before authentication, so the
 authentication-exempt `Login` service is gated too — the `Login` route carries
 no interceptors but still speaks the current wire). The gate sets
-`Rafiki-Protocol: 3` on the response unconditionally (refusals included, so a
+`Rafiki-Protocol: 4` on the response unconditionally (refusals included, so a
 client can always read the daemon's epoch) and passes a request through only
 when its header is exactly the daemon's epoch. A missing or different value is
 a Connect error — code `failed_precondition` (HTTP 400), `ErrorInfo` reason
-`protocol_mismatch`, message "this daemon speaks rafiki protocol 3; upgrade
+`protocol_mismatch`, message "this daemon speaks rafiki protocol 4; upgrade
 your rafiki client (peer sent none)". A stream is refused with the SAME code,
 message and reason, but in the form the caller's protocol expects: a Connect
 streaming request (`Content-Type: application/connect+`) gets the enveloped
@@ -222,7 +222,7 @@ HTTP-200 end-of-stream error, so a connect-go streaming client surfaces the
 `failed_precondition` and the message instead of a bare `internal: HTTP status
 400 Bad Request` (its streaming client ignores the body of a non-200 response);
 a unary request keeps the HTTP-400 JSON form. Every refusal — stream or unary —
-still carries `Rafiki-Protocol: 3`.
+still carries `Rafiki-Protocol: 4`.
 
 **Connect (client side).** The Go transport (`checkDaemonEpoch`) and the
 Python SDK both check the response's `Rafiki-Protocol`: a response without it
