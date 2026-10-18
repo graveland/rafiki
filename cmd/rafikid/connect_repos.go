@@ -130,21 +130,30 @@ func priorRepo(ctx context.Context, store repos.Store, ownerUserID, name string)
 // back). A rollback failure is only logged: the caller already gets the real
 // error, and a half-rolled-back registration is one `repo remove` away, not a
 // reason to mask the real failure.
+//
+// The schedule is disarmed ONLY when the rollback removed a registration this
+// call had created. A failed RE-add of an already-scheduled repo restores a row
+// that is still registered, and its timer is still the one the earlier add
+// armed: disarming it here would leave the repo with an interval in the store
+// and no timer until the daemon restarts.
 func (m connectRepos) rollbackRepo(ctx context.Context, owner, name string, prior *repos.Record, cause error) {
 	var err error
 	if prior == nil {
 		err = m.c.repoStore.Delete(ctx, owner, name)
+		// Nothing was registered before the call, so nothing may stay armed.
+		m.sched.disarm(owner, name)
 	} else {
 		_, err = m.c.repoStore.Put(ctx, owner, name, prior.URL, prior.Ref)
 		if err == nil {
 			err = m.c.repoStore.SetRefreshInterval(ctx, owner, name, prior.RefreshInterval)
 		}
+		// The registration — and so its timer — predates this call: leave it
+		// exactly as it was armed.
 	}
 	if err != nil {
 		slog.Error("repo add: rollback after a failed registration failed",
 			"name", name, "owner", owner, "error", err, "cause", cause)
 	}
-	m.sched.disarm(owner, name)
 }
 
 // ListRepos answers the caller's registrations with the state their last

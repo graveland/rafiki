@@ -155,16 +155,20 @@ func (s *fakeRepoStore) Delete(_ context.Context, ownerUserID, name string) erro
 // the ref resolve, and vice versa.
 type fakeRepoClient struct {
 	executorpbconnect.ExecutorServiceClient
-	mu        sync.Mutex
-	requests  []*executorpb.SyncRepoRequest
-	resp      *executorpb.SyncRepoResponse
-	err       error
-	entered   chan struct{}
-	release   chan struct{}
-	onCall    func() // invoked once, before the response/err is produced
-	resolves  []*executorpb.ResolveRepoRefRequest
-	resolveOK *executorpb.ResolveRepoRefResponse
-	resolveEr error
+	mu       sync.Mutex
+	requests []*executorpb.SyncRepoRequest
+	resp     *executorpb.SyncRepoResponse
+	err      error
+	entered  chan struct{}
+	release  chan struct{}
+	// enteredOnce makes entered fire on the FIRST call only: a test that has
+	// two refreshes in flight at once (two registrations of one source) would
+	// otherwise close it twice and panic.
+	enteredOnce sync.Once
+	onCall      func() // invoked once, before the response/err is produced
+	resolves    []*executorpb.ResolveRepoRefRequest
+	resolveOK   *executorpb.ResolveRepoRefResponse
+	resolveEr   error
 }
 
 // defaultResolveCommit is what a fake executor resolves a ref to unless the
@@ -195,7 +199,7 @@ func (c *fakeRepoClient) SyncRepo(ctx context.Context, req *connect.Request[exec
 	c.requests = append(c.requests, req.Msg)
 	c.mu.Unlock()
 	if c.entered != nil {
-		close(c.entered)
+		c.enteredOnce.Do(func() { close(c.entered) })
 	}
 	if c.release != nil {
 		select {
@@ -767,13 +771,15 @@ func TestRepoPusherResolveFallsBackAndReportsFailure(t *testing.T) {
 
 // ─── coalescing, the skills half and the recorded commit ─────────────────────
 
-// waiters returns how many callers are currently blocked on (owner, name)'s
-// in-flight refresh — the observable that makes "the second caller joined the
-// first's refresh" assertable instead of a sleep.
-func (gp *repoPusher) waiters(ownerUserID, name string) int {
+// waiters returns how many callers are currently blocked on the in-flight
+// refresh of one registration — the observable that makes "the second caller
+// joined the first's refresh" assertable instead of a sleep. The whole
+// registration is named because the in-flight key carries url and ref: a
+// refresh of a repointed source is a different call, not a join.
+func (gp *repoPusher) waiters(ownerUserID, name, url, ref string) int {
 	gp.mu.Lock()
 	defer gp.mu.Unlock()
-	call, ok := gp.inflight[repoKey(ownerUserID, name)]
+	call, ok := gp.inflight[repoRefreshKey{ownerUserID: ownerUserID, name: name, url: url, ref: ref}]
 	if !ok {
 		return 0
 	}
@@ -856,7 +862,7 @@ func TestRepoRefreshCoalesces(t *testing.T) {
 		second <- res
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for f.gp.waiters("u_alice", "ops_tools") == 0 {
+	for f.gp.waiters("u_alice", "ops_tools", url, "main") == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the second caller never joined the in-flight refresh")
 		}
@@ -910,7 +916,7 @@ func TestRepoRefreshWaiterHonoursCtx(t *testing.T) {
 		waiterDone <- err
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for f.gp.waiters("u_alice", "ops_tools") == 0 {
+	for f.gp.waiters("u_alice", "ops_tools", url, "main") == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the waiter never joined the in-flight refresh")
 		}
@@ -1064,4 +1070,165 @@ func TestRepoRefreshReportsUnchangedCommit(t *testing.T) {
 	c.Require().NoError(err, "third refresh")
 	c.False(res.Unchanged, "a refresh resolving a new commit reported unchanged")
 	c.Eq(moved, res.Commit, "refresh result commit")
+}
+
+// ─── lifecycle races: the store write is rechecked, the key is the registration
+
+// TestRepoRefreshDoesNotJoinADifferentRegistration pins the in-flight key: it
+// carries url and ref, so a refresh of a REPOINTED source is its own call
+// rather than a join. After `repo set --ref v2`, a refresh must resolve v2 —
+// inheriting the old-ref refresh's commit would record the old ref's commit as
+// the new registration's current one.
+func TestRepoRefreshDoesNotJoinADifferentRegistration(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+	const url = "https://example.net/ops.git"
+
+	oldRefDone := make(chan error, 1)
+	go func() {
+		_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+		oldRefDone <- err
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old-ref refresh never reached SyncRepo")
+	}
+
+	// The operator repoints the source while that refresh is still in flight.
+	if _, err := f.store.Put(context.Background(), "u_alice", "ops_tools", url, "v2"); err != nil {
+		t.Fatalf("repoint: %v", err)
+	}
+
+	newRefDone := make(chan error, 1)
+	go func() {
+		_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "v2")
+		newRefDone <- err
+	}()
+
+	// It runs its OWN refresh — a second SyncRepo — instead of waiting on the
+	// blocked old-ref one.
+	deadline := time.Now().Add(5 * time.Second)
+	for client.callCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("a refresh of the repointed source waited on the in-flight refresh of the OLD ref")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(client.release)
+
+	c.Require().NoError(<-oldRefDone, "the old-ref refresh")
+	c.Require().NoError(<-newRefDone, "the new-ref refresh")
+
+	// Two independent SyncRepo calls, each carrying its own registration.
+	c.Require().Len(client.requests, 2, "SyncRepo requests")
+	refs := []string{client.requests[0].GetRef(), client.requests[1].GetRef()}
+	c.EqDeep([]string{"main", "v2"}, refs, "the two refreshes' refs")
+
+	// The new registration is the one that recorded a commit, and it recorded
+	// the commit ITS refresh resolved.
+	rec, ok := f.store.lastResolved("u_alice", "ops_tools")
+	c.Require().True(ok, "the new-ref refresh recorded no commit")
+	c.Eq(defaultResolveCommit, rec.Commit, "recorded commit")
+	// ...and the registration it was recorded against is the repointed one.
+	rows, err := f.store.List(context.Background(), "u_alice")
+	c.Require().NoError(err, "list")
+	for _, r := range rows {
+		if r.Name == "ops_tools" {
+			c.Eq("v2", r.Ref, "the repointed registration's ref")
+		}
+	}
+}
+
+// TestRepoRefreshWaiterBecomesLeaderWhenTheLeaderIsCancelled pins the waiter's
+// answer: a leader cancelled by ITS OWN caller produces no answer, so a waiter
+// whose context is still live runs the refresh itself rather than inheriting a
+// context.Canceled it never asked for.
+func TestRepoRefreshWaiterBecomesLeaderWhenTheLeaderIsCancelled(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+	const url = "https://example.net/ops.git"
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := f.gp.refresh(leaderCtx, "u_alice", "ops_tools", url, "main")
+		leaderDone <- err
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader never reached SyncRepo")
+	}
+
+	type answer struct {
+		res RefreshResult
+		err error
+	}
+	waiterDone := make(chan answer, 1)
+	go func() {
+		res, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+		waiterDone <- answer{res, err}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.gp.waiters("u_alice", "ops_tools", url, "main") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the waiter never joined the in-flight refresh")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The leader's caller gives up; the waiter's does not.
+	cancelLeader()
+	c.Require().Error(<-leaderDone, "the cancelled leader reported success")
+
+	// The waiter takes over and runs its own refresh, which the test now lets
+	// through.
+	deadline = time.Now().Add(5 * time.Second)
+	for client.callCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the waiter inherited the leader's cancellation instead of taking over")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(client.release)
+
+	select {
+	case got := <-waiterDone:
+		c.Require().NoError(got.err, "the waiter inherited a cancellation its own context never asked for")
+		c.Eq(defaultResolveCommit, got.res.Commit, "the waiter's result")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter never returned")
+	}
+}
+
+// TestRepoRefreshClearsItsSlotAfterAFailure pins item 5's observable half: the
+// in-flight slot is released on every exit, so a failed refresh cannot wedge
+// the registration's slot and hang every later refresh of it. (The panic case
+// is the same defer; a panic is not catchable from here without a recover, and
+// the daemon does not install one.)
+func TestRepoRefreshClearsItsSlotAfterAFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	const url = "https://example.net/ops.git"
+	f.clients["exec-alice"].err = errors.New("git fetch failed: no route to host")
+
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+	c.Require().Error(err, "a fully-failed refresh")
+
+	f.gp.mu.Lock()
+	inflight := len(f.gp.inflight)
+	f.gp.mu.Unlock()
+	c.Eq(0, inflight, "the failed refresh left its in-flight slot occupied")
+
+	// And the next refresh of the same source runs rather than waiting forever.
+	f.clients["exec-alice"].err = nil
+	_, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+	c.Require().NoError(err, "the refresh after a failure")
 }

@@ -63,6 +63,12 @@ type RefreshResult struct {
 // another source already holds one of this repo's namespaces in this layer.
 func (r RefreshResult) NamespaceCollision() bool { return r.namespaceHeld }
 
+// errRepoRemoved reports that a refresh's registration disappeared while the
+// refresh was in flight: a `repo remove` (or a concurrent add that rolled back)
+// landed mid-clone, so this refresh has nothing to record against. It wraps
+// repos.ErrNotFound so the Connect face answers NotFound rather than Internal.
+var errRepoRemoved = fmt.Errorf("the repo was removed while the refresh was in flight; nothing was stored: %w", repos.ErrNotFound)
+
 // repoSource is the skill-set source marker a repo owns. Ownership is the
 // marker: a repo writes and deletes only its own repo:<name> rows for its
 // owner, so two repos can never overwrite each other's skills.
@@ -72,10 +78,14 @@ func repoSource(name string) string { return "repo:" + name }
 // while it ran: they wait on done and take the same result, so one (owner,
 // name) is resolved and fanned out once no matter how many callers ask.
 type repoCall struct {
-	done    chan struct{}
-	result  RefreshResult
-	err     error
-	waiters int // callers blocked on done, for the coalescing tests to observe
+	done   chan struct{}
+	result RefreshResult
+	err    error
+	// leaderCtx is the context the LEADER ran under. A waiter that sees it
+	// cancelled knows the outcome says nothing about its own live request, and
+	// takes over rather than inheriting a cancellation it never asked for.
+	leaderCtx context.Context
+	waiters   int // callers blocked on done, for the coalescing tests to observe
 }
 
 // repoPusher fans a repo's refresh out to every one of that
@@ -119,10 +129,13 @@ type repoPusher struct {
 
 	mu    sync.Mutex
 	cache map[string]repoInventory // keyed by repoKey(ownerUserID, name)
-	// inflight holds the refresh currently running per repoKey: a second
-	// caller for the same (owner, name) waits for that one's result rather
-	// than resolving the ref and cloning again.
-	inflight map[string]*repoCall
+	// inflight holds the refresh currently running per REGISTRATION: a second
+	// caller for the same (owner, name, url, ref) waits for that one's result
+	// rather than resolving the ref and cloning again. The url and ref are part
+	// of the key because a repointed source is a different registration: after
+	// `repo set --ref new`, a refresh of the NEW ref must not join an in-flight
+	// refresh of the old one and inherit its commit.
+	inflight map[repoRefreshKey]*repoCall
 }
 
 // repoKey is the cache key encoding: NUL-separated, never appearing in
@@ -132,6 +145,13 @@ func repoKey(ownerUserID, name string) string {
 	return ownerUserID + "\x00" + name
 }
 
+// repoRefreshKey identifies one in-flight refresh: the whole registration, not
+// just its name. A struct rather than a joined string, so no value of any field
+// can forge a different key by embedding the separator.
+type repoRefreshKey struct {
+	ownerUserID, name, url, ref string
+}
+
 func newRepoPusher(pool pymodulePool, store repos.Store, resolveOwnerID func(ctx context.Context, username string) (id string, found bool, err error), osUser string) *repoPusher {
 	return &repoPusher{
 		pool:           pool,
@@ -139,7 +159,7 @@ func newRepoPusher(pool pymodulePool, store repos.Store, resolveOwnerID func(ctx
 		resolveOwnerID: resolveOwnerID,
 		osUser:         osUser,
 		cache:          make(map[string]repoInventory),
-		inflight:       make(map[string]*repoCall),
+		inflight:       make(map[repoRefreshKey]*repoCall),
 	}
 }
 
@@ -151,46 +171,70 @@ func (gp *repoPusher) eligible(le execpool.LiveExecutor) bool {
 }
 
 // refresh refreshes (ownerUserID, name) on every one of that owner's eligible
-// LIVE executors, coalescing concurrent callers for the same source.
+// LIVE executors, coalescing concurrent callers for the same registration.
 //
-// One refresh per repoKey(owner, name) is in flight at a time: a second caller
-// that arrives while one is running waits for that one's result instead of
-// resolving the ref and fanning out again. Two callers — an operator's
-// `repo refresh` and the scheduler's timer, say — therefore cost one clone,
-// and the store is written once. The waiter honours its OWN context: a caller
-// that gives up returns ctx.Err() without disturbing the refresh it was
-// waiting on.
+// One refresh per (owner, name, url, ref) is in flight at a time: a second
+// caller that arrives while one is running waits for that one's result instead
+// of resolving the ref and fanning out again. Two callers — an operator's
+// `repo refresh` and the scheduler's timer, say — therefore cost one clone, and
+// the store is written once. The waiter honours its OWN context: a caller that
+// gives up returns ctx.Err() without disturbing the refresh it was waiting on.
+//
+// A waiter does not inherit a cancellation it never asked for: when the leader
+// failed because ITS caller went away (context.Canceled) while this caller's
+// context is still live, the waiter becomes the leader and runs the refresh
+// itself. Inheriting that error would report a cancellation to a caller who
+// never cancelled.
 //
 // The error is the refresh's error, never a skill's: a bad skill rides
 // RefreshResult.SkillErrors so the scripts half still succeeds.
 func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref string) (RefreshResult, error) {
-	key := repoKey(ownerUserID, name)
-	gp.mu.Lock()
-	if gp.inflight == nil {
-		gp.inflight = make(map[string]*repoCall)
-	}
-	if call, ok := gp.inflight[key]; ok {
+	key := repoRefreshKey{ownerUserID: ownerUserID, name: name, url: url, ref: ref}
+	for {
+		gp.mu.Lock()
+		if gp.inflight == nil {
+			gp.inflight = make(map[repoRefreshKey]*repoCall)
+		}
+		call, running := gp.inflight[key]
+		if !running {
+			call = &repoCall{done: make(chan struct{}), leaderCtx: ctx}
+			gp.inflight[key] = call
+			gp.mu.Unlock()
+			return gp.lead(ctx, key, call, ownerUserID, name, url, ref)
+		}
 		call.waiters++
 		gp.mu.Unlock()
+
 		select {
 		case <-call.done:
+			if call.err != nil && call.leaderCtx.Err() != nil && ctx.Err() == nil {
+				// The leader failed while its own caller had already given up
+				// (cancelled or timed out), so that failure is not an answer
+				// for anyone else: this caller is still waiting for one and
+				// takes over. A leader that SUCCEEDED is an answer whatever its
+				// caller did afterwards.
+				continue
+			}
 			return call.result, call.err
 		case <-ctx.Done():
 			return RefreshResult{}, ctx.Err()
 		}
 	}
-	call := &repoCall{done: make(chan struct{})}
-	gp.inflight[key] = call
-	gp.mu.Unlock()
+}
 
-	result, err := gp.refreshOnce(ctx, ownerUserID, name, url, ref)
-
-	gp.mu.Lock()
-	delete(gp.inflight, key)
-	call.result, call.err = result, err
-	gp.mu.Unlock()
-	close(call.done)
-	return result, err
+// lead runs one refresh and publishes its outcome to every waiter, then frees
+// the slot. The cleanup is DEFERRED so it happens on every exit — a panic in
+// refreshOnce would otherwise leave the registration's slot occupied forever,
+// and every later refresh of it would block on a channel nobody will close.
+func (gp *repoPusher) lead(ctx context.Context, key repoRefreshKey, call *repoCall, ownerUserID, name, url, ref string) (result RefreshResult, err error) {
+	defer func() {
+		gp.mu.Lock()
+		delete(gp.inflight, key)
+		call.result, call.err = result, err
+		gp.mu.Unlock()
+		close(call.done)
+	}()
+	return gp.refreshOnce(ctx, ownerUserID, name, url, ref)
 }
 
 // refreshOnce is refresh's body, run once per in-flight call.
@@ -226,9 +270,10 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 // deterministic.
 func (gp *repoPusher) refreshOnce(ctx context.Context, ownerUserID, name, url, ref string) (RefreshResult, error) {
 	// The stored commit is what makes "unchanged" mean "the ref did not move
-	// since the last refresh". A source that is not registered at all (a
-	// refresh of a name nobody wrote) has no stored commit and nothing to
-	// record; that is not an error here.
+	// since the last refresh", and whether a row existed at all is what tells
+	// the end-of-refresh recheck below whether a missing row means "removed
+	// while this ran" (report it) or "never registered" (write nothing, no
+	// error — a refresh of a name nobody wrote is not a failure).
 	prior, priorErr := gp.recordFor(ctx, ownerUserID, name)
 	if priorErr != nil && !errors.Is(priorErr, repos.ErrNotFound) {
 		return RefreshResult{}, priorErr
@@ -345,6 +390,41 @@ func (gp *repoPusher) refreshOnce(ctx context.Context, ownerUserID, name, url, r
 		VenvError: last.VenvError,
 	}
 
+	// Re-read the registration before writing ANYTHING. A refresh clones for
+	// minutes, and the store is not locked while it does: a `repo remove`, a
+	// repoint or a concurrent add that rolled back can all land in that window.
+	// Writing without re-checking would undo them — the removed source's
+	// repo:<name> skills would reappear, and its commit would be recorded
+	// against a row that no longer exists.
+	//
+	// Two refreshes of DIFFERENT registrations can also run at once (the
+	// in-flight key carries url and ref), so the older one finishing last must
+	// not overwrite the newer one's skills or commit.
+	current, rerr := gp.recordFor(ctx, ownerUserID, name)
+	switch {
+	case errors.Is(rerr, repos.ErrNotFound):
+		if !registered {
+			// Never registered at all (the unit fixtures' shape): there is no
+			// row to record against and none to lose. Report what was found and
+			// write nothing.
+			return result, nil
+		}
+		// Registered when the refresh started, gone now: a removal raced it.
+		// Drop the cached inventory the fan-out just repopulated and report it,
+		// so the caller can never read this as "stored".
+		gp.evict(ownerUserID, name)
+		return RefreshResult{}, fmt.Errorf("refresh %q: %w", name, errRepoRemoved)
+	case rerr != nil:
+		return RefreshResult{}, rerr
+	case current.URL != url || current.Ref != ref:
+		// Repointed (or re-added at a different url/ref) mid-refresh: this
+		// commit and these skills belong to the registration that was replaced.
+		// The newer registration's own refresh owns the write.
+		slog.Info("repo refresh: the registration changed while the refresh ran; nothing was stored",
+			"source", name, "owner", repoOwnerDisplay(ownerUserID), "refreshed_ref", ref, "current_ref", current.Ref)
+		return result, nil
+	}
+
 	// The skills half: one executor's discovery is the repo's set. Executors
 	// that agree on a commit are reading the same tree, so any successful one
 	// names the same skills; taking the lowest-ID responder keeps the choice
@@ -360,12 +440,9 @@ func (gp *repoPusher) refreshOnce(ctx context.Context, ownerUserID, name, url, r
 
 	// Record the resolution even when the commit did not move: the timestamp is
 	// the scheduler's anchor for the next fire, so an unchanged refresh still
-	// resets the clock. A source that is not registered has no row to record
-	// against, and nothing to re-arm either.
-	if registered {
-		if err := gp.store.SetResolved(ctx, ownerUserID, name, commit, time.Now()); err != nil {
-			return RefreshResult{}, fmt.Errorf("record resolved commit for %q: %w", name, err)
-		}
+	// resets the clock.
+	if err := gp.store.SetResolved(ctx, ownerUserID, name, commit, time.Now()); err != nil {
+		return RefreshResult{}, fmt.Errorf("record resolved commit for %q: %w", name, err)
 	}
 	return result, nil
 }

@@ -454,3 +454,131 @@ func TestRepoSetChangesOneHalfAndRearms(t *testing.T) {
 	}
 	c.Eq(before, f.clients["exec-alice"].callCount(), "SetRepo refreshed; it must not")
 }
+
+// TestRepoRemoveDuringRefreshStoresNothing pins the store-write recheck: a
+// refresh clones for minutes with nothing holding the registration, so a
+// `repo remove` can land in the middle of one. Writing afterwards would undo
+// the removal — the repo's repo:<name> skills would reappear and its commit
+// would be recorded against a row that no longer exists.
+func TestRepoRemoveDuringRefreshStoresNothing(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	sk := &repoSkillStore{changed: true}
+	f.gp.skillStore = sk
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+	client.resp = &executorpb.SyncRepoResponse{
+		Skills: []*executorpb.RepoSkill{{Namespace: "ops_tools", Name: "demo"}},
+	}
+	m := connectRepos{c: &Controller{repoStore: f.store, repoPusher: f.gp, skillStore: sk}}
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+	const url = "https://example.net/ops.git"
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+		done <- err
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh never reached SyncRepo")
+	}
+
+	// The operator removes the repo while the refresh is in flight. The
+	// removal drops the repo's skill set first, which is the only write the
+	// test should ever see.
+	c.Require().NoError(m.RemoveRepo(alice, "ops_tools"), "RemoveRepo during the refresh")
+	c.Require().Eq(1, sk.putCount(), "PutSet calls after the removal")
+
+	close(client.release)
+	err := <-done
+
+	c.Require().Error(err, "a refresh whose registration was removed mid-flight reported success")
+	c.ErrorIs(err, repos.ErrNotFound, "the removed refresh's error")
+	c.StrContains(err.Error(), "removed while the refresh was in flight", "the removed refresh's error")
+
+	// Nothing was written: the removal's empty set is still the last one, and
+	// no commit was recorded.
+	c.Eq(1, sk.putCount(), "the refresh wrote skills after the removal")
+	c.Len(sk.sets[sk.puts[0]], 0, "the removal's set was not the last write")
+	if rec, ok := f.store.lastResolved("u_alice", "ops_tools"); ok {
+		t.Errorf("the refresh recorded a commit (%q) against a removed registration", rec.Commit)
+	}
+	rows, lerr := f.store.List(context.Background(), "u_alice")
+	c.Require().NoError(lerr, "list after the race")
+	for _, r := range rows {
+		c.NotEq("ops_tools", r.Name, "the removed registration came back")
+	}
+	// The fan-out's cached inventory is dropped with it.
+	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
+		t.Error("the refresh repopulated the cache of a removed source")
+	}
+}
+
+// TestRepoAddRollbackKeepsAnExistingTimer pins the rollback's schedule rule: a
+// failed RE-add restores a registration that is still scheduled, so its timer
+// must survive. Disarming it would leave an interval in the store and no timer
+// until the daemon restarts.
+func TestRepoAddRollbackKeepsAnExistingTimer(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	timers := &fakeAfter{}
+	sched := newRepoScheduler(f.gp, f.store)
+	sched.now = func() time.Time { return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC) }
+	sched.after = timers.after
+	m := connectRepos{c: &Controller{repoStore: f.store, repoPusher: f.gp}, sched: sched}
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	// A successful add that schedules the repo.
+	if _, _, err := m.AddRepo(alice, "scheduled_tools", "https://example.net/s.git", "main", 20*time.Minute); err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+	c.Require().Eq(1, timers.count(), "the add armed no timer")
+	c.Require().Len(sched.timers, 1, "armed timers")
+
+	// The clone breaks, and the SAME repo is re-added. The add fails and its
+	// registration is restored — with its timer still armed.
+	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
+	_, _, err := m.AddRepo(alice, "scheduled_tools", "https://example.net/moved.git", "v2", 5*time.Minute)
+	c.Require().Error(err, "the re-add with a failing first refresh")
+	c.Require().Len(sched.timers, 1, "the failed re-add disarmed a live timer")
+	if _, ok := sched.timers[repoKey("u_alice", "scheduled_tools")]; !ok {
+		t.Error("the failed re-add left the repo with no timer")
+	}
+	// ...and the store is back to the pre-add schedule, which is what that
+	// timer belongs to.
+	rows, lerr := f.store.List(context.Background(), "u_alice")
+	c.Require().NoError(lerr, "list")
+	for _, r := range rows {
+		if r.Name == "scheduled_tools" {
+			c.Eq(20*time.Minute, r.RefreshInterval, "the restored interval")
+			c.Eq("https://example.net/s.git", r.URL, "the restored url")
+		}
+	}
+}
+
+// TestRepoAddRollbackLeavesNoTimerForANewRegistration is the other direction: a
+// failed FIRST add leaves nothing registered, so nothing may stay armed either.
+func TestRepoAddRollbackLeavesNoTimerForANewRegistration(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	timers := &fakeAfter{}
+	sched := newRepoScheduler(f.gp, f.store)
+	sched.now = func() time.Time { return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC) }
+	sched.after = timers.after
+	m := connectRepos{c: &Controller{repoStore: f.store, repoPusher: f.gp}, sched: sched}
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	f.clients["exec-alice"].err = errors.New("git clone failed: repository not found")
+	_, _, err := m.AddRepo(alice, "new_scheduled", "https://example.net/new.git", "main", 20*time.Minute)
+	c.Require().Error(err, "the first add with a failing refresh")
+	c.Len(sched.timers, 0, "the rolled-back registration left a timer armed")
+	c.Eq(0, timers.count(), "a rolled-back registration armed a timer")
+	rows, lerr := f.store.List(context.Background(), "u_alice")
+	c.Require().NoError(lerr, "list")
+	for _, r := range rows {
+		c.NotEq("new_scheduled", r.Name, "the rolled-back registration survived")
+	}
+}

@@ -198,11 +198,26 @@ func (s *repoScheduler) scheduleRecord(rec repos.Record) {
 // schedule arms (or re-arms) one source's timer for delay from now, replacing
 // any timer it already had.
 func (s *repoScheduler) schedule(ownerUserID, name string, interval, delay time.Duration) {
+	s.install(ownerUserID, name, interval, delay, nil)
+}
+
+// rearm is a FIRE's own re-arm: it installs the next timer only if the source
+// has not been armed or disarmed since that fire was scheduled. Without the
+// check the fire would overwrite a `repo remove` (leaving a timer for a repo
+// that no longer exists) or a `repo set --refresh off` (resurrecting the
+// schedule the operator just cleared) that landed while it ran.
+func (s *repoScheduler) rearm(ownerUserID, name string, interval, delay time.Duration, gen int) bool {
+	return s.install(ownerUserID, name, interval, delay, &gen)
+}
+
+// install arms one source's timer, optionally only when the generation still
+// matches expectGen. It reports whether a timer was installed.
+func (s *repoScheduler) install(ownerUserID, name string, interval, delay time.Duration, expectGen *int) bool {
 	key := repoKey(ownerUserID, name)
 	s.mu.Lock()
-	if s.stopped {
+	if s.stopped || (expectGen != nil && s.gen[key] != *expectGen) {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	s.gen[key]++
 	gen := s.gen[key]
@@ -222,9 +237,10 @@ func (s *repoScheduler) schedule(ownerUserID, name string, interval, delay time.
 	// this handle would forget the newer one.
 	if s.stopped || s.gen[key] != gen {
 		timer.Stop()
-		return
+		return false
 	}
 	s.timers[key] = timer
+	return true
 }
 
 // fire runs one scheduled refresh and re-arms it. gen is the generation the
@@ -263,13 +279,33 @@ func (s *repoScheduler) fire(ownerUserID, name string, gen int) {
 	_, err = s.pusher.refresh(ctx, ownerUserID, name, rec.URL, rec.Ref)
 	s.report(ownerUserID, name, err)
 
-	if rec.RefreshInterval <= 0 {
+	// Re-arm from NOW, not from the schedule's ideal instant: a refresh that
+	// took longer than its interval must not fire again immediately.
+	//
+	// The interval is re-read rather than taken from the record this fire
+	// started with, and the generation is rechecked: the store and the
+	// scheduler both move while a refresh runs, and `repo set --refresh off`
+	// or `repo remove` landing in that window must win. rearm refuses when
+	// either changed, so the operator's write is never overwritten.
+	next, nerr := s.pusher.recordFor(ctx, ownerUserID, name)
+	if nerr != nil {
+		if errors.Is(nerr, repos.ErrNotFound) {
+			// The repo is gone; so is its schedule.
+			s.disarm(ownerUserID, name)
+			return
+		}
+		// A store outage says nothing about the source: keep the schedule
+		// alive on the interval we last knew rather than ending it silently.
+		if interval, ok := s.intervalFor(repoKey(ownerUserID, name)); ok {
+			s.rearm(ownerUserID, name, interval, interval, gen)
+		}
+		return
+	}
+	if next.RefreshInterval <= 0 {
 		s.disarm(ownerUserID, name)
 		return
 	}
-	// Re-arm from NOW, not from the schedule's ideal instant: a refresh that
-	// took longer than its interval must not fire again immediately.
-	s.schedule(ownerUserID, name, rec.RefreshInterval, rec.RefreshInterval)
+	s.rearm(ownerUserID, name, next.RefreshInterval, next.RefreshInterval, gen)
 }
 
 // intervalFor returns the last interval the scheduler knew for key.

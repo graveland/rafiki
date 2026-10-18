@@ -65,6 +65,17 @@ func (f *fakeAfter) last() afterCall {
 	return f.calls[len(f.calls)-1]
 }
 
+// fireFunc returns the function handed to the i'th arm, for a test that must
+// run the fire on its own goroutine (t.Fatalf is illegal off the test's).
+func (f *fakeAfter) fireFunc(i int) func() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.calls) {
+		return nil
+	}
+	return f.calls[i].fire
+}
+
 // fireAt runs the function handed to the i'th arm, in this goroutine, so the
 // test observes the fire's effects without waiting on anything.
 func (f *fakeAfter) fireAt(t *testing.T, i int) {
@@ -264,4 +275,121 @@ func TestRepoScheduleArmFollowsTheStore(t *testing.T) {
 	none.arm("u_alice", "ops_tools")
 	none.disarm("u_alice", "ops_tools")
 	none.stop()
+}
+
+// TestRepoScheduleRemoveDuringFireLeavesNoTimer pins the fire's re-arm rule: a
+// `repo remove` that lands while the fire's refresh is running must win. The
+// fire rechecks the generation and re-reads the interval, so it cannot install
+// a timer for a registration the operator just deleted.
+func TestRepoScheduleRemoveDuringFireLeavesNoTimer(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s, f, timers, base := newScheduleFixture(t)
+	ctx := context.Background()
+	c.Require().NoError(f.store.SetRefreshInterval(ctx, "u_alice", "ops_tools", 5*time.Minute), "set interval")
+	c.Require().NoError(f.store.SetResolved(ctx, "u_alice", "ops_tools", defaultResolveCommit, base), "set resolved")
+
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+
+	s.start(ctx)
+	c.Require().Eq(1, timers.count(), "timers armed")
+	fire := timers.fireFunc(0)
+	c.Require().NotNil(fire, "the fire function")
+
+	fired := make(chan struct{})
+	go func() {
+		fire()
+		close(fired)
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fire never reached SyncRepo")
+	}
+
+	// The operator removes the repo mid-fire: the registration goes, and the
+	// scheduler is disarmed exactly as RemoveRepo does it.
+	c.Require().NoError(f.store.Delete(ctx, "u_alice", "ops_tools"), "delete the registration")
+	s.disarm("u_alice", "ops_tools")
+
+	close(client.release)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fire never finished")
+	}
+
+	c.Len(s.timers, 0, "a removed repo's fire re-armed a timer")
+	c.Eq(1, timers.count(), "the fire re-armed a removed repo")
+}
+
+// TestRepoScheduleIntervalClearedDuringFireLeavesNoTimer is the same rule for
+// `repo set --refresh off`: the fire must not resurrect the schedule the
+// operator just cleared, even though the record it started with still had one.
+func TestRepoScheduleIntervalClearedDuringFireLeavesNoTimer(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s, f, timers, base := newScheduleFixture(t)
+	ctx := context.Background()
+	c.Require().NoError(f.store.SetRefreshInterval(ctx, "u_alice", "ops_tools", 5*time.Minute), "set interval")
+	c.Require().NoError(f.store.SetResolved(ctx, "u_alice", "ops_tools", defaultResolveCommit, base), "set resolved")
+
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+
+	s.start(ctx)
+	fire := timers.fireFunc(0)
+	c.Require().NotNil(fire, "the fire function")
+	fired := make(chan struct{})
+	go func() {
+		fire()
+		close(fired)
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fire never reached SyncRepo")
+	}
+
+	// `repo set --refresh off` mid-fire: the store says on demand, and the
+	// scheduler is re-armed from it (which disarms).
+	c.Require().NoError(f.store.SetRefreshInterval(ctx, "u_alice", "ops_tools", 0), "clear the interval")
+	s.arm("u_alice", "ops_tools")
+
+	close(client.release)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fire never finished")
+	}
+
+	c.Len(s.timers, 0, "the fire re-armed a source whose interval the operator cleared")
+}
+
+// TestRepoScheduleFireKeepsANewInterval arms a fire whose refresh changes the
+// interval underneath it: the re-arm must use the interval that is in the store
+// NOW, not the one the fire started with.
+func TestRepoScheduleFireKeepsANewInterval(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s, f, timers, base := newScheduleFixture(t)
+	ctx := context.Background()
+	c.Require().NoError(f.store.SetRefreshInterval(ctx, "u_alice", "ops_tools", 5*time.Minute), "set interval")
+	c.Require().NoError(f.store.SetResolved(ctx, "u_alice", "ops_tools", defaultResolveCommit, base), "set resolved")
+
+	// The fire's own refresh widens the interval, as `repo set --refresh 30m`
+	// would while it ran.
+	client := f.clients["exec-alice"]
+	client.onCall = func() {
+		_ = f.store.SetRefreshInterval(context.Background(), "u_alice", "ops_tools", 30*time.Minute)
+		// The operator's write re-arms too, as SetRepo does; a generation bump
+		// means the fire leaves the newer timer alone.
+		s.arm("u_alice", "ops_tools")
+	}
+
+	s.start(ctx)
+	timers.fireAt(t, 0)
+
+	c.Require().Eq(2, timers.count(), "arms after the fire")
+	c.Eq(30*time.Minute, timers.last().delay, "re-arm delay after the interval changed")
 }
