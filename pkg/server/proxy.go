@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/http2"
 
 	"go.graveland.dev/rafiki/pkg/capture"
@@ -101,10 +103,25 @@ type MessagesProxy struct {
 	// must carry (see RoutingResolver). Optional; nil on the client-driven
 	// path, which keeps the pre-spec provider-routing behaviour exactly.
 	routingResolver RoutingResolver
+
+	// tracer and spanParent instrument the proxy's LLM calls (see
+	// SetTracing). Both are inert until wiring calls SetTracing.
+	tracer     trace.Tracer
+	spanParent SpanParentResolver
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
 func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
+
+// SetTracing attaches tracing (optional). A nil tp leaves the noop tracer in
+// place; a nil resolver leaves chat spans as roots unless the request already
+// carries a span.
+func (p *MessagesProxy) SetTracing(tp trace.TracerProvider, r SpanParentResolver) {
+	if tp != nil {
+		p.tracer = tp.Tracer("rafiki.server")
+	}
+	p.spanParent = r
+}
 
 // SetRawTrace enables raw HTTP request/response capture for debug. Pass nil to
 // disable (the default).
@@ -209,7 +226,7 @@ func (p *MessagesProxy) costFields(r *http.Request, convID, model string, usage 
 	defer cancel()
 	prior, err := p.store.ConversationTokens(ctx, convID)
 	if err != nil {
-		p.logger.Warn("proxy: conversation cost rollup failed", "conversation", convID, "error", err)
+		p.logger.WarnContext(r.Context(), "proxy: conversation cost rollup failed", "conversation", convID, "error", err)
 		return fields
 	}
 	total := turn
@@ -295,7 +312,7 @@ func NewMessagesProxy(store *capture.CaptureStore, auth Authenticator, apiKey, u
 		logger.Warn("proxy: h2 transport configure failed; no upstream keepalive pings", "error", err)
 	}
 	httpClient := &http.Client{Transport: transport}
-	p := &MessagesProxy{auth: auth, apiKey: apiKey, upstreamURL: upstreamURL, defaultModel: defaultModel, catalog: catalog, httpClient: httpClient, logger: logger}
+	p := &MessagesProxy{auth: auth, apiKey: apiKey, upstreamURL: upstreamURL, defaultModel: defaultModel, catalog: catalog, httpClient: httpClient, logger: logger, tracer: noopTracer()}
 	if store != nil {
 		p.store = store // avoid a typed-nil interface: nil *CaptureStore = capture-less
 	}
@@ -395,7 +412,7 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody [
 	if m, ok := payload["model"].(string); ok {
 		payload["model"] = p.catalog.OpenRouterModel(m)
 	} else {
-		p.logger.Warn("proxy: openrouter request has no string model; forwarding untranslated")
+		p.logger.WarnContext(r.Context(), "proxy: openrouter request has no string model; forwarding untranslated")
 	}
 	// Pinned model lines get their provider preferences injected; a
 	// caller-supplied provider object still wins for the pin. The guard's
@@ -465,7 +482,7 @@ func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model strin
 				hasCaller = false
 			case map[string]any:
 			default:
-				p.logger.Warn("proxy: caller provider field is not an object; replacing it to hold data policy",
+				p.logger.WarnContext(r.Context(), "proxy: caller provider field is not an object; replacing it to hold data policy",
 					"provider", payload["provider"])
 				payload["provider"] = map[string]any{}
 			}
@@ -624,6 +641,18 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	// The chat span is opened once the model is known (it names the span) and
+	// before capture, so every downstream log and step carries it.
+	ctx, span := startChatSpan(r.Context(), p.tracer, p.spanParent,
+		routingSessionID(r), claudethread.PreviousMessageID(reqBody), model, "", "anthropic")
+	thread := "main"
+	if billing, ok := claudethread.BillingFromRequest(reqBody); ok && billing.IsSubagent {
+		thread = "subagent"
+	}
+	span.SetAttributes(attribute.String("rafiki.thread", thread))
+	r = r.WithContext(ctx)
+	defer span.End()
+
 	// Best-effort capture setup (never blocks the proxy on failure).
 	cr := p.beginCapture(r, reqBody, model)
 	// Whether the client asked for a stream decides what a well-formed 2xx
@@ -635,6 +664,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return // selectUpstream already wrote the response and resolved the turn
 	}
 	if err != nil {
+		recordSpanError(r.Context(), err.Error())
 		p.failTurn(r, cr, err.Error())
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
@@ -657,6 +687,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	span.SetAttributes(attribute.String("gen_ai.provider.name", upstream))
 	defer resp.Body.Close()
 	p.streamAndCapture(w, r, resp, cr, upstream, model, start, stream)
 }
@@ -808,7 +839,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 					case <-r.Context().Done():
 						return resp, "anthropic", r.Context().Err(), false
 					}
-					p.logger.Warn("proxy: primary failed, retrying before failover",
+					p.logger.WarnContext(r.Context(), "proxy: primary failed, retrying before failover",
 						"attempt", i+1, "status", status, "error", err)
 					resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, reqBody, r)
 					status = statusOf(resp)
@@ -908,7 +939,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			case <-r.Context().Done():
 				return resp, "anthropic", r.Context().Err(), false
 			}
-			p.logger.Warn("proxy: primary failed, retrying before failover",
+			p.logger.WarnContext(r.Context(), "proxy: primary failed, retrying before failover",
 				"attempt", i+1, "status", status, "error", err)
 			resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, reqBody, r)
 			status = statusOf(resp)
@@ -923,7 +954,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		}
 		// Failing over to OpenRouter. Log it (mirrors core.go's in-process path) so
 		// an Anthropic outage masked by a successful failover isn't invisible.
-		p.logger.Warn("proxy: primary failed, failing over to openrouter", "status", status, "out_of_credit", outOfCredit, "error", err)
+		p.logger.WarnContext(r.Context(), "proxy: primary failed, failing over to openrouter", "status", status, "out_of_credit", outOfCredit, "error", err)
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -973,11 +1004,10 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 		want = "text/event-stream"
 	}
 	bodyPreview := boundedErrorBody(raw)
-	p.logger.Warn("proxy: upstream 2xx with wrong content type; surfacing as 502",
+	p.logger.WarnContext(r.Context(), "proxy: upstream 2xx with wrong content type; surfacing as 502",
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
 		"status", resp.StatusCode, "content_type", resp.Header.Get("Content-Type"), "want", want,
 		"body", bodyPreview, "latency", latency(elapsed))
-	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 	reason := "upstream " + strconv.Itoa(resp.StatusCode) + " content-type " + strconv.Quote(resp.Header.Get("Content-Type")) + " (want " + want + ")"
 	if rerr != nil {
 		reason += " (body read failed: " + rerr.Error() + ")"
@@ -985,6 +1015,8 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 	if bodyPreview != "" {
 		reason += ": " + bodyPreview
 	}
+	recordSpanError(r.Context(), reason)
+	p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 	p.failTurn(r, cr, reason)
 	msg := "upstream returned HTTP " + strconv.Itoa(resp.StatusCode) + " with an unexpected content type (" + resp.Header.Get("Content-Type") + ")"
 	if bodyPreview != "" {
@@ -998,7 +1030,7 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Length", strconv.Itoa(len(clientBody)))
 	w.WriteHeader(http.StatusBadGateway)
 	if _, werr := w.Write(clientBody); werr != nil {
-		p.logger.Warn("proxy: client write failed on malformed-success response", "conversation", cr.convID, "error", werr)
+		p.logger.WarnContext(r.Context(), "proxy: client write failed on malformed-success response", "conversation", cr.convID, "error", werr)
 	}
 	// After the client write: the insert has a 60s retry budget, and the client
 	// must not wait on it for an error response it is owed now (same shape as
@@ -1039,7 +1071,7 @@ func (p *MessagesProxy) captureQuota(r *http.Request, resp *http.Response, upstr
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := p.quotaStore.Upsert(ctx, id.UserID, st); err != nil {
-			p.logger.Warn("proxy: quota upsert failed", "conversation", convID, "user", id.Username, "error", err)
+			p.logger.WarnContext(r.Context(), "proxy: quota upsert failed", "conversation", convID, "user", id.Username, "error", err)
 		}
 	}()
 }
@@ -1105,7 +1137,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// Without a Flusher every SSE event (including keep-alive pings) sits in
 		// net/http's buffer until it fills — the client's stall detector will
 		// abort long turns. Loud because it means a middleware broke streaming.
-		p.logger.Warn("proxy: ResponseWriter is not an http.Flusher; SSE responses will buffer", "conversation", cr.convID)
+		p.logger.WarnContext(r.Context(), "proxy: ResponseWriter is not an http.Flusher; SSE responses will buffer", "conversation", cr.convID)
 	}
 	buf := make([]byte, 16*1024)
 	var streamErr error    // a real mid-stream read error (not clean io.EOF)
@@ -1116,7 +1148,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		if n > 0 {
 			lastByte = time.Now()
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				p.logger.Warn("proxy: client write failed mid-stream", "conversation", cr.convID, "error", werr)
+				p.logger.WarnContext(r.Context(), "proxy: client write failed mid-stream", "conversation", cr.convID, "error", werr)
 				clientGone = true
 				break // client went away; record as aborted below, not complete
 			}
@@ -1147,18 +1179,20 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 			// Inbound request context canceled — the client hung up (stall-detector
 			// abort, Esc, disconnect) and the cancel propagated into our upstream
 			// read. Upstream is not implicated.
-			p.logger.Warn("llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client canceled", "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
-			p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+			p.logger.WarnContext(r.Context(), "llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client canceled", "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 			reason := "client canceled mid-stream (last upstream byte " + stall + " earlier)"
+			recordSpanError(r.Context(), reason)
+			p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 			rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 			p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
 			rawCancel()
 			p.failTurn(r, cr, reason)
 			return
 		}
-		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "error", streamErr, "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn truncated", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "error", streamErr, "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 		reason := "mid-stream read error: " + streamErr.Error()
+		recordSpanError(r.Context(), reason)
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
 		rawCancel()
@@ -1169,8 +1203,9 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// The client disconnected mid-stream: the accumulated body is a partial
 		// response with undercounted usage. Record it errored, not 'complete', so
 		// truncated turns don't pollute the capture store as clean completions.
-		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "bytes", acc.Len(), "last_byte_ago", latency(time.Since(lastByte)), "latency", latency(elapsed))
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "bytes", acc.Len(), "last_byte_ago", latency(time.Since(lastByte)), "latency", latency(elapsed))
+		recordSpanError(r.Context(), "client disconnected mid-stream")
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), "client disconnected mid-stream", elapsed)
 		rawCancel()
@@ -1184,9 +1219,10 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// completion — record it errored (the client already got the bytes).
 		// The body prefix is the only forensic trace of what the upstream
 		// actually sent; without it the body vanishes with the connection.
-		p.logger.Warn("llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "error", perr, "body_prefix", boundedErrorBody(acc.Bytes()))
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "error", perr, "body_prefix", boundedErrorBody(acc.Bytes()))
 		reason := "capture parse failed: " + perr.Error()
+		recordSpanError(r.Context(), reason)
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
 		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
 		rawCancel()
@@ -1198,7 +1234,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// glitch, not a client-visible problem — the client already got the
 		// correct bytes); usage/canonical are otherwise intact, so the turn is
 		// still recorded as a normal completion below.
-		p.logger.Warn("llm turn: tool input repaired", "conversation", cr.convID, "upstream", upstream, "model", model, "detail", repaired)
+		p.logger.WarnContext(r.Context(), "llm turn: tool input repaired", "conversation", cr.convID, "upstream", upstream, "model", model, "detail", repaired)
 	}
 	turnFields := []any{
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
@@ -1208,8 +1244,9 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"cache_pct", cachePct(usage),
 		"stop_reason", stop, "latency", latency(elapsed),
 	}
-	p.logger.Info("llm turn", append(turnFields, p.costFields(r, cr.convID, model, usage)...)...)
-	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
+	p.logger.InfoContext(r.Context(), "llm turn", append(turnFields, p.costFields(r, cr.convID, model, usage)...)...)
+	setUsageAttributes(trace.SpanFromContext(r.Context()), usage)
+	p.metrics.ObserveTurn(r.Context(), upstream, "complete", "anthropic", elapsed, usage)
 	// A clean completion is the upstream verdict that clears the rate-limit
 	// watch: the model answered, so nothing is waiting on a reset (see the
 	// Controller side, ratelimit_resume.go).
@@ -1239,7 +1276,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
 		LatencyMS: int(elapsed.Milliseconds()),
 	}); cerr != nil {
-		p.logger.Warn("proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
+		p.logger.WarnContext(r.Context(), "proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
 		// Don't leave the turn stranded 'pending' on a completion write failure;
 		// mark it errored so it isn't a false orphan for the sweep.
 		p.failTurn(r, cr, "complete-turn failed: "+cerr.Error())
@@ -1272,24 +1309,24 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	// root row. RecordThread is best-effort and never fails the turn.
 	ownMsg := capture.MessageIDFromCanonical(canonical)
 	if cr.hasBilling {
-		p.logger.Debug("claude thread",
+		p.logger.DebugContext(r.Context(), "claude thread",
 			"conversation", cr.convID, "turn", cr.turnID,
 			"is_subagent", cr.isSubagent, "entrypoint", cr.billing.Entrypoint,
 			"prev_message_id", cr.prevMessageID, "own_message_id", ownMsg,
 			"chained", cr.prevMessageID != "")
 	}
 	if terr := p.store.RecordThread(capCtx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {
-		p.logger.Warn("proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
+		p.logger.WarnContext(r.Context(), "proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
 	}
 	nextOrdinal, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash)
 	if derr != nil {
-		p.logger.Warn("proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
+		p.logger.WarnContext(r.Context(), "proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
 		p.failTurn(r, cr, "decompose request failed: "+derr.Error())
 		return
 	}
 	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
 		nextOrdinal, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
-		p.logger.Warn("proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
+		p.logger.WarnContext(r.Context(), "proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
 	}
@@ -1315,7 +1352,7 @@ func (p *MessagesProxy) failTurnCtx(ctx context.Context, cr captureRef, reason s
 		return
 	}
 	if ferr := p.store.FailTurn(ctx, cr.turnID, cr.createdAt, reason); ferr != nil {
-		p.logger.Warn("proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr)
+		p.logger.WarnContext(ctx, "proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr)
 	}
 }
 
@@ -1348,7 +1385,7 @@ func (p *MessagesProxy) decomposeRequestCtx(ctx context.Context, cr captureRef) 
 		return
 	}
 	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
-		p.logger.Warn("proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
+		p.logger.WarnContext(ctx, "proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
 	}
 }
 
@@ -1364,7 +1401,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 		// The error body is small; a read failure means the upstream connection
 		// dropped mid-delivery. Note it so the failed turn isn't a silent,
 		// bodyless mystery, and still forward whatever bytes did arrive.
-		p.logger.Warn("proxy: reading upstream error body failed", "conversation", cr.convID, "error", rerr, "bytes", len(raw))
+		p.logger.WarnContext(r.Context(), "proxy: reading upstream error body failed", "conversation", cr.convID, "error", rerr, "bytes", len(raw))
 	}
 	elapsed := time.Since(start)
 	user := p.requestUser(r)
@@ -1387,7 +1424,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Length", strconv.Itoa(len(clientBody)))
 	w.WriteHeader(resp.StatusCode)
 	if _, werr := w.Write(clientBody); werr != nil {
-		p.logger.Warn("proxy: client write failed on error response", "conversation", cr.convID, "error", werr)
+		p.logger.WarnContext(r.Context(), "proxy: client write failed on error response", "conversation", cr.convID, "error", werr)
 	}
 
 	// Store the ORIGINAL upstream body (the richest form) on the turn, not the
@@ -1400,8 +1437,9 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	if errBody != "" {
 		reason += ": " + errBody
 	}
-	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
-	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	p.logger.WarnContext(r.Context(), "llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
+	recordSpanError(r.Context(), reason)
+	p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 	// A 429 is the one upstream rejection the daemon acts on itself: the
 	// auto-resume watch marks the child rate-limited (with the reset time when
 	// the response names one) so the child's idle transition can schedule a
@@ -1704,7 +1742,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 		tid, terr := p.store.ThreadOfPredecessorInSession(r.Context(), session, prevMsg)
 		switch {
 		case terr != nil:
-			p.logger.Warn("proxy capture: thread lookup failed", "session", session, "error", terr)
+			p.logger.WarnContext(r.Context(), "proxy capture: thread lookup failed", "session", session, "error", terr)
 		case tid != "":
 			threadID = tid
 		default:
@@ -1723,7 +1761,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 			}); ok {
 				family, terr = probe.SessionFamilyExists(r.Context(), session)
 				if terr != nil {
-					p.logger.Warn("proxy capture: session family probe failed", "session", session, "error", terr)
+					p.logger.WarnContext(r.Context(), "proxy capture: session family probe failed", "session", session, "error", terr)
 					family = false
 				}
 			}
@@ -1735,7 +1773,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	convID, err := p.store.ResolveThreadConversation(r.Context(), baseRef, threadID)
 	if err != nil {
-		p.logger.Warn("proxy capture: ensure-conversation failed", "error", err)
+		p.logger.WarnContext(r.Context(), "proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}
 	}
 	// A non-root thread that can ACT is a Task subagent. Give it a child record
@@ -1755,7 +1793,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// parent made belongs anyway.
 	if threadID != "" && p.threadObserver != nil && claudethread.DeclaresClientTools(reqBody) {
 		if eerr := p.threadObserver.EnsureThreadChild(session, threadID, convID); eerr != nil {
-			p.logger.Warn("proxy capture: ensure thread child failed",
+			p.logger.WarnContext(r.Context(), "proxy capture: ensure thread child failed",
 				"session", session, "thread", threadID, "error", eerr)
 		}
 	}
@@ -1769,7 +1807,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 		Source: turnSource, AuthorUserID: ownerUserID, AuthorKind: authorKind, PrefixHash: prefixHash,
 	})
 	if err != nil {
-		p.logger.Warn("proxy capture: insert-intent failed", "conversation", convID, "error", err)
+		p.logger.WarnContext(r.Context(), "proxy capture: insert-intent failed", "conversation", convID, "error", err)
 		return captureRef{convID: convID}
 	}
 	return captureRef{

@@ -16,6 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -48,6 +51,11 @@ type ChatCompletionsProxy struct {
 	httpClient *http.Client
 	logger     *slog.Logger
 	metrics    *Metrics
+
+	// tracer and spanParent instrument this face's LLM calls (see
+	// SetTracing). Both are inert until wiring calls SetTracing.
+	tracer     trace.Tracer
+	spanParent SpanParentResolver
 }
 
 func NewChatCompletionsProxy(cs *capture.CaptureStore, auth Authenticator, upstreams []OpenAIUpstream, routes []OpenAIRoute, defaultUpstream string, logger *slog.Logger) *ChatCompletionsProxy {
@@ -65,12 +73,22 @@ func NewChatCompletionsProxy(cs *capture.CaptureStore, auth Authenticator, upstr
 			Proxy:                 http.ProxyFromEnvironment,
 			ResponseHeaderTimeout: 60 * time.Second,
 		}},
-		logger: logger,
+		logger: logger, tracer: noopTracer(),
 	}
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
 func (p *ChatCompletionsProxy) SetMetrics(m *Metrics) { p.metrics = m }
+
+// SetTracing attaches tracing (optional). A nil tp leaves the noop tracer in
+// place; a nil resolver leaves chat spans as roots unless the request already
+// carries a span.
+func (p *ChatCompletionsProxy) SetTracing(tp trace.TracerProvider, r SpanParentResolver) {
+	if tp != nil {
+		p.tracer = tp.Tracer("rafiki.server")
+	}
+	p.spanParent = r
+}
 
 func (p *ChatCompletionsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -89,17 +107,26 @@ func (p *ChatCompletionsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	model := modelOfBody(reqBody)
+	// The chat span is opened once the model is known (it names the span).
+	// There is no previous-message id on this face, so a resolver gets "".
+	ctx, span := startChatSpan(r.Context(), p.tracer, p.spanParent, routingSessionID(r), "", model, "", "openai")
+	r = r.WithContext(ctx)
+	defer span.End()
+
 	up, ok := p.selectUpstream(model)
 	if !ok {
+		recordSpanError(r.Context(), "no upstream configured for model "+model)
 		http.Error(w, "no upstream configured for model "+model, http.StatusBadGateway)
 		return
 	}
+	span.SetAttributes(attribute.String("gen_ai.provider.name", up.Name))
 
 	cr := p.beginCapture(r, reqBody, model)
 
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		strings.TrimSuffix(up.BaseURL, "/")+"/chat/completions", bytes.NewReader(reqBody))
 	if err != nil {
+		recordSpanError(r.Context(), err.Error())
 		p.failTurn(r, cr, err.Error())
 		http.Error(w, "build upstream request", http.StatusInternalServerError)
 		return
@@ -116,6 +143,7 @@ func (p *ChatCompletionsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	resp, err := p.httpClient.Do(upReq)
 	if err != nil {
+		recordSpanError(r.Context(), err.Error())
 		p.failTurn(r, cr, err.Error())
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
@@ -153,7 +181,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 		n, rerr := body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				p.logger.Warn("openai proxy: client write failed mid-stream", "conversation", cr.convID, "error", werr)
+				p.logger.WarnContext(r.Context(), "openai proxy: client write failed mid-stream", "conversation", cr.convID, "error", werr)
 				clientGone = true
 				break
 			}
@@ -172,36 +200,41 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 	elapsed := time.Since(start)
 	switch {
 	case resp.StatusCode >= 400:
-		p.logger.Warn("llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "status", resp.StatusCode, "latency", latency(elapsed))
-		p.metrics.ObserveTurn(upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "status", resp.StatusCode, "latency", latency(elapsed))
+		recordSpanError(r.Context(), "upstream status "+strconv.Itoa(resp.StatusCode))
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "upstream status "+strconv.Itoa(resp.StatusCode))
 		return
 	case streamErr != nil:
-		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "error", streamErr)
-		p.metrics.ObserveTurn(upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn truncated", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "error", streamErr)
+		recordSpanError(r.Context(), "mid-stream read error: "+streamErr.Error())
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "mid-stream read error: "+streamErr.Error())
 		return
 	case clientGone:
-		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "reason", "client disconnected mid-stream")
-		p.metrics.ObserveTurn(upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn aborted", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "reason", "client disconnected mid-stream")
+		recordSpanError(r.Context(), "client disconnected mid-stream")
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "client disconnected mid-stream")
 		return
 	}
 
 	finish, usage, canonical, perr := parseOpenAIResponse(resp.Header.Get("Content-Type"), acc.Bytes())
 	if perr != nil {
-		p.logger.Warn("llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "error", perr)
-		p.metrics.ObserveTurn(upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.logger.WarnContext(r.Context(), "llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "error", perr)
+		recordSpanError(r.Context(), "capture parse failed: "+perr.Error())
+		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "capture parse failed: "+perr.Error())
 		return
 	}
-	p.logger.Info("llm turn",
+	p.logger.InfoContext(r.Context(), "llm turn",
 		"conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai",
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens,
 		"cache_pct", cachePct(usage),
 		"finish_reason", finish, "latency", latency(elapsed))
-	p.metrics.ObserveTurn(upstream, "complete", "openai", elapsed, usage)
+	setUsageAttributes(trace.SpanFromContext(r.Context()), usage)
+	p.metrics.ObserveTurn(r.Context(), upstream, "complete", "openai", elapsed, usage)
 	if !cr.on {
 		return
 	}
@@ -213,7 +246,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
 		LatencyMS: int(elapsed.Milliseconds()),
 	}); cerr != nil {
-		p.logger.Warn("openai proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
+		p.logger.WarnContext(r.Context(), "openai proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
 		p.failTurn(r, cr, "complete-turn failed: "+cerr.Error())
 	}
 }
@@ -237,7 +270,7 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 		OwnerUserID: ownerUserID, ExternalRef: r.Header.Get("X-Rafiki-Session"),
 	})
 	if err != nil {
-		p.logger.Warn("openai proxy capture: ensure-conversation failed", "error", err)
+		p.logger.WarnContext(r.Context(), "openai proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}
 	}
 	authorKind, turnSource := authorAttribution(reqBody, source)
@@ -247,7 +280,7 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 		PrefixHash: routing.PrefixHash(reqBody), Protocol: string(store.ProtocolOpenAI),
 	})
 	if err != nil {
-		p.logger.Warn("openai proxy capture: insert-intent failed", "conversation", convID, "error", err)
+		p.logger.WarnContext(r.Context(), "openai proxy capture: insert-intent failed", "conversation", convID, "error", err)
 		return captureRef{convID: convID}
 	}
 	return captureRef{convID: convID, turnID: turnID, createdAt: createdAt, on: true}
@@ -260,7 +293,7 @@ func (p *ChatCompletionsProxy) failTurn(r *http.Request, cr captureRef, reason s
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
 	if ferr := p.store.FailTurn(capCtx, cr.turnID, cr.createdAt, reason); ferr != nil {
-		p.logger.Warn("openai proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr)
+		p.logger.WarnContext(r.Context(), "openai proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr)
 	}
 }
 

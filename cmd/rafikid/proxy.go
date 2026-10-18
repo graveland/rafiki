@@ -402,7 +402,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// scrapers and probes do not carry client tokens. Only the LLM faces
 	// require authentication.
 	if opts.Registry != nil {
-		mux.Handle("/metrics", promhttp.HandlerFor(opts.Registry, promhttp.HandlerOpts{}))
+		mux.Handle("/metrics", promhttp.HandlerFor(opts.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	}
 
 	// Everything unrouted lands here, and says so.
