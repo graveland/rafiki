@@ -13,10 +13,12 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/telemetry"
 )
 
 // BatchSuffix marks an OpenRouter model id whose first call goes through the
@@ -154,7 +156,8 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 	resp, err := c.batcher.Park(ctx, BatchCustomID(convID, meta.Ordinal), string(params.Model), params, provider)
 	latency := int(time.Since(start).Milliseconds())
 	if err != nil {
-		span.RecordError(err)
+		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
+		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
 		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err, hdrs)
 		return nil, err
@@ -165,6 +168,12 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 		attribute.Int64("rafiki.tokens.output", resp.Usage.OutputTokens),
 		attribute.Int64("rafiki.tokens.cache_read", resp.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
+		attribute.String("gen_ai.response.model", resp.Model),
+		attribute.Int64("gen_ai.usage.input_tokens", resp.Usage.InputTokens),
+		attribute.Int64("gen_ai.usage.output_tokens", resp.Usage.OutputTokens),
+		attribute.Int64("gen_ai.usage.cache_read.input_tokens", resp.Usage.CacheReadInputTokens),
+		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", resp.Usage.CacheCreationInputTokens),
+		attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(resp.StopReason)}),
 	)
 	if ref.capturing {
 		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, primary, latency)

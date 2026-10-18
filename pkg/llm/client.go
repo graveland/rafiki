@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
@@ -24,6 +25,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/telemetry"
 )
 
 // Client is the long-lived library handle: configured providers, per-provider
@@ -55,6 +57,10 @@ type Client struct {
 
 	rawTrace rawTraceRecorder       // nil when disabled
 	guard    *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
+
+	// spanParent, when non-nil, supplies the parent for a span started from a
+	// context that carries none. See WithSpanParent.
+	spanParent func() trace.SpanContext
 }
 
 // rawTraceRecorder is the one method Client needs from *rawtrace.RawTraceStore,
@@ -169,6 +175,26 @@ func WithRecordRequests(s *rawtrace.RawTraceStore) ClientOption {
 // the standalone binary constructs one from OTLP env vars. Omitted = no-op.
 func WithTracerProvider(tp trace.TracerProvider) ClientOption {
 	return func(c *Client) { c.tracer = tp.Tracer("go.graveland.dev/rafiki/pkg/llm") }
+}
+
+// WithSpanParent sets where this client's spans attach when the caller's
+// context carries no span: a fundi child's LLM calls nest under the turn the
+// daemon's span observer holds open. Ignored when ctx already has a valid span.
+func WithSpanParent(f func() trace.SpanContext) ClientOption {
+	return func(c *Client) { c.spanParent = f }
+}
+
+// spanCtx returns ctx with the configured span parent attached when ctx
+// carries no span of its own. An invalid returned SpanContext is ignored, so a
+// parent source that has not opened its span yet leaves the call a root.
+func (c *Client) spanCtx(ctx context.Context) context.Context {
+	if c.spanParent == nil || trace.SpanContextFromContext(ctx).IsValid() {
+		return ctx
+	}
+	if sc := c.spanParent(); sc.IsValid() {
+		return trace.ContextWithSpanContext(ctx, sc)
+	}
+	return ctx
 }
 
 func NewClient(opts ...ClientOption) (*Client, error) {
@@ -432,11 +458,18 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	attrs := []attribute.KeyValue{
 		attribute.String("rafiki.model", string(params.Model)),
 		attribute.String("rafiki.primary", primary),
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.request.model", string(params.Model)),
+		attribute.String("gen_ai.provider.name", primary),
 	}
 	if !spec.IsZero() {
 		attrs = append(attrs, attribute.String("rafiki.routing", spec.String()))
 	}
-	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(attrs...))
+	if meta.OriginEntrypoint != "" {
+		attrs = append(attrs, attribute.String("rafiki.entrypoint", meta.OriginEntrypoint))
+	}
+	ctx, span := c.tracer.Start(c.spanCtx(ctx), "chat "+string(params.Model),
+		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
@@ -503,7 +536,8 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
 
 	if err != nil {
-		span.RecordError(err)
+		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
+		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
 		// Raw trace: non-streaming error path.
 		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err, hdrs)
@@ -515,6 +549,12 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		attribute.Int64("rafiki.tokens.output", resp.Usage.OutputTokens),
 		attribute.Int64("rafiki.tokens.cache_read", resp.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
+		attribute.String("gen_ai.response.model", resp.Model),
+		attribute.Int64("gen_ai.usage.input_tokens", resp.Usage.InputTokens),
+		attribute.Int64("gen_ai.usage.output_tokens", resp.Usage.OutputTokens),
+		attribute.Int64("gen_ai.usage.cache_read.input_tokens", resp.Usage.CacheReadInputTokens),
+		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", resp.Usage.CacheCreationInputTokens),
+		attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(resp.StopReason)}),
 	)
 	if p, ok := c.set.Get(servedBy); ok && p.Kind == providers.KindAnthropicOpenRouter {
 		c.guard.Observe(time.Now(), routing.Observation{
@@ -720,7 +760,8 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		}()
 	}
 	if serr != nil {
-		span.RecordError(serr)
+		span.RecordError(errors.New(telemetry.ErrorText(serr.Error())))
+		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
 		if breaker != nil {
 			// Nothing delivered yet and a real fallback exists: hand off
@@ -761,7 +802,8 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		SanitizeInvalidAccumulatedInput(&acc, ev)
 		if aerr := acc.Accumulate(ev); aerr != nil {
 			wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
-			span.RecordError(wrapped)
+			span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
+			span.SetStatus(codes.Error, "")
 			c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
 			recordPrimaryResult(breaker, now, wrapped)
 			c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
@@ -771,7 +813,8 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		backfillDeltaUsage(&acc, ev)
 	}
 	if serr := stream.Err(); serr != nil {
-		span.RecordError(serr)
+		span.RecordError(errors.New(telemetry.ErrorText(serr.Error())))
+		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
 		if !delivered && breaker != nil {
 			// Hand off WITHOUT recording, for the same reason as the
@@ -803,6 +846,12 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		attribute.Int64("rafiki.tokens.output", acc.Usage.OutputTokens),
 		attribute.Int64("rafiki.tokens.cache_read", acc.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", acc.Usage.CacheCreationInputTokens),
+		attribute.String("gen_ai.response.model", acc.Model),
+		attribute.Int64("gen_ai.usage.input_tokens", acc.Usage.InputTokens),
+		attribute.Int64("gen_ai.usage.output_tokens", acc.Usage.OutputTokens),
+		attribute.Int64("gen_ai.usage.cache_read.input_tokens", acc.Usage.CacheReadInputTokens),
+		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", acc.Usage.CacheCreationInputTokens),
+		attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(acc.StopReason)}),
 	)
 	if p, ok := c.set.Get(primary); ok && p.Kind == providers.KindAnthropicOpenRouter {
 		// acc is the fully accumulated message at this point (the loop above
@@ -978,7 +1027,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			// sees exactly the error the sender returned.
 			return nil, primary, c.noEligibleError(spec, string(params.Model), err)
 		}
-		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", err.Error())))
+		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", telemetry.ErrorText(err.Error()))))
 		c.logger.Warn("primary failed; failing over", "primary", primary, "error", err)
 	}
 

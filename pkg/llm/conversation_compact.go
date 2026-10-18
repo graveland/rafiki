@@ -162,8 +162,11 @@ func (conv *Conversation) Compact(ctx context.Context, instructions string, opts
 	for _, opt := range opts {
 		opt(&scfg)
 	}
-	ctx, span := conv.client.tracer.Start(ctx, "llm.conversation.compact",
-		trace.WithAttributes(attribute.String("rafiki.conversation", conv.ID)))
+	ctx, span := conv.client.tracer.Start(conv.client.spanCtx(ctx), "llm.conversation.compact",
+		trace.WithAttributes(
+			attribute.String("rafiki.conversation", conv.ID),
+			attribute.String("gen_ai.conversation.id", conv.ID),
+		))
 	defer span.End()
 
 	history, err := conv.loadHistory(ctx)
