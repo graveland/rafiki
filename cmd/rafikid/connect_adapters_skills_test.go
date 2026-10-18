@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/skills"
 
@@ -199,4 +200,56 @@ func TestSkillTargetPrefersUserLayer(t *testing.T) {
 	f.rows = f.rows[:2]
 	ck.NoError(c.SetSkillEnabled(skillUserCtx("u1", true), "rafiki", "s", true), "SetSkillEnabled")
 	ck.Eq("global-id", f.enabledID, "the global row wins over core")
+}
+
+// The boundary the whole permission model rests on: another owner's row is not
+// addressable by name at all. B naming A's `ns:name` must be NotFound — not a
+// permission error, which would confirm the row exists — and A's row must be
+// untouched. No global or core row shares the name, so there is nothing else
+// for the verb to land on.
+func TestSkillWriteCannotTargetAnotherOwnersRow(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := &fakeSkillStore{rows: []skills.Record{
+		{ID: "a-row", Namespace: "rafiki", Name: "s", Source: "manual", OwnerUserID: "u-a"},
+	}}
+	c := connectSkills{st: f}
+	b := skillUserCtx("u-b", false)
+
+	err := c.DeleteSkill(b, "rafiki", "s")
+	ck.ErrorIs(err, connectapi.ErrSkillNotFound, "u-b deleting u-a's row: got")
+	ck.Eq("", f.deletedID, "u-b's DeleteSkill reached the store")
+
+	err = c.SetSkillEnabled(b, "rafiki", "s", false)
+	ck.ErrorIs(err, connectapi.ErrSkillNotFound, "u-b toggling u-a's row: got")
+	ck.Eq("", f.enabledID, "u-b's SetSkillEnabled reached the store")
+
+	// A still owns it: A resolves the row and can delete it.
+	ck.NoError(c.DeleteSkill(skillUserCtx("u-a", false), "rafiki", "s"), "u-a deleting their own row")
+	ck.Eq("a-row", f.deletedID, "u-a's DeleteSkill reached the store with id")
+}
+
+// `show` and `list` must agree about the same row: a fallback row (the name is
+// not in effect because a higher layer replaced its namespace) is shadowed in
+// both. Without this, GetSkill reports every row as in effect.
+func TestSkillGetMarksShadowed(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := &fakeSkillStore{rows: []skills.Record{
+		{ID: "own-id", Namespace: "pg", Name: "a", Source: "manual", OwnerUserID: "u1", Enabled: true},
+		{ID: "global-id", Namespace: "pg", Name: "b", Source: "manual", Enabled: true},
+	}}
+	c := connectSkills{st: f}
+	ctx := skillUserCtx("u1", false)
+
+	// The user layer holds namespace pg, so the global layer's pg rows are
+	// replaced whole. b is not resolved, so GetSkill falls back to it.
+	row, err := c.GetSkill(ctx, "pg", "b")
+	ck.Require().NoError(err, "GetSkill of a shadowed row")
+	ck.Eq("global-id", row.ID, "GetSkill returned")
+	ck.True(row.Shadowed, "a row a higher layer replaced is shadowed")
+	ck.Eq("global", row.Layer, "layer")
+
+	row, err = c.GetSkill(ctx, "pg", "a")
+	ck.Require().NoError(err, "GetSkill of the overriding row")
+	ck.False(row.Shadowed, "the row in effect is not shadowed")
+	ck.Eq("user", row.Layer, "layer")
 }

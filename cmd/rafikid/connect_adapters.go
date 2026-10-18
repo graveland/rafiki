@@ -639,6 +639,18 @@ func (c connectSkills) skillTarget(ctx context.Context, ns, name string) (skills
 	return target, nil
 }
 
+// inEffectSkills returns the keys of the visible rows that actually resolve for
+// this owner. A row is shadowed when it is enabled and absent from this set.
+// One computation for both reads: `skills list` and `skills show` must never
+// disagree about whether the same row is in effect.
+func inEffectSkills(rows []skills.Record, owner string) map[string]bool {
+	inEffect := make(map[string]bool, len(rows))
+	for _, r := range skills.Resolve(rows, owner) {
+		inEffect[skillRowKey(r)] = true
+	}
+	return inEffect
+}
+
 func (c connectSkills) ListSkills(ctx context.Context, includeDisabled bool) ([]connectapi.SkillRow, error) {
 	// Every row, disabled included: shadowing is decided by the presence of a
 	// row, so a disabled higher-layer override must be in hand even when the
@@ -649,10 +661,7 @@ func (c connectSkills) ListSkills(ctx context.Context, includeDisabled bool) ([]
 		return nil, err
 	}
 	rows := visibleSkills(ctx, all)
-	inEffect := make(map[string]bool, len(rows))
-	for _, r := range skills.Resolve(rows, spawnOwner(ctx).UserID) {
-		inEffect[skillRowKey(r)] = true
-	}
+	inEffect := inEffectSkills(rows, spawnOwner(ctx).UserID)
 	out := make([]connectapi.SkillRow, 0, len(rows))
 	for _, r := range rows {
 		if !includeDisabled && !r.Enabled {
@@ -670,8 +679,9 @@ func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectap
 	if err != nil {
 		return connectapi.SkillRow{}, err
 	}
+	owner := spawnOwner(ctx).UserID
 	rows := visibleSkills(ctx, all)
-	target, ok := resolvedSkill(rows, spawnOwner(ctx).UserID, ns, name)
+	target, ok := resolvedSkill(rows, owner, ns, name)
 	if !ok {
 		// The name is not in effect (a namespace a higher layer replaced, or a
 		// disabled row). Show the row the caller can still act on rather than
@@ -685,7 +695,11 @@ func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectap
 	if err != nil {
 		return connectapi.SkillRow{}, translateSkillErr(err)
 	}
-	return skillRowFrom(r), nil
+	row := skillRowFrom(r)
+	// A fallback row is precisely the shadowed case, so carry the same flag
+	// ListSkills computes rather than leaving show and list to disagree.
+	row.Shadowed = r.Enabled && !inEffectSkills(rows, owner)[skillRowKey(r)]
+	return row, nil
 }
 
 func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
