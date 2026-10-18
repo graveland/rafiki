@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,40 +112,99 @@ func TestSkillBlueprintDeclinesWithoutSkills(t *testing.T) {
 
 // TestSkillToolServesAnInlineBody covers the database-backed arm: a skill
 // marked Inline resolves by QUALIFIED name and fetches its body through
-// ToolOpts.InlineSkillBody, passing the namespace and bare name separately.
+// ToolOpts.InlineSkillBody, which is handed the inventory meta itself — its ID
+// names the row, so a name shadowed in a higher layer cannot resolve to the
+// wrong one.
 func TestSkillToolServesAnInlineBody(t *testing.T) {
 	c := assert.NewCollecting(t)
-	var gotNS, gotName string
+	var got skillspkg.SkillMeta
+	meta := skillspkg.SkillMeta{ID: "row-1", Namespace: "rafiki", Name: "coordinating", Description: "d", Inline: true}
 	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
-		Skills: []skillspkg.SkillMeta{
-			{Namespace: "rafiki", Name: "coordinating", Description: "d", Inline: true},
-		},
-		InlineSkillBody: func(_ context.Context, ns, name string) (string, error) {
-			gotNS, gotName = ns, name
-			return "the body", nil
+		Skills: []skillspkg.SkillMeta{meta},
+		InlineSkillBody: func(_ context.Context, s skillspkg.SkillMeta) (string, string, error) {
+			got = s
+			return "the body", "", nil
 		},
 	})
 	c.Require().NoError(err, "materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
 	c.Require().NoError(err, "execute")
-	c.False(gotNS != "rafiki" || gotName != "coordinating", "fetcher got (%q,%q), want (rafiki,coordinating)", gotNS, gotName)
+	c.Eq("row-1", got.ID, "fetcher got meta with ID")
+	c.Eq("rafiki:coordinating", got.QualifiedName(), "fetcher got meta named")
 	c.StrContains(res.Text, "the body", "result did not carry the body: %v", res)
 }
 
-// An inline skill has no directory, so the result must NOT claim one — there
-// is nothing on disk for the model to read.
+// An inline skill with no materialized directory must NOT claim one — there is
+// nothing on disk for the model to read.
 func TestInlineSkillResultHasNoBaseDirectoryLine(t *testing.T) {
 	c := assert.NewCollecting(t)
 	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
 		Skills: []skillspkg.SkillMeta{
 			{Namespace: "rafiki", Name: "coordinating", Inline: true},
 		},
-		InlineSkillBody: func(context.Context, string, string) (string, error) { return "b", nil },
+		InlineSkillBody: func(context.Context, skillspkg.SkillMeta) (string, string, error) { return "b", "", nil },
 	})
 	c.Require().NoError(err, "materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
 	c.Require().NoError(err, "execute")
 	c.NotStrContains(res.Text, "Base directory", "inline result claimed a base directory: %v", res)
+}
+
+// TestSkillToolInlineWithDirHasBaseDirectory covers an inline skill whose
+// supporting files the daemon materialized onto this agent's machine: the
+// result names the directory exactly as the executor-backed arm does, so the
+// model reads files the same way whichever tier the skill came from.
+func TestSkillToolInlineWithDirHasBaseDirectory(t *testing.T) {
+	c := assert.NewCollecting(t)
+	const dir = "/cache/skill-cache/abc123"
+	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
+		Skills: []skillspkg.SkillMeta{
+			{Namespace: "rafiki", Name: "coordinating", Inline: true, HasFiles: true},
+		},
+		InlineSkillBody: func(context.Context, skillspkg.SkillMeta) (string, string, error) {
+			return "FILE_BODY_MARKER", dir, nil
+		},
+	})
+	c.Require().NoError(err, "materialize")
+	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
+	c.Require().NoError(err, "execute")
+	c.Eq("Base directory for this skill: "+dir+"\n\nFILE_BODY_MARKER", res.Text, "inline result with a directory")
+}
+
+// TestSkillToolInlineWithoutDirIsBodyOnly is the other half: no directory
+// means no directory line, never an empty one.
+func TestSkillToolInlineWithoutDirIsBodyOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
+		Skills: []skillspkg.SkillMeta{
+			{Namespace: "rafiki", Name: "coordinating", Inline: true},
+		},
+		InlineSkillBody: func(context.Context, skillspkg.SkillMeta) (string, string, error) {
+			return "BODY_ONLY_MARKER", "", nil
+		},
+	})
+	c.Require().NoError(err, "materialize")
+	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
+	c.Require().NoError(err, "execute")
+	c.Eq("BODY_ONLY_MARKER", res.Text, "inline result without a directory")
+}
+
+// A body-fetch failure is the tool's error: a skill the model asked for and
+// could not get must not look like an empty skill.
+func TestSkillToolInlineBodyErrorSurfaces(t *testing.T) {
+	c := assert.NewCollecting(t)
+	boom := errors.New("store is gone")
+	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
+		Skills: []skillspkg.SkillMeta{
+			{Namespace: "rafiki", Name: "coordinating", Inline: true},
+		},
+		InlineSkillBody: func(context.Context, skillspkg.SkillMeta) (string, string, error) {
+			return "", "", boom
+		},
+	})
+	c.Require().NoError(err, "materialize")
+	_, err = tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
+	c.Require().ErrorIs(err, boom, "execute: got")
 }
 
 func TestUnknownSkillErrorListsQualifiedNames(t *testing.T) {
@@ -153,7 +213,7 @@ func TestUnknownSkillErrorListsQualifiedNames(t *testing.T) {
 		Skills: []skillspkg.SkillMeta{
 			{Namespace: "rafiki", Name: "coordinating", Inline: true},
 		},
-		InlineSkillBody: func(context.Context, string, string) (string, error) { return "b", nil },
+		InlineSkillBody: func(context.Context, skillspkg.SkillMeta) (string, string, error) { return "b", "", nil },
 	})
 	c.Require().NoError(err, "materialize")
 	_, err = tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"coordinating"}`)))

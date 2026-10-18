@@ -272,10 +272,20 @@ type ToolOpts struct {
 	Backgrounder Backgrounder
 
 	Skills []skillspkg.SkillMeta
-	// InlineSkillBody fetches a database-backed skill's body by namespace and
-	// name, on the turn the model asks for it. nil means no inline skill can
-	// be served — which is correct when the daemon has no skills store.
-	InlineSkillBody func(ctx context.Context, namespace, name string) (string, error)
+	// InlineSkillBody fetches a database-backed skill's body on the turn the
+	// model asks for it, keyed by the meta the inventory was built from — its
+	// ID names the row, which is what makes a name shadowed in a higher layer
+	// resolve to the row this child was actually offered.
+	//
+	// dir is non-empty when the skill has supporting files this agent can
+	// read: the daemon materializes them onto its executor and hands back the
+	// directory. Empty means the body stands alone, either because the skill
+	// has no files or because there is no machine to put them on (the body
+	// says so itself).
+	//
+	// nil means no inline skill can be served — which is correct when the
+	// daemon has no skills store.
+	InlineSkillBody func(ctx context.Context, s skillspkg.SkillMeta) (body, dir string, err error)
 	RTK             RTKMode
 	Web             bool
 

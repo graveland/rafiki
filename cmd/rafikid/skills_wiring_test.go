@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/skills"
@@ -76,19 +77,202 @@ func TestInlineSkillBodyServesTheSpawnTimeInventory(t *testing.T) {
 	ck.Require().Eq(1, seen, "inventory carries %d entries for %q, want exactly one", seen, "before")
 
 	ck.Require().NotNil(ro.InlineSkillBody, "InlineSkillBody was not wired")
-	body, err := ro.InlineSkillBody(ctx, ns, "before")
+	body, dir, err := ro.InlineSkillBody(ctx, beforeMeta(ro.InlineSkills, ns, "before"))
 	ck.Require().NoError(err, "inline body")
 	ck.Require().Eq("before body", body, "inline body")
+	ck.Eq("", dir, "a skill with no files must not name a directory, got")
 
 	// A skill written after the spawn is not in the inventory, so the child was
-	// never offered it and the body is refused.
+	// never offered it: the inventory is what the model can name, and it is
+	// fixed at spawn.
 	put(rec("before", "before body"), rec("after", "after body"))
-	_, err = ro.InlineSkillBody(ctx, ns, "after")
-	ck.ErrorIs(err, skills.ErrNotFound, "a skill absent from the spawn-time inventory: got")
+	for _, m := range ro.InlineSkills {
+		ck.False(m.Namespace == ns && m.Name == "after",
+			"a skill written after the spawn reached the spawn-time inventory")
+	}
 
-	// So is a name that never existed.
-	_, err = ro.InlineSkillBody(ctx, ns, "never")
-	ck.ErrorIs(err, skills.ErrNotFound, "an unknown skill: got")
+	// An id the store does not hold is ErrNotFound, never an empty body: the
+	// model asked for a row that is gone.
+	_, _, err = ro.InlineSkillBody(ctx, skills.SkillMeta{Namespace: ns, Name: "after", ID: "00000000-0000-0000-0000-000000000000"})
+	ck.ErrorIs(err, skills.ErrNotFound, "a row the store no longer holds: got")
+}
+
+// beforeMeta finds one entry of the spawn-time inventory by name. The shared
+// test DB holds other rows too, so a test that wants the exact meta the child
+// was offered has to read it back from the inventory rather than build one.
+func beforeMeta(metas []skills.SkillMeta, namespace, name string) skills.SkillMeta {
+	for _, m := range metas {
+		if m.Namespace == namespace && m.Name == name {
+			return m
+		}
+	}
+	return skills.SkillMeta{Namespace: namespace, Name: name}
+}
+
+// TestInlineSkillNoExecutorNote pins the wording a model sees when a skill has
+// supporting files and there is no machine to put them on. The body still
+// arrives — the instructions are the point — and the note stops the model
+// looking for files that are not there.
+func TestInlineSkillNoExecutorNote(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := &fakeSkillStore{
+		rows: []skills.Record{{
+			ID: "row-files", Namespace: "rafiki", Name: "with-files", Body: "BODY", HasFiles: true,
+		}},
+		files: map[string][]skills.File{"row-files": {{Path: "run.sh", Mode: 0o755, Content: []byte("#!/bin/sh\n")}}},
+	}
+	body, dir, err := inlineSkillBody(store, nil)(context.Background(),
+		skills.SkillMeta{Namespace: "rafiki", Name: "with-files", ID: "row-files"})
+	ck.Require().NoError(err, "inline body with no executor")
+	ck.Eq("", dir, "an unmaterialized skill must not name a directory, got")
+	ck.Eq("BODY\n\n"+noSkillFilesNote, body, "body")
+	ck.Eq("(This skill has supporting files, but this agent has no executor to read them from.)",
+		noSkillFilesNote, "the note's wording is what the model reads")
+}
+
+// TestInlineSkillMaterializeErrorSurfaces: a failure to write the files is the
+// TOOL's error. Swallowing it would hand the model a body with no directory and
+// no note, which reads as "this skill has no files".
+func TestInlineSkillMaterializeErrorSurfaces(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	boom := errors.New("executor refused the tree")
+	store := &fakeSkillStore{
+		rows: []skills.Record{{
+			ID: "row-files", Namespace: "rafiki", Name: "with-files", Body: "BODY", HasFiles: true,
+		}},
+		files: map[string][]skills.File{"row-files": {{Path: "run.sh", Content: []byte("x")}}},
+	}
+	_, _, err := inlineSkillBody(store, func(context.Context, string, []skills.File) (string, bool, error) {
+		return "", false, boom
+	})(context.Background(), skills.SkillMeta{Namespace: "rafiki", Name: "with-files", ID: "row-files"})
+	ck.Require().ErrorIs(err, boom, "a materialize failure must surface, got")
+}
+
+// TestInlineSkillMaterializedDirIsReturned: when the files land somewhere the
+// child can read, the directory comes back with the body so the tool can name
+// it.
+func TestInlineSkillMaterializedDirIsReturned(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const dir = "/cache/skill-cache/deadbeef"
+	store := &fakeSkillStore{
+		rows: []skills.Record{{
+			ID: "row-files", Namespace: "rafiki", Name: "with-files", Body: "BODY", HasFiles: true,
+		}},
+		files: map[string][]skills.File{"row-files": {{Path: "run.sh", Content: []byte("x")}}},
+	}
+	var gotHash string
+	body, gotDir, err := inlineSkillBody(store, func(_ context.Context, treeHash string, files []skills.File) (string, bool, error) {
+		gotHash = treeHash
+		ck.Eq(1, len(files), "materializer got %d file(s)", len(files))
+		return dir, true, nil
+	})(context.Background(), skills.SkillMeta{Namespace: "rafiki", Name: "with-files", ID: "row-files"})
+	ck.Require().NoError(err, "inline body")
+	ck.Eq("BODY", body, "body")
+	ck.Eq(dir, gotDir, "dir")
+	ck.Eq(skills.TreeHash(store.files["row-files"]), gotHash, "materializer got tree hash")
+}
+
+// TestInlineSkillUnboundExecutorGetsTheNote: a child whose executor has not
+// connected yet has nowhere to write the files, so it gets the note rather than
+// an error. The next skill call, after it binds, materializes.
+func TestInlineSkillUnboundExecutorGetsTheNote(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := &fakeSkillStore{
+		rows: []skills.Record{{
+			ID: "row-files", Namespace: "rafiki", Name: "with-files", Body: "BODY", HasFiles: true,
+		}},
+		files: map[string][]skills.File{"row-files": {{Path: "run.sh", Content: []byte("x")}}},
+	}
+	body, dir, err := inlineSkillBody(store, func(context.Context, string, []skills.File) (string, bool, error) {
+		return "", false, nil
+	})(context.Background(), skills.SkillMeta{Namespace: "rafiki", Name: "with-files", ID: "row-files"})
+	ck.Require().NoError(err, "inline body")
+	ck.Eq("", dir, "dir")
+	ck.Eq("BODY\n\n"+noSkillFilesNote, body, "body")
+}
+
+// TestSkillsWiringUsesResolve pins that a child's inventory is the RESOLVED
+// set, not the store's rows: an operator's override of a core skill reaches
+// their child AS the override, and the core row it shadows does not come along
+// behind it.
+//
+// The store is read with enabledOnly=false deliberately. A disabled override is
+// how an operator switches a core skill OFF, and it shadows the core row by
+// merely existing — so resolving an enabled-only list would serve the core
+// skill the operator just turned off. The second half of this test is that
+// case.
+func TestSkillsWiringUsesResolve(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := openTestPool(t)
+	c := newTestController(t)
+	c.skillStore = skillsdb.NewPostgresStore(pool)
+	ctx := context.Background()
+
+	// The shared test DB is never reset, so every row this seeds is per-run
+	// unique and cleaned by name.
+	run := time.Now().UnixNano()
+	name := fmt.Sprintf("wiring-%d", run)
+	owner := seedControllerUser(t, pool, fmt.Sprintf("wiring-owner-%d", run))
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE name = $1`, name)
+	})
+
+	// Written directly rather than through PutSet: PutSet owns a whole SOURCE,
+	// and this test needs one row in a source it does not own (the core
+	// corpus). Only one row per (namespace, name) may be ENABLED — that is how
+	// an override replaces a core skill — so the core row starts disabled.
+	var coreID, userID string
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`INSERT INTO conversations.skills (namespace, name, description, body, source, enabled)
+		 VALUES ('rafiki', $1, 'core description', 'core body', $2, FALSE)
+		 RETURNING id::text`, name, skills.CoreSource).Scan(&coreID), "seed core row")
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`INSERT INTO conversations.skills (namespace, name, description, body, source, owner_user_id, enabled)
+		 VALUES ('rafiki', $1, 'user description', 'user body', $2, $3::uuid, TRUE)
+		 RETURNING id::text`, name, fmt.Sprintf("wiring-source-%d", run), owner).Scan(&userID), "seed user row")
+
+	spawn := func() fundi.RuntimeOptions {
+		t.Helper()
+		ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
+			Kind:  protocol.KindFundi,
+			Cwd:   t.TempDir(),
+			Model: "anthropic/claude-sonnet-4-5",
+		}, "c_skill_resolve", false, "", owner)
+		ck.Require().NoError(err, "agentRuntimeOptions")
+		return ro
+	}
+	inventory := func(ro fundi.RuntimeOptions) []skills.SkillMeta {
+		var out []skills.SkillMeta
+		for _, m := range ro.InlineSkills {
+			if m.Namespace == "rafiki" && m.Name == name {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+
+	ro := spawn()
+	seen := inventory(ro)
+	ck.Require().Eq(1, len(seen), "inventory carries %d entries for %s, want exactly one", len(seen), name)
+	ck.Eq(userID, seen[0].ID, "the inventory entry must be the owner's override, got id")
+	ck.Eq("user description", seen[0].Description, "inventory description")
+
+	// And the body the child is served is the override's, not the core row's.
+	body, _, err := ro.InlineSkillBody(ctx, seen[0])
+	ck.Require().NoError(err, "inline body")
+	ck.Eq("user body", body, "inline body")
+
+	// The other direction: an operator disabling their override must hide the
+	// core skill entirely, which is only possible when the spawn resolves the
+	// DISABLED rows too.
+	_, err = pool.Exec(ctx, `UPDATE conversations.skills SET enabled = FALSE WHERE id = $1::uuid`, userID)
+	ck.Require().NoError(err, "disable the user row")
+	_, err = pool.Exec(ctx, `UPDATE conversations.skills SET enabled = TRUE WHERE id = $1::uuid`, coreID)
+	ck.Require().NoError(err, "re-enable the core row")
+
+	ck.Eq(0, len(inventory(spawn())),
+		"a disabled override must hide the core skill it shadows, and an enabled-only read cannot see it")
 }
 
 // fakeSkillStore records what the adapter asked for. List answers from rows;
@@ -97,8 +281,10 @@ func TestInlineSkillBodyServesTheSpawnTimeInventory(t *testing.T) {
 // store with a key that is only unique within a layer.
 type fakeSkillStore struct {
 	rows      []skills.Record
+	files     map[string][]skills.File
 	listErr   error
 	getErr    error
+	filesErr  error
 	deleteErr error
 	enableErr error
 
@@ -119,6 +305,7 @@ func (f *fakeSkillStore) Get(_ context.Context, id string) (skills.Record, error
 	}
 	for _, r := range f.rows {
 		if r.ID == id {
+			r.Files = f.files[id]
 			return r, nil
 		}
 	}
@@ -126,7 +313,7 @@ func (f *fakeSkillStore) Get(_ context.Context, id string) (skills.Record, error
 }
 
 func (f *fakeSkillStore) Files(context.Context, []string) (map[string][]skills.File, error) {
-	return nil, nil
+	return f.files, f.filesErr
 }
 
 func (f *fakeSkillStore) PutSet(context.Context, skills.SetKey, []skills.Record) (bool, error) {

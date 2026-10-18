@@ -93,12 +93,16 @@ type RuntimeOptions struct {
 	// nil when the child has no executor, in which case no SkillMeta carries Remote.
 	RemoteSkillBody func(ctx context.Context, name string) (body, dir string, err error)
 	// InlineSkills is the database-backed skill tier, already fetched by the
-	// daemon. It is the BASE layer of the fold — a daemon-local directory or a
-	// workspace project skill of the same qualified name shadows it.
+	// daemon and already RESOLVED for this child's owner: a user override of a
+	// core or global skill arrives here as the user's row, never as both. It is
+	// the BASE layer of the fold — a daemon-local directory or a workspace
+	// project skill of the same qualified name shadows it.
 	InlineSkills []skills.SkillMeta
 	// InlineSkillBody fetches one of those skills' bodies from the daemon's
-	// store, on the turn the model asks. nil when there is no store.
-	InlineSkillBody func(ctx context.Context, namespace, name string) (string, error)
+	// store, on the turn the model asks, keyed by the meta the inventory named.
+	// A non-empty dir means the skill's supporting files were materialized where
+	// this child can read them. nil when there is no store.
+	InlineSkillBody func(ctx context.Context, s skills.SkillMeta) (body, dir string, err error)
 	MCPConfig       string // absolute path, or empty to skip MCP entirely
 	// MCPServers is a comma-separated allowlist of MCPConfig's mcpServers
 	// keys to actually connect; empty or "*" means all (today's behavior).

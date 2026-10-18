@@ -665,38 +665,46 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		// A slow or unavailable store must not fail a spawn: the child simply
 		// gets its on-disk tiers, the same as a daemon with no store at all.
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		recs, err := c.skillStore.List(sctx, true)
+		rows, err := c.skillStore.List(sctx, false)
 		cancel()
 		if err != nil {
 			slog.Warn("database skills unavailable; child gets on-disk tiers only",
 				"child", childID, "error", err)
 		} else {
+			// List answers with every owner's rows; Resolve keeps the layers
+			// THIS child's owner can see and folds them, so an operator's
+			// override of a core skill reaches their children AS the override
+			// and nobody else's rows are in the inventory at all. Filtering on
+			// enabled rows before resolving would break exactly that: a
+			// disabled override has to shadow the core row it disables.
+			recs := skills.Resolve(rows, ownerUserID)
 			metas := make([]skills.SkillMeta, 0, len(recs))
 			for _, r := range recs {
 				metas = append(metas, r.Meta())
 			}
 			ro.InlineSkills = metas
 		}
-		// The row id per qualified name, fixed at spawn: the inventory the model
-		// was given IS this list, so a name missing from it names no skill this
-		// child was offered. A store error leaves the map empty, which answers
-		// every lookup ErrNotFound — the same "no database skills" an empty
-		// inventory reports.
-		ids := make(map[string]string, len(recs))
-		for _, r := range recs {
-			ids[r.Namespace+":"+r.Name] = r.ID
-		}
-		ro.InlineSkillBody = func(ctx context.Context, namespace, name string) (string, error) {
-			id, ok := ids[namespace+":"+name]
-			if !ok {
-				return "", skills.ErrNotFound
+		// The closure resolves the row by the ID carried in the meta the model
+		// named, never by (namespace, name): a name is unique only within a
+		// layer, and the inventory the model was given IS the resolved set, so
+		// an id it holds names a row this child was actually offered.
+		//
+		// A skill with supporting files gets them materialized onto the child's
+		// executor — the same machine its workspace tools read — so the body's
+		// "Base directory" line points at real files. With no executor, or one
+		// not bound yet, the body says so instead: a directory nobody can read
+		// is worse than an honest note.
+		var materialize skillFileMaterializer
+		if be, ok := exec.(*boundExecutor); ok && be != nil {
+			materialize = func(ctx context.Context, treeHash string, files []skills.File) (string, bool, error) {
+				if _, _, bound := be.Current(); !bound {
+					return "", false, nil
+				}
+				dir, mErr := be.MaterializeSkill(ctx, treeHash, files)
+				return dir, mErr == nil, mErr
 			}
-			rec, err := c.skillStore.Get(ctx, id)
-			if err != nil {
-				return "", err
-			}
-			return rec.Body, nil
 		}
+		ro.InlineSkillBody = inlineSkillBody(c.skillStore, materialize)
 	}
 
 	// The dynamic python-modules skill, OUTSIDE the skillStore block: it comes
@@ -733,6 +741,49 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// is the daemon-stamped id, never something the model can influence.
 	ro.OnConsumed = func(frameIDs []string) { c.consumeFrames(frameIDs) }
 	return ro, nil
+}
+
+// noSkillFilesNote replaces a skill's supporting files on an agent with nowhere
+// to put them. The body still arrives — the instructions are the point — but
+// the model is told not to go looking for the files rather than being handed a
+// directory that does not exist.
+const noSkillFilesNote = "(This skill has supporting files, but this agent has no executor to read them from.)"
+
+// skillFileMaterializer writes a skill's supporting files onto the machine that
+// will read them and returns the directory holding them. ok is false when there
+// is nowhere to write them — no executor, or one not bound yet — which is not
+// an error: the skill's body says so instead.
+type skillFileMaterializer func(ctx context.Context, treeHash string, files []skills.File) (dir string, ok bool, err error)
+
+// inlineSkillBody builds the closure pkg/fundi's skill tool calls when a model
+// asks for a database-backed skill.
+//
+// It resolves the row by the meta's ID rather than by name, because a name is
+// unique only within a layer and the inventory the model was given is already
+// the resolved set. A skill whose files were materialized comes back with the
+// directory holding them; a skill with files and no executor to write them to
+// says so in the body. A materialize failure is the tool's error, never a
+// silent downgrade to a body whose files are missing.
+func inlineSkillBody(store skills.Store, materialize skillFileMaterializer) func(ctx context.Context, s skills.SkillMeta) (body, dir string, err error) {
+	return func(ctx context.Context, s skills.SkillMeta) (string, string, error) {
+		rec, err := store.Get(ctx, s.ID)
+		if err != nil {
+			return "", "", err
+		}
+		if len(rec.Files) == 0 {
+			return rec.Body, "", nil
+		}
+		if materialize != nil {
+			dir, ok, err := materialize(ctx, skills.TreeHash(rec.Files), rec.Files)
+			if err != nil {
+				return "", "", err
+			}
+			if ok {
+				return rec.Body, dir, nil
+			}
+		}
+		return rec.Body + "\n\n" + noSkillFilesNote, "", nil
+	}
 }
 
 // liveRoutingSource returns the closure a fundi child's llm.Client reads on

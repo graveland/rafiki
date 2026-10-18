@@ -67,7 +67,7 @@ type skillTool struct {
 	byName      map[string]skillspkg.SkillMeta
 	names       []string
 	remoteBody  func(ctx context.Context, name string) (body, dir string, err error)
-	inlineBody  func(ctx context.Context, namespace, name string) (string, error)
+	inlineBody  func(ctx context.Context, s skillspkg.SkillMeta) (body, dir string, err error)
 	dynamicBody func(ctx context.Context) (string, error)
 }
 
@@ -102,13 +102,20 @@ func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 		if st.inlineBody == nil {
 			return ToolResult{}, fmt.Errorf("skill: %q is served from this daemon's store, which is unavailable", in.Skill)
 		}
-		body, err := st.inlineBody(ctx, s.Namespace, s.Name)
+		body, dir, err := st.inlineBody(ctx, s)
 		if err != nil {
 			return ToolResult{}, fmt.Errorf("skill: %w", err)
 		}
-		// No "Base directory" preamble: an inline skill has no directory and
-		// naming one would point the model at a path that does not exist.
-		return NewTextResult(body), nil
+		// A stored skill usually has no directory to name, and naming one that
+		// does not exist would point the model at nothing. When the daemon DID
+		// materialize the skill's supporting files onto this agent's machine it
+		// hands back that directory, and the result names it exactly as the
+		// remote branch does — one format for "there are files beside this
+		// SKILL.md", whichever tier they came from.
+		if dir == "" {
+			return NewTextResult(body), nil
+		}
+		return NewTextResult(fmt.Sprintf("Base directory for this skill: %s\n\n%s", dir, body)), nil
 	}
 
 	if s.Remote {

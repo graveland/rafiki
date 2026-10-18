@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"time"
@@ -36,12 +37,30 @@ type skillPusher struct {
 // never a prune instruction.
 func shouldPush(recs []skills.Record) bool { return len(recs) > 0 }
 
+// skillFileProtos renders a skill's stored files as the wire type. Order is the
+// store's (sorted by path), which is what the executor's tree comparison
+// depends on.
+func skillFileProtos(files []skills.File) []*executorpb.SkillFile {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]*executorpb.SkillFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, &executorpb.SkillFile{Path: f.Path, Mode: f.Mode, Content: f.Content})
+	}
+	return out
+}
+
 // buildNamespaces groups rows into per-namespace payloads, sorted at both
 // levels. The ordering is load-bearing: the executor compares the rendered tree
 // against what is on disk to decide whether to rewrite, so an unstable order
 // would rewrite every namespace on every sync and keep Claude Code's file
 // watching permanently busy.
-func buildNamespaces(recs []skills.Record, version string) []*executorpb.SkillNamespace {
+//
+// files carries the supporting files of the rows that have any, keyed by row id
+// — the same shape Store.Files answers with, so a row with no entry simply
+// carries none.
+func buildNamespaces(recs []skills.Record, files map[string][]skills.File, version string) []*executorpb.SkillNamespace {
 	byNS := map[string][]*executorpb.SyncSkill{}
 	for _, r := range recs {
 		byNS[r.Namespace] = append(byNS[r.Namespace], &executorpb.SyncSkill{
@@ -50,6 +69,7 @@ func buildNamespaces(recs []skills.Record, version string) []*executorpb.SkillNa
 			Name:        r.Name,
 			Description: r.Description,
 			Body:        r.Body,
+			Files:       skillFileProtos(files[r.ID]),
 		})
 	}
 	names := make([]string, 0, len(byNS))
@@ -102,6 +122,34 @@ func (sp *skillPusher) eligible(le execpool.LiveExecutor) bool {
 	return slices.Contains(le.Describe.GetLaunchKinds(), "claude")
 }
 
+// ownerOf returns the owner of the live executor with this id. The second
+// result is false when no such executor is live — there is then no owner to
+// resolve a corpus for, and pushing one would be pushing a guess.
+func (sp *skillPusher) ownerOf(executorID string) (owner string, live bool) {
+	for _, le := range sp.pool.Live() {
+		if le.Executor.ID == executorID {
+			return le.Executor.OwnerUserID, true
+		}
+	}
+	return "", false
+}
+
+// filesFor loads the supporting files of every resolved row that has any, in
+// one query. Rows without files are not asked about: the inventory already
+// said they have none, and a skill directory is not worth a round trip.
+func (sp *skillPusher) filesFor(ctx context.Context, recs []skills.Record) (map[string][]skills.File, error) {
+	ids := make([]string, 0, len(recs))
+	for _, r := range recs {
+		if r.HasFiles {
+			ids = append(ids, r.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return sp.store.Files(ctx, ids)
+}
+
 // pushIfEligible pushes to one executor only after confirming it would pass
 // the pushAll path's own filter. The on-connect hook fires for EVERY executor
 // that joins the pool — including session executors (rafiki create/attach),
@@ -128,15 +176,31 @@ func (sp *skillPusher) pushTo(ctx context.Context, executorID string) error {
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	recs, err := sp.store.List(rctx, true)
+	// The corpus is per-OWNER, not per-daemon: two people's claude children
+	// share one executor's skills directory, so what lands there is what the
+	// executor's own owner may see. An unowned executor gets the shared layers
+	// only, which is Resolve's answer for an empty owner.
+	owner, live := sp.ownerOf(executorID)
+	if !live {
+		return fmt.Errorf("executor %s is no longer live", executorID)
+	}
+
+	rows, err := sp.store.List(rctx, false)
 	if err != nil {
 		return err
 	}
+	recs := skills.Resolve(rows, owner)
 	if !shouldPush(recs) {
 		slog.Warn("skill corpus is empty; not syncing",
 			"executor", executorID,
+			"owner", owner,
 			"reason", "an empty payload would remove every managed tree on that machine")
 		return nil
+	}
+
+	files, err := sp.filesFor(rctx, recs)
+	if err != nil {
+		return err
 	}
 
 	client, err := sp.pool.ConnectClientFor(executorID)
@@ -144,7 +208,7 @@ func (sp *skillPusher) pushTo(ctx context.Context, executorID string) error {
 		return err
 	}
 	resp, err := client.SyncSkills(rctx, connect.NewRequest(&executorpb.SyncSkillsRequest{
-		Namespaces: buildNamespaces(recs, sp.version),
+		Namespaces: buildNamespaces(recs, files, sp.version),
 	}))
 	if err != nil {
 		return err

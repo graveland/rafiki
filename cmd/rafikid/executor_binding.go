@@ -441,3 +441,20 @@ func (b *boundExecutor) SkillBody(ctx context.Context, name string) (string, str
 	})
 	return p.body, p.dir, err
 }
+
+// MaterializeSkill writes one stored skill's supporting files onto the bound
+// executor and returns the directory holding them. A client that cannot answer
+// is an ERROR rather than an empty directory: an empty dir means "this skill
+// has no files", and silently reporting that for a skill that does would leave
+// the model reading a body that points at files it cannot open.
+func (b *boundExecutor) MaterializeSkill(ctx context.Context, treeHash string, files []skills.File) (string, error) {
+	return callBound(ctx, b, true, func(ctx context.Context, cl tools.ExecutorClient) (string, error) {
+		mf, ok := cl.(interface {
+			MaterializeSkill(context.Context, string, []skills.File) (string, error)
+		})
+		if !ok {
+			return "", errors.New("executor cannot materialize skill files")
+		}
+		return mf.MaterializeSkill(ctx, treeHash, files)
+	})
+}

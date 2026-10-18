@@ -890,6 +890,31 @@ func (c *workspaceClient) SkillBody(ctx context.Context, name string) (body, dir
 	return resp.Msg.Body, resp.Msg.Dir, nil
 }
 
+// MaterializeSkill writes one stored skill's supporting files onto the
+// executor and returns the directory holding them, so the child reading the
+// skill can open them.
+//
+// Keyed by treeHash, which the executor recomputes from the bytes it was sent
+// and refuses on a mismatch: the directory name it returns is a proof of its
+// own contents, so the daemon never has to trust the executor about WHICH
+// bytes landed. Sending the files again for a tree the executor already holds
+// is cheap — it bumps the directory's mtime instead of rewriting it.
+func (c *workspaceClient) MaterializeSkill(ctx context.Context, treeHash string, files []skills.File) (dir string, err error) {
+	defer c.inflight.enter()()
+	pf := make([]*executorpb.SkillFile, 0, len(files))
+	for _, f := range files {
+		pf = append(pf, &executorpb.SkillFile{Path: f.Path, Mode: f.Mode, Content: f.Content})
+	}
+	resp, err := c.inner.MaterializeSkill(ctx, connect.NewRequest(&executorpb.MaterializeSkillRequest{
+		TreeHash: treeHash,
+		Files:    pf,
+	}))
+	if err != nil {
+		return "", fmt.Errorf("executor materialize skill: %w", err)
+	}
+	return resp.Msg.GetDir(), nil
+}
+
 func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 	ticker := time.NewTicker(p.healthInterval)
 	defer ticker.Stop()
