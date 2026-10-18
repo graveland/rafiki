@@ -628,6 +628,42 @@ func TestHintLineNamesTheActiveView(t *testing.T) {
 	ck.StrContains(out, "vision required", "hint line does not say the vision filter is on:\n")
 }
 
+// A filtered-out model looks exactly like a missing one, so the hint line says
+// how many the view is hiding for the query typed so far.
+func TestHintLineCountsWhatTheViewHides(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.modelView = modelView{keys: []sortKey{{field: colIn}}, visionOnly: true}
+
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
+	ck.StrContains(out, "1 hidden", "hint line does not count the text-only model the vision filter hides:\n")
+
+	c.form.inputs[fieldModel].SetValue("deepseek")
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	out = ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
+	ck.StrContains(out, "1 hidden", "count does not follow the typed query:\n")
+
+	c.form.inputs[fieldModel].SetValue("gpt")
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	out = ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
+	ck.NotStrContains(out, "hidden", "a query the view hides nothing for still reports a count:\n")
+}
+
+func TestHintLineSaysNothingHiddenUnderAnOpenView(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.modelView = modelView{keys: []sortKey{{field: colIn}}}
+
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
+	ck.NotStrContains(out, "hidden", "an unfiltered view reports hidden models:\n")
+}
+
 // Changing the query must drop the highlight: it names a row in the OLD
 // order, and keeping it selects whatever now sits there.
 func TestChangingTheViewClearsTheHighlight(t *testing.T) {

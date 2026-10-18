@@ -114,6 +114,10 @@ type spawnForm struct {
 	// viewSummary names the active sort and vision filter, set by view from the
 	// cockpit's shared modelView so the hint line and the list cannot disagree.
 	viewSummary string
+	// hidden is how many models matching the typed query the cockpit's view is
+	// filtering out of suggest. A filtered-out model reads the same as a
+	// missing one, so the hint line carries the count.
+	hidden int
 	// suggestOff is the first row drawn. The list holds every match and the
 	// panel shows a window onto it, so a filter matching 200 models is
 	// navigable rather than truncated at whatever happened to fit.
@@ -194,6 +198,7 @@ func newSpawnForm() *spawnForm {
 // browse, and an empty box that answers nothing looks broken.
 func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow, v modelView) {
 	f.suggest = selectModels(all, f.inputs[fieldModel].Value(), v)
+	f.hidden = len(selectModels(all, f.inputs[fieldModel].Value(), modelView{})) - len(f.suggest)
 	if f.suggestCur >= len(f.suggest) {
 		f.suggestCur = len(f.suggest) - 1
 	}
@@ -382,7 +387,11 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 				pos = fmt.Sprintf("   %d-%d of %d", f.suggestOff+1, shown, n)
 			}
 		}
-		hints = "↑/↓ pick   ⏎ take   ^S/^V/^T " + f.viewSummary + "   ^F all   ⇥" + pos
+		hidden := ""
+		if f.hidden > 0 {
+			hidden = fmt.Sprintf("   (%d hidden)", f.hidden)
+		}
+		hints = "↑/↓ pick   ⏎ take   ^S/^V/^T " + f.viewSummary + hidden + "   ^F all   ⇥" + pos
 	}
 	b.WriteString(styleMeta.Render(hints))
 	if q != nil {
