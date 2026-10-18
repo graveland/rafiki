@@ -801,11 +801,14 @@ rafiki repo remove <name>
   name keeps its previous url/ref. A namespace collision between the repo's
   skills and another source's rolls the registration back too; any other
   skill error is printed (`skill error: …` on stderr) and the command exits
-  non-zero while the registration and its scripts stay. The printed summary
-  is the discovered inventory: the resolved commit, script/package/skill
-  counts and the venv state. Note the script/package counts come from a
-  SECOND refresh call the CLI makes after registering; if that call fails,
-  the source is still registered — rerun `repo refresh`.
+  non-zero while the registration and its scripts stay. The skills half stored
+  nothing in that case, so any previously stored set for the source stays live
+  while the resolved commit is still recorded and the next refresh of that
+  commit retries. The printed summary is the discovered inventory: the resolved
+  commit, script/package/skill counts and the venv state. Note the
+  script/package counts come from a SECOND refresh call the CLI makes after
+  registering; if that call fails, the source is still registered — rerun
+  `repo refresh`.
 - **`set`** changes `--ref` and/or `--refresh` in place and does NOT refresh:
   a repoint takes effect on the next `repo refresh` or the schedule's next
   fire, and the stored commit keeps describing the old ref until then.
@@ -820,7 +823,10 @@ rafiki repo remove <name>
   carries its own `name`, so a multi-source run's rows are self-describing. A
   failed venv build is printed as `venv build failed: …` and does NOT fail the
   command — the refresh itself succeeded, and a broken build only fails the
-  runs that actually need the venv.
+  runs that actually need the venv. A skill error is printed (`skill error: …`
+  on stderr) and exits non-zero; it stores no skill rows, so the source's
+  previously stored set stays live while the resolved commit is still recorded
+  and the next refresh of that commit retries the skills half.
 - **`list`** reports `COMMIT` (the last resolved commit, 12 characters),
   `REFRESH` (`-` when on demand), `SKILLS` (rows the source owns for you) and
   `SCRIPTS` (its cached discovery count — zero until this daemon has
