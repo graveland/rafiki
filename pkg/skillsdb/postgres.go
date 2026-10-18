@@ -231,6 +231,16 @@ func (s *pgStore) PutSet(ctx context.Context, key skills.SetKey, want []skills.R
 	}
 
 	for _, w := range want {
+		cur, existed := current[setKey(w.Namespace, w.Name)]
+		// A row identical in every stored field is left completely alone: the
+		// upsert would rewrite the same values and bump updated_at, so changing
+		// one skill in a set would make the whole set look freshly written. The
+		// file list is compared here rather than in a SQL WHERE because the
+		// WHERE cannot see it, and a file-only change must still be written.
+		if existed && cur.description == w.Description && cur.body == w.Body &&
+			sameFiles(cur.files, w.Files) {
+			continue
+		}
 		var id string
 		// `enabled` is absent from the SET list on purpose: re-syncing content
 		// is not permission to turn a skill an operator switched off back on.
@@ -246,7 +256,6 @@ func (s *pgStore) PutSet(ctx context.Context, key skills.SetKey, want []skills.R
 			w.Namespace, w.Name, w.Description, w.Body, key.Source, ownerArg).Scan(&id); err != nil {
 			return false, fmt.Errorf("write skill %s: %w", setKey(w.Namespace, w.Name), err)
 		}
-		cur, existed := current[setKey(w.Namespace, w.Name)]
 		if existed && sameFiles(cur.files, w.Files) {
 			continue
 		}
@@ -313,18 +322,69 @@ func (s *pgStore) SetEnabled(ctx context.Context, id string, enabled bool) error
 	return nil
 }
 
-// Delete removes one row; its skill_file rows go with it by cascade. The blobs
-// it leaves unreferenced stay until a set write sweeps them — a global sweep
-// here would race every concurrent PutSet, and the set write already owns that
-// job under its advisory lock.
+// Delete removes one row and sweeps the blobs that row's files were the last
+// reference to. Both halves are one transaction, because the row's skill_file
+// rows go by cascade: once the row is gone the hashes are unrecoverable, so
+// they are captured first.
+//
+// It takes the same advisory lock PutSet does. Without it, a delete's sweep and
+// a concurrent set write's re-insert of the same hash can interleave — the
+// sweep does not see the other transaction's uncommitted skill_file row, so it
+// deletes a blob the other is about to reference (a foreign-key failure), or
+// strands a blob forever when nothing sweeps it.
 func (s *pgStore) Delete(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin skill delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, skillsWriteLockKey); err != nil {
+		return fmt.Errorf("lock skill delete: %w", err)
+	}
+
+	rows, err := tx.Query(ctx,
+		`SELECT sha256 FROM conversations.skill_file WHERE skill_id::text = $1`, id)
+	if err != nil {
+		return fmt.Errorf("load skill file hashes: %w", err)
+	}
+	var hashes [][]byte
+	for rows.Next() {
+		var h []byte
+		if err := rows.Scan(&h); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan skill file hash: %w", err)
+		}
+		hashes = append(hashes, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM conversations.skills WHERE id::text = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete skill: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return skills.ErrNotFound
+	}
+
+	// The same restricted sweep PutSet runs: only the hashes this skill named,
+	// and only those no remaining skill references.
+	if len(hashes) > 0 {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM conversations.skill_blob b
+			  WHERE b.sha256 = ANY($1::bytea[])
+			    AND NOT EXISTS (SELECT 1 FROM conversations.skill_file f WHERE f.sha256 = b.sha256)`,
+			hashes); err != nil {
+			return fmt.Errorf("sweep skill blobs: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit skill delete: %w", err)
 	}
 	return nil
 }

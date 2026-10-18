@@ -198,6 +198,33 @@ func TestPutSetPreservesDisabled(t *testing.T) {
 	c.False(got.Enabled, "the write re-enabled a disabled skill")
 }
 
+// A changed set must not rewrite the rows that did not change. The upsert
+// would bump updated_at on every row of the set, so editing one skill would make
+// the whole corpus look freshly written.
+func TestPutSetLeavesUnchangedRowsAlone(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+
+	f.put(t,
+		f.rec("alpha", "a", file("ref.md", "x")),
+		f.rec("beta", "b"),
+		f.rec("gamma", "g", file("ref.md", "v1")),
+	)
+	before := f.list(t)
+
+	f.put(t,
+		f.rec("alpha", "a", file("ref.md", "x")),  // identical
+		f.rec("beta", "b2"),                       // body changed
+		f.rec("gamma", "g", file("ref.md", "v2")), // file changed only
+	)
+	after := f.list(t)
+
+	c.Eq(before["alpha"].UpdatedAt, after["alpha"].UpdatedAt, "an unchanged row's updated_at moved")
+	c.NotEq(before["beta"].UpdatedAt, after["beta"].UpdatedAt, "a row whose body changed kept its updated_at")
+	c.NotEq(before["gamma"].UpdatedAt, after["gamma"].UpdatedAt, "a row whose file changed kept its updated_at")
+	c.Eq("b2", after["beta"].Body, "changed body")
+}
+
 // A namespace belongs to one source per layer. A second source claiming it is
 // refused with the holder's name, and writes nothing at all.
 func TestPutSetNamespaceHeld(t *testing.T) {
@@ -318,33 +345,113 @@ func TestPutSetSweepsBlobs(t *testing.T) {
 func TestPutSetConcurrent(t *testing.T) {
 	f := newFixture(t)
 	shared := []byte("shared blob")
-	const iterations = 20
 
-	var wg sync.WaitGroup
-	errs := make(chan error, 2*iterations)
+	// Two DIFFERENT sets that share one blob. They use different sources and
+	// namespaces, so the two writers never contend on a skills row — the only
+	// object they share is the blob, which is precisely what the advisory lock
+	// protects. Two writers over the SAME set cannot fail this way: their
+	// prunes lock the same rows and serialise the transactions for free.
+	other := skills.SetKey{Source: f.key.Source + "-b"}
+	otherNS := f.ns + "-b"
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE source = $1`, other.Source)
+	})
+
+	const iterations = 20
 	for i := 0; i < iterations; i++ {
-		for _, who := range []string{"a", "b"} {
-			wg.Add(1)
-			go func(i int, who string) {
-				defer wg.Done()
-				want := []skills.Record{{
-					Namespace: f.ns, Name: who, Body: who,
-					Files: []skills.File{
-						{Path: "shared.md", Mode: 0o644, Content: shared},
-						{Path: "own.md", Mode: 0o644, Content: []byte(fmt.Sprintf("%s-%d", who, i))},
-					},
-				}}
-				if _, err := f.st.PutSet(context.Background(), f.key, want); err != nil {
-					errs <- fmt.Errorf("%s/%d: %w", who, i, err)
-				}
-			}(i, who)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make(chan error, 2)
+
+		// The writers flip the shared blob in OPPOSITE phase: on even rounds
+		// only "a" references it, on odd rounds only "b" does. So every round
+		// one writer is dropping its last reference to the blob (its sweep
+		// targets it) while the other is inserting a fresh one — and neither
+		// writer's committed rows stand in the way of the sweep. Without the
+		// lock the two statements collide on the same blob row: the sweep
+		// deletes a blob the other is about to reference, and the skill_file
+		// foreign key fails.
+		aFiles := []skills.File{{Path: "f.md", Mode: 0o644, Content: []byte(fmt.Sprintf("a-%d", i))}}
+		bFiles := []skills.File{
+			{Path: "own.md", Mode: 0o644, Content: []byte(fmt.Sprintf("b-%d", i))},
+		}
+		if i%2 == 0 {
+			aFiles = []skills.File{{Path: "f.md", Mode: 0o644, Content: shared}}
+		} else {
+			bFiles = append(bFiles, skills.File{Path: "shared.md", Mode: 0o644, Content: shared})
+		}
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := f.st.PutSet(context.Background(), f.key, []skills.Record{{
+				Namespace: f.ns, Name: "alpha", Body: "a", Files: aFiles,
+			}}); err != nil {
+				errs <- fmt.Errorf("a/%d: %w", i, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			// "b" rewrites own.md every round, so its write is never the no-op
+			// that would skip the skill_file insert this test needs.
+			if _, err := f.st.PutSet(context.Background(), other, []skills.Record{{
+				Namespace: otherNS, Name: "beta", Body: "b", Files: bFiles,
+			}}); err != nil {
+				errs <- fmt.Errorf("b/%d: %w", i, err)
+			}
+		}()
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Errorf("concurrent PutSet: %v", err)
 		}
 	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Errorf("concurrent PutSet: %v", err)
+}
+
+// Deleting a skill must sweep the blobs its files were the last reference to.
+// Its skill_file rows go by cascade, so without capturing the hashes first (and
+// sweeping under the write lock) a deleted manual/import skill leaks its blobs
+// forever — PutSet only sweeps what its own set stopped referencing.
+func TestDeleteSweepsBlobs(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+	ctx := context.Background()
+
+	gone := []byte("only this skill's content")
+	shared := []byte("shared with another skill")
+	f.put(t, f.rec("alpha", "a",
+		file("gone.md", string(gone)),
+		file("shared.md", string(shared)),
+	))
+	alpha := f.list(t)["alpha"]
+
+	// A second set, in its own namespace, still pointing at the shared blob.
+	other := skills.SetKey{Source: f.key.Source + "-other"}
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE source = $1`, other.Source)
+	})
+	if _, err := f.st.PutSet(ctx, other, []skills.Record{{
+		Namespace: f.ns + "-other", Name: "gamma", Body: "g",
+		Files: []skills.File{{Path: "shared.md", Mode: 0o644, Content: shared}},
+	}}); err != nil {
+		t.Fatalf("second set PutSet: %v", err)
 	}
+
+	c.True(blobExists(t, f.pool, gone), "the seeded blob is missing before the delete")
+	c.True(blobExists(t, f.pool, shared), "the shared blob is missing before the delete")
+
+	c.Require().NoError(f.st.Delete(ctx, alpha.ID), "Delete")
+	c.False(blobExists(t, f.pool, gone), "the deleted skill's own blob survived the delete")
+	c.True(blobExists(t, f.pool, shared), "a blob another skill still references was swept")
+
+	_, err := f.st.Get(ctx, alpha.ID)
+	c.ErrorIs(err, skills.ErrNotFound, "Get after delete: got")
+	c.ErrorIs(f.st.Delete(ctx, alpha.ID), skills.ErrNotFound, "deleting an already-deleted skill: got")
 }
 
 func TestGetReturnsFiles(t *testing.T) {
