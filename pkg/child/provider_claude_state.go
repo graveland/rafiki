@@ -634,7 +634,7 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 		if f.Message == nil || len(f.Message.Content) == 0 {
 			return nil
 		}
-		return p.nativeAssistant(f.Message.Content, f.Message.Model, ts)
+		return p.nativeAssistant(f.Message.Content, f.Message.Model, f.ParentToolUseID, ts)
 
 	case "user":
 		if f.Message == nil {
@@ -665,7 +665,7 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 //     synthesized delta duplicates the AssistantMessage below; worse, the
 //     cockpit appends delta text to LastAssistant(), which before the message
 //     arrives is the PREVIOUS turn's finalized block.
-func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel string, ts int64) []*rafikiv1.Event {
+func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel, parentToolUseID string, ts int64) []*rafikiv1.Event {
 	var out []*rafikiv1.Event
 
 	// Build the content blocks for the assistant message.
@@ -729,8 +729,9 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 				Ts: timestamppb.New(time.UnixMilli(ts)),
 				Payload: &rafikiv1.Event_ToolExecutionStart{
 					ToolExecutionStart: &rafikiv1.ToolExecutionStart{
-						ToolUseId: b.ID,
-						Name:      b.Name,
+						ToolUseId:       b.ID,
+						Name:            b.Name,
+						ParentToolUseId: parentToolUseID,
 					},
 				},
 			})

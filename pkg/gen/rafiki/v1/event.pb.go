@@ -1079,11 +1079,15 @@ func (x *ErrorEvent) GetMessage() string {
 // the volume edge of the durable tier and the first thing to demote if
 // measurement says it is too chatty — demote with numbers, not intuition.
 type ToolExecutionStart struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ToolUseId     string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ToolUseId string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
+	Name      string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// parent_tool_use_id names the Task tool call whose sub-agent issued this
+	// tool call (Claude Code's parent_tool_use_id). Empty on the main thread and
+	// for kinds without in-conversation sub-agents. Additive; no epoch bump.
+	ParentToolUseId string `protobuf:"bytes,3,opt,name=parent_tool_use_id,json=parentToolUseId,proto3" json:"parent_tool_use_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ToolExecutionStart) Reset() {
@@ -1126,6 +1130,13 @@ func (x *ToolExecutionStart) GetToolUseId() string {
 func (x *ToolExecutionStart) GetName() string {
 	if x != nil {
 		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolExecutionStart) GetParentToolUseId() string {
+	if x != nil {
+		return x.ParentToolUseId
 	}
 	return ""
 }
@@ -2093,10 +2104,11 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\n" +
 	"ErrorEvent\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"H\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"u\n" +
 	"\x12ToolExecutionStart\x12\x1e\n" +
 	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"\x97\x01\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12+\n" +
+	"\x12parent_tool_use_id\x18\x03 \x01(\tR\x0fparentToolUseId\"\x97\x01\n" +
 	"\x10ToolExecutionEnd\x12\x1e\n" +
 	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x19\n" +
 	"\bis_error\x18\x03 \x01(\bR\aisError\x125\n" +

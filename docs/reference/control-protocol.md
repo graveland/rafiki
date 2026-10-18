@@ -1324,7 +1324,7 @@ Every event payload is classified into a tier:
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn |
 | `TurnEnd` | durable | End of an agent turn |
-| `ToolExecutionStart` | durable | Tool began executing (name, tool_use_id) |
+| `ToolExecutionStart` | durable | Tool began executing (name, tool_use_id, parent_tool_use_id — the spawning Task call for a Claude sub-agent's tool) |
 | `ToolExecutionEnd` | durable | Tool completed (duration, is_error) |
 | `Retry` | durable | Turn-level retry with attempt count and reason. Today's only producer is the daemon's rate-limit auto-resume (`cmd/rafikid/ratelimit_resume.go`): `will_retry: true` announces a scheduled resume of a claude child whose turn a 429 killed — `reason` is the cause ("rate limited (HTTP 429)"), `resume_at` (a `Timestamp`) the fire instant (unset on resolution events and pre-field rows), `max_attempts` the schedule cap; `will_retry: false` resolves it (fired, cleared by a clean completion, or the attempt cap reached), with the human sentence in `reason`. Wall-clock times are never embedded in `reason`: the producing daemon's clock zone is arbitrary (a container runs UTC), so clients render `resume_at` in the viewer's local zone. The cockpit renders the scheduling half as a system block in the transcript and shows ⟳ on the rail row until the resolution half arrives |
 | `ChildSpawned` | durable | A sub-agent was created (child_id, parent_id, name) |

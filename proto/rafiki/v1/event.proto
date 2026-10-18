@@ -170,6 +170,10 @@ message ErrorEvent {
 message ToolExecutionStart {
   string tool_use_id = 1;
   string name = 2;
+  // parent_tool_use_id names the Task tool call whose sub-agent issued this
+  // tool call (Claude Code's parent_tool_use_id). Empty on the main thread and
+  // for kinds without in-conversation sub-agents. Additive; no epoch bump.
+  string parent_tool_use_id = 3;
 }
 
 message ToolExecutionEnd {

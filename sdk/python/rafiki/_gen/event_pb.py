@@ -439,6 +439,7 @@ class ErrorEvent:
 class ToolExecutionStart:
     tool_use_id: str = ""
     name: str = ""
+    parent_tool_use_id: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -446,6 +447,8 @@ class ToolExecutionStart:
             out["toolUseId"] = self.tool_use_id
         if self.name != "":
             out["name"] = self.name
+        if self.parent_tool_use_id != "":
+            out["parentToolUseId"] = self.parent_tool_use_id
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ToolExecutionStart":
@@ -456,6 +459,9 @@ class ToolExecutionStart:
         _v = _d.get("name")
         if _v is not None:
             obj.name = _v
+        _v = _d.get("parentToolUseId")
+        if _v is not None:
+            obj.parent_tool_use_id = _v
         return obj
 
 @dataclasses.dataclass
