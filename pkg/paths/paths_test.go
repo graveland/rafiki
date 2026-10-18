@@ -217,3 +217,14 @@ func TestProvidersFile(t *testing.T) {
 	got, want := ProvidersFile(), "/etc/rafiki/p.toml"
 	assert.NewCollecting(t).Eq(want, got, "ProvidersFile() with RAFIKI_PROVIDERS")
 }
+
+func TestDaemonConfigFile(t *testing.T) {
+	t.Setenv(DaemonConfig, "")
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-config-test")
+	if got, want := DaemonConfigFile(), "/tmp/xdg-config-test/rafiki/rafikid.toml"; got != want {
+		t.Errorf("DaemonConfigFile() = %q, want %q", got, want)
+	}
+	t.Setenv(DaemonConfig, "/etc/rafiki/c.toml")
+	got, want := DaemonConfigFile(), "/etc/rafiki/c.toml"
+	assert.NewCollecting(t).Eq(want, got, "DaemonConfigFile() with RAFIKI_CONFIG")
+}

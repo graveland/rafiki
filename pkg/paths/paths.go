@@ -164,6 +164,16 @@ func ProvidersFile() string {
 	return filepath.Join(ConfigDir(), "providers.toml")
 }
 
+// DaemonConfigFile is rafikid's own configuration: $RAFIKI_CONFIG, else
+// <ConfigDir>/rafikid.toml. Sections are added as subsystems move in;
+// providers.toml, oidc.toml and install.toml are lifted in later, unrenamed.
+func DaemonConfigFile() string {
+	if v := Get(DaemonConfig); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "rafikid.toml")
+}
+
 // OIDCFile is the OIDC login configuration: <ConfigDir>/oidc.toml. Its
 // contents are by definition the contents of the future rafikid.toml [oidc]
 // section, so the eventual merge is a lift with no key renamed — the same

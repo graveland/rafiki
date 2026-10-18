@@ -93,6 +93,9 @@ const (
 	// Point it at a Claude profile explicitly if that is what you want.
 	Instructions = "RAFIKI_INSTRUCTIONS"
 
+	// DaemonConfig overrides the rafikid.toml location.
+	DaemonConfig = "RAFIKI_CONFIG"
+
 	// Providers overrides the providers.toml location.
 	Providers = "RAFIKI_PROVIDERS"
 

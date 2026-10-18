@@ -1373,7 +1373,7 @@ rafiki follows the XDG base directories:
 | socket | `~/.local/state/rafiki/controller.sock` | `$XDG_RUNTIME_DIR` |
 | records | `~/.local/share/rafiki/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
-| config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `profiles.toml`) | `$XDG_CONFIG_HOME` |
+| config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `profiles.toml`, `rafikid.toml`) | `$XDG_CONFIG_HOME` |
 
 This is where the **daemon** binds and reads from — a client reaches a
 different daemon by naming it in a profile, not by overriding these paths
@@ -1457,6 +1457,7 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_SKILLS_DIRS` | on-disk skill directories, path-list separated (opt-in — default is the daemon's database store). May be symlinks |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
+| `RAFIKI_CONFIG` | daemon-side: path to `rafikid.toml` (default `~/.config/rafiki/rafikid.toml`). Its `[telemetry]` section configures OTLP export; `OTEL_EXPORTER_OTLP_*` env vars override it |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | postgres URL for conversation persistence; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it |
 | `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated on first run); **required in Kubernetes**, where the pod filesystem is ephemeral |
@@ -1471,6 +1472,22 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_LOG_LEVEL` | daemon log verbosity: `debug`, `info` (default), `warn`, `error`. The daemon's `--log-level` flag overrides it. `debug` exposes per-request housekeeping lines |
 | `RAFIKI_EXECUTOR_SELECTOR` | client-side default label selector for `rafiki create --executor-selector` |
 | `RAFIKI_EXECUTORS_ENABLED` | daemon-side: `0`/`false` refuses executors outright. Defaults ON when `RAFIKI_CONTROL_LISTEN` is unset (UDS-only trust boundary), OFF once it's set |
+
+**OpenTelemetry export** is configured in `rafikid.toml` (or the standard
+`OTEL_EXPORTER_OTLP_*` env vars, which win over the file):
+
+```toml
+[telemetry]
+endpoint = "http://127.0.0.1:4318"   # an OTLP collector
+protocol = "http/protobuf"           # or "grpc"
+content  = "off"                     # "all"/"rules" export prompt & reply text
+```
+
+Tracing turns on as soon as an endpoint is configured; unset means a no-op
+provider. Postgres query spans start only inside an existing span, so the
+indexer and background sweeps never produce root traces, and query parameters
+are never recorded. `content` gates prompt, reply and tool-argument text;
+errors are always exported.
 
 **Web access (webfetch/websearch)** is opt-in (`RAFIKI_TOOLS_WEB=1`, daemon
 side) since a fundi child may run unattended without egress. When disabled

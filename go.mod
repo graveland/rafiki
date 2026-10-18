@@ -18,6 +18,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/dustin/go-humanize v1.0.1
+	github.com/exaring/otelpgx v0.13.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
@@ -33,6 +34,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/image v0.46.0

@@ -38,6 +38,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/pymodulesdb"
+	"go.graveland.dev/rafiki/pkg/rafikidconfig"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/reposdb"
@@ -49,6 +50,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/telemetry"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/usersdb"
@@ -302,9 +304,12 @@ func runDaemon(opts runDaemonOpts) error {
 	if err != nil {
 		return err
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	// The trace-id handler makes every log line joinable to the span it was
+	// logged in; installed with the logger itself, so lines logged during
+	// tracing setup carry ids too.
+	slog.SetDefault(slog.New(telemetry.NewLogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: level,
-	})))
+	}))))
 
 	// XDG locations, NOT ~/.pi — that is pi's own directory, and a daemon must
 	// not write its runtime state into another program's config directory.
@@ -352,12 +357,52 @@ func runDaemon(opts runDaemonOpts) error {
 		slog.Error("cannot start", "error", err)
 		os.Exit(1)
 	}
-	pool, err := pgxpool.New(baseCtx, dsn)
+
+	// rafikid.toml is the daemon's own configuration. An unknown key is fatal:
+	// a setting that silently does nothing is worse than a failed startup.
+	rcfg, err := rafikidconfig.Load(paths.DaemonConfigFile())
+	if err != nil {
+		slog.Error("rafikid.toml", "error", err)
+		os.Exit(1)
+	}
+
+	// Resolve the daemon id once: tracing stamps it as service.instance.id and
+	// the Controller records it as the conversation-lease holder.
+	daemonID, daemonIDSource, daemonIDErr := paths.DaemonID()
+	if daemonIDErr != nil {
+		// Not fatal: a daemon with no writable data dir and no env var can
+		// still run, it just cannot hold a lease, so it will not auto-resume
+		// anything. Failing to start would be worse.
+		slog.Warn("no daemon id; conversation leases disabled", "error", daemonIDErr)
+		daemonID = ""
+	} else {
+		slog.Info("daemon identity", "daemonId", daemonID, "source", daemonIDSource)
+	}
+
+	// Tracing must come before the pool: connections get the tracer when the
+	// pool config is built, not after they are handed out.
+	tp, shutdownTracing, err := setupTracing(baseCtx, rcfg.Telemetry, daemonID)
+	if err != nil {
+		slog.Error("otlp tracing setup failed; continuing without tracing", "error", err)
+		tp = nil
+	} else {
+		defer shutdownTracing()
+	}
+
+	pcfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		slog.Error("database DSN is invalid", "env", paths.DB, "error", err)
 		os.Exit(1)
 	}
-	// pgxpool.New only PARSES the DSN. Ping is what proves the database is
+	if tp != nil {
+		pcfg.ConnConfig.Tracer = newPGTracer(tp)
+	}
+	pool, err := pgxpool.NewWithConfig(baseCtx, pcfg)
+	if err != nil {
+		slog.Error("database DSN is invalid", "env", paths.DB, "error", err)
+		os.Exit(1)
+	}
+	// ParseConfig only PARSES the DSN. Ping is what proves the database is
 	// reachable, and an unreachable database is a startup failure now rather
 	// than a daemon that runs with every persistent feature silently dead.
 	pingCtx, pingCancel := context.WithTimeout(baseCtx, 10*time.Second)
@@ -374,19 +419,6 @@ func runDaemon(opts runDaemonOpts) error {
 			os.Exit(1)
 		}
 		slog.Info("dev mode: store migrated")
-	}
-
-	// The daemon's own proxy face. pi and claude children are separate
-	// processes and can only speak HTTP, so they need an address — and making
-	// that a second daemon someone must remember to start is how a child ends
-	// up talking to a provider directly. Serving it here means it cannot be
-	// down while the daemon is up.
-	tp, shutdownTracing, err := setupTracing(baseCtx, slog.Default())
-	if err != nil {
-		slog.Error("otlp tracing setup failed; continuing without tracing", "error", err)
-		tp = nil
-	} else {
-		defer shutdownTracing()
 	}
 
 	reg := prometheus.NewRegistry()
@@ -449,6 +481,14 @@ func runDaemon(opts runDaemonOpts) error {
 		prov = providers.Default()
 	} else {
 		slog.Info("provider registry loaded", "providers", prov.Names())
+	}
+
+	// Validate [telemetry] once providers.toml's names are known: a rule
+	// naming a provider that does not exist must fail startup, not silently
+	// never match.
+	if err := rcfg.Telemetry.Validate(prov.Names()); err != nil {
+		slog.Error("invalid telemetry configuration", "error", err)
+		os.Exit(1)
 	}
 
 	// OIDC login configuration (oidc.toml). A broken file must not stop the
@@ -530,6 +570,11 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
+	// The daemon's own proxy face. pi and claude children are separate
+	// processes and can only speak HTTP, so they need an address — and making
+	// that a second daemon someone must remember to start is how a child ends
+	// up talking to a provider directly. Serving it here means it cannot be
+	// down while the daemon is up.
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:         pool,
 		Logger:       slog.Default(),
@@ -601,6 +646,9 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
+	// The id was resolved once at startup (and stamped on traces); reuse it
+	// rather than reading it again here.
+	ctrl.daemonID = daemonID
 	ctrl.sandboxCfg = sandboxCfg
 	ctrl.sandboxStore = sandboxStore
 	// The sandbox sweeper's boot pass abandons a `creating` row only when it
