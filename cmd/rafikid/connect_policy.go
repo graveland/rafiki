@@ -190,6 +190,7 @@ var controlPolicyTable = map[string]controlPolicy{
 	"AddRepo":              policyUserOnly,
 	"ListRepos":            policyUserOnly,
 	"RefreshRepo":          policyUserOnly,
+	"SetRepo":              policyUserOnly,
 	"RemoveRepo":           policyUserOnly,
 	"RecallBackfill":       policyUserOnly,
 	"RecallStatus":         policyUserOnly,

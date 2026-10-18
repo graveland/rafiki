@@ -1232,6 +1232,7 @@ service Control {
   rpc AddRepo(AddRepoRequest) returns (AddRepoResponse);
   rpc ListRepos(ListReposRequest) returns (ListReposResponse);
   rpc RefreshRepo(RefreshRepoRequest) returns (RefreshRepoResponse);
+  rpc SetRepo(SetRepoRequest) returns (SetRepoResponse);
   rpc RemoveRepo(RemoveRepoRequest) returns (RemoveRepoResponse);
   rpc ListPresets(ListPresetsRequest) returns (ListPresetsResponse);
   rpc GetPreset(GetPresetRequest) returns (GetPresetResponse);
@@ -1425,11 +1426,28 @@ message DeletePymoduleRequest { string name = 1; }
 message DeletePymoduleResponse {}
 
 // RepoRow is one registered repo: the human label used as the
-// `repo` argument everywhere, plus the url and ref it was registered with.
+// `repo` argument everywhere, plus the url and ref it was registered with and
+// the state its last refresh left behind.
 message RepoRow {
   string name = 1;
   string url = 2;
   string ref = 3;
+  // commit is the commit the last successful refresh resolved ref to. Empty
+  // means the source has never been resolved.
+  string commit = 4;
+  // refresh_interval is the opt-in schedule. Absent or zero means on demand,
+  // which is the default: refresh is never on by default, for any repo. The
+  // shortest accepted interval is one minute.
+  google.protobuf.Duration refresh_interval = 5;
+  // resolved_at is when commit was resolved. Unset means never.
+  google.protobuf.Timestamp resolved_at = 6;
+  // skills is how many skill rows the source currently owns (its
+  // repo:<name> set for the caller's owner).
+  int32 skills = 7;
+  // scripts is how many scripts the source's cached discovery reported. It is
+  // a cache read, so it is zero until the source has been refreshed in this
+  // daemon's lifetime.
+  int32 scripts = 8;
 }
 
 message AddRepoRequest {
@@ -1439,13 +1457,40 @@ message AddRepoRequest {
   string name = 1;
   string url = 2;
   string ref = 3;
+  // refresh_interval opts the new registration into periodic refresh. Absent
+  // or zero means on demand.
+  optional google.protobuf.Duration refresh_interval = 4;
 }
-message AddRepoResponse { RepoRow row = 1; }
+message AddRepoResponse {
+  RepoRow row = 1;
+  // The first refresh's outcome, which registration runs synchronously: the
+  // commit it resolved, whether that commit was already the stored one, how
+  // many skills it stored, and the skills half's errors (which never fail the
+  // call, except a namespace collision, which rolls the registration back).
+  string commit = 2;
+  bool unchanged = 3;
+  int32 skills = 4;
+  repeated string skill_errors = 5;
+}
 
 message ListReposRequest {}
 message ListReposResponse { repeated RepoRow rows = 1; }
 
 message RefreshRepoRequest { string name = 1; }
+
+// SetRepoRequest changes a registration's ref and/or its refresh interval.
+// Both are optional and independent: an absent field leaves that half exactly
+// as it was, which is what makes `repo set <name> --refresh off` unable to
+// repoint anything.
+message SetRepoRequest {
+  string name = 1;
+  // ref is the git ref to track from now on. Absent leaves the stored ref.
+  optional string ref = 2;
+  // refresh_interval is the new schedule; a PRESENT zero means on demand
+  // (never), which is why the field is optional — absent and zero differ.
+  optional google.protobuf.Duration refresh_interval = 3;
+}
+message SetRepoResponse { RepoRow row = 1; }
 
 // RepoScript and RepoPackage deliberately duplicate the executor
 // protocol's messages of the same names rather than importing across the two
@@ -1470,6 +1515,17 @@ message RefreshRepoResponse {
   repeated RepoPackage packages = 2;
   bool venv_ready = 3;
   string venv_error = 4;
+  // commit is the commit this refresh resolved the ref to and fanned out.
+  string commit = 6;
+  // unchanged reports that the resolved commit was already the stored one, so
+  // the source had not moved since the previous refresh.
+  bool unchanged = 7;
+  // skills is how many skills this refresh stored. A refresh that reported
+  // skill errors stored none, and says so in skill_errors.
+  int32 skills = 8;
+  // skill_errors is the skills half's failure, per skill or per source. It is
+  // never the refresh's error: the scripts half still refreshed.
+  repeated string skill_errors = 9;
 }
 
 message RemoveRepoRequest { string name = 1; }

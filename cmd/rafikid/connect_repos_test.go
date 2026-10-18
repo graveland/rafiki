@@ -6,10 +6,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/skills"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -77,7 +81,7 @@ func TestConnectReposAddRefreshesFirstAndRefreshReusesStored(t *testing.T) {
 	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{VenvReady: true}
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
-	row, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "develop")
+	row, _, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "develop", 0)
 	c.Require().NoError(err, "AddRepo")
 	c.Require().False(row.Name != "fresh_tools" || row.URL != "https://example.net/fresh.git" || row.Ref != "develop", "AddRepo row = %+v", row)
 	// The first refresh went out synchronously, to alice's executor only.
@@ -89,9 +93,11 @@ func TestConnectReposAddRefreshesFirstAndRefreshReusesStored(t *testing.T) {
 	if _, err := f.store.Put(alice, "u_alice", "fresh_tools", "https://example.net/moved.git", "release"); err != nil {
 		t.Fatalf("repoint: %v", err)
 	}
-	scripts, packages, venvReady, venvError, err := m.RefreshRepo(alice, "fresh_tools")
+	refresh, err := m.RefreshRepo(alice, "fresh_tools")
 	c.Require().NoError(err, "RefreshRepo")
-	c.False(len(scripts) != 0 || len(packages) != 0 || !venvReady || venvError != "", "RefreshRepo = %v/%v ready=%v err=%q, want the empty default executor answer", scripts, packages, venvReady, venvError)
+	c.False(len(refresh.Scripts) != 0 || len(refresh.Packages) != 0 || !refresh.VenvReady || refresh.VenvError != "",
+		"RefreshRepo = %v/%v ready=%v err=%q, want the empty default executor answer", refresh.Scripts, refresh.Packages, refresh.VenvReady, refresh.VenvError)
+	c.Eq(defaultResolveCommit, refresh.Commit, "RefreshRepo commit")
 	c.Require().Eq(2, f.clients["exec-alice"].callCount(), "exec-alice received")
 	req := f.clients["exec-alice"].requests[1]
 	if req.GetUrl() != "https://example.net/moved.git" || req.GetRef() != "release" || req.GetName() != "fresh_tools" {
@@ -99,7 +105,7 @@ func TestConnectReposAddRefreshesFirstAndRefreshReusesStored(t *testing.T) {
 	}
 
 	// An unknown name is the store's ErrNotFound, not a silent empty refresh.
-	if _, _, _, _, err := m.RefreshRepo(alice, "no_such_source"); err != repos.ErrNotFound {
+	if _, err := m.RefreshRepo(alice, "no_such_source"); err != repos.ErrNotFound {
 		t.Fatalf("RefreshRepo(unknown) = %v, want ErrNotFound", err)
 	}
 }
@@ -115,7 +121,7 @@ func TestRepoAddRollsBackNewOnFailedRefresh(t *testing.T) {
 	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
-	row, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "develop")
+	row, _, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "develop", 0)
 	c.Require().Error(err, "AddRepo with a failing first refresh")
 	c.False(row.Name != "" || row.URL != "" || row.Ref != "", "AddRepo row = %+v, want the zero row on failure", row)
 	// The add's error is the refresh error — not a rollback failure masking it.
@@ -142,13 +148,13 @@ func TestRepoAddRestoresRepointOnFailedRefresh(t *testing.T) {
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
 	// A successful add first: fresh_tools registers at url/ref A.
-	row, err := m.AddRepo(alice, "fresh_tools", "https://example.net/old.git", "main")
+	row, _, err := m.AddRepo(alice, "fresh_tools", "https://example.net/old.git", "main", 0)
 	c.Require().NoError(err, "the first, succeeding add")
 	c.Require().False(row.URL != "https://example.net/old.git" || row.Ref != "main", "first add row = %+v", row)
 
 	// Now the clone breaks, and the source is re-added at url/ref B.
 	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
-	_, err = m.AddRepo(alice, "fresh_tools", "https://example.net/new.git", "develop")
+	_, _, err = m.AddRepo(alice, "fresh_tools", "https://example.net/new.git", "develop", 0)
 	c.Require().Error(err, "the re-add with a failing first refresh")
 	c.StrContains(err.Error(), "every eligible executor failed", "AddRepo's error")
 
@@ -186,7 +192,7 @@ func TestRepoAddRollsBackWhenCallerCancels(t *testing.T) {
 	f.clients["exec-alice"] = cl
 	alice := server.WithIdentity(ctx, &server.Identity{UserID: "u_alice"})
 
-	_, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "develop")
+	_, _, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "develop", 0)
 	c.Require().Error(err, "AddRepo whose refresh cancels ctx then fails")
 
 	// The delete STILL happened, on the uncancelled rollback context.
@@ -210,10 +216,10 @@ func TestConnectReposNilPusherStillRegisters(t *testing.T) {
 	m := connectRepos{c: &Controller{repoStore: f.store}} // pusher deliberately nil
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
-	row, err := m.AddRepo(alice, "solo_tools", "https://example.net/solo.git", "main")
+	row, _, err := m.AddRepo(alice, "solo_tools", "https://example.net/solo.git", "main", 0)
 	ck.Require().NoError(err, "AddRepo with nil pusher")
 	ck.False(row.Name != "solo_tools" || row.URL != "https://example.net/solo.git", "AddRepo row = %+v", row)
-	if _, _, _, _, err := m.RefreshRepo(alice, "solo_tools"); err == nil {
+	if _, err := m.RefreshRepo(alice, "solo_tools"); err == nil {
 		t.Fatal("RefreshRepo with nil pusher: succeeded, want a named error")
 	}
 	ck.Require().NoError(m.RemoveRepo(alice, "solo_tools"), "RemoveRepo with nil pusher")
@@ -232,10 +238,10 @@ func TestRepoRemoveEvictsCachedInventory(t *testing.T) {
 
 	// Populate the cache the way real traffic does: the adapter's synchronous
 	// first refresh on add, for two of alice's sources.
-	if _, err := m.AddRepo(alice, "ops_tools", "https://example.net/ops.git", "main"); err != nil {
+	if _, _, err := m.AddRepo(alice, "ops_tools", "https://example.net/ops.git", "main", 0); err != nil {
 		t.Fatalf("AddRepo ops_tools: %v", err)
 	}
-	if _, err := m.AddRepo(alice, "shared_lib", "https://example.net/lib.git", "v2"); err != nil {
+	if _, _, err := m.AddRepo(alice, "shared_lib", "https://example.net/lib.git", "v2", 0); err != nil {
 		t.Fatalf("AddRepo shared_lib: %v", err)
 	}
 	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); !ok {
@@ -256,4 +262,195 @@ func TestRepoRemoveEvictsCachedInventory(t *testing.T) {
 	}
 	_, ok := f.gp.inventoryFor("u_alice", "shared_lib")
 	c.True(ok, "inventoryFor lost shared_lib, which was NOT removed")
+}
+
+// ─── the skills half, the schedule and the resolved state ────────────────────
+
+// newRepoSkillsFixture wires a connectRepos over the repo fixture WITH a skill
+// store and a real pool holding one claude-capable executor, so a write's push
+// is observable. The corpus holds one enabled core row: a push of an empty
+// corpus is deliberately declined, and would make "was it pushed?"
+// untestable.
+func newRepoSkillsFixture(t *testing.T) (*repoFixture, connectRepos, *repoSkillStore, *pushFakeExecutor) {
+	t.Helper()
+	f := newRepoFixture()
+	sk := &repoSkillStore{
+		changed: true,
+		rows: []skills.Record{{
+			ID: "s1", Namespace: skills.DefaultNamespace, Name: "core", Enabled: true,
+			Source: skills.CoreSource,
+		}},
+	}
+	pool, fakes := pushTestPool(t, executors.Executor{ID: "exec-skills", OwnerUserID: "u_alice"})
+	pusher := &skillPusher{pool: pool, store: sk, version: "test"}
+	// The refresh's skills half writes through the PUSHER's store (production
+	// wires the same store into both), and pushes through the pusher — so the
+	// fixture must do both, or a collision would go undetected.
+	f.gp.skillStore = sk
+	f.gp.skillPush = func(ctx context.Context) { pusher.pushAll(ctx) }
+	// A non-nil response: the skills half reads the executor's discovered set,
+	// and a nil message is a nil set.
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{}
+	m := connectRepos{c: &Controller{
+		repoStore:   f.store,
+		repoPusher:  f.gp,
+		skillStore:  sk,
+		skillPusher: pusher,
+	}}
+	return f, m, sk, fakes["exec-skills"]
+}
+
+// TestRepoAddRollsBackOnNamespaceCollision pins the one skill error that fails
+// a registration: a repo whose skill namespace another source already holds
+// can never store its skills, so the add fails AND the registration is undone.
+// Every other skill error is reported with the registration kept.
+func TestRepoAddRollsBackOnNamespaceCollision(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f, m, sk, _ := newRepoSkillsFixture(t)
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Skills: []*executorpb.RepoSkill{{Namespace: "ops_tools", Name: "demo"}},
+	}
+	sk.putErr = &skills.NamespaceHeldError{Namespace: "ops_tools", Holder: "repo:other_repo"}
+
+	_, _, err := m.AddRepo(alice, "fresh_tools", "https://example.net/fresh.git", "main", 0)
+	c.Require().Error(err, "AddRepo whose skills collide with another source's namespace")
+	c.StrContains(err.Error(), `namespace "ops_tools" is already provided by repo:other_repo`, "AddRepo's error")
+
+	rows, lerr := m.ListRepos(alice)
+	c.Require().NoError(lerr, "ListRepos after the collision")
+	for _, r := range rows {
+		c.NotEq("fresh_tools", r.Name, "a registration whose skills collided survived the failed add")
+	}
+	c.Require().Len(f.store.deleted, 1, "deletes after the collision rollback")
+	c.Eq([2]string{"u_alice", "fresh_tools"}, f.store.deleted[0], "the delete")
+
+	// A skill error that is NOT a collision keeps the registration and is
+	// reported in the response — the scripts half works, and the operator can
+	// fix the skill.
+	sk.putErr = nil
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Scripts:     []*executorpb.RepoScript{{Name: "rotate_keys"}},
+		SkillErrors: []string{"skills/demo: symlink references/a.md is not followed"},
+	}
+	row, refresh, err := m.AddRepo(alice, "reported_tools", "https://example.net/reported.git", "main", 0)
+	c.Require().NoError(err, "AddRepo with a per-skill error")
+	c.Eq("reported_tools", row.Name, "the registration was kept")
+	c.EqDeep([]string{"skills/demo: symlink references/a.md is not followed"}, refresh.SkillErrors, "the skill error reached the caller")
+	c.Len(f.store.deleted, 1, "a reported (non-collision) skill error rolled the registration back")
+}
+
+// TestRepoRemoveDropsItsSkillsThenPushes pins RemoveRepo's order and effects:
+// the repo's own repo:<name> skill set is deleted (the source marker is the
+// only handle on it), the registration goes, the cached inventory is evicted,
+// and a removal that actually dropped rows pushes the corpus on.
+func TestRepoRemoveDropsItsSkillsThenPushes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f, m, sk, client := newRepoSkillsFixture(t)
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	if _, _, err := m.AddRepo(alice, "ops_tools", "https://example.net/ops.git", "main", 0); err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+	c.Require().Eq(1, client.syncCount(), "the add's skill write pushed the corpus")
+	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); !ok {
+		t.Fatal("precondition: ops_tools was never cached")
+	}
+
+	c.Require().NoError(m.RemoveRepo(alice, "ops_tools"), "RemoveRepo")
+	c.Require().Eq(2, sk.putCount(), "PutSet calls (the add's write, then the removal's empty set)")
+	c.Eq(skills.SetKey{OwnerUserID: "u_alice", Source: "repo:ops_tools"}, sk.puts[1], "the removal's set key")
+	c.Len(sk.sets[sk.puts[1]], 0, "the removal's set is not empty")
+	c.Eq(2, client.syncCount(), "the removal did not push the corpus on")
+	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
+		t.Error("the removed source's cached inventory survived")
+	}
+}
+
+// TestRepoListCountsSkillsAndScripts pins the two count columns: skills is how
+// many rows the source owns for this owner (its repo:<name> set), and scripts
+// is the cached discovery's count — both owner-scoped, so another owner's rows
+// never inflate them.
+func TestRepoListCountsSkillsAndScripts(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f, m, sk, _ := newRepoSkillsFixture(t)
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Scripts:  []*executorpb.RepoScript{{Name: "rotate_keys"}, {Name: "deploy"}},
+		Packages: []*executorpb.RepoPackage{{Name: "opslib"}},
+	}
+	if _, _, err := m.AddRepo(alice, "ops_tools", "https://example.net/ops.git", "main", 0); err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+	// The store's corpus: two rows for this repo, one for another source, and
+	// one belonging to another owner entirely.
+	sk.rows = []skills.Record{
+		{ID: "a", Namespace: "ops_tools", Name: "demo", Source: "repo:ops_tools", OwnerUserID: "u_alice", Enabled: true},
+		{ID: "b", Namespace: "ops_tools", Name: "other", Source: "repo:ops_tools", OwnerUserID: "u_alice"},
+		{ID: "c", Namespace: "shared_lib", Name: "demo", Source: "repo:shared_lib", OwnerUserID: "u_alice"},
+		{ID: "d", Namespace: "ops_tools", Name: "bobs", Source: "repo:ops_tools", OwnerUserID: "u_bob"},
+	}
+
+	rows, err := m.ListRepos(alice)
+	c.Require().NoError(err, "ListRepos")
+	var found bool
+	for _, r := range rows {
+		if r.Name != "ops_tools" {
+			continue
+		}
+		found = true
+		c.Eq(2, r.Skills, "ops_tools skill count")
+		c.Eq(2, r.Scripts, "ops_tools script count")
+		c.Eq(defaultResolveCommit, r.Commit, "ops_tools resolved commit")
+		c.False(r.ResolvedAt.IsZero(), "ops_tools resolved_at was never recorded")
+	}
+	c.True(found, "ops_tools missing from alice's list: %+v", rows)
+}
+
+// TestRepoSetChangesOneHalfAndRearms pins SetRepo: an unnamed half is left
+// alone, a named one is written, an unknown name is ErrNotFound, and the
+// schedule is re-armed from the store's own state afterwards (a source with an
+// interval gets a timer; clearing it removes the timer).
+func TestRepoSetChangesOneHalfAndRearms(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	timers := &fakeAfter{}
+	sched := newRepoScheduler(f.gp, f.store)
+	sched.now = func() time.Time { return time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC) }
+	sched.after = timers.after
+	m := connectRepos{c: &Controller{repoStore: f.store, repoPusher: f.gp}, sched: sched}
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	// --ref only: the interval stays on demand, and nothing is armed.
+	ref := "v2"
+	row, err := m.SetRepo(alice, connectapi.RepoSetRequest{Name: "ops_tools", Ref: &ref})
+	c.Require().NoError(err, "SetRepo ref")
+	c.Eq("v2", row.Ref, "the new ref")
+	c.Eq(time.Duration(0), row.RefreshInterval, "a ref-only set changed the interval")
+	c.Eq(0, timers.count(), "a ref-only set armed a timer for an on-demand source")
+
+	// --refresh only: the ref is untouched and the timer is armed, one interval
+	// out from the source's last resolution.
+	c.Require().NoError(f.store.SetResolved(alice, "u_alice", "ops_tools", defaultResolveCommit, sched.now()), "record a resolution")
+	interval := 20 * time.Minute
+	row, err = m.SetRepo(alice, connectapi.RepoSetRequest{Name: "ops_tools", RefreshInterval: &interval})
+	c.Require().NoError(err, "SetRepo interval")
+	c.Eq("v2", row.Ref, "an interval-only set repointed the source")
+	c.Eq(20*time.Minute, row.RefreshInterval, "the new interval")
+	c.Require().Eq(1, timers.count(), "an interval set armed no timer")
+	c.Eq(20*time.Minute, timers.last().delay, "armed delay")
+
+	// --refresh 0 (on demand): the timer goes away.
+	off := time.Duration(0)
+	_, err = m.SetRepo(alice, connectapi.RepoSetRequest{Name: "ops_tools", RefreshInterval: &off})
+	c.Require().NoError(err, "SetRepo off")
+	c.Eq(0, len(sched.timers), "clearing the interval left a timer armed")
+
+	// A name that is not registered is ErrNotFound, and nothing is written.
+	before := f.clients["exec-alice"].callCount()
+	if _, err := m.SetRepo(alice, connectapi.RepoSetRequest{Name: "no_such_source", Ref: &ref}); err != repos.ErrNotFound {
+		t.Fatalf("SetRepo(unknown) = %v, want ErrNotFound", err)
+	}
+	c.Eq(before, f.clients["exec-alice"].callCount(), "SetRepo refreshed; it must not")
 }

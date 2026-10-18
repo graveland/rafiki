@@ -23,6 +23,16 @@ var ErrNotFound = errors.New("repo not found")
 // would make repo="local" ambiguous between the two stores.
 var ErrReservedName = errors.New(`"local" is reserved for the built-in pymodule store`)
 
+// ErrIntervalTooShort refuses a schedule shorter than MinRefreshInterval. Zero
+// is the "on demand" answer and is always accepted; anything else must be a
+// real schedule, because a timer firing every few seconds would re-clone the
+// source faster than git can serve it.
+var ErrIntervalTooShort = errors.New("refresh interval must be at least 1m")
+
+// MinRefreshInterval is the shortest refresh schedule a store accepts, and the
+// same floor the conversations.repos CHECK constraint enforces.
+const MinRefreshInterval = time.Minute
+
 // Record is one row of conversations.repos.
 type Record struct {
 	ID          int64
@@ -30,7 +40,17 @@ type Record struct {
 	Name        string // the value used as the `repo` argument everywhere else
 	URL         string
 	Ref         string
-	CreatedAt   time.Time
+
+	// Commit is the commit the last successful refresh resolved Ref to. Empty
+	// means the source has never been resolved, which is not the same as "no
+	// commit" — nothing is known about it yet.
+	Commit string
+	// RefreshInterval is the opt-in schedule: 0 means on demand (never).
+	RefreshInterval time.Duration
+	// ResolvedAt is when Commit was resolved; the zero time means never.
+	ResolvedAt time.Time
+
+	CreatedAt time.Time
 }
 
 // Store is the repo backend. The Postgres implementation is
@@ -44,6 +64,10 @@ type Store interface {
 	// a new row. Put rejects name == "local" (ErrReservedName) and any other
 	// name ValidateName refuses; every implementation must apply it before
 	// touching the store.
+	//
+	// A repoint leaves the resolved state alone: Commit, RefreshInterval and
+	// ResolvedAt describe the PREVIOUS ref until the next refresh resolves the
+	// new one, so Put must not clear or rewrite them.
 	Put(ctx context.Context, ownerUserID, name, url, ref string) (Record, error)
 
 	// List returns ownerUserID's sources ordered by name. ownerUserID empty
@@ -55,6 +79,24 @@ type Store interface {
 	// versioning to soft-delete). Returns ErrNotFound when no such row
 	// exists; nothing is written in that case.
 	Delete(ctx context.Context, ownerUserID, name string) error
+
+	// SetResolved records the commit a refresh resolved the source's ref to and
+	// when it did so. A commit resolved identically to the stored one is still
+	// written: the timestamp is the scheduler's anchor for the next fire.
+	// Returns ErrNotFound when no such row exists.
+	SetResolved(ctx context.Context, ownerUserID, name, commit string, at time.Time) error
+
+	// SetRefreshInterval sets the source's opt-in schedule. Zero stores NULL
+	// (on demand, the default); a positive value below MinRefreshInterval is
+	// refused with ErrIntervalTooShort. Returns ErrNotFound when no such row
+	// exists.
+	SetRefreshInterval(ctx context.Context, ownerUserID, name string, d time.Duration) error
+
+	// ListAll returns every owner's rows ordered by (owner, name) — the whole
+	// table, not one owner's slice. It exists for the scheduler, which arms one
+	// timer per scheduled source regardless of who owns it; no request path may
+	// call it, because every other read here is owner-scoped.
+	ListAll(ctx context.Context) ([]Record, error)
 }
 
 // validNameRe is a single safe path segment, not a Python identifier: a repo's

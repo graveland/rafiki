@@ -187,3 +187,163 @@ func TestPostgresStoreDeleteRemovesAndReportsNotFound(t *testing.T) {
 	c.NoError(err, "list b")
 	c.False(len(rows) != 1 || rows[0].ID != b.ID || rows[0].URL != "https://example.com/b.git", "b's list = %+v, want exactly b's own row", rows)
 }
+
+// TestPostgresStoreSetResolvedRecordsCommit pins the resolved state a refresh
+// writes: the commit and the instant land on the row, they come back on the
+// next read, and the write is owner-scoped — an unknown (owner, name) is
+// ErrNotFound, writing nothing.
+func TestPostgresStoreSetResolvedRecordsCommit(t *testing.T) {
+	c := assert.NewAborting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	ownerA := newOwner(t, pool, "git-resolved-a")
+	ownerB := newOwner(t, pool, "git-resolved-b")
+
+	rec, err := st.Put(ctx, ownerA, "resolved_repo", "https://example.com/a.git", "main")
+	c.NoError(err, "put")
+	// A fresh registration knows nothing about a commit: empty, never-resolved,
+	// on demand — the three zero values, not a guess.
+	c.False(rec.Commit != "" || rec.RefreshInterval != 0 || !rec.ResolvedAt.IsZero(),
+		"fresh row = commit %q interval %v resolvedAt %v, want the unresolved zero values", rec.Commit, rec.RefreshInterval, rec.ResolvedAt)
+
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	at := time.Date(2026, 5, 4, 3, 2, 1, 0, time.UTC)
+	c.NoError(st.SetResolved(ctx, ownerA, "resolved_repo", sha, at), "set resolved")
+
+	rows, err := st.List(ctx, ownerA)
+	c.NoError(err, "list")
+	c.Require().Len(rows, 1, "list returned %d rows, want 1", len(rows))
+	c.Eq(sha, rows[0].Commit, "stored commit")
+	c.True(rows[0].ResolvedAt.Equal(at), "stored resolved_at = %v, want %v", rows[0].ResolvedAt, at)
+
+	// Owner-scoped: b owns no row named resolved_repo, so the update finds
+	// nothing and reports it rather than creating one.
+	c.ErrorIs(st.SetResolved(ctx, ownerB, "resolved_repo", sha, at), repos.ErrNotFound, "SetResolved for another owner")
+	rowsB, err := st.List(ctx, ownerB)
+	c.NoError(err, "list b")
+	c.Len(rowsB, 0, "b's rows after a refused SetResolved")
+}
+
+// TestPostgresStorePutLeavesResolvedStateAlone: a repoint changes url/ref and
+// nothing else. The stored commit belongs to the ref the row is LEAVING, and
+// must survive until the next refresh resolves the new one — clearing it here
+// would make `repo list` claim the source was never resolved.
+func TestPostgresStorePutLeavesResolvedStateAlone(t *testing.T) {
+	c := assert.NewAborting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "git-repoint-state")
+
+	if _, err := st.Put(ctx, owner, "kept_state", "https://example.com/a.git", "main"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	const sha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	at := time.Date(2026, 6, 7, 8, 9, 10, 0, time.UTC)
+	c.NoError(st.SetResolved(ctx, owner, "kept_state", sha, at), "set resolved")
+	c.NoError(st.SetRefreshInterval(ctx, owner, "kept_state", 15*time.Minute), "set interval")
+
+	// Repoint to a different ref.
+	rec, err := st.Put(ctx, owner, "kept_state", "https://example.com/moved.git", "v2")
+	c.NoError(err, "repoint")
+	c.False(rec.URL != "https://example.com/moved.git" || rec.Ref != "v2", "repoint returned %+v, want the new url/ref", rec)
+	c.False(rec.Commit != sha || !rec.ResolvedAt.Equal(at) || rec.RefreshInterval != 15*time.Minute,
+		"repoint returned commit %q resolvedAt %v interval %v, want the previous resolved state kept", rec.Commit, rec.ResolvedAt, rec.RefreshInterval)
+
+	rows, err := st.List(ctx, owner)
+	c.NoError(err, "list")
+	c.Require().Len(rows, 1, "list returned %d rows, want 1", len(rows))
+	c.False(rows[0].Commit != sha || !rows[0].ResolvedAt.Equal(at) || rows[0].RefreshInterval != 15*time.Minute,
+		"stored row = commit %q resolvedAt %v interval %v, want the previous resolved state kept", rows[0].Commit, rows[0].ResolvedAt, rows[0].RefreshInterval)
+}
+
+// TestPostgresStoreSetRefreshInterval pins the schedule column's three answers:
+// a real interval is stored, zero stores NULL (on demand), and anything
+// between zero and one minute is refused with the named sentinel rather than
+// reaching the table's CHECK constraint.
+func TestPostgresStoreSetRefreshInterval(t *testing.T) {
+	c := assert.NewAborting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "git-interval")
+
+	if _, err := st.Put(ctx, owner, "scheduled", "https://example.com/a.git", "main"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	// On demand is the default and stays NULL in the table.
+	var nullCount int
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.repos
+		 WHERE name = $1 AND refresh_interval IS NULL`, "scheduled").Scan(&nullCount), "count NULL intervals")
+	c.Eq(1, nullCount, "a fresh row's refresh_interval is not NULL")
+
+	c.NoError(st.SetRefreshInterval(ctx, owner, "scheduled", 10*time.Minute), "set 10m")
+	rows, err := st.List(ctx, owner)
+	c.NoError(err, "list")
+	c.Require().Len(rows, 1, "list returned %d rows, want 1", len(rows))
+	c.Eq(10*time.Minute, rows[0].RefreshInterval, "stored interval")
+
+	// Below the floor: refused, and the stored value is untouched.
+	for _, bad := range []time.Duration{time.Second, 59 * time.Second, -time.Minute} {
+		c.ErrorIs(st.SetRefreshInterval(ctx, owner, "scheduled", bad), repos.ErrIntervalTooShort,
+			"SetRefreshInterval(%v) = %v, want ErrIntervalTooShort", bad)
+	}
+	c.ErrorIs(st.SetRefreshInterval(ctx, owner, "scheduled", 59*time.Second), repos.ErrIntervalTooShort, "59s")
+	if err := st.SetRefreshInterval(ctx, owner, "scheduled", 59*time.Second); err == nil {
+		t.Fatal("59s accepted")
+	} else {
+		c.Eq("refresh interval must be at least 1m", err.Error(), "short-interval error text")
+	}
+	rows, err = st.List(ctx, owner)
+	c.NoError(err, "list after refusals")
+	c.Eq(10*time.Minute, rows[0].RefreshInterval, "a refused interval changed the stored one")
+
+	// Exactly one minute is the floor, so it is accepted.
+	c.NoError(st.SetRefreshInterval(ctx, owner, "scheduled", time.Minute), "set 1m")
+	// Zero clears it back to on demand (NULL), which List reports as zero.
+	c.NoError(st.SetRefreshInterval(ctx, owner, "scheduled", 0), "clear interval")
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.repos
+		 WHERE name = $1 AND refresh_interval IS NULL`, "scheduled").Scan(&nullCount), "count NULL intervals after clear")
+	c.Eq(1, nullCount, "SetRefreshInterval(0) did not store NULL")
+	rows, err = st.List(ctx, owner)
+	c.NoError(err, "list after clear")
+	c.Eq(time.Duration(0), rows[0].RefreshInterval, "cleared interval")
+
+	c.ErrorIs(st.SetRefreshInterval(ctx, owner, "never_registered", time.Minute), repos.ErrNotFound, "interval for an unknown name")
+}
+
+// TestPostgresStoreListAllSpansOwners pins the scheduler's read: every owner's
+// rows come back in one call, ordered by (owner, name) with the unattributed
+// bucket first — unlike List, which is owner-scoped by construction.
+func TestPostgresStoreListAllSpansOwners(t *testing.T) {
+	c := assert.NewAborting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	ownerA := newOwner(t, pool, "git-all-a")
+	ownerB := newOwner(t, pool, "git-all-b")
+
+	for _, put := range []struct{ owner, name string }{
+		{ownerB, "b_second"},
+		{ownerA, "a_second"},
+		{"", "anon_repo"},
+		{ownerA, "a_first"},
+	} {
+		if _, err := st.Put(ctx, put.owner, put.name, "https://example.com/x.git", "main"); err != nil {
+			t.Fatalf("put %s/%s: %v", put.owner, put.name, err)
+		}
+	}
+
+	rows, err := st.ListAll(ctx)
+	c.NoError(err, "list all")
+	c.Require().Len(rows, 4, "ListAll returned %d rows, want 4", len(rows))
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r.OwnerUserID+"/"+r.Name)
+	}
+	c.EqDeep([]string{
+		"/anon_repo",        // the unattributed bucket sorts first
+		ownerA + "/a_first", // then owner, then name
+		ownerA + "/a_second",
+		ownerB + "/b_second",
+	}, got, "ListAll order")
+}

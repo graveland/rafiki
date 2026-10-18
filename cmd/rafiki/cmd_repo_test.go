@@ -12,9 +12,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -31,6 +33,7 @@ type repoStubControl struct {
 	addResp     *rafikiv1.AddRepoResponse
 	refreshResp *rafikiv1.RefreshRepoResponse
 	listResp    *rafikiv1.ListReposResponse
+	setResp     *rafikiv1.SetRepoResponse
 
 	// refreshErr fails the named source only, so a multi-source run's
 	// partial-failure path is testable.
@@ -40,6 +43,7 @@ type repoStubControl struct {
 	addCalls     []*rafikiv1.AddRepoRequest
 	refreshCalls []*rafikiv1.RefreshRepoRequest
 	removeCalls  []*rafikiv1.RemoveRepoRequest
+	setCalls     []*rafikiv1.SetRepoRequest
 	listCalls    int
 }
 
@@ -78,8 +82,30 @@ func (s *repoStubControl) RefreshRepo(
 		out.Packages = s.refreshResp.GetPackages()
 		out.VenvReady = s.refreshResp.GetVenvReady()
 		out.VenvError = s.refreshResp.GetVenvError()
+		out.Commit = s.refreshResp.GetCommit()
+		out.Unchanged = s.refreshResp.GetUnchanged()
+		out.Skills = s.refreshResp.GetSkills()
+		out.SkillErrors = s.refreshResp.GetSkillErrors()
 	}
 	return connect.NewResponse(out), nil
+}
+
+func (s *repoStubControl) SetRepo(
+	_ context.Context, req *connect.Request[rafikiv1.SetRepoRequest],
+) (*connect.Response[rafikiv1.SetRepoResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setCalls = append(s.setCalls, req.Msg)
+	if s.setResp != nil {
+		return connect.NewResponse(s.setResp), nil
+	}
+	return connect.NewResponse(&rafikiv1.SetRepoResponse{Row: &rafikiv1.RepoRow{Name: req.Msg.GetName()}}), nil
+}
+
+func (s *repoStubControl) sets() []*rafikiv1.SetRepoRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*rafikiv1.SetRepoRequest(nil), s.setCalls...)
 }
 
 func (s *repoStubControl) RemoveRepo(
@@ -143,14 +169,20 @@ func runRepoCmd(t *testing.T, args ...string) error {
 
 // TestRepoAddRendersDiscoveredCount pins the add contract end to end:
 // the registration goes out first (with the CLI's --ref default applied) and
-// the printed output names the source AND the discovered inventory the
-// daemon's synchronous first refresh reported.
+// the printed output is the one summary line the contract names —
+// `refreshed <name> at <commit[:12]>: N script(s), N package(s), N skill(s)` —
+// with the commit and skill count from the registration's own refresh and the
+// script/package counts from the follow-up refresh.
 func TestRepoAddRendersDiscoveredCount(t *testing.T) {
 	c := assert.NewCollecting(t)
 	stub := &repoStubControl{
-		addResp: &rafikiv1.AddRepoResponse{Row: &rafikiv1.RepoRow{
-			Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
-		}},
+		addResp: &rafikiv1.AddRepoResponse{
+			Row: &rafikiv1.RepoRow{
+				Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
+			},
+			Commit: "0123456789abcdef0123456789abcdef01234567",
+			Skills: 3,
+		},
 		refreshResp: &rafikiv1.RefreshRepoResponse{
 			Scripts: []*rafikiv1.RepoScript{
 				{Name: "rotate_keys", Description: "rotate the keys"},
@@ -165,14 +197,24 @@ func TestRepoAddRendersDiscoveredCount(t *testing.T) {
 	out := captureStdout(t, func() {
 		c.Require().NoError(runRepoCmd(t, "add", "ops_tools", "https://example.net/ops.git"), "repo add")
 	})
-	c.False(!strings.Contains(out, "ops_tools") || !strings.Contains(out, "https://example.net/ops.git"), "add output does not name the source:\n%s", out)
-	c.False(!strings.Contains(out, "2 script(s)") || !strings.Contains(out, "1 package(s)"), "add output does not report the discovered inventory:\n%s", out)
+	c.StrContains(out, "refreshed ops_tools at 0123456789ab: 2 script(s), 1 package(s), 3 skill(s)", "add output:\n")
 
-	// The refresh that produced the summary named the registered source.
+	// The refresh that produced the counts named the registered source.
 	adds := stub.adds()
 	c.Require().False(len(adds) != 1 || adds[0].GetName() != "ops_tools" || adds[0].GetUrl() != "https://example.net/ops.git" || adds[0].GetRef() != "main", "AddRepo request = %+v, want ops_tools/url with the --ref main default", adds)
 	refreshes := stub.refreshes()
 	c.Require().False(len(refreshes) != 1 || refreshes[0].GetName() != "ops_tools", "RefreshRepo requests = %v, want exactly one for ops_tools", refreshes)
+
+	// --refresh carries the interval onto the registration; absent leaves it
+	// off (on demand), which is the wire's zero.
+	c.Require().NoError(runRepoCmd(t, "add", "scheduled", "https://example.net/s.git", "--refresh", "15m"))
+	adds = stub.adds()
+	c.Require().Len(adds, 2, "AddRepo calls")
+	c.Eq(15*time.Minute, adds[1].GetRefreshInterval().AsDuration(), "AddRepo refresh interval")
+
+	// A too-short interval is refused locally, before the round trip.
+	c.Error(runRepoCmd(t, "add", "short", "https://example.net/s.git", "--refresh", "30s"), "repo add --refresh 30s: accepted")
+	c.Len(stub.adds(), 2, "the daemon was called despite the refused interval")
 }
 
 // TestRepoRefreshRendersVenvFailure pins the other half of the summary:
@@ -270,10 +312,10 @@ func TestRepoCommandTree(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		got[sub.Name()] = true
 	}
-	for _, want := range []string{"add", "list", "refresh", "remove"} {
+	for _, want := range []string{"add", "list", "refresh", "set", "remove"} {
 		c.False(!got[want], "repo subcommands missing %q (have %v)", want, got)
 	}
-	c.Len(got, 4, "repo subcommands")
+	c.Len(got, 5, "repo subcommands")
 
 	// Arg contracts: add takes name+url, remove takes exactly one, and list
 	// takes none — validation fails before any endpoint is touched, so these
@@ -287,6 +329,8 @@ func TestRepoCommandTree(t *testing.T) {
 		{"add", "a", "u", "extra"}, // too many
 		{"remove"},                 // missing name
 		{"remove", "a", "b"},       // too many
+		{"set"},                    // missing name
+		{"set", "a", "b"},          // too many
 		{"list", "extra"},          // list takes none
 	} {
 		c.Error(runRepoCmd(t, args...), "repo %v: executed without error, want an arg refusal", args)
@@ -322,8 +366,8 @@ func TestRepoSummaryJSONLIsOneCompactLine(t *testing.T) {
 
 	// The emitter itself, both ways around: -j indents, -J stays one line.
 	var jBuf, jlBuf bytes.Buffer
-	c.Require().NoError(emitRepoSummary(&jBuf, "refreshed ops_tools", summary(), outputJSON))
-	c.Require().NoError(emitRepoSummary(&jlBuf, "refreshed ops_tools", summary(), outputJSONL))
+	c.Require().NoError(emitRepoSummary(&jBuf, summary(), outputJSON))
+	c.Require().NoError(emitRepoSummary(&jlBuf, summary(), outputJSONL))
 	if lines := strings.Split(strings.TrimRight(jlBuf.String(), "\n"), "\n"); len(lines) != 1 {
 		t.Fatalf("emitRepoSummary -J printed %d line(s), want one compact record:\n%s", len(lines), jlBuf.String())
 	}
@@ -334,9 +378,13 @@ func TestRepoSummaryJSONLIsOneCompactLine(t *testing.T) {
 	// the same persistent-flag registrations the real binary has (the same
 	// trick newTestRoot uses for the profile flag).
 	stub := &repoStubControl{
-		addResp: &rafikiv1.AddRepoResponse{Row: &rafikiv1.RepoRow{
-			Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
-		}},
+		addResp: &rafikiv1.AddRepoResponse{
+			Row: &rafikiv1.RepoRow{
+				Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
+			},
+			Commit: "0123456789abcdef0123456789abcdef01234567",
+			Skills: 2,
+		},
 		refreshResp: summary(),
 	}
 	newRepoHarness(t, stub)
@@ -354,27 +402,54 @@ func TestRepoSummaryJSONLIsOneCompactLine(t *testing.T) {
 	})
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	c.Require().Len(lines, 1, "add -J printed %d line(s), want exactly one compact record:\n%s", len(lines), out)
-	var resp rafikiv1.RefreshRepoResponse
+	// add -J emits the REGISTRATION's answer (AddRepoResponse): the row, the
+	// first refresh's commit and skill count, and its skill errors.
+	var resp rafikiv1.AddRepoResponse
 	err := json.Unmarshal([]byte(lines[0]), &resp)
 	c.Require().NoError(err, "add -J line is not a bare record: %v\n%s", err, lines[0])
-	if len(resp.GetScripts()) != 2 || len(resp.GetPackages()) != 1 {
-		t.Errorf("add -J record carries scripts=%d packages=%d, want the discovered inventory", len(resp.GetScripts()), len(resp.GetPackages()))
+	if resp.GetRow().GetName() != "ops_tools" || resp.GetCommit() != "0123456789abcdef0123456789abcdef01234567" || resp.GetSkills() != 2 {
+		t.Errorf("add -J record = %+v, want the registration's answer", &resp)
 	}
 }
 
 // The rendered table cells, tested without a daemon: the header names the
-// three columns and a URL/refless row falls back to "-".
+// seven columns, a refless row falls back to "-", the commit is shortened to
+// twelve characters, and an on-demand source renders "-" in REFRESH.
 func TestRepoListCells(t *testing.T) {
 	c := assert.NewCollecting(t)
 	var buf strings.Builder
 	c.Require().NoError(renderRepoList(&buf, []*rafikiv1.RepoRow{
-		{Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main"},
+		{
+			Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
+			Commit:          "0123456789abcdef0123456789abcdef01234567",
+			RefreshInterval: durationpb.New(15 * time.Minute),
+			Skills:          3,
+			Scripts:         2,
+		},
 		{Name: "shared_lib", Url: "https://example.net/lib.git"},
 	}, false))
 	out := buf.String()
-	for _, want := range []string{"NAME", "URL", "REF", "ops_tools", "main", "shared_lib"} {
+	for _, want := range []string{
+		"NAME", "URL", "REF", "COMMIT", "REFRESH", "SKILLS", "SCRIPTS",
+		"ops_tools", "https://example.net/ops.git", "main", "shared_lib",
+		"0123456789ab", // the commit, shortened
+		"15m0s",        // the schedule
+		"3",            // skills
+		"2",            // scripts
+	} {
 		c.StrContains(out, want, "renderRepoList output missing")
 	}
+	c.NotStrContains(out, "0123456789abcdef", "the commit was not shortened to twelve characters")
+	// The never-refreshed row is on demand with no commit: both render "-".
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	var shared string
+	for _, line := range lines {
+		if strings.Contains(line, "shared_lib") {
+			shared = line
+		}
+	}
+	c.Require().NotEq("", shared, "no shared_lib row in:\n%s", out)
+	c.StrContains(shared, "-", "the never-refreshed row has no dash fallback:\n%s", out)
 }
 
 // TestRepoAddRejectsLocalNameBeforeDial is folded into
@@ -542,4 +617,144 @@ func TestRepoRefreshCompletesSourceNames(t *testing.T) {
 	c.EqDeep([]string{"shared_lib"}, got, "prefix-filtered completion candidates")
 	got, _ = refresh.ValidArgsFunction(refresh, []string{"ops_tools"}, "")
 	c.EqDeep([]string{"ops_tools", "shared_lib"}, got, "completion after a first name")
+}
+
+// TestRepoSetSendsOnlyTheNamedHalf pins `repo set`'s presence contract: each
+// flag is optional and independent, an unnamed half is ABSENT on the wire (not
+// a zero), `--refresh off` is a present zero (on demand), and naming neither
+// is a usage error rather than a no-op round trip.
+func TestRepoSetSendsOnlyTheNamedHalf(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{setResp: &rafikiv1.SetRepoResponse{Row: &rafikiv1.RepoRow{
+		Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "v2",
+		RefreshInterval: durationpb.New(15 * time.Minute),
+	}}}
+	newRepoHarness(t, stub)
+
+	// --ref alone: the interval stays absent.
+	out := captureStdout(t, func() {
+		c.Require().NoError(runRepoCmd(t, "set", "ops_tools", "--ref", "v2"), "repo set --ref")
+	})
+	sets := stub.sets()
+	c.Require().Len(sets, 1, "SetRepo calls")
+	c.Require().NotNil(sets[0].Ref, "the ref did not reach the daemon")
+	c.Eq("v2", sets[0].GetRef(), "ref")
+	c.Nil(sets[0].RefreshInterval, "an interval was sent for a --ref-only set")
+	c.StrContains(out, "set ops_tools", "set output:\n")
+
+	// --refresh off: a PRESENT zero, which is on demand.
+	c.Require().NoError(runRepoCmd(t, "set", "ops_tools", "--refresh", "off"), "repo set --refresh off")
+	sets = stub.sets()
+	c.Require().Len(sets, 2, "SetRepo calls")
+	c.Require().NotNil(sets[1].RefreshInterval, "a present zero interval was sent as absent")
+	c.Eq(time.Duration(0), sets[1].GetRefreshInterval().AsDuration(), "the off interval")
+	c.Nil(sets[1].Ref, "a ref was sent for a --refresh-only set")
+
+	// --refresh 15m: a real interval.
+	c.Require().NoError(runRepoCmd(t, "set", "ops_tools", "--refresh", "15m"), "repo set --refresh 15m")
+	sets = stub.sets()
+	c.Require().Len(sets, 3, "SetRepo calls")
+	c.Eq(15*time.Minute, sets[2].GetRefreshInterval().AsDuration(), "the interval")
+
+	// Neither flag: refused before any round trip.
+	c.Error(runRepoCmd(t, "set", "ops_tools"), "repo set with no flags: accepted")
+	c.Len(stub.sets(), 3, "the daemon was called despite an empty set")
+
+	// A too-short interval and a malformed name are refused locally too.
+	c.Error(runRepoCmd(t, "set", "ops_tools", "--refresh", "30s"), "repo set --refresh 30s: accepted")
+	c.Error(runRepoCmd(t, "set", "bad.name", "--ref", "v2"), "repo set with a malformed name: accepted")
+	c.Len(stub.sets(), 3, "the daemon was called despite a local refusal")
+}
+
+// TestRepoRefreshPrintsCommitSkillsAndErrors pins the refresh verb's output
+// contract: `refreshed <name> at <commit[:12]>[ (unchanged)]: N script(s), N
+// package(s), N skill(s)` on stdout, one `skill error: <text>` per failure on
+// stderr, and a non-zero exit when there is any skill error — the scripts
+// refreshed, but the skills the repo ships did not.
+func TestRepoRefreshPrintsCommitSkillsAndErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{
+		refreshResp: &rafikiv1.RefreshRepoResponse{
+			Commit:      "0123456789abcdef0123456789abcdef01234567",
+			Unchanged:   true,
+			Scripts:     []*rafikiv1.RepoScript{{Name: "rotate_keys"}, {Name: "deploy"}},
+			Packages:    []*rafikiv1.RepoPackage{{Name: "opslib"}},
+			VenvReady:   true,
+			Skills:      4,
+			SkillErrors: []string{"skills/demo: symlink references/a.md is not followed", "skills/other: too large"},
+		},
+	}
+	newRepoHarness(t, stub)
+
+	stderr := captureStderr(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = runRepoCmd(t, "refresh", "ops_tools")
+	})
+	c.StrContains(out, "refreshed ops_tools at 0123456789ab (unchanged): 2 script(s), 1 package(s), 4 skill(s)", "refresh output:\n")
+	c.Require().Error(err, "a skill error must make the command exit non-zero")
+	c.StrContains(err.Error(), "2 skill error(s)", "refresh error")
+	c.StrContains(stderr(), "skill error: skills/demo: symlink references/a.md is not followed", "refresh stderr:\n")
+	c.StrContains(stderr(), "skill error: skills/other: too large", "refresh stderr:\n")
+
+	// No skill errors, no "(unchanged)": the line still reports the commit,
+	// and the command succeeds.
+	stub.refreshResp = &rafikiv1.RefreshRepoResponse{
+		Commit: "fedcbafedcbafedcbafedcbafedcbafedcbafedc",
+		Skills: 1,
+	}
+	stderr = captureStderr(t)
+	out = captureStdout(t, func() {
+		c.Require().NoError(runRepoCmd(t, "refresh", "ops_tools"), "repo refresh")
+	})
+	c.StrContains(out, "refreshed ops_tools at fedcbafedcba: 0 script(s), 0 package(s), 1 skill(s)", "refresh output:\n")
+	c.NotStrContains(out, "(unchanged)", "an unchanged refresh line was printed for a changed one:\n")
+	c.Eq("", stderr(), "stderr for a clean refresh")
+}
+
+// TestRepoRefreshLineShapes pins the line itself, without a daemon: the commit
+// is shortened to twelve characters (and left alone when it is shorter), and
+// the unchanged marker is appended before the counts.
+func TestRepoRefreshLineShapes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	c.Eq("refreshed ops_tools at 0123456789ab: 2 script(s), 1 package(s), 0 skill(s)",
+		repoRefreshLine("ops_tools", "0123456789abcdef0123456789abcdef01234567", false, 2, 1, 0), "line")
+	c.Eq("refreshed ops_tools at 0123456789ab (unchanged): 0 script(s), 0 package(s), 3 skill(s)",
+		repoRefreshLine("ops_tools", "0123456789abcdef0123456789abcdef01234567", true, 0, 0, 3), "unchanged line")
+	c.Eq("refreshed ops_tools at abc123: 0 script(s), 0 package(s), 0 skill(s)",
+		repoRefreshLine("ops_tools", "abc123", false, 0, 0, 0), "short commit line")
+	// A refresh that resolved nothing (an executor that answered with no
+	// commit) renders "-" rather than a blank.
+	c.StrContains(repoRefreshLine("ops_tools", "", false, 0, 0, 0), "refreshed ops_tools at -:", "empty commit line")
+}
+
+// TestRepoAddReportsSkillErrors pins add's skills-half contract: a skill error
+// is printed on stderr as `skill error: <text>` and the command exits
+// non-zero, even though the registration itself succeeded — only a namespace
+// collision fails an add, but a repo whose skills did not land must not look
+// like a clean success.
+func TestRepoAddReportsSkillErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{
+		addResp: &rafikiv1.AddRepoResponse{
+			Row:         &rafikiv1.RepoRow{Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main"},
+			Commit:      "0123456789abcdef0123456789abcdef01234567",
+			SkillErrors: []string{"skills/demo: symlink references/a.md is not followed"},
+		},
+		refreshResp: &rafikiv1.RefreshRepoResponse{
+			Scripts:   []*rafikiv1.RepoScript{{Name: "rotate_keys"}},
+			VenvReady: true,
+		},
+	}
+	newRepoHarness(t, stub)
+
+	stderr := captureStderr(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = runRepoCmd(t, "add", "ops_tools", "https://example.net/ops.git")
+	})
+	c.StrContains(out, "refreshed ops_tools at 0123456789ab: 1 script(s), 0 package(s), 0 skill(s)", "add output:\n")
+	c.Require().Error(err, "a skill error must make `repo add` exit non-zero")
+	c.StrContains(err.Error(), "1 skill error(s)", "add error")
+	c.StrContains(stderr(), "skill error: skills/demo: symlink references/a.md is not followed", "add stderr:\n")
 }

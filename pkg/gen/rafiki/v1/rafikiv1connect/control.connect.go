@@ -91,6 +91,8 @@ const (
 	ControlListReposProcedure = "/rafiki.v1.Control/ListRepos"
 	// ControlRefreshRepoProcedure is the fully-qualified name of the Control's RefreshRepo RPC.
 	ControlRefreshRepoProcedure = "/rafiki.v1.Control/RefreshRepo"
+	// ControlSetRepoProcedure is the fully-qualified name of the Control's SetRepo RPC.
+	ControlSetRepoProcedure = "/rafiki.v1.Control/SetRepo"
 	// ControlRemoveRepoProcedure is the fully-qualified name of the Control's RemoveRepo RPC.
 	ControlRemoveRepoProcedure = "/rafiki.v1.Control/RemoveRepo"
 	// ControlListPresetsProcedure is the fully-qualified name of the Control's ListPresets RPC.
@@ -251,6 +253,7 @@ type ControlClient interface {
 	AddRepo(context.Context, *connect.Request[v1.AddRepoRequest]) (*connect.Response[v1.AddRepoResponse], error)
 	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
 	RefreshRepo(context.Context, *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error)
+	SetRepo(context.Context, *connect.Request[v1.SetRepoRequest]) (*connect.Response[v1.SetRepoResponse], error)
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error)
 	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
@@ -497,6 +500,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			httpClient,
 			baseURL+ControlRefreshRepoProcedure,
 			connect.WithSchema(controlMethods.ByName("RefreshRepo")),
+			connect.WithClientOptions(opts...),
+		),
+		setRepo: connect.NewClient[v1.SetRepoRequest, v1.SetRepoResponse](
+			httpClient,
+			baseURL+ControlSetRepoProcedure,
+			connect.WithSchema(controlMethods.ByName("SetRepo")),
 			connect.WithClientOptions(opts...),
 		),
 		removeRepo: connect.NewClient[v1.RemoveRepoRequest, v1.RemoveRepoResponse](
@@ -889,6 +898,7 @@ type controlClient struct {
 	addRepo              *connect.Client[v1.AddRepoRequest, v1.AddRepoResponse]
 	listRepos            *connect.Client[v1.ListReposRequest, v1.ListReposResponse]
 	refreshRepo          *connect.Client[v1.RefreshRepoRequest, v1.RefreshRepoResponse]
+	setRepo              *connect.Client[v1.SetRepoRequest, v1.SetRepoResponse]
 	removeRepo           *connect.Client[v1.RemoveRepoRequest, v1.RemoveRepoResponse]
 	listPresets          *connect.Client[v1.ListPresetsRequest, v1.ListPresetsResponse]
 	getPreset            *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
@@ -1074,6 +1084,11 @@ func (c *controlClient) ListRepos(ctx context.Context, req *connect.Request[v1.L
 // RefreshRepo calls rafiki.v1.Control.RefreshRepo.
 func (c *controlClient) RefreshRepo(ctx context.Context, req *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error) {
 	return c.refreshRepo.CallUnary(ctx, req)
+}
+
+// SetRepo calls rafiki.v1.Control.SetRepo.
+func (c *controlClient) SetRepo(ctx context.Context, req *connect.Request[v1.SetRepoRequest]) (*connect.Response[v1.SetRepoResponse], error) {
+	return c.setRepo.CallUnary(ctx, req)
 }
 
 // RemoveRepo calls rafiki.v1.Control.RemoveRepo.
@@ -1403,6 +1418,7 @@ type ControlHandler interface {
 	AddRepo(context.Context, *connect.Request[v1.AddRepoRequest]) (*connect.Response[v1.AddRepoResponse], error)
 	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
 	RefreshRepo(context.Context, *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error)
+	SetRepo(context.Context, *connect.Request[v1.SetRepoRequest]) (*connect.Response[v1.SetRepoResponse], error)
 	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error)
 	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
@@ -1645,6 +1661,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		ControlRefreshRepoProcedure,
 		svc.RefreshRepo,
 		connect.WithSchema(controlMethods.ByName("RefreshRepo")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSetRepoHandler := connect.NewUnaryHandler(
+		ControlSetRepoProcedure,
+		svc.SetRepo,
+		connect.WithSchema(controlMethods.ByName("SetRepo")),
 		connect.WithHandlerOptions(opts...),
 	)
 	controlRemoveRepoHandler := connect.NewUnaryHandler(
@@ -2059,6 +2081,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListReposHandler.ServeHTTP(w, r)
 		case ControlRefreshRepoProcedure:
 			controlRefreshRepoHandler.ServeHTTP(w, r)
+		case ControlSetRepoProcedure:
+			controlSetRepoHandler.ServeHTTP(w, r)
 		case ControlRemoveRepoProcedure:
 			controlRemoveRepoHandler.ServeHTTP(w, r)
 		case ControlListPresetsProcedure:
@@ -2286,6 +2310,10 @@ func (UnimplementedControlHandler) ListRepos(context.Context, *connect.Request[v
 
 func (UnimplementedControlHandler) RefreshRepo(context.Context, *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RefreshRepo is not implemented"))
+}
+
+func (UnimplementedControlHandler) SetRepo(context.Context, *connect.Request[v1.SetRepoRequest]) (*connect.Response[v1.SetRepoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetRepo is not implemented"))
 }
 
 func (UnimplementedControlHandler) RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error) {

@@ -3813,6 +3813,11 @@ class RepoRow:
     name: str = ""
     url: str = ""
     ref: str = ""
+    commit: str = ""
+    refresh_interval: Optional[datetime.timedelta] = None
+    resolved_at: Optional[datetime.datetime] = None
+    skills: int = 0
+    scripts: int = 0
 
     def to_dict(self) -> dict:
         out = {}
@@ -3822,6 +3827,16 @@ class RepoRow:
             out["url"] = self.url
         if self.ref != "":
             out["ref"] = self.ref
+        if self.commit != "":
+            out["commit"] = self.commit
+        if self.refresh_interval is not None:
+            out["refreshInterval"] = _dur_out(self.refresh_interval)
+        if self.resolved_at is not None:
+            out["resolvedAt"] = _ts_out(self.resolved_at)
+        if self.skills != 0:
+            out["skills"] = self.skills
+        if self.scripts != 0:
+            out["scripts"] = self.scripts
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "RepoRow":
@@ -3835,6 +3850,21 @@ class RepoRow:
         _v = _d.get("ref")
         if _v is not None:
             obj.ref = _v
+        _v = _d.get("commit")
+        if _v is not None:
+            obj.commit = _v
+        _v = _d.get("refreshInterval")
+        if _v is not None:
+            obj.refresh_interval = _dur_in(_v, "refreshInterval")
+        _v = _d.get("resolvedAt")
+        if _v is not None:
+            obj.resolved_at = _ts_in(_v, "resolvedAt")
+        _v = _d.get("skills")
+        if _v is not None:
+            obj.skills = _int_in(_v)
+        _v = _d.get("scripts")
+        if _v is not None:
+            obj.scripts = _int_in(_v)
         return obj
 
 @dataclasses.dataclass
@@ -3842,6 +3872,7 @@ class AddRepoRequest:
     name: str = ""
     url: str = ""
     ref: str = ""
+    refresh_interval: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -3851,6 +3882,8 @@ class AddRepoRequest:
             out["url"] = self.url
         if self.ref != "":
             out["ref"] = self.ref
+        if self.refresh_interval is not None:
+            out["refreshInterval"] = _dur_out(self.refresh_interval)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "AddRepoRequest":
@@ -3864,16 +3897,31 @@ class AddRepoRequest:
         _v = _d.get("ref")
         if _v is not None:
             obj.ref = _v
+        _v = _d.get("refreshInterval")
+        if _v is not None:
+            obj.refresh_interval = _dur_in(_v, "refreshInterval")
         return obj
 
 @dataclasses.dataclass
 class AddRepoResponse:
     row: Optional[RepoRow] = None
+    commit: str = ""
+    unchanged: bool = False
+    skills: int = 0
+    skill_errors: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
         if self.row is not None:
             out["row"] = self.row.to_dict()
+        if self.commit != "":
+            out["commit"] = self.commit
+        if self.unchanged != False:
+            out["unchanged"] = self.unchanged
+        if self.skills != 0:
+            out["skills"] = self.skills
+        if self.skill_errors:
+            out["skillErrors"] = [x for x in self.skill_errors]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "AddRepoResponse":
@@ -3881,6 +3929,18 @@ class AddRepoResponse:
         _v = _d.get("row")
         if _v is not None:
             obj.row = RepoRow.from_dict(_v)
+        _v = _d.get("commit")
+        if _v is not None:
+            obj.commit = _v
+        _v = _d.get("unchanged")
+        if _v is not None:
+            obj.unchanged = _v
+        _v = _d.get("skills")
+        if _v is not None:
+            obj.skills = _int_in(_v)
+        _v = _d.get("skillErrors")
+        if _v is not None:
+            obj.skill_errors = [x for x in _v]
         return obj
 
 @dataclasses.dataclass
@@ -3927,6 +3987,52 @@ class RefreshRepoRequest:
         _v = _d.get("name")
         if _v is not None:
             obj.name = _v
+        return obj
+
+@dataclasses.dataclass
+class SetRepoRequest:
+    name: str = ""
+    ref: Optional[str] = None
+    refresh_interval: Optional[datetime.timedelta] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.ref is not None:
+            out["ref"] = self.ref
+        if self.refresh_interval is not None:
+            out["refreshInterval"] = _dur_out(self.refresh_interval)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetRepoRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("ref")
+        if _v is not None:
+            obj.ref = _v
+        _v = _d.get("refreshInterval")
+        if _v is not None:
+            obj.refresh_interval = _dur_in(_v, "refreshInterval")
+        return obj
+
+@dataclasses.dataclass
+class SetRepoResponse:
+    row: Optional[RepoRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.row is not None:
+            out["row"] = self.row.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetRepoResponse":
+        obj = cls()
+        _v = _d.get("row")
+        if _v is not None:
+            obj.row = RepoRow.from_dict(_v)
         return obj
 
 @dataclasses.dataclass
@@ -3982,6 +4088,10 @@ class RefreshRepoResponse:
     packages: list[RepoPackage] = dataclasses.field(default_factory=list)
     venv_ready: bool = False
     venv_error: str = ""
+    commit: str = ""
+    unchanged: bool = False
+    skills: int = 0
+    skill_errors: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
@@ -3995,6 +4105,14 @@ class RefreshRepoResponse:
             out["venvReady"] = self.venv_ready
         if self.venv_error != "":
             out["venvError"] = self.venv_error
+        if self.commit != "":
+            out["commit"] = self.commit
+        if self.unchanged != False:
+            out["unchanged"] = self.unchanged
+        if self.skills != 0:
+            out["skills"] = self.skills
+        if self.skill_errors:
+            out["skillErrors"] = [x for x in self.skill_errors]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "RefreshRepoResponse":
@@ -4014,6 +4132,18 @@ class RefreshRepoResponse:
         _v = _d.get("venvError")
         if _v is not None:
             obj.venv_error = _v
+        _v = _d.get("commit")
+        if _v is not None:
+            obj.commit = _v
+        _v = _d.get("unchanged")
+        if _v is not None:
+            obj.unchanged = _v
+        _v = _d.get("skills")
+        if _v is not None:
+            obj.skills = _int_in(_v)
+        _v = _d.get("skillErrors")
+        if _v is not None:
+            obj.skill_errors = [x for x in _v]
         return obj
 
 @dataclasses.dataclass

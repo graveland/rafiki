@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,18 +19,40 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/repos"
+	"go.graveland.dev/rafiki/pkg/skills"
 
 	"github.com/multigres/testkit/assert"
 )
 
 // fakeRepoStore is an in-memory repos.Store. Upsert semantics
 // mirror the real store: Put for an existing (owner, name) repoints url/ref
-// in place rather than appending a row.
+// in place rather than appending a row, and leaves the resolved state alone.
 type fakeRepoStore struct {
-	mu      sync.Mutex
-	rows    map[string][]repos.Record
-	listed  []string
-	deleted [][2]string // Delete calls as {ownerUserID, name}, in call order
+	mu       sync.Mutex
+	rows     map[string][]repos.Record
+	listed   []string
+	deleted  [][2]string // Delete calls as {ownerUserID, name}, in call order
+	resolved []resolvedCall
+	allCalls int
+}
+
+// resolvedCall is one SetResolved call, in call order.
+type resolvedCall struct {
+	OwnerUserID, Name, Commit string
+	At                        time.Time
+}
+
+// lastResolved returns the SetResolved call for (owner, name), or false when
+// the refresh never recorded one.
+func (s *fakeRepoStore) lastResolved(ownerUserID, name string) (resolvedCall, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.resolved) - 1; i >= 0; i-- {
+		if s.resolved[i].OwnerUserID == ownerUserID && s.resolved[i].Name == name {
+			return s.resolved[i], true
+		}
+	}
+	return resolvedCall{}, false
 }
 
 func (s *fakeRepoStore) Put(_ context.Context, ownerUserID, name, url, ref string) (repos.Record, error) {
@@ -36,6 +60,8 @@ func (s *fakeRepoStore) Put(_ context.Context, ownerUserID, name, url, ref strin
 	defer s.mu.Unlock()
 	for i, r := range s.rows[ownerUserID] {
 		if r.Name == name {
+			// A repoint changes url/ref only: the resolved state describes the
+			// ref the row is leaving.
 			s.rows[ownerUserID][i].URL = url
 			s.rows[ownerUserID][i].Ref = ref
 			return s.rows[ownerUserID][i], nil
@@ -57,6 +83,52 @@ func (s *fakeRepoStore) List(_ context.Context, ownerUserID string) ([]repos.Rec
 	defer s.mu.Unlock()
 	s.listed = append(s.listed, ownerUserID)
 	return append([]repos.Record(nil), s.rows[ownerUserID]...), nil
+}
+
+// SetResolved mirrors the real store: the commit and instant land on the row,
+// and an unknown (owner, name) is ErrNotFound.
+func (s *fakeRepoStore) SetResolved(_ context.Context, ownerUserID, name, commit string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resolved = append(s.resolved, resolvedCall{OwnerUserID: ownerUserID, Name: name, Commit: commit, At: at})
+	for i, r := range s.rows[ownerUserID] {
+		if r.Name == name {
+			s.rows[ownerUserID][i].Commit = commit
+			s.rows[ownerUserID][i].ResolvedAt = at
+			return nil
+		}
+	}
+	return repos.ErrNotFound
+}
+
+// SetRefreshInterval mirrors the real store's three answers: a real interval,
+// zero clearing it, and the named sentinel below the floor.
+func (s *fakeRepoStore) SetRefreshInterval(_ context.Context, ownerUserID, name string, d time.Duration) error {
+	if d < 0 || (d > 0 && d < repos.MinRefreshInterval) {
+		return repos.ErrIntervalTooShort
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, r := range s.rows[ownerUserID] {
+		if r.Name == name {
+			s.rows[ownerUserID][i].RefreshInterval = d
+			return nil
+		}
+	}
+	return repos.ErrNotFound
+}
+
+// ListAll returns every owner's rows ordered by (owner, name), the
+// unattributed bucket first — the scheduler's read.
+func (s *fakeRepoStore) ListAll(_ context.Context) ([]repos.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allCalls++
+	var out []repos.Record
+	for _, owner := range slices.Sorted(maps.Keys(s.rows)) {
+		out = append(out, s.rows[owner]...)
+	}
+	return out, nil
 }
 
 func (s *fakeRepoStore) Delete(_ context.Context, ownerUserID, name string) error {
@@ -691,4 +763,305 @@ func TestRepoPusherResolveFallsBackAndReportsFailure(t *testing.T) {
 	for _, id := range []string{"exec-alice", "exec-alice2"} {
 		c.Eq(0, f.clients[id].callCount(), "%s SyncRepo calls after a failed resolve", id)
 	}
+}
+
+// ─── coalescing, the skills half and the recorded commit ─────────────────────
+
+// waiters returns how many callers are currently blocked on (owner, name)'s
+// in-flight refresh — the observable that makes "the second caller joined the
+// first's refresh" assertable instead of a sleep.
+func (gp *repoPusher) waiters(ownerUserID, name string) int {
+	gp.mu.Lock()
+	defer gp.mu.Unlock()
+	call, ok := gp.inflight[repoKey(ownerUserID, name)]
+	if !ok {
+		return 0
+	}
+	return call.waiters
+}
+
+// repoSkillStore is an in-memory skills.Store for the refresh's skills half.
+// PutSet records every call — the key and the records — so a test can assert
+// the refresh wrote exactly its own repo:<name> set and nothing else.
+type repoSkillStore struct {
+	mu      sync.Mutex
+	puts    []skills.SetKey
+	sets    map[skills.SetKey][]skills.Record
+	changed bool
+	putErr  error
+	// rows is what List answers — the corpus a push reads.
+	rows []skills.Record
+}
+
+func (s *repoSkillStore) List(context.Context, bool) ([]skills.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]skills.Record(nil), s.rows...), nil
+}
+func (s *repoSkillStore) Get(context.Context, string) (skills.Record, error) {
+	return skills.Record{}, skills.ErrNotFound
+}
+func (s *repoSkillStore) Files(context.Context, []string) (map[string][]skills.File, error) {
+	return nil, nil
+}
+func (s *repoSkillStore) SetEnabled(context.Context, string, bool) error { return nil }
+func (s *repoSkillStore) Delete(context.Context, string) error           { return nil }
+
+func (s *repoSkillStore) PutSet(_ context.Context, key skills.SetKey, want []skills.Record) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.puts = append(s.puts, key)
+	if s.putErr != nil {
+		return false, s.putErr
+	}
+	if s.sets == nil {
+		s.sets = make(map[skills.SetKey][]skills.Record)
+	}
+	s.sets[key] = want
+	return s.changed, nil
+}
+
+func (s *repoSkillStore) putCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.puts)
+}
+
+// TestRepoRefreshCoalesces pins the one-refresh-per-source rule: a second
+// caller arriving while a refresh is in flight joins it instead of resolving
+// the ref and cloning again, so two concurrent callers cost exactly one
+// ResolveRepoRef and one SyncRepo per executor — and both get the answer.
+func TestRepoRefreshCoalesces(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+
+	const url = "https://example.net/ops.git"
+	first := make(chan RefreshResult, 1)
+	go func() {
+		res, _ := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+		first <- res
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first refresh never reached SyncRepo")
+	}
+
+	second := make(chan RefreshResult, 1)
+	go func() {
+		res, _ := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+		second <- res
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.gp.waiters("u_alice", "ops_tools") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the second caller never joined the in-flight refresh")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(client.release)
+	var results []RefreshResult
+	for i, ch := range []chan RefreshResult{first, second} {
+		select {
+		case res := <-ch:
+			results = append(results, res)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("caller %d never returned", i)
+		}
+	}
+
+	c.Eq(1, client.resolveCount(), "ResolveRepoRef calls for two concurrent refreshes")
+	c.Eq(1, client.callCount(), "SyncRepo calls for two concurrent refreshes")
+	c.Eq(defaultResolveCommit, results[0].Commit, "first caller's commit")
+	c.Eq(defaultResolveCommit, results[1].Commit, "the waiter got a different answer than the caller it joined")
+}
+
+// TestRepoRefreshWaiterHonoursCtx pins the waiter's own lifetime: a caller
+// that gives up returns its context's error promptly and does NOT disturb the
+// refresh it was waiting on, which still completes and still records its
+// commit.
+func TestRepoRefreshWaiterHonoursCtx(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	client := f.clients["exec-alice"]
+	client.entered = make(chan struct{})
+	client.release = make(chan struct{})
+
+	const url = "https://example.net/ops.git"
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", url, "main")
+		firstDone <- err
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first refresh never reached SyncRepo")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, err := f.gp.refresh(ctx, "u_alice", "ops_tools", url, "main")
+		waiterDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.gp.waiters("u_alice", "ops_tools") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the waiter never joined the in-flight refresh")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-waiterDone:
+		c.ErrorIs(err, context.Canceled, "the waiter's error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter ignored its canceled context and blocked on the in-flight refresh")
+	}
+
+	// The refresh it walked away from is unaffected: it finishes and records
+	// its commit.
+	close(client.release)
+	c.Require().NoError(<-firstDone, "the joined refresh")
+	got, ok := f.store.lastResolved("u_alice", "ops_tools")
+	c.Require().True(ok, "the refresh that outlived its waiter recorded no commit")
+	c.Eq(defaultResolveCommit, got.Commit, "recorded commit")
+}
+
+// TestRepoRefreshStoresDiscoveredSkills pins the skills half of a refresh: the
+// first successful response's discovered skills become the repo's own
+// repo:<name> set (with their files), the resolved commit is recorded, and a
+// write that CHANGED something pushes the corpus on.
+func TestRepoRefreshStoresDiscoveredSkills(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	sk := &repoSkillStore{changed: true}
+	f.gp.skillStore = sk
+	var pushed int
+	f.gp.skillPush = func(context.Context) { pushed++ }
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Skills: []*executorpb.RepoSkill{{
+			Namespace:   "ops_tools",
+			Name:        "demo",
+			Description: "a demo skill",
+			Body:        "# demo",
+			From:        "skills/demo",
+			Files: []*executorpb.SkillFile{
+				{Path: "references/a.md", Mode: 0o644, Content: []byte("ref")},
+			},
+		}},
+	}
+
+	res, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "refresh")
+	c.Eq(1, res.Skills, "refresh result skills")
+	c.Empty(res.SkillErrors, "refresh result skill errors")
+	c.False(res.NamespaceCollision(), "refresh result reported a namespace collision")
+
+	c.Require().Eq(1, sk.putCount(), "PutSet calls")
+	c.Eq(skills.SetKey{OwnerUserID: "u_alice", Source: "repo:ops_tools"}, sk.puts[0], "the set key")
+	got := sk.sets[sk.puts[0]]
+	c.Require().Len(got, 1, "stored skills")
+	c.False(got[0].Namespace != "ops_tools" || got[0].Name != "demo" || got[0].Description != "a demo skill" || got[0].Body != "# demo",
+		"stored skill = %+v", got[0])
+	c.False(got[0].Source != "repo:ops_tools" || got[0].OwnerUserID != "u_alice", "stored skill's ownership = %+v", got[0])
+	c.Require().Len(got[0].Files, 1, "stored skill's files")
+	c.Eq("references/a.md", got[0].Files[0].Path, "stored file path")
+	c.Eq(uint32(0o644), got[0].Files[0].Mode, "stored file mode")
+	c.EqDeep([]byte("ref"), got[0].Files[0].Content, "stored file content")
+
+	rec, ok := f.store.lastResolved("u_alice", "ops_tools")
+	c.Require().True(ok, "the refresh recorded no commit")
+	c.Eq(defaultResolveCommit, rec.Commit, "recorded commit")
+	c.True(rec.At.After(time.Time{}), "recorded resolved_at")
+	c.Eq(1, pushed, "skill pushes after a changed set")
+
+	// A set identical to the stored one writes nothing and pushes nothing.
+	sk.changed = false
+	_, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "second refresh")
+	c.Eq(1, pushed, "skill pushes after an unchanged set")
+}
+
+// TestRepoRefreshSkillErrorsSkipTheWrite pins the executor's per-skill errors:
+// they are the refresh result's errors, nothing is written (a partial
+// discovery must not replace the stored set), and the refresh itself succeeds.
+func TestRepoRefreshSkillErrorsSkipTheWrite(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	sk := &repoSkillStore{changed: true}
+	f.gp.skillStore = sk
+	var pushed int
+	f.gp.skillPush = func(context.Context) { pushed++ }
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Scripts:     []*executorpb.RepoScript{{Name: "rotate_keys"}},
+		Skills:      []*executorpb.RepoSkill{{Namespace: "ops_tools", Name: "demo"}},
+		SkillErrors: []string{"skills/demo: symlink references/a.md is not followed"},
+	}
+
+	res, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "a skill error must not fail the refresh")
+	c.EqDeep([]string{"skills/demo: symlink references/a.md is not followed"}, res.SkillErrors, "refresh result skill errors")
+	c.Eq(0, res.Skills, "skills reported as stored")
+	c.Eq(0, sk.putCount(), "PutSet calls for a refresh whose discovery reported errors")
+	c.Eq(0, pushed, "skill pushes")
+	c.Len(res.Scripts, 1, "the scripts half still refreshed")
+}
+
+// TestRepoRefreshNamespaceCollisionIsASkillError pins the one skill error that
+// is more than a report: a namespace another source already holds. It reaches
+// the caller as a skill error AND as the collision flag, which is what makes
+// `repo add` roll the registration back.
+func TestRepoRefreshNamespaceCollisionIsASkillError(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	held := &skills.NamespaceHeldError{Namespace: "ops_tools", Holder: "repo:other_repo"}
+	f.gp.skillStore = &repoSkillStore{putErr: held}
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Skills: []*executorpb.RepoSkill{{Namespace: "ops_tools", Name: "demo"}},
+	}
+
+	res, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "a namespace collision is a skill error, not the refresh's error")
+	c.EqDeep([]string{held.Error()}, res.SkillErrors, "refresh result skill errors")
+	c.True(res.NamespaceCollision(), "the namespace collision was not flagged for the caller")
+	c.Eq(0, res.Skills, "skills reported as stored after a refused write")
+
+	// The commit is still recorded: the scripts half succeeded, and the next
+	// refresh must be able to tell whether the ref moved.
+	rec, ok := f.store.lastResolved("u_alice", "ops_tools")
+	c.Require().True(ok, "a skill failure suppressed the recorded commit")
+	c.Eq(defaultResolveCommit, rec.Commit, "recorded commit")
+}
+
+// TestRepoRefreshReportsUnchangedCommit pins the flag `repo refresh` prints as
+// "(unchanged)": a refresh whose resolved commit equals the stored one did not
+// move the source, and one whose commit differs did.
+func TestRepoRefreshReportsUnchangedCommit(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+
+	res, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "first refresh")
+	c.False(res.Unchanged, "the first refresh of a never-resolved source reported unchanged")
+
+	// The same commit again: the stored commit now equals what the executor
+	// resolved, so nothing moved.
+	res, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "second refresh")
+	c.True(res.Unchanged, "a refresh resolving the stored commit did not report unchanged")
+
+	// A moved ref resolves a different commit, so it is a change.
+	const moved = "fedcbafedcbafedcbafedcbafedcbafedcbafedc"
+	f.clients["exec-alice"].resolveOK = &executorpb.ResolveRepoRefResponse{Commit: moved}
+	res, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "third refresh")
+	c.False(res.Unchanged, "a refresh resolving a new commit reported unchanged")
+	c.Eq(moved, res.Commit, "refresh result commit")
 }

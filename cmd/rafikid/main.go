@@ -738,6 +738,24 @@ func runDaemon(opts runDaemonOpts) error {
 		// the unattributed owner; any other miss, or a resolver error, skips
 		// the executor.
 		ctrl.repoPusher = newRepoPusher(execPool, repoStore, ctrl.resolveUsernameToUserID, repoOSUser)
+		// A refresh stores the skills the checkout ships, under the repo's own
+		// repo:<name> source marker, and pushes the corpus on when that write
+		// changed something — the same on-write push every other skill write
+		// uses. Both are nil-safe, so a daemon without them still refreshes.
+		ctrl.repoPusher.skillStore = skillStore
+		if ctrl.skillPusher != nil {
+			pusher := ctrl.skillPusher
+			ctrl.repoPusher.skillPush = func(ctx context.Context) { pusher.pushAll(ctx) }
+		}
+	}
+	// The per-repo refresh schedule: one timer per source with an interval, on
+	// the daemon's own lifetime (ctx), so shutdown cancels an in-flight fire and
+	// stop() disarms the rest. A daemon with no pusher has nothing to refresh on
+	// a timer, so it runs no scheduler at all.
+	var repoSched *repoScheduler
+	if ctrl.repoPusher != nil {
+		repoSched = newRepoScheduler(ctrl.repoPusher, repoStore)
+		repoSched.start(ctx)
 	}
 	if execPool != nil {
 		// An executor that has just connected has an empty or stale tree, so
@@ -846,7 +864,7 @@ func runDaemon(opts runDaemonOpts) error {
 				face.Control.SetRecallManager(connectRecall{c: ctrl})
 			}
 			if ctrl.repoStore != nil {
-				face.Control.SetRepoManager(connectRepos{c: ctrl})
+				face.Control.SetRepoManager(connectRepos{c: ctrl, sched: repoSched})
 			}
 			if ctrl.sandboxStore != nil {
 				face.Control.SetSandboxManager(connectSandbox{c: ctrl})
@@ -1044,6 +1062,10 @@ func runDaemon(opts runDaemonOpts) error {
 	slog.Info("shutting down", "signal", sig)
 
 	cancel() // stop the background sweeper
+
+	// The repo schedule goes with it: stop() disarms every timer and cancels a
+	// fire in flight, so no refresh outlives the daemon it belongs to.
+	repoSched.stop()
 
 	// Stop every live child with the one agent stop policy (agentShutdownGrace,
 	// then agentKillGrace, then SIGKILL) before closing the server, so none dies

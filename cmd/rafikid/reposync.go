@@ -10,12 +10,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/repos"
+	"go.graveland.dev/rafiki/pkg/skills"
 )
 
 // repoInventory is the latest refresh's reported snapshot for one
@@ -29,6 +31,51 @@ type repoInventory struct {
 	Packages  []*executorpb.RepoPackage
 	VenvReady bool
 	VenvError string
+}
+
+// RefreshResult is one refresh's whole answer: what commit it fanned out,
+// whether that commit was already the stored one, the discovered inventory and
+// venv state, and what happened to the skills half.
+//
+// SkillErrors is the skills half's failure, never the refresh's: a bad skill
+// is reported per skill and the scripts still refresh. The one exception is a
+// NAMESPACE COLLISION during registration, which the caller detects through
+// NamespaceCollision and treats as a failed registration.
+type RefreshResult struct {
+	Commit      string
+	Unchanged   bool // Commit equalled the stored one
+	Scripts     []*executorpb.RepoScript
+	Packages    []*executorpb.RepoPackage
+	VenvReady   bool
+	VenvError   string
+	Skills      int
+	SkillErrors []string
+
+	// namespaceHeld records that one of SkillErrors came from a
+	// *skills.NamespaceHeldError, i.e. another source already holds one of the
+	// repo's namespaces in this layer. The texts are the caller-facing answer;
+	// this is how the daemon's own AddRepo knows which kind of skill error must
+	// fail the registration instead of merely being reported.
+	namespaceHeld bool
+}
+
+// NamespaceCollision reports whether the skills half was refused because
+// another source already holds one of this repo's namespaces in this layer.
+func (r RefreshResult) NamespaceCollision() bool { return r.namespaceHeld }
+
+// repoSource is the skill-set source marker a repo owns. Ownership is the
+// marker: a repo writes and deletes only its own repo:<name> rows for its
+// owner, so two repos can never overwrite each other's skills.
+func repoSource(name string) string { return "repo:" + name }
+
+// repoCall is one in-flight refresh, shared with every caller that arrived
+// while it ran: they wait on done and take the same result, so one (owner,
+// name) is resolved and fanned out once no matter how many callers ask.
+type repoCall struct {
+	done    chan struct{}
+	result  RefreshResult
+	err     error
+	waiters int // callers blocked on done, for the coalescing tests to observe
 }
 
 // repoPusher fans a repo's refresh out to every one of that
@@ -61,8 +108,21 @@ type repoPusher struct {
 	// disables the unattributed rule entirely (no label equals "").
 	osUser string
 
+	// skillStore holds the skills a repo ships, under the repo's own
+	// repo:<name> source marker. Nil means skills are discovered and reported
+	// but not persisted (a daemon with no skill store).
+	skillStore skills.Store
+	// skillPush delivers the corpus to the executors after a write that
+	// CHANGED something — the existing on-write push path, so a refresh that
+	// re-derives an identical set stays free. Nil disables the push.
+	skillPush func(ctx context.Context)
+
 	mu    sync.Mutex
 	cache map[string]repoInventory // keyed by repoKey(ownerUserID, name)
+	// inflight holds the refresh currently running per repoKey: a second
+	// caller for the same (owner, name) waits for that one's result rather
+	// than resolving the ref and cloning again.
+	inflight map[string]*repoCall
 }
 
 // repoKey is the cache key encoding: NUL-separated, never appearing in
@@ -79,6 +139,7 @@ func newRepoPusher(pool pymodulePool, store repos.Store, resolveOwnerID func(ctx
 		resolveOwnerID: resolveOwnerID,
 		osUser:         osUser,
 		cache:          make(map[string]repoInventory),
+		inflight:       make(map[string]*repoCall),
 	}
 }
 
@@ -90,7 +151,49 @@ func (gp *repoPusher) eligible(le execpool.LiveExecutor) bool {
 }
 
 // refresh refreshes (ownerUserID, name) on every one of that owner's eligible
-// LIVE executors.
+// LIVE executors, coalescing concurrent callers for the same source.
+//
+// One refresh per repoKey(owner, name) is in flight at a time: a second caller
+// that arrives while one is running waits for that one's result instead of
+// resolving the ref and fanning out again. Two callers — an operator's
+// `repo refresh` and the scheduler's timer, say — therefore cost one clone,
+// and the store is written once. The waiter honours its OWN context: a caller
+// that gives up returns ctx.Err() without disturbing the refresh it was
+// waiting on.
+//
+// The error is the refresh's error, never a skill's: a bad skill rides
+// RefreshResult.SkillErrors so the scripts half still succeeds.
+func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref string) (RefreshResult, error) {
+	key := repoKey(ownerUserID, name)
+	gp.mu.Lock()
+	if gp.inflight == nil {
+		gp.inflight = make(map[string]*repoCall)
+	}
+	if call, ok := gp.inflight[key]; ok {
+		call.waiters++
+		gp.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.result, call.err
+		case <-ctx.Done():
+			return RefreshResult{}, ctx.Err()
+		}
+	}
+	call := &repoCall{done: make(chan struct{})}
+	gp.inflight[key] = call
+	gp.mu.Unlock()
+
+	result, err := gp.refreshOnce(ctx, ownerUserID, name, url, ref)
+
+	gp.mu.Lock()
+	delete(gp.inflight, key)
+	call.result, call.err = result, err
+	gp.mu.Unlock()
+	close(call.done)
+	return result, err
+}
+
+// refreshOnce is refresh's body, run once per in-flight call.
 //
 // It resolves the ref to a commit ONCE — through the first eligible executor,
 // in ID order, that answers — and fans that SHA out to all of them. Git runs
@@ -114,7 +217,24 @@ func (gp *repoPusher) eligible(le execpool.LiveExecutor) bool {
 // pool looked like — every live executor with its owner label and repo-sync
 // flag — so an operator can see why their executor was passed over without
 // grepping the daemon log.
-func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref string) (repoInventory, error) {
+//
+// After the fan-out the FIRST successful response in executor-ID order decides
+// the skills half: its discovered skills are stored as the repo's
+// repo:<name> set (unless it reported skill errors, in which case nothing is
+// written and the errors are returned), and the resolved commit is recorded.
+// ID order rather than arrival order makes which executor's discovery wins
+// deterministic.
+func (gp *repoPusher) refreshOnce(ctx context.Context, ownerUserID, name, url, ref string) (RefreshResult, error) {
+	// The stored commit is what makes "unchanged" mean "the ref did not move
+	// since the last refresh". A source that is not registered at all (a
+	// refresh of a name nobody wrote) has no stored commit and nothing to
+	// record; that is not an error here.
+	prior, priorErr := gp.recordFor(ctx, ownerUserID, name)
+	if priorErr != nil && !errors.Is(priorErr, repos.ErrNotFound) {
+		return RefreshResult{}, priorErr
+	}
+	registered := priorErr == nil
+
 	live := gp.pool.Live()
 	summary := make([]string, 0, len(live)) // built on this goroutine only; read after wg.Wait
 	targets := make([]string, 0, len(live))
@@ -149,7 +269,7 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 		targets = append(targets, le.Executor.ID)
 	}
 	if len(targets) == 0 {
-		return repoInventory{}, fmt.Errorf("no eligible executor for owner %q's repos: %d live executor(s): %s",
+		return RefreshResult{}, fmt.Errorf("no eligible executor for owner %q's repos: %d live executor(s): %s",
 			repoOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; "))
 	}
 	// ID order, so which executor resolves is deterministic rather than
@@ -158,23 +278,24 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 
 	commit, err := gp.resolveCommit(ctx, targets, name, url, ref)
 	if err != nil {
-		return repoInventory{}, err
+		return RefreshResult{}, err
 	}
 
 	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		first    repoInventory
-		firstID  string
-		firstSet bool
-		last     repoInventory
-		failed   int
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		first     repoInventory
+		firstID   string
+		firstSet  bool
+		last      repoInventory
+		failed    int
+		responses = make(map[string]*executorpb.SyncRepoResponse, len(targets))
 	)
 	for _, executorID := range targets {
 		wg.Add(1)
 		go func(executorID string) {
 			defer wg.Done()
-			inv, err := gp.pushTo(ctx, executorID, name, url, ref, commit)
+			resp, inv, err := gp.pushTo(ctx, executorID, name, url, ref, commit)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -192,6 +313,7 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 				first, firstID, firstSet = inv, executorID, true
 			}
 			last = inv
+			responses[executorID] = resp
 			gp.mu.Lock()
 			if gp.cache == nil {
 				gp.cache = make(map[string]repoInventory)
@@ -202,15 +324,112 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 	}
 	wg.Wait()
 	mu.Lock()
-	defer mu.Unlock()
+	// Everything the collection needs, copied out before the lock is released:
+	// the skills write below must not run under it.
 	if !firstSet {
+		mu.Unlock()
 		if failed > 0 {
-			return repoInventory{}, fmt.Errorf("refresh %q: every eligible executor failed (%d)", name, failed)
+			return RefreshResult{}, fmt.Errorf("refresh %q: every eligible executor failed (%d)", name, failed)
 		}
-		return repoInventory{}, fmt.Errorf("no eligible executor for owner %q's repos: %d live executor(s): %s",
+		return RefreshResult{}, fmt.Errorf("no eligible executor for owner %q's repos: %d live executor(s): %s",
 			repoOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; "))
 	}
-	return last, nil
+	mu.Unlock()
+
+	result := RefreshResult{
+		Commit:    commit,
+		Unchanged: prior.Commit == commit,
+		Scripts:   last.Scripts,
+		Packages:  last.Packages,
+		VenvReady: last.VenvReady,
+		VenvError: last.VenvError,
+	}
+
+	// The skills half: one executor's discovery is the repo's set. Executors
+	// that agree on a commit are reading the same tree, so any successful one
+	// names the same skills; taking the lowest-ID responder keeps the choice
+	// deterministic when they disagree.
+	var source *executorpb.SyncRepoResponse
+	for _, executorID := range targets {
+		if resp, ok := responses[executorID]; ok {
+			source = resp
+			break
+		}
+	}
+	gp.storeSkills(ctx, ownerUserID, name, source, &result)
+
+	// Record the resolution even when the commit did not move: the timestamp is
+	// the scheduler's anchor for the next fire, so an unchanged refresh still
+	// resets the clock. A source that is not registered has no row to record
+	// against, and nothing to re-arm either.
+	if registered {
+		if err := gp.store.SetResolved(ctx, ownerUserID, name, commit, time.Now()); err != nil {
+			return RefreshResult{}, fmt.Errorf("record resolved commit for %q: %w", name, err)
+		}
+	}
+	return result, nil
+}
+
+// storeSkills writes the skills half of a refresh and folds what happened into
+// result: the count stored, and the errors — per-skill errors the executor
+// reported, or the one namespace collision that must fail a registration.
+//
+// Nothing is written when the executor reported skill errors: a partial
+// discovery is not a set to replace the stored one with. A store failure is
+// also a skill error rather than the refresh's, so the scripts half survives
+// it — and its text is carried out to the caller rather than logged and
+// dropped, because a refresh that reported success while its skills silently
+// went nowhere is worse than one that says so.
+func (gp *repoPusher) storeSkills(ctx context.Context, ownerUserID, name string, source *executorpb.SyncRepoResponse, result *RefreshResult) {
+	if source == nil {
+		return
+	}
+	if errs := source.GetSkillErrors(); len(errs) > 0 {
+		result.SkillErrors = errs
+		return
+	}
+	records := repoSkillRecords(ownerUserID, name, source.GetSkills())
+	if gp.skillStore == nil {
+		// No skill store (a daemon without a database): discovery is still
+		// reported, it just has nowhere to live.
+		result.Skills = len(records)
+		return
+	}
+	changed, err := gp.skillStore.PutSet(ctx, skills.SetKey{OwnerUserID: ownerUserID, Source: repoSource(name)}, records)
+	if err != nil {
+		var held *skills.NamespaceHeldError
+		if errors.As(err, &held) {
+			result.namespaceHeld = true
+		}
+		result.SkillErrors = append(result.SkillErrors, err.Error())
+		return
+	}
+	result.Skills = len(records)
+	if changed && gp.skillPush != nil {
+		gp.skillPush(ctx)
+	}
+}
+
+// repoSkillRecords lifts the executor protocol's discovered skills into the
+// store's records: the repo's source marker and owner on every row, so the
+// write can only ever replace its own set.
+func repoSkillRecords(ownerUserID, name string, found []*executorpb.RepoSkill) []skills.Record {
+	out := make([]skills.Record, 0, len(found))
+	for _, sk := range found {
+		rec := skills.Record{
+			Namespace:   sk.GetNamespace(),
+			Name:        sk.GetName(),
+			Description: sk.GetDescription(),
+			Body:        sk.GetBody(),
+			Source:      repoSource(name),
+			OwnerUserID: ownerUserID,
+		}
+		for _, f := range sk.GetFiles() {
+			rec.Files = append(rec.Files, skills.File{Path: f.GetPath(), Mode: f.GetMode(), Content: f.GetContent()})
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 // resolveCommit asks the eligible executors, in ID order, to resolve ref to a
@@ -311,29 +530,29 @@ func slicesEqualByName[T interface{ GetName() string }](a, b []T) bool {
 // A response carrying checkout_error is a FAILURE for this executor: nothing
 // changed there, and the daemon must count it rather than cache an inventory
 // that describes a checkout the executor never made.
-func (gp *repoPusher) pushTo(ctx context.Context, executorID, name, url, ref, commit string) (repoInventory, error) {
+func (gp *repoPusher) pushTo(ctx context.Context, executorID, name, url, ref, commit string) (*executorpb.SyncRepoResponse, repoInventory, error) {
 	rctx, cancel := context.WithTimeout(ctx, pymoduleSyncTimeout())
 	defer cancel()
 
 	client, err := gp.pool.ConnectClientFor(executorID)
 	if err != nil {
-		return repoInventory{}, err
+		return nil, repoInventory{}, err
 	}
 	resp, err := client.SyncRepo(rctx, connect.NewRequest(&executorpb.SyncRepoRequest{
 		Name: name, Url: url, Ref: ref, Commit: commit,
 	}))
 	if err != nil {
-		return repoInventory{}, err
+		return nil, repoInventory{}, err
 	}
 	if cerr := resp.Msg.GetCheckoutError(); cerr != "" {
-		return repoInventory{}, fmt.Errorf("checkout %s: %s", commit, cerr)
+		return nil, repoInventory{}, fmt.Errorf("checkout %s: %s", commit, cerr)
 	}
 	slog.Info("repo refreshed",
 		"executor", executorID, "source", name, "commit", resp.Msg.GetCommit(),
 		"scripts", len(resp.Msg.GetScripts()), "packages", len(resp.Msg.GetPackages()),
 		"skills", len(resp.Msg.GetSkills()),
 		"venv_ready", resp.Msg.GetVenvReady())
-	return repoInventory{
+	return resp.Msg, repoInventory{
 		Scripts:   resp.Msg.GetScripts(),
 		Packages:  resp.Msg.GetPackages(),
 		VenvReady: resp.Msg.GetVenvReady(),
