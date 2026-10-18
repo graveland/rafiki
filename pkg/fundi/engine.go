@@ -957,8 +957,20 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	e.em.UserMessage(text, images)
 	e.em.AgentStart()
 
-	events, sendOpts := e.events()
-	result, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), sendOpts...)
+	// A child that is already halted (it, or an ancestor, is over budget) must
+	// not buy a turn: even the wrap-up the loop gives a guardrail stop is a
+	// paid LLM call. The prompt still lands in the conversation, so whatever
+	// woke the child is in its context once the budget is raised.
+	var result *agentloop.Result
+	var err error
+	if stop, why := e.haltedNow(); stop {
+		if err = e.conv.AppendUser(ctx, llm.UserContent(text, images)); err == nil {
+			result = &agentloop.Result{LimitReached: true, LimitReason: why}
+		}
+	} else {
+		events, sendOpts := e.events()
+		result, err = agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), sendOpts...)
+	}
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
 	aborted := errors.Is(ctx.Err(), context.Canceled)
@@ -1276,6 +1288,16 @@ func (e *Engine) effectiveMaxCost() float64 {
 		return e.currentMaxCost()
 	}
 	return e.maxCost
+}
+
+// haltedNow reports whether the child may not start a turn at all. Only the
+// halt predicate is consulted: the lifetime-cost guardrail needs a turn's own
+// running total, which is zero before the first reply.
+func (e *Engine) haltedNow() (bool, string) {
+	if e.halted == nil {
+		return false, ""
+	}
+	return e.halted()
 }
 
 // stopReason is ShouldStop's decision: the halt check first, then the cost
