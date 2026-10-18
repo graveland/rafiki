@@ -309,11 +309,12 @@ func (s *Server) syncRepoCommit(name, url, ref, commit string) (*executorpb.Sync
 	dir := repoCommitDir(name, commit)
 	resp := &executorpb.SyncRepoResponse{}
 
-	// Already current: no fetch, no uv sync. The commit directory is the same
-	// tree it was, venv included, so only discovery has anything to say.
+	// Already current: no fetch, and no rebuild of a venv that is there. The
+	// commit directory is the same tree it was, so only discovery and the
+	// venv-completion check have anything to say.
 	unchanged := currentCommit(name) == commit
 	if unchanged {
-		resp.VenvReady, resp.VenvError = repoVenvState(dir)
+		resp.VenvReady, resp.VenvError = repoVenvEnsure(dir)
 	} else {
 		if checkoutErr := checkoutCommit(name, url, ref, commit); checkoutErr != "" {
 			// Nothing changed: report the checkout that is still current.
@@ -420,30 +421,45 @@ func randomToken() string {
 	return hex.EncodeToString(b[:])
 }
 
-// repoVenvDir is the checkout's venv directory, or "" when it has none -- the
-// value repos.DiscoverSkills takes to decide whether a wheel-installed
-// skill-source can be read.
+// repoVenvDir is the checkout's venv directory, or "" when it has no usable
+// venv -- the value repos.DiscoverSkills takes to decide whether a
+// wheel-installed skill-source can be read.
 func repoVenvDir(dir string) string {
-	venv := filepath.Join(dir, venvDirName)
-	if _, err := os.Stat(venv); err != nil {
+	if !repoVenvPythonPresent(dir) {
 		return ""
 	}
-	return venv
+	return filepath.Join(dir, venvDirName)
 }
 
-// repoVenvState reports venv readiness for a checkout this refresh did NOT
-// build (the commit was already current). No uv invocation runs on that path,
-// so the answer is what the directory already holds: a repo with no
-// dependencies is ready by definition, a built venv is ready, and a repo that
-// declares dependencies with no venv is not.
-func repoVenvState(dir string) (ready bool, venvError string) {
-	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
+// repoVenvPythonPresent reports whether the checkout has a USABLE venv: the
+// interpreter exists, not merely the directory. A build that failed part way
+// through leaves neither, but a directory without an interpreter is no venv.
+func repoVenvPythonPresent(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, venvDirName, "bin", "python3"))
+	return err == nil
+}
+
+// repoVenvEnsure reports the commit checkout's venv state, completing the
+// build when the checkout has no usable interpreter.
+//
+// The unchanged-commit path deliberately does not re-run `uv sync` on a venv
+// that is already there — that is the design's point, and a refresh of the
+// same commit must not pay for a rebuild. "Already there" means the
+// INTERPRETER exists. A build that failed once — a network blip, a transient
+// resolve error, uv not installed at that moment — left no interpreter, and
+// skipping the build forever would make that failure permanent: only a new
+// commit would ever repair it, with nothing telling the user so. So a missing
+// interpreter means the build never completed, and it is completed here.
+//
+// The manifest gate is buildRepoVenv's, unchanged: a repo declaring no
+// dependencies invokes nothing and is ready; a requirements.txt-only repo
+// reports the same one-sentence refusal the fresh path does.
+func repoVenvEnsure(dir string) (ready bool, venvError string) {
+	if repoVenvPythonPresent(dir) {
 		return true, ""
 	}
-	if _, err := os.Stat(filepath.Join(dir, venvDirName)); err != nil {
-		return false, "repo venv is not built in this checkout"
-	}
-	return true, ""
+	venvErr := buildRepoVenv(dir)
+	return venvErr == "", venvErr
 }
 
 // repoSkillProto renders one discovered skill as its wire message.

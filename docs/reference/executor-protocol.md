@@ -871,8 +871,11 @@ staging tree, leaves any previous venv untouched, and reports
 `venvReady=false` with the capped output — while STILL returning the discovered
 inventory, because a broken dependency must not hide what exists (a broken
 build only fails the runs that actually need it). The unchanged-commit path
-runs no build at all, so it reports readiness from what the directory already
-holds: no manifest or a built venv is ready, a manifest without a venv is not.
+does NOT re-run `uv sync` on a venv that is already there — "already there"
+meaning the interpreter exists — so a refresh of the same commit never pays for
+a rebuild. It does complete a build that never finished: with no interpreter,
+the same manifest gate and build run, so one transient failure cannot leave a
+commit venv-less until a new commit lands.
 
 **Opt-in per machine, and `repo_sync` on `DescribeResponse` is
 self-reported** exactly like `pymodules_sync`: it only ever narrows what the

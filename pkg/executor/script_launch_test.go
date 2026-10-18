@@ -203,23 +203,104 @@ func TestResolveScriptLaunchGitVenvInterpreter(t *testing.T) {
 // hold is what keeps the sweeper off that directory for the child's life.
 func TestScriptLaunchUsesCurrentCommit(t *testing.T) {
 	c := assert.NewAborting(t)
-	repo := scriptGitFixture(t, "ops", false)
+	repoA := scriptGitFixture(t, "ops", true)
 
 	res, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "ops", Script: "deploy"})
 	c.NoError(err, "resolveScriptLaunch")
 	c.Require().True(res.hold != nil, "a repo launch resolved no checkout hold")
 	t.Cleanup(func() { res.hold.Close() })
 
-	c.Eq(filepath.Join(repo, "scripts", "deploy.py"), res.argv[0], "argv[0]")
-	c.Eq(repo, res.pythonPath, "PYTHONPATH")
+	c.Eq(filepath.Join(repoA, "scripts", "deploy.py"), res.argv[0], "argv[0]")
+	c.Eq(filepath.Join(repoA, ".venv", "bin", "python3"), res.interpreter, "interpreter")
+	c.Eq(repoA, res.pythonPath, "PYTHONPATH")
 	// The hold names the same directory the launch runs from: the sweeper's
 	// exclusive probe on THAT directory must fail while the launch holds it.
-	hold, busy, lerr := repos.LockRepoCheckoutExclusive(repo)
+	hold, busy, lerr := repos.LockRepoCheckoutExclusive(repoA)
 	c.NoError(lerr, "probe the held checkout")
 	if hold != nil {
 		hold.Close()
 	}
 	c.True(busy, "the resolved checkout was not held against the sweeper")
+
+	// A refresh moves `current` on to a SECOND commit whose script and venv
+	// both differ from A's. The launch resolved before the flip must keep
+	// reading A — that is the promise the per-commit layout exists for.
+	const commitB = "fedcba9876543210fedcba9876543210fedcba98"
+	repoB := repoCommitDir("ops", commitB)
+	c.NoError(os.MkdirAll(filepath.Join(repoB, "scripts"), 0o755))
+	c.NoError(os.WriteFile(filepath.Join(repoB, "scripts", "deploy.py"), []byte("print('b')\n"), 0o644))
+	c.NoError(os.MkdirAll(filepath.Join(repoB, ".venv", "bin"), 0o755))
+	c.NoError(os.WriteFile(filepath.Join(repoB, ".venv", "bin", "python3"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	c.NoError(flipCurrent("ops", commitB))
+	c.Eq(commitB, currentCommit("ops"), "current after the flip")
+
+	// The launch that started on A still runs A's script, on A's venv.
+	c.Eq(filepath.Join(repoA, "scripts", "deploy.py"), res.argv[0], "argv[0] after the flip")
+	c.Eq(filepath.Join(repoA, ".venv", "bin", "python3"), res.interpreter, "interpreter after the flip")
+	c.Eq(repoA, res.pythonPath, "PYTHONPATH after the flip")
+	body, err := os.ReadFile(res.argv[0])
+	c.NoError(err, "the held commit's script is gone from disk")
+	c.StrContains(string(body), "'d'", "the launch is reading the wrong commit's script")
+
+	// A launch resolving AFTER the flip gets B, so the assertion above is about
+	// the resolution, not about the fixture failing to move.
+	repoBReal, err := filepath.EvalSymlinks(repoB)
+	c.NoError(err, "EvalSymlinks")
+	resB, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "ops", Script: "deploy"})
+	c.NoError(err, "resolveScriptLaunch after the flip")
+	t.Cleanup(func() { resB.hold.Close() })
+	c.Eq(filepath.Join(repoBReal, "scripts", "deploy.py"), resB.argv[0], "argv[0] of a launch after the flip")
+	c.Eq(filepath.Join(repoBReal, ".venv", "bin", "python3"), resB.interpreter, "interpreter of a launch after the flip")
+}
+
+// The hold must outlive the LAUNCHER, not just the resolve: the child inherits
+// the marker's descriptor through cmd.ExtraFiles, so once Launch closes the
+// parent's copy the shared lock is still held — by the child. Without the
+// handoff the exclusive probe below would succeed the moment Launch returned,
+// and a sweep could delete the commit (and its venv) out from under a running
+// script.
+func TestScriptLaunchHoldSurvivesInTheChild(t *testing.T) {
+	c := assert.NewAborting(t)
+	// The checkout first: NewAdminServer is built after the cache is isolated.
+	repo := scriptGitFixture(t, "ops", true)
+	dump := t.TempDir()
+	t.Setenv("RAFIKI_DUMP_DIR", dump)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildEnvDumperStub(t),
+		LaunchKinds: []string{"script"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c-script-hold",
+		Cwd:     t.TempDir(),
+		Spec: &darajapb.ChildSpec{
+			Kind:   darajapb.Kind_KIND_SCRIPT,
+			Script: &darajapb.ScriptParams{Repo: "ops", Script: "deploy"},
+		},
+	}))
+	c.NoError(err, "Launch")
+	// The child is up and has dumped its environment: the launch really
+	// started, and Launch has already closed the parent's copy of the hold.
+	dumpFiles(t, dump)
+
+	probe, busy, perr := repos.LockRepoCheckoutExclusive(repo)
+	c.NoError(perr, "probe the held checkout")
+	if probe != nil {
+		probe.Close()
+	}
+	c.True(busy, "the launched child does not hold the checkout lock: the ExtraFiles handoff is missing")
+
+	// And the lock is the CHILD's, not a leaked parent copy: it goes away with
+	// the child.
+	a.Close()
+	probe, busy, perr = repos.LockRepoCheckoutExclusive(repo)
+	c.NoError(perr, "probe the checkout after the child exited")
+	if probe != nil {
+		probe.Close()
+	}
+	c.False(busy, "the checkout lock outlived the child that held it")
 }
 
 // The executor's pre-existing PYTHONPATH trails the computed entries — the

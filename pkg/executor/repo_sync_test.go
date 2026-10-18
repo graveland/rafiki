@@ -469,6 +469,67 @@ func TestSyncRepoReportsSkills(t *testing.T) {
 	c.Eq("print('h')\n", string(sk.GetFiles()[0].GetContent()), "supporting file content")
 }
 
+// A venv build that failed must not be permanent. The unchanged-commit path
+// skips `uv sync` only when the commit directory HAS an interpreter; with none,
+// the build is completed — otherwise one transient failure would leave the
+// commit venv-less until a new commit, with nothing telling the user why.
+func TestSyncRepoRepairsFailedVenvOnUnchangedCommit(t *testing.T) {
+	c := assert.NewAborting(t)
+	uvDir := writeFakeUVSync(t)
+	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
+	log := setFakeUVLog(t)
+	s := gitSyncServer(t, true)
+	repo := gitFixture(t, map[string]string{
+		"pyproject.toml":    "[project]\nname = \"ops-tools\"\nversion = \"0.1.0\"\n",
+		"scripts/rotate.py": "# rotate\n",
+	})
+	commit := resolveRepo(t, s, "ops-tools", repo, "main")
+	checkout := repoCommitDir("ops-tools", commit)
+
+	// First attempt: the build fails, and the commit directory keeps no venv.
+	t.Setenv("FAKE_UV_FAIL", "simulated resolve failure")
+	first := syncCommit(t, s, "ops-tools", repo, "main", commit)
+	c.False(first.GetVenvReady(), "a failed venv build reported VenvReady")
+	c.StrContains(first.GetVenvError(), "simulated resolve failure", "venv error")
+	_, err := os.Stat(filepath.Join(checkout, ".venv", "bin", "python3"))
+	c.True(os.IsNotExist(err), "a failed build published an interpreter (err=%v)", err)
+	assertScripts(t, first.GetScripts(), map[string]string{"rotate": "rotate"})
+
+	// The SAME commit again — no new commit, no moved ref — with the build now
+	// able to succeed. The refresh must complete it rather than skip it.
+	t.Setenv("FAKE_UV_FAIL", "")
+	second := syncCommit(t, s, "ops-tools", repo, "main", commit)
+	c.Eq(commit, second.GetCommit(), "commit")
+	c.True(second.GetVenvReady(), "the unchanged commit still reports no venv after a successful repair: %q", second.GetVenvError())
+	c.Eq("", second.GetVenvError(), "venv error after the repair")
+	_, err = os.Stat(filepath.Join(checkout, ".venv", "bin", "python3"))
+	c.NoError(err, "the repaired venv has no interpreter")
+	c.Eq(2, fakeUVInvocations(t, log), "uv ran once per attempt")
+	assertScripts(t, second.GetScripts(), map[string]string{"rotate": "rotate"})
+}
+
+// The other half of the rule: a venv that IS there is never rebuilt on the
+// unchanged path — no second `uv sync` for a commit that did not change.
+func TestSyncRepoUnchangedKeepsBuiltVenv(t *testing.T) {
+	c := assert.NewAborting(t)
+	uvDir := writeFakeUVSync(t)
+	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
+	log := setFakeUVLog(t)
+	s := gitSyncServer(t, true)
+	repo := gitFixture(t, map[string]string{
+		"pyproject.toml":    "[project]\nname = \"ops-tools\"\nversion = \"0.1.0\"\n",
+		"scripts/rotate.py": "# rotate\n",
+	})
+	commit := resolveRepo(t, s, "ops-tools", repo, "main")
+	first := syncCommit(t, s, "ops-tools", repo, "main", commit)
+	c.Require().True(first.GetVenvReady(), "the first build failed: %q", first.GetVenvError())
+
+	second := syncCommit(t, s, "ops-tools", repo, "main", commit)
+
+	c.True(second.GetVenvReady(), "the unchanged commit lost its venv")
+	c.Eq(1, fakeUVInvocations(t, log), "uv ran again for an unchanged commit with a built venv")
+}
+
 // A repo whose only dependency manifest is a bare requirements.txt cannot be
 // served by `uv sync`: reporting venv_ready=true would promise a venv that
 // was never built, its dependencies missing at run time. The failure reports
@@ -500,7 +561,10 @@ func TestSyncRepoRequirementsOnlyRepoReportsNotReady(t *testing.T) {
 //     UV_PROJECT_ENVIRONMENT -- the fake refuses to run without it, pinning
 //     the contract that buildRepoVenv stages the build.
 //   - Fails with "simulated sync failure" on stderr iff the checkout (the
-//     fake's working directory) holds a tracked FAIL_THIS_SYNC file.
+//     fake's working directory) holds a tracked FAIL_THIS_SYNC file, and with
+//     $FAKE_UV_FAIL on stderr whenever that variable is non-empty — the second
+//     trigger exists so a test can make one attempt fail and the next succeed
+//     against the SAME checkout, which a tracked file cannot do.
 //
 // Every invocation appends one line to $FAKE_UV_LOG, read via the shared
 // fakeUVInvocations helper.
@@ -514,6 +578,10 @@ printf '%s\n' "$*" >> "$FAKE_UV_LOG"
 case "$1" in
 sync)
 	path="${UV_PROJECT_ENVIRONMENT:?UV_PROJECT_ENVIRONMENT must be set}"
+	if [ -n "$FAKE_UV_FAIL" ]; then
+		echo "$FAKE_UV_FAIL" >&2
+		exit 1
+	fi
 	if [ -f ./FAIL_THIS_SYNC ]; then
 		echo "simulated sync failure" >&2
 		exit 1
