@@ -580,7 +580,8 @@ and is not an error.
 ### SyncSkills
 
 ```
-SyncSkills(namespaces[{name, version, skills[{name, description, body}]}])
+SyncSkills(namespaces[{name, version,
+            skills[{name, description, body, files[{path, mode, content}]}]}])
   → { written, pruned, skillsDir }
 ```
 
@@ -592,9 +593,16 @@ directory as a plugin, looks for that plugin's skills only under its `skills/`
 subdirectory, and derives the `<namespace>:<name>` qualified name from the
 directory layout; nothing on disk is prefixed. The skill `body` has already had
 its frontmatter stripped by the daemon; the executor re-renders a frontmatter
-block from `name` and `description` when it writes `SKILL.md`. The response
-counts the namespaces written and pruned, and `skillsDir` echoes the directory
-the corpus actually landed in so the daemon can log it rather than guess.
+block from `name` and `description` when it writes `SKILL.md`. `files` are the
+skill's supporting files, written under the skill's own directory beside
+`SKILL.md` (path relative to that directory, `/`-separated, mode `0644` or
+`0755`); the executor validates the whole set with the same rules the store
+applies — no absolute or `..` paths, no path a directory of another, no
+symlinks, 1 MiB per file and 8 MiB per skill — before touching the filesystem,
+and a namespace whose staged tree is byte-identical to the live one is left
+alone. The response counts the namespaces written and pruned, and `skillsDir`
+echoes the directory the corpus actually landed in so the daemon can log it
+rather than guess.
 
 **The whole corpus, every time.** `namespaces` is the COMPLETE set of
 rafiki-managed namespaces, and a namespace absent from it has its directory
@@ -647,6 +655,46 @@ the implication; the enforcement on the RPC remains regardless, because a
 daemon that ignored a `false` here would cost an unexpected write to the
 operator's machine, which is a worse failure than the failed launch a wrong
 `launchKinds` entry buys.
+
+### MaterializeSkill
+
+```
+MaterializeSkill(treeHash, files[{path, mode, content}]) → { dir }
+```
+
+Unary. Writes ONE stored skill's supporting-file tree into a
+content-addressed cache directory on this executor and returns its absolute
+path. `treeHash` is `skills.TreeHash(files)`; the executor recomputes the
+hash from the bytes it was sent and refuses a mismatch with
+`CodeInvalidArgument`, which makes the returned directory name a proof of its
+own contents rather than a claim the daemon has to trust. The file set is
+validated with the same rules as `SyncSkills` (relative, `/`-separated paths,
+mode `0644`/`0755`, no path a directory of another, 1 MiB per file, 8 MiB per
+skill) before anything is written, and a `treeHash` that is not exactly 64
+lowercase hex characters is refused rather than cleaned.
+
+**The target is `<paths.CacheDir()>/skill-cache/<treeHash>/`.** Cache and not
+Data: every tree there is reconstructible from the daemon's store. The root is
+marked with `.rafiki-managed` before first use; an existing root without the
+marker — or one that is not a directory — is refused `CodeFailedPrecondition`
+rather than adopted, because materialize and the sweep both `RemoveAll`
+beneath it. A tree is staged under a `.rafiki-staging-*` sibling and renamed
+into place, so a concurrent reader never observes a half-written directory;
+a rename that loses to a concurrent materialization of the same hash is
+success, since the target is content-addressed.
+
+An already-present tree is reused with only its mtime bumped, so a warm cache
+costs a stat rather than a rewrite. Each call then sweeps trees and abandoned
+staging directories older than `skillCacheMaxAge` (7 days), keeping the tree
+just asked for; sweep errors are logged and never fail the call.
+
+**No opt-in flag**, unlike `SyncSkills`: this writes only under the executor's
+own disposable cache, never into anything an operator owns. The daemon calls
+it when a fundi child invokes a database-backed skill that has supporting
+files — the same machine the child's workspace tools read — and the returned
+directory becomes the skill body's "Base directory". A child with no bound
+executor gets the body plus a note that the files are unavailable, never a
+directory that does not exist.
 
 ### SyncPyModules
 

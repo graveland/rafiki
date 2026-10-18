@@ -66,13 +66,13 @@ owner's pymodule syncs into the container:
 
 - **Saved modules** (`repo: "local"`) are pushed over the relay and work under any
   network setting.
-- **Git sources** are cloned by the *container's own git*, so they need `network: egress`.
+- **Repos** are fetched by the *container's own git*, so they need `network: egress`.
   Under `network: none` the refresh fails for that executor only — it is logged, the
   other executors' snapshot stays, and `local` modules are unaffected — but a script whose
-  `repo` names a git source cannot resolve in that sandbox. Choose the network with the
+  `repo` names a registered repo cannot resolve in that sandbox. Choose the network with the
   repo kind in mind.
-- A git source URL that embeds credentials is delivered to every sandbox the owner holds,
-  contradicting "a sandbox cannot see credentials". Use credential-free URLs for sources a
+- A repo URL that embeds credentials is delivered to every sandbox the owner holds,
+  contradicting "a sandbox cannot see credentials". Use credential-free URLs for repos a
   sandbox will sync.
 
 ## Verification inside is evidence, not proof

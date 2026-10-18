@@ -673,56 +673,54 @@ Manage the daemon's database-backed skill corpus (`conversations.skills`) —
 the tier a fundi child's skill tool serves after the file-based tiers: its
 inventory is read once at child spawn, and invoking a skill fetches the body
 from the store at call time. It talks to the daemon over the Connect plane
-(`ListSkills`/`GetSkill`/`UpsertSkill`/`DeleteSkill`/`SetSkillEnabled` — see
-`docs/reference/control-protocol.md` §2.3), so it needs a reachable profile,
-never a DSN, and works against a remote daemon exactly as against a local
-one.
+(`ListSkills`/`GetSkill`/`DeleteSkill`/`SetSkillEnabled` — see
+`docs/reference/control-protocol.md` §"Skill management verbs"), so it needs
+a reachable profile, never a DSN, and works against a remote daemon exactly
+as against a local one.
 
 Every skill lives in a **namespace** and is referenced as
 `<namespace>:<name>`; a bare `<name>` means the default namespace `rafiki`.
-The namespace is the name a model sees, and the fold that merges the
-database tier with file-based skills keys on the qualified name — which is
-why an imported corpus keeps its upstream plugin's name as its namespace
-(see `import` below).
+There is deliberately no `add` or `import`: skills come from the daemon's
+embedded core corpus, from repos (`rafiki repo add`), and from rows written
+by earlier rafiki versions — a skill's source owns it, so this command
+manages what is there rather than creating more.
 
 ```
-rafiki skills list [--all]              # the corpus; --all adds disabled rows
-rafiki skills show <namespace:name>     # one skill's body, frontmatter stripped
-rafiki skills add --file <SKILL.md> [--namespace ns]
-rafiki skills rm <namespace:name>       # hard-delete (both rows, in the override state)
+rafiki skills list [--all]              # NAME, LAYER, SOURCE, ENABLED, SHADOWED, DESCRIPTION
+rafiki skills show <namespace:name>     # one skill's body, frontmatter stripped, plus its files
+rafiki skills rm <namespace:name>       # delete the highest-layer row
 rafiki skills enable <namespace:name>
 rafiki skills disable <namespace:name>
-rafiki skills import <dir> [--namespace ns]
 ```
 
-- **`list`** omits bodies: an inventory is a handful of lines and a body is a
-  document, so none of the corpus rides along. `show` fetches one body.
-- **`add`** reads a local `SKILL.md` (frontmatter `name:`/`description:`,
-  body after it), parses it the same way `skills.DiscoverSkills` does, and
-  upserts it as `source: manual`. The daemon defaults the namespace to
-  `rafiki` and refuses the reserved source `rafiki-core`, which belongs to
-  the daemon's own startup sync.
-- **`disable`** flips a row off — it stops being served, and its NAME IS THEN
-  FREE for a replacement: because the database tier can hold an override
-  under an existing name only while the old row is disabled, disabling is
-  how you retire a core skill before adding your own under the same name.
-  `enable` is the inverse. A name with no row in the requested state is an
-  answer (`not found`), not a failure.
-- **`rm`** deletes every row under the name — there is no attribution
-  history to preserve.
-- **`import`** walks a corpus laid out as `<dir>/<name>/SKILL.md` (a Claude
-  Code plugin's `skills/` tree, or any checkout in that shape) and upserts
-  every skill into one namespace, `source: import:<namespace>`. The
-  namespace is derived from upstream's own `.claude-plugin/plugin.json` or
-  `marketplace.json` (the PLUGIN's name, never the marketplace's), falling
-  back to the directory's own name; `--namespace` overrides. Keeping the
-  upstream name is the point: a claude child on a machine where that plugin
-  is really installed deduplicates the two instead of seeing the same skill
-  twice.
+- **`list`** omits bodies and files: an inventory is a handful of lines, a
+  body is a document and a file set is a directory. `--all` adds disabled
+  rows. `LAYER` is `core`, `global` or `user`, `SOURCE` is the owner marker
+  (`rafiki-core`, `repo:<name>`, `manual`, …), and `SHADOWED` marks an
+  enabled row a higher layer overrides — listed so you can see what is being
+  overridden, and why disabling the override changes nothing.
+- **`show`** fetches one body, then — for a skill with supporting files — a
+  `files:` section with one `<mode> <size> <path>` line per file. The file
+  CONTENT stays on the daemon; the agent surfaces fetch it when the skill is
+  invoked.
+- **`enable`/`disable`** flips the highest-layer row's flag. Disabling is
+  how a core skill is switched off; it cannot be deleted. Because a row's
+  presence (not its content) decides what shadows what, a disabled
+  higher-layer row still hides the layer beneath it rather than revealing
+  it.
+- **`rm`** deletes the highest-layer row a name resolves to. A core row is
+  refused (disable it) and a `repo:<name>` row is refused (remove the repo —
+  a refresh would resurrect it); a hand-authored or legacy-imported row is
+  yours to delete. An unknown name is `not found`, an answer rather than a
+  failure.
+- **Shared rows need authority.** A core or global row may be changed only
+  by an admin credential or over the local unix socket; your own user rows
+  are yours.
 
-Authenticated by the same per-user bearer credential as every other Connect
-verb: any valid user token may read and write the corpus, in any namespace,
-until multi-user scoping is built.
+The corpus an executor receives is resolved for THAT executor's owner, not
+sent daemon-wide: the push folds core → global → user with `skills.Resolve`,
+so one owner's overrides never land on another owner's machine (an unowned
+executor gets the shared core and global layers only).
 
 ## `rafiki python` (alias `py`)
 
@@ -782,14 +780,16 @@ registrations whose discovered scripts and packages children address as
 `repo=<name>` on the pymodule tools. The blob store above is itself one such
 scope under the reserved name `local`, which is why `repo add` refuses it.
 A name is 1-64 letters, digits, `_` and `-`, not starting with `-` — it names
-a checkout directory and is never imported, so `review-swarm` is fine. These are rare, setup-shaped operations, so they live here and on no agent
-tool surface — registration goes over Connect (`AddRepo`/
-`ListRepos`/`RefreshRepo`/`RemoveRepo`)
-and works against a remote daemon exactly as against a local one.
+a checkout directory and is never imported, so `review-swarm` is fine. These
+are rare, setup-shaped operations, so they live here and on no agent tool
+surface — registration goes over Connect (`AddRepo`/`ListRepos`/
+`RefreshRepo`/`SetRepo`/`RemoveRepo`) and works against a remote daemon
+exactly as against a local one.
 
 ```
-rafiki repo add <name> <url> [--ref <ref>]   # register + first refresh (--ref main)
-rafiki repo list                             # NAME, URL, REF
+rafiki repo add <name> <url> [--ref <ref>] [--refresh <duration>|off]
+rafiki repo set <name> [--ref <ref>] [--refresh <duration>|off]
+rafiki repo list                             # NAME, URL, REF, COMMIT, REFRESH, SKILLS, SCRIPTS
 rafiki repo refresh [name...]                # re-pull on every eligible executor (all sources)
 rafiki repo remove <name>
 ```
@@ -798,10 +798,18 @@ rafiki repo remove <name>
   synchronously, so a bad clone (bad URL, unreachable host, failed auth)
   fails the add outright — and leaves the registration as it was before the
   call: a brand-new name is rolled back (nothing registered), a re-added
-  name keeps its previous url/ref. The printed summary is the discovered
-  inventory: script and package counts plus the venv state. Note the summary
-  itself is a SECOND refresh call the CLI makes after registering; if that
-  call fails, the source is still registered — rerun `repo refresh`.
+  name keeps its previous url/ref. A namespace collision between the repo's
+  skills and another source's rolls the registration back too; any other
+  skill error is printed (`skill error: …` on stderr) and the command exits
+  non-zero while the registration and its scripts stay. The printed summary
+  is the discovered inventory: the resolved commit, script/package/skill
+  counts and the venv state. Note the script/package counts come from a
+  SECOND refresh call the CLI makes after registering; if that call fails,
+  the source is still registered — rerun `repo refresh`.
+- **`set`** changes `--ref` and/or `--refresh` in place and does NOT refresh:
+  a repoint takes effect on the next `repo refresh` or the schedule's next
+  fire, and the stored commit keeps describing the old ref until then.
+  Naming neither flag is an error.
 - **`refresh`** re-pulls each named source on every live executor of yours
   whose `Describe` reports `repo_sync`, in parallel, and prints the
   same summary per source. With no name it refreshes EVERY source you have
@@ -813,8 +821,17 @@ rafiki repo remove <name>
   failed venv build is printed as `venv build failed: …` and does NOT fail the
   command — the refresh itself succeeded, and a broken build only fails the
   runs that actually need the venv.
-- **`remove`** deletes the registration; executors are never told, and the
-  discovered inventory simply stops being reported.
+- **`list`** reports `COMMIT` (the last resolved commit, 12 characters),
+  `REFRESH` (`-` when on demand), `SKILLS` (rows the source owns for you) and
+  `SCRIPTS` (its cached discovery count — zero until this daemon has
+  refreshed it).
+- **`remove`** deletes the registration and the `repo:<name>` skills it
+  owned; executors are never told, and the discovered inventory simply stops
+  being reported.
+- **`--refresh` is opt-in and the floor is one minute.** It arms a per-repo
+  timer at `resolved_at + interval` (immediately when never resolved),
+  re-armed from when a fire finishes; `off` clears the schedule. Never on by
+  default, for any repo.
 
 
 ## `rafiki recall` and `rafiki memory`

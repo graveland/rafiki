@@ -192,7 +192,7 @@ type StepSummary struct {
 // refuses a script spawn without one.
 //
 // Repo selects the pymodule source: "local" (pymodules.LocalRepo) for the
-// owner's own saved modules, or a registered git source's name. Script is the
+// owner's own saved modules, or a registered repo's name. Script is the
 // entry module, a bare Python identifier exactly as saved. Modules names
 // further pymodules the script imports, resolved within the same repo and
 // put on PYTHONPATH for the run. Args are extra command-line arguments passed

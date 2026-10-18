@@ -35,7 +35,7 @@ type CreateInputs struct {
 // The create body's fixed pieces. The entrypoint runs `rafiki executor serve`
 // bound to the relay socket the launcher mounts at ContainerRelayDir, hosting
 // script children (--launch script, which also turns on the pymodule corpus
-// and git-source syncs). It never hosts claude: the image carries no claude
+// and repo syncs). It never hosts claude: the image carries no claude
 // binary, and the command is not caller-expressible.
 const relaySocketPath = ContainerRelayDir + "/daemon.sock"
 

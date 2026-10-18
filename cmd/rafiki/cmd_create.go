@@ -71,7 +71,7 @@ flags winning on a key collision.
 
 --kind script spawns a script child: a saved pymodule run as the child's
 process, no model attached. Pass --pymodule <repo>:<script> (repo "local" or
-a git source's name) and put the script's argv after --:
+a registered repo's name) and put the script's argv after --:
 
   rafiki create -d --kind script --pymodule local:driver -- --fast 5
 
@@ -94,7 +94,7 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.0, ghostty, kitty), kitty (force), off")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
-	cmd.Flags().String("pymodule", "", "--kind script only: the pymodule to run as the child, as <repo>:<script> (e.g. local:driver); repo is \"local\" or a git source's name. Everything after -- is passed to the script as argv")
+	cmd.Flags().String("pymodule", "", "--kind script only: the pymodule to run as the child, as <repo>:<script> (e.g. local:driver); repo is \"local\" or a registered repo's name. Everything after -- is passed to the script as argv")
 	// The form has no script-spec field, and -i with --pymodule would otherwise
 	// refuse through the form branch with a "pass --pymodule" the caller had
 	// already passed. Refuse at parse time instead, like --prefill-files above.
@@ -586,7 +586,7 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 
 // resolvePymoduleFlag parses --pymodule <repo>:<script> into a ScriptSpec.
 // repo "local" is the spawning owner's saved modules; any other repo names a
-// registered git source. The script name is validated client-side (a bare
+// registered repo. The script name is validated client-side (a bare
 // Python identifier, the same rule every consumer applies) so a typo fails
 // before any dial; the repo name is left to the daemon, whose registered
 // sources are the authority on what exists.
@@ -597,7 +597,7 @@ func resolvePymoduleFlag(cmd *cobra.Command) (*protocol.ScriptSpec, error) {
 	}
 	repo, script, ok := strings.Cut(v, ":")
 	if !ok || repo == "" || script == "" {
-		return nil, fmt.Errorf("--pymodule must be <repo>:<script> (got %q); repo is \"local\" or a git source's name", v)
+		return nil, fmt.Errorf("--pymodule must be <repo>:<script> (got %q); repo is \"local\" or a registered repo's name", v)
 	}
 	if err := pymodules.ValidName(script); err != nil {
 		return nil, fmt.Errorf("--pymodule: script: %w", err)
