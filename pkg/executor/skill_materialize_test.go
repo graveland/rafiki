@@ -222,3 +222,29 @@ func TestMaterializeSkillRefusesUnmanagedRoot(t *testing.T) {
 		t.Errorf("a refused materialization wrote a tree (err=%v)", statErr)
 	}
 }
+
+// A bad file path is refused by VALIDATION even when tree_hash is exactly the
+// hash of the bad set: a self-consistent content address says nothing about
+// whether the paths can be written, so the hash check must not be what a
+// traversal attempt trips over.
+func TestMaterializeSkillRefusesBadFilePath(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := materializeServer(t)
+
+	files := []skills.File{
+		{Path: "references/api.md", Mode: 0o644, Content: []byte("fine\n")},
+		{Path: "../escape.md", Mode: 0o644, Content: []byte("out\n")},
+	}
+	// Self-consistent: the caller hashed the bad set it is sending.
+	hash := skills.TreeHash(files)
+
+	_, err := s.MaterializeSkill(context.Background(), connect.NewRequest(
+		&executorpb.MaterializeSkillRequest{TreeHash: hash, Files: pbSkillFiles(files)}))
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.StrContains(err.Error(), `has a ".." segment`, "must be refused by the path rule, not the hash check")
+	c.StrContains(err.Error(), "../escape.md", "error must name the offending path")
+
+	if _, statErr := os.Stat(skillCacheRoot()); !os.IsNotExist(statErr) {
+		t.Errorf("a refused file set created the cache root (err=%v)", statErr)
+	}
+}

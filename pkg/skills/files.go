@@ -63,9 +63,9 @@ func ValidateFilePath(p string) error {
 }
 
 // ValidateFiles checks a whole skill's file set: every path valid and unique,
-// every mode one of the two the store allows, and both size caps respected.
-// Over-cap is an error, never a truncation — a silently shortened reference
-// file is worse than a refused skill.
+// every mode one of the two the store allows, no path a directory of another,
+// and both size caps respected. Over-cap is an error, never a truncation — a
+// silently shortened reference file is worse than a refused skill.
 func ValidateFiles(files []File) error {
 	seen := make(map[string]bool, len(files))
 	var total int
@@ -81,6 +81,23 @@ func ValidateFiles(files []File) error {
 			return fmt.Errorf("file %q has mode %#o; the mode must be 0644 or 0755", f.Path, f.Mode)
 		}
 		total += len(f.Content)
+	}
+	// No path may be a directory of another in the same set. "a" and "a/b" are
+	// distinct paths but not a writable pair: "a" would have to be a file and a
+	// directory at once, and the second write fails after the first has already
+	// landed. Compared on '/'-separated segments, so "ab" is not a directory of
+	// "abc". Checked against the COMPLETE set, so the order the files arrive in
+	// cannot hide a conflict.
+	for _, f := range files {
+		for i := 0; i < len(f.Path); i++ {
+			if f.Path[i] != '/' {
+				continue
+			}
+			if seen[f.Path[:i]] {
+				return fmt.Errorf("file %q and file %q cannot both be written: one is a directory of the other",
+					f.Path[:i], f.Path)
+			}
+		}
 	}
 	// The skill budget is checked before the per-file cap on purpose: a set
 	// whose files are each too big is also over the total, and the total is

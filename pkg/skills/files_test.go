@@ -91,6 +91,47 @@ func TestValidateFiles(t *testing.T) {
 			wantInErrs: `duplicate file path "a.txt"`,
 		},
 		{
+			// A file cannot also be a directory. Caught here rather than at
+			// write time, where it fails after earlier namespaces have already
+			// been replaced.
+			name: "path is a directory of another",
+			files: []File{
+				{Path: "a", Mode: 0o644, Content: []byte("one")},
+				{Path: "a/b", Mode: 0o644, Content: []byte("two")},
+			},
+			wantErr:    true,
+			wantInErrs: `file "a" and file "a/b" cannot both be written: one is a directory of the other`,
+		},
+		{
+			// The same conflict, opposite arrival order: the rule is a property
+			// of the set, not of the sequence.
+			name: "directory of another, listed first",
+			files: []File{
+				{Path: "a/b", Mode: 0o644, Content: []byte("two")},
+				{Path: "a", Mode: 0o644, Content: []byte("one")},
+			},
+			wantErr:    true,
+			wantInErrs: `file "a" and file "a/b" cannot both be written: one is a directory of the other`,
+		},
+		{
+			// A shared STRING prefix is not a directory prefix: these two are
+			// siblings and both writable.
+			name: "shared prefix is not a directory of another",
+			files: []File{
+				{Path: "ab", Mode: 0o644, Content: []byte("one")},
+				{Path: "abc", Mode: 0o644, Content: []byte("two")},
+			},
+		},
+		{
+			// Nested paths that never collide with a file at an ancestor are
+			// the ordinary case.
+			name: "siblings under one directory",
+			files: []File{
+				{Path: "references/a.md", Mode: 0o644, Content: []byte("one")},
+				{Path: "references/b.md", Mode: 0o644, Content: []byte("two")},
+			},
+		},
+		{
 			name: "bad mode",
 			files: []File{
 				{Path: "a.txt", Mode: 0o600, Content: []byte("one")},

@@ -240,19 +240,24 @@ func TestSyncSkillsWritesFiles(t *testing.T) {
 	c.NoError(err, "SKILL.md")
 }
 
-// A traversal path refuses the WHOLE sync before anything is written. A
-// partial apply would leave a corpus no daemon published.
+// A traversal path refuses the WHOLE sync before anything is written: the set
+// is otherwise valid, so only the path rule can be what refuses it.
 func TestSyncSkillsRefusesTraversal(t *testing.T) {
 	c := assert.NewAborting(t)
 	s, skillsDir := syncServer(t)
+
+	// The skills dir exists BEFORE the call, so "nothing was written under it"
+	// is an observation about this sync rather than about a directory the sync
+	// never got as far as creating.
+	c.NoError(os.MkdirAll(skillsDir, 0o755), "create the skills dir")
 
 	_, err := s.SyncSkills(context.Background(), connect.NewRequest(&executorpb.SyncSkillsRequest{
 		Namespaces: []*executorpb.SkillNamespace{{
 			Name: "rafiki",
 			Skills: []*executorpb.SyncSkill{{
-				Name: "supporting", Body: "x",
+				Name: "supporting", Description: "has files", Body: "x",
 				Files: []*executorpb.SkillFile{
-					{Path: "ok.md", Mode: 0o644, Content: []byte("fine")},
+					{Path: "references/api.md", Mode: 0o644, Content: []byte("fine")},
 					{Path: "../x", Mode: 0o644, Content: []byte("escape")},
 				},
 			}},
@@ -260,12 +265,39 @@ func TestSyncSkillsRefusesTraversal(t *testing.T) {
 	}))
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 	c.StrContains(err.Error(), "rafiki:supporting", "error must name namespace:skill")
+	c.StrContains(err.Error(), `has a ".." segment`, "must be refused by the path rule")
 
-	// Nothing at all: the skills root itself is only created after validation.
-	_, statErr := os.Stat(skillsDir)
-	c.True(os.IsNotExist(statErr), "skills dir was created by a refused sync (err=%v)", statErr)
-	_, statErr = os.Stat(filepath.Join(filepath.Dir(skillsDir), "x"))
+	// Nothing under the skills dir: not the namespace tree, not a staging dir,
+	// not the traversal target one level up.
+	entries, err := os.ReadDir(skillsDir)
+	c.NoError(err, "read skills dir")
+	c.Eq(0, len(entries), "the refused sync wrote under the skills dir: %v", entries)
+	_, statErr := os.Stat(filepath.Join(filepath.Dir(skillsDir), "x"))
 	c.True(os.IsNotExist(statErr), "the traversal target was written (err=%v)", statErr)
+}
+
+// A mode-only change is a change: the mode is part of the skill's identity
+// (skills.TreeHash covers it) and decides whether Claude Code will execute a
+// file, so a converged sync that ignored it would leave the wrong mode on disk
+// forever.
+func TestSyncSkillsModeChangeIsChange(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, skillsDir := syncServer(t)
+
+	before := []*executorpb.SkillFile{
+		{Path: "run.sh", Mode: 0o644, Content: []byte("#!/bin/sh\n")},
+	}
+	c.Eq(int32(1), syncWithFiles(t, s, before).GetWritten(), "first sync writes")
+	c.Eq(int32(0), syncWithFiles(t, s, before).GetWritten(), "an identical set writes nothing")
+
+	after := []*executorpb.SkillFile{
+		{Path: "run.sh", Mode: 0o755, Content: []byte("#!/bin/sh\n")},
+	}
+	c.Eq(int32(1), syncWithFiles(t, s, after).GetWritten(), "a mode-only change is a change")
+
+	info, err := os.Stat(filepath.Join(skillDirOf(t, skillsDir), "run.sh"))
+	c.NoError(err, "stat run.sh")
+	c.Eq(os.FileMode(0o755), info.Mode().Perm(), "the file was rewritten with the new mode")
 }
 
 // A file added, removed or edited is a change: the convergence check compares
