@@ -366,8 +366,8 @@ func runDaemon(opts runDaemonOpts) error {
 		os.Exit(1)
 	}
 
-	// Resolve the daemon id once: tracing stamps it as service.instance.id and
-	// the Controller records it as the conversation-lease holder.
+	// Resolve the daemon id early: tracing stamps it as service.instance.id.
+	// The Controller keeps its own copy, resolved in NewController.
 	daemonID, daemonIDSource, daemonIDErr := paths.DaemonID()
 	if daemonIDErr != nil {
 		// Not fatal: a daemon with no writable data dir and no env var can
@@ -646,9 +646,9 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
-	// The id was resolved once at startup (and stamped on traces); reuse it
-	// rather than reading it again here.
-	ctrl.daemonID = daemonID
+	// The daemon id resolved above is the tracing resource's instance id; the
+	// Controller resolves its own copy in NewController, before it starts the
+	// goroutines that read it, so nothing is patched onto it after construction.
 	ctrl.sandboxCfg = sandboxCfg
 	ctrl.sandboxStore = sandboxStore
 	// The sandbox sweeper's boot pass abandons a `creating` row only when it

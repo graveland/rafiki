@@ -807,9 +807,20 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		c.displayStateWorker(displayCtx)
 	}()
 
-	// daemonID is resolved by main, once, before tracing setup needs it as
-	// service.instance.id; the value is assigned onto the Controller there.
-	// Resolving it here too would be a second read of the same identity.
+	// The daemon id is resolved here, in the constructor, so that every
+	// Controller — main's and a test's — has an identity before any child or
+	// goroutine exists. An EMPTY id is not neutral: ownsChildRow treats it as
+	// "every row is mine", so a Controller patched after construction, or one
+	// built without an id, would destroy another daemon's durable state.
+	// main reads the same value early only to stamp the tracing resource.
+	if id, _, err := paths.DaemonID(); err != nil {
+		// Not fatal: a daemon with no writable data dir and no env var can
+		// still run, it just cannot hold a lease, so it will not auto-resume
+		// anything. Failing to start would be worse.
+		slog.Warn("no daemon id; conversation leases disabled", "error", err)
+	} else {
+		c.daemonID = id
+	}
 
 	if tok, ok := paths.PIDNamespaceToken(); ok {
 		c.nsToken = tok
