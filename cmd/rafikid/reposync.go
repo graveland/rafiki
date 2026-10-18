@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -87,15 +89,23 @@ func (gp *repoPusher) eligible(le execpool.LiveExecutor) bool {
 	return le.Executor.Labels["owner"] != ""
 }
 
-// refresh broadcasts a SyncRepo call for (ownerUserID, name) to
-// every one of that owner's eligible LIVE executors, in parallel (an owner
-// with several executors shouldn't pay for them serially — each executor
-// clones, discovers and venv-builds independently), and caches the LAST one
-// to respond as the inventory snapshot for (owner, name). Executors that
-// disagree on the discovered scripts/packages after refreshing the same ref
-// are logged, not reconciled — no consensus logic, per design §3.
+// refresh refreshes (ownerUserID, name) on every one of that owner's eligible
+// LIVE executors.
 //
-// An executor that fails (dial error, clone failure, timeout) contributes
+// It resolves the ref to a commit ONCE — through the first eligible executor,
+// in ID order, that answers — and fans that SHA out to all of them. Git runs
+// only on executors, with their owner's own credentials, so the daemon asks
+// rather than resolving; resolving once is what keeps two executors from
+// landing different commits for one refresh.
+//
+// The SyncRepo calls then run in parallel (an owner with several executors
+// shouldn't pay for them serially — each executor fetches, discovers and
+// venv-builds independently), and the LAST one to respond becomes the cached
+// inventory snapshot for (owner, name). Executors that disagree on the
+// discovered scripts/packages after refreshing the same commit are logged, not
+// reconciled — no consensus logic, per design §3.
+//
+// An executor that fails (dial error, checkout failure, timeout) contributes
 // nothing and leaves any prior snapshot in place; the returned error is nil
 // whenever at least one executor responded, because the cache is populated
 // by definition in that case.
@@ -105,17 +115,9 @@ func (gp *repoPusher) eligible(le execpool.LiveExecutor) bool {
 // flag — so an operator can see why their executor was passed over without
 // grepping the daemon log.
 func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref string) (repoInventory, error) {
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		first    repoInventory
-		firstID  string
-		firstSet bool
-		last     repoInventory
-		failed   int
-		live     = gp.pool.Live()
-		summary  = make([]string, 0, len(live)) // built on this goroutine only; read after wg.Wait
-	)
+	live := gp.pool.Live()
+	summary := make([]string, 0, len(live)) // built on this goroutine only; read after wg.Wait
+	targets := make([]string, 0, len(live))
 	for _, le := range live {
 		summary = append(summary, repoExecutorSummary(le))
 		if !gp.eligible(le) {
@@ -144,15 +146,40 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 		if ownerID != ownerUserID {
 			continue
 		}
+		targets = append(targets, le.Executor.ID)
+	}
+	if len(targets) == 0 {
+		return repoInventory{}, fmt.Errorf("no eligible executor for owner %q's repos: %d live executor(s): %s",
+			repoOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; "))
+	}
+	// ID order, so which executor resolves is deterministic rather than
+	// whatever the pool happened to enumerate first.
+	slices.Sort(targets)
+
+	commit, err := gp.resolveCommit(ctx, targets, name, url, ref)
+	if err != nil {
+		return repoInventory{}, err
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		first    repoInventory
+		firstID  string
+		firstSet bool
+		last     repoInventory
+		failed   int
+	)
+	for _, executorID := range targets {
 		wg.Add(1)
 		go func(executorID string) {
 			defer wg.Done()
-			inv, err := gp.pushTo(ctx, executorID, name, url, ref)
+			inv, err := gp.pushTo(ctx, executorID, name, url, ref, commit)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				failed++
-				slog.Warn("repo refresh failed", "executor", executorID, "source", name, "error", err)
+				slog.Warn("repo refresh failed", "executor", executorID, "source", name, "commit", commit, "error", err)
 				return
 			}
 			if firstSet && repoInventoryDiffers(first, inv) {
@@ -171,7 +198,7 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 			}
 			gp.cache[repoKey(ownerUserID, name)] = inv
 			gp.mu.Unlock()
-		}(le.Executor.ID)
+		}(executorID)
 	}
 	wg.Wait()
 	mu.Lock()
@@ -184,6 +211,54 @@ func (gp *repoPusher) refresh(ctx context.Context, ownerUserID, name, url, ref s
 			repoOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; "))
 	}
 	return last, nil
+}
+
+// resolveCommit asks the eligible executors, in ID order, to resolve ref to a
+// commit and returns the first answer. An executor that cannot answer — an
+// RPC failure, or git's own refusal in the response's error field — is tried
+// past; only when every one of them fails does the refresh fail, naming the
+// last error so the operator sees the most recent reason.
+func (gp *repoPusher) resolveCommit(ctx context.Context, executorIDs []string, name, url, ref string) (string, error) {
+	var lastErr error
+	for _, executorID := range executorIDs {
+		commit, err := gp.resolveOn(ctx, executorID, name, url, ref)
+		if err != nil {
+			lastErr = err
+			slog.Warn("repo refresh: resolve failed; trying the next executor",
+				"executor", executorID, "source", name, "error", err)
+			continue
+		}
+		return commit, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no eligible executor")
+	}
+	return "", fmt.Errorf("resolve %s: %w", name, lastErr)
+}
+
+// resolveOn asks ONE executor to resolve (url, ref) to a commit.
+func (gp *repoPusher) resolveOn(ctx context.Context, executorID, name, url, ref string) (string, error) {
+	rctx, cancel := context.WithTimeout(ctx, pymoduleSyncTimeout())
+	defer cancel()
+
+	client, err := gp.pool.ConnectClientFor(executorID)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.ResolveRepoRef(rctx, connect.NewRequest(&executorpb.ResolveRepoRefRequest{
+		Name: name, Url: url, Ref: ref,
+	}))
+	if err != nil {
+		return "", err
+	}
+	if msg := resp.Msg.GetError(); msg != "" {
+		return "", errors.New(msg)
+	}
+	commit := resp.Msg.GetCommit()
+	if commit == "" {
+		return "", errors.New("executor resolved no commit")
+	}
+	return commit, nil
 }
 
 // repoOwnerDisplay renders an owner id for the no-eligible-executor error: the
@@ -228,10 +303,15 @@ func slicesEqualByName[T interface{ GetName() string }](a, b []T) bool {
 	return true
 }
 
-// pushTo refreshes ONE named source on ONE executor and returns the
-// discovery report. Same generous, env-overridable timeout as the blob-sync
-// push: a clone plus a venv build can legitimately take minutes.
-func (gp *repoPusher) pushTo(ctx context.Context, executorID, name, url, ref string) (repoInventory, error) {
+// pushTo refreshes ONE named source on ONE executor onto the commit the
+// daemon resolved, and returns the discovery report. Same generous,
+// env-overridable timeout as the blob-sync push: a fetch plus a venv build can
+// legitimately take minutes.
+//
+// A response carrying checkout_error is a FAILURE for this executor: nothing
+// changed there, and the daemon must count it rather than cache an inventory
+// that describes a checkout the executor never made.
+func (gp *repoPusher) pushTo(ctx context.Context, executorID, name, url, ref, commit string) (repoInventory, error) {
 	rctx, cancel := context.WithTimeout(ctx, pymoduleSyncTimeout())
 	defer cancel()
 
@@ -240,14 +320,18 @@ func (gp *repoPusher) pushTo(ctx context.Context, executorID, name, url, ref str
 		return repoInventory{}, err
 	}
 	resp, err := client.SyncRepo(rctx, connect.NewRequest(&executorpb.SyncRepoRequest{
-		Name: name, Url: url, Ref: ref,
+		Name: name, Url: url, Ref: ref, Commit: commit,
 	}))
 	if err != nil {
 		return repoInventory{}, err
 	}
+	if cerr := resp.Msg.GetCheckoutError(); cerr != "" {
+		return repoInventory{}, fmt.Errorf("checkout %s: %s", commit, cerr)
+	}
 	slog.Info("repo refreshed",
-		"executor", executorID, "source", name,
+		"executor", executorID, "source", name, "commit", resp.Msg.GetCommit(),
 		"scripts", len(resp.Msg.GetScripts()), "packages", len(resp.Msg.GetPackages()),
+		"skills", len(resp.Msg.GetSkills()),
 		"venv_ready", resp.Msg.GetVenvReady())
 	return repoInventory{
 		Scripts:   resp.Msg.GetScripts(),

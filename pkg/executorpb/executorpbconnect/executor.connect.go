@@ -74,6 +74,9 @@ const (
 	// ExecutorServiceSyncPyModulesProcedure is the fully-qualified name of the ExecutorService's
 	// SyncPyModules RPC.
 	ExecutorServiceSyncPyModulesProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModules"
+	// ExecutorServiceResolveRepoRefProcedure is the fully-qualified name of the ExecutorService's
+	// ResolveRepoRef RPC.
+	ExecutorServiceResolveRepoRefProcedure = "/rafiki.executor.v1.ExecutorService/ResolveRepoRef"
 	// ExecutorServiceSyncRepoProcedure is the fully-qualified name of the ExecutorService's SyncRepo
 	// RPC.
 	ExecutorServiceSyncRepoProcedure = "/rafiki.executor.v1.ExecutorService/SyncRepo"
@@ -176,10 +179,15 @@ type ExecutorServiceClient interface {
 	// wholesale, so there is no per-path bookkeeping to drift and no partial
 	// state to reconcile after a crash.
 	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
+	// ResolveRepoRef resolves a ref to a commit SHA on this executor, fetching
+	// the source into the repo's bare cache first. The daemon calls it on ONE
+	// executor and fans the resulting SHA out to the rest, so no two executors
+	// can disagree about which commit a refresh means.
+	ResolveRepoRef(context.Context, *connect.Request[executorpb.ResolveRepoRefRequest]) (*connect.Response[executorpb.ResolveRepoRefResponse], error)
 	// SyncRepo refreshes ONE named repo in this executor's
-	// rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
-	// discover the scripts and packages the checkout contains, and build the
-	// repo's one shared venv.
+	// rafiki-managed repo cache: fetch the source at its ref, check out the
+	// commit the daemon resolved, discover the scripts, packages and skills the
+	// checkout contains, and build that commit's one shared venv.
 	//
 	// Per-source, not whole-corpus like SyncPyModules: a repo's own
 	// history is already the versioning and pruning mechanism, so there is no
@@ -307,6 +315,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
 			connect.WithClientOptions(opts...),
 		),
+		resolveRepoRef: connect.NewClient[executorpb.ResolveRepoRefRequest, executorpb.ResolveRepoRefResponse](
+			httpClient,
+			baseURL+ExecutorServiceResolveRepoRefProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("ResolveRepoRef")),
+			connect.WithClientOptions(opts...),
+		),
 		syncRepo: connect.NewClient[executorpb.SyncRepoRequest, executorpb.SyncRepoResponse](
 			httpClient,
 			baseURL+ExecutorServiceSyncRepoProcedure,
@@ -369,6 +383,7 @@ type executorServiceClient struct {
 	syncSkills       *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
 	materializeSkill *connect.Client[executorpb.MaterializeSkillRequest, executorpb.MaterializeSkillResponse]
 	syncPyModules    *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
+	resolveRepoRef   *connect.Client[executorpb.ResolveRepoRefRequest, executorpb.ResolveRepoRefResponse]
 	syncRepo         *connect.Client[executorpb.SyncRepoRequest, executorpb.SyncRepoResponse]
 	readTree         *connect.Client[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse]
 	writeTree        *connect.Client[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
@@ -451,6 +466,11 @@ func (c *executorServiceClient) MaterializeSkill(ctx context.Context, req *conne
 // SyncPyModules calls rafiki.executor.v1.ExecutorService.SyncPyModules.
 func (c *executorServiceClient) SyncPyModules(ctx context.Context, req *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error) {
 	return c.syncPyModules.CallUnary(ctx, req)
+}
+
+// ResolveRepoRef calls rafiki.executor.v1.ExecutorService.ResolveRepoRef.
+func (c *executorServiceClient) ResolveRepoRef(ctx context.Context, req *connect.Request[executorpb.ResolveRepoRefRequest]) (*connect.Response[executorpb.ResolveRepoRefResponse], error) {
+	return c.resolveRepoRef.CallUnary(ctx, req)
 }
 
 // SyncRepo calls rafiki.executor.v1.ExecutorService.SyncRepo.
@@ -569,10 +589,15 @@ type ExecutorServiceHandler interface {
 	// wholesale, so there is no per-path bookkeeping to drift and no partial
 	// state to reconcile after a crash.
 	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
+	// ResolveRepoRef resolves a ref to a commit SHA on this executor, fetching
+	// the source into the repo's bare cache first. The daemon calls it on ONE
+	// executor and fans the resulting SHA out to the rest, so no two executors
+	// can disagree about which commit a refresh means.
+	ResolveRepoRef(context.Context, *connect.Request[executorpb.ResolveRepoRefRequest]) (*connect.Response[executorpb.ResolveRepoRefResponse], error)
 	// SyncRepo refreshes ONE named repo in this executor's
-	// rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
-	// discover the scripts and packages the checkout contains, and build the
-	// repo's one shared venv.
+	// rafiki-managed repo cache: fetch the source at its ref, check out the
+	// commit the daemon resolved, discover the scripts, packages and skills the
+	// checkout contains, and build that commit's one shared venv.
 	//
 	// Per-source, not whole-corpus like SyncPyModules: a repo's own
 	// history is already the versioning and pruning mechanism, so there is no
@@ -696,6 +721,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceResolveRepoRefHandler := connect.NewUnaryHandler(
+		ExecutorServiceResolveRepoRefProcedure,
+		svc.ResolveRepoRef,
+		connect.WithSchema(executorServiceMethods.ByName("ResolveRepoRef")),
+		connect.WithHandlerOptions(opts...),
+	)
 	executorServiceSyncRepoHandler := connect.NewUnaryHandler(
 		ExecutorServiceSyncRepoProcedure,
 		svc.SyncRepo,
@@ -770,6 +801,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceMaterializeSkillHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncPyModulesProcedure:
 			executorServiceSyncPyModulesHandler.ServeHTTP(w, r)
+		case ExecutorServiceResolveRepoRefProcedure:
+			executorServiceResolveRepoRefHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncRepoProcedure:
 			executorServiceSyncRepoHandler.ServeHTTP(w, r)
 		case ExecutorServiceReadTreeProcedure:
@@ -851,6 +884,10 @@ func (UnimplementedExecutorServiceHandler) MaterializeSkill(context.Context, *co
 
 func (UnimplementedExecutorServiceHandler) SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModules is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) ResolveRepoRef(context.Context, *connect.Request[executorpb.ResolveRepoRefRequest]) (*connect.Response[executorpb.ResolveRepoRefResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.ResolveRepoRef is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) SyncRepo(context.Context, *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error) {

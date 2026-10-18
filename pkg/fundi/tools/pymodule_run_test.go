@@ -42,18 +42,21 @@ func seedPymoduleCache(t *testing.T, name, code string) {
 	c.NoError(os.WriteFile(filepath.Join(dir, name+".py"), []byte(code), 0o644))
 }
 
-// seedRepo writes <cache>/pymodule-repos/<name>/ directly, in the
-// layout the executor's SyncRepo receiver produces: each script
-// becomes scripts/<script>.py (a callable), each package becomes a top-level
-// <pkg>/__init__.py (an importable package). Deliberately not going through
-// the sync path, same philosophy as seedPymoduleCache: the repo sync
-// receiver is a different layer (and these tests must not need git or uv),
-// and they exercise pymodule_run's own repo-path resolution, PYTHONPATH and
-// interpreter logic.
+// seedRepoCommit is the one commit seedRepo lays out a checkout for.
+const seedRepoCommit = "0123456789abcdef0123456789abcdef01234567"
+
+// seedRepo writes <cache>/repos/<name>/commits/<sha>/ directly, in the layout
+// the executor's SyncRepo receiver produces — scripts/<script>.py for each
+// callable, a top-level <pkg>/__init__.py for each importable package, and a
+// `current` symlink naming that commit. Deliberately not going through the
+// sync path, same philosophy as seedPymoduleCache: the repo sync receiver is a
+// different layer (and these tests must not need git or uv), and they exercise
+// pymodule_run's own repo-path resolution, PYTHONPATH and interpreter logic.
 func seedRepo(t *testing.T, name string, scripts, packages map[string]string) {
 	t.Helper()
 	c := assert.NewAborting(t)
-	repoDir := filepath.Join(paths.CacheDir(), "pymodule-repos", name)
+	root := filepath.Join(paths.CacheDir(), "repos", name)
+	repoDir := filepath.Join(root, "commits", seedRepoCommit)
 	for script, code := range scripts {
 		dir := filepath.Join(repoDir, "scripts")
 		c.NoError(os.MkdirAll(dir, 0o755))
@@ -64,13 +67,17 @@ func seedRepo(t *testing.T, name string, scripts, packages map[string]string) {
 		c.NoError(os.MkdirAll(dir, 0o755))
 		c.NoError(os.WriteFile(filepath.Join(dir, "__init__.py"), []byte(code), 0o644))
 	}
+	c.NoError(os.MkdirAll(root, 0o755))
+	c.NoError(os.Symlink(filepath.Join("commits", seedRepoCommit), filepath.Join(root, "current")))
 }
 
 // gitRepoDirOf is the synced checkout directory of a seeded repo, as
-// pymodule_run itself computes it.
+// pymodule_run itself resolves it: the REAL path `current` names.
 func gitRepoDirOf(t *testing.T, name string) string {
 	t.Helper()
-	return filepath.Join(paths.CacheDir(), "pymodule-repos", name)
+	dir, err := filepath.EvalSymlinks(filepath.Join(paths.CacheDir(), "repos", name, "current"))
+	assert.NewAborting(t).NoError(err, "resolve the seeded repo's current symlink")
+	return dir
 }
 
 // script is a bare Python identifier -- a saved module name -- so every
@@ -746,6 +753,6 @@ func TestPymoduleRunRepoRejectsPathLikeRepoNames(t *testing.T) {
 		c.False(!strings.Contains(err.Error(), "repo name") || !strings.Contains(err.Error(), "repo"), "error for %q should be the repo's repo name rule, got: %v", bad, err)
 	}
 	// Nothing escaped the guard into the managed cache root.
-	_, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodule-repos", "sibling"))
+	_, statErr := os.Stat(filepath.Join(paths.CacheDir(), "repos", "sibling"))
 	c.True(os.IsNotExist(statErr), "something was written despite the invalid repo name")
 }

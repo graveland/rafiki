@@ -36,12 +36,6 @@ const LocalRepo = "local"
 // writer and the readers.
 func BlobCacheDir() string { return filepath.Join(paths.CacheDir(), "pymodules") }
 
-// GitCacheDir is the synced repo cache root: one checkout per
-// registered source at <dir>/<repo>, whose callable scripts live under
-// scripts/ and whose top-level __init__-carrying directories are importable
-// packages. SyncRepo writes it; the same readers read it.
-func GitCacheDir() string { return filepath.Join(paths.CacheDir(), "pymodule-repos") }
-
 // Record is one row of conversations.pymodules.
 type Record struct {
 	ID          int64

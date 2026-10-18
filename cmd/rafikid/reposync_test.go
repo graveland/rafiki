@@ -74,20 +74,48 @@ func (s *fakeRepoStore) Delete(_ context.Context, ownerUserID, name string) erro
 }
 
 // fakeRepoClient satisfies executorpbconnect.ExecutorServiceClient by
-// embedding the interface and overriding ONLY SyncRepo — the
-// same loud-failure-on-anything-else trick fakePymoduleClient uses. resp/err
-// are read-only after construction; entered/release (both nil by default)
-// let a test block a response, and requests is appended under mu because
-// refresh fans out concurrently.
+// embedding the interface and overriding ONLY SyncRepo and ResolveRepoRef —
+// the same loud-failure-on-anything-else trick fakePymoduleClient uses.
+// resp/err are read-only after construction; entered/release (both nil by
+// default) let a test block a response, and requests is appended under mu
+// because refresh fans out concurrently. The resolve fields are separate from
+// the SyncRepo ones on purpose: a test that makes the SYNC fail must still let
+// the ref resolve, and vice versa.
 type fakeRepoClient struct {
 	executorpbconnect.ExecutorServiceClient
-	mu       sync.Mutex
-	requests []*executorpb.SyncRepoRequest
-	resp     *executorpb.SyncRepoResponse
-	err      error
-	entered  chan struct{}
-	release  chan struct{}
-	onCall   func() // invoked once, before the response/err is produced
+	mu        sync.Mutex
+	requests  []*executorpb.SyncRepoRequest
+	resp      *executorpb.SyncRepoResponse
+	err       error
+	entered   chan struct{}
+	release   chan struct{}
+	onCall    func() // invoked once, before the response/err is produced
+	resolves  []*executorpb.ResolveRepoRefRequest
+	resolveOK *executorpb.ResolveRepoRefResponse
+	resolveEr error
+}
+
+// defaultResolveCommit is what a fake executor resolves a ref to unless the
+// test says otherwise.
+const defaultResolveCommit = "0123456789abcdef0123456789abcdef01234567"
+
+func (c *fakeRepoClient) ResolveRepoRef(_ context.Context, req *connect.Request[executorpb.ResolveRepoRefRequest]) (*connect.Response[executorpb.ResolveRepoRefResponse], error) {
+	c.mu.Lock()
+	c.resolves = append(c.resolves, req.Msg)
+	c.mu.Unlock()
+	if c.resolveEr != nil {
+		return nil, c.resolveEr
+	}
+	if c.resolveOK != nil {
+		return connect.NewResponse(c.resolveOK), nil
+	}
+	return connect.NewResponse(&executorpb.ResolveRepoRefResponse{Commit: defaultResolveCommit}), nil
+}
+
+func (c *fakeRepoClient) resolveCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.resolves)
 }
 
 func (c *fakeRepoClient) SyncRepo(ctx context.Context, req *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error) {
@@ -588,4 +616,79 @@ func TestRepoRefreshNoEligibleNamesExecutors(t *testing.T) {
 	c.False(ok, "a failed refresh left a cache entry behind")
 	_, ok = f.gp.inventoryFor("", "anon_repo")
 	c.False(ok, "a failed refresh left a cache entry behind")
+}
+
+// TestRepoPusherResolvesOnceAndFansOutSHA pins the one-git-call contract: the
+// ref is resolved ONCE, through the first eligible executor in ID order, and
+// every SyncRepo in the fan-out carries that same commit. Two executors can
+// therefore never land different commits for one refresh.
+func TestRepoPusherResolvesOnceAndFansOutSHA(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	// A second executor for alice, so "once" is provable across a real fan-out.
+	second := execpool.LiveExecutor{
+		Executor: executors.Executor{ID: "exec-alice2", Labels: map[string]string{"owner": "alice"}},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
+	}
+	f.pool.live = append(f.pool.live, second)
+	f.clients["exec-alice2"] = &fakeRepoClient{}
+	f.pool.clients["exec-alice2"] = f.clients["exec-alice2"]
+
+	const sha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	for _, id := range []string{"exec-alice", "exec-alice2"} {
+		f.clients[id].resolveOK = &executorpb.ResolveRepoRefResponse{Commit: sha}
+	}
+
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "refresh")
+
+	// Exactly one resolve, and it went to the lowest-id eligible executor.
+	c.Eq(1, f.clients["exec-alice"].resolveCount(), "exec-alice resolve calls")
+	c.Eq(0, f.clients["exec-alice2"].resolveCount(), "exec-alice2 resolve calls")
+	c.Eq(0, f.clients["exec-bob"].resolveCount(), "exec-bob resolve calls")
+	got := f.clients["exec-alice"].resolves[0]
+	c.False(got.GetName() != "ops_tools" || got.GetUrl() != "https://example.net/ops.git" || got.GetRef() != "main",
+		"resolve payload = name %q url %q ref %q", got.GetName(), got.GetUrl(), got.GetRef())
+
+	// Both fan-out calls carry the resolved SHA.
+	for _, id := range []string{"exec-alice", "exec-alice2"} {
+		reqs := f.clients[id].requests
+		c.Require().Len(reqs, 1, "%s SyncRepo requests", id)
+		c.Eq(sha, reqs[0].GetCommit(), "%s SyncRepo commit", id)
+	}
+}
+
+// A resolve that fails on the first executor is retried on the next, and a
+// resolve that fails everywhere fails the refresh naming the source.
+func TestRepoPusherResolveFallsBackAndReportsFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newRepoFixture()
+	second := execpool.LiveExecutor{
+		Executor: executors.Executor{ID: "exec-alice2", Labels: map[string]string{"owner": "alice"}},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
+	}
+	f.pool.live = append(f.pool.live, second)
+	f.clients["exec-alice2"] = &fakeRepoClient{}
+	f.pool.clients["exec-alice2"] = f.clients["exec-alice2"]
+
+	// exec-alice cannot resolve (an RPC failure), exec-alice2 can.
+	f.clients["exec-alice"].resolveEr = errors.New("executor unreachable")
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "refresh with a fallback executor")
+	c.Eq(1, f.clients["exec-alice"].resolveCount(), "exec-alice resolve calls")
+	c.Eq(1, f.clients["exec-alice2"].resolveCount(), "exec-alice2 resolve calls")
+	c.Eq(defaultResolveCommit, f.clients["exec-alice2"].requests[0].GetCommit(), "the fallback's SHA fanned out")
+
+	// A resolve that fails everywhere is a refresh failure naming the source,
+	// and nothing is synced.
+	f.clients["exec-alice2"].resolveOK = &executorpb.ResolveRepoRefResponse{Error: "fatal: couldn't find remote ref main"}
+	f.clients["exec-alice"].requests = nil
+	f.clients["exec-alice2"].requests = nil
+	_, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().Error(err, "refresh with every resolve failing")
+	c.StrContains(err.Error(), "resolve ops_tools", "refresh error")
+	c.StrContains(err.Error(), "couldn't find remote ref main", "refresh error names the last failure")
+	for _, id := range []string{"exec-alice", "exec-alice2"} {
+		c.Eq(0, f.clients[id].callCount(), "%s SyncRepo calls after a failed resolve", id)
+	}
 }

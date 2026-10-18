@@ -263,11 +263,16 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 }
 
 // executeGitRepo is the resolution branch for any repo other than "local":
-// script, modules and interpreter resolve against a repo's synced
-// checkout at <cache>/pymodule-repos/<repo> -- the layout pkg/executor's
-// SyncRepo receiver produces on THIS executor (the executor that
-// ran the sync is the one running this tool), re-derived here from
-// paths.CacheDir() rather than imported.
+// script, modules and interpreter resolve against a repo's synced checkout —
+// the commit `current` names at the moment this call starts — which is the
+// layout pkg/executor's SyncRepo receiver produces on THIS executor (the
+// executor that ran the sync is the one running this tool).
+//
+// The checkout is resolved and HELD through pkg/repos.OpenRepoCheckout, the
+// same call the executor-hosted script launcher makes: the shared flock keeps
+// the sweeper off this commit directory for the whole run, so a refresh that
+// moves `current` on mid-run cannot pull the venv or the sources out from
+// under it.
 func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInput) (ToolResult, error) {
 	// The repo name becomes a path segment under the cache root, so it is
 	// guarded by the rule every registered source was stored under; each
@@ -289,8 +294,18 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 	}
 
 	// A checkout keeps its callable scripts under scripts/, not the flat
-	// <name>/<name>.py layout of the blob-sourced cache.
-	repoDir := filepath.Join(pymodules.GitCacheDir(), in.Repo)
+	// <name>/<name>.py layout of the blob-sourced cache. Resolving `current`
+	// gives this call the commit that is current NOW, and the hold keeps it
+	// there until the subprocess below has exited.
+	repoDir, hold, err := repos.OpenRepoCheckout(in.Repo)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("pymodule_run: repo %q: %w", in.Repo, err)
+	}
+	// Released only after the run returns. runSubprocess builds its own
+	// exec.Cmd, so there is no cmd.ExtraFiles to hand the descriptor to from
+	// here: the lock is held by this process for exactly the window the
+	// subprocess runs, which is the invariant the sweep needs.
+	defer hold.Close()
 	scriptPath := filepath.Join(repoDir, "scripts", in.Script+".py")
 	if _, err := os.Stat(scriptPath); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_run: script %q is not synced to this executor under repo %q (has the repo been refreshed on it yet?): %w", in.Script, in.Repo, err)

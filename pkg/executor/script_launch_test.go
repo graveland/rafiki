@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/adminpb"
 	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/repos"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -127,24 +128,44 @@ func TestResolveScriptLaunchRefusesUnsynced(t *testing.T) {
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "not synced to this executor"), "want the unsynced refusal, got %v", err)
 }
 
-// scriptGitFixture lays out a synced git checkout the way SyncRepo
-// does: <repo>/scripts/*.py callable, top-level __init__-carrying directories
-// importable, one repo-wide venv.
+// scriptGitFixture lays out a synced git repo the way SyncRepo does:
+// <root>/commits/<sha>/ holding the callable scripts/*.py, top-level
+// __init__-carrying directories and one repo-wide venv, with <root>/current
+// pointing at that commit. It returns the commit directory.
 func scriptGitFixture(t *testing.T, repo string, venv bool) string {
 	t.Helper()
 	c := assert.NewAborting(t)
 	base := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", base)
-	root := filepath.Join(base, "rafiki", "pymodule-repos", repo)
-	c.NoError(os.MkdirAll(filepath.Join(root, "scripts"), 0o755))
-	c.NoError(os.WriteFile(filepath.Join(root, "scripts", "deploy.py"), []byte("print('d')\n"), 0o644))
-	c.NoError(os.MkdirAll(filepath.Join(root, "ops_tools"), 0o755))
-	c.NoError(os.WriteFile(filepath.Join(root, "ops_tools", "__init__.py"), []byte(""), 0o644))
+	root := filepath.Join(base, "rafiki", "repos", repo)
+	commitDir := filepath.Join(root, "commits", scriptFixtureCommit)
+	c.NoError(os.MkdirAll(filepath.Join(commitDir, "scripts"), 0o755))
+	c.NoError(os.WriteFile(filepath.Join(commitDir, "scripts", "deploy.py"), []byte("print('d')\n"), 0o644))
+	c.NoError(os.MkdirAll(filepath.Join(commitDir, "ops_tools"), 0o755))
+	c.NoError(os.WriteFile(filepath.Join(commitDir, "ops_tools", "__init__.py"), []byte(""), 0o644))
 	if venv {
-		c.NoError(os.MkdirAll(filepath.Join(root, ".venv", "bin"), 0o755))
-		c.NoError(os.WriteFile(filepath.Join(root, ".venv", "bin", "python3"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+		c.NoError(os.MkdirAll(filepath.Join(commitDir, ".venv", "bin"), 0o755))
+		c.NoError(os.WriteFile(filepath.Join(commitDir, ".venv", "bin", "python3"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	}
-	return root
+	c.NoError(os.Symlink(filepath.Join("commits", scriptFixtureCommit), filepath.Join(root, "current")))
+	// The REAL path: OpenRepoCheckout resolves `current` through EvalSymlinks,
+	// and on a platform whose temp dir is itself behind a symlink the two
+	// spellings differ.
+	real, err := filepath.EvalSymlinks(commitDir)
+	c.NoError(err, "EvalSymlinks")
+	return real
+}
+
+// scriptFixtureCommit is the one commit scriptGitFixture lays out.
+const scriptFixtureCommit = "0123456789abcdef0123456789abcdef01234567"
+
+// closeHold releases a resolution's checkout hold; every test that resolves a
+// repo launch owns one.
+func closeHold(t *testing.T, res scriptLaunch) {
+	t.Helper()
+	if res.hold != nil {
+		t.Cleanup(func() { res.hold.Close() })
+	}
 }
 
 func TestResolveScriptLaunchFromGitCheckout(t *testing.T) {
@@ -157,6 +178,7 @@ func TestResolveScriptLaunchFromGitCheckout(t *testing.T) {
 		Args:    []string{"--plan"},
 	})
 	c.Require().NoError(err, "resolveScriptLaunch")
+	closeHold(t, res)
 	c.Eq("python3", res.interpreter, "interpreter")
 	c.Eq(filepath.Join(repo, "scripts", "deploy.py"), res.argv[0], "argv[0]")
 	// The checkout root joins PYTHONPATH once (intra-repo imports), then the
@@ -172,7 +194,32 @@ func TestResolveScriptLaunchGitVenvInterpreter(t *testing.T) {
 	repo := scriptGitFixture(t, "venvops", true)
 	res, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "venvops", Script: "deploy"})
 	c.NoError(err, "resolveScriptLaunch")
+	closeHold(t, res)
 	c.Eq(filepath.Join(repo, ".venv", "bin", "python3"), res.interpreter, "interpreter")
+}
+
+// A repo launch resolves `current` to its real commit directory and holds it:
+// the launch runs out of the commit that was current when it started, and the
+// hold is what keeps the sweeper off that directory for the child's life.
+func TestScriptLaunchUsesCurrentCommit(t *testing.T) {
+	c := assert.NewAborting(t)
+	repo := scriptGitFixture(t, "ops", false)
+
+	res, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "ops", Script: "deploy"})
+	c.NoError(err, "resolveScriptLaunch")
+	c.Require().True(res.hold != nil, "a repo launch resolved no checkout hold")
+	t.Cleanup(func() { res.hold.Close() })
+
+	c.Eq(filepath.Join(repo, "scripts", "deploy.py"), res.argv[0], "argv[0]")
+	c.Eq(repo, res.pythonPath, "PYTHONPATH")
+	// The hold names the same directory the launch runs from: the sweeper's
+	// exclusive probe on THAT directory must fail while the launch holds it.
+	hold, busy, lerr := repos.LockRepoCheckoutExclusive(repo)
+	c.NoError(lerr, "probe the held checkout")
+	if hold != nil {
+		hold.Close()
+	}
+	c.True(busy, "the resolved checkout was not held against the sweeper")
 }
 
 // The executor's pre-existing PYTHONPATH trails the computed entries — the

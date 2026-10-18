@@ -92,10 +92,16 @@ service ExecutorService {
   // state to reconcile after a crash.
   rpc SyncPyModules(SyncPyModulesRequest) returns (SyncPyModulesResponse);
 
+  // ResolveRepoRef resolves a ref to a commit SHA on this executor, fetching
+  // the source into the repo's bare cache first. The daemon calls it on ONE
+  // executor and fans the resulting SHA out to the rest, so no two executors
+  // can disagree about which commit a refresh means.
+  rpc ResolveRepoRef(ResolveRepoRefRequest) returns (ResolveRepoRefResponse);
+
   // SyncRepo refreshes ONE named repo in this executor's
-  // rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
-  // discover the scripts and packages the checkout contains, and build the
-  // repo's one shared venv.
+  // rafiki-managed repo cache: fetch the source at its ref, check out the
+  // commit the daemon resolved, discover the scripts, packages and skills the
+  // checkout contains, and build that commit's one shared venv.
   //
   // Per-source, not whole-corpus like SyncPyModules: a repo's own
   // history is already the versioning and pruning mechanism, so there is no
@@ -525,15 +531,29 @@ message RepoPackage {
   string description = 2;
 }
 
+message ResolveRepoRefRequest {
+  string name = 1;
+  string url = 2;
+  string ref = 3;
+}
+
+message ResolveRepoRefResponse {
+  string commit = 1;
+  // error is git's output when resolution failed; commit is then empty.
+  string error = 2;
+}
+
 message SyncRepoRequest {
   // name is the source's human label, which also names its cache directory.
   string name = 1;
-  // url is where the executor clones/fetches the source from. The daemon
+  // url is where the executor fetches the source from. The daemon
   // sends it rather than the executor holding a registry: the executor has
   // no store of its own.
   string url = 2;
-  // ref is the git ref to check out (a branch, tag or commit).
+  // ref is the git ref to fetch (a branch or tag).
   string ref = 3;
+  // commit is the 40-hex SHA to check out, resolved by ResolveRepoRef.
+  string commit = 4;
 }
 
 message SyncRepoResponse {
@@ -545,6 +565,29 @@ message SyncRepoResponse {
   // which case venv_error names why.
   bool venv_ready = 3;
   string venv_error = 4;
+  // commit is the commit now current on this executor.
+  string commit = 5;
+  // checkout_error is non-empty when the commit could not be checked out:
+  // nothing changed on this executor, and the fields below describe the
+  // checkout that was already current (or are empty if there was none).
+  string checkout_error = 6;
+  repeated RepoSkill skills = 7;
+  repeated string skill_errors = 8;
+}
+
+// RepoSkill is one skill discovered in a repo's checkout. Its name is BARE:
+// the namespace is a separate field, because a rendered "<namespace>:<name>"
+// would have the namespace applied twice wherever it is written out.
+message RepoSkill {
+  string namespace = 1;
+  string name = 2;
+  string description = 3;
+  // body has already had its frontmatter stripped.
+  string body = 4;
+  // from is where the skill was found: a path relative to the checkout, or
+  // "<dist>:<path>" for a skill shipped inside a python distribution.
+  string from = 5;
+  repeated SkillFile files = 6;
 }
 
 message ReadTreeRequest  { string path = 1; }

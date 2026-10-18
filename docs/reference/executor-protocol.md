@@ -688,8 +688,10 @@ sentinel for the blob store everywhere on the pymodule surface) runs a saved
 module exactly as described above. Any other value names a repo synced
 by `SyncRepo` (below): the script resolves to
 `scripts/<script>.py` in that source's checkout under
-`<paths.CacheDir()>/pymodule-repos/<repo>` — a `scripts/` layout, not the
-per-module directories above — while each `modules` entry resolves to a
+`<paths.CacheDir()>/repos/<repo>/commits/<sha>` — a `scripts/` layout, not the
+per-module directories above — where `<sha>` is whatever the repo's `current`
+symlink named when the call started, held for the duration (below); while each
+`modules` entry resolves to a
 top-level package directory of the same checkout, and the checkout ROOT
 itself always joins `PYTHONPATH` first, so a script's own intra-repo imports
 resolve without naming its packages. The interpreter is the repo's shared
@@ -754,39 +756,89 @@ enforcement on the RPC remains regardless, for the same reason as skills: a
 daemon that ignored a `false` here would cost an unexpected write to the
 operator's machine.
 
+### ResolveRepoRef
+
+```
+ResolveRepoRef(name, url, ref) → { commit, error }
+```
+
+Unary. Resolves `ref` to a commit SHA on this executor, fetching `url` at `ref`
+into the source's bare repo first. The daemon asks ONE executor and fans the
+SHA out to the rest, so git runs only on executors, with their owner's own
+credentials, and two executors can never land different commits for one
+refresh.
+
+Same gates as `SyncRepo`: the `repo_sync` option, `validSegment(name)`, and
+`refuseLeadingDash` on both `url` and `ref` (a leading dash would make git
+parse the value as an option — `git fetch --upload-pack=<cmd>` executes `<cmd>`
+locally). The fetch names the URL explicitly rather than a configured remote,
+so a source whose url was repointed resolves the NEW repository's commit; the
+bare repo is created (`git init --bare`) if it does not exist yet, and
+`git rev-parse --verify FETCH_HEAD^{commit}` reads the answer back.
+
+A git failure is REPORTED, never raised: `error` carries git's capped output
+and `commit` is empty, so the daemon can tell a bad ref from an unreachable
+executor. Resolutions of one source are serialised on the executor, like
+refreshes, because both write the same bare repo.
+
 ### SyncRepo
 
 ```
-SyncRepo(name, url, ref)
-  → { scripts[{name, description}], packages[{name, description}],
+SyncRepo(name, url, ref, commit)
+  → { commit, checkoutError, scripts[{name, description}],
+      packages[{name, description}], skills[{namespace, name, description,
+      body, from, files[{path, mode, content}]}], skillErrors[],
       venvReady, venvError }
 ```
 
-Unary. Refreshes ONE named repo into `<cache>/pymodule-repos/<name>/` —
-a sibling of the blob-sourced `pymodules/` cache root, never nested inside it,
-because a checkout's own layout (including its `.git/`) must not be interleaved
-with the flat per-module directories SyncPyModules manages and prunes by name.
-Per-source, not whole-corpus: a repo's own history is already the
-versioning and pruning mechanism, so there is no "prune what's absent" model to
-replicate.
+Unary. Refreshes ONE named repo onto the commit the daemon resolved, into
+`<cache>/repos/<name>/`:
 
-A checkout with no `.git` yet is `git clone`d fresh and checked out at `ref` (a
-branch, tag or SHA — git's own ref resolution handles each). An existing one is
-refreshed onto the tracked ref's current tip: `git fetch origin <ref>`, `git
-reset --hard FETCH_HEAD`, `git clean -fdx` — the closest equivalent to
-blob-sync's "whole corpus every time" built from git's own primitives, sweeping
-untracked and ignored leftovers (a stale `__pycache__`, a cruft `.py` that
-would otherwise become callable). Git runs as an ordinary subprocess and
-inherits whatever ambient credentials the executor's environment already has;
-rafiki configures none. Because a leading dash would make git parse the
-argument as an option rather than a value — `git fetch origin
---upload-pack=<cmd>` executes `<cmd>` locally — both `url` and `ref` beginning
-with a dash are refused with `CodeInvalidArgument` before any subprocess runs,
-re-checked at the executor's own boundary. A failed git operation is NOT an
-RPC error: the
-response carries `venvReady=false`, the capped combined output in `venvError`,
-and an empty inventory — no discovery or build is attempted against a checkout
-in an unknown state.
+```
+<name>/git/             bare repo; every fetch lands here
+<name>/commits/<sha>/   detached worktree per commit, own .venv
+<name>/current          symlink -> commits/<sha> (relative)
+```
+
+Per-source, not whole-corpus: a repo's own history is already the versioning
+and pruning mechanism, so there is no "prune what's absent" model to replicate.
+One checkout PER COMMIT is what lets a running job keep its commit: a job
+resolves `current` to its real path when it starts and holds a shared `flock`
+on `<dir>/.rafiki-inuse` for as long as it runs out of that directory, so a
+refresh that moves `current` on cannot pull the sources or the venv out from
+under it. The hold is inherited by the launched child process, so it outlives
+the executor that opened it.
+
+`commit` must be the 40-hex SHA `ResolveRepoRef` returned
+(`CodeInvalidArgument` otherwise — it becomes a path segment). The steps, in
+order: if `current` already resolves to `commits/<commit>`, skip straight to
+discovery (no fetch, no `uv sync`); otherwise fetch `url` at `ref`, verify
+`commit` arrived (`git cat-file -e`), create `commits/<commit>` as a detached
+worktree if it is absent (`git worktree add --detach`), build that checkout's
+venv, discover scripts/packages/skills, and only THEN flip `current` by
+renaming a freshly created relative symlink over it. `current` moving last is
+the contract: everything above can still fail, and a `current` naming a
+half-built checkout would hand the next job a broken tree.
+
+A failed checkout is NOT an RPC error: the response carries `checkoutError`
+with the reason, `commit` names whatever is still current, and nothing changed
+on this executor. A commit the fetch did not bring reports
+`commit <sha> not found after fetching <ref>` rather than checking out nothing.
+Because a leading dash would make git parse the argument as an option rather
+than a value, both `url` and `ref` beginning with a dash are refused with
+`CodeInvalidArgument` before any subprocess runs, re-checked at the executor's
+own boundary. Git runs as an ordinary subprocess and inherits whatever ambient
+credentials the executor's environment already has; rafiki configures none.
+
+Refreshes of one source are serialised per repo name on the executor: two
+concurrent ones would race on the bare repo's `FETCH_HEAD` and on the worktree
+they both want to create.
+
+After the flip, a sweep removes every OTHER commit checkout that is both
+unheld (an exclusive non-blocking `flock` on its `.rafiki-inuse` succeeds) and
+older than 7 days (the directory's mtime, which every hold stamps). Removal is
+`git worktree remove --force` followed by `git worktree prune`; sweep errors
+are logged, never returned.
 
 On a successful refresh, discovery is a plain walk (no manifest parsing): each
 `scripts/*.py` is one callable script and each top-level directory containing
@@ -794,23 +846,33 @@ On a successful refresh, discovery is a plain walk (no manifest parsing): each
 `#`-prefixed comment line. The `scripts[]`/`packages[]` in the response carry
 names and descriptions only, never the executor's own filesystem paths.
 
-The repo gets exactly ONE shared venv, `<checkout>/.venv`, built with `uv sync`
-run with the checkout root as its working directory — rafiki parses no manifest
-and lets uv figure out its own input. The manifest gate is file existence only,
-three-way: a checkout with neither `pyproject.toml` nor `requirements.txt`
-declares no dependencies at all, the build is skipped entirely and
-`venvReady=true` is reported with nothing invoked; a checkout carrying ONLY a
-bare `requirements.txt` — which `uv sync` cannot consume — reports
-`venvReady=false` with one clear sentence in `venvError` rather than promising
-a venv that was never built, its inventory still riding the same response as
-with any failed build. Otherwise the build runs
+Skills are discovered against the SAME commit checkout, with that checkout's
+venv when it has one: the repo's own skill directories plus any
+`[tool.rafiki] skill-sources` distributions installed there. A skill is
+reported with its namespace, bare name, description, frontmatter-stripped body,
+where it was found (`from`), and its supporting files. Per-skill and
+per-source failures ride `skillErrors` and are never fatal — to the refresh or
+to the scripts.
+
+The commit gets exactly ONE shared venv, `<commits/<sha>>/.venv`, built with
+`uv sync` run with the checkout root as its working directory — rafiki parses
+no manifest and lets uv figure out its own input. The manifest gate is file
+existence only, three-way: a checkout with neither `pyproject.toml` nor
+`requirements.txt` declares no dependencies at all, the build is skipped
+entirely and `venvReady=true` is reported with nothing invoked; a checkout
+carrying ONLY a bare `requirements.txt` — which `uv sync` cannot consume —
+reports `venvReady=false` with one clear sentence in `venvError` rather than
+promising a venv that was never built, its inventory still riding the same
+response as with any failed build. Otherwise the build runs
 staged in a sibling temp directory (via `UV_PROJECT_ENVIRONMENT`) using the
 same `RAFIKI_PYMODULE_UV` resolution and interpreter as blob-sourced venvs,
 and is renamed into place only once it succeeded; a failed build discards the
 staging tree, leaves any previous venv untouched, and reports
 `venvReady=false` with the capped output — while STILL returning the discovered
 inventory, because a broken dependency must not hide what exists (a broken
-build only fails the runs that actually need it).
+build only fails the runs that actually need it). The unchanged-commit path
+runs no build at all, so it reports readiness from what the directory already
+holds: no manifest or a built venv is ready, a manifest without a venv is not.
 
 **Opt-in per machine, and `repo_sync` on `DescribeResponse` is
 self-reported** exactly like `pymodules_sync`: it only ever narrows what the

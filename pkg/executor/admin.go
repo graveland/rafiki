@@ -264,6 +264,13 @@ func (a *AdminServer) Launch(
 				fmt.Errorf("cannot host script child %s: %w", childID, err))
 		}
 	}
+	// A script resolved out of a repo checkout holds that commit's flock. The
+	// CHILD inherits it (ExtraFiles, below) and the parent's copy is closed as
+	// soon as the child holds one; every refusal between here and the start
+	// releases it, so a failed launch leaves no lock behind.
+	if script.hold != nil {
+		defer script.hold.Close()
+	}
 
 	a.mu.Lock()
 	if _, dup := a.m[childID]; dup {
@@ -458,6 +465,15 @@ func (a *AdminServer) Launch(
 	}
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)
+	// A script child runs out of a per-commit repo checkout, and the hold it
+	// was resolved under must outlive this launch: handing the descriptor to
+	// the child (ExtraFiles starts at fd 3) keeps the shared lock held for as
+	// long as the child runs, even if this executor is killed in between. The
+	// sweeper's exclusive probe then fails, so the commit directory — and the
+	// venv the child is running from — stays on disk.
+	if script.hold != nil {
+		cmd.ExtraFiles = []*os.File{script.hold}
+	}
 	// Scrub inherited copies of every credential name this Launch manages
 	// (plus PYTHONPATH and the forwarded names, which must also appear exactly
 	// once with THIS launch's value) BEFORE the fresh values are appended, so
@@ -520,6 +536,12 @@ func (a *AdminServer) Launch(
 	// death. The parent's copy must go now: held open, it would keep the read
 	// end from ever reaching EOF.
 	stderrW.Close()
+	// Same for the repo hold: the child inherited it at Start, so the
+	// parent's copy goes now and the lock lasts exactly as long as the child
+	// does.
+	if script.hold != nil {
+		script.hold.Close()
+	}
 
 	pid := cmd.Process.Pid
 	rec := &launchRecord{running: true}

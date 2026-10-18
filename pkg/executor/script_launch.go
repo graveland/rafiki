@@ -13,10 +13,11 @@ package executor
 // is a Launch refusal with pymodule_run's own reasoning, not a runtime
 // surprise after the child is up.
 //
-// The layout constants come from pkg/pymodules (BlobCacheDir/GitCacheDir) and
-// the venv helpers from pkg/fundi/tools (exported for exactly this consumer);
-// the per-branch logic mirrors pymodule_run's Execute so a script launched on
-// an executor runs like the same pymodule_run call on it would.
+// The layout constants come from pkg/pymodules (BlobCacheDir) and pkg/repos
+// (CacheDir/OpenRepoCheckout) and the venv helpers from pkg/fundi/tools
+// (exported for exactly this consumer); the per-branch logic mirrors
+// pymodule_run's Execute so a script launched on an executor runs like the
+// same pymodule_run call on it would.
 
 import (
 	"fmt"
@@ -45,6 +46,13 @@ type scriptLaunch struct {
 	// The executor hands it to daraja, which passes it through to the script
 	// unchanged — the composition happens exactly once, here.
 	pythonPath string
+	// hold is the shared flock on the repo checkout this script resolves
+	// inside (nil for a blob-sourced script). The launched process inherits
+	// it through cmd.ExtraFiles, so the sweeper can never remove the commit
+	// directory out from under a running script — not even after this
+	// executor exits. The parent's own copy is closed once the child holds
+	// one; the caller of resolveScriptLaunch owns that close.
+	hold *os.File
 }
 
 // resolveScriptLaunch resolves sp against this executor's synced cache.
@@ -182,7 +190,24 @@ func resolveScriptFromBlobCache(sp *darajapb.ScriptParams) (scriptLaunch, error)
 // hard refusal would black out every script of the repo, ready or not — the
 // refresh surface reports venv state for exactly this.
 func resolveScriptFromGitCheckout(sp *darajapb.ScriptParams) (scriptLaunch, error) {
-	checkoutDir := repoDir(sp.GetRepo())
+	// Resolve `current` to the commit directory it names RIGHT NOW and hold it
+	// there: the launch runs out of the commit that was current when it
+	// started, whatever a refresh does to `current` afterwards.
+	checkoutDir, hold, err := repos.OpenRepoCheckout(sp.GetRepo())
+	if err != nil {
+		return scriptLaunch{}, fmt.Errorf(
+			"script %q is not synced to this executor under repo %q: %w",
+			sp.GetScript(), sp.GetRepo(), err)
+	}
+	// Every refusal below leaves nothing running, so it must also leave no
+	// lock behind.
+	resolved := false
+	defer func() {
+		if !resolved {
+			hold.Close()
+		}
+	}()
+
 	scriptPath := filepath.Join(checkoutDir, repos.ScriptsDirName, sp.GetScript()+".py")
 	if _, err := os.Stat(scriptPath); err != nil {
 		return scriptLaunch{}, fmt.Errorf(
@@ -218,10 +243,12 @@ func resolveScriptFromGitCheckout(sp *darajapb.ScriptParams) (scriptLaunch, erro
 		pp = append(pp, dir)
 	}
 
+	resolved = true
 	return scriptLaunch{
 		interpreter: interpreter,
 		argv:        append([]string{scriptPath}, sp.GetArgs()...),
 		pythonPath:  strings.Join(pp, string(os.PathListSeparator)),
+		hold:        hold,
 	}, nil
 }
 
