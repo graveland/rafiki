@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -312,7 +313,15 @@ func (s *Server) syncRepoCommit(name, url, ref, commit string) (*executorpb.Sync
 	// Already current: no fetch, and no rebuild of a venv that is there. The
 	// commit directory is the same tree it was, so only discovery and the
 	// venv-completion check have anything to say.
-	unchanged := currentCommit(name) == commit
+	//
+	// "Already current" means the directory is a COMPLETE checkout of the
+	// commit, not merely that it exists. `git worktree add` is not atomic: a
+	// crash part way through leaves commits/<sha> present and truncated, and
+	// discovering from that would report a partial script/package/skill set
+	// which the daemon would then store as the repo's whole answer. An
+	// incomplete directory falls through to checkoutCommit, which repairs it
+	// before anything is read.
+	unchanged := currentCommit(name) == commit && repoCheckoutComplete(dir, commit)
 	if unchanged {
 		resp.VenvReady, resp.VenvError = repoVenvEnsure(dir)
 	} else {
@@ -382,18 +391,127 @@ func checkoutCommit(name, url, ref, commit string) string {
 	}
 
 	dir := repoCommitDir(name, commit)
-	if _, err := os.Stat(dir); err == nil {
-		return "" // already checked out by an earlier refresh
-	} else if !os.IsNotExist(err) {
-		return fmt.Sprintf("stat %s: %v", dir, err)
+	if repoCheckoutComplete(dir, commit) {
+		return "" // already checked out by an earlier refresh, and still whole
 	}
 	if err := os.MkdirAll(repoCommitsDir(name), 0o755); err != nil {
 		return fmt.Sprintf("create commits dir: %v", err)
 	}
+	// Either nothing is there yet, or what is there is not a complete checkout
+	// of this commit (a crash during an earlier `worktree add`). Discard it —
+	// git's own removal first, so the registration goes with the directory —
+	// and add it again below.
+	if err := discardRepoCommitCheckout(gitDir, dir); err != nil {
+		return err.Error()
+	}
 	if out, err := gitOutput(gitDir, "worktree", "add", "--detach", dir, commit); err != nil {
 		return uvError(out, err)
 	}
+	// Only now is the tree whole: the marker is what a later refresh trusts
+	// (repoCheckoutComplete), so writing it before this point would bless a
+	// half-written checkout.
+	if err := writeRepoCheckoutMarker(dir, commit); err != nil {
+		return err.Error()
+	}
 	return ""
+}
+
+// repoCheckoutMarker is the file a COMPLETED commit checkout carries, holding
+// that commit's SHA.
+//
+// `git worktree add` is not atomic: it creates the directory, registers it and
+// then writes the working tree, so a crash (or a kill) part way through leaves
+// commits/<sha> present, registered, and TRUNCATED. Presence is therefore not
+// proof of a checkout, and discovery over such a tree reports a partial
+// script/package/skill set — which the daemon would store as the repo's whole
+// answer, replacing a good one. The marker is written only after `worktree add`
+// returns success, so it is the writer's own proof that the tree was complete.
+const repoCheckoutMarker = ".rafiki-checkout"
+
+// repoCheckoutComplete reports whether dir is a COMPLETE checkout of commit.
+//
+// Three proofs, cheapest first: our own completion marker names this commit;
+// git agrees the worktree's HEAD is this commit; and no tracked file is missing
+// from the working tree. The last is what catches a tree truncated AFTER it was
+// completed — a marker survives the deletion of one file, and so does HEAD —
+// while untracked files (a job's own scratch files, the built .venv) do not
+// read as damage, because they are not in the index at all.
+//
+// Any error answers "not complete": the caller then repairs, which is always
+// safe, and never discovers from a doubtful tree.
+func repoCheckoutComplete(dir, commit string) bool {
+	marker, err := os.ReadFile(filepath.Join(dir, repoCheckoutMarker))
+	if err != nil || strings.TrimSpace(string(marker)) != commit {
+		return false
+	}
+	head, err := gitOutput(dir, "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(string(head)) != commit {
+		return false
+	}
+	deleted, err := gitOutput(dir, "ls-files", "--deleted")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(deleted)) == ""
+}
+
+// writeRepoCheckoutMarker stamps a completed checkout. It stages the file under
+// a temporary name and renames it into place, so a crash can never leave a
+// marker that vouches for a tree the writer never finished.
+func writeRepoCheckoutMarker(dir, commit string) error {
+	path := filepath.Join(dir, repoCheckoutMarker)
+	staged := path + ".tmp-" + randomToken()
+	if err := os.WriteFile(staged, []byte(commit+"\n"), 0o644); err != nil {
+		return fmt.Errorf("stage checkout marker: %w", err)
+	}
+	if err := os.Rename(staged, path); err != nil {
+		os.Remove(staged)
+		return fmt.Errorf("publish checkout marker: %w", err)
+	}
+	return nil
+}
+
+// discardRepoCommitCheckout removes whatever occupies dir so a fresh
+// `git worktree add` can recreate it, leaving no registration behind.
+//
+// A directory something is RUNNING out of is never yanked, even a damaged one:
+// it takes the same exclusive lock the sweeper takes, and reports the conflict
+// as a checkout error instead. git's own `worktree remove` is preferred over a
+// plain delete because it deregisters the worktree too — a direct delete leaves
+// a registration that makes the next `worktree add` fail with "already exists",
+// and a crash can also leave a registration whose directory is already gone,
+// which only this call can drop.
+func discardRepoCommitCheckout(gitDir, dir string) error {
+	info, lerr := os.Lstat(dir)
+	if lerr != nil && !os.IsNotExist(lerr) {
+		return fmt.Errorf("stat %s: %w", dir, lerr)
+	}
+	if lerr == nil && info.IsDir() {
+		hold, busy, err := repos.LockRepoCheckoutExclusive(dir)
+		if err != nil {
+			return fmt.Errorf("lock %s: %w", dir, err)
+		}
+		if busy {
+			return fmt.Errorf("checkout %s is incomplete and in use; it is repaired when the job holding it exits", dir)
+		}
+		// The lock lives on the descriptor, not the path, so closing after the
+		// directory is gone is safe (the same rule the sweeper follows).
+		defer hold.Close()
+	}
+	out, rerr := gitOutput(gitDir, "worktree", "remove", "--force", dir)
+	if rerr != nil && !strings.Contains(string(out), "is not a working tree") {
+		slog.Warn("repo sync: git could not remove an incomplete checkout; deleting it directly",
+			"dir", dir, "error", rerr, "output", string(out))
+	}
+	if _, serr := os.Lstat(dir); serr == nil {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("remove %s: %w", dir, err)
+		}
+	}
+	if out, perr := gitOutput(gitDir, "worktree", "prune"); perr != nil {
+		slog.Warn("repo sync: worktree prune failed", "dir", dir, "error", perr, "output", string(out))
+	}
+	return nil
 }
 
 // flipCurrent atomically points <name>/current at commits/<commit>. The link

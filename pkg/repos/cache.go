@@ -13,7 +13,11 @@
 // Layout, under CacheDir()/<name>/:
 //
 //	git/             bare repo; every fetch lands here
-//	commits/<sha>/   detached worktree per commit, its own .venv inside
+//	commits/<sha>/   detached worktree per commit, its own .venv inside, and a
+//	                 .rafiki-checkout marker the executor writes once the tree
+//	                 is COMPLETE (`git worktree add` is not atomic, so presence
+//	                 alone never proves a checkout — see pkg/executor's
+//	                 repoCheckoutComplete)
 //	current          symlink -> commits/<sha> (relative)
 //
 // One checkout per commit is what lets a running job keep its commit while a

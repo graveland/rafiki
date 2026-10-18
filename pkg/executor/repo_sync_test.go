@@ -664,3 +664,93 @@ func TestDescribeReportsRepoSync(t *testing.T) {
 		c.Eq(tc.want, got, "optIn=%v: Describe reported repo_sync=%v, want", tc.optIn, got)
 	}
 }
+
+// TestSyncRepoRepairsATruncatedCommitDir pins the one way a commit directory can
+// lie. `git worktree add` is not atomic: it creates commits/<sha>, registers it
+// and only then writes the working tree, so a crash part way through leaves the
+// directory present and TRUNCATED. Presence must therefore never be read as
+// "already checked out" — discovery over that tree reports a partial skill set,
+// and the daemon stores it as the repo's whole answer, replacing a good one and
+// reporting success.
+//
+// Both damage shapes are covered: a tree that lost a tracked file (the marker
+// and HEAD survive, so only the index can tell) and a directory replaced by an
+// empty one (nothing survives, so the checkout has to be deregistered before it
+// can be re-added).
+func TestSyncRepoRepairsATruncatedCommitDir(t *testing.T) {
+	const name = "ops-tools"
+	files := map[string]string{
+		"skills/demo/SKILL.md":        "---\nname: demo\ndescription: does the demo\n---\n\nDo the demo thing.\n",
+		"skills/demo/references/a.md": "reference a\n",
+	}
+
+	for _, tc := range []struct {
+		shape    string
+		truncate func(t *testing.T, dir string)
+	}{
+		{"tracked file deleted", func(t *testing.T, dir string) {
+			// One tracked file gone, the completion marker and HEAD left behind:
+			// the tree still looks checked out, and is not.
+			assert.NewAborting(t).NoError(os.Remove(filepath.Join(dir, "skills", "demo", "references", "a.md")), "delete a tracked file")
+		}},
+		{"directory emptied", func(t *testing.T, dir string) {
+			assert.NewAborting(t).NoError(os.RemoveAll(dir), "wipe the checkout")
+			assert.NewAborting(t).NoError(os.MkdirAll(dir, 0o755), "recreate an empty dir")
+		}},
+	} {
+		t.Run(tc.shape, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			s := gitSyncServer(t, true) // a fresh cache root per shape
+			repo := gitFixture(t, files)
+
+			first := syncRepo(t, s, name, repo, "main")
+			c.Len(first.GetSkillErrors(), 0, "skill errors on the first sync")
+			c.Require().Len(first.GetSkills(), 1, "skills on the first sync")
+			c.Require().Len(first.GetSkills()[0].GetFiles(), 1, "the first sync's skill files")
+			commit := first.GetCommit()
+			dir := repoCommitDir(name, commit)
+			c.True(repoCheckoutComplete(dir, commit), "the first sync left a checkout this executor does not consider complete")
+
+			tc.truncate(t, dir)
+			c.False(repoCheckoutComplete(dir, commit), "the damage did not make the checkout read as incomplete")
+
+			// Sync the SAME commit again. It must repair the tree BEFORE reading
+			// anything out of it.
+			again := syncCommit(t, s, name, repo, "main", commit)
+			c.Eq("", again.GetCheckoutError(), "checkout error")
+			c.Require().Len(again.GetSkills(), 1, "skills reported from the repaired checkout")
+			// The supporting file is the tell: a partial tree reports the skill
+			// with no files, which is exactly the set the daemon would store.
+			c.Require().Len(again.GetSkills()[0].GetFiles(), 1,
+				"the repaired checkout reported a PARTIAL skill: its supporting file is missing")
+			c.Eq("references/a.md", again.GetSkills()[0].GetFiles()[0].GetPath(), "supporting file path")
+
+			// And the directory really is a complete checkout again.
+			c.True(repoCheckoutComplete(dir, commit), "the truncated directory was not repaired")
+			restored := filepath.Join(dir, "skills", "demo", "references", "a.md")
+			if _, err := os.Stat(restored); err != nil {
+				t.Errorf("the repaired checkout is missing %s: %v", restored, err)
+			}
+		})
+	}
+}
+
+// TestRepoCheckoutCompleteIgnoresUntrackedFiles is the other half of the
+// completeness proof: a job's own scratch files and the built .venv live inside
+// the checkout and must not read as damage, or every refresh would tear down a
+// perfectly good tree.
+func TestRepoCheckoutCompleteIgnoresUntrackedFiles(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := gitSyncServer(t, true)
+	repo := gitFixture(t, map[string]string{"pyproject.toml": "[project]\nname = \"x\"\n"})
+	resp := syncRepo(t, s, "scratch-tools", repo, "main")
+	dir := repoCommitDir("scratch-tools", resp.GetCommit())
+	c.True(repoCheckoutComplete(dir, resp.GetCommit()), "a freshly synced checkout is not complete")
+
+	writeFixtureFiles(t, dir, map[string]string{
+		"scratch.txt":           "a job wrote this\n",
+		".venv/bin/python3":     "not really a python\n",
+		"pyproject.toml.backup": "and this\n",
+	})
+	c.True(repoCheckoutComplete(dir, resp.GetCommit()), "untracked files made a complete checkout read as damaged")
+}
