@@ -24,6 +24,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
@@ -68,6 +69,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/tasksdb"
+	"go.graveland.dev/rafiki/pkg/turntrace"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -244,6 +246,16 @@ type Controller struct {
 	// it to every in-process child; nil means their requests carry no
 	// provider.ignore at all.
 	providerGuard *routing.ProviderGuard
+
+	// trace builds one span per turn from the normalized event stream (see
+	// turntrace_wiring.go). Nil until EnableTracing runs; every method is
+	// nil-safe, so an untraced daemon publishes events unchanged.
+	trace *turntrace.Observer
+
+	// tracerProvider is the provider EnableTracing was handed — the same
+	// instance every in-process child's llm.Client and both proxy faces carry,
+	// so their spans share one exporter and one resource.
+	tracerProvider trace.TracerProvider
 
 	// routePolicy is the daemon's in-memory routing-policy view (routepolicy.
 	// Policy), consulted by resolveRouting at spawn — it fills the gaps the
@@ -902,6 +914,8 @@ func (c *Controller) Stop() {
 // Every c.native.Publish call site goes through here. A rule enforced at N
 // call sites is a rule the N+1th will break.
 func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
+	// Spans are built from the same single path every consumer reads.
+	c.observeEvent(childID, ev)
 	if eventlog.TierOf(ev) == eventlog.TierDurable && c.evlog != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		ord, err := c.evlog.Append(ctx, childID, ev)
@@ -975,6 +989,9 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 		}
 	}
 	return sink, onMeta, func(obs child.SubagentObservation) {
+		// Before the capture bookkeeping: the observer only needs the ids, and
+		// a slow capture write must not delay the mapping a later span needs.
+		c.trace.ObserveSubagent(childID, obs.MessageID, obs.ParentToolUseID)
 		c.HandleSubagentObservation(childID, obs)
 	}
 }
@@ -2072,8 +2089,24 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	now := time.Now()
 
+	// Causality for the child's first turn, recorded before the child exists so
+	// the link is queued before any event it could publish. A parent's open
+	// turn is the cause when a coordinator spawned it; otherwise whatever span
+	// the operator's request carried (a Connect server span, a CLI call, a
+	// scheduler fire) is. With neither, the turn opens with trigger "unknown".
+	if req.ParentChildID != "" {
+		c.trace.LinkNext(childID, c.trace.TurnSpanContext(req.ParentChildID), "spawn")
+	} else if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		c.trace.LinkNext(childID, sc, "operator")
+	}
+
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
+		// The child never existed, so the causality link queued above must not
+		// outlive the attempt: a coordinator retrying failed spawns would
+		// otherwise accumulate one observer entry per attempt, each holding a
+		// pending link nothing will ever consume.
+		c.trace.ChildGone(childID)
 		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
@@ -3244,6 +3277,11 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, 
 // Per-child errors are logged and collected; all of them are returned as a
 // joined error so the caller can decide whether to treat them as fatal.
 func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, perChildKill time.Duration) error {
+	// End every open turn as interrupted BEFORE the children are torn down, so
+	// a dying daemon reports the turn it was in the middle of rather than a
+	// span that only the exporter's own timeout would ever close.
+	c.trace.Shutdown()
+
 	// The daemon is dying. From here on, child exits must not persist rows:
 	// recovery on the next daemon reads status, and a row saying "exited"
 	// would keep a child that was merely stopped by its daemon's death from
@@ -3369,6 +3407,9 @@ func (c *Controller) abortSpawn(childID string, ch *child.Child) {
 		}
 	}
 	c.st.Delete(childID)
+	// The id is abandoned for good, so its telemetry state goes with it — the
+	// caller may already have queued a spawn/operator link for it.
+	c.trace.ChildGone(childID)
 	c.cm.Remove(childID)
 	c.rateWatch.drop(childID)
 	c.dropPendingResume(childID)
@@ -3444,6 +3485,7 @@ func (c *Controller) Close(childID string) error {
 	// delete IS the close.
 	if snap.Native {
 		c.st.Delete(childID)
+		c.trace.ChildGone(childID)
 		return nil
 	}
 
@@ -3485,6 +3527,9 @@ func (c *Controller) Close(childID string) error {
 	}
 
 	c.st.Delete(childID)
+	// Its span state goes with the row: a turn no exit event ever closed (for a
+	// child closed while another daemon owned its conversation) ends here.
+	c.trace.ChildGone(childID)
 	// A forgotten child is never coming back: nothing must resurrect it, so
 	// its rate-limit watch goes with the row. CloseAllExited, the other
 	// forget site, drops the same way.
@@ -3664,6 +3709,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 		// persist, no failure path.
 		if s.Native {
 			c.st.Delete(s.ChildID)
+			c.trace.ChildGone(s.ChildID)
 			// A cascaded child is closed and belongs in the answer; the guard above
 			// is what keeps it from being named a second time on its own iteration.
 			closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
@@ -3691,6 +3737,9 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 			}
 		}
 		c.st.Delete(s.ChildID)
+		// The row is gone for good; free whatever observer state a late event
+		// (or a send queued before the close) re-created for it.
+		c.trace.ChildGone(s.ChildID)
 		closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
 		// The other deletion path, and the one that leaks without this: a row
 		// for a child forgotten here is never pending-for-a-live-child again
@@ -4635,6 +4684,13 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		c32 := int32(*exitCode)
 		exitCodePtr = &c32
 	}
+	// A child that just died cannot finish the turn it was in, so its spans end
+	// as interrupted here rather than with an unbounded open turn. The
+	// ChildExited event below reaches Observe too, whose ChildGone handler is
+	// idempotent — this call is the explicit lifecycle site, published first so
+	// a subscriber that sees the exit is not still watching a live turn.
+	c.trace.ChildGone(childID)
+
 	// Durable, so it precedes the exit event below in ordinal order: the
 	// child's last output was flushed to the log at the top of this handler,
 	// before MarkExited made "exited" visible.

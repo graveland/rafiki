@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -379,6 +380,19 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// reaches this child's OpenRouter requests exactly as it reaches the proxy
 	// face's — and the child's turns feed the guard's ejection evidence.
 	ro.ProviderGuard = c.providerGuard
+
+	// Tracing, only when this daemon actually runs an observer: main calls
+	// EnableTracing once at startup, before any child spawns or recovers, so
+	// c.trace is either set for a child's whole life or never.
+	// SpanParent reads the observer LIVE rather than capturing a span context,
+	// because a child makes many LLM calls per turn and the turn span does not
+	// exist yet when this runs. childID is closed over here for the same reason
+	// CurrentMaxCost's closure is: it is the daemon-stamped id, never a value
+	// the model can influence.
+	if c.trace != nil {
+		ro.TracerProvider = c.tracerProvider
+		ro.SpanParent = func() trace.SpanContext { return c.trace.TurnSpanContext(childID) }
+	}
 
 	// Same nil-means-decline guard as Quota above, and for the same reason:
 	// c.batcher is a *batch.Batcher, and ro.Batcher an llm.Batcher — a typed

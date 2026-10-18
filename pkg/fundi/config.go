@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
@@ -175,6 +176,19 @@ type Config struct {
 	// RuntimeOptions.ProviderGuard. nil means no operator bans and no
 	// ejections reach this child's requests.
 	ProviderGuard *routing.ProviderGuard
+
+	// TracerProvider, when non-nil, is handed to the engine's llm.Client via
+	// llm.WithTracerProvider, so this child's chat spans reach the daemon's one
+	// exporter. nil leaves the client's noop tracer — the standalone `rafikid
+	// fundi` process has no daemon to share.
+	TracerProvider trace.TracerProvider
+
+	// SpanParent, when non-nil, is handed to the engine's llm.Client via
+	// llm.WithSpanParent: it supplies the span a chat call attaches to when the
+	// caller's context carries none. The daemon sets it to the observer's open
+	// turn for this child, which is what nests a child's `chat <model>` span
+	// under its `invoke_agent` turn. nil leaves every chat call a root.
+	SpanParent func() trace.SpanContext
 
 	// Tools is the assembled tool registry (file tools + bash + skills +
 	// MCP), built by cmd/rafikid before calling BuildEngine.
@@ -442,6 +456,18 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	}
 	if c.ProviderGuard != nil {
 		opts = append(opts, llm.WithProviderGuard(c.ProviderGuard))
+	}
+
+	// Tracing, before the FakeTurns early-return below — the same placement rule
+	// Catalog, Batcher and ProviderGuard follow: a --fake-turns child must carry
+	// the daemon's tracer and its live span parent exactly as a real one does,
+	// so its chat spans still nest under the turn the observer holds open even
+	// though the fake sender makes no request.
+	if c.TracerProvider != nil {
+		opts = append(opts, llm.WithTracerProvider(c.TracerProvider))
+	}
+	if c.SpanParent != nil {
+		opts = append(opts, llm.WithSpanParent(c.SpanParent))
 	}
 
 	// The once-resolved routing spec, before the FakeTurns early-return below:

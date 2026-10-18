@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
@@ -154,6 +155,18 @@ type RuntimeOptions struct {
 	// SetBatcher refuses a nil *batch.Batcher for exactly that reason, so
 	// this field is nil ONLY when there is genuinely no batcher.
 	Batcher llm.Batcher
+
+	// TracerProvider is the daemon's one OpenTelemetry provider, passed to the
+	// child's llm.Client via llm.WithTracerProvider so its chat spans reach the
+	// same exporter as the turn spans. nil = the client's noop tracer (the
+	// standalone `rafikid fundi` process, which has no daemon provider).
+	TracerProvider trace.TracerProvider
+
+	// SpanParent is passed to the child's llm.Client via llm.WithSpanParent: it
+	// returns the span context a chat call should attach to when the caller's
+	// own context carries none — the daemon's observer, positioned on this
+	// child's open turn. nil leaves every chat call a root.
+	SpanParent func() trace.SpanContext
 
 	// ProviderGuard is the daemon's ONE provider cache guard, passed to the
 	// child's llm.Client via llm.WithProviderGuard. It carries the operator's
@@ -822,6 +835,8 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Catalog:                opts.Catalog,
 		Batcher:                opts.Batcher,
 		ProviderGuard:          opts.ProviderGuard,
+		TracerProvider:         opts.TracerProvider,
+		SpanParent:             opts.SpanParent,
 		Pool:                   opts.Pool,
 		Tools:                  registry,
 		AutoResume:             opts.AutoResume,

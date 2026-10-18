@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -19,6 +20,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/inboxdb"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/server"
 )
 
 // inboxStore returns a durable inbox store, or an in-memory one when there is
@@ -360,6 +362,20 @@ func (c *Controller) acceptAndDeliver(ctx context.Context, in inbox.Inbound) (st
 	id, err := c.inbox.Accept(ctx, in)
 	if err != nil {
 		return "", err
+	}
+	// Causality for the target's next turn, recorded only once a message is
+	// genuinely queued for a child that exists: an abort is a lifecycle signal
+	// and links nothing, a send to an unknown child must leave no observer
+	// state behind, and a refused send (budget, validation, persistence) must
+	// not attach its link to some later, unrelated turn. A child caller's own
+	// open turn is the cause; otherwise whatever span the operator's request
+	// carried.
+	if _, ok := c.st.Get(in.ChildID); ok && in.Mode != inbox.ModeAbort {
+		if id := server.IdentityFromContext(ctx); id != nil && id.Via == server.ProvenanceChildToken && id.ChildID != "" {
+			c.trace.LinkNext(in.ChildID, c.trace.TurnSpanContext(id.ChildID), "send")
+		} else if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+			c.trace.LinkNext(in.ChildID, sc, "operator")
+		}
 	}
 	if derr := c.inbox.Deliver(ctx, in.ChildID, in.Source); derr != nil {
 		if quietDeferral(derr) {

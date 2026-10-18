@@ -251,6 +251,9 @@ func (c *Controller) closeNativeChildrenOf(parentChildID string) []string {
 	taken := c.nativeChildrenOf(parentChildID)
 	for _, id := range taken {
 		c.st.Delete(id)
+		// A thread child is gone with its session, so its observer state (a turn
+		// its sub-agent frames opened) goes too.
+		c.trace.ChildGone(id)
 	}
 	return taken
 }

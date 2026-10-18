@@ -293,6 +293,11 @@ func (s *controllerSpawner) Send(ctx context.Context, spec tools.SendSpec) (tool
 	if err != nil {
 		return tools.SendResult{}, err
 	}
+	// The message is caused by the sender's open turn: link the recipient's
+	// next turn to it, before the frame is written so the link precedes any
+	// event the receipt could publish. A sender with no open turn yields an
+	// invalid span context and LinkNext drops it.
+	s.c.trace.LinkNext(spec.ChildID, s.c.trace.TurnSpanContext(s.selfID), "send")
 	if err := s.c.Send(spec.ChildID, frame); err != nil {
 		return tools.SendResult{}, err
 	}
