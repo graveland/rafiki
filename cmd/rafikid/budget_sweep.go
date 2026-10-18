@@ -87,6 +87,7 @@ func (c *Controller) sweepBudgets(ctx context.Context) {
 				c.refreshDisplayState(snap.ChildID)
 				// The subtree left the breach: release its held schedule fires.
 				c.releaseHeldSchedules(snap.ChildID)
+				c.releaseHeldInbox(snap.ChildID)
 			}
 			continue
 		}

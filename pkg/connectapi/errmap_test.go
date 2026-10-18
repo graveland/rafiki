@@ -35,6 +35,7 @@ var errCodeByName = map[string]connect.Code{
 	"ErrSessionFileMissing": connect.CodeNotFound,
 	"ErrBackpressure":       connect.CodeResourceExhausted,
 	"ErrAtCapacity":         connect.CodeResourceExhausted,
+	"ErrBudgetExhausted":    connect.CodeFailedPrecondition,
 	"ErrInvalidArgs":        connect.CodeInvalidArgument,
 	"ErrSpawnFailed":        connect.CodeInternal,
 	"ErrAuthRequired":       connect.CodeUnauthenticated,

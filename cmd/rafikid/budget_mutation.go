@@ -94,6 +94,9 @@ func (c *Controller) applyBudgetChange(childID string, newCap float64) error {
 	c.refreshDisplayState(childID)
 
 	if wasBreached {
+		// Held wakes first, so the raise notice queues behind what the child
+		// missed rather than ahead of it.
+		c.releaseHeldInbox(childID)
 		c.notifyBudgetRaised(childID, newCap)
 		// The tree is no longer halted: deliver the fires that were held while
 		// it was over budget, one fragment per job.

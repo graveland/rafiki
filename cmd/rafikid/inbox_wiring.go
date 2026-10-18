@@ -62,6 +62,19 @@ func inboxBatchConfig() inbox.BatchConfig {
 // failure — a queued row behind a script child is the normal state.
 var errInboxDeferred = errors.New("inbox: deferred to the child's Receive stream")
 
+// errInboxBudgetHeld is the sentinel deliverInbox returns for a prompt-mode
+// batch aimed at a child that is over budget (budgetHalted). Like
+// errInboxDeferred it leaves the batch PENDING and is a normal, quiet outcome
+// for every opportunistic caller; the rows go out when the budget is raised
+// (releaseHeldInbox).
+var errInboxBudgetHeld = errors.New("inbox: held, the child is over its budget")
+
+// quietDeferral reports whether a delivery error is a queued-not-failed
+// outcome: the batch stays pending and the caller has nothing to warn about.
+func quietDeferral(err error) bool {
+	return errors.Is(err, errInboxDeferred) || errors.Is(err, errInboxBudgetHeld)
+}
+
 // newInboxQueue builds the controller's queue. Validation runs before persist
 // so a send to a dead child is still a clean error rather than a row nobody
 // will consume.
@@ -215,6 +228,19 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 		return false, nil
 	}
 
+	// A wake for a budget-dead child would run a whole turn (the wrap-up call
+	// alone is a paid LLM request) only to be stopped again, so prompt-mode
+	// batches wait in the durable queue until the budget is raised. Steers
+	// pass: the breach notice itself is one, and a steer into a live turn
+	// costs nothing extra. Scheduled fires hold the same way (schedules.go).
+	if b.Mode == inbox.ModePrompt {
+		if root, halted := c.budgetHalted(b.ChildID); halted {
+			slog.Debug("inbox: holding a wake for a child over budget",
+				"childId", b.ChildID, "budgetRoot", root, "rows", len(b.IDs))
+			return false, errInboxBudgetHeld
+		}
+	}
+
 	awaitAck := b.Mode != inbox.ModeAbort
 	if !ok || snap.Kind != protocol.KindFundi {
 		awaitAck = false
@@ -317,16 +343,31 @@ func (c *Controller) forgetFrames(childID string) {
 // accepted, and the child's next idle transition drains it. Only a validation
 // or persistence failure is reported back.
 func (c *Controller) acceptAndDeliver(ctx context.Context, in inbox.Inbound) (string, error) {
+	// A sender is told, not silently queued behind a child that cannot run: a
+	// coordinator that learns the child is over budget can raise it or stop
+	// retrying. Abort still goes through (it spends nothing), and so does
+	// everything the daemon pushes itself, which never takes this path — those
+	// rows are held at delivery (deliverInbox) and released on a raise.
+	if in.Mode != inbox.ModeAbort {
+		if root, halted := c.budgetHalted(in.ChildID); halted {
+			return "", &connectapi.ControllerError{
+				Code: protocol.ErrBudgetExhausted,
+				Message: fmt.Sprintf("agent %s is over budget (budget held by %s); nothing was queued. "+
+					"Raise the budget with agent_set_budget, then send again", in.ChildID, root),
+			}
+		}
+	}
 	id, err := c.inbox.Accept(ctx, in)
 	if err != nil {
 		return "", err
 	}
 	if derr := c.inbox.Deliver(ctx, in.ChildID, in.Source); derr != nil {
-		if errors.Is(derr, errInboxDeferred) {
-			// A script child's rows stay pending for its Receive stream —
-			// the expected shape, not a failure.
-			slog.Debug("inbox: delivery deferred to the child's Receive stream",
-				"childId", in.ChildID, "messageId", id)
+		if quietDeferral(derr) {
+			// A script child's rows stay pending for its Receive stream, and
+			// a budget-held child's wait for a raise — the expected shapes,
+			// not failures.
+			slog.Debug("inbox: delivery deferred; message stays queued",
+				"childId", in.ChildID, "messageId", id, "reason", derr)
 		} else {
 			slog.Warn("inbox: immediate delivery failed; message stays queued",
 				"childId", in.ChildID, "messageId", id, "error", derr)
@@ -342,9 +383,9 @@ func (c *Controller) flushInboxSource(childID, source string, orphans []inbox.In
 	defer cancel()
 	if c.inbox != nil {
 		if err := c.inbox.Deliver(ctx, childID, source); err != nil {
-			if errors.Is(err, errInboxDeferred) {
-				slog.Debug("eventbuf: flush deferred to the child's Receive stream",
-					"childId", childID, "source", source)
+			if quietDeferral(err) {
+				slog.Debug("eventbuf: flush deferred; fragments stay queued",
+					"childId", childID, "source", source, "reason", err)
 			} else {
 				slog.Warn("eventbuf: flush failed; fragments stay queued",
 					"childId", childID, "source", source, "error", err)
@@ -481,8 +522,8 @@ func (c *Controller) drainInbox(q *inbox.Queue, childID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := q.Deliver(ctx, childID, ""); err != nil {
-		if errors.Is(err, errInboxDeferred) {
-			slog.Debug("inbox: idle drain deferred to the child's Receive stream", "childId", childID)
+		if quietDeferral(err) {
+			slog.Debug("inbox: idle drain deferred; messages stay queued", "childId", childID, "reason", err)
 		} else {
 			slog.Warn("inbox: idle drain failed", "childId", childID, "error", err)
 		}
@@ -621,6 +662,31 @@ func (c *Controller) replayInbox(ctx context.Context, childID string) {
 	if err := c.inbox.DeliverAll(ctx, childID); err != nil {
 		slog.Warn("inbox: replay delivery failed; messages stay queued",
 			"childId", childID, "error", err)
+	}
+}
+
+// releaseHeldInbox delivers the queue held behind a budget breach: the
+// breached node's and every live descendant's no-longer-halted rows. Run next
+// to releaseHeldSchedules wherever a breach clears. A node still halted by
+// another ancestor is skipped (deliverInbox would hold it again anyway).
+func (c *Controller) releaseHeldInbox(rootID string) {
+	if c.inbox == nil {
+		return
+	}
+	ids := []string{rootID}
+	for _, d := range c.st.Descendants(rootID) {
+		ids = append(ids, d.ChildID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, id := range ids {
+		if _, halted := c.budgetHalted(id); halted {
+			continue
+		}
+		if snap, ok := c.st.Get(id); !ok || snap.Status == protocol.StatusExited {
+			continue // an exited child's queue is replayed on resume
+		}
+		c.replayInbox(ctx, id)
 	}
 }
 

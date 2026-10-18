@@ -60,6 +60,7 @@ var errCodeTable = map[string]connect.Code{
 	protocol.ErrNotExited:          connect.CodeFailedPrecondition,
 	protocol.ErrBackpressure:       connect.CodeResourceExhausted,
 	protocol.ErrAtCapacity:         connect.CodeResourceExhausted,
+	protocol.ErrBudgetExhausted:    connect.CodeFailedPrecondition,
 	protocol.ErrAuthRequired:       connect.CodeUnauthenticated,
 	protocol.ErrAuthInvalid:        connect.CodeUnauthenticated,
 	protocol.ErrNoAgentDB:          connect.CodeUnavailable,

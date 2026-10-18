@@ -156,7 +156,16 @@ Consumers:
   `agent_report` and `agent_result` (`cmd/rafikid/mcp_budget_gate.go`,
   `budgetGateExempt`/`gateToolsOnBudget`).
 - **A fundi child's tool loop** wraps up through `EngineConfig.Halted`
-  (`pkg/fundi`), consulted by `ShouldStop` before the cost guardrail.
+  (`pkg/fundi`), consulted by `ShouldStop` before the cost guardrail. The same
+  predicate is checked before a turn starts: a halted child appends the prompt
+  to its conversation and ends the turn with the halt reason as its limit,
+  making no LLM call.
+- **The inbox**: a direct `Send` prompt or steer to a halted child is refused
+  with `budget_exhausted` and nothing is queued. Daemon-pushed prompt-mode rows
+  (job exits, subagent reports) stay pending in the durable queue and are
+  delivered when the breach clears (`releaseHeldInbox`, next to
+  `releaseHeldSchedules`, for the raised node and its live descendants).
+  Steers and aborts are not held, since the breach notice is itself a steer.
 
 Native claude tools are not gated; the existing over-budget steer covers them.
 A child with no budgeted node anywhere in its chain is never held.

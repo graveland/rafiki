@@ -2086,6 +2086,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `session_file_missing` | `not_found` | `Resume` cannot find the recorded session. |
 | `backpressure` | `resource_exhausted` | The child's command channel is full; client should retry. |
 | `at_capacity` | `resource_exhausted` | A spawn refused because the parent's subtree is at its live-children cap (default 10); transient — retry once a child settles. The permanent limit refusals (depth, a zero cap) stay `invalid_args`. |
+| `budget_exhausted` | `failed_precondition` | A `Send` prompt or steer refused because the child, or an ancestor, is over its cost budget; nothing was queued. Raise the budget (`SetBudget`) and send again. Events the daemon itself pushes (job exits, subagent reports) are not refused: they stay queued and are delivered when the budget is raised. |
 | `invalid_args` | `invalid_argument` | Request fields failed validation. |
 | `spawn_failed` | `internal` | The child subprocess failed to start or exited immediately. |
 | `auth_required` / `auth_invalid` | `unauthenticated` | The presented credential names no active user; identity failures are `unauthenticated`, never a silent downgrade. |
