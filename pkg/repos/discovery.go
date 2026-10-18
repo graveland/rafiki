@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Discovery for git-sourced pymodules: a plain walk of a git checkout with
+// Discovery for repo-sourced pymodules: a plain walk of a git checkout with
 // no manifest parsing and no pyproject.toml reading (that stays uv's own
 // input). Pure filesystem logic -- no store, no network, no subprocess.
-package gitpymodules
+package repos
 
 import (
 	"bufio"

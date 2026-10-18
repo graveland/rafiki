@@ -117,7 +117,7 @@ func TestDialRejectsA101WithTheWrongEpoch(t *testing.T) {
 	var ref *Refused
 	c.Require().True(errors.As(err, &ref), "want *Refused, got %v", err)
 	c.Eq(http.StatusBadRequest, ref.Status, "status: 400 is terminal for the reconnect loops")
-	c.StrContains(ref.Reason, "rafiki protocol mismatch: this side speaks 3", "reason")
+	c.StrContains(ref.Reason, "rafiki protocol mismatch: this side speaks 4", "reason")
 }
 
 // TestDialSendsTheEpoch pins that the epoch is set inside Dial, so no caller

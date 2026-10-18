@@ -27,7 +27,7 @@ func (PyModuleGetBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A git-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
+			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A repo-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
 			{Name: "name", Type: "string", Description: "Module name, exactly as saved with pymodule_put."},
 		},
 		Required: []string{"repo", "name"},
@@ -59,11 +59,11 @@ func (gt *pymoduleGetTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		return ToolResult{}, fmt.Errorf("pymodule_get: invalid input: %w", err)
 	}
 	// The repo check comes first, before every other validation: a caller
-	// aiming at a git source must be told this operation cannot target one
-	// (serving a git-sourced get needs an executor round-trip pymodule_run
+	// aiming at a repo must be told this operation cannot target one
+	// (serving a repo-sourced get needs an executor round-trip pymodule_run
 	// already has and get does not), whatever else is wrong with its input.
 	if in.Repo != pymodules.LocalRepo {
-		return ToolResult{}, fmt.Errorf("pymodule_get: repo must be %q — a git-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
+		return ToolResult{}, fmt.Errorf("pymodule_get: repo must be %q — a repo-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
 	}
 	if err := pymodules.ValidName(in.Name); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_get: %w", err)

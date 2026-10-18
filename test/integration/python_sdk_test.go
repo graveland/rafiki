@@ -55,7 +55,7 @@ import (
 // sdkPython returns the interpreter the SDK tests run: RAFIKI_TEST_SDK_PYTHON
 // when set, else a uv-built venv holding exactly the dependencies
 // sdk/python/pyproject.toml declares — the same tool, reading the same
-// manifest, that builds a git source's venv on an executor. The venv lives
+// manifest, that builds a repo's venv on an executor. The venv lives
 // in the user cache, not the source tree, and holds only the dependencies:
 // every driver and pymodule puts sdk/python itself first on sys.path. It is
 // built once per test binary (the SDK tests run in parallel). A missing uv
@@ -214,7 +214,7 @@ class H(BaseHTTPRequestHandler):
         # Every response carries the protocol epoch, as the real daemon's
         # RequireEpoch gate does; the SDK now refuses a response without it.
         super().send_response(*a, **k)
-        self.send_header("Rafiki-Protocol", "3")
+        self.send_header("Rafiki-Protocol", "4")
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))

@@ -789,7 +789,7 @@ func startLocalExecutor(t *testing.T, d *daemon, dsn, root string) {
 		"--credential-file", cred,
 		"--root", root,
 	)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+home,
 		"XDG_RUNTIME_DIR="+home,
 		"XDG_STATE_HOME="+home,

@@ -10,7 +10,7 @@ package protocol
 // control plane (both mounts) and the executor/daraja upgrade links refuse a
 // mismatched peer, and the clients refuse a daemon that answers with the wrong
 // epoch.
-const Epoch = 3
+const Epoch = 4
 
 // EpochHeader is the HTTP header carrying Epoch: every Connect request and
 // response on the control plane, and the executor/daraja upgrade handshake.

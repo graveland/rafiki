@@ -67,7 +67,7 @@ type Server struct {
 	pymodules      atomic.Pointer[PymoduleManager]
 	presets        atomic.Pointer[PresetManager]
 	recall         atomic.Pointer[RecallManager]
-	gitSources     atomic.Pointer[GitSourceManager]
+	repos          atomic.Pointer[RepoManager]
 	quota          atomic.Pointer[QuotaReader]
 	providerBans   atomic.Pointer[ProviderBanManager]
 	routes         atomic.Pointer[RouteManager]

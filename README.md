@@ -154,7 +154,7 @@ Three Swahili words, three roles:
   that synced cache by name — never a workspace copy, while the script runs
   in the agent's working directory or a `cwd` the call names — with further
   saved modules importable for the run. Pools beyond the personal store:
-  `rafiki python repo` registers a git-backed pymodule source that every
+  `rafiki repo` registers a repo that every
   executor clones, discovers (`scripts/*.py` plus top-level packages) and
   builds one shared venv for, so `pymodule_run` can run a repo's scripts
   against its own dependencies. Code written once in one
@@ -440,8 +440,8 @@ not already record. It is idempotent, and concurrent callers are serialized by
 an advisory lock so two servers booting together apply the chain exactly once.
 One migration detail sets the supported floor at PostgreSQL >= 15: `NULLS
 NOT DISTINCT`, first used by migration 0014's tasks-ordinal index and again by
-0034's unique index on `conversations.pymodule_git_sources (owner_user_id,
-name)` — there it keeps the unattributed bucket (a NULL owner) one identity
+0034's unique index on `conversations.repos (owner_user_id, name)` — there it
+keeps the unattributed bucket (a NULL owner) one identity
 rather than NULLs-as-distinct rows. The dev container's pg18 image already
 satisfies this.
 
@@ -561,12 +561,12 @@ at a script node so the subtree is never counted twice.
 **Where scripts run.** When an executor pool is configured and one of its
 executors was started with `--launch script`, the child is hosted ON that
 executor under daraja: the executor resolves the pymodule from its own synced
-cache (so git-sourced repos and requirements venvs work, exactly like
+cache (so repo checkouts and requirements venvs work, exactly like
 `pymodule_run` there), serves the child's per-child socket against the
 daemon's face over the same TLS the executor itself dials with, and never
 respawns a script — its exit is its result. `--launch script` implies the
-owner's pymodule corpus sync and git-source refreshes on that executor
-(`--pymodules-sync=false` / `--pymodule-git-sync=false` refuse them
+owner's pymodule corpus sync and repo refreshes on that executor
+(`--pymodules-sync=false` / `--repo-sync=false` refuse them
 explicitly). With no script-capable executor, the daemon hosts the child
 locally (the owner's own saved modules only; no git repos, no venvs).
 
@@ -709,7 +709,7 @@ visibility) while still billing the user's own Claude subscription by default
 
 `--launch` takes the child protocol the executor will host: `claude` (implying
 the skill corpus sync) or `script` (implying the owner's pymodule corpus sync
-and git-source refreshes, so script children can resolve their pymodules from
+and repo refreshes, so script children can resolve their pymodules from
 that machine's synced cache). They are independent opt-ins; an executor that
 declares neither hosts nothing.
 

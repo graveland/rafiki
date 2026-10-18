@@ -64,7 +64,7 @@ func TestRequireEpochRefusesMissingAndWrongValues(t *testing.T) {
 			_, err := client.ListModels(context.Background(), req)
 			c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
 			c.Eq(protocol.ErrProtocolMismatch, rpcreason.Reason(err), "reason")
-			c.StrContains(err.Error(), "this daemon speaks rafiki protocol 3", "message")
+			c.StrContains(err.Error(), "this daemon speaks rafiki protocol 4", "message")
 			c.StrContains(err.Error(), "peer sent "+tc.peer, "message names the peer")
 			c.Eq(strconv.Itoa(protocol.Epoch), last.Get(protocol.EpochHeader),
 				"a refusal must still carry the daemon's epoch")
@@ -95,7 +95,7 @@ func TestRequireEpochStreamRefusalIsLegible(t *testing.T) {
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err),
 		"the stream refusal must carry failed_precondition, not a bare HTTP status")
 	c.Eq(protocol.ErrProtocolMismatch, rpcreason.Reason(err), "reason")
-	c.StrContains(err.Error(), "this daemon speaks rafiki protocol 3", "message names the daemon's epoch")
+	c.StrContains(err.Error(), "this daemon speaks rafiki protocol 4", "message names the daemon's epoch")
 	c.StrContains(err.Error(), "peer sent none", "message names the peer")
 }
 

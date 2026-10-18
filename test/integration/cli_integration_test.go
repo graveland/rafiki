@@ -59,8 +59,7 @@ func writeCliProfile(t *testing.T, configDir, socketPath string) {
 // call that dials nothing), with the ambient RAFIKI_URL/RAFIKI_TOKEN/etc
 // BLANKED — those are retired variables the client now refuses outright (see
 // profile.CheckRetiredEnv) — and XDG_CONFIG_HOME pointed at a fresh scratch
-// directory holding a profile manifest for d's socket.
-//
+// directory holding a profile manifest for d's socket.//
 // The config dir is fresh PER CALL (t.TempDir()), not shared across a test's
 // several cliCmd invocations or across tests: every test here calls
 // t.Parallel(), and two daemons sharing one profiles.toml would race each
@@ -103,6 +102,20 @@ func cliCmdIn(t *testing.T, d *daemon, configDir string, args ...string) *exec.C
 		"XDG_CONFIG_HOME="+configDir,
 	)
 	return cmd
+}
+
+// subprocessEnv is the environment for a subprocess a test starts (rafikid,
+// rafiki, or `rafiki executor serve`). It blanks the executor sync variables
+// for the same reason cliCmd blanks the retired client ones: the developer's
+// shell is not hermetic. In particular RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC is a
+// retired spelling that serve now REFUSES at startup, so a subprocess
+// inheriting it would exit before enrolling and every executor test would fail
+// with "never enrolled".
+func subprocessEnv(extra ...string) []string {
+	return append(append(os.Environ(),
+		"RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC=",
+		"RAFIKI_EXECUTOR_REPO_SYNC=",
+	), extra...)
 }
 
 // TestCLI_Version verifies `rafiki version` reports BOTH halves: the client's

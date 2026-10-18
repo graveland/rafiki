@@ -305,7 +305,7 @@ def call(method, body):
                      body=json.dumps(body).encode(),
                      headers={"Content-Type": "application/json",
                               "Connect-Protocol-Version": "1",
-                              "Rafiki-Protocol": "3"})
+                              "Rafiki-Protocol": "4"})
         resp = conn.getresponse()
         data = resp.read()
         if resp.status != 200:
@@ -376,7 +376,7 @@ def run_driver():
                  body=b"\x00" + len(req_payload).to_bytes(4, "big") + req_payload,
                  headers={"Content-Type": "application/connect+json",
                           "Connect-Protocol-Version": "1",
-                          "Rafiki-Protocol": "3"})
+                          "Rafiki-Protocol": "4"})
     resp = conn.getresponse()
     if resp.status != 200:
         with open(probe, "a") as f:
@@ -980,10 +980,10 @@ func TestLogsExitedScriptMustReturn(t *testing.T) {
 	}
 }
 
-// A git-source script on a daemon with no executor that advertises the script
+// A repo script on a daemon with no executor that advertises the script
 // launch kind is a precondition the operator can fix, not an internal failure:
 // failed_precondition, and the message names the flag that fixes it.
-func TestScriptChildGitSourceWithoutScriptExecutorIsAPrecondition(t *testing.T) {
+func TestScriptChildRepoWithoutScriptExecutorIsAPrecondition(t *testing.T) {
 	t.Parallel()
 	c := assert.NewCollecting(t)
 	sd := bootScriptDaemon(t)
@@ -996,7 +996,7 @@ func TestScriptChildGitSourceWithoutScriptExecutorIsAPrecondition(t *testing.T) 
 		Cwd:  "/tmp",
 		Kind: protocol.KindScript,
 		Script: &rafikiv1.SpawnRequest_ScriptSpec{
-			Repo: "some-git-source", Script: "s",
+			Repo: "some-repo", Script: "s",
 		},
 	}))
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "spawn error code: %v", err)

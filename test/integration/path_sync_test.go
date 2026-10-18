@@ -114,7 +114,7 @@ func enrollNativeExecutorAt(t *testing.T, g *grantDaemon, root, machine string) 
 	)
 	// The executor's own XDG dirs are isolated too, so nothing it resolves
 	// leaks into the developer's machine.
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"TMPDIR="+tmp,
 		"XDG_CACHE_HOME="+filepath.Join(tmp, "cache"),
 		"XDG_CONFIG_HOME="+filepath.Join(tmp, "config"),
@@ -182,7 +182,7 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 	full := append([]string{"-c", "commit.gpgsign=false"}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"GIT_AUTHOR_NAME=pathsync-it",
 		"GIT_AUTHOR_EMAIL=pathsync-it@example.com",
 		"GIT_COMMITTER_NAME=pathsync-it",

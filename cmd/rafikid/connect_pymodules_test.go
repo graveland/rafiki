@@ -9,7 +9,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/server"
 
 	"github.com/multigres/testkit/assert"
@@ -110,19 +110,19 @@ func containsName(names []string, want string) bool {
 
 // newGitListingFixture wires a connectPyModules over BOTH stores the list now
 // spans: the blob fixture's store (alice_chart under u_alice, bob_util under
-// u_bob) and the git-source fixture's pusher (whose cache a test populates by
+// u_bob) and the repo fixture's pusher (whose cache a test populates by
 // refreshing alice's registered sources).
-func newGitListingFixture() (*pymoduleFixture, *gitSourceFixture, connectPyModules) {
+func newGitListingFixture() (*pymoduleFixture, *repoFixture, connectPyModules) {
 	f := newPymoduleFixture()
-	g := newGitSourceFixture()
-	m := connectPyModules{c: &Controller{pymoduleStore: f.store, gitpymodulePusher: g.gp}}
+	g := newRepoFixture()
+	m := connectPyModules{c: &Controller{pymoduleStore: f.store, repoPusher: g.gp}}
 	return f, g, m
 }
 
 // seedGitInventory refreshes the named source through the fixture so its
 // discovery lands in the pusher's cache — the same way Task 3.2's inventory
 // tests seed theirs. Only exec-alice serves alice's refreshes.
-func seedGitInventory(g *gitSourceFixture, source string, resp *executorpb.SyncPyModuleGitSourceResponse) error {
+func seedGitInventory(g *repoFixture, source string, resp *executorpb.SyncRepoResponse) error {
 	g.clients["exec-alice"].resp = resp
 	recs, err := g.store.List(context.Background(), "u_alice")
 	if err != nil {
@@ -134,27 +134,27 @@ func seedGitInventory(g *gitSourceFixture, source string, resp *executorpb.SyncP
 			return err
 		}
 	}
-	return gitpymodules.ErrNotFound
+	return repos.ErrNotFound
 }
 
-// TestConnectPyModulesListSpansGitSources pins the unfiltered list: local
-// rows and git-sourced rows come back together, each stamped with its own
+// TestConnectPyModulesListSpansRepos pins the unfiltered list: local
+// rows and repo-sourced rows come back together, each stamped with its own
 // Repo — "local" for the blob store, the source's name for its discovered
 // scripts and packages — and git rows carry no version, no save time and no
 // code. Owner scoping still holds: another owner's ctx sees neither alice's
 // git rows nor her local ones.
-func TestConnectPyModulesListSpansGitSources(t *testing.T) {
+func TestConnectPyModulesListSpansRepos(t *testing.T) {
 	c := assert.NewCollecting(t)
 	_, g, m := newGitListingFixture()
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
-	c.Require().NoError(seedGitInventory(g, "ops_tools", &executorpb.SyncPyModuleGitSourceResponse{
-		Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys", Description: "rotates keys"}},
-		Packages:  []*executorpb.GitSourcePackage{{Name: "opslib", Description: "ops helpers"}},
+	c.Require().NoError(seedGitInventory(g, "ops_tools", &executorpb.SyncRepoResponse{
+		Scripts:   []*executorpb.RepoScript{{Name: "rotate_keys", Description: "rotates keys"}},
+		Packages:  []*executorpb.RepoPackage{{Name: "opslib", Description: "ops helpers"}},
 		VenvReady: true,
 	}), "seed ops_tools")
-	c.Require().NoError(seedGitInventory(g, "shared_lib", &executorpb.SyncPyModuleGitSourceResponse{
-		Scripts: []*executorpb.GitSourceScript{{Name: "compile_helpers", Description: "compiles things"}},
+	c.Require().NoError(seedGitInventory(g, "shared_lib", &executorpb.SyncRepoResponse{
+		Scripts: []*executorpb.RepoScript{{Name: "compile_helpers", Description: "compiles things"}},
 	}), "seed shared_lib")
 
 	rows, err := m.ListPymodules(alice, "")
@@ -181,7 +181,7 @@ func TestConnectPyModulesListSpansGitSources(t *testing.T) {
 	}
 	c.Len(byName, 4, "got %d row(s) %v, want 4: alice_chart plus ops_tools' and shared_lib's discoveries", len(byName), rows)
 
-	// bob's ctx sees his own local row and nothing of alice's — not her git
+	// bob's ctx sees his own local row and nothing of alice's — not her repo
 	// rows either: the inventory cache is keyed per owner.
 	bob := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_bob"})
 	bobRows, err := m.ListPymodules(bob, "")
@@ -189,20 +189,20 @@ func TestConnectPyModulesListSpansGitSources(t *testing.T) {
 	c.False(len(bobRows) != 1 || bobRows[0].Name != "bob_util" || bobRows[0].Repo != "local", "bob's unfiltered list = %+v, want only his local bob_util", bobRows)
 }
 
-// TestConnectPyModulesListFiltersToOneRepo pins the narrowing: a named git
-// source returns ONLY that source's rows (no local rows, no other source's);
+// TestConnectPyModulesListFiltersToOneRepo pins the narrowing: a named repo
+// returns ONLY that repo's rows (no local rows, no other source's);
 // "local" returns ONLY the blob-store rows; a name with no cached snapshot
 // is an empty result, not an error.
 func TestConnectPyModulesListFiltersToOneRepo(t *testing.T) {
 	c := assert.NewCollecting(t)
 	_, g, m := newGitListingFixture()
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
-	c.Require().NoError(seedGitInventory(g, "ops_tools", &executorpb.SyncPyModuleGitSourceResponse{
-		Scripts:  []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
-		Packages: []*executorpb.GitSourcePackage{{Name: "opslib"}},
+	c.Require().NoError(seedGitInventory(g, "ops_tools", &executorpb.SyncRepoResponse{
+		Scripts:  []*executorpb.RepoScript{{Name: "rotate_keys"}},
+		Packages: []*executorpb.RepoPackage{{Name: "opslib"}},
 	}), "seed ops_tools")
-	c.Require().NoError(seedGitInventory(g, "shared_lib", &executorpb.SyncPyModuleGitSourceResponse{
-		Scripts: []*executorpb.GitSourceScript{{Name: "compile_helpers"}},
+	c.Require().NoError(seedGitInventory(g, "shared_lib", &executorpb.SyncRepoResponse{
+		Scripts: []*executorpb.RepoScript{{Name: "compile_helpers"}},
 	}), "seed shared_lib")
 
 	rows, err := m.ListPymodules(alice, "ops_tools")
@@ -226,12 +226,12 @@ func TestConnectPyModulesListFiltersToOneRepo(t *testing.T) {
 	c.Empty(empty, "unrefreshed scope returned")
 }
 
-// TestConnectPyModulesListSpansGitSourcesFiltersToOneRepo is a shim so the
-// verify pattern (-run TestConnectPyModulesListSpansGitSources, an UNANCHORED
+// TestConnectPyModulesListSpansReposFiltersToOneRepo is a shim so the
+// verify pattern (-run TestConnectPyModulesListSpansRepos, an UNANCHORED
 // substring match) also runs the single-scope filter test, whose pinned name
 // does not contain the pattern — the same trick
 // TestPymodulePusherBuildsSortedPayload uses for TestBuildPyModulesSortsByName.
-func TestConnectPyModulesListSpansGitSourcesFiltersToOneRepo(t *testing.T) {
+func TestConnectPyModulesListSpansReposFiltersToOneRepo(t *testing.T) {
 	t.Run("filters to one repo", TestConnectPyModulesListFiltersToOneRepo)
 }
 

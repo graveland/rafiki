@@ -21,7 +21,7 @@ var ErrNotFound = errors.New("pymodule not found")
 
 // LocalRepo is the repo scope name of the owner's own blob store -- the only
 // scope pymodule_put/delete/get can address. Every other repo value names a
-// git source, whose content is read-only through pymodule_run (its own
+// repo, whose content is read-only through pymodule_run (its own
 // history is the only mutation path) and which these tools must reject.
 // Defined here, next to the store it names a scope of, so the tool layer,
 // the daemon adapters and the CLI all quote one constant instead of three
@@ -36,10 +36,10 @@ const LocalRepo = "local"
 // writer and the readers.
 func BlobCacheDir() string { return filepath.Join(paths.CacheDir(), "pymodules") }
 
-// GitCacheDir is the synced git-source cache root: one checkout per
+// GitCacheDir is the synced repo cache root: one checkout per
 // registered source at <dir>/<repo>, whose callable scripts live under
 // scripts/ and whose top-level __init__-carrying directories are importable
-// packages. SyncPyModuleGitSource writes it; the same readers read it.
+// packages. SyncRepo writes it; the same readers read it.
 func GitCacheDir() string { return filepath.Join(paths.CacheDir(), "pymodule-repos") }
 
 // Record is one row of conversations.pymodules.

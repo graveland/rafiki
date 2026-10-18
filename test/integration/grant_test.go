@@ -148,7 +148,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 	stderr := &stderrBuf{}
 	cmd := exec.Command(daemonBinary())
 	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+homeDir,
 		"XDG_RUNTIME_DIR="+homeDir,
 		"XDG_STATE_HOME="+homeDir,
@@ -250,7 +250,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 		"--pin-cert", g.fingerprint,
 		"--root", root,
 	)
-	cmd.Env = os.Environ()
+	cmd.Env = subprocessEnv()
 	c.NoError(cmd.Start(), "start executor")
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(os.Kill)

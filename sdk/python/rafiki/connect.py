@@ -51,7 +51,7 @@ PROTOCOL_HEADER = {"Connect-Protocol-Version": "1"}
 
 # The wire-protocol epoch, mirroring pkg/protocol (Go). Every request carries
 # EPOCH_HEADER: EPOCH; every response must too, or the daemon is stale.
-EPOCH = "3"
+EPOCH = "4"
 EPOCH_HEADER = "Rafiki-Protocol"
 
 # Reserved invalid host for unix-socket endpoints, matching the Go client's

@@ -190,7 +190,7 @@ func (s *Server) gitEnv(extra ...string) []string {
 
 // git runs one hardened git invocation in dir under the executor's pinned
 // environment. It is the ONLY way this file invokes git: the argv array goes
-// straight to gitRunner (gitpymodule_sync.go's runner seam), never a shell and
+// straight to gitRunner (repo_sync.go's runner seam), never a shell and
 // never a string concatenated into one argument.
 func (s *Server) git(dir string, args ...string) ([]byte, error) {
 	return s.gitExtra(dir, nil, args...)

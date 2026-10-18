@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/profile"
@@ -121,36 +122,36 @@ func TestSkillsSyncNotImpliedByOtherLaunchKinds(t *testing.T) {
 	assert.NewCollecting(t).False(skillsSyncFromArgv(t, []string{"--launch", "other"}, ""), "only --launch claude implies skills sync")
 }
 
-// pymoduleGitSyncFromArgv drives the same path RunE uses for
-// --pymodule-git-sync: parse the flags, read them back, resolve them against
+// repoSyncFromArgv drives the same path RunE uses for
+// --repo-sync: parse the flags, read them back, resolve them against
 // the environment (see skillsSyncFromArgv for the shape this mirrors).
-func pymoduleGitSyncFromArgv(t *testing.T, argv []string, env string) bool {
+func repoSyncFromArgv(t *testing.T, argv []string, env string) bool {
 	t.Helper()
-	t.Setenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC", env)
+	t.Setenv("RAFIKI_EXECUTOR_REPO_SYNC", env)
 	c := assert.NewAborting(t)
 	cmd := newExecutorServeCmd()
 	c.NoError(cmd.Flags().Parse(argv))
-	on, err := cmd.Flags().GetBool("pymodule-git-sync")
+	on, err := cmd.Flags().GetBool("repo-sync")
 	c.NoError(err)
 	launchKinds, err := cmd.Flags().GetStringArray("launch")
 	c.NoError(err)
-	return pymoduleGitSyncEnabled(cmd, on, launchKinds)
+	return repoSyncEnabled(cmd, on, launchKinds)
 }
 
-func TestPymoduleGitSyncDefaultsOff(t *testing.T) {
-	assert.NewCollecting(t).False(pymoduleGitSyncFromArgv(t, nil, ""), "pymodule-git-sync defaulted on; it runs git clones against registered URLs")
+func TestRepoSyncDefaultsOff(t *testing.T) {
+	assert.NewCollecting(t).False(repoSyncFromArgv(t, nil, ""), "repo-sync defaulted on; it runs git clones against registered URLs")
 }
 
-func TestPymoduleGitSyncEnvTurnsItOn(t *testing.T) {
-	assert.NewCollecting(t).True(pymoduleGitSyncFromArgv(t, nil, "1"), "a non-empty RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC must enable git-source sync — a service unit cannot edit argv")
+func TestRepoSyncEnvTurnsItOn(t *testing.T) {
+	assert.NewCollecting(t).True(repoSyncFromArgv(t, nil, "1"), "a non-empty RAFIKI_EXECUTOR_REPO_SYNC must enable repo sync — a service unit cannot edit argv")
 }
 
-func TestPymoduleGitSyncExplicitFalseBeatsTheEnvironment(t *testing.T) {
-	assert.NewCollecting(t).False(pymoduleGitSyncFromArgv(t, []string{"--pymodule-git-sync=false"}, "1"), "an explicit --pymodule-git-sync=false must stay able to switch the feature off on a machine whose environment enables it")
+func TestRepoSyncExplicitFalseBeatsTheEnvironment(t *testing.T) {
+	assert.NewCollecting(t).False(repoSyncFromArgv(t, []string{"--repo-sync=false"}, "1"), "an explicit --repo-sync=false must stay able to switch the feature off on a machine whose environment enables it")
 }
 
-func TestPymoduleGitSyncFlagTurnsItOn(t *testing.T) {
-	assert.NewCollecting(t).True(pymoduleGitSyncFromArgv(t, []string{"--pymodule-git-sync"}, ""), "--pymodule-git-sync must enable git-source sync")
+func TestRepoSyncFlagTurnsItOn(t *testing.T) {
+	assert.NewCollecting(t).True(repoSyncFromArgv(t, []string{"--repo-sync"}, ""), "--repo-sync must enable repo sync")
 }
 
 // --launch script implies both pymodule syncs: a script child resolves its
@@ -169,8 +170,8 @@ func TestPymoduleSyncImpliedByLaunchScript(t *testing.T) {
 	c.True(pymodulesSyncEnabled(cmd, on, launchKinds), "--launch script must imply pymodules sync — a script host without the corpus hosts scripts that cannot resolve")
 }
 
-func TestPymoduleGitSyncImpliedByLaunchScript(t *testing.T) {
-	assert.NewCollecting(t).True(pymoduleGitSyncFromArgv(t, []string{"--launch", "script"}, ""), "--launch script must imply git-source sync — a script host that refuses checkouts only hosts half the scripts")
+func TestRepoSyncImpliedByLaunchScript(t *testing.T) {
+	assert.NewCollecting(t).True(repoSyncFromArgv(t, []string{"--launch", "script"}, ""), "--launch script must imply repo sync — a script host that refuses checkouts only hosts half the scripts")
 }
 
 func TestPymoduleSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
@@ -184,8 +185,37 @@ func TestPymoduleSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
 	c.False(pymodulesSyncEnabled(cmd, on, launchKinds), "an explicit --pymodules-sync=false must beat the --launch script implication")
 }
 
-func TestPymoduleGitSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
-	assert.NewCollecting(t).False(pymoduleGitSyncFromArgv(t, []string{"--launch", "script", "--pymodule-git-sync=false"}, ""), "an explicit --pymodule-git-sync=false must beat the --launch script implication")
+func TestRepoSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
+	assert.NewCollecting(t).False(repoSyncFromArgv(t, []string{"--launch", "script", "--repo-sync=false"}, ""), "an explicit --repo-sync=false must beat the --launch script implication")
+}
+
+// TestRetiredPymoduleGitSyncFlag: the retired flag stays REGISTERED (so an
+// operator's argv still parses) but serve refuses it by name — accepting it
+// silently would leave the machine with repo refreshes quietly disabled.
+func TestRetiredPymoduleGitSyncFlag(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC", "")
+	cmd := newExecutorServeCmd()
+	cmd.SetArgs([]string{"--pymodule-git-sync"})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	err := cmd.Execute()
+	c.Require().Error(err, "--pymodule-git-sync was accepted")
+	c.StrContains(err.Error(), "--pymodule-git-sync is now --repo-sync", "retired-flag error")
+}
+
+// TestRetiredPymoduleGitSyncEnv: same rule for the environment form, since a
+// service unit enables the sync there and cannot edit argv.
+func TestRetiredPymoduleGitSyncEnv(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC", "1")
+	cmd := newExecutorServeCmd()
+	cmd.SetArgs(nil)
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	err := cmd.Execute()
+	c.Require().Error(err, "RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC was accepted")
+	c.StrContains(err.Error(), "RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC is now RAFIKI_EXECUTOR_REPO_SYNC", "retired-env error")
 }
 
 // --relay-dir binds a socket every sandbox connection is spliced through, so a

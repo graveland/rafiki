@@ -14,12 +14,12 @@ import (
 //
 // Every method's repo parameter must be "local" -- the owner's own blob
 // store. That is the ONLY scope these three tools can address: a
-// git-sourced pymodule is read-only through pymodule_run and cannot be
+// repo-sourced pymodule is read-only through pymodule_run and cannot be
 // created, fetched or removed here (its repo's own history is the only
 // mutation path). The tool layer rejects any other value before this
 // interface is reached, so implementations may assume repo == "local" --
 // but the parameter stays in the signature so the interface stays honest
-// about the addressing scheme and a future git-sourced Get has somewhere
+// about the addressing scheme and a future repo-sourced Get has somewhere
 // to land.
 type PyModuleStore interface {
 	// Put returns the new row's id and an advisory notice string --
@@ -65,7 +65,7 @@ func (PyModulePutBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A git-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
+			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A repo-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
 			{Name: "name", Type: "string", Description: "Module name, later importable as `import <name>`. Must be a bare Python identifier: letters, digits, underscore, not starting with a digit."},
 			{Name: "code", Type: "string", Description: "Full Python source of the module. A `# pymodule-requirements:` comment block declares dependencies installed into a per-module venv at sync time."},
 			{Name: "description", Type: "string", Description: "One-line description shown in your pymodule inventory."},
@@ -101,10 +101,10 @@ func (pt *pymodulePutTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		return ToolResult{}, fmt.Errorf("pymodule_put: invalid input: %w", err)
 	}
 	// The repo check comes first, before every other validation: a caller
-	// aiming at a git source must be told this operation cannot target one,
+	// aiming at a repo must be told this operation cannot target one,
 	// whatever else is wrong with its input.
 	if in.Repo != pymodules.LocalRepo {
-		return ToolResult{}, fmt.Errorf("pymodule_put: repo must be %q — a git-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
+		return ToolResult{}, fmt.Errorf("pymodule_put: repo must be %q — a repo-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
 	}
 	if err := pymodules.ValidName(in.Name); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_put: %w", err)

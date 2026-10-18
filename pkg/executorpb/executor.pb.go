@@ -150,11 +150,11 @@ type DescribeResponse struct {
 	// this executor will do, and a wrong value costs a skipped sync rather than
 	// admitting anyone.
 	PymodulesSync bool `protobuf:"varint,13,opt,name=pymodules_sync,json=pymodulesSync,proto3" json:"pymodules_sync,omitempty"`
-	// pymodule_git_sync reports that this executor accepts
-	// SyncPyModuleGitSource. Safe to self-report for the same reason as
+	// repo_sync reports that this executor accepts
+	// SyncRepo. Safe to self-report for the same reason as
 	// pymodules_sync: it only ever NARROWS what this executor will do, and a
 	// wrong value costs a skipped sync rather than admitting anyone.
-	PymoduleGitSync bool `protobuf:"varint,14,opt,name=pymodule_git_sync,json=pymoduleGitSync,proto3" json:"pymodule_git_sync,omitempty"`
+	RepoSync bool `protobuf:"varint,14,opt,name=repo_sync,json=repoSync,proto3" json:"repo_sync,omitempty"`
 	// sandbox_mount_roots are the host directories this launcher's operator
 	// declared with --sandbox-mount-root. Self-reported, and safe to be: the
 	// daemon uses them only to PRE-CHECK a requested host path; the launcher
@@ -298,9 +298,9 @@ func (x *DescribeResponse) GetPymodulesSync() bool {
 	return false
 }
 
-func (x *DescribeResponse) GetPymoduleGitSync() bool {
+func (x *DescribeResponse) GetRepoSync() bool {
 	if x != nil {
-		return x.PymoduleGitSync
+		return x.RepoSync
 	}
 	return false
 }
@@ -3025,8 +3025,8 @@ func (x *PyModuleVenvResult) GetError() string {
 	return ""
 }
 
-// GitSourceScript is one script discovered in a git-sourced repo's checkout.
-type GitSourceScript struct {
+// RepoScript is one script discovered in a repo's checkout.
+type RepoScript struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
@@ -3034,20 +3034,20 @@ type GitSourceScript struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GitSourceScript) Reset() {
-	*x = GitSourceScript{}
+func (x *RepoScript) Reset() {
+	*x = RepoScript{}
 	mi := &file_executor_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GitSourceScript) String() string {
+func (x *RepoScript) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GitSourceScript) ProtoMessage() {}
+func (*RepoScript) ProtoMessage() {}
 
-func (x *GitSourceScript) ProtoReflect() protoreflect.Message {
+func (x *RepoScript) ProtoReflect() protoreflect.Message {
 	mi := &file_executor_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3059,28 +3059,27 @@ func (x *GitSourceScript) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GitSourceScript.ProtoReflect.Descriptor instead.
-func (*GitSourceScript) Descriptor() ([]byte, []int) {
+// Deprecated: Use RepoScript.ProtoReflect.Descriptor instead.
+func (*RepoScript) Descriptor() ([]byte, []int) {
 	return file_executor_proto_rawDescGZIP(), []int{46}
 }
 
-func (x *GitSourceScript) GetName() string {
+func (x *RepoScript) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *GitSourceScript) GetDescription() string {
+func (x *RepoScript) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-// GitSourcePackage is one importable package discovered in a git-sourced
-// repo's checkout.
-type GitSourcePackage struct {
+// RepoPackage is one importable package discovered in a repo's checkout.
+type RepoPackage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
@@ -3088,20 +3087,20 @@ type GitSourcePackage struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GitSourcePackage) Reset() {
-	*x = GitSourcePackage{}
+func (x *RepoPackage) Reset() {
+	*x = RepoPackage{}
 	mi := &file_executor_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GitSourcePackage) String() string {
+func (x *RepoPackage) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GitSourcePackage) ProtoMessage() {}
+func (*RepoPackage) ProtoMessage() {}
 
-func (x *GitSourcePackage) ProtoReflect() protoreflect.Message {
+func (x *RepoPackage) ProtoReflect() protoreflect.Message {
 	mi := &file_executor_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3113,26 +3112,26 @@ func (x *GitSourcePackage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GitSourcePackage.ProtoReflect.Descriptor instead.
-func (*GitSourcePackage) Descriptor() ([]byte, []int) {
+// Deprecated: Use RepoPackage.ProtoReflect.Descriptor instead.
+func (*RepoPackage) Descriptor() ([]byte, []int) {
 	return file_executor_proto_rawDescGZIP(), []int{47}
 }
 
-func (x *GitSourcePackage) GetName() string {
+func (x *RepoPackage) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *GitSourcePackage) GetDescription() string {
+func (x *RepoPackage) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-type SyncPyModuleGitSourceRequest struct {
+type SyncRepoRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name is the source's human label, which also names its cache directory.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -3146,20 +3145,20 @@ type SyncPyModuleGitSourceRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SyncPyModuleGitSourceRequest) Reset() {
-	*x = SyncPyModuleGitSourceRequest{}
+func (x *SyncRepoRequest) Reset() {
+	*x = SyncRepoRequest{}
 	mi := &file_executor_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SyncPyModuleGitSourceRequest) String() string {
+func (x *SyncRepoRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SyncPyModuleGitSourceRequest) ProtoMessage() {}
+func (*SyncRepoRequest) ProtoMessage() {}
 
-func (x *SyncPyModuleGitSourceRequest) ProtoReflect() protoreflect.Message {
+func (x *SyncRepoRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_executor_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3171,36 +3170,36 @@ func (x *SyncPyModuleGitSourceRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SyncPyModuleGitSourceRequest.ProtoReflect.Descriptor instead.
-func (*SyncPyModuleGitSourceRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use SyncRepoRequest.ProtoReflect.Descriptor instead.
+func (*SyncRepoRequest) Descriptor() ([]byte, []int) {
 	return file_executor_proto_rawDescGZIP(), []int{48}
 }
 
-func (x *SyncPyModuleGitSourceRequest) GetName() string {
+func (x *SyncRepoRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *SyncPyModuleGitSourceRequest) GetUrl() string {
+func (x *SyncRepoRequest) GetUrl() string {
 	if x != nil {
 		return x.Url
 	}
 	return ""
 }
 
-func (x *SyncPyModuleGitSourceRequest) GetRef() string {
+func (x *SyncRepoRequest) GetRef() string {
 	if x != nil {
 		return x.Ref
 	}
 	return ""
 }
 
-type SyncPyModuleGitSourceResponse struct {
+type SyncRepoResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
-	Scripts  []*GitSourceScript     `protobuf:"bytes,1,rep,name=scripts,proto3" json:"scripts,omitempty"`
-	Packages []*GitSourcePackage    `protobuf:"bytes,2,rep,name=packages,proto3" json:"packages,omitempty"`
+	Scripts  []*RepoScript          `protobuf:"bytes,1,rep,name=scripts,proto3" json:"scripts,omitempty"`
+	Packages []*RepoPackage         `protobuf:"bytes,2,rep,name=packages,proto3" json:"packages,omitempty"`
 	// venv_ready is true both when the repo declares no dependencies at all
 	// (nothing to build) and when the repo's one shared venv just built or was
 	// already up to date; false only when a build was needed and failed, in
@@ -3211,20 +3210,20 @@ type SyncPyModuleGitSourceResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SyncPyModuleGitSourceResponse) Reset() {
-	*x = SyncPyModuleGitSourceResponse{}
+func (x *SyncRepoResponse) Reset() {
+	*x = SyncRepoResponse{}
 	mi := &file_executor_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SyncPyModuleGitSourceResponse) String() string {
+func (x *SyncRepoResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SyncPyModuleGitSourceResponse) ProtoMessage() {}
+func (*SyncRepoResponse) ProtoMessage() {}
 
-func (x *SyncPyModuleGitSourceResponse) ProtoReflect() protoreflect.Message {
+func (x *SyncRepoResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_executor_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3236,33 +3235,33 @@ func (x *SyncPyModuleGitSourceResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SyncPyModuleGitSourceResponse.ProtoReflect.Descriptor instead.
-func (*SyncPyModuleGitSourceResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use SyncRepoResponse.ProtoReflect.Descriptor instead.
+func (*SyncRepoResponse) Descriptor() ([]byte, []int) {
 	return file_executor_proto_rawDescGZIP(), []int{49}
 }
 
-func (x *SyncPyModuleGitSourceResponse) GetScripts() []*GitSourceScript {
+func (x *SyncRepoResponse) GetScripts() []*RepoScript {
 	if x != nil {
 		return x.Scripts
 	}
 	return nil
 }
 
-func (x *SyncPyModuleGitSourceResponse) GetPackages() []*GitSourcePackage {
+func (x *SyncRepoResponse) GetPackages() []*RepoPackage {
 	if x != nil {
 		return x.Packages
 	}
 	return nil
 }
 
-func (x *SyncPyModuleGitSourceResponse) GetVenvReady() bool {
+func (x *SyncRepoResponse) GetVenvReady() bool {
 	if x != nil {
 		return x.VenvReady
 	}
 	return false
 }
 
-func (x *SyncPyModuleGitSourceResponse) GetVenvError() string {
+func (x *SyncRepoResponse) GetVenvError() string {
 	if x != nil {
 		return x.VenvError
 	}
@@ -4058,7 +4057,7 @@ var File_executor_proto protoreflect.FileDescriptor
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x11\n" +
-	"\x0fDescribeRequest\"\x8f\x06\n" +
+	"\x0fDescribeRequest\"\x80\x06\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -4075,8 +4074,8 @@ const file_executor_proto_rawDesc = "" +
 	"\flaunch_kinds\x18\v \x03(\tR\vlaunchKinds\x12\x1f\n" +
 	"\vskills_sync\x18\f \x01(\bR\n" +
 	"skillsSync\x12%\n" +
-	"\x0epymodules_sync\x18\r \x01(\bR\rpymodulesSync\x12*\n" +
-	"\x11pymodule_git_sync\x18\x0e \x01(\bR\x0fpymoduleGitSync\x12.\n" +
+	"\x0epymodules_sync\x18\r \x01(\bR\rpymodulesSync\x12\x1b\n" +
+	"\trepo_sync\x18\x0e \x01(\bR\brepoSync\x12.\n" +
 	"\x13sandbox_mount_roots\x18\x0f \x03(\tR\x11sandboxMountRoots\x12*\n" +
 	"\x11sandbox_relay_dir\x18\x10 \x01(\tR\x0fsandboxRelayDir\x120\n" +
 	"\x14sandbox_relay_volume\x18\x11 \x01(\tR\x12sandboxRelayVolume\x12\x1b\n" +
@@ -4273,20 +4272,21 @@ const file_executor_proto_rawDesc = "" +
 	"\x12PyModuleVenvResult\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05ready\x18\x02 \x01(\bR\x05ready\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"G\n" +
-	"\x0fGitSourceScript\x12\x12\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"B\n" +
+	"\n" +
+	"RepoScript\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\"H\n" +
-	"\x10GitSourcePackage\x12\x12\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\"C\n" +
+	"\vRepoPackage\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\"V\n" +
-	"\x1cSyncPyModuleGitSourceRequest\x12\x12\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\"I\n" +
+	"\x0fSyncRepoRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x10\n" +
-	"\x03ref\x18\x03 \x01(\tR\x03ref\"\xde\x01\n" +
-	"\x1dSyncPyModuleGitSourceResponse\x12=\n" +
-	"\ascripts\x18\x01 \x03(\v2#.rafiki.executor.v1.GitSourceScriptR\ascripts\x12@\n" +
-	"\bpackages\x18\x02 \x03(\v2$.rafiki.executor.v1.GitSourcePackageR\bpackages\x12\x1d\n" +
+	"\x03ref\x18\x03 \x01(\tR\x03ref\"\xc7\x01\n" +
+	"\x10SyncRepoResponse\x128\n" +
+	"\ascripts\x18\x01 \x03(\v2\x1e.rafiki.executor.v1.RepoScriptR\ascripts\x12;\n" +
+	"\bpackages\x18\x02 \x03(\v2\x1f.rafiki.executor.v1.RepoPackageR\bpackages\x12\x1d\n" +
 	"\n" +
 	"venv_ready\x18\x03 \x01(\bR\tvenvReady\x12\x1d\n" +
 	"\n" +
@@ -4344,7 +4344,7 @@ const file_executor_proto_rawDesc = "" +
 	"\x16GitFetchBundleResponse\x12\x17\n" +
 	"\aold_oid\x18\x01 \x01(\tR\x06oldOid\x12\x17\n" +
 	"\anew_oid\x18\x02 \x01(\tR\x06newOid\x12!\n" +
-	"\fcreated_repo\x18\x03 \x01(\bR\vcreatedRepo2\xac\x0f\n" +
+	"\fcreated_repo\x18\x03 \x01(\bR\vcreatedRepo2\x85\x0f\n" +
 	"\x0fExecutorService\x12U\n" +
 	"\bDescribe\x12#.rafiki.executor.v1.DescribeRequest\x1a$.rafiki.executor.v1.DescribeResponse\x12O\n" +
 	"\x06Health\x12!.rafiki.executor.v1.HealthRequest\x1a\".rafiki.executor.v1.HealthResponse\x12T\n" +
@@ -4360,8 +4360,8 @@ const file_executor_proto_rawDesc = "" +
 	"\tSkillBody\x12$.rafiki.executor.v1.SkillBodyRequest\x1a%.rafiki.executor.v1.SkillBodyResponse\x12[\n" +
 	"\n" +
 	"SyncSkills\x12%.rafiki.executor.v1.SyncSkillsRequest\x1a&.rafiki.executor.v1.SyncSkillsResponse\x12d\n" +
-	"\rSyncPyModules\x12(.rafiki.executor.v1.SyncPyModulesRequest\x1a).rafiki.executor.v1.SyncPyModulesResponse\x12|\n" +
-	"\x15SyncPyModuleGitSource\x120.rafiki.executor.v1.SyncPyModuleGitSourceRequest\x1a1.rafiki.executor.v1.SyncPyModuleGitSourceResponse\x12W\n" +
+	"\rSyncPyModules\x12(.rafiki.executor.v1.SyncPyModulesRequest\x1a).rafiki.executor.v1.SyncPyModulesResponse\x12U\n" +
+	"\bSyncRepo\x12#.rafiki.executor.v1.SyncRepoRequest\x1a$.rafiki.executor.v1.SyncRepoResponse\x12W\n" +
 	"\bReadTree\x12#.rafiki.executor.v1.ReadTreeRequest\x1a$.rafiki.executor.v1.ReadTreeResponse0\x01\x12Z\n" +
 	"\tWriteTree\x12$.rafiki.executor.v1.WriteTreeRequest\x1a%.rafiki.executor.v1.WriteTreeResponse(\x01\x12R\n" +
 	"\aGitRefs\x12\".rafiki.executor.v1.GitRefsRequest\x1a#.rafiki.executor.v1.GitRefsResponse\x12X\n" +
@@ -4384,78 +4384,78 @@ func file_executor_proto_rawDescGZIP() []byte {
 var file_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 69)
 var file_executor_proto_goTypes = []any{
-	(Failure_Code)(0),                     // 0: rafiki.executor.v1.Failure.Code
-	(*DescribeRequest)(nil),               // 1: rafiki.executor.v1.DescribeRequest
-	(*DescribeResponse)(nil),              // 2: rafiki.executor.v1.DescribeResponse
-	(*HealthRequest)(nil),                 // 3: rafiki.executor.v1.HealthRequest
-	(*HealthResponse)(nil),                // 4: rafiki.executor.v1.HealthResponse
-	(*ContentBlock)(nil),                  // 5: rafiki.executor.v1.ContentBlock
-	(*ImageBlock)(nil),                    // 6: rafiki.executor.v1.ImageBlock
-	(*ExecuteRequest)(nil),                // 7: rafiki.executor.v1.ExecuteRequest
-	(*ExecuteResponse)(nil),               // 8: rafiki.executor.v1.ExecuteResponse
-	(*OutputChunk)(nil),                   // 9: rafiki.executor.v1.OutputChunk
-	(*Result)(nil),                        // 10: rafiki.executor.v1.Result
-	(*Failure)(nil),                       // 11: rafiki.executor.v1.Failure
-	(*WatchJobsRequest)(nil),              // 12: rafiki.executor.v1.WatchJobsRequest
-	(*WatchJobsResponse)(nil),             // 13: rafiki.executor.v1.WatchJobsResponse
-	(*JobRunning)(nil),                    // 14: rafiki.executor.v1.JobRunning
-	(*JobExited)(nil),                     // 15: rafiki.executor.v1.JobExited
-	(*ReplayComplete)(nil),                // 16: rafiki.executor.v1.ReplayComplete
-	(*AckJobExitsRequest)(nil),            // 17: rafiki.executor.v1.AckJobExitsRequest
-	(*AckJobExitsResponse)(nil),           // 18: rafiki.executor.v1.AckJobExitsResponse
-	(*CancelRequest)(nil),                 // 19: rafiki.executor.v1.CancelRequest
-	(*CancelResponse)(nil),                // 20: rafiki.executor.v1.CancelResponse
-	(*Mount)(nil),                         // 21: rafiki.executor.v1.Mount
-	(*ProvisionRequest)(nil),              // 22: rafiki.executor.v1.ProvisionRequest
-	(*ProvisionResponse)(nil),             // 23: rafiki.executor.v1.ProvisionResponse
-	(*ReleaseRequest)(nil),                // 24: rafiki.executor.v1.ReleaseRequest
-	(*ReleaseResponse)(nil),               // 25: rafiki.executor.v1.ReleaseResponse
-	(*ProjectContextRequest)(nil),         // 26: rafiki.executor.v1.ProjectContextRequest
-	(*ProjectContextResponse)(nil),        // 27: rafiki.executor.v1.ProjectContextResponse
-	(*ProjectSkillsRequest)(nil),          // 28: rafiki.executor.v1.ProjectSkillsRequest
-	(*ProjectSkill)(nil),                  // 29: rafiki.executor.v1.ProjectSkill
-	(*ProjectSkillsResponse)(nil),         // 30: rafiki.executor.v1.ProjectSkillsResponse
-	(*SkillBodyRequest)(nil),              // 31: rafiki.executor.v1.SkillBodyRequest
-	(*SkillBodyResponse)(nil),             // 32: rafiki.executor.v1.SkillBodyResponse
-	(*JobOutputRequest)(nil),              // 33: rafiki.executor.v1.JobOutputRequest
-	(*JobOutputResponse)(nil),             // 34: rafiki.executor.v1.JobOutputResponse
-	(*ProxyStart)(nil),                    // 35: rafiki.executor.v1.ProxyStart
-	(*ProxyRequest)(nil),                  // 36: rafiki.executor.v1.ProxyRequest
-	(*ProxyHead)(nil),                     // 37: rafiki.executor.v1.ProxyHead
-	(*ProxyResponse)(nil),                 // 38: rafiki.executor.v1.ProxyResponse
-	(*SyncSkill)(nil),                     // 39: rafiki.executor.v1.SyncSkill
-	(*SkillNamespace)(nil),                // 40: rafiki.executor.v1.SkillNamespace
-	(*SyncSkillsRequest)(nil),             // 41: rafiki.executor.v1.SyncSkillsRequest
-	(*SyncSkillsResponse)(nil),            // 42: rafiki.executor.v1.SyncSkillsResponse
-	(*SyncPyModule)(nil),                  // 43: rafiki.executor.v1.SyncPyModule
-	(*SyncPyModulesRequest)(nil),          // 44: rafiki.executor.v1.SyncPyModulesRequest
-	(*SyncPyModulesResponse)(nil),         // 45: rafiki.executor.v1.SyncPyModulesResponse
-	(*PyModuleVenvResult)(nil),            // 46: rafiki.executor.v1.PyModuleVenvResult
-	(*GitSourceScript)(nil),               // 47: rafiki.executor.v1.GitSourceScript
-	(*GitSourcePackage)(nil),              // 48: rafiki.executor.v1.GitSourcePackage
-	(*SyncPyModuleGitSourceRequest)(nil),  // 49: rafiki.executor.v1.SyncPyModuleGitSourceRequest
-	(*SyncPyModuleGitSourceResponse)(nil), // 50: rafiki.executor.v1.SyncPyModuleGitSourceResponse
-	(*ReadTreeRequest)(nil),               // 51: rafiki.executor.v1.ReadTreeRequest
-	(*ReadTreeResponse)(nil),              // 52: rafiki.executor.v1.ReadTreeResponse
-	(*TreeHeader)(nil),                    // 53: rafiki.executor.v1.TreeHeader
-	(*WriteTreeRequest)(nil),              // 54: rafiki.executor.v1.WriteTreeRequest
-	(*WriteTreeStart)(nil),                // 55: rafiki.executor.v1.WriteTreeStart
-	(*WriteTreeResponse)(nil),             // 56: rafiki.executor.v1.WriteTreeResponse
-	(*GitRef)(nil),                        // 57: rafiki.executor.v1.GitRef
-	(*GitRefsRequest)(nil),                // 58: rafiki.executor.v1.GitRefsRequest
-	(*GitRefsResponse)(nil),               // 59: rafiki.executor.v1.GitRefsResponse
-	(*GitBundleRequest)(nil),              // 60: rafiki.executor.v1.GitBundleRequest
-	(*GitBundleResponse)(nil),             // 61: rafiki.executor.v1.GitBundleResponse
-	(*GitFetchBundleRequest)(nil),         // 62: rafiki.executor.v1.GitFetchBundleRequest
-	(*GitFetchBundleResponse)(nil),        // 63: rafiki.executor.v1.GitFetchBundleResponse
-	nil,                                   // 64: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	nil,                                   // 65: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	nil,                                   // 66: rafiki.executor.v1.Result.ObservedMtimeEntry
-	nil,                                   // 67: rafiki.executor.v1.ProvisionRequest.EnvEntry
-	nil,                                   // 68: rafiki.executor.v1.ProxyStart.HeadersEntry
-	nil,                                   // 69: rafiki.executor.v1.ProxyHead.HeadersEntry
-	(*durationpb.Duration)(nil),           // 70: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),         // 71: google.protobuf.Timestamp
+	(Failure_Code)(0),              // 0: rafiki.executor.v1.Failure.Code
+	(*DescribeRequest)(nil),        // 1: rafiki.executor.v1.DescribeRequest
+	(*DescribeResponse)(nil),       // 2: rafiki.executor.v1.DescribeResponse
+	(*HealthRequest)(nil),          // 3: rafiki.executor.v1.HealthRequest
+	(*HealthResponse)(nil),         // 4: rafiki.executor.v1.HealthResponse
+	(*ContentBlock)(nil),           // 5: rafiki.executor.v1.ContentBlock
+	(*ImageBlock)(nil),             // 6: rafiki.executor.v1.ImageBlock
+	(*ExecuteRequest)(nil),         // 7: rafiki.executor.v1.ExecuteRequest
+	(*ExecuteResponse)(nil),        // 8: rafiki.executor.v1.ExecuteResponse
+	(*OutputChunk)(nil),            // 9: rafiki.executor.v1.OutputChunk
+	(*Result)(nil),                 // 10: rafiki.executor.v1.Result
+	(*Failure)(nil),                // 11: rafiki.executor.v1.Failure
+	(*WatchJobsRequest)(nil),       // 12: rafiki.executor.v1.WatchJobsRequest
+	(*WatchJobsResponse)(nil),      // 13: rafiki.executor.v1.WatchJobsResponse
+	(*JobRunning)(nil),             // 14: rafiki.executor.v1.JobRunning
+	(*JobExited)(nil),              // 15: rafiki.executor.v1.JobExited
+	(*ReplayComplete)(nil),         // 16: rafiki.executor.v1.ReplayComplete
+	(*AckJobExitsRequest)(nil),     // 17: rafiki.executor.v1.AckJobExitsRequest
+	(*AckJobExitsResponse)(nil),    // 18: rafiki.executor.v1.AckJobExitsResponse
+	(*CancelRequest)(nil),          // 19: rafiki.executor.v1.CancelRequest
+	(*CancelResponse)(nil),         // 20: rafiki.executor.v1.CancelResponse
+	(*Mount)(nil),                  // 21: rafiki.executor.v1.Mount
+	(*ProvisionRequest)(nil),       // 22: rafiki.executor.v1.ProvisionRequest
+	(*ProvisionResponse)(nil),      // 23: rafiki.executor.v1.ProvisionResponse
+	(*ReleaseRequest)(nil),         // 24: rafiki.executor.v1.ReleaseRequest
+	(*ReleaseResponse)(nil),        // 25: rafiki.executor.v1.ReleaseResponse
+	(*ProjectContextRequest)(nil),  // 26: rafiki.executor.v1.ProjectContextRequest
+	(*ProjectContextResponse)(nil), // 27: rafiki.executor.v1.ProjectContextResponse
+	(*ProjectSkillsRequest)(nil),   // 28: rafiki.executor.v1.ProjectSkillsRequest
+	(*ProjectSkill)(nil),           // 29: rafiki.executor.v1.ProjectSkill
+	(*ProjectSkillsResponse)(nil),  // 30: rafiki.executor.v1.ProjectSkillsResponse
+	(*SkillBodyRequest)(nil),       // 31: rafiki.executor.v1.SkillBodyRequest
+	(*SkillBodyResponse)(nil),      // 32: rafiki.executor.v1.SkillBodyResponse
+	(*JobOutputRequest)(nil),       // 33: rafiki.executor.v1.JobOutputRequest
+	(*JobOutputResponse)(nil),      // 34: rafiki.executor.v1.JobOutputResponse
+	(*ProxyStart)(nil),             // 35: rafiki.executor.v1.ProxyStart
+	(*ProxyRequest)(nil),           // 36: rafiki.executor.v1.ProxyRequest
+	(*ProxyHead)(nil),              // 37: rafiki.executor.v1.ProxyHead
+	(*ProxyResponse)(nil),          // 38: rafiki.executor.v1.ProxyResponse
+	(*SyncSkill)(nil),              // 39: rafiki.executor.v1.SyncSkill
+	(*SkillNamespace)(nil),         // 40: rafiki.executor.v1.SkillNamespace
+	(*SyncSkillsRequest)(nil),      // 41: rafiki.executor.v1.SyncSkillsRequest
+	(*SyncSkillsResponse)(nil),     // 42: rafiki.executor.v1.SyncSkillsResponse
+	(*SyncPyModule)(nil),           // 43: rafiki.executor.v1.SyncPyModule
+	(*SyncPyModulesRequest)(nil),   // 44: rafiki.executor.v1.SyncPyModulesRequest
+	(*SyncPyModulesResponse)(nil),  // 45: rafiki.executor.v1.SyncPyModulesResponse
+	(*PyModuleVenvResult)(nil),     // 46: rafiki.executor.v1.PyModuleVenvResult
+	(*RepoScript)(nil),             // 47: rafiki.executor.v1.RepoScript
+	(*RepoPackage)(nil),            // 48: rafiki.executor.v1.RepoPackage
+	(*SyncRepoRequest)(nil),        // 49: rafiki.executor.v1.SyncRepoRequest
+	(*SyncRepoResponse)(nil),       // 50: rafiki.executor.v1.SyncRepoResponse
+	(*ReadTreeRequest)(nil),        // 51: rafiki.executor.v1.ReadTreeRequest
+	(*ReadTreeResponse)(nil),       // 52: rafiki.executor.v1.ReadTreeResponse
+	(*TreeHeader)(nil),             // 53: rafiki.executor.v1.TreeHeader
+	(*WriteTreeRequest)(nil),       // 54: rafiki.executor.v1.WriteTreeRequest
+	(*WriteTreeStart)(nil),         // 55: rafiki.executor.v1.WriteTreeStart
+	(*WriteTreeResponse)(nil),      // 56: rafiki.executor.v1.WriteTreeResponse
+	(*GitRef)(nil),                 // 57: rafiki.executor.v1.GitRef
+	(*GitRefsRequest)(nil),         // 58: rafiki.executor.v1.GitRefsRequest
+	(*GitRefsResponse)(nil),        // 59: rafiki.executor.v1.GitRefsResponse
+	(*GitBundleRequest)(nil),       // 60: rafiki.executor.v1.GitBundleRequest
+	(*GitBundleResponse)(nil),      // 61: rafiki.executor.v1.GitBundleResponse
+	(*GitFetchBundleRequest)(nil),  // 62: rafiki.executor.v1.GitFetchBundleRequest
+	(*GitFetchBundleResponse)(nil), // 63: rafiki.executor.v1.GitFetchBundleResponse
+	nil,                            // 64: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	nil,                            // 65: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	nil,                            // 66: rafiki.executor.v1.Result.ObservedMtimeEntry
+	nil,                            // 67: rafiki.executor.v1.ProvisionRequest.EnvEntry
+	nil,                            // 68: rafiki.executor.v1.ProxyStart.HeadersEntry
+	nil,                            // 69: rafiki.executor.v1.ProxyHead.HeadersEntry
+	(*durationpb.Duration)(nil),    // 70: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),  // 71: google.protobuf.Timestamp
 }
 var file_executor_proto_depIdxs = []int32{
 	64, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
@@ -4483,8 +4483,8 @@ var file_executor_proto_depIdxs = []int32{
 	40, // 22: rafiki.executor.v1.SyncSkillsRequest.namespaces:type_name -> rafiki.executor.v1.SkillNamespace
 	43, // 23: rafiki.executor.v1.SyncPyModulesRequest.modules:type_name -> rafiki.executor.v1.SyncPyModule
 	46, // 24: rafiki.executor.v1.SyncPyModulesResponse.venv_results:type_name -> rafiki.executor.v1.PyModuleVenvResult
-	47, // 25: rafiki.executor.v1.SyncPyModuleGitSourceResponse.scripts:type_name -> rafiki.executor.v1.GitSourceScript
-	48, // 26: rafiki.executor.v1.SyncPyModuleGitSourceResponse.packages:type_name -> rafiki.executor.v1.GitSourcePackage
+	47, // 25: rafiki.executor.v1.SyncRepoResponse.scripts:type_name -> rafiki.executor.v1.RepoScript
+	48, // 26: rafiki.executor.v1.SyncRepoResponse.packages:type_name -> rafiki.executor.v1.RepoPackage
 	53, // 27: rafiki.executor.v1.ReadTreeResponse.header:type_name -> rafiki.executor.v1.TreeHeader
 	55, // 28: rafiki.executor.v1.WriteTreeRequest.start:type_name -> rafiki.executor.v1.WriteTreeStart
 	57, // 29: rafiki.executor.v1.GitRefsResponse.heads:type_name -> rafiki.executor.v1.GitRef
@@ -4502,7 +4502,7 @@ var file_executor_proto_depIdxs = []int32{
 	31, // 41: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
 	41, // 42: rafiki.executor.v1.ExecutorService.SyncSkills:input_type -> rafiki.executor.v1.SyncSkillsRequest
 	44, // 43: rafiki.executor.v1.ExecutorService.SyncPyModules:input_type -> rafiki.executor.v1.SyncPyModulesRequest
-	49, // 44: rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource:input_type -> rafiki.executor.v1.SyncPyModuleGitSourceRequest
+	49, // 44: rafiki.executor.v1.ExecutorService.SyncRepo:input_type -> rafiki.executor.v1.SyncRepoRequest
 	51, // 45: rafiki.executor.v1.ExecutorService.ReadTree:input_type -> rafiki.executor.v1.ReadTreeRequest
 	54, // 46: rafiki.executor.v1.ExecutorService.WriteTree:input_type -> rafiki.executor.v1.WriteTreeRequest
 	58, // 47: rafiki.executor.v1.ExecutorService.GitRefs:input_type -> rafiki.executor.v1.GitRefsRequest
@@ -4523,7 +4523,7 @@ var file_executor_proto_depIdxs = []int32{
 	32, // 62: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
 	42, // 63: rafiki.executor.v1.ExecutorService.SyncSkills:output_type -> rafiki.executor.v1.SyncSkillsResponse
 	45, // 64: rafiki.executor.v1.ExecutorService.SyncPyModules:output_type -> rafiki.executor.v1.SyncPyModulesResponse
-	50, // 65: rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource:output_type -> rafiki.executor.v1.SyncPyModuleGitSourceResponse
+	50, // 65: rafiki.executor.v1.ExecutorService.SyncRepo:output_type -> rafiki.executor.v1.SyncRepoResponse
 	52, // 66: rafiki.executor.v1.ExecutorService.ReadTree:output_type -> rafiki.executor.v1.ReadTreeResponse
 	56, // 67: rafiki.executor.v1.ExecutorService.WriteTree:output_type -> rafiki.executor.v1.WriteTreeResponse
 	59, // 68: rafiki.executor.v1.ExecutorService.GitRefs:output_type -> rafiki.executor.v1.GitRefsResponse

@@ -130,7 +130,7 @@ func (h *sandboxHarness) startLauncher(t *testing.T) {
 		"--sandbox-mount-root", h.mountRoot,
 		"--relay-dir", h.relayDir,
 	)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+launcherHome,
 		"XDG_RUNTIME_DIR="+launcherHome,
 		"XDG_STATE_HOME="+launcherHome,
@@ -572,7 +572,7 @@ func (h *sandboxHarness) enrollOrdinaryExecutor(t *testing.T) {
 		"--credential-file", filepath.Join(t.TempDir(), "cred"),
 		"--root", t.TempDir(),
 	)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+home, "XDG_RUNTIME_DIR="+home, "XDG_STATE_HOME="+home,
 		"XDG_DATA_HOME="+home, "XDG_CONFIG_HOME="+home,
 	)
@@ -783,7 +783,7 @@ func restartDaemon(t *testing.T, old *daemon, daemonID string, extraEnv ...strin
 	t.Helper()
 	c := assert.NewAborting(t)
 	cmd := exec.Command(daemonBinary())
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+old.homeDir,
 		"XDG_RUNTIME_DIR="+old.homeDir,
 		"XDG_STATE_HOME="+old.homeDir,

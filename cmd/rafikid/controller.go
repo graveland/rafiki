@@ -44,7 +44,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
@@ -58,6 +57,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -440,10 +440,10 @@ type Controller struct {
 	skillPusher    *skillPusher
 	pymodulePusher *pymodulePusher
 
-	// gitpymodulePusher fans a registered git source's refresh out to the
+	// repoPusher fans a registered repo's refresh out to the
 	// owner's eligible executors and caches each latest reported inventory.
 	// Nil under the same condition as pymodulePusher.
-	gitpymodulePusher *gitPymodulePusher
+	repoPusher *repoPusher
 
 	// pymoduleStore is the owner-scoped pymodule backend, read by the
 	// pymoduleWriter bound into each fundi child (agent_pymodules.go) and by
@@ -483,11 +483,11 @@ type Controller struct {
 	displayDone    chan struct{}
 	displayCancel  context.CancelFunc
 
-	// gitpymoduleStore is the owner-scoped git-source backend (the `repo`
+	// repoStore is the owner-scoped repo backend (the `repo`
 	// scopes the pymodule tool surface addresses). Nil when the daemon has no
-	// database: `rafiki python repo` answers that the backend is not wired,
+	// database: `rafiki repo` answers that the backend is not wired,
 	// the same DB-less posture the blob store has.
-	gitpymoduleStore gitpymodules.Store
+	repoStore repos.Store
 
 	// execStore is the durable executor registry. Nil when the executor
 	// listener is not configured (require the pool to mint tokens).
@@ -2755,7 +2755,7 @@ func (c *Controller) resumeOwnerUserID(ctx context.Context, childID string, snap
 // resumeOwnerUserID performs (active rows only — a tombstone must never
 // receive an attribution). It returns (id, found, err): found=false with a
 // NIL error means the label names no active user (empty name, no store, or
-// users.ErrNotFound) — the git pusher reads that as the UNATTRIBUTED owner,
+// users.ErrNotFound) — the repo pusher reads that as the UNATTRIBUTED owner,
 // the blob pusher as "push nothing". found=false with an ERROR means the
 // store itself failed: a caller must skip on that, never read it as
 // unattributed, or a store outage would hand anonymous sources to a user's

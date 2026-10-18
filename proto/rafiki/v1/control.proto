@@ -1230,10 +1230,10 @@ service Control {
   rpc GetPymodule(GetPymoduleRequest) returns (GetPymoduleResponse);
   rpc PutPymodule(PutPymoduleRequest) returns (PutPymoduleResponse);
   rpc DeletePymodule(DeletePymoduleRequest) returns (DeletePymoduleResponse);
-  rpc AddPymoduleGitSource(AddPymoduleGitSourceRequest) returns (AddPymoduleGitSourceResponse);
-  rpc ListPymoduleGitSources(ListPymoduleGitSourcesRequest) returns (ListPymoduleGitSourcesResponse);
-  rpc RefreshPymoduleGitSource(RefreshPymoduleGitSourceRequest) returns (RefreshPymoduleGitSourceResponse);
-  rpc RemovePymoduleGitSource(RemovePymoduleGitSourceRequest) returns (RemovePymoduleGitSourceResponse);
+  rpc AddRepo(AddRepoRequest) returns (AddRepoResponse);
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+  rpc RefreshRepo(RefreshRepoRequest) returns (RefreshRepoResponse);
+  rpc RemoveRepo(RemoveRepoRequest) returns (RemoveRepoResponse);
   rpc ListPresets(ListPresetsRequest) returns (ListPresetsResponse);
   rpc GetPreset(GetPresetRequest) returns (GetPresetResponse);
   rpc PutPreset(PutPresetRequest) returns (PutPresetResponse);
@@ -1386,8 +1386,8 @@ message PymoduleRow {
   // omit it -- an inventory is not a document.
   string code = 5;
   // repo names the scope the row came from: "local" for the blob store
-  // (every row that predates git sources), otherwise the name of the git
-  // source the module was discovered in.
+  // (every row that predates repos), otherwise the name of the repo the
+  // module was discovered in.
   string repo = 6;
 
   reserved 4;
@@ -1396,7 +1396,7 @@ message PymoduleRow {
 message ListPymodulesRequest {
   // repo is an optional scope filter: empty lists every pymodule the caller
   // owns across all scopes, "local" the blob-store rows only, otherwise the
-  // named git source's discovered inventory.
+  // named repo's discovered inventory.
   string repo = 1;
 }
 message ListPymodulesResponse { repeated PymoduleRow rows = 1; }
@@ -1415,56 +1415,56 @@ message PutPymoduleResponse { PymoduleRow row = 1; }
 message DeletePymoduleRequest { string name = 1; }
 message DeletePymoduleResponse {}
 
-// GitSourceRow is one registered git source: the human label used as the
+// RepoRow is one registered repo: the human label used as the
 // `repo` argument everywhere, plus the url and ref it was registered with.
-message GitSourceRow {
+message RepoRow {
   string name = 1;
   string url = 2;
   string ref = 3;
 }
 
-message AddPymoduleGitSourceRequest {
+message AddRepoRequest {
   // name is the human label, and must not be "local": that name is reserved
-  // for the blob store, and a git source registered under it would make
+  // for the blob store, and a repo registered under it would make
   // repo="local" ambiguous.
   string name = 1;
   string url = 2;
   string ref = 3;
 }
-message AddPymoduleGitSourceResponse { GitSourceRow row = 1; }
+message AddRepoResponse { RepoRow row = 1; }
 
-message ListPymoduleGitSourcesRequest {}
-message ListPymoduleGitSourcesResponse { repeated GitSourceRow rows = 1; }
+message ListReposRequest {}
+message ListReposResponse { repeated RepoRow rows = 1; }
 
-message RefreshPymoduleGitSourceRequest { string name = 1; }
+message RefreshRepoRequest { string name = 1; }
 
-// GitSourceScript and GitSourcePackage deliberately duplicate the executor
+// RepoScript and RepoPackage deliberately duplicate the executor
 // protocol's messages of the same names rather than importing across the two
 // proto packages: the daemon-client wire format and the daemon-executor wire
 // format stay dependency-free on each other.
-message GitSourceScript {
+message RepoScript {
   string name = 1;
   string description = 2;
 }
-message GitSourcePackage {
+message RepoPackage {
   string name = 1;
   string description = 2;
 }
 
-message RefreshPymoduleGitSourceResponse {
+message RefreshRepoResponse {
   // name echoes the source this inventory belongs to. A caller refreshing
-  // several sources in turn (`rafiki python repo refresh` with no name
+  // several sources in turn (`rafiki repo refresh` with no name
   // refreshes them all) attributes each response by this field alone; without
   // it a row of the multi-source JSON output names nothing.
   string name = 5;
-  repeated GitSourceScript scripts = 1;
-  repeated GitSourcePackage packages = 2;
+  repeated RepoScript scripts = 1;
+  repeated RepoPackage packages = 2;
   bool venv_ready = 3;
   string venv_error = 4;
 }
 
-message RemovePymoduleGitSourceRequest { string name = 1; }
-message RemovePymoduleGitSourceResponse {}
+message RemoveRepoRequest { string name = 1; }
+message RemoveRepoResponse {}
 
 // StringList wraps a repeated string so a preset allowlist can be ABSENT
 // (unset: the kind's default), PRESENT-AND-EMPTY (none), or a list --

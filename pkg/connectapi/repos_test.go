@@ -10,22 +10,22 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 
 	"github.com/multigres/testkit/assert"
 )
 
-// fakeGitSources records every call the handlers make, so a test can assert
+// fakeRepos records every call the handlers make, so a test can assert
 // the handler passed the request through unchanged and mapped the result.
-type fakeGitSources struct {
-	addRow  GitSourceRow
+type fakeRepos struct {
+	addRow  RepoRow
 	addErr  error
-	rows    []GitSourceRow
+	rows    []RepoRow
 	listErr error
 
-	refreshed string // the name the last RefreshGitSource got
-	scripts   []GitSourceScript
-	packages  []GitSourcePackage
+	refreshed string // the name the last RefreshRepo got
+	scripts   []RepoScript
+	packages  []RepoPackage
 	venvReady bool
 	venvError string
 	refreshEr error
@@ -34,22 +34,22 @@ type fakeGitSources struct {
 	delErr  error
 }
 
-func (f *fakeGitSources) AddGitSource(_ context.Context, name, url, ref string) (GitSourceRow, error) {
+func (f *fakeRepos) AddRepo(_ context.Context, name, url, ref string) (RepoRow, error) {
 	if f.addErr != nil {
-		return GitSourceRow{}, f.addErr
+		return RepoRow{}, f.addErr
 	}
-	f.addRow = GitSourceRow{Name: name, URL: url, Ref: ref}
+	f.addRow = RepoRow{Name: name, URL: url, Ref: ref}
 	return f.addRow, nil
 }
 
-func (f *fakeGitSources) ListGitSources(context.Context) ([]GitSourceRow, error) {
+func (f *fakeRepos) ListRepos(context.Context) ([]RepoRow, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 	return f.rows, nil
 }
 
-func (f *fakeGitSources) RefreshGitSource(_ context.Context, name string) ([]GitSourceScript, []GitSourcePackage, bool, string, error) {
+func (f *fakeRepos) RefreshRepo(_ context.Context, name string) ([]RepoScript, []RepoPackage, bool, string, error) {
 	f.refreshed = name
 	if f.refreshEr != nil {
 		return nil, nil, false, "", f.refreshEr
@@ -57,7 +57,7 @@ func (f *fakeGitSources) RefreshGitSource(_ context.Context, name string) ([]Git
 	return f.scripts, f.packages, f.venvReady, f.venvError, nil
 }
 
-func (f *fakeGitSources) RemoveGitSource(_ context.Context, name string) error {
+func (f *fakeRepos) RemoveRepo(_ context.Context, name string) error {
 	if f.delErr != nil {
 		return f.delErr
 	}
@@ -65,29 +65,29 @@ func (f *fakeGitSources) RemoveGitSource(_ context.Context, name string) error {
 	return nil
 }
 
-// TestGitPymoduleManagerUnavailableBeforeWiring mirrors TestPymodulesUnwired:
-// with no manager attached, all four git-source verbs answer CodeUnavailable
+// TestRepoManagerUnavailableBeforeWiring mirrors TestPymodulesUnwired:
+// with no manager attached, all four repo verbs answer CodeUnavailable
 // rather than nil-panicking or pretending success.
-func TestGitPymoduleManagerUnavailableBeforeWiring(t *testing.T) {
+func TestRepoManagerUnavailableBeforeWiring(t *testing.T) {
 	s := &Server{}
 	for _, call := range []struct {
 		name string
 		fn   func() error
 	}{
-		{"AddPymoduleGitSource", func() error {
-			_, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{Name: "x", Url: "u"}))
+		{"AddRepo", func() error {
+			_, err := s.AddRepo(context.Background(), connect.NewRequest(&rafikiv1.AddRepoRequest{Name: "x", Url: "u"}))
 			return err
 		}},
-		{"ListPymoduleGitSources", func() error {
-			_, err := s.ListPymoduleGitSources(context.Background(), connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
+		{"ListRepos", func() error {
+			_, err := s.ListRepos(context.Background(), connect.NewRequest(&rafikiv1.ListReposRequest{}))
 			return err
 		}},
-		{"RefreshPymoduleGitSource", func() error {
-			_, err := s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "x"}))
+		{"RefreshRepo", func() error {
+			_, err := s.RefreshRepo(context.Background(), connect.NewRequest(&rafikiv1.RefreshRepoRequest{Name: "x"}))
 			return err
 		}},
-		{"RemovePymoduleGitSource", func() error {
-			_, err := s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "x"}))
+		{"RemoveRepo", func() error {
+			_, err := s.RemoveRepo(context.Background(), connect.NewRequest(&rafikiv1.RemoveRepoRequest{Name: "x"}))
 			return err
 		}},
 	} {
@@ -100,61 +100,61 @@ func TestGitPymoduleManagerUnavailableBeforeWiring(t *testing.T) {
 	}
 }
 
-// TestAddPymoduleGitSourceRejectsEmptyName: an empty name can never become
+// TestAddRepoRejectsEmptyName: an empty name can never become
 // the `repo` argument, and the reserved "local" would make repo="local"
-// ambiguous between the blob store and a git source — both refused before
+// ambiguous between the blob store and a repo — both refused before
 // the manager is touched.
-func TestAddPymoduleGitSourceRejectsEmptyName(t *testing.T) {
+func TestAddRepoRejectsEmptyName(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := &Server{}
-	f := &fakeGitSources{}
-	s.SetGitSourceManager(f)
+	f := &fakeRepos{}
+	s.SetRepoManager(f)
 
 	for _, name := range []string{"", "local"} {
-		_, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{Name: name, Url: "https://example.net/x.git"}))
+		_, err := s.AddRepo(context.Background(), connect.NewRequest(&rafikiv1.AddRepoRequest{Name: name, Url: "https://example.net/x.git"}))
 		c.Require().Error(err, "add with name %q: accepted", name)
 		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "add with name %q: got code %v, want InvalidArgument", name, connect.CodeOf(err))
 	}
-	c.Eq((GitSourceRow{}), f.addRow, "manager was called despite the rejections")
+	c.Eq((RepoRow{}), f.addRow, "manager was called despite the rejections")
 }
 
-// TestAddPymoduleGitSourceRejectsEmptyURL: a git source without a url has
+// TestAddRepoRejectsEmptyURL: a repo without a url has
 // nothing for the executor to clone.
-func TestAddPymoduleGitSourceRejectsEmptyURL(t *testing.T) {
+func TestAddRepoRejectsEmptyURL(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := &Server{}
-	f := &fakeGitSources{}
-	s.SetGitSourceManager(f)
+	f := &fakeRepos{}
+	s.SetRepoManager(f)
 
-	_, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{Name: "ops_tools", Url: ""}))
+	_, err := s.AddRepo(context.Background(), connect.NewRequest(&rafikiv1.AddRepoRequest{Name: "ops_tools", Url: ""}))
 	c.Require().Error(err, "add without url: accepted")
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "add without url: got code")
-	c.Eq((GitSourceRow{}), f.addRow, "manager was called despite the rejection")
+	c.Eq((RepoRow{}), f.addRow, "manager was called despite the rejection")
 }
 
-// TestSetGitSourceManagerNilIsRefused: SetGitSourceManager(nil) is refused,
+// TestSetRepoManagerNilIsRefused: SetRepoManager(nil) is refused,
 // not stored — a stored pointer to a nil interface would defeat the
 // Unavailable path above and nil-panic the first handler call instead.
-func TestSetGitSourceManagerNilIsRefused(t *testing.T) {
+func TestSetRepoManagerNilIsRefused(t *testing.T) {
 	s := &Server{}
-	s.SetGitSourceManager(nil)
-	_, err := s.ListPymoduleGitSources(context.Background(), connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
-	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetGitSourceManager(nil): got code")
+	s.SetRepoManager(nil)
+	_, err := s.ListRepos(context.Background(), connect.NewRequest(&rafikiv1.ListReposRequest{}))
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetRepoManager(nil): got code")
 }
 
-// TestGitPymoduleHandlersPassThroughToManager pins the handler contract on a
+// TestRepoHandlersPassThroughToManager pins the handler contract on a
 // wired manager: arguments pass through unchanged, the response maps the
 // manager's rows, an unknown name maps to NotFound, a store failure maps to
 // Internal, and validation failures never reach the manager.
-func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
+func TestRepoHandlersPassThroughToManager(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := &Server{}
 
 	// Add passes (name, url, ref) through and returns the row; an empty ref
 	// stays an empty ref (the CLI defaults it, the daemon stores what it got).
-	f := &fakeGitSources{}
-	s.SetGitSourceManager(f)
-	resp, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{
+	f := &fakeRepos{}
+	s.SetRepoManager(f)
+	resp, err := s.AddRepo(context.Background(), connect.NewRequest(&rafikiv1.AddRepoRequest{
 		Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
 	}))
 	c.Require().NoError(err, "add")
@@ -166,11 +166,11 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	}
 
 	// List maps rows verbatim.
-	s.SetGitSourceManager(&fakeGitSources{rows: []GitSourceRow{
+	s.SetRepoManager(&fakeRepos{rows: []RepoRow{
 		{Name: "ops_tools", URL: "https://example.net/ops.git", Ref: "main"},
 		{Name: "shared_lib", URL: "https://example.net/lib.git", Ref: "v2"},
 	}})
-	lresp, err := s.ListPymoduleGitSources(context.Background(), connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
+	lresp, err := s.ListRepos(context.Background(), connect.NewRequest(&rafikiv1.ListReposRequest{}))
 	c.Require().NoError(err, "list")
 	c.Require().Len(lresp.Msg.GetRows(), 2, "list returned %d rows, want 2", len(lresp.Msg.GetRows()))
 	if lresp.Msg.GetRows()[0].GetName() != "ops_tools" || lresp.Msg.GetRows()[0].GetRef() != "main" {
@@ -178,12 +178,12 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	}
 
 	// Refresh maps scripts/packages and the venv state.
-	s.SetGitSourceManager(&fakeGitSources{
-		scripts:   []GitSourceScript{{Name: "rotate_keys", Description: "rotate keys"}},
-		packages:  []GitSourcePackage{{Name: "opslib", Description: "shared ops helpers"}},
+	s.SetRepoManager(&fakeRepos{
+		scripts:   []RepoScript{{Name: "rotate_keys", Description: "rotate keys"}},
+		packages:  []RepoPackage{{Name: "opslib", Description: "shared ops helpers"}},
 		venvReady: true,
 	})
-	rresp, err := s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "ops_tools"}))
+	rresp, err := s.RefreshRepo(context.Background(), connect.NewRequest(&rafikiv1.RefreshRepoRequest{Name: "ops_tools"}))
 	c.Require().NoError(err, "refresh")
 	c.Eq(1, len(rresp.Msg.GetScripts()), "refresh returned")
 	c.Eq(1, len(rresp.Msg.GetPackages()), "refresh returned")
@@ -193,8 +193,8 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	c.Eq("ops_tools", rresp.Msg.GetName(), "refresh response does not echo the source name")
 
 	// A venv failure stays in the response: the refresh itself succeeded.
-	s.SetGitSourceManager(&fakeGitSources{venvReady: false, venvError: "uv sync failed"})
-	rresp, err = s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "ops_tools"}))
+	s.SetRepoManager(&fakeRepos{venvReady: false, venvError: "uv sync failed"})
+	rresp, err = s.RefreshRepo(context.Background(), connect.NewRequest(&rafikiv1.RefreshRepoRequest{Name: "ops_tools"}))
 	c.Require().NoError(err, "refresh with failed venv")
 	if rresp.Msg.GetVenvReady() || rresp.Msg.GetVenvError() != "uv sync failed" {
 		t.Errorf("refresh response lost the venv failure: ready=%v error=%q", rresp.Msg.GetVenvReady(), rresp.Msg.GetVenvError())
@@ -202,37 +202,37 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 
 	// Remove records the name; a never-registered name maps ErrNotFound to
 	// CodeNotFound, and a store failure maps to Internal.
-	f = &fakeGitSources{}
-	s.SetGitSourceManager(f)
-	if _, err := s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "ops_tools"})); err != nil {
+	f = &fakeRepos{}
+	s.SetRepoManager(f)
+	if _, err := s.RemoveRepo(context.Background(), connect.NewRequest(&rafikiv1.RemoveRepoRequest{Name: "ops_tools"})); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	c.Eq("ops_tools", f.removed, "manager removed")
 
-	s.SetGitSourceManager(&fakeGitSources{delErr: gitpymodules.ErrNotFound})
-	_, err = s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "gone"}))
+	s.SetRepoManager(&fakeRepos{delErr: repos.ErrNotFound})
+	_, err = s.RemoveRepo(context.Background(), connect.NewRequest(&rafikiv1.RemoveRepoRequest{Name: "gone"}))
 	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "remove of unknown name: got code")
 
 	boom := errors.New("connection refused")
-	s.SetGitSourceManager(&fakeGitSources{delErr: boom})
-	_, err = s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "x"}))
+	s.SetRepoManager(&fakeRepos{delErr: boom})
+	_, err = s.RemoveRepo(context.Background(), connect.NewRequest(&rafikiv1.RemoveRepoRequest{Name: "x"}))
 	c.Eq(connect.CodeInternal, connect.CodeOf(err), "remove store failure: got code")
 
 	// A malformed name is refused before the manager, on every verb that
 	// takes one — the store would reject it too, but the handler owes the
 	// caller the InvalidArgument-shaped answer.
-	f = &fakeGitSources{}
-	s.SetGitSourceManager(f)
+	f = &fakeRepos{}
+	s.SetRepoManager(f)
 	for _, tc := range []struct {
 		name string
 		call func() error
 	}{
 		{"refresh", func() error {
-			_, err := s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "bad.name"}))
+			_, err := s.RefreshRepo(context.Background(), connect.NewRequest(&rafikiv1.RefreshRepoRequest{Name: "bad.name"}))
 			return err
 		}},
 		{"remove", func() error {
-			_, err := s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "bad.name"}))
+			_, err := s.RemoveRepo(context.Background(), connect.NewRequest(&rafikiv1.RemoveRepoRequest{Name: "bad.name"}))
 			return err
 		}},
 	} {
@@ -245,12 +245,12 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	}
 }
 
-// TestGitPymoduleAddValidationShim is a shim so the verify pattern (-run
-// TestGitPymodule, an UNANCHORED substring match) also runs the three pinned
+// TestRepoAddValidationShim is a shim so the verify pattern (-run
+// TestRepo, an UNANCHORED substring match) also runs the three pinned
 // tests above, whose names do not contain the pattern — the same trick
 // cmd/rafikid/pymodulesync_test.go uses for its pinned payload-builder test.
-func TestGitPymoduleAddValidationShim(t *testing.T) {
-	t.Run("empty name", TestAddPymoduleGitSourceRejectsEmptyName)
-	t.Run("empty url", TestAddPymoduleGitSourceRejectsEmptyURL)
-	t.Run("nil manager refused", TestSetGitSourceManagerNilIsRefused)
+func TestRepoAddValidationShim(t *testing.T) {
+	t.Run("empty name", TestAddRepoRejectsEmptyName)
+	t.Run("empty url", TestAddRepoRejectsEmptyURL)
+	t.Run("nil manager refused", TestSetRepoManagerNilIsRefused)
 }

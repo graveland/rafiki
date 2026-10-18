@@ -24,14 +24,14 @@ func newMCPPyModuleLister(ctrl *Controller, owner users.Identity) *mcpPyModuleLi
 }
 
 // List spans the same scopes the fundi skill body renders: the caller's own
-// store ("local") plus every git source's cached inventory. repo scopes it —
+// store ("local") plus every repo's cached inventory. repo scopes it —
 // empty means everything, "local" narrows to the blob store, any other value
-// names one git source (unknown name: empty result, not an error). A nil
-// gitpymodulePusher (no exec pool) contributes no git section, never an
+// names one repo (unknown name: empty result, not an error). A nil
+// repoPusher (no exec pool) contributes no git section, never an
 // error.
 func (l *mcpPyModuleLister) List(ctx context.Context, repo string) ([]tools.PyModuleInfo, error) {
 	out := make([]tools.PyModuleInfo, 0)
-	// "local" is in every span except one narrowed to another git source.
+	// "local" is in every span except one narrowed to another repo.
 	if repo == "" || repo == pymodules.LocalRepo {
 		recs, err := l.ctrl.pymoduleStore.List(ctx, l.ownerUserID)
 		if err != nil {
@@ -41,18 +41,18 @@ func (l *mcpPyModuleLister) List(ctx context.Context, repo string) ([]tools.PyMo
 			out = append(out, tools.PyModuleInfo{Repo: pymodules.LocalRepo, Name: r.Name, Description: r.Description})
 		}
 	}
-	if l.ctrl.gitpymodulePusher == nil {
+	if l.ctrl.repoPusher == nil {
 		return out, nil
 	}
 	if repo == "" {
-		out = append(out, gitPymoduleInfos(l.ctrl.gitpymodulePusher, l.ownerUserID)...)
+		out = append(out, repoInfos(l.ctrl.repoPusher, l.ownerUserID)...)
 		return out, nil
 	}
 	if repo != pymodules.LocalRepo {
-		// One named git source; an unknown name yields an empty result, not
+		// One named repo; an unknown name yields an empty result, not
 		// an error.
-		if inv, ok := l.ctrl.gitpymodulePusher.inventoryFor(l.ownerUserID, repo); ok {
-			out = append(out, gitSourcePymoduleInfos(repo, inv)...)
+		if inv, ok := l.ctrl.repoPusher.inventoryFor(l.ownerUserID, repo); ok {
+			out = append(out, repoPymoduleInfos(repo, inv)...)
 			sortPyModuleInfos(out)
 		}
 	}
@@ -60,9 +60,9 @@ func (l *mcpPyModuleLister) List(ctx context.Context, repo string) ([]tools.PyMo
 }
 
 const mcpPymoduleListDescription = "List the pymodules available to you: what you've " +
-	"saved with pymodule_put (repo \"local\") plus what your git sources provide, " +
+	"saved with pymodule_put (repo \"local\") plus what your repos provide, " +
 	"each entry labeled with the repo it came from. Optional `repo` narrows to one " +
-	"source (\"local\" or a git source name); omit it to see everything. Use " +
+	"source (\"local\" or a repo name); omit it to see everything. Use " +
 	"pymodule_put to save a new one or a new version, pymodule_delete to remove one."
 
 // mcpPyModuleListBlueprint implements tools.Tool + tools.Materializer
@@ -78,7 +78,7 @@ func (mcpPyModuleListBlueprint) InputSchema() tools.Schema {
 	return tools.Schema{
 		Type: "object",
 		Properties: []tools.SchemaProperty{
-			{Name: "repo", Type: "string", Description: "Optional: narrow to one source (\"local\" or a git source name). Omit to see everything."},
+			{Name: "repo", Type: "string", Description: "Optional: narrow to one source (\"local\" or a repo name). Omit to see everything."},
 		},
 	}
 }
@@ -118,7 +118,7 @@ func (t *mcpPyModuleListTool) Execute(ctx context.Context, input tools.ToolInput
 	var b strings.Builder
 	for _, i := range infos {
 		// Same labeling the fundi skill body uses: a local row is the bare
-		// name, a git-sourced row carries its source -- "reponame/name" --
+		// name, a repo-sourced row carries its source -- "reponame/name" --
 		// so the caller can tell which repo value to pass back.
 		label := i.Name
 		if i.Repo != "" && i.Repo != pymodules.LocalRepo {

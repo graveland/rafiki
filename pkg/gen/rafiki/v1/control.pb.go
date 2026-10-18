@@ -7584,8 +7584,8 @@ type PymoduleRow struct {
 	// omit it -- an inventory is not a document.
 	Code string `protobuf:"bytes,5,opt,name=code,proto3" json:"code,omitempty"`
 	// repo names the scope the row came from: "local" for the blob store
-	// (every row that predates git sources), otherwise the name of the git
-	// source the module was discovered in.
+	// (every row that predates repos), otherwise the name of the repo the
+	// module was discovered in.
 	Repo          string `protobuf:"bytes,6,opt,name=repo,proto3" json:"repo,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -7667,7 +7667,7 @@ type ListPymodulesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// repo is an optional scope filter: empty lists every pymodule the caller
 	// owns across all scopes, "local" the blob-store rows only, otherwise the
-	// named git source's discovered inventory.
+	// named repo's discovered inventory.
 	Repo          string `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -8027,9 +8027,9 @@ func (*DeletePymoduleResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{105}
 }
 
-// GitSourceRow is one registered git source: the human label used as the
+// RepoRow is one registered repo: the human label used as the
 // `repo` argument everywhere, plus the url and ref it was registered with.
-type GitSourceRow struct {
+type RepoRow struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Url           string                 `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
@@ -8038,20 +8038,20 @@ type GitSourceRow struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GitSourceRow) Reset() {
-	*x = GitSourceRow{}
+func (x *RepoRow) Reset() {
+	*x = RepoRow{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GitSourceRow) String() string {
+func (x *RepoRow) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GitSourceRow) ProtoMessage() {}
+func (*RepoRow) ProtoMessage() {}
 
-func (x *GitSourceRow) ProtoReflect() protoreflect.Message {
+func (x *RepoRow) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8063,36 +8063,36 @@ func (x *GitSourceRow) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GitSourceRow.ProtoReflect.Descriptor instead.
-func (*GitSourceRow) Descriptor() ([]byte, []int) {
+// Deprecated: Use RepoRow.ProtoReflect.Descriptor instead.
+func (*RepoRow) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{106}
 }
 
-func (x *GitSourceRow) GetName() string {
+func (x *RepoRow) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *GitSourceRow) GetUrl() string {
+func (x *RepoRow) GetUrl() string {
 	if x != nil {
 		return x.Url
 	}
 	return ""
 }
 
-func (x *GitSourceRow) GetRef() string {
+func (x *RepoRow) GetRef() string {
 	if x != nil {
 		return x.Ref
 	}
 	return ""
 }
 
-type AddPymoduleGitSourceRequest struct {
+type AddRepoRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name is the human label, and must not be "local": that name is reserved
-	// for the blob store, and a git source registered under it would make
+	// for the blob store, and a repo registered under it would make
 	// repo="local" ambiguous.
 	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Url           string `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
@@ -8101,20 +8101,20 @@ type AddPymoduleGitSourceRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AddPymoduleGitSourceRequest) Reset() {
-	*x = AddPymoduleGitSourceRequest{}
+func (x *AddRepoRequest) Reset() {
+	*x = AddRepoRequest{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AddPymoduleGitSourceRequest) String() string {
+func (x *AddRepoRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AddPymoduleGitSourceRequest) ProtoMessage() {}
+func (*AddRepoRequest) ProtoMessage() {}
 
-func (x *AddPymoduleGitSourceRequest) ProtoReflect() protoreflect.Message {
+func (x *AddRepoRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8126,53 +8126,53 @@ func (x *AddPymoduleGitSourceRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AddPymoduleGitSourceRequest.ProtoReflect.Descriptor instead.
-func (*AddPymoduleGitSourceRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use AddRepoRequest.ProtoReflect.Descriptor instead.
+func (*AddRepoRequest) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{107}
 }
 
-func (x *AddPymoduleGitSourceRequest) GetName() string {
+func (x *AddRepoRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *AddPymoduleGitSourceRequest) GetUrl() string {
+func (x *AddRepoRequest) GetUrl() string {
 	if x != nil {
 		return x.Url
 	}
 	return ""
 }
 
-func (x *AddPymoduleGitSourceRequest) GetRef() string {
+func (x *AddRepoRequest) GetRef() string {
 	if x != nil {
 		return x.Ref
 	}
 	return ""
 }
 
-type AddPymoduleGitSourceResponse struct {
+type AddRepoResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Row           *GitSourceRow          `protobuf:"bytes,1,opt,name=row,proto3" json:"row,omitempty"`
+	Row           *RepoRow               `protobuf:"bytes,1,opt,name=row,proto3" json:"row,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AddPymoduleGitSourceResponse) Reset() {
-	*x = AddPymoduleGitSourceResponse{}
+func (x *AddRepoResponse) Reset() {
+	*x = AddRepoResponse{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AddPymoduleGitSourceResponse) String() string {
+func (x *AddRepoResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AddPymoduleGitSourceResponse) ProtoMessage() {}
+func (*AddRepoResponse) ProtoMessage() {}
 
-func (x *AddPymoduleGitSourceResponse) ProtoReflect() protoreflect.Message {
+func (x *AddRepoResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8184,38 +8184,38 @@ func (x *AddPymoduleGitSourceResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AddPymoduleGitSourceResponse.ProtoReflect.Descriptor instead.
-func (*AddPymoduleGitSourceResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use AddRepoResponse.ProtoReflect.Descriptor instead.
+func (*AddRepoResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{108}
 }
 
-func (x *AddPymoduleGitSourceResponse) GetRow() *GitSourceRow {
+func (x *AddRepoResponse) GetRow() *RepoRow {
 	if x != nil {
 		return x.Row
 	}
 	return nil
 }
 
-type ListPymoduleGitSourcesRequest struct {
+type ListReposRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListPymoduleGitSourcesRequest) Reset() {
-	*x = ListPymoduleGitSourcesRequest{}
+func (x *ListReposRequest) Reset() {
+	*x = ListReposRequest{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListPymoduleGitSourcesRequest) String() string {
+func (x *ListReposRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListPymoduleGitSourcesRequest) ProtoMessage() {}
+func (*ListReposRequest) ProtoMessage() {}
 
-func (x *ListPymoduleGitSourcesRequest) ProtoReflect() protoreflect.Message {
+func (x *ListReposRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8227,32 +8227,32 @@ func (x *ListPymoduleGitSourcesRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListPymoduleGitSourcesRequest.ProtoReflect.Descriptor instead.
-func (*ListPymoduleGitSourcesRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListReposRequest.ProtoReflect.Descriptor instead.
+func (*ListReposRequest) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{109}
 }
 
-type ListPymoduleGitSourcesResponse struct {
+type ListReposResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Rows          []*GitSourceRow        `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	Rows          []*RepoRow             `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListPymoduleGitSourcesResponse) Reset() {
-	*x = ListPymoduleGitSourcesResponse{}
+func (x *ListReposResponse) Reset() {
+	*x = ListReposResponse{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListPymoduleGitSourcesResponse) String() string {
+func (x *ListReposResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListPymoduleGitSourcesResponse) ProtoMessage() {}
+func (*ListReposResponse) ProtoMessage() {}
 
-func (x *ListPymoduleGitSourcesResponse) ProtoReflect() protoreflect.Message {
+func (x *ListReposResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8264,39 +8264,39 @@ func (x *ListPymoduleGitSourcesResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListPymoduleGitSourcesResponse.ProtoReflect.Descriptor instead.
-func (*ListPymoduleGitSourcesResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListReposResponse.ProtoReflect.Descriptor instead.
+func (*ListReposResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{110}
 }
 
-func (x *ListPymoduleGitSourcesResponse) GetRows() []*GitSourceRow {
+func (x *ListReposResponse) GetRows() []*RepoRow {
 	if x != nil {
 		return x.Rows
 	}
 	return nil
 }
 
-type RefreshPymoduleGitSourceRequest struct {
+type RefreshRepoRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RefreshPymoduleGitSourceRequest) Reset() {
-	*x = RefreshPymoduleGitSourceRequest{}
+func (x *RefreshRepoRequest) Reset() {
+	*x = RefreshRepoRequest{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RefreshPymoduleGitSourceRequest) String() string {
+func (x *RefreshRepoRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RefreshPymoduleGitSourceRequest) ProtoMessage() {}
+func (*RefreshRepoRequest) ProtoMessage() {}
 
-func (x *RefreshPymoduleGitSourceRequest) ProtoReflect() protoreflect.Message {
+func (x *RefreshRepoRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8308,23 +8308,23 @@ func (x *RefreshPymoduleGitSourceRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RefreshPymoduleGitSourceRequest.ProtoReflect.Descriptor instead.
-func (*RefreshPymoduleGitSourceRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use RefreshRepoRequest.ProtoReflect.Descriptor instead.
+func (*RefreshRepoRequest) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{111}
 }
 
-func (x *RefreshPymoduleGitSourceRequest) GetName() string {
+func (x *RefreshRepoRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-// GitSourceScript and GitSourcePackage deliberately duplicate the executor
+// RepoScript and RepoPackage deliberately duplicate the executor
 // protocol's messages of the same names rather than importing across the two
 // proto packages: the daemon-client wire format and the daemon-executor wire
 // format stay dependency-free on each other.
-type GitSourceScript struct {
+type RepoScript struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
@@ -8332,20 +8332,20 @@ type GitSourceScript struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GitSourceScript) Reset() {
-	*x = GitSourceScript{}
+func (x *RepoScript) Reset() {
+	*x = RepoScript{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GitSourceScript) String() string {
+func (x *RepoScript) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GitSourceScript) ProtoMessage() {}
+func (*RepoScript) ProtoMessage() {}
 
-func (x *GitSourceScript) ProtoReflect() protoreflect.Message {
+func (x *RepoScript) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8357,26 +8357,26 @@ func (x *GitSourceScript) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GitSourceScript.ProtoReflect.Descriptor instead.
-func (*GitSourceScript) Descriptor() ([]byte, []int) {
+// Deprecated: Use RepoScript.ProtoReflect.Descriptor instead.
+func (*RepoScript) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{112}
 }
 
-func (x *GitSourceScript) GetName() string {
+func (x *RepoScript) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *GitSourceScript) GetDescription() string {
+func (x *RepoScript) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-type GitSourcePackage struct {
+type RepoPackage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
@@ -8384,20 +8384,20 @@ type GitSourcePackage struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GitSourcePackage) Reset() {
-	*x = GitSourcePackage{}
+func (x *RepoPackage) Reset() {
+	*x = RepoPackage{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GitSourcePackage) String() string {
+func (x *RepoPackage) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GitSourcePackage) ProtoMessage() {}
+func (*RepoPackage) ProtoMessage() {}
 
-func (x *GitSourcePackage) ProtoReflect() protoreflect.Message {
+func (x *RepoPackage) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8409,54 +8409,54 @@ func (x *GitSourcePackage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GitSourcePackage.ProtoReflect.Descriptor instead.
-func (*GitSourcePackage) Descriptor() ([]byte, []int) {
+// Deprecated: Use RepoPackage.ProtoReflect.Descriptor instead.
+func (*RepoPackage) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{113}
 }
 
-func (x *GitSourcePackage) GetName() string {
+func (x *RepoPackage) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *GitSourcePackage) GetDescription() string {
+func (x *RepoPackage) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-type RefreshPymoduleGitSourceResponse struct {
+type RefreshRepoResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name echoes the source this inventory belongs to. A caller refreshing
-	// several sources in turn (`rafiki python repo refresh` with no name
+	// several sources in turn (`rafiki repo refresh` with no name
 	// refreshes them all) attributes each response by this field alone; without
 	// it a row of the multi-source JSON output names nothing.
-	Name          string              `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
-	Scripts       []*GitSourceScript  `protobuf:"bytes,1,rep,name=scripts,proto3" json:"scripts,omitempty"`
-	Packages      []*GitSourcePackage `protobuf:"bytes,2,rep,name=packages,proto3" json:"packages,omitempty"`
-	VenvReady     bool                `protobuf:"varint,3,opt,name=venv_ready,json=venvReady,proto3" json:"venv_ready,omitempty"`
-	VenvError     string              `protobuf:"bytes,4,opt,name=venv_error,json=venvError,proto3" json:"venv_error,omitempty"`
+	Name          string         `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	Scripts       []*RepoScript  `protobuf:"bytes,1,rep,name=scripts,proto3" json:"scripts,omitempty"`
+	Packages      []*RepoPackage `protobuf:"bytes,2,rep,name=packages,proto3" json:"packages,omitempty"`
+	VenvReady     bool           `protobuf:"varint,3,opt,name=venv_ready,json=venvReady,proto3" json:"venv_ready,omitempty"`
+	VenvError     string         `protobuf:"bytes,4,opt,name=venv_error,json=venvError,proto3" json:"venv_error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RefreshPymoduleGitSourceResponse) Reset() {
-	*x = RefreshPymoduleGitSourceResponse{}
+func (x *RefreshRepoResponse) Reset() {
+	*x = RefreshRepoResponse{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RefreshPymoduleGitSourceResponse) String() string {
+func (x *RefreshRepoResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RefreshPymoduleGitSourceResponse) ProtoMessage() {}
+func (*RefreshRepoResponse) ProtoMessage() {}
 
-func (x *RefreshPymoduleGitSourceResponse) ProtoReflect() protoreflect.Message {
+func (x *RefreshRepoResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8468,67 +8468,67 @@ func (x *RefreshPymoduleGitSourceResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RefreshPymoduleGitSourceResponse.ProtoReflect.Descriptor instead.
-func (*RefreshPymoduleGitSourceResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use RefreshRepoResponse.ProtoReflect.Descriptor instead.
+func (*RefreshRepoResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{114}
 }
 
-func (x *RefreshPymoduleGitSourceResponse) GetName() string {
+func (x *RefreshRepoResponse) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *RefreshPymoduleGitSourceResponse) GetScripts() []*GitSourceScript {
+func (x *RefreshRepoResponse) GetScripts() []*RepoScript {
 	if x != nil {
 		return x.Scripts
 	}
 	return nil
 }
 
-func (x *RefreshPymoduleGitSourceResponse) GetPackages() []*GitSourcePackage {
+func (x *RefreshRepoResponse) GetPackages() []*RepoPackage {
 	if x != nil {
 		return x.Packages
 	}
 	return nil
 }
 
-func (x *RefreshPymoduleGitSourceResponse) GetVenvReady() bool {
+func (x *RefreshRepoResponse) GetVenvReady() bool {
 	if x != nil {
 		return x.VenvReady
 	}
 	return false
 }
 
-func (x *RefreshPymoduleGitSourceResponse) GetVenvError() string {
+func (x *RefreshRepoResponse) GetVenvError() string {
 	if x != nil {
 		return x.VenvError
 	}
 	return ""
 }
 
-type RemovePymoduleGitSourceRequest struct {
+type RemoveRepoRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RemovePymoduleGitSourceRequest) Reset() {
-	*x = RemovePymoduleGitSourceRequest{}
+func (x *RemoveRepoRequest) Reset() {
+	*x = RemoveRepoRequest{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RemovePymoduleGitSourceRequest) String() string {
+func (x *RemoveRepoRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RemovePymoduleGitSourceRequest) ProtoMessage() {}
+func (*RemoveRepoRequest) ProtoMessage() {}
 
-func (x *RemovePymoduleGitSourceRequest) ProtoReflect() protoreflect.Message {
+func (x *RemoveRepoRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8540,38 +8540,38 @@ func (x *RemovePymoduleGitSourceRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RemovePymoduleGitSourceRequest.ProtoReflect.Descriptor instead.
-func (*RemovePymoduleGitSourceRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use RemoveRepoRequest.ProtoReflect.Descriptor instead.
+func (*RemoveRepoRequest) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{115}
 }
 
-func (x *RemovePymoduleGitSourceRequest) GetName() string {
+func (x *RemoveRepoRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-type RemovePymoduleGitSourceResponse struct {
+type RemoveRepoResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RemovePymoduleGitSourceResponse) Reset() {
-	*x = RemovePymoduleGitSourceResponse{}
+func (x *RemoveRepoResponse) Reset() {
+	*x = RemoveRepoResponse{}
 	mi := &file_rafiki_v1_control_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RemovePymoduleGitSourceResponse) String() string {
+func (x *RemoveRepoResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RemovePymoduleGitSourceResponse) ProtoMessage() {}
+func (*RemoveRepoResponse) ProtoMessage() {}
 
-func (x *RemovePymoduleGitSourceResponse) ProtoReflect() protoreflect.Message {
+func (x *RemoveRepoResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_control_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8583,8 +8583,8 @@ func (x *RemovePymoduleGitSourceResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RemovePymoduleGitSourceResponse.ProtoReflect.Descriptor instead.
-func (*RemovePymoduleGitSourceResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use RemoveRepoResponse.ProtoReflect.Descriptor instead.
+func (*RemoveRepoResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{116}
 }
 
@@ -15612,39 +15612,40 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x03row\x18\x01 \x01(\v2\x16.rafiki.v1.PymoduleRowR\x03row\"+\n" +
 	"\x15DeletePymoduleRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x18\n" +
-	"\x16DeletePymoduleResponse\"F\n" +
-	"\fGitSourceRow\x12\x12\n" +
+	"\x16DeletePymoduleResponse\"A\n" +
+	"\aRepoRow\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x10\n" +
-	"\x03ref\x18\x03 \x01(\tR\x03ref\"U\n" +
-	"\x1bAddPymoduleGitSourceRequest\x12\x12\n" +
+	"\x03ref\x18\x03 \x01(\tR\x03ref\"H\n" +
+	"\x0eAddRepoRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x10\n" +
-	"\x03ref\x18\x03 \x01(\tR\x03ref\"I\n" +
-	"\x1cAddPymoduleGitSourceResponse\x12)\n" +
-	"\x03row\x18\x01 \x01(\v2\x17.rafiki.v1.GitSourceRowR\x03row\"\x1f\n" +
-	"\x1dListPymoduleGitSourcesRequest\"M\n" +
-	"\x1eListPymoduleGitSourcesResponse\x12+\n" +
-	"\x04rows\x18\x01 \x03(\v2\x17.rafiki.v1.GitSourceRowR\x04rows\"5\n" +
-	"\x1fRefreshPymoduleGitSourceRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"G\n" +
-	"\x0fGitSourceScript\x12\x12\n" +
+	"\x03ref\x18\x03 \x01(\tR\x03ref\"7\n" +
+	"\x0fAddRepoResponse\x12$\n" +
+	"\x03row\x18\x01 \x01(\v2\x12.rafiki.v1.RepoRowR\x03row\"\x12\n" +
+	"\x10ListReposRequest\";\n" +
+	"\x11ListReposResponse\x12&\n" +
+	"\x04rows\x18\x01 \x03(\v2\x12.rafiki.v1.RepoRowR\x04rows\"(\n" +
+	"\x12RefreshRepoRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"B\n" +
+	"\n" +
+	"RepoScript\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\"H\n" +
-	"\x10GitSourcePackage\x12\x12\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\"C\n" +
+	"\vRepoPackage\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\"\xe3\x01\n" +
-	" RefreshPymoduleGitSourceResponse\x12\x12\n" +
-	"\x04name\x18\x05 \x01(\tR\x04name\x124\n" +
-	"\ascripts\x18\x01 \x03(\v2\x1a.rafiki.v1.GitSourceScriptR\ascripts\x127\n" +
-	"\bpackages\x18\x02 \x03(\v2\x1b.rafiki.v1.GitSourcePackageR\bpackages\x12\x1d\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\"\xcc\x01\n" +
+	"\x13RefreshRepoResponse\x12\x12\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\x12/\n" +
+	"\ascripts\x18\x01 \x03(\v2\x15.rafiki.v1.RepoScriptR\ascripts\x122\n" +
+	"\bpackages\x18\x02 \x03(\v2\x16.rafiki.v1.RepoPackageR\bpackages\x12\x1d\n" +
 	"\n" +
 	"venv_ready\x18\x03 \x01(\bR\tvenvReady\x12\x1d\n" +
 	"\n" +
-	"venv_error\x18\x04 \x01(\tR\tvenvError\"4\n" +
-	"\x1eRemovePymoduleGitSourceRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"!\n" +
-	"\x1fRemovePymoduleGitSourceResponse\"\"\n" +
+	"venv_error\x18\x04 \x01(\tR\tvenvError\"'\n" +
+	"\x11RemoveRepoRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"\x14\n" +
+	"\x12RemoveRepoResponse\"\"\n" +
 	"\n" +
 	"StringList\x12\x14\n" +
 	"\x05items\x18\x01 \x03(\tR\x05items\"\xb7\a\n" +
@@ -16143,7 +16144,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	" REVIEW_ACCEPT_STATUS_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dREVIEW_ACCEPT_STATUS_ENQUEUED\x10\x01\x12(\n" +
 	"$REVIEW_ACCEPT_STATUS_ALREADY_RUNNING\x10\x02\x12#\n" +
-	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xca5\n" +
+	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xae4\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -16171,11 +16172,12 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\rListPymodules\x12\x1f.rafiki.v1.ListPymodulesRequest\x1a .rafiki.v1.ListPymodulesResponse\x12L\n" +
 	"\vGetPymodule\x12\x1d.rafiki.v1.GetPymoduleRequest\x1a\x1e.rafiki.v1.GetPymoduleResponse\x12L\n" +
 	"\vPutPymodule\x12\x1d.rafiki.v1.PutPymoduleRequest\x1a\x1e.rafiki.v1.PutPymoduleResponse\x12U\n" +
-	"\x0eDeletePymodule\x12 .rafiki.v1.DeletePymoduleRequest\x1a!.rafiki.v1.DeletePymoduleResponse\x12g\n" +
-	"\x14AddPymoduleGitSource\x12&.rafiki.v1.AddPymoduleGitSourceRequest\x1a'.rafiki.v1.AddPymoduleGitSourceResponse\x12m\n" +
-	"\x16ListPymoduleGitSources\x12(.rafiki.v1.ListPymoduleGitSourcesRequest\x1a).rafiki.v1.ListPymoduleGitSourcesResponse\x12s\n" +
-	"\x18RefreshPymoduleGitSource\x12*.rafiki.v1.RefreshPymoduleGitSourceRequest\x1a+.rafiki.v1.RefreshPymoduleGitSourceResponse\x12p\n" +
-	"\x17RemovePymoduleGitSource\x12).rafiki.v1.RemovePymoduleGitSourceRequest\x1a*.rafiki.v1.RemovePymoduleGitSourceResponse\x12L\n" +
+	"\x0eDeletePymodule\x12 .rafiki.v1.DeletePymoduleRequest\x1a!.rafiki.v1.DeletePymoduleResponse\x12@\n" +
+	"\aAddRepo\x12\x19.rafiki.v1.AddRepoRequest\x1a\x1a.rafiki.v1.AddRepoResponse\x12F\n" +
+	"\tListRepos\x12\x1b.rafiki.v1.ListReposRequest\x1a\x1c.rafiki.v1.ListReposResponse\x12L\n" +
+	"\vRefreshRepo\x12\x1d.rafiki.v1.RefreshRepoRequest\x1a\x1e.rafiki.v1.RefreshRepoResponse\x12I\n" +
+	"\n" +
+	"RemoveRepo\x12\x1c.rafiki.v1.RemoveRepoRequest\x1a\x1d.rafiki.v1.RemoveRepoResponse\x12L\n" +
 	"\vListPresets\x12\x1d.rafiki.v1.ListPresetsRequest\x1a\x1e.rafiki.v1.ListPresetsResponse\x12F\n" +
 	"\tGetPreset\x12\x1b.rafiki.v1.GetPresetRequest\x1a\x1c.rafiki.v1.GetPresetResponse\x12F\n" +
 	"\tPutPreset\x12\x1b.rafiki.v1.PutPresetRequest\x1a\x1c.rafiki.v1.PutPresetResponse\x12O\n" +
@@ -16374,17 +16376,17 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*PutPymoduleResponse)(nil),               // 108: rafiki.v1.PutPymoduleResponse
 	(*DeletePymoduleRequest)(nil),             // 109: rafiki.v1.DeletePymoduleRequest
 	(*DeletePymoduleResponse)(nil),            // 110: rafiki.v1.DeletePymoduleResponse
-	(*GitSourceRow)(nil),                      // 111: rafiki.v1.GitSourceRow
-	(*AddPymoduleGitSourceRequest)(nil),       // 112: rafiki.v1.AddPymoduleGitSourceRequest
-	(*AddPymoduleGitSourceResponse)(nil),      // 113: rafiki.v1.AddPymoduleGitSourceResponse
-	(*ListPymoduleGitSourcesRequest)(nil),     // 114: rafiki.v1.ListPymoduleGitSourcesRequest
-	(*ListPymoduleGitSourcesResponse)(nil),    // 115: rafiki.v1.ListPymoduleGitSourcesResponse
-	(*RefreshPymoduleGitSourceRequest)(nil),   // 116: rafiki.v1.RefreshPymoduleGitSourceRequest
-	(*GitSourceScript)(nil),                   // 117: rafiki.v1.GitSourceScript
-	(*GitSourcePackage)(nil),                  // 118: rafiki.v1.GitSourcePackage
-	(*RefreshPymoduleGitSourceResponse)(nil),  // 119: rafiki.v1.RefreshPymoduleGitSourceResponse
-	(*RemovePymoduleGitSourceRequest)(nil),    // 120: rafiki.v1.RemovePymoduleGitSourceRequest
-	(*RemovePymoduleGitSourceResponse)(nil),   // 121: rafiki.v1.RemovePymoduleGitSourceResponse
+	(*RepoRow)(nil),                           // 111: rafiki.v1.RepoRow
+	(*AddRepoRequest)(nil),                    // 112: rafiki.v1.AddRepoRequest
+	(*AddRepoResponse)(nil),                   // 113: rafiki.v1.AddRepoResponse
+	(*ListReposRequest)(nil),                  // 114: rafiki.v1.ListReposRequest
+	(*ListReposResponse)(nil),                 // 115: rafiki.v1.ListReposResponse
+	(*RefreshRepoRequest)(nil),                // 116: rafiki.v1.RefreshRepoRequest
+	(*RepoScript)(nil),                        // 117: rafiki.v1.RepoScript
+	(*RepoPackage)(nil),                       // 118: rafiki.v1.RepoPackage
+	(*RefreshRepoResponse)(nil),               // 119: rafiki.v1.RefreshRepoResponse
+	(*RemoveRepoRequest)(nil),                 // 120: rafiki.v1.RemoveRepoRequest
+	(*RemoveRepoResponse)(nil),                // 121: rafiki.v1.RemoveRepoResponse
 	(*StringList)(nil),                        // 122: rafiki.v1.StringList
 	(*PresetRow)(nil),                         // 123: rafiki.v1.PresetRow
 	(*ListPresetsRequest)(nil),                // 124: rafiki.v1.ListPresetsRequest
@@ -16604,10 +16606,10 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	102, // 86: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
 	102, // 87: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
 	102, // 88: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	111, // 89: rafiki.v1.AddPymoduleGitSourceResponse.row:type_name -> rafiki.v1.GitSourceRow
-	111, // 90: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
-	117, // 91: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
-	118, // 92: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
+	111, // 89: rafiki.v1.AddRepoResponse.row:type_name -> rafiki.v1.RepoRow
+	111, // 90: rafiki.v1.ListReposResponse.rows:type_name -> rafiki.v1.RepoRow
+	117, // 91: rafiki.v1.RefreshRepoResponse.scripts:type_name -> rafiki.v1.RepoScript
+	118, // 92: rafiki.v1.RefreshRepoResponse.packages:type_name -> rafiki.v1.RepoPackage
 	234, // 93: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
 	122, // 94: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
 	122, // 95: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
@@ -16696,10 +16698,10 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	105, // 178: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
 	107, // 179: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
 	109, // 180: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
-	112, // 181: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
-	114, // 182: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
-	116, // 183: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
-	120, // 184: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
+	112, // 181: rafiki.v1.Control.AddRepo:input_type -> rafiki.v1.AddRepoRequest
+	114, // 182: rafiki.v1.Control.ListRepos:input_type -> rafiki.v1.ListReposRequest
+	116, // 183: rafiki.v1.Control.RefreshRepo:input_type -> rafiki.v1.RefreshRepoRequest
+	120, // 184: rafiki.v1.Control.RemoveRepo:input_type -> rafiki.v1.RemoveRepoRequest
 	124, // 185: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
 	126, // 186: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
 	128, // 187: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
@@ -16784,10 +16786,10 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	106, // 266: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
 	108, // 267: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
 	110, // 268: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
-	113, // 269: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
-	115, // 270: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
-	119, // 271: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
-	121, // 272: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
+	113, // 269: rafiki.v1.Control.AddRepo:output_type -> rafiki.v1.AddRepoResponse
+	115, // 270: rafiki.v1.Control.ListRepos:output_type -> rafiki.v1.ListReposResponse
+	119, // 271: rafiki.v1.Control.RefreshRepo:output_type -> rafiki.v1.RefreshRepoResponse
+	121, // 272: rafiki.v1.Control.RemoveRepo:output_type -> rafiki.v1.RemoveRepoResponse
 	125, // 273: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
 	127, // 274: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
 	129, // 275: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse

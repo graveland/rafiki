@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package gitpymodulesdb
+package reposdb
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/usersdb"
@@ -23,7 +23,7 @@ import (
 // testStore gives each test its own scratch database, migrated fresh —
 // mirrors pkg/pymodulesdb/postgres_test.go's testStore, so this never
 // touches a developer's real database.
-func testStore(t *testing.T) (gitpymodules.Store, *pgxpool.Pool) {
+func testStore(t *testing.T) (repos.Store, *pgxpool.Pool) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -37,7 +37,7 @@ func testStore(t *testing.T) (gitpymodules.Store, *pgxpool.Pool) {
 	c.NoError(err, "connect admin")
 	t.Cleanup(admin.Close)
 
-	name := fmt.Sprintf("rafiki_gitpymodules_%d", time.Now().UnixNano())
+	name := fmt.Sprintf("rafiki_repos_%d", time.Now().UnixNano())
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
 		t.Fatalf("create scratch db: %v", err)
 	}
@@ -67,9 +67,9 @@ func newOwner(t *testing.T, pool *pgxpool.Pool, username string) string {
 }
 
 // "local" is the blob store's sentinel across the whole pymodule tool
-// surface; a git source registered under it would make repo="local"
+// surface; a repo registered under it would make repo="local"
 // ambiguous. Put must reject it (and any name failing
-// gitpymodules.ValidateName) before touching the database.
+// repos.ValidateName) before touching the database.
 func TestPostgresStorePutRejectsReservedLocalName(t *testing.T) {
 	c := assert.NewAborting(t)
 	st, pool := testStore(t)
@@ -77,22 +77,22 @@ func TestPostgresStorePutRejectsReservedLocalName(t *testing.T) {
 	owner := newOwner(t, pool, "git-reserved")
 
 	_, err := st.Put(ctx, owner, "local", "https://example.com/ops.git", "main")
-	c.ErrorIs(err, gitpymodules.ErrReservedName, "Put(\"local\") = %v, want ErrReservedName", err)
+	c.ErrorIs(err, repos.ErrReservedName, "Put(\"local\") = %v, want ErrReservedName", err)
 	var n int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.pymodule_git_sources`).Scan(&n), "count rows")
+		`SELECT count(*) FROM conversations.repos`).Scan(&n), "count rows")
 	c.Eq(0, n, "row count after rejected Put")
 
 	// Other invalid names are rejected too, with the ValidName verdict, not
 	// the reserved-name sentinel.
 	if _, err := st.Put(ctx, owner, "has space", "https://example.com/x.git", "main"); err == nil {
 		t.Fatal("Put(\"has space\") = nil error, want a validation error")
-	} else if errors.Is(err, gitpymodules.ErrReservedName) {
+	} else if errors.Is(err, repos.ErrReservedName) {
 		t.Fatalf("Put(\"has space\") = %v, want the pymodules.ValidName verdict", err)
 	}
 }
 
-// A git source registration is a pointer to repoint, not an append-only
+// A repo registration is a pointer to repoint, not an append-only
 // snippet history: two Puts under one (owner, name) must leave ONE row with
 // the url/ref of the second Put — updated in place, same id. This must hold
 // for the unattributed bucket too, which is exactly what the unique index's
@@ -125,7 +125,7 @@ func TestPostgresStorePutUpdatesExistingName(t *testing.T) {
 	c.False(len(rows) != 1 || rows[0].Name != "shared_tools" || rows[0].URL != "https://example.com/b.git" || rows[0].Ref != "dev", "unattributed rows = %+v, want exactly one shared_tools row repointed to b.git@dev (NULLS NOT DISTINCT)", rows)
 	var n int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.pymodule_git_sources
+		`SELECT count(*) FROM conversations.repos
 		 WHERE owner_user_id IS NOT DISTINCT FROM $1 AND name = $2`,
 		ownerArg(""), "shared_tools").Scan(&n), "count unattributed rows")
 	c.Eq(1, n, "unattributed row count")
@@ -149,7 +149,7 @@ func TestPostgresStoreListScopesByOwner(t *testing.T) {
 		t.Fatalf("put unattributed: %v", err)
 	}
 
-	for owner, want := range map[string]gitpymodules.GitSourceRecord{ownerA: a, ownerB: b} {
+	for owner, want := range map[string]repos.Record{ownerA: a, ownerB: b} {
 		rows, err := st.List(ctx, owner)
 		c.NoError(err, "list %s", owner)
 		c.Len(rows, 1, "list %s: got %d rows, want exactly 1", owner, len(rows))
@@ -180,8 +180,8 @@ func TestPostgresStoreDeleteRemovesAndReportsNotFound(t *testing.T) {
 	c.NoError(err, "put b")
 
 	c.NoError(st.Delete(ctx, ownerA, "shared"), "delete a")
-	c.ErrorIs(st.Delete(ctx, ownerA, "shared"), gitpymodules.ErrNotFound, "second delete")
-	c.ErrorIs(st.Delete(ctx, ownerB, "never_registered"), gitpymodules.ErrNotFound, "delete unknown name")
+	c.ErrorIs(st.Delete(ctx, ownerA, "shared"), repos.ErrNotFound, "second delete")
+	c.ErrorIs(st.Delete(ctx, ownerB, "never_registered"), repos.ErrNotFound, "delete unknown name")
 	// B's independent copy survives A's delete, with its own row intact.
 	rows, err := st.List(ctx, ownerB)
 	c.NoError(err, "list b")

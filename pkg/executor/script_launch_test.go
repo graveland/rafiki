@@ -127,7 +127,7 @@ func TestResolveScriptLaunchRefusesUnsynced(t *testing.T) {
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "not synced to this executor"), "want the unsynced refusal, got %v", err)
 }
 
-// scriptGitFixture lays out a synced git checkout the way SyncPyModuleGitSource
+// scriptGitFixture lays out a synced git checkout the way SyncRepo
 // does: <repo>/scripts/*.py callable, top-level __init__-carrying directories
 // importable, one repo-wide venv.
 func scriptGitFixture(t *testing.T, repo string, venv bool) string {

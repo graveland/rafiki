@@ -193,12 +193,12 @@ func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 	c.Eq("alice_chart — charts things\n", body, "inventory")
 }
 
-// TestPymoduleInventorySpansGitSources pins the skill body spanning both
-// scopes: the owner's local rows first, then every git source's cached
-// inventory, each git-sourced line labeled "reponame/name" so the agent can
-// tell which repo value to pass back. A nil gitpymodulePusher (no exec pool)
+// TestPymoduleInventorySpansRepos pins the skill body spanning both
+// scopes: the owner's local rows first, then every repo's cached
+// inventory, each repo-sourced line labeled "reponame/name" so the agent can
+// tell which repo value to pass back. A nil repoPusher (no exec pool)
 // keeps the body to the local rows alone, never an error.
-func TestPymoduleInventorySpansGitSources(t *testing.T) {
+func TestPymoduleInventorySpansRepos(t *testing.T) {
 	c := assert.NewCollecting(t)
 	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	// A fresh store, not the shared fixture: the fixture pre-seeds rows, and
@@ -206,13 +206,13 @@ func TestPymoduleInventorySpansGitSources(t *testing.T) {
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{
 		"u_alice": {{ID: 1, OwnerUserID: "u_alice", Name: "alice_chart", Description: "charts things"}},
 	}}
-	gp := &gitPymodulePusher{cache: map[string]gitPymoduleInventory{
-		gitSourceKey("u_alice", "ops-tools"): {
-			Scripts:  []*executorpb.GitSourceScript{{Name: "rotate_keys", Description: "rotates the API keys"}},
-			Packages: []*executorpb.GitSourcePackage{{Name: "opslib", Description: "ops helpers"}},
+	gp := &repoPusher{cache: map[string]repoInventory{
+		repoKey("u_alice", "ops-tools"): {
+			Scripts:  []*executorpb.RepoScript{{Name: "rotate_keys", Description: "rotates the API keys"}},
+			Packages: []*executorpb.RepoPackage{{Name: "opslib", Description: "ops helpers"}},
 		},
 	}}
-	ctrl := &Controller{pymoduleStore: store, gitpymodulePusher: gp}
+	ctrl := &Controller{pymoduleStore: store, repoPusher: gp}
 
 	body, err := pymoduleInventory(ctrl, "u_alice")(context.Background())
 	c.Require().NoError(err, "inventory")

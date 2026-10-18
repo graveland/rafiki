@@ -16,7 +16,7 @@ import (
 
 // PymoduleRow is one saved pymodule as the manager returns it. Code is
 // populated only by Get and Put. Repo names the scope the row came from:
-// "local" for the blob store, otherwise the git source it was discovered in
+// "local" for the blob store, otherwise the repo it was discovered in
 // — the manager stamps it, the RPC handler passes it through.
 type PymoduleRow struct {
 	Version     int64
@@ -35,7 +35,7 @@ type PymoduleRow struct {
 type PymoduleManager interface {
 	// ListPymodules lists the caller's pymodules. repo is a scope filter:
 	// empty lists every scope, "local" the blob-store rows only, otherwise
-	// the named git source's discovered inventory. Empty meaning "no
+	// the named repo's discovered inventory. Empty meaning "no
 	// filter" is legitimate HERE alone — repo is a filter argument on this
 	// one method, never the "local" addressing sentinel used everywhere
 	// else (design §7).

@@ -92,8 +92,8 @@ func TestListPymodulesOmitsCode(t *testing.T) {
 
 // TestListPymodulesPassesRepoFilterThrough pins the handler's role: it
 // forwards req.Msg.GetRepo() to the manager UNCHANGED — scoping is entirely
-// the manager's job (the daemon-side adapter decides what "local" and a git
-// source's name mean) — and every manager-supplied field, Repo included,
+// the manager's job (the daemon-side adapter decides what "local" and a repo's
+// name mean) — and every manager-supplied field, Repo included,
 // reaches the wire unmangled while code stays blanked.
 func TestListPymodulesPassesRepoFilterThrough(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -113,7 +113,7 @@ func TestListPymodulesPassesRepoFilterThrough(t *testing.T) {
 	resp, err := s.ListPymodules(context.Background(), connect.NewRequest(&rafikiv1.ListPymodulesRequest{Repo: "ops_tools"}))
 	c.Require().NoError(err, "list")
 	got := resp.Msg.GetRows()
-	c.False(len(got) != 1 || got[0].GetRepo() != "ops_tools" || got[0].GetCode() != "", "rows = %+v, want the git-sourced row with Repo ops_tools and no code", got)
+	c.False(len(got) != 1 || got[0].GetRepo() != "ops_tools" || got[0].GetCode() != "", "rows = %+v, want the repo-sourced row with Repo ops_tools and no code", got)
 }
 
 func TestGetPymoduleValidation(t *testing.T) {

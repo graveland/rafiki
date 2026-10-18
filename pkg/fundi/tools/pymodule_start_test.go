@@ -77,7 +77,7 @@ func TestPyModuleStartReturnsTheChildAtOnce(t *testing.T) {
 }
 
 // Same refusal shape as pymodule_run: a missing repo is a loud error, never
-// a silent default — an implicit "local" would start a git-sourced call
+// a silent default — an implicit "local" would start a repo-sourced call
 // running (or missing) a same-named saved module with nothing in the result
 // saying which scope it started.
 func TestPyModuleStartRefusesMissingRepo(t *testing.T) {

@@ -685,8 +685,8 @@ scripts.
 **`pymodule_run`'s `repo` argument selects the source, and only `local` means
 this corpus.** `repo` is required on the tool; `repo="local"` (the reserved
 sentinel for the blob store everywhere on the pymodule surface) runs a saved
-module exactly as described above. Any other value names a git source synced
-by `SyncPyModuleGitSource` (below): the script resolves to
+module exactly as described above. Any other value names a repo synced
+by `SyncRepo` (below): the script resolves to
 `scripts/<script>.py` in that source's checkout under
 `<paths.CacheDir()>/pymodule-repos/<repo>` — a `scripts/` layout, not the
 per-module directories above — while each `modules` entry resolves to a
@@ -695,7 +695,7 @@ itself always joins `PYTHONPATH` first, so a script's own intra-repo imports
 resolve without naming its packages. The interpreter is the repo's shared
 `.venv/bin/python3` when that checkout has one, else the plain fallback — a
 repo whose venv build failed runs and fails visibly at import time rather
-than refusing. A git source's name never collides with `local`:
+than refusing. A repo's name never collides with `local`:
 registration refuses it.
 
 **The whole owner's corpus, every time.** `modules` is the complete set for
@@ -754,19 +754,19 @@ enforcement on the RPC remains regardless, for the same reason as skills: a
 daemon that ignored a `false` here would cost an unexpected write to the
 operator's machine.
 
-### SyncPyModuleGitSource
+### SyncRepo
 
 ```
-SyncPyModuleGitSource(name, url, ref)
+SyncRepo(name, url, ref)
   → { scripts[{name, description}], packages[{name, description}],
       venvReady, venvError }
 ```
 
-Unary. Refreshes ONE named git source into `<cache>/pymodule-repos/<name>/` —
+Unary. Refreshes ONE named repo into `<cache>/pymodule-repos/<name>/` —
 a sibling of the blob-sourced `pymodules/` cache root, never nested inside it,
 because a checkout's own layout (including its `.git/`) must not be interleaved
 with the flat per-module directories SyncPyModules manages and prunes by name.
-Per-source, not whole-corpus: a git source's own history is already the
+Per-source, not whole-corpus: a repo's own history is already the
 versioning and pruning mechanism, so there is no "prune what's absent" model to
 replicate.
 
@@ -812,13 +812,13 @@ staging tree, leaves any previous venv untouched, and reports
 inventory, because a broken dependency must not hide what exists (a broken
 build only fails the runs that actually need it).
 
-**Opt-in per machine, and `pymodule_git_sync` on `DescribeResponse` is
+**Opt-in per machine, and `repo_sync` on `DescribeResponse` is
 self-reported** exactly like `pymodules_sync`: it only ever narrows what the
 executor will do, an executor answers `CodePermissionDenied` when the option is
 off, and a daemon reading `false` from `Describe` never sends a refresh. The
-option is on when the operator passed `--pymodule-git-sync` or set
-`RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC`. There is NO launch-kind implication — an
-operator opts in explicitly; `--pymodule-git-sync=false` still refuses
+option is on when the operator passed `--repo-sync` or set
+`RAFIKI_EXECUTOR_REPO_SYNC`. There is NO launch-kind implication — an
+operator opts in explicitly; `--repo-sync=false` still refuses
 explicitly.
 
 ### Cancel

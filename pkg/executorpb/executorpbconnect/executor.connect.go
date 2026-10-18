@@ -71,9 +71,9 @@ const (
 	// ExecutorServiceSyncPyModulesProcedure is the fully-qualified name of the ExecutorService's
 	// SyncPyModules RPC.
 	ExecutorServiceSyncPyModulesProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModules"
-	// ExecutorServiceSyncPyModuleGitSourceProcedure is the fully-qualified name of the
-	// ExecutorService's SyncPyModuleGitSource RPC.
-	ExecutorServiceSyncPyModuleGitSourceProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModuleGitSource"
+	// ExecutorServiceSyncRepoProcedure is the fully-qualified name of the ExecutorService's SyncRepo
+	// RPC.
+	ExecutorServiceSyncRepoProcedure = "/rafiki.executor.v1.ExecutorService/SyncRepo"
 	// ExecutorServiceReadTreeProcedure is the fully-qualified name of the ExecutorService's ReadTree
 	// RPC.
 	ExecutorServiceReadTreeProcedure = "/rafiki.executor.v1.ExecutorService/ReadTree"
@@ -162,15 +162,15 @@ type ExecutorServiceClient interface {
 	// wholesale, so there is no per-path bookkeeping to drift and no partial
 	// state to reconcile after a crash.
 	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
-	// SyncPyModuleGitSource refreshes ONE named git source in this executor's
+	// SyncRepo refreshes ONE named repo in this executor's
 	// rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
 	// discover the scripts and packages the checkout contains, and build the
 	// repo's one shared venv.
 	//
-	// Per-source, not whole-corpus like SyncPyModules: a git source's own
+	// Per-source, not whole-corpus like SyncPyModules: a repo's own
 	// history is already the versioning and pruning mechanism, so there is no
 	// "prune what's absent" model to replicate here.
-	SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error)
+	SyncRepo(context.Context, *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error)
 	// ReadTree streams a file or directory tree from this executor. A directory
 	// is sent as a header followed by one chunk per entry; a file is sent as a
 	// header followed by its bytes.
@@ -287,10 +287,10 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
 			connect.WithClientOptions(opts...),
 		),
-		syncPyModuleGitSource: connect.NewClient[executorpb.SyncPyModuleGitSourceRequest, executorpb.SyncPyModuleGitSourceResponse](
+		syncRepo: connect.NewClient[executorpb.SyncRepoRequest, executorpb.SyncRepoResponse](
 			httpClient,
-			baseURL+ExecutorServiceSyncPyModuleGitSourceProcedure,
-			connect.WithSchema(executorServiceMethods.ByName("SyncPyModuleGitSource")),
+			baseURL+ExecutorServiceSyncRepoProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("SyncRepo")),
 			connect.WithClientOptions(opts...),
 		),
 		readTree: connect.NewClient[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse](
@@ -334,27 +334,27 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 
 // executorServiceClient implements ExecutorServiceClient.
 type executorServiceClient struct {
-	describe              *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
-	health                *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
-	execute               *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
-	cancel                *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
-	watchJobs             *connect.Client[executorpb.WatchJobsRequest, executorpb.WatchJobsResponse]
-	ackJobExits           *connect.Client[executorpb.AckJobExitsRequest, executorpb.AckJobExitsResponse]
-	jobOutput             *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
-	provision             *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
-	release               *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
-	projectContext        *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
-	projectSkills         *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
-	skillBody             *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
-	syncSkills            *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
-	syncPyModules         *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
-	syncPyModuleGitSource *connect.Client[executorpb.SyncPyModuleGitSourceRequest, executorpb.SyncPyModuleGitSourceResponse]
-	readTree              *connect.Client[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse]
-	writeTree             *connect.Client[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
-	gitRefs               *connect.Client[executorpb.GitRefsRequest, executorpb.GitRefsResponse]
-	gitBundle             *connect.Client[executorpb.GitBundleRequest, executorpb.GitBundleResponse]
-	gitFetchBundle        *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
-	proxy                 *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
+	describe       *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
+	health         *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
+	execute        *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
+	cancel         *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	watchJobs      *connect.Client[executorpb.WatchJobsRequest, executorpb.WatchJobsResponse]
+	ackJobExits    *connect.Client[executorpb.AckJobExitsRequest, executorpb.AckJobExitsResponse]
+	jobOutput      *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
+	provision      *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
+	release        *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
+	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
+	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
+	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
+	syncSkills     *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
+	syncPyModules  *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
+	syncRepo       *connect.Client[executorpb.SyncRepoRequest, executorpb.SyncRepoResponse]
+	readTree       *connect.Client[executorpb.ReadTreeRequest, executorpb.ReadTreeResponse]
+	writeTree      *connect.Client[executorpb.WriteTreeRequest, executorpb.WriteTreeResponse]
+	gitRefs        *connect.Client[executorpb.GitRefsRequest, executorpb.GitRefsResponse]
+	gitBundle      *connect.Client[executorpb.GitBundleRequest, executorpb.GitBundleResponse]
+	gitFetchBundle *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
+	proxy          *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -427,9 +427,9 @@ func (c *executorServiceClient) SyncPyModules(ctx context.Context, req *connect.
 	return c.syncPyModules.CallUnary(ctx, req)
 }
 
-// SyncPyModuleGitSource calls rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource.
-func (c *executorServiceClient) SyncPyModuleGitSource(ctx context.Context, req *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
-	return c.syncPyModuleGitSource.CallUnary(ctx, req)
+// SyncRepo calls rafiki.executor.v1.ExecutorService.SyncRepo.
+func (c *executorServiceClient) SyncRepo(ctx context.Context, req *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error) {
+	return c.syncRepo.CallUnary(ctx, req)
 }
 
 // ReadTree calls rafiki.executor.v1.ExecutorService.ReadTree.
@@ -532,15 +532,15 @@ type ExecutorServiceHandler interface {
 	// wholesale, so there is no per-path bookkeeping to drift and no partial
 	// state to reconcile after a crash.
 	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
-	// SyncPyModuleGitSource refreshes ONE named git source in this executor's
+	// SyncRepo refreshes ONE named repo in this executor's
 	// rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
 	// discover the scripts and packages the checkout contains, and build the
 	// repo's one shared venv.
 	//
-	// Per-source, not whole-corpus like SyncPyModules: a git source's own
+	// Per-source, not whole-corpus like SyncPyModules: a repo's own
 	// history is already the versioning and pruning mechanism, so there is no
 	// "prune what's absent" model to replicate here.
-	SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error)
+	SyncRepo(context.Context, *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error)
 	// ReadTree streams a file or directory tree from this executor. A directory
 	// is sent as a header followed by one chunk per entry; a file is sent as a
 	// header followed by its bytes.
@@ -653,10 +653,10 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
 		connect.WithHandlerOptions(opts...),
 	)
-	executorServiceSyncPyModuleGitSourceHandler := connect.NewUnaryHandler(
-		ExecutorServiceSyncPyModuleGitSourceProcedure,
-		svc.SyncPyModuleGitSource,
-		connect.WithSchema(executorServiceMethods.ByName("SyncPyModuleGitSource")),
+	executorServiceSyncRepoHandler := connect.NewUnaryHandler(
+		ExecutorServiceSyncRepoProcedure,
+		svc.SyncRepo,
+		connect.WithSchema(executorServiceMethods.ByName("SyncRepo")),
 		connect.WithHandlerOptions(opts...),
 	)
 	executorServiceReadTreeHandler := connect.NewServerStreamHandler(
@@ -725,8 +725,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceSyncSkillsHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncPyModulesProcedure:
 			executorServiceSyncPyModulesHandler.ServeHTTP(w, r)
-		case ExecutorServiceSyncPyModuleGitSourceProcedure:
-			executorServiceSyncPyModuleGitSourceHandler.ServeHTTP(w, r)
+		case ExecutorServiceSyncRepoProcedure:
+			executorServiceSyncRepoHandler.ServeHTTP(w, r)
 		case ExecutorServiceReadTreeProcedure:
 			executorServiceReadTreeHandler.ServeHTTP(w, r)
 		case ExecutorServiceWriteTreeProcedure:
@@ -804,8 +804,8 @@ func (UnimplementedExecutorServiceHandler) SyncPyModules(context.Context, *conne
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModules is not implemented"))
 }
 
-func (UnimplementedExecutorServiceHandler) SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource is not implemented"))
+func (UnimplementedExecutorServiceHandler) SyncRepo(context.Context, *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncRepo is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) ReadTree(context.Context, *connect.Request[executorpb.ReadTreeRequest], *connect.ServerStream[executorpb.ReadTreeResponse]) error {

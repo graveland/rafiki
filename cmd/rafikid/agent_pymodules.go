@@ -88,7 +88,7 @@ func (w *pymoduleWriter) Delete(ctx context.Context, repo, name string) (string,
 // Get reads the latest live version of a module under this writer's bound
 // owner. Read-only: no push, nothing to fan out.
 // repo is always "local" by the time the tool layer calls in (it rejects
-// every other value; serving a git-sourced get is deferred -- the daemon
+// every other value; serving a repo-sourced get is deferred -- the daemon
 // caches names and descriptions only, never file content), but the
 // parameter stays: tools.PyModuleStore requires it.
 func (w *pymoduleWriter) Get(ctx context.Context, repo, name string) (pymodules.Record, error) {
@@ -97,9 +97,9 @@ func (w *pymoduleWriter) Get(ctx context.Context, repo, name string) (pymodules.
 
 // pymoduleInventory renders ownerUserID's saved modules as "name —
 // description" lines, one per line, for the dynamic skill body. After the
-// local rows it appends every entry from the owner's git sources' cached
+// local rows it appends every entry from the owner's repos' cached
 // inventory, each labeled "reponame/name" so the agent can tell which repo
-// value to pass back; a nil gitpymodulePusher (no exec pool) skips that
+// value to pass back; a nil repoPusher (no exec pool) skips that
 // section entirely rather than erroring. Returns a clear "nothing saved
 // yet" line when BOTH scopes are empty rather than an empty string, since
 // an empty tool result reads as an error to a model, not as an empty list.
@@ -113,8 +113,8 @@ func pymoduleInventory(ctrl *Controller, ownerUserID string) func(ctx context.Co
 		for _, r := range recs {
 			fmt.Fprintf(&b, "%s — %s\n", r.Name, r.Description)
 		}
-		if ctrl.gitpymodulePusher != nil {
-			for _, info := range gitPymoduleInfos(ctrl.gitpymodulePusher, ownerUserID) {
+		if ctrl.repoPusher != nil {
+			for _, info := range repoInfos(ctrl.repoPusher, ownerUserID) {
 				fmt.Fprintf(&b, "%s/%s — %s\n", info.Repo, info.Name, info.Description)
 			}
 		}
@@ -125,24 +125,24 @@ func pymoduleInventory(ctrl *Controller, ownerUserID string) func(ctx context.Co
 	}
 }
 
-// gitPymoduleInfos flattens the git pusher's cached per-source inventory for
+// repoInfos flattens the repo pusher's cached per-source inventory for
 // ownerUserID into one labeled entry per discovered script and package,
 // each entry's Repo naming its source (the same "reponame/name" labeling the
 // skill body renders). Sorted by repo then name: allInventory's map has no
 // stable order, and the same two calls should render the same list.
-func gitPymoduleInfos(gp *gitPymodulePusher, ownerUserID string) []tools.PyModuleInfo {
+func repoInfos(gp *repoPusher, ownerUserID string) []tools.PyModuleInfo {
 	out := make([]tools.PyModuleInfo, 0)
 	for repo, inv := range gp.allInventory(ownerUserID) {
-		out = append(out, gitSourcePymoduleInfos(repo, inv)...)
+		out = append(out, repoPymoduleInfos(repo, inv)...)
 	}
 	sortPyModuleInfos(out)
 	return out
 }
 
-// gitSourcePymoduleInfos labels ONE source's inventory with its own name --
-// the per-scope slice of gitPymoduleInfos' whole-owner flattening, for the
+// repoPymoduleInfos labels ONE source's inventory with its own name --
+// the per-scope slice of repoInfos' whole-owner flattening, for the
 // filtered listing.
-func gitSourcePymoduleInfos(repo string, inv gitPymoduleInventory) []tools.PyModuleInfo {
+func repoPymoduleInfos(repo string, inv repoInventory) []tools.PyModuleInfo {
 	out := make([]tools.PyModuleInfo, 0)
 	for _, s := range inv.Scripts {
 		out = append(out, tools.PyModuleInfo{Repo: repo, Name: s.GetName(), Description: s.GetDescription()})

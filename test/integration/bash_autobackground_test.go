@@ -139,7 +139,7 @@ func startAutoBgDaemon(t *testing.T, p autoBgParams) *daemon {
 	stderr := &stderrBuf{}
 	cmd := exec.Command(daemonBinary())
 	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+p.homeDir,
 		"XDG_RUNTIME_DIR="+p.homeDir,
 		"XDG_STATE_HOME="+p.homeDir,
@@ -513,7 +513,7 @@ func (g *autoBgDaemon) enrollExecutorUDS(t *testing.T) string {
 		"--credential-file", credFile,
 		"--root", root,
 	)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"HOME="+execHome,
 		"XDG_RUNTIME_DIR="+execHome,
 		"XDG_STATE_HOME="+execHome,

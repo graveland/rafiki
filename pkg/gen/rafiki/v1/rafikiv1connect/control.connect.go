@@ -87,18 +87,14 @@ const (
 	ControlPutPymoduleProcedure = "/rafiki.v1.Control/PutPymodule"
 	// ControlDeletePymoduleProcedure is the fully-qualified name of the Control's DeletePymodule RPC.
 	ControlDeletePymoduleProcedure = "/rafiki.v1.Control/DeletePymodule"
-	// ControlAddPymoduleGitSourceProcedure is the fully-qualified name of the Control's
-	// AddPymoduleGitSource RPC.
-	ControlAddPymoduleGitSourceProcedure = "/rafiki.v1.Control/AddPymoduleGitSource"
-	// ControlListPymoduleGitSourcesProcedure is the fully-qualified name of the Control's
-	// ListPymoduleGitSources RPC.
-	ControlListPymoduleGitSourcesProcedure = "/rafiki.v1.Control/ListPymoduleGitSources"
-	// ControlRefreshPymoduleGitSourceProcedure is the fully-qualified name of the Control's
-	// RefreshPymoduleGitSource RPC.
-	ControlRefreshPymoduleGitSourceProcedure = "/rafiki.v1.Control/RefreshPymoduleGitSource"
-	// ControlRemovePymoduleGitSourceProcedure is the fully-qualified name of the Control's
-	// RemovePymoduleGitSource RPC.
-	ControlRemovePymoduleGitSourceProcedure = "/rafiki.v1.Control/RemovePymoduleGitSource"
+	// ControlAddRepoProcedure is the fully-qualified name of the Control's AddRepo RPC.
+	ControlAddRepoProcedure = "/rafiki.v1.Control/AddRepo"
+	// ControlListReposProcedure is the fully-qualified name of the Control's ListRepos RPC.
+	ControlListReposProcedure = "/rafiki.v1.Control/ListRepos"
+	// ControlRefreshRepoProcedure is the fully-qualified name of the Control's RefreshRepo RPC.
+	ControlRefreshRepoProcedure = "/rafiki.v1.Control/RefreshRepo"
+	// ControlRemoveRepoProcedure is the fully-qualified name of the Control's RemoveRepo RPC.
+	ControlRemoveRepoProcedure = "/rafiki.v1.Control/RemoveRepo"
 	// ControlListPresetsProcedure is the fully-qualified name of the Control's ListPresets RPC.
 	ControlListPresetsProcedure = "/rafiki.v1.Control/ListPresets"
 	// ControlGetPresetProcedure is the fully-qualified name of the Control's GetPreset RPC.
@@ -255,10 +251,10 @@ type ControlClient interface {
 	GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error)
 	PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error)
 	DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error)
-	AddPymoduleGitSource(context.Context, *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error)
-	ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error)
-	RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error)
-	RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error)
+	AddRepo(context.Context, *connect.Request[v1.AddRepoRequest]) (*connect.Response[v1.AddRepoResponse], error)
+	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
+	RefreshRepo(context.Context, *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error)
+	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error)
 	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
 	PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error)
@@ -494,28 +490,28 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("DeletePymodule")),
 			connect.WithClientOptions(opts...),
 		),
-		addPymoduleGitSource: connect.NewClient[v1.AddPymoduleGitSourceRequest, v1.AddPymoduleGitSourceResponse](
+		addRepo: connect.NewClient[v1.AddRepoRequest, v1.AddRepoResponse](
 			httpClient,
-			baseURL+ControlAddPymoduleGitSourceProcedure,
-			connect.WithSchema(controlMethods.ByName("AddPymoduleGitSource")),
+			baseURL+ControlAddRepoProcedure,
+			connect.WithSchema(controlMethods.ByName("AddRepo")),
 			connect.WithClientOptions(opts...),
 		),
-		listPymoduleGitSources: connect.NewClient[v1.ListPymoduleGitSourcesRequest, v1.ListPymoduleGitSourcesResponse](
+		listRepos: connect.NewClient[v1.ListReposRequest, v1.ListReposResponse](
 			httpClient,
-			baseURL+ControlListPymoduleGitSourcesProcedure,
-			connect.WithSchema(controlMethods.ByName("ListPymoduleGitSources")),
+			baseURL+ControlListReposProcedure,
+			connect.WithSchema(controlMethods.ByName("ListRepos")),
 			connect.WithClientOptions(opts...),
 		),
-		refreshPymoduleGitSource: connect.NewClient[v1.RefreshPymoduleGitSourceRequest, v1.RefreshPymoduleGitSourceResponse](
+		refreshRepo: connect.NewClient[v1.RefreshRepoRequest, v1.RefreshRepoResponse](
 			httpClient,
-			baseURL+ControlRefreshPymoduleGitSourceProcedure,
-			connect.WithSchema(controlMethods.ByName("RefreshPymoduleGitSource")),
+			baseURL+ControlRefreshRepoProcedure,
+			connect.WithSchema(controlMethods.ByName("RefreshRepo")),
 			connect.WithClientOptions(opts...),
 		),
-		removePymoduleGitSource: connect.NewClient[v1.RemovePymoduleGitSourceRequest, v1.RemovePymoduleGitSourceResponse](
+		removeRepo: connect.NewClient[v1.RemoveRepoRequest, v1.RemoveRepoResponse](
 			httpClient,
-			baseURL+ControlRemovePymoduleGitSourceProcedure,
-			connect.WithSchema(controlMethods.ByName("RemovePymoduleGitSource")),
+			baseURL+ControlRemoveRepoProcedure,
+			connect.WithSchema(controlMethods.ByName("RemoveRepo")),
 			connect.WithClientOptions(opts...),
 		),
 		listPresets: connect.NewClient[v1.ListPresetsRequest, v1.ListPresetsResponse](
@@ -877,92 +873,92 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	getHistory               *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
-	streamEvents             *connect.Client[v1.StreamEventsRequest, v1.Event]
-	send                     *connect.Client[v1.SendRequest, v1.SendResponse]
-	listChildren             *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
-	getChild                 *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
-	spawn                    *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
-	kill                     *connect.Client[v1.KillRequest, v1.KillResponse]
-	close                    *connect.Client[v1.CloseRequest, v1.CloseResponse]
-	setBudget                *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
-	setRouting               *connect.Client[v1.SetRoutingRequest, v1.SetRoutingResponse]
-	listTasks                *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
-	listModels               *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
-	listExecutors            *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
-	getRateLimitStatus       *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
-	listSkills               *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
-	getSkill                 *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
-	upsertSkill              *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
-	deleteSkill              *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
-	setSkillEnabled          *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
-	listPymodules            *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
-	getPymodule              *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
-	putPymodule              *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
-	deletePymodule           *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
-	addPymoduleGitSource     *connect.Client[v1.AddPymoduleGitSourceRequest, v1.AddPymoduleGitSourceResponse]
-	listPymoduleGitSources   *connect.Client[v1.ListPymoduleGitSourcesRequest, v1.ListPymoduleGitSourcesResponse]
-	refreshPymoduleGitSource *connect.Client[v1.RefreshPymoduleGitSourceRequest, v1.RefreshPymoduleGitSourceResponse]
-	removePymoduleGitSource  *connect.Client[v1.RemovePymoduleGitSourceRequest, v1.RemovePymoduleGitSourceResponse]
-	listPresets              *connect.Client[v1.ListPresetsRequest, v1.ListPresetsResponse]
-	getPreset                *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
-	putPreset                *connect.Client[v1.PutPresetRequest, v1.PutPresetResponse]
-	deletePreset             *connect.Client[v1.DeletePresetRequest, v1.DeletePresetResponse]
-	recall                   *connect.Client[v1.RecallRequest, v1.RecallResponse]
-	recallContext            *connect.Client[v1.RecallContextRequest, v1.RecallContextResponse]
-	getMemory                *connect.Client[v1.GetMemoryRequest, v1.GetMemoryResponse]
-	memoryTree               *connect.Client[v1.MemoryTreeRequest, v1.MemoryTreeResponse]
-	putMemory                *connect.Client[v1.PutMemoryRequest, v1.PutMemoryResponse]
-	deleteMemory             *connect.Client[v1.DeleteMemoryRequest, v1.DeleteMemoryResponse]
-	recallBackfill           *connect.Client[v1.RecallBackfillRequest, v1.RecallBackfillResponse]
-	recallStatus             *connect.Client[v1.RecallStatusRequest, v1.RecallStatusResponse]
-	conversationSearch       *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
-	conversationExport       *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
-	conversationQuery        *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
-	conversationReview       *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
-	conversationFindings     *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
-	darajaLaunch             *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
-	darajaSend               *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
-	darajaWatch              *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
-	listProviderBans         *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
-	banProvider              *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
-	unbanProvider            *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
-	listRoutes               *connect.Client[v1.ListRoutesRequest, v1.ListRoutesResponse]
-	setRoute                 *connect.Client[v1.SetRouteRequest, v1.SetRouteResponse]
-	deleteRoute              *connect.Client[v1.DeleteRouteRequest, v1.DeleteRouteResponse]
-	report                   *connect.Client[v1.ReportRequest, v1.ReportResponse]
-	receive                  *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
-	setResult                *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
-	resume                   *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
-	closeAllExited           *connect.Client[v1.CloseAllExitedRequest, v1.CloseAllExitedResponse]
-	setLabels                *connect.Client[v1.SetLabelsRequest, v1.SetLabelsResponse]
-	status                   *connect.Client[v1.StatusRequest, v1.StatusResponse]
-	search                   *connect.Client[v1.SearchRequest, v1.SearchResponse]
-	shutdownDaemon           *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
-	modelInfo                *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
-	createSandbox            *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
-	syncPath                 *connect.Client[v1.SyncPathRequest, v1.SyncPathResponse]
-	syncRepo                 *connect.Client[v1.SyncRepoRequest, v1.SyncRepoResponse]
-	listSandboxes            *connect.Client[v1.ListSandboxesRequest, v1.ListSandboxesResponse]
-	removeSandbox            *connect.Client[v1.RemoveSandboxRequest, v1.RemoveSandboxResponse]
-	modelRoutes              *connect.Client[v1.ModelRoutesRequest, v1.ModelRoutesResponse]
-	conversationStats        *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
-	enrollExecutor           *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
-	createExecutor           *connect.Client[v1.CreateExecutorRequest, v1.CreateExecutorResponse]
-	labelExecutor            *connect.Client[v1.LabelExecutorRequest, v1.LabelExecutorResponse]
-	disableExecutor          *connect.Client[v1.DisableExecutorRequest, v1.DisableExecutorResponse]
-	enableExecutor           *connect.Client[v1.EnableExecutorRequest, v1.EnableExecutorResponse]
-	deleteExecutor           *connect.Client[v1.DeleteExecutorRequest, v1.DeleteExecutorResponse]
-	executorSession          *connect.Client[v1.ExecutorSessionRequest, v1.ExecutorSessionEvent]
-	createUser               *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
-	listUsers                *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
-	removeUser               *connect.Client[v1.RemoveUserRequest, v1.RemoveUserResponse]
-	updateUser               *connect.Client[v1.UpdateUserRequest, v1.UpdateUserResponse]
-	mintToken                *connect.Client[v1.MintTokenRequest, v1.MintTokenResponse]
-	listTokens               *connect.Client[v1.ListTokensRequest, v1.ListTokensResponse]
-	revokeToken              *connect.Client[v1.RevokeTokenRequest, v1.RevokeTokenResponse]
-	getStreams               *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
-	sendFrame                *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
+	getHistory           *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	streamEvents         *connect.Client[v1.StreamEventsRequest, v1.Event]
+	send                 *connect.Client[v1.SendRequest, v1.SendResponse]
+	listChildren         *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
+	getChild             *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
+	spawn                *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
+	kill                 *connect.Client[v1.KillRequest, v1.KillResponse]
+	close                *connect.Client[v1.CloseRequest, v1.CloseResponse]
+	setBudget            *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
+	setRouting           *connect.Client[v1.SetRoutingRequest, v1.SetRoutingResponse]
+	listTasks            *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
+	listModels           *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	listExecutors        *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
+	getRateLimitStatus   *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
+	listSkills           *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
+	getSkill             *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
+	upsertSkill          *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
+	deleteSkill          *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
+	setSkillEnabled      *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
+	listPymodules        *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
+	getPymodule          *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
+	putPymodule          *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
+	deletePymodule       *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
+	addRepo              *connect.Client[v1.AddRepoRequest, v1.AddRepoResponse]
+	listRepos            *connect.Client[v1.ListReposRequest, v1.ListReposResponse]
+	refreshRepo          *connect.Client[v1.RefreshRepoRequest, v1.RefreshRepoResponse]
+	removeRepo           *connect.Client[v1.RemoveRepoRequest, v1.RemoveRepoResponse]
+	listPresets          *connect.Client[v1.ListPresetsRequest, v1.ListPresetsResponse]
+	getPreset            *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
+	putPreset            *connect.Client[v1.PutPresetRequest, v1.PutPresetResponse]
+	deletePreset         *connect.Client[v1.DeletePresetRequest, v1.DeletePresetResponse]
+	recall               *connect.Client[v1.RecallRequest, v1.RecallResponse]
+	recallContext        *connect.Client[v1.RecallContextRequest, v1.RecallContextResponse]
+	getMemory            *connect.Client[v1.GetMemoryRequest, v1.GetMemoryResponse]
+	memoryTree           *connect.Client[v1.MemoryTreeRequest, v1.MemoryTreeResponse]
+	putMemory            *connect.Client[v1.PutMemoryRequest, v1.PutMemoryResponse]
+	deleteMemory         *connect.Client[v1.DeleteMemoryRequest, v1.DeleteMemoryResponse]
+	recallBackfill       *connect.Client[v1.RecallBackfillRequest, v1.RecallBackfillResponse]
+	recallStatus         *connect.Client[v1.RecallStatusRequest, v1.RecallStatusResponse]
+	conversationSearch   *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
+	conversationExport   *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
+	conversationQuery    *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
+	conversationReview   *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
+	conversationFindings *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
+	darajaLaunch         *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
+	darajaSend           *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
+	darajaWatch          *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
+	listProviderBans     *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
+	banProvider          *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
+	unbanProvider        *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
+	listRoutes           *connect.Client[v1.ListRoutesRequest, v1.ListRoutesResponse]
+	setRoute             *connect.Client[v1.SetRouteRequest, v1.SetRouteResponse]
+	deleteRoute          *connect.Client[v1.DeleteRouteRequest, v1.DeleteRouteResponse]
+	report               *connect.Client[v1.ReportRequest, v1.ReportResponse]
+	receive              *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
+	setResult            *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
+	resume               *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
+	closeAllExited       *connect.Client[v1.CloseAllExitedRequest, v1.CloseAllExitedResponse]
+	setLabels            *connect.Client[v1.SetLabelsRequest, v1.SetLabelsResponse]
+	status               *connect.Client[v1.StatusRequest, v1.StatusResponse]
+	search               *connect.Client[v1.SearchRequest, v1.SearchResponse]
+	shutdownDaemon       *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
+	modelInfo            *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
+	createSandbox        *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
+	syncPath             *connect.Client[v1.SyncPathRequest, v1.SyncPathResponse]
+	syncRepo             *connect.Client[v1.SyncRepoRequest, v1.SyncRepoResponse]
+	listSandboxes        *connect.Client[v1.ListSandboxesRequest, v1.ListSandboxesResponse]
+	removeSandbox        *connect.Client[v1.RemoveSandboxRequest, v1.RemoveSandboxResponse]
+	modelRoutes          *connect.Client[v1.ModelRoutesRequest, v1.ModelRoutesResponse]
+	conversationStats    *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
+	enrollExecutor       *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
+	createExecutor       *connect.Client[v1.CreateExecutorRequest, v1.CreateExecutorResponse]
+	labelExecutor        *connect.Client[v1.LabelExecutorRequest, v1.LabelExecutorResponse]
+	disableExecutor      *connect.Client[v1.DisableExecutorRequest, v1.DisableExecutorResponse]
+	enableExecutor       *connect.Client[v1.EnableExecutorRequest, v1.EnableExecutorResponse]
+	deleteExecutor       *connect.Client[v1.DeleteExecutorRequest, v1.DeleteExecutorResponse]
+	executorSession      *connect.Client[v1.ExecutorSessionRequest, v1.ExecutorSessionEvent]
+	createUser           *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
+	listUsers            *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
+	removeUser           *connect.Client[v1.RemoveUserRequest, v1.RemoveUserResponse]
+	updateUser           *connect.Client[v1.UpdateUserRequest, v1.UpdateUserResponse]
+	mintToken            *connect.Client[v1.MintTokenRequest, v1.MintTokenResponse]
+	listTokens           *connect.Client[v1.ListTokensRequest, v1.ListTokensResponse]
+	revokeToken          *connect.Client[v1.RevokeTokenRequest, v1.RevokeTokenResponse]
+	getStreams           *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
+	sendFrame            *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -1080,24 +1076,24 @@ func (c *controlClient) DeletePymodule(ctx context.Context, req *connect.Request
 	return c.deletePymodule.CallUnary(ctx, req)
 }
 
-// AddPymoduleGitSource calls rafiki.v1.Control.AddPymoduleGitSource.
-func (c *controlClient) AddPymoduleGitSource(ctx context.Context, req *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error) {
-	return c.addPymoduleGitSource.CallUnary(ctx, req)
+// AddRepo calls rafiki.v1.Control.AddRepo.
+func (c *controlClient) AddRepo(ctx context.Context, req *connect.Request[v1.AddRepoRequest]) (*connect.Response[v1.AddRepoResponse], error) {
+	return c.addRepo.CallUnary(ctx, req)
 }
 
-// ListPymoduleGitSources calls rafiki.v1.Control.ListPymoduleGitSources.
-func (c *controlClient) ListPymoduleGitSources(ctx context.Context, req *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error) {
-	return c.listPymoduleGitSources.CallUnary(ctx, req)
+// ListRepos calls rafiki.v1.Control.ListRepos.
+func (c *controlClient) ListRepos(ctx context.Context, req *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error) {
+	return c.listRepos.CallUnary(ctx, req)
 }
 
-// RefreshPymoduleGitSource calls rafiki.v1.Control.RefreshPymoduleGitSource.
-func (c *controlClient) RefreshPymoduleGitSource(ctx context.Context, req *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error) {
-	return c.refreshPymoduleGitSource.CallUnary(ctx, req)
+// RefreshRepo calls rafiki.v1.Control.RefreshRepo.
+func (c *controlClient) RefreshRepo(ctx context.Context, req *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error) {
+	return c.refreshRepo.CallUnary(ctx, req)
 }
 
-// RemovePymoduleGitSource calls rafiki.v1.Control.RemovePymoduleGitSource.
-func (c *controlClient) RemovePymoduleGitSource(ctx context.Context, req *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error) {
-	return c.removePymoduleGitSource.CallUnary(ctx, req)
+// RemoveRepo calls rafiki.v1.Control.RemoveRepo.
+func (c *controlClient) RemoveRepo(ctx context.Context, req *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error) {
+	return c.removeRepo.CallUnary(ctx, req)
 }
 
 // ListPresets calls rafiki.v1.Control.ListPresets.
@@ -1420,10 +1416,10 @@ type ControlHandler interface {
 	GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error)
 	PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error)
 	DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error)
-	AddPymoduleGitSource(context.Context, *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error)
-	ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error)
-	RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error)
-	RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error)
+	AddRepo(context.Context, *connect.Request[v1.AddRepoRequest]) (*connect.Response[v1.AddRepoResponse], error)
+	ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error)
+	RefreshRepo(context.Context, *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error)
+	RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error)
 	ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error)
 	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
 	PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error)
@@ -1655,28 +1651,28 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("DeletePymodule")),
 		connect.WithHandlerOptions(opts...),
 	)
-	controlAddPymoduleGitSourceHandler := connect.NewUnaryHandler(
-		ControlAddPymoduleGitSourceProcedure,
-		svc.AddPymoduleGitSource,
-		connect.WithSchema(controlMethods.ByName("AddPymoduleGitSource")),
+	controlAddRepoHandler := connect.NewUnaryHandler(
+		ControlAddRepoProcedure,
+		svc.AddRepo,
+		connect.WithSchema(controlMethods.ByName("AddRepo")),
 		connect.WithHandlerOptions(opts...),
 	)
-	controlListPymoduleGitSourcesHandler := connect.NewUnaryHandler(
-		ControlListPymoduleGitSourcesProcedure,
-		svc.ListPymoduleGitSources,
-		connect.WithSchema(controlMethods.ByName("ListPymoduleGitSources")),
+	controlListReposHandler := connect.NewUnaryHandler(
+		ControlListReposProcedure,
+		svc.ListRepos,
+		connect.WithSchema(controlMethods.ByName("ListRepos")),
 		connect.WithHandlerOptions(opts...),
 	)
-	controlRefreshPymoduleGitSourceHandler := connect.NewUnaryHandler(
-		ControlRefreshPymoduleGitSourceProcedure,
-		svc.RefreshPymoduleGitSource,
-		connect.WithSchema(controlMethods.ByName("RefreshPymoduleGitSource")),
+	controlRefreshRepoHandler := connect.NewUnaryHandler(
+		ControlRefreshRepoProcedure,
+		svc.RefreshRepo,
+		connect.WithSchema(controlMethods.ByName("RefreshRepo")),
 		connect.WithHandlerOptions(opts...),
 	)
-	controlRemovePymoduleGitSourceHandler := connect.NewUnaryHandler(
-		ControlRemovePymoduleGitSourceProcedure,
-		svc.RemovePymoduleGitSource,
-		connect.WithSchema(controlMethods.ByName("RemovePymoduleGitSource")),
+	controlRemoveRepoHandler := connect.NewUnaryHandler(
+		ControlRemoveRepoProcedure,
+		svc.RemoveRepo,
+		connect.WithSchema(controlMethods.ByName("RemoveRepo")),
 		connect.WithHandlerOptions(opts...),
 	)
 	controlListPresetsHandler := connect.NewUnaryHandler(
@@ -2081,14 +2077,14 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlPutPymoduleHandler.ServeHTTP(w, r)
 		case ControlDeletePymoduleProcedure:
 			controlDeletePymoduleHandler.ServeHTTP(w, r)
-		case ControlAddPymoduleGitSourceProcedure:
-			controlAddPymoduleGitSourceHandler.ServeHTTP(w, r)
-		case ControlListPymoduleGitSourcesProcedure:
-			controlListPymoduleGitSourcesHandler.ServeHTTP(w, r)
-		case ControlRefreshPymoduleGitSourceProcedure:
-			controlRefreshPymoduleGitSourceHandler.ServeHTTP(w, r)
-		case ControlRemovePymoduleGitSourceProcedure:
-			controlRemovePymoduleGitSourceHandler.ServeHTTP(w, r)
+		case ControlAddRepoProcedure:
+			controlAddRepoHandler.ServeHTTP(w, r)
+		case ControlListReposProcedure:
+			controlListReposHandler.ServeHTTP(w, r)
+		case ControlRefreshRepoProcedure:
+			controlRefreshRepoHandler.ServeHTTP(w, r)
+		case ControlRemoveRepoProcedure:
+			controlRemoveRepoHandler.ServeHTTP(w, r)
 		case ControlListPresetsProcedure:
 			controlListPresetsHandler.ServeHTTP(w, r)
 		case ControlGetPresetProcedure:
@@ -2308,20 +2304,20 @@ func (UnimplementedControlHandler) DeletePymodule(context.Context, *connect.Requ
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeletePymodule is not implemented"))
 }
 
-func (UnimplementedControlHandler) AddPymoduleGitSource(context.Context, *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.AddPymoduleGitSource is not implemented"))
+func (UnimplementedControlHandler) AddRepo(context.Context, *connect.Request[v1.AddRepoRequest]) (*connect.Response[v1.AddRepoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.AddRepo is not implemented"))
 }
 
-func (UnimplementedControlHandler) ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListPymoduleGitSources is not implemented"))
+func (UnimplementedControlHandler) ListRepos(context.Context, *connect.Request[v1.ListReposRequest]) (*connect.Response[v1.ListReposResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListRepos is not implemented"))
 }
 
-func (UnimplementedControlHandler) RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RefreshPymoduleGitSource is not implemented"))
+func (UnimplementedControlHandler) RefreshRepo(context.Context, *connect.Request[v1.RefreshRepoRequest]) (*connect.Response[v1.RefreshRepoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RefreshRepo is not implemented"))
 }
 
-func (UnimplementedControlHandler) RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemovePymoduleGitSource is not implemented"))
+func (UnimplementedControlHandler) RemoveRepo(context.Context, *connect.Request[v1.RemoveRepoRequest]) (*connect.Response[v1.RemoveRepoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemoveRepo is not implemented"))
 }
 
 func (UnimplementedControlHandler) ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error) {

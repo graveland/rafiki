@@ -42,15 +42,15 @@ func seedPymoduleCache(t *testing.T, name, code string) {
 	c.NoError(os.WriteFile(filepath.Join(dir, name+".py"), []byte(code), 0o644))
 }
 
-// seedGitPymoduleRepo writes <cache>/pymodule-repos/<name>/ directly, in the
-// layout the executor's SyncPyModuleGitSource receiver produces: each script
+// seedRepo writes <cache>/pymodule-repos/<name>/ directly, in the
+// layout the executor's SyncRepo receiver produces: each script
 // becomes scripts/<script>.py (a callable), each package becomes a top-level
 // <pkg>/__init__.py (an importable package). Deliberately not going through
-// the sync path, same philosophy as seedPymoduleCache: the git-source sync
+// the sync path, same philosophy as seedPymoduleCache: the repo sync
 // receiver is a different layer (and these tests must not need git or uv),
 // and they exercise pymodule_run's own repo-path resolution, PYTHONPATH and
 // interpreter logic.
-func seedGitPymoduleRepo(t *testing.T, name string, scripts, packages map[string]string) {
+func seedRepo(t *testing.T, name string, scripts, packages map[string]string) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	repoDir := filepath.Join(paths.CacheDir(), "pymodule-repos", name)
@@ -66,7 +66,7 @@ func seedGitPymoduleRepo(t *testing.T, name string, scripts, packages map[string
 	}
 }
 
-// gitRepoDirOf is the synced checkout directory of a seeded git source, as
+// gitRepoDirOf is the synced checkout directory of a seeded repo, as
 // pymodule_run itself computes it.
 func gitRepoDirOf(t *testing.T, name string) string {
 	t.Helper()
@@ -549,7 +549,7 @@ func TestPymoduleRunRepoKeepsProcessEnvWithModules(t *testing.T) {
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("RAFIKI_TEST_PYMODULE_MARKER", "present")
-	seedGitPymoduleRepo(t, "ops_tools",
+	seedRepo(t, "ops_tools",
 		map[string]string{"main": "import os\n" +
 			"print(\"path:\" + (os.environ.get(\"PATH\") or \"\"))\n" +
 			"print(\"marker:\" + (os.environ.get(\"RAFIKI_TEST_PYMODULE_MARKER\") or \"\"))\n"},
@@ -607,7 +607,7 @@ func TestPymoduleRunRepoLocalUnchanged(t *testing.T) {
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	seedPymoduleCache(t, "main", "print(\"ok-local\")\n")
-	seedGitPymoduleRepo(t, "main", map[string]string{"main": "print(\"ok-repo\")\n"}, nil)
+	seedRepo(t, "main", map[string]string{"main": "print(\"ok-repo\")\n"}, nil)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "main"}`))
@@ -631,7 +631,7 @@ func TestPymoduleRunRepoMissingFieldErrors(t *testing.T) {
 	}
 }
 
-// TestPymoduleRunRepoRunsScriptFromRepo: a git-sourced call runs the
+// TestPymoduleRunRepoRunsScriptFromRepo: a repo-sourced call runs the
 // checkout's scripts/<script>.py, not a blob-sourced copy.
 func TestPymoduleRunRepoRunsScriptFromRepo(t *testing.T) {
 	c := assert.NewAborting(t)
@@ -639,7 +639,7 @@ func TestPymoduleRunRepoRunsScriptFromRepo(t *testing.T) {
 		t.Skipf("python3 not found: %v", err)
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	seedGitPymoduleRepo(t, "ops_tools", map[string]string{"rotate": "print(\"rotated\")\n"}, nil)
+	seedRepo(t, "ops_tools", map[string]string{"rotate": "print(\"rotated\")\n"}, nil)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "rotate"}`))
@@ -657,7 +657,7 @@ func TestPymoduleRunRepoAutoJoinsOwnPackages(t *testing.T) {
 		t.Skipf("python3 not found: %v", err)
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	seedGitPymoduleRepo(t, "ops_tools",
+	seedRepo(t, "ops_tools",
 		map[string]string{"main": "import ops_tools\nprint(\"got\", ops_tools.VALUE)\n"},
 		map[string]string{"ops_tools": "VALUE = 99\n"})
 
@@ -673,7 +673,7 @@ func TestPymoduleRunRepoAutoJoinsOwnPackages(t *testing.T) {
 func TestPymoduleRunRepoMissingScriptNamesRepoAndScript(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	c := assert.NewAborting(t)
-	seedGitPymoduleRepo(t, "ops_tools", map[string]string{"rotate": "pass\n"}, nil)
+	seedRepo(t, "ops_tools", map[string]string{"rotate": "pass\n"}, nil)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "nonexistent"}`))
@@ -690,7 +690,7 @@ func TestPymoduleRunRepoVenvInterpreterAndRootOnPath(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("PYTHONPATH", "") // keep the echoed PYTHONPATH exactly assertable
 	c := assert.NewAborting(t)
-	seedGitPymoduleRepo(t, "ops_tools", map[string]string{"main": "pass\n"}, nil)
+	seedRepo(t, "ops_tools", map[string]string{"main": "pass\n"}, nil)
 	repoDir := gitRepoDirOf(t, "ops_tools")
 	fakeVenv(t, repoDir, echoInterpreter, true)
 
@@ -713,7 +713,7 @@ func TestPymoduleRunRepoModulesResolveWithinRepo(t *testing.T) {
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("PYTHONPATH", "")
-	seedGitPymoduleRepo(t, "ops_tools",
+	seedRepo(t, "ops_tools",
 		map[string]string{"main": "import os\nimport ops_tools\nprint(\"pp:\" + os.environ.get(\"PYTHONPATH\", \"\"))\nprint(\"got\", ops_tools.VALUE)\n"},
 		map[string]string{"ops_tools": "VALUE = 7\n"})
 
@@ -743,7 +743,7 @@ func TestPymoduleRunRepoRejectsPathLikeRepoNames(t *testing.T) {
 	for _, bad := range []string{"../sibling/evil", "sub/evil", "./evil", "evil.py"} {
 		_, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"repo": %q, "script": "main"}`, bad)))
 		c.Error(err, "want an error for the path-like repo %q, got nil", bad)
-		c.False(!strings.Contains(err.Error(), "git source name") || !strings.Contains(err.Error(), "repo"), "error for %q should be the repo's git source name rule, got: %v", bad, err)
+		c.False(!strings.Contains(err.Error(), "repo name") || !strings.Contains(err.Error(), "repo"), "error for %q should be the repo's repo name rule, got: %v", bad, err)
 	}
 	// Nothing escaped the guard into the managed cache root.
 	_, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodule-repos", "sibling"))

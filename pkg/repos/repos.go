@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package gitpymodules is the domain type and store interface for pymodule
-// git sources: owner-scoped (url, ref) pointers to external git content that
+// Package repos is the domain type and store interface for pymodule
+// repos: owner-scoped (url, ref) pointers to external git content that
 // the pymodule tool surface addresses as a `repo` scope. The Postgres
-// implementation is pkg/gitpymodulesdb; this package stays pgx-free, same
+// implementation is pkg/reposdb; this package stays pgx-free, same
 // split as pkg/pymodules/pkg/pymodulesdb.
-package gitpymodules
+package repos
 
 import (
 	"context"
@@ -15,16 +15,16 @@ import (
 	"time"
 )
 
-// ErrNotFound means the git source does not exist for the given owner.
-var ErrNotFound = errors.New("git pymodule source not found")
+// ErrNotFound means the repo does not exist for the given owner.
+var ErrNotFound = errors.New("repo not found")
 
 // ErrReservedName rejects "local": that name is the sentinel every pymodule
-// tool uses for the built-in blob store, so a git source registered under it
+// tool uses for the built-in blob store, so a repo registered under it
 // would make repo="local" ambiguous between the two stores.
 var ErrReservedName = errors.New(`"local" is reserved for the built-in pymodule store`)
 
-// GitSourceRecord is one row of conversations.pymodule_git_sources.
-type GitSourceRecord struct {
+// Record is one row of conversations.repos.
+type Record struct {
 	ID          int64
 	OwnerUserID string // empty means unattributed, same convention as pymodules.Record
 	Name        string // the value used as the `repo` argument everywhere else
@@ -33,23 +33,23 @@ type GitSourceRecord struct {
 	CreatedAt   time.Time
 }
 
-// Store is the git-source backend. The Postgres implementation is
-// pkg/gitpymodulesdb; this interface stays here so pkg/gitpymodules remains
+// Store is the repo backend. The Postgres implementation is
+// pkg/reposdb; this interface stays here so pkg/repos remains
 // pgx-free, same split as pymodules.Store/pymodulesdb.
 type Store interface {
 	// Put registers (or repoints) the source named name for ownerUserID --
-	// ownerUserID empty means unattributed. A git source registration is a
+	// ownerUserID empty means unattributed. A repo registration is a
 	// pointer to repoint, not an append-only snippet history, so Put for an
 	// existing (owner, name) updates url/ref in place rather than inserting
 	// a new row. Put rejects name == "local" (ErrReservedName) and any other
 	// name ValidateName refuses; every implementation must apply it before
 	// touching the store.
-	Put(ctx context.Context, ownerUserID, name, url, ref string) (GitSourceRecord, error)
+	Put(ctx context.Context, ownerUserID, name, url, ref string) (Record, error)
 
 	// List returns ownerUserID's sources ordered by name. ownerUserID empty
 	// returns only OTHER unattributed rows -- never another owner's, and
 	// never every owner's, same rule as pymodules.Store.List.
-	List(ctx context.Context, ownerUserID string) ([]GitSourceRecord, error)
+	List(ctx context.Context, ownerUserID string) ([]Record, error)
 
 	// Delete removes ownerUserID's source named name outright (there is no
 	// versioning to soft-delete). Returns ErrNotFound when no such row
@@ -57,8 +57,8 @@ type Store interface {
 	Delete(ctx context.Context, ownerUserID, name string) error
 }
 
-// validNameRe is a single safe path segment, not a Python identifier: a git
-// source's name only ever becomes a directory under the executor's checkout
+// validNameRe is a single safe path segment, not a Python identifier: a repo's
+// name only ever becomes a directory under the executor's checkout
 // cache and the value of the `repo` argument. Python never imports it — the
 // checkout's CONTENTS go on PYTHONPATH — so "review-swarm" is fine. No "."
 // (so no "..", hidden directories or extension-shaped names), no leading "-"
@@ -75,10 +75,10 @@ func ValidateName(name string) error {
 		return ErrReservedName
 	}
 	if len(name) == 0 || len(name) > 64 {
-		return fmt.Errorf("git source name must be 1-64 characters, got %d", len(name))
+		return fmt.Errorf("repo name must be 1-64 characters, got %d", len(name))
 	}
 	if !validNameRe.MatchString(name) {
-		return fmt.Errorf("git source name %q may only contain letters, digits, \"_\" and \"-\", and must not start with \"-\"", name)
+		return fmt.Errorf("repo name %q may only contain letters, digits, \"_\" and \"-\", and must not start with \"-\"", name)
 	}
 	return nil
 }

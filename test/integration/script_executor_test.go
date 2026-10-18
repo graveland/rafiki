@@ -145,7 +145,7 @@ func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName, ownerUserID s
 	// The executor's own XDG dirs are isolated so the test can watch its
 	// pymodule cache fill — and so nothing this subprocess resolves leaks into
 	// the developer's machine.
-	cmd.Env = append(os.Environ(),
+	cmd.Env = subprocessEnv(
 		"XDG_CACHE_HOME="+cache,
 		"XDG_CONFIG_HOME="+filepath.Join(cache, "config"),
 		"XDG_STATE_HOME="+filepath.Join(cache, "state"),

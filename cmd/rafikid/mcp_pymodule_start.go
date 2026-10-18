@@ -42,7 +42,7 @@ const mcpPymoduleStartDescription = "Start a saved Python script as a rafiki SCR
 	"agent_list or task_list deliberately.\n\n" +
 	"`repo` picks the source: \"local\" for your owner's saved pymodules " +
 	"(pymodule_put — the spawning owner's bucket is what the child " +
-	"materializes from), or a git source's name as reported by discovery. " +
+	"materializes from), or a repo's name as reported by discovery. " +
 	"`script` is the module name exactly as saved with pymodule_put -- not " +
 	"a path, and not inline code. `modules` names further saved pymodules " +
 	"the script imports, resolved within the same repo. The child gets the " +

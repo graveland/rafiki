@@ -10,20 +10,20 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 const pymoduleRunDescription = "Run a Python script you saved with pymodule_put, or one from " +
-	"a registered git source, by its module name. `repo` picks the source: " +
-	"\"local\" for your own saved pymodules (pymodule_put), or a git " +
-	"source's name as reported by discovery. `script` is the module name " +
+	"a registered repo, by its module name. `repo` picks the source: " +
+	"\"local\" for your own saved pymodules (pymodule_put), or a repo's " +
+	"name as reported by discovery. `script` is the module name " +
 	"exactly as saved with pymodule_put -- not a path, and not inline code; " +
 	"if you have edited a module's code since saving it, pymodule_put it " +
 	"again before running. `modules` names further pymodules the script " +
 	"imports, resolved within the same repo; they go on " +
-	"PYTHONPATH for the run, and a git source's own top-level packages are " +
+	"PYTHONPATH for the run, and a repo's own top-level packages are " +
 	"importable without naming them. If the script or any named module " +
 	"declares a requirements block (`# pymodule-requirements:`, see " +
 	"pymodule_put), its installed packages are on PYTHONPATH for the run and " +
@@ -42,7 +42,7 @@ func (PyModuleRunBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "repo", Type: "string", Description: "Which pymodule source to use: \"local\" for your own saved pymodules (pymodule_put), or a git source's name as reported by discovery."},
+			{Name: "repo", Type: "string", Description: "Which pymodule source to use: \"local\" for your own saved pymodules (pymodule_put), or a repo's name as reported by discovery."},
 			{Name: "script", Type: "string", Description: "Name of the pymodule to run (e.g. \"analyze\"): for repo \"local\", exactly as saved with pymodule_put; otherwise a discovered script name of the repo, as reported by discovery. A bare Python identifier, not a path."},
 			{Name: "modules", Type: "array", Items: &Schema{Type: "string"}, Description: "Names of further pymodules the script imports, resolved within the same repo: for repo \"local\", from pymodule_put; otherwise discovered packages of the repo, as reported by discovery."},
 			{Name: "cwd", Type: "string", Description: "Optional working directory for the run -- absolute, ~-expanded, or relative to your working directory. Default: your working directory."},
@@ -102,11 +102,11 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	}
 	// `repo` is required by the schema, but a model can still omit it: fail
 	// loudly instead of silently defaulting. An implicit default would leave
-	// a git-sourced call silently running (or missing) a same-named
+	// a repo-sourced call silently running (or missing) a same-named
 	// blob-sourced module, with nothing in the result saying which scope it
 	// ran in.
 	if in.Repo == "" {
-		return ToolResult{}, fmt.Errorf("pymodule_run: repo is required: \"local\" for your own saved pymodules (pymodule_put), or a git source's name as reported by discovery")
+		return ToolResult{}, fmt.Errorf("pymodule_run: repo is required: \"local\" for your own saved pymodules (pymodule_put), or a repo's name as reported by discovery")
 	}
 	if in.Repo != "local" {
 		return rt.executeGitRepo(ctx, in)
@@ -263,9 +263,9 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 }
 
 // executeGitRepo is the resolution branch for any repo other than "local":
-// script, modules and interpreter resolve against a git source's synced
+// script, modules and interpreter resolve against a repo's synced
 // checkout at <cache>/pymodule-repos/<repo> -- the layout pkg/executor's
-// SyncPyModuleGitSource receiver produces on THIS executor (the executor that
+// SyncRepo receiver produces on THIS executor (the executor that
 // ran the sync is the one running this tool), re-derived here from
 // paths.CacheDir() rather than imported.
 func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInput) (ToolResult, error) {
@@ -273,7 +273,7 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 	// guarded by the rule every registered source was stored under; each
 	// consumption point validates independently, never trusting an earlier
 	// check.
-	if err := gitpymodules.ValidateName(in.Repo); err != nil {
+	if err := repos.ValidateName(in.Repo); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_run: repo: %w", err)
 	}
 	if err := pymodules.ValidName(in.Script); err != nil {
@@ -293,7 +293,7 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 	repoDir := filepath.Join(pymodules.GitCacheDir(), in.Repo)
 	scriptPath := filepath.Join(repoDir, "scripts", in.Script+".py")
 	if _, err := os.Stat(scriptPath); err != nil {
-		return ToolResult{}, fmt.Errorf("pymodule_run: script %q is not synced to this executor under repo %q (has the git source been refreshed on it yet?): %w", in.Script, in.Repo, err)
+		return ToolResult{}, fmt.Errorf("pymodule_run: script %q is not synced to this executor under repo %q (has the repo been refreshed on it yet?): %w", in.Script, in.Repo, err)
 	}
 
 	// The whole repo shares ONE venv, so the interpreter question is a single
@@ -327,7 +327,7 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 		dir := filepath.Join(repoDir, m)
 		fi, statErr := os.Stat(dir)
 		if statErr != nil {
-			return ToolResult{}, fmt.Errorf("pymodule_run: module %q is not synced to this executor under repo %q (has the git source been refreshed on it yet?): %w", m, in.Repo, statErr)
+			return ToolResult{}, fmt.Errorf("pymodule_run: module %q is not synced to this executor under repo %q (has the repo been refreshed on it yet?): %w", m, in.Repo, statErr)
 		}
 		if !fi.IsDir() {
 			return ToolResult{}, fmt.Errorf("pymodule_run: module %q under repo %q is not a package directory", m, in.Repo)

@@ -16,22 +16,22 @@ import (
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 
 	"github.com/multigres/testkit/assert"
 )
 
-// fakeGitSourceStore is an in-memory gitpymodules.Store. Upsert semantics
+// fakeRepoStore is an in-memory repos.Store. Upsert semantics
 // mirror the real store: Put for an existing (owner, name) repoints url/ref
 // in place rather than appending a row.
-type fakeGitSourceStore struct {
+type fakeRepoStore struct {
 	mu      sync.Mutex
-	rows    map[string][]gitpymodules.GitSourceRecord
+	rows    map[string][]repos.Record
 	listed  []string
 	deleted [][2]string // Delete calls as {ownerUserID, name}, in call order
 }
 
-func (s *fakeGitSourceStore) Put(_ context.Context, ownerUserID, name, url, ref string) (gitpymodules.GitSourceRecord, error) {
+func (s *fakeRepoStore) Put(_ context.Context, ownerUserID, name, url, ref string) (repos.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, r := range s.rows[ownerUserID] {
@@ -41,7 +41,7 @@ func (s *fakeGitSourceStore) Put(_ context.Context, ownerUserID, name, url, ref 
 			return s.rows[ownerUserID][i], nil
 		}
 	}
-	rec := gitpymodules.GitSourceRecord{
+	rec := repos.Record{
 		ID:          int64(len(s.rows[ownerUserID]) + 1),
 		OwnerUserID: ownerUserID,
 		Name:        name,
@@ -52,14 +52,14 @@ func (s *fakeGitSourceStore) Put(_ context.Context, ownerUserID, name, url, ref 
 	return rec, nil
 }
 
-func (s *fakeGitSourceStore) List(_ context.Context, ownerUserID string) ([]gitpymodules.GitSourceRecord, error) {
+func (s *fakeRepoStore) List(_ context.Context, ownerUserID string) ([]repos.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.listed = append(s.listed, ownerUserID)
-	return append([]gitpymodules.GitSourceRecord(nil), s.rows[ownerUserID]...), nil
+	return append([]repos.Record(nil), s.rows[ownerUserID]...), nil
 }
 
-func (s *fakeGitSourceStore) Delete(_ context.Context, ownerUserID, name string) error {
+func (s *fakeRepoStore) Delete(_ context.Context, ownerUserID, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows := s.rows[ownerUserID]
@@ -70,27 +70,27 @@ func (s *fakeGitSourceStore) Delete(_ context.Context, ownerUserID, name string)
 			return nil
 		}
 	}
-	return gitpymodules.ErrNotFound
+	return repos.ErrNotFound
 }
 
-// fakeGitSourceClient satisfies executorpbconnect.ExecutorServiceClient by
-// embedding the interface and overriding ONLY SyncPyModuleGitSource — the
+// fakeRepoClient satisfies executorpbconnect.ExecutorServiceClient by
+// embedding the interface and overriding ONLY SyncRepo — the
 // same loud-failure-on-anything-else trick fakePymoduleClient uses. resp/err
 // are read-only after construction; entered/release (both nil by default)
 // let a test block a response, and requests is appended under mu because
 // refresh fans out concurrently.
-type fakeGitSourceClient struct {
+type fakeRepoClient struct {
 	executorpbconnect.ExecutorServiceClient
 	mu       sync.Mutex
-	requests []*executorpb.SyncPyModuleGitSourceRequest
-	resp     *executorpb.SyncPyModuleGitSourceResponse
+	requests []*executorpb.SyncRepoRequest
+	resp     *executorpb.SyncRepoResponse
 	err      error
 	entered  chan struct{}
 	release  chan struct{}
 	onCall   func() // invoked once, before the response/err is produced
 }
 
-func (c *fakeGitSourceClient) SyncPyModuleGitSource(ctx context.Context, req *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
+func (c *fakeRepoClient) SyncRepo(ctx context.Context, req *connect.Request[executorpb.SyncRepoRequest]) (*connect.Response[executorpb.SyncRepoResponse], error) {
 	c.mu.Lock()
 	c.requests = append(c.requests, req.Msg)
 	c.mu.Unlock()
@@ -113,39 +113,39 @@ func (c *fakeGitSourceClient) SyncPyModuleGitSource(ctx context.Context, req *co
 	return connect.NewResponse(c.resp), nil
 }
 
-func (c *fakeGitSourceClient) callCount() int {
+func (c *fakeRepoClient) callCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.requests)
 }
 
-// gitSourceFixture builds a pusher over three live executors — alice's, bob's
+// repoFixture builds a pusher over three live executors — alice's, bob's
 // and one whose owner username does not resolve — each answering git refresh
 // through its own client, and a store holding one registered source per
 // resolved owner.
-type gitSourceFixture struct {
-	gp      *gitPymodulePusher
+type repoFixture struct {
+	gp      *repoPusher
 	pool    *fakePymodulePool
-	store   *fakeGitSourceStore
-	clients map[string]*fakeGitSourceClient
+	store   *fakeRepoStore
+	clients map[string]*fakeRepoClient
 }
 
-func newGitSourceFixture() *gitSourceFixture {
+func newRepoFixture() *repoFixture {
 	live := []execpool.LiveExecutor{
 		{
 			Executor: executors.Executor{ID: "exec-alice", Labels: map[string]string{"owner": "alice"}},
-			Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+			Describe: &executorpb.DescribeResponse{RepoSync: true},
 		},
 		{
 			Executor: executors.Executor{ID: "exec-bob", Labels: map[string]string{"owner": "bob"}},
-			Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+			Describe: &executorpb.DescribeResponse{RepoSync: true},
 		},
 		{
 			Executor: executors.Executor{ID: "exec-ghost", Labels: map[string]string{"owner": "ghost"}},
-			Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+			Describe: &executorpb.DescribeResponse{RepoSync: true},
 		},
 	}
-	store := &fakeGitSourceStore{rows: map[string][]gitpymodules.GitSourceRecord{
+	store := &fakeRepoStore{rows: map[string][]repos.Record{
 		"u_alice": {
 			{ID: 1, OwnerUserID: "u_alice", Name: "ops_tools", URL: "https://example.net/ops.git", Ref: "main"},
 			{ID: 3, OwnerUserID: "u_alice", Name: "shared_lib", URL: "https://example.net/lib.git", Ref: "v2"},
@@ -154,7 +154,7 @@ func newGitSourceFixture() *gitSourceFixture {
 			{ID: 2, OwnerUserID: "u_bob", Name: "bob_lib", URL: "https://example.net/boblib.git", Ref: "trunk"},
 		},
 	}}
-	clients := map[string]*fakeGitSourceClient{
+	clients := map[string]*fakeRepoClient{
 		"exec-alice": {},
 		"exec-bob":   {},
 		"exec-ghost": {},
@@ -166,15 +166,15 @@ func newGitSourceFixture() *gitSourceFixture {
 	// osUser is "ghost": the fixture's ghost executor carries the daemon's OS
 	// username as its owner label, so it is the anonymous-enrolled case and the
 	// ONLY unresolvable label that maps to the unattributed owner.
-	gp := newGitPymodulePusher(pool, store, func(_ context.Context, username string) (string, bool, error) {
+	gp := newRepoPusher(pool, store, func(_ context.Context, username string) (string, bool, error) {
 		id, ok := map[string]string{"alice": "u_alice", "bob": "u_bob"}[username]
 		return id, ok, nil
 	}, "ghost")
-	return &gitSourceFixture{gp: gp, pool: pool, store: store, clients: clients}
+	return &repoFixture{gp: gp, pool: pool, store: store, clients: clients}
 }
 
-// gitSourceNames returns the names a SyncPyModuleGitSource request carries.
-func gitSourceNames(resp *executorpb.SyncPyModuleGitSourceResponse) []string {
+// repoNames returns the names a SyncRepo request carries.
+func repoNames(resp *executorpb.SyncRepoResponse) []string {
 	out := make([]string, 0, len(resp.GetScripts())+len(resp.GetPackages()))
 	for _, s := range resp.GetScripts() {
 		out = append(out, "script:"+s.GetName())
@@ -185,31 +185,31 @@ func gitSourceNames(resp *executorpb.SyncPyModuleGitSourceResponse) []string {
 	return out
 }
 
-// TestGitPymodulePusherRefreshCachesLatestInventory pins the cache contract:
+// TestRepoPusherRefreshCachesLatestInventory pins the cache contract:
 // the fan-out carries the registration (name, url, ref) to each executor, and
 // the cache ends up holding the LAST response to arrive — the first
 // responder's snapshot is visible in the cache before the second is released,
 // and the second's overwrites it.
-func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
+func TestRepoPusherRefreshCachesLatestInventory(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	f := newGitSourceFixture()
+	f := newRepoFixture()
 	// Two executors both resolve to alice: a second live executor for the
 	// same owner, so "latest" is a two-way race the test controls. Both block
 	// until released, so the release order — first early, second late — makes
 	// "the last one to respond" deterministic.
 	second := execpool.LiveExecutor{
 		Executor: executors.Executor{ID: "exec-alice2", Labels: map[string]string{"owner": "alice"}},
-		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
 	}
 	f.pool.live = append(f.pool.live, second)
-	early := &fakeGitSourceClient{
+	early := &fakeRepoClient{
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	late := &fakeGitSourceClient{
-		resp: &executorpb.SyncPyModuleGitSourceResponse{
-			Scripts:   []*executorpb.GitSourceScript{{Name: "late_script"}},
-			Packages:  []*executorpb.GitSourcePackage{{Name: "late_pkg"}},
+	late := &fakeRepoClient{
+		resp: &executorpb.SyncRepoResponse{
+			Scripts:   []*executorpb.RepoScript{{Name: "late_script"}},
+			Packages:  []*executorpb.RepoPackage{{Name: "late_pkg"}},
 			VenvReady: true,
 		},
 		entered: make(chan struct{}),
@@ -227,7 +227,7 @@ func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
 	}()
 
 	const waitLimit = 5 * time.Second
-	for name, c := range map[string]*fakeGitSourceClient{"exec-alice": early, "exec-alice2": late} {
+	for name, c := range map[string]*fakeRepoClient{"exec-alice": early, "exec-alice2": late} {
 		select {
 		case <-c.entered:
 		case <-time.After(waitLimit):
@@ -239,7 +239,7 @@ func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
 	if got := early.requests; len(got) != 1 {
 		t.Fatalf("exec-alice received %d request(s), want 1", len(got))
 	} else if r := got[0]; r.GetName() != "ops_tools" || r.GetUrl() != "https://example.net/ops.git" || r.GetRef() != "main" {
-		t.Errorf("SyncPyModuleGitSource payload = name %q url %q ref %q, want ops_tools/url/main", r.GetName(), r.GetUrl(), r.GetRef())
+		t.Errorf("SyncRepo payload = name %q url %q ref %q, want ops_tools/url/main", r.GetName(), r.GetUrl(), r.GetRef())
 	}
 
 	close(early.release)
@@ -260,7 +260,7 @@ func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
 
 	inv, ok := f.gp.inventoryFor("u_alice", "ops_tools")
 	ck.Require().True(ok, "inventoryFor found nothing after a refresh that had responders")
-	got, want := gitSourceNames(&executorpb.SyncPyModuleGitSourceResponse{Scripts: inv.Scripts, Packages: inv.Packages}),
+	got, want := repoNames(&executorpb.SyncRepoResponse{Scripts: inv.Scripts, Packages: inv.Packages}),
 		[]string{"script:late_script", "package:late_pkg"}
 	ck.EqDiff(want, got, "cached inventory")
 	ck.True(inv.VenvReady, "cached inventory lost venvReady")
@@ -272,25 +272,25 @@ func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
 	}
 }
 
-// TestGitPymodulePusherRefreshRunsExecutorsInParallel proves the fan-out is
+// TestRepoPusherRefreshRunsExecutorsInParallel proves the fan-out is
 // not serial — the same technique as the blob-sync
 // TestPymodulePusherPushAllRunsExecutorsConcurrently: each fake RPC blocks
 // until released, and the test must observe BOTH entered before releasing
 // either. A sequential refresh never enters the second push.
-func TestGitPymodulePusherRefreshRunsExecutorsInParallel(t *testing.T) {
-	f := newGitSourceFixture()
+func TestRepoPusherRefreshRunsExecutorsInParallel(t *testing.T) {
+	f := newRepoFixture()
 	second := execpool.LiveExecutor{
 		Executor: executors.Executor{ID: "exec-alice2", Labels: map[string]string{"owner": "alice"}},
-		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
 	}
 	f.pool.live = append(f.pool.live, second)
-	early := &fakeGitSourceClient{
-		resp:    &executorpb.SyncPyModuleGitSourceResponse{},
+	early := &fakeRepoClient{
+		resp:    &executorpb.SyncRepoResponse{},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	late := &fakeGitSourceClient{
-		resp:    &executorpb.SyncPyModuleGitSourceResponse{},
+	late := &fakeRepoClient{
+		resp:    &executorpb.SyncRepoResponse{},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
@@ -304,7 +304,7 @@ func TestGitPymodulePusherRefreshRunsExecutorsInParallel(t *testing.T) {
 	}()
 
 	const waitLimit = 5 * time.Second
-	for name, c := range map[string]*fakeGitSourceClient{"exec-alice": early, "exec-alice2": late} {
+	for name, c := range map[string]*fakeRepoClient{"exec-alice": early, "exec-alice2": late} {
 		select {
 		case <-c.entered:
 		case <-time.After(waitLimit):
@@ -322,12 +322,12 @@ func TestGitPymodulePusherRefreshRunsExecutorsInParallel(t *testing.T) {
 	}
 }
 
-// TestGitPymodulePusherAllInventorySpansMultipleSources pins the discovery
+// TestRepoPusherAllInventorySpansMultipleSources pins the discovery
 // read: every cached source name for ONE owner comes back, and no other
 // owner's does — the "list everything" path Task 3.2's inventories build on.
-func TestGitPymodulePusherAllInventorySpansMultipleSources(t *testing.T) {
+func TestRepoPusherAllInventorySpansMultipleSources(t *testing.T) {
 	c := assert.NewCollecting(t)
-	f := newGitSourceFixture()
+	f := newRepoFixture()
 
 	if _, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main"); err != nil {
 		t.Fatalf("refresh ops_tools: %v", err)
@@ -364,8 +364,8 @@ func TestGitPymodulePusherAllInventorySpansMultipleSources(t *testing.T) {
 // failed → the named error and an empty cache; (b) one fails, others succeed
 // → nil error and the successful snapshot cached, the failure contributing
 // nothing and overwriting nothing.
-func TestGitPymodulePusherRefreshEveryExecutorFailingIsAnError(t *testing.T) {
-	f := newGitSourceFixture()
+func TestRepoPusherRefreshEveryExecutorFailingIsAnError(t *testing.T) {
+	f := newRepoFixture()
 	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
 
 	if _, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main"); err == nil {
@@ -377,18 +377,18 @@ func TestGitPymodulePusherRefreshEveryExecutorFailingIsAnError(t *testing.T) {
 	assert.NewCollecting(t).False(ok, "a fully-failed refresh left a cache entry behind")
 }
 
-func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
+func TestRepoPusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
 	c := assert.NewCollecting(t)
-	f := newGitSourceFixture()
+	f := newRepoFixture()
 	// A second executor for the same owner: one fails, one answers.
 	second := execpool.LiveExecutor{
 		Executor: executors.Executor{ID: "exec-alice2", Labels: map[string]string{"owner": "alice"}},
-		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
 	}
 	f.pool.live = append(f.pool.live, second)
-	ok := &fakeGitSourceClient{
-		resp: &executorpb.SyncPyModuleGitSourceResponse{
-			Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
+	ok := &fakeRepoClient{
+		resp: &executorpb.SyncRepoResponse{
+			Scripts:   []*executorpb.RepoScript{{Name: "rotate_keys"}},
 			VenvReady: true,
 		},
 	}
@@ -403,14 +403,14 @@ func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
 	c.False(!present || len(cached.Scripts) != 1 || cached.Scripts[0].GetName() != "rotate_keys", "cached inventory = %+v (present %v), want the successful executor's snapshot", cached, present)
 }
 
-// TestGitPymodulePusherRefreshFailureKeepsPriorSnapshot pins what a sandbox
+// TestRepoPusherRefreshFailureKeepsPriorSnapshot pins what a sandbox
 // with network none relies on: its clone fails on every refresh, and that
 // failure must leave the snapshot a healthy executor already reported intact.
-func TestGitPymodulePusherRefreshFailureKeepsPriorSnapshot(t *testing.T) {
+func TestRepoPusherRefreshFailureKeepsPriorSnapshot(t *testing.T) {
 	c := assert.NewCollecting(t)
-	f := newGitSourceFixture()
-	f.clients["exec-alice"].resp = &executorpb.SyncPyModuleGitSourceResponse{
-		Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
+	f := newRepoFixture()
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Scripts:   []*executorpb.RepoScript{{Name: "rotate_keys"}},
 		VenvReady: true,
 	}
 	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
@@ -425,16 +425,16 @@ func TestGitPymodulePusherRefreshFailureKeepsPriorSnapshot(t *testing.T) {
 		"cached inventory = %+v (present %v), want the earlier successful snapshot", cached, present)
 }
 
-// TestGitPymodulePusherRefreshSkipsIneligibleExecutors: the Describe flag and
-// the owner label are both gates. An executor without the git-sync flag and
+// TestRepoPusherRefreshSkipsIneligibleExecutors: the Describe flag and
+// the owner label are both gates. An executor without the repo-sync flag and
 // one whose owner label names no active user receive nothing for a USER's
 // refresh — the latter is unattributed and serves only owner ""'s sources
-// (see TestGitPymoduleRefreshUnattributedExecutor) — and a refresh with no
+// (see TestRepoRefreshUnattributedExecutor) — and a refresh with no
 // eligible executor at all fails loudly rather than silently succeeding with
 // an empty inventory.
-func TestGitPymodulePusherRefreshSkipsIneligibleExecutors(t *testing.T) {
+func TestRepoPusherRefreshSkipsIneligibleExecutors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	f := newGitSourceFixture()
+	f := newRepoFixture()
 	// exec-alice loses the flag entirely: the source's own owner has no
 	// eligible executor left, so the refresh must fail, not no-op.
 	f.pool.live[0].Describe = &executorpb.DescribeResponse{}
@@ -451,7 +451,7 @@ func TestGitPymodulePusherRefreshSkipsIneligibleExecutors(t *testing.T) {
 
 	// With the flag back on, the refresh reaches exactly the owner's own
 	// resolvable executors.
-	f.pool.live[0].Describe = &executorpb.DescribeResponse{PymoduleGitSync: true}
+	f.pool.live[0].Describe = &executorpb.DescribeResponse{RepoSync: true}
 	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
 	ck.Require().NoError(err, "refresh after re-enabling the flag")
 	ck.Eq(1, f.clients["exec-alice"].callCount(), "exec-alice received")
@@ -461,11 +461,11 @@ func TestGitPymodulePusherRefreshSkipsIneligibleExecutors(t *testing.T) {
 // A source whose venv failed to build still caches: discovery worked, only
 // the build didn't — the snapshot carries ready=false plus the executor's
 // error so the CLI can print it and the inventory is not lost.
-func TestGitPymodulePusherRefreshCachesVenvFailure(t *testing.T) {
+func TestRepoPusherRefreshCachesVenvFailure(t *testing.T) {
 	c := assert.NewCollecting(t)
-	f := newGitSourceFixture()
-	f.clients["exec-alice"].resp = &executorpb.SyncPyModuleGitSourceResponse{
-		Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
+	f := newRepoFixture()
+	f.clients["exec-alice"].resp = &executorpb.SyncRepoResponse{
+		Scripts:   []*executorpb.RepoScript{{Name: "rotate_keys"}},
 		VenvReady: false,
 		VenvError: "uv sync failed: no solution",
 	}
@@ -476,16 +476,16 @@ func TestGitPymodulePusherRefreshCachesVenvFailure(t *testing.T) {
 	c.False(inv.VenvReady || inv.VenvError != "uv sync failed: no solution", "cached venv state = ready %v error %q, want false + the executor's error", inv.VenvReady, inv.VenvError)
 }
 
-// TestGitPymoduleRefreshUnattributedExecutor pins the unattributed rule: a
+// TestRepoRefreshUnattributedExecutor pins the unattributed rule: a
 // live executor whose owner label resolves to NO user (the fixture's ghost)
 // is the UNATTRIBUTED owner "" — the same rule the anonymous unix-socket
 // caller follows — so an anonymous registration (owner "") syncs to it, while
 // a user's refresh still never reaches it. A resolver ERROR is not a miss:
 // the executor is skipped, so an outage never hands anonymous sources to an
 // executor whose ownership the store could not settle.
-func TestGitPymoduleRefreshUnattributedExecutor(t *testing.T) {
+func TestRepoRefreshUnattributedExecutor(t *testing.T) {
 	c := assert.NewCollecting(t)
-	f := newGitSourceFixture()
+	f := newRepoFixture()
 
 	// The anonymous refresh reaches ONLY the unresolvable ghost, and the RPC
 	// carries the registration verbatim.
@@ -526,7 +526,7 @@ func TestGitPymoduleRefreshUnattributedExecutor(t *testing.T) {
 	}
 	_, err = f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
 	c.Require().Error(err, "refresh with an erroring owner lookup: succeeded, want no eligible executor")
-	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s git sources`, "refresh error")
+	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s repos`, "refresh error")
 	c.Eq(1, f.clients["exec-ghost"].callCount(), "exec-ghost received after the resolver outage")
 
 	// A label naming a NON-OS, unresolvable user is skipped, never treated as
@@ -537,26 +537,26 @@ func TestGitPymoduleRefreshUnattributedExecutor(t *testing.T) {
 	// because the only unattributed executor (ghost) is currently erroring.
 	f.pool.live = append(f.pool.live, execpool.LiveExecutor{
 		Executor: executors.Executor{ID: "exec-tombstone", Labels: map[string]string{"owner": "removed_user"}},
-		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
 	})
-	f.clients["exec-tombstone"] = &fakeGitSourceClient{}
+	f.clients["exec-tombstone"] = &fakeRepoClient{}
 	f.pool.clients["exec-tombstone"] = f.clients["exec-tombstone"]
 	_, err = f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
 	c.Require().Error(err, "anonymous refresh with only a non-OS unresolvable executor: succeeded, want no eligible executor")
 	c.Eq(0, f.clients["exec-tombstone"].callCount(), "exec-tombstone received")
 }
 
-// TestGitPymoduleRefreshNoEligibleNamesExecutors pins the no-eligible error's
+// TestRepoRefreshNoEligibleNamesExecutors pins the no-eligible error's
 // content: it names the owner the refresh was for (unattributed included) and
-// lists EVERY live executor with its id prefix, owner label and git-sync
+// lists EVERY live executor with its id prefix, owner label and repo-sync
 // flag, so an operator can see why their executor was passed over.
-func TestGitPymoduleRefreshNoEligibleNamesExecutors(t *testing.T) {
+func TestRepoRefreshNoEligibleNamesExecutors(t *testing.T) {
 	c := assert.NewCollecting(t)
-	f := newGitSourceFixture()
+	f := newRepoFixture()
 	// A fourth live executor with a long id: the id renders as a prefix.
 	f.pool.live = append(f.pool.live, execpool.LiveExecutor{
 		Executor: executors.Executor{ID: "0123456789abcdef", Labels: map[string]string{"owner": "longowner"}},
-		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+		Describe: &executorpb.DescribeResponse{RepoSync: true},
 	})
 
 	// Alice's executor loses the flag: nothing is eligible for her source, and
@@ -564,11 +564,11 @@ func TestGitPymoduleRefreshNoEligibleNamesExecutors(t *testing.T) {
 	f.pool.live[0].Describe = &executorpb.DescribeResponse{}
 	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
 	c.Require().Error(err, "refresh with no eligible executor")
-	c.StrContains(err.Error(), `no eligible executor for owner "u_alice"'s git sources: 4 live executor(s):`, "refresh error")
-	c.StrContains(err.Error(), `exec-alice owner="alice" git-sync=false`, "refresh error")
-	c.StrContains(err.Error(), `exec-bob owner="bob" git-sync=true`, "refresh error")
-	c.StrContains(err.Error(), `exec-ghost owner="ghost" git-sync=true`, "refresh error")
-	c.StrContains(err.Error(), `0123456789ab owner="longowner" git-sync=true`, "refresh error")
+	c.StrContains(err.Error(), `no eligible executor for owner "u_alice"'s repos: 4 live executor(s):`, "refresh error")
+	c.StrContains(err.Error(), `exec-alice owner="alice" repo-sync=false`, "refresh error")
+	c.StrContains(err.Error(), `exec-bob owner="bob" repo-sync=true`, "refresh error")
+	c.StrContains(err.Error(), `exec-ghost owner="ghost" repo-sync=true`, "refresh error")
+	c.StrContains(err.Error(), `0123456789ab owner="longowner" repo-sync=true`, "refresh error")
 	c.NotStrContains(err.Error(), "0123456789abcdef", "the long id was not truncated to a prefix")
 
 	// The unattributed owner is named rather than printed as an empty id. With
@@ -578,7 +578,7 @@ func TestGitPymoduleRefreshNoEligibleNamesExecutors(t *testing.T) {
 	}
 	_, err = f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
 	c.Require().Error(err, "unattributed refresh with no eligible executor")
-	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s git sources: 4 live executor(s):`, "refresh error")
+	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s repos: 4 live executor(s):`, "refresh error")
 
 	// No executor received anything, and no cache entry was left behind.
 	for id, cl := range f.clients {

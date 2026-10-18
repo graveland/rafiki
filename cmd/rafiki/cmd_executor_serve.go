@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -447,23 +448,23 @@ func pymodulesSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string)
 	return slices.Contains(launchKinds, "script")
 }
 
-// pymoduleGitSyncEnabled resolves the effective --pymodule-git-sync value
-// from the flag and its environment form, with the same flag-vs-env precedence
-// as pymodulesSyncEnabled (see that function for why the environment is read
+// repoSyncEnabled resolves the effective --repo-sync value from the flag and
+// its environment form, with the same flag-vs-env precedence as
+// pymodulesSyncEnabled (see that function for why the environment is read
 // here rather than as the flag's default).
 //
 // --launch script implies the sync, like pymodules sync: a script child whose
-// repo names a git source resolves against THIS machine's synced checkout, so
-// a script host that refuses refreshes hosts only the blob-corpus half of its
-// scripts. An explicit --pymodule-git-sync=false still wins: refusing the
-// checkouts is a deliberate act (the executor's own git does the cloning, a
-// real network side effect an operator may not want) and must be spelled as
-// one.
-func pymoduleGitSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bool {
-	if cmd.Flags().Changed("pymodule-git-sync") {
+// `repo` names a registered repo resolves against THIS machine's synced
+// checkout, so a script host that refuses refreshes hosts only the
+// blob-corpus half of its scripts. An explicit --repo-sync=false still wins:
+// refusing the checkouts is a deliberate act (the executor's own git does the
+// cloning, a real network side effect an operator may not want) and must be
+// spelled as one.
+func repoSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bool {
+	if cmd.Flags().Changed("repo-sync") {
 		return flagOn
 	}
-	if os.Getenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC") != "" {
+	if os.Getenv("RAFIKI_EXECUTOR_REPO_SYNC") != "" {
 		return true
 	}
 	return slices.Contains(launchKinds, "script")
@@ -489,7 +490,8 @@ func newExecutorServeCmd() *cobra.Command {
 		noLSP              bool
 		skillsSync         bool
 		pymodulesSync      bool
-		pymoduleGitSync    bool
+		repoSync           bool
+		retiredGitSync     bool
 		proxyArgs          []string
 		launchKinds        []string
 		sandboxMountRoots  []string
@@ -514,6 +516,17 @@ Two transports, exactly one of which is used:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+
+			// The retired spellings must fail loudly rather than silently do
+			// nothing: an operator's argv or service unit that still says
+			// pymodule-git-sync has to be told the new name, not left with an
+			// executor that quietly refuses repo refreshes.
+			if cmd.Flags().Changed("pymodule-git-sync") {
+				return errors.New("--pymodule-git-sync is now --repo-sync")
+			}
+			if os.Getenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC") != "" {
+				return errors.New("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC is now RAFIKI_EXECUTOR_REPO_SYNC")
+			}
 
 			pinnedEnv := executorPinnedEnv()
 
@@ -606,7 +619,7 @@ Two transports, exactly one of which is used:
 				NoLSP:               noLSP,
 				SkillsSync:          skillsSyncEnabled(cmd, skillsSync, launchKinds),
 				PyModulesSync:       pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
-				PymoduleGitSync:     pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
+				RepoSync:            repoSyncEnabled(cmd, repoSync, launchKinds),
 				Proxies:             proxies,
 				LaunchKinds:         launchKinds,
 				SandboxMountRoots:   mountRoots,
@@ -701,17 +714,21 @@ Two transports, exactly one of which is used:
 	cmd.Flags().BoolVar(&pymodulesSync, "pymodules-sync", false,
 		"accept the daemon's owner-scoped pymodule corpus into this machine's disposable cache "+
 			"directory (RAFIKI_EXECUTOR_PYMODULES_SYNC enables it from a service unit)")
-	cmd.Flags().BoolVar(&pymoduleGitSync, "pymodule-git-sync", false,
-		"accept refreshes of this executor's owner's registered git pymodule sources into this "+
+	cmd.Flags().BoolVar(&repoSync, "repo-sync", false,
+		"accept refreshes of this executor's owner's registered repos into this "+
 			"machine's disposable pymodule-repo cache, cloning or fetching them with this machine's "+
-			"own git (RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC enables it from a service unit)")
+			"own git (RAFIKI_EXECUTOR_REPO_SYNC enables it from a service unit)")
+	// Retired spelling: registered only so RunE can refuse it by name. Hidden,
+	// because offering it in --help would invite new use.
+	cmd.Flags().BoolVar(&retiredGitSync, "pymodule-git-sync", false, "retired; use --repo-sync")
+	_ = cmd.Flags().MarkHidden("pymodule-git-sync")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
 		"child protocol this executor will host for the daemon: claude or script (repeatable). "+
 			"Opt-in: with no --launch this executor hosts nothing. --launch claude also accepts the "+
 			"skill corpus unless --skills-sync=false. --launch script implies the owner's pymodule "+
-			"corpus sync and git-source refreshes (unless --pymodules-sync=false / "+
-			"--pymodule-git-sync=false): a script child resolves its pymodule from THIS machine's "+
+			"corpus sync and repo refreshes (unless --pymodules-sync=false / "+
+			"--repo-sync=false): a script child resolves its pymodule from THIS machine's "+
 			"synced cache")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")

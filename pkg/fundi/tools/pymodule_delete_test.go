@@ -77,7 +77,7 @@ func TestPymoduleDeleteReportsNotFound(t *testing.T) {
 	c.StrContains(err.Error(), `no module named "gone"`, "Execute error = %v, want it to contain", err)
 }
 
-// A non-"local" repo names a git source, which this operation can never
+// A non-"local" repo names a repo, which this operation can never
 // target: a clear tool-level error, raised before the store is touched --
 // and an omitted repo is the same rejection, since "required" is enforced
 // here and not by the schema.

@@ -18,9 +18,9 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 )
 
 // scriptChildren kinds, hosted locally. Wave 4 moves hosting onto executors
@@ -130,7 +130,7 @@ func scriptInterpreter() string {
 
 // scriptRunner routes a script child's hosting: an executor that advertises
 // the script launch kind hosts it under daraja (the executor resolves the
-// pymodule from its synced cache, where git sources and venvs exist); with no
+// pymodule from its synced cache, where repos and venvs exist); with no
 // such executor the wave-3 local runner stays the fallback — the daemon forks
 // the pymodule process itself. The routing decision is the same predicate
 // checkKindNarrowing consults (scriptExecutorRouted): the guard admits a
@@ -177,7 +177,7 @@ func (c *Controller) scriptExecutorRouted() bool {
 
 // darajaScriptRunner launches the script child on an executor: the executor
 // resolves the pymodule from its synced cache (so repo="local" resolves from
-// the pushed corpus and a git source from its synced checkout — both with
+// the pushed corpus and a repo from its synced checkout — both with
 // their venvs), builds the child's environment the way the executor itself
 // was configured, and serves the child's per-child Connect socket against the
 // daemon's face. The daemon-side side of the launch is deliberately thin:
@@ -354,19 +354,19 @@ var errScriptHosting = errors.New("script hosting unavailable")
 // host directory the way pymodule_run consumes them: one directory per name
 // (script at <dir>/<script>/<script>.py — sys.path[0] for the run — each
 // module's directory joining PYTHONPATH in call order). repo "local"
-// resolves against the OWNER's own saved modules; a git source names an
+// resolves against the OWNER's own saved modules; a repo names an
 // executor-hosted checkout, which a locally hosted child cannot reach.
 func (c *Controller) materializeScript(spec *protocol.ScriptSpec, childID, ownerUserID string) (scriptMaterialization, error) {
 	if err := validateScriptSpecNames(spec); err != nil {
 		return scriptMaterialization{}, err
 	}
 	if spec.Repo != pymodules.LocalRepo {
-		// A git source's content lives in an EXECUTOR's synced checkout
-		// (pkg/executor's SyncPyModuleGitSource); the daemon has no clone of
+		// A repo's content lives in an EXECUTOR's synced checkout
+		// (pkg/executor's SyncRepo); the daemon has no clone of
 		// its own. Wave 4 hosts scripts on executors, where that cache
 		// exists. Refuse rather than half-simulate it locally.
 		return scriptMaterialization{}, fmt.Errorf(
-			"script child: repo %q is a git source and no live executor advertises the script launch kind; start one with `rafiki executor serve --launch script` (locally hosted children run only the owner's own saved modules, repo %q): %w",
+			"script child: repo %q is a repo and no live executor advertises the script launch kind; start one with `rafiki executor serve --launch script` (locally hosted children run only the owner's own saved modules, repo %q): %w",
 			spec.Repo, pymodules.LocalRepo, errScriptHosting)
 	}
 	if c.pymoduleStore == nil {
@@ -435,10 +435,10 @@ func (c *Controller) materializeScript(spec *protocol.ScriptSpec, childID, owner
 // independently, never trusting an earlier check.
 func validateScriptSpecNames(spec *protocol.ScriptSpec) error {
 	if spec.Repo == "" {
-		return errors.New(`script child: repo is required ("local" for the owner's own saved modules, or a registered git source's name)`)
+		return errors.New(`script child: repo is required ("local" for the owner's own saved modules, or a registered repo's name)`)
 	}
 	if spec.Repo != pymodules.LocalRepo {
-		if err := gitpymodules.ValidateName(spec.Repo); err != nil {
+		if err := repos.ValidateName(spec.Repo); err != nil {
 			return fmt.Errorf("script child: repo %q: %w", spec.Repo, err)
 		}
 	}
@@ -532,7 +532,7 @@ func validateScriptSpawn(req protocol.SpawnRequest) error {
 	if req.Script == nil {
 		return &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
-			Message: "script kind requires a script spec: repo (\"local\" or a git source's name) and the script's pymodule name",
+			Message: "script kind requires a script spec: repo (\"local\" or a repo's name) and the script's pymodule name",
 		}
 	}
 	if err := validateScriptSpecNames(req.Script); err != nil {

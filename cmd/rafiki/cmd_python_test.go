@@ -24,8 +24,8 @@ func savedAt(y, mo, d, h, mi, s int) *timestamppb.Timestamp {
 }
 
 // The tree contract: `python` sits under the root with the alias `py`, and
-// carries exactly the four blob verbs plus the `repo` group that manages git
-// sources. Aliases are guarded the same way aliases_test.go guards the rest
+// carries exactly the four blob verbs plus the retired `repo` pointer (the
+// group itself is a ROOT command now). Aliases are guarded the same way aliases_test.go guards the rest
 // of the CLI — presence is a test failure away from silent regression.
 func TestPythonCommandTree(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -160,7 +160,7 @@ func TestPythonListCells(t *testing.T) {
 		t.Errorf("formatSavedAt(nil) = %q, want \"-\"", got)
 	}
 
-	// The version's absent marker mirrors the timestamp's: a git-sourced row
+	// The version's absent marker mirrors the timestamp's: a repo-sourced row
 	// has no version, and 0 is the wire's way of saying "none".
 	if got := formatVersion(0); got != "-" {
 		t.Errorf("formatVersion(0) = %q, want \"-\"", got)
@@ -181,8 +181,8 @@ func TestPythonListCells(t *testing.T) {
 }
 
 // TestPythonListRepoColumnRendersLocalAndGitRows pins the REPO column: a
-// local row and a git-sourced row render side by side, each carrying its own
-// repo cell, and a git-sourced row's VERSION/SAVED cells render "-" — it has
+// local row and a repo-sourced row render side by side, each carrying its own
+// repo cell, and a repo-sourced row's VERSION/SAVED cells render "-" — it has
 // neither a version nor a save time, its source of truth being the repo's own
 // history.
 func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
@@ -209,8 +209,8 @@ func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
 	}
 	c.Require().NotEq("", gitLine, "rotate_keys row not rendered:\n%s", out)
 	n := strings.Count(gitLine, "-")
-	c.GreaterOrEqual(2, n, "git-sourced row %q: only %d \"-\" cell(s), want the absent VERSION and SAVED both rendered \"-\"", gitLine, n)
-	c.NotStrContains(gitLine, "0", "git-sourced row rendered a zero version")
+	c.GreaterOrEqual(2, n, "repo-sourced row %q: only %d \"-\" cell(s), want the absent VERSION and SAVED both rendered \"-\"", gitLine, n)
+	c.NotStrContains(gitLine, "0", "repo-sourced row rendered a zero version")
 }
 
 // The JSON shapes: list -j wraps the rows in the {"rows": …} envelope, list

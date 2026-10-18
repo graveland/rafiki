@@ -29,8 +29,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
-	"go.graveland.dev/rafiki/pkg/gitpymodulesdb"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/oidclogin"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -41,6 +39,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/pymodulesdb"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+	"go.graveland.dev/rafiki/pkg/repos"
+	"go.graveland.dev/rafiki/pkg/reposdb"
 	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/sandbox"
@@ -709,7 +709,7 @@ func runDaemon(opts runDaemonOpts) error {
 			// The blob pusher's rule is "unknown means push nothing" — found
 			// =false for ANY reason, a store error included — because a wrong
 			// guess about ownership hands one user's private pymodule corpus to
-			// another user's executor. (The git pusher takes the 3-value
+			// another user's executor. (The repo pusher takes the 3-value
 			// resolver directly: there, only a genuine miss is unattributed.)
 			resolveOwnerID: func(ctx context.Context, username string) (string, bool) {
 				id, found, err := ctrl.resolveUsernameToUserID(ctx, username)
@@ -721,23 +721,23 @@ func runDaemon(opts runDaemonOpts) error {
 			},
 		}
 	}
-	var gitpymoduleStore gitpymodules.Store
+	var repoStore repos.Store
 	if pool != nil {
-		gitpymoduleStore = gitpymodulesdb.NewPostgresStore(pool)
+		repoStore = reposdb.NewPostgresStore(pool)
 	}
-	ctrl.gitpymoduleStore = gitpymoduleStore
-	var gitPymoduleOSUser string
+	ctrl.repoStore = repoStore
+	var repoOSUser string
 	if u, err := osUser(); err == nil {
-		gitPymoduleOSUser = u
+		repoOSUser = u
 	} else {
-		slog.Warn("git pymodule source refresh: cannot determine the daemon's OS user; unresolvable owner labels will never be treated as unattributed", "error", err)
+		slog.Warn("repo refresh: cannot determine the daemon's OS user; unresolvable owner labels will never be treated as unattributed", "error", err)
 	}
-	if gitpymoduleStore != nil && execPool != nil {
-		// The git pusher takes the 3-value resolver directly: only a genuine
+	if repoStore != nil && execPool != nil {
+		// The repo pusher takes the 3-value resolver directly: only a genuine
 		// miss (found=false, err=nil) whose label IS the daemon's OS user is
 		// the unattributed owner; any other miss, or a resolver error, skips
 		// the executor.
-		ctrl.gitpymodulePusher = newGitPymodulePusher(execPool, gitpymoduleStore, ctrl.resolveUsernameToUserID, gitPymoduleOSUser)
+		ctrl.repoPusher = newRepoPusher(execPool, repoStore, ctrl.resolveUsernameToUserID, repoOSUser)
 	}
 	if execPool != nil {
 		// An executor that has just connected has an empty or stale tree, so
@@ -845,8 +845,8 @@ func runDaemon(opts runDaemonOpts) error {
 			if ctrl.recall != nil {
 				face.Control.SetRecallManager(connectRecall{c: ctrl})
 			}
-			if ctrl.gitpymoduleStore != nil {
-				face.Control.SetGitSourceManager(connectGitSources{c: ctrl})
+			if ctrl.repoStore != nil {
+				face.Control.SetRepoManager(connectRepos{c: ctrl})
 			}
 			if ctrl.sandboxStore != nil {
 				face.Control.SetSandboxManager(connectSandbox{c: ctrl})

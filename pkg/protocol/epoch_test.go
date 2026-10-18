@@ -16,13 +16,13 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// TestEpochIsThreeAndHeaderName pins the epoch value and header name: the wire
-// is epoch 3, and both the daemon and the clients key the gate on this exact
+// TestEpochIsFourAndHeaderName pins the epoch value and header name: the wire
+// is epoch 4, and both the daemon and the clients key the gate on this exact
 // header spelling. A change here is a wire-breaking change and must be
 // deliberate.
-func TestEpochIsThreeAndHeaderName(t *testing.T) {
+func TestEpochIsFourAndHeaderName(t *testing.T) {
 	c := assert.NewAborting(t)
-	c.Eq(3, protocol.Epoch, "protocol.Epoch")
+	c.Eq(4, protocol.Epoch, "protocol.Epoch")
 	c.Eq("Rafiki-Protocol", protocol.EpochHeader, "protocol.EpochHeader")
 	c.Eq("protocol_mismatch", protocol.ErrProtocolMismatch, "protocol.ErrProtocolMismatch")
 }

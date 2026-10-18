@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,8 +25,26 @@ func newPythonCmd() *cobra.Command {
 		Aliases: []string{"py"},
 		Short:   "Manage your saved pymodules (reusable, owner-scoped Python snippets)",
 	}
-	cmd.AddCommand(newPythonListCmd(), newPythonGetCmd(), newPythonPutCmd(), newPythonDeleteCmd(), newPythonRepoCmd())
+	cmd.AddCommand(newPythonListCmd(), newPythonGetCmd(), newPythonPutCmd(), newPythonDeleteCmd(), newRetiredPythonRepoCmd())
 	return cmd
+}
+
+// newRetiredPythonRepoCmd keeps `rafiki python repo …` failing loudly instead
+// of falling through to cobra's unknown-command help: the repo verbs moved to
+// `rafiki repo`, and anything still invoking the old tree must be told the new
+// one by name. DisableFlagParsing lets the old invocation's own flags reach
+// RunE rather than being refused as unknown flags first; Hidden keeps the
+// retired spelling out of `rafiki python --help`.
+func newRetiredPythonRepoCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "repo",
+		Hidden:             true,
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return errors.New(`"rafiki python repo" is now "rafiki repo"`)
+		},
+	}
 }
 
 func newPythonListCmd() *cobra.Command {
@@ -53,9 +72,9 @@ func newPythonListCmd() *cobra.Command {
 	}
 	// --repo defaults to empty, meaning everything — a filter, not an address,
 	// so unlike the tool surface there is no "local"-only default to state
-	// (design §7's CLI split): "local" narrows to saved pymodules, a git
-	// source's name to its discovered inventory.
-	cmd.Flags().StringVar(&repo, "repo", "", `scope to one source: "local" for saved pymodules, otherwise a git source's name (default: everything)`)
+	// (design §7's CLI split): "local" narrows to saved pymodules, a repo's
+	// name to its discovered inventory.
+	cmd.Flags().StringVar(&repo, "repo", "", `scope to one source: "local" for saved pymodules, otherwise a repo's name (default: everything)`)
 	return cmd
 }
 
@@ -99,7 +118,7 @@ func pymoduleCells(r *rafikiv1.PymoduleRow) (name, repo, version, saved, descrip
 }
 
 // formatVersion renders a row's version the way formatSavedAt renders its
-// timestamp: "-" when absent — a git-sourced row carries no version, and 0 is
+// timestamp: "-" when absent — a repo-sourced row carries no version, and 0 is
 // the wire's way of saying "none" — the number otherwise.
 func formatVersion(v int64) string {
 	if v == 0 {
@@ -267,7 +286,7 @@ func completePyModuleNames(cmd *cobra.Command, args []string, toComplete string)
 	ctx, cancel := context.WithTimeout(cmdCtx(cmd), completionDeadline)
 	defer cancel()
 	// get/put/delete only ever operate on the local scope (design §7), so the
-	// completion narrows to it: a git-sourced name would be suggested and
+	// completion narrows to it: a repo-sourced name would be suggested and
 	// then refused.
 	resp, err := ep.control().ListPymodules(ctx, connect.NewRequest(&rafikiv1.ListPymodulesRequest{Repo: "local"}))
 	if err != nil {

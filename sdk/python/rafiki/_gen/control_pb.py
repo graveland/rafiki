@@ -3820,7 +3820,7 @@ class DeletePymoduleResponse:
         return obj
 
 @dataclasses.dataclass
-class GitSourceRow:
+class RepoRow:
     name: str = ""
     url: str = ""
     ref: str = ""
@@ -3835,7 +3835,7 @@ class GitSourceRow:
             out["ref"] = self.ref
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "GitSourceRow":
+    def from_dict(cls, _d: dict) -> "RepoRow":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
@@ -3849,7 +3849,7 @@ class GitSourceRow:
         return obj
 
 @dataclasses.dataclass
-class AddPymoduleGitSourceRequest:
+class AddRepoRequest:
     name: str = ""
     url: str = ""
     ref: str = ""
@@ -3864,7 +3864,7 @@ class AddPymoduleGitSourceRequest:
             out["ref"] = self.ref
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "AddPymoduleGitSourceRequest":
+    def from_dict(cls, _d: dict) -> "AddRepoRequest":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
@@ -3878,8 +3878,8 @@ class AddPymoduleGitSourceRequest:
         return obj
 
 @dataclasses.dataclass
-class AddPymoduleGitSourceResponse:
-    row: Optional[GitSourceRow] = None
+class AddRepoResponse:
+    row: Optional[RepoRow] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -3887,28 +3887,28 @@ class AddPymoduleGitSourceResponse:
             out["row"] = self.row.to_dict()
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "AddPymoduleGitSourceResponse":
+    def from_dict(cls, _d: dict) -> "AddRepoResponse":
         obj = cls()
         _v = _d.get("row")
         if _v is not None:
-            obj.row = GitSourceRow.from_dict(_v)
+            obj.row = RepoRow.from_dict(_v)
         return obj
 
 @dataclasses.dataclass
-class ListPymoduleGitSourcesRequest:
+class ListReposRequest:
     pass
 
     def to_dict(self) -> dict:
         out = {}
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "ListPymoduleGitSourcesRequest":
+    def from_dict(cls, _d: dict) -> "ListReposRequest":
         obj = cls()
         return obj
 
 @dataclasses.dataclass
-class ListPymoduleGitSourcesResponse:
-    rows: list[GitSourceRow] = dataclasses.field(default_factory=list)
+class ListReposResponse:
+    rows: list[RepoRow] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
@@ -3916,15 +3916,15 @@ class ListPymoduleGitSourcesResponse:
             out["rows"] = [x.to_dict() for x in self.rows]
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "ListPymoduleGitSourcesResponse":
+    def from_dict(cls, _d: dict) -> "ListReposResponse":
         obj = cls()
         _v = _d.get("rows")
         if _v is not None:
-            obj.rows = [GitSourceRow.from_dict(x) for x in _v]
+            obj.rows = [RepoRow.from_dict(x) for x in _v]
         return obj
 
 @dataclasses.dataclass
-class RefreshPymoduleGitSourceRequest:
+class RefreshRepoRequest:
     name: str = ""
 
     def to_dict(self) -> dict:
@@ -3933,7 +3933,7 @@ class RefreshPymoduleGitSourceRequest:
             out["name"] = self.name
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "RefreshPymoduleGitSourceRequest":
+    def from_dict(cls, _d: dict) -> "RefreshRepoRequest":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
@@ -3941,7 +3941,7 @@ class RefreshPymoduleGitSourceRequest:
         return obj
 
 @dataclasses.dataclass
-class GitSourceScript:
+class RepoScript:
     name: str = ""
     description: str = ""
 
@@ -3953,7 +3953,7 @@ class GitSourceScript:
             out["description"] = self.description
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "GitSourceScript":
+    def from_dict(cls, _d: dict) -> "RepoScript":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
@@ -3964,7 +3964,7 @@ class GitSourceScript:
         return obj
 
 @dataclasses.dataclass
-class GitSourcePackage:
+class RepoPackage:
     name: str = ""
     description: str = ""
 
@@ -3976,7 +3976,7 @@ class GitSourcePackage:
             out["description"] = self.description
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "GitSourcePackage":
+    def from_dict(cls, _d: dict) -> "RepoPackage":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
@@ -3987,10 +3987,10 @@ class GitSourcePackage:
         return obj
 
 @dataclasses.dataclass
-class RefreshPymoduleGitSourceResponse:
+class RefreshRepoResponse:
     name: str = ""
-    scripts: list[GitSourceScript] = dataclasses.field(default_factory=list)
-    packages: list[GitSourcePackage] = dataclasses.field(default_factory=list)
+    scripts: list[RepoScript] = dataclasses.field(default_factory=list)
+    packages: list[RepoPackage] = dataclasses.field(default_factory=list)
     venv_ready: bool = False
     venv_error: str = ""
 
@@ -4008,17 +4008,17 @@ class RefreshPymoduleGitSourceResponse:
             out["venvError"] = self.venv_error
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "RefreshPymoduleGitSourceResponse":
+    def from_dict(cls, _d: dict) -> "RefreshRepoResponse":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
             obj.name = _v
         _v = _d.get("scripts")
         if _v is not None:
-            obj.scripts = [GitSourceScript.from_dict(x) for x in _v]
+            obj.scripts = [RepoScript.from_dict(x) for x in _v]
         _v = _d.get("packages")
         if _v is not None:
-            obj.packages = [GitSourcePackage.from_dict(x) for x in _v]
+            obj.packages = [RepoPackage.from_dict(x) for x in _v]
         _v = _d.get("venvReady")
         if _v is not None:
             obj.venv_ready = _v
@@ -4028,7 +4028,7 @@ class RefreshPymoduleGitSourceResponse:
         return obj
 
 @dataclasses.dataclass
-class RemovePymoduleGitSourceRequest:
+class RemoveRepoRequest:
     name: str = ""
 
     def to_dict(self) -> dict:
@@ -4037,7 +4037,7 @@ class RemovePymoduleGitSourceRequest:
             out["name"] = self.name
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "RemovePymoduleGitSourceRequest":
+    def from_dict(cls, _d: dict) -> "RemoveRepoRequest":
         obj = cls()
         _v = _d.get("name")
         if _v is not None:
@@ -4045,14 +4045,14 @@ class RemovePymoduleGitSourceRequest:
         return obj
 
 @dataclasses.dataclass
-class RemovePymoduleGitSourceResponse:
+class RemoveRepoResponse:
     pass
 
     def to_dict(self) -> dict:
         out = {}
         return out
     @classmethod
-    def from_dict(cls, _d: dict) -> "RemovePymoduleGitSourceResponse":
+    def from_dict(cls, _d: dict) -> "RemoveRepoResponse":
         obj = cls()
         return obj
 

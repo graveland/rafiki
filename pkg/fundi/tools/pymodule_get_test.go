@@ -66,8 +66,8 @@ func TestPymoduleGetInvalidName(t *testing.T) {
 	c.StrContains(err.Error(), "bare Python identifier", "Execute error = %v, want it to mention", err)
 }
 
-// A non-"local" repo names a git source, which this operation can never
-// target (serving a git-sourced get needs an executor round-trip pymodule_run
+// A non-"local" repo names a repo, which this operation can never
+// target (serving a repo-sourced get needs an executor round-trip pymodule_run
 // already has and get does not): a clear tool-level error, raised before the
 // store is touched -- and an omitted repo is the same rejection, since
 // "required" is enforced here and not by the schema.

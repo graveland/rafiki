@@ -8,8 +8,8 @@ package executor
 //
 // The resolution reads THIS executor's own synced pymodule cache and never
 // runs anything the daemon shipped in the launch itself: blob modules land
-// here through SyncPyModules (with their per-module venvs), git sources
-// through SyncPyModuleGitSource (with their checkout venv). An unsynced name
+// here through SyncPyModules (with their per-module venvs), repos
+// through SyncRepo (with their checkout venv). An unsynced name
 // is a Launch refusal with pymodule_run's own reasoning, not a runtime
 // surprise after the child is up.
 //
@@ -26,15 +26,15 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 )
 
 // scriptLaunch is the resolution product: what the executor tells daraja to
 // exec, and the PYTHONPATH the hosted process must run with.
 type scriptLaunch struct {
 	// interpreter is the binary that runs the script — the script's own venv
-	// python when one was built for it (or the repo's, for a git source),
+	// python when one was built for it (or the repo's, for a repo),
 	// else the executor's configured fallback.
 	interpreter string
 	// argv is the full child argv after the interpreter: the script path,
@@ -72,7 +72,7 @@ func resolveScriptLaunch(sp *darajapb.ScriptParams) (scriptLaunch, error) {
 	if sp.GetRepo() == pymodules.LocalRepo {
 		res, err = resolveScriptFromBlobCache(sp)
 	} else {
-		if err := gitpymodules.ValidateName(sp.GetRepo()); err != nil {
+		if err := repos.ValidateName(sp.GetRepo()); err != nil {
 			return scriptLaunch{}, fmt.Errorf("repo %q: %w", sp.GetRepo(), err)
 		}
 		res, err = resolveScriptFromGitCheckout(sp)
@@ -182,16 +182,16 @@ func resolveScriptFromBlobCache(sp *darajapb.ScriptParams) (scriptLaunch, error)
 // hard refusal would black out every script of the repo, ready or not — the
 // refresh surface reports venv state for exactly this.
 func resolveScriptFromGitCheckout(sp *darajapb.ScriptParams) (scriptLaunch, error) {
-	repoDir := filepath.Join(pymodules.GitCacheDir(), sp.GetRepo())
-	scriptPath := filepath.Join(repoDir, gitpymodules.ScriptsDirName, sp.GetScript()+".py")
+	checkoutDir := repoDir(sp.GetRepo())
+	scriptPath := filepath.Join(checkoutDir, repos.ScriptsDirName, sp.GetScript()+".py")
 	if _, err := os.Stat(scriptPath); err != nil {
 		return scriptLaunch{}, fmt.Errorf(
-			"script %q is not synced to this executor under repo %q (has the git source been refreshed on it yet?): %w",
+			"script %q is not synced to this executor under repo %q (has the repo been refreshed on it yet?): %w",
 			sp.GetScript(), sp.GetRepo(), err)
 	}
 
 	interpreter := scriptInterpreter()
-	if repoVenv := tools.PymoduleVenvPython(repoDir); func() bool {
+	if repoVenv := tools.PymoduleVenvPython(checkoutDir); func() bool {
 		_, err := os.Stat(repoVenv)
 		return err == nil
 	}() {
@@ -203,13 +203,13 @@ func resolveScriptFromGitCheckout(sp *darajapb.ScriptParams) (scriptLaunch, erro
 	// the caller naming which top-level packages the repo contains. Each
 	// named module must be a directory of the SAME checkout; there is no
 	// cross-source composition.
-	pp := []string{repoDir}
+	pp := []string{checkoutDir}
 	for _, m := range sp.GetModules() {
-		dir := filepath.Join(repoDir, m)
+		dir := filepath.Join(checkoutDir, m)
 		fi, err := os.Stat(dir)
 		if err != nil {
 			return scriptLaunch{}, fmt.Errorf(
-				"module %q is not synced to this executor under repo %q (has the git source been refreshed on it yet?): %w",
+				"module %q is not synced to this executor under repo %q (has the repo been refreshed on it yet?): %w",
 				m, sp.GetRepo(), err)
 		}
 		if !fi.IsDir() {

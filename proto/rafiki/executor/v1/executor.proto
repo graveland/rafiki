@@ -80,15 +80,15 @@ service ExecutorService {
   // state to reconcile after a crash.
   rpc SyncPyModules(SyncPyModulesRequest) returns (SyncPyModulesResponse);
 
-  // SyncPyModuleGitSource refreshes ONE named git source in this executor's
+  // SyncRepo refreshes ONE named repo in this executor's
   // rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
   // discover the scripts and packages the checkout contains, and build the
   // repo's one shared venv.
   //
-  // Per-source, not whole-corpus like SyncPyModules: a git source's own
+  // Per-source, not whole-corpus like SyncPyModules: a repo's own
   // history is already the versioning and pruning mechanism, so there is no
   // "prune what's absent" model to replicate here.
-  rpc SyncPyModuleGitSource(SyncPyModuleGitSourceRequest) returns (SyncPyModuleGitSourceResponse);
+  rpc SyncRepo(SyncRepoRequest) returns (SyncRepoResponse);
 
   // ReadTree streams a file or directory tree from this executor. A directory
   // is sent as a header followed by one chunk per entry; a file is sent as a
@@ -148,11 +148,11 @@ message DescribeResponse {
   // this executor will do, and a wrong value costs a skipped sync rather than
   // admitting anyone.
   bool pymodules_sync = 13;
-  // pymodule_git_sync reports that this executor accepts
-  // SyncPyModuleGitSource. Safe to self-report for the same reason as
+  // repo_sync reports that this executor accepts
+  // SyncRepo. Safe to self-report for the same reason as
   // pymodules_sync: it only ever NARROWS what this executor will do, and a
   // wrong value costs a skipped sync rather than admitting anyone.
-  bool pymodule_git_sync = 14;
+  bool repo_sync = 14;
   // sandbox_mount_roots are the host directories this launcher's operator
   // declared with --sandbox-mount-root. Self-reported, and safe to be: the
   // daemon uses them only to PRE-CHECK a requested host path; the launcher
@@ -477,20 +477,19 @@ message PyModuleVenvResult {
   string error = 3;
 }
 
-// GitSourceScript is one script discovered in a git-sourced repo's checkout.
-message GitSourceScript {
+// RepoScript is one script discovered in a repo's checkout.
+message RepoScript {
   string name = 1;
   string description = 2;
 }
 
-// GitSourcePackage is one importable package discovered in a git-sourced
-// repo's checkout.
-message GitSourcePackage {
+// RepoPackage is one importable package discovered in a repo's checkout.
+message RepoPackage {
   string name = 1;
   string description = 2;
 }
 
-message SyncPyModuleGitSourceRequest {
+message SyncRepoRequest {
   // name is the source's human label, which also names its cache directory.
   string name = 1;
   // url is where the executor clones/fetches the source from. The daemon
@@ -501,9 +500,9 @@ message SyncPyModuleGitSourceRequest {
   string ref = 3;
 }
 
-message SyncPyModuleGitSourceResponse {
-  repeated GitSourceScript scripts = 1;
-  repeated GitSourcePackage packages = 2;
+message SyncRepoResponse {
+  repeated RepoScript scripts = 1;
+  repeated RepoPackage packages = 2;
   // venv_ready is true both when the repo declares no dependencies at all
   // (nothing to build) and when the repo's one shared venv just built or was
   // already up to date; false only when a build was needed and failed, in

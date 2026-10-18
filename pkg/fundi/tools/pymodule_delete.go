@@ -25,7 +25,7 @@ func (PyModuleDeleteBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A git-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
+			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A repo-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
 			{Name: "name", Type: "string", Description: "Name of the module to delete, exactly as saved with pymodule_put."},
 		},
 		Required: []string{"repo", "name"},
@@ -57,10 +57,10 @@ func (dt *pymoduleDeleteTool) Execute(ctx context.Context, input ToolInput) (Too
 		return ToolResult{}, fmt.Errorf("pymodule_delete: invalid input: %w", err)
 	}
 	// The repo check comes first, before every other validation: a caller
-	// aiming at a git source must be told this operation cannot target one,
+	// aiming at a repo must be told this operation cannot target one,
 	// whatever else is wrong with its input.
 	if in.Repo != pymodules.LocalRepo {
-		return ToolResult{}, fmt.Errorf("pymodule_delete: repo must be %q — a git-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
+		return ToolResult{}, fmt.Errorf("pymodule_delete: repo must be %q — a repo-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
 	}
 	if err := pymodules.ValidName(in.Name); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_delete: %w", err)

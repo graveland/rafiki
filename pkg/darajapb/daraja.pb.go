@@ -509,7 +509,7 @@ func (x *ClaudeParams) GetMcpToken() string {
 // Unlike ClaudeParams, nothing here names a binary or a path: the EXECUTOR
 // resolves the script against its own synced pymodule cache at Launch time —
 // the same layout SyncPyModules (blob modules, with per-module venvs) and
-// SyncPyModuleGitSource (checkouts) produce — and hands daraja the resolved
+// SyncRepo (checkouts) produce — and hands daraja the resolved
 // interpreter and argv. The daemon never ships code to an executor it did not
 // already sync, and the executor never runs code its cache does not hold.
 //
@@ -518,7 +518,7 @@ func (x *ClaudeParams) GetMcpToken() string {
 type ScriptParams struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// repo names the pymodule source: "local" for the owner's synced blob
-	// modules (pymodule_put), or a registered git source's name for its synced
+	// modules (pymodule_put), or a registered repo's name for its synced
 	// checkout. Resolved on the executor; an unsynced name is a Launch refusal,
 	// not a runtime surprise.
 	Repo string `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`

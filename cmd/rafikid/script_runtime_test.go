@@ -533,7 +533,7 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		t.Fatalf("want a proxy-face refusal, got %v", err)
 	}
 
-	// A git-sourced repo is executor-hosted (wave 4): the local runner
+	// A non-`local` `repo` is executor-hosted (wave 4): the local runner
 	// refuses with a message that names the gap rather than half-simulating
 	// a checkout it cannot have.
 	c3 := scriptRunnerTestController(t, "http://127.0.0.1:1", runnerPyModules(t, nil))
@@ -542,6 +542,6 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		Cwd:    "/tmp",
 		Script: &protocol.ScriptSpec{Repo: "somegit", Script: "s"},
 	}, "c_x", "", "owner")
-	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "git source"), "want the git-source refusal, got %v", err)
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "repo"), "want the repo refusal, got %v", err)
 	assert.NewAborting(t).True(errors.Is(err, errScriptHosting) && strings.Contains(err.Error(), "--launch script"), "refusal must be a hosting precondition naming the remedy, got %v", err)
 }

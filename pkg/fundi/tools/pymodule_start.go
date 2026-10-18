@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 )
 
 func init() { DefaultBlueprint.Register(&PyModuleStartBlueprint{}) }
@@ -30,7 +30,7 @@ const pymoduleStartDescription = "Start a saved Python script as a rafiki SCRIPT
 	"conversation: it blocks until the script exits and returns its " +
 	"stdout, costing nothing to steer.\n\n" +
 	"`repo` picks the source: \"local\" for your own saved pymodules " +
-	"(pymodule_put), or a git source's name as reported by discovery. " +
+	"(pymodule_put), or a repo's name as reported by discovery. " +
 	"`script` is the module name exactly as saved with pymodule_put -- not " +
 	"a path, and not inline code. `modules` names further saved pymodules " +
 	"the script imports, resolved within the same repo. The child gets the " +
@@ -50,7 +50,7 @@ func (PyModuleStartBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "repo", Type: "string", Description: "Which pymodule source to use: \"local\" for your own saved pymodules (pymodule_put), or a git source's name as reported by discovery."},
+			{Name: "repo", Type: "string", Description: "Which pymodule source to use: \"local\" for your own saved pymodules (pymodule_put), or a repo's name as reported by discovery."},
 			{Name: "script", Type: "string", Description: "Name of the pymodule to run as the child (e.g. \"driver\"): for repo \"local\", exactly as saved with pymodule_put; otherwise a discovered script name of the repo, as reported by discovery. A bare Python identifier, not a path."},
 			{Name: "modules", Type: "array", Items: &Schema{Type: "string"}, Description: "Names of further pymodules the script imports, resolved within the same repo: for repo \"local\", from pymodule_put; otherwise discovered packages of the repo, as reported by discovery."},
 			{Name: "args", Type: "array", Items: &Schema{Type: "string"}, Description: "Extra command-line arguments passed to the script."},
@@ -102,17 +102,17 @@ func (t *pymoduleStartTool) Execute(ctx context.Context, input ToolInput) (ToolR
 	}
 	// `repo` is required by the schema, but a model can still omit it: fail
 	// loudly instead of silently defaulting, exactly like pymodule_run — an
-	// implicit "local" would leave a git-sourced call silently running (or
+	// implicit "local" would leave a repo-sourced call silently running (or
 	// missing) a same-named saved module, with nothing in the result saying
 	// which scope it started.
 	if in.Repo == "" {
-		return ToolResult{}, errors.New("pymodule_start: repo is required: \"local\" for your own saved pymodules (pymodule_put), or a git source's name as reported by discovery")
+		return ToolResult{}, errors.New("pymodule_start: repo is required: \"local\" for your own saved pymodules (pymodule_put), or a repo's name as reported by discovery")
 	}
 	// A non-local repo is validated by the same rule pymodule_run applies to
 	// it: the name becomes a path segment under the git cache on the hosting
 	// side, and the daemon re-checks it against the registered sources.
 	if in.Repo != pymodules.LocalRepo {
-		if err := gitpymodules.ValidateName(in.Repo); err != nil {
+		if err := repos.ValidateName(in.Repo); err != nil {
 			return ToolResult{}, fmt.Errorf("pymodule_start: repo: %w", err)
 		}
 	}

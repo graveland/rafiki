@@ -189,7 +189,7 @@ func (AgentSendBlueprint) InputSchema() Schema {
 						Description: "Run a saved pymodule, with pymodule_run's inputs.",
 						Properties: []SchemaProperty{
 							{Name: "repo", Type: "string", Description: "Required. Pymodule source: " +
-								"\"local\" or a registered git source's name."},
+								"\"local\" or a registered repo's name."},
 							{Name: "script", Type: "string", Description: "Required. Entry module, as saved."},
 							{Name: "cwd", Type: "string", Description: "Working directory for the run. " +
 								"Omit for the step's cwd; a relative path resolves against it."},

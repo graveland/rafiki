@@ -148,29 +148,29 @@ func TestMCPPyModuleStorePutSucceedsDespiteLintFindings(t *testing.T) {
 	c.False(len(rows) != 2 || rows[1].Name != "alice_plot", "store rows = %+v, want alice_plot saved: a lint finding must not block", rows)
 }
 
-// gitInventoryFixture builds a Controller whose git pusher's cache holds two
+// gitInventoryFixture builds a Controller whose repo pusher's cache holds two
 // sources for u_alice -- one with a script and a package, one with a script
 // of its own -- so the listing tests can assert both scoping directions. The
 // pusher is cache-seeded directly (no pool, no refresh): allInventory and
 // inventoryFor read the cache and nothing else.
 func gitInventoryFixture(store *fakePymoduleStore) *Controller {
-	gp := &gitPymodulePusher{cache: map[string]gitPymoduleInventory{
-		gitSourceKey("u_alice", "ops-tools"): {
-			Scripts:  []*executorpb.GitSourceScript{{Name: "rotate_keys", Description: "rotates the API keys"}},
-			Packages: []*executorpb.GitSourcePackage{{Name: "opslib", Description: "ops helpers"}},
+	gp := &repoPusher{cache: map[string]repoInventory{
+		repoKey("u_alice", "ops-tools"): {
+			Scripts:  []*executorpb.RepoScript{{Name: "rotate_keys", Description: "rotates the API keys"}},
+			Packages: []*executorpb.RepoPackage{{Name: "opslib", Description: "ops helpers"}},
 		},
-		gitSourceKey("u_alice", "other-src"): {
-			Scripts: []*executorpb.GitSourceScript{{Name: "other_tool", Description: "another source's tool"}},
+		repoKey("u_alice", "other-src"): {
+			Scripts: []*executorpb.RepoScript{{Name: "other_tool", Description: "another source's tool"}},
 		},
 	}}
-	return &Controller{pymoduleStore: store, gitpymodulePusher: gp}
+	return &Controller{pymoduleStore: store, repoPusher: gp}
 }
 
-// TestMCPPyModuleListSpansGitSources pins the MCP listing spanning both
+// TestMCPPyModuleListSpansRepos pins the MCP listing spanning both
 // scopes when no repo filter is given: the local rows (bare names) plus every
-// git source's entries (repo-labeled), the same shape the fundi skill body
+// repo's entries (repo-labeled), the same shape the fundi skill body
 // renders.
-func TestMCPPyModuleListSpansGitSources(t *testing.T) {
+func TestMCPPyModuleListSpansRepos(t *testing.T) {
 	c := assert.NewCollecting(t)
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{
 		"u_alice": {{ID: 1, OwnerUserID: "u_alice", Name: "alice_chart", Description: "charts things"}},
@@ -188,7 +188,7 @@ func TestMCPPyModuleListSpansGitSources(t *testing.T) {
 		"alice_chart — charts things",                  // local, bare name
 		"ops-tools/rotate_keys — rotates the API keys", // git script, repo-labeled
 		"ops-tools/opslib — ops helpers",               // git package, repo-labeled
-		"other-src/other_tool — another source's tool", // the second git source
+		"other-src/other_tool — another source's tool", // the second repo
 	} {
 		c.StrContains(res.Text, want, "pymodule_list result")
 	}
@@ -201,7 +201,7 @@ func TestMCPPyModuleListSpansGitSources(t *testing.T) {
 }
 
 // TestMCPPyModuleListFiltersByRepo pins the optional repo filter narrowing to
-// one scope: a git source's name returns only that source's entries (no
+// one scope: a repo's name returns only that source's entries (no
 // local rows, no other source), "local" returns only the blob store's.
 func TestMCPPyModuleListFiltersByRepo(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -226,7 +226,7 @@ func TestMCPPyModuleListFiltersByRepo(t *testing.T) {
 	res, err = tool.Execute(context.Background(), tools.ToolInput(`{"repo":"local"}`))
 	c.Require().NoError(err, "Execute(local)")
 	c.StrContains(res.Text, "alice_chart — charts things", "pymodule_list(local)")
-	c.False(strings.Contains(res.Text, "ops-tools/") || strings.Contains(res.Text, "other-src/"), "pymodule_list(local) = %q, want no git-sourced entries", res.Text)
+	c.False(strings.Contains(res.Text, "ops-tools/") || strings.Contains(res.Text, "other-src/"), "pymodule_list(local) = %q, want no repo-sourced entries", res.Text)
 
 	// An unknown source name is an empty listing, not an error.
 	res, err = tool.Execute(context.Background(), tools.ToolInput(`{"repo":"no-such-source"}`))

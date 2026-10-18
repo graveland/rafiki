@@ -14,21 +14,21 @@ import (
 	"connectrpc.com/connect"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
-	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/repos"
 )
 
-// gitPymoduleReposRoot is the parent cache root every git checkout lives
+// reposRoot is the parent cache root every git checkout lives
 // under: <cache>/pymodule-repos -- a sibling cache root to pymoduleCacheDir(),
 // not nested inside it, since a git checkout's own layout (including .git/)
 // must not be interleaved with the flat per-module directories
 // pymodule_sync.go manages and prunes by name.
-func gitPymoduleReposRoot() string {
+func reposRoot() string {
 	return pymodules.GitCacheDir()
 }
 
-func gitPymoduleRepoDir(name string) string {
-	return filepath.Join(gitPymoduleReposRoot(), name)
+func repoDir(name string) string {
+	return filepath.Join(reposRoot(), name)
 }
 
 // ensureGitReposRoot establishes the pymodule-repos cache root exactly the
@@ -59,14 +59,14 @@ func ensureGitReposRoot(root string) error {
 // dependency manifest is a bare requirements.txt: `uv sync` cannot consume
 // one, so the build is not attempted and venv_ready stays false rather than
 // promising a venv that was never built.
-const requirementsOnlyVenvError = "repo carries only requirements.txt; rafiki builds git-source venvs with `uv sync`, which needs a pyproject.toml — add one that declares the dependency"
+const requirementsOnlyVenvError = "repo carries only requirements.txt; rafiki builds repo venvs with `uv sync`, which needs a pyproject.toml — add one that declares the dependency"
 
-// SyncPyModuleGitSource refreshes ONE named git source in this executor's
+// SyncRepo refreshes ONE named repo in this executor's
 // rafiki-managed pymodule-repo cache: clone it fresh or fetch-and-reset an
 // existing checkout onto ref's current tip, discover the scripts and packages
 // the checkout contains, and build the repo's one shared venv.
 //
-// Per-source, not whole-corpus like SyncPyModules: a git source's own history
+// Per-source, not whole-corpus like SyncPyModules: a repo's own history
 // is already the versioning and pruning mechanism, so there is no "prune
 // what's absent" model to replicate here.
 //
@@ -75,13 +75,13 @@ const requirementsOnlyVenvError = "repo carries only requirements.txt; rafiki bu
 // checkout left in an unknown state is not a state to discover or build
 // against, but the daemon still wants the failure REPORTED rather than
 // mistaking it for an unreachable executor.
-func (s *Server) SyncPyModuleGitSource(
+func (s *Server) SyncRepo(
 	_ context.Context,
-	req *connect.Request[executorpb.SyncPyModuleGitSourceRequest],
-) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
-	if !s.opts.PymoduleGitSync {
+	req *connect.Request[executorpb.SyncRepoRequest],
+) (*connect.Response[executorpb.SyncRepoResponse], error) {
+	if !s.opts.RepoSync {
 		return nil, connect.NewError(connect.CodePermissionDenied,
-			errors.New("this executor does not accept pymodule git-source syncs"))
+			errors.New("this executor does not accept pymodule repo syncs"))
 	}
 
 	// The name becomes a path segment under the cache root: guard it before
@@ -105,33 +105,33 @@ func (s *Server) SyncPyModuleGitSource(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	dir := gitPymoduleRepoDir(req.Msg.GetName())
+	dir := repoDir(req.Msg.GetName())
 
 	// Establish the checkout root the same way the blob path establishes its
 	// cache dir, BEFORE any clone/fetch/clean: refuse rather than adopt a root
 	// this executor never created.
-	if err := ensureGitReposRoot(gitPymoduleReposRoot()); err != nil {
+	if err := ensureGitReposRoot(reposRoot()); err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	if out, err := refreshGitCheckout(dir, req.Msg.GetUrl(), req.Msg.GetRef()); err != nil {
-		return connect.NewResponse(&executorpb.SyncPyModuleGitSourceResponse{
+		return connect.NewResponse(&executorpb.SyncRepoResponse{
 			VenvReady: false,
 			VenvError: uvError(out, err), // same 4096-byte cap as a failed uv build
 		}), nil
 	}
 
-	scripts, packages, err := gitpymodules.Discover(dir)
+	scripts, packages, err := repos.Discover(dir)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	resp := &executorpb.SyncPyModuleGitSourceResponse{}
+	resp := &executorpb.SyncRepoResponse{}
 	for _, sc := range scripts {
 		resp.Scripts = append(resp.Scripts,
-			&executorpb.GitSourceScript{Name: sc.Name, Description: sc.Description})
+			&executorpb.RepoScript{Name: sc.Name, Description: sc.Description})
 	}
 	for _, p := range packages {
 		resp.Packages = append(resp.Packages,
-			&executorpb.GitSourcePackage{Name: p.Name, Description: p.Description})
+			&executorpb.RepoPackage{Name: p.Name, Description: p.Description})
 	}
 
 	// A broken dependency build only fails the runs that need the venv: the

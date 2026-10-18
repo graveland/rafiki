@@ -86,7 +86,7 @@ func (w *mcpPyModuleStore) Delete(ctx context.Context, repo, name string) (strin
 // Get reads the latest live version of a module under this store's bound
 // owner. Read-only: no push, nothing to fan out.
 // repo is always "local" by the time the tool layer calls in (it rejects
-// every other value; serving a git-sourced get is deferred -- the daemon
+// every other value; serving a repo-sourced get is deferred -- the daemon
 // caches names and descriptions only, never file content), but the
 // parameter stays: tools.PyModuleStore requires it.
 func (w *mcpPyModuleStore) Get(ctx context.Context, repo, name string) (pymodules.Record, error) {

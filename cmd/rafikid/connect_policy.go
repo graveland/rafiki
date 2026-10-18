@@ -32,7 +32,7 @@ type controlPolicy uint8
 const (
 	// policyUserOnly requires a real user credential (or a nil identity, the
 	// unix socket's local trust). It is the DEFAULT: anything that acts with
-	// operator authority — budgets, skills, pymodule git sources,
+	// operator authority — budgets, skills, pymodule repos,
 	// the daraja verbs — is here, and a new RPC that misses the
 	// table lands here by the completeness test (TestControlPolicyTableCoversEveryProcedure).
 	policyUserOnly controlPolicy = iota
@@ -182,23 +182,23 @@ var controlPolicyTable = map[string]controlPolicy{
 	// userOnly: everything that acts with operator authority or answers as
 	// the caller's identity. Listed explicitly so the completeness test can
 	// tell "classified userOnly" from "missing".
-	"ListExecutors":            policyUserOnly,
-	"ListSkills":               policyUserOnly,
-	"GetSkill":                 policyUserOnly,
-	"UpsertSkill":              policyUserOnly,
-	"DeleteSkill":              policyUserOnly,
-	"SetSkillEnabled":          policyUserOnly,
-	"AddPymoduleGitSource":     policyUserOnly,
-	"ListPymoduleGitSources":   policyUserOnly,
-	"RefreshPymoduleGitSource": policyUserOnly,
-	"RemovePymoduleGitSource":  policyUserOnly,
-	"RecallBackfill":           policyUserOnly,
-	"RecallStatus":             policyUserOnly,
-	"ConversationReview":       policyUserOnly,
-	"ConversationFindings":     policyUserOnly,
-	"DarajaLaunch":             policyUserOnly,
-	"DarajaSend":               policyUserOnly,
-	"DarajaWatch":              policyUserOnly,
+	"ListExecutors":        policyUserOnly,
+	"ListSkills":           policyUserOnly,
+	"GetSkill":             policyUserOnly,
+	"UpsertSkill":          policyUserOnly,
+	"DeleteSkill":          policyUserOnly,
+	"SetSkillEnabled":      policyUserOnly,
+	"AddRepo":              policyUserOnly,
+	"ListRepos":            policyUserOnly,
+	"RefreshRepo":          policyUserOnly,
+	"RemoveRepo":           policyUserOnly,
+	"RecallBackfill":       policyUserOnly,
+	"RecallStatus":         policyUserOnly,
+	"ConversationReview":   policyUserOnly,
+	"ConversationFindings": policyUserOnly,
+	"DarajaLaunch":         policyUserOnly,
+	"DarajaSend":           policyUserOnly,
+	"DarajaWatch":          policyUserOnly,
 	// :batch's provider-ban verbs. List is a read-only, non-scoped surface
 	// (the ban list names providers, not users); Ban/Unban are operator
 	// writes, so userOnly.

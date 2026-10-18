@@ -93,12 +93,12 @@ type Options struct {
 	// reasoning as SkillsSync.
 	PyModulesSync bool
 
-	// PymoduleGitSync lets the daemon refresh this executor's owner's
-	// registered git pymodule sources into its pymodule-repo cache: the
-	// executor clones or fetches a source its owner registered, which means
+	// RepoSync lets the daemon refresh this executor's owner's
+	// registered repos into its pymodule-repo cache: the executor clones or
+	// fetches a repo its owner registered, which means
 	// running `git` as a subprocess against whatever URL was registered.
 	// Off by default, same reasoning as SkillsSync.
-	PymoduleGitSync bool
+	RepoSync bool
 
 	// SandboxMountRoots are the host paths a sandboxed child's container may
 	// bind-mount from, from repeated --sandbox-mount-root flags. A bind whose
@@ -306,7 +306,7 @@ func (s *Server) Describe(
 		LaunchKinds:        s.LaunchKinds(),
 		SkillsSync:         s.opts.SkillsSync,
 		PymodulesSync:      s.opts.PyModulesSync,
-		PymoduleGitSync:    s.opts.PymoduleGitSync,
+		RepoSync:           s.opts.RepoSync,
 		TreeSync:           true,
 		SandboxMountRoots:  append([]string(nil), s.opts.SandboxMountRoots...),
 		SandboxRelayDir:    s.opts.SandboxRelayDir,

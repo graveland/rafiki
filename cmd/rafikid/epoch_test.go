@@ -81,7 +81,7 @@ func TestLoginIsEpochGated(t *testing.T) {
 	_, err = client.BeginLogin(ctx, req)
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code without the epoch")
 	c.Eq(protocol.ErrProtocolMismatch, rpcreason.Reason(err), "reason without the epoch")
-	c.StrContains(err.Error(), "this daemon speaks rafiki protocol 3", "message without the epoch")
+	c.StrContains(err.Error(), "this daemon speaks rafiki protocol 4", "message without the epoch")
 
 	// With the epoch, the credential-less caller reaches BeginLogin and gets
 	// Login's own answer (OIDC unconfigured), proving the route is live behind

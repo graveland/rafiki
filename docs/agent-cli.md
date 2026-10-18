@@ -478,7 +478,7 @@ rafiki create -d --kind script --pymodule ops_tools:rotate
 
 - `--pymodule` is **required** for a script kind and shaped `<repo>:<script>`
   — `repo` is `local` (the spawning owner's saved modules, what `rafiki python
-  put` writes) or a registered git source's name (`rafiki python repo add`).
+  put` writes) or a registered repo's name (`rafiki repo add`).
   The script name is checked client-side (a bare Python identifier), the repo
   name by the daemon, whose registered sources are the authority. On any other
   resolved kind `--pymodule` is refused rather than silently dropped — the
@@ -616,7 +616,7 @@ against the daemon's face (TLS with the executor's own `--pin-cert`; the
 child secret arrives in the launch payload's environment, never argv), runs
 the interpreter on the resolved argv, and does NOT respawn a script — a
 script's exit is its result. `--launch script` implies `--pymodules-sync` and
-`--pymodule-git-sync` unless each is refused explicitly. A script spawn on a
+`--repo-sync` unless each is refused explicitly. A script spawn on a
 daemon whose executors declare no `script` launch kind falls back to the
 daemon's own host (the owner's saved modules only), and under an
 executor-granted parent that fallback is refused instead — the grant would be
@@ -746,9 +746,9 @@ rafiki python delete <name>                 # soft-delete every live version
 - **`list`** shows `NAME`, `REPO`, `VERSION`, `SAVED`, `DESCRIPTION` and
   never the code — an inventory is a handful of lines and a body is a
   document. `--repo` narrows the inventory to one scope: `local` (the saved
-  blob store), a registered git source's name, or unset for everything —
+  blob store), a registered repo's name, or unset for everything —
   the one place an empty value means "no filter", because it is a filter
-  flag, not an address. Git-sourced rows show the source's name in REPO and
+  flag, not an address. Repo-sourced rows show the source's name in REPO and
   `-` for VERSION and SAVED: they have neither, the repo's own history
   being their versioning. `-o json`/`-o jsonl` work on `list` too, and the
   rows stay codeless in every mode (json wraps them in the shared
@@ -775,23 +775,23 @@ rafiki python delete <name>                 # soft-delete every live version
   the materializer reads the spawning OWNER's rows, so what you save here is
   what your children start.
 
-### `rafiki python repo` (git-backed sources)
+### `rafiki repo` (repos)
 
-Manage git-backed pymodule sources: owner-scoped `(name, url, ref)`
+Manage repos: owner-scoped `(name, url, ref)`
 registrations whose discovered scripts and packages children address as
 `repo=<name>` on the pymodule tools. The blob store above is itself one such
 scope under the reserved name `local`, which is why `repo add` refuses it.
 A name is 1-64 letters, digits, `_` and `-`, not starting with `-` — it names
 a checkout directory and is never imported, so `review-swarm` is fine. These are rare, setup-shaped operations, so they live here and on no agent
-tool surface — registration goes over Connect (`AddPymoduleGitSource`/
-`ListPymoduleGitSources`/`RefreshPymoduleGitSource`/`RemovePymoduleGitSource`)
+tool surface — registration goes over Connect (`AddRepo`/
+`ListRepos`/`RefreshRepo`/`RemoveRepo`)
 and works against a remote daemon exactly as against a local one.
 
 ```
-rafiki python repo add <name> <url> [--ref <ref>]   # register + first refresh (--ref main)
-rafiki python repo list                             # NAME, URL, REF
-rafiki python repo refresh [name...]                # re-pull on every eligible executor (all sources)
-rafiki python repo remove <name>
+rafiki repo add <name> <url> [--ref <ref>]   # register + first refresh (--ref main)
+rafiki repo list                             # NAME, URL, REF
+rafiki repo refresh [name...]                # re-pull on every eligible executor (all sources)
+rafiki repo remove <name>
 ```
 
 - **`add`** registers the source and the daemon fires the FIRST refresh
@@ -801,9 +801,9 @@ rafiki python repo remove <name>
   name keeps its previous url/ref. The printed summary is the discovered
   inventory: script and package counts plus the venv state. Note the summary
   itself is a SECOND refresh call the CLI makes after registering; if that
-  call fails, the source is still registered — rerun `python repo refresh`.
+  call fails, the source is still registered — rerun `repo refresh`.
 - **`refresh`** re-pulls each named source on every live executor of yours
-  whose `Describe` reports `pymodule_git_sync`, in parallel, and prints the
+  whose `Describe` reports `repo_sync`, in parallel, and prints the
   same summary per source. With no name it refreshes EVERY source you have
   registered, in list order; `<TAB>` completes source names. Each source is
   its own call, so one that fails is reported on stderr (`error: refresh
