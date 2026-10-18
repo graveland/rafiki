@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -88,4 +89,20 @@ func TestSetupTracingResolve(t *testing.T) {
 			c.Eq(tc.endpoint, endpoint, "endpoint")
 		})
 	}
+}
+
+// TestSetupTracingEnabledBuildsProvider pins that an endpoint actually yields a
+// working provider. The resource merge used by setupTracing is schema-version
+// sensitive: resource.Default() carries the SDK's semantic-convention URL, and
+// merging attributes tagged with a different version fails with "conflicting
+// Schema URL", which the daemon swallows as "tracing setup failed". A unit test
+// that only exercised resolveOTLP could not see that.
+func TestSetupTracingEnabledBuildsProvider(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// The exporter is constructed, not dialled, so an unused local port is
+	// enough to prove setup completes.
+	tp, shutdown, err := setupTracing(context.Background(), telemetry.Config{Endpoint: "http://127.0.0.1:1"}, "test-daemon")
+	c.NoError(err, "setupTracing with an endpoint")
+	c.NotNil(tp, "provider")
+	defer shutdown()
 }

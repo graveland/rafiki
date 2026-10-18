@@ -1,0 +1,33 @@
+# Sample rafikid.toml — the daemon's own configuration.
+#
+# Location: $RAFIKI_CONFIG if set, else <ConfigDir>/rafikid.toml
+# (~/.config/rafiki/rafikid.toml by default). A missing file means "defaults".
+# Decoding is strict: an unknown key or section fails startup.
+#
+# Standard OTEL_* environment variables override this file. In particular,
+# OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT turn
+# tracing on and replace `endpoint`, and OTEL_EXPORTER_OTLP_PROTOCOL /
+# OTEL_EXPORTER_OTLP_TRACES_PROTOCOL replace `protocol`. Auth headers are set
+# only through OTEL_EXPORTER_OTLP_HEADERS — never here.
+
+[telemetry]
+# OTLP collector URL. Setting it turns tracing on; leaving it out (with no
+# OTEL_EXPORTER_OTLP_* endpoint in the environment) runs a no-op provider.
+# 4317 is the conventional gRPC port, 4318 the HTTP/protobuf port.
+endpoint = "http://localhost:4318"
+
+# "http/protobuf" (default) or "grpc".
+protocol = "http/protobuf"
+
+# What prompt/reply/tool-argument text may leave the daemon on a span:
+#   "off"   (default) — metadata and sizes only; errors are always exported
+#   "all"             — content for every child
+#   "rules"           — content only for children matching a content_rule
+content = "rules"
+
+# Each rule ANDs its non-empty fields; rules OR with each other. `user` is the
+# child owner's username. `provider` is a providers.toml entry name (a typo
+# fails startup). `model` is a path.Match glob over the child's model id.
+[[telemetry.content_rule]]
+provider = "ollama"
+model    = "deepseek/*"

@@ -777,6 +777,10 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 `make web` builds the UI into `pkg/webui/dist` and embeds it into the `rafiki` binary; a binary built without it refuses `rafiki web` (the one exception is `--dev-assets`, below). `make check-web` typechecks, lints and tests the UI under `web/`; both targets need node + pnpm + protoc on `PATH`. Dev loop: run `pnpm dev` in `web/`, then `rafiki web --dev-assets http://localhost:5173` to reverse-proxy static assets to the Vite dev server.
 
+## Telemetry
+
+`rafikid` reads its own configuration — the `[telemetry]` section today, more sections over time — from `rafikid.toml`, at `$RAFIKI_CONFIG` else `<ConfigDir>/rafikid.toml` (a missing file means defaults, and an unknown key fails startup). Setting an OTLP endpoint there, or in the standard `OTEL_EXPORTER_OTLP_*` environment variables that override it, exports OpenTelemetry traces: one trace per agent turn, `execute_tool` and `chat` spans nested under it, cross-agent causality as span links, and postgres spans only under an active parent. Prompt, reply and tool-argument text is opt-in via content rules; errors are always exported. Metrics are independent of tracing and served at `/metrics`. See [`docs/reference/telemetry.md`](docs/reference/telemetry.md) for the configuration, span and attribute vocabulary, content policy, and a TraceQL query for one agent tree.
+
 ## Recall and memory
 
 The daemon indexes what it captures into a searchable recall index: every
