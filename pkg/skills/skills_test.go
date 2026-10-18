@@ -232,3 +232,25 @@ func TestSkillsInventoryRendersQualifiedNames(t *testing.T) {
 	want := "- rafiki:coordinating: how to run subagents\n- local-only: from a directory"
 	assert.NewCollecting(t).Eq(want, got, "got:\n")
 }
+
+// Record.Meta is the one projection onto the inventory type, so it must carry
+// the row's id (what a body lookup resolves with) and whether the skill has
+// supporting files — while never carrying the body or the files themselves: an
+// inventory is a handful of lines, and a document does not belong in it.
+func TestRecordMetaCarriesIDAndHasFiles(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := Record{
+		ID: "row-1", Namespace: "rafiki", Name: "coordinating",
+		Description: "how to run subagents", Body: "the whole document",
+		HasFiles: true,
+		Files:    []File{{Path: "ref.md", Mode: 0o644, Content: []byte("x")}},
+	}
+	m := r.Meta()
+	c.Eq("row-1", m.ID, "Meta().ID")
+	c.Eq("rafiki", m.Namespace, "Meta().Namespace")
+	c.Eq("coordinating", m.Name, "Meta().Name")
+	c.Eq("how to run subagents", m.Description, "Meta().Description")
+	c.True(m.HasFiles, "Meta().HasFiles")
+	c.True(m.Inline, "Meta().Inline: a stored row is served inline")
+	c.Eq("rafiki:coordinating", m.QualifiedName(), "QualifiedName")
+}

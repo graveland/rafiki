@@ -73,8 +73,6 @@ const (
 	ControlListSkillsProcedure = "/rafiki.v1.Control/ListSkills"
 	// ControlGetSkillProcedure is the fully-qualified name of the Control's GetSkill RPC.
 	ControlGetSkillProcedure = "/rafiki.v1.Control/GetSkill"
-	// ControlUpsertSkillProcedure is the fully-qualified name of the Control's UpsertSkill RPC.
-	ControlUpsertSkillProcedure = "/rafiki.v1.Control/UpsertSkill"
 	// ControlDeleteSkillProcedure is the fully-qualified name of the Control's DeleteSkill RPC.
 	ControlDeleteSkillProcedure = "/rafiki.v1.Control/DeleteSkill"
 	// ControlSetSkillEnabledProcedure is the fully-qualified name of the Control's SetSkillEnabled RPC.
@@ -244,7 +242,6 @@ type ControlClient interface {
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
 	ListSkills(context.Context, *connect.Request[v1.ListSkillsRequest]) (*connect.Response[v1.ListSkillsResponse], error)
 	GetSkill(context.Context, *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error)
-	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
 	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
 	ListPymodules(context.Context, *connect.Request[v1.ListPymodulesRequest]) (*connect.Response[v1.ListPymodulesResponse], error)
@@ -446,12 +443,6 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			httpClient,
 			baseURL+ControlGetSkillProcedure,
 			connect.WithSchema(controlMethods.ByName("GetSkill")),
-			connect.WithClientOptions(opts...),
-		),
-		upsertSkill: connect.NewClient[v1.UpsertSkillRequest, v1.UpsertSkillResponse](
-			httpClient,
-			baseURL+ControlUpsertSkillProcedure,
-			connect.WithSchema(controlMethods.ByName("UpsertSkill")),
 			connect.WithClientOptions(opts...),
 		),
 		deleteSkill: connect.NewClient[v1.DeleteSkillRequest, v1.DeleteSkillResponse](
@@ -889,7 +880,6 @@ type controlClient struct {
 	getRateLimitStatus   *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
 	listSkills           *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
 	getSkill             *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
-	upsertSkill          *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
 	deleteSkill          *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
 	setSkillEnabled      *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
 	listPymodules        *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
@@ -1039,11 +1029,6 @@ func (c *controlClient) ListSkills(ctx context.Context, req *connect.Request[v1.
 // GetSkill calls rafiki.v1.Control.GetSkill.
 func (c *controlClient) GetSkill(ctx context.Context, req *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error) {
 	return c.getSkill.CallUnary(ctx, req)
-}
-
-// UpsertSkill calls rafiki.v1.Control.UpsertSkill.
-func (c *controlClient) UpsertSkill(ctx context.Context, req *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error) {
-	return c.upsertSkill.CallUnary(ctx, req)
 }
 
 // DeleteSkill calls rafiki.v1.Control.DeleteSkill.
@@ -1409,7 +1394,6 @@ type ControlHandler interface {
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
 	ListSkills(context.Context, *connect.Request[v1.ListSkillsRequest]) (*connect.Response[v1.ListSkillsResponse], error)
 	GetSkill(context.Context, *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error)
-	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
 	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
 	ListPymodules(context.Context, *connect.Request[v1.ListPymodulesRequest]) (*connect.Response[v1.ListPymodulesResponse], error)
@@ -1607,12 +1591,6 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		ControlGetSkillProcedure,
 		svc.GetSkill,
 		connect.WithSchema(controlMethods.ByName("GetSkill")),
-		connect.WithHandlerOptions(opts...),
-	)
-	controlUpsertSkillHandler := connect.NewUnaryHandler(
-		ControlUpsertSkillProcedure,
-		svc.UpsertSkill,
-		connect.WithSchema(controlMethods.ByName("UpsertSkill")),
 		connect.WithHandlerOptions(opts...),
 	)
 	controlDeleteSkillHandler := connect.NewUnaryHandler(
@@ -2063,8 +2041,6 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListSkillsHandler.ServeHTTP(w, r)
 		case ControlGetSkillProcedure:
 			controlGetSkillHandler.ServeHTTP(w, r)
-		case ControlUpsertSkillProcedure:
-			controlUpsertSkillHandler.ServeHTTP(w, r)
 		case ControlDeleteSkillProcedure:
 			controlDeleteSkillHandler.ServeHTTP(w, r)
 		case ControlSetSkillEnabledProcedure:
@@ -2274,10 +2250,6 @@ func (UnimplementedControlHandler) ListSkills(context.Context, *connect.Request[
 
 func (UnimplementedControlHandler) GetSkill(context.Context, *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetSkill is not implemented"))
-}
-
-func (UnimplementedControlHandler) UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UpsertSkill is not implemented"))
 }
 
 func (UnimplementedControlHandler) DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error) {

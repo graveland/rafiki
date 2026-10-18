@@ -7,7 +7,6 @@ import (
 	"errors"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -65,55 +64,71 @@ func TestEligibleRequiresSkillsSyncAndClaude(t *testing.T) {
 	c.False(eligible(nil), "a nil Describe must not be eligible (and must not panic)")
 }
 
+// pushStore is a store holding one core row, enough for every verb to resolve.
+func pushStore() *fakeSkillStore {
+	return &fakeSkillStore{rows: []skills.Record{
+		{ID: "id-1", Namespace: "rafiki", Name: "a", Source: skills.CoreSource},
+	}}
+}
+
 // The ticker is gone: skillPusher has no Run, and the corpus is refreshed on
 // write instead (connectSkills.push below) and on executor connect (main.go's
-// SetOnConnect). These pin the adapter side of that contract — push fires
-// after a successful write, never after a failed one, and a nil push is
-// tolerated since existing wiring constructs connectSkills without one.
-func TestConnectSkillsPushesOnUpsert(t *testing.T) {
-	ck := assert.NewCollecting(t)
+// SetOnConnect). These pin the adapter side of that contract — push fires after
+// a successful write, never after a failed one, and a nil push is tolerated
+// since existing wiring constructs connectSkills without one.
+func TestConnectSkillsPushesOnDelete(t *testing.T) {
+	ck := assert.NewAborting(t)
 	called := false
 	c := connectSkills{
-		st:      &fakeSkillStore{},
-		version: "v1",
-		push:    func(context.Context) { called = true },
+		st:   pushStore(),
+		push: func(context.Context) { called = true },
 	}
-	if _, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
-		Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
-	}); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	ck.Require().True(called, "UpsertSkill did not push after a successful write")
-
-	// A failed write pushes nothing: the store did not change, so the corpora
-	// the executors already hold still match it.
-	called = false
-	c.st = &fakeSkillStore{upsertErr: errors.New("db is gone")}
-	_, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
-		Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
-	})
-	ck.Require().Error(err, "upsert unexpectedly succeeded")
-	ck.False(called, "push fired on a failed upsert")
+	ck.NoError(c.DeleteSkill(context.Background(), "rafiki", "a"), "delete")
+	ck.True(called, "DeleteSkill did not push after a successful write")
 }
 
 func TestConnectSkillsPushesOnSetEnabled(t *testing.T) {
 	ck := assert.NewAborting(t)
 	called := false
 	c := connectSkills{
-		st:      &fakeSkillStore{},
-		version: "v1",
-		push:    func(context.Context) { called = true },
+		st:   pushStore(),
+		push: func(context.Context) { called = true },
 	}
 	ck.NoError(c.SetSkillEnabled(context.Background(), "rafiki", "a", false), "set enabled")
 	ck.True(called, "SetSkillEnabled did not push after a successful write")
 }
 
-func TestConnectSkillsToleratesNilPush(t *testing.T) {
-	c := connectSkills{st: &fakeSkillStore{}, version: "v1"}
-	if _, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
-		Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
-	}); err != nil {
-		t.Fatalf("upsert: %v", err)
+// A write that did not happen pushes nothing: the corpora the executors already
+// hold still match the store.
+func TestConnectSkillsPushesNothingOnAFailedWrite(t *testing.T) {
+	boom := errors.New("db is gone")
+	for _, tc := range []struct {
+		name   string
+		store  *fakeSkillStore
+		invoke func(connectSkills) error
+	}{
+		{"delete failed", &fakeSkillStore{
+			rows: pushStore().rows, deleteErr: boom,
+		}, func(c connectSkills) error { return c.DeleteSkill(context.Background(), "rafiki", "a") }},
+		{"disable failed", &fakeSkillStore{
+			rows: pushStore().rows, enableErr: boom,
+		}, func(c connectSkills) error { return c.SetSkillEnabled(context.Background(), "rafiki", "a", false) }},
+		{"nothing to write", &fakeSkillStore{}, func(c connectSkills) error {
+			return c.DeleteSkill(context.Background(), "rafiki", "absent")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			c := connectSkills{st: tc.store, push: func(context.Context) { called = true }}
+			assert.NewAborting(t).Error(tc.invoke(c), "write unexpectedly succeeded")
+			assert.NewAborting(t).False(called, "push fired on a failed write")
+		})
 	}
-	assert.NewAborting(t).NoError(c.SetSkillEnabled(context.Background(), "rafiki", "a", true), "set enabled")
+}
+
+func TestConnectSkillsToleratesNilPush(t *testing.T) {
+	c := connectSkills{st: pushStore()}
+	ck := assert.NewAborting(t)
+	ck.NoError(c.DeleteSkill(context.Background(), "rafiki", "a"), "delete")
+	ck.NoError(c.SetSkillEnabled(context.Background(), "rafiki", "a", true), "set enabled")
 }

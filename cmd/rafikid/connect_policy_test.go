@@ -162,10 +162,10 @@ func childUsableVerbs(client rafikiv1connect.ControlClient) []struct {
 			_, err := client.BanProvider(ctx, req)
 			return err
 		}},
-		{"UpsertSkill", func(ctx context.Context, set func(h http.Header)) error {
-			req := connect.NewRequest(&rafikiv1.UpsertSkillRequest{Namespace: "user", Name: "s", Body: "b"})
+		{"SetSkillEnabled", func(ctx context.Context, set func(h http.Header)) error {
+			req := connect.NewRequest(&rafikiv1.SetSkillEnabledRequest{Namespace: "user", Name: "s", Enabled: false})
 			set(req.Header())
-			_, err := client.UpsertSkill(ctx, req)
+			_, err := client.SetSkillEnabled(ctx, req)
 			return err
 		}},
 	}
@@ -328,12 +328,12 @@ func TestControlPolicyTableCoversEveryProcedure(t *testing.T) {
 // gap in the table can only over-refuse, never admit.
 func TestPolicyForDefaultsClosed(t *testing.T) {
 	for procedure, want := range map[string]controlPolicy{
-		controlProcedurePrefix + "Kill":        policyChildScoped,
-		controlProcedurePrefix + "ListModels":  policyAnyCaller,
-		controlProcedurePrefix + "UpsertSkill": policyUserOnly,
-		controlProcedurePrefix + "NoSuchRPC":   policyUserOnly,
-		"/other.v1.Service/Do":                 policyUserOnly,
-		"not-a-procedure":                      policyUserOnly,
+		controlProcedurePrefix + "Kill":       policyChildScoped,
+		controlProcedurePrefix + "ListModels": policyAnyCaller,
+		controlProcedurePrefix + "GetSkill":   policyUserOnly,
+		controlProcedurePrefix + "NoSuchRPC":  policyUserOnly,
+		"/other.v1.Service/Do":                policyUserOnly,
+		"not-a-procedure":                     policyUserOnly,
 	} {
 		got := policyFor(procedure)
 		assert.NewCollecting(t).Eq(want, got, "policyFor(%q) = %v, want", procedure, got)
@@ -392,7 +392,7 @@ func TestSyncPathVerbsAreClassifiedForChildren(t *testing.T) {
 func TestAuthorizeControlProcedure(t *testing.T) {
 	c := assert.NewCollecting(t)
 	const (
-		userOnly   = controlProcedurePrefix + "UpsertSkill"
+		userOnly   = controlProcedurePrefix + "GetSkill"
 		anyCaller  = controlProcedurePrefix + "ListModels"
 		childScope = controlProcedurePrefix + "Kill"
 	)

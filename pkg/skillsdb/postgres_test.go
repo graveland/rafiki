@@ -4,9 +4,9 @@ package skillsdb
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,411 +54,372 @@ func testStore(t *testing.T) (skills.Store, *pgxpool.Pool) {
 	return NewPostgresStore(pool), pool
 }
 
-// The override state leaves two rows under one name: a disabled core row and
-// an enabled override. Get serves the INLINE SKILL BODY path and `skills
-// show`, so a row order that hands back the disabled core row serves content
-// an operator deliberately switched off. The enabled row must win.
-func TestGetPrefersTheEnabledRowInOverrideState(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "core text", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed core: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable core")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert override: %v", err)
-	}
-
-	for i := 0; i < 10; i++ {
-		got, err := st.Get(ctx, "rafiki", "model-selection")
-		c.NoError(err, "get")
-		c.False(got.Body != "our text" || !got.Enabled, "iteration %d: got body %q enabled=%v, want the ENABLED override row", i, got.Body, got.Enabled)
-	}
+// fixture is one test's own namespace and source. Both are unique per run: the
+// shared test database is never reset between runs, so a fixed name would read
+// an earlier run's rows, and a global row count would count them.
+type fixture struct {
+	st   skills.Store
+	pool *pgxpool.Pool
+	ns   string
+	key  skills.SetKey
 }
 
-func TestUpsertGetList(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "coordinating",
-		Description: "how to run subagents", Body: "body one",
-		Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert: %v", err)
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	st, pool := testStore(t)
+	n := time.Now().UnixNano()
+	f := &fixture{
+		st:   st,
+		pool: pool,
+		ns:   fmt.Sprintf("ns-%d", n),
+		key:  skills.SetKey{Source: fmt.Sprintf("test-%d", n)},
 	}
-
-	got, err := st.Get(ctx, "rafiki", "coordinating")
-	c.NoError(err, "get")
-	c.False(got.Body != "body one" || got.Source != skills.CoreSource, "got %+v", got)
-
-	if _, err := st.Get(ctx, "rafiki", "nope"); !errors.Is(err, skills.ErrNotFound) {
-		t.Fatalf("missing skill: got %v, want ErrNotFound", err)
-	}
-
-	rows, err := st.List(ctx, true)
-	c.NoError(err, "list")
-	c.Len(rows, 1, "got %d rows, want 1", len(rows))
-}
-
-// A disabled row frees its name, so an operator can add their own row under
-// it. This is the whole override mechanism — if the partial index is wrong,
-// this test is what catches it.
-func TestDisabledNameCanBeReclaimed(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "vendor text", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert core: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert override: %v", err)
-	}
-
-	rows, err := st.List(ctx, true)
-	c.NoError(err, "list")
-	c.False(len(rows) != 1 || rows[0].Body != "our text", "got %+v, want exactly the override row", rows)
-}
-
-// An upsert refreshes content; it does not take a name away from another
-// source. Rewriting an enabled row's source would hand the name to the
-// upserter while the old provenance — and the sync that owns it — silently
-// loses its row, so a different source over an enabled row is refused, and
-// the incumbent left byte-identical. The same source stays the normal
-// replace path.
-func TestUpsertRefusesSourceChangeOnEnabledRow(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	seed := skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "v1", Source: "manual", Enabled: true,
-	}
-	if _, err := st.Upsert(ctx, seed); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	_, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "hijacked", Source: "import:other", Enabled: true,
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE source = $1`, f.key.Source)
 	})
-	c.ErrorIs(err, skills.ErrSourceConflict, "cross-source upsert over enabled row: got")
-
-	got, err := st.Get(ctx, "rafiki", "model-selection")
-	c.NoError(err, "get")
-	c.False(got.Source != "manual" || got.Body != "v1", "incumbent rewritten: %+v, want source manual body v1", got)
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "v2", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("same-source refresh: %v", err)
-	}
-	got, err = st.Get(ctx, "rafiki", "model-selection")
-	c.NoError(err, "get after refresh")
-	c.False(got.Body != "v2" || got.Source != "manual", "same-source refresh: %+v, want body v2 under source manual", got)
+	return f
 }
 
-// Enabling in the two-row override state hits the partial unique index: one
-// enabled row per name. That conflict is an ANSWER about the corpus (the name
-// is taken), so it must surface as the typed sentinel — a raw 23505 would
-// leave the Connect layer nothing to translate but driver text under
-// CodeInternal. The escape is Delete, then let the sync reinsert core content.
-func TestSetEnabledEnableInOverrideStateIsErrSourceConflict(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "core text", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed core: %v", err)
+// rec builds a want row in this fixture's namespace and source.
+func (f *fixture) rec(name, body string, files ...skills.File) skills.Record {
+	return skills.Record{
+		Namespace: f.ns, Name: name, Description: name + " description",
+		Body: body, Source: f.key.Source, Enabled: true, Files: files,
 	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable core")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert override: %v", err)
-	}
-
-	err := st.SetEnabled(ctx, "rafiki", "model-selection", true)
-	c.ErrorIs(err, skills.ErrSourceConflict, "enable in override state: got")
-	// The corpus is unchanged: both rows survive, the override still enabled.
-	rows, err := st.List(ctx, false)
-	c.NoError(err, "list")
-	c.Len(rows, 2, "got %d rows, want the core and override rows both intact", len(rows))
 }
 
-// The core sync owns (namespace, source) and nothing else. An operator's row
-// in the same namespace must survive a sync that does not mention it.
-func TestReplaceNamespaceSourceLeavesOtherSourcesAlone(t *testing.T) {
-	c := assert.NewCollecting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
+func (f *fixture) put(t *testing.T, want ...skills.Record) bool {
+	t.Helper()
+	changed, err := f.st.PutSet(context.Background(), f.key, want)
+	if err != nil {
+		t.Fatalf("PutSet: %v", err)
+	}
+	return changed
+}
 
-	for _, r := range []skills.Record{
-		{Namespace: "rafiki", Name: "gone-next-sync", Body: "x", Source: skills.CoreSource, Enabled: true},
-		{Namespace: "rafiki", Name: "operator-owned", Body: "y", Source: "manual", Enabled: true},
-	} {
-		if _, err := st.Upsert(ctx, r); err != nil {
-			t.Fatalf("seed %s: %v", r.Name, err)
+// list is this fixture's namespace only, keyed by name — never a global count.
+func (f *fixture) list(t *testing.T) map[string]skills.Record {
+	t.Helper()
+	rows, err := f.st.List(context.Background(), false)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	out := make(map[string]skills.Record)
+	for _, r := range rows {
+		if r.Namespace == f.ns {
+			out[r.Name] = r
 		}
 	}
+	return out
+}
 
-	err := st.ReplaceNamespaceSource(ctx, "rafiki", skills.CoreSource, []skills.Record{
-		{Namespace: "rafiki", Name: "brand-new", Body: "z", Source: skills.CoreSource, Enabled: true},
+func file(path, content string) skills.File {
+	return skills.File{Path: path, Mode: 0o644, Content: []byte(content)}
+}
+
+func blobExists(t *testing.T, pool *pgxpool.Pool, content []byte) bool {
+	t.Helper()
+	h := skills.BlobHash(content)
+	var ok bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM conversations.skill_blob WHERE sha256 = $1)`, h[:]).Scan(&ok); err != nil {
+		t.Fatalf("probe blob: %v", err)
+	}
+	return ok
+}
+
+func TestPutSetInsertsAndPrunes(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+	ctx := context.Background()
+
+	c.True(f.put(t, f.rec("alpha", "a1"), f.rec("beta", "b1", file("ref.md", "hello"))), "first write reported no change")
+
+	byName := f.list(t)
+	c.Require().Len(byName, 2, "got %d rows, want the two written", len(byName))
+	c.Eq("a1", byName["alpha"].Body, "alpha body")
+	c.False(byName["alpha"].HasFiles, "alpha has no files, but HasFiles is set")
+	c.True(byName["beta"].HasFiles, "beta has a file, but HasFiles is clear")
+
+	got, err := f.st.Get(ctx, byName["beta"].ID)
+	c.Require().NoError(err, "Get")
+	c.Require().Len(got.Files, 1, "got %d files, want 1", len(got.Files))
+	c.Eq("ref.md", got.Files[0].Path, "file path")
+	c.Eq("hello", string(got.Files[0].Content), "file content")
+
+	// A row absent from the next write belongs to this set, so it is pruned.
+	c.True(f.put(t, f.rec("beta", "b1", file("ref.md", "hello")), f.rec("gamma", "g1")), "pruning write reported no change")
+	byName = f.list(t)
+	c.Require().Len(byName, 2, "got %d rows, want beta and gamma", len(byName))
+	c.NotHasKey(byName, "alpha", "a row dropped from the set survived")
+	c.HasKey(byName, "gamma", "a row added to the set is missing")
+}
+
+// A set byte-identical to what is stored writes nothing: no updated_at churn,
+// and changed=false so no push follows.
+func TestPutSetIdenticalIsNoop(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+
+	want := []skills.Record{
+		f.rec("alpha", "a1", file("x.md", "x")),
+		f.rec("beta", "b1"),
+	}
+	c.True(f.put(t, want...), "first write reported no change")
+	before := f.list(t)
+
+	c.False(f.put(t, want...), "an identical set reported a change")
+
+	after := f.list(t)
+	c.Require().Len(after, len(before), "row count moved on a no-op write")
+	for name, was := range before {
+		now, ok := after[name]
+		c.Require().True(ok, "%s disappeared on a no-op write", name)
+		c.Eq(was.ID, now.ID, "%s: id changed", name)
+		c.Eq(was.UpdatedAt, now.UpdatedAt, "%s: updated_at moved on a no-op write", name)
+	}
+}
+
+// Re-syncing content is not permission to re-enable a skill an operator turned
+// off: enabled is deliberately absent from the upsert's SET list.
+func TestPutSetPreservesDisabled(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.put(t, f.rec("alpha", "v1"))
+	row := f.list(t)["alpha"]
+	c.Require().NoError(f.st.SetEnabled(ctx, row.ID, false), "disable")
+
+	f.put(t, f.rec("alpha", "v2"))
+	got := f.list(t)["alpha"]
+	c.Eq("v2", got.Body, "body was not refreshed")
+	c.False(got.Enabled, "the write re-enabled a disabled skill")
+}
+
+// A namespace belongs to one source per layer. A second source claiming it is
+// refused with the holder's name, and writes nothing at all.
+func TestPutSetNamespaceHeld(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.put(t, f.rec("alpha", "a"))
+
+	other := skills.SetKey{Source: f.key.Source + "-other"}
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE source = $1`, other.Source)
 	})
-	c.Require().NoError(err, "replace")
+	_, err := f.st.PutSet(ctx, other, []skills.Record{{
+		Namespace: f.ns, Name: "beta", Body: "b", Source: other.Source,
+	}})
 
-	rows, err := st.List(ctx, false)
-	c.Require().NoError(err, "list")
-	byName := map[string]skills.Record{}
-	for _, r := range rows {
-		byName[r.Name] = r
-	}
-	if _, ok := byName["gone-next-sync"]; ok {
-		t.Error("core row absent from want should have been pruned")
-	}
-	if _, ok := byName["brand-new"]; !ok {
-		t.Error("core row present in want should have been inserted")
-	}
-	_, ok := byName["operator-owned"]
-	c.True(ok, "operator row was pruned by a core sync — ownership scoping is broken")
+	held := c.Require().ErrorAs[*skills.NamespaceHeldError](err, "a second source claiming the same namespace: got")
+	c.Eq(f.ns, held.Namespace, "namespace named by the error")
+	c.Eq(f.key.Source, held.Holder, "holder named by the error")
+	c.ErrorContains(err, f.key.Source, "error text")
+
+	byName := f.list(t)
+	c.Len(byName, 1, "the refused write left %d rows, want only the incumbent", len(byName))
+	c.NotHasKey(byName, "beta", "the refused write inserted its row")
 }
 
-// The sync ships a skill the operator disabled: the row must be refreshed in
-// place, not resurrected as a second, enabled row — the partial index cannot
-// see the disabled row, so a plain INSERT would silently bring the skill back.
-func TestReplaceNamespaceSourceDoesNotResurrectADisabledCoreRow(t *testing.T) {
+// The core layer is its own layer: a global (or user) set may hold the same
+// namespace and name without colliding, and neither write touches the other's
+// row.
+func TestPutSetCoreIsItsOwnLayer(t *testing.T) {
 	c := assert.NewAborting(t)
-	st, _ := testStore(t)
+	f := newFixture(t)
 	ctx := context.Background()
 
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "noisy", Body: "v1", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "noisy", false), "disable")
-	c.NoError(st.ReplaceNamespaceSource(ctx, "rafiki", skills.CoreSource, []skills.Record{
-		{Namespace: "rafiki", Name: "noisy", Body: "v2", Enabled: true},
-	}), "replace")
+	name := fmt.Sprintf("layer-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE namespace = $1 AND name = $2`,
+			skills.DefaultNamespace, name)
+	})
 
-	rows, err := st.List(ctx, false)
-	c.NoError(err, "list")
-	var found []skills.Record
-	for _, r := range rows {
-		if r.Name == "noisy" {
-			found = append(found, r)
+	core := skills.SetKey{Source: skills.CoreSource}
+	if _, err := f.st.PutSet(ctx, core, []skills.Record{{
+		Namespace: skills.DefaultNamespace, Name: name, Body: "core body",
+	}}); err != nil {
+		t.Fatalf("core PutSet: %v", err)
+	}
+	if _, err := f.st.PutSet(ctx, f.key, []skills.Record{{
+		Namespace: skills.DefaultNamespace, Name: name, Body: "global body",
+	}}); err != nil {
+		t.Fatalf("global PutSet in the core's namespace: %v", err)
+	}
+
+	rows := rowsByName(t, f.st, skills.DefaultNamespace, name)
+	c.Require().Len(rows, 2, "got %d rows, want the core row and the global row", len(rows))
+
+	// A later core write refreshes only its own layer's row.
+	if _, err := f.st.PutSet(ctx, core, []skills.Record{{
+		Namespace: skills.DefaultNamespace, Name: name, Body: "core body v2",
+	}}); err != nil {
+		t.Fatalf("second core PutSet: %v", err)
+	}
+	bySource := map[string]skills.Record{}
+	for _, r := range rowsByName(t, f.st, skills.DefaultNamespace, name) {
+		bySource[r.Source] = r
+	}
+	c.Require().Len(bySource, 2, "a core write collapsed the layers: %v", bySource)
+	c.Eq("core body v2", bySource[skills.CoreSource].Body, "core body")
+	c.Eq("global body", bySource[f.key.Source].Body, "the core write rewrote the global layer's row")
+}
+
+// The sweep removes exactly the blobs this set stopped referencing: a replaced
+// file's bytes go, and a hash another skill still points at stays.
+func TestPutSetSweepsBlobs(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newFixture(t)
+	ctx := context.Background()
+
+	oldContent := []byte("old content")
+	shared := []byte("shared content")
+	f.put(t,
+		f.rec("alpha", "a", file("old.md", string(oldContent))),
+		f.rec("beta", "b", file("shared.md", string(shared))),
+	)
+
+	// A second set, in its own namespace, referencing the same blob.
+	other := skills.SetKey{Source: f.key.Source + "-other"}
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(),
+			`DELETE FROM conversations.skills WHERE source = $1`, other.Source)
+	})
+	if _, err := f.st.PutSet(ctx, other, []skills.Record{{
+		Namespace: f.ns + "-other", Name: "gamma", Body: "g",
+		Files: []skills.File{{Path: "shared.md", Mode: 0o644, Content: shared}},
+	}}); err != nil {
+		t.Fatalf("second set PutSet: %v", err)
+	}
+
+	c.True(blobExists(t, f.pool, oldContent), "the seeded blob is missing before the write")
+	c.True(blobExists(t, f.pool, shared), "the shared blob is missing before the write")
+
+	newContent := []byte("new content")
+	f.put(t,
+		f.rec("alpha", "a", file("old.md", string(newContent))),
+		f.rec("beta", "b", file("shared.md", string(shared))),
+	)
+
+	c.False(blobExists(t, f.pool, oldContent), "the replaced file's blob survived the sweep")
+	c.True(blobExists(t, f.pool, newContent), "the new blob was swept")
+	c.True(blobExists(t, f.pool, shared), "a blob another skill still references was swept")
+}
+
+// Two writers whose sets overlap and share a blob must not race the blob sweep
+// against the skill_file foreign key. The advisory lock is what makes this
+// safe; without it the loser's DELETE can strand the winner's INSERT.
+func TestPutSetConcurrent(t *testing.T) {
+	f := newFixture(t)
+	shared := []byte("shared blob")
+	const iterations = 20
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*iterations)
+	for i := 0; i < iterations; i++ {
+		for _, who := range []string{"a", "b"} {
+			wg.Add(1)
+			go func(i int, who string) {
+				defer wg.Done()
+				want := []skills.Record{{
+					Namespace: f.ns, Name: who, Body: who,
+					Files: []skills.File{
+						{Path: "shared.md", Mode: 0o644, Content: shared},
+						{Path: "own.md", Mode: 0o644, Content: []byte(fmt.Sprintf("%s-%d", who, i))},
+					},
+				}}
+				if _, err := f.st.PutSet(context.Background(), f.key, want); err != nil {
+					errs <- fmt.Errorf("%s/%d: %w", who, i, err)
+				}
+			}(i, who)
 		}
 	}
-	c.False(len(found) != 1 || found[0].Enabled || found[0].Body != "v2", "got %+v, want exactly one disabled row with refreshed body", found)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent PutSet: %v", err)
+	}
 }
 
-// An enabled operator override shadows the core skill of the same name; the
-// sync must leave its content alone — rows with a different source are never
-// touched.
-func TestReplaceNamespaceSourceDoesNotClobberAnEnabledOverride(t *testing.T) {
+func TestGetReturnsFiles(t *testing.T) {
 	c := assert.NewAborting(t)
-	st, _ := testStore(t)
+	f := newFixture(t)
 	ctx := context.Background()
 
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "vendor text", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed core: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert override: %v", err)
-	}
+	f.put(t, f.rec("alpha", "a",
+		skills.File{Path: "ref/notes.md", Mode: 0o644, Content: []byte("notes")},
+		skills.File{Path: "run.sh", Mode: 0o755, Content: []byte("#!/bin/sh\n")},
+	))
 
-	c.NoError(st.ReplaceNamespaceSource(ctx, "rafiki", skills.CoreSource, []skills.Record{
-		{Namespace: "rafiki", Name: "model-selection", Body: "vendor text v2", Enabled: true},
-	}), "replace")
+	row := f.list(t)["alpha"]
+	got, err := f.st.Get(ctx, row.ID)
+	c.Require().NoError(err, "Get")
+	c.Eq(row.ID, got.ID, "id")
+	c.Require().Len(got.Files, 2, "got %d files, want 2", len(got.Files))
+	c.Eq("ref/notes.md", got.Files[0].Path, "files must be sorted by path: first is")
+	c.Eq(uint32(0o644), got.Files[0].Mode, "mode of ref/notes.md")
+	c.Eq("notes", string(got.Files[0].Content), "content of ref/notes.md")
+	c.Eq("run.sh", got.Files[1].Path, "second file")
+	c.Eq(uint32(0o755), got.Files[1].Mode, "mode of run.sh")
 
-	rows, err := st.List(ctx, true)
-	c.NoError(err, "list")
-	c.False(len(rows) != 1 || rows[0].Body != "our text", "got %+v, want the operator override untouched by the sync", rows)
+	_, err = f.st.Get(ctx, "00000000-0000-0000-0000-000000000000")
+	c.ErrorIs(err, skills.ErrNotFound, "Get of an absent id: got")
 }
 
-// Upsert must not resurrect a row an operator disabled: re-syncing content is
-// not permission to turn a skill back on.
-func TestUpsertDoesNotReEnableADisabledRow(t *testing.T) {
-	c := assert.NewCollecting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "noisy", Body: "v1", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	c.Require().NoError(st.SetEnabled(ctx, "rafiki", "noisy", false), "disable")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "noisy", Body: "v2", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("re-upsert: %v", err)
-	}
-
-	got, err := st.Get(ctx, "rafiki", "noisy")
-	c.Require().NoError(err, "get")
-	c.False(got.Enabled, "upsert re-enabled a disabled row")
-	c.Eq("v2", got.Body, "body not updated: got")
-}
-
-// Re-enabling after the override machinery has run must flip exactly the
-// disabled row — single row in, single enabled row out, no unique violation.
-// The flow is the one the sync and an operator produce together: a core skill
-// disabled to free its name, its content re-upserted over the disabled row
-// (staying disabled), then the operator turns it back on.
-func TestSetEnabledReEnablesAfterTheOverrideFlow(t *testing.T) {
+func TestListFilesBatch(t *testing.T) {
 	c := assert.NewAborting(t)
-	st, _ := testStore(t)
+	f := newFixture(t)
 	ctx := context.Background()
 
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "noisy", Body: "v1", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "noisy", false), "disable")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "noisy", Body: "v2", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("re-upsert: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "noisy", true), "re-enable")
+	f.put(t,
+		f.rec("alpha", "a", file("a.md", "a-content")),
+		f.rec("beta", "b", file("b.md", "b-content"), file("b2.md", "b2-content")),
+	)
+	byName := f.list(t)
+	ids := []string{byName["alpha"].ID, byName["beta"].ID}
 
-	got, err := st.Get(ctx, "rafiki", "noisy")
-	c.NoError(err, "get")
-	c.False(!got.Enabled || got.Body != "v2", "got %+v, want the single row re-enabled with fresh content", got)
-	rows, err := st.List(ctx, false)
-	c.NoError(err, "list")
-	c.Len(rows, 1, "got %d rows, want exactly one — the name must stay unique", len(rows))
-	// Already-enabled: nothing left to flip.
-	c.ErrorIs(st.SetEnabled(ctx, "rafiki", "noisy", true), skills.ErrNotFound, "re-enable of an enabled row: got")
+	files, err := f.st.Files(ctx, ids)
+	c.Require().NoError(err, "Files")
+	c.Require().Len(files, 2, "got %d entries, want both skills", len(files))
+	c.Require().Len(files[byName["alpha"].ID], 1, "alpha file count")
+	c.Eq("a.md", files[byName["alpha"].ID][0].Path, "alpha file")
+	c.Require().Len(files[byName["beta"].ID], 2, "beta file count")
+	c.Eq("b.md", files[byName["beta"].ID][0].Path, "beta files must be sorted by path: first is")
+	c.Eq("b2.md", files[byName["beta"].ID][1].Path, "beta second file")
+
+	// A skill with no files is absent from the map, so a caller's lookup is nil.
+	f.put(t,
+		f.rec("alpha", "a", file("a.md", "a-content")),
+		f.rec("beta", "b", file("b.md", "b-content"), file("b2.md", "b2-content")),
+		f.rec("gamma", "g"),
+	)
+	gamma := f.list(t)["gamma"]
+	files, err = f.st.Files(ctx, []string{gamma.ID})
+	c.Require().NoError(err, "Files for a file-less skill")
+	c.NotHasKey(files, gamma.ID, "a file-less skill must not appear in the map")
+
+	files, err = f.st.Files(ctx, nil)
+	c.Require().NoError(err, "Files with no ids")
+	c.Empty(files, "Files(nil) returned")
 }
 
-// Disabling in the override state (disabled core row + enabled override) must
-// switch off the ENABLED row only — not issue the name-wide update that
-// touches the disabled core row too.
-func TestSetEnabledDisableTouchesOnlyTheEnabledRow(t *testing.T) {
-	c := assert.NewCollecting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "vendor text", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed core: %v", err)
+func rowsByName(t *testing.T, st skills.Store, namespace, name string) []skills.Record {
+	t.Helper()
+	rows, err := st.List(context.Background(), false)
+	if err != nil {
+		t.Fatalf("List: %v", err)
 	}
-	c.Require().NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable core")
-	core, err := st.Get(ctx, "rafiki", "model-selection")
-	c.Require().NoError(err, "get core")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert override: %v", err)
-	}
-
-	c.Require().NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable override")
-
-	rows, err := st.List(ctx, false)
-	c.Require().NoError(err, "list")
-	c.Require().Len(rows, 2, "got %d rows, want both the core and the override row", len(rows))
+	var out []skills.Record
 	for _, r := range rows {
-		c.False(r.Enabled, "%s row still enabled", r.Source)
-		if r.Source == skills.CoreSource && !r.UpdatedAt.Equal(core.UpdatedAt) {
-			t.Errorf("disabled core row was touched by the override's disable: "+
-				"updated_at moved from %v to %v", core.UpdatedAt, r.UpdatedAt)
+		if r.Namespace == namespace && r.Name == name {
+			out = append(out, r)
 		}
 	}
-	// Nothing enabled remains: a second disable has no row to flip.
-	c.Require().ErrorIs(st.SetEnabled(ctx, "rafiki", "model-selection", false), skills.ErrNotFound, "disable of an all-disabled name: got")
-}
-
-// Delete is the only management surface a disabled row has, so it removes the
-// WHOLE name family — not just the enabled row an override left behind.
-func TestDeleteRemovesTheWholeNameFamily(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "vendor text", Source: skills.CoreSource, Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed core: %v", err)
-	}
-	c.NoError(st.SetEnabled(ctx, "rafiki", "model-selection", false), "disable core")
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("upsert override: %v", err)
-	}
-
-	c.NoError(st.Delete(ctx, "rafiki", "model-selection"), "delete")
-	if _, err := st.Get(ctx, "rafiki", "model-selection"); !errors.Is(err, skills.ErrNotFound) {
-		t.Fatalf("get after delete: got %v, want ErrNotFound", err)
-	}
-	rows, err := st.List(ctx, false)
-	c.NoError(err, "list")
-	c.Empty(rows, "got")
-	c.ErrorIs(st.Delete(ctx, "rafiki", "model-selection"), skills.ErrNotFound, "delete of an absent name: got")
-}
-
-// The sync's DO UPDATE carries a source guard: a conflicting ENABLED row of a
-// different source must be left exactly as it is, not rewritten with the
-// sync's content. Unlike the clobber test above, no same-source disabled row
-// exists here, so the INSERT (and its ON CONFLICT clause) actually runs.
-func TestReplaceNamespaceSourceSkipsAnEnabledOverrideOfAnotherSource(t *testing.T) {
-	c := assert.NewAborting(t)
-	st, _ := testStore(t)
-	ctx := context.Background()
-
-	if _, err := st.Upsert(ctx, skills.Record{
-		Namespace: "rafiki", Name: "model-selection",
-		Description: "my description", Body: "our text", Source: "manual", Enabled: true,
-	}); err != nil {
-		t.Fatalf("seed override: %v", err)
-	}
-
-	c.NoError(st.ReplaceNamespaceSource(ctx, "rafiki", skills.CoreSource, []skills.Record{
-		{Namespace: "rafiki", Name: "model-selection",
-			Description: "vendor description", Body: "vendor text v2", Enabled: true},
-	}), "replace")
-
-	rows, err := st.List(ctx, false)
-	c.NoError(err, "list")
-	c.Len(rows, 1, "got %d rows, want only the override row", len(rows))
-	got := rows[0]
-	c.False(got.Source != "manual" || got.Body != "our text" || got.Description != "my description" || !got.Enabled, "got %+v, want the operator override untouched by the sync", got)
+	return out
 }

@@ -677,8 +677,21 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			}
 			ro.InlineSkills = metas
 		}
+		// The row id per qualified name, fixed at spawn: the inventory the model
+		// was given IS this list, so a name missing from it names no skill this
+		// child was offered. A store error leaves the map empty, which answers
+		// every lookup ErrNotFound — the same "no database skills" an empty
+		// inventory reports.
+		ids := make(map[string]string, len(recs))
+		for _, r := range recs {
+			ids[r.Namespace+":"+r.Name] = r.ID
+		}
 		ro.InlineSkillBody = func(ctx context.Context, namespace, name string) (string, error) {
-			rec, err := c.skillStore.Get(ctx, namespace, name)
+			id, ok := ids[namespace+":"+name]
+			if !ok {
+				return "", skills.ErrNotFound
+			}
+			rec, err := c.skillStore.Get(ctx, id)
 			if err != nil {
 				return "", err
 			}

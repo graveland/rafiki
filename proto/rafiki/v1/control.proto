@@ -1223,7 +1223,6 @@ service Control {
   rpc GetRateLimitStatus(GetRateLimitStatusRequest) returns (GetRateLimitStatusResponse);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
   rpc GetSkill(GetSkillRequest) returns (GetSkillResponse);
-  rpc UpsertSkill(UpsertSkillRequest) returns (UpsertSkillResponse);
   rpc DeleteSkill(DeleteSkillRequest) returns (DeleteSkillResponse);
   rpc SetSkillEnabled(SetSkillEnabledRequest) returns (SetSkillEnabledResponse);
   rpc ListPymodules(ListPymodulesRequest) returns (ListPymodulesResponse);
@@ -1328,12 +1327,13 @@ message SkillRow {
   string description = 3;
   string source = 4;
   bool enabled = 5;
-  string shadowed_core_version = 6;
   google.protobuf.Timestamp updated_at = 9;
   // body is populated only by GetSkill.
   string body = 8;
 
+  reserved 6;
   reserved 7;
+  reserved "shadowed_core_version";
 }
 
 message ListSkillsRequest {
@@ -1347,19 +1347,6 @@ message GetSkillRequest {
   string name = 2;
 }
 message GetSkillResponse { SkillRow row = 1; }
-
-message UpsertSkillRequest {
-  // namespace defaults to "rafiki" when empty.
-  string namespace = 1;
-  string name = 2;
-  string description = 3;
-  string body = 4;
-  // source defaults to "manual" when empty. "rafiki-core" is REJECTED: that
-  // provenance belongs to the daemon's own startup sync.
-  string source = 5;
-  string shadowed_core_version = 6;
-}
-message UpsertSkillResponse { SkillRow row = 1; }
 
 message DeleteSkillRequest {
   string namespace = 1;

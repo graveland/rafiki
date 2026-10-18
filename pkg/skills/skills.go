@@ -17,6 +17,10 @@ import (
 type SkillMeta struct {
 	Name, Description, Dir, Path string
 
+	// ID is the store row's id for a database-backed skill. It is empty for a
+	// skill discovered from a directory, which has no row to name.
+	ID string
+
 	// Namespace is the render/plugin namespace a database-backed skill
 	// belongs to ("rafiki" for core and operator content, an upstream plugin
 	// name for an imported corpus). Empty for a skill discovered from a
@@ -28,6 +32,11 @@ type SkillMeta struct {
 	// rather than reading from Path or fetching over an executor link. Its
 	// Path and Dir are empty and meaningless.
 	Inline bool
+
+	// HasFiles reports whether a stored skill carries supporting files besides
+	// SKILL.md. It is always false for a skill discovered on disk, whose files
+	// live beside its Path.
+	HasFiles bool
 
 	// Remote marks a skill discovered on the child's EXECUTOR rather than on
 	// this machine. Its Path is empty and meaningless here; its body is

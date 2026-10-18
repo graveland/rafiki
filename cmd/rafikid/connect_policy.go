@@ -185,7 +185,6 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ListExecutors":        policyUserOnly,
 	"ListSkills":           policyUserOnly,
 	"GetSkill":             policyUserOnly,
-	"UpsertSkill":          policyUserOnly,
 	"DeleteSkill":          policyUserOnly,
 	"SetSkillEnabled":      policyUserOnly,
 	"AddRepo":              policyUserOnly,

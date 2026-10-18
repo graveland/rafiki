@@ -478,43 +478,79 @@ func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]con
 
 // connectSkills adapts the daemon's skills.Store to connectapi.SkillManager.
 // The translation exists so pkg/connectapi — which cmd/rafiki links — never
-// imports pkg/skills' store half. version is the daemon's build version, used
-// to stamp shadowed_core_version on core overrides.
+// imports pkg/skills' store half.
 type connectSkills struct {
-	st      skills.Store
+	st skills.Store
+
+	// version is the daemon's build version. No method reads it: it stays on
+	// the struct so main.go's wiring, which sets it, needs no change.
 	version string
 
 	// push refreshes the executor-facing skill corpus after a successful
-	// write (Upsert, SetEnabled): push-on-write rather than a timer. Nil is
-	// legal — tests and any wiring constructed before the pusher existed —
-	// and means writes still succeed, they just don't fan out.
+	// write (delete, enable/disable): push-on-write rather than a timer. Nil is
+	// legal — tests and any wiring constructed before the pusher existed — and
+	// means writes still succeed, they just don't fan out.
 	push func(ctx context.Context)
 }
 
 func skillRowFrom(r skills.Record) connectapi.SkillRow {
 	return connectapi.SkillRow{
-		Namespace:           r.Namespace,
-		Name:                r.Name,
-		Description:         r.Description,
-		Body:                r.Body,
-		Source:              r.Source,
-		ShadowedCoreVersion: r.ShadowedCoreVersion,
-		Enabled:             r.Enabled,
-		UpdatedAt:           r.UpdatedAt,
+		Namespace:   r.Namespace,
+		Name:        r.Name,
+		Description: r.Description,
+		Body:        r.Body,
+		Source:      r.Source,
+		Enabled:     r.Enabled,
+		UpdatedAt:   r.UpdatedAt,
 	}
 }
 
 // translateSkillErr maps the store's sentinels onto connectapi's, so a missing
-// skill stays an ANSWER (NotFound) and a name held by an enabled row stays one
-// too (AlreadyExists) rather than both becoming internal errors.
+// skill stays an ANSWER (NotFound) rather than becoming an internal error.
 func translateSkillErr(err error) error {
 	if errors.Is(err, skills.ErrNotFound) {
 		return connectapi.ErrSkillNotFound
 	}
-	if errors.Is(err, skills.ErrSourceConflict) {
-		return connectapi.ErrSkillSourceConflict
-	}
 	return err
+}
+
+// resolveSkill finds the row a (namespace, name) means for THIS caller. A name
+// is unique only within a layer, so the three layers have to be ordered
+// explicitly: the caller's own row wins, then the global non-core row, then the
+// core row. Anything else — another user's row — is not addressable from here.
+//
+// Permission rules are not applied: the daemon's policy interceptor has already
+// decided this caller may manage skills at all.
+func (c connectSkills) resolveSkill(ctx context.Context, ns, name string) (skills.Record, error) {
+	recs, err := c.st.List(ctx, false)
+	if err != nil {
+		return skills.Record{}, err
+	}
+	owner := spawnOwner(ctx).UserID
+	var own, global, core *skills.Record
+	for i := range recs {
+		r := &recs[i]
+		if r.Namespace != ns || r.Name != name {
+			continue
+		}
+		switch {
+		case r.Source == skills.CoreSource:
+			core = r
+		case owner != "" && r.OwnerUserID == owner:
+			own = r
+		case r.OwnerUserID == "":
+			global = r
+		}
+	}
+	switch {
+	case own != nil:
+		return *own, nil
+	case global != nil:
+		return *global, nil
+	case core != nil:
+		return *core, nil
+	}
+	return skills.Record{}, skills.ErrNotFound
 }
 
 func (c connectSkills) ListSkills(ctx context.Context, includeDisabled bool) ([]connectapi.SkillRow, error) {
@@ -530,51 +566,37 @@ func (c connectSkills) ListSkills(ctx context.Context, includeDisabled bool) ([]
 }
 
 func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectapi.SkillRow, error) {
-	r, err := c.st.Get(ctx, ns, name)
+	target, err := c.resolveSkill(ctx, ns, name)
+	if err != nil {
+		return connectapi.SkillRow{}, translateSkillErr(err)
+	}
+	r, err := c.st.Get(ctx, target.ID)
 	if err != nil {
 		return connectapi.SkillRow{}, translateSkillErr(err)
 	}
 	return skillRowFrom(r), nil
 }
 
-func (c connectSkills) UpsertSkill(ctx context.Context, row connectapi.SkillRow) (connectapi.SkillRow, error) {
-	// Stamping shadowed_core_version is the daemon's job, never the client's:
-	// the stamp records which DAEMON build's core skill this row displaced, and
-	// warnStaleOverrides compares it against the running daemon — a client's
-	// claim about either is a self-reported fact. It is stamped only when the
-	// upsert replaces a core row (the row Get finds at the name), so an
-	// ordinary skill never carries a phantom shadow version; a re-written
-	// override carries no stamp at all, which reads as fresh rather than stale.
-	// A Get that errors is not evidence — the upsert proceeds un-stamped.
-	if c.version != "" {
-		if cur, err := c.st.Get(ctx, row.Namespace, row.Name); err == nil && cur.Source == skills.CoreSource {
-			row.ShadowedCoreVersion = c.version
-		}
-	}
-	out, err := c.st.Upsert(ctx, skills.Record{
-		Namespace:           row.Namespace,
-		Name:                row.Name,
-		Description:         row.Description,
-		Body:                row.Body,
-		Source:              row.Source,
-		ShadowedCoreVersion: row.ShadowedCoreVersion,
-		Enabled:             row.Enabled,
-	})
+func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
+	target, err := c.resolveSkill(ctx, ns, name)
 	if err != nil {
-		return connectapi.SkillRow{}, translateSkillErr(err)
+		return translateSkillErr(err)
+	}
+	if err := c.st.Delete(ctx, target.ID); err != nil {
+		return translateSkillErr(err)
 	}
 	if c.push != nil {
 		c.push(ctx)
 	}
-	return skillRowFrom(out), nil
-}
-
-func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
-	return translateSkillErr(c.st.Delete(ctx, ns, name))
+	return nil
 }
 
 func (c connectSkills) SetSkillEnabled(ctx context.Context, ns, name string, enabled bool) error {
-	if err := c.st.SetEnabled(ctx, ns, name, enabled); err != nil {
+	target, err := c.resolveSkill(ctx, ns, name)
+	if err != nil {
+		return translateSkillErr(err)
+	}
+	if err := c.st.SetEnabled(ctx, target.ID, enabled); err != nil {
 		return translateSkillErr(err)
 	}
 	if c.push != nil {

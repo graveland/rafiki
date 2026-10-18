@@ -3363,7 +3363,6 @@ class SkillRow:
     description: str = ""
     source: str = ""
     enabled: bool = False
-    shadowed_core_version: str = ""
     updated_at: Optional[datetime.datetime] = None
     body: str = ""
 
@@ -3379,8 +3378,6 @@ class SkillRow:
             out["source"] = self.source
         if self.enabled != False:
             out["enabled"] = self.enabled
-        if self.shadowed_core_version != "":
-            out["shadowedCoreVersion"] = self.shadowed_core_version
         if self.updated_at is not None:
             out["updatedAt"] = _ts_out(self.updated_at)
         if self.body != "":
@@ -3404,9 +3401,6 @@ class SkillRow:
         _v = _d.get("enabled")
         if _v is not None:
             obj.enabled = _v
-        _v = _d.get("shadowedCoreVersion")
-        if _v is not None:
-            obj.shadowed_core_version = _v
         _v = _d.get("updatedAt")
         if _v is not None:
             obj.updated_at = _ts_in(_v, "updatedAt")
@@ -3483,70 +3477,6 @@ class GetSkillResponse:
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "GetSkillResponse":
-        obj = cls()
-        _v = _d.get("row")
-        if _v is not None:
-            obj.row = SkillRow.from_dict(_v)
-        return obj
-
-@dataclasses.dataclass
-class UpsertSkillRequest:
-    namespace: str = ""
-    name: str = ""
-    description: str = ""
-    body: str = ""
-    source: str = ""
-    shadowed_core_version: str = ""
-
-    def to_dict(self) -> dict:
-        out = {}
-        if self.namespace != "":
-            out["namespace"] = self.namespace
-        if self.name != "":
-            out["name"] = self.name
-        if self.description != "":
-            out["description"] = self.description
-        if self.body != "":
-            out["body"] = self.body
-        if self.source != "":
-            out["source"] = self.source
-        if self.shadowed_core_version != "":
-            out["shadowedCoreVersion"] = self.shadowed_core_version
-        return out
-    @classmethod
-    def from_dict(cls, _d: dict) -> "UpsertSkillRequest":
-        obj = cls()
-        _v = _d.get("namespace")
-        if _v is not None:
-            obj.namespace = _v
-        _v = _d.get("name")
-        if _v is not None:
-            obj.name = _v
-        _v = _d.get("description")
-        if _v is not None:
-            obj.description = _v
-        _v = _d.get("body")
-        if _v is not None:
-            obj.body = _v
-        _v = _d.get("source")
-        if _v is not None:
-            obj.source = _v
-        _v = _d.get("shadowedCoreVersion")
-        if _v is not None:
-            obj.shadowed_core_version = _v
-        return obj
-
-@dataclasses.dataclass
-class UpsertSkillResponse:
-    row: Optional[SkillRow] = None
-
-    def to_dict(self) -> dict:
-        out = {}
-        if self.row is not None:
-            out["row"] = self.row.to_dict()
-        return out
-    @classmethod
-    def from_dict(cls, _d: dict) -> "UpsertSkillResponse":
         obj = cls()
         _v = _d.get("row")
         if _v is not None:

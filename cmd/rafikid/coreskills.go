@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"path"
 	"strings"
 	"time"
@@ -68,9 +67,9 @@ func loadCoreSkills() ([]skills.Record, error) {
 	return out, nil
 }
 
-// coreSyncTimeout bounds the startup sync, warnStaleOverrides included. A
-// var rather than a const so a test can shrink it; a sync that misses its
-// deadline leaves last-good-wins rows in place, exactly as a failed one does.
+// coreSyncTimeout bounds the startup sync. A var rather than a const so a test
+// can shrink it; a sync that misses its deadline leaves last-good-wins rows in
+// place, exactly as a failed one does.
 var coreSyncTimeout = 30 * time.Second
 
 // syncCoreSkills reconciles the embedded corpus into the store, owning exactly
@@ -85,7 +84,10 @@ var coreSyncTimeout = 30 * time.Second
 // Never fatal: a daemon that cannot reach its store still serves children.
 // The timeout is part of that never-fatal contract — the sync runs on the
 // daemon's base context, which has no deadline of its own.
-func syncCoreSkills(ctx context.Context, st skills.Store, version string) error {
+//
+// The trailing version argument is no longer read. It stays in the signature
+// so main.go's startup call site is unchanged.
+func syncCoreSkills(ctx context.Context, st skills.Store, _ string) error {
 	if st == nil {
 		return nil
 	}
@@ -95,35 +97,8 @@ func syncCoreSkills(ctx context.Context, st skills.Store, version string) error 
 	if err != nil {
 		return fmt.Errorf("load core skills: %w", err)
 	}
-	if err := st.ReplaceNamespaceSource(ctx, skills.DefaultNamespace, skills.CoreSource, want); err != nil {
+	if _, err := st.PutSet(ctx, skills.SetKey{Source: skills.CoreSource}, want); err != nil {
 		return fmt.Errorf("sync core skills: %w", err)
 	}
-	warnStaleOverrides(ctx, st, want, version)
 	return nil
-}
-
-// warnStaleOverrides announces an operator override whose core skill has moved
-// on. An override is allowed deliberately, but its risk is that it silently
-// misdescribes machinery that changed underneath it — so the staleness is
-// reported rather than left to be discovered by a confused agent.
-func warnStaleOverrides(ctx context.Context, st skills.Store, core []skills.Record, version string) {
-	rows, err := st.List(ctx, true)
-	if err != nil {
-		return
-	}
-	coreNames := make(map[string]bool, len(core))
-	for _, r := range core {
-		coreNames[r.Name] = true
-	}
-	for _, r := range rows {
-		if r.Source == skills.CoreSource || !coreNames[r.Name] {
-			continue
-		}
-		if r.ShadowedCoreVersion != "" && r.ShadowedCoreVersion != version {
-			slog.Warn("skill override may be stale: it replaces a core skill that has changed since",
-				"skill", r.Namespace+":"+r.Name,
-				"overrideWrittenFor", r.ShadowedCoreVersion,
-				"currentVersion", version)
-		}
-	}
 }
