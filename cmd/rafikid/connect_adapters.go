@@ -490,13 +490,25 @@ type connectSkills struct {
 }
 
 func skillRowFrom(r skills.Record) connectapi.SkillRow {
+	var files []connectapi.SkillFile
+	for _, f := range r.Files {
+		files = append(files, connectapi.SkillFile{
+			Path: f.Path,
+			Mode: f.Mode,
+			Size: int64(len(f.Content)),
+		})
+	}
 	return connectapi.SkillRow{
+		ID:          r.ID,
 		Namespace:   r.Namespace,
 		Name:        r.Name,
 		Description: r.Description,
 		Body:        r.Body,
 		Source:      r.Source,
+		OwnerUserID: r.OwnerUserID,
+		Layer:       skillLayerName(skills.LayerOf(r)),
 		Enabled:     r.Enabled,
+		Files:       files,
 		UpdatedAt:   r.UpdatedAt,
 	}
 }
@@ -510,61 +522,164 @@ func translateSkillErr(err error) error {
 	return err
 }
 
-// resolveSkill finds the row a (namespace, name) means for THIS caller. A name
-// is unique only within a layer, so the three layers have to be ordered
-// explicitly: the caller's own row wins, then the global non-core row, then the
-// core row. Anything else — another user's row — is not addressable from here.
-//
-// Permission rules are not applied: the daemon's policy interceptor has already
-// decided this caller may manage skills at all.
-func (c connectSkills) resolveSkill(ctx context.Context, ns, name string) (skills.Record, error) {
-	recs, err := c.st.List(ctx, false)
-	if err != nil {
-		return skills.Record{}, err
+// skillLayerName is the wire spelling of a layer: "core", "global" or "user".
+// The domain's Layer is an int, deliberately not shared with the wire, so the
+// mapping lives in exactly one place.
+func skillLayerName(l skills.Layer) string {
+	switch l {
+	case skills.LayerCore:
+		return "core"
+	case skills.LayerUser:
+		return "user"
+	default:
+		return "global"
 	}
+}
+
+// visibleSkills keeps the rows this caller may see: the core and global layers
+// are shared, and a user row is visible only to its owner. Another owner's row
+// is not addressable and not listed — its content is not this caller's
+// business, and neither is its existence.
+func visibleSkills(ctx context.Context, rows []skills.Record) []skills.Record {
 	owner := spawnOwner(ctx).UserID
-	var own, global, core *skills.Record
-	for i := range recs {
-		r := &recs[i]
+	out := make([]skills.Record, 0, len(rows))
+	for _, r := range rows {
+		switch skills.LayerOf(r) {
+		case skills.LayerCore, skills.LayerGlobal:
+			out = append(out, r)
+		default:
+			if owner != "" && r.OwnerUserID == owner {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// skillRowKey identifies a row across the store's List and Resolve outputs.
+// The id is the real key; the composite is a fallback for a record that has
+// none (a store fake), so a shadowed computation can never collapse two
+// different rows into one.
+func skillRowKey(r skills.Record) string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Namespace + "\x00" + r.Name + "\x00" + r.Source + "\x00" + r.OwnerUserID
+}
+
+// highestLayerSkill picks the strongest visible row for ns:name: the caller's
+// own row, then the global row, then the core row. It is the target of
+// enable/disable and rm — those verbs act on a row, and the row a bare name
+// means is the one the caller would see in effect.
+func highestLayerSkill(rows []skills.Record, ns, name string) (skills.Record, bool) {
+	var (
+		best      skills.Record
+		bestLayer skills.Layer
+		found     bool
+	)
+	for _, r := range rows {
 		if r.Namespace != ns || r.Name != name {
 			continue
 		}
-		switch {
-		case r.Source == skills.CoreSource:
-			core = r
-		case owner != "" && r.OwnerUserID == owner:
-			own = r
-		case r.OwnerUserID == "":
-			global = r
+		if l := skills.LayerOf(r); !found || l > bestLayer {
+			best, bestLayer, found = r, l, true
 		}
 	}
-	switch {
-	case own != nil:
-		return *own, nil
-	case global != nil:
-		return *global, nil
-	case core != nil:
-		return *core, nil
+	return best, found
+}
+
+// resolvedSkill finds the row a name resolves to — the one a child would
+// actually load, namespace shadowing included.
+func resolvedSkill(rows []skills.Record, owner, ns, name string) (skills.Record, bool) {
+	for _, r := range skills.Resolve(rows, owner) {
+		if r.Namespace == ns && r.Name == name {
+			return r, true
+		}
 	}
-	return skills.Record{}, skills.ErrNotFound
+	return skills.Record{}, false
+}
+
+// mayChangeSharedSkill reports whether this caller may write a shared row (the
+// core and global layers, whose OwnerUserID is empty): the unix socket's nil
+// identity is local trust, and a real user credential must be an admin. A
+// child credential is never a user credential, so it can never satisfy this
+// even if the users row it was minted from is an admin.
+func mayChangeSharedSkill(ctx context.Context) bool {
+	id := server.IdentityFromContext(ctx)
+	return id == nil || (id.IsUserCredential() && id.IsAdmin)
+}
+
+// sharedSkillRefusal is the PermissionDenied every non-admin user gets for a
+// shared row. It names the skill and both ways to be allowed, because "you may
+// not" without a route forward is an unactionable error.
+func sharedSkillRefusal(ns, name string) error {
+	return connect.NewError(connect.CodePermissionDenied, fmt.Errorf(
+		"shared skill %s:%s can only be changed by an admin or over the local socket", ns, name))
+}
+
+// skillTarget resolves the row an enable/disable or rm acts on and applies the
+// shared-row permission rule. NotFound rather than Forbidden when the row does
+// not exist at all: an absent name is not a permission problem, and answering
+// Forbidden would leak which names exist.
+func (c connectSkills) skillTarget(ctx context.Context, ns, name string) (skills.Record, error) {
+	rows, err := c.st.List(ctx, false)
+	if err != nil {
+		return skills.Record{}, err
+	}
+	target, ok := highestLayerSkill(visibleSkills(ctx, rows), ns, name)
+	if !ok {
+		return skills.Record{}, connectapi.ErrSkillNotFound
+	}
+	// Core and global are the shared layers; only a user row has an owner to
+	// answer for it. LayerOf is consulted rather than the owner field so a core
+	// row is shared even if it somehow carries an owner.
+	if skills.LayerOf(target) != skills.LayerUser && !mayChangeSharedSkill(ctx) {
+		return skills.Record{}, sharedSkillRefusal(ns, name)
+	}
+	return target, nil
 }
 
 func (c connectSkills) ListSkills(ctx context.Context, includeDisabled bool) ([]connectapi.SkillRow, error) {
-	recs, err := c.st.List(ctx, !includeDisabled)
+	// Every row, disabled included: shadowing is decided by the presence of a
+	// row, so a disabled higher-layer override must be in hand even when the
+	// caller asked for enabled rows only. Dropping it here would report the
+	// row it hides as in effect.
+	all, err := c.st.List(ctx, false)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]connectapi.SkillRow, 0, len(recs))
-	for _, r := range recs {
-		out = append(out, skillRowFrom(r))
+	rows := visibleSkills(ctx, all)
+	inEffect := make(map[string]bool, len(rows))
+	for _, r := range skills.Resolve(rows, spawnOwner(ctx).UserID) {
+		inEffect[skillRowKey(r)] = true
+	}
+	out := make([]connectapi.SkillRow, 0, len(rows))
+	for _, r := range rows {
+		if !includeDisabled && !r.Enabled {
+			continue
+		}
+		row := skillRowFrom(r)
+		row.Shadowed = r.Enabled && !inEffect[skillRowKey(r)]
+		out = append(out, row)
 	}
 	return out, nil
 }
 
 func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectapi.SkillRow, error) {
-	target, err := c.resolveSkill(ctx, ns, name)
+	all, err := c.st.List(ctx, false)
 	if err != nil {
-		return connectapi.SkillRow{}, translateSkillErr(err)
+		return connectapi.SkillRow{}, err
+	}
+	rows := visibleSkills(ctx, all)
+	target, ok := resolvedSkill(rows, spawnOwner(ctx).UserID, ns, name)
+	if !ok {
+		// The name is not in effect (a namespace a higher layer replaced, or a
+		// disabled row). Show the row the caller can still act on rather than
+		// pretending it does not exist.
+		target, ok = highestLayerSkill(rows, ns, name)
+	}
+	if !ok {
+		return connectapi.SkillRow{}, connectapi.ErrSkillNotFound
 	}
 	r, err := c.st.Get(ctx, target.ID)
 	if err != nil {
@@ -574,9 +689,25 @@ func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectap
 }
 
 func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
-	target, err := c.resolveSkill(ctx, ns, name)
+	target, err := c.skillTarget(ctx, ns, name)
 	if err != nil {
 		return translateSkillErr(err)
+	}
+	// The source marker is ownership: only a hand-authored or legacy imported
+	// row is the user's to delete. A core row is disabled instead, and a repo
+	// row goes when its repo does — deleting it here would silently resurrect
+	// on the next refresh.
+	switch {
+	case target.Source == skills.CoreSource:
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+			`%s:%s is a core skill; disable it with "rafiki skills disable %s:%s"`, ns, name, ns, name))
+	case strings.HasPrefix(target.Source, "repo:"):
+		repo := strings.TrimPrefix(target.Source, "repo:")
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+			`%s:%s comes from repo %q; remove the repo with "rafiki repo remove %s"`, ns, name, repo, repo))
+	case target.Source != "manual" && !strings.HasPrefix(target.Source, "import:"):
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+			"%s:%s comes from source %q, which rafiki does not let you delete", ns, name, target.Source))
 	}
 	if err := c.st.Delete(ctx, target.ID); err != nil {
 		return translateSkillErr(err)
@@ -588,7 +719,7 @@ func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
 }
 
 func (c connectSkills) SetSkillEnabled(ctx context.Context, ns, name string, enabled bool) error {
-	target, err := c.resolveSkill(ctx, ns, name)
+	target, err := c.skillTarget(ctx, ns, name)
 	if err != nil {
 		return translateSkillErr(err)
 	}

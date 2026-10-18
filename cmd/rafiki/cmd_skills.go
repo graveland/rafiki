@@ -4,15 +4,17 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 func newSkillsCmd() *cobra.Command {
@@ -56,17 +58,38 @@ func newSkillsListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tSOURCE\tENABLED\tDESCRIPTION")
-			for _, r := range resp.Msg.GetRows() {
-				fmt.Fprintf(w, "%s:%s\t%s\t%t\t%s\n",
-					r.GetNamespace(), r.GetName(), r.GetSource(), r.GetEnabled(), r.GetDescription())
+			mode, useColor, err := outputOpts(cmd)
+			if err != nil {
+				return err
 			}
-			return w.Flush()
+			if mode != outputTable {
+				return emitProtoRows(os.Stdout, resp.Msg.GetRows(), mode)
+			}
+			return renderSkillsTable(os.Stdout, resp.Msg.GetRows(), useColor)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "include disabled skills")
 	return cmd
+}
+
+// renderSkillsTable is the inventory: one row per visible skill row, its layer
+// and its source, and whether it is in effect. SHADOWED marks an enabled row a
+// higher layer overrides — it is listed so an operator can see what is being
+// overridden, and why disabling the override changes nothing.
+func renderSkillsTable(w io.Writer, rows []*rafikiv1.SkillRow, useColor bool) error {
+	tb := table.New(w, table.Options{Color: useColor})
+	tb.Header(dimHeader(useColor, "NAME", "LAYER", "SOURCE", "ENABLED", "SHADOWED", "DESCRIPTION")...)
+	for _, r := range rows {
+		tb.Row(
+			r.GetNamespace()+":"+r.GetName(),
+			r.GetLayer(),
+			r.GetSource(),
+			strconv.FormatBool(r.GetEnabled()),
+			strconv.FormatBool(r.GetShadowed()),
+			r.GetDescription(),
+		)
+	}
+	return tb.Render()
 }
 
 func newSkillsShowCmd() *cobra.Command {
@@ -85,12 +108,42 @@ func newSkillsShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Println(resp.Msg.GetRow().GetBody())
-			return nil
+			mode, _, err := outputOpts(cmd)
+			if err != nil {
+				return err
+			}
+			if mode != outputTable {
+				return emitProto(os.Stdout, resp.Msg, mode)
+			}
+			return renderSkillShow(os.Stdout, resp.Msg.GetRow())
 		},
 	}
 	cmd.ValidArgsFunction = completeSkillArgs
 	return cmd
+}
+
+// renderSkillShow prints the body, then — for a skill that has supporting
+// files — a `files:` section naming each one. The files themselves stay on the
+// daemon: this is an inventory of what an agent would get beside SKILL.md, not
+// their content.
+func renderSkillShow(w io.Writer, row *rafikiv1.SkillRow) error {
+	if _, err := fmt.Fprintln(w, row.GetBody()); err != nil {
+		return err
+	}
+	files := row.GetFiles()
+	if len(files) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "files:"); err != nil {
+		return err
+	}
+	for _, f := range files {
+		// Mode is always 0644 or 0755, so four octal digits is the full mode.
+		if _, err := fmt.Fprintf(w, "%04o %d %s\n", f.GetMode(), f.GetSize(), f.GetPath()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newSkillsRmCmd() *cobra.Command {

@@ -19,14 +19,34 @@ import (
 // into pgx's dependency graph through pkg/skills' store half.
 var ErrSkillNotFound = errors.New("skill not found")
 
-// SkillRow is one skill. Body is populated only on GetSkill.
+// SkillFile is one supporting file of a skill, as the manager reports it: the
+// path relative to the skill's directory, its 0644/0755 mode, and its size in
+// bytes. The content stays on the daemon — the agent surfaces fetch it by the
+// skill's id.
+type SkillFile struct {
+	Path string
+	Mode uint32
+	Size int64
+}
+
+// SkillRow is one skill. Body and Files are populated only on GetSkill.
+//
+// ID and OwnerUserID are the row's identity: a name is unique only within a
+// layer, so the same namespace:name can be three rows. Layer is "core",
+// "global" or "user"; Shadowed marks an enabled row a higher layer overrides,
+// so an inventory can say "listed, but not in effect".
 type SkillRow struct {
+	ID          string
 	Namespace   string
 	Name        string
 	Description string
 	Body        string
 	Source      string
+	OwnerUserID string
+	Layer       string
 	Enabled     bool
+	Shadowed    bool
+	Files       []SkillFile
 	UpdatedAt   time.Time
 }
 
@@ -35,6 +55,14 @@ type SkillRow struct {
 // There is no write-a-skill verb: skills come from repos and from the daemon's
 // own embedded corpus, each owning its own rows, and a client-side upsert could
 // only ever overwrite one of those owners' content.
+//
+// The two writes enforce the permission boundary, because only the
+// implementation can see the caller's identity and the target row's layer: a
+// shared row (core or global) may be changed only by an admin or over the local
+// socket, and DeleteSkill refuses a source that owns its row's lifecycle (the
+// core corpus, a repo). Those refusals must be returned as an already-coded
+// *connect.Error — PermissionDenied and FailedPrecondition respectively — so
+// skillError passes the code through instead of reporting internal.
 type SkillManager interface {
 	ListSkills(ctx context.Context, includeDisabled bool) ([]SkillRow, error)
 	GetSkill(ctx context.Context, namespace, name string) (SkillRow, error)
@@ -63,7 +91,17 @@ func (s *Server) skillManager() (SkillManager, error) {
 	return *p, nil
 }
 
+// skillError maps a manager failure onto a Connect code. An unknown skill is
+// NotFound — a missing skill is an ANSWER, not a failure. An already-coded
+// *connect.Error passes through untouched: the daemon's adapter chooses the
+// code for a refusal deliberately (PermissionDenied for a shared row a
+// non-admin may not toggle, FailedPrecondition for a row whose source owns its
+// lifecycle), and re-wrapping it would report every refusal as internal.
 func skillError(err error) error {
+	var ce *connect.Error
+	if errors.As(err, &ce) {
+		return err
+	}
 	if errors.Is(err, ErrSkillNotFound) {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
@@ -71,7 +109,7 @@ func skillError(err error) error {
 }
 
 func toProtoSkill(r SkillRow) *rafikiv1.SkillRow {
-	return &rafikiv1.SkillRow{
+	out := &rafikiv1.SkillRow{
 		Namespace:   r.Namespace,
 		Name:        r.Name,
 		Description: r.Description,
@@ -79,7 +117,19 @@ func toProtoSkill(r SkillRow) *rafikiv1.SkillRow {
 		Enabled:     r.Enabled,
 		UpdatedAt:   timestamppb.New(r.UpdatedAt),
 		Body:        r.Body,
+		Id:          r.ID,
+		OwnerUserId: r.OwnerUserID,
+		Layer:       r.Layer,
+		Shadowed:    r.Shadowed,
 	}
+	for _, f := range r.Files {
+		out.Files = append(out.Files, &rafikiv1.SkillFileInfo{
+			Path: f.Path,
+			Mode: f.Mode,
+			Size: f.Size,
+		})
+	}
+	return out
 }
 
 func (s *Server) ListSkills(

@@ -3357,6 +3357,35 @@ class SyncRepoResponse:
         return obj
 
 @dataclasses.dataclass
+class SkillFileInfo:
+    path: str = ""
+    mode: int = 0
+    size: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.path != "":
+            out["path"] = self.path
+        if self.mode != 0:
+            out["mode"] = self.mode
+        if self.size != 0:
+            out["size"] = str(self.size)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SkillFileInfo":
+        obj = cls()
+        _v = _d.get("path")
+        if _v is not None:
+            obj.path = _v
+        _v = _d.get("mode")
+        if _v is not None:
+            obj.mode = _int_in(_v)
+        _v = _d.get("size")
+        if _v is not None:
+            obj.size = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
 class SkillRow:
     namespace: str = ""
     name: str = ""
@@ -3365,6 +3394,11 @@ class SkillRow:
     enabled: bool = False
     updated_at: Optional[datetime.datetime] = None
     body: str = ""
+    id: str = ""
+    owner_user_id: str = ""
+    layer: str = ""
+    shadowed: bool = False
+    files: list[SkillFileInfo] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
@@ -3382,6 +3416,16 @@ class SkillRow:
             out["updatedAt"] = _ts_out(self.updated_at)
         if self.body != "":
             out["body"] = self.body
+        if self.id != "":
+            out["id"] = self.id
+        if self.owner_user_id != "":
+            out["ownerUserId"] = self.owner_user_id
+        if self.layer != "":
+            out["layer"] = self.layer
+        if self.shadowed != False:
+            out["shadowed"] = self.shadowed
+        if self.files:
+            out["files"] = [x.to_dict() for x in self.files]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "SkillRow":
@@ -3407,6 +3451,21 @@ class SkillRow:
         _v = _d.get("body")
         if _v is not None:
             obj.body = _v
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        _v = _d.get("ownerUserId")
+        if _v is not None:
+            obj.owner_user_id = _v
+        _v = _d.get("layer")
+        if _v is not None:
+            obj.layer = _v
+        _v = _d.get("shadowed")
+        if _v is not None:
+            obj.shadowed = _v
+        _v = _d.get("files")
+        if _v is not None:
+            obj.files = [SkillFileInfo.from_dict(x) for x in _v]
         return obj
 
 @dataclasses.dataclass

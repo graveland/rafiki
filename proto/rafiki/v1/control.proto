@@ -1319,6 +1319,16 @@ service Control {
   rpc SendFrame(SendFrameRequest) returns (SendFrameResponse);
 }
 
+// SkillFileInfo describes one supporting file of a skill without carrying it:
+// GetSkill names the files, the agent surfaces fetch the content.
+message SkillFileInfo {
+  // path is relative to the skill's directory, '/'-separated.
+  string path = 1;
+  // mode is 0644 or 0755: a skill file is never executable in any other way.
+  uint32 mode = 2;
+  int64 size = 3;
+}
+
 // SkillRow is one row of conversations.skills. body is omitted from list
 // responses: an inventory is a handful of lines and a body is a document.
 message SkillRow {
@@ -1330,6 +1340,18 @@ message SkillRow {
   google.protobuf.Timestamp updated_at = 9;
   // body is populated only by GetSkill.
   string body = 8;
+  // id is the row's own key. A name is unique only within a layer, so the
+  // three layers of one name are three rows.
+  string id = 10;
+  // owner_user_id is empty for the shared (core and global) layers.
+  string owner_user_id = 11;
+  // layer is "core", "global" or "user".
+  string layer = 12;
+  // shadowed marks an enabled row a higher layer overrides, so it is listed
+  // but not in effect.
+  bool shadowed = 13;
+  // files is populated only by GetSkill, and only for a skill that has any.
+  repeated SkillFileInfo files = 14;
 
   reserved 6;
   reserved 7;

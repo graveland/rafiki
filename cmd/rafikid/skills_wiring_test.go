@@ -332,7 +332,9 @@ func (f *fakeSkillStore) Delete(_ context.Context, id string) error {
 
 // A name is unique only within a layer, so a verb that takes (namespace, name)
 // has to pick one: the caller's own row, then the global non-core row, then the
-// core row. Another user's row is not addressable from here at all.
+// core row. Another user's row is not addressable from here at all. GetSkill is
+// the read that resolves the same way every write does — the writes' own source
+// rules are pinned separately (TestSkillTargetPrefersUserLayer).
 func TestConnectSkillsResolvesOwnRowThenGlobalThenCore(t *testing.T) {
 	const (
 		coreRow   = "core-id"
@@ -395,13 +397,13 @@ func TestConnectSkillsResolvesOwnRowThenGlobalThenCore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeSkillStore{rows: tc.rows}
 			c := connectSkills{st: f}
-			if err := c.DeleteSkill(tc.ctx, "rafiki", "s"); tc.wantErr != nil {
-				assert.NewAborting(t).ErrorIs(err, tc.wantErr, "DeleteSkill: got")
+			if _, err := c.GetSkill(tc.ctx, "rafiki", "s"); tc.wantErr != nil {
+				assert.NewAborting(t).ErrorIs(err, tc.wantErr, "GetSkill: got")
 				return
 			} else if err != nil {
-				t.Fatalf("DeleteSkill: %v", err)
+				t.Fatalf("GetSkill: %v", err)
 			}
-			assert.NewAborting(t).Eq(tc.wantID, f.deletedID, "DeleteSkill reached the store with id")
+			assert.NewAborting(t).Eq(tc.wantID, f.gotID, "GetSkill reached the store with id")
 		})
 	}
 }

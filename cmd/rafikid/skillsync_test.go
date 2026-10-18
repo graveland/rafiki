@@ -74,10 +74,12 @@ func TestEligibleRequiresSkillsSyncAndClaude(t *testing.T) {
 	c.False(eligible(nil), "a nil Describe must not be eligible (and must not panic)")
 }
 
-// pushStore is a store holding one core row, enough for every verb to resolve.
+// pushStore is a store holding one deletable row, enough for every verb to
+// resolve. The source is `manual` because a core or repo row is refused by
+// DeleteSkill's own rules — the push contract is what these tests are about.
 func pushStore() *fakeSkillStore {
 	return &fakeSkillStore{rows: []skills.Record{
-		{ID: "id-1", Namespace: "rafiki", Name: "a", Source: skills.CoreSource},
+		{ID: "id-1", Namespace: "rafiki", Name: "a", Source: "manual"},
 	}}
 }
 
