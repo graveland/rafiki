@@ -154,6 +154,12 @@ message AgentStatus {
   string state = 1;
 }
 
+// ChildRenamed reports that a live child's name changed (Control.Rename).
+// name is the new name, already trimmed and non-empty.
+message ChildRenamed {
+  string name = 1;
+}
+
 message ErrorEvent {
   string code = 1;
   string message = 2;
@@ -332,5 +338,6 @@ message Event {
     ScriptReport script_report = 23;
     ScriptOutput script_output = 24;
     OperatorState operator_state = 26;
+    ChildRenamed child_renamed = 27;
   }
 }

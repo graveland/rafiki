@@ -128,6 +128,8 @@ var controlPolicyTable = map[string]controlPolicy{
 	// routes it to SetChildBudget (direct parentage, bounded by the caller's
 	// own remaining grant) — the agent_set_budget tool's rule.
 	"SetBudget": policyChildScoped,
+	// Rename is operator/owner only: no child credential may rename.
+	"Rename": policyUserOnly,
 	// SetRouting from a child is subtree-scoped and refused only= — see
 	// SetChildRouting. It edits the stored spec, never re-resolves policy.
 	"SetRouting": policyChildScoped,

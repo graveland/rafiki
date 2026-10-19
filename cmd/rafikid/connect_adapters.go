@@ -440,6 +440,12 @@ func (l connectLifecycle) SetBudget(ctx context.Context, childID string, maxCost
 	return l.c.SetChildBudgetAsOperator(ctx, childID, maxCost)
 }
 
+// Rename is operator authority: the policy gate admits only a user credential
+// or the socket's nil identity.
+func (l connectLifecycle) Rename(ctx context.Context, childID, name string) error {
+	return l.c.Rename(ctx, childID, name)
+}
+
 // SetRouting is operator authority for a user credential (or the socket's nil
 // identity) and subtree authority for a per-child credential: SetChildRouting
 // bounds the target to the caller's subtree and refuses only= from a child, so

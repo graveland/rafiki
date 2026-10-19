@@ -173,6 +173,10 @@ type ChildLifecycle interface {
 	// Only a negative or non-finite cap is refused; 0 means unlimited and
 	// is an accepted, intentional value.
 	SetBudget(ctx context.Context, childID string, maxCost float64) error
+	// Rename sets childID's name and the name of every conversation linked
+	// to it. name is already trimmed and non-empty. An unregistered child is
+	// a protocol.ErrNotFound ControllerError.
+	Rename(ctx context.Context, childID, name string) error
 	// SetRouting merges a routing-spec delta over childID's stored routing
 	// spec and returns the canonical stored spec after the merge. Operator
 	// authority for a user credential (or the socket's nil identity); for a

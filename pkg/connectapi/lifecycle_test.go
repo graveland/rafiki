@@ -31,6 +31,9 @@ type fakeLifecycle struct {
 	budgetChildID string
 	budgetMaxCost float64
 	budgetErr     error
+	renameChildID string
+	renameName    string
+	renameErr     error
 
 	routingChildID string
 	routingDelta   string
@@ -65,6 +68,12 @@ func (f *fakeLifecycle) SetBudget(_ context.Context, childID string, maxCost flo
 	f.budgetChildID = childID
 	f.budgetMaxCost = maxCost
 	return f.budgetErr
+}
+
+func (f *fakeLifecycle) Rename(_ context.Context, childID, name string) error {
+	f.renameChildID = childID
+	f.renameName = name
+	return f.renameErr
 }
 
 func (f *fakeLifecycle) SetRouting(_ context.Context, childID, delta string) (string, error) {

@@ -541,6 +541,20 @@ message SetBudgetResponse {
   double max_cost = 2;
 }
 
+// RenameRequest renames a live child and every conversation linked to it
+// (the child's own conversation, plus claude threads keyed by external_ref).
+// name must be non-empty after trimming. Operator/owner only: a child
+// credential is refused. A closed child is no longer registered and is NotFound.
+message RenameRequest {
+  string child_id = 1;
+  string name     = 2;
+}
+
+message RenameResponse {
+  string child_id = 1;
+  string name     = 2;
+}
+
 // SetRouting merges a routing-spec delta over a child's stored routing spec,
 // effective on its next OpenRouter request. delta is the bracket-free spec
 // string ("prefer=fireworks", "sort=throughput,quant=fp8+"). The merge is
@@ -1217,6 +1231,7 @@ service Control {
   rpc Kill(KillRequest) returns (KillResponse);
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc SetBudget(SetBudgetRequest) returns (SetBudgetResponse);
+  rpc Rename(RenameRequest) returns (RenameResponse);
   rpc SetRouting(SetRoutingRequest) returns (SetRoutingResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);

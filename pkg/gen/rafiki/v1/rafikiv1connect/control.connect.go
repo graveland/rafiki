@@ -58,6 +58,8 @@ const (
 	ControlCloseProcedure = "/rafiki.v1.Control/Close"
 	// ControlSetBudgetProcedure is the fully-qualified name of the Control's SetBudget RPC.
 	ControlSetBudgetProcedure = "/rafiki.v1.Control/SetBudget"
+	// ControlRenameProcedure is the fully-qualified name of the Control's Rename RPC.
+	ControlRenameProcedure = "/rafiki.v1.Control/Rename"
 	// ControlSetRoutingProcedure is the fully-qualified name of the Control's SetRouting RPC.
 	ControlSetRoutingProcedure = "/rafiki.v1.Control/SetRouting"
 	// ControlListTasksProcedure is the fully-qualified name of the Control's ListTasks RPC.
@@ -237,6 +239,7 @@ type ControlClient interface {
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	SetBudget(context.Context, *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error)
+	Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error)
 	SetRouting(context.Context, *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
@@ -404,6 +407,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			httpClient,
 			baseURL+ControlSetBudgetProcedure,
 			connect.WithSchema(controlMethods.ByName("SetBudget")),
+			connect.WithClientOptions(opts...),
+		),
+		rename: connect.NewClient[v1.RenameRequest, v1.RenameResponse](
+			httpClient,
+			baseURL+ControlRenameProcedure,
+			connect.WithSchema(controlMethods.ByName("Rename")),
 			connect.WithClientOptions(opts...),
 		),
 		setRouting: connect.NewClient[v1.SetRoutingRequest, v1.SetRoutingResponse](
@@ -882,6 +891,7 @@ type controlClient struct {
 	kill                 *connect.Client[v1.KillRequest, v1.KillResponse]
 	close                *connect.Client[v1.CloseRequest, v1.CloseResponse]
 	setBudget            *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
+	rename               *connect.Client[v1.RenameRequest, v1.RenameResponse]
 	setRouting           *connect.Client[v1.SetRoutingRequest, v1.SetRoutingResponse]
 	listTasks            *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
 	listModels           *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
@@ -1004,6 +1014,11 @@ func (c *controlClient) Close(ctx context.Context, req *connect.Request[v1.Close
 // SetBudget calls rafiki.v1.Control.SetBudget.
 func (c *controlClient) SetBudget(ctx context.Context, req *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error) {
 	return c.setBudget.CallUnary(ctx, req)
+}
+
+// Rename calls rafiki.v1.Control.Rename.
+func (c *controlClient) Rename(ctx context.Context, req *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error) {
+	return c.rename.CallUnary(ctx, req)
 }
 
 // SetRouting calls rafiki.v1.Control.SetRouting.
@@ -1402,6 +1417,7 @@ type ControlHandler interface {
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	SetBudget(context.Context, *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error)
+	Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error)
 	SetRouting(context.Context, *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
@@ -1565,6 +1581,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		ControlSetBudgetProcedure,
 		svc.SetBudget,
 		connect.WithSchema(controlMethods.ByName("SetBudget")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRenameHandler := connect.NewUnaryHandler(
+		ControlRenameProcedure,
+		svc.Rename,
+		connect.WithSchema(controlMethods.ByName("Rename")),
 		connect.WithHandlerOptions(opts...),
 	)
 	controlSetRoutingHandler := connect.NewUnaryHandler(
@@ -2049,6 +2071,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlCloseHandler.ServeHTTP(w, r)
 		case ControlSetBudgetProcedure:
 			controlSetBudgetHandler.ServeHTTP(w, r)
+		case ControlRenameProcedure:
+			controlRenameHandler.ServeHTTP(w, r)
 		case ControlSetRoutingProcedure:
 			controlSetRoutingHandler.ServeHTTP(w, r)
 		case ControlListTasksProcedure:
@@ -2246,6 +2270,10 @@ func (UnimplementedControlHandler) Close(context.Context, *connect.Request[v1.Cl
 
 func (UnimplementedControlHandler) SetBudget(context.Context, *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetBudget is not implemented"))
+}
+
+func (UnimplementedControlHandler) Rename(context.Context, *connect.Request[v1.RenameRequest]) (*connect.Response[v1.RenameResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Rename is not implemented"))
 }
 
 func (UnimplementedControlHandler) SetRouting(context.Context, *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error) {

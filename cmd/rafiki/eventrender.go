@@ -148,6 +148,9 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		if _, born := r.bornAt[id]; !born {
 			r.bornAt[id] = t
 		}
+	case *rafikiv1.Event_ChildRenamed:
+		r.names[id] = p.ChildRenamed.GetName()
+		detail = " renamed"
 	case *rafikiv1.Event_AgentStatus:
 		prev := r.status[id]
 		st := p.AgentStatus.GetState()

@@ -59,6 +59,8 @@ func (emptyLifecycle) Spawn(context.Context, connectapi.SpawnParams) (string, er
 	return "c_spawned", nil
 }
 
+func (emptyLifecycle) Rename(context.Context, string, string) error { return nil }
+
 func (emptyLifecycle) Kill(context.Context, string, time.Duration, time.Duration) (connectapi.KillOutcome, error) {
 	return connectapi.KillOutcome{}, nil
 }

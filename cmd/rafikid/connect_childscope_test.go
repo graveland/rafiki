@@ -97,6 +97,10 @@ func (l *recordingLifecycle) SetBudget(_ context.Context, _ string, _ float64) e
 	return nil
 }
 
+func (l *recordingLifecycle) Rename(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func (l *recordingLifecycle) SetRouting(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }

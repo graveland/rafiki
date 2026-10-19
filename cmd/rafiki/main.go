@@ -169,6 +169,7 @@ func newRootCmd() *cobra.Command {
 		newRepoCmd(),
 		newProfileCmd(),
 		newBudgetCmd(),
+		newRenameCmd(),
 		newLoginCmd(),
 		newWebCmd(),
 		newVersionCmd(),

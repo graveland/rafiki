@@ -1320,6 +1320,52 @@ class SetBudgetResponse:
         return obj
 
 @dataclasses.dataclass
+class RenameRequest:
+    child_id: str = ""
+    name: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.name != "":
+            out["name"] = self.name
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RenameRequest":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        return obj
+
+@dataclasses.dataclass
+class RenameResponse:
+    child_id: str = ""
+    name: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.name != "":
+            out["name"] = self.name
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RenameResponse":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        return obj
+
+@dataclasses.dataclass
 class SetRoutingRequest:
     child_id: str = ""
     delta: str = ""
