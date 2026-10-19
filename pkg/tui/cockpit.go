@@ -1149,8 +1149,13 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // trigger, which is why there is no polling and no new event type: the ledger
 // stays authoritative and the event plane is not asked to carry a lossy copy
 // of it.
+//
+// A claude child reaches the ledger through the rafiki MCP server, where Claude
+// Code names the tool mcp__rafiki__task_add; fundi calls it by its bare name.
+// Only the rafiki server's prefix counts: another server's task_add is not
+// this ledger.
 func isTaskTool(name string) bool {
-	switch name {
+	switch strings.TrimPrefix(name, "mcp__rafiki__") {
 	case "task_add", "task_update", "task_drop":
 		return true
 	}

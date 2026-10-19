@@ -2523,6 +2523,19 @@ func TestTaskToolsTriggerARefresh(t *testing.T) {
 	}
 }
 
+// A claude child reaches the ledger through MCP, so Claude Code reports the
+// tool as mcp__rafiki__task_add. Matching only the bare name left its task box
+// stale until the next focus hop.
+func TestMCPPrefixedTaskToolsTriggerARefresh(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"mcp__rafiki__task_add", "mcp__rafiki__task_update", "mcp__rafiki__task_drop"} {
+		c.True(isTaskTool(name), "%s must trigger a task refresh", name)
+	}
+	for _, name := range []string{"mcp__other__task_add", "mcp__rafiki__task_list", "mcp__rafiki__agent_spawn", "mcp__rafiki__"} {
+		c.False(isTaskTool(name), "%s must not trigger a task refresh", name)
+	}
+}
+
 // TestClosingARowKeepsTheCursorWhereTheRowWas pins that the cursor lands on the
 // row that slides into the closed row's place, however far the committed agent
 // is from it.
