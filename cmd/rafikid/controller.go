@@ -1802,6 +1802,30 @@ func (c *Controller) inheritSkipDerivedIndex(req protocol.SpawnRequest) protocol
 	return req
 }
 
+// checkTaskHandle refuses a spawn whose task handle the spawner's ledger does
+// not hold. The post-spawn Assign is best-effort by design (a running child is
+// never killed for a bookkeeping miss), so without this check a typo'd handle
+// started a child and left the ledger untouched with nothing said to the
+// caller. Checked before the child exists, so a refusal writes nothing.
+func (c *Controller) checkTaskHandle(ctx context.Context, req protocol.SpawnRequest) error {
+	if req.Task == "" || c.tasks == nil || req.SpawnerConversationID == "" {
+		return nil
+	}
+	rows, err := c.tasks.List(ctx, tasks.ListFilter{ConversationID: req.SpawnerConversationID})
+	if err != nil {
+		return fmt.Errorf("check task handle %q: %w", req.Task, err)
+	}
+	for _, r := range rows {
+		if r.Handle == req.Task {
+			return nil
+		}
+	}
+	return &connectapi.ControllerError{
+		Code:    protocol.ErrInvalidArgs,
+		Message: fmt.Sprintf("task handle %q is not in your task ledger; use a handle task_add returned (task_list shows them)", req.Task),
+	}
+}
+
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (protocol.SpawnResponseData, error) {
 	// The model the REQUEST named, captured before applyPreset can replace it
 	// with the preset's: resolveRouting parses both and merges spawn over
@@ -1851,6 +1875,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			Code:    protocol.ErrInvalidArgs,
 			Message: "a sandbox spawn block is only supported for kind=fundi: claude and script children are launched, not workspace-bound",
 		}
+	}
+
+	if err := c.checkTaskHandle(ctx, req); err != nil {
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// A pre-fill the child could not run is refused here, before anything

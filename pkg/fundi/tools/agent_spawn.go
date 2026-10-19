@@ -79,7 +79,7 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"it cannot. Omit to use your own. This is how you point a worker at a git " +
 					"worktree you created."},
 			{Name: "task", Type: "string",
-				Description: "Handle of a task in YOUR list (e.g. \"2.1\") to assign to this agent."},
+				Description: "Handle of a task in YOUR list (e.g. \"2.1\") to assign to this agent. A handle your list does not hold refuses the spawn."},
 			{Name: "kind", Type: "string",
 				Description: "Agent runtime: \"fundi\" (default) or \"claude\"."},
 			{Name: "max_depth", Type: "integer",
