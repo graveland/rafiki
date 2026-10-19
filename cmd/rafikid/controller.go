@@ -1881,6 +1881,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		return protocol.SpawnResponseData{}, err
 	}
 
+	if err := c.checkClaudeModelRoutable(req); err != nil {
+		return protocol.SpawnResponseData{}, err
+	}
+
 	// A pre-fill the child could not run is refused here, before anything
 	// else reads req — same ordering argument as applyPreset above: the
 	// preset's kind and tool shaping are already resolved, so the check sees
