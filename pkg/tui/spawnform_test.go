@@ -237,6 +237,24 @@ func TestSpawnSuccessClosesTheForm(t *testing.T) {
 	assert.NewCollecting(t).Nil(c.form, "form stayed open after a successful create")
 }
 
+// Creating an agent lands the rail cursor on it. applySpawned hops there, and
+// hop moves the cursor with the commit -- otherwise the rail's next visit finds
+// the cursor on whatever row it was left on, and `x`/`b`/`r` act on that row
+// rather than the agent just created.
+func TestSpawnMovesTheRailCursorToTheNewAgent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_old", "old", 0)})
+	c.rail.SetFocus("c_old")
+	c.selected = "c_old"
+	c.form.busy = true
+
+	c.applySpawned(spawnedMsg{childID: "c_new"})
+
+	ck.Eq("c_new", c.selected, "rail cursor after create")
+	ck.Eq("c_new", c.focused(), "focused child after create")
+}
+
 // A second Enter while the first is in flight must not create two agents.
 func TestBusyFormRefusesASecondSubmit(t *testing.T) {
 	c := formCockpit(t)

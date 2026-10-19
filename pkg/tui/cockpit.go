@@ -1851,6 +1851,14 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 		return nil
 	}
 	c.reveal(childID)
+	// The rail cursor follows the commit. Every caller of hop has just decided
+	// this is the agent to look at -- ⏎ on a previewed row, an attention jump, a
+	// freshly spawned child -- so leaving the cursor behind means the next visit
+	// to the rail lands on a row nobody chose, and `x`/`b`/`r` act on it.
+	// Setting it before the no-op return keeps a re-commit to the already
+	// focused child moving the cursor too.
+	c.selected = childID
+	c.selectedSeq++
 	if childID == c.focused() {
 		return nil
 	}
