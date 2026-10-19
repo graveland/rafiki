@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -110,13 +111,11 @@ func renderList(w io.Writer, children []*rafikiv1.ChildSummary, mode outputMode,
 
 	cur := clientstate.LoadScoped(clientstate.Scope{}).Currency
 	totals := subtreeCosts(children)
+	now := time.Now()
 
 	for _, tr := range treeRows {
 		ch := tr.Child
-		started := "-"
-		if ts := ch.GetStartedAt(); ts != nil {
-			started = ts.AsTime().Local().Format("2006-01-02 15:04")
-		}
+		started := startedCell(ch.GetStartedAt(), now)
 		provider, model := splitProviderModel(ch.GetModel())
 		idCell := ch.GetChildId()
 		if tr.Depth > 0 {
@@ -192,6 +191,33 @@ func formatTimestamp(ts *timestamppb.Timestamp) string {
 		return "-"
 	}
 	return ts.AsTime().Local().Format("2006-01-02 15:04")
+}
+
+// startedCell is the list table's STARTED cell: the absolute stamp, then how
+// long ago it was, or "-" when absent. The age is the list's alone — the other
+// formatTimestamp callers print expiry and revocation times, which are often in
+// the future. A stamp ahead of now (a skewed clock) reads "just now" rather
+// than a negative age.
+func startedCell(ts *timestamppb.Timestamp, now time.Time) string {
+	if ts == nil || ts.AsTime().IsZero() {
+		return "-"
+	}
+	t := ts.AsTime()
+	return t.Local().Format("2006-01-02 15:04") + " (" + relativeAge(now.Sub(t)) + ")"
+}
+
+// relativeAge renders d as the coarsest whole unit it reaches: "just now"
+// under a minute, then minutes, hours and days.
+func relativeAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return strconv.Itoa(int(d/time.Minute)) + "m ago"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d/time.Hour)) + "h ago"
+	}
+	return strconv.Itoa(int(d/(24*time.Hour))) + "d ago"
 }
 
 // humanBytes renders a byte count in binary units for status display.
