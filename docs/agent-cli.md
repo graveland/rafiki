@@ -547,8 +547,13 @@ pkg/**/*.go
 exclusive with `-i`: the interactive form cannot carry a pre-fill, so the
 combination is refused at parse time rather than silently dropping the list.
 
-Pre-fills are **fundi only** — the daemon refuses the spawn for any other
-kind. The reads run through an internal read/glob reader wired to the same
+Pre-fills are accepted for **fundi and claude** children; any other kind is
+refused. A claude child cannot be handed synthetic tool results, so the daemon
+instead appends the entries (in the list syntax above) and a one-paragraph
+legend of the `:N-M` suffix to its system prompt, telling it to Read them
+before anything else — the files are read when the child gets to them, not
+snapshotted at spawn, and the model may skip the instruction. The rest of this
+section describes the fundi behaviour. The reads run through an internal read/glob reader wired to the same
 executor as the child's own tools, so the child's tool set does not need
 `read`: a tool-less child (a preset with `tools: []`, or an allowlist without
 `read`) gets its files persisted as one text row — each under an

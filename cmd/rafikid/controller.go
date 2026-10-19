@@ -1892,6 +1892,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	if err := validatePrefill(req); err != nil {
 		return protocol.SpawnResponseData{}, err
 	}
+	req = foldClaudePrefill(req)
 
 	// A kind=script request that names any fundi/claude-only field is
 	// refused here, before lineage or limits read req. It runs after

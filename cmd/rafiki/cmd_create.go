@@ -100,7 +100,7 @@ Set these defaults on a profile, not an environment variable: see
 	// already passed. Refuse at parse time instead, like --prefill-files above.
 	cmd.MarkFlagsMutuallyExclusive("interactive", "pymodule")
 	cmd.Flags().String("prefill-files", "",
-		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi only.")
+		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi: read before turn 1; claude: added to its system prompt as files to read first.")
 	// The create form cannot carry a pre-fill (pkg/tui's SpawnRequest has no
 	// such field), so accepting both would parse the list and then silently
 	// drop it on the form path. Refuse at parse time instead.

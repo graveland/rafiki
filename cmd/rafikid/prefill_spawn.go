@@ -19,7 +19,8 @@ import (
 // routing as the child's tools, never offered to the model), so a tool-less
 // child carries a pre-fill as one text row — the engine refuses a spawn
 // whose executor cannot serve reads, at worker start. Only the kind is
-// checked here: a non-fundi kind has no engine that runs a pre-fill at all.
+// checked here: only fundi (an engine that runs the reads) and claude (told to
+// read them, see foldClaudePrefill) can carry a pre-fill.
 func validatePrefill(req protocol.SpawnRequest) error {
 	// prefill.Validate errors with "prefill: no entries" on an empty slice,
 	// which is the normal no-prefill case, not a refusal.
@@ -27,10 +28,10 @@ func validatePrefill(req protocol.SpawnRequest) error {
 		return nil
 	}
 
-	if req.Kind != "" && req.Kind != protocol.KindFundi {
+	if req.Kind != "" && req.Kind != protocol.KindFundi && req.Kind != protocol.KindClaude {
 		return &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
-			Message: "prefill: only kind fundi supports a pre-fill",
+			Message: "prefill: only kinds fundi and claude support a pre-fill",
 		}
 	}
 
@@ -47,4 +48,17 @@ func validatePrefill(req protocol.SpawnRequest) error {
 	}
 
 	return nil
+}
+
+// foldClaudePrefill turns a claude child's pre-fill into appended
+// system-prompt text: the Claude Code binary cannot be handed synthetic tool
+// results, so the child is instead told to read the listed files first. Run
+// once in Controller.Spawn; the result rides AppendSystemPrompt, so the
+// snapshot and every restart path carry it without re-rendering.
+func foldClaudePrefill(req protocol.SpawnRequest) protocol.SpawnRequest {
+	if req.Kind != protocol.KindClaude || len(req.Prefill) == 0 {
+		return req
+	}
+	req.AppendSystemPrompt = joinNonEmpty(req.AppendSystemPrompt, prefill.Instructions(req.Prefill))
+	return req
 }

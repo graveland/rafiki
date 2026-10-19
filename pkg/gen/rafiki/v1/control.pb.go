@@ -2087,7 +2087,8 @@ type SpawnRequest struct {
 	// Controller.Spawn resolves FIRST — it supplies kind, model, tools, prompt
 	// and budgets. Empty = none.
 	Preset string `protobuf:"bytes,12,opt,name=preset,proto3" json:"preset,omitempty"`
-	// Files the child reads before its first turn (fundi only).
+	// Files the child reads before its first turn (fundi: pre-read; claude: told
+	// to read them in its system prompt).
 	Prefill []*PrefillRead           `protobuf:"bytes,13,rep,name=prefill,proto3" json:"prefill,omitempty"`
 	Script  *SpawnRequest_ScriptSpec `protobuf:"bytes,14,opt,name=script,proto3" json:"script,omitempty"`
 	// Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.

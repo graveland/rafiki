@@ -239,7 +239,7 @@ type SpawnRequest struct {
 
 	// Prefill lists files the child reads through its own Read tool, on its
 	// own executor, before its first turn; they're recorded as real
-	// tool_use/tool_result history. fundi only. Empty means none.
+	// tool_use/tool_result history. fundi runs the reads; claude is told to read them (system-prompt appendix). Empty means none.
 	Prefill []PrefillRead `json:"prefill,omitempty"`
 
 	// Sandbox, when set, is the spawn block's sandbox: the new child's executor

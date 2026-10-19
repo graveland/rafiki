@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +38,8 @@ func TestPrefillValidateRefusals(t *testing.T) {
 		{"no builtin tools with a glob entry accepted", protocol.SpawnRequest{Prefill: globEntry, NoBuiltinTools: true}, ""},
 		{"tools omit read accepted", protocol.SpawnRequest{Prefill: plain, Tools: "bash,edit"}, ""},
 		{"glob entry, tools omit glob accepted", protocol.SpawnRequest{Prefill: globEntry, Tools: "read"}, ""},
-		{"claude kind", protocol.SpawnRequest{Kind: protocol.KindClaude, Prefill: plain}, "prefill: only kind fundi supports a pre-fill"},
+		{"claude kind accepted", protocol.SpawnRequest{Kind: protocol.KindClaude, Prefill: plain}, ""},
+		{"script kind", protocol.SpawnRequest{Kind: protocol.KindScript, Prefill: plain}, "prefill: only kinds fundi and claude support a pre-fill"},
 		{"bad range", protocol.SpawnRequest{Prefill: badRange, Tools: "read"}, "prefill: entry 1: start 9 is after end 3"},
 	}
 
@@ -59,15 +61,15 @@ func TestPrefillValidateRefusals(t *testing.T) {
 }
 
 // TestPrefillSpawnCallsValidate is the test that dies if the validatePrefill
-// call site in Controller.Spawn is deleted: a claude-kind spawn with a pre-fill
-// must be refused through the real Spawn entry point with ErrInvalidArgs.
+// call site in Controller.Spawn is deleted: a script-kind spawn with a
+// pre-fill must be refused through the real Spawn entry point.
 func TestPrefillSpawnCallsValidate(t *testing.T) {
 	t.Parallel()
 	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 
 	req := protocol.SpawnRequest{
-		Kind:     protocol.KindClaude,
+		Kind:     protocol.KindScript,
 		Cwd:      t.TempDir(),
 		PiBinary: fakePiBin(t),
 		Prefill:  []protocol.PrefillRead{{Path: "a.md"}},
@@ -75,11 +77,25 @@ func TestPrefillSpawnCallsValidate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := ctrl.Spawn(ctx, req, users.Identity{})
-	c.Require().Error(err, "Spawn with a pre-fill on a claude child must be refused")
+	c.Require().Error(err, "Spawn with a pre-fill on a script child must be refused")
 	var ce *connectapi.ControllerError
 	c.Require().True(errors.As(err, &ce), "want *connectapi.ControllerError, got %T: %v", err, err)
 	c.Eq(protocol.ErrInvalidArgs, ce.Code, "Code")
-	c.Eq("prefill: only kind fundi supports a pre-fill", ce.Message, "Message =")
+	c.Eq("prefill: only kinds fundi and claude support a pre-fill", ce.Message, "Message =")
+}
+
+// TestFoldClaudePrefill pins the claude rendering: the list and legend land
+// after any existing appendix, and other kinds are untouched.
+func TestFoldClaudePrefill(t *testing.T) {
+	c := assert.NewCollecting(t)
+	entries := []protocol.PrefillRead{{Path: "a.go"}, {Path: "b.go", Start: 4, End: 9}, {Path: "c.go", Start: 7}, {Path: "d.go", End: 3}}
+
+	got := foldClaudePrefill(protocol.SpawnRequest{Kind: protocol.KindClaude, AppendSystemPrompt: "be terse", Prefill: entries})
+	c.True(strings.HasPrefix(got.AppendSystemPrompt, "be terse\n\nBefore doing anything else"), "appendix kept first: %q", got.AppendSystemPrompt)
+	c.True(strings.HasSuffix(got.AppendSystemPrompt, "\n\na.go\nb.go:4-9\nc.go:7-\nd.go:-3"), "entries listed in Parse syntax: %q", got.AppendSystemPrompt)
+
+	fundi := protocol.SpawnRequest{Kind: protocol.KindFundi, Prefill: entries}
+	c.EqDeep(fundi, foldClaudePrefill(fundi), "fundi request unchanged")
 }
 
 // TestPrefillArgvRoundTrip follows TestArgvRoundTripsIntoRuntimeOptions: a

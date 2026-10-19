@@ -117,3 +117,31 @@ func Validate(entries []protocol.PrefillRead) error {
 func IsGlob(path string) bool {
 	return strings.ContainsAny(path, "*?[{")
 }
+
+// Instructions renders entries as system-prompt text for a child that cannot
+// have its reads performed for it (a claude child): the legend, then one
+// entry per line in the list syntax Parse reads. Empty entries render "".
+func Instructions(entries []protocol.PrefillRead) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Before doing anything else, read each of the following with your Read tool, in full unless a line range is given. " +
+		"A path containing a glob (*?[{) means read every file it matches. " +
+		"A suffix :N-M means only lines N through M, 1-based and inclusive; :N- means line N to the end of the file; :-M means the start of the file through line M.\n\n")
+	for _, e := range entries {
+		b.WriteString(e.Path)
+		if e.Start != 0 || e.End != 0 {
+			b.WriteByte(':')
+			if e.Start != 0 {
+				b.WriteString(strconv.Itoa(e.Start))
+			}
+			b.WriteByte('-')
+			if e.End != 0 {
+				b.WriteString(strconv.Itoa(e.End))
+			}
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}

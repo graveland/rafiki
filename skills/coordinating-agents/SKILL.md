@@ -97,7 +97,9 @@ into `prompt`: rafiki reads them through an internal reader before the
 worker's first turn and persists them as real history, so the files sit in
 the conversation before turn 1 at a fraction of the prompt's token cost.
 Ranges work for skill or CLAUDE.md excerpts too (`{"path": "CLAUDE.md",
-"start": 1, "end": 60}`). The worker's kind must be fundi; its own tool set
+"start": 1, "end": 60}`). For a claude worker the daemon instead appends the
+list, with a legend of the `path:N-M` syntax, to its system prompt, so it
+Reads them first itself (a request, not a snapshot). For a fundi worker, its own tool set
 need NOT include `read` — a tool-less seat (`tools: []`, the review
 pipeline's batch reviewer) gets its files rendered as one text row under
 `=== <path> ===` headers, while a seat that keeps `read` gets ordinary

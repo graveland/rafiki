@@ -381,7 +381,8 @@ message SpawnRequest {
   // and budgets. Empty = none.
   string preset = 12;
 
-  // Files the child reads before its first turn (fundi only).
+  // Files the child reads before its first turn (fundi: pre-read; claude: told
+  // to read them in its system prompt).
   repeated PrefillRead prefill = 13;
 
   // ScriptSpec, for kind = "script", names the pymodule that IS the child's

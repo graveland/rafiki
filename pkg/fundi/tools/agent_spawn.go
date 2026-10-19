@@ -137,7 +137,8 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"(src/**/*.rs, no range). The reads run on the agent's own machine before its first turn and " +
 					"cost you almost nothing to send; use this instead of pasting file contents into prompt. " +
 					"Put CLAUDE.md or skill files here too, with ranges. The agent does not need the read tool " +
-					"for this: a tool-less agent gets the files as text under `=== <path> ===` headers."},
+					"for this: a tool-less agent gets the files as text under `=== <path> ===` headers. " +
+					"A claude agent is instead told in its system prompt to Read them first."},
 			{Name: "sandbox", Type: "object",
 				Description: "Run the new agent's workspace inside a fresh, isolated container: its executor is provisioned into a sandbox with the mounts, network and limits below. `scope` is required: \"self\" offers the container only to the new agent, \"subtree\" also to its descendants. A `ro` mount cannot be written even by root in the container; `network` confines the CONTAINER's own processes (the agent itself still runs in the daemon — see the tool description); a host_path must sit under a directory the launcher's operator allowed. If the sandbox cannot be created the spawn is refused.",
 				Properties: []SchemaProperty{
