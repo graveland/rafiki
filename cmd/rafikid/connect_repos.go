@@ -4,12 +4,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
@@ -87,13 +87,15 @@ func (m connectRepos) AddRepo(ctx context.Context, name, url, ref string, refres
 	}
 	if res.NamespaceCollision() {
 		// The collision's own text names the namespace and its holder, which is
-		// what the operator needs to act on; the fallback only exists so a
-		// flagged-but-textless result cannot panic here.
-		text := "the repo's skills collide with another source's namespace"
-		if len(res.SkillErrors) > 0 {
-			text = res.SkillErrors[0]
+		// what the operator needs to act on, and this codebase wrote it. It is
+		// an authored refusal, so it rides a ControllerError and reaches the
+		// caller instead of being redacted as a backend failure; the fallback
+		// only exists so a flagged-but-textless result cannot go out empty.
+		text := res.namespaceHeldMsg
+		if text == "" {
+			text = "the repo's skills collide with another source's namespace"
 		}
-		collision := errors.New(text)
+		collision := &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: text}
 		m.rollbackRepo(context.WithoutCancel(ctx), owner, name, prior, collision)
 		return connectapi.RepoRow{}, connectapi.RepoRefresh{}, collision
 	}
@@ -218,7 +220,10 @@ func (m connectRepos) skillCounts(ctx context.Context, ownerUserID string) (map[
 func (m connectRepos) RefreshRepo(ctx context.Context, name string) (connectapi.RepoRefresh, error) {
 	owner := spawnOwner(ctx).UserID
 	if m.c.repoPusher == nil {
-		return connectapi.RepoRefresh{}, errors.New("no executor pool: nothing to refresh a repo on")
+		return connectapi.RepoRefresh{}, &connectapi.ControllerError{
+			Code:    protocol.ErrFailedPrecondition,
+			Message: "no executor pool: nothing to refresh a repo on",
+		}
 	}
 	rec, err := m.c.repoPusher.recordFor(ctx, owner, name)
 	if err != nil {

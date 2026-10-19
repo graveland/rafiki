@@ -14,8 +14,10 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/repos"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
@@ -57,6 +59,11 @@ type RefreshResult struct {
 	// this is how the daemon's own AddRepo knows which kind of skill error must
 	// fail the registration instead of merely being reported.
 	namespaceHeld bool
+	// namespaceHeldMsg is that error's own text, which this codebase authors
+	// (the namespace and its holder). It is kept apart from SkillErrors because
+	// the collision is not necessarily SkillErrors[0], and only this text is
+	// safe to hand a caller as a refusal.
+	namespaceHeldMsg string
 }
 
 // NamespaceCollision reports whether the skills half was refused because
@@ -314,8 +321,11 @@ func (gp *repoPusher) refreshOnce(ctx context.Context, ownerUserID, name, url, r
 		targets = append(targets, le.Executor.ID)
 	}
 	if len(targets) == 0 {
-		return RefreshResult{}, fmt.Errorf("no eligible executor for owner %q's repos: %d live executor(s): %s",
-			repoOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; "))
+		return RefreshResult{}, &connectapi.ControllerError{
+			Code: protocol.ErrFailedPrecondition,
+			Message: fmt.Sprintf("no eligible executor for owner %q's repos: %d live executor(s): %s",
+				repoOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; ")),
+		}
 	}
 	// ID order, so which executor resolves is deterministic rather than
 	// whatever the pool happened to enumerate first.
@@ -477,6 +487,7 @@ func (gp *repoPusher) storeSkills(ctx context.Context, ownerUserID, name string,
 		var held *skills.NamespaceHeldError
 		if errors.As(err, &held) {
 			result.namespaceHeld = true
+			result.namespaceHeldMsg = held.Error()
 		}
 		result.SkillErrors = append(result.SkillErrors, err.Error())
 		return
