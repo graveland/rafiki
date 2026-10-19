@@ -52,6 +52,14 @@ type claudeState struct {
 	// goroutines touch it, every access is under mu — unlike the other state
 	// fields, which only BusFrames/ResetState touch.
 	nativeTurnActive bool
+	// lastTotalCost is the session total_cost_usd the previous priced result
+	// frame reported. claude's stream-json result restates the RUNNING total for
+	// the whole process on every turn, while TurnEnd.cost_usd is one turn's cost
+	// and every consumer sums it, so turnCost reports the difference. Under mu
+	// like nativeTurnActive. ResetState deliberately leaves it: a reset does not
+	// say whether claude zeroed its counter, and turnCost already rebaselines
+	// when the total goes down.
+	lastTotalCost float64
 }
 
 // newClaudeProvider constructs a fresh per-child claude translator.
@@ -451,7 +459,9 @@ func (p *claudeProvider) emitResult(f claudeStreamFrame) [][]byte {
 // claudeResultUsage maps a claude result frame's token counts and total cost to
 // a PiUsage. Returns nil when the frame carries no usage data so agent_end omits
 // the field entirely. Only the total cost is known (claude gives a single
-// total_cost_usd, no per-category breakdown).
+// total_cost_usd, no per-category breakdown). That figure is the CUMULATIVE
+// session total, passed through untouched: this legacy agent_end has no summing
+// consumer, unlike TurnEnd, which turnCost reduces to one turn's share.
 func claudeResultUsage(f claudeStreamFrame) *PiUsage {
 	if f.Usage == nil && f.TotalCostUSD == 0 {
 		return nil
@@ -869,11 +879,7 @@ func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1
 			CacheWriteTokens: int64Ptr(int64(f.Usage.CacheCreationInputTokens)),
 		}
 	}
-	var costUSD *float64
-	if f.TotalCostUSD > 0 {
-		v := f.TotalCostUSD
-		costUSD = &v
-	}
+	costUSD := p.turnCost(f.TotalCostUSD)
 	return []*rafikiv1.Event{{
 		Ts: timestamppb.New(time.UnixMilli(ts)),
 		Payload: &rafikiv1.Event_TurnEnd{
@@ -883,6 +889,24 @@ func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1
 			},
 		},
 	}}
+}
+
+// turnCost converts claude's cumulative session total into this turn's share,
+// nil when the frame carries no total. A total below the last one means claude's
+// counter restarted (a fresh process), so the new figure is the baseline and the
+// whole of that turn's cost.
+func (p *claudeProvider) turnCost(total float64) *float64 {
+	if total <= 0 {
+		return nil
+	}
+	p.st.mu.Lock()
+	defer p.st.mu.Unlock()
+	delta := total - p.st.lastTotalCost
+	if delta < 0 {
+		delta = total
+	}
+	p.st.lastTotalCost = total
+	return &delta
 }
 
 func int64Ptr(v int64) *int64 { return &v }

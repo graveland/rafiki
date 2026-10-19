@@ -1,6 +1,8 @@
 package child
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -397,4 +399,66 @@ func TestBusFramesNativeSystemInitEmitsNothing(t *testing.T) {
 	evs := p.BusFramesNative(line, 1000)
 	c.Empty(evs, "system/init produced %d events, want 0", len(evs))
 	c.Eq("claude-opus-5", p.st.model, "st.model")
+}
+
+// resultCosts feeds result frames carrying the given total_cost_usd values to a
+// fresh provider and returns the cost each emitted turn_end reports.
+func resultCosts(t *testing.T, totals ...float64) []float64 {
+	t.Helper()
+	p := newClaudeProvider()
+	out := make([]float64, 0, len(totals))
+	for i, total := range totals {
+		line := []byte(fmt.Sprintf(`{"type":"result","subtype":"success","total_cost_usd":%v}`, total))
+		for _, ev := range p.BusFramesNative(line, int64(1000+i)) {
+			if te := ev.GetTurnEnd(); te != nil {
+				out = append(out, te.GetCostUsd())
+			}
+		}
+	}
+	return out
+}
+
+// claude's stream-json result restates the SESSION's running total on every
+// turn, while TurnEnd.cost_usd is one turn's cost and consumers sum it. Passing
+// the total through inflated the bill quadratically.
+func TestNativeTurnEndCostIsThisTurnsShareOfTheSessionTotal(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	got := resultCosts(t, 1.0, 2.5, 2.75)
+
+	ck.EqDeep([]float64{1.0, 1.5, 0.25}, got, "per-turn costs")
+}
+
+func TestNativeTurnEndCostsSumToTheSessionTotal(t *testing.T) {
+	var sum float64
+	for _, c := range resultCosts(t, 0.4, 1.1, 1.1, 3.0) {
+		sum += c
+	}
+
+	assert.NewCollecting(t).Less(1e-9, math.Abs(sum-3.0), "summed turn costs must equal the final session total, got %v", sum)
+}
+
+// A total that goes DOWN means claude's counter restarted (a new process, or a
+// reset the provider was not told about): the new figure is a fresh baseline,
+// not a negative cost.
+func TestNativeTurnEndCostRestartsWhenTheTotalDrops(t *testing.T) {
+	got := resultCosts(t, 3.0, 0.4, 1.0)
+
+	assert.NewCollecting(t).EqDeep([]float64{3.0, 0.4, 0.6}, got, "per-turn costs")
+}
+
+// A result with no total reports no cost at all, and must not disturb the
+// baseline the next priced turn is measured against.
+func TestNativeTurnEndWithoutACostKeepsTheBaseline(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	p := newClaudeProvider()
+
+	p.BusFramesNative([]byte(`{"type":"result","subtype":"success","total_cost_usd":1.0}`), 1000)
+	free := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1001)
+	next := p.BusFramesNative([]byte(`{"type":"result","subtype":"success","total_cost_usd":1.5}`), 1002)
+
+	ck.Require().Len(free, 1, "events")
+	ck.Nil(free[0].GetTurnEnd().CostUsd, "an unpriced result reports no cost")
+	ck.Require().Len(next, 1, "events")
+	ck.Eq(0.5, next[0].GetTurnEnd().GetCostUsd(), "cost measured from the last priced total")
 }
