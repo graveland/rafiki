@@ -113,9 +113,17 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	// of HTTP/1.1. This is what lets the control plane and the executor link
 	// share one port and one certificate; a wrong endpoint now fails with a
 	// readable HTTP status instead of as garbage in the first frame.
+	//
+	// The fixed deadline bounds a silent peer; closing the connection when ctx
+	// is done ends the attempt without waiting it out.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	upConn, resp, err := upgradeconn.Dial(conn, upgradeconn.Executor, host, hdr)
 	_ = conn.SetDeadline(time.Time{})
+	if !stop() {
+		// ctx fired and closed the connection under the upgrade.
+		return ctx.Err()
+	}
 	if err != nil {
 		return classifyRefusal(err)
 	}
@@ -198,13 +206,13 @@ func dialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, string, error)
 		tlsCfg.VerifyPeerCertificate = pinVerify(o.PinCert)
 	}
 
-	conn, err := tls.DialWithDialer(&net.Dialer{}, "tcp", o.Addr, tlsCfg)
+	// DialContext, not tls.DialWithDialer: that one handshakes on its own with
+	// no deadline, so a peer that accepts the TCP connection and then says
+	// nothing would hold this goroutine forever. The handshake runs under ctx.
+	d := tls.Dialer{NetDialer: &net.Dialer{}, Config: tlsCfg}
+	conn, err := d.DialContext(ctx, "tcp", o.Addr)
 	if err != nil {
 		return nil, "", fmt.Errorf("dial %s: %w", o.Addr, err)
-	}
-	if err := conn.HandshakeContext(ctx); err != nil {
-		conn.Close()
-		return nil, "", fmt.Errorf("tls handshake: %w", err)
 	}
 	return conn, sni, nil
 }
