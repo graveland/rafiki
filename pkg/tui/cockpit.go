@@ -205,7 +205,19 @@ type seedMsg struct {
 
 // seedRetryMsg fires when a failed seed's backoff timer expires.
 type seedRetryMsg struct{}
-type sendFailedMsg struct{ err error }
+
+// sendFailedMsg carries enough of the attempt to retry it: the input pane is
+// already cleared by the time a send fails, so without the draft here a refused
+// message would be gone.
+type sendFailedMsg struct {
+	err     error
+	childID string
+	// mode is what the user asked for, before sendModeFor adapted it to the
+	// child's state at send time.
+	mode   rafikiv1.SendMode
+	text   string
+	images []stagedAttachment
+}
 
 // previewTickMsg fires previewDebounce after the rail cursor landed on a row
 // whose transcript the pane is not already live on. Several can be pending at
@@ -455,6 +467,9 @@ type Cockpit struct {
 	endArmedID string
 	// endAsk is the pending "include subagents?" question, nil when none.
 	endAsk *endAsk
+	// resumeAsk is the pending "resume and send?" question after a message
+	// was refused because its target had exited, nil when none.
+	resumeAsk *resumeAsk
 
 	// currency is the display conversion loaded once at construction, the
 	// same way modelView is -- a `rafiki config set` takes effect on the
@@ -1002,8 +1017,11 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case sendFailedMsg:
-		c.status = "send failed: " + msg.err.Error()
 		c.pending = ""
+		if c.askToResume(msg) {
+			return c, nil
+		}
+		c.status = "send failed: " + msg.err.Error()
 		return c, nil
 
 	case modelsLoadedMsg:
@@ -1326,6 +1344,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// A pending "include subagents?" question owns the next key outright.
 	if c.endAsk != nil {
 		return c, c.answerEndAsk(msg.String())
+	}
+	if c.resumeAsk != nil {
+		return c, c.answerResumeAsk(msg.String())
 	}
 
 	// Any keystroke that is not the repeat disarms the end confirmation, for
@@ -1762,15 +1783,20 @@ func (c *Cockpit) send(mode rafikiv1.SendMode, text string) tea.Cmd {
 }
 
 // sendWith submits to the focused child, carrying any staged attachments.
+func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedAttachment) tea.Cmd {
+	return c.sendTo(c.focused(), mode, text, images)
+}
+
+// sendTo submits to child, carrying any staged attachments.
 //
 // Images go FIRST in the block list, matching llm.UserContent: the common shape
 // is a screenshot followed by a question about it, and a model attends better
 // to an image that precedes the text asking about it.
-func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedAttachment) tea.Cmd {
-	child := c.focused()
+func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, images []stagedAttachment) tea.Cmd {
 	if child == "" {
 		return nil
 	}
+	asked := mode
 	if n, ok := c.rail.Get(child); ok {
 		mode = sendModeFor(mode, n.Status)
 	}
@@ -1804,7 +1830,7 @@ func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedA
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, err := c.client.Send(ctx, connect.NewRequest(req)); err != nil {
-			return sendFailedMsg{err: err}
+			return sendFailedMsg{err: err, childID: child, mode: asked, text: text, images: images}
 		}
 		return nil
 	}

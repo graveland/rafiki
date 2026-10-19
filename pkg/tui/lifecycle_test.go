@@ -8,9 +8,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"connectrpc.com/connect"
 	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -423,4 +426,97 @@ func TestResumeFailureIsReportedAndSuccessReseeds(t *testing.T) {
 	c.Update(resumedMsg{childID: "c_1", name: "one"})
 	ck.StrContains(c.notice, "resumed one", "notice")
 	ck.True(c.reseedInFlight, "a resume must reseed")
+}
+
+// ── send to an exited agent ──────────────────────────────────────────────────
+
+func exitedSendFailure(childID, text string) sendFailedMsg {
+	err := rpcreason.Attach(connect.NewError(connect.CodeFailedPrecondition, errors.New("child has exited")), protocol.ErrChildExited)
+	return sendFailedMsg{err: err, childID: childID, mode: rafikiv1.SendMode_SEND_MODE_PROMPT, text: text}
+}
+
+// A send to an exited agent used to vanish into a status line. It must instead
+// ask, and keep what was typed until the question is answered.
+func TestSendToExitedAgentAsksToResume(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+	exitChild(c, "c_1")
+	c.pending = "hello"
+
+	c.Update(exitedSendFailure("c_1", "hello"))
+
+	ck.Require().NotNil(c.resumeAsk, "an exited-agent send failure must open the resume question")
+	ck.Eq("hello", c.resumeAsk.text, "draft held by the question")
+	ck.Eq("", c.pending, "the pending marker must clear")
+	ck.StrContains(c.notice, "resume", "notice")
+}
+
+func TestSendFailureForOtherReasonsStaysAStatusLine(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+
+	c.Update(sendFailedMsg{err: errors.New("boom"), childID: "c_1", text: "hello"})
+
+	ck.Nil(c.resumeAsk, "only child_exited may open the resume question")
+	ck.StrContains(c.status, "send failed", "status")
+}
+
+func TestAbortToExitedAgentDoesNotAskToResume(t *testing.T) {
+	c := railWith(t, "c_1")
+	msg := exitedSendFailure("c_1", "")
+	msg.mode = rafikiv1.SendMode_SEND_MODE_ABORT
+
+	c.Update(msg)
+
+	assert.NewCollecting(t).Nil(c.resumeAsk, "aborting an exited agent must not offer to resume it")
+}
+
+func TestResumeAskYesResumesAndSendsAfterwards(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+	exitChild(c, "c_1")
+	c.Update(exitedSendFailure("c_1", "hello"))
+
+	ck.NotNil(press(c, "y"), "y must issue the resume")
+	ck.Nil(c.resumeAsk, "answering must close the question")
+
+	cmd := c.applyResumed(resumedMsg{childID: "c_1", name: "c_1", resend: &resumeAsk{
+		childID: "c_1", name: "c_1", mode: rafikiv1.SendMode_SEND_MODE_PROMPT, text: "hello",
+	}})
+	ck.NotNil(cmd, "a successful resume must carry the held message on")
+	ck.Eq("hello", c.pending, "the re-send shows the message as pending")
+}
+
+func TestResumeAskAnyOtherKeyKeepsTheDraft(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+	exitChild(c, "c_1")
+	c.Update(exitedSendFailure("c_1", "hello"))
+
+	ck.Nil(press(c, "n"), "declining must not issue a command")
+	ck.Nil(c.resumeAsk, "answering must close the question")
+	ck.Eq("hello", c.ta.Value(), "declined send must come back as the draft")
+}
+
+func TestDeclinedDraftIsPrependedToWhatWasTypedSince(t *testing.T) {
+	c := railWith(t, "c_1")
+	c.Update(exitedSendFailure("c_1", "hello"))
+	c.ta.SetValue("next")
+
+	press(c, "n")
+
+	assert.NewCollecting(t).Eq("hello\nnext", c.ta.Value(), "draft must not overwrite newer input")
+}
+
+func TestFailedResumeGivesTheDraftBack(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+
+	cmd := c.applyResumed(resumedMsg{childID: "c_1", name: "c_1", err: errors.New("boom"), resend: &resumeAsk{
+		childID: "c_1", name: "c_1", text: "hello",
+	}})
+
+	ck.Nil(cmd, "a failed resume must not send")
+	ck.Eq("hello", c.ta.Value(), "draft")
+	ck.StrContains(c.notice, "could not resume", "notice")
 }

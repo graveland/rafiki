@@ -56,6 +56,9 @@ type resumedMsg struct {
 	childID string
 	name    string
 	err     error
+	// resend is the message that was refused while the child was exited, sent
+	// once the resume lands. Nil for a plain `r` resume.
+	resend *resumeAsk
 }
 
 type closedMsg struct {
@@ -77,6 +80,19 @@ type endAsk struct {
 	// close.
 	verb string
 	kids int
+}
+
+// resumeAsk is the question a refused send poses when its target has exited:
+// resume it and deliver the message, or take the message back. It is modal like
+// endAsk: the next key answers it, and any key but the affirmative declines.
+type resumeAsk struct {
+	childID string
+	name    string
+	// mode is what the user asked for, before it was adapted to the child's
+	// state; the re-send adapts it again against the resumed child.
+	mode   rafikiv1.SendMode
+	text   string
+	images []stagedAttachment
 }
 
 type budgetSetMsg struct {
@@ -196,13 +212,67 @@ func (c *Cockpit) killCmd(childID, name string, force, include bool) tea.Cmd {
 
 // resumeCmd restarts an exited child.
 func (c *Cockpit) resumeCmd(childID, name string) tea.Cmd {
+	return c.resumeThenSend(childID, name, nil)
+}
+
+// resumeThenSend restarts an exited child and hands resend, when set, back on
+// the outcome so applyResumed can deliver it or return it to the input.
+func (c *Cockpit) resumeThenSend(childID, name string, resend *resumeAsk) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
 		_, err := c.client.Resume(ctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID}))
-		return resumedMsg{childID: childID, name: name, err: err}
+		return resumedMsg{childID: childID, name: name, err: err, resend: resend}
 	}
+}
+
+// resumeAskKey is the answer that resumes; every other key declines.
+const resumeAskKey = "y"
+
+// askToResume opens the resume question when msg is a message refused because
+// its target had exited, and reports whether it did. An abort has nothing to
+// deliver, so it never asks.
+func (c *Cockpit) askToResume(msg sendFailedMsg) bool {
+	if msg.mode == rafikiv1.SendMode_SEND_MODE_ABORT ||
+		rpcreason.Reason(msg.err) != protocol.ErrChildExited ||
+		(strings.TrimSpace(msg.text) == "" && len(msg.images) == 0) {
+		return false
+	}
+	name := msg.childID
+	if n, ok := c.rail.Get(msg.childID); ok && n.Name != "" {
+		name = n.Name
+	}
+	c.resumeAsk = &resumeAsk{
+		childID: msg.childID, name: name,
+		mode: msg.mode, text: msg.text, images: msg.images,
+	}
+	c.setNotice(name + " has exited — " + resumeAskKey + " = resume and send, any other key keeps your message as a draft")
+	return true
+}
+
+// answerResumeAsk consumes the key that answers the pending resumeAsk.
+func (c *Cockpit) answerResumeAsk(key string) tea.Cmd {
+	ask := c.resumeAsk
+	c.resumeAsk = nil
+	if key == resumeAskKey {
+		c.setNotice("resuming " + ask.name + "…")
+		return c.resumeThenSend(ask.childID, ask.name, ask)
+	}
+	c.restoreDraft(ask)
+	c.setNotice("kept as a draft")
+	return nil
+}
+
+// restoreDraft puts a refused message back in the input pane. Anything typed
+// since the send stays, after the draft, so nothing is overwritten.
+func (c *Cockpit) restoreDraft(ask *resumeAsk) {
+	text := ask.text
+	if cur := c.ta.Value(); cur != "" {
+		text += "\n" + cur
+	}
+	c.ta.SetValue(text)
+	c.attachments = append(ask.images, c.attachments...)
 }
 
 // resumeSelected implements `r` on the agents pane. Only an exited row can be
@@ -229,11 +299,18 @@ func (c *Cockpit) resumeSelected() tea.Cmd {
 func (c *Cockpit) applyResumed(m resumedMsg) tea.Cmd {
 	if m.err != nil {
 		c.setNotice("could not resume " + m.name + ": " + trimRPCError(m.err))
+		if m.resend != nil {
+			c.restoreDraft(m.resend)
+		}
 		return nil
 	}
 	c.setNotice("resumed " + m.name)
 	c.reseeding = true
-	return c.maybeReseed(nil)
+	reseed := c.maybeReseed(nil)
+	if m.resend == nil {
+		return reseed
+	}
+	return tea.Batch(reseed, c.sendTo(m.resend.childID, m.resend.mode, m.resend.text, m.resend.images))
 }
 
 // closeCmd finalizes an exited child: it leaves the daemon's store and can
