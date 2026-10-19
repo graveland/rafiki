@@ -114,6 +114,11 @@ Three Swahili words, three roles:
   while costing nothing itself, coordinating the `fundi`/`claude` children it
   spawns from Python. Hosted locally or on an executor under daraja; its exit
   is its result, and its `cost_usd` is its subtree's spend.
+  [rafiki-review-swarm](https://github.com/graveland/rafiki-review-swarm) is a
+  worked example: lens-driven code review where each stage is a script child
+  spawning narrow reviewers, then fresh refuters, as one budgeted tree. Its
+  "review home" is a git repo registered with `rafiki repo`, so rafiki clones
+  it onto executors and builds its venv.
 - **Batch transport rides on the model id** — a fundi child on a model id
   ending `:batch` sends its first call through the OpenRouter Batch API
   (parked, hours-scale work — the rail's `⧖` glyph) and goes live on the base
