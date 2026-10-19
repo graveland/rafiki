@@ -218,8 +218,7 @@ func (s *Server) GetHistory(
 
 	msgs, err := s.history.Load(ctx, conversationID)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("load history: %w", err))
+		return nil, unmappedErr(err, "rpc", "GetHistory", "conversationId", conversationID)
 	}
 
 	if req.Msg.AfterOrdinal != nil {

@@ -58,7 +58,7 @@ func (s *Server) GetRateLimitStatus(
 	}
 	st, ok, err := (*p).RateLimitStatus(ctx)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, unmappedErr(err, "rpc", "GetRateLimitStatus")
 	}
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound,

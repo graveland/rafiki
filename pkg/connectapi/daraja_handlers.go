@@ -208,7 +208,7 @@ func (s *Server) DarajaLaunch(
 		Spec:       spec,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, unmappedErr(err, "rpc", "DarajaLaunch", "childId", childID)
 	}
 
 	return connect.NewResponse(&rafikiv1.DarajaLaunchResponse{

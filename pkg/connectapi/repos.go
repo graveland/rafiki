@@ -133,7 +133,7 @@ func repoError(err error) error {
 	case errors.Is(err, repos.ErrIntervalTooShort):
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "repoError")
 }
 
 // validateRepoName applies the repo name rule client-side of the

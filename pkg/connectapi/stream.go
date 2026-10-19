@@ -5,7 +5,6 @@ package connectapi
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"connectrpc.com/connect"
@@ -186,7 +185,7 @@ func (s *Server) replay(
 		for {
 			recs, err := elog.Read(ctx, cid, afterOrd, replayPageSize)
 			if err != nil {
-				return connect.NewError(connect.CodeInternal, fmt.Errorf("replay read child %s: %w", cid, err))
+				return unmappedErr(err, "rpc", "StreamEvents", "phase", "replay read", "childId", cid)
 			}
 			for _, rec := range recs {
 				afterOrd = rec.Ordinal
@@ -195,7 +194,7 @@ func (s *Server) replay(
 				}
 				ev, err := rec.Decode()
 				if err != nil {
-					return connect.NewError(connect.CodeInternal, fmt.Errorf("replay event %s:%d: %w", cid, rec.Ordinal, err))
+					return unmappedErr(err, "rpc", "StreamEvents", "phase", "replay decode", "childId", cid, "ordinal", rec.Ordinal)
 				}
 				ev.Ordinal = &rec.Ordinal
 				if !filter.Match(ev, ln) {

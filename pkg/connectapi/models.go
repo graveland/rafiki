@@ -81,7 +81,7 @@ func (s *Server) ListModels(
 	}
 	rows, err := (*p).ListModels(ctx, req.Msg.GetProvider(), req.Msg.GetKind())
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, unmappedErr(err, "rpc", "ListModels")
 	}
 	out := make([]*rafikiv1.ModelRow, 0, len(rows))
 	for _, r := range rows {

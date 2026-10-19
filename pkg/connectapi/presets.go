@@ -77,7 +77,7 @@ func presetError(err error) error {
 	if errors.Is(err, ErrPresetAuthoring) {
 		return connect.NewError(connect.CodePermissionDenied, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "presetError")
 }
 
 func (s *Server) ListPresets(

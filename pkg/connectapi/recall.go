@@ -83,7 +83,7 @@ func recallError(err error) error {
 	case errors.Is(err, ErrNoBackfillBudget):
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "recallError")
 }
 
 func (s *Server) Recall(

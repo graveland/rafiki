@@ -79,7 +79,7 @@ func providerBanError(err error) error {
 	if errors.Is(err, ErrInvalidProviderBan) {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "providerBanError")
 }
 
 func toProtoProviderBan(r ProviderBanRow) *rafikiv1.ProviderBan {

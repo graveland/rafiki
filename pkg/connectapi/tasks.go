@@ -77,7 +77,7 @@ func (s *Server) ListTasks(
 		Limit: limit,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, unmappedErr(err, "rpc", "ListTasks")
 	}
 	for _, t := range rows {
 		out.Tasks = append(out.Tasks, &rafikiv1.TaskRow{

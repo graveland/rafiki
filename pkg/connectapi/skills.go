@@ -105,7 +105,7 @@ func skillError(err error) error {
 	if errors.Is(err, ErrSkillNotFound) {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "skillError")
 }
 
 func toProtoSkill(r SkillRow) *rafikiv1.SkillRow {

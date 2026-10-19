@@ -2108,7 +2108,12 @@ detail is attached, because an unredacted dependency error names
 infrastructure the caller has no business learning from a failed request (a
 pgx failure names the database host, user and database). The handlers
 practise **log-then-redact**: the cause is logged at the call site first, or
-it is lost. `ConnectErr` itself does not log.
+it is lost. `ConnectErr` itself does not log; `unmappedErr`
+(`pkg/connectapi/errmap.go`) is log-then-`ConnectErr` in one call and is how
+every per-manager error mapper and inline backend failure ends, so none of them
+wraps a raw error as `CodeInternal`. Pinned by
+`TestBackendErrorMappersRedactStoreFailuresAndKeepReasons` and
+`TestInlineBackendErrorsAreRedactedAndKeepReasons` (`pkg/connectapi`).
 
 **Refusals name the credential, never the secret**: the provenance gate's
 `CodePermissionDenied` names the procedure and the credential kind; the user

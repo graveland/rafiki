@@ -4,6 +4,7 @@ package connectapi
 
 import (
 	"errors"
+	"log/slog"
 
 	"connectrpc.com/connect"
 
@@ -101,4 +102,18 @@ func ConnectErr(err error) error {
 		code = connect.CodeInternal
 	}
 	return rpcreason.Attach(connect.NewError(code, ce), ce.Code)
+}
+
+// unmappedErr is the fallthrough every handler and per-manager mapper ends in
+// for an error it has no sentinel for: ConnectErr, plus the log line ConnectErr
+// promises its caller will write. The peer sees the fixed internal text (or, for
+// a ControllerError, its authored message, code and reason); the cause stays in
+// the daemon's log, with attrs naming what was being done. A ControllerError is
+// an authored refusal rather than a backend failure, so it is not logged.
+func unmappedErr(err error, attrs ...any) error {
+	var ce *ControllerError
+	if !errors.As(err, &ce) {
+		slog.Error("connectapi: backend error", append(attrs, "error", err)...)
+	}
+	return ConnectErr(err)
 }

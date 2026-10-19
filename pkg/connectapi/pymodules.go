@@ -70,7 +70,7 @@ func pymoduleError(err error) error {
 	if errors.Is(err, pymodules.ErrNotFound) {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "pymoduleError")
 }
 
 func toProtoPymodule(r PymoduleRow) *rafikiv1.PymoduleRow {

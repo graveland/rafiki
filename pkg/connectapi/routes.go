@@ -78,7 +78,7 @@ func routeError(err error) error {
 	if errors.Is(err, ErrRouteNotFound) {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
-	return connect.NewError(connect.CodeInternal, err)
+	return unmappedErr(err, "mapper", "routeError")
 }
 
 // toProtoRouteRow renders the row's creation time as a Timestamp.
