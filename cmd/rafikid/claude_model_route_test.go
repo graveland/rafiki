@@ -7,6 +7,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
@@ -38,13 +39,13 @@ func TestClaudeSpawnRefusesPassthroughWithANonAnthropicModel(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := proxiedClaude(t, "or-key")
 
-	err := c.checkClaudeModelRoutable(claudeReq("openrouter/z-ai/glm-5.3-flash", "on"))
+	err := c.checkClaudeModelRoutable(claudeReq("z-ai/glm-5.3-flash", "on"))
 
 	ck.Require().Error(err, "passthrough on + an OpenRouter model must be refused")
 	ce := refusal(t, err)
 	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
 	ck.StrContains(ce.Message, "passthrough", "message")
-	ck.StrContains(ce.Message, "openrouter/z-ai/glm-5.3-flash", "message names the model")
+	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash", "message names the model")
 }
 
 // With no OpenRouter key the proxy answers 502 "openrouter not configured",
@@ -53,7 +54,7 @@ func TestClaudeSpawnRefusesAnOpenRouterModelWithNoOpenRouterKey(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := proxiedClaude(t, "")
 
-	err := c.checkClaudeModelRoutable(claudeReq("openrouter/openai/gpt-5.6-sol", ""))
+	err := c.checkClaudeModelRoutable(claudeReq("openai/gpt-5.6-sol", ""))
 
 	ck.Require().Error(err, "an OpenRouter model with no key must be refused")
 	ce := refusal(t, err)
@@ -66,12 +67,11 @@ func TestClaudeSpawnAdmitsWhatTheProxyCanServe(t *testing.T) {
 	cases := []struct {
 		name, key, model, passthrough string
 	}{
-		{"openrouter model, key present", "or-key", "openrouter/openai/gpt-5.6-sol", ""},
-		{"openrouter model, passthrough off", "or-key", "openrouter/openai/gpt-5.6-sol", "off"},
+		{"openrouter model, key present", "or-key", "openai/gpt-5.6-sol", ""},
+		{"openrouter model, passthrough off", "or-key", "openai/gpt-5.6-sol", "off"},
 		{"anthropic id, passthrough on, no key", "", "anthropic/claude-opus-5-5", "on"},
 		{"dashed anthropic id", "", "claude-opus-5-5", "on"},
-		// A bare name is UNKNOWN to this check, not "not Anthropic": Claude Code's
-		// own aliases are bare, and unknown must admit.
+		// A bare name routes to Anthropic: Claude Code's own aliases are bare.
 		{"bare alias", "", "sonnet", "on"},
 		{"no model", "", "", "on"},
 	}
@@ -90,10 +90,10 @@ func TestClaudeModelCheckOnlyAppliesToProxiedClaudeChildren(t *testing.T) {
 
 	unproxied := &Controller{}
 	t.Setenv("OPENROUTER_API_KEY", "")
-	ck.NoError(unproxied.checkClaudeModelRoutable(claudeReq("openrouter/openai/gpt-5.6-sol", "on")), "no proxy URL: the child talks to whatever base URL is ambient")
+	ck.NoError(unproxied.checkClaudeModelRoutable(claudeReq("openai/gpt-5.6-sol", "on")), "no proxy URL: the child talks to whatever base URL is ambient")
 
 	c := proxiedClaude(t, "")
-	fundi := claudeReq("openrouter/openai/gpt-5.6-sol", "on")
+	fundi := claudeReq("openai/gpt-5.6-sol", "on")
 	fundi.Kind = protocol.KindFundi
 	ck.NoError(c.checkClaudeModelRoutable(fundi), "fundi is not proxied")
 }
@@ -105,7 +105,7 @@ func TestSpawnRefusesAnUnroutableClaudeModel(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
 	before := len(c.st.List())
 
-	_, err := c.Spawn(context.Background(), claudeReq("openrouter/openai/gpt-5.6-sol", ""), users.Identity{})
+	_, err := c.Spawn(context.Background(), claudeReq("openai/gpt-5.6-sol", ""), users.Identity{})
 
 	ck := assert.NewCollecting(t)
 	ck.Require().Error(err, "Spawn must refuse")
@@ -113,17 +113,19 @@ func TestSpawnRefusesAnUnroutableClaudeModel(t *testing.T) {
 	ck.Eq(before, len(c.st.List()), "a refused spawn registers no child")
 }
 
-// "openai/gpt-5.6-sol" is not a spelling rafiki routes: the provider set knows
-// anthropic and openrouter, so the OpenRouter id is "openrouter/openai/...". The
-// proxy answers the bare spelling with a 400 on the first turn; say so at spawn.
-func TestClaudeSpawnRefusesAnUnknownProviderPrefix(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	c := proxiedClaude(t, "or-key")
+// The proxy routes by the shape of the resolved id, not through the provider
+// registry: "anthropic/<id>" is stripped to a bare Anthropic id by
+// routing.ResolveModel. A providers.toml with no "anthropic" provider must not
+// make the check refuse what the proxy serves.
+func TestClaudeSpawnAdmitsAnAnthropicIDWithNoAnthropicProvider(t *testing.T) {
+	c := proxiedClaude(t, "")
+	c.providers = &providers.Set{
+		DefaultProvider: "ollama",
+		Providers: map[string]providers.Provider{
+			"ollama":     {Name: "ollama", Kind: providers.KindOpenAI},
+			"openrouter": {Name: "openrouter", Kind: providers.KindAnthropicOpenRouter},
+		},
+	}
 
-	err := c.checkClaudeModelRoutable(claudeReq("openai/gpt-5.6-sol", ""))
-
-	ck.Require().Error(err, "an unknown provider prefix must be refused")
-	ce := refusal(t, err)
-	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
-	ck.StrContains(ce.Message, `unknown provider "openai"`, "message names the unknown provider")
+	assert.NewCollecting(t).NoError(c.checkClaudeModelRoutable(claudeReq("anthropic/claude-opus-5-5", "")), "admit")
 }

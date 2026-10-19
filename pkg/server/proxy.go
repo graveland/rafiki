@@ -24,7 +24,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/claudethread"
-	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -81,8 +80,6 @@ type MessagesProxy struct {
 	rawTraceAll bool             // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
 
 	guard *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
-
-	set *providers.Set // the provider registry; nil = routing via the old slash rule
 
 	quotaStore *quota.Store // nil = no agent database; quota capture disabled
 
@@ -783,125 +780,25 @@ func (p *MessagesProxy) primaryOutOfCredit(resp *http.Response, status int) bool
 	return true
 }
 
-// selectUpstream routes the request and returns the upstream response. When the
-// provider registry is set, the model is resolved through it; otherwise the old
-// slash-based rule applies. A passthrough credential cannot serve a non-Anthropic
-// provider.
+// selectUpstream routes the request and returns the upstream response. The
+// routing decision is RouteModel's; a refusal is answered here without
+// contacting an upstream.
 func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, reqBody []byte, model, path string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
 	passthrough := PassthroughCredential(r.Context()) != ""
 
-	// Resolve the model to a provider when the registry is configured.
-	var provider *providers.Provider
-	if p.set != nil {
-		prov, provModel, splitErr := p.set.Split(model)
-		if splitErr != nil {
-			msg := splitErr.Error()
-			p.failTurn(r, cr, msg)
-			http.Error(w, msg, http.StatusBadRequest)
-			return nil, "", nil, true
+	route, rerr := RouteModel(model, passthrough, p.orKey != "")
+	if rerr != nil {
+		status := http.StatusBadRequest
+		if errors.Is(rerr, ErrOpenRouterNotConfigured) {
+			status = http.StatusBadGateway
 		}
-		provider = &prov
-		_ = provModel // the proxy forwards body JSON as-is; model rewriting is internal only
+		p.failTurn(r, cr, rerr.Error())
+		http.Error(w, rerr.Error(), status)
+		return nil, "", nil, true
 	}
-
-	if provider != nil {
-		if passthrough && provider.Kind != providers.KindAnthropic {
-			msg := "passthrough auth cannot serve non-Anthropic provider " + provider.Name
-			p.failTurn(r, cr, msg)
-			http.Error(w, msg, http.StatusBadRequest)
-			return nil, "", nil, true
-		}
-		switch provider.Kind {
-		case providers.KindAnthropic:
-			if passthrough {
-				// No breaker and no failover: every fallback path leads to
-				// OpenRouter on rafiki's key. An upstream error surfaces to
-				// the caller verbatim instead.
-				resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, path, false, reqBody, r)
-				return resp, "anthropic", err, false
-			}
-			// Primary Anthropic with breaker+failover logic.
-			now := time.Now()
-			if p.breaker == nil || p.breaker.UsePrimary(now) {
-				resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, reqBody, r)
-				if p.breaker == nil {
-					return resp, "anthropic", err, false
-				}
-				status := statusOf(resp)
-				primaryFailed := routing.ClassifyFailure(status, err)
-				outOfCredit := !primaryFailed && p.primaryOutOfCredit(resp, status)
-				for i := 0; primaryFailed && i < len(routing.RetryBackoffs); i++ {
-					if resp != nil {
-						resp.Body.Close()
-					}
-					select {
-					case <-time.After(routing.RetryBackoffs[i]):
-					case <-r.Context().Done():
-						return resp, "anthropic", r.Context().Err(), false
-					}
-					p.logger.WarnContext(r.Context(), "proxy: primary failed, retrying before failover",
-						"attempt", i+1, "status", status, "error", err)
-					resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, reqBody, r)
-					status = statusOf(resp)
-					primaryFailed = routing.ClassifyFailure(status, err)
-				}
-				p.breaker.RecordResult(now, primaryFailed || outOfCredit)
-				if (!primaryFailed && !outOfCredit) || p.orKey == "" {
-					return resp, "anthropic", err, false
-				}
-				if resp != nil {
-					resp.Body.Close()
-				}
-				resp, err = p.upstreamRequest(r.Context(), p.orURL, p.orKey, "/v1/messages", true, reqBody, r, cr.convID)
-				return resp, "openrouter", err, false
-			}
-			// Breaker open, use fallback.
-			if p.orKey == "" {
-				return nil, "anthropic", errors.New("anthropic primary unavailable and no fallback configured"), false
-			}
-			resp, err = p.upstreamRequest(r.Context(), p.orURL, p.orKey, "/v1/messages", true, reqBody, r, cr.convID)
-			return resp, "openrouter", err, false
-		case providers.KindAnthropicOpenRouter:
-			if passthrough {
-				msg := "passthrough auth cannot serve non-Anthropic provider " + provider.Name
-				p.failTurn(r, cr, msg)
-				http.Error(w, msg, http.StatusBadRequest)
-				return nil, "", nil, true
-			}
-			if p.orKey == "" {
-				p.failTurn(r, cr, "openrouter not configured for model "+model)
-				http.Error(w, "openrouter not configured for model "+model, http.StatusBadGateway)
-				return nil, "", nil, true
-			}
-			resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
-			return resp, "openrouter", err, false
-		default:
-			msg := "unsupported provider kind " + string(provider.Kind)
-			p.failTurn(r, cr, msg)
-			http.Error(w, msg, http.StatusBadRequest)
-			return nil, "", nil, true
-		}
-	}
-
-	// Fallback: old slash-based routing (no provider registry configured).
-	if strings.Contains(model, "/") {
-		if passthrough {
-			// The caller's Anthropic credential cannot pay OpenRouter, and
-			// falling back to rafiki's key would bill the party the caller
-			// explicitly opted out of billing.
-			msg := "passthrough auth cannot serve non-Anthropic model " + model
-			p.failTurn(r, cr, msg)
-			http.Error(w, msg, http.StatusBadRequest)
-			return nil, "", nil, true
-		}
-		// Slash id = an OpenRouter-native model; route directly to OpenRouter,
-		// skipping the Anthropic primary + breaker. No failover: the caller asked
-		// for this specific model. doOpenRouter forwards slash ids untranslated.
-		if p.orKey == "" {
-			p.failTurn(r, cr, "openrouter not configured for model "+model)
-			http.Error(w, "openrouter not configured for model "+model, http.StatusBadGateway)
-			return nil, "", nil, true
-		}
+	if route == RouteOpenRouter {
+		// No failover: the caller asked for this specific model.
+		// doOpenRouter forwards slash ids untranslated.
 		resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
 		return resp, "openrouter", err, false
 	}

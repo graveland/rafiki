@@ -1,13 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/server"
 )
 
 // checkClaudeModelRoutable refuses, at spawn, a proxied claude child whose
@@ -16,11 +18,13 @@ import (
 // operator sees an agent that is merely busy, and finds the cause in the proxy
 // log.
 //
-// It applies the proxy's own rules (MessagesProxy.selectUpstream), resolved
-// through the same provider set, and only to children the proxy serves: an
-// unproxied claude child talks to whatever base URL is ambient on its executor,
-// which this daemon cannot see. A bare name such as "sonnet" resolves to the
-// default Anthropic provider and is admitted -- unknown is not "not Anthropic".
+// It takes the proxy's own two steps -- routing.ResolveModel, then
+// server.RouteModel -- with the passthrough decision the child is launched with
+// and the OpenRouter key the proxy is built with, and only for children the
+// proxy serves: an unproxied claude child talks to whatever base URL is ambient
+// on its executor, which this daemon cannot see. A model ResolveModel cannot
+// resolve yet (an alias against a cold catalog) is admitted: the catalog may be
+// warm by the first turn, and the proxy remains the authority.
 func (c *Controller) checkClaudeModelRoutable(req protocol.SpawnRequest) error {
 	if req.Kind != protocol.KindClaude || req.Model == "" {
 		return nil
@@ -28,27 +32,25 @@ func (c *Controller) checkClaudeModelRoutable(req protocol.SpawnRequest) error {
 	if url, _ := c.proxyEndpoint(); url == "" || !proxyRoutesKind(req.Kind) {
 		return nil
 	}
-	prov, _, err := providersOrDefault(c.providers).Split(req.Model)
+	resolved, err := routing.ResolveModel(c.catalog, "", req.Model)
 	if err != nil {
-		return claudeModelRefusal("model %q cannot be routed: %v", req.Model, err)
+		return nil
 	}
-	switch prov.Kind {
-	case providers.KindAnthropic:
+	mode, perr := proxyenv.ParsePassthroughMode(req.PassthroughAuth)
+	if perr != nil {
+		mode = proxyenv.PassthroughAuto // agent_runtime.go degrades the same way
+	}
+	passthrough := proxyenv.PassthroughAuthFor(mode, req.Model)
+	_, err = server.RouteModel(resolved, passthrough, paths.Get("OPENROUTER_API_KEY") != "")
+	switch {
+	case err == nil:
 		return nil
-	case providers.KindAnthropicOpenRouter:
-		mode, perr := proxyenv.ParsePassthroughMode(req.PassthroughAuth)
-		if perr != nil {
-			mode = proxyenv.PassthroughAuto
-		}
-		if proxyenv.PassthroughAuthFor(mode, req.Model) {
-			return claudeModelRefusal("model %q is not an Anthropic model, and passthrough auth bills your Claude subscription, which the proxy will not route to OpenRouter; set passthrough_auth=off or use an Anthropic model", req.Model)
-		}
-		if paths.Get("OPENROUTER_API_KEY") == "" {
-			return claudeModelRefusal("model %q routes through OpenRouter, but the daemon has no OPENROUTER_API_KEY; set it or use an Anthropic model", req.Model)
-		}
-		return nil
+	case errors.Is(err, server.ErrPassthroughNonAnthropic):
+		return claudeModelRefusal("model %q is not an Anthropic model, and passthrough auth bills your Claude subscription, which the proxy will not route to OpenRouter; set passthrough_auth=off or use an Anthropic model", req.Model)
+	case errors.Is(err, server.ErrOpenRouterNotConfigured):
+		return claudeModelRefusal("model %q routes through OpenRouter, but the daemon has no OPENROUTER_API_KEY; set it or use an Anthropic model", req.Model)
 	default:
-		return claudeModelRefusal("model %q resolves to provider %q (kind %s), which the proxy cannot serve a claude child from", req.Model, prov.Name, prov.Kind)
+		return claudeModelRefusal("model %q cannot be routed: %v", req.Model, err)
 	}
 }
 
