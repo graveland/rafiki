@@ -193,3 +193,23 @@ func TestAgentSpawnPrefillParsed(t *testing.T) {
 		c.Empty(sp.spawned, "a failed parse must not spawn, got %d spawns", len(sp.spawned))
 	})
 }
+
+// A child can only discover that the model string carries routing brackets from
+// this description, so the grammar it advertises is pinned here: every key the
+// parser accepts, the :batch refusal, and the post-spawn verb.
+func TestAgentSpawnModelDescribesTheRoutingBrackets(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var desc string
+	for _, p := range (AgentSpawnBlueprint{}).InputSchema().Properties {
+		if p.Name == "model" {
+			desc = p.Description
+		}
+	}
+	c.Require().NotEq("", desc, "agent_spawn has no model property")
+	for _, want := range []string{
+		"[", "sort=", "price|throughput|latency|balanced", "quant=", "prefer=", "only=", "nodata", "zdr",
+		":batch", "agent_route",
+	} {
+		c.StrContains(desc, want, "model description missing %q", want)
+	}
+}

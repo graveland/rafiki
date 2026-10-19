@@ -71,7 +71,14 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 				Description: "Short human-readable name (\"reviewer\", \"impl-auth\"). Optional but makes agent_list readable."},
 			{Name: "model", Type: "string",
 				Description: "Overrides the preset's model; only set this when the human named a model. " +
-					"Model id to run it on. Omit to inherit the daemon default. Use agent_models to see the options."},
+					"Model id to run it on. Omit to inherit the daemon default. Use agent_models to see the options. " +
+					"An id may end in a routing spec in brackets that decides where its requests are served, " +
+					"e.g. \"openrouter/z-ai/glm-5.3[sort=throughput,nodata]\": comma-separated items " +
+					"sort=price|throughput|latency|balanced, quant=<floor like fp8+ or a list a|b>, " +
+					"prefer=<provider slugs a|b> (soft preference), only=<provider slugs a|b> (hard pin), " +
+					"nodata, zdr. Your spec wins per key over the preset's, and the operator's routing " +
+					"policy fills the rest. A \":batch\" model accepts only only=. A malformed spec " +
+					"refuses the spawn. agent_route changes a running agent's spec afterwards."},
 			{Name: "cwd", Type: "string",
 				Description: "Absolute working directory for the agent: where its tools start and " +
 					"relative paths resolve. For an executor-bound agent the executor must be " +

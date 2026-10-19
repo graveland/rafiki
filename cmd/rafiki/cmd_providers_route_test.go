@@ -233,7 +233,7 @@ func TestProvidersRouteCompletionOffersTheSpecTail(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 
 	got := completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[")
-	c.EqDiff([]string{"sort=", "quant=", "only=", "nodata", "zdr"}, got, "keys after [")
+	c.EqDiff([]string{"sort=", "quant=", "prefer=", "only=", "nodata", "zdr"}, got, "keys after [")
 
 	got = completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[sort=")
 	c.EqDiff([]string{
@@ -245,7 +245,7 @@ func TestProvidersRouteCompletionOffersTheSpecTail(t *testing.T) {
 	c.EqDiff([]string{"price"}, got, "values after sort=p")
 
 	got = completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[sort=price,")
-	c.EqDiff([]string{"quant=", "only=", "nodata", "zdr"}, got, "keys after a used sort= must drop it")
+	c.EqDiff([]string{"quant=", "prefer=", "only=", "nodata", "zdr"}, got, "keys after a used sort= must drop it")
 
 	got = completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[nodata,zdr,q")
 	c.EqDiff([]string{"quant="}, got, "keys after two used flags, filtered")

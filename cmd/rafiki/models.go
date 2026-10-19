@@ -41,11 +41,11 @@ func completeModel(cmd *cobra.Command, kind, toComplete string) []string {
 // too: sort= takes one of ParseSpec's four spellings (the parse error's
 // price|throughput|latency|balanced order), quant= names OpenRouter's
 // quantizations (pkg/routing/spec.go's quantTiers plus "unknown"; a caller
-// appends "+" for a floor). only= takes provider slugs, which only the
-// daemon's catalog knows, so nothing is offered for it — these tables mirror
-// pkg/routing's grammar, and the daemon is the validator either way.
+// appends "+" for a floor). prefer= and only= take provider slugs, which only
+// the daemon's catalog knows, so nothing is offered for them — these tables
+// mirror pkg/routing's grammar, and the daemon is the validator either way.
 var (
-	specKeys   = []string{"sort=", "quant=", "only=", "nodata", "zdr"}
+	specKeys   = []string{"sort=", "quant=", "prefer=", "only=", "nodata", "zdr"}
 	specValues = map[string][]string{
 		"sort":  {"price", "throughput", "latency", "balanced"},
 		"quant": {"int4", "fp4", "mxfp4", "nvfp4", "fp6", "int8", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"},
