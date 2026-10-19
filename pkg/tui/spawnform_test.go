@@ -575,3 +575,76 @@ func TestSubmitWithFlagSelectorSkipsTheAmbiguityCheck(t *testing.T) {
 	ck.NotNil(cmd, "a declared selector did not spawn")
 	ck.Nil(c.execPicker, "the picker opened over a declared selector policy")
 }
+
+// ── remembered values on open ────────────────────────────────────────────────
+
+func profiledCockpit(profile string, opts Options) *Cockpit {
+	opts.BaseURL = "http://127.0.0.1:1"
+	opts.ProfileName = profile
+	return NewCockpit(opts)
+}
+
+// The form used to open with an empty model row and only fill it from the
+// remembered value after a kind switch, so the default looked absent until you
+// cycled away and back.
+func TestSpawnFormOpensWithTheRememberedModelAndExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := profiledCockpit("open-remembered", Options{})
+	kind := newSpawnForm().kind()
+	clientstate.RememberModel("open-remembered", kind, "vendor/remembered")
+	clientstate.RememberExecutor("open-remembered", kind, "exec-1")
+
+	c.openSpawnForm()
+
+	ck.Eq("vendor/remembered", c.form.inputs[fieldModel].Value(), "model row")
+	ck.Eq("exec-1", c.form.inputs[fieldExecutor].Value(), "executor row")
+}
+
+func TestSpawnFormOpenedByTheConstructorIsSeededToo(t *testing.T) {
+	kind := newSpawnForm().kind()
+	clientstate.RememberModel("ctor-remembered", kind, "vendor/remembered")
+
+	c := profiledCockpit("ctor-remembered", Options{OpenCreate: true})
+
+	assert.NewCollecting(t).Eq("vendor/remembered", c.form.inputs[fieldModel].Value(), "model row")
+}
+
+// A remembered value is an inference; a declared default is a decision. The
+// declared one must win.
+func TestDeclaredModelOutranksTheRememberedOne(t *testing.T) {
+	kind := newSpawnForm().kind()
+	clientstate.RememberModel("declared-wins", kind, "vendor/remembered")
+
+	c := profiledCockpit("declared-wins", Options{
+		OpenCreate:     true,
+		CreateDefaults: SpawnDefaults{Model: "vendor/declared"},
+	})
+
+	assert.NewCollecting(t).Eq("vendor/declared", c.form.inputs[fieldModel].Value(), "model row")
+}
+
+// A declared kind selects which kind's memory is read.
+func TestRememberedModelFollowsTheDeclaredKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	other := spawnKinds[len(spawnKinds)-1]
+	if other == newSpawnForm().kind() {
+		t.Skip("only one spawn kind")
+	}
+	clientstate.RememberModel("declared-kind", other, "vendor/for-other")
+
+	c := profiledCockpit("declared-kind", Options{
+		OpenCreate:     true,
+		CreateDefaults: SpawnDefaults{Kind: other},
+	})
+
+	ck.Eq(other, c.form.kind(), "kind")
+	ck.Eq("vendor/for-other", c.form.inputs[fieldModel].Value(), "model row")
+}
+
+func TestSpawnFormWithNothingRememberedStaysEmpty(t *testing.T) {
+	c := profiledCockpit("nothing-remembered", Options{})
+
+	c.openSpawnForm()
+
+	assert.NewCollecting(t).Eq("", c.form.inputs[fieldModel].Value(), "model row falls back to the daemon default")
+}

@@ -634,6 +634,21 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 	return c, cmd
 }
 
+// seedRemembered fills the model and executor rows from what was last spawned
+// for the form's kind, so a freshly opened form shows the same values a kind
+// switch would. It only fills rows still empty: a value the caller declared
+// (a flag, a preset, the environment) is a decision and outranks this
+// inference, so it must run after prefill.
+func (c *Cockpit) seedRemembered() {
+	kind := c.form.kind()
+	if c.form.inputs[fieldModel].Value() == "" {
+		c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(c.profileName, kind))
+	}
+	if c.form.inputs[fieldExecutor].Value() == "" {
+		c.form.inputs[fieldExecutor].SetValue(clientstate.LastExecutorFor(c.profileName, kind))
+	}
+}
+
 // kindChanged reacts to the kind row cycling: the two kinds have different
 // model universes, so the typeahead must be rebuilt from the other catalog and
 // that catalog may not be fetched yet. The executor field swaps too -- a

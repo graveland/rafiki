@@ -569,6 +569,7 @@ func NewCockpit(opts Options) *Cockpit {
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
 		c.form.prefill(opts.CreateDefaults)
+		c.seedRemembered()
 		c.form.refreshSuggestions(nil, c.modelView)
 	}
 	if opts.ChildID != "" {
@@ -744,6 +745,7 @@ func (c *Cockpit) seedCmd() tea.Cmd {
 // form is the one thing there is to do about that.
 func (c *Cockpit) openSpawnForm() tea.Cmd {
 	c.form = newSpawnForm()
+	c.seedRemembered()
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
 }
