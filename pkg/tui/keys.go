@@ -80,6 +80,7 @@ type keyMap struct {
 	EndAgent   key.Binding
 	Resume     key.Binding
 	EditBudget key.Binding
+	Rename     key.Binding
 
 	// Any pane: return to input.
 	Escape key.Binding
@@ -194,6 +195,9 @@ func defaultKeyMap() keyMap {
 		// every unmatched key while it has focus, so this costs the textarea
 		// nothing and needs no textareaKeys collision check.
 		EditBudget: key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "budget")),
+
+		// Capital R: lowercase r is Resume.
+		Rename: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
 
 		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back to input")),
 	}

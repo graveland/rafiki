@@ -427,6 +427,7 @@ type Cockpit struct {
 	// while it is up, so this is checked before the global bindings.
 	form       *spawnForm
 	budgetForm *budgetForm
+	renameForm *renameForm
 	// picker is the full model browser opened from the form's model row, nil
 	// when none. It stacks ON TOP of the form -- esc returns to the form
 	// rather than dismissing both, because the other fields are still half
@@ -1051,6 +1052,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.applyBudgetSet(msg)
 		return c, nil
 
+	case renamedMsg:
+		c.applyRenamed(msg)
+		return c, nil
+
 	case tickMsg:
 		if c.notice != "" && time.Now().After(c.noticeUntil) {
 			c.notice = ""
@@ -1347,6 +1352,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if c.budgetForm != nil {
 		return c.handleBudgetFormKey(msg)
 	}
+	if c.renameForm != nil {
+		return c.handleRenameFormKey(msg)
+	}
 
 	// A pending "include subagents?" question owns the next key outright.
 	if c.endAsk != nil {
@@ -1509,6 +1517,13 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				name = id
 			}
 			c.budgetForm = newBudgetForm(id, name, node.MaxCost, c.currency)
+			return c, textinput.Blink
+		case key.Matches(msg, k.Rename):
+			node, ok := c.rail.Get(c.selected)
+			if !ok {
+				return c, nil
+			}
+			c.renameForm = newRenameForm(c.selected, node.Name)
 			return c, textinput.Blink
 		case key.Matches(msg, k.Escape):
 			return c, c.leaveRail()
@@ -2345,7 +2360,7 @@ func (c *Cockpit) bodyHeight() int {
 // wins over both, and no peek can outlive the last row: a zero-row rail is an
 // empty column costing the transcript width for nothing.
 func (c *Cockpit) railCols() int {
-	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.railHidden ||
+	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.renameForm != nil || c.railHidden ||
 		c.rail.Len() == 0 || (c.rail.Len() < 2 && !c.railPeek) {
 		return 0
 	}
@@ -2599,7 +2614,7 @@ func (c *Cockpit) footerHints() string {
 	var bs []key.Binding
 	switch c.focus {
 	case focusRail:
-		bs = []key.Binding{k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape}
+		bs = []key.Binding{k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape}
 	default:
 		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort}
 	}
@@ -2647,7 +2662,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		k.ToggleImages, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
-		k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Escape)...)
+		k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape)...)
 	right = append(right, group("reading",
 		k.ScrollPageUp, k.ScrollTop, k.ScrollBottom,
 		key.NewBinding(key.WithKeys("up", "down"),
@@ -2724,6 +2739,8 @@ func (c *Cockpit) View() tea.View {
 		conv = c.form.view(convWidth, bodyHeight, c.modelView, c.query, c.currency)
 	case c.budgetForm != nil:
 		conv = c.budgetForm.view(convWidth, bodyHeight, c.currency)
+	case c.renameForm != nil:
+		conv = c.renameForm.view(convWidth)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:
@@ -2761,7 +2778,7 @@ func (c *Cockpit) View() tea.View {
 		// would read as if the preview sent it. Coming back to the input
 		// restores it while it is still unacknowledged.
 		conv += "\n" + stylePending.Render("⏳ "+c.pending)
-	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && !c.showHelp && c.sessions[f] != nil:
+	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && !c.showHelp && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
 		}

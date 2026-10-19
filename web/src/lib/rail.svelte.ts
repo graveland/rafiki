@@ -40,6 +40,7 @@ const RAIL_TYPES = [
   'retry',
   'child_spawned',
   'child_exited',
+  'child_renamed',
 ]
 
 const BASE_BACKOFF_MS = 500
@@ -213,6 +214,9 @@ function applyEvent(event: Event): void {
       break
     case 'agentStatus':
       patchRow(id, { status: payload.value.state })
+      break
+    case 'childRenamed':
+      patchRow(id, { name: payload.value.name })
       break
     case 'turnEnd': {
       const cost = payload.value.costUsd

@@ -19,7 +19,7 @@ import (
 // avoid.
 func TestRailAsksForDurableTierAndSmallTypes(t *testing.T) {
 	c := assert.NewAborting(t)
-	c.Len(rail.Types(), 7, "rail.Types()")
+	c.Len(rail.Types(), 8, "rail.Types()")
 	c.NotEq(rafikiv1.EventTier_EVENT_TIER_ALL, rafikiv1.EventTier_EVENT_TIER_DURABLE, "tier constants collapsed")
 }
 

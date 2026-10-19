@@ -37,6 +37,7 @@ func Types() []string {
 		"turn_end",
 		"agent_status",
 		"operator_state",
+		"child_renamed",
 		"error",
 		"retry",
 		"child_spawned",

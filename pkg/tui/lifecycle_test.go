@@ -520,3 +520,52 @@ func TestFailedResumeGivesTheDraftBack(t *testing.T) {
 	ck.Eq("hello", c.ta.Value(), "draft")
 	ck.StrContains(c.notice, "could not resume", "notice")
 }
+
+// ── rename modal ─────────────────────────────────────────────────────────────
+
+func TestRenameKeyOpensModalPrefilled(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "alpha", Status: "idle", Labels: map[string]string{}},
+		{ChildId: "c_2", Name: "beta", Status: "idle", Labels: map[string]string{}},
+	})
+	c.focus = focusRail
+	c.selected = "c_1"
+
+	press(c, "R")
+
+	ck.Require().NotNil(c.renameForm, "renameForm is nil after pressing 'R' on rail")
+	ck.Eq("c_1", c.renameForm.childID, "childID")
+	ck.Eq("alpha", c.renameForm.input.Value(), "prefilled name")
+}
+
+func TestRenameFormRejectsBlankName(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+	c.selected = "c_1"
+	press(c, "R")
+	ck.Require().NotNil(c.renameForm, "renameForm is nil")
+
+	c.renameForm.input.SetValue("   ")
+	_, cmd := c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	ck.Nil(cmd, "cmd returned for a blank name, want nil")
+	ck.NotEq("", c.renameForm.err, "expected an error for a blank name")
+	ck.False(c.renameForm.busy, "busy is true on validation error")
+}
+
+func TestAppliedRenameUpdatesRailAndDismissesModal(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{{ChildId: "c_1", Name: "alpha", Status: "idle", Labels: map[string]string{}}})
+	c.selected = "c_1"
+	press(c, "R")
+	f := c.renameForm
+	ck.Require().NotNil(f, "renameForm is nil")
+
+	c.applyRenamed(renamedMsg{origin: f, childID: "c_1", name: "gamma"})
+
+	n, _ := c.rail.Get("c_1")
+	ck.Eq("gamma", n.Name, "rail name")
+	ck.Nil(c.renameForm, "modal still up after a successful rename")
+}

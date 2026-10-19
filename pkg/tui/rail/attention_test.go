@@ -196,6 +196,7 @@ func TestTypesIsTheSmallStatusSet(t *testing.T) {
 	want := map[string]bool{
 		"turn_end": true, "agent_status": true, "operator_state": true,
 		"error": true, "retry": true, "child_spawned": true, "child_exited": true,
+		"child_renamed": true,
 	}
 	c.Require().Len(got, len(want), "Types() = %v, want the small set in %v", got, want)
 	for _, ty := range got {
@@ -216,6 +217,7 @@ func TestEveryRequestedTypeIsConsumed(t *testing.T) {
 		"retry":          true, // Node.Retrying
 		"child_spawned":  true, // introduces a row
 		"child_exited":   true, // Node.Exited + Notable
+		"child_renamed":  true, // Node.Name
 	}
 	for _, ty := range rail.Types() {
 		assert.NewCollecting(t).False(!consumed[ty], "rail asks for %q but nothing in the rail consumes it", ty)

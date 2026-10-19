@@ -3,6 +3,7 @@ import { Code, ConnectError } from '@connectrpc/connect'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import {
   AgentStatusSchema,
+  ChildRenamedSchema,
   ChildSpawnedSchema,
   EventSchema,
 } from '../gen/rafiki/v1/event_pb'
@@ -90,6 +91,17 @@ function statusEvent(childId: string, state: string, ordinal?: number): Event {
   })
 }
 
+function renamedEvent(childId: string, name: string, ordinal?: number): Event {
+  return create(EventSchema, {
+    childId,
+    ordinal,
+    payload: {
+      case: 'childRenamed',
+      value: create(ChildRenamedSchema, { name }),
+    },
+  })
+}
+
 function spawnedEvent(childId: string, parentId = '', ordinal = 0): Event {
   return create(EventSchema, {
     childId,
@@ -159,6 +171,16 @@ it('ordinal max-tracked and unset ordinal ignored', async () => {
 
   expect(latest.get('c_1')).toBe(4)
   expect(children.get('c_1')?.status).toBe('idle')
+})
+
+it('childRenamed updates the row name', async () => {
+  fake.summaries = [summary({ childId: 'c_1' })]
+  fake.scripts = [{ events: [renamedEvent('c_1', 'shiny', 3)] }]
+
+  startRail()
+  await flush()
+
+  expect(children.get('c_1')?.name).toBe('shiny')
 })
 
 it('unset latest_ordinal seeds -1', async () => {

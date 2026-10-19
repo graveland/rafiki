@@ -407,6 +407,10 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 			n.WaitingOn = p.OperatorState.GetWaitingOn()
 			n.DisplayMsg = p.OperatorState.GetMsg()
 		}
+	case *rafikiv1.Event_ChildRenamed:
+		if statusOrdinalAdmits(n, ev) {
+			n.Name = p.ChildRenamed.GetName()
+		}
 	case *rafikiv1.Event_Retry:
 		if statusOrdinalAdmits(n, ev) {
 			// will_retry=false is the resolution half (fired, cleared by a
@@ -556,6 +560,17 @@ func (r *Rail) SetMaxCost(childID string, maxCost float64) {
 		return
 	}
 	n.MaxCost = maxCost
+}
+
+// SetName replaces a child's displayed name after an operator rename.
+func (r *Rail) SetName(childID, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.nodes[childID]
+	if !ok {
+		return
+	}
+	n.Name = name
 }
 
 // SubtreeCost sums childID and every descendant.

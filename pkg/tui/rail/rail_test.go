@@ -495,6 +495,25 @@ func TestApplyIgnoresAnOlderStatusArrivingAfterANewerOne(t *testing.T) {
 	assert.NewCollecting(t).Eq("idle", n.Status, "Status")
 }
 
+func renamedEvt(childID string, ordinal int32, name string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Ordinal: &ordinal,
+		Payload: &rafikiv1.Event_ChildRenamed{ChildRenamed: &rafikiv1.ChildRenamed{Name: name}},
+	}
+}
+
+func TestApplyChildRenamedSetsTheNameAndIgnoresAStaleOne(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(renamedEvt("c1", 5, "new"))
+	r.Apply(renamedEvt("c1", 2, "older")) // delivered late by the other feed
+
+	n, _ := r.Get("c1")
+	c.Eq("new", n.Name, "Name")
+}
+
 // A ChildExited must not be undone by a stale AgentStatus that outraces it
 // through the other feed.
 func TestApplyIgnoresAStaleStatusArrivingAfterExit(t *testing.T) {
