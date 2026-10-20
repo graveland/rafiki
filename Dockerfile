@@ -135,11 +135,14 @@ ENTRYPOINT ["rafiki"]
 # The webhook gateway: one static binary, no shell, no libc, nothing else. It
 # is the image an operator exposes to the internet (behind their own TLS
 # termination, or with -tls_cert set in its config), so it carries no daemon,
-# no toolchain and no package manager to be escalated through.
+# no toolchain and no package manager to be escalated through — and it does not
+# run as root: the `:nonroot` tag is the same static-debian12 image with
+# `USER nonroot:nonroot` baked in, which is the whole point of it for the one
+# internet-facing process here.
 #
 # Deliberately NOT the last stage: a Dockerfile's last stage is the default
 # build target, and the default here must stay `release`.
-FROM gcr.io/distroless/static-debian12 AS hooks
+FROM gcr.io/distroless/static-debian12:nonroot AS hooks
 
 COPY --from=build /out/rafiki-hooks /rafiki-hooks
 

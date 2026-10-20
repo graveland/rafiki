@@ -141,6 +141,21 @@ type Store interface {
 	// u.Email is normalized first; an address an active user already holds is
 	// ErrEmailTaken, a malformed one ErrInvalidEmail — both ANSWERS.
 	Create(ctx context.Context, u NewUser) (User, string, error)
+	// Authenticate resolves a plaintext token to its identity, filling
+	// IsAdmin, TokenID and Capabilities from the token's own row — never from
+	// the request.
+	//
+	// Capabilities is DATA the caller must INTERPRET, not authority this layer
+	// has already resolved. nil means the token carries full user authority;
+	// a non-nil set means exactly the capabilities it names (a non-nil empty
+	// slice means none). v1 defines one capability (CapabilityNotify), so a
+	// caller MUST refuse — as an INVALID TOKEN, never as a narrower user — any
+	// non-nil set other than exactly {notify} (empty, unknown names,
+	// duplicates, or {notify} alongside anything else). Treating an
+	// unrecognised set as a full user is the widening this split exists to
+	// prevent; an unrecognised set is not a license to drop a capability and
+	// carry on either. pkg/server's identityFromStoreRow is that single
+	// interpreter for the Connect plane.
 	Authenticate(ctx context.Context, token string) (Identity, error)
 	List(ctx context.Context, includeDeleted bool, limit int) ([]User, error)
 	// Delete tombstones the named ACTIVE user and, in the same transaction,
