@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -285,4 +286,54 @@ func TestPostgresConcurrentFirstAddDoesNotDuplicateOrdinal(t *testing.T) {
 		c.False(seen[r.Handle], "handle %q assigned twice — two tasks share one handle", r.Handle)
 		seen[r.Handle] = true
 	}
+}
+
+// OrphanAssigned returns the rows it changed, one notice's worth per
+// conversation, with the same handles List would give them. The conformance
+// suite sweeps one conversation at a time; this pins the RETURNING rows'
+// grouping across two, and that the sweep's status predicate is what selects
+// them rather than the assignee alone.
+func TestOrphanAssignedReturnsChangedRowsAcrossConversations(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := testPool(t)
+	st := tasksdb.NewPostgresStore(pool)
+	ctx := context.Background()
+
+	convA := newTestConversation(t, pool)
+	convB := newTestConversation(t, pool)
+	// The sweep is global and the test database is shared between runs, so a
+	// literal assignee would also match rows an earlier run left behind.
+	dead := "c_dead-" + uuid.NewString()
+
+	if _, err := st.Add(ctx, convA, "", []tasks.NewTask{{Content: "a1"}, {Content: "a2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Add(ctx, convB, "", []tasks.NewTask{{Content: "b1"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []struct{ conv, handle string }{{convA, "1"}, {convA, "2"}, {convB, "1"}} {
+		if _, err := st.Assign(ctx, target.conv, target.handle, dead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A finished task is not unfinished work: it must not come back changed.
+	if _, err := st.Update(ctx, convA, []tasks.Change{{Handle: "2", Status: tasks.StatusCompleted}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := st.OrphanAssigned(ctx, dead)
+	c.Require().NoError(err)
+	c.Require().Len(rows, 2, "swept rows")
+
+	byConv := map[string][]tasks.Task{}
+	for _, r := range rows {
+		byConv[r.ConversationID] = append(byConv[r.ConversationID], r)
+		c.Eq(tasks.StatusOrphaned, r.Status, "row %q", r.Handle)
+		c.Eq(dead, r.Assignee, "row %q must retain its assignee", r.Handle)
+		c.NotEq("", r.Handle, "returned rows carry the handle List computes")
+	}
+	c.Len(byConv[convA], 1, "conversation A contributed its one unfinished row")
+	c.Len(byConv[convB], 1, "conversation B contributed its one unfinished row")
+	c.Eq("1", byConv[convA][0].Handle)
+	c.Eq("1", byConv[convB][0].Handle)
 }

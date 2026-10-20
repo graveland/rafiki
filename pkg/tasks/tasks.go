@@ -149,9 +149,28 @@ type Store interface {
 	// Assign binds a task to an agent by childID.
 	Assign(ctx context.Context, convID, handle, assignee string) (Task, error)
 	// OrphanAssigned moves an agent's unfinished work to StatusOrphaned,
-	// retaining the assignee. Returns the number of rows affected.
-	OrphanAssigned(ctx context.Context, assignee string) (int, error)
+	// retaining the assignee. Returns the rows it changed, Handle populated;
+	// an empty assignee changes nothing and returns nil.
+	OrphanAssigned(ctx context.Context, assignee string) ([]Task, error)
 }
+
+// Notice reports one committed ledger mutation.
+type Notice struct {
+	// Kind is one of the Notice* constants.
+	Kind           string
+	ConversationID string
+	// Tasks are the rows the mutation changed, Handle populated.
+	Tasks []Task
+}
+
+// The kinds of mutation a Notice reports.
+const (
+	NoticeAdded    = "added"
+	NoticeUpdated  = "updated"
+	NoticeDropped  = "dropped"
+	NoticeAssigned = "assigned"
+	NoticeOrphaned = "orphaned"
+)
 
 var (
 	ErrNotFound      = errors.New("tasks: no such handle")

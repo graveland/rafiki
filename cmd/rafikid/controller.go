@@ -4975,11 +4975,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// behind a dead child, which is recoverable.
 	if c.tasks != nil {
 		sweepCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if n, err := c.tasks.OrphanAssigned(sweepCtx, childID); err != nil {
+		if rows, err := c.tasks.OrphanAssigned(sweepCtx, childID); err != nil {
 			slog.Warn("orphan task sweep failed; tasks remain in_progress",
 				"childId", childID, "error", err)
-		} else if n > 0 {
-			slog.Info("orphaned tasks for exited child", "childId", childID, "count", n)
+		} else if len(rows) > 0 {
+			slog.Info("orphaned tasks for exited child", "childId", childID, "count", len(rows))
 		}
 		cancel()
 	}

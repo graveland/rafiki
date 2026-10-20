@@ -3,6 +3,8 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,35 +249,59 @@ func (ms *memoryStore) Assign(ctx context.Context, convID, handle, assignee stri
 		return Task{}, err
 	}
 	t.Assignee = assignee
-	return *t, nil
+	// Handles are computed over the full set, never echoed from the argument;
+	// the Postgres store returns them this way and a caller publishing the
+	// change needs the row to be addressable.
+	out := *t
+	for _, cand := range AssignHandles(ms.listLocked(convID)) {
+		if cand.ID == t.ID {
+			out.Handle = cand.Handle
+			break
+		}
+	}
+	return out, nil
 }
 
-func (ms *memoryStore) OrphanAssigned(ctx context.Context, assignee string) (int, error) {
+func (ms *memoryStore) OrphanAssigned(ctx context.Context, assignee string) ([]Task, error) {
 	// Go has no NULL: an unassigned row's Assignee is "", so the equality
 	// match below would orphan every never-assigned task in the ledger. The
 	// Postgres store matches none for the same call (assignee IS NULL), so
 	// without this guard the two stores disagree catastrophically on an
 	// argument that is only ever a caller bug. See the matching guard there.
 	if assignee == "" {
-		return 0, nil
+		return nil, nil
 	}
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	count := 0
+	changed := make(map[string]bool)
+	convs := make(map[string]bool)
 	for _, t := range ms.rows {
 		if t.Assignee == assignee &&
 			(t.Status == StatusPending || t.Status == StatusInProgress || t.Status == StatusBlocked) {
 			t.Status = StatusOrphaned
-			count++
+			changed[t.ID] = true
+			convs[t.ConversationID] = true
 		}
 	}
-	return count, nil
+
+	// Handles are computed over each conversation's full set, so a reported
+	// row carries the same handle List renders for it.
+	convIDs := slices.Sorted(maps.Keys(convs))
+	var out []Task
+	for _, convID := range convIDs {
+		for _, t := range AssignHandles(ms.listLocked(convID)) {
+			if changed[t.ID] {
+				out = append(out, t)
+			}
+		}
+	}
+	return out, nil
 }
 
 // listLocked returns all tasks for convID, unsorted. Caller must hold mu.

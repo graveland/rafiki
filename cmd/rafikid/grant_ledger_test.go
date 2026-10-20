@@ -116,8 +116,8 @@ func TestLostExecutorOrphansThroughTheOrdinaryExitPath(t *testing.T) {
 
 	// When the exit path's sweep runs, the assignee is RETAINED — "c_abc died
 	// holding this" is what a coordinator needs.
-	if n, err := store.OrphanAssigned(ctx, "c_abc"); err != nil || n != 1 {
-		t.Fatalf("orphan sweep: n=%d err=%v", n, err)
+	if swept, err := store.OrphanAssigned(ctx, "c_abc"); err != nil || len(swept) != 1 {
+		t.Fatalf("orphan sweep: rows=%d err=%v", len(swept), err)
 	}
 	rows, _ = store.List(ctx, tasks.ListFilter{ConversationID: "conv"})
 	ck.Eq(tasks.StatusOrphaned, rows[0].Status, "status")

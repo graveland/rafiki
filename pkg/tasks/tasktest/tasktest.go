@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
@@ -169,21 +171,30 @@ func RunConformance(t *testing.T, mk func(*testing.T) (tasks.Store, string)) {
 		}
 	})
 
-	t.Run("orphan sweep marks a dead agent's work", func(t *testing.T) {
+	t.Run("orphan sweep marks a dead agent's work and returns the rows it changed", func(t *testing.T) {
 		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}, {Content: "b"}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Assign(ctx, conv, "1", "c_dead"); err != nil {
+		// The sweep is global, and the Postgres test database is shared between
+		// runs: a literal assignee would also match rows left by an earlier one.
+		dead := "c_dead-" + uuid.NewString()
+		if _, err := s.Assign(ctx, conv, "1", dead); err != nil {
 			t.Fatal(err)
 		}
-		n, err := s.OrphanAssigned(ctx, "c_dead")
+		rows, err := s.OrphanAssigned(ctx, dead)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if n != 1 {
-			t.Fatalf("orphaned %d; want 1", n)
+		if len(rows) != 1 {
+			t.Fatalf("orphaned %d rows; want 1", len(rows))
 		}
+		got := rows[0]
+		if got.Handle != "1" || got.Status != tasks.StatusOrphaned || got.Assignee != dead {
+			t.Fatalf("returned row = {handle:%q status:%q assignee:%q}; want {1 orphaned %q}",
+				got.Handle, got.Status, got.Assignee, dead)
+		}
+
 		all, _ := s.List(ctx, tasks.ListFilter{ConversationID: conv})
 		for _, task := range all {
 			if task.Handle == "1" {
@@ -192,8 +203,16 @@ func RunConformance(t *testing.T, mk func(*testing.T) (tasks.Store, string)) {
 				}
 				// The assignee is RETAINED. "c_dead died holding this" is
 				// exactly what a coordinator needs; nulling it destroys that.
-				if task.Assignee != "c_dead" {
-					t.Errorf("assignee = %q; want c_dead retained", task.Assignee)
+				if task.Assignee != dead {
+					t.Errorf("assignee = %q; want %q retained", task.Assignee, dead)
+				}
+			}
+			if task.Handle == "2" {
+				if task.Status != tasks.StatusPending {
+					t.Errorf("unassigned task 2 status = %s; the sweep must touch only the dead assignee's rows", task.Status)
+				}
+				if task.ID == got.ID {
+					t.Error("the sweep reported a row it did not change")
 				}
 			}
 		}
@@ -213,26 +232,49 @@ func RunConformance(t *testing.T, mk func(*testing.T) (tasks.Store, string)) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Assign(ctx, conv, "2", "c_live"); err != nil {
+		if _, err := s.Assign(ctx, conv, "2", "c_live-"+uuid.NewString()); err != nil {
 			t.Fatal(err)
 		}
-
-		n, err := s.OrphanAssigned(ctx, "")
+		before, err := s.List(ctx, tasks.ListFilter{ConversationID: conv, IncludeDropped: true})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if n != 0 {
-			t.Fatalf(`OrphanAssigned("") affected %d rows; it must affect none`, n)
-		}
 
-		all, err := s.List(ctx, tasks.ListFilter{ConversationID: conv})
+		rows, err := s.OrphanAssigned(ctx, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, task := range all {
+		if rows != nil {
+			t.Fatalf(`OrphanAssigned("") returned %d rows; it must change none`, len(rows))
+		}
+
+		after, err := s.List(ctx, tasks.ListFilter{ConversationID: conv, IncludeDropped: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range after {
 			if task.Status == tasks.StatusOrphaned {
 				t.Errorf("task %q (assignee %q) was orphaned by an empty-assignee sweep",
 					task.Content, task.Assignee)
+			}
+		}
+		if len(before) != len(after) {
+			t.Fatalf("ledger has %d rows after the sweep; want the %d it started with", len(after), len(before))
+		}
+		// Keyed by id: the memory store's List order is map iteration order.
+		statusBefore := make(map[string]tasks.Status, len(before))
+		for _, r := range before {
+			statusBefore[r.ID] = r.Status
+		}
+		for _, r := range after {
+			was, ok := statusBefore[r.ID]
+			if !ok {
+				t.Errorf("row %q appeared during an empty-assignee sweep", r.Handle)
+				continue
+			}
+			if was != r.Status {
+				t.Errorf("row %q changed from %s to %s; an empty-assignee sweep must change nothing",
+					r.Handle, was, r.Status)
 			}
 		}
 	})

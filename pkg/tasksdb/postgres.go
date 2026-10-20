@@ -14,6 +14,8 @@ package tasksdb
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -285,26 +287,57 @@ func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee st
 	return *t, nil
 }
 
-func (ps *postgresStore) OrphanAssigned(ctx context.Context, assignee string) (int, error) {
+func (ps *postgresStore) OrphanAssigned(ctx context.Context, assignee string) ([]tasks.Task, error) {
 	// Guarded here as well as in the memory store, so the two agree by
 	// contract rather than by accident. `assignee = ''` happens to match
 	// nothing today only because unassigned rows are NULL; a future NOT NULL
 	// DEFAULT '' would silently turn this into the memory store's data loss.
 	if assignee == "" {
-		return 0, nil
+		return nil, nil
 	}
 
-	tag, err := ps.pool.Exec(ctx,
+	rows, err := ps.pool.Query(ctx,
 		`UPDATE conversations.tasks
 		    SET status = 'orphaned', updated_at = now()
 		  WHERE assignee = $1
-		    AND status IN ('pending','in_progress','blocked')`,
+		    AND status IN ('pending','in_progress','blocked')
+		  RETURNING id, conversation_id`,
 		assignee,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("tasks orphan: %w", err)
+		return nil, fmt.Errorf("tasks orphan: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	changed := make(map[string]bool)
+	convs := make(map[string]bool)
+	for rows.Next() {
+		var id, convID string
+		if scanErr := rows.Scan(&id, &convID); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("tasks orphan: scan: %w", scanErr)
+		}
+		changed[id] = true
+		convs[convID] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tasks orphan: rows: %w", err)
+	}
+
+	// Handles are computed over each affected conversation's full set, which
+	// is what List does; the changed ids then pick the sweep's rows out of it.
+	var out []tasks.Task
+	for _, convID := range slices.Sorted(maps.Keys(convs)) {
+		all, err := ps.List(ctx, tasks.ListFilter{ConversationID: convID, IncludeDropped: true})
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range all {
+			if changed[t.ID] {
+				out = append(out, t)
+			}
+		}
+	}
+	return out, nil
 }
 
 // loadAll reads every task row for convID, or every task row in the ledger
