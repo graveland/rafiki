@@ -5,6 +5,8 @@ package eventbuf
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -164,6 +166,46 @@ func (b *Buffer) Push(childID, source, key, fragment string) {
 	b.notify(childID)
 }
 
+// PushDurable is Push for a caller that must know the fragment is stored
+// before it answers its own sender. It persists through the accepter and,
+// on failure, returns the error WITHOUT falling back to an in-memory orphan
+// and without arming the debounce — the caller reports the failure and its
+// sender retries. On success it behaves exactly like Push.
+// A source containing "::" is rejected with an error (Push only logs).
+// With no accepter set it returns an error: there is nothing durable.
+func (b *Buffer) PushDurable(ctx context.Context, childID, source, key, fragment string) error {
+	if err := sourceRejection(source); err != nil {
+		return err
+	}
+	// Read outside the lock for the same reason accept does: SetAccepter is
+	// documented to run before any push.
+	acc := b.acc
+	if acc == nil {
+		return errors.New("eventbuf: PushDurable requires an accepter; there is nothing durable to write to")
+	}
+
+	// The same row accept would have built, minus the orphan fallback.
+	in := inbox.Inbound{
+		ChildID: childID,
+		Mode:    inbox.ModePrompt,
+		Source:  source,
+		Key:     key,
+		Text:    truncate(fragment, b.cfg.MaxBytesPerFrag),
+	}
+	if _, err := acc.Accept(ctx, in); err != nil {
+		// No orphan, no dirty, no timer. The caller's sender owns the retry,
+		// so a fragment queued here would be delivered twice on success.
+		return fmt.Errorf("eventbuf: durable accept for %s/%s: %w", childID, source, err)
+	}
+
+	b.mu.Lock()
+	b.keyLocked(bufKey{childID, source}).dirty = true
+	b.armLocked(childID, source)
+	b.mu.Unlock()
+	b.notify(childID)
+	return nil
+}
+
 // PushNow bypasses the DEBOUNCE but not the busy gate: a child mid-turn keeps
 // the batch until DrainIdle.
 //
@@ -273,8 +315,18 @@ func (b *Buffer) Forget(childID string) {
 // slow database stalls child bookkeeping.
 const acceptTimeout = 5 * time.Second
 
+// sourceRejection returns why source cannot be used as an event-buffer source,
+// or nil. It is the single source rule: Push logs and drops, PushDurable
+// returns the error to a caller whose sender can retry.
+func sourceRejection(source string) error {
+	if !strings.Contains(source, "::") {
+		return nil
+	}
+	return fmt.Errorf("eventbuf: source %q contains \"::\"", source)
+}
+
 func validSource(childID, source, op string) bool {
-	if strings.Contains(source, "::") {
+	if err := sourceRejection(source); err != nil {
 		slog.Warn("eventbuf: push rejected — source name contains \"::\"",
 			"op", op, "childId", childID, "source", source)
 		return false
