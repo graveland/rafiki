@@ -33,12 +33,20 @@ func (s *Server) SetTaskLister(l TaskLister) { s.taskLister.Store(&l) }
 // rows.
 const taskListMaxRows = 2000
 
-// ListTasks answers the task ledger for one conversation.
+// ListTasks answers the task ledger for one conversation, or for the ledger
+// OWNED by one child (owner_child_id; child_id stays the ASSIGNEE filter).
+//
+// conversation_id and owner_child_id are mutually exclusive for every caller:
+// together they name two different ledgers, and silently picking one would
+// answer a question nobody asked.
 //
 // childScoped: a per-child credential must NAME a conversation inside its own
 // subtree (its own ledger or a descendant's — ConversationInScope resolves
 // both from the childstore), because an empty conversation_id means "every
-// conversation", which is the operator's cross-fleet view. The refusal is
+// conversation", which is the operator's cross-fleet view. Naming
+// owner_child_id instead admits the caller's own id and any descendant —
+// Authorize refuses the caller itself, because a child is not a descendant of
+// its own id, so the self arm is not redundant. The refusal is
 // PermissionDenied, not a scoped empty list: a silently empty ledger reads
 // exactly like "you have no tasks".
 //
@@ -52,9 +60,20 @@ func (s *Server) ListTasks(
 	ctx context.Context, req *connect.Request[rafikiv1.ListTasksRequest],
 ) (*connect.Response[rafikiv1.ListTasksResponse], error) {
 	out := &rafikiv1.ListTasksResponse{}
+	convID := req.Msg.GetConversationId()
+	ownerID := req.Msg.GetOwnerChildId()
+	if convID != "" && ownerID != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("set conversation_id or owner_child_id, not both"))
+	}
 	if sc := s.childScope(ctx); sc != nil {
-		convID := req.Msg.GetConversationId()
-		if convID == "" || !sc.ConversationInScope(convID) {
+		switch {
+		case ownerID != "":
+			if ownerID != sc.ChildID() && sc.Authorize(ownerID) != nil {
+				return nil, refuseChildScope(errors.New(
+					"list the task ledger you own or one a descendant owns; another child's ledger is out of scope"))
+			}
+		case convID == "" || !sc.ConversationInScope(convID):
 			return nil, refuseChildScope(errors.New(
 				"list the task ledger of one conversation inside your own subtree; every conversation is the operator's view"))
 		}
@@ -68,7 +87,8 @@ func (s *Server) ListTasks(
 		limit = taskListMaxRows
 	}
 	rows, err := (*lp).TaskList(ctx, protocol.TaskListRequest{
-		ConversationID: req.Msg.GetConversationId(),
+		ConversationID: convID,
+		OwnerChildID:   ownerID,
 		ChildID:        req.Msg.GetChildId(),
 		Status:         req.Msg.GetStatus(),
 		// Both spellings stay on the wire (control.proto's comment on

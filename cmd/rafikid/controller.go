@@ -5695,6 +5695,13 @@ func parseEventType(frame []byte, hdr any) error {
 // which is a cross-conversation question. The dispatcher clamps Limit before
 // calling, and the store applies it after sorting, which is what keeps the
 // response inside protocol.MaxFrameBytes.
+//
+// OwnerChildID names the ledger OWNED by a child, resolved by LOOKUP
+// (conversationIDForChild) — the conversation the child's engine minted, or
+// the row the proxy captured. A read never creates a conversation row, so an
+// unknown child, or one whose conversation does not exist yet, answers an
+// empty ledger rather than ensureLedgerConversation's row. ChildID stays the
+// assignee filter and narrows that ledger as it would any other.
 func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
 	if c.tasks == nil {
 		return nil, &connectapi.ControllerError{
@@ -5709,6 +5716,17 @@ func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest)
 		Status:         tasks.Status(req.Status),
 		IncludeDropped: req.All,
 		Limit:          req.Limit,
+	}
+	if req.OwnerChildID != "" {
+		snap, ok := c.st.Get(req.OwnerChildID)
+		if !ok {
+			return nil, nil
+		}
+		convID := c.conversationIDForChild(snap)
+		if convID == "" {
+			return nil, nil
+		}
+		f.ConversationID = convID
 	}
 	return c.tasks.List(ctx, f)
 }

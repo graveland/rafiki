@@ -450,10 +450,14 @@ type TaskListRequest struct {
 	// ConversationID scopes the query to one conversation's ledger. Empty
 	// means every conversation, matching tasks.ListFilter.
 	ConversationID string `json:"conversationId,omitempty"`
-	ChildID        string `json:"childId,omitempty"` // tasks assigned to this child
-	Status         string `json:"status,omitempty"`
-	Limit          int    `json:"limit,omitempty"`
-	All            bool   `json:"all,omitempty"` // include dropped
+	// OwnerChildID selects the ledger OWNED by this child. ChildID stays the
+	// assignee filter; the two are different questions. Mutually exclusive
+	// with ConversationID on the wire.
+	OwnerChildID string `json:"ownerChildId,omitempty"`
+	ChildID      string `json:"childId,omitempty"` // tasks assigned to this child
+	Status       string `json:"status,omitempty"`
+	Limit        int    `json:"limit,omitempty"`
+	All          bool   `json:"all,omitempty"` // include dropped
 }
 
 // ─── Response data types ─────────────────────────────────────────────────────
