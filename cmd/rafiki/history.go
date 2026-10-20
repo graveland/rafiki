@@ -41,12 +41,14 @@ func lifecycleTypes() []string {
 
 // defaultTypeSet is the default `types` filter for a subscription, resolved
 // by SUBJECT shape: multi-child (no id, or labels) → lifecycle only; a single
-// child → conversation events plus lifecycle. Sorted so request bytes and
-// tests are deterministic.
+// child → conversation events, its task-ledger changes, plus lifecycle. The
+// fleet-wide default omits tasks_changed so it stays the rail's set. Sorted so
+// request bytes and tests are deterministic.
 func defaultTypeSet(singleChild bool) []string {
 	var types []string
 	if singleChild {
 		types = append(types, conversationTypes...)
+		types = append(types, "tasks_changed")
 	}
 	types = append(types, lifecycleTypes()...)
 	slices.Sort(types)
