@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 }
 
 // TestParseControlListenAddr covers every spelling of RAFIKI_CONTROL_LISTEN
-// documented in .env.example, README.md, and
+// documented in .env.example, docs/guide/configuration.md, and
 // docs/reference/control-protocol.md, plus the already-working host:port
 // forms and the failure cases.
 func TestParseControlListenAddr(t *testing.T) {

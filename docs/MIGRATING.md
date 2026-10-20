@@ -79,7 +79,7 @@ it currently *means*:
   retired now: the face and the control plane both authenticate against the
   `users` table (a later change, not part of this rename), so a token the face
   accepts is minted with `rafiki user create` rather than exported. See the
-  "first user" section in `README.md`.
+  "first user" section in `docs/guide/authentication.md`.
 
 Those two used to be the same variable wearing opposite meanings depending on
 context. They are now separate, and neither is overloaded.

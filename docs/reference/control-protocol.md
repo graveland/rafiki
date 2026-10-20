@@ -699,7 +699,7 @@ returns. Past that:
 
 A `{notify}` token is the credential this verb exists for — it may call
 `Notify` and nothing else (§"The gate distinguishes four credential shapes").
-The gateway that holds one is `cmd/rafiki-hooks` (README, "Webhook gateway").
+The gateway that holds one is `cmd/rafiki-hooks` (`docs/guide/webhooks.md`).
 
 A leaked `{notify}` token is bounded in authority but not in effect, and that
 is accepted for v1 (the design defers a per-token address whitelist): it can
@@ -2370,7 +2370,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `permission_denied` | `permission_denied` | The authenticated caller addressed a resource that belongs to a different user — executor ownership scoping (`LabelExecutor`/`DisableExecutor`/`EnableExecutor`/`DeleteExecutor` against another user's executor). A MISSING row is `not_found`, never this; this code says "it exists and is not yours". |
 | `internal` | `internal` | Unexpected daemon-side error. |
 | `no_agent_db` | `unavailable` | The conversation/recall/pymodule backend is unwired (`RAFIKI_DB` unset). |
-| `unavailable` | `unavailable` | The daemon cannot take the request RIGHT NOW, and the same request may succeed later: `Notify`'s unwired notifier, missing durable child store, name-resolve failure or failed durable accept; `ModelRoutes` with no endpoint catalog. Retryable — the webhook gateway's `503` rests on it (README, "Webhook gateway"). |
+| `unavailable` | `unavailable` | The daemon cannot take the request RIGHT NOW, and the same request may succeed later: `Notify`'s unwired notifier, missing durable child store, name-resolve failure or failed durable accept; `ModelRoutes` with no endpoint catalog. Retryable — the webhook gateway's `503` rests on it (`docs/guide/webhooks.md`). |
 | `payload_too_large` | `invalid_argument` | A transcript or report exceeds its size cap. |
 | `protocol_mismatch` | `failed_precondition` | A Connect request's `Rafiki-Protocol` header is missing or names a different epoch (`pkg/server.RequireEpoch`). Attached by the epoch gate, not the domain error table — see "The protocol epoch" above. |
 

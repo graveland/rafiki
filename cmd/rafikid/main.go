@@ -1295,7 +1295,7 @@ func executorsEnabled(controlAddr string, dbConfigured bool) bool {
 // when the env var is unset or not a valid host:port.
 //
 // A bare port after stripping the prefix (the documented "tcp:8036" form,
-// used verbatim in .env.example, README.md, and
+// used verbatim in .env.example, docs/guide/configuration.md, and
 // docs/reference/control-protocol.md) has no colon at all, so
 // net.SplitHostPort would reject it with "missing port in address" — that
 // silently disabled the TCP control listener for anyone following the docs.

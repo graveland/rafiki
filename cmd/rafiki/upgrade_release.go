@@ -300,7 +300,7 @@ func (c *releaseClient) stageRelease(ctx context.Context, keys []relsign.Key, ta
 	if err != nil {
 		var missing errAssetMissing
 		if errors.As(err, &missing) {
-			return stagedRelease{}, errors.New("this release has no checksums.txt.sig; it predates signed releases, so install it manually (see the README)")
+			return stagedRelease{}, errors.New("this release has no checksums.txt.sig; it predates signed releases, so install it manually (see docs/guide/install.md)")
 		}
 		return stagedRelease{}, err
 	}

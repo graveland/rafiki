@@ -18,12 +18,12 @@ import (
 )
 
 // providersHeader opens every providers.toml setup writes. It points at the
-// README for everything setup deliberately does not configure.
+// provider guide for everything setup deliberately does not configure.
 const providersHeader = `# providers.toml — written by ` + "`rafiki setup`" + `.
 # Setup rewrites this file on a re-run only while it is unchanged since setup
 # wrote it; once you edit it, setup leaves it alone (and offers to back it up).
 # Aliases, ` + "`only`" + ` pins, via_executor, fallback chains and session headers are
-# hand-edited: see the README's providers.toml section.
+# hand-edited: see docs/guide/proxy.md.
 
 `
 

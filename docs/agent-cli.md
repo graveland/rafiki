@@ -67,7 +67,7 @@ the anonymous local socket, which is the credential on the daemon's own
 host), and `create` NEVER mints an admin — admins come only from
 `rafikid user create <name> --admin` on the daemon host, which opens the
 database directly and is also how a fresh daemon gets its first identity (see
-README's "First user" section; the daemon logs that exact instruction once at
+[Authentication](guide/authentication.md)'s "First user" section; the daemon logs that exact instruction once at
 startup while zero users exist).
 
 - **`--no-write`** (create only): print the token but skip writing it to the
@@ -83,8 +83,8 @@ startup while zero users exist).
 
 Token storage moved to per-profile files with client profiles (2026-09): the
 old global `~/.config/rafiki/token` (and the even older, already-unread
-`~/.config/rafiki/control.token`) are no longer read at all — see README's
-"Profiles" section for the schema and resolution order.
+`~/.config/rafiki/control.token`) are no longer read at all — see [Configuration](guide/configuration.md#profiles)
+for the schema and resolution order.
 
 `rafiki profile show` honours the root `--output` contract: `-o json` (or
 `-j`) prints the resolved profile as ONE machine-readable record —
@@ -289,7 +289,7 @@ error *before* any per-conversation work starts, rather than mid-batch.
 `rafikid agent` is a daemon-side CLI — it reads `RAFIKI_URL`/`RAFIKI_TOKEN`
 straight from `os.Getenv` (`cmd/rafikid/agent_cli.go`) and is unaffected by
 client profiles; the two variables are retired only for the `rafiki`
-**client** binary (see README's "Profiles" section).
+**client** binary (see [Configuration](guide/configuration.md#profiles)).
 
 **Other flags:** `--force` (re-analyze even if already analyzed under this
 exact configuration), `--limit N` (cap conversations analyzed; 0 = profile
@@ -499,13 +499,13 @@ Batch API and shows status `batch_wait` until the batched result is
 delivered — hours is normal (OpenRouter's completion window is 24 h), and
 the child stays working and attachable throughout. Batch is a property of
 the model id: no batch flag, id, or verb exists anywhere in the CLI. See the
-README's *Batch transport* section for the full mechanics.
+[The proxy and library](guide/proxy.md#batch-transport-batch-model-ids) for the full mechanics.
 
 ### Script children from the CLI
 
 `rafiki create -d --kind script --pymodule <repo>:<script> [-- args]` spawns
 a script child — a saved pymodule run as the child's process, no model
-attached (see the README's *Script children* for the runtime):
+attached (see [Agents](guide/agents.md#script-children) for the runtime):
 
 ```
 rafiki create -d --kind script --pymodule local:driver -- --fast 5
@@ -692,7 +692,7 @@ Launches a claude child via daraja on a matching executor:
 4. Prints `child_id`, `pid`, `pgid`, and `connected_at` (Unix ms epoch).
 
 Through `newConnectEndpoint` — honours the resolved profile for remote
-daemons (a profile with a `url`; see README's "Profiles" section). Requires
+daemons (a profile with a `url`; see [Configuration](guide/configuration.md#profiles)). Requires
 a TCP control address on the target daemon (`RAFIKI_CONTROL_LISTEN` must be set);
 UDS-only daemons refuse with a clear diagnostic.
 
