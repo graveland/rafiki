@@ -159,8 +159,9 @@ func TestNotifyEndToEnd(t *testing.T) {
 		c.StrContains(string(out), childID, "notify must print the notified child's id; stdout = %q", out)
 
 		body := notifyInboxBody(t, pool, childID, "e2e", "k1")
-		c.StrContains(body, `<notification source="e2e" key="k1"`,
+		c.StrContains(body, `<notification origin="third-party">`,
 			"the stored fragment is not the notification's opening element: %s", body)
+		c.StrContains(body, `"source":"e2e","key":"k1"`, "the stored fragment lost its source and key: %s", body)
 		c.StrContains(body, `"status":"failed"`, "the stored fragment lost its fields: %s", body)
 	})
 
@@ -204,7 +205,7 @@ func TestNotifyEndToEnd(t *testing.T) {
 		c.NoError(err, "notify with a notify-scoped token must succeed: %v\nstderr: %s", err, notifyStderr.String())
 		c.StrContains(string(out), childID, "notify under the narrowed token printed %q", out)
 		body := notifyInboxBody(t, pool, childID, "e2e", "confined")
-		c.StrContains(body, `<notification source="e2e" key="confined"`, "the narrowed token's fragment: %s", body)
+		c.StrContains(body, `"source":"e2e","key":"confined"`, "the narrowed token's fragment: %s", body)
 
 		// Everything else is closed to it — the read-only ListChildren a full
 		// user credential would be admitted to included.

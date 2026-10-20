@@ -633,15 +633,18 @@ truncated:
 | fields | at most 32, encoded as a JSON object of at most 16384 bytes |
 
 Zero fields is valid and encodes as `{}`. The delivered fragment is the
-agent's prompt, exactly (attributes Go-quoted, `received` in UTC as
-`time.RFC3339`, `origin` the constant `third-party`):
+agent's prompt, exactly (`received` in UTC as `time.RFC3339`; an empty `key`
+renders as `""`):
 
 ```
-<notification source="SOURCE" key="KEY" received="RECEIVED" origin="third-party">
-FIELDS_JSON
+<notification origin="third-party">
+{"source":"SOURCE","key":"KEY","received":"RECEIVED","fields":FIELDS_JSON}
 </notification>
 ```
 
+The element carries only the constant `origin`; every variable value is in
+the one JSON body, so `encoding/json` is the only escaper in play and the
+charsets above are input hygiene, not what keeps the frame intact.
 `FIELDS_JSON` is `json.Marshal(map[string]string)`: sorted keys, and `<`, `>`
 and `&` escaped, which is why no value can close the element. That is the WHOLE
 promise `pkg/notify` makes — the frame stays three well-formed pieces whatever

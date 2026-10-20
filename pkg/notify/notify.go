@@ -120,14 +120,35 @@ func Render(source, key string, fields map[string]string, received time.Time) (s
 	if err != nil {
 		return "", &InvalidError{Msg: fmt.Sprintf("fields do not encode: %v", err)}
 	}
-	// %q is safe here only because the charsets Validate enforces exclude '"'
-	// and '\': source and key are checked by Validate, received is an RFC3339
-	// stamp and Origin is a constant, so Go-quoting any of them cannot emit a
-	// quote or a backslash that closes the attribute. Fields are the untrusted
-	// free-form part, and they are interpolated only as encoding/json output,
-	// which escapes '<', '>' and '&' and therefore cannot close the element.
-	return fmt.Sprintf("<notification source=%q key=%q received=%q origin=%q>\n%s\n</notification>",
-		source, key, received.UTC().Format(time.RFC3339), Origin, encoded), nil
+	// Every variable value goes through encoding/json, which escapes '<', '>'
+	// and '&', so nothing can close the element; the tags themselves are
+	// constants. The charsets Validate enforces are input hygiene, not what
+	// keeps the frame intact.
+	body, err := json.Marshal(envelope{
+		Source:   source,
+		Key:      key,
+		Received: received.UTC().Format(time.RFC3339),
+		Fields:   encoded,
+	})
+	if err != nil {
+		return "", &InvalidError{Msg: fmt.Sprintf("notification does not encode: %v", err)}
+	}
+	return openTag + "\n" + string(body) + "\n" + closeTag, nil
+}
+
+// openTag and closeTag frame the body. Both are constants: no caller-supplied
+// value is ever written outside the JSON body.
+const (
+	openTag  = `<notification origin="` + Origin + `">`
+	closeTag = `</notification>`
+)
+
+// envelope is the fragment's body. Field order is the rendered key order.
+type envelope struct {
+	Source   string          `json:"source"`
+	Key      string          `json:"key"`
+	Received string          `json:"received"`
+	Fields   json.RawMessage `json:"fields"`
 }
 
 // encodeFields marshals fields the way a fragment carries them: sorted keys,

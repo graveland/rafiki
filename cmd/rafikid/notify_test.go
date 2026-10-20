@@ -100,7 +100,7 @@ func (f *notifyFixture) pending(t *testing.T, childID string) []inbox.Inbound {
 	return rows
 }
 
-var receivedRE = regexp.MustCompile(`received="([^"]*)"`)
+var receivedRE = regexp.MustCompile(`"received":"([^"]*)"`)
 
 // assertFragmentMatchesRender compares a stored fragment against a fresh
 // notify.Render at the received time the fragment itself carries. Every other
@@ -110,9 +110,9 @@ func assertFragmentMatchesRender(t *testing.T, got, source, key string, fields m
 	t.Helper()
 	ck := assert.NewAborting(t)
 	m := receivedRE.FindStringSubmatch(got)
-	ck.Require().True(len(m) == 2, "stored fragment carries no received attribute: %q", got)
+	ck.Require().True(len(m) == 2, "stored fragment carries no received stamp: %q", got)
 	received, err := time.Parse(time.RFC3339, m[1])
-	ck.Require().NoError(err, "received attribute %q is not an RFC3339 stamp", m[1])
+	ck.Require().NoError(err, "received stamp %q is not RFC3339", m[1])
 	want, err := notify.Render(source, key, fields, received)
 	ck.Require().NoError(err, "Render")
 	ck.Eq(want, got, "stored fragment")

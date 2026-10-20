@@ -28,13 +28,40 @@ const (
 // received is the fixed timestamp the golden fragment carries.
 var received = time.Date(2026, 10, 19, 9, 30, 0, 0, time.UTC)
 
+// openLine is every fragment's first line, whatever the input.
+const openLine = `<notification origin="third-party">`
+
+// TestRenderOpenTagIsConstant pins that no caller-supplied value is written
+// into the element itself: source and key travel in the JSON body, so the tag
+// is the same for every notification and the charsets are hygiene, not the
+// thing keeping the frame intact.
+func TestRenderOpenTagIsConstant(t *testing.T) {
+	inputs := []struct{ source, key string }{
+		{"github", "push:1"}, {"a", ""}, {"my.source-name_2", "ci/main/check:9"},
+	}
+	for _, in := range inputs {
+		c := assert.NewAborting(t)
+		got, err := notify.Render(in.source, in.key, map[string]string{"x": "y"}, received)
+		c.NoError(err, "Render(%q, %q)", in.source, in.key)
+		lines := strings.Split(got, "\n")
+		c.Eq(openLine, lines[0], "opening line for source %q key %q", in.source, in.key)
+		var body struct {
+			Source string `json:"source"`
+			Key    string `json:"key"`
+		}
+		c.NoError(json.Unmarshal([]byte(lines[1]), &body), "body %q", lines[1])
+		c.Eq(in.source, body.Source, "source travels in the body")
+		c.Eq(in.key, body.Key, "key travels in the body")
+	}
+}
+
 func TestRenderExactFormat(t *testing.T) {
 	c := assert.NewAborting(t)
 	got, err := notify.Render("github", "push:1", map[string]string{"zeta": "last", "alpha": "first"}, received)
 	c.NoError(err, "Render")
-	c.Eq("<notification source=\"github\" key=\"push:1\" received=\"2026-10-19T09:30:00Z\" origin=\"third-party\">\n"+
-		"{\"alpha\":\"first\",\"zeta\":\"last\"}\n"+
-		"</notification>", got, "the golden fragment, keys sorted")
+	c.Eq(openLine+"\n"+
+		`{"source":"github","key":"push:1","received":"2026-10-19T09:30:00Z","fields":{"alpha":"first","zeta":"last"}}`+"\n"+
+		"</notification>", got, "the golden fragment, field keys sorted")
 }
 
 // TestRenderEmptyFieldsIsEmptyObject pins that a nil map (and an empty one)
@@ -42,8 +69,8 @@ func TestRenderExactFormat(t *testing.T) {
 // object, so a consumer can parse it unconditionally.
 func TestRenderEmptyFieldsIsEmptyObject(t *testing.T) {
 	c := assert.NewAborting(t)
-	body := "<notification source=\"github\" key=\"push:1\" received=\"2026-10-19T09:30:00Z\" origin=\"third-party\">\n" +
-		"{}\n" +
+	body := openLine + "\n" +
+		`{"source":"github","key":"push:1","received":"2026-10-19T09:30:00Z","fields":{}}` + "\n" +
 		"</notification>"
 	got, err := notify.Render(okSource, okKey, nil, received)
 	c.NoError(err, "Render nil fields")
@@ -63,8 +90,8 @@ func TestRenderExactFormatUTC(t *testing.T) {
 	local := time.Date(2026, 10, 19, 11, 30, 0, 0, plusTwo)
 	got, err := notify.Render("github", "push:1", map[string]string{"alpha": "first"}, local)
 	c.NoError(err, "Render")
-	c.Eq("<notification source=\"github\" key=\"push:1\" received=\"2026-10-19T09:30:00Z\" origin=\"third-party\">\n"+
-		"{\"alpha\":\"first\"}\n"+
+	c.Eq(openLine+"\n"+
+		`{"source":"github","key":"push:1","received":"2026-10-19T09:30:00Z","fields":{"alpha":"first"}}`+"\n"+
 		"</notification>", got, "a non-UTC received must render as UTC")
 }
 
@@ -81,16 +108,17 @@ func TestRenderEscapesClosingTag(t *testing.T) {
 			c.NoError(err, "Render")
 			lines := strings.Split(got, "\n")
 			c.Len(lines, 3, "opening line, one body line, closing line; got %q", got)
-			c.Eq("<notification source=\"github\" key=\"push:1\" received=\"2026-10-19T09:30:00Z\" origin=\"third-party\">",
-				lines[0], "opening line")
+			c.Eq(openLine, lines[0], "opening line")
 			c.Eq("</notification>", lines[2], "closing line is the last thing in the fragment")
 			c.False(strings.ContainsAny(lines[1], "<>"),
 				"no literal < or > may appear between the opening and closing lines; body was %q", lines[1])
 			// The body is one JSON object holding the value unchanged: nothing
 			// inside a value can be read as an attribute or as the closing tag.
-			var body map[string]string
+			var body struct {
+				Fields map[string]string `json:"fields"`
+			}
 			c.NoError(json.Unmarshal([]byte(lines[1]), &body), "the body is one JSON object; got %q", lines[1])
-			c.Eq(value, body["body"], "the value round-trips unchanged")
+			c.Eq(value, body.Fields["body"], "the value round-trips unchanged")
 		})
 	}
 }
