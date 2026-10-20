@@ -4,6 +4,7 @@ package childstore
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -121,6 +122,12 @@ type ChildConfig struct {
 	RecordRequests bool                   `json:"recordRequests,omitempty"`
 }
 
+// ErrNameTaken is returned by an upsert that would give a live child a name a
+// live sibling already holds. The database's child_sibling_name_live index is
+// the authoritative rule; this sentinel is how a violation of it reaches Go
+// code that has to tell it apart from every other write failure.
+var ErrNameTaken = errors.New("childstore: name taken by a live sibling")
+
 // ChildStore persists child state records.
 //
 // One implementation exists (Postgres). The interface is a seam that keeps SQL
@@ -130,6 +137,13 @@ type ChildStore interface {
 	Upsert(ctx context.Context, rec ChildRecord) error
 	Delete(ctx context.Context, childID string) error
 	List(ctx context.Context) ([]ChildRecord, error)
+	// NameHolder returns the live (non-closed) child holding name among the
+	// children of parentID ("" = top level) owned by ownerUserID ("" = the
+	// anonymous owner, owner_user_id IS NULL). ok is false when none does.
+	//
+	// Its predicate mirrors the child_sibling_name_live index exactly, so a
+	// name it reports as free is a name the next Upsert can write.
+	NameHolder(ctx context.Context, ownerUserID, parentID, name string) (childID, status string, ok bool, err error)
 	// AdoptOwnership re-stamps who owns a child row without touching its
 	// contents: daemon_id, the rafiki/daemon label and updated_at move;
 	// status and ns_token do not. Used by boot recovery when it adopts a

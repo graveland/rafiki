@@ -201,6 +201,12 @@ func (r *recordingChildStore) List(_ context.Context) ([]childstore.ChildRecord,
 	return append([]childstore.ChildRecord(nil), r.upserts...), nil
 }
 
+// NameHolder reports no holder: this fake never enforces the name rule, so a
+// caller that asks is told the name is free.
+func (r *recordingChildStore) NameHolder(_ context.Context, _, _, _ string) (string, string, bool, error) {
+	return "", "", false, nil
+}
+
 // lastUpsertFor returns the most recent record written for childID.
 func (r *recordingChildStore) lastUpsertFor(childID string) (childstore.ChildRecord, bool) {
 	r.mu.Lock()

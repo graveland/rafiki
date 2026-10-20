@@ -8,9 +8,12 @@ package childstoredb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -89,6 +92,12 @@ ON CONFLICT (child_id) DO UPDATE SET
 // predicate loses the only value it reads. conversation_id becomes known after
 // the row already exists, and a later write that has not re-read it must not
 // erase the correlation.
+//
+// A write that would give a live child the name of a live sibling fails, and
+// the error wraps childstore.ErrNameTaken: the name rule is enforced by the
+// child_sibling_name_live index, not by a pre-read, so two racing spawns cannot
+// both pass a check and both write. Re-upserting a row with its own name is not
+// a conflict — ON CONFLICT (child_id) updates in place.
 func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 	config, err := json.Marshal(rec.Config)
 	if err != nil {
@@ -116,10 +125,58 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 		config, labelsJSON, nullString(rec.Result), rec.SkipDerivedIndex,
 		nullString(rec.PendingQuestion), nullString(rec.LastTurnError))
 	if err != nil {
+		if isSiblingNameViolation(err) {
+			return fmt.Errorf("childstoredb: upsert %s: %w", rec.ChildID, childstore.ErrNameTaken)
+		}
 		return fmt.Errorf("childstoredb: upsert %s: %w", rec.ChildID, err)
 	}
 	return nil
 }
+
+// isSiblingNameViolation reports whether err is the child_sibling_name_live
+// unique violation and nothing else. Matching on the constraint name as well as
+// the SQLSTATE is deliberate: the sibling-name rule has a caller-visible
+// meaning (pick another name), while every other 23505 on this table is a bug,
+// and mapping those to ErrNameTaken would make a caller retry a broken write
+// forever.
+func isSiblingNameViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "child_sibling_name_live"
+}
+
+// NameHolder returns the live child holding name among ownerUserID's children
+// of parentID, found by exactly the predicate child_sibling_name_live indexes.
+//
+// The empty name is answered without a query: the index exempts empty names
+// (`coalesce(name,”) <> ”`), so no row can hold one and a query would only
+// find unindexed rows the rule does not cover.
+func (s *Store) NameHolder(ctx context.Context, ownerUserID, parentID, name string) (string, string, bool, error) {
+	if name == "" {
+		return "", "", false, nil
+	}
+	var childID, status string
+	err := s.pool.QueryRow(ctx, nameHolderSQL, ownerUserID, parentID, name).Scan(&childID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("childstoredb: name holder %q: %w", name, err)
+	}
+	return childID, status, true, nil
+}
+
+// nameHolderSQL mirrors child_sibling_name_live term for term: the same two
+// coalesces (an empty owner is an anonymous owner; one parent can be spelled
+// rafiki/parent or the older fundi/parent), the same live filter. An index and
+// a query that disagree answer "free" for a name the next Upsert then refuses.
+const nameHolderSQL = `
+SELECT child_id, status
+  FROM conversations.child
+ WHERE coalesce(owner_user_id::text, '') = $1
+   AND coalesce(labels->>'rafiki/parent', labels->>'fundi/parent', '') = $2
+   AND name = $3
+   AND closed_at IS NULL
+ LIMIT 1`
 
 // Delete stamps closed_at on a child row — the close tombstone. Idempotent: a
 // missing or already-closed row is not an error.
