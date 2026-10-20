@@ -36,9 +36,28 @@ builds:
       - arm64
     ldflags:
       - -s -w -X go.graveland.dev/rafiki/pkg/version.Version={{.Tag}}
+  # The webhook gateway is its own binary because it is deployed on its own: the
+  # one rafiki process an operator exposes to the internet, holding a narrowed
+  # {notify} token and no database access.
+  - id: rafiki-hooks
+    main: ./cmd/rafiki-hooks
+    binary: rafiki-hooks
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X go.graveland.dev/rafiki/pkg/version.Version={{.Tag}}
 
 archives:
-  # Both binaries ride ONE tarball per platform.
+  # rafiki and rafikid ride ONE tarball per platform. rafiki-hooks is
+  # deliberately not here: it ships as the Dockerfile's `hooks` image, and a
+  # tarball entry would also have to be wired into install.sh and the upgrade
+  # staging by whoever deploys it.
   - ids: [rafiki, rafikid]
     formats: [tar.gz]
     name_template: "rafiki_{{ .Version }}_{{ .Os }}_{{ .Arch }}"

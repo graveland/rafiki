@@ -1,0 +1,56 @@
+# Example rafiki-hooks configuration.
+#
+# Every route is both the path a sender posts to and the secret that sender
+# signs with; a path that is not listed here answers 404 with no body. The
+# daemon credential is a `{notify}`-capability token minted on the daemon host:
+#
+#   rafikid user token mint bot --capability notify
+#
+# Start the gateway with: rafiki-hooks -config /etc/rafiki/hooks.toml
+
+[daemon]
+# The daemon's Connect endpoint. Must be https unless the host is 127.0.0.1 or
+# localhost, because this token can wake agents.
+url = "https://rafiki.example.com"
+# Holds the {notify} token. A mounted secret, never a literal in this file.
+token_file = "/run/secrets/rafiki-hooks-token"
+# Optional: a PEM pool trusted for the daemon's TLS, on top of the system roots.
+# ca_file = "/etc/rafiki/ca.pem"
+listen = ":8080"
+# The gateway's own serving certificate. Both or neither; unset means plain
+# HTTP, for a TLS-terminating proxy in front of it.
+# tls_cert = "/run/secrets/hooks-tls.crt"
+# tls_key = "/run/secrets/hooks-tls.key"
+timeout_seconds = 10
+
+# A GitHub workflow that failed on the main branch wakes the on-call agent.
+# GitHub sends X-Hub-Signature-256 (HMAC-SHA256 over the raw body) and a
+# delivery id, so a redelivery of the same run is not delivered twice.
+[[route]]
+path = "/hooks/github"
+source = "github"
+secret_file = "/run/secrets/github-webhook-secret"
+target = "oncall"
+
+[[route.rule]]
+event = "workflow_run"
+key = "github/workflow_run/{repository.full_name}/{workflow_run.id}"
+match = { action = "failure", "workflow_run.head_branch" = "main" }
+fields = { repo = "repository.full_name", workflow = "workflow_run.name", branch = "workflow_run.head_branch", url = "workflow_run.html_url", conclusion = "workflow_run.conclusion" }
+
+# A network controller (Omada) posting its own JSON on the inside of the
+# network, with a shared secret in a header of our choosing. A generic webhook
+# carries no event type and no delivery id, so it cannot be deduplicated: this
+# scheme is for a trusted device, not a public endpoint.
+# The route's rule has no `event`, because a generic sender declares none.
+[[route]]
+path = "/hooks/omada"
+source = "generic"
+secret_file = "/run/secrets/omada-webhook-secret"
+header = "X-Omada-Secret"
+target = "network-ops"
+notify_source = "omada"
+
+[[route.rule]]
+match = { event = "client_offline" }
+fields = { mac = "client.mac", ssid = "client.ssid", access_point = "access_point.name" }

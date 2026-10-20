@@ -17,6 +17,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -ldflags="-s -w -X go.graveland.dev/rafiki/pkg/version.Version=${VERSION}" -o /out/rafiki ./cmd/rafiki
 
+# The webhook gateway is the one binary designed to face the internet. The
+# build stage sets no global CGO_ENABLED, so it is set on this line: distroless
+# static-debian12 carries no libc, and a dynamically linked binary would not
+# start.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w -X go.graveland.dev/rafiki/pkg/version.Version=${VERSION}" -o /out/rafiki-hooks ./cmd/rafiki-hooks
+
 
 FROM debian:trixie-slim AS rtk
 
@@ -122,6 +130,20 @@ ENV LANG=C.UTF-8 \
     PATH=/home/rafiki/.cargo/bin:/home/rafiki/go/bin:/home/rafiki/.local/bin:/home/rafiki/.npm-global/bin:/usr/local/go/bin:${PATH}
 
 ENTRYPOINT ["rafiki"]
+
+
+# The webhook gateway: one static binary, no shell, no libc, nothing else. It
+# is the image an operator exposes to the internet (behind their own TLS
+# termination, or with -tls_cert set in its config), so it carries no daemon,
+# no toolchain and no package manager to be escalated through.
+#
+# Deliberately NOT the last stage: a Dockerfile's last stage is the default
+# build target, and the default here must stay `release`.
+FROM gcr.io/distroless/static-debian12 AS hooks
+
+COPY --from=build /out/rafiki-hooks /rafiki-hooks
+
+ENTRYPOINT ["/rafiki-hooks"]
 
 
 FROM debian:trixie-slim AS release
