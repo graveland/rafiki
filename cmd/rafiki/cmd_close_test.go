@@ -549,3 +549,69 @@ func TestCloseIncludeSubagentsFalseClosesOnlyTheTarget(t *testing.T) {
 	c.Require().Len(stub.closeReqs, 1, "close requests")
 	c.False(stub.closeReqs[0].GetIncludeDescendants(), "include_descendants")
 }
+
+func TestCloseSubagentsOnlyStopsThenClosesSubagentsAndKeepsTheTarget(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := newReviewHarness(t)
+	stub.children = []*rafikiv1.ChildSummary{
+		kid("c_1", "", "exited", false),
+		kid("c_2", "c_1", "idle", false),
+	}
+	stub.childStatus = map[string]string{"c_1": "exited"}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"--subagents-only", "c_1"})
+	c.Require().NoError(cmd.Execute(), "close")
+	c.Require().Len(stub.killReqs, 1, "kill requests")
+	c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY, stub.killReqs[0].GetScope(), "kill scope")
+	c.Require().Len(stub.closeReqs, 1, "close requests")
+	c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY, stub.closeReqs[0].GetScope(), "close scope")
+}
+
+func TestCloseExitedSubagentsOnlyStopsNothing(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := newReviewHarness(t)
+	stub.children = []*rafikiv1.ChildSummary{
+		kid("c_1", "", "idle", false),
+		kid("c_2", "c_1", "exited", false),
+	}
+	stub.childStatus = map[string]string{"c_1": "idle"}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"--exited-subagents-only", "c_1"})
+	c.Require().NoError(cmd.Execute(), "close")
+	c.Empty(stub.killReqs, "an exited-only close never stops anything, even a live target")
+	c.Require().Len(stub.closeReqs, 1, "close requests")
+	c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY, stub.closeReqs[0].GetScope(), "close scope")
+}
+
+func TestCloseScopeFlagsAreMutuallyExclusive(t *testing.T) {
+	for _, args := range [][]string{
+		{"--subagents-only", "--include-subagents=true", "c_1"},
+		{"--subagents-only", "--exited-subagents-only", "c_1"},
+		{"--exited-subagents-only", "--include-subagents=false", "c_1"},
+	} {
+		c := assert.NewCollecting(t)
+		stub := newReviewHarness(t)
+		cmd := newCloseCmd()
+		cmd.SetArgs(args)
+		c.Error(cmd.Execute(), "conflicting flags %v", args)
+		c.Empty(stub.closeReqs, "nothing closed for %v", args)
+	}
+}
+
+func TestCloseLegacyScopesAlsoSendIncludeDescendants(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := newReviewHarness(t)
+	stub.children = []*rafikiv1.ChildSummary{
+		kid("c_1", "", "idle", false),
+		kid("c_2", "c_1", "idle", false),
+	}
+	stub.childStatus = map[string]string{"c_1": "idle"}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"--include-subagents=true", "c_1"})
+	c.Require().NoError(cmd.Execute(), "close")
+	c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS, stub.closeReqs[0].GetScope(), "scope")
+	c.True(stub.closeReqs[0].GetIncludeDescendants(), "include_descendants rides along for a daemon that predates scope")
+}

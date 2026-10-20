@@ -253,7 +253,7 @@ func runDoctorAgent(ctx context.Context, client rafikiv1connect.ControlClient, o
 func closeDoctorChild(client rafikiv1connect.ControlClient, childID string, out io.Writer) {
 	ctx, cancel := context.WithTimeout(context.Background(), doctorCloseTimeout)
 	defer cancel()
-	if err := closeChildConnect(ctx, client, childID, false, 0, 0); err != nil {
+	if err := closeChildConnect(ctx, client, childID, rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY, 0, 0); err != nil {
 		fmt.Fprintf(out, "      warning: could not close child %s (%v); close it with: rafiki close %s\n", childID, err, childID)
 	}
 }

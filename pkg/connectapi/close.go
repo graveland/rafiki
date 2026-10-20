@@ -44,13 +44,22 @@ func (s *Server) Close(
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lifecycle not yet wired"))
 	}
+	sc, err := resolveScope(req.Msg.GetIncludeDescendants(), req.Msg.GetScope())
+	if err != nil {
+		return nil, err
+	}
 	var descendants []string
-	if req.Msg.GetIncludeDescendants() {
-		var err error
+	switch {
+	case sc.exitedOnly:
+		descendants, err = cascadeCloseExited(ctx, *p, childID)
+	case sc.descendants:
 		descendants, err = cascadeClose(ctx, *p, childID)
-		if err != nil {
-			return nil, cascadeErr(err)
-		}
+	}
+	if err != nil {
+		return nil, cascadeErr(err)
+	}
+	if !sc.target {
+		return connect.NewResponse(&rafikiv1.CloseResponse{ChildId: childID, DescendantIds: descendants}), nil
 	}
 	if err := (*p).Close(ctx, childID); err != nil {
 		var ce *ControllerError

@@ -538,14 +538,24 @@ func (s *Server) Kill(
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
 	}
+	ss, err := resolveScope(req.Msg.GetIncludeDescendants(), req.Msg.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	if ss.exitedOnly {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("EXITED_DESCENDANTS_ONLY applies to Close, not Kill"))
+	}
 	var descendants []string
-	if req.Msg.GetIncludeDescendants() {
-		var err error
+	if ss.descendants {
 		descendants, err = cascadeKill(ctx, *p, childID,
 			req.Msg.GetShutdownTimeout().AsDuration(), req.Msg.GetKillTimeout().AsDuration())
 		if err != nil {
 			return nil, cascadeErr(err)
 		}
+	}
+	if !ss.target {
+		return connect.NewResponse(&rafikiv1.KillResponse{ChildId: childID, DescendantIds: descendants}), nil
 	}
 	out, err := (*p).Kill(ctx, childID,
 		req.Msg.GetShutdownTimeout().AsDuration(), req.Msg.GetKillTimeout().AsDuration())

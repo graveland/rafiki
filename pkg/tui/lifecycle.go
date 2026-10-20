@@ -49,7 +49,10 @@ type killedMsg struct {
 	name        string
 	forced      bool
 	descendants int
-	err         error
+	// keptTarget is set when only the subagents were stopped and childID was
+	// left running.
+	keptTarget bool
+	err        error
 }
 
 type resumedMsg struct {
@@ -67,12 +70,14 @@ type closedMsg struct {
 	// descendants are the rows a cascading close took with childID, deepest
 	// first.
 	descendants []string
-	err         error
+	// keptTarget is set when only subagents were closed and childID stays.
+	keptTarget bool
+	err        error
 }
 
 // endAsk is the question `x` poses when the agent it is about to end has
-// subagents: take them along or end only this one. It is modal to the rail: the
-// next key answers it, and any key but the two answers cancels.
+// subagents: take them along, end only this one, or end only them. It is modal
+// to the rail: the next key answers it, and any key that is not an answer cancels.
 type endAsk struct {
 	id   string
 	name string
@@ -80,6 +85,9 @@ type endAsk struct {
 	// close.
 	verb string
 	kids int
+	// exitedKids counts the subagents that are already exited; it gates the
+	// close-only-the-exited answer.
+	exitedKids int
 }
 
 // resumeAsk is the question a refused send poses when its target has exited:
@@ -193,12 +201,12 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 
 // killCmd ends a child. force asks the daemon to escalate immediately instead
 // of waiting out its shutdown grace.
-func (c *Cockpit) killCmd(childID, name string, force, include bool) tea.Cmd {
+func (c *Cockpit) killCmd(childID, name string, force bool, scope rafikiv1.DescendantScope) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
-		req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
+		req := &rafikiv1.KillRequest{ChildId: childID, Scope: scope, IncludeDescendants: legacyInclude(scope)}
 		if force {
 			req.ShutdownTimeout = durationpb.New(forceShutdown)
 		}
@@ -206,7 +214,11 @@ func (c *Cockpit) killCmd(childID, name string, force, include bool) tea.Cmd {
 		if err != nil {
 			return killedMsg{childID: childID, name: name, forced: force, err: err}
 		}
-		return killedMsg{childID: childID, name: name, forced: force, descendants: len(resp.Msg.GetDescendantIds())}
+		return killedMsg{
+			childID: childID, name: name, forced: force,
+			descendants: len(resp.Msg.GetDescendantIds()),
+			keptTarget:  scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY,
+		}
 	}
 }
 
@@ -317,29 +329,37 @@ func (c *Cockpit) applyResumed(m resumedMsg) tea.Cmd {
 // never be resumed again. The transcript survives -- nothing references
 // conversations.child -- so this ends resumption, not history.
 //
-// With include, still-running subagents are stopped first (a close refuses a
-// live child), and the target is stopped too if it is itself still up; an
-// already-exited target is the common case and not an error.
-func (c *Cockpit) closeCmd(childID, name string, include bool) tea.Cmd {
+// With a scope that covers descendants, still-running subagents are stopped
+// first (a close refuses a live child), and the target is stopped too if it is
+// itself still up; an already-exited target is the common case and not an
+// error. EXITED_DESCENDANTS_ONLY stops nothing: it closes what is already
+// exited and leaves the rest.
+func (c *Cockpit) closeCmd(childID, name string, scope rafikiv1.DescendantScope) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
-		if include {
+		switch scope {
+		case rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS,
+			rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY:
 			_, err := c.client.Kill(ctx, connect.NewRequest(&rafikiv1.KillRequest{
-				ChildId: childID, IncludeDescendants: true,
+				ChildId: childID, Scope: scope, IncludeDescendants: legacyInclude(scope),
 			}))
 			if err != nil && rpcreason.Reason(err) != protocol.ErrChildExited {
 				return closedMsg{childID: childID, name: name, err: err}
 			}
 		}
 		resp, err := c.client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
-			ChildId: childID, IncludeDescendants: include,
+			ChildId: childID, Scope: scope, IncludeDescendants: legacyInclude(scope),
 		}))
 		if err != nil {
 			return closedMsg{childID: childID, name: name, err: err}
 		}
-		return closedMsg{childID: childID, name: name, descendants: resp.Msg.GetDescendantIds()}
+		return closedMsg{
+			childID: childID, name: name, descendants: resp.Msg.GetDescendantIds(),
+			keptTarget: scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY ||
+				scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY,
+		}
 	}
 }
 
@@ -392,18 +412,48 @@ func (c *Cockpit) endSelected() tea.Cmd {
 	c.endArmedID = ""
 
 	if kids := len(c.subagentIDs(id, verb != "close")); kids > 0 {
-		c.endAsk = &endAsk{id: id, name: name, verb: verb, kids: kids}
-		c.setNotice(name + " has " + pluralSubagents(kids) + ": " +
-			endAskInclude + " = " + verb + " them too, " + endAskOnly + " = only " + name + ", any other key cancels")
+		ask := &endAsk{id: id, name: name, verb: verb, kids: kids}
+		if verb == "close" {
+			for _, kid := range c.subagentIDs(id, false) {
+				if n, ok := c.rail.Get(kid); ok && n.Exited {
+					ask.exitedKids++
+				}
+			}
+		}
+		c.endAsk = ask
+		c.setNotice(endAskPrompt(ask))
 		return nil
 	}
-	return c.dispatchEnd(id, name, verb, false)
+	return c.dispatchEnd(id, name, verb, rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY)
 }
 
 const (
 	endAskInclude = "a"
 	endAskOnly    = "o"
+	endAskKids    = "k"
+	endAskExited  = "e"
 )
+
+// legacyInclude is the include_descendants value that agrees with scope. It is
+// sent alongside scope so a daemon that predates DescendantScope still does the
+// right thing for the two scopes it understands; it cannot honour the others.
+func legacyInclude(scope rafikiv1.DescendantScope) bool {
+	return scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS
+}
+
+// endAskPrompt words the question for ask. The exited-only answer is offered
+// only to a close with exited subagents: stopping what has already exited is
+// meaningless, and a close with none has nothing to take.
+func endAskPrompt(ask *endAsk) string {
+	p := ask.name + " has " + pluralSubagents(ask.kids) + ": " +
+		endAskInclude + " = " + ask.verb + " them too, " +
+		endAskOnly + " = only " + ask.name + ", " +
+		endAskKids + " = only its subagents"
+	if ask.exitedKids > 0 {
+		p += ", " + endAskExited + " = close only its exited ones"
+	}
+	return p + ", any other key cancels"
+}
 
 func pluralSubagents(n int) string {
 	if n == 1 {
@@ -418,26 +468,32 @@ func (c *Cockpit) answerEndAsk(key string) tea.Cmd {
 	c.endAsk = nil
 	switch key {
 	case endAskInclude:
-		return c.dispatchEnd(ask.id, ask.name, ask.verb, true)
+		return c.dispatchEnd(ask.id, ask.name, ask.verb, rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS)
 	case endAskOnly:
-		return c.dispatchEnd(ask.id, ask.name, ask.verb, false)
+		return c.dispatchEnd(ask.id, ask.name, ask.verb, rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY)
+	case endAskKids:
+		return c.dispatchEnd(ask.id, ask.name, ask.verb, rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY)
+	case endAskExited:
+		if ask.exitedKids > 0 {
+			return c.dispatchEnd(ask.id, ask.name, ask.verb, rafikiv1.DescendantScope_DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY)
+		}
 	}
 	c.setNotice("cancelled")
 	return nil
 }
 
 // dispatchEnd runs the confirmed outcome for id.
-func (c *Cockpit) dispatchEnd(id, name, verb string, include bool) tea.Cmd {
+func (c *Cockpit) dispatchEnd(id, name, verb string, scope rafikiv1.DescendantScope) tea.Cmd {
 	switch verb {
 	case "close":
 		c.setNotice("closing " + name + "…")
-		return c.closeCmd(id, name, include)
+		return c.closeCmd(id, name, scope)
 	case "force kill":
 		c.setNotice("force killing " + name + "…")
-		return c.killCmd(id, name, true, include)
+		return c.killCmd(id, name, true, scope)
 	default:
 		c.setNotice("stopping " + name + "…")
-		return c.killCmd(id, name, false, include)
+		return c.killCmd(id, name, false, scope)
 	}
 }
 
@@ -488,6 +544,14 @@ func (c *Cockpit) applyKilled(m killedMsg) {
 	if m.forced {
 		verb = "force killed "
 	}
+	if m.keptTarget {
+		if m.descendants == 0 {
+			c.setNotice(m.name + " has no live subagents")
+			return
+		}
+		c.setNotice(verb + pluralSubagents(m.descendants) + " of " + m.name)
+		return
+	}
 	if m.descendants > 0 {
 		c.setNotice(verb + m.name + " and " + pluralSubagents(m.descendants))
 		return
@@ -508,6 +572,14 @@ func (c *Cockpit) applyClosed(m closedMsg) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, id := range m.descendants {
 		cmds = append(cmds, c.forgetChild(id))
+	}
+	if m.keptTarget {
+		if len(m.descendants) == 0 {
+			c.setNotice(m.name + " has no subagents to close")
+		} else {
+			c.setNotice("closed " + pluralSubagents(len(m.descendants)) + " of " + m.name)
+		}
+		return tea.Batch(cmds...)
 	}
 	cmds = append(cmds, c.forgetChild(m.childID))
 	if len(m.descendants) > 0 {

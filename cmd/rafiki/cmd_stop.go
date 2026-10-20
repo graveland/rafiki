@@ -35,7 +35,8 @@ finalize a child in one step.
 
 A target with running subagents is refused until you say what to do with them:
 --include-subagents=true stops them too (deepest first, before the target),
---include-subagents=false stops only the target.`,
+--include-subagents=false stops only the target, and --subagents-only stops just
+the subagents and leaves the target running.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runStop,
 	}
@@ -114,12 +115,12 @@ func stopOne(ctx context.Context, cmd *cobra.Command, ctrl rafikiv1connect.Contr
 		return "", nil, err
 	}
 
-	include, err := includeSubagents(ctx, cmd, ctrl, childID, arg, false)
+	scope, err := descendantScope(ctx, cmd, ctrl, childID, arg, false)
 	if err != nil {
 		return childID, nil, err
 	}
 
-	req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
+	req := &rafikiv1.KillRequest{ChildId: childID, Scope: scope, IncludeDescendants: legacyInclude(scope)}
 	if st > 0 {
 		req.ShutdownTimeout = durationpb.New(st)
 	}

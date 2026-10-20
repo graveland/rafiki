@@ -13,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // cmdCtx returns the cobra command's context — canceled on SIGINT/SIGTERM,
@@ -129,7 +131,7 @@ func attachAndDecide(cmd *cobra.Command, ep connectEndpoint, childID string, kil
 	// New client: the TUI's connection has already closed when it exited.
 	// "Terminate" is close's semantics under a different name: stop the
 	// child if still running, then finalize it — unconditionally.
-	if err := closeChildConnect(cmdCtx(cmd), ep.control(), childID, false, 0, 0); err != nil {
+	if err := closeChildConnect(cmdCtx(cmd), ep.control(), childID, rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY, 0, 0); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
 	return nil

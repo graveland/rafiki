@@ -34,6 +34,9 @@ func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	// adapter loses the method and every include_descendants request answers
 	// "unimplemented". This line is the pin.
 	var _ connectapi.DescendantLister = connectLifecycle{}
+	// Same reasoning for the exited-descendant close: ClosableDescendantLister
+	// is asserted off the lifecycle at runtime.
+	var _ connectapi.ClosableDescendantLister = connectLifecycle{}
 	var _ connectapi.ConversationResolver = (*Controller)(nil)
 	// The sandbox adapters are wired as connectSandbox, not *Controller — the
 	// compiler stays silent if the adapter drops a method, so this line is the
@@ -133,6 +136,25 @@ func TestConnectLifecycleForwardsDescendantIDs(t *testing.T) {
 
 	lc := connectLifecycle{c: &Controller{st: st}}
 	c.EqDeep([]string{"b"}, lc.DescendantIDs("a"), "adapter forwards to the Controller's descendants")
+}
+
+// TestConnectLifecycleForwardsClosableDescendantIDs is the runtime half of the
+// ClosableDescendantLister pin: an exited child is closable, so a forwarder
+// answering empty would show here.
+func TestConnectLifecycleForwardsClosableDescendantIDs(t *testing.T) {
+	c := assert.NewAborting(t)
+	st := childstore.New()
+	now := time.Now()
+	st.Insert(&childstore.Session{
+		ChildID: "a", Status: protocol.StatusIdle, StartedAt: now, Labels: map[string]string{},
+	})
+	st.Insert(&childstore.Session{
+		ChildID: "b", Status: protocol.StatusExited, StartedAt: now,
+		Labels: map[string]string{childstore.LabelParent: "a", childstore.LabelRoot: "a"},
+	})
+
+	lc := connectLifecycle{c: &Controller{st: st}}
+	c.EqDeep([]string{"b"}, lc.ClosableDescendantIDs("a"), "adapter forwards to the Controller's closable descendants")
 }
 
 // mountPathSyncRoute stands up the Connect Control route the way the UDS

@@ -41,3 +41,33 @@ func TestDescendantIDsAreDeepestFirstAndSkipNatives(t *testing.T) {
 	c.EqDeep([]string{"c"}, ctrl.DescendantIDs("b"), "b's descendants")
 	c.Eq(0, len(ctrl.DescendantIDs("z")), "a childless child")
 }
+
+// TestClosableDescendantIDsKeepExitedRowsAboveLiveOnes pins the stranding rule:
+// an exited row is closable only when nothing beneath it is still live, so an
+// exited-only close never leaves a live child under a closed parent.
+func TestClosableDescendantIDsKeepExitedRowsAboveLiveOnes(t *testing.T) {
+	c := assert.NewAborting(t)
+	st := childstore.New()
+	ins := func(id, parent string, status protocol.Status, native bool) {
+		labels := map[string]string{}
+		if parent != "" {
+			labels[childstore.LabelParent] = parent
+			labels[childstore.LabelRoot] = "a"
+		}
+		st.Insert(&childstore.Session{
+			ChildID: id, Status: status, StartedAt: time.Now(), Labels: labels, Native: native,
+		})
+	}
+	ins("a", "", protocol.StatusIdle, false)
+	ins("b", "a", protocol.StatusExited, false) // exited, but c beneath it is live
+	ins("c", "b", protocol.StatusIdle, false)
+	ins("d", "a", protocol.StatusExited, false) // exited branch: d and e both closable
+	ins("e", "d", protocol.StatusExited, false)
+	ins("f", "a", protocol.StatusIdle, false) // live leaf
+	ins("t", "a", protocol.StatusExited, true)
+
+	ctrl := &Controller{st: st}
+	c.EqDeep([]string{"e", "d"}, ctrl.ClosableDescendantIDs("a"), "closable under a")
+	c.Eq(0, len(ctrl.ClosableDescendantIDs("c")), "a childless child")
+	c.Eq(0, len(ctrl.ClosableDescendantIDs("z")), "an unknown child")
+}

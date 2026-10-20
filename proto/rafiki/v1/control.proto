@@ -97,6 +97,24 @@ enum SendMode {
   SEND_MODE_ABORT = 3;
 }
 
+// DescendantScope selects which rows a Kill or Close touches relative to the
+// target. UNSPECIFIED defers to the request's include_descendants, so a client
+// that predates the enum behaves exactly as it did.
+enum DescendantScope {
+  DESCENDANT_SCOPE_UNSPECIFIED = 0;
+  // TARGET_ONLY ends the target and leaves its subtree alone.
+  DESCENDANT_SCOPE_TARGET_ONLY = 1;
+  // TARGET_AND_DESCENDANTS ends every descendant, deepest first, then the target.
+  DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS = 2;
+  // DESCENDANTS_ONLY ends every descendant and leaves the target untouched.
+  DESCENDANT_SCOPE_DESCENDANTS_ONLY = 3;
+  // EXITED_DESCENDANTS_ONLY (Close only; Kill refuses it) closes the
+  // descendants that are already exited and leaves the target and every live
+  // descendant alone. An exited descendant that still has a live descendant
+  // beneath it is kept too, so no live child is stranded.
+  DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY = 4;
+}
+
 // StepSite names whose authority a send step runs under. UNSPECIFIED is
 // refused, never defaulted.
 enum StepSite {
@@ -475,8 +493,12 @@ message KillRequest {
   google.protobuf.Duration kill_timeout = 6;
   // include_descendants also kills every live descendant of child_id, deepest
   // first, before child_id itself. Off (the default) it ends child_id alone and
-  // leaves its subtree running, exactly as before.
+  // leaves its subtree running, exactly as before. Honoured only while scope is
+  // UNSPECIFIED; a contradicting explicit scope is InvalidArgument.
   bool include_descendants = 4;
+  // scope supersedes include_descendants. EXITED_DESCENDANTS_ONLY is refused:
+  // killing something already exited is meaningless.
+  DescendantScope scope = 7;
 
   reserved 2, 3;
   reserved "shutdown_timeout_ms", "kill_timeout_ms";
@@ -487,6 +509,9 @@ message KillRequest {
 // child's status is read separately via GetChild if a client wants it.
 message KillResponse {
   string child_id = 1;
+  // exit_code, signal, duration and escalated describe child_id's own exit;
+  // they are unset when scope was DESCENDANTS_ONLY, which leaves child_id
+  // running.
   // exit_code is optional: a signalled child has none, and 0 means clean exit.
   optional int32 exit_code = 2;
   string signal = 3;
@@ -512,8 +537,11 @@ message CloseRequest {
   string child_id = 1;
   // include_descendants also closes every descendant of child_id, deepest
   // first, before child_id itself. Each must already be exited, as for
-  // child_id. Off (the default) it closes child_id alone.
+  // child_id. Off (the default) it closes child_id alone. Honoured only while
+  // scope is UNSPECIFIED; a contradicting explicit scope is InvalidArgument.
   bool include_descendants = 2;
+  // scope supersedes include_descendants.
+  DescendantScope scope = 3;
 }
 
 message CloseResponse {

@@ -31,6 +31,13 @@ class SendMode:
     SEND_MODE_STEER = "SEND_MODE_STEER"
     SEND_MODE_ABORT = "SEND_MODE_ABORT"
 
+class DescendantScope:
+    DESCENDANT_SCOPE_UNSPECIFIED = "DESCENDANT_SCOPE_UNSPECIFIED"
+    DESCENDANT_SCOPE_TARGET_ONLY = "DESCENDANT_SCOPE_TARGET_ONLY"
+    DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS = "DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS"
+    DESCENDANT_SCOPE_DESCENDANTS_ONLY = "DESCENDANT_SCOPE_DESCENDANTS_ONLY"
+    DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY = "DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY"
+
 class StepSite:
     STEP_SITE_UNSPECIFIED = "STEP_SITE_UNSPECIFIED"
     STEP_SITE_CHILD = "STEP_SITE_CHILD"
@@ -1151,6 +1158,7 @@ class KillRequest:
     shutdown_timeout: Optional[datetime.timedelta] = None
     kill_timeout: Optional[datetime.timedelta] = None
     include_descendants: bool = False
+    scope: str = "DESCENDANT_SCOPE_UNSPECIFIED"
 
     def to_dict(self) -> dict:
         out = {}
@@ -1162,6 +1170,8 @@ class KillRequest:
             out["killTimeout"] = _dur_out(self.kill_timeout)
         if self.include_descendants != False:
             out["includeDescendants"] = self.include_descendants
+        if self.scope != "DESCENDANT_SCOPE_UNSPECIFIED":
+            out["scope"] = self.scope
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "KillRequest":
@@ -1178,6 +1188,9 @@ class KillRequest:
         _v = _d.get("includeDescendants")
         if _v is not None:
             obj.include_descendants = _v
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
         return obj
 
 @dataclasses.dataclass
@@ -1231,6 +1244,7 @@ class KillResponse:
 class CloseRequest:
     child_id: str = ""
     include_descendants: bool = False
+    scope: str = "DESCENDANT_SCOPE_UNSPECIFIED"
 
     def to_dict(self) -> dict:
         out = {}
@@ -1238,6 +1252,8 @@ class CloseRequest:
             out["childId"] = self.child_id
         if self.include_descendants != False:
             out["includeDescendants"] = self.include_descendants
+        if self.scope != "DESCENDANT_SCOPE_UNSPECIFIED":
+            out["scope"] = self.scope
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CloseRequest":
@@ -1248,6 +1264,9 @@ class CloseRequest:
         _v = _d.get("includeDescendants")
         if _v is not None:
             obj.include_descendants = _v
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
         return obj
 
 @dataclasses.dataclass

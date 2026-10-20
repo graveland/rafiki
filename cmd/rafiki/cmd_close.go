@@ -42,7 +42,11 @@ directory and, for fundi children, its clipped-output spill directory.
 
 A target with subagents is refused until you say what to do with them:
 --include-subagents=true stops and closes them too (deepest first, before the
-target), --include-subagents=false closes only the target.
+target), --include-subagents=false closes only the target. --subagents-only
+stops and closes just the subagents and leaves the target alone;
+--exited-subagents-only closes only the subagents that have already exited,
+stopping nothing, and keeps an exited subagent that still has a live one
+beneath it.
 
 With --all-exited, closes every already-exited child (optionally filtered by
 --older-than). --all-exited never stops a running child — only closing by
@@ -73,6 +77,7 @@ that pass a fixed flag set.`,
 	// flag set whether or not something else added --review.
 	cmd.Flags().Bool("no-review", false, "Explicitly skip the post-close review (the default)")
 	addIncludeSubagentsFlag(cmd, "close")
+	addExitedSubagentsOnlyFlag(cmd)
 	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout when a target must be stopped first (default 2s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when a target must be stopped first (default 2.5s)")
@@ -133,13 +138,13 @@ func runClose(cmd *cobra.Command, args []string) error {
 			failures++
 			continue
 		}
-		include, err := includeSubagents(ctx, cmd, ctrl, childID, arg, true)
+		scope, err := descendantScope(ctx, cmd, ctrl, childID, arg, true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: close %q: %v\n", arg, err)
 			failures++
 			continue
 		}
-		if err := closeChildConnect(ctx, ctrl, childID, include, st, kt); err != nil {
+		if err := closeChildConnect(ctx, ctrl, childID, scope, st, kt); err != nil {
 			fmt.Fprintf(os.Stderr, "error: close %q: %v\n", arg, err)
 			failures++
 			continue
@@ -242,15 +247,23 @@ func renderCloseAllExited(w io.Writer, resp *rafikiv1.CloseAllExitedResponse, mo
 //   - The kill error's own ErrChildExited reason covers the race between the
 //     pre-check and the kill. A kill failure carrying no reason is reported
 //     as the failure it is.
-func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, childID string, include bool, st, kt time.Duration) error {
+func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, childID string, scope rafikiv1.DescendantScope, st, kt time.Duration) error {
 	get, err := ctrl.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 	if err != nil {
 		return fmt.Errorf("get child: %s", formatConnectErr(err))
 	}
-	// With include, the kill runs even for an exited target: its subagents may
-	// still be live, and the cascade ends them before the target is touched.
-	if include || get.Msg.GetChild().GetStatus() != string(protocol.StatusExited) {
-		req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
+	// A scope covering descendants runs the kill even for an exited target: its
+	// subagents may still be live, and the cascade ends them before the target
+	// is touched. Exited-only never stops anything.
+	coversDescendants := scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_AND_DESCENDANTS ||
+		scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_DESCENDANTS_ONLY
+	targetLive := get.Msg.GetChild().GetStatus() != string(protocol.StatusExited)
+	if coversDescendants || (targetLive && scope != rafikiv1.DescendantScope_DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY) {
+		killScope := scope
+		if scope == rafikiv1.DescendantScope_DESCENDANT_SCOPE_EXITED_DESCENDANTS_ONLY {
+			killScope = rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY
+		}
+		req := &rafikiv1.KillRequest{ChildId: childID, Scope: killScope, IncludeDescendants: legacyInclude(killScope)}
 		if st > 0 {
 			req.ShutdownTimeout = durationpb.New(st)
 		}
@@ -266,7 +279,7 @@ func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, 
 		}
 	}
 
-	_, err = ctrl.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID, IncludeDescendants: include}))
+	_, err = ctrl.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID, Scope: scope, IncludeDescendants: legacyInclude(scope)}))
 	if err != nil {
 		return fmt.Errorf("close: %s", formatConnectErr(err))
 	}

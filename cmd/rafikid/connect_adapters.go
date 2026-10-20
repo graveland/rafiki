@@ -308,8 +308,49 @@ func (c *Controller) DescendantDepth(ancestorID, candidateID string) int {
 // out: they have no process of their own and already end and close with their
 // parent (exitNativeChildrenOf, closeNativeChildrenOf).
 func (c *Controller) DescendantIDs(childID string) []string {
+	snaps := c.orderedDescendants(childID)
+	ids := make([]string, len(snaps))
+	for i, snap := range snaps {
+		ids[i] = snap.ChildID
+	}
+	return ids
+}
+
+// ClosableDescendantIDs satisfies connectapi.ClosableDescendantLister: the
+// descendants of childID that are exited and have no live descendant beneath
+// them, deepest first. An exited row above a live one is left out because
+// closing it would strand the live child. Native thread children are excluded
+// as in DescendantIDs.
+func (c *Controller) ClosableDescendantIDs(childID string) []string {
+	snaps := c.orderedDescendants(childID)
+	held := make(map[string]bool, len(snaps))
+	for _, snap := range snaps {
+		if snap.Status == protocol.StatusExited {
+			continue
+		}
+		for id := snap.ChildID; id != childID && !held[id]; {
+			held[id] = true
+			parent, ok := c.st.ParentOf(id)
+			if !ok {
+				break
+			}
+			id = parent
+		}
+	}
+	var ids []string
+	for _, snap := range snaps {
+		if !held[snap.ChildID] {
+			ids = append(ids, snap.ChildID)
+		}
+	}
+	return ids
+}
+
+// orderedDescendants lists childID's non-native descendants deepest first,
+// ties broken on id.
+func (c *Controller) orderedDescendants(childID string) []childstore.Snapshot {
 	type entry struct {
-		id    string
+		snap  childstore.Snapshot
 		depth int
 	}
 	var entries []entry
@@ -317,19 +358,19 @@ func (c *Controller) DescendantIDs(childID string) []string {
 		if snap.Native {
 			continue
 		}
-		entries = append(entries, entry{snap.ChildID, c.st.DescendantDepth(childID, snap.ChildID)})
+		entries = append(entries, entry{snap, c.st.DescendantDepth(childID, snap.ChildID)})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].depth != entries[j].depth {
 			return entries[i].depth > entries[j].depth
 		}
-		return entries[i].id < entries[j].id
+		return entries[i].snap.ChildID < entries[j].snap.ChildID
 	})
-	ids := make([]string, len(entries))
+	out := make([]childstore.Snapshot, len(entries))
 	for i, e := range entries {
-		ids[i] = e.id
+		out[i] = e.snap
 	}
-	return ids
+	return out
 }
 
 // Labels satisfies eventlog.Lineage.
@@ -763,6 +804,14 @@ func (l connectLifecycle) Close(_ context.Context, childID string) error {
 // include_descendants request is refused unimplemented.
 func (l connectLifecycle) DescendantIDs(childID string) []string {
 	return l.c.DescendantIDs(childID)
+}
+
+// ClosableDescendantIDs satisfies connectapi.ClosableDescendantLister, asserted
+// off the ChildLifecycle at runtime exactly like DescendantIDs above, so the
+// method must exist HERE or every exited-descendant close is refused
+// unimplemented.
+func (l connectLifecycle) ClosableDescendantIDs(childID string) []string {
+	return l.c.ClosableDescendantIDs(childID)
 }
 
 // spawnOwner maps the proxy face's authenticated identity onto the daemon's.
