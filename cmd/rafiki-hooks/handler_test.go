@@ -116,11 +116,16 @@ func TestHandlerStatuses(t *testing.T) {
 		want int
 	}{
 		{"ok", nil, http.StatusOK},
+		// 422: the sender's own input can never work.
 		{"not found", connect.NewError(connect.CodeNotFound, errors.New(`no live top-level agent named "oncall"`)), http.StatusUnprocessableEntity},
 		{"invalid argument", connect.NewError(connect.CodeInvalidArgument, errors.New("bad field")), http.StatusUnprocessableEntity},
 		{"failed precondition", connect.NewError(connect.CodeFailedPrecondition, errors.New("protocol mismatch")), http.StatusUnprocessableEntity},
-		{"permission denied", connect.NewError(connect.CodePermissionDenied, errors.New("denied")), http.StatusUnprocessableEntity},
-		{"unauthenticated", connect.NewError(connect.CodeUnauthenticated, errors.New("invalid auth token")), http.StatusUnprocessableEntity},
+		// 500: an expired, revoked or rotated gateway token. The operator can
+		// fix it and a redelivery then succeeds, so telling a retrying sender
+		// "give up" (422) would be wrong.
+		{"permission denied", connect.NewError(connect.CodePermissionDenied, errors.New("denied")), http.StatusInternalServerError},
+		{"unauthenticated", connect.NewError(connect.CodeUnauthenticated, errors.New("invalid auth token")), http.StatusInternalServerError},
+		// 503: temporarily unavailable, so retry.
 		{"unavailable", connect.NewError(connect.CodeUnavailable, errors.New("down")), http.StatusServiceUnavailable},
 		{"deadline exceeded", connect.NewError(connect.CodeDeadlineExceeded, errors.New("slow")), http.StatusServiceUnavailable},
 		// A plain error never became a Connect error: the request did not reach

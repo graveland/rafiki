@@ -7,11 +7,24 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"go.graveland.dev/rafiki/pkg/notify"
+)
+
+const (
+	// healthPath is the one path the mux answers itself. A route claiming it is
+	// shadowed by the health handler and never receives a webhook.
+	healthPath = "/healthz"
+	// defaultTimeoutSeconds is daemon.timeout_seconds' default.
+	defaultTimeoutSeconds = 10
+	// writeTimeoutSeconds is the http.Server's WriteTimeout. A Notify call may
+	// not outlast the response the sender is waiting for.
+	writeTimeoutSeconds = 30
 )
 
 // Config is the gateway's whole configuration: one daemon to talk to, and one
@@ -88,10 +101,6 @@ type Rule struct {
 	Fields map[string]string `toml:"fields"`
 }
 
-// sourcePattern is the daemon's rule for Notify.source. Enforced here as well
-// so a typo is a startup failure rather than a 422 on every delivery.
-var sourcePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-
 // Load reads and validates a TOML config and reads the files it names, so a
 // missing token or secret fails startup rather than the first delivery.
 func Load(path string) (*Config, error) {
@@ -126,7 +135,7 @@ func (c *Config) applyDefaults() {
 		c.Daemon.Listen = ":8080"
 	}
 	if c.Daemon.TimeoutSeconds == 0 {
-		c.Daemon.TimeoutSeconds = 10
+		c.Daemon.TimeoutSeconds = defaultTimeoutSeconds
 	}
 	for i := range c.Routes {
 		r := &c.Routes[i]
@@ -167,8 +176,15 @@ func (c *Config) validate() error {
 	if (c.Daemon.TLSCert == "") != (c.Daemon.TLSKey == "") {
 		return errors.New("daemon.tls_cert and daemon.tls_key must be set together")
 	}
-	if c.Daemon.TimeoutSeconds < 0 {
-		return fmt.Errorf("daemon.timeout_seconds %d: must not be negative", c.Daemon.TimeoutSeconds)
+	if c.Daemon.TimeoutSeconds <= 0 {
+		return fmt.Errorf("daemon.timeout_seconds %d: must be positive (0 means the default, %ds)", c.Daemon.TimeoutSeconds, defaultTimeoutSeconds)
+	}
+	// A timeout at or past the server's WriteTimeout outlives the response: the
+	// sender sees a dropped connection after the daemon has accepted the
+	// notification, and retries it into a duplicate. Refuse it at startup.
+	if c.Daemon.TimeoutSeconds >= writeTimeoutSeconds {
+		return fmt.Errorf("daemon.timeout_seconds %d: must be under the %ds write timeout, or the sender's connection "+
+			"drops after the notification was accepted", c.Daemon.TimeoutSeconds, writeTimeoutSeconds)
 	}
 	if c.Daemon.Listen == "" {
 		return errors.New("daemon.listen must not be empty")
@@ -199,6 +215,15 @@ func (r *Route) validate() error {
 	if !strings.HasPrefix(r.Path, "/") {
 		return fmt.Errorf("route %q: path must start with %q", r.Path, "/")
 	}
+	if r.Path == healthPath {
+		return fmt.Errorf("route %q: the health endpoint owns this path; a webhook would never reach it", r.Path)
+	}
+	// ServeMux cleans and redirects a non-clean path before the gateway sees the
+	// request, so a sender would get a 301 and treat the delivery as failed
+	// while the route looks configured. Refuse it instead.
+	if cleaned := path.Clean(r.Path); cleaned != r.Path {
+		return fmt.Errorf("route %q: path is not clean (want %q); ServeMux would redirect it", r.Path, cleaned)
+	}
 	if r.Source == "" {
 		return fmt.Errorf("route %q: source is required", r.Path)
 	}
@@ -219,8 +244,10 @@ func (r *Route) validate() error {
 	if r.Target == "" {
 		return fmt.Errorf("route %q: target is required", r.Path)
 	}
-	if !sourcePattern.MatchString(r.Notify) {
-		return fmt.Errorf("route %q: notify_source %q must match %s", r.Path, r.Notify, sourcePattern)
+	// notify.ValidSource is the daemon's own Notify.source rule, so a typo is a
+	// startup failure here rather than a 422 on every delivery.
+	if err := notify.ValidSource(r.Notify); err != nil {
+		return fmt.Errorf("route %q: notify_source: %w", r.Path, err)
 	}
 	if r.MaxBody <= 0 {
 		return fmt.Errorf("route %q: max_body must be positive", r.Path)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -261,6 +262,44 @@ func TestSiblingNameRaceBackstop(t *testing.T) {
 	if _, ok := ctrl.cm.Get(refused); ok {
 		t.Fatalf("the refused spawn left %s running, so a process was launched and not aborted", refused)
 	}
+	ck.EqDeep([]string{name}, childNamesFor(t, ctrl.pool, name), "the refused spawn must leave no row")
+}
+
+// A whitespace-only name is INDEXABLE: the index's predicate is
+// coalesce(name,”) <> ”, so "   " is a name like any other. The admission
+// pre-check must use that same emptiness test; with a TrimSpace check it lets
+// the second one through, launches a process, and is refused at the initial
+// write with the misleading "taken concurrently" instead of the holder's name.
+//
+// A whitespace-only name cannot carry a per-run unique token, so the test owns
+// its fixture outright: every live row actually named "   " is removed before
+// and after, which is what a crashed earlier run would otherwise leave behind.
+func TestSiblingNameWhitespaceOnlyRefusedBeforeLaunch(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newSiblingNameController(t)
+	const name = "   "
+	deleteWhitespaceNamed := func() {
+		_, err := ctrl.pool.Exec(context.Background(), `DELETE FROM conversations.child WHERE name = $1`, name)
+		ck.Require().NoError(err, "clear rows named %q", name)
+	}
+	deleteWhitespaceNamed()
+	t.Cleanup(deleteWhitespaceNamed)
+
+	first, err := spawnNamed(t, ctrl, name, false, "")
+	ck.Require().NoError(err, "the first spawn of a whitespace-only name is admitted; it is indexable")
+	ck.Eq(name, rowNameFor(t, ctrl.pool, first.ChildID), "the row keeps the name as given")
+
+	before := len(ctrl.st.List())
+	_, err = spawnNamed(t, ctrl, name, false, "")
+	ck.Require().Error(err, "a second live sibling with the same whitespace-only name must be refused")
+	ce := controllerError(t, err)
+	ck.Eq(protocol.ErrAlreadyExists, ce.Code, "the refusal's reason")
+	ck.StrContains(ce.Message, "is held by", "the refusal names the holder, not a race: %s", ce.Message)
+	ck.StrContains(ce.Message, first.ChildID, "the refusal names the holder's child id: %s", ce.Message)
+	ck.False(strings.Contains(ce.Message, "taken concurrently"),
+		"the pre-check must catch this before a process exists: %s", ce.Message)
+	ck.Eq(before, len(ctrl.st.List()), "nothing was registered for the refused spawn")
+
 	ck.EqDeep([]string{name}, childNamesFor(t, ctrl.pool, name), "the refused spawn must leave no row")
 }
 

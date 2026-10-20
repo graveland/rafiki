@@ -43,8 +43,8 @@ func (n controlNotifier) Notify(ctx context.Context, req *rafikiv1.NotifyRequest
 // The order of checks is the security property, not an implementation detail:
 // the path decides which secret applies before anything reads the body, the
 // body is bounded before it is read, and the signature is verified before the
-// JSON is parsed. A sender that cannot sign gets the same answer whether or not
-// its body was well-formed.
+// JSON is parsed. A body that is merely malformed JSON cannot change the answer
+// to a sender that cannot sign.
 type gateway struct {
 	routes   map[string]*Route
 	notifier notifier
@@ -153,13 +153,21 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // reportFailure turns a Notify failure into the status the sender should see.
+//
+// The split is "can this delivery ever succeed?", not "what did the daemon
+// call it":
+//   - 422: the sender's own input is wrong or the target does not exist, so a
+//     retry delivers the same refusal;
+//   - 503: the daemon or the path to it is temporarily unavailable, so a
+//     retrying sender should try again;
+//   - 500: everything else, including an expired, revoked or rotated gateway
+//     token. That one is fixable by the OPERATOR, and a redelivery after the
+//     fix succeeds — answering 422 would tell a retrying sender to give up for
+//     good.
 func (g *gateway) reportFailure(w http.ResponseWriter, route *Route, deliveryID string, err error) {
 	code := classify(err)
 	switch code {
-	case connect.CodeNotFound, connect.CodeInvalidArgument, connect.CodeFailedPrecondition,
-		connect.CodePermissionDenied, connect.CodeUnauthenticated:
-		// The daemon understood the request and refused it: a retry delivers
-		// the same refusal, so tell the sender not to bother.
+	case connect.CodeNotFound, connect.CodeInvalidArgument, connect.CodeFailedPrecondition:
 		slog.Error("rafiki-hooks: notification refused",
 			"path", route.Path, "target", route.Target, "delivery", deliveryID, "code", code.String(), "error", err)
 		writeText(w, http.StatusUnprocessableEntity, "refused")
@@ -167,6 +175,15 @@ func (g *gateway) reportFailure(w http.ResponseWriter, route *Route, deliveryID 
 		slog.Error("rafiki-hooks: notification not delivered",
 			"path", route.Path, "target", route.Target, "delivery", deliveryID, "code", code.String(), "error", err)
 		writeText(w, http.StatusServiceUnavailable, "unavailable")
+	case connect.CodePermissionDenied, connect.CodeUnauthenticated:
+		// The gateway's own credential was refused: the daemon is up and the
+		// sender's request is fine, so this is an operator problem, not the
+		// sender's. Say so in the log — it is the only clue that the token was
+		// revoked or expired, and the sender can only retry and wait.
+		slog.Error("rafiki-hooks: the gateway's daemon credential was refused; mint a new notify-scoped token "+
+			"and restart the gateway",
+			"path", route.Path, "target", route.Target, "delivery", deliveryID, "code", code.String(), "error", err)
+		writeText(w, http.StatusInternalServerError, "error")
 	default:
 		slog.Error("rafiki-hooks: notification failed",
 			"path", route.Path, "target", route.Target, "delivery", deliveryID, "code", code.String(), "error", err)

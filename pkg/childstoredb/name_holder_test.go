@@ -285,3 +285,31 @@ func TestUpsertNameTakenOnlyForThisIndex(t *testing.T) {
 	c.True(errors.As(err, &pgErr), "err = %v, want a *pgconn.PgError passing through", err)
 	c.Eq("23503", pgErr.Code, "SQLSTATE")
 }
+
+// TestIsSiblingNameViolation pins BOTH clauses of the mapping above: the
+// SQLSTATE and the constraint name. Either one alone is not enough — the code
+// alone would turn every other 23505 on this table into "pick another name",
+// and the name alone would trust a code the database did not send.
+func TestIsSiblingNameViolation(t *testing.T) {
+	pg := func(code, constraint string) error {
+		return &pgconn.PgError{Code: code, ConstraintName: constraint, Message: "duplicate key value violates unique constraint"}
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"this index", pg("23505", "child_sibling_name_live"), true},
+		{"wrapped", fmt.Errorf("upsert: %w", pg("23505", "child_sibling_name_live")), true},
+		{"another constraint", pg("23505", "child_pkey"), false},
+		{"no constraint name", pg("23505", ""), false},
+		{"another sqlstate", pg("23503", "child_sibling_name_live"), false},
+		{"not a pg error", errors.New("child_sibling_name_live"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NewAborting(t).Eq(tc.want, isSiblingNameViolation(tc.err), "isSiblingNameViolation(%v)", tc.err)
+		})
+	}
+}

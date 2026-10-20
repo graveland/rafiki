@@ -144,6 +144,51 @@ func TestValidateSource(t *testing.T) {
 	}
 }
 
+// TestValidSource pins the exported charset check on its own, because the
+// gateway calls it without key or fields. Valid agree with Validate's source
+// rule row for row: the same table, so a change to one cannot silently leave
+// the other behind.
+func TestValidSource(t *testing.T) {
+	rows := []struct {
+		source string
+		ok     bool
+	}{
+		{"", false},
+		{"github", true},
+		{"github-webhooks.ci_2", true},
+		{"GitHub", false},
+		{"-leading-dash", false},
+		{"_leading-underscore", false},
+		{".leading-dot", false},
+		{"a", true},
+		{"0abc", true},
+		{"my.source-name_2", true},
+		{"a b", false},
+		{"a:b", false},
+		{"a/b", false},
+		{strings.Repeat("a", 64), true},
+		{strings.Repeat("a", 65), false},
+		{`a"b`, false},
+	}
+	for _, row := range rows {
+		t.Run(fmt.Sprintf("%q", row.source), func(t *testing.T) {
+			c := assert.NewAborting(t)
+			err := notify.ValidSource(row.source)
+			if row.ok {
+				c.NoError(err, "ValidSource %q", row.source)
+				return
+			}
+			requireInvalid(t, err, "source")
+			// Validate must report the identical failure, since it defers to
+			// ValidSource for this check.
+			var fromValid, fromValidate *notify.InvalidError
+			c.True(errors.As(err, &fromValid), "ValidSource's error is an *InvalidError")
+			c.True(errors.As(notify.Validate(row.source, okKey, nil), &fromValidate), "Validate also refuses %q", row.source)
+			c.Eq(fromValid.Msg, fromValidate.Msg, "Validate defers to ValidSource")
+		})
+	}
+}
+
 func TestValidateKey(t *testing.T) {
 	rows := []struct {
 		key string

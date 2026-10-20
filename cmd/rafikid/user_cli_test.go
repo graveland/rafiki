@@ -330,6 +330,32 @@ func TestUserTokenMintCapability(t *testing.T) {
 	c.Eq("token: rfk_plain\n", out.String(), "output for a full-authority token")
 }
 
+// TestUserTokenMintRefusesEmptyCapability pins that --capability with no value
+// is refused before the DSN is opened. It would store '{}', which
+// identityFromStoreRow refuses as an invalid token: the operator would walk
+// away with a credential that 401s on every call, believed to be a harmless
+// empty one.
+func TestUserTokenMintRefusesEmptyCapability(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	// pflag's CSV reader turns an empty value into an empty slice, which is the
+	// '{}' row this refuses.
+	flagCmd := newUserTokenMintCLICmd(new(string))
+	c.Require().NoError(flagCmd.Flags().Parse([]string{"--capability", ""}), "parse --capability \"\"")
+	caps, err := capabilityFlag(flagCmd)
+	c.Require().Error(err, "--capability \"\" was accepted as %v", caps)
+	c.StrContains(err.Error(), "empty capability set", "the refusal must say why: %v", err)
+	c.StrContains(err.Error(), "omit the flag", "the refusal names the way to get a working token: %v", err)
+
+	// And through cobra, with no --db at all: the refusal is the flag's, so
+	// openUserStore is never reached (an empty DSN would fail differently).
+	cmd := newUserTokenMintCLICmd(new(string))
+	cmd.SetArgs([]string{"hook", "--capability", ""})
+	err = cmd.Execute()
+	c.Require().Error(err, "--capability \"\" was accepted")
+	c.StrContains(err.Error(), "empty capability set", "err = %v, want the flag's own refusal", err)
+}
+
 // TestUserTokenListTable pins the ls table: pkg/table, the eight columns in
 // the brief's order, capability sets rendered as all/none/the list,
 // never-expiring and unrevoked tokens rendered as "never"/"-", and the
@@ -354,8 +380,9 @@ func TestUserTokenListTable(t *testing.T) {
 			return []users.Token{
 				{ID: "t-1", UserID: "uuid-1", Username: "root", Name: "host h1", Origin: users.OriginService, CreatedAt: created},
 				{ID: "t-2", UserID: "uuid-2", Username: "alice", Name: "ci", Origin: users.OriginOIDC, CreatedAt: created, ExpiresAt: &expires, RevokedAt: &revoked},
-				// The three capability states: NULL is full authority, '{}' is
-				// nothing, and a set lists what it may call.
+				// The three capability states: NULL is full authority, a stored
+				// '{}' is an INVALID token (identityFromStoreRow refuses it, so
+				// every call 401s), and a set lists what it may call.
 				{ID: "t-3", UserID: "uuid-1", Username: "root", Name: "webhook", Origin: users.OriginService, CreatedAt: created, Capabilities: []string{}},
 				{ID: "t-4", UserID: "uuid-1", Username: "root", Name: "hook", Origin: users.OriginService, CreatedAt: created, Capabilities: []string{users.CapabilityNotify}},
 			}, nil
@@ -369,7 +396,7 @@ func TestUserTokenListTable(t *testing.T) {
 	for _, want := range []string{"ID", "USER", "NAME", "ORIGIN", "CAPABILITIES", "CREATED", "EXPIRES", "REVOKED",
 		"t-1", "root", "host h1", "service", "never", "-",
 		"t-2", "alice", "ci", "oidc", cliTime(expires), cliTime(revoked),
-		"t-3", "webhook", "none", "t-4", "hook", "notify"} {
+		"t-3", "webhook", "none (invalid)", "t-4", "hook", "notify"} {
 		c.StrContains(out.String(), want, "table missing %q:\n%s", want, out.String())
 	}
 	// "all" is the NULL column, so it belongs in the full-authority row.

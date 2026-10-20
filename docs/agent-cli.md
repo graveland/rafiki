@@ -131,14 +131,21 @@ validated as an IANA name before the store is touched. See
 it may call `Control.Notify` and nothing else. Without `--capability` the
 token carries full user authority (`capabilities` stays NULL); with it, the
 token carries exactly the names given, and an unknown or repeated name is
-refused before the DSN is opened. `--capability ""` (an explicitly empty set)
-stores `'{}'` — a token that may call nothing — which is a different answer
-from omitting the flag. A token whose stored set is anything other
-than NULL or exactly `{notify}` authenticates as an INVALID token (`401` /
-`unauthenticated`), never as a full user, so a hand-written SQL row with an
-unexpected set fails closed. The confinement itself is described under "The
-gate distinguishes four credential shapes" in
-`docs/reference/control-protocol.md`.
+refused before the DSN is opened. An explicit EMPTY set (`--capability ""`) is
+refused too, before the DSN is opened: it would store `'{}'`, which
+authenticates as an INVALID token — a credential that 401s on every call —
+so v1 has no use for it; omit the flag for a full-authority token. A token
+whose stored set is anything other than NULL or exactly `{notify}`
+authenticates as an INVALID token (`401` / `unauthenticated`), never as a full
+user, so a hand-written SQL row with an unexpected set fails closed. The
+confinement itself is described under "The gate distinguishes four credential
+shapes" in `docs/reference/control-protocol.md`.
+
+**Order the deploy, and the rollback.** A `{notify}` row is narrow only for a
+binary that reads `user_token.capabilities` (migration `0055`). A daemon older
+than that selects NULL instead, so it authenticates a notify token as a FULL
+user. Therefore: mint notify tokens only AFTER every daemon sharing the
+database runs this version, and revoke them BEFORE rolling any daemon back.
 
 Two consequences of the set not being on the wire (neither `MintTokenRequest`
 nor `TokenRow` carries a field for it): this host CLI is the ONLY way to mint
@@ -148,12 +155,13 @@ one.
 - `rafikid user token ls` renders a `CAPABILITIES` column beside `ID`, `USER`,
   `NAME`, `ORIGIN`, `CREATED`, `EXPIRES`, `REVOKED`: `all` for NULL (full user
   authority, which is what every token minted without `--capability` reads),
-  `none` for a stored empty set, and otherwise the comma-joined names.
+  `none (invalid)` for a stored empty set (nothing mint could produce — it
+  came from direct SQL, and it authenticates as nothing), and otherwise the
+  comma-joined names.
 - `rafikid user token mint` prints one informational line under the plaintext
   when `--capability` was given — `capabilities: notify (this token can call
-  Notify and nothing else)`, or `capabilities: none (this token can call
-  nothing)` — so the narrowing is visible while the secret is still on screen.
-  A full-authority token prints no such line.
+  Notify and nothing else)` — so the narrowing is visible while the secret is
+  still on screen. A full-authority token prints no such line.
 
 ## `stats`
 

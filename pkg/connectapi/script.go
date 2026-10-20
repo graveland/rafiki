@@ -16,9 +16,9 @@ import (
 )
 
 // Size caps on the script children's free-form JSON payloads. Both are well
-// inside the event buffer's own per-fragment truncation
-// (RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT, default 64 KiB), so a report or a
-// result that passed the cap here can never be truncated again downstream.
+// inside the event buffer's own per-fragment cap
+// (RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT, default 8192 bytes), so a report or a
+// result that passed the cap here can never be refused downstream.
 //
 // The caps are REFUSALS, not truncations: a silently truncated JSON payload is
 // worse than an explicit error, because the parent agent reading the fragment

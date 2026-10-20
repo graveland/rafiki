@@ -373,7 +373,7 @@ defined under "Who may call what" below; each row names its own.
 | `Close` | unary · childScoped | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped. An error for a live child — closing is never an implicit kill. `include_descendants` closes every descendant first, deepest first, each of which must already be exited (reported in `descendant_ids`). A descendant that cannot be ended aborts before the parent is touched, so no child is orphaned; one already exited or gone is skipped. Native Task subagents are never listed: they end and close with their parent. The daemon never refuses a parent for having descendants; the CLI and cockpit ask first |
 | `SetBudget` | unary · childScoped | Change one child's `max_cost` (0 = unlimited). A user credential acts with operator authority — any child, no lineage or remaining-grant check; a per-child credential gets `agent_set_budget`'s rule — a direct child only, bounded by the caller's own remaining grant |
 | `Rename` | unary · userOnly | Set one live child's name and the name of every conversation linked to it (the child's own conversation, `external_ref = child_id` for a claude root thread, `child_id:<thread>` for subagent threads). `name` is trimmed and must be non-empty; an empty `child_id` or `name` is `CodeInvalidArgument`. A child that is not registered — unknown or already closed — is `CodeNotFound`. A child credential is refused by the policy gate; there is no MCP counterpart. A `name` a DIFFERENT live sibling holds is refused `CodeAlreadyExists` naming the holder (§"Child names are unique among live siblings"). Returns the stored name |
-| `Notify` | unary · userOnly | Deliver a third-party notification to ONE of the caller owner's live top-level agents, named by `target`; no live top-level agent by that name is `CodeNotFound`. The owner comes from the connection — never a request field — and a nil identity (the unix socket) addresses the ownerless (`owner_user_id IS NULL`) children. An identity that is NOT nil (so not the unix socket) but carries an empty user id is refused `CodeInvalidArgument` before anything is looked up — it never resolves as the ownerless namespace. An empty or whitespace-only `target` is `CodeInvalidArgument`; every other rule — `source` matching `^[a-z0-9][a-z0-9._-]{0,63}$`, `key` empty or `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`, field names `^[a-zA-Z0-9_.-]{1,64}$`, values valid UTF-8 with no NUL byte and at most 4096 bytes, at most 32 fields, encoded JSON at most 16384 bytes — is the Controller's (`pkg/notify`) and is refused `CodeInvalidArgument`, never truncated. Those rules are not the whole ceiling: the RENDERED fragment (`<notification …>` element, fields JSON and closing tag) must also fit the event buffer's per-fragment cap, `RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT` (default 8192). An oversize notification is `CodeInvalidArgument` naming both sizes — not a truncated frame (a notification cut before its closing tag is not one), and not `CodeUnavailable`, since a retry cannot shrink a fixed payload. The fragment is persisted (`eventbuf` source `notify:<source>`, prompt mode) BEFORE the call returns; a store failure is `CodeUnavailable` with nothing queued, so the gateway's sender retries instead of losing the event. A KILLED target still receives: Kill leaves the child's row live and its name held, so the notification is stored and stays pending until the child resumes; only closing a child drops its rows. Returns the delivered child's id. **The one procedure a `{notify}` token — `ProvenanceNotify` — may call**: every other procedure refuses it `CodePermissionDenied`, and the proxy face refuses it every non-`/rafiki.v1.Control/Notify` path with `403` (see "The gate distinguishes four credential shapes") |
+| `Notify` | unary · userOnly | Deliver a third-party notification to ONE of the caller owner's live top-level agents, named by `target`; no live top-level agent by that name is `CodeNotFound`. The owner comes from the connection — never a request field — and a nil identity (the unix socket) addresses the ownerless (`owner_user_id IS NULL`) children. An identity that is NOT nil (so not the unix socket) but carries an empty user id is refused `CodeInvalidArgument` before anything is looked up — it never resolves as the ownerless namespace. An empty or whitespace-only `target` is `CodeInvalidArgument`; every other rule — `source` matching `^[a-z0-9][a-z0-9._-]{0,63}$`, `key` empty or `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`, field names `^[a-zA-Z0-9_.-]{1,64}$`, values valid UTF-8 with no NUL byte and at most 4096 bytes, at most 32 fields, encoded JSON at most 16384 bytes — is the Controller's (`pkg/notify`) and is refused `CodeInvalidArgument`, never truncated. Those rules are not the whole ceiling: the RENDERED fragment (`<notification …>` element, fields JSON and closing tag) must also fit the event buffer's per-fragment cap, `RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT` (default 8192). An oversize notification is `CodeInvalidArgument` naming both sizes — not a truncated frame (a notification cut before its closing tag is not one), and not `CodeUnavailable`, since a retry cannot shrink a fixed payload. The fragment is persisted (`eventbuf` source `notify:<source>`, prompt mode) BEFORE the call returns; a store failure is `CodeUnavailable` with nothing queued, so the gateway's sender retries instead of losing the event. A KILLED target still receives: Kill leaves the child's row live and its name held, so the notification is stored and stays pending until the child resumes; only closing a child drops its rows. Returns the delivered child's id. **The one procedure a `{notify}` token — `ProvenanceNotify` — may call**: it is admitted here by a branch ahead of the policy table, and every other procedure refuses it `CodePermissionDenied` at the gate. On the proxy face the answer a remote client actually sees is an HTTP `403` (`notify-scoped token may only call /rafiki.v1.Control/Notify`), because `UserTokenAuth.Middleware` runs before the gate; the gate's `CodePermissionDenied` is defence in depth behind it (see "The gate distinguishes four credential shapes") |
 | `SetRouting` | unary · childScoped | Merge a routing-spec delta over one child's stored spec, effective on its next OpenRouter request (§"Route policy"). `delta` is the bracket-free spec string (`prefer=fireworks`, `sort=throughput,quant=fp8+`); the merge is delta-over-stored per key (`routing.Spec.Merge`), so a key the delta names wins and every other stored key stays. An empty `child_id` or `delta` is `CodeInvalidArgument`, as is a parse failure or a provider slug the directory does not know. Authority: a user credential may set any key and target any child; a per-child credential is bounded to its own subtree and may set only `prefer`, `sort` and `quant` — it may not set or change `only=`, and may not clear an operator's `only`/`nodata`/`zdr` (`CodePermissionDenied`). Returns the stored canonical spec after the merge |
 | `ListModels` | unary · anyCaller | The daemon's model rows: one per id the daemon can resolve for a kind, with source and — when the catalog knows the id — optional context window, per-token USD prices and input modalities. `kind` scopes the sources (`claude` resolves only Anthropic ids; empty means the fundi default), `provider` filters by provider. Each row also carries `created` (a `Timestamp`; unset = no catalog entry) and `expires_at` (a `Timestamp`; unset = none). This is what `rafiki models` and `--model` completion read |
 | `ModelInfo` | unary · anyCaller | The daemon's own catalog answer for ONE model, so a client never reads the OpenRouter catalog itself. `model` is required (`CodeInvalidArgument` otherwise). Never an error for an unknown model: `known=false` is an ordinary answer, and every caller degrades by leaving the model's own defaults alone — an unconfigured catalog answers the same way |
@@ -496,7 +496,7 @@ store and is refused.
 
 | Policy | Meaning | Procedures |
 |---|---|---|
-| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `Rename`, `Notify`, `ListExecutors`, `ListSkills`, `GetSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddRepo`, `ListRepos`, `RefreshRepo`, `SetRepo`, `RemoveRepo`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `UpdateUser`, `MintToken`, `ListTokens`, `RevokeToken`, `GetStreams`, `SendFrame` |
+| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust). One departure: `Notify` ALSO admits a `{notify}` token (`ProvenanceNotify`), by a branch ahead of this table — see "The gate distinguishes four credential shapes" | `Rename`, `Notify`, `ListExecutors`, `ListSkills`, `GetSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddRepo`, `ListRepos`, `RefreshRepo`, `SetRepo`, `RemoveRepo`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `UpdateUser`, `MintToken`, `ListTokens`, `RevokeToken`, `GetStreams`, `SendFrame` |
 | `anyCaller` | Read-only, non-scoped; child credentials included | `ListModels`, `ListPresets`, `GetPreset`, `GetRateLimitStatus`, `ListProviderBans`, `ListRoutes`, `ModelInfo`, `ModelRoutes` |
 | `childScoped` | A per-child credential may call these on its own subtree: the gate admits `ProvenanceChildToken` only, and the handler bounds it — the stored parent chain via `childstore.IsDescendant` (`connectapi.Server.SetChildScopeSource`, implemented in `cmd/rafikid/connect_childscope.go`), the caller itself refused (a child is not a descendant of its own id), unknown ids refused with the same answer. `Spawn` forces `ParentChildID` to the caller's own id — the child-spawn admission, whose depth/children/budget checks read the parent's grant through it — and a credential that names no child cannot spawn at all, since an empty forced parent would be the top-level spawn shape. `ListChildren` answers only the subtree; `StreamEvents` refuses the `All` subject and any non-descendant subject; `ListTasks` only a conversation inside the caller's subtree. The other child shapes stay refused. The source never resolves nil (the operator path) for a child-shaped credential — the empty-ChildID and vanished-row shapes resolve an always-refusing scope — and the daemon wiring is pinned end to end by `TestConnectChildScopedOnTheConnectPlane` (`test/integration`). The three script-hub verbs (`Report`/`Receive`/`SetResult`) resolve the caller's position from the credential rather than authorizing a target, and `Report`/`SetResult` admit ANY child credential — script or LLM, the LLM kinds reaching them through the `agent_report`/`agent_result` tools: `Report` acts outward on the caller's own parent (a top-level child appends to its own event log), `Receive` and `SetResult` are strictly self-only — `Receive`'s `child_id` is an identity self-check, not a subtree call, and both verbs refuse any caller that resolves to no child scope (a user credential has no position in the tree for a self-position verb to act on). `SetBudget` from a per-child credential is NOT operator authority: after the subtree check it applies `agent_set_budget`'s rule (`Controller.SetChildBudget` — direct parentage, bounded by the caller's own remaining grant). `SetRouting` from a per-child credential is bounded to `prefer`/`sort`/`quant`: `Controller.SetChildRouting` refuses `only=` from child provenance (it bypasses provider bans) and never clears an operator's `only`/`nodata`/`zdr`. The conversation reads `ConversationSearch`/`ConversationExport`/`ConversationQuery` answer a per-child credential from its own subtree (`insights.ScopeSubtree`, the MCP face's `conversation_*` boundary) — never its owner's corpus; a conversation outside it answers not-found. `ListPymodules`/`GetPymodule`/`PutPymodule`/`DeletePymodule` read and write the owner's corpus, exactly as the MCP face's pymodule tools do. `PutPreset`/`DeletePreset` admit only a TOP-LEVEL child (no parent — the operator's own session); a parented or unknown child is refused `CodePermissionDenied` by `connectPresets.authoringChild`. `CreateSandbox`/`RemoveSandbox` admit a per-child credential on its OWN containers: creates are clamped and bounded by the launcher's declared mount roots, and a remove is bounded to a row the caller or a descendant created (`childstore.IsDescendant`) — the Controller enforces both, since the gate admits by credential kind alone and a sandbox ref carries no subtree to check. `SyncPath`/`SyncRepo` bound a per-child credential to the executors it can REACH: its effective executor set, plus the sandboxes it or a descendant created, one it owns, or a subtree-scoped one owned by an ancestor. A SANDBOX executor is reachable only through a permitted sandbox row — never by selection — and each named endpoint is resolved across every lookup pass (sandbox name/id, exact machine label, exact id, trailing id fragment), deduped by executor id and REFUSED as AMBIGUOUS when more than one distinct executor matches, so a sandbox named like a machine label makes that label ambiguous rather than letting it capture a request. `overwrite` is allowed only when the destination row says `isolation=container` | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `SetBudget`, `SetRouting`, `ListTasks`, `Report`, `Receive`, `SetResult`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `PutPreset`, `DeletePreset`, `CreateSandbox`, `RemoveSandbox`, `SyncPath`, `SyncRepo` |
 | `ownerScoped` | A per-child credential may call these as its OWNER: the gate admits `ProvenanceChildToken` only (the per-boot shapes stay refused); the handler resolves the owner's NON-admin identity (`recallOwner`, `cmd/rafikid/recall.go`), so conversation-derived reads cover only the owner's rows — never `Scope{All: true}`, even for an admin's child — and memories are the owner's own. The surface a fundi child's `recall`/`memory_*` tools already have, and what the MCP face gives a claude child. `ListSandboxes` answers the caller's owner's live sandboxes the same way — keyed on the owner's user id, so a local (unix-socket) caller, whose identity is empty, sees only that local identity's sandboxes, never an admin's whole fleet. No subtree check | `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `ListSandboxes` |
@@ -567,6 +567,11 @@ Connect wire carries a capability: neither `MintTokenRequest` nor `TokenRow`
 has a field for it, so a `{notify}` token is minted only by the host CLI
 (`rafikid user token mint --capability notify`, `docs/agent-cli.md`) and
 seen only by `rafikid user token ls`.
+
+**Deploy order.** A binary that predates `0055` does not select the column, so
+it reads every token as `NULL` — full user authority, including a `{notify}`
+row. Mint notify tokens only AFTER every daemon sharing the database runs this
+version, and revoke them BEFORE rolling any daemon back.
 
 This gate exists because every claude child holds a child credential in its
 environment (`ANTHROPIC_AUTH_TOKEN`, `RAFIKI_MCP_TOKEN`) — as does every bash
@@ -668,9 +673,38 @@ yet wired`); on a daemon with no durable child store or no event buffer it is
 `CodeUnavailable` too (`notify requires the durable child store`), as is a
 store failure. It returns the child id it delivered to.
 
+**What the sender can rely on, and what it cannot.** A `2xx` means the
+notification is a durable row: nothing is acknowledged before `Notify`
+returns. Past that:
+
+- **`key` is last-write-wins within the pending batch.** A later notification
+  with the same `(child, source, key)` REPLACES an earlier one that has not
+  been delivered yet (`pkg/inbox/coalesce.go`) — a sender that wants every
+  event delivered one by one must vary the key or leave it empty.
+- **An empty `key` never coalesces.** Every unkeyed notification is delivered,
+  as its own prompt.
+- **A burst can arrive as an omission marker.** One delivered batch is capped
+  by `RAFIKI_EVENTBUF_MAX_FRAGMENTS` (default 30) and
+  `RAFIKI_EVENTBUF_MAX_BYTES_PER_FLUSH` (default 65536); content the caps cut
+  from a batch arrives as `[N fragment(s) omitted]` rather than silently
+  vanishing. A `2xx` per notification is therefore not a promise that every
+  fragment's text is still there after a burst — spread a burst out, or key it.
+- **A target mid-turn receives it after the turn**, and a target over its
+  budget (or with an over-budget ancestor) has the row HELD pending rather
+  than refused: it is delivered when the budget is raised
+  (`budgetHalted`, `releaseHeldInbox`).
+
 A `{notify}` token is the credential this verb exists for — it may call
 `Notify` and nothing else (§"The gate distinguishes four credential shapes").
 The gateway that holds one is `cmd/rafiki-hooks` (README, "Webhook gateway").
+
+A leaked `{notify}` token is bounded in authority but not in effect, and that
+is accepted for v1 (the design defers a per-token address whitelist): it can
+enumerate its owner's top-level agent names by probing `target` (an unknown
+one is `CodeNotFound`, a hit returns the child id), and every unkeyed
+notification is a durable inbox row that wakes that agent and spends its
+owner's LLM budget. There is no per-token rate limit or pending-row cap on
+this path; a budget breach holds the row rather than dropping it.
 
 #### Child names are unique among live siblings
 
@@ -681,7 +715,10 @@ keeps a name, because a killed child is resumable and its name still resolves;
 `Close` (the tombstone) frees it.
 
 The authority is the database index, never a pre-read (migration
-`0054_child_sibling_name`):
+`0054_child_sibling_name`). Both admission paths below pre-read with the SAME
+emptiness test the index uses — `name == ""`, not `TrimSpace(name) == ""`, so
+a whitespace-only name is admitted to the pre-read rather than passing it and
+failing at the initial write. The index:
 
 ```sql
 CREATE UNIQUE INDEX child_sibling_name_live ON conversations.child (
@@ -715,7 +752,10 @@ and every operator surface — the CLI, the cockpit, Connect `Spawn` — passes
 `false` and refuses. A store ERROR during the pre-read refuses the spawn (an
 unchecked name must not run) as a plain error, not a name conflict.
 - `Rename` refuses a name a DIFFERENT live sibling holds, with the same
-`CodeAlreadyExists` message; re-stating the child's own name is a no-op. A
+`CodeAlreadyExists` message. Re-stating the child's own name is PERMITTED but
+not a no-op: it writes the record, renames the linked conversations to that
+name and emits `ChildRenamed`, exactly as any other rename does — the self
+case is simply exempt from the conflict pre-read. A
 child's OWN self-reported rename (the session name sniffer,
 `handleChildRenamed`) is gated the same way and SKIPS a held name instead of
 applying it: an unchecked name would make every later `writeRecord` fail
@@ -734,6 +774,30 @@ and answers the same way. Pinned by `TestSiblingNameRaceBackstop`,
 `TestSiblingNameKilledHoldsClosedFrees` and `TestRenameRefusedWhenSiblingHoldsName`
 (`cmd/rafikid`), and `TestSiblingNameIndex*` / `TestNameHolder*`
 (`pkg/childstoredb`).
+
+**Deploying `0054`.** The migration does two things, and both matter to an
+operator:
+
+1. It RENAMES existing live duplicates so the index can build: in each live,
+   non-empty-name sibling group the earliest `spawned_at` row (ties by
+   `child_id`) keeps the name and the n-th later row becomes `<name>-2`,
+   `<name>-3`, …; the conversations linked to a renamed row are renamed with
+   it (all three arms). Nothing is deleted, and nothing records the original
+   names — the down migration drops only the index, so a renamed child stays
+   renamed (rename it back by hand if you need to).
+2. It creates `child_sibling_name_live`.
+
+The renames and the index build share one transaction, so a failure leaves the
+database exactly as it was. Apply it with the daemon **stopped** — the
+migration runs at boot, and a daemon that was already running keeps the renamed
+children under their old in-memory names, so its next record write hits the new
+index. For the same reason, upgrade **every daemon sharing the database
+together**: one old binary left running after a new one has migrated is in
+exactly that state. The rename pass also fails LOUDLY (a
+`23505` naming the index, and then a daemon that will not start) if a
+pre-existing sibling is already named `<name>-2`; the migration cannot pick a
+winner, so rename that row by hand and boot again. Pinned by
+`TestMigrate0054RenamesLiveDuplicates` (`pkg/store`).
 
 #### Spawn's operator-only fields (15–29)
 
@@ -2288,6 +2352,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `permission_denied` | `permission_denied` | The authenticated caller addressed a resource that belongs to a different user — executor ownership scoping (`LabelExecutor`/`DisableExecutor`/`EnableExecutor`/`DeleteExecutor` against another user's executor). A MISSING row is `not_found`, never this; this code says "it exists and is not yours". |
 | `internal` | `internal` | Unexpected daemon-side error. |
 | `no_agent_db` | `unavailable` | The conversation/recall/pymodule backend is unwired (`RAFIKI_DB` unset). |
+| `unavailable` | `unavailable` | The daemon cannot take the request RIGHT NOW, and the same request may succeed later: `Notify`'s unwired notifier, missing durable child store, name-resolve failure or failed durable accept; `ModelRoutes` with no endpoint catalog. Retryable — the webhook gateway's `503` rests on it (README, "Webhook gateway"). |
 | `payload_too_large` | `invalid_argument` | A transcript or report exceeds its size cap. |
 | `protocol_mismatch` | `failed_precondition` | A Connect request's `Rafiki-Protocol` header is missing or names a different epoch (`pkg/server.RequireEpoch`). Attached by the epoch gate, not the domain error table — see "The protocol epoch" above. |
 

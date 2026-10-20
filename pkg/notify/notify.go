@@ -59,6 +59,17 @@ type InvalidError struct{ Msg string }
 
 func (e *InvalidError) Error() string { return e.Msg }
 
+// ValidSource reports whether source matches the charset a notification's
+// source must satisfy, returning the same *InvalidError Validate produces for
+// it. It is exported because the gateway validates a route's notify_source at
+// startup and must enforce exactly the daemon's rule.
+func ValidSource(source string) error {
+	if !sourceRE.MatchString(source) {
+		return &InvalidError{Msg: fmt.Sprintf("invalid source %s: must match %s", echo(source), sourcePattern)}
+	}
+	return nil
+}
+
 // Validate checks source, key and fields against the charsets and caps. Every
 // failure is an *InvalidError naming the offending part. A nil fields map is
 // valid and encodes as {}.
@@ -66,8 +77,8 @@ func (e *InvalidError) Error() string { return e.Msg }
 // Because fields is a map, when more than one field is invalid the field named
 // in the error is undefined; Validate reports the first it reaches.
 func Validate(source, key string, fields map[string]string) error {
-	if !sourceRE.MatchString(source) {
-		return &InvalidError{Msg: fmt.Sprintf("invalid source %s: must match %s", echo(source), sourcePattern)}
+	if err := ValidSource(source); err != nil {
+		return err
 	}
 	if key != "" && !keyRE.MatchString(key) {
 		return &InvalidError{Msg: fmt.Sprintf("invalid key %s: must be empty or match %s", echo(key), keyPattern)}

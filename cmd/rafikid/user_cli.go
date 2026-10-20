@@ -286,7 +286,13 @@ afterward.
 
 Without --capability the token has full user authority. With it, the token
 carries exactly the capabilities named — 'notify' lets it call Notify and
-nothing else.`,
+nothing else. An explicitly empty set (--capability "") is refused: it would
+store a credential that authenticates as nothing.
+
+A narrowed token is only narrow for a daemon that reads the capability
+column (migration 0055): an older daemon reads it as full authority. Mint
+notify tokens only after every daemon sharing the database is upgraded, and
+revoke them before rolling any daemon back.`,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -325,9 +331,14 @@ nothing else.`,
 	return cmd
 }
 
-// capabilityFlag reads --capability, keeping "not given" distinct from "given
-// as an empty set": absent is nil, which is full user authority, while a given
-// set is exactly what the flag says.
+// capabilityFlag reads --capability: absent is nil (full user authority), and a
+// given set is exactly what the flag says.
+//
+// A given EMPTY set is refused here, before the DSN is opened. It would be
+// stored as '{}', which identityFromStoreRow refuses as an invalid token: the
+// operator would hold a credential that 401s on every call, including Notify,
+// while the mint output called it "none". v1 has no use for that token —
+// "narrow to nothing" is expressed by revoking.
 func capabilityFlag(cmd *cobra.Command) ([]string, error) {
 	if !cmd.Flags().Changed("capability") {
 		return nil, nil
@@ -335,6 +346,10 @@ func capabilityFlag(cmd *cobra.Command) ([]string, error) {
 	caps, err := cmd.Flags().GetStringSlice("capability")
 	if err != nil {
 		return nil, fmt.Errorf("invalid --capability: %w", err)
+	}
+	if len(caps) == 0 {
+		return nil, fmt.Errorf("invalid --capability: an empty capability set is not a usable token in v1 " +
+			"(it authenticates as nothing); omit the flag for a full-authority token")
 	}
 	return caps, nil
 }
@@ -389,10 +404,12 @@ func runUserTokenMintCLI(ctx context.Context, out io.Writer, store users.Store, 
 
 // capabilityLine says what a narrowed token may do. v1 has exactly one
 // capability, so the verbs are named rather than derived: a grammar for a set
-// that cannot yet exist would be invented text.
+// that cannot yet exist would be invented text. An empty set is unreachable
+// from mint (capabilityFlag refuses it), and is described as what it is: a
+// credential that authenticates as nothing.
 func capabilityLine(caps []string) string {
 	if len(caps) == 0 {
-		return "capabilities: none (this token can call nothing)"
+		return "capabilities: none (not a usable token: it authenticates as nothing)"
 	}
 	return "capabilities: " + strings.Join(caps, ", ") + " (this token can call Notify and nothing else)"
 }
@@ -458,14 +475,16 @@ func runUserTokenListCLI(ctx context.Context, out io.Writer, store users.Store, 
 }
 
 // tokenCapabilities renders a token's capability set: NULL is full user
-// authority, so it reads "all"; a stored '{}' reads "none"; anything else is
-// the capability list.
+// authority, so it reads "all"; a stored '{}' reads "none (invalid)" because
+// identityFromStoreRow refuses such a row as an invalid token — every call,
+// Notify included, answers 401. Mint cannot produce one (capabilityFlag
+// refuses an empty set), so a row like that came from direct SQL.
 func tokenCapabilities(caps []string) string {
 	switch {
 	case caps == nil:
 		return "all"
 	case len(caps) == 0:
-		return "none"
+		return "none (invalid)"
 	default:
 		return strings.Join(caps, ",")
 	}

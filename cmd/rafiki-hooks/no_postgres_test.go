@@ -37,6 +37,25 @@ func TestHooksDoesNotLinkPostgres(t *testing.T) {
 	}
 }
 
+// daemonOnlyPackages are the importable packages that carry the daemon's own
+// machinery — executors, capture, the inbox, and every database handle. None of
+// them belongs in a process reachable from outside.
+//
+// The list is by PACKAGE, not by binary: cmd/rafikid is `package main` and can
+// never be a dependency of anything, so asserting on it (as this test once did)
+// is an assertion that cannot fail. Only importable packages can be linked.
+var daemonOnlyPackages = []string{
+	"go.graveland.dev/rafiki/pkg/inbox",
+	"go.graveland.dev/rafiki/pkg/inboxdb",
+	"go.graveland.dev/rafiki/pkg/childstoredb",
+	"go.graveland.dev/rafiki/pkg/usersdb",
+	"go.graveland.dev/rafiki/pkg/recalldb",
+	"go.graveland.dev/rafiki/pkg/store",
+	"go.graveland.dev/rafiki/pkg/execpool",
+	"go.graveland.dev/rafiki/pkg/server",
+	"go.graveland.dev/rafiki/pkg/rawtrace",
+}
+
 // TestHooksDoesNotLinkDaemon pins the other half: the gateway links no daemon
 // code. It is a client of one RPC, and the daemon's own tree carries executors,
 // capture and every database handle — none of which belongs in a process
@@ -48,10 +67,24 @@ func TestHooksDoesNotLinkDaemon(t *testing.T) {
 		t.Fatalf("go list -deps go.graveland.dev/rafiki/cmd/rafiki-hooks could not run; "+
 			"the daemon-link guard cannot be evaluated without the Go toolchain on PATH: %v", err)
 	}
+	deps := make(map[string]bool)
 	for _, dep := range strings.Split(string(out), "\n") {
-		if strings.Contains(dep, "go.graveland.dev/rafiki/cmd/rafikid") {
+		deps[dep] = true
+	}
+
+	// A guard that has drifted out of date looks exactly like a passing one, so
+	// fail rather than pass when the list names a package this module does not
+	// have: a renamed package must not silently leave nothing to check.
+	if err := exec.Command("go", append([]string{"list"}, daemonOnlyPackages...)...).Run(); err != nil {
+		t.Errorf("daemonOnlyPackages names a package this module does not have; "+
+			"update the list rather than letting the guard check a package that no longer exists: %v", err)
+	}
+
+	for _, banned := range daemonOnlyPackages {
+		if deps[banned] {
 			t.Errorf("cmd/rafiki-hooks links %s. The gateway is a Connect client of rafikid and must "+
-				"not import daemon code; move what both need into a package under pkg/", dep)
+				"not import daemon code; move what both need into a package under pkg/ (pkg/notify is "+
+				"the one such share)", banned)
 		}
 	}
 }

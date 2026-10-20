@@ -1866,7 +1866,11 @@ func nameHeldError(name, holderID, holderStatus string) error {
 // would then be refused by its initial write, after a process and possibly a
 // sandbox exist.
 func (c *Controller) claimSiblingName(ctx context.Context, ownerUserID, parentID, name string, suffix bool) (string, error) {
-	if c.children == nil || strings.TrimSpace(name) == "" {
+	// name == "" is the index's own emptiness test (coalesce(name,'') <> '').
+	// TrimSpace here would let a whitespace-only name past admission and fail it
+	// at the initial write instead — after a process exists, with the
+	// "taken concurrently" message rather than the holder's.
+	if c.children == nil || name == "" {
 		return name, nil
 	}
 	holderID, holderStatus, taken, err := c.children.NameHolder(ctx, ownerUserID, parentID, name)

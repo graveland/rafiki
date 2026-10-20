@@ -386,3 +386,159 @@ func TestMigrate0047Sandbox(t *testing.T) {
 	c.NoError(pool.QueryRow(ctx, `SELECT to_regclass('conversations.sandbox') IS NOT NULL`).Scan(&exists), "probe sandbox after down")
 	c.False(exists, "conversations.sandbox survived the down migration")
 }
+
+// TestMigrate0054RenamesLiveDuplicates pins 0054's rename pass — the only
+// irreversible, data-mutating SQL in the chain. Migrate has already run, so
+// drop the index it built, seed the duplicates a pre-0054 database could hold,
+// then apply the migration's own SQL by reading the file: a future edit to it
+// must keep this test green, and a no-op body must fail it.
+//
+// Seeded, all children of ONE owner:
+//   - three LIVE rows named <tag>dup, in spawned_at order;
+//   - three LIVE rows named <tag>tri, one carrying the legacy fundi/parent
+//     label, so the group is split across both parent spellings and must still
+//     be grouped as siblings;
+//   - two CLOSED rows named <tag>dup, which the index exempts and the pass
+//     must not touch.
+//
+// The renamed rows' conversations are linked by the three arms the pass
+// handles: conversation_id, external_ref = child_id, and external_ref =
+// child_id:<thread>. Child ids carry an underscore, a LIKE wildcard, so the
+// escaping is exercised too.
+func TestMigrate0054RenamesLiveDuplicates(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	// Migrate left 0054's index in place; remove it so the duplicates this
+	// migration exists to repair can be seeded.
+	_, err := pool.Exec(ctx, `DROP INDEX conversations.child_sibling_name_live`)
+	c.NoError(err, "drop child_sibling_name_live so duplicates can be seeded")
+
+	tag := fmt.Sprintf("d54%d", time.Now().UnixNano())
+	dup, tri, parent := tag+"dup", tag+"tri", tag+"parent"
+	owner := insertMigrationOwner(t, ctx, pool, tag)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	insertChild := func(childID, name, labels string, spawnedAt time.Time, closed bool) {
+		t.Helper()
+		var closedAt any
+		if closed {
+			closedAt = time.Now()
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO conversations.child
+			   (child_id, owner_user_id, kind, name, labels, status, spawned_at, closed_at)
+			 VALUES ($1, $2, 'fundi', $3, $4::jsonb, 'exited', $5, $6)`,
+			childID, owner, name, labels, spawnedAt, closedAt); err != nil {
+			t.Fatalf("insert child %s: %v", childID, err)
+		}
+	}
+	parentLabel := func(key string) string { return fmt.Sprintf(`{"%s":"%s"}`, key, parent) }
+
+	insertChild(dup+"_a", dup, `{}`, base, false)
+	insertChild(dup+"_b", dup, `{}`, base.Add(time.Minute), false)
+	insertChild(dup+"_c", dup, `{}`, base.Add(2*time.Minute), false)
+
+	insertChild(tri+"_a", tri, parentLabel("rafiki/parent"), base, false)
+	insertChild(tri+"_b", tri, parentLabel("fundi/parent"), base.Add(time.Minute), false)
+	insertChild(tri+"_c", tri, parentLabel("rafiki/parent"), base.Add(2*time.Minute), false)
+
+	insertChild(dup+"_closed_a", dup, `{}`, base, true)
+	insertChild(dup+"_closed_b", dup, `{}`, base.Add(time.Minute), true)
+
+	newConversation := func(name, externalRef *string) string {
+		t.Helper()
+		var id string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref, name)
+			VALUES ('claude', 'server', $1, $2) RETURNING id::text`, externalRef, name).Scan(&id); err != nil {
+			t.Fatalf("insert conversation %v: %v", externalRef, err)
+		}
+		return id
+	}
+	str := func(s string) *string { return &s }
+
+	// Arm 1: the child row names its conversation directly.
+	viaConversationID := newConversation(str(dup), nil)
+	if _, err := pool.Exec(ctx, `UPDATE conversations.child SET conversation_id = $1 WHERE child_id = $2`,
+		viaConversationID, dup+"_b"); err != nil {
+		t.Fatalf("link conversation_id: %v", err)
+	}
+	// Arm 2: external_ref is the child id itself.
+	viaChildID := newConversation(str(dup), str(dup+"_c"))
+	// Arm 3: external_ref is child_id:<thread>, the claude-thread shape.
+	viaThread := newConversation(str(tri), str(tri+"_b:thread1"))
+
+	up, err := os.ReadFile("migrations/0054_child_sibling_name.up.sql")
+	c.NoError(err, "read 0054 up migration")
+	if _, err := pool.Exec(ctx, string(up)); err != nil {
+		t.Fatalf("apply 0054 up: %v", err)
+	}
+
+	// The oldest keeps its name; the later ones become <name>-2, -3.
+	c.Eq(dup, childNameRow(t, ctx, pool, dup+"_a"), "the earliest spawned sibling keeps its name")
+	c.Eq(dup+"-2", childNameRow(t, ctx, pool, dup+"_b"), "the second is renamed")
+	c.Eq(dup+"-3", childNameRow(t, ctx, pool, dup+"_c"), "the third is renamed")
+	c.Eq(tri, childNameRow(t, ctx, pool, tri+"_a"), "the split group's earliest keeps its name")
+	c.Eq(tri+"-2", childNameRow(t, ctx, pool, tri+"_b"), "a legacy fundi/parent sibling is grouped and renamed")
+	c.Eq(tri+"-3", childNameRow(t, ctx, pool, tri+"_c"), "the split group's third is renamed")
+	c.Eq(dup, childNameRow(t, ctx, pool, dup+"_closed_a"), "a closed row is exempt from the rename")
+	c.Eq(dup, childNameRow(t, ctx, pool, dup+"_closed_b"), "a second closed row keeps the name too")
+
+	// Every arm's conversation follows its child's new name.
+	c.Eq(dup+"-2", conversationNameRow(t, ctx, pool, viaConversationID), "the conversation linked by conversation_id is renamed")
+	c.Eq(dup+"-3", conversationNameRow(t, ctx, pool, viaChildID), "the conversation linked by external_ref = child_id is renamed")
+	c.Eq(tri+"-2", conversationNameRow(t, ctx, pool, viaThread), "the conversation linked by external_ref = child_id:<thread> is renamed")
+
+	var exists bool
+	c.NoError(pool.QueryRow(ctx, `SELECT to_regclass('conversations.child_sibling_name_live') IS NOT NULL`).Scan(&exists),
+		"probe the index")
+	c.True(exists, "the index was not created by the up migration")
+
+	// And it is live again: a NEW live duplicate is refused, while a closed
+	// one is still exempt.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO conversations.child (child_id, owner_user_id, kind, name, status, spawned_at)
+		VALUES ($1, $2, 'fundi', $3, 'exited', now())`, dup+"_after", owner, dup); err == nil {
+		t.Fatal("a new live duplicate name was accepted; the index is missing or wrong")
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO conversations.child (child_id, owner_user_id, kind, name, status, spawned_at, closed_at)
+		VALUES ($1, $2, 'fundi', $3, 'exited', now(), now())`, dup+"_after_closed", owner, dup); err != nil {
+		t.Fatalf("a closed duplicate must stay exempt from the index: %v", err)
+	}
+}
+
+// childNameRow reads one child row's name.
+func childNameRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, childID string) string {
+	t.Helper()
+	var name string
+	if err := pool.QueryRow(ctx, `SELECT coalesce(name,'') FROM conversations.child WHERE child_id = $1`, childID).Scan(&name); err != nil {
+		t.Fatalf("read the name for %s: %v", childID, err)
+	}
+	return name
+}
+
+// conversationNameRow reads one conversation row's name.
+func conversationNameRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string) string {
+	t.Helper()
+	var name string
+	if err := pool.QueryRow(ctx, `SELECT coalesce(name,'') FROM conversations.conversation WHERE id = $1::uuid`, id).Scan(&name); err != nil {
+		t.Fatalf("read the name for conversation %s: %v", id, err)
+	}
+	return name
+}
+
+// insertMigrationOwner creates one active user and returns its id, which is what
+// the sibling index groups by.
+func insertMigrationOwner(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO conversations.users (username, token_sha256) VALUES ($1, $1) RETURNING id::text`, name).Scan(&id); err != nil {
+		t.Fatalf("insert owner %q: %v", name, err)
+	}
+	return id
+}

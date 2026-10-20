@@ -292,6 +292,85 @@ event = "push"
 			},
 			want: "must match",
 		},
+		{
+			// The daemon's charset is lowercase-only, so an uppercase
+			// notify_source is refused by the same rule the daemon applies.
+			name: "uppercase notify_source",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, `target = "oncall"`, "target = \"oncall\"\nnotify_source = \"GitHub\"")
+			},
+			want: "invalid source",
+		},
+		{
+			// The mux answers /healthz itself, so this route would never see a
+			// webhook: refuse it rather than let the gateway look configured.
+			name: "route on the health path",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, `path = "/hooks/github"`, `path = "/healthz"`)
+			},
+			want: "the health endpoint owns this path",
+		},
+		{
+			name: "route path with a double slash",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, `path = "/hooks/github"`, `path = "/hooks//github"`)
+			},
+			want: "path is not clean",
+		},
+		{
+			name: "route path with a trailing slash",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, `path = "/hooks/github"`, `path = "/hooks/github/"`)
+			},
+			want: "path is not clean",
+		},
+		{
+			name: "route path with a dot segment",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, `path = "/hooks/github"`, `path = "/hooks/./github"`)
+			},
+			want: "path is not clean",
+		},
+		{
+			name: "route path with a parent segment",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, `path = "/hooks/github"`, `path = "/hooks/../github"`)
+			},
+			want: "path is not clean",
+		},
+		{
+			// Past the server's WriteTimeout the response outlives the sender's
+			// connection, so an accepted notification is retried into a
+			// duplicate.
+			name: "timeout at the write timeout",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, "token_file = ", fmt.Sprintf("timeout_seconds = %d\ntoken_file = ", writeTimeoutSeconds))
+			},
+			want: "must be under the",
+		},
+		{
+			name: "timeout past the write timeout",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, "token_file = ", fmt.Sprintf("timeout_seconds = %d\ntoken_file = ", writeTimeoutSeconds+60))
+			},
+			want: "must be under the",
+		},
+		{
+			name: "negative timeout",
+			load: func(t *testing.T) (*Config, error) {
+				t.Helper()
+				return f.mutate(t, "token_file = ", "timeout_seconds = -1\ntoken_file = ")
+			},
+			want: "must be positive",
+		},
 	}
 	for _, tc := range cases {
 		load := tc.load
@@ -302,6 +381,35 @@ event = "push"
 			c.Error(err)
 			c.ErrorContains(err, want)
 		})
+	}
+}
+
+// TestRouteValidateNotifySource pins that notify_source is checked with
+// notify.ValidSource — the daemon's own rule — rather than a copy of it. An
+// empty notify_source never reaches validate through Load (it defaults to
+// source), so the empty case calls validate directly.
+func TestRouteValidateNotifySource(t *testing.T) {
+	base := Route{
+		Path:       "/hooks/github",
+		Source:     "github",
+		SecretFile: "/run/secrets/secret",
+		Target:     "oncall",
+		MaxBody:    1 << 20,
+		Rules:      []Rule{{Event: "push"}},
+	}
+	c := assert.NewAborting(t)
+
+	for _, source := range []string{"github", "omada.ci_2", "a"} {
+		r := base
+		r.Notify = source
+		c.NoError(r.validate(), "notify_source %q is valid", source)
+	}
+	for _, source := range []string{"", "GitHub", "GitHub Webhooks", "-x", strings.Repeat("a", 65)} {
+		r := base
+		r.Notify = source
+		err := r.validate()
+		c.Error(err, "notify_source %q must be refused", source)
+		c.ErrorContains(err, "invalid source", "the error names the daemon's own rule")
 	}
 }
 
