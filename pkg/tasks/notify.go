@@ -82,11 +82,18 @@ func (s *notifyingStore) Drop(ctx context.Context, convID, handle, reason string
 	return rows, nil
 }
 
-// droppedFrom keeps the rows a Drop of handle changed: the target and its
-// subtree. The dot is part of the match so dropping "1" never claims "10".
+// droppedFrom keeps the rows a Drop of handle reports: the rows of its
+// subtree that now read StatusDropped. Both stores' Drop leaves a terminal
+// descendant (completed, failed) untouched, so reporting one as dropped would
+// claim a change that never happened; it is excluded along with everything
+// outside the subtree. The dot is part of the match so dropping "1" never
+// claims "10".
 func droppedFrom(rows []Task, handle string) []Task {
 	var out []Task
 	for _, t := range rows {
+		if t.Status != StatusDropped {
+			continue
+		}
 		if t.Handle == handle || strings.HasPrefix(t.Handle, handle+".") {
 			out = append(out, t)
 		}

@@ -250,6 +250,67 @@ func TestTaskLedgerOrphanSweepPublishesOnTheParent(t *testing.T) {
 	ck.Eq(res.ChildID, row.GetAssignee(), "the assignee is retained: a coordinator needs to know who held it")
 }
 
+// TestTaskLedgerOrphanSweepFollowsTheLegacyParentLabel pins that the sweep
+// resolves the parent through the childstore's resolver rather than the label
+// directly: a live parent recorded under the pre-rename parent label is the
+// child's parent to every other parent walk in the daemon, so it receives the
+// orphaned notice as well.
+func TestTaskLedgerOrphanSweepFollowsTheLegacyParentLabel(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	ctrl.tasks = tasks.NewMemoryStore()
+	const parent = "c_legacy_parent"
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: parent, Kind: protocol.KindFundi, Status: protocol.StatusIdle,
+		StartedAt: time.Now(), SessionID: "sess-legacy-parent", Labels: map[string]string{},
+		MaxDepth: 1, MaxChildren: 2,
+	})
+
+	ctx, cancelSpawn := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelSpawn()
+	res, err := ctrl.Spawn(ctx, protocol.SpawnRequest{
+		Cwd: t.TempDir(), Kind: protocol.KindClaude, PiBinary: fakePiBin(t), NoSession: true,
+		ParentChildID: parent,
+	}, users.Identity{})
+	ck.NoError(err, "spawn the child whose work will be orphaned")
+
+	// The same lineage a record persisted before the rename carries: only the
+	// legacy parent label remains.
+	_, err = ctrl.st.SetLabels(res.ChildID,
+		map[string]string{"fundi/parent": parent}, []string{childstore.LabelParent})
+	ck.NoError(err, "move the child's lineage to the pre-rename label")
+	snap, ok := ctrl.st.Get(res.ChildID)
+	ck.Require().True(ok, "the child is registered")
+	ck.Eq("", snap.Labels[childstore.LabelParent], "the current label is gone")
+	ck.Eq(parent, snap.Labels["fundi/parent"], "the legacy label carries the lineage")
+
+	const conv = "sess-legacy"
+	if _, err := ctrl.tasks.Add(t.Context(), conv, "", []tasks.NewTask{{Content: "unfinished"}}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if _, err := ctrl.tasks.Assign(t.Context(), conv, "1", res.ChildID); err != nil {
+		t.Fatalf("assign to the child: %v", err)
+	}
+
+	ch, cancel := ctrl.native.Subscribe(parent)
+	defer cancel()
+	endChild(t, ctrl, res.ChildID)
+
+	seen := tasksChangedOn(ch)
+	ck.Len(seen, 1, "a legacy-labelled parent's bus gets the sweep's event")
+	if len(seen) != 1 {
+		return
+	}
+	ck.Eq(parent, seen[0].GetChildId(), "the event names the parent, whose ledger the rows live in")
+	tc := seen[0].GetTasksChanged()
+	ck.Eq(tasks.NoticeOrphaned, tc.GetKind(), "kind")
+	ck.Len(tc.GetTasks(), 1, "one row reported")
+	row := tc.GetTasks()[0]
+	ck.Eq("1", row.GetHandle(), "handle")
+	ck.Eq(string(tasks.StatusOrphaned), row.GetStatus(), "status")
+	ck.Eq(res.ChildID, row.GetAssignee(), "the assignee is retained")
+}
+
 // TestTaskLedgerOrphanSweepWithoutParentIsSilent pins the other half: a
 // top-level child's work is still orphaned, but nothing is published, because
 // there is no owning ledger to announce it on.

@@ -4982,14 +4982,16 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// PARENT's ledger, so the notice goes on the parent's bus when there is a
 	// registered parent to receive it; a child whose parent is gone (or that
 	// never had one) is swept without announcing to a bus nobody reads.
+	//
+	// The parent comes from the store's own resolver rather than the label
+	// directly, so a record still carrying the pre-rename parent label is
+	// announced like every other parent walk in the daemon sees it.
 	if c.tasks != nil {
 		sweepCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		ledger := c.tasks
-		if snap, ok := c.st.Get(childID); ok {
-			if parentID := snap.Labels[childstore.LabelParent]; parentID != "" {
-				if _, live := c.st.Get(parentID); live {
-					ledger = c.tasksFor(parentID)
-				}
+		if parentID, ok := c.st.ParentOf(childID); ok {
+			if _, live := c.st.Get(parentID); live {
+				ledger = c.tasksFor(parentID)
 			}
 		}
 		if rows, err := ledger.OrphanAssigned(sweepCtx, childID); err != nil {

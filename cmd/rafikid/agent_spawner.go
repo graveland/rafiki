@@ -460,7 +460,9 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 	if spec.Task != "" {
 		convID, err := s.c.ensureLedgerConversation(ctx, self)
 		if err != nil {
-			return tools.AgentInfo{}, fmt.Errorf("resolve task ledger for %s: %w", s.selfID, err)
+			// ensureLedgerConversation's error already names the child and the
+			// reason; re-wrapping it would repeat the phrase.
+			return tools.AgentInfo{}, err
 		}
 		spawnerConversationID = convID
 	}

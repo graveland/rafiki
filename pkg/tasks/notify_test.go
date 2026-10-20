@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
@@ -13,6 +14,22 @@ type noticeRecorder struct {
 }
 
 func (r *noticeRecorder) record(n Notice) { r.got = append(r.got, n) }
+
+// errStoreFailed is what errOnWrite returns; the point is that the wrapper
+// sees an error, not which error it is.
+var errStoreFailed = errors.New("tasks: test store write failed")
+
+// errOnWrite wraps a Store so every mutation returns the conversation's rows
+// alongside an error — a write that committed and then failed to report
+// returns exactly this, and the wrapper must publish nothing for it.
+type errOnWrite struct {
+	Store
+}
+
+func (s errOnWrite) Update(ctx context.Context, convID string, changes []Change) ([]Task, error) {
+	rows, _ := s.List(ctx, ListFilter{ConversationID: convID})
+	return rows, errStoreFailed
+}
 
 // notifyingMemory returns a wrapped memory store and its recorder. The
 // wrapper is synchronous, so every assertion below reads a settled recorder.
@@ -93,6 +110,94 @@ func TestNotifyingDropReportsTheSubtree(t *testing.T) {
 	}
 }
 
+// TestNotifyingDropSkipsTerminalDescendants pins the status half of the
+// report filter: a drop moves only the non-terminal rows of its subtree, so a
+// completed descendant is NOT announced as dropped with the drop's reason —
+// it was not touched, and it reads completed in the ledger.
+func TestNotifyingDropSkipsTerminalDescendants(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	s, rec := notifyingMemory()
+
+	if _, err := s.Add(ctx, "conv", "", []NewTask{{Content: "top"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "conv", "1", []NewTask{{Content: "kid"}, {Content: "done"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update(ctx, "conv", []Change{{Handle: "1.1", Status: StatusCompleted}}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rec.got)
+	if _, err := s.Drop(ctx, "conv", "1", "dropped the rest"); err != nil {
+		t.Fatal(err)
+	}
+
+	notices := rec.got[before:]
+	c.Len(notices, 1, "the drop is one notice")
+	if len(notices) != 1 {
+		return
+	}
+	got := map[string]Task{}
+	for _, task := range notices[0].Tasks {
+		got[task.Handle] = task
+	}
+	c.Len(notices[0].Tasks, 2, "the target and the live descendant, not the completed one")
+	c.Eq(StatusDropped, got["1"].Status, "the target is reported dropped")
+	c.Eq("dropped the rest", got["1"].DropReason)
+	c.Eq(StatusDropped, got["1.2"].Status, "the live descendant is reported dropped")
+	c.Eq("dropped the rest", got["1.2"].DropReason)
+	if completed, ok := got["1.1"]; ok {
+		t.Fatalf("the completed descendant was reported as dropped: %#v", completed)
+	}
+
+	rows, err := s.List(ctx, ListFilter{ConversationID: "conv", IncludeDropped: true})
+	c.NoError(err, "List after the drop")
+	for _, row := range rows {
+		if row.Handle == "1.1" {
+			c.Eq(StatusCompleted, row.Status, "the completed descendant keeps its status")
+			c.Eq("", row.DropReason, "and no drop reason")
+		}
+	}
+}
+
+// TestNotifyingDropDoesNotReportHandleSiblings pins the dot in the match: a
+// drop of "1" reports "1", never "10" or "10.x" — an already-dropped sibling
+// subtree still reads StatusDropped, so only the dot keeps it out.
+func TestNotifyingDropDoesNotReportHandleSiblings(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	s, rec := notifyingMemory()
+
+	items := make([]NewTask, 10)
+	for i := range items {
+		items[i] = NewTask{Content: "row"}
+	}
+	if _, err := s.Add(ctx, "conv", "", items); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "conv", "10", []NewTask{{Content: "kid of ten"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Drop(ctx, "conv", "10", "not this one"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rec.got)
+	if _, err := s.Drop(ctx, "conv", "1", "only the first"); err != nil {
+		t.Fatal(err)
+	}
+
+	notices := rec.got[before:]
+	c.Len(notices, 1, "the drop is one notice")
+	if len(notices) != 1 {
+		return
+	}
+	c.Len(notices[0].Tasks, 1, `dropping "1" reports exactly "1"`)
+	c.Eq("1", notices[0].Tasks[0].Handle, `"10" and "10.1" are outside the subtree`)
+	c.Eq(StatusDropped, notices[0].Tasks[0].Status)
+	c.Eq("only the first", notices[0].Tasks[0].DropReason, "the earlier drop's rows keep their own reason")
+}
+
 func TestNotifyingAssignReportsTheRow(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
@@ -155,6 +260,68 @@ func TestNotifyingStaysSilentOnError(t *testing.T) {
 	_, err := s.Drop(ctx, "conv", "1", "")
 	c.ErrorIs(err, ErrDropReason, "Drop without a reason")
 	c.Len(rec.got[before:], 0, "a refused mutation must report nothing")
+}
+
+// TestNotifyingUpdateAndAssignStaySilentOnError pins Update's and Assign's
+// error guards: an inner call that returned an error must publish nothing,
+// even when it also returned rows.
+func TestNotifyingUpdateAndAssignStaySilentOnError(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("update with an unknown handle", func(t *testing.T) {
+		c := assert.NewCollecting(t)
+		s, rec := notifyingMemory()
+		if _, err := s.Add(ctx, "conv", "", []NewTask{{Content: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+		before := len(rec.got)
+		_, err := s.Update(ctx, "conv", []Change{{Handle: "9", Status: StatusCompleted}})
+		c.ErrorIs(err, ErrNotFound, "Update of a handle that does not exist")
+		c.Len(rec.got[before:], 0, "a failed Update must report nothing")
+	})
+
+	t.Run("update that returned rows alongside its error", func(t *testing.T) {
+		c := assert.NewCollecting(t)
+		inner := NewMemoryStore()
+		if _, err := inner.Add(ctx, "conv", "", []NewTask{{Content: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+		rec := &noticeRecorder{}
+		s := Notifying(errOnWrite{Store: inner}, rec.record)
+		_, err := s.Update(ctx, "conv", []Change{{Handle: "1", Status: StatusCompleted}})
+		c.ErrorIs(err, errStoreFailed, "the inner store's error is returned")
+		c.Len(rec.got, 0, "rows returned with an error are not a committed mutation")
+	})
+
+	t.Run("assign with an unknown handle", func(t *testing.T) {
+		c := assert.NewCollecting(t)
+		s, rec := notifyingMemory()
+		if _, err := s.Add(ctx, "conv", "", []NewTask{{Content: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+		before := len(rec.got)
+		_, err := s.Assign(ctx, "conv", "9", "c_worker")
+		c.ErrorIs(err, ErrNotFound, "Assign of a handle that does not exist")
+		c.Len(rec.got[before:], 0, "a failed Assign must report nothing")
+	})
+}
+
+// TestNotifyingUpdateWithNoChangesIsSilent pins the empty-report guard: an
+// Update carrying no changes mutates nothing, so it must not publish the
+// empty notice the filter alone would let through.
+func TestNotifyingUpdateWithNoChangesIsSilent(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	s, rec := notifyingMemory()
+
+	if _, err := s.Add(ctx, "conv", "", []NewTask{{Content: "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rec.got)
+	rows, err := s.Update(ctx, "conv", nil)
+	c.NoError(err, "Update with no changes")
+	c.Len(rows, 1, "the store still returns the conversation's rows")
+	c.Len(rec.got[before:], 0, "an Update that changed nothing must report nothing")
 }
 
 func TestNotifyingStaysSilentWhenNothingChanged(t *testing.T) {
