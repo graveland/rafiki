@@ -208,6 +208,55 @@ func TestNotifyOwnerScoped(t *testing.T) {
 	requireControllerError(t, err, protocol.ErrNotFound, "no live top-level agent named")
 }
 
+// A non-anonymous caller with an EMPTY user id must not be resolved as the
+// NULL owner: ("", false) is not the unix socket's local trust, and treating it
+// as ownerless would let such a connection notify another owner's namespace.
+// The refusal happens before the store is touched.
+func TestNotifyEmptyOwnerNonAnonymousRefused(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := newNotifyFixture(t)
+	const childID = "c_notify_empty_owner"
+	name := uniqueNotifyName("emptyowner")
+	// An ownerless agent by that name: resolving ("", false) as the NULL owner
+	// would find it and succeed, so a success here means the guard never ran.
+	f.insertChild(t, childID, "", "", name, protocol.StatusIdle)
+	st := &countingChildStore{ChildStore: f.ctrl.children}
+	f.ctrl.children = st
+
+	_, err := f.ctrl.Notify(t.Context(), "", false, name, "ci", "", nil)
+	requireControllerError(t, err, protocol.ErrInvalidArgs, "requires an owner")
+	ck.Eq(0, st.nameHolderCalls(), "NameHolder calls: the refusal must precede the lookup")
+	ck.Empty(f.pending(t, childID), "pending rows after a refused notification")
+
+	// The SAME empty owner is the unix socket's local trust when the caller is
+	// anonymous, and still reaches the ownerless agent.
+	got, err := f.ctrl.Notify(t.Context(), "", true, name, "ci", "", nil)
+	ck.Require().NoError(err, "anonymous Notify")
+	ck.Eq(childID, got, "anonymous resolved child")
+}
+
+// countingChildStore records NameHolder calls, so a refusal can be shown to
+// happen BEFORE the lookup rather than merely to return the right code.
+type countingChildStore struct {
+	childstore.ChildStore
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *countingChildStore) NameHolder(ctx context.Context, ownerUserID, parentID, name string) (string, string, bool, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return s.ChildStore.NameHolder(ctx, ownerUserID, parentID, name)
+}
+
+func (s *countingChildStore) nameHolderCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
 // A field violating pkg/notify's rules is refused as invalid arguments, never
 // truncated, and nothing reaches the target's queue.
 func TestNotifyInvalidFieldsRefused(t *testing.T) {

@@ -53,6 +53,21 @@ func (c *Controller) Notify(ctx context.Context, ownerUserID string, anonymous b
 		}
 	}
 
+	// An authenticated caller that resolved to an EMPTY owner is refused
+	// before the store is touched. The Connect handler derives (owner, anonymous)
+	// from identity alone — a nil identity is the unix socket's local trust and
+	// is legitimately ownerless, but a non-nil identity with no user id is not:
+	// resolving it as "" would address the ownerless namespace (and so, in
+	// practice, somebody else's agents). InvalidArgument rather than
+	// Unavailable on purpose: a retryable code would have the gateway re-post the
+	// same event forever against a defect no retry can fix.
+	if !anonymous && ownerUserID == "" {
+		return "", &connectapi.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "notify requires an owner: the caller's identity carries no user id",
+		}
+	}
+
 	owner := ownerUserID
 	if anonymous {
 		owner = ""
