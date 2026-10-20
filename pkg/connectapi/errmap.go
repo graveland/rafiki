@@ -51,6 +51,7 @@ var errCodeTable = map[string]connect.Code{
 	protocol.ErrPayloadTooLarge:    connect.CodeInvalidArgument,
 	protocol.ErrChildNotFound:      connect.CodeNotFound,
 	protocol.ErrNotFound:           connect.CodeNotFound,
+	protocol.ErrAlreadyExists:      connect.CodeAlreadyExists,
 	protocol.ErrFailedPrecondition: connect.CodeFailedPrecondition,
 	protocol.ErrPermissionDenied:   connect.CodePermissionDenied,
 	protocol.ErrSessionFileMissing: connect.CodeNotFound,
@@ -65,6 +66,7 @@ var errCodeTable = map[string]connect.Code{
 	protocol.ErrAuthRequired:       connect.CodeUnauthenticated,
 	protocol.ErrAuthInvalid:        connect.CodeUnauthenticated,
 	protocol.ErrNoAgentDB:          connect.CodeUnavailable,
+	protocol.ErrUnavailable:        connect.CodeUnavailable,
 	protocol.ErrSpawnFailed:        connect.CodeInternal,
 	protocol.ErrInternal:           connect.CodeInternal,
 }

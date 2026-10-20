@@ -77,6 +77,10 @@ const (
 	ErrAuthInvalid = "auth_invalid"
 	// ErrNotFound is the generic not-found error.
 	ErrNotFound = "not_found"
+	// ErrAlreadyExists is returned when the request addresses a resource a
+	// distinct one already holds (a name another live child has, a key already
+	// claimed).
+	ErrAlreadyExists = "already_exists"
 	// ErrFailedPrecondition is returned when the request is well formed but the
 	// current state refuses it (a destination that exists, an executor that
 	// lacks a capability, a git update that is not a fast-forward).
@@ -92,6 +96,10 @@ const (
 	// ErrNoAgentDB is returned by the conversation-insight queries when the
 	// daemon has no agent database configured (RAFIKI_DB unset).
 	ErrNoAgentDB = "no_agent_db"
+	// ErrUnavailable is a transient refusal: a dependency the daemon needs to
+	// answer is unreachable right now, so the same request may succeed if
+	// retried.
+	ErrUnavailable = "unavailable"
 	// ErrPayloadTooLarge is returned when a marshaled response would exceed
 	// the response size budget.
 	ErrPayloadTooLarge = "payload_too_large"

@@ -555,6 +555,32 @@ message RenameResponse {
   string name     = 2;
 }
 
+// NotifyRequest delivers a notification from a third-party integration to one
+// of the caller owner's top-level agents, named by target. The Controller
+// validates every field below (pkg/notify); a violation is CodeInvalidArgument,
+// never truncation, and zero fields is allowed.
+message NotifyRequest {
+  // target is the NAME of the caller owner's live top-level agent. Required;
+  // no live top-level agent by that name is CodeNotFound.
+  string target = 1;
+  // source names the integration that sent the notification. Required, and
+  // must match ^[a-z0-9][a-z0-9._-]{0,63}$.
+  string source = 2;
+  // key is the integration's own notification key. Empty, or matching
+  // ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$.
+  string key = 3;
+  // fields is the notification payload. Field names must match
+  // ^[a-zA-Z0-9_.-]{1,64}$; each value must be valid UTF-8 with no NUL byte
+  // and at most 4096 bytes; at most 32 fields; the encoded JSON object at
+  // most 16384 bytes.
+  map<string, string> fields = 4;
+}
+
+message NotifyResponse {
+  // child_id is the top-level agent the notification was delivered to.
+  string child_id = 1;
+}
+
 // SetRouting merges a routing-spec delta over a child's stored routing spec,
 // effective on its next OpenRouter request. delta is the bracket-free spec
 // string ("prefer=fireworks", "sort=throughput,quant=fp8+"). The merge is
@@ -1232,6 +1258,7 @@ service Control {
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc SetBudget(SetBudgetRequest) returns (SetBudgetResponse);
   rpc Rename(RenameRequest) returns (RenameResponse);
+  rpc Notify(NotifyRequest) returns (NotifyResponse);
   rpc SetRouting(SetRoutingRequest) returns (SetRoutingResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);

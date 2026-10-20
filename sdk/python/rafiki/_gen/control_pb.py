@@ -1366,6 +1366,58 @@ class RenameResponse:
         return obj
 
 @dataclasses.dataclass
+class NotifyRequest:
+    target: str = ""
+    source: str = ""
+    key: str = ""
+    fields: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.target != "":
+            out["target"] = self.target
+        if self.source != "":
+            out["source"] = self.source
+        if self.key != "":
+            out["key"] = self.key
+        if self.fields:
+            out["fields"] = dict((k, v) for k, v in self.fields.items())
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "NotifyRequest":
+        obj = cls()
+        _v = _d.get("target")
+        if _v is not None:
+            obj.target = _v
+        _v = _d.get("source")
+        if _v is not None:
+            obj.source = _v
+        _v = _d.get("key")
+        if _v is not None:
+            obj.key = _v
+        _v = _d.get("fields")
+        if _v is not None:
+            obj.fields = {k: v for k, v in _v.items()}
+        return obj
+
+@dataclasses.dataclass
+class NotifyResponse:
+    child_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "NotifyResponse":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        return obj
+
+@dataclasses.dataclass
 class SetRoutingRequest:
     child_id: str = ""
     delta: str = ""

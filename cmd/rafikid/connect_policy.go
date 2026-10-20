@@ -130,6 +130,10 @@ var controlPolicyTable = map[string]controlPolicy{
 	"SetBudget": policyChildScoped,
 	// Rename is operator/owner only: no child credential may rename.
 	"Rename": policyUserOnly,
+	// Notify is userOnly at the gate today. A later task admits a token whose
+	// only capability is {notify} here — and only here — once
+	// Store.Authenticate resolves it to ProvenanceNotify.
+	"Notify": policyUserOnly,
 	// SetRouting from a child is subtree-scoped and refused only= — see
 	// SetChildRouting. It edits the stored spec, never re-resolves policy.
 	"SetRouting": policyChildScoped,

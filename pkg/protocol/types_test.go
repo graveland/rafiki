@@ -117,8 +117,10 @@ func TestErrorCodeConstants(t *testing.T) {
 		{"ErrAuthRequired", protocol.ErrAuthRequired, "auth_required"},
 		{"ErrAuthInvalid", protocol.ErrAuthInvalid, "auth_invalid"},
 		{"ErrNotFound", protocol.ErrNotFound, "not_found"},
+		{"ErrAlreadyExists", protocol.ErrAlreadyExists, "already_exists"},
 		{"ErrFailedPrecondition", protocol.ErrFailedPrecondition, "failed_precondition"},
 		{"ErrInternal", protocol.ErrInternal, "internal"},
+		{"ErrUnavailable", protocol.ErrUnavailable, "unavailable"},
 	}
 	for _, tc := range cases {
 		assert.NewCollecting(t).Eq(tc.want, tc.val, "%s = %q, want", tc.name, tc.val)
