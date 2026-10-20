@@ -449,18 +449,30 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 	if cwd == "" {
 		cwd = self.Cwd
 	}
+	// SpawnerConversationID lets Controller.Spawn resolve the handle against
+	// the CALLER's ledger rather than the new child's, which does not have one
+	// yet. It is resolved only when a handle is named: for a claude child the
+	// resolution CREATES that child's ledger row, and a spawn that assigns
+	// nothing must not mint one. A fundi caller's row may not exist yet (its
+	// engine has not started), and resolving then leaves the field empty, which
+	// is the same no-assignment outcome it had before.
+	spawnerConversationID := ""
+	if spec.Task != "" {
+		convID, err := s.c.ensureLedgerConversation(ctx, self)
+		if err != nil {
+			return tools.AgentInfo{}, fmt.Errorf("resolve task ledger for %s: %w", s.selfID, err)
+		}
+		spawnerConversationID = convID
+	}
 
 	req := protocol.SpawnRequest{
-		Kind:          kind,
-		Name:          spec.Name,
-		Model:         spec.Model,
-		Cwd:           cwd,
-		ParentChildID: s.selfID,
-		Task:          spec.Task,
-		// SpawnerConversationID lets Controller.Spawn resolve the handle
-		// against the CALLER's ledger rather than the new child's, which
-		// does not have one yet.
-		SpawnerConversationID: self.SessionID,
+		Kind:                  kind,
+		Name:                  spec.Name,
+		Model:                 spec.Model,
+		Cwd:                   cwd,
+		ParentChildID:         s.selfID,
+		Task:                  spec.Task,
+		SpawnerConversationID: spawnerConversationID,
 		MaxDepth:              spec.MaxDepth,
 		MaxCost:               spec.MaxCost,
 		MaxChildren:           spec.MaxChildren,

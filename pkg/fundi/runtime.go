@@ -191,6 +191,11 @@ type RuntimeOptions struct {
 	// not need postgres.
 	Pool *pgxpool.Pool
 
+	// Tasks, when non-nil, replaces the ledger BuildRuntime would build
+	// (postgres with a Pool, in-memory without). The daemon passes a store that
+	// publishes tasks_changed.
+	Tasks tasks.Store
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -708,9 +713,15 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		}
 	}
 
-	taskStore := tasks.Store(tasks.NewMemoryStore())
-	if opts.Pool != nil {
-		taskStore = tasksdb.NewPostgresStore(opts.Pool)
+	// opts.Tasks wins over the built default: the daemon hands down the store
+	// that publishes tasks_changed on this child's bus, and a second ledger
+	// beside it would take the writes and stay silent. See RuntimeOptions.Tasks.
+	taskStore := opts.Tasks
+	if taskStore == nil {
+		taskStore = tasks.NewMemoryStore()
+		if opts.Pool != nil {
+			taskStore = tasksdb.NewPostgresStore(opts.Pool)
+		}
 	}
 
 	toolOpts := tools.ToolOpts{

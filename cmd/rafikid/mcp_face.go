@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -251,6 +252,11 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	if isChild {
 		conversations = newMCPChildConversationReader(r.Context(), ctrl, id.ChildID)
 	}
+	// A user credential's task tools read the per-user ledger taskStoreFor
+	// resolves; a child caller reads its OWN ledger (below), never its owner's.
+	resolveConversation := func(ctx context.Context) (string, error) {
+		return f.ledger.ConversationID(ctx, owner)
+	}
 	opts := tools.ToolOpts{
 		Agents:        spawner,
 		Tasks:         f.taskStoreFor(ctrl),
@@ -265,6 +271,25 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// same nil-means-decline rule Agents follows).
 	if isChild {
 		opts.Parent = newParentReporter(ctrl, id.ChildID)
+		// The task ledger is the caller's own: keyed by its child id and
+		// publishing tasks_changed on its bus, so a sibling's task_add is
+		// invisible here and the operator sees the work where it is done.
+		// tasksFor returns a nil interface on a daemon with no ledger at all,
+		// and the face-wide in-memory store stays the fallback for that case.
+		if childTasks := ctrl.tasksFor(id.ChildID); childTasks != nil {
+			opts.Tasks = childTasks
+		}
+		childID := id.ChildID
+		resolveConversation = func(ctx context.Context) (string, error) {
+			if ctrl.st == nil {
+				return "", fmt.Errorf("child %s is not registered", childID)
+			}
+			snap, ok := ctrl.st.Get(childID)
+			if !ok {
+				return "", fmt.Errorf("child %s is not registered", childID)
+			}
+			return ctrl.ensureLedgerConversation(ctx, snap)
+		}
 		// The schedule tools, bound to THIS child like Parent above — the
 		// tool methods take no child id. The budget gate earlier in this
 		// function already wraps them.
@@ -354,14 +379,12 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	}
 
 	return mcpserver.New(mcpserver.Options{
-		Tools:        toolset,
-		Descriptions: mcpToolDescriptions,
-		ResolveConversationID: func(ctx context.Context) (string, error) {
-			return f.ledger.ConversationID(ctx, owner)
-		},
-		ServerOptions:   settlementHooksFor(owner),
-		RegisterSession: settlementRegistrationFor(owner),
-		Version:         f.version,
+		Tools:                 toolset,
+		Descriptions:          mcpToolDescriptions,
+		ResolveConversationID: resolveConversation,
+		ServerOptions:         settlementHooksFor(owner),
+		RegisterSession:       settlementRegistrationFor(owner),
+		Version:               f.version,
 	})
 }
 
@@ -403,6 +426,11 @@ func (f *mcpFace) controller() *Controller {
 // taskStoreFor returns the Controller's ledger, falling back to a face-wide
 // in-memory store when the Controller has none. ToolOpts.Tasks is never nil:
 // the task_* tools do not nil-check it.
+//
+// This is the USER caller's ledger — one per user, shared by every session that
+// user opens. A child caller gets its own instead (getServer's isChild branch,
+// Controller.tasksFor), which is why this remains the answer only for a user
+// credential and for the fallback.
 //
 // Pairing assumption: the mcpLedger's DB-less fallback key "user:<id>" is only
 // ever fed to a store that accepts it — the nil-ness of ctrl.tasks and of the

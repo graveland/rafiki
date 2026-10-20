@@ -36,9 +36,11 @@ func TestUnboundSpawnStillAssignsTheTask(t *testing.T) {
 	ck.NoError(err, "spawn must succeed")
 	ck.NotEq("", got.ChildID, "childID must not be empty")
 
-	// The task is still pending because SpawnerConversationID is not set — the
-	// Assigncondition requires it. An unbound child simply starts without error.
+	// The task is assigned to the unbound child and stays pending: Assign sets
+	// the assignee, never the status, so an unbound child simply starts without
+	// error and the work it was handed is still visible to whoever delegated it.
 	rows, _ := store.List(ctx, tasks.ListFilter{ConversationID: "conv-parent"})
+	ck.Eq(got.ChildID, rows[0].Assignee, "assignee")
 	ck.Eq(tasks.StatusPending, rows[0].Status, "status")
 }
 

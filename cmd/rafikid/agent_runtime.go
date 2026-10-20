@@ -333,6 +333,12 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
 	ro.MaxCost = grantedCost(req)
+	// This child's own task ledger: every task_* mutation publishes
+	// tasks_changed on the child's bus, so a subscriber sees the work as it is
+	// recorded. nil on a daemon with no task store keeps BuildRuntime's built-in
+	// ledger — the degradation it documents for a pool-less agent. childID is the
+	// daemon-stamped id, never a value a tool can name.
+	ro.Tasks = c.tasksFor(childID)
 	// CurrentMaxCost lets Controller.SetChildBudget's persisted change reach
 	// this engine's own live cost guardrail without a restart — see
 	// pkg/fundi/engine.go's Engine.effectiveMaxCost. childID is closed over

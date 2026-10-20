@@ -2095,10 +2095,11 @@ onto another caller's bound tools.
   every verb authorizes against the caller's position in the tree via
   `controllerSpawner.authorize` — a child sees and drives only its own
   subtree, never a sibling's and never the whole daemon, no matter what its
-  prompt is injected into asking for. The task ledger is keyed by the caller's
-  OWNER (the conversation the `/v1/messages` attribution path already
-  resolves), so a child shares its owner's ledger, exactly as a fundi child
-  does. The rest of the child's
+  prompt is injected into asking for. The task ledger is the child's OWN,
+  keyed by its child id (`Controller.ensureLedgerConversation`), so a sibling's
+  `task_add` is invisible to it and every mutation publishes `tasks_changed` on
+  the writing child's bus; only a user credential keeps the per-user ledger
+  (see below). The rest of the child's
   tool set is narrowed to the same boundary (review-0's F1 finding): `conversation_*` read
   the child's own SUBTREE — its conversation plus its descendants' — through
   `insights.ScopeSubtree`, never its owner's corpus; the recall and memory
@@ -2223,6 +2224,17 @@ as a conversation carrying no turns, which is correct — the tasks in it are
 real work. On a DB-less daemon the ledger degrades to an in-memory store keyed
 `user:<id>` and is lost on restart, the same degradation a pool-less agent
 already documents.
+
+A per-child caller never reaches that ledger: its tasks key by its child id
+(`Controller.ensureLedgerConversation`, `cmd/rafikid/task_ledger.go`), the same
+turn-less conversation row the proxy's traffic for that child correlates to
+(`external_ref` = child id, client-driven). The MCP `task_*` tools and the
+child's own fundi `task_*` tools (`RuntimeOptions.Tasks`, set from
+`Controller.tasksFor`) share that one ledger, and every mutation publishes a
+`tasks_changed` event on the child's bus naming the child as `child_id`. A
+claude spawner therefore resolves the ledger itself when it hands a task handle
+to `agent_spawn` (`SpawnerConversationID`), since a claude child's own row
+carries no conversation id.
 
 **Settlement notification (`notifications/message`).** On settlement, the
 daemon fans out the same fragment a settling child's parent would receive

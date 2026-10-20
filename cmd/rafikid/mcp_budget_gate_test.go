@@ -92,6 +92,7 @@ func TestMCPBudgetGateWiredForChildCallersOnly(t *testing.T) {
 	ck := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
 	ctrl := face.controller()
+	registerMCPChild(t, ctrl, "u-owner", "c-child")
 	ctrl.breaches.mark("c-child")
 
 	childReq := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)

@@ -500,6 +500,7 @@ func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
 func TestMCPFaceRoutesSetRoutingByProvenance(t *testing.T) {
 	ck := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
+	registerMCPChild(t, face.controller(), "u-owner", "c-child")
 
 	userSess := mcpConnect(t, face.getServer(mcpRequestFor("u-alice")))
 
@@ -878,6 +879,8 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 func TestSiblingCannotUseSiblingSession(t *testing.T) {
 	c := assert.NewAborting(t)
 	face, ledger := mcpFaceFixture(t)
+	registerMCPChild(t, face.controller(), "u-owner", "c-a")
+	registerMCPChild(t, face.controller(), "u-owner", "c-b")
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{}, "child-secret", time.Second)
 	tokenAuth.SetChildTokenLookup(func(token string) (string, string, bool) {
 		switch token {
@@ -901,14 +904,14 @@ func TestSiblingCannotUseSiblingSession(t *testing.T) {
 	// runs, even though the UserIDs match exactly.
 	code, _, _ := mcpPost(t, mux, sid, "child-secret-b", mcpTaskAddBody)
 	c.Eq(http.StatusForbidden, code, "sibling on sibling's session: got")
-	c.Eq(0, mcpLedgerCount(t, ledger, "u-owner"), "sibling ride-along executed a tool")
+	c.Eq(0, len(ledgerRows(t, ledger, "child:c-a")), "sibling ride-along executed a tool")
 
 	// Positive control: child A on its own session still executes.
 	code, _, msgs := mcpPost(t, mux, sid, "child-secret-a", mcpTaskAddBody)
 	c.Eq(http.StatusOK, code, "child A on its own session: got")
 	text, isErr := mcpResultText(t, msgs, 3)
 	c.False(isErr, "task_add failed for the session's own child: %s", text)
-	c.Eq(1, mcpLedgerCount(t, ledger, "u-owner"), "child A's task_add did not reach the ledger")
+	c.Eq(1, len(ledgerRows(t, ledger, "child:c-a")), "child A's task_add did not reach its own ledger")
 }
 
 // TestMCPEntitlementIsOneSpelling pins mcpEntitled against every identity

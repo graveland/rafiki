@@ -111,6 +111,7 @@ func TestMCPSandboxSyncUnavailableWithoutSyncer(t *testing.T) {
 	ctx := context.Background()
 	face, _ := mcpFaceFixture(t)
 	face.controller().sandboxStore = newFakeSandboxStore()
+	registerMCPChild(t, face.controller(), "u-owner", "c-child")
 	cs := mcpConnect(t, face.getServer(mcpChildRequest("u-owner", "c-child", false)))
 
 	calls := []struct {

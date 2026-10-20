@@ -105,6 +105,7 @@ func TestMCPSandboxManagerListScopesToOwner(t *testing.T) {
 	c.NoError(st.Insert(ctx, sandbox.Row{ID: "sbx_admin", OwnerUserID: "u-admin", Name: "admin-box", State: sandboxStateReady}), "seed admin row")
 	c.NoError(st.Insert(ctx, sandbox.Row{ID: "sbx_other", OwnerUserID: "u-other", Name: "other-box", State: sandboxStateReady}), "seed other row")
 	face.controller().sandboxStore = st
+	registerMCPChild(t, face.controller(), "u-admin", "c-child")
 
 	cs := mcpConnect(t, face.getServer(mcpChildRequest("u-admin", "c-child", true)))
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "sandbox_list"})
@@ -124,6 +125,7 @@ func TestMCPSandboxManagerRemoveUsesChildId(t *testing.T) {
 	st := newFakeSandboxStore()
 	c.NoError(st.Insert(ctx, sandbox.Row{ID: "sbx_x", OwnerUserID: "u-admin", Name: "other-box", CreatedBy: "c-other", State: sandboxStateReady}), "seed row")
 	face.controller().sandboxStore = st
+	registerMCPChild(t, face.controller(), "u-admin", "c-child")
 
 	cs := mcpConnect(t, face.getServer(mcpChildRequest("u-admin", "c-child", false)))
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
