@@ -26,6 +26,9 @@ timeout_seconds = 10
 # A GitHub workflow that failed on the main branch wakes the on-call agent.
 # GitHub sends X-Hub-Signature-256 (HMAC-SHA256 over the raw body) and a
 # delivery id, so a redelivery of the same run is not delivered twice.
+# `action` is completed/requested/in_progress — the verdict rides in
+# `workflow_run.conclusion`, so a rule matching action = "failure" would never
+# fire.
 [[route]]
 path = "/hooks/github"
 source = "github"
@@ -35,7 +38,7 @@ target = "oncall"
 [[route.rule]]
 event = "workflow_run"
 key = "github/workflow_run/{repository.full_name}/{workflow_run.id}"
-match = { action = "failure", "workflow_run.head_branch" = "main" }
+match = { action = "completed", "workflow_run.conclusion" = "failure", "workflow_run.head_branch" = "main" }
 fields = { repo = "repository.full_name", workflow = "workflow_run.name", branch = "workflow_run.head_branch", url = "workflow_run.html_url", conclusion = "workflow_run.conclusion" }
 
 # A network controller (Omada) posting its own JSON on the inside of the

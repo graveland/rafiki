@@ -16,6 +16,16 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 )
 
+// ErrFragmentTooLarge reports a fragment longer than Config.MaxBytesPerFrag
+// reaching PushDurable. It is a refusal, not a truncation: a caller that must
+// answer its own sender (a webhook gateway) is answered with something the
+// sender can fix, and a truncated frame would reach the agent broken — a
+// notification cut before its closing tag is not a notification at all.
+// Push, PushNow and PushSteer still truncate: their fragments are the daemon's
+// own events, shaped where they are built, and never carry a frame that a cut
+// would invalidate.
+var ErrFragmentTooLarge = errors.New("eventbuf: fragment exceeds MaxBytesPerFrag")
+
 // Config controls event buffer behaviour. Zero values are replaced with
 // sensible defaults by New.
 //
@@ -143,6 +153,12 @@ func (b *Buffer) Pending(childID string) bool {
 // behaviour and is what a unit test with no store gets.
 func (b *Buffer) SetAccepter(a inbox.Accepter) { b.acc = a }
 
+// MaxBytesPerFrag reports the per-fragment cap New resolved from Config. A
+// producer whose own input caps are looser than this one (Notify: 16 KiB of
+// encoded JSON against a default 8 KiB fragment) needs the number to explain
+// ErrFragmentTooLarge to its sender in terms the sender can act on.
+func (b *Buffer) MaxBytesPerFrag() int { return b.cfg.MaxBytesPerFrag }
+
 // Push records a fragment for (childID, source) and arms the debounce.
 //
 // The fragment is persisted to the inbox BEFORE the timer is armed. That
@@ -173,9 +189,17 @@ func (b *Buffer) Push(childID, source, key, fragment string) {
 // sender retries. On success it behaves exactly like Push.
 // A source containing "::" is rejected with an error (Push only logs).
 // With no accepter set it returns an error: there is nothing durable.
+//
+// An over-cap fragment is REFUSED (ErrFragmentTooLarge), never truncated — see
+// the sentinel, and nothing is touched: no accept, no dirty, no timer.
 func (b *Buffer) PushDurable(ctx context.Context, childID, source, key, fragment string) error {
 	if err := sourceRejection(source); err != nil {
 		return err
+	}
+	// Refused before the store is touched, and before any buffer state exists
+	// to clean up. The boundary is inclusive: exactly MaxBytesPerFrag fits.
+	if max := b.cfg.MaxBytesPerFrag; len(fragment) > max {
+		return fmt.Errorf("%w: %d bytes exceeds the %d-byte limit for %s/%s", ErrFragmentTooLarge, len(fragment), max, childID, source)
 	}
 	// Read outside the lock for the same reason accept does: SetAccepter is
 	// documented to run before any push.
@@ -190,7 +214,7 @@ func (b *Buffer) PushDurable(ctx context.Context, childID, source, key, fragment
 		Mode:    inbox.ModePrompt,
 		Source:  source,
 		Key:     key,
-		Text:    truncate(fragment, b.cfg.MaxBytesPerFrag),
+		Text:    fragment, // already bounded by the check above
 	}
 	if _, err := acc.Accept(ctx, in); err != nil {
 		// No orphan, no dirty, no timer. The caller's sender owns the retry,

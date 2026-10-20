@@ -285,3 +285,85 @@ func TestSiblingNameStoreErrorRefuses(t *testing.T) {
 	ck.False(errors.As(err, &ce), "a store failure is not a name conflict; got %T", err)
 	ck.Eq(0, len(ctrl.st.List()), "the refusal must come before anything is registered")
 }
+
+// seedSiblingChild writes one live child row AND the matching in-memory
+// session: the row is what NameHolder queries, the session is the snapshot the
+// rename path reads owner and parent from.
+func seedSiblingChild(t *testing.T, ctrl *Controller, childID, owner, parent, name string) {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	labels := map[string]string{}
+	if parent != "" {
+		labels[childstore.LabelParent] = parent
+	}
+	now := time.Now()
+	ck.Require().NoError(childstoredb.New(ctrl.pool).Upsert(context.Background(), childstore.ChildRecord{
+		ChildID:      childID,
+		OwnerUserID:  owner,
+		Kind:         protocol.KindFundi,
+		Name:         name,
+		Status:       string(protocol.StatusIdle),
+		SpawnedAt:    now,
+		LastActivity: now,
+		Labels:       labels,
+	}), "upsert child %s", childID)
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: childID, Kind: protocol.KindFundi, Name: name, Status: protocol.StatusIdle,
+		OwnerUserID: owner, StartedAt: now, LastActivity: now, Labels: labels,
+	})
+}
+
+// A name the child's OWN PROCESS reports is not admitted by anything: applying
+// it over a live sibling's name violates child_sibling_name_live, and every
+// later writeRecord for the child then fails — it stops persisting its session
+// id. The skipped rename is what keeps the row writable: the store keeps the
+// old name while the process keeps displaying the name it chose.
+func TestSiblingNameSniffedRenameSkipsSiblingName(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newSiblingNameController(t)
+	owner := seedControllerUser(t, ctrl.pool, uniqueSiblingName(t))
+	held, mine := uniqueSiblingName(t), uniqueSiblingName(t)
+	const holderID, childID = "c_sib_sniff_holder", "c_sib_sniff_child"
+	seedSiblingChild(t, ctrl, holderID, owner, "", held)
+	seedSiblingChild(t, ctrl, childID, owner, "", mine)
+
+	// The sniffer saw the child rename itself to the name a live sibling holds.
+	ctrl.handleChildRenamed(childID, held, mine)
+
+	ck.Eq(mine, mustSnapshot(t, ctrl, childID).Name,
+		"the child keeps its own name when the detected one is a live sibling's")
+	ck.Eq(held, rowNameFor(t, ctrl.pool, holderID), "the holder keeps its name")
+
+	// The point of the skip: the row still writes. Applied, this upsert would
+	// fail against child_sibling_name_live and take the child's session id with
+	// it.
+	ck.Require().NoError(ctrl.writeRecord(childID), "writeRecord after a skipped rename")
+	ck.Eq(mine, rowNameFor(t, ctrl.pool, childID), "the row keeps the old name")
+	ck.Eq(held, rowNameFor(t, ctrl.pool, holderID), "the holder's row is untouched")
+
+	// A FREE name is still applied: the check is a sibling collision test, not
+	// a licence to ignore the process.
+	free := uniqueSiblingName(t)
+	ctrl.handleChildRenamed(childID, free, mine)
+	ck.Eq(free, mustSnapshot(t, ctrl, childID).Name, "a free name must still be applied")
+	ck.Require().NoError(ctrl.writeRecord(childID), "writeRecord after a free rename")
+	ck.Eq(free, rowNameFor(t, ctrl.pool, childID), "the row carries the free name")
+}
+
+// A name that cannot be CHECKED is not applied either: the sniffer's rename is
+// the one name path with no operator behind it, so an unknown answer leaves the
+// store's own name alone.
+func TestSiblingNameSniffedRenameSkipsOnStoreError(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	const childID = "c_sib_sniff_err"
+	name := uniqueSiblingName(t)
+	insertDisplayChild(ctrl.st, childID, "", "", protocol.StatusIdle)
+	ck.Require().NoError(ctrl.st.Rename(childID, name), "seed the child's name")
+	ctrl.children = errNameStore{}
+
+	ctrl.handleChildRenamed(childID, uniqueSiblingName(t), name)
+
+	ck.Eq(name, mustSnapshot(t, ctrl, childID).Name,
+		"a rename whose name cannot be checked must leave the stored name alone")
+}

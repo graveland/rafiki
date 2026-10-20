@@ -118,6 +118,50 @@ func TestPushDurableRejectsDoubleColonSource(t *testing.T) {
 	c.Eq(0, acc.callCount(), "accepter calls after the debounce")
 }
 
+// An over-cap fragment is REFUSED, not truncated. A notification's closing tag
+// is its last bytes, so a cut frame reaches the agent broken — and the sender
+// can be told to shrink its payload, which is a fix truncation hides. Nothing
+// may be touched on the way out: no store write, no queued state, no timer.
+func TestPushDurableRefusesOversizeFragment(t *testing.T) {
+	c := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	acc := &fakeAccepter{}
+	rec := &flushRecorder{}
+	b := New(Config{Debounce: time.Second, MaxBytesPerFrag: 64}, clk)
+	b.SetAccepter(acc)
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return false })
+
+	err := b.PushDurable(context.Background(), "c_w", "notify:github", "", strings.Repeat("x", 65))
+	c.Error(err, "PushDurable accepted an over-cap fragment")
+	c.ErrorIs(err, ErrFragmentTooLarge, "an over-cap fragment must be the sentinel, so a caller can tell it from a store failure")
+	c.StrContains(err.Error(), "65", "error text must name the fragment's length")
+	c.StrContains(err.Error(), "64", "error text must name the cap")
+
+	c.Eq(0, acc.callCount(), "accepter calls; an over-cap fragment must never reach the store")
+	c.False(b.Pending("c_w"), "Pending after an over-cap push")
+	clk.Advance(b.cfg.Debounce + time.Minute)
+	c.Eq(0, rec.n(), "flushes after the debounce; the refused push armed a timer")
+	c.False(b.Pending("c_w"), "Pending after the debounce; the refused push queued something")
+}
+
+// The boundary is INCLUSIVE: a fragment of exactly the cap is what the cap
+// means, and refusing it off-by-one would make the documented limit a lie.
+func TestPushDurableAcceptsFragmentAtCap(t *testing.T) {
+	c := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	acc := &fakeAccepter{}
+	b := New(Config{Debounce: time.Second, MaxBytesPerFrag: 64}, clk)
+	b.SetAccepter(acc)
+	b.SetFlush(func(string, string, []inbox.Inbound) {})
+	b.SetBusy(func(string) bool { return false })
+
+	atCap := strings.Repeat("y", 64)
+	c.NoError(b.PushDurable(context.Background(), "c_w", "notify:github", "", atCap), "PushDurable at exactly the cap")
+	c.Eq(1, acc.callCount(), "accepter calls")
+	c.Eq(atCap, acc.calls[0].Text, "stored text; an in-cap fragment must be stored verbatim")
+}
+
 // Without an accepter there is nothing durable to write to, so the promise
 // "stored before the sender is answered" cannot be kept and the call fails
 // rather than degrading to the in-memory path.

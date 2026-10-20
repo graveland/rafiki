@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/notify"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -87,6 +88,19 @@ func (c *Controller) Notify(ctx context.Context, ownerUserID string, anonymous b
 	}
 
 	if err := c.evbuf.PushDurable(ctx, childID, notifySourcePrefix+source, key, fragment); err != nil {
+		// An over-cap fragment is the sender's own doing and no retry can fix
+		// it: Repeatable-as-is would have the gateway re-post the same event
+		// forever. InvalidArgument names the number the sender must get under,
+		// which the buffer refuses to do by truncation (a cut frame reaches the
+		// agent without its closing tag).
+		if errors.Is(err, eventbuf.ErrFragmentTooLarge) {
+			return "", &connectapi.ControllerError{
+				Code: protocol.ErrInvalidArgs,
+				Message: fmt.Sprintf(
+					"notification is %d bytes, over the event buffer's %d-byte per-fragment limit; send fewer or smaller fields",
+					len(fragment), c.evbuf.MaxBytesPerFrag()),
+			}
+		}
 		return "", &connectapi.ControllerError{
 			Code:    protocol.ErrUnavailable,
 			Message: fmt.Sprintf("notification not stored: %v", err),

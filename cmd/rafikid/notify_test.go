@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -384,6 +385,45 @@ func TestNotifyCoalescesByKey(t *testing.T) {
 	assertFragmentMatchesRender(t, batches[0].Frags[0], "ci", "pr-7", map[string]string{"event": "merged"})
 	assertFragmentMatchesRender(t, batches[0].Frags[1], "ci", "", map[string]string{"event": "first-unkeyed"})
 	assertFragmentMatchesRender(t, batches[0].Frags[2], "ci", "", map[string]string{"event": "second-unkeyed"})
+}
+
+// A notification whose rendered fragment is bigger than the event buffer's
+// per-fragment cap is refused as INVALID ARGUMENTS, never truncated and never
+// Unavailable: the gateway's sender retries an Unavailable forever, and the
+// cap is the sender's to get under. Three 4096-byte values are inside
+// pkg/notify's own rules (each under its per-value cap, and the encoded JSON
+// under 16384) and still exceed an 8192-byte fragment cap, so they reach the
+// buffer and are refused there.
+func TestNotifyOversizeFragmentInvalidArgs(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := newNotifyFixture(t)
+	owner, childID := f.seedOwner(t, "owner-oversize"), "c_notify_oversize"
+	name := uniqueNotifyName("oversize")
+	f.insertChild(t, childID, owner, "", name, protocol.StatusIdle)
+
+	const cap = 8192
+	b := eventbuf.New(eventbuf.Config{Debounce: time.Second, MaxBytesPerFrag: cap}, clock.NewFakeClock(time.Unix(0, 0)))
+	acc := &failingNotifyAccepter{err: errors.New("the buffer must refuse before the store")}
+	b.SetAccepter(acc)
+	b.SetFlush(func(string, string, []inbox.Inbound) {})
+	b.SetBusy(func(string) bool { return false })
+	f.ctrl.evbuf = b
+
+	big := strings.Repeat("z", 4096)
+	fields := map[string]string{"a": big, "b": big, "c": big}
+	// The fragment itself is what has to be over the cap, not just the JSON.
+	rendered, err := notify.Render("ci", "", fields, time.Now())
+	ck.Require().NoError(err, "Render must accept these fields; they are inside pkg/notify's own caps")
+	ck.Require().True(len(rendered) > cap, "fixture fragment is %d bytes; it must exceed the %d-byte cap", len(rendered), cap)
+
+	_, err = f.ctrl.Notify(t.Context(), owner, false, name, "ci", "", fields)
+	requireControllerError(t, err, protocol.ErrInvalidArgs, "per-fragment limit")
+	ck.StrContains(err.Error(), fmt.Sprint(cap), "the refusal must name the buffer's limit")
+	ck.StrContains(err.Error(), fmt.Sprint(len(rendered)), "the refusal must name the rendered size")
+
+	ck.Eq(0, acc.count(), "accepter calls; an over-cap notification must never reach the store")
+	ck.False(b.Pending(childID), "Pending after an over-cap notification")
+	ck.Empty(f.pending(t, childID), "durable rows after an over-cap notification")
 }
 
 // failingNotifyAccepter refuses every durable accept, which is the only way to

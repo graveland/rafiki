@@ -4686,10 +4686,50 @@ func (c *Controller) handleSessionMetaChange(childID, sessionID, sessionFile str
 
 // handleChildRenamed updates the store when the sniffer detects that the
 // child's process changed its session name.
+//
+// The name here is the child's own report, not a request: nothing has admitted
+// it. Applying it unchecked can walk the child onto a name a live SIBLING
+// already holds, and then every later writeRecord for the child fails against
+// child_sibling_name_live — it silently stops persisting its session id, which
+// is the row a resume needs. So the same pre-read Rename does runs first: a
+// name a DIFFERENT live sibling holds is skipped, and the process keeps
+// displaying what it reported while the store keeps the old name. A failed
+// check skips it too — an unchecked name is never applied.
+//
+// monitorChild (the only caller) has no context to lend: it is a goroutine
+// loop over the child's bus, started with `go`. So this takes a background
+// context bounded by renameCheckTimeout rather than an invented one.
 func (c *Controller) handleChildRenamed(childID, newName, previous string) {
-	_ = c.st.Rename(childID, newName)
 	_ = previous // kept in the signature: the previous name is caller context
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return
+	}
+	if c.children != nil {
+		// "" parent (no parent label) is top level, and ParentOf carries the
+		// legacy fundi/parent fallback — the same sibling set Rename checks.
+		parent, _ := c.st.ParentOf(childID)
+		ctx, cancel := context.WithTimeout(context.Background(), renameCheckTimeout)
+		holderID, holderStatus, taken, err := c.children.NameHolder(ctx, snap.OwnerUserID, parent, newName)
+		cancel()
+		if err != nil {
+			slog.Warn("skip session rename: the name cannot be checked",
+				"childId", childID, "name", newName, "error", err)
+			return
+		}
+		if taken && holderID != childID {
+			slog.Debug("skip session rename: a live sibling holds the name",
+				"childId", childID, "name", newName, "holder", holderID, "holderStatus", holderStatus)
+			return
+		}
+	}
+	_ = c.st.Rename(childID, newName)
 }
+
+// renameCheckTimeout bounds the sibling-name pre-read on the sniffer's rename
+// path. The caller is a per-child monitor goroutine: a stalled database must
+// not park it indefinitely.
+const renameCheckTimeout = 5 * time.Second
 
 func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	res := ch.ExitResult()

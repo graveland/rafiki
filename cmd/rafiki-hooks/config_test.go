@@ -339,7 +339,27 @@ func TestConfigExampleParses(t *testing.T) {
 	c.Eq("github-secret", string(github.secret))
 	c.Len(github.Rules, 1)
 	c.Eq("workflow_run", github.Rules[0].Event)
-	c.Eq("failure", github.Rules[0].Match["action"])
+	c.Eq("completed", github.Rules[0].Match["action"])
+	c.Eq("failure", github.Rules[0].Match["workflow_run.conclusion"])
+	c.Eq("main", github.Rules[0].Match["workflow_run.head_branch"])
+
+	// The example has to FIRE on a real red run — that is the whole reason it
+	// is shipped. GitHub's workflow_run puts the verdict in conclusion and
+	// sends action = completed, so a rule matching action = "failure" matches
+	// nothing GitHub ever sends, and an operator copying the example is silent.
+	failed := payload(t, `{
+		"action": "completed",
+		"repository": {"full_name": "graveland/rafiki"},
+		"workflow_run": {
+			"id": 1234, "name": "ci", "head_branch": "main", "conclusion": "failure",
+			"html_url": "https://github.com/graveland/rafiki/actions/runs/1234"
+		}
+	}`)
+	c.True(github.Rules[0].matches("workflow_run", failed),
+		"the example github rule must fire for a failed workflow_run on main")
+	succeeded := payload(t, `{"action": "completed", "workflow_run": {"head_branch": "main", "conclusion": "success"}}`)
+	c.False(github.Rules[0].matches("workflow_run", succeeded),
+		"a successful run must not wake on-call")
 
 	c.Eq("/hooks/omada", omada.Path)
 	c.Eq("generic", omada.Source)
