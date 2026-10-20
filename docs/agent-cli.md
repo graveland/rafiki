@@ -131,12 +131,29 @@ validated as an IANA name before the store is touched. See
 it may call `Control.Notify` and nothing else. Without `--capability` the
 token carries full user authority (`capabilities` stays NULL); with it, the
 token carries exactly the names given, and an unknown or repeated name is
-refused before the DSN is opened. A token whose stored set is anything other
+refused before the DSN is opened. `--capability ""` (an explicitly empty set)
+stores `'{}'` — a token that may call nothing — which is a different answer
+from omitting the flag. A token whose stored set is anything other
 than NULL or exactly `{notify}` authenticates as an INVALID token (`401` /
 `unauthenticated`), never as a full user, so a hand-written SQL row with an
 unexpected set fails closed. The confinement itself is described under "The
 gate distinguishes four credential shapes" in
 `docs/reference/control-protocol.md`.
+
+Two consequences of the set not being on the wire (neither `MintTokenRequest`
+nor `TokenRow` carries a field for it): this host CLI is the ONLY way to mint
+a narrowed token, and `rafikid user token ls` is the only listing that shows
+one.
+
+- `rafikid user token ls` renders a `CAPABILITIES` column beside `ID`, `USER`,
+  `NAME`, `ORIGIN`, `CREATED`, `EXPIRES`, `REVOKED`: `all` for NULL (full user
+  authority, which is what every token minted without `--capability` reads),
+  `none` for a stored empty set, and otherwise the comma-joined names.
+- `rafikid user token mint` prints one informational line under the plaintext
+  when `--capability` was given — `capabilities: notify (this token can call
+  Notify and nothing else)`, or `capabilities: none (this token can call
+  nothing)` — so the narrowing is visible while the secret is still on screen.
+  A full-authority token prints no such line.
 
 ## `stats`
 

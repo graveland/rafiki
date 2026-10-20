@@ -777,10 +777,113 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 |---|---|
 | `rafikid` | the daemon. Runs `fundi`-kind children as goroutines inside itself; `claude` children route through daraja on an executor when one is configured for it, else run as local subprocesses. `rafikid fundi` is a standalone one-child-on-stdio mode |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
+| `rafiki-hooks` | the webhook gateway — the one process meant to face the internet. Authenticates a sender's webhook and reports it to the daemon over `Control.Notify`. Ships as the Dockerfile's `hooks` image (see [Webhook gateway](#webhook-gateway)) |
 
-**The web UI is the third client.** `rafiki web [--port N] [--no-open] [--dev-assets URL]` serves a browser UI from the `rafiki` binary itself: a `127.0.0.1`-only reverse proxy in front of the daemon's Connect control plane (rafikid never serves the UI). It prints a single-use link (`http://127.0.0.1:<port>/#k=<code>`) and opens it; the fragment code is exchanged for a per-tab session secret held in `sessionStorage` and sent as `X-Rafiki-Web` — no cookies, no CORS headers. A Connect `Unauthenticated` on any call the localhost gate did not refuse triggers in-browser sign-in through the daemon's OIDC login (a popup). The proxy forwards `/rafiki.v1.Control/*` verbatim — its own upstream transport adds the bearer and the protocol epoch — and never `/rafiki.v1.Login/*`. On a remote machine, forward the port with `ssh -L <port>:127.0.0.1:<port>`. See `docs/reference/control-protocol.md` §"Browser clients".
+**The web UI is a third client, served by the `rafiki` binary.** `rafiki web [--port N] [--no-open] [--dev-assets URL]` serves a browser UI from the `rafiki` binary itself: a `127.0.0.1`-only reverse proxy in front of the daemon's Connect control plane (rafikid never serves the UI). It prints a single-use link (`http://127.0.0.1:<port>/#k=<code>`) and opens it; the fragment code is exchanged for a per-tab session secret held in `sessionStorage` and sent as `X-Rafiki-Web` — no cookies, no CORS headers. A Connect `Unauthenticated` on any call the localhost gate did not refuse triggers in-browser sign-in through the daemon's OIDC login (a popup). The proxy forwards `/rafiki.v1.Control/*` verbatim — its own upstream transport adds the bearer and the protocol epoch — and never `/rafiki.v1.Login/*`. On a remote machine, forward the port with `ssh -L <port>:127.0.0.1:<port>`. See `docs/reference/control-protocol.md` §"Browser clients".
 
 `make web` builds the UI into `pkg/webui/dist` and embeds it into the `rafiki` binary; a binary built without it refuses `rafiki web` (the one exception is `--dev-assets`, below). `make check-web` typechecks, lints and tests the UI under `web/`; both targets need node + pnpm + protoc on `PATH`. Dev loop: run `pnpm dev` in `web/`, then `rafiki web --dev-assets http://localhost:5173` to reverse-proxy static assets to the Vite dev server.
+
+## Webhook gateway
+
+`rafiki-hooks` (`cmd/rafiki-hooks`) is how a third-party integration wakes one
+of your agents. It authenticates a sender's webhook, decides from your rules
+whether the delivery is worth waking an agent for, and reports it to `rafikid`
+over the `Notify` RPC — one call, one narrowed token. It holds no database
+DSN, no executor and no daemon code (`TestHooksDoesNotLinkPostgres`,
+`TestHooksDoesNotLinkDaemon`), and it never answers a sender `2xx` before
+`Notify` has returned, so an acknowledged delivery is a stored one.
+
+Config is one TOML file (`-config <path>`);
+[`cmd/rafiki-hooks/example.toml`](cmd/rafiki-hooks/example.toml) is a worked
+example. The shape:
+
+```toml
+[daemon]
+url = "https://rafiki.example.com"                 # https unless the host is 127.0.0.1/localhost
+token_file = "/run/secrets/rafiki-hooks-token"     # a {notify} token; a file, never a literal
+listen = ":8080"                                   # optional: ca_file, tls_cert/tls_key, timeout_seconds
+
+[[route]]
+path = "/hooks/github"                             # the exact path a sender posts to
+source = "github"                                  # github | gitea | generic
+secret_file = "/run/secrets/github-webhook-secret"
+target = "oncall"                                  # the NAME of the top-level agent to wake
+notify_source = "github"                           # optional: the Notify.source the daemon sees
+
+[[route.rule]]
+event = "workflow_run"                             # "" matches any event
+key = "github/workflow_run/{repository.full_name}/{workflow_run.id}"
+match = { action = "completed", "workflow_run.conclusion" = "failure" }
+fields = { repo = "repository.full_name", url = "workflow_run.html_url" }
+```
+
+A path that is not listed answers `404` with no body. `github` and `gitea`
+verify their own HMAC-SHA256 signature header against the route's secret in
+constant time; `generic` compares the header the route names
+(`header = "X-Omada-Secret"`) the same way and is for a device inside your
+network, because it cannot sign a body. The body is bounded by `max_body`
+(default 1 MiB) before anything reads it, and an unknown config key fails
+startup, as does a missing secret or token file. Rules are tried in order and
+the first match is delivered; `match` is dotted-path → exact string equality
+and `key`/`fields` interpolate `{dotted.path}` (only scalars have a text form —
+an object or array is treated as absent). Numbers keep the sender's literal
+text. A delivery id already delivered is answered `ok`/`duplicate` without
+waking the agent twice.
+
+| Response | Meaning |
+|---|---|
+| `200` | delivered, or deliberately ignored (`ignored`, `duplicate`) |
+| `401` | the signature did not verify |
+| `413` | body over `max_body` |
+| `422` | the daemon refused the notification — unknown target, invalid payload, or the gateway's OWN token was rejected; a retry cannot help |
+| `503` | the daemon could not take it right now — retry |
+| `500` | anything else |
+
+A `422` on every delivery is the signature of a wrong `token_file` (revoked, or
+unknown to this daemon) or a `target` naming no live top-level agent, not a
+sender problem — the log line names the code. A full-authority user token would
+also reach `Notify`; a gateway should still never hold one. `GET /healthz`
+answers `ok` without touching a route or the daemon, so liveness and delivery
+are separate signals.
+
+The token is the only credential the gateway holds, and it can do nothing but
+`Notify`. Mint it on the daemon host:
+
+```
+rafikid user token mint oncall-bot --capability notify
+```
+
+The plaintext prints once; put it in the file `token_file` names (a mounted
+secret, trimmed of surrounding whitespace). Minting a narrowed token, and
+seeing one, is host-CLI only — the Connect API carries no capability field (see
+[`docs/agent-cli.md`](docs/agent-cli.md)).
+
+Build it as the `hooks` image target — a static binary on distroless, running
+as nonroot (it is deliberately not the Dockerfile's default target, which stays
+`release`):
+
+```
+docker build --target hooks -t rafiki-hooks .
+docker run --rm -p 8080:8080 \
+    -v /etc/rafiki/hooks.toml:/etc/rafiki/hooks.toml:ro \
+    -v /run/secrets:/run/secrets:ro \
+    rafiki-hooks -config /etc/rafiki/hooks.toml
+```
+
+To deliver a notification by hand — for testing a route, or for a sender with
+no webhook of its own — `rafiki notify` does the same call from the CLI:
+
+```
+rafiki notify oncall --source github --key repos/acme/rafiki/push event=push branch=main
+rafiki notify oncall --source sentry --field-file body=payload.json
+```
+
+AGENT is the top-level agent's NAME (the daemon resolves it, so this works
+with a notify-scoped token that may not list children); a field is
+`name=value`, split on the first `=`, and `--field-file name=path` (`-` for
+stdin, once) carries a value that is awkward to quote. The child id prints on
+success. See `docs/reference/control-protocol.md` §"Third-party
+notifications".
 
 ## Telemetry
 
