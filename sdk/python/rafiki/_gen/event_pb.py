@@ -430,6 +430,76 @@ class ChildRenamed:
         return obj
 
 @dataclasses.dataclass
+class TaskChange:
+    handle: str = ""
+    content: str = ""
+    active_form: str = ""
+    status: str = ""
+    assignee: str = ""
+    drop_reason: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.handle != "":
+            out["handle"] = self.handle
+        if self.content != "":
+            out["content"] = self.content
+        if self.active_form != "":
+            out["activeForm"] = self.active_form
+        if self.status != "":
+            out["status"] = self.status
+        if self.assignee != "":
+            out["assignee"] = self.assignee
+        if self.drop_reason != "":
+            out["dropReason"] = self.drop_reason
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "TaskChange":
+        obj = cls()
+        _v = _d.get("handle")
+        if _v is not None:
+            obj.handle = _v
+        _v = _d.get("content")
+        if _v is not None:
+            obj.content = _v
+        _v = _d.get("activeForm")
+        if _v is not None:
+            obj.active_form = _v
+        _v = _d.get("status")
+        if _v is not None:
+            obj.status = _v
+        _v = _d.get("assignee")
+        if _v is not None:
+            obj.assignee = _v
+        _v = _d.get("dropReason")
+        if _v is not None:
+            obj.drop_reason = _v
+        return obj
+
+@dataclasses.dataclass
+class TasksChanged:
+    kind: str = ""
+    tasks: list[TaskChange] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.kind != "":
+            out["kind"] = self.kind
+        if self.tasks:
+            out["tasks"] = [x.to_dict() for x in self.tasks]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "TasksChanged":
+        obj = cls()
+        _v = _d.get("kind")
+        if _v is not None:
+            obj.kind = _v
+        _v = _d.get("tasks")
+        if _v is not None:
+            obj.tasks = [TaskChange.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
 class ErrorEvent:
     code: str = ""
     message: str = ""
@@ -735,6 +805,7 @@ class Event:
     script_output: Optional[ScriptOutput] = None
     operator_state: Optional[OperatorState] = None
     child_renamed: Optional[ChildRenamed] = None
+    tasks_changed: Optional[TasksChanged] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -744,7 +815,7 @@ class Event:
             out["ordinal"] = self.ordinal
         if self.ts is not None:
             out["ts"] = _ts_out(self.ts)
-        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed) if x is not None]
+        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
         if self.user_message is not None:
@@ -781,6 +852,8 @@ class Event:
             out["operatorState"] = self.operator_state.to_dict()
         if self.child_renamed is not None:
             out["childRenamed"] = self.child_renamed.to_dict()
+        if self.tasks_changed is not None:
+            out["tasksChanged"] = self.tasks_changed.to_dict()
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Event":
@@ -845,6 +918,9 @@ class Event:
         _v = _d.get("childRenamed")
         if _v is not None:
             obj.child_renamed = ChildRenamed.from_dict(_v)
+        _v = _d.get("tasksChanged")
+        if _v is not None:
+            obj.tasks_changed = TasksChanged.from_dict(_v)
         return obj
 
 

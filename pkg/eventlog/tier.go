@@ -49,6 +49,7 @@ var durableTypes = map[string]bool{
 	"script_output":        true,
 	"operator_state":       true,
 	"child_renamed":        true,
+	"tasks_changed":        true,
 }
 
 // ephemeralTypes is listed explicitly rather than left as a default so that

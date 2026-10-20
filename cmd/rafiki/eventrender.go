@@ -151,6 +151,8 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 	case *rafikiv1.Event_ChildRenamed:
 		r.names[id] = p.ChildRenamed.GetName()
 		detail = " renamed"
+	case *rafikiv1.Event_TasksChanged:
+		detail = fmt.Sprintf(" tasks %s (%d)", p.TasksChanged.GetKind(), len(p.TasksChanged.GetTasks()))
 	case *rafikiv1.Event_AgentStatus:
 		prev := r.status[id]
 		st := p.AgentStatus.GetState()

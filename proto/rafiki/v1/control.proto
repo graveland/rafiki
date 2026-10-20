@@ -630,6 +630,11 @@ message ListTasksRequest {
   // all is the include-dropped flag. Both spellings stay on the wire; the
   // handler treats include_dropped OR all set as include-dropped.
   bool all = 6;
+  // owner_child_id selects the ledger OWNED by this child (child_id, field 3,
+  // filters by ASSIGNEE instead). The daemon resolves the child's ledger
+  // conversation; an unknown child or one with no ledger yet answers an empty
+  // list. Mutually exclusive with conversation_id.
+  string owner_child_id = 7;
 }
 
 message ListTasksResponse {

@@ -160,6 +160,29 @@ message ChildRenamed {
   string name = 1;
 }
 
+// TaskChange is one task as a TasksChanged event reports it. handle is the
+// dotted ordinal path ("2.1") over the owner's full ledger at the moment of
+// the change.
+message TaskChange {
+  string handle = 1;
+  string content = 2;
+  string active_form = 3;
+  string status = 4;
+  string assignee = 5;
+  string drop_reason = 6;
+}
+
+// TasksChanged reports that the task ledger owned by this event's child_id
+// changed. kind is one of "added", "updated", "dropped", "assigned",
+// "orphaned"; tasks are the rows the change touched, as they read after it.
+// It is published after the store mutation commits. A string kind, like
+// AgentStatus.state, so a new kind needs no wire change and there is no
+// zero-valued default to land on by accident.
+message TasksChanged {
+  string kind = 1;
+  repeated TaskChange tasks = 2;
+}
+
 message ErrorEvent {
   string code = 1;
   string message = 2;
@@ -339,5 +362,6 @@ message Event {
     ScriptOutput script_output = 24;
     OperatorState operator_state = 26;
     ChildRenamed child_renamed = 27;
+    TasksChanged tasks_changed = 28;
   }
 }

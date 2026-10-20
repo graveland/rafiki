@@ -189,6 +189,8 @@ func TypeName(ev *rafikiv1.Event) string {
 		return "operator_state"
 	case *rafikiv1.Event_ChildRenamed:
 		return "child_renamed"
+	case *rafikiv1.Event_TasksChanged:
+		return "tasks_changed"
 	case *rafikiv1.Event_Error:
 		return "error"
 	case *rafikiv1.Event_Retry:

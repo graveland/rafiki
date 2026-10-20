@@ -1524,6 +1524,7 @@ class ListTasksRequest:
     status: str = ""
     limit: int = 0
     all: bool = False
+    owner_child_id: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -1539,6 +1540,8 @@ class ListTasksRequest:
             out["limit"] = self.limit
         if self.all != False:
             out["all"] = self.all
+        if self.owner_child_id != "":
+            out["ownerChildId"] = self.owner_child_id
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ListTasksRequest":
@@ -1561,6 +1564,9 @@ class ListTasksRequest:
         _v = _d.get("all")
         if _v is not None:
             obj.all = _v
+        _v = _d.get("ownerChildId")
+        if _v is not None:
+            obj.owner_child_id = _v
         return obj
 
 @dataclasses.dataclass

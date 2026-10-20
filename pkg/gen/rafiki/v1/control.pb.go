@@ -3299,7 +3299,12 @@ type ListTasksRequest struct {
 	Limit   int32  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
 	// all is the include-dropped flag. Both spellings stay on the wire; the
 	// handler treats include_dropped OR all set as include-dropped.
-	All           bool `protobuf:"varint,6,opt,name=all,proto3" json:"all,omitempty"`
+	All bool `protobuf:"varint,6,opt,name=all,proto3" json:"all,omitempty"`
+	// owner_child_id selects the ledger OWNED by this child (child_id, field 3,
+	// filters by ASSIGNEE instead). The daemon resolves the child's ledger
+	// conversation; an unknown child or one with no ledger yet answers an empty
+	// list. Mutually exclusive with conversation_id.
+	OwnerChildId  string `protobuf:"bytes,7,opt,name=owner_child_id,json=ownerChildId,proto3" json:"owner_child_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3374,6 +3379,13 @@ func (x *ListTasksRequest) GetAll() bool {
 		return x.All
 	}
 	return false
+}
+
+func (x *ListTasksRequest) GetOwnerChildId() string {
+	if x != nil {
+		return x.OwnerChildId
+	}
+	return ""
 }
 
 type ListTasksResponse struct {
@@ -15672,14 +15684,15 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bassignee\x18\x05 \x01(\tR\bassignee\x12\x1f\n" +
 	"\vdrop_reason\x18\x06 \x01(\tR\n" +
 	"dropReason\x12'\n" +
-	"\x0fconversation_id\x18\a \x01(\tR\x0econversationId\"\xbf\x01\n" +
+	"\x0fconversation_id\x18\a \x01(\tR\x0econversationId\"\xe5\x01\n" +
 	"\x10ListTasksRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
 	"\x0finclude_dropped\x18\x02 \x01(\bR\x0eincludeDropped\x12\x19\n" +
 	"\bchild_id\x18\x03 \x01(\tR\achildId\x12\x16\n" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12\x14\n" +
 	"\x05limit\x18\x05 \x01(\x05R\x05limit\x12\x10\n" +
-	"\x03all\x18\x06 \x01(\bR\x03all\"=\n" +
+	"\x03all\x18\x06 \x01(\bR\x03all\x12$\n" +
+	"\x0eowner_child_id\x18\a \x01(\tR\fownerChildId\"=\n" +
 	"\x11ListTasksResponse\x12(\n" +
 	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\xc1\a\n" +
 	"\bModelRow\x12\x0e\n" +
