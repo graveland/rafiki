@@ -529,7 +529,14 @@ func TestSeedOpensTheFocusStreamForTheInitialChild(t *testing.T) {
 	ck.NotNil(c.stopRail, "seed must start the rail stream")
 	ck.Require().NotNil(cmd, "seed must return a command for the initially focused child; "+
 		"without it the pane only ever sees rail-tier events and stays empty")
-	c.Update(cmd())
+	// seed returns a batch -- the history fetch, the ledger fetch and the OSC
+	// sync -- so every command it returned has to run, the way the program
+	// loop runs them.
+	for _, m := range runCmdDeep(t, cmd) {
+		if m != nil {
+			c.Update(m)
+		}
+	}
 	ck.Require().NotNil(c.stopFocus, "seed must open a FOCUS stream for the initially focused child; "+
 		"without it the pane only ever sees rail-tier events and stays empty")
 }
@@ -1378,7 +1385,13 @@ func TestHopBackDoesNotRefetchHistory(t *testing.T) {
 	c.applyEvent(textEventFor("c_1", "live")) // gives the session a real cursor
 
 	c.hop("c_2")
-	assert.NewCollecting(t).Nil(c.hop("c_1"), "hopping back to a child whose transcript is already loaded must not re-fetch history")
+	// hop also returns the focused child's ledger fetch, so the property under
+	// test is what the returned commands FETCH, not whether there is one.
+	ck := assert.NewCollecting(t)
+	for _, m := range runCmdDeep(t, c.hop("c_1")) {
+		_, fetched := m.(historyMsg)
+		ck.False(fetched, "hopping back to a child whose transcript is already loaded re-fetched its history")
+	}
 }
 
 // ── script children: the event log IS the transcript ───────────────────────
@@ -2509,31 +2522,6 @@ func TestRedrawInvalidatesThePaneCache(t *testing.T) {
 	c.Require().Nil(p.linesFor(s, 80, 24, false, false, false), "second render should have been a cache hit")
 	p.invalidate()
 	c.NotNil(p.linesFor(s, 80, 24, false, false, false), "invalidate did not force a rebuild")
-}
-
-// No polling. The cockpit already sees every tool call, so a completed task
-// mutation is the refresh trigger.
-func TestTaskToolsTriggerARefresh(t *testing.T) {
-	c := assert.NewCollecting(t)
-	for _, name := range []string{"task_add", "task_update", "task_drop"} {
-		c.True(isTaskTool(name), "%s must trigger a task refresh", name)
-	}
-	for _, name := range []string{"bash", "read", "agent_spawn", ""} {
-		c.False(isTaskTool(name), "%s must not trigger a task refresh", name)
-	}
-}
-
-// A claude child reaches the ledger through MCP, so Claude Code reports the
-// tool as mcp__rafiki__task_add. Matching only the bare name left its task box
-// stale until the next focus hop.
-func TestMCPPrefixedTaskToolsTriggerARefresh(t *testing.T) {
-	c := assert.NewCollecting(t)
-	for _, name := range []string{"mcp__rafiki__task_add", "mcp__rafiki__task_update", "mcp__rafiki__task_drop"} {
-		c.True(isTaskTool(name), "%s must trigger a task refresh", name)
-	}
-	for _, name := range []string{"mcp__other__task_add", "mcp__rafiki__task_list", "mcp__rafiki__agent_spawn", "mcp__rafiki__"} {
-		c.False(isTaskTool(name), "%s must not trigger a task refresh", name)
-	}
 }
 
 // TestClosingARowKeepsTheCursorWhereTheRowWas pins that the cursor lands on the

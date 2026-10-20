@@ -352,10 +352,10 @@ type Cockpit struct {
 	// shows the last known list rather than an empty box while the refetch is
 	// in flight.
 	tasks map[string][]*rafikiv1.TaskRow
-	// taskRefresh says the event just processed completed a ledger mutation
-	// for the focused child and the next Update should issue one fetch.
-	// applyEvent is a void fold, so the request rides out to the caller
-	// instead of a tea.Cmd being minted mid-fold.
+	// taskRefresh says the event just processed was a tasks_changed for the
+	// focused child, so the next Update should issue one fetch. applyEvent is
+	// a void fold, so the request rides out to the caller instead of a tea.Cmd
+	// being minted mid-fold.
 	taskRefresh bool
 	// pastes holds folded pastes in insertion order, keyed by the token
 	// standing in for each. Cleared on send: the tokens leave with the text.
@@ -1147,57 +1147,18 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// applyEvent routes one event to the rail and, when it is the focused child's,
-// to that session. Both see it: the rail needs the ordinal for RailCursor even
-// while the user is looking at the child.
-// isTaskTool names the ledger mutations. A completed one is the refresh
-// trigger, which is why there is no polling and no new event type: the ledger
-// stays authoritative and the event plane is not asked to carry a lossy copy
-// of it.
-//
-// A claude child reaches the ledger through the rafiki MCP server, where Claude
-// Code names the tool mcp__rafiki__task_add; fundi calls it by its bare name.
-// Only the rafiki server's prefix counts: another server's task_add is not
-// this ledger.
-func isTaskTool(name string) bool {
-	switch strings.TrimPrefix(name, "mcp__rafiki__") {
-	case "task_add", "task_update", "task_drop":
-		return true
-	}
-	return false
-}
-
-// toolNameFor resolves a tool_use id to its name. ToolExecutionEnd carries a
-// duration and an error flag and no name, so the name has to come from the
-// assistant block that announced the call.
-func toolNameFor(s *session.Session, toolUseID string) string {
-	for i := len(s.Blocks) - 1; i >= 0; i-- {
-		for _, tc := range s.Blocks[i].ToolCalls {
-			if tc.ID == toolUseID {
-				return tc.Name
-			}
-		}
-	}
-	return ""
-}
-
 // fetchTasks loads the focused child's ledger. A failure yields no message at
 // all: the box is a readout, and an unreachable ledger should hide it rather
 // than raise an error over the conversation.
 func (c *Cockpit) fetchTasks(childID string) tea.Cmd {
-	n, ok := c.rail.Get(childID)
-	if !ok {
-		return nil
-	}
-	convID := n.SessionID
-	if convID == "" {
+	if _, ok := c.rail.Get(childID); !ok {
 		return nil
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		resp, err := c.client.ListTasks(ctx,
-			connect.NewRequest(&rafikiv1.ListTasksRequest{ConversationId: convID}))
+			connect.NewRequest(&rafikiv1.ListTasksRequest{OwnerChildId: childID}))
 		if err != nil {
 			return nil
 		}
@@ -1312,8 +1273,9 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 		s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
 		c.pending = ""
 	}
-	// A completed ledger mutation is the refresh trigger; no polling.
-	if te := ev.GetToolExecutionEnd(); te != nil && isTaskTool(toolNameFor(s, te.GetToolUseId())) {
+	// A durable ledger mutation for the focused child is the refresh trigger;
+	// there is no polling.
+	if ev.GetTasksChanged() != nil {
 		c.taskRefresh = true
 	}
 }

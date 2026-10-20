@@ -96,8 +96,10 @@ type Node struct {
 	StatusThrough  int32
 	HasStatusFloor bool
 
-	// SessionID is the child's session/conversation id from ListChildren, so
-	// the task box can address the ledger by conversation without another RPC.
+	// SessionID is the child's session id as ListChildren reports it: a
+	// conversation UUID for a fundi child, the backend's own session id for a
+	// claude child. Nothing addresses the ledger by it -- the ledger belongs to
+	// the child that owns it.
 	SessionID string
 
 	// Cwd is the child's working directory, from ListChildren. It has no
