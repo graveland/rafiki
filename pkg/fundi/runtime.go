@@ -822,16 +822,18 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	cfg := Config{
-		Model:                  opts.Model,
-		ThinkingBudget:         opts.ThinkingBudget,
-		MaxOutputTokens:        opts.MaxOutputTokens,
-		SystemPromptOverride:   opts.SystemPromptOverride,
-		AppendSystemPrompt:     opts.AppendSystemPrompt,
-		Prefill:                opts.Prefill,
-		PrefillTools:           prefillTools,
-		ContextFiles:           contextFiles,
-		SkillsInventory:        skills.SkillsInventory(discovered),
-		Recall:                 registry.Retains((tools.RecallBlueprint{}).Name()),
+		Model:                opts.Model,
+		ThinkingBudget:       opts.ThinkingBudget,
+		MaxOutputTokens:      opts.MaxOutputTokens,
+		SystemPromptOverride: opts.SystemPromptOverride,
+		AppendSystemPrompt:   opts.AppendSystemPrompt,
+		Prefill:              opts.Prefill,
+		PrefillTools:         prefillTools,
+		ContextFiles:         contextFiles,
+		SkillsInventory:      skills.SkillsInventory(discovered),
+		Recall:               registry.Retains((tools.RecallBlueprint{}).Name()),
+		Wait: registry.Retains((tools.AgentSpawnBlueprint{}).Name()) ||
+			registry.Retains((tools.BashStartBlueprint{}).Name()),
 		Cwd:                    opts.Cwd,
 		Workspace:              opts.Workspace,
 		Ref:                    opts.Ref,

@@ -19,7 +19,8 @@ const agentSpawnDescription = "Spawn a subagent to do a piece of work in paralle
 	"a cost budget, or failed), and pinged periodically while it is still working on " +
 	"something long. Do not sleep, poll, or repeatedly call agent_list/agent_view to " +
 	"check whether it is done — that costs you a turn each time and tells you nothing " +
-	"sooner than the notification will. Keep doing your own work in the meantime; use " +
+	"sooner than the notification will. If waiting is all that is left, end your turn: " +
+	"the notification starts a new one. Keep doing your own work if you have any; use " +
 	"agent_list/agent_view only when you actually need to look something up (which " +
 	"agent is which, or what one has said so far), not as a waiting loop.\n\n" +
 	"Give it a `prompt` that stands on its own: the subagent starts with none of " +

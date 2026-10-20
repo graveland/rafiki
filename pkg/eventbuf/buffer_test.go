@@ -542,3 +542,69 @@ func TestSteerSurvivesTheOrphanPath(t *testing.T) {
 	// It really is the degraded path: nothing reached the store.
 	c.Empty(pendingRows(t, st.Memory, "c_w"), "persisted rows")
 }
+
+// A batch that comes due while its child is mid-turn is steered through the
+// steer flush once the debounce closes, not deferred to the idle drain. The
+// debounce still coalesces: three settles are one steer.
+func TestEligibleBatchSteersWhenBusyAfterDebounce(t *testing.T) {
+	c := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	st := inbox.NewMemory()
+	plain := &flushRecorder{st: st}
+	steer := &flushRecorder{st: st}
+	b := New(Config{Debounce: 5 * time.Second, MaxWait: 60 * time.Second}, clk)
+	b.SetAccepter(inbox.NewQueue(inbox.QueueConfig{Store: st}))
+	b.SetFlush(plain.record)
+	b.SetBusy(func(string) bool { return true })
+	b.SetSteerWhenBusy(func(_, source string) bool { return source == "subagents" }, steer.record)
+
+	b.Push("c_coord", "subagents", "w1", "w1 done")
+	b.Push("c_coord", "subagents", "w2", "w2 done")
+	b.Push("c_coord", "subagents", "w3", "w3 done")
+	c.Eq(0, steer.n(), "steered inside the debounce window")
+	clk.Advance(6 * time.Second)
+
+	c.Eq(1, steer.n(), "a busy parent must get one steer when the window closes")
+	c.Eq(0, plain.n(), "the ordinary flush ran for a batch that should have steered")
+	c.Eq(3, len(steer.call(0).pending), "all three settles coalesce into the one steer")
+}
+
+// Ineligible sources keep the old behaviour: held for the idle transition.
+func TestIneligibleBatchStillDefersWhenBusy(t *testing.T) {
+	c := assert.NewAborting(t)
+	clk := clock.NewFakeClock(time.Unix(0, 0))
+	st := inbox.NewMemory()
+	plain := &flushRecorder{st: st}
+	steer := &flushRecorder{st: st}
+	var busy atomic.Bool
+	busy.Store(true)
+	b := New(Config{Debounce: 5 * time.Second, MaxWait: 60 * time.Second}, clk)
+	b.SetAccepter(inbox.NewQueue(inbox.QueueConfig{Store: st}))
+	b.SetFlush(plain.record)
+	b.SetBusy(func(string) bool { return busy.Load() })
+	b.SetSteerWhenBusy(func(_, source string) bool { return source == "subagents" }, steer.record)
+
+	b.Push("c_coord", "heartbeat", "w1", "still working")
+	clk.Advance(10 * time.Minute)
+	c.Eq(0, steer.n(), "an ineligible source was steered")
+	c.Eq(0, plain.n(), "an ineligible source flushed while busy")
+
+	busy.Store(false)
+	b.DrainIdle("c_coord")
+	c.Eq(1, plain.n(), "the idle drain must still release it through the ordinary flush")
+	c.Eq(0, steer.n(), "the idle drain must not use the steer flush")
+}
+
+// An idle parent is never steered: there is no turn to speak into, so the
+// batch goes out as a message that starts one.
+func TestEligibleBatchUsesOrdinaryFlushWhenIdle(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, clk, plain, st := newTestBuffer(t)
+	steer := &flushRecorder{st: st}
+	b.SetSteerWhenBusy(func(string, string) bool { return true }, steer.record)
+
+	b.Push("c_coord", "subagents", "w1", "w1 done")
+	clk.Advance(6 * time.Second)
+	c.Eq(1, plain.n(), "an idle parent gets the ordinary flush")
+	c.Eq(0, steer.n(), "an idle parent was steered")
+}

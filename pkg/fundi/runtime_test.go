@@ -726,3 +726,38 @@ func TestRecallSectionGatedOnFilteredToolSet(t *testing.T) {
 	c.StrContains(allowed, "## Recall", "a non-nil binding with no allowlist must keep the recall section; got")
 	c.NotStrContains(stripped, "## Recall", "an allowlist that strips recall must silence the section; got")
 }
+
+// TestWaitSectionFollowsFilteredToolSet pins that the waiting rule is gated on
+// the tool set the child actually has: it names subagents and background jobs,
+// so an allowlist that strips agent_spawn and bash_start must silence it. The
+// positive case needs an executor binding to register those tools, so it is
+// covered at the BuildSystemPrompt level.
+func TestWaitSectionFollowsFilteredToolSet(t *testing.T) {
+	c := assert.NewAborting(t)
+	silenceSlog(t)
+
+	systemText := func(toolAllowlist string) string {
+		sender := newCapturingSender(t, sampleEndTurn)
+		opts := fakeRuntimeOptions(t, t.TempDir())
+		opts.FakeTurns = ""
+		opts.Tools = toolAllowlist
+		opts.ProviderSenders = map[string]llm.Sender{"anthropic": sender}
+
+		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+		c.Require().NoError(err, "BuildRuntime")
+		defer shutdown()
+
+		eng.HandlePrompt("hi")
+		eng.Wait()
+		c.Require().Len(sender.captured, 1, "expected exactly one API request")
+
+		var sb strings.Builder
+		for _, block := range sender.captured[0].System {
+			sb.WriteString(block.Text)
+		}
+		return sb.String()
+	}
+
+	c.NotStrContains(systemText("read"), "## Waiting", "an allowlist without agent_spawn or bash_start must silence the section; got")
+}

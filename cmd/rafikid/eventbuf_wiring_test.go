@@ -131,3 +131,23 @@ func TestInboxBatchConfigDefaults(t *testing.T) {
 	cfg := inboxBatchConfig()
 	assert.NewCollecting(t).False(cfg.MaxFragments != 30 || cfg.MaxBytesPerFlush != 65536, "defaults = %+v; want {30 65536}", cfg)
 }
+
+// TestSteersWhenBusyIsFundiCompletionNewsDuringATurn pins who gets steered:
+// completion news (subagent settles, job exits) for a fundi child that is
+// executing a turn. Everything else keeps waiting for the idle drain.
+func TestSteersWhenBusyIsFundiCompletionNewsDuringATurn(t *testing.T) {
+	c := assert.NewCollecting(t)
+	st := childstore.New()
+	st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi, Status: protocol.StatusToolRunning})
+	st.Insert(&childstore.Session{ChildID: "c_compact", Kind: protocol.KindFundi, Status: protocol.StatusCompacting})
+	st.Insert(&childstore.Session{ChildID: "c_claude", Kind: protocol.KindClaude, Status: protocol.StatusToolRunning})
+	ctl := &Controller{st: st}
+
+	c.True(ctl.steersWhenBusy("c_fundi", subagentEventSource), "a settle must steer a fundi child mid-turn")
+	c.True(ctl.steersWhenBusy("c_fundi", jobEventSource), "a job exit must steer a fundi child mid-turn")
+	c.False(ctl.steersWhenBusy("c_fundi", heartbeatEventSource), "a heartbeat is not worth interrupting for")
+	c.False(ctl.steersWhenBusy("c_fundi", scheduleEventSource), "a schedule frame is not worth interrupting for")
+	c.False(ctl.steersWhenBusy("c_compact", subagentEventSource), "compaction is not a moment to speak into")
+	c.False(ctl.steersWhenBusy("c_claude", subagentEventSource), "only the fundi runtime takes a steer into a running turn")
+	c.False(ctl.steersWhenBusy("ghost", subagentEventSource), "an unknown child has no turn")
+}

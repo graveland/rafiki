@@ -412,6 +412,34 @@ func (c *Controller) flushInboxSource(childID, source string, orphans []inbox.In
 	c.deliverOrphans(childID, orphans)
 }
 
+// flushInboxSourceSteer is flushInboxSource for a batch that came due while its
+// child was mid-turn: the rows are delivered as a steer, and orphans (rows whose
+// durable write failed) are upgraded the same way so a database blip cannot turn
+// the steer back into a message that waits for a turn that never ends.
+func (c *Controller) flushInboxSourceSteer(childID, source string, orphans []inbox.Inbound) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if c.inbox != nil {
+		if err := c.inbox.DeliverSteer(ctx, childID, source); err != nil {
+			if quietDeferral(err) {
+				slog.Debug("eventbuf: steer flush deferred; fragments stay queued",
+					"childId", childID, "source", source, "reason", err)
+			} else {
+				slog.Warn("eventbuf: steer flush failed; fragments stay queued",
+					"childId", childID, "source", source, "error", err)
+			}
+		}
+	}
+	steered := make([]inbox.Inbound, len(orphans))
+	for i, o := range orphans {
+		if o.Source != "" && o.Mode == inbox.ModePrompt {
+			o.Mode = inbox.ModeSteer
+		}
+		steered[i] = o
+	}
+	c.deliverOrphans(childID, steered)
+}
+
 // deliverOrphans injects fragments whose durable write failed. They have no
 // rows, so they are never marked sent or consumed and never await an ack:
 // delivered and forgotten.

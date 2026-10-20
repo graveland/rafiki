@@ -42,6 +42,34 @@ func childIsBusy(st *childstore.Store, childID string) bool {
 	return true
 }
 
+// steersWhenBusy reports whether a batch for (childID, source) that comes due
+// while childID is mid-turn should be steered into that turn.
+//
+// Only completion news qualifies (a subagent settling, a background job
+// finishing): it is what a coordinator is waiting on, and a coordinator that
+// waits by chaining tool calls never ends the turn the batch would otherwise
+// be deferred to. Heartbeats, schedules and notifications stay deferred, since
+// interrupting for them costs a turn and conveys nothing to act on.
+//
+// Fundi only: it is the runtime whose frame protocol takes a steer into a
+// running turn. And only while a turn is actually executing (running,
+// streaming, tool_running); compaction and a blocked UI prompt are not moments
+// to speak into.
+func (c *Controller) steersWhenBusy(childID, source string) bool {
+	if source != subagentEventSource && source != jobEventSource {
+		return false
+	}
+	snap, ok := c.st.Get(childID)
+	if !ok || snap.Kind != protocol.KindFundi {
+		return false
+	}
+	switch snap.Status {
+	case protocol.StatusRunning, protocol.StatusStreaming, protocol.StatusToolRunning:
+		return true
+	}
+	return false
+}
+
 // wireEventBuffer attaches the buffer to the durable inbox and to the
 // controller's flush and busy hooks.
 //
@@ -61,6 +89,7 @@ func (c *Controller) wireEventBuffer() {
 	// change. refreshDisplayState is a non-blocking enqueue, which is what makes
 	// it safe as the callback.
 	c.evbuf.SetOnChange(c.refreshDisplayState)
+	c.evbuf.SetSteerWhenBusy(c.steersWhenBusy, c.flushInboxSourceSteer)
 	c.evbuf.SetBusy(func(childID string) bool { return childIsBusy(c.st, childID) })
 }
 

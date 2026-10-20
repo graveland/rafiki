@@ -20,6 +20,14 @@ const defaultBasePrompt = `You are fundi, a coding agent working directly agains
 // true.
 const recallSection = "## Recall\n\nBefore non-trivial work, search past conversations and saved memories with recall, expand a promising hit with recall_context, and save durable facts with memory_put."
 
+// waitSection tells a child that can start subagents or background jobs how to
+// wait for them. Tool descriptions already say "do not poll", but a rule there
+// only forbids; this names the alternative. A turn kept alive by `sleep` cannot
+// receive a settlement until the sleep returns, so the child that waits by
+// polling is the one that hears about nothing. Emitted only when
+// SysPromptConfig.Wait is true, for the same reason recallSection is.
+const waitSection = "## Waiting\n\nSubagents and background jobs report back on their own: when one settles you receive a message and, if your turn has ended, a new turn starts. When everything left to do is waiting on them, end your turn. Do not sleep or loop to wait; a turn kept alive that way cannot receive the message until the sleep finishes."
+
 // WorkspaceInfo describes where a child actually landed. Every field is
 // resolved by the daemon at spawn; none of it is asked of the model.
 type WorkspaceInfo struct {
@@ -41,7 +49,10 @@ type SysPromptConfig struct {
 	// Recall, when true, emits the recall section: the child has the recall
 	// and memory tools. It is false for a child that does not, which must not
 	// pay for the nudge.
-	Recall       bool
+	Recall bool
+	// Wait, when true, emits the waiting section: the child has agent_spawn or
+	// bash_start, so it will have something to wait on.
+	Wait         bool
 	Cwd, ModelID string
 	// Workspace, when non-nil and Isolation != "none", appends a per-child
 	// machine block to the environment section. It varies BETWEEN children, so
@@ -55,7 +66,7 @@ type SysPromptConfig struct {
 // files, skills) MUST precede anything that changes turn to turn, and the
 // per-turn environment block (which includes today's date) goes last:
 //
-//	base (Override if set, else Base) -> Append -> Recall -> ContextFiles ->
+//	base (Override if set, else Base) -> Append -> Recall -> Wait -> ContextFiles ->
 //	SkillsInventory -> environment block
 //
 // Empty optional sections are omitted entirely - no stray blank sections or
@@ -69,6 +80,9 @@ func BuildSystemPrompt(c SysPromptConfig) string {
 	optional := []string{base, c.Append}
 	if c.Recall {
 		optional = append(optional, recallSection)
+	}
+	if c.Wait {
+		optional = append(optional, waitSection)
 	}
 	optional = append(optional, c.ContextFiles, c.SkillsInventory)
 

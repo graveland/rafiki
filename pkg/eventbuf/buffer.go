@@ -56,6 +56,11 @@ type Config struct {
 // durable one rather than a second implementation that drifts.
 type FlushFn func(childID, source string, orphans []inbox.Inbound)
 
+// SteerFn reports whether a batch for (childID, source) that comes due while
+// childID is mid-turn should be delivered into that turn rather than held for
+// its end.
+type SteerFn func(childID, source string) bool
+
 // BusyFn reports whether childID is mid-turn. A flush is deferred while true.
 type BusyFn func(childID string) bool
 
@@ -90,6 +95,8 @@ type Buffer struct {
 	state    map[bufKey]*perKey
 	flush    FlushFn
 	busy     BusyFn
+	steerOn  SteerFn
+	steer    FlushFn
 	onChange func(childID string)
 	acc      inbox.Accepter
 }
@@ -123,6 +130,21 @@ func (b *Buffer) SetFlush(fn FlushFn) {
 // target may be mid-turn.
 func (b *Buffer) SetBusy(fn BusyFn) {
 	b.busy = fn
+}
+
+// SetSteerWhenBusy lets a batch that comes due while its child is mid-turn be
+// delivered as a steer through flush instead of being deferred to DrainIdle.
+// eligible picks the (child, source) pairs this applies to; flush is the
+// steer-mode counterpart of SetFlush.
+//
+// This is the decision point the debounce leaves open: coalescing still runs
+// in full, and only when the batch is ready does the buffer choose between
+// waiting for the turn to end and speaking into it. A coordinator that never
+// ends its turn (it chains tool calls while it waits) would otherwise never
+// hear that its children settled.
+func (b *Buffer) SetSteerWhenBusy(eligible SteerFn, flush FlushFn) {
+	b.steerOn = eligible
+	b.steer = flush
 }
 
 // SetOnChange registers fn, called with childID whenever Pending(childID) may
@@ -454,10 +476,14 @@ func (b *Buffer) fire(bk bufKey, forced bool) {
 		b.mu.Unlock()
 		return
 	}
+	steer := false
 	if !forced && b.busy != nil && b.busy(bk.childID) {
-		pk.deferred = true
-		b.mu.Unlock()
-		return
+		if b.steerOn == nil || b.steer == nil || !b.steerOn(bk.childID, bk.source) {
+			pk.deferred = true
+			b.mu.Unlock()
+			return
+		}
+		steer = true
 	}
 	orphans := pk.orphans
 	pk.orphans = nil
@@ -469,6 +495,9 @@ func (b *Buffer) fire(bk bufKey, forced bool) {
 		pk.timer = nil
 	}
 	flush := b.flush
+	if steer {
+		flush = b.steer
+	}
 	b.mu.Unlock()
 
 	// flush MUST run with b.mu released: it reaches Controller.Send, a

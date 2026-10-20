@@ -144,3 +144,16 @@ func TestRecallSectionOrdering(t *testing.T) {
 	c.Greater(appendIdx, recallIdx, "the recall section must come after the append; got %q", got)
 	c.Less(filesIdx, recallIdx, "the recall section must come before the context files; got %q", got)
 }
+
+// The waiting rule is emitted only for a child that can start subagents or
+// background jobs; a child with nothing to wait on must not pay for it on
+// every request.
+func TestWaitSectionOnlyWhenEnabled(t *testing.T) {
+	on := BuildSystemPrompt(SysPromptConfig{Base: "base.", Wait: true, Cwd: "/w", ModelID: "m"})
+	off := BuildSystemPrompt(SysPromptConfig{Base: "base.", Cwd: "/w", ModelID: "m"})
+
+	c := assert.NewAborting(t)
+	c.StrContains(on, "## Waiting", "waiting section missing when Wait is set; got")
+	c.StrContains(on, "end your turn", "waiting section must name the alternative to polling; got")
+	c.NotStrContains(off, "## Waiting", "waiting section present when Wait is unset; got")
+}

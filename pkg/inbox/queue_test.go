@@ -159,3 +159,25 @@ func TestQueueSerializesDeliveryPerChild(t *testing.T) {
 		c.Eq(1, rec.count(), "trial %d: concurrent drains delivered %d copies, want 1", trial, rec.count())
 	}
 }
+
+// DeliverSteer upgrades grouped fragments to a steer so they enter a running
+// turn, but leaves a direct message with the mode its sender chose.
+func TestQueueDeliverSteerUpgradesFragmentsOnly(t *testing.T) {
+	c := assert.NewAborting(t)
+	rec := &recorder{}
+	q, _ := newQueue(t, rec, nil)
+	ctx := context.Background()
+
+	_, err := q.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Source: "subagents", Key: "w1", Text: "w1 done"})
+	c.Require().NoError(err, "Accept fragment")
+	_, err = q.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hello"})
+	c.Require().NoError(err, "Accept direct")
+
+	c.Require().NoError(q.DeliverSteer(ctx, "c_1", "subagents"), "DeliverSteer")
+	c.Require().Eq(1, rec.count(), "only the named source delivers")
+	c.Eq(inbox.ModeSteer, rec.batches[0].Mode, "the fragment batch must be a steer")
+
+	c.Require().NoError(q.DeliverAll(ctx, "c_1"), "DeliverAll")
+	c.Require().Eq(2, rec.count(), "the direct message delivers on the drain")
+	c.Eq(inbox.ModePrompt, rec.batches[1].Mode, "a direct message keeps its own mode")
+}

@@ -70,14 +70,25 @@ func (q *Queue) Accept(ctx context.Context, in Inbound) (string, error) {
 // Deliver writes childID's pending rows for exactly one source. source == ""
 // selects direct messages.
 func (q *Queue) Deliver(ctx context.Context, childID, source string) error {
-	return q.deliver(ctx, childID, &source)
+	return q.deliver(ctx, childID, &source, false)
+}
+
+// DeliverSteer is Deliver with every grouped batch upgraded to a steer, so it
+// lands inside a turn already running instead of waiting for the next one.
+//
+// The upgrade is made here, at delivery, rather than when the row was accepted:
+// whether a fragment should interrupt depends on whether the child is mid-turn
+// when the debounce window closes, which is not known when it is queued. Direct
+// messages (source "") keep the mode the sender chose.
+func (q *Queue) DeliverSteer(ctx context.Context, childID, source string) error {
+	return q.deliver(ctx, childID, &source, true)
 }
 
 // DeliverAll writes every pending row for childID. This is the drain: used on
 // the child's idle transition (retrying anything a failed immediate delivery
 // left behind) and by recovery replay after a restart.
 func (q *Queue) DeliverAll(ctx context.Context, childID string) error {
-	return q.deliver(ctx, childID, nil)
+	return q.deliver(ctx, childID, nil, false)
 }
 
 // Pull atomically retires and returns childID's pending rows: the read-side
@@ -113,7 +124,7 @@ func (q *Queue) Pull(ctx context.Context, childID string) ([]Inbound, error) {
 	return rows, nil
 }
 
-func (q *Queue) deliver(ctx context.Context, childID string, source *string) error {
+func (q *Queue) deliver(ctx context.Context, childID string, source *string, steer bool) error {
 	if q.cfg.Store == nil || q.cfg.Deliver == nil {
 		return nil
 	}
@@ -141,6 +152,9 @@ func (q *Queue) deliver(ctx context.Context, childID string, source *string) err
 	}
 
 	for _, b := range Coalesce(rows, q.cfg.Batch) {
+		if steer && b.Source != "" && b.Mode == ModePrompt {
+			b.Mode = ModeSteer
+		}
 		awaitAck, err := q.cfg.Deliver(ctx, b)
 		if err != nil {
 			// Stop at the first failure rather than pressing on: a later
