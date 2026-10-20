@@ -1826,6 +1826,69 @@ func (c *Controller) checkTaskHandle(ctx context.Context, req protocol.SpawnRequ
 	}
 }
 
+// siblingNameSuffixLimit bounds the <name>-2 … <name>-N suffixes a tool-spawn
+// claims before it gives up and refuses.
+const siblingNameSuffixLimit = 32
+
+// nameHeldError is the refusal a taken sibling name answers with, from both
+// spawn admission and rename. It names who holds the name and how to free it,
+// because the caller's only real options are "pick another" or "close that
+// one".
+func nameHeldError(name, holderID, holderStatus string) error {
+	return &connectapi.ControllerError{
+		Code:    protocol.ErrAlreadyExists,
+		Message: fmt.Sprintf("name %q is held by %s (%s); close it to reuse the name", name, holderID, holderStatus),
+	}
+}
+
+// claimSiblingName returns the name a spawn should actually use: name itself
+// when it is free among the owner's live siblings under parentID ("" = top
+// level), a fresh <name>-N when suffix is set, and a refusal otherwise.
+//
+// This is ADMISSION, not the authority. The rule — "among an owner's non-closed
+// children, a non-empty name is unique among siblings" — is enforced by the
+// child_sibling_name_live index, so a spawn that loses the race between this
+// check and its initial write still fails, via the ErrNameTaken backstop in
+// Spawn. Checking here is what turns the common refusal into something the
+// caller can act on instead of a 23505.
+//
+// suffix is set only by the daemon's own tool spawners (agent_spawn and the MCP
+// face): a model that reuses a name should get name-2 rather than an error it
+// tends to retry unchanged. Every operator surface passes false.
+//
+// A store error refuses the spawn. An unchecked name must not run: the child
+// would then be refused by its initial write, after a process and possibly a
+// sandbox exist.
+func (c *Controller) claimSiblingName(ctx context.Context, ownerUserID, parentID, name string, suffix bool) (string, error) {
+	if c.children == nil || strings.TrimSpace(name) == "" {
+		return name, nil
+	}
+	holderID, holderStatus, taken, err := c.children.NameHolder(ctx, ownerUserID, parentID, name)
+	if err != nil {
+		return "", fmt.Errorf("check name %q: %w", name, err)
+	}
+	if !taken {
+		return name, nil
+	}
+	if !suffix {
+		return "", nameHeldError(name, holderID, holderStatus)
+	}
+	for i := 2; i <= siblingNameSuffixLimit; i++ {
+		candidate := fmt.Sprintf("%s-%d", name, i)
+		_, _, taken, err := c.children.NameHolder(ctx, ownerUserID, parentID, candidate)
+		if err != nil {
+			return "", fmt.Errorf("check name %q: %w", candidate, err)
+		}
+		if !taken {
+			return candidate, nil
+		}
+	}
+	return "", &connectapi.ControllerError{
+		Code:    protocol.ErrAlreadyExists,
+		Message: fmt.Sprintf("name %q and its suffixes -2..-%d are all held", name, siblingNameSuffixLimit),
+	}
+}
+
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (protocol.SpawnResponseData, error) {
 	// The model the REQUEST named, captured before applyPreset can replace it
 	// with the preset's: resolveRouting parses both and merges spawn over
@@ -1863,6 +1926,17 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// above, so this only fills the genuinely-absent case.
 	if req.Kind == "" {
 		req.Kind = protocol.KindFundi
+	}
+
+	// A name a live SIBLING already holds is refused here (suffixed, for the
+	// daemon's tool spawners) — after the preset and routing resolution that
+	// decide the effective kind, and before anything is minted, forked or
+	// sandboxed, so a refusal starts no process. The index stays the
+	// authority: the initial writeRecord below is the backstop for a name taken
+	// between this check and that write.
+	req.Name, err = c.claimSiblingName(ctx, owner.UserID, req.ParentChildID, req.Name, req.SuffixNameOnConflict)
+	if err != nil {
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// A spawn block confines the child to a sandbox workspace, which only a
@@ -2274,6 +2348,15 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		// the best-effort warn (there is no row to write in a DB-less test).
 		if c.children != nil {
 			c.abortSpawn(childID, ch)
+			// A name a sibling claimed between claimSiblingName and this
+			// write is the ONE failure here the caller can fix by retrying,
+			// so it is reported as a conflict rather than a spawn failure.
+			if errors.Is(err, childstore.ErrNameTaken) {
+				return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+					Code:    protocol.ErrAlreadyExists,
+					Message: fmt.Sprintf("name %q was taken concurrently; retry", req.Name),
+				}
+			}
 			return protocol.SpawnResponseData{}, fmt.Errorf("spawn %s: %w", childID, err)
 		}
 		slog.Warn("write state record (spawning)", "childId", childID, "error", err)

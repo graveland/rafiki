@@ -466,6 +466,10 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		MaxChildren:           spec.MaxChildren,
 		ExecutorSelector:      spec.ExecutorSelector,
 		WorkspaceMode:         spec.WorkspaceMode,
+		// A model that asks for a name one of its live workers already has
+		// gets name-2 rather than a refusal it can do nothing useful with. Set
+		// HERE only: every operator surface refuses a taken name.
+		SuffixNameOnConflict: true,
 	}
 	applySpawnSpecShaping(&req, spec)
 	// The owner id is the caller's own row's, read from the same fetch that

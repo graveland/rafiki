@@ -92,3 +92,56 @@ func TestRenamePublishesChildRenamedAndUpdatesTheStore(t *testing.T) {
 	}
 	ck.Eq("shiny", got, "child_renamed event name")
 }
+
+// A rename onto a name a live SIBLING holds is refused, and nothing moves: the
+// refusal comes before the snapshot is touched, so the store and the row both
+// still carry the old name. Fails without the pre-read: the rename would be
+// applied in memory and then bounce off the index at writeRecord.
+func TestRenameRefusedWhenSiblingHoldsName(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := scratchPool(t)
+	ctrl := newTestController(t)
+	ctrl.pool = pool
+	ctrl.children = childstoredb.New(pool)
+
+	nameA := uniqueSiblingName(t)
+	nameB := nameA + "b"
+	holder, mover := "c_rename_holder", "c_rename_mover"
+	now := time.Now()
+	for id, name := range map[string]string{holder: nameA, mover: nameB} {
+		ctrl.st.Insert(&childstore.Session{
+			ChildID: id, Name: name, Kind: protocol.KindFundi, Status: protocol.StatusIdle,
+			Cwd: t.TempDir(), StartedAt: now, LastActivity: now,
+		})
+		ck.Require().NoError(ctrl.writeRecord(id), "write the row for %s", id)
+	}
+
+	err := ctrl.Rename(context.Background(), mover, nameA)
+	ck.Require().Error(err, "a rename onto a live sibling's name must be refused")
+	ce := controllerError(t, err)
+	ck.Eq(protocol.ErrAlreadyExists, ce.Code, "the refusal's reason")
+	ck.StrContains(ce.Message, holder, "the refusal must name the holder: %s", ce.Message)
+
+	ck.Eq(nameB, mustSnapshot(t, ctrl, mover).Name, "the refused rename must leave the snapshot name alone")
+	ck.Eq(nameA, rowNameFor(t, pool, holder), "the holder's row")
+	ck.Eq(nameB, rowNameFor(t, pool, mover), "the refused rename must leave the row alone")
+}
+
+// A rename that fails to persist is UNDONE: the snapshot would otherwise show a
+// name the database never accepted. Fails without the revert.
+func TestRenameRevertsOnRecordFailure(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	ctrl.children = &failingChildStore{}
+
+	const id = "c_rename_revert"
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: id, Name: "old", Kind: protocol.KindFundi, Status: protocol.StatusIdle,
+		Cwd: t.TempDir(), StartedAt: time.Now(),
+	})
+
+	ck.Require().Error(ctrl.Rename(context.Background(), id, "new"),
+		"a rename whose row cannot be written must fail")
+	ck.Eq("old", mustSnapshot(t, ctrl, id).Name,
+		"the failed rename must leave the snapshot on the old name")
+}

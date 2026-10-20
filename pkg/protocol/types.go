@@ -268,6 +268,12 @@ type SpawnRequest struct {
 	Name   string            `json:"name,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; rafiki/ prefix rejected
 
+	// SuffixNameOnConflict is set ONLY by the daemon's tool spawners (an LLM
+	// calling agent_spawn): a taken sibling name becomes name-2, name-3, …
+	// instead of refusing. Never on the wire; the CLI, cockpit and Connect
+	// Spawn always refuse a taken name.
+	SuffixNameOnConflict bool `json:"-"`
+
 	// ParentChildID names the child spawning this one, forming the tree edge
 	// recorded as the rafiki/parent label (rafiki/root is derived from it).
 	// Empty means top-level.

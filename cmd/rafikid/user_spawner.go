@@ -92,6 +92,9 @@ func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.Ag
 		MaxChildren:      spec.MaxChildren,
 		ExecutorSelector: spec.ExecutorSelector,
 		WorkspaceMode:    spec.WorkspaceMode,
+		// This is an MCP tool call, not an operator: a taken sibling name
+		// becomes name-2 instead of a refusal, exactly as agent_spawn does.
+		SuffixNameOnConflict: true,
 	}
 	applySpawnSpecShaping(&req, spec)
 	res, err := s.c.Spawn(ctx, req, s.owner)
