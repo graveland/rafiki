@@ -2382,9 +2382,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// concurrency, and every one of those refusals returns BEFORE this point,
 	// so a refused spawn can never leave a row pointing at a child that never
 	// started — no rollback, no compensating write.
-	if req.Task != "" && c.tasks != nil && req.SpawnerConversationID != "" {
+	//
+	// The assignment publishes on the SPAWNER's bus (ParentChildID), and
+	// SpawnRequest.Task is honoured only under a parent: without one there is
+	// no conversation the notice belongs to.
+	if req.Task != "" && req.ParentChildID != "" && c.tasks != nil && req.SpawnerConversationID != "" {
 		assignCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		if _, err := c.tasks.Assign(assignCtx, req.SpawnerConversationID, req.Task, childID); err != nil {
+		if _, err := c.tasksFor(req.ParentChildID).Assign(assignCtx, req.SpawnerConversationID, req.Task, childID); err != nil {
 			// Best-effort, and deliberately not fatal: the child is already
 			// running, and killing a healthy agent because a bookkeeping row
 			// would not update trades a recoverable inconsistency for an
@@ -4973,9 +4977,22 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// Best-effort under a short deadline: a database outage must not wedge
 	// child teardown. The cost of failure is that rows stay in_progress
 	// behind a dead child, which is recoverable.
+	//
+	// The rows this orphans are the dead child's own, but they live in its
+	// PARENT's ledger, so the notice goes on the parent's bus when there is a
+	// registered parent to receive it; a child whose parent is gone (or that
+	// never had one) is swept without announcing to a bus nobody reads.
 	if c.tasks != nil {
 		sweepCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if rows, err := c.tasks.OrphanAssigned(sweepCtx, childID); err != nil {
+		ledger := c.tasks
+		if snap, ok := c.st.Get(childID); ok {
+			if parentID := snap.Labels[childstore.LabelParent]; parentID != "" {
+				if _, live := c.st.Get(parentID); live {
+					ledger = c.tasksFor(parentID)
+				}
+			}
+		}
+		if rows, err := ledger.OrphanAssigned(sweepCtx, childID); err != nil {
 			slog.Warn("orphan task sweep failed; tasks remain in_progress",
 				"childId", childID, "error", err)
 		} else if len(rows) > 0 {
