@@ -224,6 +224,27 @@ func TestOSC7501OffUntilSupported(t *testing.T) {
 	ck.NotEmpty(e.Sync(d), "the 7501 reply turns the emitter on")
 }
 
+// TestOSC7501SupportFromDecodedReply feeds the reply bytes through ultraviolet's
+// decoder and hands the resulting event to the emitter, so a decoder that
+// changes how it reports the reply fails here instead of silently leaving the
+// terminal without status records. The decoder's event type is the message
+// bubbletea forwards, by way of tea.ProgramStatusSupportMsg.
+func TestOSC7501SupportFromDecodedReply(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	d := []rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}
+
+	var dec uv.EventDecoder
+	reply := []byte("\x1b]7501;?;states=working,blocked,error,done,idle,clear;kinds=question\x1b\\")
+	n, ev := dec.Decode(reply)
+	ck.Eq(len(reply), n, "the whole reply is consumed")
+	_, isSupport := ev.(uv.ProgramStatusSupportEvent)
+	ck.True(isSupport, "the decoder reports a support event")
+
+	e := newOSC7501Emitter(env(nil))
+	e.observe(tea.ProgramStatusSupportMsg{})
+	ck.NotEmpty(e.Sync(d), "the support message turns the emitter on")
+}
+
 // TestOSC7501OffUnderTmux pins that $TMUX disables the emitter entirely, even
 // after a reply arrived.
 func TestOSC7501OffUnderTmux(t *testing.T) {

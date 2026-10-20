@@ -1106,7 +1106,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.ColorProfileMsg:
 		return c, c.observeCaps(msg)
 
-	case uv.UnknownOscEvent:
+	case uv.UnknownOscEvent, tea.ProgramStatusSupportMsg:
 		// The OSC 7501 support reply is what turns the emitter on (step 0).
 		// A first reply re-syncs immediately, so a state that changed before
 		// support resolved is not left unshown.

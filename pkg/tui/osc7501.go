@@ -237,20 +237,20 @@ func (e *osc7501Emitter) query() string {
 // support when an OSC 7501 reply arrives, and does nothing else: every other
 // message, and every message once support is known, is ignored.
 //
-// Step 0 finding: ultraviolet's OSC parser returns an unknown command as a
-// uv.UnknownOscEvent carrying the whole raw sequence, and bubbletea forwards it
-// to Update unchanged (it has no case for it), so the reply is exactly what
-// lands here.
+// Current ultraviolet decodes the `?` reply itself and bubbletea forwards it as
+// tea.ProgramStatusSupportMsg. The uv.UnknownOscEvent arm stays for a decoder
+// that hands the raw sequence through instead.
 func (e *osc7501Emitter) observe(msg tea.Msg) {
 	if e.tmux || e.supported {
 		return
 	}
-	osc, ok := msg.(uv.UnknownOscEvent)
-	if !ok {
-		return
-	}
-	if osc7501Reply(string(osc)) {
+	switch m := msg.(type) {
+	case tea.ProgramStatusSupportMsg:
 		e.supported = true
+	case uv.UnknownOscEvent:
+		if osc7501Reply(string(m)) {
+			e.supported = true
+		}
 	}
 }
 
