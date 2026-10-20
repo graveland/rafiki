@@ -403,8 +403,10 @@ func TestMigrate0047Sandbox(t *testing.T) {
 //
 // The renamed rows' conversations are linked by the three arms the pass
 // handles: conversation_id, external_ref = child_id, and external_ref =
-// child_id:<thread>. Child ids carry an underscore, a LIKE wildcard, so the
-// escaping is exercised too.
+// child_id:<thread>. The third arm reaches the row through a LIKE pattern with
+// an escaped `%`/`_`: child ids carry an underscore, so an unescaped pattern
+// would over-match. Nothing here acts as a DECOY for that over-match yet — the
+// escaping itself is not pinned by this test.
 func TestMigrate0054RenamesLiveDuplicates(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()

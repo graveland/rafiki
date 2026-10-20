@@ -790,8 +790,10 @@ of your agents. It authenticates a sender's webhook, decides from your rules
 whether the delivery is worth waking an agent for, and reports it to `rafikid`
 over the `Notify` RPC — one call, one narrowed token. It holds no database
 DSN, no executor and no daemon code: it depends on no pgx package
-(`TestHooksDoesNotLinkPostgres`) and on none of the daemon's own importable
-packages — the inbox, the stores, the execpool, the server (`TestHooksDoesNotLinkDaemon`).
+(`TestHooksDoesNotLinkPostgres`) and on none of the daemon-side packages that
+guard names — the inbox, the stores, the execpool, the server
+(`TestHooksDoesNotLinkDaemon`, a denylist over importable daemon packages,
+because `cmd/rafikid` is `package main` and can never appear as a dependency).
 It never answers a sender `2xx` before `Notify` has returned, so an
 acknowledged DELIVERABLE event is a stored one; the `ignored` and `duplicate`
 `200`s are answered without calling `Notify` at all, because there is nothing
