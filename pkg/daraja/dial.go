@@ -49,10 +49,15 @@ var (
 // Connect dials rafikid and serves the handler on the connection until ctx is
 // done or a terminal auth error arrives. Reconnect loop modelled on execpool.
 func Connect(ctx context.Context, o ConnectOptions) error {
-	backoff := initialBackoff
+	initial, ceiling := initialBackoff, maxBackoff
+	backoff := initial
 
 	for ctx.Err() == nil {
+		started := time.Now()
 		cred, err := connectOnce(ctx, o)
+		if time.Since(started) >= ceiling {
+			backoff = initial
+		}
 		if cred != "" {
 			o.Credential = cred
 			o.Ticket = "" // mutual exclusion: credential replaces ticket
@@ -66,10 +71,7 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = min(backoff*2, ceiling)
 	}
 	return ctx.Err()
 }

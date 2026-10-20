@@ -66,20 +66,28 @@ var ErrEnrollmentRejected = errors.New("execpool: enrollment rejected by rafikid
 
 // Connect dials rafikid, enrolls if needed, and serves the executor's Connect
 // handler on the connection until ctx is done.
-// Reconnect pacing. Vars rather than constants so tests can exercise the retry
-// loop in milliseconds; nothing outside tests changes them.
+// Reconnect pacing. A connection that lasted at least maxBackoff counts as
+// healthy and resets the ladder, so a long-lived executor redials a restarted
+// daemon after initialBackoff rather than the ladder's previous peak. Vars
+// rather than constants so tests can exercise the retry loop in milliseconds;
+// nothing outside tests changes them.
 var (
 	initialBackoff = 1 * time.Second
 	maxBackoff     = 30 * time.Second
 )
 
 func Connect(ctx context.Context, o ConnectOptions) error {
-	backoff := initialBackoff
+	initial, ceiling := initialBackoff, maxBackoff
+	backoff := initial
 
 	for ctx.Err() == nil {
+		started := time.Now()
 		err := connectOnce(ctx, o)
 		if errors.Is(err, ErrEnrollmentRejected) {
 			return err
+		}
+		if time.Since(started) >= ceiling {
+			backoff = initial
 		}
 		slog.Warn("executor: connection lost; reconnecting", "error", err, "in", backoff)
 		select {
@@ -87,10 +95,7 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = min(backoff*2, ceiling)
 	}
 	return ctx.Err()
 }
