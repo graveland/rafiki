@@ -23,4 +23,9 @@ var (
 	// active rows only, which is what makes an address reusable after its
 	// owner is deleted.
 	ErrEmailTaken = errors.New("users: email already in use")
+
+	// ErrInvalidCapability is returned by ValidCapabilities, and by MintToken
+	// when it is handed a capability set that names an unknown or repeated
+	// capability. An ANSWER — the input is wrong, not the store.
+	ErrInvalidCapability = errors.New("users: invalid capability")
 )

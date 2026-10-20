@@ -131,15 +131,20 @@ func (s *pgStore) Create(ctx context.Context, u users.NewUser) (users.User, stri
 
 func (s *pgStore) Authenticate(ctx context.Context, token string) (users.Identity, error) {
 	var id users.Identity
+	// t.capabilities lands in id.Capabilities through pgx's []string array
+	// scan, which preserves the three states: SQL NULL gives a nil slice and
+	// '{}' a non-nil empty one (pgtype.FlatArray.SetDimensions(nil) nils the
+	// slice, a zero-length dimension allocates a non-nil one) — so no
+	// COALESCE or other normalization here, which would collapse them.
 	err := s.pool.QueryRow(ctx,
-		`SELECT u.id::text, u.username, u.is_admin, t.id::text
+		`SELECT u.id::text, u.username, u.is_admin, t.id::text, t.capabilities
 		   FROM conversations.user_token t
 		   JOIN conversations.users u ON u.id = t.user_id
 		  WHERE t.token_sha256 = $1
 		    AND t.revoked_at IS NULL
 		    AND (t.expires_at IS NULL OR t.expires_at > now())
 		    AND u.deleted_at IS NULL`,
-		users.HashToken(token)).Scan(&id.UserID, &id.Username, &id.IsAdmin, &id.TokenID)
+		users.HashToken(token)).Scan(&id.UserID, &id.Username, &id.IsAdmin, &id.TokenID, &id.Capabilities)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return users.Identity{}, users.ErrNotFound
 	}
@@ -266,6 +271,16 @@ func (s *pgStore) SetEmail(ctx context.Context, username, email string) (users.U
 // username out with the token row, which plain RETURNING cannot do (it sees
 // the target table only).
 func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken) (users.Token, string, error) {
+	if err := users.ValidCapabilities(t.Capabilities); err != nil {
+		return users.Token{}, "", err
+	}
+	if t.Capabilities != nil && t.Origin == users.OriginOIDC {
+		// An OIDC session token is minted on the user's behalf for a federated
+		// login, which has full user authority by definition: a narrowed one
+		// would be a permission decision nobody asked for, and the login path
+		// has no request field to ask with.
+		return users.Token{}, "", fmt.Errorf("users: an oidc-origin token cannot carry capabilities (%v)", t.Capabilities)
+	}
 	if t.Name == "" {
 		return users.Token{}, "", fmt.Errorf("users: token name must not be empty")
 	}
@@ -284,27 +299,31 @@ func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken
 	}
 	var tok users.Token
 	var expiresAt *time.Time
+	// $6 nil is SQL NULL (pgx encodes a nil slice as NULL, not '{}'), which
+	// is what "full user authority" is stored as.
 	err = s.pool.QueryRow(ctx, `
 		WITH target AS (
 			SELECT id, username FROM conversations.users
 			 WHERE id = $1::uuid AND deleted_at IS NULL
 		), inserted AS (
 			INSERT INTO conversations.user_token
-			       (user_id, token_sha256, name, origin, expires_at)
+			       (user_id, token_sha256, name, origin, expires_at, capabilities)
 			SELECT target.id, $2, $3, $4,
 			       CASE WHEN $5::bigint > 0
 			            THEN now() + ($5::bigint * interval '1 microsecond')
-			            ELSE NULL END
+			            ELSE NULL END,
+			       $6
 			  FROM target
-			RETURNING id::text, user_id::text, name, origin, created_at, expires_at
+			RETURNING id::text, user_id::text, name, origin, created_at, expires_at, capabilities
 		)
 		SELECT inserted.id, inserted.user_id, target.username, inserted.name,
-		       inserted.origin, inserted.created_at, inserted.expires_at
+		       inserted.origin, inserted.created_at, inserted.expires_at,
+		       inserted.capabilities
 		  FROM inserted CROSS JOIN target`,
 		userID, users.HashToken(token), t.Name, string(t.Origin),
-		t.TTL.Microseconds()).Scan(
+		t.TTL.Microseconds(), t.Capabilities).Scan(
 		&tok.ID, &tok.UserID, &tok.Username, &tok.Name, &tok.Origin,
-		&tok.CreatedAt, &expiresAt)
+		&tok.CreatedAt, &expiresAt, &tok.Capabilities)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return users.Token{}, "", users.ErrNotFound
 	}
@@ -318,13 +337,15 @@ func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken
 // tokenColumns is the projection every token query shares; ListTokens and
 // GetToken join users for Username, since a Token names its owner.
 const tokenColumns = `t.id::text, t.user_id::text, u.username, t.name, t.origin,
-	t.created_at, t.expires_at, t.revoked_at`
+	t.created_at, t.expires_at, t.revoked_at, t.capabilities`
 
 func scanToken(row pgx.Row) (users.Token, error) {
 	var t users.Token
 	var expiresAt, revokedAt *time.Time
+	// capabilities keeps NULL and '{}' apart through the []string scan — see
+	// Authenticate.
 	if err := row.Scan(&t.ID, &t.UserID, &t.Username, &t.Name, &t.Origin,
-		&t.CreatedAt, &expiresAt, &revokedAt); err != nil {
+		&t.CreatedAt, &expiresAt, &revokedAt, &t.Capabilities); err != nil {
 		return users.Token{}, err
 	}
 	t.ExpiresAt = expiresAt

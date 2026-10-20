@@ -159,7 +159,9 @@ func TestSandboxListResolvesOwnerFromCredential(t *testing.T) {
 	udsCtx := context.Background() // no identity: the unix socket's local trust
 	_, err = s.ListSandboxes(udsCtx, connect.NewRequest(&rafikiv1.ListSandboxesRequest{}))
 	c.Require().NoError(err, "ListSandboxes (UDS)")
-	c.Eq(users.Identity{}, f.listOwner, "UDS caller resolves the zero identity")
+	// EqDeep, not Eq: users.Identity carries a capability slice since 0055, so
+	// it is no longer comparable.
+	c.EqDeep(users.Identity{}, f.listOwner, "UDS caller resolves the zero identity")
 }
 
 // TestSandboxChildTokenAdminBitIsDemoted pins the handler-side admin guard: a

@@ -95,3 +95,38 @@ func TestNormalizeEmail(t *testing.T) {
 		})
 	}
 }
+
+// TestTokenCapabilitiesValidation pins ValidCapabilities without a database:
+// nil is full user authority and always legal, and a non-nil set is legal only
+// when it is exactly the known capabilities with no repeats. The refusal names
+// the offending value, so a mint can say what was wrong.
+func TestTokenCapabilitiesValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []string
+		wantErr bool
+		names   string
+	}{
+		{"nil is full authority", nil, false, ""},
+		{"the one capability", []string{CapabilityNotify}, false, ""},
+		{"empty is none", []string{}, false, ""},
+		{"unknown", []string{"admin"}, true, `"admin"`},
+		{"unknown among known", []string{CapabilityNotify, "admin"}, true, `"admin"`},
+		{"duplicate", []string{CapabilityNotify, CapabilityNotify}, true, `"notify"`},
+		{"case matters", []string{"Notify"}, true, `"Notify"`},
+		{"empty element", []string{""}, true, `""`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			err := ValidCapabilities(tt.in)
+			if !tt.wantErr {
+				c.Require().NoError(err, "ValidCapabilities(%v)", tt.in)
+				return
+			}
+			c.Require().Error(err, "ValidCapabilities(%v) was accepted", tt.in)
+			c.Require().ErrorIs(err, ErrInvalidCapability, "error")
+			c.StrContains(err.Error(), tt.names, "err = %v, want the offending value named", err)
+		})
+	}
+}

@@ -232,7 +232,7 @@ func TestUserTokenMintUnknownUser(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runUserTokenMintCLI(context.Background(), &out, store, "zed", "host somewhere", 0)
+	err := runUserTokenMintCLI(context.Background(), &out, store, "zed", "host somewhere", 0, nil)
 	c.Require().Error(err, "mint for an unknown user succeeded")
 	c.StrContains(err.Error(), "zed", "err = %v, want the username named", err)
 	c.False(minted, "MintToken was called for an unknown user")
@@ -255,7 +255,7 @@ func TestUserTokenMintPrintsPlaintext(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	c.Require().NoError(runUserTokenMintCLI(context.Background(), &out, store, "root", "host somewhere", 72*time.Hour), "mint")
+	c.Require().NoError(runUserTokenMintCLI(context.Background(), &out, store, "root", "host somewhere", 72*time.Hour, nil), "mint")
 	c.Eq("uuid-1", gotID, "userID MintToken received")
 	c.Eq("host somewhere", gotToken.Name, "token name")
 	c.Eq(users.OriginService, gotToken.Origin, "origin MintToken received")
@@ -279,9 +279,61 @@ func TestUserTokenMintTTLParsing(t *testing.T) {
 	c.StrContains(err.Error(), "bogus", "err = %v, want the input named", err)
 }
 
-// TestUserTokenListTable pins the ls table: pkg/table, the seven columns in
-// the brief's order, never-expiring and unrevoked tokens rendered as
-// "never"/"-", and the filters wired through.
+// TestUserTokenMintCapability pins --capability end to end: omitted reads as
+// nil (full user authority, the behaviour every existing token has), given
+// reads as exactly its values, an unknown one is refused before the DSN is
+// opened, and a narrowed token announces what it can do under the plaintext.
+func TestUserTokenMintCapability(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+
+	// Omitted is nil, not an empty set: the two mean different things.
+	cmd := newUserTokenMintCLICmd(new(string))
+	c.Require().NoError(cmd.Flags().Parse(nil), "parse no flags")
+	caps, err := capabilityFlag(cmd)
+	c.Require().NoError(err, "capabilityFlag with --capability omitted")
+	c.Nil(caps, "--capability omitted = %v, want nil (full user authority)", caps)
+
+	cmd = newUserTokenMintCLICmd(new(string))
+	c.Require().NoError(cmd.Flags().Parse([]string{"--capability", users.CapabilityNotify}), "parse --capability notify")
+	caps, err = capabilityFlag(cmd)
+	c.Require().NoError(err, "capabilityFlag after --capability notify")
+	c.EqDiff([]string{users.CapabilityNotify}, caps, "capabilityFlag")
+
+	// The whole verb, through cobra: with no --db at all, an unknown capability
+	// must be the refusal, which can only happen before openUserStore.
+	cmd = newUserTokenMintCLICmd(new(string))
+	cmd.SetArgs([]string{"hook", "--capability", "admin"})
+	err = cmd.Execute()
+	c.Require().Error(err, "--capability admin was accepted")
+	c.ErrorIs(err, users.ErrInvalidCapability, "--capability admin must be refused as an answer, not reached the DSN")
+
+	// And the accepted set reaches the store and the output.
+	var got users.NewToken
+	store := fakeUserCLIStore{
+		lookupFn: func(string) (string, error) { return "uuid-1", nil },
+		mintFn: func(userID string, t users.NewToken) (users.Token, string, error) {
+			got = t
+			return users.Token{ID: "t1", UserID: userID, Username: "hook", Name: t.Name, Origin: t.Origin, Capabilities: t.Capabilities}, "rfk_plain", nil
+		},
+	}
+
+	var out bytes.Buffer
+	c.Require().NoError(runUserTokenMintCLI(ctx, &out, store, "hook", "webhook", 0, []string{users.CapabilityNotify}), "mint with --capability")
+	c.EqDiff([]string{users.CapabilityNotify}, got.Capabilities, "capabilities MintToken received")
+	c.Eq("token: rfk_plain\ncapabilities: notify (this token can call Notify and nothing else)\n", out.String(), "output")
+
+	// A full-authority mint says nothing about capabilities.
+	out.Reset()
+	c.Require().NoError(runUserTokenMintCLI(ctx, &out, store, "hook", "webhook", 0, nil), "mint without --capability")
+	c.Nil(got.Capabilities, "capabilities MintToken received for a full-authority token")
+	c.Eq("token: rfk_plain\n", out.String(), "output for a full-authority token")
+}
+
+// TestUserTokenListTable pins the ls table: pkg/table, the eight columns in
+// the brief's order, capability sets rendered as all/none/the list,
+// never-expiring and unrevoked tokens rendered as "never"/"-", and the
+// filters wired through.
 func TestUserTokenListTable(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
@@ -302,6 +354,10 @@ func TestUserTokenListTable(t *testing.T) {
 			return []users.Token{
 				{ID: "t-1", UserID: "uuid-1", Username: "root", Name: "host h1", Origin: users.OriginService, CreatedAt: created},
 				{ID: "t-2", UserID: "uuid-2", Username: "alice", Name: "ci", Origin: users.OriginOIDC, CreatedAt: created, ExpiresAt: &expires, RevokedAt: &revoked},
+				// The three capability states: NULL is full authority, '{}' is
+				// nothing, and a set lists what it may call.
+				{ID: "t-3", UserID: "uuid-1", Username: "root", Name: "webhook", Origin: users.OriginService, CreatedAt: created, Capabilities: []string{}},
+				{ID: "t-4", UserID: "uuid-1", Username: "root", Name: "hook", Origin: users.OriginService, CreatedAt: created, Capabilities: []string{users.CapabilityNotify}},
 			}, nil
 		},
 	}
@@ -310,10 +366,17 @@ func TestUserTokenListTable(t *testing.T) {
 	c.Require().NoError(runUserTokenListCLI(ctx, &out, store, "", true), "ls all users, including revoked")
 	c.Eq("", gotUserID, "no name must query every user (empty userID)")
 	c.True(gotRevoked, "--revoked did not reach the store")
-	for _, want := range []string{"ID", "USER", "NAME", "ORIGIN", "CREATED", "EXPIRES", "REVOKED",
+	for _, want := range []string{"ID", "USER", "NAME", "ORIGIN", "CAPABILITIES", "CREATED", "EXPIRES", "REVOKED",
 		"t-1", "root", "host h1", "service", "never", "-",
-		"t-2", "alice", "ci", "oidc", cliTime(expires), cliTime(revoked)} {
+		"t-2", "alice", "ci", "oidc", cliTime(expires), cliTime(revoked),
+		"t-3", "webhook", "none", "t-4", "hook", "notify"} {
 		c.StrContains(out.String(), want, "table missing %q:\n%s", want, out.String())
+	}
+	// "all" is the NULL column, so it belongs in the full-authority row.
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "host h1") {
+			c.StrContains(line, "all", "full-authority token's capability cell:\n%s", line)
+		}
 	}
 
 	out.Reset()

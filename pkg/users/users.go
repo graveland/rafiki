@@ -48,6 +48,15 @@ type Identity struct {
 	// Store.Authenticate. It lets callers attribute a session to a specific
 	// credential and revoke it without disturbing the user's other tokens.
 	TokenID string `json:"token_id,omitempty"`
+	// Capabilities is the capability set of the token that authenticated.
+	// Like IsAdmin, it is populated ONLY by Store.Authenticate, from the
+	// user_token row -- never a request field, never a claim. nil means the
+	// token carries full user authority; non-nil means exactly these (a
+	// non-nil empty slice means none).
+	//
+	// No omitempty: JSON must keep the three states apart for the same reason
+	// the column does (null is full authority, [] is none).
+	Capabilities []string `json:"capabilities"`
 }
 
 // NewUser is the input to Store.Create. IsAdmin and MintToken are stated
@@ -71,6 +80,11 @@ const (
 	OriginOIDC    TokenOrigin = "oidc"
 )
 
+// CapabilityNotify is the one capability v1 defines: a token holding exactly
+// this set may call Notify and nothing else. See NewToken.Capabilities for
+// what a nil and an empty set mean.
+const CapabilityNotify = "notify"
+
 // NewToken is the input to Store.MintToken. TTL zero means the token never
 // expires; a positive TTL sets expires_at = now() + TTL, exact to the
 // microsecond for any practical TTL. A negative TTL is refused.
@@ -78,6 +92,14 @@ type NewToken struct {
 	Name   string
 	Origin TokenOrigin
 	TTL    time.Duration
+	// Capabilities narrows the token: nil means full user authority (the
+	// column stays NULL, so every pre-existing token is unchanged) and a
+	// non-nil slice means exactly these — '{}' (a non-nil empty slice) is a
+	// token that may do nothing. The two are NOT interchangeable: MintToken
+	// stores them as the different values they are, and ValidCapabilities
+	// decides what a non-nil set may contain. Never populated from a request
+	// field for an OIDC-origin mint, which always carries nil.
+	Capabilities []string
 }
 
 // Token is one user credential. It is never the plaintext — MintToken
@@ -93,6 +115,11 @@ type Token struct {
 	// Revocation and expiry are permanent: neither is ever cleared.
 	ExpiresAt *time.Time
 	RevokedAt *time.Time
+	// Capabilities is the token's stored capability set: nil means full user
+	// authority, non-nil means exactly these, and a non-nil empty slice means
+	// none. The distinction is preserved from the user_token column (SQL NULL
+	// vs '{}'), never collapsed into one value.
+	Capabilities []string
 }
 
 // IsUser reports whether the identity names a row in the users table. Only a
@@ -132,7 +159,10 @@ type Store interface {
 	// MintToken adds a credential to an existing user and returns its
 	// plaintext exactly once. A bad name or origin is a plain error — an
 	// ANSWER; an unknown or tombstoned userID is ErrNotFound. Any other
-	// error is an outage.
+	// error is an outage. t.Capabilities is validated by ValidCapabilities
+	// first and stored as given (NULL for nil, '{}' for a non-nil empty
+	// slice); an OIDC-origin mint with a non-nil set is refused, since a
+	// federated session has full user authority.
 	MintToken(ctx context.Context, userID string, t NewToken) (Token, string, error)
 	// ListTokens returns a user's credentials, newest first, joined with the
 	// username. An empty userID means every user's. includeRevoked controls
@@ -193,6 +223,28 @@ func NormalizeUsername(s string) (string, error) {
 		return "", fmt.Errorf("%w: longer than %d bytes", ErrInvalidUsername, MaxUsernameLen)
 	}
 	return s, nil
+}
+
+// ValidCapabilities checks a capability set. nil is always accepted — it is
+// full user authority, not a malformed input. A non-nil set is accepted only
+// when every element is CapabilityNotify and none repeats; anything else is
+// refused with the offending value named, so a mint can say what was wrong
+// rather than "invalid capabilities".
+//
+// Enforced in the store rather than the CLI so every caller gets it, the same
+// way NormalizeUsername is — the direct-DSN CLI is not the only way in.
+func ValidCapabilities(caps []string) error {
+	seen := make(map[string]bool, len(caps))
+	for _, c := range caps {
+		if c != CapabilityNotify {
+			return fmt.Errorf("%w: unknown capability %q", ErrInvalidCapability, c)
+		}
+		if seen[c] {
+			return fmt.Errorf("%w: duplicate capability %q", ErrInvalidCapability, c)
+		}
+		seen[c] = true
+	}
+	return nil
 }
 
 // TokenPrefix marks a rafiki user token in logs, config files and secret

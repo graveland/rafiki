@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -274,19 +275,33 @@ func newUserTokenCmd(dbDSN *string) *cobra.Command {
 func newUserTokenMintCLICmd(dbDSN *string) *cobra.Command {
 	var name string
 	var ttl string
+	var capabilities []string
 
 	cmd := &cobra.Command{
 		Use:   "mint <name>",
 		Short: "Mint a new service token for an existing user and print it once",
 		Long: `Mints a service token by opening the DSN directly — no running daemon is
 contacted. The plaintext is printed exactly once and cannot be recovered
-afterward.`,
+afterward.
+
+Without --capability the token has full user authority. With it, the token
+carries exactly the capabilities named — 'notify' lets it call Notify and
+nothing else.`,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d, err := tokenTTL(ttl)
 			if err != nil {
+				return err
+			}
+			caps, err := capabilityFlag(cmd)
+			if err != nil {
+				return err
+			}
+			// Refuse an unknown capability before opening the DSN, the same way
+			// --ttl and set-timezone's zone are refused without a round trip.
+			if err := users.ValidCapabilities(caps); err != nil {
 				return err
 			}
 			if name == "" {
@@ -298,14 +313,30 @@ afterward.`,
 				return err
 			}
 			defer pool.Close()
-			return runUserTokenMintCLI(ctx, cmd.OutOrStdout(), store, args[0], name, d)
+			return runUserTokenMintCLI(ctx, cmd.OutOrStdout(), store, args[0], name, d, caps)
 		},
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", "token name (default \"host <hostname>\")")
 	cmd.Flags().StringVar(&ttl, "ttl", "", "token lifetime as a Go duration (e.g. 720h); default never expires")
+	cmd.Flags().StringSliceVar(&capabilities, "capability", nil,
+		"narrow the token to these capabilities (repeatable; currently only \"notify\"); omitted means full user authority")
 
 	return cmd
+}
+
+// capabilityFlag reads --capability, keeping "not given" distinct from "given
+// as an empty set": absent is nil, which is full user authority, while a given
+// set is exactly what the flag says.
+func capabilityFlag(cmd *cobra.Command) ([]string, error) {
+	if !cmd.Flags().Changed("capability") {
+		return nil, nil
+	}
+	caps, err := cmd.Flags().GetStringSlice("capability")
+	if err != nil {
+		return nil, fmt.Errorf("invalid --capability: %w", err)
+	}
+	return caps, nil
 }
 
 // tokenTTL parses --ttl. Empty means never expires: MintToken's TTL 0 is no
@@ -334,7 +365,10 @@ func hostTokenName() string {
 
 // runUserTokenMintCLI is the DSN-agnostic core of `rafikid user token mint`.
 // The plaintext is written to out and nowhere else — it must never be logged.
-func runUserTokenMintCLI(ctx context.Context, out io.Writer, store users.Store, username, name string, ttl time.Duration) error {
+// A nil caps is full user authority; a non-nil set is described on a line
+// after the token, so the operator can see the token is narrower than usual
+// while the plaintext is still on screen.
+func runUserTokenMintCLI(ctx context.Context, out io.Writer, store users.Store, username, name string, ttl time.Duration, caps []string) error {
 	id, err := store.LookupUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, users.ErrNotFound) {
@@ -342,12 +376,25 @@ func runUserTokenMintCLI(ctx context.Context, out io.Writer, store users.Store, 
 		}
 		return err
 	}
-	_, token, err := store.MintToken(ctx, id, users.NewToken{Name: name, Origin: users.OriginService, TTL: ttl})
+	_, token, err := store.MintToken(ctx, id, users.NewToken{Name: name, Origin: users.OriginService, TTL: ttl, Capabilities: caps})
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "token: %s\n", token)
+	if caps != nil {
+		fmt.Fprintf(out, "%s\n", capabilityLine(caps))
+	}
 	return nil
+}
+
+// capabilityLine says what a narrowed token may do. v1 has exactly one
+// capability, so the verbs are named rather than derived: a grammar for a set
+// that cannot yet exist would be invented text.
+func capabilityLine(caps []string) string {
+	if len(caps) == 0 {
+		return "capabilities: none (this token can call nothing)"
+	}
+	return "capabilities: " + strings.Join(caps, ", ") + " (this token can call Notify and nothing else)"
 }
 
 func newUserTokenListCLICmd(dbDSN *string) *cobra.Command {
@@ -402,12 +449,26 @@ func runUserTokenListCLI(ctx context.Context, out io.Writer, store users.Store, 
 		return err
 	}
 	tb := table.New(out, table.Options{})
-	tb.Header("ID", "USER", "NAME", "ORIGIN", "CREATED", "EXPIRES", "REVOKED")
+	tb.Header("ID", "USER", "NAME", "ORIGIN", "CAPABILITIES", "CREATED", "EXPIRES", "REVOKED")
 	for _, t := range tokens {
-		tb.Row(t.ID, t.Username, t.Name, string(t.Origin),
+		tb.Row(t.ID, t.Username, t.Name, string(t.Origin), tokenCapabilities(t.Capabilities),
 			cliTime(t.CreatedAt), tokenExpiry(t.ExpiresAt), tokenRevoked(t.RevokedAt))
 	}
 	return tb.Render()
+}
+
+// tokenCapabilities renders a token's capability set: NULL is full user
+// authority, so it reads "all"; a stored '{}' reads "none"; anything else is
+// the capability list.
+func tokenCapabilities(caps []string) string {
+	switch {
+	case caps == nil:
+		return "all"
+	case len(caps) == 0:
+		return "none"
+	default:
+		return strings.Join(caps, ",")
+	}
 }
 
 // cliTime renders a token timestamp the way the rest of the CLI's tables do:
