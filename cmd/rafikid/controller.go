@@ -360,6 +360,12 @@ type Controller struct {
 	// build a Controller by hand and never send.
 	inbox *inbox.Queue
 
+	// inboxStore is the durable store behind inbox, kept because a
+	// notification is written straight to it: the queue's ValidateFn answers a
+	// command-plane question ("can this child still be sent to") that a
+	// notification must not be subject to (notifyAccepter, notify.go).
+	inboxStore inbox.Store
+
 	// inboxBatch caps one delivered batch. Held here as well as inside the
 	// queue because the orphan path (eventbuf fragments whose durable write
 	// failed) coalesces with the same rules and must not drift from them.

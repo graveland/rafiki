@@ -929,6 +929,11 @@ func runDaemon(opts runDaemonOpts) error {
 					},
 				})
 			}
+			// The notification backend is unconditional: Notify's durability
+			// comes from the durable child store and the event buffer, not
+			// from an optional store, and the Controller answers Unavailable
+			// itself on a daemon missing either.
+			face.Control.SetNotifier(ctrl)
 			if ctrl.pymoduleStore != nil {
 				face.Control.SetPymoduleManager(connectPyModules{c: ctrl})
 			}

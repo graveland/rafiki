@@ -52,7 +52,9 @@ func (c *Controller) wireEventBuffer() {
 	if c.evbuf == nil {
 		return
 	}
-	c.evbuf.SetAccepter(c.inbox)
+	// The accepter is the inbox queue for every fragment except a
+	// notification, which keeps its own rule (see notifyAccepter).
+	c.evbuf.SetAccepter(notifyAccepter{c: c})
 	c.evbuf.SetFlush(c.flushInboxSource)
 	// The buffer's accept and flush are exactly when a parent's
 	// waiting_on=events starts and stops, so refresh the display state on every

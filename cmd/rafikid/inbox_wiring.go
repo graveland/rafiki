@@ -81,6 +81,7 @@ func quietDeferral(err error) bool {
 // so a send to a dead child is still a clean error rather than a row nobody
 // will consume.
 func (c *Controller) newInboxQueue(store inbox.Store) *inbox.Queue {
+	c.inboxStore = store
 	return inbox.NewQueue(inbox.QueueConfig{
 		Store:    store,
 		Validate: c.validateSendTarget,
