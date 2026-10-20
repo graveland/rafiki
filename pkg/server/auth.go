@@ -35,6 +35,13 @@ const (
 	// consulting any header, so agent-control surfaces accept it and bind to
 	// that child's own position in the tree. It dies with the child.
 	ProvenanceChildToken
+	// ProvenanceNotify: a user token whose capabilities are exactly {notify}:
+	// it may call Control.Notify and nothing else. Not a user credential —
+	// IsUserCredential is false — so every operator check refuses it
+	// unchanged. It names a real user (the owner whose agents it notifies),
+	// and resolve() refuses a {notify} row that names nobody, so a notify
+	// identity is never mistaken for the anonymous caller.
+	ProvenanceNotify
 )
 
 // Identity is the authenticated caller of a proxy face.

@@ -127,6 +127,17 @@ the zone they were created in, so recreate one to move it. The zone is
 validated as an IANA name before the store is touched. See
 `docs/reference/agent-schedules.md`.
 
+`rafikid user token mint <user> --capability notify` mints a NARROWED token:
+it may call `Control.Notify` and nothing else. Without `--capability` the
+token carries full user authority (`capabilities` stays NULL); with it, the
+token carries exactly the names given, and an unknown or repeated name is
+refused before the DSN is opened. A token whose stored set is anything other
+than NULL or exactly `{notify}` authenticates as an INVALID token (`401` /
+`unauthenticated`), never as a full user, so a hand-written SQL row with an
+unexpected set fails closed. The confinement itself is described under "The
+gate distinguishes four credential shapes" in
+`docs/reference/control-protocol.md`.
+
 ## `stats`
 
 Global stats, or stats for one conversation if given a positional id.

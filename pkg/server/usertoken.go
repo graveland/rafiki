@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -124,6 +125,16 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			http.Error(w, "unknown token", http.StatusUnauthorized)
+			return
+		}
+		// A notify-scoped token is confined at the door, not by the handlers:
+		// it names one procedure and may reach nothing else on any face —
+		// the LLM proxies, the MCP surface and every other Control RPC
+		// included. The Connect mounts re-check this in their policy gate
+		// (authorizeControlProcedure); this is the one place that covers the
+		// non-Connect faces too.
+		if id.Via == ProvenanceNotify && r.URL.Path != rafikiv1connect.ControlNotifyProcedure {
+			http.Error(w, "notify-scoped token may only call "+rafikiv1connect.ControlNotifyProcedure, http.StatusForbidden)
 			return
 		}
 
@@ -289,7 +300,10 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 		return Identity{}, ErrAuthUnavailable
 	}
 
-	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser, IsAdmin: uid.IsAdmin, TokenID: uid.TokenID}
+	id, err := identityFromStoreRow(uid)
+	if err != nil {
+		return Identity{}, err
+	}
 	a.mu.Lock()
 	a.cache[key] = cachedIdentity{id: id, expires: now.Add(a.ttl)}
 	// Opportunistic sweep: entries are tiny and the population is the number
@@ -301,4 +315,59 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 	}
 	a.mu.Unlock()
 	return id, nil
+}
+
+// identityFromStoreRow turns the identity Store.Authenticate returned for a
+// token into the identity this face runs the request as, or refuses it.
+//
+// The row's capability set decides the provenance, and the set is honoured in
+// exactly two shapes:
+//
+//   - nil — the column is NULL, which means full user authority. Every token
+//     minted before capabilities existed is here, and resolves to
+//     ProvenanceUser exactly as it always did.
+//   - exactly {notify} — ProvenanceNotify: Control.Notify and nothing else,
+//     with the caller still named (UserID/Username/TokenID carried through,
+//     so the notification lands on that user's own agents and the credential
+//     stays revocable) and IsAdmin forced false whatever the row says: a
+//     narrowed token must never inherit the operator bit.
+//
+// Anything else is REFUSED with users.ErrNotFound — the same answer an
+// unknown token gets, so both faces refuse it identically (401 on the proxy
+// face, Unauthenticated "invalid auth token" on the Connect mounts) — rather
+// than being collapsed into one of the two shapes above. That covers '{}'
+// (a token minted to do nothing), a duplicate {notify,notify}, {notify,admin}
+// and any capability name a future release drops: a set this code does not
+// understand must never widen into full user authority, and "narrowed to
+// nothing" must not silently become "narrowed to notify". A {notify} row that
+// names no user is refused too — the notify path resolves its target against
+// the caller's owner, and an identity with no owner is not the anonymous
+// caller but an unattributable one.
+//
+// The check lives here rather than in usersdb.Store.Authenticate because this
+// is the layer that turns a row into authority, and it is the only caller of
+// that method — a store-level refusal would have to answer "invalid" from a
+// layer that cannot tell an outage from an answer. MintToken already refuses
+// to WRITE any of these sets (users.ValidCapabilities), so a row this refuses
+// can only have arrived by direct SQL.
+func identityFromStoreRow(uid users.Identity) (Identity, error) {
+	switch {
+	case uid.Capabilities == nil:
+		return Identity{
+			UserID:   uid.UserID,
+			Username: uid.Username,
+			IsAdmin:  uid.IsAdmin,
+			TokenID:  uid.TokenID,
+			Via:      ProvenanceUser,
+		}, nil
+	case len(uid.Capabilities) == 1 && uid.Capabilities[0] == users.CapabilityNotify && uid.UserID != "":
+		return Identity{
+			UserID:   uid.UserID,
+			Username: uid.Username,
+			IsAdmin:  false,
+			TokenID:  uid.TokenID,
+			Via:      ProvenanceNotify,
+		}, nil
+	}
+	return Identity{}, users.ErrNotFound
 }

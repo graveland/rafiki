@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/server"
 )
 
@@ -130,9 +131,11 @@ var controlPolicyTable = map[string]controlPolicy{
 	"SetBudget": policyChildScoped,
 	// Rename is operator/owner only: no child credential may rename.
 	"Rename": policyUserOnly,
-	// Notify is userOnly at the gate today. A later task admits a token whose
-	// only capability is {notify} here — and only here — once
-	// Store.Authenticate resolves it to ProvenanceNotify.
+	// Notify is userOnly in the table, and a token whose only capability is
+	// {notify} is admitted to it — and ONLY to it — by the ProvenanceNotify
+	// branch at the top of authorizeControlProcedure, which runs before any
+	// table policy. A notify token is therefore refused every other procedure,
+	// the anyCaller reads included, whatever this table says.
 	"Notify": policyUserOnly,
 	// SetRouting from a child is subtree-scoped and refused only= — see
 	// SetChildRouting. It edits the stored spec, never re-resolves policy.
@@ -352,8 +355,25 @@ func (controlPolicyGate) WrapStreamingHandler(next connect.StreamingHandlerFunc)
 // child caller is still not an operator: each childScoped handler resolves
 // the caller's subtree through the wired ChildScopeSource and refuses every
 // target outside it.
+//
+// A ProvenanceNotify identity is neither a user nor a child credential: it is
+// admitted to Control.Notify and refused everything else (see the first
+// branch below), so the two admissions just described never apply to it.
 func authorizeControlProcedure(ctx context.Context, procedure string) error {
 	id := server.IdentityFromContext(ctx)
+	// A notify-scoped token ({notify}) reaches exactly one procedure and is
+	// checked FIRST: before the nil/user-credential early return and before
+	// any policyAnyCaller admission, so the read-only verbs a child credential
+	// is admitted to stay closed to it too. It is not a user credential
+	// (IsUserCredential is false), but it is also not a child credential —
+	// without this branch a retarget of the table could hand it an
+	// anyCaller verb, which is why the confinement cannot live in the table.
+	if id != nil && id.Via == server.ProvenanceNotify {
+		if procedure == rafikiv1connect.ControlNotifyProcedure {
+			return nil
+		}
+		return connect.NewError(connect.CodePermissionDenied, errors.New("notify-scoped token may only call Notify"))
+	}
 	if id == nil || id.IsUserCredential() {
 		return nil
 	}
