@@ -264,6 +264,96 @@ func TestDBToPiFramesMessages_SkipsTailAndRendersBoundary(t *testing.T) {
 	c.Eq(0, summary, "the summary row must not render as a plain user message")
 }
 
+// TestDBToPiFramesWithOrigins pins that every frame names the stored row it was
+// rendered from, one origin per frame. It fails if any branch forgets to append
+// its origin (the length check), if the compaction_tail skip is lost (ordinal 4
+// reappears), or if a row's StopReason is not carried.
+func TestDBToPiFramesWithOrigins(t *testing.T) {
+	c := assert.NewCollecting(t)
+	originsPtr := func(s string) *string { return &s }
+	pre := 123
+	rows := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
+		{Ordinal: 1, StopReason: "tool_use", Param: anthropic.NewAssistantMessage(
+			anthropic.NewTextBlock("a1"),
+			anthropic.NewToolUseBlock("tu1", map[string]any{"file": "/tmp/x"}, "read"),
+		)},
+		{Ordinal: 2, Param: anthropic.NewUserMessage(
+			anthropic.NewToolResultBlock("tu1", "r1", false),
+			anthropic.NewToolResultBlock("tu2", "r2", false),
+		)},
+		{Ordinal: 3, StopReason: "max_tokens", Param: anthropic.NewAssistantMessage(
+			anthropic.NewThinkingBlock("sig", "weighing it up"),
+		)},
+		{Ordinal: 4, Kind: originsPtr(store.KindCompactionTail),
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
+		{Ordinal: 5, Kind: originsPtr(store.KindCompactionSummary), InputTokens: &pre,
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("SUMMARY-TEXT"))},
+	}
+
+	frames, origins := DBToPiFramesWithOrigins(rows)
+
+	c.Require().Len(origins, len(frames), "origins = %d, frames = %d — every frame needs exactly one origin", len(origins), len(frames))
+	c.Require().NotEmpty(frames, "no frames")
+
+	// Parse each frame's type once, so the assertions below index frames and
+	// origins in lockstep.
+	types := make([]string, len(frames))
+	for i, f := range frames {
+		var env struct {
+			Type string `json:"type"`
+		}
+		c.Require().NoError(json.Unmarshal(f, &env), "frame %d: %s", i, f)
+		types[i] = env.Type
+	}
+
+	c.False(origins[0].FromRow, "first origin (agent_start) FromRow = true, want false")
+	c.False(origins[len(origins)-1].FromRow, "last origin (agent_end) FromRow = true, want false")
+	c.Eq("agent_start", types[0], "frame 0 type")
+	c.Eq("agent_end", types[len(types)-1], "last frame type")
+
+	var toolEnds int
+	var maxTokensEnd, toolUseEnd, boundary int
+	for i, origin := range origins {
+		c.NotEq(4, origin.Ordinal, "frame %d (%s) claims the compaction_tail copy row 4, which produces no frame", i, types[i])
+		switch types[i] {
+		case "tool_execution_end":
+			toolEnds++
+			c.Eq(2, origin.Ordinal, "tool_execution_end %d origin ordinal = %d, want 2 (the tool_result row)", toolEnds, origin.Ordinal)
+		case "message_end":
+			switch origin.Ordinal {
+			case 1:
+				c.Eq("tool_use", origin.StopReason, "message_end for ord 1 StopReason = %q, want tool_use", origin.StopReason)
+				toolUseEnd++
+			case 3:
+				c.Eq("max_tokens", origin.StopReason, "message_end for ord 3 StopReason = %q, want max_tokens", origin.StopReason)
+				c.True(origin.FromRow, "message_end for ord 3 FromRow = false, want true")
+				maxTokensEnd++
+			}
+		case "compaction_boundary":
+			boundary++
+			c.True(origin.FromRow, "compaction_boundary FromRow = false, want true")
+			c.Eq(5, origin.Ordinal, "compaction_boundary origin ordinal = %d, want 5 (the summary row)", origin.Ordinal)
+		}
+	}
+	c.Eq(2, toolEnds, "tool_execution_end frames = %d, want exactly 2 (one per tool_result block)", toolEnds)
+	c.Eq(1, toolUseEnd, "message_end frames for ord 1 = %d, want 1", toolUseEnd)
+	c.Eq(1, maxTokensEnd, "message_end frames for ord 3 = %d, want 1", maxTokensEnd)
+	c.Eq(1, boundary, "compaction_boundary frames = %d, want 1", boundary)
+
+	// The plain reader must return the same frames — same count, same type at
+	// every index (the bytes carry time.Now() timestamps, so they differ).
+	plain := DBToPiFramesMessages(rows)
+	c.Require().Len(plain, len(frames), "DBToPiFramesMessages frames = %d, DBToPiFramesWithOrigins frames = %d", len(plain), len(frames))
+	for i, f := range plain {
+		var env struct {
+			Type string `json:"type"`
+		}
+		c.Require().NoError(json.Unmarshal(f, &env), "plain frame %d: %s", i, f)
+		c.Eq(types[i], env.Type, "frame %d type: DBToPiFramesMessages = %q, DBToPiFramesWithOrigins = %q", i, env.Type, types[i])
+	}
+}
+
 // TestAppendPiMsg_SkipsNilRawMessage guards the fix for appendPiMsg's dead
 // nil check: a nil json.RawMessage (what mustFrame returns when marshaling
 // fails) must be skipped, not appended as a literal JSON `null`.

@@ -53,6 +53,15 @@ func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
 	return out
 }
 
+// FrameOrigin names the stored row a frame was rendered from. FromRow is
+// false for the synthetic agent_start/agent_end frames, which come from no
+// row; it is the explicit flag because Ordinal 0 is a real ordinal.
+type FrameOrigin struct {
+	FromRow    bool
+	Ordinal    int
+	StopReason string
+}
+
 // DBToPiFramesMessages is DBToPiFrames for stored rows: it drops
 // compaction_tail copies (their originals still exist earlier in the table, so
 // the tail is shown exactly once) and renders the compaction_summary row as a
@@ -61,6 +70,14 @@ func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
 // CompactionBoundary from the same summary row — the full-history reader
 // contract (docs/reference/fundi-compaction.md).
 func DBToPiFramesMessages(msgs []store.Message) []json.RawMessage {
+	frames, _ := DBToPiFramesWithOrigins(msgs)
+	return frames
+}
+
+// DBToPiFramesWithOrigins is DBToPiFramesMessages plus a parallel slice naming
+// the stored row each frame came from. The frames are exactly
+// DBToPiFramesMessages'; origins[i] names the row frames[i] came from.
+func DBToPiFramesWithOrigins(msgs []store.Message) ([]json.RawMessage, []FrameOrigin) {
 	params := make([]anthropic.MessageParam, 0, len(msgs))
 	for _, m := range msgs {
 		if hasKind(m, store.KindCompactionTail) {
@@ -71,36 +88,64 @@ func DBToPiFramesMessages(msgs []store.Message) []json.RawMessage {
 	uses, resolved := toolUseMap(params)
 
 	out := make([]json.RawMessage, 0, len(params)*3+2)
+	origins := make([]FrameOrigin, 0, len(params)*3+2)
 	piMsgs := make([]json.RawMessage, 0, len(params))
 
-	out = appendFrame(out, child.PiAgentStart())
+	out, origins = appendFrameWithOrigin(out, origins, child.PiAgentStart(), FrameOrigin{})
 
 	for _, m := range msgs {
 		if hasKind(m, store.KindCompactionTail) {
 			continue
 		}
 		if hasKind(m, store.KindCompactionSummary) {
-			out = appendFrame(out, compactionBoundaryFrame(m.InputTokens, ""))
+			out, origins = appendFrameWithOrigin(out, origins,
+				compactionBoundaryFrame(m.InputTokens, ""),
+				FrameOrigin{FromRow: true, Ordinal: m.Ordinal})
 			continue
 		}
 		if store.IsClearBoundary(m) {
-			out = appendFrame(out, compactionBoundaryFrame(nil, "clear"))
+			out, origins = appendFrameWithOrigin(out, origins,
+				compactionBoundaryFrame(nil, "clear"),
+				FrameOrigin{FromRow: true, Ordinal: m.Ordinal})
 			continue
 		}
 		switch m.Param.Role {
 		case "user":
 			frames, piMsgsFor := dbUserFramesWithTools(m.Param, uses)
 			out = append(out, frames...)
+			origins = appendOrigins(origins, len(frames), m)
 			piMsgs = append(piMsgs, piMsgsFor...)
 		case "assistant":
 			frames, piMsg := dbAssistantFramesWithTools(m.Param, uses, resolved)
 			out = append(out, frames...)
+			origins = appendOrigins(origins, len(frames), m)
 			piMsgs = appendPiMsg(piMsgs, piMsg)
 		}
 	}
 
-	out = appendFrame(out, child.PiAgentEnd(piMsgs, nil))
-	return out
+	out, origins = appendFrameWithOrigin(out, origins, child.PiAgentEnd(piMsgs, nil), FrameOrigin{})
+	return out, origins
+}
+
+// appendFrameWithOrigin appends v to out and origin to origins, keeping the two
+// slices in step: the origin is appended only when the frame actually landed,
+// since appendFrame silently drops a frame whose marshal fails.
+func appendFrameWithOrigin(out []json.RawMessage, origins []FrameOrigin, v any, origin FrameOrigin) ([]json.RawMessage, []FrameOrigin) {
+	before := len(out)
+	out = appendFrame(out, v)
+	if len(out) == before {
+		return out, origins
+	}
+	return out, append(origins, origin)
+}
+
+// appendOrigins appends n copies of m's origin, one per frame m produced.
+func appendOrigins(origins []FrameOrigin, n int, m store.Message) []FrameOrigin {
+	origin := FrameOrigin{FromRow: true, Ordinal: m.Ordinal, StopReason: m.StopReason}
+	for i := 0; i < n; i++ {
+		origins = append(origins, origin)
+	}
+	return origins
 }
 
 // hasKind reports whether m carries the given compaction kind.
