@@ -218,6 +218,15 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 // docker. Returns the enrolled executor's ID.
 func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) string {
 	t.Helper()
+	return g.enrollExecutorExtra(t, labels)
+}
+
+// enrollExecutorExtra is enrollExecutor with additional `rafiki executor serve`
+// flags (--mcp-command, say): the flags an executor's OPERATOR declares are
+// what a via_executor entry is resolved against, so a test that needs one has to
+// enroll with it.
+func (g *grantDaemon) enrollExecutorExtra(t *testing.T, labels map[string]string, extra ...string) string {
+	t.Helper()
 	c := assert.NewAborting(t)
 
 	// A label unique to THIS enrollment, so the row can be identified by the
@@ -243,13 +252,15 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 
 	root := t.TempDir()
 	credFile := filepath.Join(t.TempDir(), "cred")
-	cmd := exec.Command(cliBinary(), "executor", "serve",
+	argv := []string{"executor", "serve",
 		"--connect", g.listenAddr,
 		"--enroll-token", token,
 		"--credential-file", credFile,
 		"--pin-cert", g.fingerprint,
 		"--root", root,
-	)
+	}
+	argv = append(argv, extra...)
+	cmd := exec.Command(cliBinary(), argv...)
 	cmd.Env = subprocessEnv()
 	c.NoError(cmd.Start(), "start executor")
 	t.Cleanup(func() {

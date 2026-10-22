@@ -92,6 +92,8 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 	cmd.Flags().String("spill-dir", "", "where oversized results and background job output are written")
 	cmd.Flags().Int64("job-output-budget-mb", 0, "megabytes of background-job output retained per workspace")
 	cmd.Flags().StringArray("proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable) — the main reason to run an executor as a service")
+	cmd.Flags().StringArray("mcp-command", nil, "MCP server process this executor will host for the daemon, "+
+		"name=argv (repeatable). The daemon names the server; the argv never leaves this machine")
 	cmd.Flags().StringArray("launch", nil, "child protocol this executor will host for the daemon, e.g. --launch claude "+
 		"(repeatable). Opt-in: with no --launch this executor hosts nothing")
 	cmd.Flags().StringArray("sandbox-mount-root", nil, "host directory a sandboxed child's container may bind-mount from "+
@@ -114,7 +116,7 @@ type executorInstallOptions struct {
 	Binary, PathEnv                                                        string
 	Concurrency                                                            int
 	JobOutputBudgetMB                                                      int64
-	Proxy, Launch, SandboxMountRoots                                       []string
+	Proxy, MCPCommand, Launch, SandboxMountRoots                           []string
 	// Context carries the command's (or wizard's) cancellable context so the
 	// one-time enrollment exchange is interrupted by SIGINT exactly as it was
 	// before the refactor. A nil Context falls back to context.Background()
@@ -146,6 +148,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	jobOutputBudgetMB, _ := cmd.Flags().GetInt64("job-output-budget-mb")
 	proxy, _ := cmd.Flags().GetStringArray("proxy")
+	mcpCommand, _ := cmd.Flags().GetStringArray("mcp-command")
 	launch, _ := cmd.Flags().GetStringArray("launch")
 	sandboxMountRoots, _ := cmd.Flags().GetStringArray("sandbox-mount-root")
 
@@ -167,6 +170,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 		Concurrency:        concurrency,
 		JobOutputBudgetMB:  jobOutputBudgetMB,
 		Proxy:              proxy,
+		MCPCommand:         mcpCommand,
 		Launch:             launch,
 		SandboxMountRoots:  sandboxMountRoots,
 		Context:            cmd.Context(),
@@ -247,6 +251,10 @@ func installExecutorService(opts executorInstallOptions, out io.Writer) error {
 		args = append(args, "--job-output-budget-mb", fmt.Sprint(opts.JobOutputBudgetMB))
 	}
 	args, err = appendProxyArgs(args, opts.Proxy)
+	if err != nil {
+		return err
+	}
+	args, err = appendMCPCommandArgs(args, opts.MCPCommand)
 	if err != nil {
 		return err
 	}
@@ -522,6 +530,23 @@ func appendProxyArgs(args []string, proxies []string) ([]string, error) {
 	}
 	for _, p := range proxies {
 		args = append(args, "--proxy", p)
+	}
+	return args, nil
+}
+
+// appendMCPCommandArgs validates --mcp-command flags (repeatable name=argv
+// declarations) and appends them to args as repeated pairs, for the same
+// reason as appendProxyArgs: a unit file that bakes in an argv the executor
+// would refuse is a unit that restarts forever.
+func appendMCPCommandArgs(args []string, commands []string) ([]string, error) {
+	if len(commands) == 0 {
+		return args, nil
+	}
+	if _, err := executor.ParseMCPCommandFlags(commands); err != nil {
+		return nil, err
+	}
+	for _, c := range commands {
+		args = append(args, "--mcp-command", c)
 	}
 	return args, nil
 }

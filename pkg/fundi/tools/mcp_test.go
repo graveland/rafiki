@@ -93,15 +93,16 @@ func newBigOutputMCPServer(serverName, toolName, output string) *mcp.Server {
 func inMemoryRef(t *testing.T, server *mcp.Server) *mcpServerSession {
 	t.Helper()
 	ctx := context.Background()
-	ref := &mcpServerSession{name: "test-server", dial: func(ctx context.Context) (*mcp.ClientSession, error) {
+	ref := &mcpServerSession{name: "test-server", dial: func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
 		serverTransport, clientTransport := mcp.NewInMemoryTransports()
 		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
-		return client.Connect(ctx, clientTransport, nil)
+		sess, err := client.Connect(ctx, clientTransport, nil)
+		return sess, nil, err
 	}}
-	sess, err := ref.dial(ctx)
+	sess, _, err := ref.dial(ctx)
 	assert.NewAborting(t).NoError(err, "dial")
 	ref.sess = sess
 	t.Cleanup(ref.close)
@@ -240,7 +241,7 @@ func TestConnectMCPSkipsServerThatFailsToConnect(t *testing.T) {
 	}}
 
 	r := NewRegistry()
-	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil)
+	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil, nil)
 	c.NoError(err, "ConnectMCP")
 	defer shutdown()
 
@@ -256,7 +257,7 @@ func TestConnectMCPSkipsServerWithNoCommandOrURL(t *testing.T) {
 	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{"empty": {}}}
 
 	r := NewRegistry()
-	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil)
+	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil, nil)
 	c.NoError(err, "ConnectMCP")
 	defer shutdown()
 
@@ -399,19 +400,20 @@ func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
 		last *mcp.ServerSession
 	)
 	ref := &mcpServerSession{name: "test-server"}
-	ref.dial = func(ctx context.Context) (*mcp.ClientSession, error) {
+	ref.dial = func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
 		serverTransport, clientTransport := mcp.NewInMemoryTransports()
 		ssess, err := server.Connect(ctx, serverTransport, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		mu.Lock()
 		last = ssess
 		mu.Unlock()
 		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
-		return client.Connect(ctx, clientTransport, nil)
+		sess, err := client.Connect(ctx, clientTransport, nil)
+		return sess, nil, err
 	}
-	sess, err := ref.dial(ctx)
+	sess, _, err := ref.dial(ctx)
 	c.NoError(err, "initial dial")
 	ref.sess = sess
 	t.Cleanup(ref.close)
@@ -447,8 +449,8 @@ func TestMCPSessionRedialFailureIsReported(t *testing.T) {
 	r := NewRegistry()
 	c.NoError(registerMCPServerTools(ctx, r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
-	session.dial = func(_ context.Context) (*mcp.ClientSession, error) {
-		return nil, errors.New("dial boom")
+	session.dial = func(_ context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
+		return nil, nil, errors.New("dial boom")
 	}
 	session.close() // drop the live session: the next call must redial
 
@@ -457,4 +459,280 @@ func TestMCPSessionRedialFailureIsReported(t *testing.T) {
 
 	_, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
 	c.False(err == nil || !strings.Contains(err.Error(), "unreachable"), "expected a cooldown-throttled failure, got %v", err)
+}
+
+// A via_executor entry is refused BY NAME at load time: the argv and the
+// environment live on the executor, and a config error that degrades into "no
+// tools" is invisible.
+func TestLoadMCPConfigRefusesBadViaExecutor(t *testing.T) {
+	cases := []struct{ name, server, body, want string }{
+		{
+			name:   "alongside an entry command",
+			server: "hesabu",
+			body:   `{"mcpServers":{"hesabu":{"command":"hesabu","args":["mcp"],"via_executor":{"selector":"name=x","command":"hesabu"}}}}`,
+			want:   "cannot be combined",
+		},
+		{
+			name:   "alongside an entry url",
+			server: "codescan",
+			body:   `{"mcpServers":{"codescan":{"url":"http://x","via_executor":{"selector":"name=x","proxy":"codescan"}}}}`,
+			want:   "cannot be combined",
+		},
+		{
+			name:   "neither command nor proxy",
+			server: "hesabu",
+			body:   `{"mcpServers":{"hesabu":{"via_executor":{"selector":"name=x"}}}}`,
+			want:   "exactly one of command",
+		},
+		{
+			name:   "both command and proxy",
+			server: "hesabu",
+			body:   `{"mcpServers":{"hesabu":{"via_executor":{"selector":"name=x","command":"hesabu","proxy":"p"}}}}`,
+			want:   "both command and proxy",
+		},
+		{
+			name:   "empty selector",
+			server: "hesabu",
+			body:   `{"mcpServers":{"hesabu":{"via_executor":{"selector":"","command":"hesabu"}}}}`,
+			want:   "needs a selector",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			path := filepath.Join(t.TempDir(), "mcp.json")
+			c.Require().NoError(os.WriteFile(path, []byte(tc.body), 0o600), "write config")
+			_, err := LoadMCPConfig(path)
+			c.Require().Error(err, "accepted %s", tc.name)
+			c.StrContains(err.Error(), `server "`+tc.server+`"`, "error names the server")
+			c.StrContains(err.Error(), tc.want, "error")
+		})
+	}
+}
+
+func TestLoadMCPConfigAcceptsViaExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	body := `{"mcpServers":{
+		"hesabu":{"via_executor":{"selector":"name=greyshift","command":"hesabu"}},
+		"codescan":{"via_executor":{"selector":"name=greyshift","proxy":"codescan"}},
+		"local":{"command":"hesabu","args":["mcp"]}
+	}}`
+	c.Require().NoError(os.WriteFile(path, []byte(body), 0o600), "write config")
+	cfg, err := LoadMCPConfig(path)
+	c.Require().NoError(err, "LoadMCPConfig")
+	c.EqDeep(cfg.ViaExecutorNames(), []string{"codescan", "hesabu"}, "via_executor names")
+	c.Eq(cfg.MCPServers["hesabu"].ViaExecutor.Command, "hesabu", "command")
+	c.Eq(cfg.MCPServers["codescan"].ViaExecutor.Proxy, "codescan", "proxy")
+}
+
+// A via_executor server with no dialer fails rather than falling through to a
+// direct dial of the daemon's own localhost: this is what `rafikid agent`
+// prints, since it has no executor pool.
+func TestDialMCPServerWithoutADialerFailsClosed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := MCPServerConfig{ViaExecutor: &MCPViaExecutor{Selector: "name=x", Command: "hesabu"}}
+	_, _, err := dialMCPServer(context.Background(), "hesabu", sc, nil, nil)
+	c.Require().Error(err, "a via_executor server dialled with no dialer")
+	c.StrContains(err.Error(), "via_executor requires the executor plane", "error")
+	c.StrContains(err.Error(), "RAFIKI_EXECUTORS_ENABLED=1", "error names the knob")
+}
+
+// Keepalive is set for BOTH transports: it is the only thing that sees a
+// wedged-but-alive server holding its pipe.
+func TestMCPClientOptionsCarryKeepAlive(t *testing.T) {
+	c := assert.NewCollecting(t)
+	opts := mcpClientOptions()
+	c.Eq(opts.KeepAlive, mcpKeepAlive, "KeepAlive")
+	c.Eq(opts.KeepAliveFailureThreshold, mcpKeepAliveFailures, "KeepAliveFailureThreshold")
+}
+
+// fakeMCPHealth is a transport's exit record, as execpool's MCPStdioTransport
+// reports it.
+type fakeMCPHealth struct {
+	exited bool
+	status string
+	tail   string
+}
+
+func (h *fakeMCPHealth) Exited() (string, string, bool) { return h.status, h.tail, h.exited }
+
+// sequencedHealth answers "not exited" to the FIRST Exited() call and "exited"
+// to every one after it. call() reads the record once before the call and once
+// after it, so this models — deterministically — an exit that appeared while
+// the call was in flight, which is the case the no-retry rule is about.
+type sequencedHealth struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (h *sequencedHealth) Exited() (string, string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls++
+	return "exit code 1", "fatal: credentials expired", h.calls > 1
+}
+
+// An OBSERVED process exit is not retried — and the rule must still hold when
+// the SDK has wrapped the underlying error, which is why it reads a health flag
+// rather than an error value.
+func TestMCPCallDoesNotRetryAnObservedExit(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	server := newTestMCPServer("test-server")
+
+	var (
+		mu    sync.Mutex
+		last  *mcp.ServerSession
+		dials int
+		// The exit appears only from the second Exited() read, i.e. while the
+		// call is in flight.
+		health = &sequencedHealth{}
+		ref    = &mcpServerSession{name: "test-server"}
+	)
+	ref.dial = func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		serverTransport, clientTransport := mcp.NewInMemoryTransports()
+		ssess, err := server.Connect(ctx, serverTransport, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		mu.Lock()
+		last = ssess
+		mu.Unlock()
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+		sess, err := client.Connect(ctx, clientTransport, nil)
+		return sess, health, err
+	}
+	sess, h, err := ref.dial(ctx)
+	c.NoError(err, "initial dial")
+	ref.sess, ref.health = sess, h
+	t.Cleanup(ref.close)
+
+	r := NewRegistry()
+	c.NoError(registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
+
+	_ = last
+	// The client's session is finished, so the call fails the way a dead session
+	// does; health reports the observed exit only from the second read on, i.e.
+	// while that call is in flight.
+	c.NoError(sess.Close(), "client-side close")
+
+	_, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
+	c.Require().Error(err, "the call succeeded against a dead server")
+	c.StrContains(err.Error(), "not retried", "error")
+	c.StrContains(err.Error(), "exit code 1", "error carries the exit status")
+	c.StrContains(err.Error(), "fatal: credentials expired", "error carries the stderr tail")
+	mu.Lock()
+	got := dials
+	mu.Unlock()
+	c.Eq(got, 1, "an observed exit was retried")
+}
+
+// An AMBIGUOUS death — a dropped session with no observed process exit — is
+// still retried once, which is the behaviour that keeps a restarted server's
+// tools working for the life of an agent.
+func TestMCPCallRetriesAnAmbiguousDeath(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	server := newTestMCPServer("test-server")
+
+	var (
+		mu    sync.Mutex
+		last  *mcp.ServerSession
+		dials int
+		ref   = &mcpServerSession{name: "test-server"}
+	)
+	ref.dial = func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		serverTransport, clientTransport := mcp.NewInMemoryTransports()
+		ssess, err := server.Connect(ctx, serverTransport, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		mu.Lock()
+		last = ssess
+		mu.Unlock()
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+		sess, err := client.Connect(ctx, clientTransport, nil)
+		return sess, &fakeMCPHealth{}, err
+	}
+	sess, h, err := ref.dial(ctx)
+	c.NoError(err, "initial dial")
+	ref.sess, ref.health = sess, h
+	t.Cleanup(ref.close)
+
+	r := NewRegistry()
+	c.NoError(registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
+
+	mu.Lock()
+	ss := last
+	mu.Unlock()
+	c.NoError(ss.Close(), "server-side close")
+
+	res, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
+	c.NoError(err, "an ambiguous death was not retried")
+	c.Eq(res.Text, "3", "result after redial")
+	mu.Lock()
+	got := dials
+	mu.Unlock()
+	c.Eq(got, 2, "dial count")
+}
+
+// A server that died while its session sat IDLE is not this call's failure: the
+// exit record was already there before the call began, so the call must redial
+// rather than refuse (the agent never learns of an idle death — the design's
+// §3 rule). Only an exit observed DURING the call suppresses the retry.
+func TestMCPCallRetriesAfterAnIdleExit(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	server := newTestMCPServer("test-server")
+
+	var (
+		mu    sync.Mutex
+		dials int
+		ref   = &mcpServerSession{name: "test-server"}
+		// The FIRST transport's record: the process died with no call in
+		// flight. The redial gets a fresh, healthy one.
+		health = &fakeMCPHealth{exited: true, status: "exit code 1", tail: "restarting"}
+	)
+	ref.dial = func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
+		mu.Lock()
+		dials++
+		h := health
+		mu.Unlock()
+		serverTransport, clientTransport := mcp.NewInMemoryTransports()
+		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+			return nil, nil, err
+		}
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+		sess, err := client.Connect(ctx, clientTransport, nil)
+		return sess, h, err
+	}
+	sess, h, err := ref.dial(ctx)
+	c.NoError(err, "initial dial")
+	ref.sess, ref.health = sess, h
+	t.Cleanup(ref.close)
+
+	r := NewRegistry()
+	c.NoError(registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
+
+	// The session is finished and the transport already records the exit: the
+	// idle death case.
+	c.NoError(sess.Close(), "client-side close")
+	mu.Lock()
+	health = &fakeMCPHealth{} // the redial's session is healthy
+	mu.Unlock()
+
+	res, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
+	c.NoError(err, "an idle exit was treated as an in-flight crash")
+	c.Eq(res.Text, "3", "result after redial")
+	mu.Lock()
+	got := dials
+	mu.Unlock()
+	c.Eq(got, 2, "dial count")
 }

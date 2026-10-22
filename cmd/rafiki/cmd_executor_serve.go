@@ -493,6 +493,7 @@ func newExecutorServeCmd() *cobra.Command {
 		repoSync           bool
 		retiredGitSync     bool
 		proxyArgs          []string
+		mcpCommandArgs     []string
 		launchKinds        []string
 		sandboxMountRoots  []string
 		relayDir           string
@@ -553,6 +554,11 @@ Two transports, exactly one of which is used:
 			}
 
 			proxies, err := executor.ParseProxyFlags(proxyArgs)
+			if err != nil {
+				return err
+			}
+
+			mcpCommands, err := executor.ParseMCPCommandFlags(mcpCommandArgs)
 			if err != nil {
 				return err
 			}
@@ -621,6 +627,7 @@ Two transports, exactly one of which is used:
 				PyModulesSync:       pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
 				RepoSync:            repoSyncEnabled(cmd, repoSync, launchKinds),
 				Proxies:             proxies,
+				MCPCommands:         mcpCommands,
 				LaunchKinds:         launchKinds,
 				SandboxMountRoots:   mountRoots,
 				SandboxRelayDir:     resolvedRelayDir,
@@ -723,6 +730,12 @@ Two transports, exactly one of which is used:
 	cmd.Flags().BoolVar(&retiredGitSync, "pymodule-git-sync", false, "retired; use --repo-sync")
 	_ = cmd.Flags().MarkHidden("pymodule-git-sync")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
+	cmd.Flags().StringArrayVar(&mcpCommandArgs, "mcp-command", nil,
+		"MCP server process this executor will host for the daemon, name=argv (repeatable). "+
+			"Whitespace splits argv; a backslash escapes a space, a backslash or a quote, and no "+
+			"shell is involved. The daemon names the server, never its command line: this flag is "+
+			"the whole allowlist, and the process runs under THIS machine's environment and working "+
+			"directory")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
 		"child protocol this executor will host for the daemon: claude or script (repeatable). "+
 			"Opt-in: with no --launch this executor hosts nothing. --launch claude also accepts the "+

@@ -246,6 +246,18 @@ func joinProxyPath(base, p string) (string, error) {
 	if strings.HasPrefix(clean, "/..") {
 		return "", fmt.Errorf("proxy: path %q escapes the declared base", p)
 	}
+	// A request for "/" is a request for the base ITSELF, path and all. An
+	// MCP endpoint declared as `--proxy codescan=http://host:8080/mcp` is
+	// exactly this case: the protocol client names only the origin, and the
+	// operator's base carries the path nobody asked it to guess. Appending
+	// another slash would ask for /mcp/ instead.
+	if u, uerr := url.Parse(base); clean == "/" && uerr == nil && strings.Trim(u.Path, "/") != "" {
+		out := base
+		if query != "" {
+			out += "?" + query
+		}
+		return out, nil
+	}
 	out := base + clean
 	if query != "" {
 		out += "?" + query

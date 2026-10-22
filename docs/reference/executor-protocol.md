@@ -334,7 +334,8 @@ the same connection — see [AdminService: Launch, Reap and Status](#adminservic
 Describe() → { executorId, platform, roots[], concurrency, isolation,
                workspaceMode, tools[], version, selfReportedLabels,
                proxies[], launchKinds[], skillsSync, pymodulesSync,
-               sandboxMountRoots[], sandboxRelayDir, sandboxRelayVolume }
+               sandboxMountRoots[], sandboxRelayDir, sandboxRelayVolume,
+               mcpCommands[] }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -345,16 +346,18 @@ child's envelope. It includes the `lsp_*` verbs only when a language server is
 installed (or `--lsp-config` names one), and never the parent-side
 `bash_start`/`bash_output`/`bash_kill` RPCs, which the daemon implements itself.
 
-`proxies[]` and `launchKinds[]` are the two things an executor self-reports, and
-both are safe to self-report for the same reason: each only ever NARROWS what
-the executor will do. `proxies[]` names the LLM endpoints its operator declared
+`proxies[]`, `launchKinds[]` and `mcpCommands[]` are the things an executor
+self-reports, and all are safe to self-report for the same reason: each only
+ever NARROWS what the executor will do. `proxies[]` names the LLM endpoints its operator declared
 with `--proxy` and the relay enforces on this side — a name that is not declared
 never reaches the network. `launchKinds[]` names the child protocols its
 operator declared with `--launch` that the daemon may host here via
 `AdminService.Launch`; the daemon still requires the child's ordinary executor
 selector to match, so a wrong entry costs a failed launch rather than admitting
-anyone. Both default to EMPTY: with no flag the executor forwards nothing and
-hosts nothing. A machine volunteering to host other people's children because
+anyone. `mcpCommands[]` names the MCP server processes its operator declared
+with `--mcp-command` — the NAMES only; the argv lives on this machine and never
+travels (see "MCPStdio"). All of them default to EMPTY: with no flag the
+executor forwards nothing, hosts nothing and serves no MCP server. A machine volunteering to host other people's children because
 someone forgot a flag is the self-report-gates-placement shape the isolation and
 workspace_mode rules exist to forbid — unlike those two fields, which the
 executor does not report at all. `skillsSync` and `pymodulesSync` self-report
@@ -1346,72 +1349,141 @@ back. The `socket` field (number 3) is reserved and no longer served.
 `RestartRequest.spec` (typed `ChildSpec`) replaced `RestartRequest.argv` in 1b.
 A 1a client speaking raw argv is incompatible with a 1b daraja.
 
-## Not implemented: MCP servers on an executor
+## MCPStdio
 
-MCP servers are defined **at the daemon** and run there. This section records a
-design that was worked through and deliberately not built, so the next person
-starts from the decisions rather than from the question.
+```
+MCPStdio() ⇄ stream { start{name} | stdin(bytes) }
+                 → stream { started{pid, program} | stdout(bytes)
+                          | stderr(bytes) | exit{code, signal, stderr_tail} }
+```
 
-**Why it would be worth building.** A sidecar next to rafikid can serve a
-*service* MCP server — GitHub, Slack, Linear — perfectly well over
-`MCPServerConfig.URL`, and should. What it structurally cannot serve is a
-**workspace-local** server: a filesystem or git server pointed at the project.
-Those need to run where the checkout is, and the checkout is on the executor,
-possibly a laptop behind NAT that rafikid cannot reach at all. The axis is
-therefore **"does this server need to see the workspace"**, not "is it stdio or
-HTTP" — that is the sentence worth remembering.
+Bidirectional streaming. Hosts ONE declared MCP server process for ONE client
+session and relays its stdio. This is how an MCP server that only exists on a
+workstation reaches a child of a cluster daemon: no TCP listener, no new
+credential, no new allowlist on the network — just the connection the executor
+already holds.
 
-A second case only an executor can serve: an MCP endpoint reachable on the
-executor's network — a cluster-internal service, something behind its VPN —
-which rafikid has no route to.
+**The executor relays BYTES and never speaks MCP.** stdout is opaque and the
+caller frames it; stderr is opaque and is never parsed as protocol. Same
+principle as the HTTP relay: rafiki does not care what protocol an endpoint
+speaks, only that it can reach it.
 
-**The shape.** One **bidirectional streaming** RPC carrying opaque bytes, opened
-by the daemon on first use and reopened if it drops. rafikid stays the MCP
-client throughout; the executor either execs a server and pipes its stdio, or
-relays to a URL only it can reach. The stream-open message carries
-`{command, args, env}`.
+**The argv lives on the executor.** The request carries a NAME, and the name is
+checked against `Options.MCPCommands` — the operator's `--mcp-command
+name=argv…` declarations — BEFORE anything is spawned or even stat'd. The
+matched process runs under the executor's own environment and `--root`
+working directory (which IS the executor's process working directory unless the
+operator passed `--root`), never the daemon's: credentials live on the machine that holds them, and nothing
+secret travels to the daemon. A compromised daemon gains the ability to name a
+declared command, and nothing more — no argv, no env, no cwd, and no way to run
+an undeclared binary.
 
-This does **not** violate §Transport's rule that *"rafikid is the RPC client;
-the executor is the server"*. That is about which side initiates calls, and the
-executor still never does. A bidi *stream* inside a call the daemon opened
-leaves the property intact — the design doc's "no bidirectional transport" means
-neither side is an RPC client to the other, not that a single RPC cannot stream
-both ways. The two were conflated once already, and the mistake cost a wrong
-"this is blocked" verdict.
+The declared grammar is whitespace-separated words with a backslash escaping a
+space, a backslash or a quote. **No shell is involved**, so a glob or `$(…)` in
+an argument is literal text.
 
-**Credentials.** stdio MCP is JSON-RPC over a pipe with no header channel, so a
-credential cannot ride the messages; it reaches the server through its process
-environment (`MCPServerConfig.Env`). On an executor that means the token is
-readable at `/proc/<pid>/environ` by any same-uid process — including the
-agent's own `bash`. That is **accepted**: an executor holding the workspace
-already holds the source, `.git/config`, `.env`, and on a laptop the operator's
-SSH keys, so a service-scoped MCP token is not a meaningful addition to the
-pile. `URL`-mode servers avoid the question entirely, because rafikid applies
-`Headers` before the bytes leave it.
+**Framing rules.**
 
-If that ever stops being acceptable, the escape hatch is an **MCP-only
-executor**, serving no workspace tools so no agent-controlled process shares its
-uid. Note that is not a label: a child gets exactly one executor
-(`resolveExecutor` returns a single client, `ToolOpts.Executor` is one field), so
-MCP-only means a child needs *two*, which is an architectural change.
+- `start` is exactly once, first. A stream whose first frame is not `start`, or
+  whose `start` arrives twice, is a protocol violation and ends with an error —
+  the daemon is the only caller, so it is a bug loud enough to name.
+- `started` is exactly once, first in the response. A dial that cannot spawn
+  fails on the stream instead, so the caller learns why BEFORE it begins its
+  handshake.
+- `stdout` chunks are flushed as they arrive (32 KiB reads); the executor never
+  buffers to a line, because it does not know where lines are.
+- `stderr` is a first-class channel rather than a debugging afterthought, and it
+  **never backpressures stdout**: a stderr frame whose send would stall is
+  DROPPED rather than queued behind it, so a chatty server cannot deadlock a
+  tool call. A 4 KiB ring buffer (the same cap as `Status`'s stderr tail) is the
+  record that survives, and it is what `exit.stderr_tail` carries.
+- Half-closing the request stream closes the process's stdin.
+- `exit{code, signal, stderr_tail}` is last when the process ends while the
+  stream is open; `code` is −1 when a signal killed it.
 
-**A hazard to design for.** MCP discovers tools at `initialize`, but a child's
-`tools[]` is fixed at build because the tool block sits inside the prompt-cache
-breakpoint. A reconnect that returns a different tool list therefore cannot add
-to it. Pin to the first discovery: tools that vanished return `is_error`, tools
-that appeared are ignored until the child restarts.
+**Lifetime: one process per stream, killed on stream end.** The process leads
+its own process group (`Setpgid`), so a server that forks (`npx`, a shell
+wrapper) dies whole; stream end — the daemon disconnecting, the child being
+killed, a pod rolling — is SIGTERM, wait out `child.TermGrace`, then SIGKILL to
+the group, the same escalation `AdminService.Reap` uses. No MCP server outlives
+the session that asked for it, and nothing is restarted inside an open stream: a
+fresh process has no MCP session (the `initialize` handshake and any session id
+belong to the process that died), so a restart is always a new stream.
 
-**Before building any of it**, spike Connect bidi streaming over
-`ServeInverted`'s inverted HTTP/2. That transport has never carried a bidi
-stream, it is the least conventional part of this system, and a subtle bug there
-presents as intermittent tool-call failures under load.
+**The group is swept when the leader exits**, not only when the stream ends: a
+server that forks a helper and then exits would otherwise leave the helper
+holding the pipes for the rest of the session. The sweep is SIGTERM, a short
+grace, SIGKILL, and an empty group costs one `ESRCH`.
 
-**Related, already fixed:** a stdio MCP server used to inherit the daemon's
-entire environment — `RAFIKI_DB`, `RAFIKI_TOKEN`, and both provider API keys.
-`mcpServerEnv` now filters through `paths.IsReservedEnvKey`. If executor-hosted
-MCP is ever built, the stream-open message must carry **only** the configured
-`Env`, never the daemon's `os.Environ()`, or that leak returns with the whole
-executor fleet as its blast radius.
+**No signal is ever sent after the process is reaped.** A pgid belongs to this
+executor only while the group's leader is unreaped — once it is reaped the
+kernel may hand that pid to a new process, whose group is somebody else's. Every
+kill therefore happens either before `Wait` returns or immediately after it, and
+the stream-end watcher is stopped the instant the wait completes rather than
+being left able to fire during the exit drain.
+
+**Spawn budget (crash-loop guard), per declared NAME across the whole machine** —
+a shared laptop can have ten children retrying at once:
+
+- a spawn that fails to start, or whose process dies within 5 s, counts as a
+  failure;
+- a process that ran longer than that and then died resets the record (an
+  hourly crash is not a crash loop);
+- 3 failures within 60 s refuse new spawns for 60 s, answering with the last
+  stderr tail;
+- at most 8 concurrent streams per name;
+- **a kill this executor performed is neither a failure nor a success** — it
+  leaves the record exactly as it was. Otherwise three ordinary child shutdowns
+  inside a minute would quarantine a perfectly healthy server for the whole
+  machine.
+
+This is the half of supervision the daemon cannot do: it sees one child's
+dials, the executor sees the machine's.
+
+**A `url` server needs no new machinery.** It is dialled through the executor's
+existing HTTP relay (`--proxy`), whose meaning is deliberately protocol-agnostic:
+"an HTTP endpoint this executor will forward to". A request for `/` is served by
+the base URL as declared, path and all, so `--proxy codescan=http://host:8080/mcp`
+reaches `/mcp` rather than `/mcp/`.
+
+**Credentials.** A stdio MCP server takes its credential from its process
+environment, and here that environment is the executor's own — readable at
+`/proc/<pid>/environ` by any same-uid process on that machine, including the
+agent's own `bash`. That is accepted: an executor holding the workspace already
+holds the source, `.git/config`, `.env`, and on a laptop the operator's SSH keys.
+A `url` server's headers travel over the relay instead, because the entry's
+Authorization is the server's own credential and the daemon is what holds it.
+
+**What a reconnect cannot change.** MCP discovers tools at `initialize`, but a
+child's `tools[]` is fixed at build because the tool block sits inside the
+prompt-cache breakpoint. A redial that returns a different tool list therefore
+cannot add to it: tools that vanished return `is_error`, tools that appeared are
+ignored until the child restarts.
+
+**Keepalive is for legacy handshakes only.** The daemon pings a server every 30 s
+and tolerates one miss, which is the one failure neither side can otherwise see:
+a process that is alive and holding its pipe. MCP removed `ping` in protocol
+2026-07-28, and the SDK starts keepalive only on the legacy `initialize`
+handshake, so against a modern peer no pings are sent and a wedged server is
+caught by the call's own deadline instead. The option stays set: it is exactly
+right for an older server, which is the population most likely to wedge.
+
+**Failures are not retried when the process exit was OBSERVED DURING THE CALL.**
+The daemon's session retries once on an ambiguous transport death, but an `exit`
+frame means the executor saw the process end, and replaying a possibly
+non-idempotent tool against a server that just died is a side effect the model
+must see rather than a hiccup to paper over. The call fails with the exit status
+and the stderr tail, the session is dropped, and the next call redials.
+
+"A server that died while its session sat idle" is NOT that case: the exit record
+was already there before the call began, so the call redials silently and the
+agent never learns of it. The record is read before the call and consulted on the
+same transport afterwards, which is also what keeps a concurrent redial from
+answering for a failure on a different session.
+
+**An executor too old to serve it says so.** An `Unimplemented` answer to
+`MCPStdio` is reported as a version gap naming the executor — not as a broken MCP
+server — so an operator upgrades the laptop rather than debugging a config.
 
 ## Failure codes
 

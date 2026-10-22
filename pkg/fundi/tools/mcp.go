@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,25 @@ type MCPServerConfig struct {
 	Env     map[string]string `json:"env,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+	// ViaExecutor, when set, means this server lives on an EXECUTOR's machine
+	// rather than this process's: either a process the executor hosts by a
+	// name its operator declared (Command), or an HTTP endpoint its operator
+	// declared (Proxy). The entry's own command/args/env/url must then be
+	// absent — the argv and the environment belong to the machine that holds
+	// the credentials, and nothing secret travels to the daemon.
+	ViaExecutor *MCPViaExecutor `json:"via_executor,omitempty"`
+}
+
+// MCPViaExecutor says where a server reachable only through the executor plane
+// lives, and which declared name on that machine serves it.
+type MCPViaExecutor struct {
+	// Selector picks the executor(s) by label, as every other selector does.
+	// A malformed selector EXCLUDES rather than admits.
+	Selector string `json:"selector"`
+	// Exactly one of Command (a --mcp-command name on the executor) or Proxy
+	// (a --proxy name on the executor).
+	Command string `json:"command,omitempty"`
+	Proxy   string `json:"proxy,omitempty"`
 }
 
 // MCPConfig mirrors the standard .mcp.json shape:
@@ -58,7 +78,79 @@ func LoadMCPConfig(path string) (MCPConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return MCPConfig{}, fmt.Errorf("mcp: parsing config %s: %w", path, err)
 	}
+	// A via_executor entry is refused HERE, by name, rather than at dial time:
+	// a config error that degrades into "no tools" is invisible, and this one
+	// is a deploy mistake, not third-party fragility.
+	for name, sc := range cfg.MCPServers {
+		if err := sc.validate(name); err != nil {
+			return MCPConfig{}, fmt.Errorf("mcp: config %s: %w", path, err)
+		}
+	}
 	return cfg, nil
+}
+
+// validate refuses a server whose shape cannot be honoured, naming the server.
+//
+// via_executor's own command/proxy are SIBLINGS of the entry's top-level
+// command/args/env/url, and only one set may be present: the argv and the
+// environment live on the executor (they are what the operator declared, and
+// what the daemon must not be able to change), so an entry carrying both is
+// ambiguous about which machine runs what.
+func (sc MCPServerConfig) validate(name string) error {
+	ve := sc.ViaExecutor
+	if ve == nil {
+		return nil
+	}
+	if sc.Command != "" || len(sc.Args) > 0 || len(sc.Env) > 0 || sc.URL != "" {
+		return fmt.Errorf("server %q: via_executor cannot be combined with the entry's own command/args/env/url — the argv and environment live on the executor", name)
+	}
+	switch {
+	case ve.Command == "" && ve.Proxy == "":
+		return fmt.Errorf("server %q: via_executor needs exactly one of command (a --mcp-command name on the executor) or proxy (a --proxy name on the executor)", name)
+	case ve.Command != "" && ve.Proxy != "":
+		return fmt.Errorf("server %q: via_executor sets both command and proxy; exactly one is allowed", name)
+	}
+	if ve.Selector == "" {
+		return fmt.Errorf("server %q: via_executor needs a selector naming the machine the server lives on", name)
+	}
+	return nil
+}
+
+// ViaExecutorNames returns the names of the servers in cfg that reach their
+// transport through the executor plane.
+func (cfg MCPConfig) ViaExecutorNames() []string {
+	var out []string
+	for name, sc := range cfg.MCPServers {
+		if sc.ViaExecutor != nil {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// FilterMCPServers narrows cfg to the comma-separated allowlist. Empty or "*"
+// means all (no filtering, cfg returned as-is); any other value keeps only the
+// named servers, dropping the rest before anything is dialled.
+//
+// Exported because the daemon must apply the SAME allowlist when it resolves
+// via_executor entries at spawn: a server this child may not use must not be
+// able to refuse its spawn.
+func FilterMCPServers(cfg map[string]MCPServerConfig, allowlist string) map[string]MCPServerConfig {
+	if allowlist == "" || allowlist == "*" {
+		return cfg
+	}
+	allowed := make(map[string]bool, len(cfg))
+	for _, name := range strings.Split(allowlist, ",") {
+		allowed[name] = true
+	}
+	out := make(map[string]MCPServerConfig, len(cfg))
+	for name, sc := range cfg {
+		if allowed[name] {
+			out[name] = sc
+		}
+	}
+	return out
 }
 
 // ConnectMCP dials every server in cfg (stdio via Command, HTTP via URL),
@@ -94,7 +186,7 @@ func LoadMCPConfig(path string) (MCPConfig, error) {
 // The returned shutdown func closes every session that was successfully
 // connected. It is always non-nil and safe to call even if every server was
 // skipped.
-func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy, env []string) (func(), error) {
+func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy, env []string, dial MCPDialer) (func(), error) {
 	var refs []*mcpServerSession
 
 	// registeredNames tracks every mcp__server__tool name registered so far
@@ -108,14 +200,16 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy,
 	registeredNames := make(map[string]string)
 
 	for name, sc := range cfg.MCPServers {
-		session, err := dialMCPServer(ctx, name, sc, env)
+		session, health, err := dialMCPServer(ctx, name, sc, env, dial)
 		if err != nil {
+			// The reason is named, not swallowed: for a via_executor entry the
+			// operator needs to see WHICH resolution step failed.
 			slog.Error("agent/tools: mcp: failed to connect to server, skipping", "server", name, "error", err)
 			continue
 		}
 
-		ref := &mcpServerSession{name: name, sess: session, dial: func(ctx context.Context) (*mcp.ClientSession, error) {
-			return dialMCPServer(ctx, name, sc, env)
+		ref := &mcpServerSession{name: name, sess: session, health: health, dial: func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
+			return dialMCPServer(ctx, name, sc, env, dial)
 		}}
 
 		if err := registerMCPServerTools(ctx, r, name, ref, p, registeredNames); err != nil {
@@ -135,13 +229,72 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy,
 	return shutdown, nil
 }
 
-// dialMCPServer connects to a single configured server, choosing a stdio or
-// HTTP transport based on which of Command/URL is set. A stdio server is
-// spawned under env (ToolOpts.Env) when one is pinned, else the process
-// environment — the same base every other subprocess-spawning tool uses.
-func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []string) (*mcp.ClientSession, error) {
+// MCPDialer builds the transport for one via_executor server, resolving the
+// machine it lives on. The daemon supplies it because pkg/execpool already
+// imports this package, so the dependency cannot run the other way — and the
+// resolution happens ONCE, at spawn, with the chosen executor id closed into
+// the returned dialer: a child's MCP server cannot hop machines mid-life.
+//
+// A nil dialer on a via_executor server is an error, never a silent direct
+// dial: the daemon's own localhost is not the machine the entry names.
+type MCPDialer func(ctx context.Context, name string, sc MCPServerConfig) (mcp.Transport, error)
+
+// MCPServerHealth is the one-method view this package takes of a transport that
+// can report an OBSERVED process exit — execpool's MCPStdioTransport is the
+// implementation. It is a flag, not an error identity: the SDK wraps and
+// unwraps errors on the way up, so an error value would be a rule that
+// silently stops holding after an SDK bump.
+type MCPServerHealth interface {
+	// Exited reports whether the server process was seen to end, and how.
+	Exited() (status, tail string, ok bool)
+}
+
+// Keepalive: an MCP ping every mcpKeepAlive, closing the session after
+// mcpKeepAliveFailures consecutive misses. This catches the one failure the
+// executor cannot see — a wedged process that is alive and holding its pipe —
+// and closing the session closes the stream, which makes the executor kill it.
+const (
+	mcpKeepAlive         = 30 * time.Second
+	mcpKeepAliveFailures = 2
+)
+
+// mcpClientOptions is the ONE set of client options every MCP session uses,
+// both transports alike: a wedged server is a wedged server whether it is a
+// subprocess or an endpoint. KeepAlive pings every mcpKeepAlive with a 15s
+// timeout of its own, tolerates mcpKeepAliveFailures consecutive misses, and
+// stops quietly if the peer answers ErrMethodNotFound — an older server, which
+// is correct.
+func mcpClientOptions() *mcp.ClientOptions {
+	return &mcp.ClientOptions{
+		KeepAlive:                 mcpKeepAlive,
+		KeepAliveFailureThreshold: mcpKeepAliveFailures,
+		// The SDK's own diagnostics — a keepalive miss, a session closing —
+		// go to this daemon's log rather than to a logger nobody reads. Without
+		// it, a wedged server's death is invisible until a tool call fails.
+		Logger: slog.Default(),
+	}
+}
+
+// dialMCPServer connects to a single configured server, choosing a via_executor,
+// stdio or HTTP transport based on the config. A stdio server is spawned under
+// env (ToolOpts.Env) when one is pinned, else the process environment — the same
+// base every other subprocess-spawning tool uses.
+//
+// The returned health is nil for a transport that cannot report an observed
+// exit (a local stdio subprocess, an HTTP endpoint); call() reads it to decide
+// whether an error is retryable.
+func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []string, dial MCPDialer) (*mcp.ClientSession, MCPServerHealth, error) {
 	var transport mcp.Transport
 	switch {
+	case sc.ViaExecutor != nil:
+		if dial == nil {
+			return nil, nil, fmt.Errorf("mcp: server %q: via_executor requires the executor plane (set RAFIKI_EXECUTORS_ENABLED=1 and RAFIKI_DB)", name)
+		}
+		tr, err := dial(ctx, name, sc)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mcp: server %q: %w", name, err)
+		}
+		transport = tr
 	case sc.Command != "":
 		cmd := exec.Command(sc.Command, sc.Args...)
 		cmd.Env = mcpServerEnv(env, sc.Env)
@@ -153,15 +306,19 @@ func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []s
 		}
 		transport = &mcp.StreamableClientTransport{Endpoint: sc.URL, HTTPClient: httpClient}
 	default:
-		return nil, fmt.Errorf("mcp: server %q has neither command nor url configured", name)
+		return nil, nil, fmt.Errorf("mcp: server %q has neither command nor url configured", name)
 	}
 
-	client := mcp.NewClient(&mcp.Implementation{Name: mcpClientName}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: mcpClientName}, mcpClientOptions())
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: connecting to server %q: %w", name, err)
+		return nil, nil, fmt.Errorf("mcp: connecting to server %q: %w", name, err)
 	}
-	return session, nil
+	var health MCPServerHealth
+	if h, ok := transport.(MCPServerHealth); ok {
+		health = h
+	}
+	return session, health, nil
 }
 
 // mcpRedialCooldown throttles reconnection attempts after a FAILED dial: a
@@ -195,32 +352,39 @@ type mcpServerSession struct {
 	name string
 	// dial (re)connects to the server. Derived from the MCPServerConfig in
 	// production; tests inject an in-memory equivalent.
-	dial func(context.Context) (*mcp.ClientSession, error)
+	dial func(context.Context) (*mcp.ClientSession, MCPServerHealth, error)
 
-	mu         sync.Mutex
-	sess       *mcp.ClientSession
+	mu   sync.Mutex
+	sess *mcp.ClientSession
+	// health is the CURRENT session's exit record, if its transport has one.
+	// call() reads it to tell an OBSERVED process exit from an ambiguous
+	// transport death: the first must not be retried (replaying a
+	// non-idempotent tool against a server that just died is a side effect the
+	// model has to see), the second may be.
+	health     MCPServerHealth
 	lastRedial time.Time
 }
 
 // current returns the live session, dialing a new one if the stored session
 // was dropped. Failed dials set mcpRedialCooldown; a call inside the
 // cooldown window fails fast rather than re-attempting the dial.
-func (s *mcpServerSession) current(ctx context.Context) (*mcp.ClientSession, error) {
+func (s *mcpServerSession) current(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sess != nil {
-		return s.sess, nil
+		return s.sess, s.health, nil
 	}
 	if !s.lastRedial.IsZero() && time.Since(s.lastRedial) < mcpRedialCooldown {
-		return nil, fmt.Errorf("mcp: server %q is unreachable (redial attempted %v ago)", s.name, time.Since(s.lastRedial).Round(time.Millisecond))
+		return nil, nil, fmt.Errorf("mcp: server %q is unreachable (redial attempted %v ago)", s.name, time.Since(s.lastRedial).Round(time.Millisecond))
 	}
-	sess, err := s.dial(ctx)
+	sess, health, err := s.dial(ctx)
 	if err != nil {
 		s.lastRedial = time.Now()
-		return nil, fmt.Errorf("mcp: redialing server %q: %w", s.name, err)
+		return nil, nil, fmt.Errorf("mcp: redialing server %q: %w", s.name, err)
 	}
 	s.sess = sess
-	return sess, nil
+	s.health = health
+	return sess, health, nil
 }
 
 // noteDead drops the stored session if it is still the one that failed —
@@ -241,21 +405,55 @@ func (s *mcpServerSession) noteDead(sess *mcp.ClientSession) {
 // tool-level failures (which arrive as IsError results, not Go errors) and
 // caller-side context cancellation — passes through untouched.
 func (s *mcpServerSession) call(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	sess, err := s.current(ctx)
+	sess, health, err := s.current(ctx)
 	if err != nil {
 		return nil, err
 	}
+	// The exit record is read BEFORE the call and consulted on the SAME
+	// transport after it. Both halves matter:
+	//
+	//   - before, because a server that died while the session sat IDLE has an
+	//     exit record too, and that death is not this call's: the next call is
+	//     supposed to redial silently (the agent never learns of it). Only an
+	//     exit observed DURING the call suppresses the retry.
+	//   - the same transport, because a concurrent call may have redialled and
+	//     replaced the session; the record that explains THIS failure belongs to
+	//     the session that failed.
+	_, _, exitedBefore := exitOf(health)
 	res, err := sess.CallTool(ctx, params)
 	if err == nil || !deadSession(err) {
 		return res, err
 	}
+	if status, tail, ok := exitOf(health); ok && !exitedBefore {
+		// The executor SAW the process end while this call was in flight.
+		// Retrying would replay a possibly non-idempotent tool against a server
+		// that just died, and would repeat itself on every call while it
+		// crash-loops. The session is dropped so the next call redials.
+		s.noteDead(sess)
+		if tail == "" {
+			return nil, fmt.Errorf("mcp: calling tool %q: server %q exited (%s); not retried", params.Name, s.name, status)
+		}
+		return nil, fmt.Errorf("mcp: calling tool %q: server %q exited (%s): %s; not retried", params.Name, s.name, status, tail)
+	}
 	s.noteDead(sess)
 	slog.Warn("agent/tools: mcp: session to server died; redialing", "server", s.name)
-	fresh, rerr := s.current(ctx)
+	fresh, _, rerr := s.current(ctx)
 	if rerr != nil {
 		return nil, fmt.Errorf("mcp: calling tool %q: %w (session to server %q was dead and redial failed: %v)", params.Name, err, s.name, rerr)
 	}
 	return fresh.CallTool(ctx, params)
+}
+
+// exitOf reports whether health's server process was seen to end, and how. It
+// reads the health FLAG rather than an error value, because the SDK wraps and
+// unwraps errors on the way up — an error identity would be a rule that
+// silently stops holding after an SDK bump. A nil health (a local subprocess, an
+// HTTP endpoint) never reports an exit.
+func exitOf(health MCPServerHealth) (status, tail string, ok bool) {
+	if health == nil {
+		return "", "", false
+	}
+	return health.Exited()
 }
 
 // deadSession reports whether err means "this session is finished and no
@@ -329,7 +527,7 @@ func (t headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 // caught and the later one skipped, rather than silently shadowing the
 // first via Registry.Register's overwrite semantics.
 func registerMCPServerTools(ctx context.Context, r *Registry, serverName string, ref *mcpServerSession, p OutputPolicy, registeredNames map[string]string) error {
-	session, err := ref.current(ctx)
+	session, _, err := ref.current(ctx)
 	if err != nil {
 		return fmt.Errorf("mcp: listing tools for server %q: %w", serverName, err)
 	}

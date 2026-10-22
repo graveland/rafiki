@@ -375,6 +375,16 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 	ro.ProviderSenders = senders
 
+	// via_executor MCP servers resolve ONCE here, at spawn, with the chosen
+	// executor id closed into the dialer: a config error refuses the spawn
+	// rather than leaving the child quietly toolless, and a server cannot hop
+	// machines mid-life. nil when this child has no via_executor entries.
+	dial, err := c.mcpDialer(ro)
+	if err != nil {
+		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
+	}
+	ro.MCPDial = dial
+
 	// The daemon's ONE shared model catalog, so this child's llm.Client never
 	// builds (and OpenRouter-fetches) its own — N in-process children used to
 	// mean N model-list fetches and N copies of the same ~MB of models. This

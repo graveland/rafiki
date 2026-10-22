@@ -545,6 +545,7 @@ func (p *Pool) Live() []LiveExecutor {
 			Executor:    lc.executor,
 			Describe:    lc.describe,
 			Proxies:     lc.describe.GetProxies(),
+			MCPCommands: lc.describe.GetMcpCommands(),
 			ConnectedAt: lc.connectedAt,
 		})
 	}
@@ -591,6 +592,11 @@ type LiveExecutor struct {
 	// and it is enforced on the executor's own side (pkg/executor's allowlist),
 	// not trusted on this one.
 	Proxies []string
+	// MCPCommands are the MCP server-process names this executor self-reported
+	// at Describe time, declared by its operator with --mcp-command. Same
+	// reasoning as Proxies: it only ever NARROWS what the executor will host,
+	// and it is enforced on the executor's own side, before a spawn.
+	MCPCommands []string
 	// ConnectedAt is when this specific connection joined the pool — distinct
 	// from the executor row's LastSeenAt, which a reconnect does not reset.
 	ConnectedAt time.Time

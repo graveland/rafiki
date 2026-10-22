@@ -76,6 +76,25 @@ func listBuildInputs(root string, pkgs ...string) ([]string, error) {
 	}
 	inputs = append(inputs, scripts...)
 
+	// Go fixtures under fixtures/ are built by a test (buildMCPFixture runs
+	// `go build ./fixtures/mcpstdio`) and handed to a subprocess, so an edit to
+	// one of them must invalidate the cache exactly as an edit to a .sh fixture
+	// does.
+	fixtures := filepath.Join(root, "test", "integration", "fixtures")
+	err = filepath.WalkDir(fixtures, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && strings.HasPrefix(d.Name(), ".") {
+			return filepath.SkipDir
+		}
+		inputs = append(inputs, p)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk %s: %w", fixtures, err)
+	}
+
 	sdk := filepath.Join(root, "sdk", "python")
 	err = filepath.WalkDir(sdk, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {

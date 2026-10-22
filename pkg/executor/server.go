@@ -83,6 +83,16 @@ type Options struct {
 	// --launch. Empty means none, deliberately: hosting is opt-in.
 	LaunchKinds []string
 
+	// MCPCommands is the MCP server-process allowlist: name -> argv, from
+	// repeated --mcp-command flags. Empty means this executor hosts no MCP
+	// servers, which is the default and the right one.
+	//
+	// The argv lives HERE and never travels: a caller names a server, and this
+	// map decides what that name runs, under this process's own environment
+	// and working directory. That is the whole point — the daemon must not be
+	// able to repoint a credential-holding binary at another command.
+	MCPCommands map[string][]string
+
 	// SkillsSync lets the daemon push its skill corpus onto this executor's
 	// Claude config directory. Off by default: it writes into the operator's
 	// home directory, which is not something to enable by accident.
@@ -142,6 +152,12 @@ type Server struct {
 	// a request (the pool/cache lock must not be held while dialing).
 	proxyMu      sync.Mutex
 	proxyClients map[string]*http.Client
+
+	// mcpBudgetsMu guards mcpBudgets: one spawn budget per declared MCP
+	// command name, shared by every stream on this executor (a shared laptop
+	// can have ten children retrying at once — see mcpBudget).
+	mcpBudgetsMu sync.Mutex
+	mcpBudgets   map[string]*mcpBudget
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -170,12 +186,13 @@ func NewServer(opts Options) *Server {
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg:     reg,
-		tracker: tracker,
-		jobs:    jobs,
-		sem:     make(chan struct{}, opts.Concurrency),
-		wsReg:   newWorkspaceRegistry(),
-		lsp:     lspMgr,
+		reg:        reg,
+		tracker:    tracker,
+		jobs:       jobs,
+		sem:        make(chan struct{}, opts.Concurrency),
+		wsReg:      newWorkspaceRegistry(),
+		lsp:        lspMgr,
+		mcpBudgets: map[string]*mcpBudget{},
 	}
 }
 
@@ -308,6 +325,7 @@ func (s *Server) Describe(
 		PymodulesSync:      s.opts.PyModulesSync,
 		RepoSync:           s.opts.RepoSync,
 		TreeSync:           true,
+		McpCommands:        s.MCPCommandNames(),
 		SandboxMountRoots:  append([]string(nil), s.opts.SandboxMountRoots...),
 		SandboxRelayDir:    s.opts.SandboxRelayDir,
 		SandboxRelayVolume: s.opts.SandboxRelayVolume,

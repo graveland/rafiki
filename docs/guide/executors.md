@@ -60,8 +60,10 @@ that instead of starting its own, so an agent keeps working after you detach.
 **Without an executor, an agent has no workspace tools at all** —
 `read`/`write`/`edit`/`glob`/`grep`/`ls`/`bash`/`lsp_*` simply aren't
 registered, never silently running against the daemon's own filesystem. What
-remains is the daemon tier: MCP, web fetch/search, the task ledger, skills,
-and the agent-control verbs.
+remains is the daemon tier: web fetch/search, the task ledger, skills, and the
+agent-control verbs. MCP servers are the exception that either tier can serve —
+they run on the daemon by default, and on an executor when `mcp.json` says so
+(see "MCP servers on an executor").
 
 ```bash
 go build -o bin/rafiki ./cmd/rafiki
@@ -72,8 +74,10 @@ rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
 **Flags:** `--connect host:port` (remote reverse-dial) / `--connect-socket`
 (local reverse-dial) — one is required; `--root` (working directory root,
 default cwd); `--concurrency` (default 6); `--proxy name=base_url`
-(repeatable — forward an LLM endpoint only this machine can reach, see "The
-executor relay" below); `--launch kind` (repeatable — opt this machine into
+(repeatable — forward an HTTP endpoint only this machine can reach; an LLM
+endpoint for "The executor relay" below, or an MCP one, see "MCP servers on an
+executor"); `--mcp-command name=argv…` (repeatable — host an MCP server process
+by NAME, its argv never leaving this machine); `--launch kind` (repeatable — opt this machine into
 hosting a launched child kind, e.g. `claude`); `--lsp-config` / `--no-lsp`
 (language servers auto-detect from `PATH` by default; a configured-but-absent
 server just drops its `lsp_*` tools rather than advertising broken ones).
@@ -153,6 +157,71 @@ instead). The relay carries request headers over the executor's connection,
 so a keyed provider's credential transits whatever machine relays it — treat
 `via_executor` like any other tool call an executor already runs on your
 behalf.
+
+### MCP servers on an executor
+
+A provider is one thing a `via_executor` entry can name; an MCP server is the
+other, and for the same reason: a stdio MCP server that reads
+`~/.config/hesabu/config.yaml` exists only on the operator's laptop, and the
+cluster's daemon has no route to it.
+
+The executor declares what it will host by NAME, and never accepts an argv from
+the daemon:
+
+```bash
+rafiki executor serve --connect ... --root ... \
+  --mcp-command 'hesabu=/Users/you/go/bin/hesabu mcp --stdio'
+```
+
+The value is whitespace-separated argv, with a backslash escaping a space, a
+backslash or a quote. **No shell is involved** — a glob or `$(…)` in an argument
+is literal text, which is what makes a declaration an allowlist rather than a
+promise. The hosted process runs under the EXECUTOR's environment and working
+directory, so its credentials never travel to the daemon.
+
+The cluster's `mcp.json` then names the server and the machine:
+
+```json
+{
+  "mcpServers": {
+    "hesabu":   { "via_executor": { "selector": "name=greyshift", "command": "hesabu" } },
+    "codescan": { "via_executor": { "selector": "name=greyshift", "proxy":   "codescan" } }
+  }
+}
+```
+
+`command` names a `--mcp-command` on the executor (stdio); `proxy` names a
+`--proxy` on it (an HTTP MCP endpoint) — exactly one of the two, and neither
+`command`/`args`/`env`/`url` at the entry's own level, because the argv and the
+environment live on the executor. A malformed entry is refused at LOAD time, by
+name.
+
+**Resolution happens once, at spawn.** Every `via_executor` server is resolved
+while the child's runtime is built, against the executors that are live then; a
+child's MCP server cannot hop machines mid-life, and every failure is a SPAWN
+error naming the real problem rather than a silently toolless child:
+
+| Situation | What you get |
+|---|---|
+| Selector matches no live executor | spawn refused, naming the selector |
+| Executor live, name not declared | spawn refused, telling you to start it with `--mcp-command name=…` |
+| Executor live, name declared, more than one matches | the lowest executor ID wins, deterministically |
+| The server dies mid-session | the CALL fails with its exit status and stderr tail, and is **not** retried; the next call redials |
+| The daemon disconnects, or the child is killed | the executor kills the process group (SIGTERM, then SIGKILL) |
+| The hosted process forks a helper and exits | the leftover group is swept too; nothing outlives the stream |
+
+The hosted process runs in the executor's `--root` directory under the
+executor's own environment — never the daemon's — so a credentialed server reads
+its config on the machine that already holds it.
+
+A crash-looping server (3 failures inside 60 s) is refused for a minute with its
+last stderr, so ten children retrying at once cannot spin a shared laptop. Kills
+the executor performed itself are not failures: ending a stream is how a child
+shuts down normally, and three of those in a minute must not quarantine a
+healthy server.
+
+`via_executor` requires the executor plane; a daemon without one (and
+`rafikid agent`) refuses to start a child whose `mcp.json` names such a server.
 
 ### Container executors
 

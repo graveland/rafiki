@@ -128,6 +128,14 @@ service ExecutorService {
   // Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
   // the response back. One stream per request/response cycle.
   rpc Proxy(stream ProxyRequest) returns (stream ProxyResponse);
+
+  // MCPStdio hosts one declared MCP server process for one client session and
+  // relays its stdio. The executor never parses the protocol: stdout is opaque
+  // bytes, stderr is opaque bytes, and the caller frames both. One process
+  // exists for the life of its stream — stream end kills the process group,
+  // because an unattached process is one the daemon cannot talk to and nobody
+  // reaps.
+  rpc MCPStdio(stream MCPStdioRequest) returns (stream MCPStdioResponse);
 }
 
 message DescribeRequest {}
@@ -189,6 +197,13 @@ message DescribeResponse {
   // ever NARROWS what this executor will do, and a wrong value costs a refused
   // sync rather than admitting anyone.
   bool tree_sync = 18;
+  // mcp_commands are the names of the MCP server processes this executor will
+  // host for the daemon, declared by its operator with --mcp-command at
+  // startup. The NAMES only: the argv lives on this machine and never travels.
+  // Safe to self-report for the same reason as proxies and launch_kinds — it
+  // only ever NARROWS what this executor will do, and it is enforced on this
+  // side, before anything is spawned.
+  repeated string mcp_commands = 19;
 }
 
 message HealthRequest {}
@@ -426,6 +441,45 @@ message ProxyResponse {
     ProxyHead head = 1;  // exactly once, first
     bytes     body = 2;  // response body chunks, flushed as they arrive
   }
+}
+
+message MCPStdioRequest {
+  oneof msg {
+    // start is exactly once, first: the name of a command this executor's
+    // operator declared with --mcp-command. The argv never travels.
+    MCPStdioStart start = 1;
+    // stdin chunks, forwarded verbatim to the process's stdin. Half-closing
+    // the request stream closes the process's stdin.
+    bytes stdin = 2;
+  }
+}
+
+message MCPStdioStart { string name = 1; }
+
+message MCPStdioResponse {
+  oneof msg {
+    // started is exactly once, first: the process is running. A dial that
+    // cannot spawn fails on the stream instead, so the caller learns why
+    // before it begins its handshake.
+    MCPStdioStarted started = 1;
+    // stdout carries the protocol stream, opaque and unframed.
+    MCPStdioStdout stdout = 2;
+    // stderr carries the process's diagnostics, never parsed as protocol.
+    MCPStdioStderr stderr = 3;
+    // exit is last when the process ends while the stream is open.
+    MCPStdioExit exit = 4;
+  }
+}
+
+message MCPStdioStarted { int32 pid = 1; string program = 2; }
+message MCPStdioStdout  { bytes data = 1; }
+message MCPStdioStderr  { bytes data = 1; }
+message MCPStdioExit {
+  int32  code        = 1;  // -1 when killed by a signal
+  string signal      = 2;
+  // stderr_tail is the last bytes of the process's stderr, for a caller that
+  // dropped frames or missed them.
+  string stderr_tail = 3;
 }
 
 // SkillFile is one supporting file of a skill, besides SKILL.md.

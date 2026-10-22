@@ -96,6 +96,9 @@ const (
 	ExecutorServiceGitFetchBundleProcedure = "/rafiki.executor.v1.ExecutorService/GitFetchBundle"
 	// ExecutorServiceProxyProcedure is the fully-qualified name of the ExecutorService's Proxy RPC.
 	ExecutorServiceProxyProcedure = "/rafiki.executor.v1.ExecutorService/Proxy"
+	// ExecutorServiceMCPStdioProcedure is the fully-qualified name of the ExecutorService's MCPStdio
+	// RPC.
+	ExecutorServiceMCPStdioProcedure = "/rafiki.executor.v1.ExecutorService/MCPStdio"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -212,6 +215,13 @@ type ExecutorServiceClient interface {
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse]
+	// MCPStdio hosts one declared MCP server process for one client session and
+	// relays its stdio. The executor never parses the protocol: stdout is opaque
+	// bytes, stderr is opaque bytes, and the caller frames both. One process
+	// exists for the life of its stream — stream end kills the process group,
+	// because an unattached process is one the daemon cannot talk to and nobody
+	// reaps.
+	MCPStdio(context.Context) *connect.BidiStreamForClient[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -363,6 +373,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("Proxy")),
 			connect.WithClientOptions(opts...),
 		),
+		mCPStdio: connect.NewClient[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse](
+			httpClient,
+			baseURL+ExecutorServiceMCPStdioProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("MCPStdio")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -391,6 +407,7 @@ type executorServiceClient struct {
 	gitBundle        *connect.Client[executorpb.GitBundleRequest, executorpb.GitBundleResponse]
 	gitFetchBundle   *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
 	proxy            *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
+	mCPStdio         *connect.Client[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -508,6 +525,11 @@ func (c *executorServiceClient) Proxy(ctx context.Context) *connect.BidiStreamFo
 	return c.proxy.CallBidiStream(ctx)
 }
 
+// MCPStdio calls rafiki.executor.v1.ExecutorService.MCPStdio.
+func (c *executorServiceClient) MCPStdio(ctx context.Context) *connect.BidiStreamForClient[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse] {
+	return c.mCPStdio.CallBidiStream(ctx)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -622,6 +644,13 @@ type ExecutorServiceHandler interface {
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error
+	// MCPStdio hosts one declared MCP server process for one client session and
+	// relays its stdio. The executor never parses the protocol: stdout is opaque
+	// bytes, stderr is opaque bytes, and the caller frames both. One process
+	// exists for the life of its stream — stream end kills the process group,
+	// because an unattached process is one the daemon cannot talk to and nobody
+	// reaps.
+	MCPStdio(context.Context, *connect.BidiStream[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]) error
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -769,6 +798,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("Proxy")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceMCPStdioHandler := connect.NewBidiStreamHandler(
+		ExecutorServiceMCPStdioProcedure,
+		svc.MCPStdio,
+		connect.WithSchema(executorServiceMethods.ByName("MCPStdio")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -817,6 +852,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceGitFetchBundleHandler.ServeHTTP(w, r)
 		case ExecutorServiceProxyProcedure:
 			executorServiceProxyHandler.ServeHTTP(w, r)
+		case ExecutorServiceMCPStdioProcedure:
+			executorServiceMCPStdioHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -916,4 +953,8 @@ func (UnimplementedExecutorServiceHandler) GitFetchBundle(context.Context, *conn
 
 func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Proxy is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) MCPStdio(context.Context, *connect.BidiStream[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.MCPStdio is not implemented"))
 }

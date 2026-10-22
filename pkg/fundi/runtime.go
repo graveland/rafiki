@@ -111,7 +111,15 @@ type RuntimeOptions struct {
 	// cmd/rafikid's resolveModelDefaults — or an explicit caller override.
 	MCPServers string
 	// NoMCP disables MCP entirely, overriding MCPConfig even when it is set.
-	NoMCP          bool
+	NoMCP bool
+	// MCPDial builds the transport for a server declared with via_executor —
+	// one that lives on an executor's machine rather than this process's. The
+	// daemon supplies it, having already resolved which executor serves each
+	// declared name at spawn time; nil means this process has no executor
+	// plane (the standalone `rafikid fundi`, and every daemon with no pool), in
+	// which case a via_executor server fails with a message naming the knobs
+	// that would enable it rather than silently dialling localhost.
+	MCPDial        tools.MCPDialer
 	LSPConfig      string // absolute path, or empty to skip LSP entirely
 	FakeTurns      string
 	Providers      *providers.Set
@@ -543,20 +551,7 @@ func executorToolSet(served []string) map[string]bool {
 // them — so a restricted server is never even attempted, not merely hidden
 // after connecting.
 func filterMCPServers(cfg map[string]tools.MCPServerConfig, allowlist string) map[string]tools.MCPServerConfig {
-	if allowlist == "" || allowlist == "*" {
-		return cfg
-	}
-	allowed := make(map[string]bool, len(cfg))
-	for _, name := range strings.Split(allowlist, ",") {
-		allowed[name] = true
-	}
-	out := make(map[string]tools.MCPServerConfig, len(cfg))
-	for name, sc := range cfg {
-		if allowed[name] {
-			out[name] = sc
-		}
-	}
-	return out
+	return tools.FilterMCPServers(cfg, allowlist)
 }
 
 // splitToolList splits a comma-separated tool list into names, trimming
@@ -815,7 +810,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		// Filter before ConnectMCP dials anything, so a restricted server is
 		// never even attempted, not merely hidden after connecting.
 		mcpCfg.MCPServers = filterMCPServers(mcpCfg.MCPServers, opts.MCPServers)
-		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy, mergedEnv)
+		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy, mergedEnv, opts.MCPDial)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: connect mcp: %w", err)
 		}

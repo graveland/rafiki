@@ -82,6 +82,45 @@ silently-outranking globals. They keep their old meaning for `rafikid`
 itself, and for the two headless, profile-exempt commands `rafiki executor
 serve` / `rafiki executor service install`.
 
+## MCP servers
+
+`mcp.json` (the standard `.mcp.json` shape, read from `$RAFIKI_MCP_CONFIG`, then
+`<cwd>/.mcp.json`, then `<config dir>/mcp.json`) names the MCP servers a fundi
+child connects to. A server is either local to the daemon:
+
+```json
+{ "mcpServers": { "local": { "command": "hesabu", "args": ["mcp"], "env": {"TOKEN": "..."} } } }
+```
+
+…or it lives on an **executor**, for a server only that machine can reach (see
+[executors](executors.md#mcp-servers-on-an-executor)):
+
+```json
+{
+  "mcpServers": {
+    "hesabu":   { "via_executor": { "selector": "name=greyshift", "command": "hesabu" } },
+    "codescan": { "via_executor": { "selector": "name=greyshift", "proxy":   "codescan" } }
+  }
+}
+```
+
+A `via_executor` entry is validated when the file is LOADED, and refused by
+server name when it:
+
+- also carries its own top-level `command`/`args`/`env`/`url` — the argv and the
+  environment live on the executor, which is the machine holding the
+  credentials;
+- sets both `command` and `proxy`, or neither;
+- has an empty `selector`.
+
+Each server is then resolved against the live executors ONCE, at spawn: a
+selector that matches nothing, or a machine that does not declare the name, is a
+spawn error rather than a child that quietly has no tools. A WELL-FORMED
+`via_executor` server a child's `--mcp-servers` allowlist excludes is skipped and
+never refuses its spawn — the load-time refusals above are a property of the
+file, not of this child, so a malformed entry refuses every child that reads it
+whatever their allowlist says.
+
 ## Environment
 
 rafiki's variables are `RAFIKI_`-prefixed; `pkg/paths.Get` reads exactly the
