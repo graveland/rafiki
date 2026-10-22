@@ -1,6 +1,6 @@
 ---
 name: subagent-driven-development
-description: Use when executing a written implementation plan by dispatching subagents - covers wave dispatch in worktrees, settle handling, preset-dispatched tasks, merge-and-gate, and the ledgers that survive compaction.
+description: Use when executing a written implementation plan by dispatching subagents - covers the confirmation stop when handed a design instead of a plan, wave dispatch in worktrees, settle handling, preset-dispatched tasks, merge-and-gate, and the ledgers that survive compaction.
 ---
 
 # Executing a plan with subagents
@@ -11,6 +11,32 @@ you do not stop to ask permission between tasks.
 
 `coordinating-agents` is what the tools do — spawn semantics, settles, preset
 dispatch, worktree isolation, budgets. This skill is the loop.
+
+## Before anything: confirm you were given a PLAN
+
+A **design** (`docs/plans/YYYY-MM-DD-<topic>-design.md`) is an argument. A
+**plan** (`…-plan.md`) is dispatchable work: a `Preset group:` header, waves,
+`touches:` globs and a cap per task. This loop consumes the second.
+
+If the human says "execute <file>" and the file is a design — or anything
+without those four things — **stop and confirm before you touch the tree.** Name
+what is missing and offer the two choices: run `writing-plans` first (default,
+and what produces a coverage table, a conflict scan and a reservable final
+review), or an explicit blessing to implement the design inline yourself.
+
+**Only the human's answer starts the run.** Do not silently pick one: guessing
+"it's a design, I'll just implement it" skips the coverage table, the conflict
+scan, the ledger and the reserved final review, and lands every edit in the main
+checkout instead of a worktree — a weaker gate than the plan format exists to
+give, chosen without anyone noticing. This is a confirmation stop, not a ruling:
+`Rulings, not stalls` covers ambiguities *inside* a plan, and this is the
+question of whether there is one.
+
+If they do bless inline work, record it as a RULING in the plan's ledger (or in
+the design doc's Status line when there is no ledger) so a later session does
+not re-litigate it, keep the work out of the main checkout where you can, and
+still run the final review at the end — that review is the one nothing else
+replaces.
 
 ## Rulings, not stalls
 
@@ -25,6 +51,8 @@ RULING: <what you decided> — <why> — <what it costs if wrong>
 
 A wrong ruling costs rework your human partner can see and undo. A session
 parked on a question costs their whole day and buys nothing.
+
+(The confirmation stop above happens *before* the run and is not one of these.)
 
 **Four things stop you, and only these:** an irreversible or destructive
 operation; a security-sensitive action; a side effect outside this plan's
