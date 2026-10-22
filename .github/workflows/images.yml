@@ -60,7 +60,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.platform }}
           # A scheduled run exists to re-resolve the apt packages and the
           # latest Go/Rust, which a cached layer would silently pin.
           no-cache: ${{ github.event_name == 'schedule' }}
