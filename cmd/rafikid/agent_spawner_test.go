@@ -61,7 +61,7 @@ func TestSpawnerRefusesNonDescendantOnEveryVerb(t *testing.T) {
 	// non-descendants. A check that only rejected the first would pass a test
 	// that only tried the first.
 	for _, target := range []string{"c_stranger", "c_root", "c_mine", "c_nonexistent"} {
-		if _, err := sp.View(ctx, target, 0); err == nil {
+		if _, err := sp.View(ctx, tools.ViewSpec{ChildID: target}); err == nil {
 			t.Errorf("View(%s) must refuse", target)
 		}
 		_, sErr := sp.Send(ctx, tools.SendSpec{ChildID: target, Message: "hi"})

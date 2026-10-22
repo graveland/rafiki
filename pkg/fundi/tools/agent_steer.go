@@ -18,11 +18,17 @@ func init() {
 }
 
 const (
-	agentViewDescription = "Read the recent transcript of an agent you spawned: its " +
-		"prompts, what it said, and the tools it called with their results. Use this " +
-		"to check on a worker that seems stuck, or to understand a result before " +
-		"acting on it — not in a loop to poll for completion; you are notified when a " +
-		"subagent settles.\n\n" +
+	agentViewDescription = "Read the transcript of an agent you spawned: its prompts, " +
+		"what it said, and the tools it called with their results. Use this to check on a " +
+		"worker that seems stuck, or to understand a result before acting on it — not in a " +
+		"loop to poll for completion; you are notified when a subagent settles.\n\n" +
+		"With no cursor it shows the newest entries. Every line starts with that entry's " +
+		"cursor (m:<n>.<n>), and every place the view stops prints the argument that " +
+		"continues it. To read one entry in full (long replies are cut on a page), pass " +
+		"entry=<cursor>. To find where it said something, pass find=\"text\" " +
+		"(case-insensitive substring over the full text); after=<cursor> continues a " +
+		"search. before=<cursor> pages back; after=<cursor> pages forward again. Only " +
+		"find and after may be combined.\n\n" +
 		"For \"what is it actually working on\", prefer task_list with assignee set — " +
 		"that is one indexed read of what the agent decided, where this is a wall of " +
 		"transcript you have to interpret."
@@ -87,10 +93,28 @@ type AgentViewBlueprint struct{}
 func (AgentViewBlueprint) Name() string        { return "agent_view" }
 func (AgentViewBlueprint) Description() string { return agentViewDescription }
 func (AgentViewBlueprint) InputSchema() Schema {
-	return agentIDSchema(SchemaProperty{
-		Name: "limit", Type: "integer",
-		Description: "How many recent transcript entries to show (default 40, max 200).",
-	})
+	return agentIDSchema(
+		SchemaProperty{
+			Name: "limit", Type: "integer",
+			Description: "How many entries to show (default 40, max 200), or find hits (default 10).",
+		},
+		SchemaProperty{
+			Name: "before", Type: "string",
+			Description: "Show the page of entries older than this cursor, as a marker printed it.",
+		},
+		SchemaProperty{
+			Name: "after", Type: "string",
+			Description: "Show the page of entries newer than this cursor; with find, continue the search after it.",
+		},
+		SchemaProperty{
+			Name: "entry", Type: "string",
+			Description: "Show one entry's full text. A long entry continues with the entry=<cursor>@<offset> its marker prints.",
+		},
+		SchemaProperty{
+			Name: "find", Type: "string",
+			Description: "Case-insensitive text to search for across the full text of every entry.",
+		},
+	)
 }
 
 func (AgentViewBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
@@ -111,8 +135,12 @@ type agentViewTool struct {
 
 func (t *agentViewTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var params struct {
-		Agent string `json:"agent"`
-		Limit int    `json:"limit,omitempty"`
+		Agent  string `json:"agent"`
+		Limit  int    `json:"limit,omitempty"`
+		Before string `json:"before,omitempty"`
+		After  string `json:"after,omitempty"`
+		Entry  string `json:"entry,omitempty"`
+		Find   string `json:"find,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_view: invalid input: %w", err)
@@ -123,7 +151,20 @@ func (t *agentViewTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 	if params.Agent == "" {
 		return ToolResult{}, errors.New("agent_view: agent is required; use agent_list to find the id")
 	}
-	text, err := t.agents.View(ctx, params.Agent, params.Limit)
+	spec := ViewSpec{
+		ChildID: params.Agent,
+		Limit:   params.Limit,
+		Before:  params.Before,
+		After:   params.After,
+		Entry:   params.Entry,
+		Find:    params.Find,
+	}
+	// Refused here, before a spawner sees it: a combination the view cannot
+	// honour is the caller's mistake, not something to resolve by precedence.
+	if err := spec.Validate(); err != nil {
+		return ToolResult{}, fmt.Errorf("agent_view: %w", err)
+	}
+	text, err := t.agents.View(ctx, spec)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_view: %w", err)
 	}

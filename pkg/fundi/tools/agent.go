@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -109,6 +110,45 @@ type SendSpec struct {
 	Steps   []protocol.SendStep
 }
 
+// ViewSpec is one agent_view read. Before, After, Entry and Find are the
+// opaque cursor strings a previous agent_view marker printed (Find is the
+// search text); at most one is set, except Find with After. Validate
+// enforces that.
+type ViewSpec struct {
+	ChildID string
+	Limit   int
+	Before  string
+	After   string
+	Entry   string
+	Find    string
+}
+
+// Validate refuses a combination of paging arguments the view cannot honour.
+// Conflicting arguments are refused rather than resolved by precedence: the
+// only combination that means anything is find with after, which continues a
+// search.
+func (s ViewSpec) Validate() error {
+	switch {
+	case s.Before != "" && s.After != "":
+		return conflicting("before", "after")
+	case s.Before != "" && s.Entry != "":
+		return conflicting("before", "entry")
+	case s.Before != "" && s.Find != "":
+		return conflicting("before", "find")
+	case s.After != "" && s.Entry != "":
+		return conflicting("after", "entry")
+	case s.Entry != "" && s.Find != "":
+		return conflicting("entry", "find")
+	case s.Entry != "" && s.Limit != 0:
+		return errors.New("limit does not apply to entry")
+	}
+	return nil
+}
+
+func conflicting(a, b string) error {
+	return fmt.Errorf("%s and %s cannot be combined; only find and after go together", a, b)
+}
+
 // SendResult reports each step to the sender (never its output, except
 // an echo the step asked for).
 type SendResult struct {
@@ -133,9 +173,10 @@ type AgentSpawner interface {
 	Models(ctx context.Context, q ModelQuery) ([]ModelInfo, error)
 	// Spawn creates a descendant and returns it once it is registered.
 	Spawn(ctx context.Context, spec SpawnSpec) (AgentInfo, error)
-	// View returns the tail of a descendant's transcript as plain text.
-	// limit caps the number of transcript entries; 0 means the default.
-	View(ctx context.Context, childID string, limit int) (string, error)
+	// View renders a descendant's transcript as plain text: the newest page
+	// by default, or the page/entry/search spec names. spec.Limit caps
+	// entries (find hits, for a search); 0 means the default.
+	View(ctx context.Context, spec ViewSpec) (string, error)
 	// Send delivers a prompt to a descendant, running spec.Steps first.
 	Send(ctx context.Context, spec SendSpec) (SendResult, error)
 	// Kill shuts a descendant down and waits for the exit to be recorded.

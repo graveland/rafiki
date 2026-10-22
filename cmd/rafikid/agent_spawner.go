@@ -268,14 +268,21 @@ func toolModelInfo(r *rafikiv1.ModelRow) tools.ModelInfo {
 	return m
 }
 
-func (s *controllerSpawner) View(ctx context.Context, childID string, limit int) (string, error) {
-	if err := s.authorize(childID); err != nil {
+// View is the interim adapter: paging is not implemented on this side yet, so
+// any cursor or search argument is refused rather than silently ignored. A
+// silent ignore would answer a paged request with page one forever.
+func (s *controllerSpawner) View(ctx context.Context, spec tools.ViewSpec) (string, error) {
+	if err := s.authorize(spec.ChildID); err != nil {
 		return "", err
 	}
+	if spec.Before != "" || spec.After != "" || spec.Entry != "" || spec.Find != "" {
+		return "", errors.New("paging is not available yet")
+	}
+	limit := spec.Limit
 	if limit <= 0 || limit > viewMaxEntries {
 		limit = viewDefaultEntries
 	}
-	res, err := s.c.GetRecent(childID, recentQuery{Rendered: true})
+	res, err := s.c.GetRecent(spec.ChildID, recentQuery{Rendered: true})
 	if err != nil {
 		return "", err
 	}

@@ -649,12 +649,17 @@ var mcpToolDescriptions = func() map[string]string {
 			"id, name, model, current status, working directory and assigned task handle. " +
 			"Takes no arguments. Use it before agent_send or agent_kill to find the id you " +
 			"mean, or to look something up. " + mcpNotificationNote,
-		"agent_view": "Read the recent transcript of a rafiki agent: its prompts, what it " +
+		"agent_view": "Read the transcript of a rafiki agent: its prompts, what it " +
 			"said, and the tools it called with their results. Use it to check on a worker " +
 			"that seems stuck, or to understand a result before acting on it — deliberately, " +
-			"not as a polling loop. " + mcpNotificationNote + " For \"what is it actually " +
-			"working on\", prefer task_list with assignee set — that is one indexed read of " +
-			"what the agent decided, where this is a wall of transcript you have to interpret.",
+			"not as a polling loop. " + mcpNotificationNote + " With no cursor it shows the " +
+			"newest entries; every line starts with its cursor (m:<n>.<n>) and every place the " +
+			"view stops prints the argument that continues it: entry=<cursor> for one entry in " +
+			"full, find=\"text\" to search the full text (after=<cursor> continues), " +
+			"before=/after=<cursor> to page. Only find and after may be combined. For \"what is " +
+			"it actually working on\", prefer task_list with assignee set — that is one indexed " +
+			"read of what the agent decided, where this is a wall of transcript you have to " +
+			"interpret.",
 		"agent_send":   mcpSurfacePrefix + send.Description(),
 		"agent_kill":   mcpSurfacePrefix + kill.Description(),
 		"agent_report": mcpSurfacePrefix + report.Description(),

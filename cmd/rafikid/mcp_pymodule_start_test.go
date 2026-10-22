@@ -30,7 +30,7 @@ func (s *recordingSpawner) Spawn(_ context.Context, spec tools.SpawnSpec) (tools
 	s.specs = append(s.specs, spec)
 	return tools.AgentInfo{ChildID: "c_new", Name: spec.Name, Kind: spec.Kind, Status: "idle"}, nil
 }
-func (s *recordingSpawner) View(context.Context, string, int) (string, error) { return "", nil }
+func (s *recordingSpawner) View(context.Context, tools.ViewSpec) (string, error) { return "", nil }
 func (s *recordingSpawner) Send(context.Context, tools.SendSpec) (tools.SendResult, error) {
 	return tools.SendResult{}, nil
 }

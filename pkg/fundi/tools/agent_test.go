@@ -43,6 +43,10 @@ type fakeSpawner struct {
 	routingResult string
 	viewErr       error
 	listErr       error
+	// viewSpecs is every ViewSpec that reached View, in call order. A refused
+	// argument combination must leave this empty: Validate runs in the tool,
+	// before any spawner sees the spec.
+	viewSpecs []ViewSpec
 }
 
 func (f *fakeSpawner) List(context.Context) ([]AgentInfo, error) {
@@ -67,7 +71,8 @@ func (f *fakeSpawner) Spawn(_ context.Context, spec SpawnSpec) (AgentInfo, error
 	return info, nil
 }
 
-func (f *fakeSpawner) View(_ context.Context, childID string, limit int) (string, error) {
+func (f *fakeSpawner) View(_ context.Context, spec ViewSpec) (string, error) {
+	f.viewSpecs = append(f.viewSpecs, spec)
 	if f.viewErr != nil {
 		return "", f.viewErr
 	}
@@ -240,6 +245,64 @@ func TestAgentViewReturnsTranscript(t *testing.T) {
 	out := outRes.Text
 	c.NoError(err, "agent_view")
 	c.StrContains(out, "do the thing", "got:\n")
+}
+
+// Conflicting paging arguments are refused rather than resolved by
+// precedence, and refused BEFORE the spawner is reached: a spec the view
+// cannot honour is the caller's mistake, not something to guess at. The
+// viewSpecs assertion is the one that dies if Validate ever moves behind View.
+func TestAgentViewRejectsConflictingArguments(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	for _, tc := range []struct {
+		name string
+		args string
+		want string
+	}{
+		{"before+after", `{"agent":"c_a","before":"m:9.0","after":"m:3.0"}`, "cannot be combined"},
+		{"before+find", `{"agent":"c_a","before":"m:9.0","find":"x"}`, "cannot be combined"},
+		{"before+entry", `{"agent":"c_a","before":"m:9.0","entry":"m:3.1"}`, "cannot be combined"},
+		{"after+entry", `{"agent":"c_a","after":"m:3.0","entry":"m:3.1"}`, "cannot be combined"},
+		{"entry+find", `{"agent":"c_a","entry":"m:3.1","find":"x"}`, "cannot be combined"},
+		{"entry+limit", `{"agent":"c_a","entry":"m:3.1","limit":5}`, "does not apply"},
+	} {
+		_, err := reg.Execute(ctx, "agent_view", json.RawMessage(tc.args))
+		c.Error(err, "%s: conflicting arguments must be refused", tc.name)
+		if err != nil {
+			c.StrContains(err.Error(), tc.want, "%s: refusal does not say why; got", tc.name)
+		}
+		c.Eq(0, len(sp.viewSpecs), "%s: the refusal must happen before the spawner sees the spec", tc.name)
+	}
+}
+
+// find with after is the one combination that means something: it continues a
+// search from a hit the last call printed.
+func TestAgentViewAcceptsFindWithAfter(t *testing.T) {
+	c := assert.NewAborting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "agent_view", json.RawMessage(`{"agent":"c_a","find":"x","after":"m:3.0"}`))
+	c.NoError(err, "agent_view find+after")
+	c.Eq(1, len(sp.viewSpecs), "the spawner must be reached exactly once")
+	if len(sp.viewSpecs) == 1 {
+		c.Eq("x", sp.viewSpecs[0].Find, "find text")
+		c.Eq("m:3.0", sp.viewSpecs[0].After, "after cursor")
+	}
+}
+
+// Every argument the caller gave reaches the spawner intact — nothing is
+// defaulted, dropped or re-derived on the way.
+func TestAgentViewPassesSpecThrough(t *testing.T) {
+	c := assert.NewAborting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "agent_view", json.RawMessage(`{"agent":"c_a","before":"m:9.1","limit":5}`))
+	c.NoError(err, "agent_view")
+	c.Eq(1, len(sp.viewSpecs), "the spawner must be reached exactly once")
+	if len(sp.viewSpecs) == 1 {
+		c.EqDeep(ViewSpec{ChildID: "c_a", Before: "m:9.1", Limit: 5}, sp.viewSpecs[0], "spec reached the spawner changed")
+	}
 }
 
 func TestAgentSendDeliversMessage(t *testing.T) {
