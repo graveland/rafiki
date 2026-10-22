@@ -44,6 +44,15 @@ func (c *Controller) conversationIDForChild(snap childstore.Snapshot) string {
 	return id
 }
 
+// dbSourced reports whether snap's transcript is read from its stored
+// conversation, and that conversation's id ("" for a fundi child that has not
+// yet persisted one). GetRecent and viewTranscript both decide with it, so the
+// source a view is rendered from and the source it is paged from cannot drift.
+func (c *Controller) dbSourced(snap childstore.Snapshot) (string, bool) {
+	convID := c.conversationIDForChild(snap)
+	return convID, convID != "" || snap.Kind == protocol.KindFundi
+}
+
 // dbRecent loads a conversation's persisted messages and converts them to pi
 // vocabulary. Serves BOTH fundi and claude children: DBToPiFramesMessages emits
 // exactly the message_start/message_end/tool_execution_* events that

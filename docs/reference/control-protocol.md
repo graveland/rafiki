@@ -2155,7 +2155,7 @@ transport error, and never a successful result carrying the text.
 |---|---|
 | `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used) |
 | `agent_list` | Every agent the daemon knows: id, name, model, current status, working directory, assigned task handle |
-| `agent_view` | Recent transcript of one agent — prompts, replies, tool calls with their results; a deliberate check, not a polling loop |
+| `agent_view` | Transcript of one agent — prompts, replies, tool calls with their results; newest entries by default, paged/searched/expanded by cursor (`before`, `after`, `entry`, `find`; only `find`+`after` combine) on a stored conversation, newest page only for a live/exited child without one; a deliberate check, not a polling loop |
 | `agent_send` | Deliver a prompt to a running agent |
 | `agent_kill` | Shut an agent down and wait for the exit to be recorded |
 | `agent_set_budget` | Change a TOP-LEVEL agent's USD budget (the exception above) |

@@ -136,7 +136,7 @@ tree:
 |---|---|
 | `agent_spawn` | start a subagent (`kind: fundi\|claude`); returns a handle immediately, does not block |
 | `agent_list` | your subtree — id, name, model, status, assigned task |
-| `agent_view` | the tail of a descendant's transcript |
+| `agent_view` | a descendant's transcript: the newest entries, or a page (`before=`/`after=`), one entry in full (`entry=`), or a search (`find=`) by the cursors its markers print |
 | `agent_send` | steer a descendant mid-flight, or give it more work |
 | `agent_route` | steer a descendant's provider routing — `prefer`/`sort`/`quant`; `only` is operator-only |
 | `agent_kill` | stop a descendant and everything below it |

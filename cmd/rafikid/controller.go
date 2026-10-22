@@ -1271,8 +1271,8 @@ func (c *Controller) GetRecent(childID string, q recentQuery) (protocol.GetRecen
 	var total int
 	var oldestTS int64
 
-	convID := c.conversationIDForChild(snap)
-	if convID != "" || snap.Kind == protocol.KindFundi {
+	convID, fromDB := c.dbSourced(snap)
+	if fromDB {
 		// Fundi children stay in this branch even when the conversation id does
 		// not resolve (an exited-before-first-turn child): their contract is
 		// db-only, with no disk fallback (TestGetRecentFundiNoDB).

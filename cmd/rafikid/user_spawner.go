@@ -114,8 +114,10 @@ func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.Ag
 	return snapshotInfo(snap, s.c.st.AbsoluteDepth(res.ChildID)), nil
 }
 
-// View is the interim adapter: paging is not implemented on this side yet, so
-// any cursor or search argument is refused rather than silently ignored.
+// View renders one agent's transcript for a user credential: the same paging
+// surface the agent face has (a caller passing before= and having it ignored
+// would be the silent dead end the modes exist to remove). The registered check
+// runs FIRST, before any load, render or cursor parse.
 func (s *userSpawner) View(_ context.Context, spec tools.ViewSpec) (string, error) {
 	if spec.ChildID == "" {
 		return "", errors.New("agent id is required")
@@ -123,18 +125,7 @@ func (s *userSpawner) View(_ context.Context, spec tools.ViewSpec) (string, erro
 	if _, ok := s.c.st.Get(spec.ChildID); !ok {
 		return "", fmt.Errorf("agent %s is not registered", spec.ChildID)
 	}
-	if spec.Before != "" || spec.After != "" || spec.Entry != "" || spec.Find != "" {
-		return "", errors.New("paging is not available yet")
-	}
-	limit := spec.Limit
-	if limit <= 0 || limit > viewMaxEntries {
-		limit = viewDefaultEntries
-	}
-	res, err := s.c.GetRecent(spec.ChildID, recentQuery{Rendered: false})
-	if err != nil {
-		return "", err
-	}
-	return renderTranscript(res.Events, limit, viewMaxBytes), nil
+	return s.c.viewTranscript(spec, false)
 }
 
 func (s *userSpawner) Send(ctx context.Context, spec tools.SendSpec) (tools.SendResult, error) {

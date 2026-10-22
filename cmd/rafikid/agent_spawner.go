@@ -268,25 +268,14 @@ func toolModelInfo(r *rafikiv1.ModelRow) tools.ModelInfo {
 	return m
 }
 
-// View is the interim adapter: paging is not implemented on this side yet, so
-// any cursor or search argument is refused rather than silently ignored. A
-// silent ignore would answer a paged request with page one forever.
+// View renders a descendant's transcript: the newest page by default, or the
+// page, entry or search spec names. authorize runs FIRST, before any load,
+// render or cursor parse — the gate must not depend on arguments.
 func (s *controllerSpawner) View(ctx context.Context, spec tools.ViewSpec) (string, error) {
 	if err := s.authorize(spec.ChildID); err != nil {
 		return "", err
 	}
-	if spec.Before != "" || spec.After != "" || spec.Entry != "" || spec.Find != "" {
-		return "", errors.New("paging is not available yet")
-	}
-	limit := spec.Limit
-	if limit <= 0 || limit > viewMaxEntries {
-		limit = viewDefaultEntries
-	}
-	res, err := s.c.GetRecent(spec.ChildID, recentQuery{Rendered: true})
-	if err != nil {
-		return "", err
-	}
-	return renderTranscript(res.Events, limit, viewMaxBytes), nil
+	return s.c.viewTranscript(spec, true)
 }
 
 func (s *controllerSpawner) Send(ctx context.Context, spec tools.SendSpec) (tools.SendResult, error) {

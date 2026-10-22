@@ -39,6 +39,10 @@ wait — do not manufacture tool calls to fill the time.
 Use `agent_list`/`agent_view` when you need to *look something up* — which
 agent is which, what one has said — never as a waiting loop.
 
+A long reply is cut on `agent_view`'s page — read it whole with
+`entry=<cursor>`, or locate something with `find=`, instead of concluding the
+agent stopped there.
+
 ## Dispatching by preset
 
 A dispatch carries `preset: "<group>:<role>"` — a named seat that fixes kind,
