@@ -253,83 +253,213 @@ func TestTranscriptViewOversizeEntryStillShown(t *testing.T) {
 }
 
 // TestTranscriptViewPagingIsLossless is the equivalence test: walking back
-// from the newest page and then forward from the oldest reassembles every
+// from the newest page and then forward from the first page reassembles every
 // entry exactly once, in order. It dies on any off-by-one in the window maths,
 // a marker naming the wrong cursor, or a page that skips or repeats an entry.
+//
+// The fixture is deliberately harder than a wall of one-line rows, and the
+// byte budget is tight enough to BIND, so the window maths is actually
+// exercised rather than merely called:
+//   - rows that render SEVERAL entries (a user row with three tool results
+//     renders as m:i.0, m:i.1, m:i.2), so a boundary that splits a row's
+//     entries, or a cursor that loses its sub-index, cannot pass;
+//   - compaction dividers;
+//   - cut entries, whose page line carries its own entry= marker;
+//   - entries larger than the whole budget, which only the never-empty floor
+//     can place — a page of one inside the middle of the transcript.
 func TestTranscriptViewPagingIsLossless(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	var msgs []store.Message
-	for i := 0; i < 137; i++ {
-		switch i % 4 {
+	for i := 0; i < 48; i++ {
+		switch i % 6 {
 		case 0:
 			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
 				anthropic.NewTextBlock(fmt.Sprintf("prompt %d", i)))})
 		case 1:
 			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewAssistantMessage(
-				anthropic.NewTextBlock(strings.Repeat(fmt.Sprintf("answer %d ", i), 5)))})
+				anthropic.NewTextBlock(strings.Repeat(fmt.Sprintf("answer %d ", i), 3)))})
 		case 2:
+			// One row, three entries — the sub-index half of the cursor.
 			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
-				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d", i), fmt.Sprintf("result %d", i), false))})
+				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d_a", i), fmt.Sprintf("first result %d", i), false),
+				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d_b", i), strings.Repeat("z", 600), false),
+				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d_c", i), fmt.Sprintf("third result %d", i), true),
+			)})
 		case 3:
 			msgs = append(msgs, store.Message{Ordinal: i, Kind: ptr(store.KindCompactionSummary),
 				InputTokens: ptr(1000 * i), Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))})
+		case 4:
+			// Longer than the 2000-char page cap, and longer than the byte
+			// budget below: cut, and too big for any page.
+			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewAssistantMessage(
+				anthropic.NewTextBlock(strings.Repeat(fmt.Sprintf("long answer %d ", i), 200)))})
+		case 5:
+			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+				anthropic.NewTextBlock(fmt.Sprintf("follow-up %d", i)))})
 		}
 	}
 	all := viewEntries(t, msgs)
-	ck.Eq(137, len(all), "one entry per row, dividers included")
+
+	// tight is small enough that the byte budget — not the entry limit, and
+	// not the end of the transcript — is what ends most pages.
+	const tight = 200
 
 	want := make([]string, len(all))
+	multiEntry, cutLines, dividers, oversize := 0, 0, 0, 0
 	for i, e := range all {
 		want[i] = pageLine(e)
+		if strings.HasSuffix(e.cursor, ".1") || strings.HasSuffix(e.cursor, ".2") {
+			multiEntry++
+		}
+		if e.cut {
+			cutLines++
+		}
+		if strings.HasPrefix(e.page, "— context") {
+			dividers++
+		}
+		if len(pageLine(e))+1 > tight {
+			oversize++
+		}
+	}
+	ck.True(len(all) > 48, "the multi-result rows render several entries each (%d entries)", len(all))
+	ck.True(multiEntry > 5, "the fixture has cursors carrying a sub-index (%d)", multiEntry)
+	ck.True(cutLines > 0, "the fixture has cut entries (%d)", cutLines)
+	ck.True(dividers > 0, "the fixture has compaction dividers (%d)", dividers)
+	ck.True(oversize > 0, "the fixture has entries larger than the whole budget (%d)", oversize)
+
+	// walk pages back from the newest page to the first, then forward from the
+	// first to the end. Both reassemblies are returned as pages of data lines.
+	walk := func(limit, maxBytes int) (back, forward [][]string) {
+		spec := func(mode pageMode, at int) pageSpec {
+			return pageSpec{mode: mode, at: at, limit: limit, maxBytes: maxBytes}
+		}
+		out := renderPage(all, spec(pageNewest, 0))
+		var first string
+		for hops := 0; ; hops++ {
+			if hops > len(all) {
+				t.Fatalf("before= walk did not terminate after %d pages", hops)
+			}
+			lines, before, _, hasBefore, hasAfter := viewPage(out)
+			ck.False(hasAfter && hops == 0, "the newest page has nothing after it")
+			back = append(back, lines)
+			if !hasBefore {
+				first = out
+				break
+			}
+			out = renderPage(all, spec(pageBefore, viewIndexOf(t, all, before)))
+		}
+		out = first
+		for hops := 0; ; hops++ {
+			if hops > len(all) {
+				t.Fatalf("after= walk did not terminate after %d pages", hops)
+			}
+			lines, _, after, _, hasAfter := viewPage(out)
+			forward = append(forward, lines)
+			if !hasAfter {
+				break
+			}
+			out = renderPage(all, spec(pageAfter, viewIndexOf(t, all, after)))
+		}
+		return back, forward
 	}
 
-	spec := func(mode pageMode, at int) pageSpec {
-		return pageSpec{mode: mode, at: at, limit: 20, maxBytes: viewMaxBytes}
-	}
+	for _, cfg := range []struct {
+		name     string
+		limit    int
+		maxBytes int
+	}{
+		{"no entry limit, so only the byte budget ends a page", 0, tight},
+		{"an entry limit and a byte budget together", 7, 900},
+	} {
+		back, forward := walk(cfg.limit, cfg.maxBytes)
 
-	// Backward: newest page, then follow every before= marker to the start.
-	var backward [][]string
-	out := renderPage(all, spec(pageNewest, 0))
-	for hops := 0; ; hops++ {
-		if hops > len(all) {
-			t.Fatalf("before= walk did not terminate after %d pages", hops)
+		var backFlat []string
+		for i := len(back); i > 0; i-- {
+			backFlat = append(backFlat, back[i-1]...)
 		}
-		lines, before, _, hasBefore, _ := viewPage(out)
-		backward = append(backward, lines)
-		if !hasBefore {
-			break
-		}
-		out = renderPage(all, spec(pageBefore, viewIndexOf(t, all, before)))
-	}
-	var backFlat []string
-	for i := len(backward) - 1; i >= 0; i-- {
-		backFlat = append(backFlat, backward[i]...)
-	}
-	ck.EqDeep(want, backFlat, "paging back from the newest page reassembles the transcript")
+		ck.EqDeep(want, backFlat, "%s: paging back from the newest page reassembles the transcript", cfg.name)
 
-	// Forward: from the oldest page, follow every after= marker to the end.
-	oldest := renderPage(all, spec(pageNewest, 0))
-	for {
-		_, before, _, hasBefore, _ := viewPage(oldest)
-		if !hasBefore {
-			break
+		var forwardFlat []string
+		for _, page := range forward {
+			forwardFlat = append(forwardFlat, page...)
 		}
-		oldest = renderPage(all, spec(pageBefore, viewIndexOf(t, all, before)))
+		ck.EqDeep(want, forwardFlat, "%s: paging forward from the first page reassembles the transcript", cfg.name)
+
+		if cfg.limit != 0 {
+			continue
+		}
+		// The byte budget is what produced these pages: many of them, and at
+		// least one holding several entries (so it was the budget, not the
+		// end of the transcript, that stopped the window).
+		ck.Greater(3, len(back), "%s: the walk back takes many pages (%d pages)", cfg.name, len(back))
+		ck.Greater(3, len(forward), "%s: the walk forward takes many pages (%d pages)", cfg.name, len(forward))
+		packed := 0
+		for _, page := range back {
+			if len(page) < 2 {
+				continue
+			}
+			packed++
+			size := 0
+			for _, line := range page {
+				size += len(line) + 1
+			}
+			ck.True(size <= cfg.maxBytes,
+				"%s: a page of %d entries fits the byte budget (%d > %d)", cfg.name, len(page), size, cfg.maxBytes)
+		}
+		ck.True(packed > 0, "%s: some pages hold several entries", cfg.name)
 	}
-	var forward []string
-	out = oldest
-	for hops := 0; ; hops++ {
-		if hops > len(all) {
-			t.Fatalf("after= walk did not terminate after %d pages", hops)
-		}
-		lines, _, after, _, hasAfter := viewPage(out)
-		forward = append(forward, lines...)
-		if !hasAfter {
-			break
-		}
-		out = renderPage(all, spec(pageAfter, viewIndexOf(t, all, after)))
-	}
-	ck.EqDeep(want, forward, "paging forward from the oldest page reassembles the transcript")
+}
+
+// TestTranscriptViewNeverEmptyOnBeforeAndAfter extends the newest-page floor
+// above to the two cursor paths: when the entry standing where a before= or
+// after= window would begin or end is larger than the whole budget, that entry
+// is shown alone — never an empty page, and never "(nothing after …)".
+func TestTranscriptViewNeverEmptyOnBeforeAndAfter(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	all := viewEntries(t, []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("small prompt"))},
+		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock(strings.Repeat("y", 5000)))},
+		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("small follow-up"))},
+	})
+	ck.EqDeep([]string{"m:0.0", "m:1.0", "m:2.0"}, viewCursors(all), "one entry per row")
+
+	const tight = 100
+	big := 1
+	ck.True(len(pageLine(all[big]))+1 > tight, "the middle entry alone exceeds the budget (%d bytes)",
+		len(pageLine(all[big])))
+
+	// after=: the window opens ON the oversize entry, so the from-start walk
+	// breaks immediately and the floor is the only thing with an entry to show.
+	after := renderPage(all, pageSpec{mode: pageAfter, at: 0, limit: 0, maxBytes: tight})
+	ck.StrContains(after, "showing m:1.0..m:1.0", "the oversize entry is the whole window")
+	ck.NotStrContains(after, "(nothing after", "an oversize first entry is not an empty page")
+	ck.EqDeep([]string{pageLine(all[big])}, viewDataLines(t, after),
+		"an after= page starting at an oversize entry shows it alone")
+	ck.StrContains(after, "…[1 later — after=m:1.0]", "and names the way on")
+
+	// before=: the window closes ON the oversize entry, so the from-end walk
+	// breaks immediately and the floor is again the only thing with an entry.
+	before := renderPage(all, pageSpec{mode: pageBefore, at: 2, limit: 0, maxBytes: tight})
+	ck.StrContains(before, "showing m:1.0..m:1.0", "the oversize entry is again the whole window")
+	ck.NotStrContains(before, "(nothing before", "an oversize last entry is not an empty page")
+	ck.EqDeep([]string{pageLine(all[big])}, viewDataLines(t, before),
+		"a before= page ending at an oversize entry shows it alone")
+	ck.StrContains(before, "…[1 earlier — before=m:1.0]", "and names the way back")
+	ck.StrContains(before, "…[1 later — after=m:1.0]", "with the way on")
+
+	// A window with several entries under the same tight budget still shows at
+	// least one of them rather than nothing: every entry exceeds the budget,
+	// so the floor is what keeps the page non-empty.
+	crowded := viewEntries(t, []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("start"))},
+		{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(strings.Repeat("x", 400)))},
+		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(strings.Repeat("x", 400)))},
+	})
+	crowdedOut := renderPage(crowded, pageSpec{mode: pageAfter, at: 0, limit: 0, maxBytes: tight})
+	ck.EqDeep([]string{pageLine(crowded[1])}, viewDataLines(t, crowdedOut),
+		"a normal multi-entry window under the same tight budget still shows at least one entry")
+	ck.NotStrContains(crowdedOut, "(nothing after", "two entries remain, so the page is not empty")
+	ck.StrContains(crowdedOut, "…[1 later — after=m:1.0]", "and it says one entry is left")
 }
 
 // TestTranscriptViewCursorErrors pins every refusal a cursor can earn: the
