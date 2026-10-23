@@ -19,19 +19,22 @@ import (
 
 type fakeLoader struct{ msgs []store.Message }
 
-func (f fakeLoader) Load(context.Context, string) ([]store.Message, error) {
+func (f fakeLoader) LoadPage(context.Context, string, store.HistoryPage) ([]store.Message, error) {
 	return f.msgs, nil
 }
 
-// recordingLoader remembers the id it was queried with, so a test can prove
-// the handler looked up the RESOLVED conversation id rather than the child id.
+// recordingLoader remembers the id and page it was queried with, so a test
+// can prove the handler looked up the RESOLVED conversation id rather than the
+// child id, and handed the request's bounds to the store.
 type recordingLoader struct {
-	msgs  []store.Message
-	gotID string
+	msgs    []store.Message
+	gotID   string
+	gotPage store.HistoryPage
 }
 
-func (r *recordingLoader) Load(_ context.Context, conversationID string) ([]store.Message, error) {
+func (r *recordingLoader) LoadPage(_ context.Context, conversationID string, page store.HistoryPage) ([]store.Message, error) {
 	r.gotID = conversationID
+	r.gotPage = page
 	return r.msgs, nil
 }
 
@@ -49,9 +52,7 @@ func (f fakeResolver) ConversationID(childID string) (string, bool) {
 	return cid, ok
 }
 
-// historyT0 is the fixture's base timestamp. Rows 0 and 1 share it, the way
-// every row one transaction wrote shares its transaction-start created_at;
-// row 2 is one second later.
+// historyT0 is the fixture's base timestamp.
 var historyT0 = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 func threeMessages() []store.Message {
@@ -73,75 +74,36 @@ func TestGetHistoryReturnsAllByDefault(t *testing.T) {
 	c.Eq(3, len(resp.Msg.Events), "got")
 }
 
-func TestGetHistoryFiltersByAfterOrdinal(t *testing.T) {
+// The page semantics are store.Messages.LoadPage's (TestLoadPage* in
+// pkg/store); the handler's job is to hand every bound over intact, and to
+// leave an unset one unset rather than collapsing it to a zero value.
+func TestGetHistoryPassesBoundsToTheStore(t *testing.T) {
 	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
+	loader := &recordingLoader{msgs: threeMessages()}
+	s := connectapi.NewServer(loader)
 	s.SetChildResolver(fakeResolver{})
 
-	resp, err := s.GetHistory(context.Background(),
+	_, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{
 			ChildId:      "c_1",
 			AfterOrdinal: proto.Int32(0),
+			Before:       timestamppb.New(historyT0.Add(time.Second)),
+			Limit:        proto.Int32(2),
 		}))
 	c.NoError(err, "GetHistory")
-	c.Eq(2, len(resp.Msg.Events), "got")
-	c.Eq(1, resp.Msg.Events[0].GetOrdinal(), "first ordinal")
-}
+	c.NotNil(loader.gotPage.AfterOrdinal, "after_ordinal")
+	c.Eq(0, *loader.gotPage.AfterOrdinal, "after_ordinal")
+	c.NotNil(loader.gotPage.Before, "before")
+	c.True(historyT0.Add(time.Second).Equal(*loader.gotPage.Before), "before = %v", *loader.gotPage.Before)
+	c.NotNil(loader.gotPage.Limit, "limit")
+	c.Eq(2, *loader.gotPage.Limit, "limit")
 
-// limit keeps the newest N events, so a caller paging backwards gets the most
-// recent page first.
-func TestGetHistoryLimitReturnsNewest(t *testing.T) {
-	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
-	s.SetChildResolver(fakeResolver{})
-
-	resp, err := s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{
-			ChildId: "c_1",
-			Limit:   proto.Int32(1),
-		}))
+	_, err = s.GetHistory(context.Background(),
+		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
 	c.NoError(err, "GetHistory")
-	c.Eq(1, len(resp.Msg.Events), "got %d events, want 1", len(resp.Msg.Events))
-	c.Eq(2, resp.Msg.Events[0].GetOrdinal(), "the one event is the newest")
-}
-
-// Rows 0 and 1 share a timestamp because one transaction wrote them. A page of
-// 2 must therefore widen back to the whole group and return all three events:
-// cutting between 0 and 1 would let a client paging with `before` skip ordinal
-// 0 entirely.
-func TestGetHistoryLimitKeepsSameTimestampGroup(t *testing.T) {
-	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
-	s.SetChildResolver(fakeResolver{})
-
-	resp, err := s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{
-			ChildId: "c_1",
-			Limit:   proto.Int32(2),
-		}))
-	c.NoError(err, "GetHistory")
-	c.Eq(3, len(resp.Msg.Events), "got %d events, want 3 (the whole t0 group)", len(resp.Msg.Events))
-	c.Eq(0, resp.Msg.Events[0].GetOrdinal(), "first ordinal")
-	c.Eq(1, resp.Msg.Events[1].GetOrdinal(), "second ordinal")
-	c.Eq(2, resp.Msg.Events[2].GetOrdinal(), "third ordinal")
-}
-
-// before is STRICTLY earlier: an event whose ts equals the cursor is excluded,
-// which is what makes paging with the oldest kept ts not repeat a row.
-func TestGetHistoryBeforeFiltersStrictly(t *testing.T) {
-	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
-	s.SetChildResolver(fakeResolver{})
-
-	resp, err := s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{
-			ChildId: "c_1",
-			Before:  timestamppb.New(historyT0.Add(time.Second)),
-		}))
-	c.NoError(err, "GetHistory")
-	c.Eq(2, len(resp.Msg.Events), "got %d events, want 2", len(resp.Msg.Events))
-	c.Eq(0, resp.Msg.Events[0].GetOrdinal(), "first ordinal")
-	c.Eq(1, resp.Msg.Events[1].GetOrdinal(), "second ordinal")
+	c.Nil(loader.gotPage.AfterOrdinal, "unset after_ordinal")
+	c.Nil(loader.gotPage.Before, "unset before")
+	c.Nil(loader.gotPage.Limit, "unset limit")
 }
 
 // A limit <= 0 is refused before the conversation resolves, so no resolver is

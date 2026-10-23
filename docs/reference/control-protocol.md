@@ -278,9 +278,12 @@ Note that the durable event ordinal is **not** `conversation_message.ordinal`: i
 `GetHistory` reads the `conversation_message` side of that split — the
 ordinal it returns is `conversation_message.ordinal`, never the event-log
 ordinal — and every event it returns carries `ts`: its row's `created_at`.
-That is **transaction-start time**, so every row one transaction wrote (a
-prompt and the assistant reply, a tool call and its result, a whole batch)
-shares one `ts`.
+That is **transaction-start time**, so every row one transaction wrote shares
+one `ts`. Ordinary messages are appended one statement each and get their own;
+the multi-row transaction today is a compaction or `/clear` boundary written
+together with the tail copied after it (`appendBoundary`, `pkg/store`), and
+those copies render no event. Clients must still treat `ts` as non-unique; the
+widening below is what makes that safe.
 
 The request's two optional fields page that history BACKWARDS:
 
@@ -294,9 +297,10 @@ The cut is **group-aligned**: when it would fall between two events sharing a
 more than `limit` events. This is what keeps a page from breaking a
 transaction apart: a client pages with the oldest `ts` it received, and if the
 cut had split a same-`ts` group, the rows on the near side of the split would
-share that `ts` and be skipped for good by the next `before`. Two `nil`
-timestamps are never the same group — an untimestamped event has no group to
-widen to.
+share that `ts` and be skipped for good by the next `before`. The bounds are
+applied in the database (`store.Messages.LoadPage`), so a page costs the rows
+it returns rather than the whole conversation; `compaction_tail` rows render no
+event and never count toward `limit`.
 
 Both fields are additive optional proto fields, so `protocol.Epoch` is
 unchanged.

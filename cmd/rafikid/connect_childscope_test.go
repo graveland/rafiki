@@ -114,7 +114,7 @@ func (i *recordingInbox) Accept(_ context.Context, in inbox.Inbound) (string, er
 
 type recordingHistory struct{ loads []string }
 
-func (h *recordingHistory) Load(_ context.Context, conversationID string) ([]store.Message, error) {
+func (h *recordingHistory) LoadPage(_ context.Context, conversationID string, _ store.HistoryPage) ([]store.Message, error) {
 	h.loads = append(h.loads, conversationID)
 	return nil, nil
 }

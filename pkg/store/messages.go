@@ -63,10 +63,11 @@ type Message struct {
 	// (including on a kind='clear' or kind='compaction_tail' row, which carry
 	// no size).
 	InputTokens *int
-	// CreatedAt is the row's created_at — transaction-start time, shared by
-	// every row one transaction wrote. It is what a durable event's ts
-	// reports, and because it repeats within a transaction a time cursor
-	// pages on whole groups rather than single rows.
+	// CreatedAt is the row's created_at — transaction-start time, so every row
+	// one transaction wrote shares it (a compaction or clear boundary and the
+	// tail copied after it). It is what a durable event's ts reports, and
+	// because it can repeat, a time cursor pages on whole groups rather than
+	// single rows (LoadPage).
 	CreatedAt time.Time
 }
 
@@ -101,6 +102,81 @@ func (m *Messages) load(ctx context.Context, conversationID string, workingOnly 
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
 	}
+	return scanMessages(rows)
+}
+
+// HistoryPage bounds a LoadPage read. Every field is optional; the zero value
+// reads the whole history.
+type HistoryPage struct {
+	// AfterOrdinal keeps rows whose ordinal is strictly greater.
+	AfterOrdinal *int
+	// Before keeps rows whose created_at is strictly earlier.
+	Before *time.Time
+	// Limit keeps only the newest N rows left after the other bounds, widened
+	// backwards so the page never splits rows that share a created_at: a
+	// client pages with the oldest ts it received as the next Before, and a
+	// split group's older half would carry that same ts and be skipped for
+	// good. A page can therefore hold more than Limit rows. Limit must be
+	// positive.
+	Limit *int
+}
+
+// historyPageSQL is LoadPage's one statement. The three bounds ride as
+// nullable parameters ($2 after_ordinal, $3 before, $4 limit), and $5 is the
+// compaction_tail kind, whose rows render no event and so never count toward
+// the limit. edge is the oldest row the limit keeps, found by walking the
+// (conversation_id, ordinal) index backwards; floor is where that row's
+// same-created_at run begins — one past the newest in-bounds row older than
+// edge with a different created_at — so the widening is exactly "extend the
+// page back over adjacent rows sharing the edge's timestamp". With no limit,
+// or fewer rows than the limit, floor has no row and nothing is cut.
+const historyPageSQL = `
+	WITH edge AS (
+		SELECT ordinal, created_at
+		  FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND kind IS DISTINCT FROM $5
+		   AND ($2::int IS NULL OR ordinal > $2::int)
+		   AND ($3::timestamptz IS NULL OR created_at < $3::timestamptz)
+		 ORDER BY ordinal DESC
+		OFFSET $4::int - 1 LIMIT 1
+	), floor AS (
+		SELECT coalesce((
+			SELECT max(m.ordinal) + 1
+			  FROM conversations.conversation_message m, edge
+			 WHERE m.conversation_id = $1::uuid AND m.kind IS DISTINCT FROM $5
+			   AND ($2::int IS NULL OR m.ordinal > $2::int)
+			   AND ($3::timestamptz IS NULL OR m.created_at < $3::timestamptz)
+			   AND m.ordinal < edge.ordinal AND m.created_at <> edge.created_at
+		), -1) AS ordinal
+		 WHERE $4::int IS NOT NULL AND EXISTS (SELECT 1 FROM edge)
+	)
+	SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
+	  FROM conversations.conversation_message
+	 WHERE conversation_id = $1::uuid AND kind IS DISTINCT FROM $5
+	   AND ($2::int IS NULL OR ordinal > $2::int)
+	   AND ($3::timestamptz IS NULL OR created_at < $3::timestamptz)
+	   AND ordinal >= coalesce((SELECT ordinal FROM floor), -1)
+	 ORDER BY ordinal`
+
+// LoadPage reads one page of the conversation's FULL history (not
+// horizon-bounded, like Load) in ordinal order, bounded by page in the
+// database so a backward page costs the rows it returns, not the whole
+// conversation. It omits kind='compaction_tail' rows: they are copies of
+// earlier rows that render no event, so counting them would short a page.
+func (m *Messages) LoadPage(ctx context.Context, conversationID string, page HistoryPage) ([]Message, error) {
+	if page.Limit != nil && *page.Limit <= 0 {
+		return nil, fmt.Errorf("load history page: limit %d is not positive", *page.Limit)
+	}
+	rows, err := m.pool.Query(ctx, historyPageSQL, conversationID,
+		page.AfterOrdinal, page.Before, page.Limit, KindCompactionTail)
+	if err != nil {
+		return nil, fmt.Errorf("load history page: %w", err)
+	}
+	return scanMessages(rows)
+}
+
+// scanMessages decodes rows selected with load's column list, closing rows.
+func scanMessages(rows pgx.Rows) ([]Message, error) {
 	defer rows.Close()
 	var out []Message
 	for rows.Next() {
