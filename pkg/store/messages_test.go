@@ -73,4 +73,11 @@ func TestLoadRoundTripsKindAndInputTokens(t *testing.T) {
 	c.False(comp.InputTokens == nil || *comp.InputTokens != 182000, "compaction row input_tokens = %v, want 182000", comp.InputTokens)
 	// The summary row is kept API-valid as Claude Code's own user message.
 	c.Eq("user", string(comp.Param.Role), "compaction row role = %q, want user", comp.Param.Role)
+
+	// created_at is what a durable event's ts reports, so every row Load
+	// returns must carry a real instant -- a zero here would put the event at
+	// year 1 and page it behind every other row.
+	for i, m := range msgs {
+		c.False(m.CreatedAt.IsZero(), "message %d has a zero CreatedAt", i)
+	}
 }

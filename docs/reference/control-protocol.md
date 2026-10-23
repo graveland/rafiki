@@ -273,6 +273,34 @@ clear message instead of misbehaving.
 `StreamEvents` uses `EventSubject` predicates, `EventTier`, and `EventCursor` (per-child ordinals).
 Note that the durable event ordinal is **not** `conversation_message.ordinal`: it is a separate per-child sequence starting at 0 stored in `conversations.event_log`.
 
+### `GetHistory`: ts, `limit` and `before`
+
+`GetHistory` reads the `conversation_message` side of that split — the
+ordinal it returns is `conversation_message.ordinal`, never the event-log
+ordinal — and every event it returns carries `ts`: its row's `created_at`.
+That is **transaction-start time**, so every row one transaction wrote (a
+prompt and the assistant reply, a tool call and its result, a whole batch)
+shares one `ts`.
+
+The request's two optional fields page that history BACKWARDS:
+
+| Field | Meaning |
+|---|---|
+| `before` | Keep only events whose `ts` is **strictly** earlier. Unset = no bound. |
+| `limit` | Keep only the newest N events left after the other filters. Unset = no limit; `<= 0` is `InvalidArgument`, checked before the conversation resolves. |
+
+The cut is **group-aligned**: when it would fall between two events sharing a
+`ts`, it widens backwards to the start of that group, so a page can return
+more than `limit` events. This is what keeps a page from breaking a
+transaction apart: a client pages with the oldest `ts` it received, and if the
+cut had split a same-`ts` group, the rows on the near side of the split would
+share that `ts` and be skipped for good by the next `before`. Two `nil`
+timestamps are never the same group — an untimestamped event has no group to
+widen to.
+
+Both fields are additive optional proto fields, so `protocol.Epoch` is
+unchanged.
+
 #### `EventSubject`
 
 | Field | Meaning |
@@ -363,7 +391,7 @@ defined under "Who may call what" below; each row names its own.
 
 | RPC | Kind | Purpose |
 |---|---|---|
-| `GetHistory` | unary · childScoped | Durable events for one child, after an optional ordinal |
+| `GetHistory` | unary · childScoped | Durable events for one child: the persisted messages converted to events, each carrying `ts` (its row's `created_at` — transaction time; unset only on a row written before the column was read), filterable by `after_ordinal`, and pageable BACKWARDS by `before` (a `Timestamp`, strictly earlier) with an optional `limit` of the newest N events. The cut never splits events that share a timestamp — see "`GetHistory`: ts, `limit` and `before`" below. These are additive OPTIONAL fields, so no protocol epoch bump |
 | `StreamEvents` | server-streaming · childScoped | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child or a `/exit` slash command (see "`Send` and the durable inbox" and "Slash commands in a prompt" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
 | `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child, plus the server-derived display fields `display_state`/`waiting_on`/`display_msg` — see "Operator display state"); answers only the caller's own subtree |

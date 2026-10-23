@@ -2,6 +2,7 @@ package eventconv_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
@@ -29,6 +30,29 @@ func TestEventsFromMessagesCarriesOrdinal(t *testing.T) {
 	c.NotNil(evs[1].GetAssistantMessage(), "event 1 is not an assistant message")
 	c.Eq(rafikiv1.StopReason_STOP_REASON_END_TURN, evs[1].GetAssistantMessage().StopReason, "stop reason")
 	c.Eq("end_turn", evs[1].GetAssistantMessage().RawStopReason, "raw stop reason")
+}
+
+// Each event carries its row's created_at as ts. A row with no recorded
+// created_at leaves ts unset rather than stamping the zero time, which would
+// read as "year 1" and sort before every real event.
+func TestEventsFromMessagesCarriesTimestamp(t *testing.T) {
+	c := assert.NewAborting(t)
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	t1 := t0.Add(90 * time.Second)
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first")), CreatedAt: t0},
+		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("second")), CreatedAt: t1},
+		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("undated"))},
+	}
+
+	evs := eventconv.EventsFromMessages("c_test", msgs)
+
+	c.Len(evs, 3, "got %d events, want 3", len(evs))
+	c.NotNil(evs[0].GetTs(), "event 0 ts is nil")
+	c.NotNil(evs[1].GetTs(), "event 1 ts is nil")
+	c.Eq(t0, evs[0].GetTs().AsTime().UTC(), "event 0 ts")
+	c.Eq(t1, evs[1].GetTs().AsTime().UTC(), "event 1 ts")
+	c.Nil(evs[2].GetTs(), "event 2 has a zero CreatedAt, want ts nil")
 }
 
 func TestBlocksFromParamPreservesToolUseInputAsRawJSON(t *testing.T) {

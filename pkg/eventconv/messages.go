@@ -4,6 +4,7 @@ package eventconv
 
 import (
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -13,7 +14,9 @@ import (
 // durable-tier events, one per message, carrying the stored ordinal. The
 // ordinal is the resumption cursor: it already exists as the
 // (conversation_id, ordinal) append-idempotency key, so nothing new is
-// invented here.
+// invented here. Each event also carries the row's created_at as its ts, so a
+// client can page by time; a row with no recorded created_at leaves ts unset
+// rather than stamping the zero time.
 func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event {
 	out := make([]*rafikiv1.Event, 0, len(msgs))
 	for _, m := range msgs {
@@ -23,6 +26,9 @@ func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event 
 		ev := &rafikiv1.Event{
 			ChildId: childID,
 			Ordinal: proto.Int32(int32(m.Ordinal)),
+		}
+		if !m.CreatedAt.IsZero() {
+			ev.Ts = timestamppb.New(m.CreatedAt)
 		}
 		if m.Kind != nil && *m.Kind == store.KindCompactionSummary {
 			cb := &rafikiv1.CompactionBoundary{}

@@ -19,6 +19,15 @@ message GetHistoryRequest {
   // Return only durable events with ordinal strictly greater than this.
   // Unset means the whole conversation.
   optional int32 after_ordinal = 2;
+
+  // limit returns only the newest N events after the other filters. A page
+  // never splits events that share a timestamp: the cut widens to include
+  // every event with the same ts as the oldest one kept, so a client paging
+  // with `before` (strictly older than) never skips a row. Unset = no limit;
+  // set to <= 0 is InvalidArgument.
+  optional int32 limit = 3;
+  // before keeps only events whose ts is strictly earlier. Unset = no bound.
+  google.protobuf.Timestamp before = 4;
 }
 
 message GetHistoryResponse {

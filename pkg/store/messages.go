@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,11 @@ type Message struct {
 	// (including on a kind='clear' or kind='compaction_tail' row, which carry
 	// no size).
 	InputTokens *int
+	// CreatedAt is the row's created_at — transaction-start time, shared by
+	// every row one transaction wrote. It is what a durable event's ts
+	// reports, and because it repeats within a transaction a time cursor
+	// pages on whole groups rather than single rows.
+	CreatedAt time.Time
 }
 
 // Load returns the conversation's FULL message history in ordinal order. It is
@@ -80,12 +86,12 @@ func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, 
 // decode — is shared between the two reads.
 func (m *Messages) load(ctx context.Context, conversationID string, workingOnly bool) ([]Message, error) {
 	query := `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid ORDER BY ordinal`
 	if workingOnly {
 		query = `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid
 		   AND ordinal >= coalesce((SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid), 0)
@@ -103,7 +109,7 @@ func (m *Messages) load(ctx context.Context, conversationID string, workingOnly 
 			role    string
 			content []byte
 		)
-		if err := rows.Scan(&msg.Ordinal, &role, &content, &msg.ToolUseIDs, &msg.StopReason, &msg.Kind, &msg.InputTokens); err != nil {
+		if err := rows.Scan(&msg.Ordinal, &role, &content, &msg.ToolUseIDs, &msg.StopReason, &msg.Kind, &msg.InputTokens, &msg.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		wire, err := json.Marshal(map[string]json.RawMessage{

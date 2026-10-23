@@ -58,6 +58,8 @@ class ReviewAcceptStatus:
 class GetHistoryRequest:
     child_id: str = ""
     after_ordinal: Optional[int] = None
+    limit: Optional[int] = None
+    before: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -65,6 +67,10 @@ class GetHistoryRequest:
             out["childId"] = self.child_id
         if self.after_ordinal is not None:
             out["afterOrdinal"] = self.after_ordinal
+        if self.limit is not None:
+            out["limit"] = self.limit
+        if self.before is not None:
+            out["before"] = _ts_out(self.before)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "GetHistoryRequest":
@@ -75,6 +81,12 @@ class GetHistoryRequest:
         _v = _d.get("afterOrdinal")
         if _v is not None:
             obj.after_ordinal = _int_in(_v)
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
+        _v = _d.get("before")
+        if _v is not None:
+            obj.before = _ts_in(_v, "before")
         return obj
 
 @dataclasses.dataclass

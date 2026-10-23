@@ -189,10 +189,19 @@ func (s *Server) Routes(interceptors ...connect.Interceptor) (string, http.Handl
 }
 
 // GetHistory serves the durable tier: persisted messages converted to native
-// events, filtered to those after the caller's cursor. The cursor is the
-// stored ordinal, which is exact — unlike a timestamp, which collides because
-// postgres now() is transaction-start time and is identical for every row
-// written in one transaction.
+// events, each carrying its row's created_at as ts, filtered and paged by the
+// request's three optional fields:
+//
+//   - after_ordinal keeps events with a strictly greater ordinal. The ordinal
+//     is exact and is the resumption cursor a follower replays from.
+//   - before keeps events whose ts is strictly earlier, which is how a caller
+//     pages backwards through history.
+//   - limit keeps only the newest N events left after those filters — but a
+//     page never splits events that share a timestamp. created_at is
+//     transaction-start time, so every row one transaction wrote carries the
+//     same ts; cutting between them would make `before` skip rows on the next
+//     page. The cut therefore widens backwards to the start of the oldest kept
+//     event's same-ts group, and a page may return more than limit events.
 func (s *Server) GetHistory(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.GetHistoryRequest],
@@ -201,6 +210,12 @@ func (s *Server) GetHistory(
 	if childID == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
+	}
+	// Checked before the conversation resolves: a malformed limit is refused
+	// regardless of the child named, and never costs a storage read.
+	if req.Msg.Limit != nil && req.Msg.GetLimit() <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("limit must be positive"))
 	}
 	// childScoped: the subtree boundary runs BEFORE the conversation
 	// resolves, so a caller learns nothing about a child it may not read —
@@ -233,9 +248,41 @@ func (s *Server) GetHistory(
 		msgs = kept
 	}
 
-	return connect.NewResponse(&rafikiv1.GetHistoryResponse{
-		Events: eventconv.EventsFromMessages(childID, msgs),
-	}), nil
+	events := eventconv.EventsFromMessages(childID, msgs)
+
+	if before := req.Msg.GetBefore(); before != nil {
+		cutoff := before.AsTime()
+		kept := events[:0]
+		for _, ev := range events {
+			if ts := ev.GetTs(); ts != nil && ts.AsTime().Before(cutoff) {
+				kept = append(kept, ev)
+			}
+		}
+		events = kept
+	}
+
+	if n := req.Msg.GetLimit(); req.Msg.Limit != nil && int(n) < len(events) {
+		cut := len(events) - int(n)
+		// Widen the cut back to the start of the oldest kept event's
+		// same-timestamp group, so the page never splits a transaction.
+		for cut > 0 && sameEventTs(events[cut-1], events[cut]) {
+			cut--
+		}
+		events = events[cut:]
+	}
+
+	return connect.NewResponse(&rafikiv1.GetHistoryResponse{Events: events}), nil
+}
+
+// sameEventTs reports whether two events share a timestamp. A nil ts is never
+// equal to anything, including another nil: an event with no recorded
+// created_at carries no group to widen to.
+func sameEventTs(a, b *rafikiv1.Event) bool {
+	aTs, bTs := a.GetTs(), b.GetTs()
+	if aTs == nil || bTs == nil {
+		return false
+	}
+	return aTs.AsTime().Equal(bTs.AsTime())
 }
 
 // Compile-time proof that the production type satisfies the test seam.
