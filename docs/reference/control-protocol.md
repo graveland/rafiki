@@ -191,7 +191,8 @@ budgets an idle-read timeout: a quiet stream is the normal case, not a dead
 connection, and the protocol has no keepalive frame (Connect defines none, and
 every face is HTTP/1.1, so there are no HTTP/2 PINGs). The Python SDK turns
 that quiet window into a `deadline_exceeded` error its callers re-open on
-(cursor-replayed for `settled()`, at-most-once for `Receive`).
+(cursor-replayed for `settled()`, at-most-once for `Receive`); the Rust SDK's
+`follow_events` re-opens by itself, from a cursor built from what it yielded.
 
 The **per-child unix socket** (script children, and any child kind whose
 tools are hosted) is described under "Script children" below: the socket is

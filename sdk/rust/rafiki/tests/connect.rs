@@ -4,116 +4,19 @@
 //! Each test spawns its own hyper server, so nothing here needs a rafikid (the
 //! live-daemon test is `tests/daemon.rs`). Everything is offline.
 
-use std::convert::Infallible;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
 use http::{HeaderValue, Request, Response};
-use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
-use hyper::body::{Frame, Incoming};
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
 use prost::Message as _;
 use rafiki::{pb, Client};
 
-/// What the stub server answers with.
-type TestBody = BoxBody<Bytes, std::io::Error>;
-
-/// What a stub answers, once it has read the request.
-type StubFuture = Pin<Box<dyn Future<Output = Result<Response<TestBody>, Infallible>> + Send>>;
-
-/// One stub handler.
-type Stub = Arc<dyn Fn(Request<Incoming>) -> StubFuture + Send + Sync>;
-
-fn full(bytes: impl Into<Bytes>) -> TestBody {
-    Full::new(bytes.into())
-        .map_err(|never| match never {})
-        .boxed()
-}
-
-/// A body made of the given frames, in order.
-fn frames(parts: Vec<Bytes>) -> TestBody {
-    let stream = futures_util::stream::iter(
-        parts
-            .into_iter()
-            .map(|part| Ok::<_, std::io::Error>(Frame::data(part))),
-    );
-    BodyExt::boxed(StreamBody::new(stream))
-}
-
-/// A body that never yields: headers, then silence.
-fn silent() -> TestBody {
-    BodyExt::boxed(StreamBody::new(futures_util::stream::pending::<
-        Result<Frame<Bytes>, std::io::Error>,
-    >()))
-}
-
-/// One Connect streaming envelope.
-fn envelop(flags: u8, payload: &[u8]) -> Bytes {
-    let mut out = vec![flags];
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
-    Bytes::from(out)
-}
-
-fn end_of_stream(json: &str) -> Bytes {
-    envelop(0x02, json.as_bytes())
-}
-
-fn with_epoch(mut response: Response<TestBody>) -> Response<TestBody> {
-    response
-        .headers_mut()
-        .insert("rafiki-protocol", HeaderValue::from_static("4"));
-    response
-}
-
-fn header_of(req: &Request<Incoming>, name: &str) -> Option<String> {
-    req.headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-}
-
-/// Serve `handler` on 127.0.0.1:0 and return its base URL.
-async fn serve(handler: Stub) -> String {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("a bound address");
-    tokio::spawn(async move {
-        while let Ok((stream, _peer)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let service = service_fn(move |req: Request<Incoming>| {
-                    let handler = handler.clone();
-                    async move { handler(req).await }
-                });
-                if let Err(err) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await
-                {
-                    // A client that hangs up mid-stream is a test's own doing.
-                    eprintln!("stub connection ended: {err}");
-                }
-            });
-        }
-    });
-    format!("http://{addr}")
-}
-
-/// One distinct event, so a decoded message is identifiable.
-fn event(child_id: &str, ordinal: i32) -> pb::Event {
-    pb::Event {
-        child_id: child_id.to_string(),
-        ordinal: Some(ordinal),
-        ts: None,
-        payload: None,
-    }
-}
+mod common;
+use common::*;
 
 #[tokio::test]
 async fn unary_success() {
@@ -247,25 +150,6 @@ async fn a_non_200_becomes_the_connect_error_it_names() {
     assert!(err.is_not_found(), "{err}");
     assert_eq!(err.message, "no such child: c_9");
     assert_eq!(err.http_status, Some(404));
-}
-
-/// Check a streaming request's shape and decode it: ONE envelope, flags 0, a
-/// length that covers the rest of the body.
-async fn read_stream_request(req: Request<Incoming>) -> pb::StreamEventsRequest {
-    assert_eq!(
-        header_of(&req, "content-type").as_deref(),
-        Some("application/connect+proto")
-    );
-    let body = req
-        .into_body()
-        .collect()
-        .await
-        .expect("the request body")
-        .to_bytes();
-    assert_eq!(body[0], 0);
-    let length = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
-    assert_eq!(body.len(), 5 + length);
-    pb::StreamEventsRequest::decode(&body[5..]).expect("a StreamEventsRequest")
 }
 
 /// A stub that answers a stream request with `body`.

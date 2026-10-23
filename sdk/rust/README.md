@@ -10,9 +10,8 @@ It exists so a Rust program can drive a daemon without shelling out to
 child's transcript, send a prompt, follow the event feed.
 
 ```rust
-use std::time::Duration;
 use futures_util::StreamExt;
-use rafiki::{pb, Client};
+use rafiki::{pb, Client, FollowPolicy, Followed};
 
 let client = Client::new("unix:///run/user/1000/rafiki/controller.sock", None)?;
 let children = client.list_children(&pb::ListChildrenRequest::default()).await?;
@@ -22,18 +21,13 @@ let request = pb::StreamEventsRequest {
     tier: pb::EventTier::All as i32,
     ..Default::default()
 };
-// A quiet stream sends no headers, so the idle window can end the open too.
-let mut events = match client.stream_events(&request, Duration::from_secs(30)).await {
-    Ok(events) => events,
-    Err(err) if err.is_idle() => return Ok(()), // nothing yet: re-open later with your cursor
-    Err(err) => return Err(err.into()),
-};
-while let Some(event) = events.next().await {
-    match event {
-        Ok(event) => println!("{} {:?}", event.child_id, event.ordinal),
-        // A quiet daemon is normal: resume with your own cursor, don't hang.
-        Err(err) if err.is_idle() => break,
-        Err(err) => return Err(err.into()),
+// Re-opens itself across idle windows, dropped connections and daemon restarts.
+let mut events = client.follow_events(request, FollowPolicy::default());
+while let Some(item) = events.next().await {
+    match item? {
+        Followed::Event(event) => println!("{} {:?}", event.child_id, event.ordinal),
+        // Deltas from the gap are gone; durable events will be replayed.
+        Followed::Interrupted { cause, retry_in, .. } => eprintln!("{cause}; retrying in {retry_in:?}"),
     }
 }
 ```
@@ -71,7 +65,7 @@ normal token for a local daemon.
 
 Typed wrappers over `Client::unary` and `Client::server_stream`, taking and
 returning the generated `pb::` types: `get_history`, `stream_events(req,
-idle)`, `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
+idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
 `list_executors`. `unary` and `server_stream` are public, so an RPC added to
 `control.proto` is callable immediately (regenerate first). `pb` holds the
@@ -111,28 +105,56 @@ stays retryable instead of looking terminal. The daemon's own
 A response body, or one stream envelope, over 64 MiB is `resource_exhausted`;
 a length field is never trusted past that.
 
-## Idle and resume
+## Following the event feed
 
-A server stream's headers arrive with its **first message**, not before: a
-stream with nothing to say yet sends no bytes at all. `server_stream(method,
-req, idle)` therefore bounds two waits with `idle` — the response headers, and
-each next body frame. On expiry the stream yields
-`deadline_exceeded` / "stream idle" (`is_idle()`) and ends — and because a quiet
-stream sends no headers, that expiry usually ends `stream_events(...).await`
-itself, before any `Streaming` exists. Handle `is_idle()` at the open as well
-as on each item.
+`follow_events(req, policy)` is the event feed a long-running consumer wants:
+a `Following` stream of `Followed::Event(..)` and `Followed::Interrupted {
+attempt, cause, retry_in }` that re-opens itself.
 
-That is not a failure, and the SDK never re-opens the stream itself: only the
-caller knows the cursor. A dropped connection is the same kind of event, and so
-is any end without the Connect end-of-stream envelope ("stream closed without
-an end-of-stream envelope"): a truncation, never a clean close. Treat
-`is_idle()` and `is_unavailable()` alike — re-open from your own cursor. Only
-`None` from the stream, after a flags-`0x02` end-of-stream envelope, is a clean
-end.
+- **Cursor.** It records the highest ordinal yielded per child, and on every
+  re-open sends them as `ordinals` with a `floor` at the newest server time it
+  has seen (the `Date` of its last open, or a later event's `ts`), so the
+  daemon replays exactly the durable events it missed — including those of a
+  child born during the gap. `req.cursor` seeds the first open; unset means
+  live. A live `child` subject reads `GetChild.latest_ordinal` first and opens
+  from it, because an unnamed child subject replays its whole log.
+- **Idle** (`policy.idle`, default 30s) re-opens at once and silently: a quiet
+  stream lost nothing.
+- **Interruptions** — `unavailable`, a truncated stream, a clean end (a daemon
+  shutting down) — yield `Interrupted`, then re-open after a jittered
+  exponential backoff (`initial_backoff` 500ms doubling to `max_backoff` 30s).
+  Ephemeral events from the gap (`content_block_delta`) are gone; the
+  `AssistantMessage` that follows carries the full text, so drop partial text
+  on `Interrupted`. `max_retries` (default unlimited) bounds consecutive
+  failures; an event resets the count.
+- **Anything else is terminal**: `unauthenticated`, a protocol mismatch,
+  `not_found`, `permission_denied`. It is yielded once and the stream ends.
 
-Resume by calling `stream_events` again with `EventCursor` set from the events
-already seen (`ordinals` for children you have seen, `floor` for a child you
-have not). Never invent a cursor of 0 — 0 is a real ordinal.
+`Client` is cheap to clone (it shares its connection pool), and the follower
+owns a clone, so a `Following` is `'static` and `Send`.
+
+## Raw streams: idle and resume
+
+`stream_events(req, idle)` is one open, and nothing re-opens it. `idle` bounds
+two waits — the response headers, and each next body frame. On expiry the
+stream yields `deadline_exceeded` / "stream idle" (`is_idle()`) and ends. A
+current daemon flushes `StreamEvents` headers at open, but an older one sends
+them with the first message, so handle `is_idle()` at the open as well as on
+each item. Other server streams still send headers with their first message.
+
+A dropped connection, and any end without the Connect end-of-stream envelope
+("stream closed without an end-of-stream envelope"), is `unavailable`: a
+truncation, never a clean close. Only `None` from the stream, after a
+flags-`0x02` end-of-stream envelope, is a clean end.
+
+Resuming by hand means calling `stream_events` again with `EventCursor` set
+from the events already seen (`ordinals` for children you have seen, `floor`
+for a child you have not). Never invent a cursor of 0 — 0 is a real ordinal.
+
+Every TCP connection the client dials has keepalive on (30s, probing every
+10s), so the OS notices a dead peer without protocol traffic. There is no
+keepalive frame on the wire: Connect defines none, and every rafikid face is
+HTTP/1.1.
 
 Two ordinal spaces exist and must never be mixed: `GetHistory` events are
 `conversation_message` ordinals, the event feed's `Event.ordinal` is the
@@ -161,7 +183,8 @@ in-process hyper server on `127.0.0.1:0`, and the live-daemon tests in
 against the daemon at `RAFIKI_SDK_TEST_URL` (with `RAFIKI_SDK_TEST_TOKEN` as an
 optional bearer token), and FAILS when it is unset. They only read: a unary
 call, a stream that replays a child's recent events, idles and resumes from
-its cursor without a repeat, backward `GetHistory` paging checked against one
+its cursor without a repeat, a follower that does the same across several
+silent idle re-opens, a live child follower that never replays history, backward `GetHistory` paging checked against one
 unbounded read, and the daemon's own epoch refusal on both codecs (sent through
 `Client::with_wire_epoch`, which exists only under the `test-hooks` feature —
 never enable it in a consumer). The daemon needs a child that is not working

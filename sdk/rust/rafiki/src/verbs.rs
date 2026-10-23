@@ -21,8 +21,9 @@ impl Client {
         self.unary("GetHistory", req).await
     }
 
-    /// The daemon's event feed, as a stream. A quiet stream ends with
-    /// [`Error::is_idle`]; resume from `cursor`.
+    /// One open of the daemon's event feed. A quiet stream ends with
+    /// [`Error::is_idle`] and nothing re-opens it; [`Client::follow_events`]
+    /// is the feed that resumes itself.
     pub async fn stream_events(
         &self,
         req: &pb::StreamEventsRequest,

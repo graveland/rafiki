@@ -29,6 +29,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 http = "1"
 http-body-util = "0.1"
+httpdate = "1"
 hyper = { version = "1", features = ["client", "http1"] }
 # rustls + ring only: no aws-lc-rs, no native-tls, no openssl anywhere in this
 # tree (`cargo tree -p rafiki -i aws-lc-rs` reports nothing).

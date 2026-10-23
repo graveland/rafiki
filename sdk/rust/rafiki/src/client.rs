@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http::{header, HeaderName, HeaderValue, Method, Request, Response, Uri, Version};
@@ -66,6 +66,13 @@ const UDS_BASE: &str = "http://connect.rafiki.invalid";
 
 /// The default unary budget; [`Client::with_timeout`] overrides it.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// TCP keepalive on every dialled connection: the OS notices a dead peer (a
+/// laptop that slept, expired NAT state) with no protocol traffic at all. A
+/// reverse proxy's read timeout counts data, not keepalive probes, so this
+/// complements a stream's idle window rather than replacing it.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The request body type both codecs use.
 type ReqBody = Full<Bytes>;
@@ -154,6 +161,7 @@ impl Service<Uri> for UnixConnector {
 
 /// Which client dials. One variant per endpoint form, so an `http://` endpoint
 /// never loads root certificates and a unix endpoint never resolves a host.
+#[derive(Clone)]
 enum Transport {
     Https(HttpClient<hyper_rustls::HttpsConnector<HttpConnector>, ReqBody>),
     Http(HttpClient<HttpConnector, ReqBody>),
@@ -174,7 +182,8 @@ impl Transport {
 }
 
 /// A client for one daemon: a unix socket, or a TCP listener with or without
-/// TLS.
+/// TLS. Cloning is cheap and shares the connection pool.
+#[derive(Clone)]
 pub struct Client {
     transport: Transport,
     base: String,
@@ -207,9 +216,7 @@ impl Client {
         let (transport, base) = match parse_endpoint(endpoint)? {
             Endpoint::Tcp { base, tls: true } => (tls_transport()?, base),
             Endpoint::Tcp { base, tls: false } => (
-                Transport::Http(
-                    HttpClient::builder(TokioExecutor::new()).build(HttpConnector::new()),
-                ),
+                Transport::Http(HttpClient::builder(TokioExecutor::new()).build(tcp_connector())),
                 base,
             ),
             Endpoint::Unix { base, path } => (
@@ -308,8 +315,8 @@ impl Client {
     ///
     /// `idle` bounds waiting for the response headers and, separately, waiting
     /// for each next body frame. Its expiry is [`Code::DeadlineExceeded`] with
-    /// the message `stream idle`; the SDK never re-opens — callers resume with
-    /// their own cursor.
+    /// the message `stream idle`. This call never re-opens;
+    /// [`Client::follow_events`] does.
     pub async fn server_stream<Req, Resp>(
         &self,
         method: &str,
@@ -341,7 +348,12 @@ impl Client {
             return Err(err);
         }
         check_epoch(peer.as_deref(), None, true, status)?;
-        Ok(Streaming::new(response.into_body(), idle))
+        let opened_at = response
+            .headers()
+            .get(header::DATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok());
+        Ok(Streaming::new(response.into_body(), idle, opened_at))
     }
 
     /// The ONE place a request is built, so every header — the Connect
@@ -415,6 +427,14 @@ impl Client {
     }
 }
 
+/// The TCP dialer both TCP transports wrap, with keepalive on.
+fn tcp_connector() -> HttpConnector {
+    let mut connector = HttpConnector::new();
+    connector.set_keepalive(Some(TCP_KEEPALIVE));
+    connector.set_keepalive_interval(Some(TCP_KEEPALIVE_INTERVAL));
+    connector
+}
+
 fn tls_transport() -> Result<Transport, Error> {
     // rustls + ring, explicitly: the process default provider is never
     // consulted, so an aws-lc-rs build anywhere else cannot change the
@@ -430,7 +450,13 @@ fn tls_transport() -> Result<Transport, Error> {
         })?
         .https_only()
         .enable_http1()
-        .build();
+        .wrap_connector({
+            // The TLS layer owns the scheme check; the TCP layer must accept
+            // the https:// URIs it is handed.
+            let mut tcp = tcp_connector();
+            tcp.enforce_http(false);
+            tcp
+        });
     Ok(Transport::Https(
         HttpClient::builder(TokioExecutor::new()).build(connector),
     ))
@@ -515,12 +541,15 @@ enum Next<T> {
 /// Error>>`.
 ///
 /// Dropping it closes the stream. An idle expiry ends it with
-/// [`Error::is_idle`]; the SDK never re-opens it. It ends with `None` ONLY
+/// [`Error::is_idle`], and nothing re-opens it ([`Client::follow_events`]
+/// is the stream that does). It ends with `None` ONLY
 /// after a clean end-of-stream envelope: a transport EOF without one is
 /// [`Code::Unavailable`], because a truncated stream must never look
 /// complete.
 pub struct Streaming<T> {
     body: Pin<Box<Incoming>>,
+    /// The server's `Date` when the stream opened.
+    opened_at: Option<SystemTime>,
     decoder: EnvelopeDecoder,
     idle: Duration,
     sleep: Pin<Box<Sleep>>,
@@ -548,9 +577,10 @@ impl<T> fmt::Debug for Streaming<T> {
 }
 
 impl<T> Streaming<T> {
-    fn new(body: Incoming, idle: Duration) -> Streaming<T> {
+    fn new(body: Incoming, idle: Duration, opened_at: Option<SystemTime>) -> Streaming<T> {
         Streaming {
             body: Box::pin(body),
+            opened_at,
             decoder: EnvelopeDecoder::new(),
             idle,
             sleep: Box::pin(sleep(idle)),
@@ -560,6 +590,13 @@ impl<T> Streaming<T> {
             done: false,
             _message: PhantomData,
         }
+    }
+
+    /// The server's clock when the stream opened, from its `Date` header (to
+    /// the second), if it sent one. It is the server's time, not ours, which
+    /// is what a replay `floor` is measured against.
+    pub fn opened_at(&self) -> Option<SystemTime> {
+        self.opened_at
     }
 
     /// What one envelope means for the stream.

@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use rafiki::{pb, Client, Error, Streaming};
+use rafiki::{pb, Client, Error, FollowPolicy, Followed, Streaming};
 
 /// How long a stream may stay quiet before it counts as caught up.
 const IDLE: Duration = Duration::from_secs(2);
@@ -128,6 +128,113 @@ async fn a_live_stream_idles_and_resumes_from_its_cursor() {
         resumed.iter().all(|ordinal| *ordinal > last),
         "a resumed stream repeated an event at or before {last}: {resumed:?}"
     );
+}
+
+/// The child the stream tests read: not working, with at least one durable
+/// event.
+async fn quiet_child(client: &Client) -> (String, i32) {
+    client
+        .list_children(&pb::ListChildrenRequest::default())
+        .await
+        .expect("list_children")
+        .children
+        .iter()
+        .filter(|child| child.display_state != "working")
+        .filter_map(|child| {
+            child
+                .latest_ordinal
+                .map(|latest| (child.child_id.clone(), latest))
+        })
+        .filter(|(_, latest)| *latest >= 0)
+        .max_by_key(|(_, latest)| *latest)
+        .expect("the daemon needs a child that is not working and has a durable event")
+}
+
+/// Everything a follower yields until it has been quiet for `quiet`.
+async fn follow_until_quiet(mut follow: rafiki::Following, quiet: Duration) -> Vec<Followed> {
+    let mut items = Vec::new();
+    while let Ok(item) = tokio::time::timeout(quiet, follow.next()).await {
+        match item {
+            Some(Ok(item)) => items.push(item),
+            Some(Err(err)) => panic!("follow_events after {items:?}: {err}"),
+            None => panic!("follow_events ended after {items:?}"),
+        }
+    }
+    items
+}
+
+fn one_second_idle() -> FollowPolicy {
+    FollowPolicy {
+        idle: Duration::from_secs(1),
+        ..FollowPolicy::default()
+    }
+}
+
+/// A follower replays a child's tail from its cursor, then sits through
+/// several idle windows — each one a silent re-open — without repeating an
+/// event or reporting an interruption.
+#[tokio::test]
+#[ignore = "needs a live rafikid: set RAFIKI_SDK_TEST_URL and run with --ignored"]
+async fn a_live_follower_reopens_across_idle_windows_without_repeats() {
+    let client = live_client();
+    let (child_id, latest) = quiet_child(&client).await;
+    let start = (latest - 3).max(-1);
+    let follow = client.follow_events(child_stream(&child_id, start), one_second_idle());
+
+    let items = follow_until_quiet(follow, Duration::from_millis(3500)).await;
+    let ordinals: Vec<i32> = items
+        .iter()
+        .map(|item| match item {
+            Followed::Event(event) => event.ordinal.expect("a durable event carries an ordinal"),
+            Followed::Interrupted { cause, .. } => {
+                panic!("interrupted on a healthy daemon: {cause}")
+            }
+        })
+        .collect();
+    println!("{child_id}: followed {ordinals:?} after {start} across idle re-opens");
+    assert!(
+        !ordinals.is_empty(),
+        "nothing replayed after {start} (latest {latest})"
+    );
+    assert!(
+        ordinals.windows(2).all(|pair| pair[0] < pair[1]) && ordinals[0] > start,
+        "in order, after the cursor, never repeated: {ordinals:?}"
+    );
+    assert!(
+        *ordinals.last().expect("non-empty") >= latest,
+        "{ordinals:?}"
+    );
+}
+
+/// A live follower of one child starts at the child's latest ordinal, so its
+/// idle re-opens never replay the child's log.
+#[tokio::test]
+#[ignore = "needs a live rafikid: set RAFIKI_SDK_TEST_URL and run with --ignored"]
+async fn a_live_child_follower_never_replays_history() {
+    let client = live_client();
+    let (child_id, latest) = quiet_child(&client).await;
+    let request = pb::StreamEventsRequest {
+        subject: Some(pb::EventSubject {
+            scope: Some(pb::event_subject::Scope::Child(child_id.clone())),
+            ..Default::default()
+        }),
+        tier: pb::EventTier::Durable as i32,
+        ..Default::default()
+    };
+    let items = follow_until_quiet(
+        client.follow_events(request, one_second_idle()),
+        Duration::from_millis(3500),
+    )
+    .await;
+    for item in &items {
+        if let Followed::Event(event) = item {
+            assert!(
+                event.ordinal.is_some_and(|ordinal| ordinal > latest),
+                "{child_id}: replayed history at or before {latest}: {event:?}"
+            );
+        }
+    }
+    println!("{child_id}: live follower saw {} new event(s)", items.len());
 }
 
 /// Paging `GetHistory` backwards — `limit`, then `before` set to the oldest

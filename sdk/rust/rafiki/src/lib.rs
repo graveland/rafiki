@@ -16,9 +16,10 @@
 //!   every typed verb rides; the verbs themselves (`get_history`,
 //!   `stream_events`, `send`, `spawn`, …) take and return the generated
 //!   messages in [`pb`].
-//! - Errors are [`Error`] with a Connect [`Code`]. Nothing is retried: a
-//!   caller that wants to retry `is_unavailable()` may, and a stream that ends
-//!   with `is_idle()` resumes with its own cursor.
+//! - Errors are [`Error`] with a Connect [`Code`]. No unary call is retried.
+//!   [`Client::follow_events`] is the one thing that re-opens: the event feed,
+//!   resumed from the cursor it keeps, across idle windows, dropped
+//!   connections and daemon restarts.
 //!
 //! The generated message types under `src/gen/` are produced by `make proto`
 //! (via the `rafiki-gen` binary in this workspace) and committed. They are
@@ -51,10 +52,12 @@ pub use proto::rafiki::v1 as pb;
 mod client;
 mod envelope;
 mod error;
+mod follow;
 mod verbs;
 
 pub use client::{Client, Streaming};
 pub use error::{Code, Error};
+pub use follow::{FollowPolicy, Followed, Following};
 
 /// The wire-protocol epoch this client speaks, mirroring `pkg/protocol.Epoch`
 /// (Go). Every request carries it in [`EPOCH_HEADER`]; every response must too,
