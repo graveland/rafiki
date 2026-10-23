@@ -191,7 +191,7 @@ takes one endpoint and an optional bearer token; the token is attached in the
 transport, once, for unary and streaming calls alike. The two transports are
 `unary` and `server_stream`, with typed verbs (`get_history`, `stream_events`,
 `send`, `spawn`, `list_models`, …) over the generated `pb::` types; nothing is
-retried, and a stream's idle window ends it with `deadline_exceeded` so the
-caller resumes from its own cursor. See
+retried, and a stream's idle window ends it with an `is_idle()` error so the
+caller re-opens from its own cursor — the SDK never re-opens a stream itself. See
 [sdk/rust/README.md](../../sdk/rust/README.md); `make check-sdk-rust` is its
 gate.

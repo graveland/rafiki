@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::{header, HeaderName, HeaderValue, Method, Request, Response, Uri, Version};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::{Body as _, Incoming};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client as HttpClient;
@@ -38,7 +38,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::time::{sleep, Instant, Sleep};
 use tower_service::Service;
 
-use crate::envelope::{self, Envelope, EnvelopeDecoder, FLAG_COMPRESSED, FLAG_END};
+use crate::envelope::{self, Envelope, EnvelopeDecoder, FLAG_COMPRESSED, FLAG_END, MAX_PAYLOAD};
 use crate::error;
 use crate::{Code, Error, EPOCH, EPOCH_HEADER};
 
@@ -83,9 +83,7 @@ enum Endpoint {
 fn invalid_endpoint(endpoint: &str) -> Error {
     Error::new(
         Code::InvalidArgument,
-        format!(
-            "endpoint {endpoint:?}: not a unix socket path, unix:/// or http(s):// URL"
-        ),
+        format!("endpoint {endpoint:?}: not a unix socket path, unix:/// or http(s):// URL"),
     )
 }
 
@@ -182,6 +180,9 @@ pub struct Client {
     base: String,
     token: Option<String>,
     timeout: Duration,
+    /// The epoch sent in `Rafiki-Protocol`: always [`EPOCH`] outside the
+    /// `test-hooks` feature.
+    wire_epoch: &'static str,
 }
 
 impl fmt::Debug for Client {
@@ -199,14 +200,16 @@ impl Client {
     /// A client for `endpoint`, presenting `token` when one is given.
     ///
     /// Accepted spellings: `https://host[:port][/prefix]` (TLS over rustls +
-    /// ring), `http://host[:port][/prefix]` (plain TCP, for a `rafikid --dev`
-    /// loopback), `unix:///abs/path` and a bare `/abs/path`. Anything else is
+    /// ring), `http://host[:port][/prefix]` (plain TCP, for a loopback
+    /// listener), `unix:///abs/path` and a bare `/abs/path`. Anything else is
     /// [`Code::InvalidArgument`].
     pub fn new(endpoint: &str, token: Option<String>) -> Result<Client, Error> {
         let (transport, base) = match parse_endpoint(endpoint)? {
             Endpoint::Tcp { base, tls: true } => (tls_transport()?, base),
             Endpoint::Tcp { base, tls: false } => (
-                Transport::Http(HttpClient::builder(TokioExecutor::new()).build(HttpConnector::new())),
+                Transport::Http(
+                    HttpClient::builder(TokioExecutor::new()).build(HttpConnector::new()),
+                ),
                 base,
             ),
             Endpoint::Unix { base, path } => (
@@ -223,7 +226,16 @@ impl Client {
             base,
             token,
             timeout: DEFAULT_TIMEOUT,
+            wire_epoch: EPOCH,
         })
+    }
+
+    /// Send `epoch` instead of [`EPOCH`], so a live-daemon test can provoke
+    /// the daemon's own `protocol_mismatch` refusal. Test builds only.
+    #[cfg(feature = "test-hooks")]
+    pub fn with_wire_epoch(mut self, epoch: &'static str) -> Client {
+        self.wire_epoch = epoch;
+        self
     }
 
     /// The unary budget, covering connect + response for one call (default
@@ -245,7 +257,8 @@ impl Client {
         Req: prost::Message,
         Resp: prost::Message + Default,
     {
-        let request = self.build_request(method, CONTENT_UNARY, Bytes::from(req.encode_to_vec()))?;
+        let request =
+            self.build_request(method, CONTENT_UNARY, Bytes::from(req.encode_to_vec()))?;
         let call = async {
             let response = self
                 .transport
@@ -254,14 +267,15 @@ impl Client {
                 .map_err(|err| self.unavailable(method, &err))?;
             let status = response.status().as_u16();
             let peer = peer_epoch(response.headers());
-            let body = response
-                .into_body()
+            let body = Limited::new(response.into_body(), MAX_PAYLOAD)
                 .collect()
                 .await
-                .map_err(|err| self.unavailable(method, &err))?
+                .map_err(|err| self.body_error(method, err))?
                 .to_bytes();
             let failure = (status != 200).then(|| error::from_body(status, &body));
-            check_epoch(peer.as_deref(), failure.as_ref(), status)?;
+            let from_connect = failure.as_ref().is_none_or(|(_, connect)| *connect);
+            let failure = failure.map(|(err, _)| err);
+            check_epoch(peer.as_deref(), failure.as_ref(), from_connect, status)?;
             match failure {
                 Some(err) => Err(err),
                 // An empty 200 body is the empty message, as Connect defines.
@@ -269,7 +283,10 @@ impl Client {
                 None => Resp::decode(body).map_err(|err| {
                     Error::new(
                         Code::Internal,
-                        format!("{method} against {}: malformed response body: {err}", self.base),
+                        format!(
+                            "{method} against {}: malformed response body: {err}",
+                            self.base
+                        ),
                     )
                     .with_status(200)
                 }),
@@ -308,21 +325,22 @@ impl Client {
         let response = match tokio::time::timeout(idle, self.transport.request(request)).await {
             Ok(Ok(response)) => response,
             Ok(Err(err)) => return Err(self.unavailable(method, &err)),
-            Err(_) => return Err(idle_error()),
+            Err(_) => return Err(Error::stream_idle()),
         };
         let status = response.status().as_u16();
         let peer = peer_epoch(response.headers());
         if status != 200 {
-            let body = match tokio::time::timeout(idle, response.into_body().collect()).await {
+            let collect = Limited::new(response.into_body(), MAX_PAYLOAD).collect();
+            let body = match tokio::time::timeout(idle, collect).await {
                 Ok(Ok(collected)) => collected.to_bytes(),
-                Ok(Err(err)) => return Err(self.unavailable(method, &err)),
-                Err(_) => return Err(idle_error()),
+                Ok(Err(err)) => return Err(self.body_error(method, err)),
+                Err(_) => return Err(Error::stream_idle()),
             };
-            let err = error::from_body(status, &body);
-            check_epoch(peer.as_deref(), Some(&err), status)?;
+            let (err, from_connect) = error::from_body(status, &body);
+            check_epoch(peer.as_deref(), Some(&err), from_connect, status)?;
             return Err(err);
         }
-        check_epoch(peer.as_deref(), None, status)?;
+        check_epoch(peer.as_deref(), None, true, status)?;
         Ok(Streaming::new(response.into_body(), idle))
     }
 
@@ -358,11 +376,14 @@ impl Client {
         headers.insert(
             HeaderName::from_static(EPOCH_HEADER_LOWER),
             // `EPOCH_HEADER`'s value is this client's epoch.
-            HeaderValue::from_static(EPOCH),
+            HeaderValue::from_static(self.wire_epoch),
         );
         if let Some(token) = &self.token {
             let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
-                Error::new(Code::InvalidArgument, "token is not a valid HTTP header value")
+                Error::new(
+                    Code::InvalidArgument,
+                    "token is not a valid HTTP header value",
+                )
             })?;
             headers.insert(header::AUTHORIZATION, value);
         }
@@ -376,6 +397,21 @@ impl Client {
             Code::Unavailable,
             format!("{method} against {}: {err}", self.base),
         )
+    }
+
+    /// A failure collecting a size-[`Limited`] body: over the cap is
+    /// `resource_exhausted`, anything else a read failure.
+    fn body_error(&self, method: &str, err: Box<dyn std::error::Error + Send + Sync>) -> Error {
+        if err.is::<LengthLimitError>() {
+            return Error::new(
+                Code::ResourceExhausted,
+                format!(
+                    "{method} against {}: response body exceeds {MAX_PAYLOAD} bytes",
+                    self.base
+                ),
+            );
+        }
+        self.unavailable(method, &err)
     }
 }
 
@@ -392,7 +428,7 @@ fn tls_transport() -> Result<Transport, Error> {
                 format!("loading native root certificates: {err}"),
             )
         })?
-        .https_or_http()
+        .https_only()
         .enable_http1()
         .build();
     Ok(Transport::Https(
@@ -413,32 +449,46 @@ fn peer_epoch(headers: &http::HeaderMap) -> Option<String> {
 /// The daemon's OWN `protocol_mismatch` is never masked: when `daemon_error`
 /// already carries that reason the caller sees the daemon's message, which is
 /// the more specific one ("upgrade your rafiki client"), not ours.
+///
+/// A missing header is a stale daemon only when a Connect server answered —
+/// a 200, or an error body naming a Connect code (`from_connect`). A non-200
+/// with neither came from something in front of the daemon (a reverse proxy,
+/// a load balancer), so it is that status's error: a 502 while rafikid
+/// restarts must stay a retryable `unavailable`, never a terminal mismatch.
 fn check_epoch(
     peer: Option<&str>,
     daemon_error: Option<&Error>,
+    from_connect: bool,
     status: u16,
 ) -> Result<(), Error> {
     if peer == Some(EPOCH) {
         return Ok(());
     }
     if let Some(err) = daemon_error {
-        if err.is_protocol_mismatch() {
+        if err.is_protocol_mismatch() || (peer.is_none() && !from_connect) {
             return Err(err.clone());
         }
     }
-    Err(Error {
-        code: Code::FailedPrecondition,
-        message: format!(
-            "daemon speaks rafiki protocol {}; this client speaks {EPOCH} — upgrade the daemon",
+    // Which side is behind decides the advice; an unparseable or missing peer
+    // epoch is an old daemon (a peer without the header is epoch 1).
+    let newer_daemon = matches!(
+        (peer.and_then(|p| p.parse::<u32>().ok()), EPOCH.parse::<u32>().ok()),
+        (Some(theirs), Some(ours)) if theirs > ours
+    );
+    let advice = if newer_daemon {
+        "upgrade this client"
+    } else {
+        "upgrade the daemon"
+    };
+    Err(Error::new(
+        Code::FailedPrecondition,
+        format!(
+            "daemon speaks rafiki protocol {}; this client speaks {EPOCH} — {advice}",
             peer.unwrap_or("none")
         ),
-        reason: Some(error::PROTOCOL_MISMATCH_REASON.to_string()),
-        http_status: Some(status),
-    })
-}
-
-fn idle_error() -> Error {
-    Error::new(Code::DeadlineExceeded, "stream idle")
+    )
+    .with_reason(error::PROTOCOL_MISMATCH_REASON)
+    .with_status(status))
 }
 
 /// The body ended without an end-of-stream envelope. A Connect server stream
@@ -518,10 +568,11 @@ impl<T> Streaming<T> {
         T: prost::Message + Default,
     {
         if envelope.flags & FLAG_COMPRESSED != 0 {
-            return Next::Item(Err(
-                Error::new(Code::Unimplemented, "compressed envelopes are not supported")
-                    .with_status(200),
-            ));
+            return Next::Item(Err(Error::new(
+                Code::Unimplemented,
+                "compressed envelopes are not supported",
+            )
+            .with_status(200)));
         }
         if envelope.flags & FLAG_END != 0 {
             return match error::from_trailer(&envelope.payload) {
@@ -533,11 +584,7 @@ impl<T> Streaming<T> {
             return Next::Continue;
         }
         Next::Item(T::decode(envelope.payload).map_err(|err| {
-            Error::new(
-                Code::Internal,
-                format!("malformed stream payload: {err}"),
-            )
-            .with_status(200)
+            Error::new(Code::Internal, format!("malformed stream payload: {err}")).with_status(200)
         }))
     }
 }
@@ -616,7 +663,7 @@ impl<T: prost::Message + Default> futures_core::Stream for Streaming<T> {
                 Poll::Pending => {
                     if this.sleep.as_mut().poll(cx).is_ready() {
                         this.done = true;
-                        return Poll::Ready(Some(Err(idle_error())));
+                        return Poll::Ready(Some(Err(Error::stream_idle())));
                     }
                     return Poll::Pending;
                 }
@@ -663,7 +710,10 @@ mod tests {
         );
         assert_eq!(
             unix_path("unix:///run/rafiki/controller.sock"),
-            (UDS_BASE.to_string(), PathBuf::from("/run/rafiki/controller.sock"))
+            (
+                UDS_BASE.to_string(),
+                PathBuf::from("/run/rafiki/controller.sock")
+            )
         );
         assert_eq!(
             unix_path("/home/u/.local/state/rafiki/controller.sock"),

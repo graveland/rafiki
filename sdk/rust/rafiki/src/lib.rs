@@ -43,6 +43,8 @@ mod proto {
         }
     }
 }
+/// Generated `rafiki.daraja.v1` messages, which Control's `Daraja*` RPCs carry.
+pub use proto::rafiki::daraja::v1 as daraja_pb;
 /// Generated `rafiki.v1` messages (control + event).
 pub use proto::rafiki::v1 as pb;
 
@@ -70,7 +72,10 @@ mod tests {
     /// instead of on the wire.
     #[test]
     fn epoch_matches_go() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../pkg/protocol/epoch.go");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../pkg/protocol/epoch.go"
+        );
         let source =
             std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {path}: {err}"));
         let wanted = format!("const Epoch = {}", super::EPOCH);

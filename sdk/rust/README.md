@@ -22,7 +22,12 @@ let request = pb::StreamEventsRequest {
     tier: pb::EventTier::All as i32,
     ..Default::default()
 };
-let mut events = client.stream_events(&request, Duration::from_secs(30)).await?;
+// A quiet stream sends no headers, so the idle window can end the open too.
+let mut events = match client.stream_events(&request, Duration::from_secs(30)).await {
+    Ok(events) => events,
+    Err(err) if err.is_idle() => return Ok(()), // nothing yet: re-open later with your cursor
+    Err(err) => return Err(err.into()),
+};
 while let Some(event) = events.next().await {
     match event {
         Ok(event) => println!("{} {:?}", event.child_id, event.ordinal),
@@ -40,7 +45,7 @@ while let Some(event) = events.next().await {
 | endpoint | transport |
 | --- | --- |
 | `https://host[:port][/prefix]` | TLS over hyper + rustls, **ring** provider, native roots, HTTP/1.1 only |
-| `http://host[:port][/prefix]` | plain TCP (a `rafikid --dev` loopback) |
+| `http://host[:port][/prefix]` | plain TCP (a loopback listener) |
 | `unix:///abs/path` | unix socket |
 | `/abs/path` | unix socket |
 
@@ -69,7 +74,14 @@ returning the generated `pb::` types: `get_history`, `stream_events(req,
 idle)`, `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
 `list_executors`. `unary` and `server_stream` are public, so an RPC added to
-`control.proto` is callable immediately (regenerate first).
+`control.proto` is callable immediately (regenerate first). `pb` holds the
+`rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the `Daraja*`
+RPCs carry.
+
+`get_history` pages backwards: ask with `limit` for the newest N, then again
+with `before` set to the oldest `ts` you hold. A page never splits events that
+share a `ts`, so it can hold more than `limit`; an empty page is the start of
+the conversation.
 
 ## Errors: nothing is retried
 
@@ -79,14 +91,25 @@ Every failure is an `Error` carrying a Connect `Code` (snake_case on the wire,
 `is_unavailable()` is the daemon-restarting signal a caller MAY retry on;
 `is_unauthenticated()`, `is_not_found()`, `is_protocol_mismatch()` and
 `permission_denied` are terminal. A unary call is bounded by
-`Client::with_timeout` (30s default) and its expiry is `deadline_exceeded`.
+`Client::with_timeout` (30s default) and its expiry is `deadline_exceeded` —
+but NOT `is_idle()`: the call's outcome is unknown, so never resend a `send` on
+it (`Send` has no idempotency key; a resend can queue the message twice).
 
 A daemon speaking another wire epoch is refused on EVERY response, unary or
-stream (the stream's response headers included): a missing or different
+stream (the stream's response headers included): a different
 `Rafiki-Protocol` is `failed_precondition` with reason `protocol_mismatch` —
-"daemon speaks rafiki protocol N; this client speaks 4 — upgrade the daemon".
-The daemon's own `protocol_mismatch` refusal is passed through unchanged, since
-its message ("upgrade your rafiki client") is the more specific one.
+"daemon speaks rafiki protocol N; this client speaks 4 — upgrade the daemon",
+or "— upgrade this client" when N is the newer one. A MISSING header is a
+mismatch only when a Connect server answered (a 200, or an error body naming a
+Connect code: a daemon from before the epoch). A non-200 that is neither came
+from something in front of the daemon — a reverse proxy's 502 while rafikid
+restarts — and is that status's error (`unavailable` for 502–504), so an outage
+stays retryable instead of looking terminal. The daemon's own
+`protocol_mismatch` refusal is passed through unchanged, since its message
+("upgrade your rafiki client") is the more specific one.
+
+A response body, or one stream envelope, over 64 MiB is `resource_exhausted`;
+a length field is never trusted past that.
 
 ## Idle and resume
 
@@ -94,7 +117,10 @@ A server stream's headers arrive with its **first message**, not before: a
 stream with nothing to say yet sends no bytes at all. `server_stream(method,
 req, idle)` therefore bounds two waits with `idle` — the response headers, and
 each next body frame. On expiry the stream yields
-`deadline_exceeded` / "stream idle" and ends.
+`deadline_exceeded` / "stream idle" (`is_idle()`) and ends — and because a quiet
+stream sends no headers, that expiry usually ends `stream_events(...).await`
+itself, before any `Streaming` exists. Handle `is_idle()` at the open as well
+as on each item.
 
 That is not a failure, and the SDK never re-opens the stream itself: only the
 caller knows the cursor. A dropped connection is the same kind of event, and so
@@ -125,13 +151,22 @@ the protos.
 ## Checking
 
 ```bash
-make check-sdk-rust     # cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
+make check-sdk-rust       # cargo fmt --check, then test + clippy -D warnings (--locked --all-features)
+make check-sdk-rust-live  # tests/daemon.rs against RAFIKI_SDK_TEST_URL
 ```
 
-The tests are offline: the transport tests run against an in-process hyper
-server on `127.0.0.1:0`. `tests/daemon.rs` is the one live-daemon test and
-runs only when `RAFIKI_SDK_TEST_URL` is set (with `RAFIKI_SDK_TEST_TOKEN` as an
-optional bearer token); unset, it prints a SKIP line and returns.
+`make check-sdk-rust` is offline: the transport tests run against an
+in-process hyper server on `127.0.0.1:0`, and the live-daemon tests in
+`tests/daemon.rs` report as ignored. `make check-sdk-rust-live` runs them
+against the daemon at `RAFIKI_SDK_TEST_URL` (with `RAFIKI_SDK_TEST_TOKEN` as an
+optional bearer token), and FAILS when it is unset. They only read: a unary
+call, a stream that replays a child's recent events, idles and resumes from
+its cursor without a repeat, backward `GetHistory` paging checked against one
+unbounded read, and the daemon's own epoch refusal on both codecs (sent through
+`Client::with_wire_epoch`, which exists only under the `test-hooks` feature —
+never enable it in a consumer). The daemon needs a child that is not working
+and has at least two history events. A daemon NEWER than the client cannot be
+provoked live; the stub tests cover it.
 
 `cargo tree -i aws-lc-rs` must keep reporting nothing: the crate builds TLS
 with rustls + ring only, so it can be a dependency of a consumer that forbids

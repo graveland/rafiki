@@ -343,7 +343,10 @@ async fn stream_truncated_after_a_message_is_unavailable() {
         .expect("an error, never a clean end")
         .expect_err("a truncated stream");
     assert!(err.is_unavailable(), "{err}");
-    assert_eq!(err.message, "stream closed without an end-of-stream envelope");
+    assert_eq!(
+        err.message,
+        "stream closed without an end-of-stream envelope"
+    );
     assert!(stream.next().await.is_none(), "the error ends the stream");
 }
 
@@ -363,7 +366,10 @@ async fn stream_ending_with_no_envelope_at_all_is_unavailable() {
         .expect("an error, never a clean end")
         .expect_err("a truncated stream");
     assert!(err.is_unavailable(), "{err}");
-    assert_eq!(err.message, "stream closed without an end-of-stream envelope");
+    assert_eq!(
+        err.message,
+        "stream closed without an end-of-stream envelope"
+    );
     assert!(stream.next().await.is_none(), "the error ends the stream");
 }
 
@@ -388,7 +394,11 @@ async fn stream_ending_in_an_error_trailer_yields_that_error() {
         stream.next().await.expect("first").expect("an event"),
         event("c_2", 3)
     );
-    let err = stream.next().await.expect("an error").expect_err("an error");
+    let err = stream
+        .next()
+        .await
+        .expect("an error")
+        .expect_err("an error");
     assert!(err.is_unauthenticated(), "{err}");
     assert_eq!(err.message, "invalid auth token");
     assert!(stream.next().await.is_none(), "the error ends the stream");
@@ -518,4 +528,105 @@ fn the_public_bounds_hold() {
     fn client_bounds<T: Send + Sync + 'static>() {}
     stream_bounds::<rafiki::Streaming<pb::Event>>();
     client_bounds::<Client>();
+}
+
+/// A stub that answers every request with `status`, `body` and, when given,
+/// that `Rafiki-Protocol`.
+fn fixed(status: u16, body: &'static str, epoch: Option<&'static str>) -> Stub {
+    Arc::new(move |_req: Request<Incoming>| {
+        Box::pin(async move {
+            let mut response = Response::new(full(body));
+            *response.status_mut() = http::StatusCode::from_u16(status).expect("a status");
+            if let Some(epoch) = epoch {
+                response
+                    .headers_mut()
+                    .insert("rafiki-protocol", HeaderValue::from_static(epoch));
+            }
+            Ok(response)
+        })
+    })
+}
+
+/// A reverse proxy in front of a restarting daemon answers 502 with its own
+/// page and no rafiki header. That is the retryable outage it looks like,
+/// never a terminal protocol mismatch — on either codec.
+#[tokio::test]
+async fn a_proxy_502_without_the_epoch_header_is_unavailable() {
+    let url = serve(fixed(502, "<html>bad gateway</html>", None)).await;
+    let client = Client::new(&url, None).expect("a client");
+
+    let err = client
+        .get_history(&pb::GetHistoryRequest::default())
+        .await
+        .expect_err("a proxy outage");
+    assert!(err.is_unavailable(), "unary: {err}");
+    assert!(!err.is_protocol_mismatch(), "unary: {err}");
+
+    let err = client
+        .stream_events(&pb::StreamEventsRequest::default(), Duration::from_secs(5))
+        .await
+        .expect_err("a proxy outage");
+    assert!(err.is_unavailable(), "stream: {err}");
+    assert!(!err.is_protocol_mismatch(), "stream: {err}");
+}
+
+/// A Connect error body with no rafiki header is a daemon from before the
+/// epoch existed: a mismatch, not the error it names.
+#[tokio::test]
+async fn a_connect_error_without_the_epoch_header_is_a_protocol_mismatch() {
+    let body = r#"{"code": "unimplemented", "message": "no such procedure"}"#;
+    let url = serve(fixed(404, body, None)).await;
+    let client = Client::new(&url, None).expect("a client");
+    let err = client
+        .get_history(&pb::GetHistoryRequest::default())
+        .await
+        .expect_err("a pre-epoch daemon");
+    assert!(err.is_protocol_mismatch(), "{err}");
+    assert!(
+        err.message.contains("upgrade the daemon"),
+        "{}",
+        err.message
+    );
+}
+
+/// A daemon NEWER than this client must not be told to upgrade: the client is
+/// the one behind.
+#[tokio::test]
+async fn a_newer_daemon_says_upgrade_this_client() {
+    let url = serve(fixed(200, "", Some("5"))).await;
+    let client = Client::new(&url, None).expect("a client");
+    let err = client
+        .get_history(&pb::GetHistoryRequest::default())
+        .await
+        .expect_err("a newer daemon");
+    assert!(err.is_protocol_mismatch(), "{err}");
+    assert!(
+        err.message.contains("upgrade this client"),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("protocol 5"), "{}", err.message);
+}
+
+/// A unary timeout leaves the call's outcome unknown, so it is
+/// `deadline_exceeded` but never `is_idle()` — a caller resuming on idle must
+/// not resend a `send` whose fate it does not know.
+#[tokio::test]
+async fn a_unary_timeout_is_not_idle() {
+    let stub: Stub = Arc::new(|_req: Request<Incoming>| {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(with_epoch(Response::new(full(Vec::new()))))
+        })
+    });
+    let url = serve(stub).await;
+    let client = Client::new(&url, None)
+        .expect("a client")
+        .with_timeout(Duration::from_millis(150));
+    let err = client
+        .send(&pb::SendRequest::default())
+        .await
+        .expect_err("a timeout");
+    assert_eq!(err.code, rafiki::Code::DeadlineExceeded, "{err}");
+    assert!(!err.is_idle(), "{err}");
 }

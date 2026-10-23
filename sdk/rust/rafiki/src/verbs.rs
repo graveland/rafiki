@@ -39,7 +39,10 @@ impl Client {
         self.unary("Spawn", req).await
     }
 
-    pub async fn get_child(&self, req: &pb::GetChildRequest) -> Result<pb::GetChildResponse, Error> {
+    pub async fn get_child(
+        &self,
+        req: &pb::GetChildRequest,
+    ) -> Result<pb::GetChildResponse, Error> {
         self.unary("GetChild", req).await
     }
 

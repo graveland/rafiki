@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Connect errors: the 16 codes plus `Unknown`, and the wire error bodies that
-//! carry them.
+//! Connect errors: the 16 codes, and the wire error bodies that carry them.
 
 use std::fmt;
 
@@ -137,6 +136,10 @@ pub struct Error {
     /// The HTTP status the error arrived with, when it arrived over HTTP at
     /// all (a local dial failure has none).
     pub http_status: Option<u16>,
+    /// Set only on the error a stream's own idle window raised, so
+    /// [`Error::is_idle`] never mistakes a unary timeout or a peer's
+    /// `deadline_exceeded` for a quiet stream.
+    idle: bool,
 }
 
 impl Error {
@@ -146,6 +149,15 @@ impl Error {
             message: message.into(),
             reason: None,
             http_status: None,
+            idle: false,
+        }
+    }
+
+    /// The error a stream's idle window ends it with.
+    pub(crate) fn stream_idle() -> Error {
+        Error {
+            idle: true,
+            ..Error::new(Code::DeadlineExceeded, "stream idle")
         }
     }
 
@@ -179,10 +191,12 @@ impl Error {
         self.code == Code::NotFound
     }
 
-    /// An exceeded deadline — for a stream, the quiet window the caller chose.
-    /// Not a failure: re-open and resume from the caller's own cursor.
+    /// The stream's idle window expired: it was quiet for the window the
+    /// caller chose. Not a failure — re-open and resume from the caller's own
+    /// cursor. A unary timeout is `deadline_exceeded` but NOT idle: the call's
+    /// outcome is unknown, and a `send` must not be repeated on it.
     pub fn is_idle(&self) -> bool {
-        self.code == Code::DeadlineExceeded
+        self.idle
     }
 }
 
@@ -220,6 +234,7 @@ impl ConnectBody {
             message: self.message,
             reason,
             http_status: Some(status),
+            idle: false,
         }
     }
 }
@@ -231,18 +246,17 @@ fn decode_reason(value: &str) -> Option<String> {
     (!info.reason.is_empty()).then_some(info.reason)
 }
 
-/// The error an HTTP response body carries.
-pub(crate) fn from_body(status: u16, body: &[u8]) -> Error {
+/// The error a non-200 response body carries, and whether the body was a
+/// Connect error at all. `false` means something other than a Connect server
+/// answered — a proxy's HTML page, an empty body, a truncated write — and the
+/// status is all the peer told us.
+pub(crate) fn from_body(status: u16, body: &[u8]) -> (Error, bool) {
     match serde_json::from_slice::<ConnectBody>(body) {
-        Ok(parsed) => parsed.into_error(status),
-        // Not a Connect body: a proxy's HTML page, an empty body, a truncated
-        // write. The status is all the peer told us.
-        Err(_) => Error {
-            code: code_for_status(status),
-            message: format!("HTTP {status}"),
-            reason: None,
-            http_status: Some(status),
-        },
+        Ok(parsed) if !parsed.code.is_empty() => (parsed.into_error(status), true),
+        _ => (
+            Error::new(code_for_status(status), format!("HTTP {status}")).with_status(status),
+            false,
+        ),
     }
 }
 
@@ -263,8 +277,11 @@ pub(crate) fn from_trailer(payload: &[u8]) -> Option<Error> {
         // A trailer that is not JSON at all is not a clean close; say so
         // rather than ending a stream on a body nobody could read.
         Err(err) => Some(
-            Error::new(Code::Internal, format!("malformed end-of-stream trailer: {err}"))
-                .with_status(200),
+            Error::new(
+                Code::Internal,
+                format!("malformed end-of-stream trailer: {err}"),
+            )
+            .with_status(200),
         ),
     }
 }
@@ -320,7 +337,8 @@ mod tests {
                 "details": [{"type": ERROR_INFO_TYPE, "value": value}],
             })
             .to_string();
-            let err = from_body(400, body.as_bytes());
+            let (err, connect) = from_body(400, body.as_bytes());
+            assert!(connect);
             assert_eq!(err.code, Code::FailedPrecondition);
             assert_eq!(err.message, "the daemon's own words");
             assert_eq!(err.reason.as_deref(), Some("protocol_mismatch"));
@@ -332,7 +350,8 @@ mod tests {
     #[test]
     fn error_body_without_error_info_has_no_reason() {
         let body = br#"{"code": "not_found", "message": "no such child"}"#;
-        let err = from_body(404, body);
+        let (err, connect) = from_body(404, body);
+        assert!(connect);
         assert_eq!(err.code, Code::NotFound);
         assert_eq!(err.reason, None);
         assert!(err.is_not_found());
@@ -340,10 +359,27 @@ mod tests {
 
     #[test]
     fn non_json_503_is_unavailable() {
-        let err = from_body(503, b"<html>upstream is restarting</html>");
+        let (err, connect) = from_body(503, b"<html>upstream is restarting</html>");
+        assert!(!connect, "a proxy's page is not a Connect body");
         assert_eq!(err.code, Code::Unavailable);
         assert!(err.is_unavailable());
         assert_eq!(err.reason, None);
+    }
+
+    /// JSON is not enough to be a Connect error: a body that names no code is
+    /// some other server's.
+    #[test]
+    fn json_without_a_code_is_not_a_connect_body() {
+        let (err, connect) = from_body(502, br#"{"error": "bad gateway"}"#);
+        assert!(!connect);
+        assert!(err.is_unavailable());
+    }
+
+    #[test]
+    fn only_the_stream_idle_error_is_idle() {
+        assert!(Error::stream_idle().is_idle());
+        assert_eq!(Error::stream_idle().code, Code::DeadlineExceeded);
+        assert!(!Error::new(Code::DeadlineExceeded, "timed out").is_idle());
     }
 
     #[test]
@@ -354,7 +390,7 @@ mod tests {
             "details": [{"type": ERROR_INFO_TYPE, "value": "!!! not base64 !!!"}],
         })
         .to_string();
-        let err = from_body(412, body.as_bytes());
+        let (err, _) = from_body(412, body.as_bytes());
         assert_eq!(err.reason, None);
         assert!(!err.is_protocol_mismatch());
     }

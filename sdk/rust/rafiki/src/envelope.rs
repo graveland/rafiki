@@ -21,6 +21,12 @@ pub(crate) const FLAG_END: u8 = 0x02;
 /// flags byte + 4-byte big-endian length.
 const HEADER_LEN: usize = 5;
 
+/// The largest message, envelope payload or response body this client will
+/// buffer. A length field is trusted only up to here, so a corrupt or hostile
+/// one is refused instead of growing the buffer toward 4 GiB. Ingested images
+/// are resized to at most 1.15MP, so a real event is far below this.
+pub(crate) const MAX_PAYLOAD: usize = 64 << 20;
+
 /// One envelope as it arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Envelope {
@@ -82,6 +88,12 @@ impl EnvelopeDecoder {
         let flags = self.buf[0];
         let length = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]);
         let length = length as usize;
+        if length > MAX_PAYLOAD {
+            return Err(Error::new(
+                Code::ResourceExhausted,
+                format!("stream envelope of {length} bytes exceeds {MAX_PAYLOAD}"),
+            ));
+        }
         if self.buf.len() < HEADER_LEN + length {
             if self.eof {
                 return Err(closed_mid_envelope());
@@ -108,7 +120,10 @@ mod tests {
         let wire = envelop(b"hello world");
         for piece in wire.chunks(4).take(3) {
             decoder.feed(piece);
-            assert!(decoder.next().expect("no error").is_none(), "a partial envelope is not data");
+            assert!(
+                decoder.next().expect("no error").is_none(),
+                "a partial envelope is not data"
+            );
         }
         decoder.feed(&wire[12..]);
         let envelope = decoder.next().expect("no error").expect("one envelope");
@@ -177,6 +192,16 @@ mod tests {
         decoder.finish();
         assert!(decoder.next().expect("no error").is_some());
         assert!(decoder.next().expect("no error").is_none());
+    }
+
+    #[test]
+    fn an_oversized_length_is_refused_before_buffering() {
+        let mut decoder = EnvelopeDecoder::new();
+        let mut header = vec![0u8];
+        header.extend_from_slice(&u32::MAX.to_be_bytes());
+        decoder.feed(&header);
+        let err = decoder.next().expect_err("an oversized envelope");
+        assert_eq!(err.code, Code::ResourceExhausted);
     }
 
     #[test]

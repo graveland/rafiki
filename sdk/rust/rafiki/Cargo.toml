@@ -13,6 +13,15 @@ publish = false
 # never hand-edited, so the crate's doctests are off (it has none of its own).
 doctest = false
 
+[features]
+# Test-only knobs (`Client::with_wire_epoch`) the live-daemon test needs to
+# provoke a daemon's own refusals. Never enable it in a consumer.
+test-hooks = []
+
+[[test]]
+name = "daemon"
+required-features = ["test-hooks"]
+
 [dependencies]
 base64 = "0.22"
 bytes = "1"

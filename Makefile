@@ -262,8 +262,12 @@ check-web: ## Typecheck, lint and test the web UI (needs node + pnpm + protoc).
 	cd web && pnpm install --frozen-lockfile && pnpm run gen && pnpm run check && pnpm run lint && pnpm run test
 
 .PHONY: check-sdk-rust
-check-sdk-rust: ## Test and lint the Rust SDK (needs cargo).
-	cd sdk/rust && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
+check-sdk-rust: ## Test, lint and format-check the Rust SDK (needs cargo).
+	cd sdk/rust && cargo fmt --check && cargo test --locked --all-features && cargo clippy --locked --all-targets --all-features -- -D warnings
+
+.PHONY: check-sdk-rust-live
+check-sdk-rust-live: ## Run the Rust SDK's live-daemon test (needs cargo and RAFIKI_SDK_TEST_URL).
+	cd sdk/rust && cargo test --locked --all-features --test daemon -- --ignored
 
 .PHONY: check
 check: vet lint test ## Run vet + lint + tests (the full local gate).
