@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# The Rust SDK workspace: the client crate and the generator `make proto` runs.
+[workspace]
+resolver = "2"
+members = ["rafiki", "rafiki-gen"]

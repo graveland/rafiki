@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "rafiki-gen"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Regenerates the rafiki Rust SDK's protobuf types from proto/"
+publish = false
+
+[dependencies]
+prost-build = "0.13"

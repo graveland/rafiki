@@ -246,6 +246,8 @@ proto: bin/protoc-gen-go bin/protoc-gen-connect-go bin/protoc-gen-rafikipy ## Re
 		--rafikipy_out=sdk/python/rafiki/_gen \
 		--proto_path=proto \
 		proto/rafiki/v1/control.proto proto/rafiki/v1/event.proto proto/rafiki/daraja/v1/daraja.proto
+	# The Rust SDK's message types regenerate in the same run (sdk/rust).
+	cargo run --quiet --locked --manifest-path sdk/rust/Cargo.toml -p rafiki-gen -- $(CURDIR)
 	$(MAKE) fmt
 
 ##@ Web
@@ -258,6 +260,10 @@ web: ## Build the web UI into pkg/webui/dist (needs node + pnpm + protoc).
 .PHONY: check-web
 check-web: ## Typecheck, lint and test the web UI (needs node + pnpm + protoc).
 	cd web && pnpm install --frozen-lockfile && pnpm run gen && pnpm run check && pnpm run lint && pnpm run test
+
+.PHONY: check-sdk-rust
+check-sdk-rust: ## Test and lint the Rust SDK (needs cargo).
+	cd sdk/rust && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings
 
 .PHONY: check
 check: vet lint test ## Run vet + lint + tests (the full local gate).

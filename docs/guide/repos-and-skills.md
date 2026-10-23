@@ -179,3 +179,19 @@ re-opens under its documented at-most-once contract.
 A script child spawned with the SDK reports, receives and settles through
 the same `Client.inside()` face the wave-2 verbs define — see the script
 children section of [agents](agents.md#script-children) for the socket's own contract.
+
+## The Rust SDK
+
+`sdk/rust` is the same control plane from Rust: a protobuf Connect client over
+hyper + rustls (ring only — no aws-lc-rs, no native-tls) on a unix socket, a
+plain `http://` loopback, or an `https://` listener. Its message types are
+generated from `control.proto` by `make proto` too (the `rafiki-gen` binary in
+that workspace), so the Rust SDK cannot lag the wire either. `Client::new`
+takes one endpoint and an optional bearer token; the token is attached in the
+transport, once, for unary and streaming calls alike. The two transports are
+`unary` and `server_stream`, with typed verbs (`get_history`, `stream_events`,
+`send`, `spawn`, `list_models`, …) over the generated `pb::` types; nothing is
+retried, and a stream's idle window ends it with `deadline_exceeded` so the
+caller resumes from its own cursor. See
+[sdk/rust/README.md](../../sdk/rust/README.md); `make check-sdk-rust` is its
+gate.
