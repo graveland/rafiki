@@ -97,10 +97,16 @@ each next body frame. On expiry the stream yields
 `deadline_exceeded` / "stream idle" and ends.
 
 That is not a failure, and the SDK never re-opens the stream itself: only the
-caller knows the cursor. Resume by calling `stream_events` again with
-`EventCursor` set from the events already seen (`ordinals` for children you
-have seen, `floor` for a child you have not). Never invent a cursor of 0 —
-0 is a real ordinal.
+caller knows the cursor. A dropped connection is the same kind of event, and so
+is any end without the Connect end-of-stream envelope ("stream closed without
+an end-of-stream envelope"): a truncation, never a clean close. Treat
+`is_idle()` and `is_unavailable()` alike — re-open from your own cursor. Only
+`None` from the stream, after a flags-`0x02` end-of-stream envelope, is a clean
+end.
+
+Resume by calling `stream_events` again with `EventCursor` set from the events
+already seen (`ordinals` for children you have seen, `floor` for a child you
+have not). Never invent a cursor of 0 — 0 is a real ordinal.
 
 Two ordinal spaces exist and must never be mixed: `GetHistory` events are
 `conversation_message` ordinals, the event feed's `Event.ordinal` is the

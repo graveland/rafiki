@@ -67,6 +67,11 @@ impl EnvelopeDecoder {
     /// The next complete envelope, `None` if more bytes are needed. At EOF a
     /// partial envelope is [`Code::Unavailable`] — the connection died, it did
     /// not say goodbye.
+    ///
+    /// A boundary EOF with nothing buffered is also `Ok(None)`: the decoder
+    /// only says "no partial envelope", not that the stream is over. Whether a
+    /// boundary EOF is a clean close is the stream layer's call, and it is one
+    /// only after a flags-`0x02` end-of-stream envelope.
     pub(crate) fn next(&mut self) -> Result<Option<Envelope>, Error> {
         if self.buf.len() < HEADER_LEN {
             if self.eof && !self.buf.is_empty() {
@@ -161,8 +166,12 @@ mod tests {
         assert_eq!(err.message, "stream closed mid-envelope");
     }
 
+    /// A decoder-layer statement only: a boundary EOF leaves no partial
+    /// envelope to complain about. It is NOT a clean close of the stream — the
+    /// stream layer reports a boundary EOF without an end-of-stream envelope
+    /// as truncation (`tests/connect.rs`).
     #[test]
-    fn eof_at_an_envelope_boundary_is_clean() {
+    fn eof_at_an_envelope_boundary_leaves_no_partial_envelope() {
         let mut decoder = EnvelopeDecoder::new();
         decoder.feed(&envelop(b"payload"));
         decoder.finish();

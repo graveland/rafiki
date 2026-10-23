@@ -441,6 +441,17 @@ fn idle_error() -> Error {
     Error::new(Code::DeadlineExceeded, "stream idle")
 }
 
+/// The body ended without an end-of-stream envelope. A Connect server stream
+/// terminates with a flags-`0x02` envelope, so EOF at an envelope boundary is
+/// a TRUNCATED stream, never a clean close: reporting it as a clean end would
+/// make a dropped connection look like a daemon that finished talking.
+fn truncated_error() -> Error {
+    Error::new(
+        Code::Unavailable,
+        "stream closed without an end-of-stream envelope",
+    )
+}
+
 /// One decoded envelope's outcome.
 enum Next<T> {
     Item(Result<T, Error>),
@@ -454,7 +465,10 @@ enum Next<T> {
 /// Error>>`.
 ///
 /// Dropping it closes the stream. An idle expiry ends it with
-/// [`Error::is_idle`]; the SDK never re-opens it.
+/// [`Error::is_idle`]; the SDK never re-opens it. It ends with `None` ONLY
+/// after a clean end-of-stream envelope: a transport EOF without one is
+/// [`Code::Unavailable`], because a truncated stream must never look
+/// complete.
 pub struct Streaming<T> {
     body: Pin<Box<Incoming>>,
     decoder: EnvelopeDecoder,
@@ -465,6 +479,9 @@ pub struct Streaming<T> {
     armed: bool,
     /// The body has ended.
     eof: bool,
+    /// A flags-`0x02` end-of-stream envelope said the stream closed. Until one
+    /// has been consumed, a body EOF is a truncation.
+    ended: bool,
     done: bool,
     _message: PhantomData<fn() -> T>,
 }
@@ -474,6 +491,7 @@ impl<T> fmt::Debug for Streaming<T> {
         f.debug_struct("Streaming")
             .field("idle", &self.idle)
             .field("eof", &self.eof)
+            .field("ended", &self.ended)
             .field("done", &self.done)
             .finish()
     }
@@ -488,6 +506,7 @@ impl<T> Streaming<T> {
             sleep: Box::pin(sleep(idle)),
             armed: false,
             eof: false,
+            ended: false,
             done: false,
             _message: PhantomData,
         }
@@ -543,6 +562,7 @@ impl<T: prost::Message + Default> futures_core::Stream for Streaming<T> {
                             return Poll::Ready(Some(item));
                         }
                         Next::End => {
+                            this.ended = true;
                             this.done = true;
                             return Poll::Ready(None);
                         }
@@ -552,7 +572,14 @@ impl<T: prost::Message + Default> futures_core::Stream for Streaming<T> {
                 Ok(None) => {
                     if this.eof {
                         this.done = true;
-                        return Poll::Ready(None);
+                        // No end-of-stream envelope: the connection ended
+                        // mid-stream, and saying `None` would call a truncated
+                        // stream complete.
+                        return if this.ended {
+                            Poll::Ready(None)
+                        } else {
+                            Poll::Ready(Some(Err(truncated_error())))
+                        };
                     }
                 }
                 Err(err) => {

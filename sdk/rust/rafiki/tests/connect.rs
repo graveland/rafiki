@@ -316,6 +316,57 @@ async fn stream_yields_every_message_then_a_clean_end() {
     );
 }
 
+/// A Connect server stream ends with a flags-`0x02` envelope. A connection
+/// that just stops after a complete message is a TRUNCATION: the message
+/// arrives, then an error — never a clean `None`, which a consumer would read
+/// as "settled" instead of "resume from my cursor".
+#[tokio::test]
+async fn stream_truncated_after_a_message_is_unavailable() {
+    let url = serve(stream_stub(frames_body(vec![envelop(
+        0,
+        &event("c_3", 4).encode_to_vec(),
+    )])))
+    .await;
+    let client = Client::new(&url, None).expect("a client");
+    let stream = client
+        .stream_events(&pb::StreamEventsRequest::default(), Duration::from_secs(5))
+        .await
+        .expect("stream_events");
+    futures_util::pin_mut!(stream);
+    assert_eq!(
+        stream.next().await.expect("first").expect("an event"),
+        event("c_3", 4)
+    );
+    let err = stream
+        .next()
+        .await
+        .expect("an error, never a clean end")
+        .expect_err("a truncated stream");
+    assert!(err.is_unavailable(), "{err}");
+    assert_eq!(err.message, "stream closed without an end-of-stream envelope");
+    assert!(stream.next().await.is_none(), "the error ends the stream");
+}
+
+/// The same truncation with nothing at all after the headers.
+#[tokio::test]
+async fn stream_ending_with_no_envelope_at_all_is_unavailable() {
+    let url = serve(stream_stub(frames_body(Vec::new()))).await;
+    let client = Client::new(&url, None).expect("a client");
+    let stream = client
+        .stream_events(&pb::StreamEventsRequest::default(), Duration::from_secs(5))
+        .await
+        .expect("stream_events");
+    futures_util::pin_mut!(stream);
+    let err = stream
+        .next()
+        .await
+        .expect("an error, never a clean end")
+        .expect_err("a truncated stream");
+    assert!(err.is_unavailable(), "{err}");
+    assert_eq!(err.message, "stream closed without an end-of-stream envelope");
+    assert!(stream.next().await.is_none(), "the error ends the stream");
+}
+
 #[tokio::test]
 async fn stream_ending_in_an_error_trailer_yields_that_error() {
     let trailer = serde_json::json!({
