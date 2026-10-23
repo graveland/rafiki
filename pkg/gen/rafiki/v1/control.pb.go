@@ -614,12 +614,15 @@ func (*EventSubject_All) isEventSubject_Scope() {}
 // EventCursor resumes a subscription.
 type EventCursor struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// child_id -> last ordinal seen. A child absent from this map replays from
-	// floor. Without the floor, a child that spawned and exited entirely
-	// during a disconnect is indistinguishable from a brand new one.
+	// child_id -> last ordinal seen; each named child replays after it. A child
+	// subject the map does not name replays from its first event.
 	Ordinals map[string]int32 `protobuf:"bytes,1,rep,name=ordinals,proto3" json:"ordinals,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// floor is the earliest event time a child absent from ordinals replays
-	// from. Unset or the epoch means unbounded (the old floor_unix_ms = 0).
+	// floor bounds replay by event time. With a floor, every child the subject
+	// admits that the map does not name replays from its first event at or
+	// after the floor, provided the daemon still knows it (a closed child never
+	// replays this way) — without one, a child that spawned and exited entirely
+	// during a disconnect is indistinguishable from a brand new one. Unset or
+	// the epoch means no floor: only the children named above replay.
 	Floor         *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=floor,proto3" json:"floor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

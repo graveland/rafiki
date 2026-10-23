@@ -125,6 +125,41 @@ func RunConformance(t *testing.T, mk func(*testing.T) (eventlog.Store, string)) 
 		}
 	})
 
+	t.Run("children since starts each child at its first record in bound", func(t *testing.T) {
+		s, child := mk(t)
+		// other's only record predates the bound, so it must not appear.
+		other := child + "_before"
+		if _, err := s.Append(ctx, other, statusEvent(other, "idle")); err != nil {
+			t.Fatalf("Append other: %v", err)
+		}
+		for range 3 {
+			if _, err := s.Append(ctx, child, statusEvent(child, "idle")); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+		}
+		recs, err := s.Read(ctx, child, -1, 0)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		since := recs[1].CreatedAt
+
+		got, err := s.ChildrenSince(ctx, since)
+		if err != nil {
+			t.Fatalf("ChildrenSince: %v", err)
+		}
+		first, ok := got[child]
+		if !ok {
+			t.Fatalf("ChildrenSince(%v) omits %s: %v", since, child, got)
+		}
+		// Ordinal 0 may share ordinal 1's timestamp; it can never be later.
+		if first > 1 {
+			t.Fatalf("first ordinal = %d, want <= 1", first)
+		}
+		if _, ok := got[other]; ok {
+			t.Fatalf("ChildrenSince(%v) includes %s, whose only record is older", since, other)
+		}
+	})
+
 	t.Run("payload round-trips", func(t *testing.T) {
 		s, child := mk(t)
 		if _, err := s.Append(ctx, child, statusEvent(child, "tool_running")); err != nil {

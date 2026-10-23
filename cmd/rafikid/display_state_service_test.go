@@ -112,6 +112,10 @@ func (b *blockingEventLog) Latest(context.Context, string) (int32, error) {
 	return 0, eventlog.ErrNotFound
 }
 
+func (b *blockingEventLog) ChildrenSince(context.Context, time.Time) (map[string]int32, error) {
+	return nil, nil
+}
+
 // ─── displayFacts ─────────────────────────────────────────────────────────────
 
 // TestDisplayFactsCountsRunningJobsByOwner: the running-job count spans every

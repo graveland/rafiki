@@ -183,13 +183,15 @@ curl -H 'Content-Type: application/json' \
      http://127.0.0.1:8035/rafiki.v1.Control/GetHistory
 ```
 
-A server stream's **headers arrive with its first message**, not before — a
-stream with nothing yet to say sends no bytes at all (connect-go flushes
-headers on the first `Send`). A client must therefore budget an idle-read
-timeout rather than wait for headers: a quiet stream is the normal case, not
-a dead connection. The Python SDK turns that quiet window into a
-`deadline_exceeded` error its callers re-open on (cursor-replayed for
-`settled()`, at-most-once for `Receive`).
+`StreamEvents` **flushes its response headers as soon as the stream opens**,
+before any replay, so a quiet stream still answers at once. Other server
+streams send their headers with their first message (connect-go's default),
+so a stream with nothing yet to say sends no bytes at all. Either way a client
+budgets an idle-read timeout: a quiet stream is the normal case, not a dead
+connection, and the protocol has no keepalive frame (Connect defines none, and
+every face is HTTP/1.1, so there are no HTTP/2 PINGs). The Python SDK turns
+that quiet window into a `deadline_exceeded` error its callers re-open on
+(cursor-replayed for `settled()`, at-most-once for `Receive`).
 
 The **per-child unix socket** (script children, and any child kind whose
 tools are hosted) is described under "Script children" below: the socket is
@@ -271,6 +273,35 @@ clear message instead of misbehaving.
 | Ephemeral | Live content deltas (`content_block_delta`) | None | No, by design |
 
 `StreamEvents` uses `EventSubject` predicates, `EventTier`, and `EventCursor` (per-child ordinals).
+
+#### Replay and the hand-off to live
+
+A stream that carries a cursor replays from the durable log, then follows the
+live bus. The two are one ordered sequence per child, never a gap or a repeat:
+
+- **Subscribe first.** The live subscription opens before replay reads the log,
+  so an event published mid-replay waits in it rather than being lost.
+- **One high-water mark per child.** The stream tracks the highest durable
+  ordinal it has *examined* for each child (delivered, or read and filtered
+  out), starting at the cursor. A live durable event at or below it is a copy
+  replay already delivered and is dropped.
+- **Gaps are backfilled.** A child's log ordinals are gap-free, so a live
+  event beyond the mark plus one means the bus dropped this subscriber's
+  copies in between (`pkg/bus` drops for a slow subscriber rather than block a
+  turn); the missing range is read back from the log first. Counting events a
+  type filter rejected as examined is what keeps a filtered stream, whose
+  delivered ordinals are never contiguous, from reading the log on every
+  event.
+- **What replays.** A child named in `ordinals` replays after its ordinal; a
+  `child` subject the cursor does not name replays from its first event. With
+  a `floor`, every other child the subject admits replays from its first
+  event at or after the floor, if the daemon still knows it — an exited child
+  qualifies, a closed one never does (`eventlog.Store.ChildrenSince`). With no
+  floor, only the named children replay.
+
+Ephemeral events and a durable event whose log append failed carry no ordinal
+and are delivered as they arrive. Pinned by the `TestStreamEvents*` hand-off
+tests (`pkg/connectapi/stream_handoff_test.go`).
 Note that the durable event ordinal is **not** `conversation_message.ordinal`: it is a separate per-child sequence starting at 0 stored in `conversations.event_log`.
 
 ### `GetHistory`: ts, `limit` and `before`

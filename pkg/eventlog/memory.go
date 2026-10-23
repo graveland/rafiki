@@ -80,6 +80,24 @@ func (m *Memory) Read(ctx context.Context, childID string, afterOrdinal int32, l
 	return out, nil
 }
 
+// ChildrenSince maps each child with a record created at or after since to the
+// lowest such ordinal.
+func (m *Memory) ChildrenSince(ctx context.Context, since time.Time) (map[string]int32, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make(map[string]int32)
+	for childID, recs := range m.recs {
+		for _, r := range recs {
+			if !r.CreatedAt.Before(since) {
+				out[childID] = r.Ordinal
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // Latest returns the highest ordinal for childID, or ErrNotFound if no events exist.
 func (m *Memory) Latest(ctx context.Context, childID string) (int32, error) {
 	m.mu.Lock()

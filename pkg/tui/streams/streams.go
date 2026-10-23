@@ -68,10 +68,11 @@ func BackoffFor(attempt int) time.Duration { return backoffFor(attempt) }
 // open time would resume from a map that does not mention them. It is called
 // from this goroutine, which is why rail.Rail is mutex-guarded.
 //
-// After every pump completes a nil sentinel is sent on out. The stream has
-// ended, so children spawned during the gap are invisible to replay -- replay
-// enumerates only the cursor's children -- and the cockpit treats the sentinel
-// as a re-seed request. It fires after a failed open too: a re-seed against a
+// After every pump completes a nil sentinel is sent on out, and the cockpit
+// treats it as a re-seed request. Replay covers the cursor's children and,
+// through the floor, any child born in the gap that the daemon still knows;
+// what no replay can report is a child CLOSED in the gap, whose row only
+// ListChildren can retire. It fires after a failed open too: a re-seed against a
 // down daemon is idempotent and backoff-governed.
 func StartRail(
 	ctx context.Context,
@@ -99,10 +100,9 @@ func StartRail(
 				attempt++
 			}
 			// A completed pump means the subscription was interrupted at
-			// least briefly. The next open replays from the cursor, but the
-			// cursor only names children this client already knows -- a child
-			// spawned mid-gap would stay invisible for the rest of the
-			// session. The nil sentinel tells the cockpit to re-seed from
+			// least briefly. The next open replays from the cursor and its
+			// floor, but a child closed mid-gap leaves no event that says
+			// so. The nil sentinel tells the cockpit to re-seed from
 			// ListChildren; nil cannot be mistaken for a real event, and
 			// rail.Apply already ignores nil.
 			if ctx.Err() == nil {

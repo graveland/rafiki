@@ -104,6 +104,12 @@ func (f Filter) Match(ev *rafikiv1.Event, ln Lineage) bool {
 	return f.Subject.match(ev.GetChildId(), ln)
 }
 
+// AdmitsChild reports whether the subject admits childID's events at all,
+// before tier and type: what a replay checks before reading a child's log.
+func (f Filter) AdmitsChild(childID string, ln Lineage) bool {
+	return f.Subject.match(childID, ln)
+}
+
 func (s Subject) match(childID string, ln Lineage) bool {
 	if childID == "" {
 		return false

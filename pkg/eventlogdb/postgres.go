@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -38,6 +39,14 @@ SELECT child_id, ordinal, type, payload, created_at
  WHERE child_id = $1 AND ordinal > $2
  ORDER BY ordinal ASC
  LIMIT $3`
+
+// childrenSinceSQL rides the event_log_created_at index: the range is the
+// records since the bound, not the whole log.
+const childrenSinceSQL = `
+SELECT child_id, MIN(ordinal)
+  FROM conversations.event_log
+ WHERE created_at >= $1
+ GROUP BY child_id`
 
 const latestSQL = `
 SELECT MAX(ordinal)
@@ -162,4 +171,30 @@ func (s *Store) Latest(ctx context.Context, childID string) (int32, error) {
 		return 0, eventlog.ErrNotFound
 	}
 	return *maxOrd, nil
+}
+
+// ChildrenSince maps each child with a record created at or after since to the
+// lowest such ordinal.
+func (s *Store) ChildrenSince(ctx context.Context, since time.Time) (map[string]int32, error) {
+	rows, err := s.pool.Query(ctx, childrenSinceSQL, since)
+	if err != nil {
+		return nil, fmt.Errorf("eventlog: children since: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int32)
+	for rows.Next() {
+		var (
+			childID string
+			first   int32
+		)
+		if err := rows.Scan(&childID, &first); err != nil {
+			return nil, fmt.Errorf("eventlog: children since: scan: %w", err)
+		}
+		out[childID] = first
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("eventlog: children since: %w", err)
+	}
+	return out, nil
 }

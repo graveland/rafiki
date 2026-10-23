@@ -929,10 +929,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, ev := range msg.evs {
 			if ev == nil {
 				// streams.StartRail's resync sentinel: the rail stream
-				// re-opened, and replay enumerates only the cursor's
-				// children, so anything that spawned mid-gap stays invisible
-				// until ListChildren says otherwise. The sentinel must not
-				// reach applyRailEvent -- it is not an event from any child.
+				// re-opened, and a child closed mid-gap is retired only by
+				// ListChildren. The sentinel must not reach applyRailEvent --
+				// it is not an event from any child.
 				c.reseeding = true
 				continue
 			}

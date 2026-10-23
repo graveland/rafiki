@@ -60,4 +60,9 @@ type Store interface {
 
 	// Latest returns the highest ordinal for childID, or ErrNotFound if none exist.
 	Latest(ctx context.Context, childID string) (int32, error)
+
+	// ChildrenSince maps every child with a record created at or after since
+	// to the lowest such record's ordinal: where a replay bounded by since
+	// starts for a child the caller has no cursor for.
+	ChildrenSince(ctx context.Context, since time.Time) (map[string]int32, error)
 }
