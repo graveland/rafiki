@@ -4,6 +4,8 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +22,10 @@ func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "up":
+		return tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	case "shift+up":
 		return tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift}
 	case "shift+down":
@@ -121,25 +127,29 @@ func TestNInTheInputPaneIsJustALetter(t *testing.T) {
 	ck.StrContains(c.ta.Value(), "n", "textarea")
 }
 
-// The modal is checked BEFORE the globals, so tab must move between fields
-// rather than reaching cyclePane.
-func TestTabCyclesFieldsRatherThanPanes(t *testing.T) {
+// The modal is checked BEFORE the globals, so the field keys must not reach
+// cyclePane.
+func TestDownMovesFieldsRatherThanPanes(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	before := c.focus
 
-	c.handleKey(keyMsg("tab"))
+	c.handleKey(keyMsg("down"))
 
 	ck.Eq(fieldKind, c.form.focus, "form focus")
+	ck.Eq(before, c.focus, "a field key reached the pane ring; a modal must own it")
+
+	c.handleKey(keyMsg("tab"))
+	ck.Eq(fieldKind, c.form.focus, "tab must complete, never move focus")
 	ck.Eq(before, c.focus, "tab reached the pane ring; a modal must own that key")
 }
 
 func TestFieldFocusWrapsBothWays(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
-	c.handleKey(keyMsg("shift+tab"))
+	c.handleKey(keyMsg("up"))
 	ck.Eq(spawnFieldCount-1, c.form.focus, "focus")
-	c.handleKey(keyMsg("tab"))
+	c.handleKey(keyMsg("down"))
 	ck.Eq(fieldName, c.form.focus, "focus")
 }
 
@@ -315,7 +325,7 @@ func TestTypingFollowsTheFocusedField(t *testing.T) {
 	// the executor row joined (model moved last), and a count silently became
 	// the wrong row.
 	for c.form.focus != fieldModel {
-		c.handleKey(keyMsg("tab"))
+		c.handleKey(keyMsg("down"))
 	}
 
 	for _, r := range "opus" {
@@ -665,4 +675,32 @@ func TestSpawnFormWithNothingRememberedStaysEmpty(t *testing.T) {
 	c.openSpawnForm()
 
 	assert.NewCollecting(t).Eq("", c.form.inputs[fieldModel].Value(), "model row falls back to the daemon default")
+}
+
+func TestTabCompletesCwd(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	root := t.TempDir()
+	ck.Require().NoError(os.Mkdir(filepath.Join(root, "project"), 0o755), "mkdir")
+	c := formCockpit(t)
+	c.form.moveFocus(int(fieldCwd) - int(c.form.focus))
+	c.form.inputs[fieldCwd].SetValue(root + "/pro")
+
+	c.handleKey(keyMsg("tab"))
+
+	ck.Eq(root+"/project/", c.form.inputs[fieldCwd].Value(), "cwd")
+	ck.Eq(fieldCwd, c.form.focus, "tab moved focus")
+}
+
+func TestTabAcceptsTheFirstSuggestionOnTheModelRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	ck.Require().True(c.form.showSuggestions(), "no suggestions to begin with")
+	want := c.form.suggest[0].GetId()
+
+	c.handleKey(keyMsg("tab"))
+
+	ck.Eq(want, c.form.inputs[fieldModel].Value(), "model")
+	ck.Eq(fieldModel, c.form.focus, "tab moved focus")
 }

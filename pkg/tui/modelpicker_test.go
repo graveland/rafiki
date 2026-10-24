@@ -341,7 +341,7 @@ func TestSuggestionsHideWhenTheModelRowLosesFocus(t *testing.T) {
 	focusModelRow(c)
 	ck.Require().True(c.form.showSuggestions(), "no suggestions to begin with")
 
-	c.handleKey(keyMsg("tab"))
+	c.handleKey(keyMsg("up"))
 
 	ck.False(c.form.showSuggestions(), "suggestions still showing after the model row lost focus")
 }

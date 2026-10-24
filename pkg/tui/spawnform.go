@@ -208,7 +208,7 @@ func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow, v modelView) {
 }
 
 // showSuggestions reports whether the typeahead is on screen. It follows FOCUS,
-// so tabbing off the model row hides the list rather than leaving it floating
+// so moving off the model row hides the list rather than leaving it floating
 // under a field nobody is editing.
 func (f *spawnForm) showSuggestions() bool {
 	return f.focus == fieldModel && len(f.suggest) > 0
@@ -372,7 +372,7 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 	b.WriteString("\n")
 	// The ⏎ hint is contextual because ⏎ genuinely does two things, and a
 	// static footer would be wrong on one row out of four.
-	hints := "⇥ field   ←/→ kind   ^E executor   ⏎ create   esc cancel"
+	hints := "↑/↓ field   ⇥ complete   ←/→ kind   ^E executor   ⏎ create   esc cancel"
 	if f.focus == fieldModel {
 		// The model row has its own vocabulary and it is worth the line: ↑/↓
 		// mean the list here rather than the field ring, and ^F is the only
@@ -391,7 +391,7 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 		if f.hidden > 0 {
 			hidden = fmt.Sprintf("   (%d hidden)", f.hidden)
 		}
-		hints = "↑/↓ pick   ⏎ take   ^S/^V/^T " + f.viewSummary + hidden + "   ^F all   ⇥" + pos
+		hints = "↑/↓ pick   ⏎ take   ^S/^V/^T " + f.viewSummary + hidden + "   ^F all   ⇥ take" + pos
 	}
 	b.WriteString(styleMeta.Render(hints))
 	if q != nil {
@@ -479,17 +479,28 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		c.form = nil
 		return c, nil
 	case "tab":
-		f.suggestCur = -1
-		f.moveFocus(+1)
-		return c, c.fetchModelsCmd(f.kind())
+		// ⇥ completes; ↑/↓ move between fields. A key cannot both advance
+		// the focus and complete the field it is on.
+		switch f.focus {
+		case fieldModel:
+			if f.suggestCur < 0 && len(f.suggest) > 0 {
+				f.suggestCur = 0
+			}
+			if f.acceptSuggestion() {
+				f.inputs[fieldModel].CursorEnd()
+				f.refreshSuggestions(c.models[f.kind()], c.modelView)
+			}
+		case fieldCwd:
+			in := &f.inputs[fieldCwd]
+			in.SetValue(completePath(in.Value()))
+			in.CursorEnd()
+		}
+		return c, nil
 	case "shift+tab":
-		f.suggestCur = -1
-		f.moveFocus(-1)
-		return c, c.fetchModelsCmd(f.kind())
+		return c, nil
 	case "down":
 		// On the model row ↓ walks INTO the typeahead rather than to the next
-		// field. Leaving the row is still ⇥, which is the key that always
-		// means that; ↓ next to a visible list can only sensibly mean the list.
+		// field. Leaving the row is ↑ off the top; ↓ next to a visible list can only sensibly mean the list.
 		if f.showSuggestions() && f.suggestCur < len(f.suggest)-1 {
 			f.moveSuggest(+1, window)
 			return c, nil
