@@ -5,10 +5,12 @@ package fundi
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -38,7 +40,7 @@ func TestEmitterPublishesNativeAssistantMessage(t *testing.T) {
 			{Type: "text", Text: "the answer"},
 			{Type: "tool_use", ID: "tu_1", Name: "bash", Input: []byte(`{"cmd":"ls"}`)},
 		},
-	}, 0)
+	}, 0, store.Appended{CreatedAt: time.Now()})
 
 	am := findAssistant(t, sink.events)
 	c.Eq("end_turn", am.GetRawStopReason(), "raw stop reason")
@@ -67,7 +69,7 @@ func TestStreamedTurnPublishesTheAssistantMessage(t *testing.T) {
 	}
 	em.StreamStart(MapAssistantMessage(resp, "anthropic", nil))
 	em.StreamEnd(MapAssistantMessage(resp, "anthropic", nil))
-	em.publishAssistant(resp, 0)
+	em.publishAssistant(resp, 0, store.Appended{CreatedAt: time.Now()})
 
 	am := findAssistant(t, sink.events)
 	assert.NewCollecting(t).Eq("streamed reply", am.GetContent()[0].GetText().GetText(), "text")
@@ -83,7 +85,7 @@ func TestPublishAssistantCarriesRunningCost(t *testing.T) {
 		Role:       "assistant",
 		StopReason: anthropic.StopReasonEndTurn,
 		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "hi"}},
-	}, 1.2345)
+	}, 1.2345, store.Appended{CreatedAt: time.Now()})
 
 	am := findAssistant(t, sink.events)
 	assert.NewAborting(t).NotNil(am.CostUsd, "CostUsd is nil, want the running total")
@@ -110,7 +112,7 @@ func TestAgentEndPublishesTurnEnd(t *testing.T) {
 		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 3},
 	}
 	em.AssistantTurn(resp)
-	em.publishAssistant(resp, 0)
+	em.publishAssistant(resp, 0, store.Appended{CreatedAt: time.Now()})
 	em.AgentEnd()
 
 	var te *rafikiv1.TurnEnd
@@ -137,12 +139,10 @@ func findAssistant(t *testing.T, evs []*rafikiv1.Event) *rafikiv1.AssistantMessa
 	return nil
 }
 
-// Live tool output did not exist. ToolExecutionEnd carries a duration and an
-// error flag and no text, and the user turn holding the result was persisted
-// but never published — so watching an agent work showed every tool call with
-// its arguments and its ✓/✗ and nothing of what it returned. Verified against
-// a real daemon before the fix: every event arrived with resultLen=0.
-func TestToolEndPublishesTheOutput(t *testing.T) {
+// Live tool output rides a UserMessage carrying a tool_result block —
+// ToolExecutionEnd has no room for text — and is published with the row that
+// stores it (publishUserRow), never from ToolEnd, so it carries the row's ts.
+func TestToolResultPublishesWithItsRow(t *testing.T) {
 	c := assert.NewCollecting(t)
 	var out bytes.Buffer
 	em := NewEmitter(NewFrontend(bytes.NewReader(nil), &out, nil), "anthropic", nil)
@@ -151,16 +151,19 @@ func TestToolEndPublishesTheOutput(t *testing.T) {
 
 	em.ToolStart("tu_1", "bash", []byte(`{"command":"false"}`))
 	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "cat: /nope: No such file"}, true)
-
-	var tr *rafikiv1.ToolResultBlock
 	for _, ev := range sink.events {
-		for _, cb := range ev.GetUserMessage().GetContent() {
-			if b := cb.GetToolResult(); b != nil {
-				tr = b
-			}
-		}
+		c.Nil(ev.GetUserMessage(), "ToolEnd published a user_message; only the row's insert may")
 	}
-	c.Require().NotNil(tr, "no tool_result published; got %d events", len(sink.events))
+
+	at := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
+	em.publishUserRow([]anthropic.ContentBlockParamUnion{
+		anthropic.NewToolResultBlock("tu_1", "cat: /nope: No such file", true),
+	}, store.Appended{CreatedAt: at})
+
+	ev := sink.events[len(sink.events)-1]
+	c.True(ev.GetTs().AsTime().Equal(at), "ts = %v, want the row's created_at %v", ev.GetTs().AsTime(), at)
+	tr := ev.GetUserMessage().GetContent()[0].GetToolResult()
+	c.Require().NotNil(tr, "no tool_result in %v", ev)
 	c.Eq("tu_1", tr.GetToolUseId(), "tool_use_id")
 	c.True(tr.GetIsError(), "a failed tool's result must carry is_error")
 	c.Eq("cat: /nope: No such file", tr.GetContent()[0].GetText().GetText(), "result text =")

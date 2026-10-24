@@ -33,7 +33,8 @@ func appendRows(t *testing.T, pool *pgxpool.Pool, convID string, n int) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	for i := range n {
-		c.NoError(NewMessages(pool).Append(ctx, convID, i, userMessage("row"), nil), "append row %d", i)
+		_, aerr := NewMessages(pool).Append(ctx, convID, i, userMessage("row"), nil)
+		c.NoError(aerr, "append row %d", i)
 	}
 }
 
@@ -311,7 +312,8 @@ func TestCompactionUnfinishedOrphansUnchanged(t *testing.T) {
 	conv := newConversation(t, pool)
 
 	orphan := "orphan-" + conv
-	c.NoError(NewMessages(pool).Append(ctx, conv, 0, assistantToolUse(orphan), nil), "append assistant tool_use")
+	_, aerr := NewMessages(pool).Append(ctx, conv, 0, assistantToolUse(orphan), nil)
+	c.NoError(aerr, "append assistant tool_use")
 
 	_, err := NewMessages(pool).AppendCompaction(ctx, conv, userMessage("summary"), 7, []Message{
 		{Param: assistantToolUse(orphan), StopReason: "tool_use"},

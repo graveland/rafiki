@@ -26,16 +26,25 @@ func TestAppendReplayAndDivergence(t *testing.T) {
 	m := NewMessages(pool)
 	msg := anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))
 
-	c.NoError(m.Append(ctx, convID, 0, msg, nil), "first append")
-	// Identical replay: no-op, no error, still one row.
-	c.NoError(m.Append(ctx, convID, 0, msg, nil), "replay append")
+	first, err := m.Append(ctx, convID, 0, msg, nil)
+	c.NoError(err, "first append")
+	// Identical replay: no-op, no error, still one row, and the returned
+	// identity is the existing row's.
+	replay, err := m.Append(ctx, convID, 0, msg, nil)
+	c.NoError(err, "replay append")
+	c.EqDeep(first, replay, "replay returns the existing row's id and created_at")
+	stored, err := m.Load(ctx, convID)
+	c.NoError(err, "load")
+	c.Require().Len(stored, 1, "rows after replay")
+	c.True(stored[0].CreatedAt.Equal(first.CreatedAt), "Append created_at %v, stored %v", first.CreatedAt, stored[0].CreatedAt)
+	c.NotEmpty(first.ID, "row id")
 	var n int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
 		WHERE conversation_id=$1::uuid`, convID).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("rows = %d err=%v, want 1", n, err)
 	}
 	// Diverging content at the same ordinal: loud error.
-	err := m.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("DIFFERENT")), nil)
+	_, err = m.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("DIFFERENT")), nil)
 	c.False(err == nil || !strings.Contains(err.Error(), "diverged"), "diverged append err = %v, want history-diverged error", err)
 }
 

@@ -167,6 +167,16 @@ Streaming calls retry too, with their delivery contracts spelled out:
   between pull and wire loses what it had not yet yielded. That is the
   daemon's contract, not a choice the SDK makes.
 
+Message identity: a durable `AssistantMessage` or `UserMessage` event carries
+in `Event.ts` the `created_at` of the `conversation_message` row that message
+was persisted as, the same value `get_history` reports for it, so a message is
+identified across a live stream and a history read by its `ts`. Fundi children
+meet this today; a claude child's live `ts` is still the claude stream's time,
+not the row's. Rows written in one transaction share a `ts`, so match on `ts`
+plus position and role. A fundi tool result is its own `UserMessage` (a
+`tool_result` block), published in tool_use order; steers drained together are
+one merged event.
+
 ## Tests
 
 The Go test `TestPythonSDK*` in `test/integration` drives this SDK against a

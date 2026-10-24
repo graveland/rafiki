@@ -78,7 +78,7 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 		return 0, nil
 	}
 
-	if err := conv.AppendUser(ctx, blocks); err != nil {
+	if _, err := conv.AppendUser(ctx, blocks); err != nil {
 		return 0, fmt.Errorf("agent: repair orphans: append synthetic results: %w", err)
 	}
 	return len(blocks), nil

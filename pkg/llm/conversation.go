@@ -320,6 +320,7 @@ type sendConfig struct {
 	toolChoice    string
 	streamHandler StreamHandler
 	batchWait     func(bool)
+	persisted     func(store.Appended)
 }
 
 type SendOption func(*sendConfig)
@@ -363,6 +364,14 @@ func WithBatchWait(fn func(waiting bool)) SendOption {
 	return func(s *sendConfig) { s.batchWait = fn }
 }
 
+// WithPersisted registers fn to receive the committed identity of the
+// assistant row a Continue wrote, called once the row is stored and before
+// Continue returns. A store-less conversation reports the wall-clock time of
+// the append and an empty ID: it has no committed row.
+func WithPersisted(fn func(store.Appended)) SendOption {
+	return func(s *sendConfig) { s.persisted = fn }
+}
+
 // WithMaxTokens overrides the output cap for this send only.
 func WithMaxTokens(n int64) SendOption { return func(s *sendConfig) { s.maxTokens = n } }
 
@@ -395,7 +404,7 @@ func WithToolChoice(name string) SendOption {
 // call (breaker/fallback/capture, prompt-too-large trim-retry) → persist the
 // assistant message + turn. Returns the assistant response.
 func (conv *Conversation) Send(ctx context.Context, userContent []anthropic.ContentBlockParamUnion, opts ...SendOption) (*anthropic.Message, error) {
-	if err := conv.AppendUser(ctx, userContent); err != nil {
+	if _, err := conv.AppendUser(ctx, userContent); err != nil {
 		return nil, err
 	}
 	return conv.Continue(ctx, opts...)
@@ -404,17 +413,20 @@ func (conv *Conversation) Send(ctx context.Context, userContent []anthropic.Cont
 // AppendUser persists user content as the next message row WITHOUT sending —
 // the write-ahead primitive the agent loop uses to persist tool results (one
 // row per result) before continuing. Consecutive user rows merge into a
-// single wire message at request assembly.
-func (conv *Conversation) AppendUser(ctx context.Context, content []anthropic.ContentBlockParamUnion) error {
+// single wire message at request assembly. It returns the committed row's
+// identity (see store.Appended; a store-less conversation reports the
+// wall-clock time of the append).
+func (conv *Conversation) AppendUser(ctx context.Context, content []anthropic.ContentBlockParamUnion) (store.Appended, error) {
 	history, err := conv.loadHistory(ctx)
 	if err != nil {
-		return fmt.Errorf("llm: %w", err)
+		return store.Appended{}, fmt.Errorf("llm: %w", err)
 	}
 	userParam := anthropic.MessageParam{Role: anthropic.MessageParamRoleUser, Content: content}
-	if err := conv.appendMessage(ctx, nextOrdinal(history), userParam, nil); err != nil {
-		return fmt.Errorf("llm: %w", err)
+	row, err := conv.appendMessage(ctx, nextOrdinal(history), userParam, nil)
+	if err != nil {
+		return store.Appended{}, fmt.Errorf("llm: %w", err)
 	}
-	return nil
+	return row, nil
 }
 
 // Continue sends the conversation AS STORED — no new user message — and
@@ -492,12 +504,16 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	conv.usedTokens = int(resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.OutputTokens)
 
 	assistant := resp.ToParam()
-	if err := conv.appendMessage(ctx, ordinal, assistant,
+	row, err := conv.appendMessage(ctx, ordinal, assistant,
 		&store.AssistantMeta{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens,
-			StopReason: string(resp.StopReason)}); err != nil {
+			StopReason: string(resp.StopReason)})
+	if err != nil {
 		// The turn is already captured; a failed message append must be loud —
 		// resume protocol depends on message rows.
 		return nil, fmt.Errorf("llm: persist assistant message: %w", err)
+	}
+	if scfg.persisted != nil {
+		scfg.persisted(row)
 	}
 	return resp, nil
 }
@@ -568,16 +584,16 @@ func (conv *Conversation) loadHistory(ctx context.Context) ([]store.Message, err
 
 // appendMessage writes through the storage seam, preserving the store's
 // ordinal-idempotent divergence semantics in memory.
-func (conv *Conversation) appendMessage(ctx context.Context, ordinal int, param anthropic.MessageParam, meta *store.AssistantMeta) error {
+func (conv *Conversation) appendMessage(ctx context.Context, ordinal int, param anthropic.MessageParam, meta *store.AssistantMeta) (store.Appended, error) {
 	if conv.client.messages == nil {
 		for _, m := range conv.mem {
 			if m.Ordinal == ordinal {
 				a, _ := json.Marshal(m.Param.Content)
 				b, _ := json.Marshal(param.Content)
 				if string(a) != string(b) {
-					return fmt.Errorf("llm: ordinal %d already holds different content (history diverged)", ordinal)
+					return store.Appended{}, fmt.Errorf("llm: ordinal %d already holds different content (history diverged)", ordinal)
 				}
-				return nil
+				return store.Appended{CreatedAt: time.Now()}, nil
 			}
 		}
 		msg := store.Message{Ordinal: ordinal, Param: param, ToolUseIDs: store.ToolUseIDsOf(param)}
@@ -585,7 +601,7 @@ func (conv *Conversation) appendMessage(ctx context.Context, ordinal int, param 
 			msg.StopReason = meta.StopReason
 		}
 		conv.mem = append(conv.mem, msg)
-		return nil
+		return store.Appended{CreatedAt: time.Now()}, nil
 	}
 	return conv.client.messages.Append(ctx, conv.ID, ordinal, param, meta)
 }
@@ -595,7 +611,7 @@ func (conv *Conversation) appendMessage(ctx context.Context, ordinal int, param 
 // already-persisted identical rows no-op, diverging content errors.
 func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
 	for i, m := range msgs {
-		if err := conv.appendMessage(ctx, i, m, nil); err != nil {
+		if _, err := conv.appendMessage(ctx, i, m, nil); err != nil {
 			return err
 		}
 	}

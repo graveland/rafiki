@@ -74,6 +74,16 @@ type Events struct {
 	// persisted and before the next Continue. Non-empty returned content is
 	// appended as an additional user message — the mid-turn steer seam.
 	PendingUser func() []anthropic.ContentBlockParamUnion
+	// OnUserRow fires once per user row the loop persists from caller-visible
+	// content — the run's prompt, a PendingUser steer, and each tool result —
+	// after the insert has committed, with the content that was stored and the
+	// committed row. Tool results fire in tool_use order, each after its own
+	// insert, from the loop's goroutine. Rows the loop fabricates (wrap-up
+	// notices, truncated-call errors) do not fire it.
+	OnUserRow func(content []anthropic.ContentBlockParamUnion, row store.Appended)
+	// OnAssistantRow fires after each successful LLM call, once OnTurn has run
+	// and the assistant row is committed.
+	OnAssistantRow func(resp *anthropic.Message, row store.Appended)
 
 	// MaxIterations, when positive, caps this run's tool-calling iterations.
 	// Zero (the default) means unlimited — see maxIterations.
@@ -115,6 +125,34 @@ func (e *Events) toolEnd(id, name string, result toolmeta.Result, err error) {
 	if e != nil && e.OnToolEnd != nil {
 		e.OnToolEnd(id, name, result, err)
 	}
+}
+
+func (e *Events) userRow(content []anthropic.ContentBlockParamUnion, row store.Appended) {
+	if e != nil && e.OnUserRow != nil {
+		e.OnUserRow(content, row)
+	}
+}
+
+func (e *Events) assistantRow(resp *anthropic.Message, row store.Appended) {
+	if e != nil && e.OnAssistantRow != nil {
+		e.OnAssistantRow(resp, row)
+	}
+}
+
+// appendUser persists content as a user row and reports it through OnUserRow.
+func appendUser(ctx context.Context, conv *llm.Conversation, ev *Events, content []anthropic.ContentBlockParamUnion) error {
+	row, err := conv.AppendUser(ctx, content)
+	if err != nil {
+		return err
+	}
+	ev.userRow(content, row)
+	return nil
+}
+
+// persistedInto returns opts plus an option that records the committed
+// assistant row into row.
+func persistedInto(opts []llm.SendOption, row *store.Appended) []llm.SendOption {
+	return append(append([]llm.SendOption{}, opts...), llm.WithPersisted(func(a store.Appended) { *row = a }))
 }
 
 func (e *Events) turn(iteration int, resp *anthropic.Message, dur time.Duration, err error) {
@@ -191,7 +229,7 @@ func Run(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events,
 	if len(before) > 0 {
 		ordinal = before[len(before)-1].Ordinal + 1
 	}
-	if err := conv.AppendUser(ctx, userContent); err != nil {
+	if err := appendUser(ctx, conv, ev, userContent); err != nil {
 		return nil, err
 	}
 	result, err := drive(ctx, conv, tools, ev, opts...)
@@ -265,7 +303,7 @@ func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Even
 		synthetic := []anthropic.ContentBlockParamUnion{
 			anthropic.NewToolResultBlock(o.id, InterruptedToolResult(o.name, o.input), true),
 		}
-		if err := conv.AppendUser(ctx, synthetic); err != nil {
+		if _, err := conv.AppendUser(ctx, synthetic); err != nil {
 			return nil, fmt.Errorf("agentloop: persist synthetic result: %w", err)
 		}
 	}
@@ -368,11 +406,13 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			// is a SendOption, and later options win for same-field config).
 			turnOpts = append(append([]llm.SendOption{}, baseOpts...), llm.WithMaxTokens(bumped))
 		}
-		resp, err := continueWithRetry(ctx, conv, turnOpts...)
+		var assistantRow store.Appended
+		resp, err := continueWithRetry(ctx, conv, persistedInto(turnOpts, &assistantRow)...)
 		ev.turn(iteration, resp, time.Since(start), err)
 		if err != nil {
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: iteration %d: %w", iteration, err)
 		}
+		ev.assistantRow(resp, assistantRow)
 		stats.InputTokens += resp.Usage.InputTokens
 		stats.OutputTokens += resp.Usage.OutputTokens
 
@@ -390,7 +430,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			// closes that gap the same way the other two branches already do.
 			if ev != nil && ev.PendingUser != nil {
 				if extra := ev.PendingUser(); len(extra) > 0 {
-					if err := conv.AppendUser(ctx, extra); err != nil {
+					if err := appendUser(ctx, conv, ev, extra); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content after end_turn: %w", err)
 					}
 					continue
@@ -416,15 +456,12 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			}
 
 			stats.ToolCalls += len(toolUses)
-			results := executeBatch(ctx, tools, ev, toolUses)
-			for _, r := range results {
-				if err := conv.AppendUser(ctx, []anthropic.ContentBlockParamUnion{r}); err != nil {
-					return &Result{Stats: stats}, fmt.Errorf("agentloop: persist tool result: %w", err)
-				}
+			if err := executeBatch(ctx, conv, tools, ev, toolUses); err != nil {
+				return &Result{Stats: stats}, fmt.Errorf("agentloop: persist tool result: %w", err)
 			}
 			if ev != nil && ev.PendingUser != nil {
 				if extra := ev.PendingUser(); len(extra) > 0 {
-					if err := conv.AppendUser(ctx, extra); err != nil {
+					if err := appendUser(ctx, conv, ev, extra); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
 					}
 				}
@@ -446,13 +483,13 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 					result := anthropic.NewToolResultBlock(tu.id,
 						fmt.Sprintf("Response hit output token limit — tool call %q may have truncated arguments. Re-issue if needed.", tu.name),
 						true)
-					if err := conv.AppendUser(ctx, []anthropic.ContentBlockParamUnion{result}); err != nil {
+					if _, err := conv.AppendUser(ctx, []anthropic.ContentBlockParamUnion{result}); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: persist truncated tool result: %w", err)
 					}
 				}
 				if ev != nil && ev.PendingUser != nil {
 					if extra := ev.PendingUser(); len(extra) > 0 {
-						if err := conv.AppendUser(ctx, extra); err != nil {
+						if err := appendUser(ctx, conv, ev, extra); err != nil {
 							return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
 						}
 					}
@@ -493,7 +530,7 @@ func wrapUp(ctx context.Context, conv *llm.Conversation, ev *Events, sendOpts []
 	for i, tu := range toolUses {
 		results[i] = anthropic.NewToolResultBlock(tu.id, notice, true)
 	}
-	if err := conv.AppendUser(ctx, results); err != nil {
+	if _, err := conv.AppendUser(ctx, results); err != nil {
 		return &Result{Stats: *stats}, fmt.Errorf("agentloop: persist wrap-up tool results: %w", err)
 	}
 
@@ -504,11 +541,13 @@ func wrapUp(ctx context.Context, conv *llm.Conversation, ev *Events, sendOpts []
 	finalOpts := append(append([]llm.SendOption{}, sendOpts...), llm.WithTools(nil))
 	finalIteration := iteration + 1
 	start := time.Now()
-	resp, err := conv.Continue(ctx, finalOpts...)
+	var assistantRow store.Appended
+	resp, err := conv.Continue(ctx, persistedInto(finalOpts, &assistantRow)...)
 	ev.turn(finalIteration, resp, time.Since(start), err)
 	if err != nil {
 		return &Result{Stats: *stats}, fmt.Errorf("agentloop: wrap-up call: %w", err)
 	}
+	ev.assistantRow(resp, assistantRow)
 	stats.Iterations = finalIteration
 	stats.InputTokens += resp.Usage.InputTokens
 	stats.OutputTokens += resp.Usage.OutputTokens
@@ -548,54 +587,87 @@ func firstText(content []anthropic.ContentBlockUnion) (string, bool) {
 	return "", false
 }
 
-// executeBatch runs the requested tools (bounded concurrency) and returns one
-// tool_result block per request IN REQUEST ORDER — order matters for
-// prompt-cache stability of the next turn. Failures are IsError results, not
-// loop errors, so the model can distinguish a failed tool from missing data.
+// executeBatch runs the requested tools (bounded concurrency) and persists one
+// tool_result row per request IN REQUEST ORDER — order matters for
+// prompt-cache stability of the next turn. Each row is inserted, then reported
+// through OnUserRow, as soon as it and every earlier sibling has finished: a
+// result never waits on a LATER tool, so a slow tail cannot hold back the
+// results ahead of it. Failures are IsError results, not loop errors, so the
+// model can distinguish a failed tool from missing data; the error returned
+// is a failed insert, after which no later row is written.
 //
 // Tool calls with empty names are NEVER executed (no tool is registered with
 // an empty name, and forwarding them to the API would cause a 400 rejection).
 // Instead, an is_error result is fabricated so the model sees the error and can
 // self-correct.
-func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse) []anthropic.ContentBlockParamUnion {
+func executeBatch(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, uses []toolUse) error {
 	results := make([]anthropic.ContentBlockParamUnion, len(uses))
-	var emitMu sync.Mutex // serializes host callbacks across goroutines
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(maxConcurrentTools)
-	for i, use := range uses {
-		g.Go(func() error {
-			emitMu.Lock()
-			ev.toolCall(use.name, use.input)
-			ev.toolStart(use.id, use.name, use.input)
-			emitMu.Unlock()
-
-			var result toolmeta.Result
-			var err error
-			if use.name == "" {
-				result.Text = "tool call had an empty name — this was a model hallucination; re-issue the call with a valid tool name"
-				err = errors.New("empty tool name")
-			} else {
-				tctx := toolmeta.WithToolCallID(gctx, use.id)
-				result, err = tools.Execute(tctx, use.name, use.input)
-				if err != nil && result.Text == "" {
-					result.Text = fmt.Sprintf("Error executing tool: %v", err)
-				}
-			}
-			// Only the TEXT is size-capped: an image is already bounded by the
-			// tool that produced it, and clipping an image is not meaningful.
-			result.Text = truncateToolResult(result.Text, toolmeta.MaxToolResultSize)
-
-			emitMu.Lock()
-			ev.toolResult(use.name, result, err)
-			ev.toolEnd(use.id, use.name, result, err)
-			emitMu.Unlock()
-
-			results[i] = toolResultBlock(use.id, result, err != nil)
-			return nil // a failed tool is a marked result, never a group error
-		})
+	done := make([]chan struct{}, len(uses))
+	for i := range done {
+		done[i] = make(chan struct{})
 	}
-	_ = g.Wait()
-	return results
+	var emitMu sync.Mutex // serializes host callbacks across goroutines
+	bctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	g, gctx := errgroup.WithContext(bctx)
+	g.SetLimit(maxConcurrentTools)
+	// g.Go blocks at the concurrency limit, so tools launch from their own
+	// goroutine and this one stays free to persist results as they complete.
+	launched := make(chan struct{})
+	go func() {
+		defer close(launched)
+		for i, use := range uses {
+			g.Go(func() error {
+				defer close(done[i])
+				emitMu.Lock()
+				ev.toolCall(use.name, use.input)
+				ev.toolStart(use.id, use.name, use.input)
+				emitMu.Unlock()
+
+				var result toolmeta.Result
+				var err error
+				if use.name == "" {
+					result.Text = "tool call had an empty name — this was a model hallucination; re-issue the call with a valid tool name"
+					err = errors.New("empty tool name")
+				} else {
+					tctx := toolmeta.WithToolCallID(gctx, use.id)
+					result, err = tools.Execute(tctx, use.name, use.input)
+					if err != nil && result.Text == "" {
+						result.Text = fmt.Sprintf("Error executing tool: %v", err)
+					}
+				}
+				// Only the TEXT is size-capped: an image is already bounded by the
+				// tool that produced it, and clipping an image is not meaningful.
+				result.Text = truncateToolResult(result.Text, toolmeta.MaxToolResultSize)
+
+				emitMu.Lock()
+				ev.toolResult(use.name, result, err)
+				ev.toolEnd(use.id, use.name, result, err)
+				emitMu.Unlock()
+
+				results[i] = toolResultBlock(use.id, result, err != nil)
+				return nil // a failed tool is a marked result, never a group error
+			})
+		}
+	}()
+
+	var persistErr error
+	for i := range uses {
+		<-done[i]
+		content := []anthropic.ContentBlockParamUnion{results[i]}
+		row, err := conv.AppendUser(ctx, content)
+		if err != nil {
+			persistErr = err
+			cancel()
+			break
+		}
+		emitMu.Lock()
+		ev.userRow(content, row)
+		emitMu.Unlock()
+	}
+	<-launched
+	_ = g.Wait() // tools never return a group error; this only joins them
+	return persistErr
 }
 
 // toolResultBlock builds the tool_result content block sent back to the model.

@@ -942,7 +942,9 @@ func (e *Engine) fatal(err error) {
 // runTurn drives one prompt through the agent loop, emitting the pi frames
 // that bracket it. The user echo precedes agent_start: a pi child echoes the
 // user message itself, and the attach TUI renders the bubble before the
-// agent's activity indicator.
+// agent's activity indicator. That order is the PI FRAMES' only: the durable
+// native UserMessage is published after the prompt's row is inserted (it
+// carries the row's created_at), which is after the native TurnStart.
 func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	// Publish cancel BEFORE the Emit calls below: those write JSON to stdout
 	// and can block on a slow reader, and an abort landing in that window
@@ -954,7 +956,7 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	e.cancel = cancel
 	e.mu.Unlock()
 
-	e.em.UserMessage(text, images)
+	e.em.UserMessage(text)
 	e.em.AgentStart()
 
 	// A child that is already halted (it, or an ancestor, is over budget) must
@@ -964,7 +966,10 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	var result *agentloop.Result
 	var err error
 	if stop, why := e.haltedNow(); stop {
-		if err = e.conv.AppendUser(ctx, llm.UserContent(text, images)); err == nil {
+		content := llm.UserContent(text, images)
+		var row store.Appended
+		if row, err = e.conv.AppendUser(ctx, content); err == nil {
+			e.em.publishUserRow(content, row)
 			result = &agentloop.Result{LimitReached: true, LimitReason: why}
 		}
 	} else {
@@ -1193,7 +1198,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 				// turnCost excludes priorCost deliberately — see its declaration
 				// above. e.em.usage.Cost.Total already holds every PRIOR iteration
 				// of this same turn (folded in by addUsage inside
-				// StreamEnd/AssistantTurn, which run before publishAssistant below);
+				// StreamEnd/AssistantTurn, which run before publishAssistant in OnAssistantRow);
 				// iterCost.Total is this iteration's own contribution.
 				turnCost = e.em.usage.Cost.Total + iterCost.Total
 				cachePct := cacheHitPct(resp.Usage)
@@ -1219,20 +1224,23 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			if err != nil {
 				return // a failed call has no assistant message to render
 			}
-			// The pi frames first, then ONE durable native publication for
-			// both paths. It lives here rather than inside StreamEnd and
-			// AssistantTurn because only one of those two is handed the
-			// provider response, and because a completed turn is exactly the
-			// boundary the durable event describes — how it was transported
-			// is not the event's business. The early return above is why a
-			// failed call publishes nothing: there is no assistant message.
+			// The pi frames here; the ONE durable native publication for both
+			// paths is OnAssistantRow, below, once the assistant row is
+			// committed. The early return above is why a failed call
+			// publishes nothing: there is no assistant message.
 			if wasStreamed {
 				e.em.StreamEnd(e.em.mapMessage(resp))
 			} else {
 				e.em.AssistantTurn(resp)
 			}
-			e.em.publishAssistant(resp, turnCost)
 		},
+		// The durable assistant event waits for the committed row: its ts is
+		// the row's created_at. It runs on the turn goroutine right after
+		// OnTurn, so turnCost is the figure OnTurn just computed.
+		OnAssistantRow: func(resp *anthropic.Message, row store.Appended) {
+			e.em.publishAssistant(resp, turnCost, row)
+		},
+		OnUserRow: e.em.publishUserRow,
 		// OnToolStart/OnToolEnd are the only callbacks here that do NOT run on
 		// the turn goroutine: agentloop invokes them from inside its per-tool
 		// errgroup goroutine (one g.Go per tool_use block), which nothing
@@ -1435,7 +1443,7 @@ func (e *Engine) drainSteers() []anthropic.ContentBlockParamUnion {
 	}
 	e.consume(ids)
 	for _, q := range entries {
-		e.em.UserMessage(q.text, q.attachments)
+		e.em.UserMessage(q.text)
 	}
 	if len(images) > 0 {
 		return llm.UserContent(strings.Join(texts, "\n"), images)

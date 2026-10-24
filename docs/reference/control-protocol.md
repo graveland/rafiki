@@ -305,6 +305,43 @@ and are delivered as they arrive. Pinned by the `TestStreamEvents*` hand-off
 tests (`pkg/connectapi/stream_handoff_test.go`).
 Note that the durable event ordinal is **not** `conversation_message.ordinal`: it is a separate per-child sequence starting at 0 stored in `conversations.event_log`.
 
+### Message events: `ts` is the row's `created_at`
+
+A durable `AssistantMessage` or `UserMessage` event on `StreamEvents` carries in `Event.ts` the `created_at` of the `conversation_message` row that message was persisted as, the same value `GetHistory` reports for that message. A client can therefore identify one message across a live stream and a history read by its `ts`.
+
+Because several rows can share a `ts` (a transaction's rows share one), `ts`
+identifies a message together with its position and role, not alone.
+
+**Which children meet it today: fundi.** A fundi child publishes a message event
+only after the row it describes has been inserted, and takes `ts` from that
+insert's `RETURNING created_at` (`store.Messages.Append`; on a resume replay of
+an existing ordinal, the existing row's). Event content for a user row is the
+stored content converted exactly as `GetHistory` converts it
+(`eventconv.BlocksFromParam`). Every other event (`TurnStart`, `TurnEnd`,
+deltas, tool events, errors) keeps its emit-time `ts`. Behaviour this implies:
+
+- **One `UserMessage` per persisted user row**: the prompt, each drained steer
+  batch, and each tool result. Steers drained together are persisted as ONE
+  merged row (their texts joined with `"\n"` in arrival order, attachments
+  carried alongside), so they publish as ONE event with that merged content. The
+  pi frames keep one `message_start`/`message_end` pair per steer.
+- **Tool results publish in tool_use order**, each after its own insert, so a
+  result waits only for earlier tools of the same batch. `ToolExecutionEnd` is
+  still published the moment its tool finishes.
+- **Native order for a prompt is `TurnStart`, then `UserMessage`**: the user
+  event waits for its row, which agentloop inserts after the turn opens. The pi
+  frame order is unchanged: the user echo still precedes `agent_start`.
+- **A store-less (in-memory) conversation has no committed row**: its events
+  carry the wall-clock time of the append and there is no `GetHistory` to
+  compare against. Every real deployment has a database.
+- Rows the loop fabricates (wrap-up notices, truncated-call errors) are not
+  published live; they appear in `GetHistory` only.
+
+**Claude children do not meet it yet.** Their message events are built from the
+claude stream and carry its time, while the proxy writes the row after the
+stream ends, so their `ts` and the row's `created_at` differ. Pinned as a known
+gap, not a promise.
+
 ### `GetHistory`: ts, `limit` and `before`
 
 `GetHistory` reads the `conversation_message` side of that split — the
@@ -315,7 +352,9 @@ one `ts`. Ordinary messages are appended one statement each and get their own;
 the multi-row transaction today is a compaction or `/clear` boundary written
 together with the tail copied after it (`appendBoundary`, `pkg/store`), and
 those copies render no event. Clients must still treat `ts` as non-unique; the
-widening below is what makes that safe.
+widening below is what makes that safe. For a fundi child this `ts` is the same
+value the live `AssistantMessage`/`UserMessage` event carried — see "Message
+events: `ts` is the row's `created_at`" above.
 
 The request's two optional fields page that history BACKWARDS:
 
@@ -407,7 +446,8 @@ send stays visible and only a user-triggered resend re-issues it
 not.
 
 **`UserMessage` carries no message id**, so a client cannot match a streamed user
-message to the send that produced it. The web client reconciles its pending sends
+message to the send that produced it (its `ts` identifies the stored row, not the
+send). The web client reconciles its pending sends
 by TEXT — the oldest queued entry whose text matches the delivered user block is
 marked delivered, FIFO (`SendQueue.markDelivered`).
 
@@ -1643,7 +1683,7 @@ Every event payload is classified into a tier:
 
 | Event | Tier | Purpose |
 |---|---|---|
-| `UserMessage` | durable | User prompt message; attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way |
+| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` for fundi children — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way |
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn, emitted once per turn by both model-backed kinds: a fundi turn opens at `Emitter.AgentStart` (`pkg/fundi/emit.go`) before its first request, so `model` is unset there; a claude turn opens at prompt delivery — its prompt echo (`OutboundEchoNative`, `pkg/child/provider_claude_state.go`), before the first model request reaches the proxy — so `model` is unset there too, and the first assistant frame (which names one) does not reopen it. A second prompt/steer inside the same turn publishes no second `TurnStart`. `turn_id` is unset on both, since no producer mints one and `TurnEnd` carries none either |
 | `TurnEnd` | durable | End of an agent turn. A fundi turn publishes it from `Emitter.AgentEnd`, a claude turn from its `result` frame. Both carry the turn's token usage; cost rides `cost_usd` when the producer can price the turn (fundi always reports one, a claude child omits it when the result frame reports none) |

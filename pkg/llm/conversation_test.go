@@ -243,7 +243,8 @@ func TestConversationTrimRetryKeepsPrefixAndRows(t *testing.T) {
 		}
 		msg := anthropic.MessageParam{Role: role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		ck.Require().NoError(store.NewMessages(pool).Append(ctx, conv.ID, i, msg, nil))
+		_, aerr := store.NewMessages(pool).Append(ctx, conv.ID, i, msg, nil)
+		ck.Require().NoError(aerr)
 	}
 
 	if _, err := conv.Send(ctx, UserText("question")); err != nil {
@@ -301,7 +302,8 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	msgs := store.NewMessages(pool)
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_orphan", map[string]any{"a": 1}, "service_status"))
-	ck.Require().NoError(msgs.Append(ctx, convB.ID, 0, assistant, nil))
+	_, aerr := msgs.Append(ctx, convB.ID, 0, assistant, nil)
+	ck.Require().NoError(aerr)
 
 	// Conversation C: clean (a full Send).
 	convC, err := c.Conversation(ctx, NewConversation("", "test"))

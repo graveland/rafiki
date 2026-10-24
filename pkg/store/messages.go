@@ -12,7 +12,6 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -202,13 +201,24 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 	return out, rows.Err()
 }
 
-// Append persists one message at the given ordinal. Idempotent under resume:
-// re-appending an ordinal that already exists is a no-op when the content
-// matches, and an error when it doesn't (two histories diverged).
-func (m *Messages) Append(ctx context.Context, conversationID string, ordinal int, param anthropic.MessageParam, meta *AssistantMeta) error {
+// Appended is the committed identity of a row Append wrote or found: its id
+// and created_at as the database reported them, so a caller can publish the
+// same time GetHistory will later report for the row.
+type Appended struct {
+	ID        string
+	CreatedAt time.Time
+}
+
+// Append persists one message at the given ordinal and returns the committed
+// row's id and created_at. Idempotent under resume: re-appending an ordinal
+// that already exists writes nothing, returns the EXISTING row's identity when
+// the content matches, and is an error when it doesn't (two histories
+// diverged). Both identities come from committed state: the insert is one
+// autocommit statement, and the replay read sees only committed rows.
+func (m *Messages) Append(ctx context.Context, conversationID string, ordinal int, param anthropic.MessageParam, meta *AssistantMeta) (Appended, error) {
 	content, err := json.Marshal(param.Content)
 	if err != nil {
-		return fmt.Errorf("append message: marshal content: %w", err)
+		return Appended{}, fmt.Errorf("append message: marshal content: %w", err)
 	}
 	content = jsonbSafe(content)
 	var inTok, outTok *int64
@@ -223,34 +233,36 @@ func (m *Messages) Append(ctx context.Context, conversationID string, ordinal in
 	// Two statements rather than one with a conditional guard: an unfenced
 	// caller must behave exactly as it did before fencing existed, and a
 	// clever single query that tries to be both is where the subtle bugs live.
-	var tag pgconn.CommandTag
+	var row pgx.Row
 	if m.lease.Held() {
-		tag, err = m.pool.Exec(ctx, appendFencedSQL,
+		row = m.pool.QueryRow(ctx, appendFencedSQL,
 			conversationID, ordinal, string(param.Role), content, toolUseIDs(param),
 			inTok, outTok, stopReason, m.lease.Holder, m.lease.Token)
 	} else {
-		tag, err = m.pool.Exec(ctx, appendSQL,
+		row = m.pool.QueryRow(ctx, appendSQL,
 			conversationID, ordinal, string(param.Role), content, toolUseIDs(param),
 			inTok, outTok, stopReason)
 	}
-	if err != nil {
-		return fmt.Errorf("append message %d: %w", ordinal, err)
+	var appended Appended
+	err = row.Scan(&appended.ID, &appended.CreatedAt)
+	if err == nil {
+		return appended, nil
 	}
-	if tag.RowsAffected() == 1 {
-		return nil
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Appended{}, fmt.Errorf("append message %d: %w", ordinal, err)
 	}
 
-	// Zero rows has two causes once fencing is on: the ordinal already exists
-	// (a Resume replay), or the lease is gone. Check the lease first — a lost
-	// lease is the more serious answer and reporting it as a content conflict
-	// would send the caller down entirely the wrong path.
+	// No row came back, which has two causes once fencing is on: the ordinal
+	// already exists (a Resume replay), or the lease is gone. Check the lease
+	// first — a lost lease is the more serious answer and reporting it as a
+	// content conflict would send the caller down entirely the wrong path.
 	if m.lease.Held() {
 		valid, verr := NewLeases(m.pool).Valid(ctx, m.lease)
 		if verr != nil {
-			return fmt.Errorf("append message %d: lease check: %w", ordinal, verr)
+			return Appended{}, fmt.Errorf("append message %d: lease check: %w", ordinal, verr)
 		}
 		if !valid {
-			return fmt.Errorf("append message %d: %w", ordinal, ErrLeaseLost)
+			return Appended{}, fmt.Errorf("append message %d: %w", ordinal, ErrLeaseLost)
 		}
 	}
 
@@ -258,21 +270,22 @@ func (m *Messages) Append(ctx context.Context, conversationID string, ordinal in
 	// replay), otherwise fail loudly rather than silently forking history.
 	var existing []byte
 	if err := m.pool.QueryRow(ctx, `
-		SELECT content FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND ordinal = $2`, conversationID, ordinal).Scan(&existing); err != nil {
-		return fmt.Errorf("append message %d: conflict readback: %w", ordinal, err)
+		SELECT id::text, content, created_at FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND ordinal = $2`, conversationID, ordinal).Scan(&appended.ID, &existing, &appended.CreatedAt); err != nil {
+		return Appended{}, fmt.Errorf("append message %d: conflict readback: %w", ordinal, err)
 	}
 	if !jsonEqual(existing, content) {
-		return fmt.Errorf("append message %d: ordinal already holds different content (history diverged)", ordinal)
+		return Appended{}, fmt.Errorf("append message %d: ordinal already holds different content (history diverged)", ordinal)
 	}
-	return nil
+	return appended, nil
 }
 
 const appendSQL = `
 INSERT INTO conversations.conversation_message
 	(conversation_id, ordinal, role, content, tool_use_ids, input_tokens, output_tokens, stop_reason)
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (conversation_id, ordinal) DO NOTHING`
+ON CONFLICT (conversation_id, ordinal) DO NOTHING
+RETURNING id::text, created_at`
 
 // appendFencedSQL is appendSQL with the lease guard. The EXISTS clause is
 // evaluated in the SAME statement as the insert, which is what makes a stalled
@@ -286,7 +299,8 @@ SELECT $1::uuid, $2, $3, $4, $5, $6, $7, $8
    SELECT 1 FROM conversations.conversation_lease
     WHERE conversation_id = $1::uuid AND holder = $9 AND token = $10::uuid
       AND expires_at > now())
-ON CONFLICT (conversation_id, ordinal) DO NOTHING`
+ON CONFLICT (conversation_id, ordinal) DO NOTHING
+RETURNING id::text, created_at`
 
 // AssistantMeta carries per-message usage and the producing turn's stop
 // reason (assistant messages; resume consults StopReason to distinguish a

@@ -259,7 +259,7 @@ func TestCompactionProactiveCountsPendingRows(t *testing.T) {
 	big := strings.Repeat("z", 140_000)
 	for i := 0; i < 2; i++ {
 		content := []anthropic.ContentBlockParamUnion{anthropic.NewToolResultBlock("toolu_1", big, false)}
-		if err := conv.AppendUser(ctx, content); err != nil {
+		if _, err := conv.AppendUser(ctx, content); err != nil {
 			t.Fatalf("append tool result %d: %v", i, err)
 		}
 	}
@@ -854,8 +854,9 @@ func TestCompactionStoreLoadStaysFull(t *testing.T) {
 		if i%2 == 1 {
 			role = anthropic.MessageParamRoleAssistant
 		}
-		ck.Require().NoError(msgs.Append(ctx, conv.ID, i,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}}, nil))
+		_, aerr := msgs.Append(ctx, conv.ID, i,
+			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}}, nil)
+		ck.Require().NoError(aerr)
 	}
 	conv.usedTokens = 999_000
 
@@ -895,8 +896,9 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 		if i%2 == 1 {
 			role = anthropic.MessageParamRoleAssistant
 		}
-		ck.Require().NoError(msgs.Append(ctx, conv.ID, i,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}}, nil))
+		_, aerr := msgs.Append(ctx, conv.ID, i,
+			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}}, nil)
+		ck.Require().NoError(aerr)
 	}
 	conv.usedTokens = 999_000
 

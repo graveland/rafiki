@@ -50,7 +50,8 @@ func agentViewDBFixtureFor(t *testing.T) agentViewDBFixture {
 	msgs := store.NewMessages(pool)
 	ordinal := 0
 	appendRow := func(param anthropic.MessageParam, meta *store.AssistantMeta) {
-		ck.NoError(msgs.Append(ctx, convID, ordinal, param, meta), "append ordinal %d", ordinal)
+		_, aerr := msgs.Append(ctx, convID, ordinal, param, meta)
+		ck.NoError(aerr, "append ordinal %d", ordinal)
 		ordinal++
 	}
 	user := func(text string) anthropic.MessageParam {

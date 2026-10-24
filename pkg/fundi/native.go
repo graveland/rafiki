@@ -3,13 +3,15 @@
 package fundi
 
 import (
+	"time"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/toolmeta"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // NativeSink receives fundi's rafiki-native events. It is optional: an Emitter
@@ -41,7 +43,10 @@ func (e *Emitter) SetNativeSink(s NativeSink) { e.native = s }
 // ToParam while the struct fields are already correct. Both current callers
 // pass a complete response, so ToParam would work today — and would silently
 // start dropping content the first time anyone published from a partial one.
-func (e *Emitter) publishAssistant(resp *anthropic.Message, turnCostUSD float64) {
+//
+// It is called only once the assistant row is committed, and the event's ts is
+// that row's created_at (row), the value GetHistory reports for the message.
+func (e *Emitter) publishAssistant(resp *anthropic.Message, turnCostUSD float64, row store.Appended) {
 	if e.native == nil {
 		return
 	}
@@ -71,12 +76,12 @@ func (e *Emitter) publishAssistant(resp *anthropic.Message, turnCostUSD float64)
 		blocks = append(blocks, cb)
 	}
 	e.lastStop = string(resp.StopReason)
-	e.publishNative(&rafikiv1.AssistantMessage{
+	e.publishNativeAt(&rafikiv1.AssistantMessage{
 		Content:       blocks,
 		StopReason:    eventconv.StopReasonFromString(e.lastStop),
 		RawStopReason: e.lastStop,
 		CostUsd:       proto.Float64(turnCostUSD),
-	})
+	}, row.CreatedAt)
 }
 
 // publishTurnEnd closes the turn for durable consumers. The TUI does not need
@@ -151,61 +156,33 @@ func (e *Emitter) publishError(err error) {
 	})
 }
 
-// publishToolResult publishes a completed tool's OUTPUT.
+// publishUserRow publishes a persisted user row — a prompt, a drained steer,
+// or one tool's result — as a durable UserMessage whose ts is the row's
+// created_at and whose content is the stored content converted exactly as
+// GetHistory converts it (eventconv.BlocksFromParam), so a live viewer and a
+// replayed one see one message, identifiable by its ts.
 //
-// It rides a UserMessage carrying a tool_result block because that is exactly
-// the shape history has: Anthropic puts tool_result in the user turn, so
-// EventsFromMessages produces this and a live viewer and a replayed one
-// converge on one code path rather than two.
-//
-// Without it, live tool output did not exist. ToolExecutionEnd carries a
-// duration and an error flag and no text, and the user turn holding the result
-// was persisted but never published — so watching an agent work showed every
-// tool call with its arguments, its ✓ or ✗, and nothing whatsoever of what it
-// returned. The output only appeared on reattach, from the conversation store.
-func (e *Emitter) publishToolResult(id string, result toolmeta.Result, isErr bool) {
-	if e.native == nil {
-		return
-	}
-	e.publishNative(&rafikiv1.UserMessage{
-		Content: []*rafikiv1.ContentBlock{{
-			Index: 0,
-			Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
-				ToolUseId: id,
-				IsError:   isErr,
-				Content:   nativeToolResultContent(result),
-			}},
-		}},
-	})
+// A tool_result rides a UserMessage because that is the shape history has:
+// Anthropic puts tool_result in the user turn. ToolExecutionEnd carries a
+// duration and an error flag and no text, so this event is the only live
+// source of a tool's output.
+func (e *Emitter) publishUserRow(content []anthropic.ContentBlockParamUnion, row store.Appended) {
+	e.publishNativeAt(&rafikiv1.UserMessage{
+		Content: eventconv.BlocksFromParam(anthropic.MessageParam{Role: anthropic.MessageParamRoleUser, Content: content}),
+	}, row.CreatedAt)
 }
 
-// nativeToolResultContent builds the tool_result's content blocks: images
-// first (mirroring nativeUserContent and the request-side order), then the
-// text. The text block is always present so a text-free image-only result
-// still has the shape every consumer expects.
-func nativeToolResultContent(result toolmeta.Result) []*rafikiv1.ContentBlock {
-	var out []*rafikiv1.ContentBlock
-	for _, img := range result.Images {
-		if len(img.Data) == 0 {
-			continue
-		}
-		out = append(out, &rafikiv1.ContentBlock{
-			Index: int32(len(out)),
-			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: img.MediaType, Data: img.Data}},
-		})
-	}
-	out = append(out, &rafikiv1.ContentBlock{
-		Index: int32(len(out)),
-		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: result.Text}},
-	})
-	return out
-}
-
+// publishNative publishes payload stamped with the emit time. Message events
+// that are persisted as rows go through publishNativeAt instead.
 func (e *Emitter) publishNative(payload any) {
+	e.publishNativeAt(payload, time.Now())
+}
+
+func (e *Emitter) publishNativeAt(payload any, ts time.Time) {
 	if e.native == nil {
 		return
 	}
-	ev := &rafikiv1.Event{Ts: timestamppb.Now()}
+	ev := &rafikiv1.Event{Ts: timestamppb.New(ts)}
 	switch p := payload.(type) {
 	case *rafikiv1.UserMessage:
 		ev.Payload = &rafikiv1.Event_UserMessage{UserMessage: p}
@@ -229,11 +206,4 @@ func (e *Emitter) publishNative(payload any) {
 		return
 	}
 	e.native.Publish(ev)
-}
-
-func nativeText(s string) []*rafikiv1.ContentBlock {
-	return []*rafikiv1.ContentBlock{{
-		Index: 0,
-		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: s}},
-	}}
 }

@@ -236,7 +236,8 @@ func TestResumeReissuesPendingCall(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	c.Require().NoError(conv.AppendUser(context.Background(), llm.UserText("diagnose it")))
+	_, aerr := conv.AppendUser(context.Background(), llm.UserText("diagnose it"))
+	c.Require().NoError(aerr)
 	// (crash here: no assistant, no results)
 
 	result, err := Resume(context.Background(), conv, tools, nil)
@@ -314,9 +315,11 @@ func TestResumeAlreadyComplete(t *testing.T) {
 
 	msgs := store.NewMessages(pool)
 	ctx := context.Background()
-	c.Require().NoError(msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil))
-	c.Require().NoError(msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
-		&store.AssistantMeta{StopReason: "end_turn"}))
+	_, aerr := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil)
+	c.Require().NoError(aerr)
+	_, aerr = msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
+		&store.AssistantMeta{StopReason: "end_turn"})
+	c.Require().NoError(aerr)
 
 	result, err := Resume(ctx, conv, tools, nil)
 	c.Require().NoError(err, "Resume")
@@ -382,16 +385,19 @@ func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversati
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	msgs := store.NewMessages(pool)
-	c.NoError(msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil))
+	_, aerr := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil)
+	c.NoError(aerr)
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_a", map[string]any{"k": "a"}, "alpha"),
 		anthropic.NewToolUseBlock("toolu_b", map[string]any{"k": "b"}, "beta"),
 	)
-	c.NoError(msgs.Append(ctx, conv.ID, 1, assistant, nil))
+	_, aerr = msgs.Append(ctx, conv.ID, 1, assistant, nil)
+	c.NoError(aerr)
 	for i, block := range partial {
-		c.NoError(msgs.Append(ctx, conv.ID, 2+i,
+		_, aerr := msgs.Append(ctx, conv.ID, 2+i,
 			anthropic.MessageParam{Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{block}}, nil))
+				Content: []anthropic.ContentBlockParamUnion{block}}, nil)
+		c.NoError(aerr)
 	}
 }
 
@@ -456,9 +462,11 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
 	msgs := store.NewMessages(pool)
-	c.Require().NoError(msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil))
-	c.Require().NoError(msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
-		&store.AssistantMeta{StopReason: "max_tokens"}))
+	_, aerr := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil)
+	c.Require().NoError(aerr)
+	_, aerr = msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
+		&store.AssistantMeta{StopReason: "max_tokens"})
+	c.Require().NoError(aerr)
 
 	result, err := Resume(ctx, conv, tools, nil)
 	c.Require().NoError(err, "Resume")

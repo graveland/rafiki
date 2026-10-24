@@ -188,7 +188,7 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	em := NewEmitter(fe, "anthropic", nil)
 	em.AgentStart()
-	em.UserMessage("go", nil)
+	em.UserMessage("go")
 	em.AssistantTurn(&resp)
 	em.ToolStart("tu_1", "bash", json.RawMessage(`{"command":"ls"}`))
 	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "file.txt"}, false)
@@ -262,13 +262,13 @@ func TestUserMessageAssignsUniqueID(t *testing.T) {
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	em := NewEmitter(fe, "anthropic", nil)
-	em.UserMessage("first", nil)
+	em.UserMessage("first")
 	// A real turn always separates two UserMessage calls by at least one LLM
 	// round trip; sleep to guarantee distinct millisecond timestamps rather
 	// than asserting uniqueness at zero elapsed time, which the ts-based
 	// scheme (matching the claudeUserEcho precedent) was never meant to give.
 	time.Sleep(2 * time.Millisecond)
-	em.UserMessage("second", nil)
+	em.UserMessage("second")
 
 	var ids []string
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {

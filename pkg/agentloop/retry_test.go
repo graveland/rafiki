@@ -209,7 +209,8 @@ func TestContinueWithRetry_ExhaustedRetries_ReturnsLastError(t *testing.T) {
 // STORED, unlike Send/Run) has something to send.
 func seedUser(t *testing.T, conv *llm.Conversation) {
 	t.Helper()
-	assert.NewAborting(t).NoError(conv.AppendUser(context.Background(), llm.UserText("hi")), "seed user message")
+	_, aerr := conv.AppendUser(context.Background(), llm.UserText("hi"))
+	assert.NewAborting(t).NoError(aerr, "seed user message")
 }
 
 // conditionalSender calls fn on each New call.

@@ -39,7 +39,8 @@ func TestDBRecentSkipsCompactionTailAndRendersSummaryBoundary(t *testing.T) {
 		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-2")),
 	}
 	for i, p := range rows {
-		ck.Require().NoError(msgs.Append(ctx, convID, i, p, nil), "append %d", i)
+		_, aerr := msgs.Append(ctx, convID, i, p, nil)
+		ck.Require().NoError(aerr, "append %d", i)
 	}
 	tail := []store.Message{
 		{Ordinal: 2, Param: rows[2]},

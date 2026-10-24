@@ -12,7 +12,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/llm"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -21,23 +20,20 @@ type capturingSink struct{ events []*rafikiv1.Event }
 
 func (c *capturingSink) Publish(ev *rafikiv1.Event) { c.events = append(c.events, ev) }
 
-func TestEmitterPublishesNativeUserMessage(t *testing.T) {
-	c := assert.NewAborting(t)
+// The pi echo publishes nothing durable: the native UserMessage waits for the
+// inserted row (publishUserRow) because its ts is that row's created_at.
+func TestEmitterUserMessagePublishesNoNativeEvent(t *testing.T) {
 	var out bytes.Buffer
 	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
 	em := fundi.NewEmitter(fe, "anthropic", nil)
-
 	sink := &capturingSink{}
 	em.SetNativeSink(sink)
 
-	em.UserMessage("hello there", nil)
+	em.UserMessage("hello there")
 
-	c.Len(sink.events, 1, "got %d native events, want 1", len(sink.events))
-	um := sink.events[0].GetUserMessage()
-	c.NotNil(um, "event is not a user message")
-	if len(um.Content) != 1 || um.Content[0].GetText().GetText() != "hello there" {
-		t.Fatalf("unexpected content: %+v", um.Content)
-	}
+	c := assert.NewAborting(t)
+	c.Empty(sink.events, "native events from the pi echo")
+	c.NotEq(0, out.Len(), "pi frames")
 }
 
 // A nil sink must be a complete no-op: existing callers pass none.
@@ -46,63 +42,9 @@ func TestEmitterWithNoSinkDoesNotPanic(t *testing.T) {
 	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
 	em := fundi.NewEmitter(fe, "anthropic", nil)
 
-	em.UserMessage("hello there", nil)
+	em.UserMessage("hello there")
 
 	assert.NewAborting(t).NotEq(0, out.Len(), "pi frame output disappeared; the pi path must be unchanged")
-}
-
-// Images ride the native user_message event only, in llm.UserContent's order:
-// images first, the text last, and an image with no data skipped entirely.
-func TestEmitterUserMessageCarriesImages(t *testing.T) {
-	c := assert.NewAborting(t)
-	var out bytes.Buffer
-	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
-	em := fundi.NewEmitter(fe, "anthropic", nil)
-
-	sink := &capturingSink{}
-	em.SetNativeSink(sink)
-
-	em.UserMessage("look", []llm.UserImage{
-		{MediaType: "image/png", Data: []byte{1, 2, 3}},
-		{MediaType: "image/png"},
-		{MediaType: "image/jpeg", Data: []byte{4}},
-	})
-
-	c.Len(sink.events, 1, "got %d native events, want 1", len(sink.events))
-	um := sink.events[0].GetUserMessage()
-	c.NotNil(um, "event is not a user message")
-	c.Len(um.Content, 3, "got %d content blocks, want 3 (empty-Data image skipped)", len(um.Content))
-	img0 := um.Content[0].GetImage()
-	c.Require().NotNil(img0, "content[0] is not an image")
-	c.Eq("image/png", img0.MediaType, "content[0] media type")
-	c.EqDiff([]byte{1, 2, 3}, img0.Data, "content[0] data")
-	c.Eq(int32(0), um.Content[0].Index, "content[0] index")
-	img1 := um.Content[1].GetImage()
-	c.Require().NotNil(img1, "content[1] is not an image")
-	c.Eq("image/jpeg", img1.MediaType, "content[1] media type")
-	c.EqDiff([]byte{4}, img1.Data, "content[1] data")
-	c.Eq(int32(1), um.Content[1].Index, "content[1] index")
-	c.Eq("look", um.Content[2].GetText().GetText(), "content[2] text")
-	c.Eq(int32(2), um.Content[2].Index, "content[2] index")
-}
-
-// An image-only prompt has no text block at all — matching llm.UserContent,
-// which omits empty text rather than sending a content-free block.
-func TestEmitterImageOnlyPromptHasNoTextBlock(t *testing.T) {
-	c := assert.NewAborting(t)
-	var out bytes.Buffer
-	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
-	em := fundi.NewEmitter(fe, "anthropic", nil)
-
-	sink := &capturingSink{}
-	em.SetNativeSink(sink)
-
-	em.UserMessage("", []llm.UserImage{{MediaType: "image/png", Data: []byte{1}}})
-
-	um := sink.events[0].GetUserMessage()
-	c.Require().NotNil(um, "event is not a user message")
-	c.Len(um.Content, 1, "got %d content blocks, want 1", len(um.Content))
-	c.NotNil(um.Content[0].GetImage(), "sole content block is not an image")
 }
 
 // A multi-call agentic turn must publish the FINAL call's usage on turn_end —

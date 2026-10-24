@@ -156,7 +156,8 @@ func TestFencedAppendSucceedsWithLiveLease(t *testing.T) {
 	c.False(err != nil || !ok, "Acquire: ok=%v err=%v", ok, err)
 
 	msgs := NewMessages(pool).WithLease(lease)
-	c.NoError(msgs.Append(ctx, conv, 0, userMessage("hello"), nil), "Append with a live lease")
+	_, aerr := msgs.Append(ctx, conv, 0, userMessage("hello"), nil)
+	c.NoError(aerr, "Append with a live lease")
 
 	loaded, err := NewMessages(pool).Load(ctx, conv)
 	c.NoError(err, "Load")
@@ -180,7 +181,7 @@ func TestFencedAppendFailsAfterTakeover(t *testing.T) {
 	}
 
 	msgs := NewMessages(pool).WithLease(stale)
-	err = msgs.Append(ctx, conv, 0, userMessage("should not land"), nil)
+	_, err = msgs.Append(ctx, conv, 0, userMessage("should not land"), nil)
 	c.Require().ErrorIs(err, ErrLeaseLost, "Append error")
 
 	loaded, lerr := NewMessages(pool).Load(ctx, conv)
@@ -195,7 +196,8 @@ func TestUnfencedAppendStillWorks(t *testing.T) {
 	ctx := context.Background()
 	conv := newConversation(t, pool)
 
-	assert.NewAborting(t).NoError(NewMessages(pool).Append(ctx, conv, 0, userMessage("unfenced"), nil), "unfenced Append")
+	_, aerr := NewMessages(pool).Append(ctx, conv, 0, userMessage("unfenced"), nil)
+	assert.NewAborting(t).NoError(aerr, "unfenced Append")
 }
 
 // TestFencedAppendConflictIsNotLeaseLost proves the zero-rows path still tells
@@ -212,12 +214,14 @@ func TestFencedAppendConflictIsNotLeaseLost(t *testing.T) {
 	c.Require().False(err != nil || !ok, "Acquire: ok=%v err=%v", ok, err)
 	msgs := NewMessages(pool).WithLease(lease)
 
-	c.Require().NoError(msgs.Append(ctx, conv, 0, userMessage("same"), nil), "first Append")
+	_, aerr := msgs.Append(ctx, conv, 0, userMessage("same"), nil)
+	c.Require().NoError(aerr, "first Append")
 	// Re-appending identical content at the same ordinal is a replay, not a
 	// takeover, and must succeed.
-	c.NoError(msgs.Append(ctx, conv, 0, userMessage("same"), nil), "replay Append")
+	_, aerr = msgs.Append(ctx, conv, 0, userMessage("same"), nil)
+	c.NoError(aerr, "replay Append")
 	// Different content at the same ordinal is a diverged history.
-	err = msgs.Append(ctx, conv, 0, userMessage("different"), nil)
+	_, err = msgs.Append(ctx, conv, 0, userMessage("different"), nil)
 	c.Error(err, "diverging content at an existing ordinal was accepted")
 	c.False(errors.Is(err, ErrLeaseLost), "a content divergence was reported as a lost lease")
 }

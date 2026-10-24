@@ -170,8 +170,10 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 	})
 	ck.NoError(err, "EnsureConversationByExternalRef")
 	ms := store.NewMessages(pool)
-	ck.NoError(ms.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil), "append user message")
-	ck.NoError(ms.Append(ctx, convID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil), "append assistant message")
+	_, aerr := ms.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil)
+	ck.NoError(aerr, "append user message")
+	_, aerr = ms.Append(ctx, convID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil)
+	ck.NoError(aerr, "append assistant message")
 
 	c.st.Insert(&childstore.Session{
 		ChildID:   childID,

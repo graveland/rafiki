@@ -61,7 +61,8 @@ func TestStartupResumeSurvivesAFailedResume(t *testing.T) {
 	c.NoError(err)
 	conv1, err := seed.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err)
-	c.NoError(conv1.AppendUser(ctx, llm.UserText("interrupted work")))
+	_, appendErr := conv1.AppendUser(ctx, llm.UserText("interrupted work"))
+	c.NoError(appendErr)
 
 	// The recovered engine: its FIRST send (the re-issued turn) fails; every
 	// later send succeeds.
@@ -146,7 +147,8 @@ func TestStartupResumeIsAbortable(t *testing.T) {
 	c.NoError(err)
 	conv1, err := seed.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err)
-	c.NoError(conv1.AppendUser(ctx, llm.UserText("interrupted work")))
+	_, appendErr := conv1.AppendUser(ctx, llm.UserText("interrupted work"))
+	c.NoError(appendErr)
 
 	sender := &blockFirstSender{inner: scriptedSender(t, sampleEndTurn), started: make(chan struct{})}
 	client, err := llm.NewClient(

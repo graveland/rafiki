@@ -420,7 +420,8 @@ func seedBigHistory(t *testing.T, conv *Conversation, n int) {
 		}
 		msg := anthropic.MessageParam{Role: role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		assert.NewAborting(t).NoError(conv.appendMessage(context.Background(), i, msg, nil))
+		_, aerr := conv.appendMessage(context.Background(), i, msg, nil)
+		assert.NewAborting(t).NoError(aerr)
 	}
 }
 

@@ -150,6 +150,15 @@ A dropped connection, and any end without the Connect end-of-stream envelope
 truncation, never a clean close. Only `None` from the stream, after a
 flags-`0x02` end-of-stream envelope, is a clean end.
 
+A durable `AssistantMessage` or `UserMessage` event carries in `Event.ts` the
+`created_at` of the `conversation_message` row that message was persisted as,
+the same value `get_history` reports for it, so a message is identified across
+a live stream and a history read by its `ts`. Fundi children meet this today;
+a claude child's live `ts` is still the claude stream's time, not the row's.
+Rows written in one transaction share a `ts`, so match on `ts` plus position
+and role. A fundi tool result is its own `UserMessage` (a `tool_result` block),
+published in tool_use order; steers drained together are one merged event.
+
 Resuming by hand means calling `stream_events` again with `EventCursor` set
 from the events already seen (`ordinals` for children you have seen, `floor`
 for a child you have not). Never invent a cursor of 0 — 0 is a real ordinal.
