@@ -63,6 +63,10 @@ for settle in c.settled([child]):         # yields Settle(child_id, state)
 states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
 transcript = c.export(child)              # the child's decomposed transcript (fundi or claude; last assistant turn = the answer)
+page = c.get_history(child, limit=50)     # the newest 50 transcript events, oldest first, each with ts;
+older = c.get_history(child, limit=50, before=page[0].ts)
+                                          #   page backwards with the oldest ts held (an empty page is
+                                          #   the start; a page never splits events sharing a ts)
 models = c.list_models()                 # catalog rows: context_window etc., before you spawn
 transcript = c.export_conversation(conv)  # any readable conversation, by its id
 rows = c.conversation_search(text="x", source="claude", limit=50)
@@ -153,7 +157,11 @@ Streaming calls retry too, with their delivery contracts spelled out:
   picking the prompt up. Exited always settles.
 - `settled()`/`wait()` resume from the highest event ordinal actually seen
   (the daemon's replay cursor), so a settle that lands during a daemon
-  restart is seen rather than waited past.
+  restart is seen rather than waited past. That holds mid-stream too: a
+  connection that dies after events have flowed re-opens with a cursor
+  rebuilt from the last ordinal seen, on the same bounded budget. A child
+  with no events yet watches from ordinal -1, never 0, because 0 is its
+  first real event.
 - `receive()` re-opens from the start of the inbox. Delivery is
   at-most-once — rows are consumed at the pull — so a stream that dies
   between pull and wire loses what it had not yet yielded. That is the

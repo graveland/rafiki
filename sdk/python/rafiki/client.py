@@ -74,6 +74,13 @@ SETTLED_STATES = ("idle", "exited")
 SETTLE_EVENT_TYPES = ["agent_status", "child_exited"]
 
 
+def _latest_ordinal(summary) -> int:
+    """A child's latest event-log ordinal as a replay cursor: -1 when it has
+    no events. 0 is a real ordinal, so an unset latest_ordinal must never
+    read as 0 — a cursor of 0 would skip the child's first event."""
+    return -1 if summary.latest_ordinal is None else summary.latest_ordinal
+
+
 def _mode_wire(mode: str) -> str:
     """Accept "prompt"/"steer"/"abort" (any case, with - or _) and return the
     proto enum name."""
@@ -312,11 +319,31 @@ class Client:
         # must see that work's turn end, not the idle the child sits in until
         # the prompt is picked up. The floor is read BEFORE the Send so a turn
         # that starts and ends immediately still lands above it.
-        floor = (self.get(child_id).latest_ordinal or 0) if mode == "prompt" else None
+        floor = _latest_ordinal(self.get(child_id)) if mode == "prompt" else None
         message_id = self._call("Send", req, _gen.control_pb.SendResponse).message_id
         if floor is not None:
             self._prompt_floor[child_id] = floor
         return message_id
+
+    def get_history(
+        self,
+        child_id: str,
+        *,
+        limit: "int | None" = None,
+        before: "datetime.datetime | None" = None,
+        after_ordinal: "int | None" = None,
+    ) -> "list":
+        """One page of a child's transcript as durable events, oldest first,
+        each carrying ``ts`` (its row's created_at). Page backwards with
+        ``limit`` for the newest N, then again with ``before`` set to the
+        oldest ``ts`` held; an empty page is the start. A page never splits
+        events that share a ``ts``, so it can hold more than ``limit``.
+        ``before`` is an aware ``datetime``. Ordinals here are
+        conversation_message ordinals, never the event feed's."""
+        req = _gen.control_pb.GetHistoryRequest(
+            child_id=child_id, limit=limit, before=before, after_ordinal=after_ordinal
+        )
+        return list(self._call("GetHistory", req, _gen.control_pb.GetHistoryResponse).events)
 
     def stop(self, child_id: str, *, shutdown_timeout: "datetime.timedelta | float | None" = None, kill_timeout: "datetime.timedelta | float | None" = None):
         """Stop a child: the graceful window first, then the SIGTERM/SIGKILL
@@ -661,7 +688,7 @@ class Client:
         if settles(summary.status):
             yield done(summary.status)
             return
-        last_ordinal = floor if floor is not None else (summary.latest_ordinal or 0)
+        last_ordinal = floor if floor is not None else _latest_ordinal(summary)
         deadline = None if timeout is None else time.monotonic() + timeout
 
         seen = last_ordinal
@@ -680,16 +707,21 @@ class Client:
                 return 0.0 if self._conn.is_unix else REMOTE_IDLE_CEILING
             return max(0.05, deadline - time.monotonic())
 
-        while True:
-            req = _gen.control_pb.StreamEventsRequest(
+        def request() -> dict:
+            # Built per attempt from the last ordinal seen, so a re-open after
+            # a mid-stream unavailability (a daemon restarting) replays only
+            # what this watch has not had.
+            return _gen.control_pb.StreamEventsRequest(
                 subject=_gen.control_pb.EventSubject(child=child_id),
                 tier="EVENT_TIER_DURABLE",
                 types=SETTLE_EVENT_TYPES,
                 cursor=_gen.control_pb.EventCursor(ordinals={child_id: seen}),
-            )
+            ).to_dict()
+
+        while True:
             try:
                 for event in self._conn.stream(
-                    "StreamEvents", req.to_dict(), read_timeout=remaining()
+                    "StreamEvents", request, read_timeout=remaining(), on_resume=lambda: None
                 ):
                     ev = _gen.event_pb.Event.from_dict(event)
                     state = None

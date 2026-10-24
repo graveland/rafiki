@@ -204,7 +204,8 @@ def note(s):
     with open(probe, "a") as f:
         f.write(s + "\n")
 
-STATE = {"unary_503s": 2, "stream_503s": 0, "requests": [], "c2_cursors": [], "routes": []}
+STATE = {"unary_503s": 2, "stream_503s": 0, "requests": [], "c2_cursors": [], "c3_cursors": [],
+         "c4_cursors": [], "routes": [], "history_req": None}
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -259,6 +260,42 @@ class H(BaseHTTPRequestHandler):
         if self.path.endswith("/StreamEvents"):
             n = struct.unpack(">I", body[1:5])[0]
             sreq = json.loads(body[5:5 + n])
+            if sreq["subject"]["child"] == "c_3":
+                # A child with no events yet: its settle is ordinal 0, which
+                # only a cursor of -1 replays. Any other cursor gets silence,
+                # so a watch that skipped it times out instead of settling.
+                cursor = int(sreq["cursor"]["ordinals"]["c_3"])
+                STATE["c3_cursors"].append(cursor)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/connect+json")
+                self.end_headers()
+                if cursor < 0:
+                    env(self.wfile, {"childId": "c_3", "ordinal": 0, "ts": "2026-09-26T15:04:05Z", "agentStatus": {"state": "exited"}})
+                    env(self.wfile, {"error": None}, end=True)
+                else:
+                    self.wfile.flush()
+                    time.sleep(4)
+                return
+            if sreq["subject"]["child"] == "c_4":
+                # A daemon restarting mid-watch: the first stream delivers
+                # ordinal 7, then the connection dies short of its declared
+                # length (a transport error, not a clean truncation). The
+                # re-open must resume from 7.
+                cursor = int(sreq["cursor"]["ordinals"]["c_4"])
+                STATE["c4_cursors"].append(cursor)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/connect+json")
+                if cursor < 7:
+                    self.send_header("Content-Length", "100000")
+                    self.end_headers()
+                    env(self.wfile, {"childId": "c_4", "ordinal": 7, "ts": "2026-09-26T15:04:05Z", "agentStatus": {"state": "streaming"}})
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
+                self.end_headers()
+                env(self.wfile, {"childId": "c_4", "ordinal": 8, "ts": "2026-09-26T15:04:06Z", "agentStatus": {"state": "exited"}})
+                env(self.wfile, {"error": None}, end=True)
+                return
             if sreq["subject"]["child"] == "c_2":
                 # The prompted-child race: the first stream carries only the
                 # idle the child reports before its prompt is picked up, then
@@ -292,8 +329,20 @@ class H(BaseHTTPRequestHandler):
                 self._json({"child": {"childId": "c_1", "status": "streaming", "latestOrdinal": 6, "labels": {}}})
             elif req.get("childId") == "c_2":
                 self._json({"child": {"childId": "c_2", "status": "idle", "latestOrdinal": 6, "labels": {}}})
+            elif req.get("childId") == "c_3":
+                # No latestOrdinal: the child has no events yet.
+                self._json({"child": {"childId": "c_3", "status": "streaming", "labels": {}}})
+            elif req.get("childId") == "c_4":
+                self._json({"child": {"childId": "c_4", "status": "streaming", "latestOrdinal": 6, "labels": {}}})
             else:
                 self._err(403, "permission_denied", "not yours")
+            return
+        if self.path.endswith("/GetHistory"):
+            STATE["history_req"] = json.loads(body)
+            self._json({"events": [
+                {"childId": "c_1", "ordinal": 3, "ts": "2026-09-26T15:04:03Z", "userMessage": {}},
+                {"childId": "c_1", "ordinal": 4, "ts": "2026-09-26T15:04:04Z", "assistantMessage": {}},
+            ]})
             return
         if self.path.endswith("/SetRoute"):
             req = json.loads(body)
@@ -483,6 +532,35 @@ def run():
         assert t.connect == c._conn._timeout == 30.0, (t.connect, c._conn._timeout)
         assert t.read == 62.0, t.read
         note("10 connect-timeout-unchanged OK")
+
+        # 11. a child with no events yet has an UNSET latest_ordinal, which
+        # is not ordinal 0: the settle cursor and a prompt's floor are -1, so
+        # the child's first event (its settle, at ordinal 0) is replayed
+        # rather than skipped.
+        assert c.wait(["c_3"], timeout=2) == {"c_3": "exited"}, STATE["c3_cursors"]
+        assert STATE["c3_cursors"] == [-1], STATE["c3_cursors"]
+        c.send("c_3", "go")
+        assert c._prompt_floor["c_3"] == -1, c._prompt_floor
+        c._prompt_floor.pop("c_3")
+        note("11 unset-latest-ordinal OK")
+
+        # 12. a settle watch that has delivered events survives a transport
+        # error mid-stream (a daemon restarting): it re-opens from the last
+        # ordinal it saw instead of raising out of settled().
+        settles = list(c.settled(["c_4"]))
+        assert [s.state for s in settles] == ["exited"], settles
+        assert STATE["c4_cursors"] == [6, 7], STATE["c4_cursors"]
+        note("12 settle-survives-reset OK")
+
+        # 13. get_history: limit and before ride the wire, events come back
+        # with their ts.
+        before = datetime.datetime(2026, 9, 26, 15, 4, 5, tzinfo=datetime.timezone.utc)
+        evs = c.get_history("c_1", limit=2, before=before)
+        assert STATE["history_req"] == {"childId": "c_1", "limit": 2, "before": "2026-09-26T15:04:05Z"}, STATE["history_req"]
+        assert [e.ordinal for e in evs] == [3, 4], evs
+        assert evs[0].ts == datetime.datetime(2026, 9, 26, 15, 4, 3, tzinfo=datetime.timezone.utc), evs[0].ts
+        assert STATE["requests"][-1][0].endswith("/GetHistory"), STATE["requests"][-1]
+        note("13 get-history OK")
         srv.shutdown()
         note("TRANSPORT PASS")
     except Exception:

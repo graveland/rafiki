@@ -284,7 +284,7 @@ class ConnectClient:
     def stream(
         self,
         method: str,
-        payload: dict,
+        payload: "dict | Callable[[], dict]",
         *,
         read_timeout: "float | None" = None,
         on_resume: "Callable[[], None] | None" = None,
@@ -300,11 +300,12 @@ class ConnectClient:
         Retried on Unavailable with bounded backoff while nothing has been
         delivered yet (the daemon-restart gap). Once messages HAVE flowed, a
         mid-stream unavailability ends iteration by raising — unless
-        ``on_resume`` was given, in which case the hook runs (settled()
-        advances its cursor there; payloads already yielded are not
-        re-yielded) and the stream re-opens on the same bounded budget.
-        Receive() passes no hook and documents its at-most-once contract
-        instead.
+        ``on_resume`` was given, in which case the hook runs and the stream
+        re-opens on the same bounded budget. ``payload`` may be a callable,
+        called afresh for every attempt: settled() passes one that builds its
+        cursor from the last ordinal it saw, so a re-open replays nothing it
+        already yielded. Receive() passes a no-op hook and documents its
+        at-most-once contract instead.
         """
         attempt = 0
         while True:
@@ -313,8 +314,9 @@ class ConnectClient:
             def mark() -> None:
                 delivered[0] = True
 
+            body = payload() if callable(payload) else payload
             try:
-                yield from self._stream_once(method, payload, mark, read_timeout)
+                yield from self._stream_once(method, body, mark, read_timeout)
                 return
             except ConnectError as exc:
                 # Idle quiet is not an error condition: hand it to the caller.
@@ -344,8 +346,9 @@ class ConnectClient:
             headers=self._headers(CONTENT_STREAM),
             # The dial keeps the client's dial timeout; the READ carries the
             # idle budget — this is what bounds a stream the daemon has
-            # nothing to say on yet (its headers arrive with the first
-            # message, so the budget also covers the open).
+            # nothing to say on yet. StreamEvents flushes its headers at open;
+            # other streams send them with the first message, so the budget
+            # also covers their open.
             timeout=httpx.Timeout(self._timeout, read=idle if idle and idle > 0 else None),
         )
         try:
