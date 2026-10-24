@@ -72,6 +72,9 @@ idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, 
 `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the `Daraja*`
 RPCs carry.
 
+`get_child` and `list_children` return `ChildSummary`; its `parent_child_id` names the
+child that spawned it and is empty for a top-level child.
+
 `get_history` pages backwards: ask with `limit` for the newest N, then again
 with `before` set to the oldest `ts` you hold. A page never splits events that
 share a `ts`, so it can hold more than `limit`; an empty page is the start of

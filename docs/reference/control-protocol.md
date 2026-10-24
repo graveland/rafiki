@@ -1669,6 +1669,13 @@ wire's `Event` oneof is. The tier column is enforced by `pkg/eventlog`'s
 `durableTypes` through `TypeName`/`TierOf` — every payload in the oneof is
 classified on purpose, proven by `TestEveryEventTypeHasATier`.
 
+### Parent child id
+
+`ChildSummary.parent_child_id` is the id of the child that spawned this one,
+empty for a top-level child. It is read from the `rafiki/parent` label, falling
+back to the legacy `fundi/parent` spelling (`childstore.ParentLabel`), so rows
+written before the rename report it too.
+
 ### Operator display state
 
 `GetChild` and `ListChildren` report three SERVER-DERIVED display fields on

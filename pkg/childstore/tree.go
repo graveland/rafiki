@@ -33,7 +33,13 @@ func (s *Store) ParentOf(childID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return labelLookup(snap.Labels, LabelParent, legacyLabelParent)
+	return ParentLabel(snap.Labels)
+}
+
+// ParentLabel reads the parent child id from a label map, honouring the
+// pre-rename spelling. ok is false for a top-level child.
+func ParentLabel(labels map[string]string) (string, bool) {
+	return labelLookup(labels, LabelParent, legacyLabelParent)
 }
 
 // RootOf returns the top-level ancestor's child id. A top-level child is its

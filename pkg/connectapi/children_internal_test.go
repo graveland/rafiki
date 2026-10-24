@@ -49,3 +49,10 @@ func TestSpawnRequestScriptSpecMapsOntoParams(t *testing.T) {
 		strings.Join(got.Script.Modules, ",") != "helper" ||
 		strings.Join(got.Script.Args, ",") != "--one", "script spec round trip mismatch: %+v", got.Script)
 }
+
+func TestChildSummaryCarriesParentChildID(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	got := toProtoChild(protocol.ChildSummary{ChildID: "c1", ParentChildID: "c0"}, nil, nil)
+	ck.Eq("c0", got.GetParentChildId(), "parent_child_id")
+	ck.Eq("", toProtoChild(protocol.ChildSummary{ChildID: "c0"}, nil, nil).GetParentChildId(), "top-level parent_child_id")
+}

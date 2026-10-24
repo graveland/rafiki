@@ -886,6 +886,9 @@ pub struct ChildSummary {
     /// verbatim. Empty when there is nothing to say.
     #[prost(string, tag = "27")]
     pub display_msg: ::prost::alloc::string::String,
+    /// parent_child_id is the child that spawned this one, empty for a top-level child.
+    #[prost(string, tag = "28")]
+    pub parent_child_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChildrenRequest {

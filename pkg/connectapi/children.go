@@ -80,6 +80,7 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 	out.DisplayState = string(c.DisplayState)
 	out.WaitingOn = string(c.WaitingOn)
 	out.DisplayMsg = c.DisplayMsg
+	out.ParentChildId = c.ParentChildID
 	if elog != nil && ctx != nil {
 		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {
 			out.LatestOrdinal = &latest

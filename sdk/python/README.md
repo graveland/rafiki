@@ -56,7 +56,7 @@ quiet = c.spawn("audit this", kind="fundi", skip_derived_index=True)
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"
 kids = c.list(labels={"team": "infra"})   # status-filtered server-side,
                                           # label-filtered client-side
-one  = c.get(child)                       # status, cost, latest_ordinal, result
+one  = c.get(child)                       # status, cost, latest_ordinal, result, parent_child_id ("" if top-level)
 
 for settle in c.settled([child]):         # yields Settle(child_id, state)
     print(settle)                         #   as each child reaches idle/exited

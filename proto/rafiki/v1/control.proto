@@ -349,6 +349,8 @@ message ChildSummary {
   // display_msg is the human sentence explaining the display state, rendered
   // verbatim. Empty when there is nothing to say.
   string display_msg = 27;
+  // parent_child_id is the child that spawned this one, empty for a top-level child.
+  string parent_child_id = 28;
 }
 
 message ListChildrenRequest {

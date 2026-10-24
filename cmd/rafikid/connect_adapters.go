@@ -189,6 +189,7 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 	if len(snap.Labels) > 0 {
 		cs.Labels = snap.Labels
 	}
+	cs.ParentChildID, _ = childstore.ParentLabel(snap.Labels)
 	if len(snap.SlashCommands) > 0 {
 		cs.SlashCommands = snap.SlashCommands
 	}

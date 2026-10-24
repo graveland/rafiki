@@ -517,6 +517,9 @@ type ChildSummary struct {
 	DisplayState DisplayState `json:"displayState,omitempty"`
 	WaitingOn    WaitingOn    `json:"waitingOn,omitempty"`
 	DisplayMsg   string       `json:"displayMsg,omitempty"`
+	// ParentChildID is the child that spawned this one, empty for a top-level
+	// child.
+	ParentChildID string `json:"parentChildId,omitempty"`
 }
 
 // SpawnResponseData is the data payload of a Spawn/Resume answer (§6.3).

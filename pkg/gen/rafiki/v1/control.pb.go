@@ -1655,7 +1655,9 @@ type ChildSummary struct {
 	WaitingOn string `protobuf:"bytes,26,opt,name=waiting_on,json=waitingOn,proto3" json:"waiting_on,omitempty"`
 	// display_msg is the human sentence explaining the display state, rendered
 	// verbatim. Empty when there is nothing to say.
-	DisplayMsg    string `protobuf:"bytes,27,opt,name=display_msg,json=displayMsg,proto3" json:"display_msg,omitempty"`
+	DisplayMsg string `protobuf:"bytes,27,opt,name=display_msg,json=displayMsg,proto3" json:"display_msg,omitempty"`
+	// parent_child_id is the child that spawned this one, empty for a top-level child.
+	ParentChildId string `protobuf:"bytes,28,opt,name=parent_child_id,json=parentChildId,proto3" json:"parent_child_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1861,6 +1863,13 @@ func (x *ChildSummary) GetWaitingOn() string {
 func (x *ChildSummary) GetDisplayMsg() string {
 	if x != nil {
 		return x.DisplayMsg
+	}
+	return ""
+}
+
+func (x *ChildSummary) GetParentChildId() string {
+	if x != nil {
+		return x.ParentChildId
 	}
 	return ""
 }
@@ -15622,7 +15631,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10SetResultRequest\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\"\x13\n" +
-	"\x11SetResultResponse\"\xf5\a\n" +
+	"\x11SetResultResponse\"\x9d\b\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -15654,7 +15663,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"waiting_on\x18\x1a \x01(\tR\twaitingOn\x12\x1f\n" +
 	"\vdisplay_msg\x18\x1b \x01(\tR\n" +
-	"displayMsg\x1a9\n" +
+	"displayMsg\x12&\n" +
+	"\x0fparent_child_id\x18\x1c \x01(\tR\rparentChildId\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +

@@ -648,6 +648,7 @@ class ChildSummary:
     display_state: str = ""
     waiting_on: str = ""
     display_msg: str = ""
+    parent_child_id: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -701,6 +702,8 @@ class ChildSummary:
             out["waitingOn"] = self.waiting_on
         if self.display_msg != "":
             out["displayMsg"] = self.display_msg
+        if self.parent_child_id != "":
+            out["parentChildId"] = self.parent_child_id
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSummary":
@@ -780,6 +783,9 @@ class ChildSummary:
         _v = _d.get("displayMsg")
         if _v is not None:
             obj.display_msg = _v
+        _v = _d.get("parentChildId")
+        if _v is not None:
+            obj.parent_child_id = _v
         return obj
 
 @dataclasses.dataclass
