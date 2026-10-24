@@ -17,6 +17,10 @@ doctest = false
 # Test-only knobs (`Client::with_wire_epoch`) the live-daemon test needs to
 # provoke a daemon's own refusals. Never enable it in a consumer.
 test-hooks = []
+# For a consumer's own tests: `Error::stream_idle_for_tests`, so a fake standing
+# in for `Client::stream_events` can end a stream exactly as the idle window
+# does. Enable it from `[dev-dependencies]` only, never in a production build.
+test-util = []
 
 [[test]]
 name = "daemon"

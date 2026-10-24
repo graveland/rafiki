@@ -156,6 +156,17 @@ Every TCP connection the client dials has keepalive on (30s, probing every
 keepalive frame on the wire: Connect defines none, and every rafikid face is
 HTTP/1.1.
 
+`is_idle()` is a flag only the stream's own idle window sets: an
+`Error::new(Code::DeadlineExceeded, …)` is a unary timeout and is never idle.
+A consumer whose tests fake `stream_events` builds the real one with
+`Error::stream_idle_for_tests()`, under the `test-util` feature, enabled from
+`[dev-dependencies]` only:
+
+```toml
+[dev-dependencies]
+rafiki = { git = "https://github.com/graveland/rafiki.git", tag = "…", features = ["test-util"] }
+```
+
 Two ordinal spaces exist and must never be mixed: `GetHistory` events are
 `conversation_message` ordinals, the event feed's `Event.ordinal` is the
 event-log ordinal.

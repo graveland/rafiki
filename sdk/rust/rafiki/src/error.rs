@@ -161,6 +161,18 @@ impl Error {
         }
     }
 
+    /// The idle error a stream's own window raises, for a consumer's test
+    /// double of [`crate::Client::stream_events`]: a fake that ends a stream
+    /// with it drives the caller down its real idle path ([`Error::is_idle`]).
+    ///
+    /// Test-only (`test-util` feature). Never construct one to classify a real
+    /// error: idleness means "the SDK's idle window elapsed", and a caller that
+    /// re-opens on it at once must never be handed a unary timeout instead.
+    #[cfg(feature = "test-util")]
+    pub fn stream_idle_for_tests() -> Error {
+        Error::stream_idle()
+    }
+
     pub fn with_reason(mut self, reason: impl Into<String>) -> Error {
         self.reason = Some(reason.into());
         self
@@ -380,6 +392,15 @@ mod tests {
         assert!(Error::stream_idle().is_idle());
         assert_eq!(Error::stream_idle().code, Code::DeadlineExceeded);
         assert!(!Error::new(Code::DeadlineExceeded, "timed out").is_idle());
+    }
+
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn the_test_util_idle_error_is_the_stream_idle_error() {
+        let err = Error::stream_idle_for_tests();
+        assert!(err.is_idle());
+        assert_eq!(err.code, Code::DeadlineExceeded);
+        assert_eq!(err.message, Error::stream_idle().message);
     }
 
     #[test]
