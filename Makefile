@@ -188,7 +188,7 @@ redeploy: install ## Rebuild + install, then restart the rafiki daemon.
 
 PROTOC ?= protoc
 
-bin/protoc-gen-go:
+bin/protoc-gen-go: go.mod
 	go build -o bin/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
 
 bin/protoc-gen-connect-go:
