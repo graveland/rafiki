@@ -50,23 +50,15 @@ func assertTypes(t *testing.T, got []string, want []string) {
 }
 
 // A text-only assistant frame with no preceding prompt echo opens its turn with
-// a TurnStart, then produces exactly one assistant_message. (In production the
-// echo has already opened it; this pins the fallback.) It produces no delta:
-// claude frames are complete messages, so a delta would duplicate the message
-// and, on a later turn, append its text to the PREVIOUS turn's finalized block.
-func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
-	c := assert.NewAborting(t)
+// a TurnStart and nothing else: the message itself comes from its stored row, and
+// claude frames are complete messages, so no delta is synthesized either.
+func TestNativeAssistantTextOpensTurnOnly(t *testing.T) {
 	p := newClaudeProvider()
 	line := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"hello"}]}}`)
 
 	evs := p.BusFramesNative(line, 1000)
 
-	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "assistant_message"})
-
-	am := evs[1].GetAssistantMessage()
-	c.NotNil(am, "first event is not an AssistantMessage")
-	c.Len(am.GetContent(), 1, "content blocks = %d, want 1", len(am.GetContent()))
-	c.Eq("hello", am.GetContent()[0].GetText().GetText(), "text")
+	assertTypes(t, nativeTypeNames(evs), []string{"turn_start"})
 }
 
 // A turn opens exactly once, at prompt delivery, and closes on the result
@@ -83,7 +75,7 @@ func TestNativeTurnStartOncePerTurn(t *testing.T) {
 	}
 
 	first := p.OutboundEchoNative(prompt, 1000)
-	assertTypes(t, nativeTypeNames(first), []string{"turn_start", "user_message"})
+	assertTypes(t, nativeTypeNames(first), []string{"turn_start"})
 	start := first[0].GetTurnStart()
 	c.Require().NotNil(start, "first event is not a TurnStart")
 	c.Eq("", start.GetModel(), "the prompt echo names no model")
@@ -91,13 +83,13 @@ func TestNativeTurnStartOncePerTurn(t *testing.T) {
 
 	// A second prompt (a steer) and the first assistant frame are mid-turn.
 	steer := p.OutboundEchoNative([]byte(`{"type":"steer","message":"also"}`), 1001)
-	assertTypes(t, nativeTypeNames(steer), []string{"user_message"})
+	assertTypes(t, nativeTypeNames(steer), []string{})
 	firstFrame := p.BusFramesNative(assistant("one"), 1002)
-	assertTypes(t, nativeTypeNames(firstFrame), []string{"assistant_message"})
+	assertTypes(t, nativeTypeNames(firstFrame), []string{})
 
 	// A second assistant frame in the same turn is mid-turn, not a new turn.
 	second := p.BusFramesNative(assistant("two"), 1003)
-	assertTypes(t, nativeTypeNames(second), []string{"assistant_message"})
+	assertTypes(t, nativeTypeNames(second), []string{})
 
 	// The result frame closes the turn...
 	result := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1004)
@@ -105,7 +97,7 @@ func TestNativeTurnStartOncePerTurn(t *testing.T) {
 
 	// ...so the next prompt opens its own.
 	next := p.OutboundEchoNative(prompt, 1005)
-	assertTypes(t, nativeTypeNames(next), []string{"turn_start", "user_message"})
+	assertTypes(t, nativeTypeNames(next), []string{"turn_start"})
 }
 
 // A claude turn's first chat span must nest under the turn, so the turn has to
@@ -121,11 +113,11 @@ func TestNativeTurnStartOpensAtPromptEcho(t *testing.T) {
 	assistant := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"done"}]}}`)
 
 	echo := p.OutboundEchoNative(prompt, 1000)
-	assertTypes(t, nativeTypeNames(echo), []string{"turn_start", "user_message"})
+	assertTypes(t, nativeTypeNames(echo), []string{"turn_start"})
 	c.NotNil(echo[0].GetTurnStart(), "the prompt echo must open the turn")
 
 	frame := p.BusFramesNative(assistant, 1001)
-	assertTypes(t, nativeTypeNames(frame), []string{"assistant_message"})
+	assertTypes(t, nativeTypeNames(frame), []string{})
 	for _, ev := range frame {
 		c.True(ev.GetTurnStart() == nil,
 			"the first assistant frame published a second TurnStart: %v", nativeTypeNames(frame))
@@ -135,7 +127,7 @@ func TestNativeTurnStartOpensAtPromptEcho(t *testing.T) {
 	assertTypes(t, nativeTypeNames(result), []string{"turn_end"})
 
 	again := p.OutboundEchoNative(prompt, 1003)
-	assertTypes(t, nativeTypeNames(again), []string{"turn_start", "user_message"})
+	assertTypes(t, nativeTypeNames(again), []string{"turn_start"})
 }
 
 // A frame that names no model publishes an empty one rather than a stale value:
@@ -156,54 +148,9 @@ func TestNativeTurnStartModelComesFromTheOpeningFrame(t *testing.T) {
 	c.Eq("", start.GetModel(), "turn_start model")
 }
 
-// A tool_use frame emits the assistant message FIRST, then the execution start.
-// The cockpit's applyToolStart looks up the call by id on the last assistant
-// block and only marks it running; if the start arrives first there is no block
-// to find and it appends a duplicate.
-func TestNativeAssistantEmitsMessageBeforeToolStart(t *testing.T) {
-	p := newClaudeProvider()
-	line := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{"command":"ls"}}]}}`)
-
-	evs := p.BusFramesNative(line, 1000)
-
-	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "assistant_message", "tool_execution_start"})
-
-	assert.NewAborting(t).Eq("tu_1", evs[2].GetToolExecutionStart().GetToolUseId(), "tool_use_id")
-}
-
-// A user frame carries only tool_result blocks and must not open a turn. Each
-// tool_result emits its ToolExecutionEnd FIRST, then a UserMessage carrying the
-// flattened output — the exact shape fundi's publishToolResult uses. Without the
-// second event the cockpit's reducer never sets HasResult and a claude child
-// renders "⋯ no result" forever.
-func TestNativeUserEmitsToolEndAndResultMessage(t *testing.T) {
-	c := assert.NewAborting(t)
-	p := newClaudeProvider()
-	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ok"}]}}`)
-
-	evs := p.BusFramesNative(line, 1000)
-
-	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
-
-	end := evs[0].GetToolExecutionEnd()
-	c.NotNil(end, "first event is not a ToolExecutionEnd")
-	c.Eq("tu_1", end.GetToolUseId(), "tool_use_id")
-
-	um := evs[1].GetUserMessage()
-	c.NotNil(um, "second event is not a UserMessage")
-	c.Len(um.GetContent(), 1, "content blocks = %d, want 1", len(um.GetContent()))
-	tr := um.GetContent()[0].GetToolResult()
-	c.NotNil(tr, "UserMessage block is not a ToolResult")
-	c.Eq("tu_1", tr.GetToolUseId(), "tool_result tool_use_id")
-	c.False(tr.GetIsError(), "tool_result is_error")
-	c.Eq("ok", tr.GetContent()[0].GetText().GetText(), "tool_result text")
-}
-
-// Two tool_result blocks in one frame pair each end with its own result
-// message, in per-block order: End, then the UserMessage (fundi's ToolEnd
-// order). ToolUseIds must not cross.
-func TestNativeUserPairsEachResultWithItsOwnMessage(t *testing.T) {
-	c := assert.NewAborting(t)
+// Two tool_result blocks in one frame each complete their own call, in block
+// order. ToolUseIds must not cross.
+func TestNativeUserEndsEachResultInBlockOrder(t *testing.T) {
 	p := newClaudeProvider()
 	line := []byte(`{"type":"user","message":{"role":"user","content":[` +
 		`{"type":"tool_result","tool_use_id":"tu_1","content":"first output"},` +
@@ -211,70 +158,16 @@ func TestNativeUserPairsEachResultWithItsOwnMessage(t *testing.T) {
 
 	evs := p.BusFramesNative(line, 1000)
 
-	assertTypes(t, nativeTypeNames(evs),
-		[]string{"tool_execution_end", "user_message", "tool_execution_end", "user_message"})
-
+	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "tool_execution_end"})
 	want := []struct {
 		id      string
 		isError bool
-		text    string
-	}{{"tu_1", false, "first output"}, {"tu_2", true, "second output"}}
+	}{{"tu_1", false}, {"tu_2", true}}
 	for i, w := range want {
-		end := evs[i*2].GetToolExecutionEnd()
+		end := evs[i].GetToolExecutionEnd()
 		if end == nil || end.GetToolUseId() != w.id || end.GetIsError() != w.isError {
-			t.Fatalf("event %d: end = %+v, want tool_use_id=%q is_error=%v", i*2, evs[i*2], w.id, w.isError)
+			t.Fatalf("event %d: end = %+v, want tool_use_id=%q is_error=%v", i, evs[i], w.id, w.isError)
 		}
-		tr := evs[i*2+1].GetUserMessage().GetContent()[0].GetToolResult()
-		if tr == nil || tr.GetToolUseId() != w.id {
-			t.Fatalf("event %d: result message not paired with %q", i*2+1, w.id)
-		}
-		c.Eq(w.isError, tr.GetIsError(), "event %d: is_error = %v, want", i*2+1, tr.GetIsError())
-		got := tr.GetContent()[0].GetText().GetText()
-		c.Eq(w.text, got, "event %d: text = %q, want", i*2+1, got)
-	}
-}
-
-// An empty-content tool_result still emits the result message with an empty
-// text block: a call that ran and returned nothing is a completed call, and the
-// reducer's HasResult must be true rather than "⋯ no result".
-func TestNativeUserEmitsResultMessageForEmptyContent(t *testing.T) {
-	c := assert.NewAborting(t)
-	p := newClaudeProvider()
-	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":""}]}}`)
-
-	evs := p.BusFramesNative(line, 1000)
-
-	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
-
-	tr := evs[1].GetUserMessage().GetContent()[0].GetToolResult()
-	c.NotNil(tr, "UserMessage block is not a ToolResult")
-	c.Len(tr.GetContent(), 1, "tool_result content blocks = %d, want 1", len(tr.GetContent()))
-	c.Eq("", tr.GetContent()[0].GetText().GetText(), "tool_result text")
-}
-
-// A tool_result carrying an image (Read on a PNG, an MCP screenshot) keeps it:
-// the flattened text block first, then each image in order, bytes decoded from
-// claude's base64 source. Dropping it left the cockpit an empty result.
-func TestNativeUserToolResultCarriesImages(t *testing.T) {
-	c := assert.NewAborting(t)
-	p := newClaudeProvider()
-	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[` +
-		`{"type":"text","text":"read shot.png"},` +
-		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}},` +
-		`{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"BAU="}}]}]}}`)
-
-	evs := p.BusFramesNative(line, 1000)
-
-	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
-	content := evs[1].GetUserMessage().GetContent()[0].GetToolResult().GetContent()
-	c.Len(content, 3, "text then two images, got %d blocks", len(content))
-	c.Eq("read shot.png", content[0].GetText().GetText(), "text first")
-	c.Eq("image/png", content[1].GetImage().GetMediaType(), "first image media type")
-	c.EqDeep([]byte{1, 2, 3}, content[1].GetImage().GetData(), "first image bytes")
-	c.Eq("image/jpeg", content[2].GetImage().GetMediaType(), "second image media type")
-	c.EqDeep([]byte{4, 5}, content[2].GetImage().GetData(), "second image bytes")
-	for i, b := range content {
-		c.Eq(int32(i), b.GetIndex(), "block %d index", i)
 	}
 }
 
@@ -303,22 +196,16 @@ func TestNativeVocabularyExcludesContentBlockDelta(t *testing.T) {
 	}
 }
 
-// The user's prompt must reach the native stream. claude never echoes it on
-// stdout, so without this the cockpit shows replies with no prompts. The same
-// echo opens the turn, before claude's first request reaches the proxy.
-func TestOutboundEchoNativeEmitsUserMessage(t *testing.T) {
-	c := assert.NewAborting(t)
+// The prompt echo opens the turn before claude's first request reaches the
+// proxy and publishes nothing else: the user's message arrives from its stored
+// row.
+func TestOutboundEchoNativeOpensTurnOnly(t *testing.T) {
 	p := newClaudeProvider()
 	frame := []byte(`{"type":"prompt","message":"do the thing"}`)
 
 	evs := p.OutboundEchoNative(frame, 1000)
 
-	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "user_message"})
-
-	um := evs[1].GetUserMessage()
-	c.NotNil(um, "event is not a UserMessage")
-	c.Len(um.GetContent(), 1, "content blocks = %d, want 1", len(um.GetContent()))
-	c.Eq("do the thing", um.GetContent()[0].GetText().GetText(), "text")
+	assertTypes(t, nativeTypeNames(evs), []string{"turn_start"})
 }
 
 // Frames carrying no user-authored text produce nothing. claudeUserEcho already
@@ -461,4 +348,83 @@ func TestNativeTurnEndWithoutACostKeepsTheBaseline(t *testing.T) {
 	ck.Nil(free[0].GetTurnEnd().CostUsd, "an unpriced result reports no cost")
 	ck.Require().Len(next, 1, "events")
 	ck.Eq(0.5, next[0].GetTurnEnd().GetCostUsd(), "cost measured from the last priced total")
+}
+
+// Message events come from persisted rows, so no stdout or echo translation may
+// produce an AssistantMessage or UserMessage.
+func TestNativeEmitsNoMessageEvents(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(p *claudeProvider) []*rafikiv1.Event
+	}{
+		{"prompt echo", func(p *claudeProvider) []*rafikiv1.Event {
+			return p.OutboundEchoNative([]byte(`{"type":"prompt","message":"hi"}`), 1000)
+		}},
+		{"assistant text", func(p *claudeProvider) []*rafikiv1.Event {
+			return p.BusFramesNative([]byte(`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"hello"}]}}`), 1000)
+		}},
+		{"assistant tool_use", func(p *claudeProvider) []*rafikiv1.Event {
+			return p.BusFramesNative([]byte(`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{}}]}}`), 1000)
+		}},
+		{"user tool_result", func(p *claudeProvider) []*rafikiv1.Event {
+			return p.BusFramesNative([]byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ok"}]}}`), 1000)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, name := range nativeTypeNames(tc.run(newClaudeProvider())) {
+				assert.NewAborting(t).NotEq("assistant_message", name, "translator emitted a message event")
+				assert.NewAborting(t).NotEq("user_message", name, "translator emitted a message event")
+			}
+		})
+	}
+}
+
+// A Task subagent's messages are published on its own thread child from its
+// rows; its frames produce nothing on the parent.
+func TestNativeIgnoresSubagentFrames(t *testing.T) {
+	p := newClaudeProvider()
+	for _, line := range []string{
+		`{"type":"assistant","parent_tool_use_id":"toolu_task1","message":{"id":"msg_s","content":[{"type":"tool_use","id":"tu_s","name":"bash","input":{}}]}}`,
+		`{"type":"assistant","parent_tool_use_id":"toolu_task1","message":{"id":"msg_s","content":[{"type":"text","text":"sub"}]}}`,
+		`{"type":"user","parent_tool_use_id":"toolu_task1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_s","content":"ok"}]}}`,
+	} {
+		evs := p.BusFramesNative([]byte(line), 1000)
+		assert.NewAborting(t).Empty(evs, "subagent frame %s produced %v", line, nativeTypeNames(evs))
+	}
+}
+
+func TestGatedMessageID(t *testing.T) {
+	p := newClaudeProvider()
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"main assistant", `{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"x"}]}}`, "msg_1"},
+		{"subagent assistant", `{"type":"assistant","parent_tool_use_id":"toolu_t","message":{"id":"msg_s","content":[]}}`, ""},
+		{"assistant without message", `{"type":"assistant"}`, ""},
+		{"user", `{"type":"user","message":{"id":"msg_u","role":"user","content":[]}}`, ""},
+		{"malformed", `not json`, ""},
+	}
+	for _, tc := range cases {
+		assert.NewAborting(t).Eq(tc.want, p.GatedMessageID([]byte(tc.line)), tc.name)
+	}
+}
+
+func TestNativeToolEventsStillEmitted(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newClaudeProvider()
+
+	evs := p.BusFramesNative([]byte(`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{}}]}}`), 1000)
+	assertTypes(t, nativeTypeNames(evs), []string{"turn_start", "tool_execution_start"})
+	start := evs[1].GetToolExecutionStart()
+	c.Eq("tu_1", start.GetToolUseId(), "tool_use_id")
+	c.Eq("bash", start.GetName(), "name")
+
+	evs = p.BusFramesNative([]byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"boom","is_error":true}]}}`), 1001)
+	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end"})
+	end := evs[0].GetToolExecutionEnd()
+	c.Eq("tu_1", end.GetToolUseId(), "tool_use_id")
+	c.True(end.GetIsError(), "is_error")
 }

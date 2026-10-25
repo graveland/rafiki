@@ -187,20 +187,6 @@ func TestClaudeProvider_EncodePromptCarriesAttachments(t *testing.T) {
 	c.Eq("what is this", env.Message.Content[1].Text, "text")
 }
 
-func TestClaudeProvider_OutboundEchoNativeCarriesImages(t *testing.T) {
-	c := assert.NewAborting(t)
-	frame := []byte(`{"type":"prompt","message":"what is this","attachments":[{"media_type":"image/png","data":"AQID"}]}`)
-	evs := newClaudeProvider().OutboundEchoNative(frame, 1)
-	c.Eq(2, len(evs), "a turn start and one user message event")
-	c.NotNil(evs[0].GetTurnStart(), "the prompt echo opens the turn")
-	blocks := evs[1].GetUserMessage().GetContent()
-	c.Eq(2, len(blocks), "image then text")
-	c.EqDeep([]byte{1, 2, 3}, blocks[0].GetImage().GetData(), "image bytes")
-	c.Eq("image/png", blocks[0].GetImage().GetMediaType(), "media type")
-	c.Eq(int32(1), blocks[1].GetIndex(), "text index follows the image")
-	c.Eq("what is this", blocks[1].GetText().GetText(), "text")
-}
-
 func TestClaudeProvider_Parse_StatusFramesBracketCompaction(t *testing.T) {
 	c := assert.NewAborting(t)
 	start := ClaudeProvider{}.Parse([]byte(`{"type":"system","subtype":"status","status":"compacting","session_id":"s"}`))

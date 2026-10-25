@@ -44,13 +44,14 @@ type claudeState struct {
 	// nativeTurnActive tracks the same fact for the NATIVE path, and cannot
 	// share turnActive: readStdout runs BusFrames before BusFramesNative on
 	// every line, so openTurn has already raised turnActive by the time the
-	// native translator sees the same frame. A native guard reading
-	// turnActive was therefore always false, which is why no TurnStart ever
-	// reached publishEvent. It is raised by the prompt echo (OutboundEchoNative,
-	// on the supervise goroutine) so the turn is open before claude's first
-	// request reaches the proxy, and cleared by nativeResult. Because two
-	// goroutines touch it, every access is under mu — unlike the other state
-	// fields, which only BusFrames/ResetState touch.
+	// native translator sees the same frame. It gates the TurnStart, the one
+	// event the translator owns besides tool events: message events come from
+	// persisted rows (cmd/rafikid/capture_sink.go), not from this translator.
+	// It is raised by the prompt echo (OutboundEchoNative, on the supervise
+	// goroutine) so the turn is open before claude's first request reaches the
+	// proxy, and cleared by nativeResult. Because two goroutines touch it,
+	// every access is under mu — unlike the other state fields, which only
+	// BusFrames/ResetState touch.
 	nativeTurnActive bool
 	// lastTotalCost is the session total_cost_usd the previous priced result
 	// frame reported. claude's stream-json result restates the RUNNING total for
@@ -150,72 +151,32 @@ func (p *claudeProvider) OutboundEcho(frame []byte, ts int64) [][]byte {
 	return frames
 }
 
-// OutboundEchoNative is the rafiki-native sibling of OutboundEcho.
+// OutboundEchoNative is the rafiki-native sibling of OutboundEcho, reduced to
+// opening the turn.
 //
 // It reuses claudeUserEcho's parse rather than re-deciding which frames carry
 // user text: that judgment (reject abort, set_session_name, empty messages)
 // exists once and a second copy would drift from it.
 //
-// It opens the native turn HERE, at prompt delivery, rather than waiting for
-// claude's first assistant frame. claude's first request reaches the proxy
-// before that frame arrives, so an assistant-frame open left the turn's first
-// `chat` span an orphan root (and a one-call turn with no nested chat span at
-// all). openNativeTurn's guard makes the first assistant frame a no-op, and a
-// second prompt/steer inside the same turn publishes no second TurnStart. The
-// model is left empty because no frame names one yet; the observer falls back
-// to the child's metadata model.
+// It emits no UserMessage: the user's prompt reaches the native stream from its
+// persisted conversation_message row, published by the daemon's capture sink
+// (cmd/rafikid/capture_sink.go) with the row's created_at. What this owns is the
+// TurnStart, opened HERE at prompt delivery rather than on claude's first
+// assistant frame, because claude's first request reaches the proxy before that
+// frame arrives; an assistant-frame open left the turn's first `chat` span an
+// orphan root (and a one-call turn with no nested chat span at all).
+// openNativeTurn's guard makes the first assistant frame a no-op, and a second
+// prompt/steer inside the same turn publishes no second TurnStart. The model is
+// left empty because no frame names one yet; the observer falls back to the
+// child's metadata model.
 //
 // It does NOT append to p.st.messages — OutboundEcho already did that for the
-// pi path, and both run on the supervise goroutine for the same frame, so
-// appending here would record the user's message twice.
+// pi path, and both run on the supervise goroutine for the same frame.
 func (p *claudeProvider) OutboundEchoNative(frame []byte, ts int64) []*rafikiv1.Event {
-	msg, _, ok := claudeUserEcho(frame, ts)
-	if !ok {
+	if _, _, ok := claudeUserEcho(frame, ts); !ok {
 		return nil
 	}
-	// PiUserMessage.Content is `any`, and claudeUserEcho is its only constructor
-	// today, so this assertion always succeeds. It is a type ASSERTION rather
-	// than fmt.Sprint deliberately: the day that field carries []PiContentBlock
-	// — which is where multi-block user turns are heading, since images already
-	// travel end to end and lead the block list — fmt.Sprint would render Go
-	// syntax straight into the user's visible message with nothing failing.
-	// Dropping the echo is the loud failure; a garbled prompt is the silent one.
-	text, ok := msg.Content.(string)
-	if !ok {
-		return nil
-	}
-	blocks := echoImageBlocks(frame)
-	blocks = append(blocks, &rafikiv1.ContentBlock{
-		Index: int32(len(blocks)),
-		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
-	})
-	out := p.openNativeTurn("", ts)
-	return append(out, &rafikiv1.Event{
-		Ts:      timestamppb.New(time.UnixMilli(ts)),
-		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{Content: blocks}},
-	})
-}
-
-// echoImageBlocks returns the frame's attachments as image blocks, in frame
-// order, so the echoed user message shows what EncodeOutbound actually sent.
-func echoImageBlocks(frame []byte) []*rafikiv1.ContentBlock {
-	var in struct {
-		Attachments []struct {
-			MediaType string `json:"media_type"`
-			Data      []byte `json:"data"`
-		} `json:"attachments"`
-	}
-	if err := json.Unmarshal(frame, &in); err != nil {
-		return nil
-	}
-	blocks := make([]*rafikiv1.ContentBlock, 0, len(in.Attachments)+1)
-	for _, a := range in.Attachments {
-		blocks = append(blocks, &rafikiv1.ContentBlock{
-			Index: int32(len(blocks)),
-			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: a.MediaType, Data: a.Data}},
-		})
-	}
-	return blocks
+	return p.openNativeTurn("", ts)
 }
 
 // claudeStreamFrame is the full claude stream-json envelope BusFrames needs to
@@ -280,6 +241,20 @@ func (p *claudeProvider) SubagentFrame(line []byte) (SubagentObservation, bool) 
 		return SubagentObservation{}, false
 	}
 	return SubagentObservation{MessageID: f.Message.ID, ParentToolUseID: f.ParentToolUseID}, true
+}
+
+// GatedMessageID names the response a main-thread assistant frame belongs
+// to, so the child's gate holds the frame's tool events (and everything
+// after them) until the daemon has published that response's row.
+func (p *claudeProvider) GatedMessageID(line []byte) string {
+	var f claudeStreamFrame
+	if err := json.Unmarshal(line, &f); err != nil {
+		return ""
+	}
+	if f.Type != "assistant" || f.ParentToolUseID != "" || f.Message == nil {
+		return ""
+	}
+	return f.Message.ID
 }
 
 // claudeContentBlock is one assistant/user content block in claude's wire shape.
@@ -568,28 +543,10 @@ func claudeProviderAPI(_ string) (provider, api string) {
 
 // toolResultText flattens a claude tool_result content value (string or array of
 // content blocks) into a plain string for the pi tool result, whose vocabulary
-// is text-only; toolResultContent is the native path that keeps images.
+// is text-only.
 func toolResultText(raw json.RawMessage) string {
 	text, _ := decodeToolResult(raw)
 	return text
-}
-
-// toolResultContent builds a native tool result's content: the flattened text
-// block first (always present, so an empty result still completes the call),
-// then each image block in order.
-func toolResultContent(raw json.RawMessage) []*rafikiv1.ContentBlock {
-	text, images := decodeToolResult(raw)
-	content := []*rafikiv1.ContentBlock{{
-		Index: 0,
-		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
-	}}
-	for _, img := range images {
-		content = append(content, &rafikiv1.ContentBlock{
-			Index: int32(len(content)),
-			Block: &rafikiv1.ContentBlock_Image{Image: img},
-		})
-	}
-	return content
 }
 
 // decodeToolResult splits a claude tool_result content value into its
@@ -700,10 +657,16 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 		if f.Message == nil || len(f.Message.Content) == 0 {
 			return nil
 		}
-		return p.nativeAssistant(f.Message.Content, f.Message.Model, f.ParentToolUseID, ts)
+		if f.ParentToolUseID != "" {
+			return nil
+		}
+		return p.nativeAssistant(f.Message.Content, f.Message.Model, ts)
 
 	case "user":
 		if f.Message == nil {
+			return nil
+		}
+		if f.ParentToolUseID != "" {
 			return nil
 		}
 		return p.nativeUser(f.Message.Content, ts)
@@ -716,90 +679,36 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 	}
 }
 
-// nativeAssistant maps one claude assistant frame to rafiki-native events.
+// nativeAssistant maps one claude assistant frame to rafiki-native turn and
+// tool events.
 //
-// The emitted vocabulary is deliberately IDENTICAL to fundi's — TurnStart, then
-// AssistantMessage, then ToolExecutionStart, then ToolExecutionEnd — because
-// pkg/tui/session reduces both with one code path and only that ordering is
-// correct there. A turn is already open by the time this runs: OutboundEchoNative
-// opened it at prompt delivery, before claude's first request reached the proxy
-// (see openNativeTurn). This call is the fallback for a frame arriving with no
+// It emits no AssistantMessage: the response's message event comes from its
+// persisted conversation_message row, published by the daemon's capture sink
+// (cmd/rafikid/capture_sink.go). The child's message gate (GatedMessageID) holds
+// the ToolExecutionStart events emitted here until that row is published, which
+// keeps the tool events after the message that declares them — the cockpit's
+// applyToolStart looks the call up by id on the last assistant block and only
+// marks it running.
+//
+// A turn is already open by the time this runs: OutboundEchoNative opened it at
+// prompt delivery, before claude's first request reached the proxy (see
+// openNativeTurn). This call is the fallback for a frame arriving with no
 // preceding echo, and its guard makes the ordinary case a no-op; nativeResult
 // closes the turn so the next prompt opens a fresh one.
 //
-// One event this deliberately does NOT emit:
-//
-//   - ContentBlockDelta. claude's stream-json carries COMPLETE messages, so a
-//     synthesized delta duplicates the AssistantMessage below; worse, the
-//     cockpit appends delta text to LastAssistant(), which before the message
-//     arrives is the PREVIOUS turn's finalized block.
-func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel, parentToolUseID string, ts int64) []*rafikiv1.Event {
+// ContentBlockDelta is never emitted: claude's stream-json carries COMPLETE
+// messages, so a synthesized delta would duplicate the row-sourced message.
+func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel string, ts int64) []*rafikiv1.Event {
 	out := p.openNativeTurn(frameModel, ts)
 
-	// Build the content blocks for the assistant message.
-	var content []*rafikiv1.ContentBlock
-	idx := int32(0)
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			if b.Text != "" {
-				content = append(content, &rafikiv1.ContentBlock{
-					Index: idx,
-					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: b.Text}},
-				})
-				idx++
-			}
-		case "thinking":
-			if b.Thinking != "" {
-				content = append(content, &rafikiv1.ContentBlock{
-					Index: idx,
-					Block: &rafikiv1.ContentBlock_Thinking{Thinking: &rafikiv1.ThinkingBlock{Thinking: b.Thinking}},
-				})
-				idx++
-			}
-		case "tool_use":
-			content = append(content, &rafikiv1.ContentBlock{
-				Index: idx,
-				Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
-					Id: b.ID, Name: b.Name, InputJson: toolInputJSON(b.Input),
-				}},
-			})
-			idx++
-		case "tool_result":
-			content = append(content, &rafikiv1.ContentBlock{
-				Index: idx,
-				Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
-					ToolUseId: b.ToolUseID,
-					Content:   toolResultContent(b.Content),
-					IsError:   b.IsError,
-				}},
-			})
-			idx++
-		}
-	}
-
-	if len(content) > 0 {
-		out = append(out, &rafikiv1.Event{
-			Ts: timestamppb.New(time.UnixMilli(ts)),
-			Payload: &rafikiv1.Event_AssistantMessage{
-				AssistantMessage: &rafikiv1.AssistantMessage{
-					Content:    content,
-					StopReason: rafikiv1.StopReason_STOP_REASON_TOOL_USE,
-				},
-			},
-		})
-	}
-
-	// Execution events follow the message that declares them.
 	for _, b := range blocks {
 		if b.Type == "tool_use" {
 			out = append(out, &rafikiv1.Event{
 				Ts: timestamppb.New(time.UnixMilli(ts)),
 				Payload: &rafikiv1.Event_ToolExecutionStart{
 					ToolExecutionStart: &rafikiv1.ToolExecutionStart{
-						ToolUseId:       b.ID,
-						Name:            b.Name,
-						ParentToolUseId: parentToolUseID,
+						ToolUseId: b.ID,
+						Name:      b.Name,
 					},
 				},
 			})
@@ -807,58 +716,37 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 	}
 	for _, b := range blocks {
 		if b.Type == "tool_result" {
-			out = append(out, &rafikiv1.Event{
-				Ts: timestamppb.New(time.UnixMilli(ts)),
-				Payload: &rafikiv1.Event_ToolExecutionEnd{
-					ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
-						ToolUseId: b.ToolUseID,
-						IsError:   b.IsError,
-					},
-				},
-			})
+			out = append(out, toolExecutionEnd(b, ts))
 		}
 	}
 
 	return out
 }
 
+// nativeUser maps a claude user frame to one ToolExecutionEnd per tool_result
+// block. The result's output reaches the native stream as a UserMessage from the
+// persisted row (cmd/rafikid/capture_sink.go); ToolExecutionEnd carries no text,
+// and the child's gate orders it after the response whose tool_use it completes.
 func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*rafikiv1.Event {
 	var out []*rafikiv1.Event
-
 	for _, b := range blocks {
-		if b.Type != "tool_result" {
-			continue
+		if b.Type == "tool_result" {
+			out = append(out, toolExecutionEnd(b, ts))
 		}
-		out = append(out, &rafikiv1.Event{
-			Ts: timestamppb.New(time.UnixMilli(ts)),
-			Payload: &rafikiv1.Event_ToolExecutionEnd{
-				ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
-					ToolUseId: b.ToolUseID,
-					IsError:   b.IsError,
-				},
-			},
-		})
-		// The result's OUTPUT rides a UserMessage carrying a tool_result block,
-		// exactly the shape fundi's publishToolResult emits (pkg/fundi/native.go):
-		// ToolExecutionEnd carries no text, and the cockpit's session reducer only
-		// sets HasResult/Result from that user turn — without it a claude child
-		// renders "⋯ no result" forever. Emitted even when the text flattens to "":
-		// a call that ran and returned nothing is still a completed call.
-		out = append(out, &rafikiv1.Event{
-			Ts: timestamppb.New(time.UnixMilli(ts)),
-			Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
-				Content: []*rafikiv1.ContentBlock{{
-					Index: 0,
-					Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
-						ToolUseId: b.ToolUseID,
-						IsError:   b.IsError,
-						Content:   toolResultContent(b.Content),
-					}},
-				}},
-			}},
-		})
 	}
 	return out
+}
+
+func toolExecutionEnd(b claudeContentBlock, ts int64) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		Ts: timestamppb.New(time.UnixMilli(ts)),
+		Payload: &rafikiv1.Event_ToolExecutionEnd{
+			ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
+				ToolUseId: b.ToolUseID,
+				IsError:   b.IsError,
+			},
+		},
+	}
 }
 
 func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1.Event {
@@ -910,15 +798,3 @@ func (p *claudeProvider) turnCost(total float64) *float64 {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
-
-// toolInputJSON converts a tool input map to a JSON string.
-func toolInputJSON(input map[string]any) string {
-	if input == nil {
-		return "{}"
-	}
-	b, err := json.Marshal(input)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
-}
