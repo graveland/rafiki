@@ -364,12 +364,15 @@ func (s *pgStore) ListTokens(ctx context.Context, userID string, includeRevoked 
 	// usable for the per-user listing. The default view (includeRevoked
 	// false) shows only LIVE credentials: an unrevoked token of a tombstoned
 	// user is dead with its owner (Delete revokes identities but never
-	// touches token rows), so it lists only in the audit view.
+	// touches token rows), and an expired token authenticates as nothing, so
+	// both list only in the audit view. Expiry is a read filter like
+	// revocation: no row is ever deleted.
 	q := `SELECT ` + tokenColumns + `
 	        FROM conversations.user_token t
 	        JOIN conversations.users u ON u.id = t.user_id
 	       WHERE ($1 = '' OR t.user_id = $1::uuid)
-	         AND ($2::bool OR (t.revoked_at IS NULL AND u.deleted_at IS NULL))
+	         AND ($2::bool OR (t.revoked_at IS NULL AND u.deleted_at IS NULL
+	                          AND (t.expires_at IS NULL OR t.expires_at > now())))
 	       ORDER BY t.created_at DESC, t.id DESC`
 	rows, err := s.pool.Query(ctx, q, userID, includeRevoked)
 	if err != nil {

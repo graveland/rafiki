@@ -78,7 +78,7 @@ client side:
 
 ```sh
 rafikid user update brent --email brent@example.com   # on the daemon host
-rafiki token ls                                       # find the `initial` token's id
+rafiki token list                                     # find the `initial` token's id
 rafiki token revoke <id>                              # the token stops working at once
 ```
 
@@ -101,7 +101,7 @@ a script, a cron job) uses a minted token instead:
 
 ```sh
 rafiki token mint --name ci --ttl 720h    # plaintext printed exactly once
-rafiki token ls                           # metadata only, secrets never shown
+rafiki token list                         # alias: ls; live tokens only, secrets never shown
 rafiki token revoke <id>                  # immediate; cuts that token's open streams
 ```
 

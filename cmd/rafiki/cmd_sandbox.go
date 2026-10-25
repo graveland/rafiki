@@ -223,8 +223,8 @@ func runSandboxCreate(cmd *cobra.Command, _ []string) error {
 
 func newSandboxListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "ls",
-		Aliases: []string{"list"},
+		Use:     "list",
+		Aliases: []string{"ls"},
 		Short:   "List sandboxes",
 		Long: `List sandboxes.
 

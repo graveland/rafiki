@@ -183,9 +183,10 @@ does that now, and the schedule does it at the next fire.`,
 
 func newRepoListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List your registered repos",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List your registered repos",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {

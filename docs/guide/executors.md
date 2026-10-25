@@ -363,14 +363,14 @@ daemon — the client never dials a sandbox directly):
 
 ```sh
 rafiki sandbox create --name work --mount ro:/work=host:/srv/repos/app
-rafiki sandbox ls
+rafiki sandbox list
 rafiki sandbox rm work
 ```
 
 A named sandbox has a TTL and always expires. A sandbox bound to a child as a
 **spawn block** (`SpawnRequest.sandbox`; fundi/MCP expose it as an
 `agent_spawn` field) is created and removed with its child, but it is not
-invisible to the CLI: `rafiki sandbox ls` shows spawn-block rows too (their
+invisible to the CLI: `rafiki sandbox list` shows spawn-block rows too (their
 `owner_child` names the child), and `rafiki sandbox rm <id>` removes one (the
 spawning child, or any of its ancestors, may also remove it). A spawn block is
 unnamed and has no TTL.

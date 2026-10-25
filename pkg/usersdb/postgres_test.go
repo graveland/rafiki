@@ -439,6 +439,32 @@ func TestAuthenticateExpiredToken(t *testing.T) {
 	c.Eq(u.ID, sibling.UserID, "sibling identity user")
 }
 
+// An expired token drops out of the default listing but stays in the audit
+// view (includeRevoked): expiry is a read filter, the row is never deleted.
+func TestListTokensHidesExpired(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	s, pool := testStore(t)
+
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent", MintToken: true})
+	c.Require().NoError(err, "create")
+	expiring, _ := mintSecond(t, s, u.ID, "ephemeral", time.Hour)
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.user_token SET expires_at = now() - interval '1 hour' WHERE id = $1::uuid`,
+		expiring.ID); err != nil {
+		t.Fatalf("age the token: %v", err)
+	}
+
+	live, err := s.ListTokens(ctx, u.ID, false)
+	c.Require().NoError(err, "list live")
+	c.Eq(1, len(live), "only the never-expiring initial token is live")
+	c.NotEq(expiring.ID, live[0].ID, "the expired token must not list by default")
+
+	all, err := s.ListTokens(ctx, u.ID, true)
+	c.Require().NoError(err, "list all")
+	c.Eq(2, len(all), "the audit view keeps the expired row")
+}
+
 // Tombstoning a user kills every one of its credentials at once — the auth
 // predicate joins users and filters deleted_at IS NULL.
 func TestAuthenticateTombstonedUser(t *testing.T) {

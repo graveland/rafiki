@@ -2003,7 +2003,7 @@ ordering is pinned by `TestUserRPCsRefuseNonAdmin`.
   token (`ttl`, a `Duration`; unset or zero = never expires, negative refused)
   whose plaintext rides the response
   exactly once; `ListTokens` returns metadata rows only, `include_revoked`
-  adding tombstoned credentials (revocation is a filter, never a deletion);
+  adding tombstoned AND expired credentials (both are read filters, never deletions);
   `RevokeToken` stamps `revoked_at` — an unknown id answers `CodeNotFound`,
   an already-revoked id the unchanged row, and the ownership check needs the
   row (`GetToken` first), so a foreign id answers `CodePermissionDenied` and

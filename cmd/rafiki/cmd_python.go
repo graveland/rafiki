@@ -50,9 +50,10 @@ func newRetiredPythonRepoCmd() *cobra.Command {
 func newPythonListCmd() *cobra.Command {
 	var repo string
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List your saved pymodules (code is never printed here)",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List your saved pymodules (code is never printed here)",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {

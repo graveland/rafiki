@@ -120,14 +120,15 @@ func renderTokenMint(w io.Writer, resp *rafikiv1.MintTokenResponse, mode outputM
 
 func newTokenLsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ls",
-		Short: "List tokens (secrets are never shown)",
-		Args:  cobra.NoArgs,
-		RunE:  runTokenLs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List tokens (secrets are never shown)",
+		Args:    cobra.NoArgs,
+		RunE:    runTokenLs,
 	}
 	cmd.Flags().String("user", "", "List another user's tokens (admin)")
 	cmd.Flags().Bool("all", false, "List every user's tokens (admin)")
-	cmd.Flags().Bool("revoked", false, "Include revoked tokens")
+	cmd.Flags().Bool("revoked", false, "Include revoked and expired tokens")
 	return cmd
 }
 
@@ -175,7 +176,7 @@ func newTokenRevokeCmd() *cobra.Command {
 		Use:   "revoke <id>",
 		Short: "Revoke a token; it stops working immediately",
 		Long: `Revoke a token. Revocation is permanent: the token stops authenticating at
-once and never revives. List ids with 'rafiki token ls'.`,
+once and never revives. List ids with 'rafiki token list'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: runTokenRevoke,
 	}

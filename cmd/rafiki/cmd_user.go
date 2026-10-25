@@ -184,10 +184,11 @@ func writeTokenFile(path, token string) error {
 
 func newUserListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List users (tokens are never shown)",
-		Args:  cobra.NoArgs,
-		RunE:  runUserList,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List users (tokens are never shown)",
+		Args:    cobra.NoArgs,
+		RunE:    runUserList,
 	}
 	cmd.Flags().Bool("all", false, "Include removed users (history still resolves to them)")
 	return cmd

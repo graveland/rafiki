@@ -418,12 +418,13 @@ func newUserTokenListCLICmd(dbDSN *string) *cobra.Command {
 	var revoked bool
 
 	cmd := &cobra.Command{
-		Use:   "ls [name]",
-		Short: "List service tokens — every user's, or one user's",
+		Use:     "list [name]",
+		Aliases: []string{"ls"},
+		Short:   "List service tokens — every user's, or one user's",
 		Long: `Lists service tokens by opening the DSN directly — no running daemon is
 contacted. With a name, only that user's tokens; without, every user's.
-Revoked tokens are hidden unless --revoked is passed — revocation is a
-filter, never a deletion.`,
+Revoked and expired tokens are hidden unless --revoked is passed — both are
+filters, never deletions.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -442,7 +443,7 @@ filter, never a deletion.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&revoked, "revoked", false, "include revoked tokens")
+	cmd.Flags().BoolVar(&revoked, "revoked", false, "include revoked and expired tokens")
 
 	return cmd
 }

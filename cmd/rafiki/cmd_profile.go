@@ -63,9 +63,10 @@ func endpointOf(p profile.Profile) string {
 
 func newProfileListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List configured profiles",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List configured profiles",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			set, err := loadForEdit()
 			if err != nil {

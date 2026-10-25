@@ -45,9 +45,10 @@ func splitQualified(ref string) (namespace, name string) {
 func newSkillsListCmd() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List skills in the daemon's corpus",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List skills in the daemon's corpus",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {

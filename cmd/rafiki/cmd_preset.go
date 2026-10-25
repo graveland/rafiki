@@ -54,9 +54,10 @@ func presetViewOf(row *rafikiv1.PresetRow) presetView {
 
 func newPresetListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list [PREFIX]",
-		Short: "List presets, optionally narrowed to a name prefix",
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "list [PREFIX]",
+		Aliases: []string{"ls"},
+		Short:   "List presets, optionally narrowed to a name prefix",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prefix := ""
 			if len(args) > 0 {

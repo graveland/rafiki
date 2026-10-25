@@ -124,8 +124,9 @@ Example:
 
 func newProvidersRouteListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List the live routing-policy rows: each model line and its spec",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List the live routing-policy rows: each model line and its spec",
 		Long: `List the live routing-policy rows — the newest row per model line, tombstoned
 ones hidden — with when each was written. This is the view the resolver
 serves from; rows are appended on write, never edited in place.
