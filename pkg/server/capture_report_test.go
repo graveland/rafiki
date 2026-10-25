@@ -146,13 +146,41 @@ func TestCaptureReportReadBackFailure(t *testing.T) {
 	c.Len(got[0].Rows, 0, "rows")
 }
 
-func TestCaptureReportSkipsRequestWithoutClientTools(t *testing.T) {
+// A session request that declares no client tools is not the agent's own
+// conversation — Claude Code's titler, its quota probe and the per-tool model
+// helpers all ride the session header — so none of its rows may publish. It
+// MUST still report, because the response id in that report is what releases the
+// child's message gate: a request that armed the gate and reported nothing left
+// the child's event stream (TurnEnd included) silent until the child exited.
+func TestCaptureReportReleasesGateForRequestWithoutClientTools(t *testing.T) {
 	c := assert.NewAborting(t)
-	p, sink, _ := reportProxy(t, &fakeProxyStore{}, http.StatusOK)
+	fs := &fakeProxyStore{sinceRows: []store.Message{{Ordinal: 0}, {Ordinal: 1}}}
+	p, sink, _ := reportProxy(t, fs, http.StatusOK)
 
 	serveReport(p, reportPlainBody, "sess-1")
 
-	c.Len(sink.all(), 0, "reports")
+	got := sink.all()
+	c.Require().Len(got, 1, "reports")
+	c.True(got[0].ReleaseOnly, "ReleaseOnly")
+	c.Eq("msg_resp1", got[0].ResponseMessageID, "the response id is what releases the gate")
+	c.Len(got[0].Rows, 0, "rows")
+	c.Eq(0, fs.sinceCalls, "MessagesSince calls: a release-only report reads nothing back")
+}
+
+// The client-tool declaration decides whether rows publish, never whether the
+// request reports: a refused capture on a no-client-tools request must reach
+// the sink too, or the gate its frame armed is never released.
+func TestCaptureReportReleasesGateForRefusedRequestWithoutClientTools(t *testing.T) {
+	c := assert.NewAborting(t)
+	p, sink, _ := reportProxy(t, &fakeProxyStore{intentErr: errors.New("db down")}, http.StatusOK)
+
+	serveReport(p, reportPlainBody, "sess-1")
+
+	got := sink.all()
+	c.Require().Len(got, 1, "reports")
+	c.True(got[0].ReleaseOnly, "ReleaseOnly")
+	c.StrContains(got[0].Err, "insert turn intent", "Err")
+	c.Eq("", got[0].ResponseMessageID, "a refused capture stores no response")
 }
 
 func TestCaptureReportSkipsSessionlessRequest(t *testing.T) {

@@ -430,7 +430,10 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	}
 
 	if _, ok := prov.(messageGated); ok && spec.NativeSink != nil {
-		c.gate = &messageGate{sink: spec.NativeSink}
+		// childID rides along so the gate's backstop release can name the child
+		// whose response was never reported: that warning is the only signal a
+		// wedged capture leaves behind.
+		c.gate = &messageGate{sink: spec.NativeSink, childID: spec.ChildID}
 	}
 
 	if isScript {

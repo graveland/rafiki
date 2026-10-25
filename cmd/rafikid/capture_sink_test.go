@@ -285,3 +285,48 @@ func assertPublishedTsMatchesHistory(t *testing.T, role string) {
 	ck.Require().NotNil(hist, "no history %s event", role)
 	ck.True(pub.AsTime().Equal(hist.AsTime()), "published ts %v != history ts %v", pub.AsTime(), hist.AsTime())
 }
+
+// A release-only report — a session request that declares no client tools, so
+// it is not the agent's own conversation — publishes NOTHING, but it must still
+// release the gate: the response it names is what a frame on the child's stdout
+// armed the gate behind, and dropping this report is what left that child's
+// event stream silent (TurnEnd included) until it exited.
+func TestCaptureReportReleaseOnlyReleasesTheGateAndPublishesNothing(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := newCaptureHarness(t)
+	now := time.Now()
+
+	h.c.CaptureReported(server.CaptureReport{
+		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1", ReleaseOnly: true,
+		Rows: []store.Message{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")},
+	})
+	h.drain()
+
+	ck.Eq(0, len(h.got), "a release-only report publishes no rows")
+	ck.EqDeep([]string{"persisted:msg_1"}, h.log, "gate calls")
+
+	// Its rows must not advance the ordinal mark either: a release-only report
+	// says nothing about what this conversation has published.
+	h.log, h.got = nil, nil
+	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1",
+		Rows: []store.Message{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")}})
+	h.drain()
+
+	ck.EqDeep([]string{"user:0", "assistant:1", "persisted:msg_1"}, h.log, "the mark was not advanced")
+}
+
+// A release-only report that stored no response names nothing to release, and
+// flushing the whole gate would publish the agent's own held turn events out of
+// order behind a helper's failure. It leaves the gate alone; the gate's stall
+// release is the backstop.
+func TestCaptureReportReleaseOnlyWithoutResponseNeverFlushesHeldEvents(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := newCaptureHarness(t)
+
+	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv",
+		ReleaseOnly: true, Err: "insert failed"})
+	h.drain()
+
+	ck.Eq(0, len(h.got), "events: a helper's failure is not the agent's turn")
+	ck.Eq(0, len(h.log), "gate calls")
+}

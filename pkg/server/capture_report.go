@@ -20,6 +20,15 @@ type CaptureReport struct {
 	ResponseMessageID string // the response's message id; "" when it was not stored
 	Rows              []store.Message
 	Err               string // non-empty: the capture failed
+	// ReleaseOnly marks a report from a request that is NOT the child's own
+	// conversation — Claude Code's titler, its quota probe and the per-tool
+	// model helpers all ride the session header, and none of them declares a
+	// client tool. None of its rows may publish, but the report is still sent,
+	// because the response id in it is what releases the child's message gate:
+	// a frame that arms the gate and never reports wedges that child's whole
+	// event stream until it exits. A sink must release the gate on a
+	// release-only report that names a response, and publish nothing.
+	ReleaseOnly bool
 }
 
 // CaptureSink receives capture reports. Implemented by the daemon's Controller.
@@ -39,17 +48,28 @@ func (p *MessagesProxy) SetCaptureSink(s CaptureSink) {
 // reportCapture sends the request's CaptureReport. It runs deferred from
 // ServeHTTP, after every capture write for the request: none runs on another
 // goroutine.
+//
+// It reports every session request that reached capture — begun OR refused —
+// and only those: a request with no session header, no sink or no capture
+// outcome belongs to no child, so there is nobody to report to. The request's
+// client-tool declaration decides whether its ROWS publish, never whether it
+// reports: the report is also the child gate's release, and a request that
+// armed the gate and reported nothing left the child's stream silent until it
+// exited. See CaptureReport.ReleaseOnly.
 func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []byte) {
 	if p.captureSink == nil || cr.session == "" || cr.outcome == nil ||
-		(!cr.on && cr.refused == "") || !claudethread.DeclaresClientTools(reqBody) {
+		(!cr.on && cr.refused == "") {
 		return
 	}
 	errText := cr.refused
 	if errText == "" {
 		errText = cr.outcome.failure
 	}
+	releaseOnly := !claudethread.DeclaresClientTools(reqBody)
 	var rows []store.Message
-	if cr.on {
+	// No read-back for a release-only report: none of its rows can publish, and
+	// the read would be a DB round trip on every titler and helper request.
+	if cr.on && !releaseOnly {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
 		defer cancel()
 		var rerr error
@@ -64,7 +84,7 @@ func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []
 	}
 	report := CaptureReport{
 		Session: cr.session, ThreadID: cr.threadID, ConversationID: cr.convID,
-		Rows: rows, Err: errText,
+		Rows: rows, Err: errText, ReleaseOnly: releaseOnly,
 	}
 	if errText == "" {
 		report.ResponseMessageID = cr.outcome.responseMessageID

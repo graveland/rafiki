@@ -3,6 +3,8 @@ package child
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -234,4 +236,151 @@ func TestChildExitReleasesHeldEvents(t *testing.T) {
 			t.Fatal("held event not released on child exit")
 		}
 	}
+}
+
+// holding reports whether the gate is still awaiting id with n events queued
+// behind it: the state a test waits for before asserting nothing was delivered.
+func (g *messageGate) holding(id string, n int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.key == id && len(g.held) == n
+}
+
+// syncBuf collects slog output written from the stall timer's goroutine.
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// A response nothing ever reports must not hold the child's event stream until
+// the child exits: the bounded wait releases what it held, and says so at WARN
+// with the child and the message id. Silence here is the defect — sentinel sees
+// a chat turn that never ends, and nothing anywhere says why.
+func TestGateStallReleasesHeldEventsLoudly(t *testing.T) {
+	ck := assert.NewAborting(t)
+	logs := &syncBuf{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	g, rec := newTestGate()
+	g.childID = "c_stall"
+	g.stallAfter = 20 * time.Millisecond
+	g.await("msg_stall")
+	g.emit(ev("A"))
+	g.emit(ev("B"))
+	ck.Eq(0, len(rec.got()), "events delivered before their response was reported")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(rec.got()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	ck.EqDeep([]string{"A", "B"}, rec.got(), "held events released when the wait expired")
+
+	for !strings.Contains(logs.String(), "msg_stall") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	logged := logs.String()
+	ck.StrContains(logged, "c_stall", "the warning names the child")
+	ck.StrContains(logged, "msg_stall", "the warning names the message id")
+	ck.StrContains(logged, "level=WARN", "the release is a warning, never a silent release")
+
+	// The released id is settled, exactly as releaseAll settles it: a late
+	// report neither re-publishes nor re-arms the gate.
+	g.markPersisted("msg_stall")
+	g.await("msg_stall")
+	g.emit(ev("C"))
+	ck.EqDeep([]string{"A", "B", "C"}, rec.got(), "no re-arm after the stall release")
+}
+
+// A report settles the wait it names: the bounded wait is gone (so nothing can
+// fire a spurious release or a warning for a response that WAS reported) and the
+// gate is open for the next turn's events.
+func TestGateReportSettlesTheStallWait(t *testing.T) {
+	ck := assert.NewAborting(t)
+	g, rec := newTestGate()
+	g.stallAfter = time.Minute
+	g.await("X")
+	g.emit(ev("A"))
+	g.markPersisted("X")
+	ck.EqDeep([]string{"A"}, rec.got(), "released by the report")
+
+	g.mu.Lock()
+	armed := g.stall != nil
+	g.mu.Unlock()
+	ck.False(armed, "the bounded wait is still armed after the response was reported")
+
+	g.emit(ev("B"))
+	ck.EqDeep([]string{"A", "B"}, rec.got(), "the gate is open after the report")
+}
+
+// A claude child whose response IS reported publishes its held events then: the
+// report is the release path. This is the call a release-only capture report (a
+// request declaring no client tools) makes, and the frame that armed the gate is
+// a real main-thread assistant frame from the real provider.
+func TestClaudeChildTurnEndIsReleasedByTheResponseReport(t *testing.T) {
+	ck := assert.NewAborting(t)
+	stub := newResettableStubRunner()
+	got := make(chan *rafikiv1.Event, 8)
+	ch, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:    "c_gate_report",
+		Cwd:        t.TempDir(),
+		Runner:     stub,
+		Provider:   ClaudeProvider{},
+		NativeSink: func(ev *rafikiv1.Event) { got <- ev },
+	})
+	ck.NoError(err, "spawn")
+	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
+	ck.Require().NotNil(ch.gate, "claude child has no message gate")
+	ch.gate.mu.Lock()
+	ch.gate.stallAfter = time.Minute // the report, not the backstop, must release this
+	ch.gate.mu.Unlock()
+
+	for _, line := range []string{
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"result","subtype":"success","session_id":"sess-1"}`,
+	} {
+		_, werr := stub.stdoutW.Write([]byte(line + "\n"))
+		ck.NoError(werr, "write stdout")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !ch.gate.holding("msg_1", 2) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	ck.True(ch.gate.holding("msg_1", 2), "the assistant frame did not arm the gate behind msg_1")
+	select {
+	case ev := <-got:
+		t.Fatalf("event %T delivered before its response was reported", ev.GetPayload())
+	default:
+	}
+
+	ch.MessagePersisted("msg_1") // the capture report for that response
+
+	seen := make([]string, 0, 2)
+	for time.Now().Before(deadline) {
+		select {
+		case ev := <-got:
+			if ev.GetTurnEnd() != nil {
+				seen = append(seen, "turn_end")
+				ck.EqDeep([]string{"turn_start", "turn_end"}, seen, "released in order")
+				return
+			}
+			seen = append(seen, "turn_start")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	t.Fatalf("TurnEnd never reached the sink after the report; got %v", seen)
 }

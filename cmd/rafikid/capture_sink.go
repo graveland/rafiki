@@ -48,6 +48,12 @@ func (c *Controller) gateFor(childID string) (heldEventReleaser, bool) {
 // response is now persisted. The gate is driven only after capturePub.mu is
 // released: the gate invokes publishEvent under its own lock, so holding
 // capturePub.mu across a gate call would order the two locks both ways.
+//
+// A ReleaseOnly report publishes nothing at all — its request is not the
+// agent's own conversation (a titler, a quota probe, a per-tool helper) — but
+// it still drives the gate: the response it names is what a frame on the
+// child's stdout armed the gate behind, and dropping that report is what left
+// the child's event stream silent until it exited.
 func (c *Controller) CaptureReported(r server.CaptureReport) {
 	childID := r.Session
 	if r.ThreadID != "" {
@@ -56,6 +62,13 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	if _, ok := c.st.Get(childID); !ok {
 		slog.Debug("capture report for unknown child", "child", childID, "conversation", r.ConversationID)
 		return
+	}
+
+	if r.ReleaseOnly {
+		// No rows and no capture_not_persisted Error: this request's messages
+		// belong to another conversation, and a helper's capture failure is not
+		// the agent's turn. Only the gate release below applies to it.
+		r.Rows = nil
 	}
 
 	c.capturePub.mu.Lock()
@@ -84,7 +97,7 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	if len(kept) > 0 {
 		c.capturePub.mark[r.ConversationID] = kept[len(kept)-1].Ordinal
 	}
-	if r.Err != "" {
+	if r.Err != "" && !r.ReleaseOnly {
 		c.publishEvent(childID, &rafikiv1.Event{
 			ChildId: childID,
 			Ts:      timestamppb.Now(),
@@ -105,6 +118,16 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	}
 	if r.Err == "" && r.ResponseMessageID != "" {
 		g.MessagePersisted(r.ResponseMessageID)
+		return
+	}
+	if r.ReleaseOnly {
+		// A release-only report only ever releases the one response it names:
+		// with no id there is nothing of THIS request to release, and flushing
+		// here would publish the agent's own held turn events out of order
+		// behind a helper's failure. The gate's stall release is the backstop
+		// for a request that armed it and could not name its response.
+		slog.Debug("capture report: release-only request stored no response id; gate left to its backstop",
+			"child", childID, "conversation", r.ConversationID, "error", r.Err)
 		return
 	}
 	g.ReleaseHeldEvents()
