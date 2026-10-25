@@ -41,16 +41,18 @@ type fakeProxyStore struct {
 	lastIntentModel      string
 	lastIntentSource     string
 	lastIntentAuthorKind string
-	lastFailMsg          string // errMsg passed to the last FailTurn
-	decomposes           int    // DecomposeRequest call count
-	completeErr          error  // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
-	threads              int    // RecordThread call count
-	lastSession          string // session passed to the last RecordThread
-	lastPrevMsg          string // prevMessageID passed to the last RecordThread
-	lastOwnMsg           string // ownMessageID passed to the last RecordThread
-	lastIsSubagent       bool   // isSubagent passed to the last RecordThread
-	threadErr            error  // when set, RecordThread returns it (to exercise the swallow)
-	appendErr            error  // when set, AppendResponseMessage returns it (to exercise the FailTurn path)
+	lastFailMsg          string   // errMsg passed to the last FailTurn
+	decomposes           int      // DecomposeRequest call count
+	completeErr          error    // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
+	threads              int      // RecordThread call count
+	lastSession          string   // session passed to the last RecordThread
+	lastPrevMsg          string   // prevMessageID passed to the last RecordThread
+	lastOwnMsg           string   // ownMessageID passed to the last RecordThread
+	lastIsSubagent       bool     // isSubagent passed to the last RecordThread
+	threadErr            error    // when set, RecordThread returns it (to exercise the swallow)
+	appendErr            error    // when set, AppendResponseMessage returns it (to exercise the FailTurn path)
+	decomposeErr         error    // when set, DecomposeRequest returns it (to exercise the FailTurn path)
+	failMsgs             []string // every errMsg passed to FailTurn, in order
 
 	// threadID, when non-empty, is the thread id ThreadOfPredecessorInSession
 	// answers with, standing in for a request on a Claude Code subagent thread.
@@ -119,12 +121,13 @@ func (f *fakeProxyStore) CompleteTurn(ctx context.Context, r capture.TurnResult)
 func (f *fakeProxyStore) FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error {
 	f.fails++
 	f.lastFailMsg = errMsg
+	f.failMsgs = append(f.failMsgs, errMsg)
 	return nil
 }
 
 func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
 	f.decomposes++
-	return 0, nil
+	return 0, f.decomposeErr
 }
 
 func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
@@ -255,6 +258,60 @@ func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
 
 	c.Eq(1, fs.fails, "FailTurn fallback should fire on AppendResponseMessage failure, got fails=")
 	c.StrContains(fs.lastFailMsg, "append response failed:", "fail message")
+}
+
+// A request-message collision from DecomposeRequest reaches the turn as an
+// errored turn, not a log line.
+func TestMessagesProxyDecomposeCollisionFailsTurn(t *testing.T) {
+	c := assert.NewCollecting(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{decomposeErr: fmt.Errorf("%w: conversation c ordinal 3 (request message)", capture.ErrOrdinalOccupied)}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "sess-cdecomp")
+	p.ServeHTTP(rec, req)
+
+	c.Eq(1, fs.fails, "FailTurn calls")
+	c.StrContains(fs.lastFailMsg, "decompose request failed:", "fail message")
+	c.StrContains(fs.lastFailMsg, "ordinal already occupied", "fail message carries the capture error")
+}
+
+// An upstream-failed turn whose request rows cannot be stored keeps the
+// upstream reason and adds the capture failure to the turn error.
+func TestMessagesProxyUpstreamErrorDecomposeFailureReachesTurn(t *testing.T) {
+	c := assert.NewCollecting(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"nope"}}`))
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{decomposeErr: fmt.Errorf("%w: conversation c ordinal 3 (request message)", capture.ErrOrdinalOccupied)}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "sess-uedecomp")
+	p.ServeHTTP(rec, req)
+
+	c.Require().Eq(2, fs.fails, "FailTurn calls: upstream reason, then the capture failure")
+	c.StrContains(fs.lastFailMsg, "upstream status 400", "final reason keeps the upstream failure")
+	c.StrContains(fs.lastFailMsg, "decompose request failed:", "final reason names the capture failure")
 }
 
 func TestMessagesProxyFailsTurnOnUpstreamError(t *testing.T) {

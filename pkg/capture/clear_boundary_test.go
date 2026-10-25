@@ -165,11 +165,11 @@ func TestClearBoundaryStaysPendingOnMatchingHead(t *testing.T) {
 	c.Eq(0, kindCount, "kind-tagged rows")
 }
 
-// TestClearBoundaryNotPendingDropsDivergentHead: the same divergent request as
-// TestClearBoundaryWritesClearRow but with no /clear pending keeps today's
-// behaviour — horizon unchanged, no clear row, the head dropped. Fails if the
-// branch ignores the flag.
-func TestClearBoundaryNotPendingDropsDivergentHead(t *testing.T) {
+// TestClearBoundaryNotPendingRefusesDivergentHead: the same divergent request as
+// TestClearBoundaryWritesClearRow but with no /clear pending is reported as
+// ErrOrdinalOccupied — horizon unchanged, no clear row, nothing written. Fails
+// if the branch ignores the flag.
+func TestClearBoundaryNotPendingRefusesDivergentHead(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx, pool, s := horizonTestEnv(t)
 	convID, _ := clearTestConv(t, ctx, s, "not-pending-drops")
@@ -177,11 +177,14 @@ func TestClearBoundaryNotPendingDropsDivergentHead(t *testing.T) {
 	seed := []byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"},{"role":"user","content":"m2"},{"role":"assistant","content":"m3"}]}`)
 	c.Eq(4, runTurn(t, ctx, s, convID, seed, 100, 10), "seed next ordinal")
 
-	// No MarkClearPending. The head inserts at h=0 (DO NOTHING), return h+len.
+	// No MarkClearPending.
 	clearReq := []byte(`{"model":"claude","messages":[{"role":"user","content":"fresh after clear"}]}`)
-	next := clearDecompose(t, ctx, s, convID, clearReq)
-
-	c.Eq(1, next, "next ordinal")
+	hc := routing.PrefixHash(clearReq)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: clearReq, PrefixHash: hc, Protocol: "anthropic"})
+	c.NoError(err, "InsertTurnIntent")
+	_, err = s.DecomposeRequest(ctx, convID, turnID, createdAt, clearReq, hc)
+	c.ErrorIs(err, ErrOrdinalOccupied, "divergent head without a pending clear")
 	c.Eq(0, storedHorizon(t, ctx, pool, convID), "horizon unchanged")
 
 	var clearRows int

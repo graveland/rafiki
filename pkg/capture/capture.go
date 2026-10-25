@@ -36,11 +36,11 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 }
 
 // ErrOrdinalOccupied reports that a response could not be written because its
-// ordinal already held a different message. Request-message inserts stay
-// lenient (a replayed prefix re-inserts identical content and first-seen wins),
-// but a second assistant reply at one ordinal is always a lost response: nine
-// such collisions dropped 22 model replies before threads were separated, and
-// nothing reported it.
+// ordinal already held a different message. It covers both write sites: a
+// replayed request prefix re-inserts an equivalent message and succeeds
+// (appendRequestMessage), but a request message or an assistant reply landing on
+// a different occupant is never stored, so it is reported. Nine such collisions
+// dropped 22 model replies before threads were separated, and nothing said so.
 //
 // Residual case: the conflict test is content-only (IS DISTINCT FROM), so an
 // occupant whose content is jsonb-equal to the incoming reply stays a silent
@@ -53,18 +53,18 @@ var ErrOrdinalOccupied = errors.New("capture: ordinal already occupied by a diff
 // request-decomposition path's ordinary rows (kind is set only on a
 // compaction-summary boundary row).
 //
-// An ordinal that is already occupied is not an error: both statements' ON
-// CONFLICT (conversation_id, ordinal) DO NOTHING silently drops the new row and
-// the occupant's first-seen content wins — accepted leniency for rewound and
-// short requests (design §3); capture is best-effort.
+// An ordinal that is already occupied is not an error HERE: both statements' ON
+// CONFLICT (conversation_id, ordinal) DO NOTHING drop the new row and report
+// inserted=false. Callers decide what an occupant means:
+// appendRequestMessage accepts an equivalent one and refuses a different one,
+// appendMessageStrict refuses any different one.
 //
 // A returned ErrLeaseLost is deliberately NOT retryable: isRetryableDB only
 // classifies DeadlineExceeded, net.OpError and SQLSTATE 40P01/40001, so retryDB
 // surfaces it on the first attempt. Do not add it to the retryable set — a lost
 // lease is an answer, not a blip.
-func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason any, kind any) error {
+func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason any, kind any) (inserted bool, err error) {
 	var tag pgconn.CommandTag
-	var err error
 	if s.lease.Held() {
 		tag, err = s.pool.Exec(ctx, captureAppendFencedSQL,
 			convID, ordinal, role, content, inTok, outTok, stopReason, kind,
@@ -74,30 +74,96 @@ func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal
 			convID, ordinal, role, content, inTok, outTok, stopReason, kind)
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if tag.RowsAffected() == 0 && s.lease.Held() {
 		valid, verr := store.NewLeases(s.pool).Valid(ctx, s.lease)
 		if verr != nil {
-			return verr
+			return false, verr
 		}
 		if !valid {
-			return store.ErrLeaseLost
+			return false, store.ErrLeaseLost
 		}
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// appendRequestMessage persists one request-decomposition row. A replayed
+// prefix finds its own message already stored and succeeds; an ordinal held by
+// a DIFFERENT message returns ErrOrdinalOccupied, because that request message
+// was not stored and nothing else will report it. "Same message" ignores
+// cache_control (sameMessage): Claude Code moves that marker between replays.
+func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok *int64, kind any) error {
+	inserted, err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, nil, nil, kind)
+	if err != nil || inserted {
+		return err
+	}
+	var stored []byte
+	if err := s.pool.QueryRow(ctx,
+		`SELECT content FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
+		convID, ordinal).Scan(&stored); err != nil {
+		return fmt.Errorf("read occupant of ordinal %d: %w", ordinal, err)
+	}
+	if !sameMessage(stored, content) {
+		return fmt.Errorf("%w: conversation %s ordinal %d (request message)", ErrOrdinalOccupied, convID, ordinal)
 	}
 	return nil
 }
 
+// sameMessage reports whether two stored/replayed message contents are the same
+// message: equal as JSON once cache_control markers are removed.
+func sameMessage(a, b []byte) bool {
+	na, aok := normalizeMessage(a)
+	nb, bok := normalizeMessage(b)
+	if !aok || !bok {
+		return bytes.Equal(a, b)
+	}
+	return bytes.Equal(na, nb)
+}
+
+func normalizeMessage(raw []byte) ([]byte, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	out, err := json.Marshal(stripCacheControl(v))
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// stripCacheControl removes cache_control from every content block. A tool_use
+// block's input is user data and is left alone.
+func stripCacheControl(v any) any {
+	switch t := v.(type) {
+	case []any:
+		for i := range t {
+			t[i] = stripCacheControl(t[i])
+		}
+	case map[string]any:
+		delete(t, "cache_control")
+		for k, e := range t {
+			if k != "input" {
+				t[k] = stripCacheControl(e)
+			}
+		}
+	}
+	return v
+}
+
 // appendMessageForTest exposes appendMessage to this package's tests.
 func (s *CaptureStore) appendMessageForTest(ctx context.Context, convID string, ordinal int, role string, content []byte) error {
-	return s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil, nil)
+	_, err := s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil, nil)
+	return err
 }
 
 // appendMessageStrict is appendMessage that distinguishes a conflict from a
 // lost lease. appendMessage cannot: both yield RowsAffected() == 0.
 func (s *CaptureStore) appendMessageStrict(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason, kind any) error {
-	err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, outTok, stopReason, kind)
-	if err != nil {
+	if _, err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, outTok, stopReason, kind); err != nil {
 		return err
 	}
 	var occupied bool
@@ -354,11 +420,13 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 	// model fills it. First-seen wins (WHERE model IS NULL) — mid-conversation
 	// model changes stay visible per-turn, never rewrite the conversation.
 	// Best-effort: a failed backfill must not fail the turn, and the next
-	// turn retries it (the column is still NULL).
+	// turn retries it (the column is still NULL). It is logged, not swallowed.
 	if t.Model != "" {
-		_, _ = s.pool.Exec(ctx, `UPDATE conversations.conversation
+		if _, merr := s.pool.Exec(ctx, `UPDATE conversations.conversation
 			SET model = $2, updated_at = now()
-			WHERE id = $1::uuid AND model IS NULL`, t.ConversationID, t.Model)
+			WHERE id = $1::uuid AND model IS NULL`, t.ConversationID, t.Model); merr != nil {
+			slog.Warn("capture: conversation model backfill failed", "conversation", t.ConversationID, "error", merr)
+		}
 	}
 	return turnID, createdAt, nil
 }
@@ -405,13 +473,15 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 		// --model). Using the response model is authoritative. Best-effort: a
 		// failed backfill must not fail the turn.
 		if r.Model != "" {
-			_, _ = s.pool.Exec(ctx, `UPDATE conversations.conversation
+			if _, merr := s.pool.Exec(ctx, `UPDATE conversations.conversation
 				SET model = $3, updated_at = now()
 				WHERE id = (
 					SELECT conversation_id FROM conversations.conversation_turn
 					WHERE id = $1::uuid AND created_at = $2
 				) AND model IS NULL`,
-				r.TurnID, r.CreatedAt, r.Model)
+				r.TurnID, r.CreatedAt, r.Model); merr != nil {
+				slog.Warn("capture: conversation model backfill failed", "turn", r.TurnID, "error", merr)
+			}
 		}
 		return nil
 	})
@@ -439,8 +509,8 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 // Content is stored verbatim, ON CONFLICT (conversation_id,ordinal) DO
 // NOTHING. Also stores prefix_content on this turn iff prefixHash != the
 // previous turn's, and records cache-breakpoint ordinals on the turn.
-// Best-effort: returns error for the caller to Warn, never panics, never
-// alters reqBody. Returns the ordinal the assistant response belongs at
+// Returns the error for the caller to escalate (the proxy fails the turn),
+// never panics, never alters reqBody. Returns the ordinal the assistant response belongs at
 // (horizon + message count) -- NOT a bare message count.
 func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
 	var req struct {
@@ -492,7 +562,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 					}
 				}
 			}
-			if err := s.appendMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, nil, nil, kind); err != nil {
+			if err := s.appendRequestMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, kind); err != nil {
 				return fmt.Errorf("decompose: insert message %d: %w", i, err)
 			}
 		}
@@ -532,6 +602,18 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 		        EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2 AND content=$3::jsonb)`,
 		convID, h, jsonbSafe(msg0)).Scan(&rowExists, &matches); err != nil {
 		return 0, "", fmt.Errorf("resolve horizon: read anchor: %w", err)
+	}
+	if rowExists && !matches {
+		// The exact jsonb compare is stricter than a replay guarantees:
+		// cache_control moves between requests. A head equal modulo that
+		// marker is the same head.
+		var stored []byte
+		if err := s.pool.QueryRow(ctx,
+			`SELECT content FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
+			convID, h).Scan(&stored); err != nil {
+			return 0, "", fmt.Errorf("resolve horizon: read anchor content: %w", err)
+		}
+		matches = sameMessage(stored, jsonbSafe(msg0))
 	}
 	if !rowExists || matches {
 		// Bootstrap (no anchor row yet -- the conversation's first-ever
@@ -577,30 +659,25 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 			return hPrime, "clear", nil
 		}
 		// Structurally divergent but not a summary and no clear pending: a new
-		// thread's preamble, or a client that rewrote its head. Insert at the
-		// existing horizon untagged rather than moving the resume point onto
-		// it. The divergent head itself is NOT captured (its inserts DO NOTHING
-		// against the rows at the horizon) and nothing re-anchors later: the
-		// append never wrote it, so reanchorHorizon cannot match it. That is
-		// still the safe direction: no false resume point, no readable history
-		// lost. The warn is the only signal this happened, so a marker list
-		// gone stale shows up in the log instead of only in a manual DB scan.
-		// The stored occupant is named beside the request's head: a fresh
-		// client session landing in an old conversation (a relaunch without
-		// --resume) looks identical to a rewritten head from this side, and the
-		// two heads side by side are what tells them apart. A /clear the daemon
-		// accepted is distinguished by clear_pending and takes the branch
-		// above; without the flag a fresh head is still dropped here.
+		// thread's preamble, or a client that rewrote its head. Its messages
+		// would insert against the rows at the horizon and be dropped, and
+		// nothing re-anchors later (reanchorHorizon cannot match what was never
+		// written), so this is reported as ErrOrdinalOccupied rather than
+		// silently losing them. The stored occupant is named beside the
+		// request's head: a fresh client session landing in an old conversation
+		// (a relaunch without --resume) looks identical to a rewritten head from
+		// this side, and the two heads side by side tell them apart. A /clear
+		// the daemon accepted is distinguished by clear_pending and takes the
+		// branch above.
 		var storedHead string
 		if qerr := s.pool.QueryRow(ctx,
 			`SELECT left(content::text, 120) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
 			convID, h).Scan(&storedHead); qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
 			storedHead = "unreadable: " + qerr.Error()
 		}
-		slog.Warn("capture: divergent message 0 is not a compaction summary; its messages will be dropped and the response will collide",
-			"conversation", convID, "horizon", h, "request_messages", len(messages),
-			"request_head_first_120", string(msg0[:min(len(msg0), 120)]), "stored_head_first_120", storedHead)
-		return h, "", nil
+		return 0, "", fmt.Errorf("%w: conversation %s horizon %d: message 0 diverges from the stored head and is not a compaction summary (%d request messages not stored; request head %q, stored head %q)",
+			ErrOrdinalOccupied, convID, h, len(messages),
+			string(msg0[:min(len(msg0), 120)]), storedHead)
 	}
 	// A divergent head that reads as a compaction summary takes the compaction
 	// path and leaves clear_pending as it is.

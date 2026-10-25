@@ -736,13 +736,18 @@ func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
 		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind='compaction_summary'`, convID).Scan(&boundaryCount), "count boundary rows")
 	c.Eq(1, boundaryCount, "boundary rows")
 
-	// Rewind: the client resumes from the older, pre-compact session.
+	// Rewind: the client resumes from the older, pre-compact session. Messages
+	// 0..2 match rows 0..2 positionally; "r1" at ordinal 3 meets the stored
+	// SUMMARY-A boundary row, a different occupant, so the decompose reports it.
 	req4 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"},{"role":"assistant","content":"r1"}]}`)
-	next := runTurn(t, ctx, s, convID, req4, 130, 13)
-	c.Eq(4, next, "turn 4 next ordinal")
+	h4 := routing.PrefixHash(req4)
+	turn4, at4, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req4, PrefixHash: h4, Protocol: "anthropic"})
+	c.NoError(err, "InsertTurnIntent")
+	_, err = s.DecomposeRequest(ctx, convID, turn4, at4, req4, h4)
+	c.ErrorIs(err, ErrOrdinalOccupied, "rewound request over the boundary row")
 
 	// No NEW boundary was recorded: still exactly one marker row, still the
-	// turn-3 one (the rewound request's insert at its ordinal DO NOTHING'd).
+	// turn-3 one (the rewound request's insert at its ordinal was refused).
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind='compaction_summary'`, convID).Scan(&boundaryCount), "count boundary rows")
 	c.Eq(1, boundaryCount, "boundary rows")
@@ -757,18 +762,14 @@ func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
 	c.Eq(3, horizon, "resume_from_ordinal")
 }
 
-// TestDecomposeRequest_RewindResponseCollisionIsLoud pins the response-side
-// consequence of the re-anchor rewind, strict since task 4.2: a rewound request
-// re-anchors to an earlier horizon, so DecomposeRequest's returned ordinal lands
-// on an already-occupied row, and AppendResponseMessage at that ordinal FAILS
-// with ErrOrdinalOccupied rather than silently dropping the reply. The earlier
-// lenient pin (review finding 1, coordinator-accepted then as design §3's
-// documented leniency) recorded 22 dropped responses on one real conversation
-// before it was reversed. runTurn never calls AppendResponseMessage, which is
-// why the other horizon tests cannot see this behavior; the request-side
-// inserts of the same rewind stay lenient (the "r1" row DO NOTHINGs against the
-// stored SUMMARY-A boundary row and DecomposeRequest still returns 4).
-func TestDecomposeRequest_RewindResponseCollisionIsLoud(t *testing.T) {
+// TestDecomposeRequest_RewindRequestCollisionIsLoud pins the request-side
+// consequence of the re-anchor rewind: a rewound request re-anchors to an
+// earlier horizon, so its "r1" message lands on the stored SUMMARY-A boundary
+// row. That message is not stored, so DecomposeRequest returns
+// ErrOrdinalOccupied and writes nothing at that ordinal; the proxy fails the
+// turn on it. (The response-side collision is pinned by
+// TestOrdinalCollisionOnAResponseIsLoud.)
+func TestDecomposeRequest_RewindRequestCollisionIsLoud(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx, pool, s := horizonTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
@@ -781,52 +782,19 @@ func TestDecomposeRequest_RewindResponseCollisionIsLoud(t *testing.T) {
 	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q2"}]}`)
 	c.Eq(5, runTurn(t, ctx, s, convID, req3, 120, 12), "turn 3 next ordinal")
 
-	// Rewind turn, run manually (not via runTurn) so the response can be
-	// appended against THIS turn's row, the way the proxy does post-stream.
 	req4 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"},{"role":"assistant","content":"r1"}]}`)
 	h := routing.PrefixHash(req4)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, Request: req4, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	// Re-anchors to 0: messages 0..2 match rows 0..2 positionally, and "r1" at
-	// ordinal 3 DO NOTHINGs against the stored "SUMMARY-A" boundary row. The
-	// returned ordinal 4 is ALREADY occupied by the "q2" row from turn 3.
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req4, h)
-	c.NoError(err, "DecomposeRequest")
-	c.Eq(4, next, "rewind turn next ordinal")
-	c.NoError(s.CompleteTurn(ctx, TurnResult{
-		TurnID: turnID, CreatedAt: createdAt, Response: []byte(`{"content":[]}`),
-		StopReason: "end_turn", Upstream: "anthropic",
-		InputTokens: 130, OutputTokens: 13,
-	}), "CompleteTurn")
+	_, err = s.DecomposeRequest(ctx, convID, turnID, createdAt, req4, h)
+	c.ErrorIs(err, ErrOrdinalOccupied, "rewound request message over the boundary row")
 
-	// The colliding response must surface, not vanish: a response landing on an
-	// occupied ordinal is always a lost reply, never a benign replay.
-	canonical := []byte(`{"content":[{"type":"text","text":"rewound assistant reply"}]}`)
-	err = s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 14, 2, "end_turn")
-	c.Error(err, "a rewind response at an occupied ordinal must not be silently dropped")
-	c.ErrorIs(err, ErrOrdinalOccupied, "err")
-
-	// No assistant row exists at that ordinal: the insert is refused, not
-	// relocated.
-	var present bool
-	c.NoError(pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=$2 AND role='assistant')`,
-		convID, next).Scan(&present), "read response row")
-	c.False(present, "assistant row present at ordinal %d, want absent (the collision must write no row)", next)
-	// The pre-existing occupant's first-seen content wins, untouched.
-	_, role, _, content := requireKindRow(t, ctx, pool, convID, next)
-	c.False(role == nil || *role != "user", "ordinal %d role = %v, want user (occupant untouched by the collision)", next, role)
-	requireJSONEqual(t, content, `"q2"`)
-
-	// A refused append must not stamp the turn row: previously both turns kept
-	// response_ordinal pointing at a user row.
-	var respOrd *int
-	c.NoError(pool.QueryRow(ctx,
-		`SELECT response_ordinal FROM conversations.conversation_turn WHERE id=$1::uuid`, turnID).Scan(&respOrd), "read response_ordinal")
-	if respOrd != nil {
-		t.Fatalf("response_ordinal = %d, want NULL (the failed append must not stamp the turn)", *respOrd)
-	}
+	// The occupant's content is untouched and no assistant row was written.
+	kind, role, _, content := requireKindRow(t, ctx, pool, convID, 3)
+	c.False(kind == nil || *kind != "compaction_summary", "ordinal 3 kind = %v, want compaction_summary", kind)
+	c.False(role == nil || *role != "user", "ordinal 3 role = %v, want user", role)
+	requireJSONEqual(t, content, summaryContent("SUMMARY-A details"))
 }
 
 // TestDecomposeRequest_BootstrapNoBoundary: a brand-new conversation's first
@@ -885,8 +853,8 @@ func TestABareStringCompactionSummaryIsRecognised(t *testing.T) {
 // TestDecomposeRequest_DivergentPreambleDoesNotRebase pins the guard itself,
 // end to end: a request whose message 0 diverges from the stored anchor but
 // carries no summary prose (a thread's own session preamble, the shape all 19
-// mis-tagged rows had) inserts at the existing horizon untagged. Without the
-// prose check this request would move the resume point and tag a boundary.
+// mis-tagged rows had) is reported as ErrOrdinalOccupied and the horizon stays put. Without
+// the prose check this request would move the resume point and tag a boundary.
 func TestDecomposeRequest_DivergentPreambleDoesNotRebase(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx, pool, s := horizonTestEnv(t)
@@ -898,7 +866,11 @@ func TestDecomposeRequest_DivergentPreambleDoesNotRebase(t *testing.T) {
 
 	preamble := `[{"type":"text","text":"<system-reminder>\nCodebase and user instructions are shown below.\n</system-reminder>"}]`
 	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + preamble + `},{"role":"user","content":"q1"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req2, 90, 8), "turn 2 next ordinal")
+	h2 := routing.PrefixHash(req2)
+	turn2, at2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, PrefixHash: h2, Protocol: "anthropic"})
+	c.NoError(err, "InsertTurnIntent")
+	_, err = s.DecomposeRequest(ctx, convID, turn2, at2, req2, h2)
+	c.ErrorIs(err, ErrOrdinalOccupied, "divergent preamble is reported, not dropped")
 
 	// The horizon did not move: resume_from_ordinal is still NULL.
 	var resume *int

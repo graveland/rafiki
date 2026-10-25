@@ -1276,14 +1276,17 @@ func boundedErrorBody(b []byte) string {
 
 // decomposeRequestCtx decomposes cr.reqBody into conversation_message rows on a
 // fail path against a caller-supplied context, so it can share the fail path's
-// one detached context. No-op when capture is off.
-func (p *MessagesProxy) decomposeRequestCtx(ctx context.Context, cr captureRef) {
+// one detached context. No-op (nil) when capture is off. A failure is returned:
+// the request rows were not stored and the caller records that on the turn.
+func (p *MessagesProxy) decomposeRequestCtx(ctx context.Context, cr captureRef) error {
 	if !cr.on {
-		return
+		return nil
 	}
 	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
 		p.logger.WarnContext(ctx, "proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
+		return derr
 	}
+	return nil
 }
 
 // handleUpstreamError forwards a non-2xx upstream response to the client and
@@ -1357,7 +1360,9 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	// same shared detached context.
 	if cr.on {
 		p.failTurnCtx(capCtx, cr, reason)
-		p.decomposeRequestCtx(capCtx, cr)
+		if derr := p.decomposeRequestCtx(capCtx, cr); derr != nil {
+			p.failTurnCtx(capCtx, cr, reason+"; decompose request failed: "+derr.Error())
+		}
 	}
 }
 
