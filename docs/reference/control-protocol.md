@@ -312,7 +312,7 @@ A durable `AssistantMessage` or `UserMessage` event on `StreamEvents` carries in
 Because several rows can share a `ts` (a transaction's rows share one), `ts`
 identifies a message together with its position and role, not alone.
 
-**Which children meet it today: fundi.** A fundi child publishes a message event
+**Fundi children.** A fundi child publishes a message event
 only after the row it describes has been inserted, and takes `ts` from that
 insert's `RETURNING created_at` (`store.Messages.Append`; on a resume replay of
 an existing ordinal, the existing row's). Event content for a user row is the
@@ -337,10 +337,22 @@ deltas, tool events, errors) keeps its emit-time `ts`. Behaviour this implies:
 - Rows the loop fabricates (wrap-up notices, truncated-call errors) are not
   published live; they appear in `GetHistory` only.
 
-**Claude children do not meet it yet.** Their message events are built from the
-claude stream and carry its time, while the proxy writes the row after the
-stream ends, so their `ts` and the row's `created_at` differ. Pinned as a known
-gap, not a promise.
+**Claude children meet it too.** Their `AssistantMessage`/`UserMessage` events
+are published from the stored rows, not from the claude stream: the proxy
+reports each capture of a client-tool-declaring session request once, after its
+last write, and the daemon reads the request's rows back and publishes them with
+`ts` = the row's `created_at` (`CaptureSink`, `Controller.CaptureReported`). A
+prompt therefore appears once its first response completes. Rows publish once
+each, in ordinal order. A Task subagent's messages are published on its thread
+child (`<child_id>:<thread>`), not on the parent. Native `TurnStart`, `TurnEnd`
+and tool events keep their emit-time `ts`, held behind the assistant message
+they follow until its row is reported.
+
+**Capture failures.** If capture fails after the stream, the rows that were
+stored publish first, then an `Error` event with code `capture_not_persisted`
+and message `turn not persisted: <reason>`. If capture cannot begin for a
+request carrying `X-Rafiki-Session`, the Anthropic proxy answers `503` with body
+`rafiki capture unavailable: <reason>`.
 
 ### `GetHistory`: ts, `limit` and `before`
 
@@ -352,7 +364,7 @@ one `ts`. Ordinary messages are appended one statement each and get their own;
 the multi-row transaction today is a compaction or `/clear` boundary written
 together with the tail copied after it (`appendBoundary`, `pkg/store`), and
 those copies render no event. Clients must still treat `ts` as non-unique; the
-widening below is what makes that safe. For a fundi child this `ts` is the same
+widening below is what makes that safe. For a fundi or claude child this `ts` is the same
 value the live `AssistantMessage`/`UserMessage` event carried — see "Message
 events: `ts` is the row's `created_at`" above.
 
@@ -1683,7 +1695,7 @@ Every event payload is classified into a tier:
 
 | Event | Tier | Purpose |
 |---|---|---|
-| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` for fundi children — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way |
+| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way |
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn, emitted once per turn by both model-backed kinds: a fundi turn opens at `Emitter.AgentStart` (`pkg/fundi/emit.go`) before its first request, so `model` is unset there; a claude turn opens at prompt delivery — its prompt echo (`OutboundEchoNative`, `pkg/child/provider_claude_state.go`), before the first model request reaches the proxy — so `model` is unset there too, and the first assistant frame (which names one) does not reopen it. A second prompt/steer inside the same turn publishes no second `TurnStart`. `turn_id` is unset on both, since no producer mints one and `TurnEnd` carries none either |
 | `TurnEnd` | durable | End of an agent turn. A fundi turn publishes it from `Emitter.AgentEnd`, a claude turn from its `result` frame. Both carry the turn's token usage; cost rides `cost_usd` when the producer can price the turn (fundi always reports one, a claude child omits it when the result frame reports none) |
@@ -1693,7 +1705,7 @@ Every event payload is classified into a tier:
 | `ChildSpawned` | durable | A sub-agent was created (child_id, parent_id, name) |
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
-| `Error` | durable | Turn or engine level error event |
+| `Error` | durable | Turn or engine level error event. Code `capture_not_persisted` marks a claude turn whose rows could not be stored (see "Message events") |
 | `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
 | `ScriptOutput` | durable | One coalesced chunk of a script child's stdout or stderr. Fields: `stream` (`"stdout"`/`"stderr"`) and `text` — the newline-terminated lines or split pieces carried verbatim. Produced by the daemon's per-child coalescer (`cmd/rafikid/script_output.go`); see "Script output" below |
 | `OperatorState` | durable | The operator-facing display state of a child changed (see "Operator display state" below). Fields: `display_state` (working/waiting/failed/idle/exited), `waiting_on` (set only when `display_state` is `waiting`: operator/schedule/job/children/events) and `msg` (the human sentence). Server-derived and deduplicated: published only when the (state, waiting_on, msg) tuple differs from the last published one. `AgentStatus` remains the machine status and is unchanged |
