@@ -661,6 +661,14 @@ func (a *AdminServer) reap(childID string, grace time.Duration) bool {
 			"childID", childID)
 		return false
 	}
+	// Return only once supervise has released the slot, so a Launch of the
+	// same child issued right after Reap is not refused with AlreadyExists.
+	defer func() {
+		select {
+		case <-l.supDone:
+		case <-time.After(grace):
+		}
+	}()
 
 	if err := syscall.Kill(-l.pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		slog.Warn("admin: SIGTERM to child group failed", "childID", childID, "pgid", l.pgid, "error", err)

@@ -126,13 +126,30 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 	})
 	defer unsubscribe()
 
-	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(&adminpb.LaunchRequest{
+	launchReq := &adminpb.LaunchRequest{
 		ChildId:  p.ChildID,
 		Cwd:      p.Cwd,
 		Spec:     p.Spec,
 		DialAddr: p.DialAddr,
 		Ticket:   ticket,
-	}))
+	}
+	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(launchReq))
+	if connect.CodeOf(err) == connect.CodeAlreadyExists {
+		// The executor still tracks a daraja for this child. If it is
+		// connected to us, the child is genuinely running: refuse. Otherwise
+		// it is an orphan from a lost link (its reconnect loop outlived the
+		// daemon's record of it) and nothing will ever adopt it, so reap it
+		// and launch once more.
+		if _, lostErr := p.Pool.ClientFor(p.ChildID); lostErr == nil {
+			return LaunchResult{}, fmt.Errorf("AdminService.Launch on executor %s: %w", p.ExecutorID, err)
+		}
+		slog.Warn("daraja launch: reaping a stale host for this child before relaunching",
+			"childID", p.ChildID, "executor", p.ExecutorID)
+		if _, rerr := adminCLI.Reap(ctx, connect.NewRequest(&adminpb.ReapRequest{ChildId: p.ChildID})); rerr != nil {
+			return LaunchResult{}, fmt.Errorf("reap stale host on executor %s: %w (launch refused: %w)", p.ExecutorID, rerr, err)
+		}
+		launchResp, err = adminCLI.Launch(ctx, connect.NewRequest(launchReq))
+	}
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("AdminService.Launch on executor %s: %w", p.ExecutorID, err)
 	}

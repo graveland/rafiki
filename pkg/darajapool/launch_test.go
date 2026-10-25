@@ -30,6 +30,7 @@ import (
 type fakeAdminClient struct {
 	launchFn func(context.Context, *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error)
 	statusFn func(context.Context, *connect.Request[adminpb.StatusRequest]) (*connect.Response[adminpb.StatusResponse], error)
+	reapFn   func(context.Context, *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error)
 }
 
 func (f *fakeAdminClient) Launch(ctx context.Context, req *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error) {
@@ -43,8 +44,11 @@ func (f *fakeAdminClient) Status(ctx context.Context, req *connect.Request[admin
 	return f.statusFn(ctx, req)
 }
 
-func (f *fakeAdminClient) Reap(context.Context, *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error) {
-	return nil, errors.New("fakeAdminClient: Reap not implemented")
+func (f *fakeAdminClient) Reap(ctx context.Context, req *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error) {
+	if f.reapFn == nil {
+		return nil, errors.New("fakeAdminClient: Reap not implemented")
+	}
+	return f.reapFn(ctx, req)
 }
 
 // fakeExecPool implements adminLauncher, handing back a fixed client for any
@@ -369,4 +373,63 @@ func TestLaunchStatusErrorIsLoggedOncePerWait(t *testing.T) {
 	c := assert.NewAborting(t)
 	c.Error(err, "want the timeout error")
 	c.Eq(1, h.count("daraja launch: Status poll failed; waiting on the connect signal"), "Status failure warnings")
+}
+
+// A daraja the executor still tracks but that is not connected to this daemon
+// is an orphan; Launch reaps it and launches once more.
+func TestLaunchReapsAnOrphanedHostAndRelaunches(t *testing.T) {
+	c := assert.NewAborting(t)
+	reg := NewRegistry()
+	pool := New(reg)
+
+	var launches, reaps int
+	execPool := &fakeExecPool{client: &fakeAdminClient{
+		launchFn: func(ctx context.Context, req *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error) {
+			launches++
+			if reaps == 0 {
+				return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("child c1 is already hosted here"))
+			}
+			go pool.FireConnect(req.Msg.GetChildId())
+			return connect.NewResponse(&adminpb.LaunchResponse{Pid: 7, Pgid: 7}), nil
+		},
+		reapFn: func(ctx context.Context, req *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error) {
+			reaps++
+			c.Eq("c1", req.Msg.GetChildId(), "reaped child")
+			return connect.NewResponse(&adminpb.ReapResponse{Reaped: true}), nil
+		},
+	}}
+
+	result, err := Launch(context.Background(), LaunchParams{
+		ExecPool: execPool, Pool: pool, Registry: reg, DialAddr: "/tmp/whatever.sock",
+		ExecutorID: "exec-1", ChildID: "c1", Cwd: "/tmp", Spec: validSpec(), Timeout: 2 * time.Second,
+	})
+	c.NoError(err, "Launch")
+	c.Eq(int32(7), result.Pid, "pid")
+	c.Eq(2, launches, "launch attempts")
+	c.Eq(1, reaps, "reaps")
+}
+
+// A daraja that IS connected to this daemon is a live child: reaping it would
+// kill work in progress, so the refusal stands.
+func TestLaunchRefusesWhenTheHostIsConnected(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool, childID, teardown := connectFakeDaraja(t, stubDaraja{})
+	defer teardown()
+
+	execPool := &fakeExecPool{client: &fakeAdminClient{
+		launchFn: func(context.Context, *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error) {
+			return nil, connect.NewError(connect.CodeAlreadyExists, errors.New("already hosted here"))
+		},
+		reapFn: func(context.Context, *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error) {
+			t.Error("Reap called for a connected host")
+			return connect.NewResponse(&adminpb.ReapResponse{}), nil
+		},
+	}}
+
+	_, err := Launch(context.Background(), LaunchParams{
+		ExecPool: execPool, Pool: pool, Registry: pool.Reg(), DialAddr: "/tmp/whatever.sock",
+		ExecutorID: "exec-1", ChildID: childID, Cwd: "/tmp", Spec: validSpec(), Timeout: time.Second,
+	})
+	c.Error(err, "want the refusal")
+	c.Eq(connect.CodeAlreadyExists, connect.CodeOf(err), "code")
 }

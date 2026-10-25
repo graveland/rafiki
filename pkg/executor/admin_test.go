@@ -144,6 +144,34 @@ func TestReapEndsTheWholeGroup(t *testing.T) {
 	t.Fatalf("process group %d still alive after Reap", pgid)
 }
 
+// Reap returns only after the slot is released, so the relaunch that follows
+// it is never refused AlreadyExists.
+func TestLaunchRightAfterReapIsAdmitted(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+	launch := func() error {
+		_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+			ChildId: "c1",
+			Cwd:     t.TempDir(),
+			Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+		}))
+		return err
+	}
+
+	c.Require().NoError(launch(), "first Launch")
+	_, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{
+		ChildId: "c1", Grace: durationpb.New(500 * time.Millisecond),
+	}))
+	c.Require().NoError(err, "Reap")
+	c.NoError(launch(), "Launch right after Reap")
+}
+
 // An out-of-range Duration grace is refused InvalidArgument, before any
 // process is signalled.
 func TestReapRejectsOutOfRangeGrace(t *testing.T) {
