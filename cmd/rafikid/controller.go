@@ -350,6 +350,13 @@ type Controller struct {
 	// control plane's StreamEvents.
 	native *nativebus.Registry
 
+	// capturePub dedupes the message events CaptureReported publishes.
+	capturePub capturePublisher
+
+	// gateLookup resolves the live child whose message gate a capture report
+	// releases; nil means the child manager. A test seam.
+	gateLookup func(childID string) (heldEventReleaser, bool)
+
 	// evlog is the durable event log.
 	evlog eventlog.Store
 

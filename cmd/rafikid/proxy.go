@@ -515,6 +515,9 @@ func (f *proxyFace) SetController(c *Controller) {
 	// reports main-thread 429s and clean completions, and the controller
 	// schedules a claude child's resume against the reset time.
 	f.messages.SetRateLimitObserver(c)
+	// The proxy reports each capture's stored rows; the controller publishes
+	// them as message events and releases the child's message gate.
+	f.messages.SetCaptureSink(c)
 	// And for the per-session routing resolver: an OpenRouter request on this
 	// face carries the routing spec recorded on the request's child (or the
 	// policy's), resolved by the same Controller that recorded it.
