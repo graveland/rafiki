@@ -406,6 +406,7 @@ func TestGatedMessageID(t *testing.T) {
 		{"assistant without message", `{"type":"assistant"}`, ""},
 		{"user", `{"type":"user","message":{"id":"msg_u","role":"user","content":[]}}`, ""},
 		{"malformed", `not json`, ""},
+		{"synthetic api error", `{"type":"assistant","isApiErrorMessage":true,"message":{"id":"7f3c2a10-0000-4000-8000-000000000000","model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}`, ""},
 	}
 	for _, tc := range cases {
 		assert.NewAborting(t).Eq(tc.want, p.GatedMessageID([]byte(tc.line)), tc.name)

@@ -254,6 +254,10 @@ func (p *claudeProvider) GatedMessageID(line []byte) string {
 	if f.Type != "assistant" || f.ParentToolUseID != "" || f.Message == nil {
 		return ""
 	}
+	// Claude Code's synthetic API-error reply has a random id the proxy never reports.
+	if f.Message.Model == "<synthetic>" {
+		return ""
+	}
 	return f.Message.ID
 }
 

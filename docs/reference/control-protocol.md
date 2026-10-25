@@ -342,8 +342,8 @@ are published from the stored rows, not from the claude stream: the proxy
 reports each capture of a client-tool-declaring session request once, after its
 last write, and the daemon reads the request's rows back and publishes them with
 `ts` = the row's `created_at` (`CaptureSink`, `Controller.CaptureReported`). A
-prompt therefore appears once its first response completes. Rows publish once
-each, in ordinal order. A Task subagent's messages are published on its thread
+prompt therefore appears once its first response completes. Each row publishes at
+most once, in ordinal order. A Task subagent's messages are published on its thread
 child (`<child_id>:<thread>`), not on the parent. Native `TurnStart`, `TurnEnd`
 and tool events keep their emit-time `ts`, held behind the assistant message
 they follow until its row is reported.

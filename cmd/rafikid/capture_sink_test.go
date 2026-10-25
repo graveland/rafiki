@@ -139,6 +139,25 @@ func TestCaptureReportDedupesByOrdinal(t *testing.T) {
 	ck.EqDeep([]string{"user:3", "assistant:4", "user:5"}, labels, "published once each")
 }
 
+func TestCaptureReportPublishesNoBoundaryForCompactionSummary(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := newCaptureHarness(t)
+	now := time.Now()
+	summary := capRow(1, "user", now, "")
+	kind := store.KindCompactionSummary
+	summary.Kind = &kind
+
+	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv",
+		Rows: []store.Message{capRow(0, "user", now, ""), summary, capRow(2, "assistant", now, "end_turn")}})
+	h.drain()
+
+	var labels []string
+	for _, ev := range h.got {
+		labels = append(labels, eventLabel(ev))
+	}
+	ck.EqDeep([]string{"user:0", "assistant:2"}, labels, "no boundary from the summary row")
+}
+
 func TestCaptureReportErrPublishesErrorAfterRows(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	h := newCaptureHarness(t)
