@@ -302,6 +302,7 @@ type Child struct {
 	sm             *StateMachine
 	provider       ProtocolProvider
 	nativeSink     func(*rafikiv1.Event)
+	gate           *messageGate
 	onMeta         func(SnifferMetadata)
 	onSubagent     func(SubagentObservation)
 	onScriptOutput func(stream, line string, terminated bool)
@@ -426,6 +427,10 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		transitionCh:   make(chan struct{}, 1),
 		idle:           make(chan struct{}),
 		abandonAfter:   abandonTimeout,
+	}
+
+	if _, ok := prov.(messageGated); ok && spec.NativeSink != nil {
+		c.gate = &messageGate{sink: spec.NativeSink}
 	}
 
 	if isScript {
@@ -625,6 +630,32 @@ func (c *Child) publishBus(f []byte, ts int64) {
 // source; when false, the raw ring is already renderable.
 func (c *Child) Normalizes() bool { return c.provider.Normalizes() }
 
+// emitNative delivers a native event, through the gate when the provider
+// activated one.
+func (c *Child) emitNative(ev *rafikiv1.Event) {
+	if c.gate != nil {
+		c.gate.emit(ev)
+		return
+	}
+	c.nativeSink(ev)
+}
+
+// MessagePersisted reports that the response with this message id has been
+// stored and published, releasing the native events held behind it.
+func (c *Child) MessagePersisted(messageID string) {
+	if c.gate != nil {
+		c.gate.markPersisted(messageID)
+	}
+}
+
+// ReleaseHeldEvents releases every held native event in order; used when a
+// capture failed and the awaited id will never be reported.
+func (c *Child) ReleaseHeldEvents() {
+	if c.gate != nil {
+		c.gate.releaseAll()
+	}
+}
+
 // busFramesNative translates one raw stdout line into native events via the
 // provider, when it supports native translation (claudeProvider).
 func (c *Child) busFramesNative(line []byte, ts int64) []*rafikiv1.Event {
@@ -764,7 +795,7 @@ func (c *Child) supervise() {
 			if c.nativeSink != nil {
 				for _, ev := range c.outboundEchoNative(frame, echoTS) {
 					ev.ChildId = c.ID
-					c.nativeSink(ev)
+					c.emitNative(ev)
 				}
 			}
 			c.in.append(frame) // capture the original (normalized) frame for log dumps
@@ -775,6 +806,9 @@ func (c *Child) supervise() {
 	}
 cleanup:
 	wg.Wait()
+	if c.gate != nil {
+		c.gate.releaseAll()
+	}
 
 	// Release the daemon-side ends of ALL THREE of the child's streams. Until
 	// this existed, NOTHING in the daemon ever closed c.stdout or c.stderr:
@@ -874,9 +908,12 @@ func (c *Child) readStdout() {
 			c.publishBus(f, ts)
 		}
 		if c.nativeSink != nil {
+			if c.gate != nil {
+				c.gate.await(c.provider.(messageGated).GatedMessageID(line))
+			}
 			for _, ev := range c.busFramesNative(line, ts) {
 				ev.ChildId = c.ID
-				c.nativeSink(ev)
+				c.emitNative(ev)
 			}
 		}
 		c.handleFrame(line)
