@@ -559,3 +559,8 @@ func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
 func (s *recordingChatStore) ConversationTokens(context.Context, string) ([]capture.ModelTokens, error) {
 	return nil, nil
 }
+
+// MessagesSince satisfies proxyStore; this fake reports no stored rows.
+func (s *recordingChatStore) MessagesSince(context.Context, string, time.Time) ([]store.Message, error) {
+	return nil, nil
+}

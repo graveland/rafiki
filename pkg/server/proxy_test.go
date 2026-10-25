@@ -64,6 +64,13 @@ type fakeProxyStore struct {
 	lastResolvedRef string // external_ref the last ResolveThreadConversation received
 	lastIntentConv  string // conversation the last InsertTurnIntent landed on
 	lastIntentID    string // TurnIntent.ID the last InsertTurnIntent received (a pre-minted founding turn)
+
+	resolveErr error           // when set, ResolveThreadConversation returns it
+	intentErr  error           // when set, InsertTurnIntent returns it
+	sinceErr   error           // when set, MessagesSince returns it
+	sinceRows  []store.Message // what MessagesSince answers
+	sinceCalls int             // MessagesSince call count
+	lastSince  time.Time       // since passed to the last MessagesSince
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
@@ -71,6 +78,9 @@ func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, re
 }
 func (s *fakeProxyStore) ResolveThreadConversation(ctx context.Context, ref capture.ConversationRef, threadID string) (string, error) {
 	s.lastThreadID = threadID
+	if s.resolveErr != nil {
+		return "", s.resolveErr
+	}
 	// Model the store's contract: the effective external_ref is the session
 	// value suffixed with the thread id, which the real method applies inside.
 	effective := ref.ExternalRef
@@ -103,6 +113,9 @@ func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t capture.TurnInt
 	f.intents++
 	f.lastIntentConv = t.ConversationID
 	f.lastIntentID = t.ID
+	if f.intentErr != nil {
+		return "", time.Time{}, f.intentErr
+	}
 	f.lastIntentModel = t.Model
 	f.lastIntentSource = t.Source
 	f.lastIntentAuthorKind = t.AuthorKind
@@ -1155,6 +1168,12 @@ func TestMessagesProxyEffortRetry(t *testing.T) {
 // mid-flight — the case a flat SUM would price wrong.
 func (s *fakeProxyStore) ConversationTokens(context.Context, string) ([]capture.ModelTokens, error) {
 	return s.convTokens, nil
+}
+
+func (s *fakeProxyStore) MessagesSince(_ context.Context, _ string, since time.Time) ([]store.Message, error) {
+	s.sinceCalls++
+	s.lastSince = since
+	return s.sinceRows, s.sinceErr
 }
 
 // TestCostFieldsPricesTurnAndConversation proves the log line carries both

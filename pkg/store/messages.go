@@ -174,6 +174,20 @@ func (m *Messages) LoadPage(ctx context.Context, conversationID string, page His
 	return scanMessages(rows)
 }
 
+// LoadSince reads the conversation's rows created at or after since, in
+// ordinal order, omitting kind='compaction_tail' rows.
+func (m *Messages) LoadSince(ctx context.Context, conversationID string, since time.Time) ([]Message, error) {
+	rows, err := m.pool.Query(ctx, `
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
+		  FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND created_at >= $2 AND kind IS DISTINCT FROM $3
+		 ORDER BY ordinal`, conversationID, since, KindCompactionTail)
+	if err != nil {
+		return nil, fmt.Errorf("load since: %w", err)
+	}
+	return scanMessages(rows)
+}
+
 // scanMessages decodes rows selected with load's column list, closing rows.
 func scanMessages(rows pgx.Rows) ([]Message, error) {
 	defer rows.Close()

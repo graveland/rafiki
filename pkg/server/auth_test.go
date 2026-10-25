@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 type recordingStore struct {
@@ -110,5 +111,10 @@ func TestMessagesProxyNilAuthenticatorIsAnonymous(t *testing.T) {
 // ConversationTokens satisfies proxyStore. The fake records nothing, so the
 // rollup is empty and cost_total reflects only the turn being logged.
 func (s *recordingStore) ConversationTokens(context.Context, string) ([]capture.ModelTokens, error) {
+	return nil, nil
+}
+
+// MessagesSince satisfies proxyStore; this fake reports no stored rows.
+func (s *recordingStore) MessagesSince(context.Context, string, time.Time) ([]store.Message, error) {
 	return nil, nil
 }

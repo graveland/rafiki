@@ -27,6 +27,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 type proxyStore interface {
@@ -40,6 +41,7 @@ type proxyStore interface {
 	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
 	RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
+	MessagesSince(ctx context.Context, convID string, since time.Time) ([]store.Message, error)
 }
 
 // rawTraceRecorder is the one method the proxy needs from
@@ -105,6 +107,10 @@ type MessagesProxy struct {
 	// SetTracing). Both are inert until wiring calls SetTracing.
 	tracer     trace.Tracer
 	spanParent SpanParentResolver
+
+	// captureSink receives one CaptureReport per begun capture of a request that
+	// declares client tools. Optional; nil on the client-driven path.
+	captureSink CaptureSink
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -622,6 +628,18 @@ type captureRef struct {
 	reqBody        []byte // decomposed post-stream in streamAndCapture (see beginCapture)
 	prefixHash     string
 	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
+	threadID       string
+	// refused is non-empty when capture could not begin for a session request:
+	// the reason. ServeHTTP answers 503 rather than forward a turn nothing records.
+	refused string
+	outcome *captureOutcome
+}
+
+// captureOutcome is what the request's exit paths learned, read by the
+// deferred report: the first failure reason, or the stored response's id.
+type captureOutcome struct {
+	failure           string
+	responseMessageID string
 }
 
 func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -652,6 +670,11 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort capture setup (never blocks the proxy on failure).
 	cr := p.beginCapture(r, reqBody, model)
+	defer p.reportCapture(r, cr, reqBody)
+	if cr.refused != "" {
+		http.Error(w, "rafiki capture unavailable: "+cr.refused, http.StatusServiceUnavailable)
+		return
+	}
 	// Whether the client asked for a stream decides what a well-formed 2xx
 	// Content-Type must be — see the guard in streamAndCapture.
 	stream := requestsStream(reqBody)
@@ -1227,6 +1250,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
 	}
+	cr.outcome.responseMessageID = ownMsg
 }
 
 // failTurn resolves a begun capture turn as errored (best-effort) so a handled
@@ -1245,6 +1269,9 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 // also issues other capture writes can share one detached context instead of
 // opening a second. No-op when capture is off.
 func (p *MessagesProxy) failTurnCtx(ctx context.Context, cr captureRef, reason string) {
+	if cr.outcome != nil && cr.outcome.failure == "" {
+		cr.outcome.failure = reason
+	}
 	if !cr.on {
 		return
 	}
@@ -1676,6 +1703,9 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	convID, err := p.store.ResolveThreadConversation(r.Context(), baseRef, threadID)
 	if err != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: ensure-conversation failed", "error", err)
+		if session != "" {
+			return captureRef{session: session, threadID: threadID, refused: "ensure conversation: " + err.Error(), outcome: &captureOutcome{}}
+		}
 		return captureRef{}
 	}
 	// A non-root thread that can ACT is a Task subagent. Give it a child record
@@ -1710,6 +1740,9 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	})
 	if err != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: insert-intent failed", "conversation", convID, "error", err)
+		if session != "" {
+			return captureRef{session: session, threadID: threadID, convID: convID, refused: "insert turn intent: " + err.Error(), outcome: &captureOutcome{}}
+		}
 		return captureRef{convID: convID}
 	}
 	return captureRef{
@@ -1718,6 +1751,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 		isSubagent: isSubagent, hasBilling: hasBilling, billing: billing,
 		reqBody: reqBody, prefixHash: prefixHash,
 		recordRequests: r.Header.Get("X-Rafiki-Record-Requests") == "1",
+		threadID:       threadID, outcome: &captureOutcome{},
 	}
 }
 
