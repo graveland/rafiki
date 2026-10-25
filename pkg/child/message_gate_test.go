@@ -116,6 +116,18 @@ func TestGateReleaseAllFlushesInOrder(t *testing.T) {
 	ck.EqDeep([]string{"A", "B", "C"}, rec.got())
 }
 
+func TestGateReleaseAllSettlesKeyForLateAwait(t *testing.T) {
+	ck := assert.NewAborting(t)
+	g, rec := newTestGate()
+	g.await("X")
+	g.emit(ev("A"))
+	g.releaseAll()
+	ck.EqDeep([]string{"A"}, rec.got())
+	g.await("X")
+	g.emit(ev("B"))
+	ck.EqDeep([]string{"A", "B"}, rec.got())
+}
+
 func TestGatePersistedRingIsBounded(t *testing.T) {
 	ck := assert.NewAborting(t)
 	g, rec := newTestGate()

@@ -58,19 +58,27 @@ func (g *messageGate) await(id string) {
 func (g *messageGate) markPersisted(id string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.persisted = append(g.persisted, id)
-	if len(g.persisted) > persistedRingSize {
-		g.persisted = g.persisted[len(g.persisted)-persistedRingSize:]
-	}
+	g.settle(id)
 	if g.key == id {
 		g.key = ""
 	}
 	g.flush()
 }
 
+// settle records id in the persisted ring. The caller holds mu.
+func (g *messageGate) settle(id string) {
+	g.persisted = append(g.persisted, id)
+	if len(g.persisted) > persistedRingSize {
+		g.persisted = g.persisted[len(g.persisted)-persistedRingSize:]
+	}
+}
+
 func (g *messageGate) releaseAll() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.key != "" {
+		g.settle(g.key)
+	}
 	g.key = ""
 	for _, h := range g.held {
 		g.sink(h.ev)
