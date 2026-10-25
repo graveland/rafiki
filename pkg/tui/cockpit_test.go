@@ -1514,6 +1514,19 @@ func TestPendingClearsWhenTheMessageComesBack(t *testing.T) {
 	ck.Eq("", c.pending, "the message came back and pending")
 }
 
+// A slash command is interpreted by the daemon and may never echo back as a
+// user_message (/clear, /exit), so it must not park a ⏳ that nothing clears.
+func TestSlashCommandLeavesNoPendingEcho(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "/clear", nil)
+	ck.Eq("", c.pending, "/clear must not leave a pending echo")
+}
+
 // The rail and focus streams are independent feeds, and only the focus one
 // may advance the session. A rail-delivered agent_status that beats the focus
 // stream's user_message to the cockpit used to advance the ordinal cursor

@@ -32,6 +32,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/quotafmt"
+	"go.graveland.dev/rafiki/pkg/slashcmd"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 	"go.graveland.dev/rafiki/pkg/tui/streams"
@@ -1804,9 +1805,13 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
 			})
 		}
-		c.pending = text
-		if text == "" {
-			c.pending = "(" + itoa(int64(len(images))) + " attached)"
+		// A slash command is consumed by the daemon: /clear and /exit produce no
+		// user_message to acknowledge the echo, so a pending line would never clear.
+		if _, _, slash := slashcmd.Parse(text); !slash || mode != rafikiv1.SendMode_SEND_MODE_PROMPT {
+			c.pending = text
+			if text == "" {
+				c.pending = "(" + itoa(int64(len(images))) + " attached)"
+			}
 		}
 	}
 	return func() tea.Msg {
