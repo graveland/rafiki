@@ -115,9 +115,11 @@ arrival order. Each file is an HTTP message: start line, headers, blank line,
 then the exact body — an SSE stream included. Nothing is redacted, so the
 directory holds credentials.
 
-This process is deliberately isolated: it reads no config file, no profile and
-no database, and starts no other listener. Its only purpose is capturing a real
-response so it can later be sanitized into a fixture.
+This process is deliberately isolated: it consults no config file, no profile
+and no database, and starts no other listener. (rafikid's shared pre-cobra
+environment-file load still runs, as it does for every subcommand, but the
+recorder reads nothing from it.) Its only purpose is capturing a real response
+so it can later be sanitized into a fixture.
 
 --record-dir must be absent (created 0700) or empty; the recorder never
 overwrites a recording. Every file is 0600 and appears only once its pair is

@@ -107,9 +107,12 @@ Anthropic-protocol client gets the same routing via
 
 `rafikid proxy record` is a standalone diagnostic: it forwards `POST
 /v1/messages` to one upstream and writes every exchange to disk byte for byte.
-It reads no config file, profile or database, opens no socket, and is the one
+It consults no config file, profile or database, opens no socket, and is the one
 `rafikid` command path that runs with `RAFIKI_DB` unset — which is what makes it
-usable when the daemon is the thing that is broken.
+usable when the daemon is the thing that is broken. (`rafikid`'s shared
+pre-cobra environment-file load still runs, exactly as it does for every
+subcommand, so `service.env` is read into the process environment; the recorder
+reads none of it, and a missing file is silent.)
 
 ```bash
 go run ./cmd/rafikid proxy record \
@@ -143,10 +146,13 @@ itself (a `502 Bad Gateway` for an upstream transport failure) is recorded in
 the same file format, never a sidecar.
 
 Files are staged as `0600` temp files in the record directory and renamed into
-place only once both halves are written, so a request never appears without its
-response. The pair is committed *after* the response has been relayed, so a
-reader that has just read the last body byte must wait for the `-response.http`
-file to appear; its presence implies the request half is already there.
+place only once both halves are written, request first and response second. A
+reader must therefore treat the `-response.http` file as the completion marker:
+a crash between the two renames can leave a lone request half, but a response
+half never appears without its request. The pair is committed *after* the
+response has been relayed, so a reader that has just read the last body byte
+must wait for the `-response.http` file to appear; its presence implies the
+request half is already there.
 
 **The recordings are raw.** Authorization headers, prompts and completions are
 stored unredacted for a later sanitizer to strip. Treat the directory as a
