@@ -1,8 +1,12 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
@@ -15,6 +19,41 @@ func strictConv(t *testing.T, ctx context.Context, s *CaptureStore, _ string) st
 	id, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	assert.NewAborting(t).NoError(err, "EnsureConversation")
 	return id
+}
+
+func captureFixtureBody(t *testing.T, name string) []byte {
+	t.Helper()
+	path := filepath.Join("..", "..", "testdata", "claude-capture", name)
+	raw, err := os.ReadFile(path)
+	assert.NewAborting(t).NoError(err, "read %s", path)
+	_, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
+	if !ok {
+		t.Fatalf("%s is not an HTTP fixture", path)
+	}
+	return body
+}
+
+// TestCapturedClaudeSessionReplays proves every historical request row in a
+// real Claude Code session can be decomposed after capture writes the prior
+// response through routing.ParseCapturedResponse. The fixture includes text,
+// thinking, tool_use, and tool_result turns whose wire representations change
+// between requests.
+func TestCapturedClaudeSessionReplays(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, _, s := horizonTestEnv(t)
+	convID := strictConv(t, ctx, s, "captured-session")
+
+	for n := 1; n <= 5; n++ {
+		req := captureFixtureBody(t, fmt.Sprintf("%06d-request.http", n))
+		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, Protocol: "anthropic"})
+		c.NoError(err, "InsertTurnIntent request %d", n)
+		next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, "")
+		c.NoError(err, "DecomposeRequest request %d", n)
+
+		_, _, canonical, _, err := routing.ParseCapturedResponse("text/event-stream", captureFixtureBody(t, fmt.Sprintf("%06d-response.http", n)))
+		c.NoError(err, "ParseCapturedResponse response %d", n)
+		c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 1, 1, "end_turn"), "AppendResponseMessage response %d", n)
+	}
 }
 
 // A replayed prefix whose cache_control marker moved is the same message: the

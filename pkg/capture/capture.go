@@ -94,17 +94,9 @@ func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal
 
 // appendRequestMessage persists one request-decomposition row. A replayed
 // prefix finds its own message already stored and succeeds; an ordinal held by
-// a DIFFERENT message returns ErrOrdinalOccupied, because that request message
-// was not stored and nothing else will report it. "Same message" ignores
-// cache_control (sameMessage): Claude Code moves that marker between replays.
-//
-// One occupant is accepted WITHOUT an exact content comparison: a reply this
-// conversation's own capture wrote (AppendResponseMessage stamps the turn's
-// response_ordinal). The client replays that reply on the next turn, and the
-// replay carries the provider's JSON whereas capture stored the SDK-marshalled
-// response. sameAssistantContent puts both representations through the SDK
-// before comparison; an unrecognised or changed assistant block still fails
-// strict capture.
+// A replayed prefix whose cached semantic content was written by a supported
+// Anthropic client representation succeeds. A role change, invalid/unknown
+// semantic content, or changed meaningful block remains ErrOrdinalOccupied.
 func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok *int64, kind any) error {
 	inserted, err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, nil, nil, kind)
 	if err != nil || inserted {
@@ -112,39 +104,27 @@ func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, 
 	}
 	var stored []byte
 	var storedRole string
-	var isCapturedReply bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT m.content, m.role,
-		        EXISTS (SELECT 1 FROM conversations.conversation_turn t
-		                 WHERE t.conversation_id = m.conversation_id
-		                   AND t.response_ordinal = m.ordinal)
-		   FROM conversations.conversation_message m
-		  WHERE m.conversation_id=$1::uuid AND m.ordinal=$2`,
-		convID, ordinal).Scan(&stored, &storedRole, &isCapturedReply); err != nil {
+		`SELECT content, role FROM conversations.conversation_message
+		  WHERE conversation_id=$1::uuid AND ordinal=$2`,
+		convID, ordinal).Scan(&stored, &storedRole); err != nil {
 		return fmt.Errorf("read occupant of ordinal %d: %w", ordinal, err)
 	}
-	if sameMessage(stored, content) {
-		return nil
-	}
-	// A response replay is structurally different after the SDK has marshalled
-	// its response (including zero union fields the provider omitted), so compare
-	// known Anthropic blocks through that same SDK representation. An arbitrary
-	// replacement assistant message must still fail strict capture.
-	if isCapturedReply && role == "assistant" && storedRole == "assistant" && sameAssistantContent(stored, content) {
+	if storedRole == role && (sameAnthropicContent(stored, content) || sameMessage(stored, content)) {
 		return nil
 	}
 	return fmt.Errorf("%w: conversation %s ordinal %d (request message)", ErrOrdinalOccupied, convID, ordinal)
 }
 
-// sameAssistantContent compares assistant content after the Anthropic SDK has
-// decoded and encoded both values. It also gives a legacy/plain-text assistant
-// content string the same text-block meaning the Anthropic API assigns it. This
-// removes provider-only fields not modelled by the SDK (such as
-// tool_use.caller) while retaining meaningful blocks and tool inputs. Invalid
-// or unknown content is not a replay.
-func sameAssistantContent(a, b []byte) bool {
-	am, aok := assistantContentBlocks(a)
-	bm, bok := assistantContentBlocks(b)
+// sameAnthropicContent compares request content after the Anthropic SDK has
+// decoded and encoded both values. Claude Code replays all historical roles in
+// a different wire representation from what capture stored: strings replace
+// text blocks, cache_control moves, and provider-only union fields disappear.
+// Meaningful blocks and tool inputs survive the round-trip. Invalid or unknown
+// content is not a semantic replay.
+func sameAnthropicContent(a, b []byte) bool {
+	am, aok := anthropicContentBlocks(a)
+	bm, bok := anthropicContentBlocks(b)
 	if !aok || !bok {
 		return false
 	}
@@ -153,10 +133,10 @@ func sameAssistantContent(a, b []byte) bool {
 	return aerr == nil && berr == nil && bytes.Equal(ac, bc)
 }
 
-// assistantContentBlocks decodes the two content forms Anthropic permits for
-// an assistant message. A string is shorthand for one text block; capture
-// stores the response form as blocks because it comes from anthropic.Message.
-func assistantContentBlocks(content []byte) ([]anthropic.ContentBlockUnion, bool) {
+// anthropicContentBlocks decodes the two content forms Anthropic permits in
+// every message role. A string is shorthand for one text block; capture stores
+// response content as blocks because it comes from anthropic.Message.
+func anthropicContentBlocks(content []byte) ([]anthropic.ContentBlockUnion, bool) {
 	var text string
 	if err := json.Unmarshal(content, &text); err == nil {
 		return []anthropic.ContentBlockUnion{{Type: "text", Text: text}}, true
@@ -168,10 +148,9 @@ func assistantContentBlocks(content []byte) ([]anthropic.ContentBlockUnion, bool
 	return blocks, true
 }
 
-// sameMessage reports whether two stored/replayed message contents are the same
-// message: equal as JSON once cache_control markers are removed. Anthropic also
-// permits a plain string as shorthand for exactly one text content block, so
-// normalize that form before comparing a request replay.
+// `cache_control` is a per-request caching hint. sameAnthropicContent handles
+// it as part of SDK canonicalisation; sameMessage remains the generic fallback
+// for request forms that are not Anthropic content blocks.
 func sameMessage(a, b []byte) bool {
 	na, aok := normalizeMessage(a)
 	nb, bok := normalizeMessage(b)
