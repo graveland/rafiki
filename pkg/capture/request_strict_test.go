@@ -147,6 +147,36 @@ func TestRequestPlainTextReplayOfStoredReplyIsNotOrdinalOccupied(t *testing.T) {
 	c.Eq(3, runTurn(t, ctx, s, convID, req2, 1, 1), "plain-text replay")
 }
 
+// Claude Code can change a user text block into Anthropic's equivalent plain
+// string shorthand on the next request. The cache marker is also per-request,
+// so this replay must not be treated as rewritten history.
+func TestRequestReplayTextBlockAsPlainString(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, _, s := horizonTestEnv(t)
+	convID := strictConv(t, ctx, s, "text-shorthand")
+
+	req1 := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":[{"type":"text","text":"testing conversation storage","cache_control":{"type":"ephemeral"}}]}]}`)
+	c.Eq(3, runTurn(t, ctx, s, convID, req1, 1, 1), "seed text block")
+
+	req2 := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"testing conversation storage"},{"role":"assistant","content":"next"}]}`)
+	c.Eq(4, runTurn(t, ctx, s, convID, req2, 1, 1), "replay plain string")
+}
+
+func TestRequestReplayDifferentPlainTextIsOrdinalOccupied(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, _, s := horizonTestEnv(t)
+	convID := strictConv(t, ctx, s, "text-shorthand-different")
+
+	req1 := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"original"}]}]}`)
+	c.Eq(1, runTurn(t, ctx, s, convID, req1, 1, 1), "seed text block")
+
+	req2 := []byte(`{"messages":[{"role":"user","content":"rewritten"}]}`)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, Protocol: "anthropic"})
+	c.NoError(err, "InsertTurnIntent")
+	_, err = s.DecomposeRequest(ctx, convID, turnID, createdAt, req2, "h")
+	c.ErrorIs(err, ErrOrdinalOccupied, "different text")
+}
+
 // A differing assistant message remains strict even at a captured response
 // ordinal. Its meaningful tool-use input differs from the stored reply.
 func TestRequestDifferentAssistantContentOnStoredReplyIsOrdinalOccupied(t *testing.T) {

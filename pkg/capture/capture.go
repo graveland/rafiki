@@ -169,7 +169,9 @@ func assistantContentBlocks(content []byte) ([]anthropic.ContentBlockUnion, bool
 }
 
 // sameMessage reports whether two stored/replayed message contents are the same
-// message: equal as JSON once cache_control markers are removed.
+// message: equal as JSON once cache_control markers are removed. Anthropic also
+// permits a plain string as shorthand for exactly one text content block, so
+// normalize that form before comparing a request replay.
 func sameMessage(a, b []byte) bool {
 	na, aok := normalizeMessage(a)
 	nb, bok := normalizeMessage(b)
@@ -185,6 +187,9 @@ func normalizeMessage(raw []byte) ([]byte, bool) {
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return nil, false
+	}
+	if text, ok := v.(string); ok {
+		v = []any{map[string]any{"type": "text", "text": text}}
 	}
 	out, err := json.Marshal(stripCacheControl(v))
 	if err != nil {
