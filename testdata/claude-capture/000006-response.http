@@ -1,0 +1,98 @@
+HTTP/1.1 200 OK
+Anthropic-Organization-Id: 0a518565-263c-4160-a9ac-6352799211db
+Anthropic-Ratelimit-Unified-5h-Reset: 1793061000
+Anthropic-Ratelimit-Unified-5h-Status: allowed
+Anthropic-Ratelimit-Unified-5h-Utilization: 0.11
+Anthropic-Ratelimit-Unified-7d-Reset: 1793383200
+Anthropic-Ratelimit-Unified-7d-Status: allowed
+Anthropic-Ratelimit-Unified-7d-Utilization: 0.45
+Anthropic-Ratelimit-Unified-Fallback-Percentage: 0.5
+Anthropic-Ratelimit-Unified-Overage-Disabled-Reason: out_of_credits
+Anthropic-Ratelimit-Unified-Overage-Status: rejected
+Anthropic-Ratelimit-Unified-Representative-Claim: five_hour
+Anthropic-Ratelimit-Unified-Reset: 1793061000
+Anthropic-Ratelimit-Unified-Status: allowed
+Anthropic-Workspace-Id: wrkspc_018b8WGdDeGtTZqBKfn7LC9J
+Cache-Control: no-cache
+Cf-Cache-Status: DYNAMIC
+Cf-Ray: a50cb8ce8af3d214-YVR
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Content-Type: text/event-stream; charset=utf-8
+Date: Mon, 26 Oct 2026 21:58:21 GMT
+Request-Id: req_011CgRbdur7eGjAd6ENkx9oE
+Server: cloudflare
+Server-Timing: x-originResponse;dur=167
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Traceresponse: 00-db3cee08ea0d0be532bdb01673fc299a-5e788a413790dd59-01
+Vary: Accept-Encoding
+X-Robots-Tag: none
+
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_011CgRbdvEvasw29EKieBend","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":89,"cache_read_input_tokens":4767,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":89},"output_tokens":6,"service_tier":"standard","inference_geo":"not_available","speed":"standard"},"input_transformations":[],"diagnostics":null,"context_management":null}          }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}   }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ErUECtABCBMYAipANrGdFOp/L+unSR+jpljAGYCKSy7qkepxVhfAeOKApAv2kxMKsQofRMmnEbFGL3m8SU1n1SVXtOfKsznVlkn9UTIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okMGE1MTg1NjUtMjYzYy00MTYwLWE5YWMtNjM1Mjc5OTIxMWRichBZ5LAmMoRv377DQ65Y+P2oiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAH+mf/WBrABAhIMkTAJiHtbJQMDFm1vGgyzjZSFNaySA1/0lygiMBjGeI9YCKGtNJORGf6gHTwcQaMicAYlWgufjeZ9lXYu+L0Dh3JdHWgOuuWComuUZiqRAjpLQORdI72yh00+XmCR8rIsE8M0RIUB6tVgbNRYzpeLMY/c95oiota3dkCUi+oACLuoXeWcmAdZatNAAIcgKPkGZQU4QtZmCnntCp2aaNi3+pwca7R19/MDfQ2RgzYtG2WpLgm3MB3LJl90HWfwpqRxET59Zvm65ozRSeCy2TQjfKEqFAOes5zhGZ4+jaM5Zx6bOx2rn8uMEtzGlPol+QFaklQkKPD/JLkH+klZXHNxCLS5Y/vx6AseULH3HhIz+1SOrtFd9TtnRlq+ASy8wuu8eusJ+mkyhOIGpUzVpPSt4ZkxGyV4EWtsM+flFM7ujo5jpahSP+gvk8X41mtRD8M+s9aBLgdMznOyG+DHvbtYyBgB"}     }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0       }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01PnMiaQhRqQPpwevCtf6ckR","name":"Bash","input":{},"caller":{"type":"direct"}}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\": \"echo"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" alpha"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\", \"description\": \"Echo"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" alpha"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"}"} }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1          }
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_015VtStV1NMiRKT9BCEWryxq","name":"Bash","input":{},"caller":{"type":"direct"}}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":""}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\": \"echo beta"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\", \"description\": \"Echo beta"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"}"}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2         }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":89,"cache_read_input_tokens":4767,"output_tokens":190,"output_tokens_details":{"thinking_tokens":62},"iterations":[{"input_tokens":10,"output_tokens":190,"cache_read_input_tokens":4767,"cache_creation_input_tokens":89,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":89},"type":"message"}]},"context_management":{"applied_edits":[]}               }
+
+event: message_stop
+data: {"type":"message_stop"    }
+

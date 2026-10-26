@@ -21,7 +21,7 @@ than an archive.
   plus a sha256 of the token, never the token.
 - **`metadata.user_id`** (device id and account uuid) is recorded as a sha256
   of the whole field.
-- **Prompts and completions are verbatim.** `scripts/capture-turns.txt` is
+- **Prompts and completions are verbatim.** `testdata/claude-capture-turns.txt` is
   deliberately dull for that reason: anything you add to it lands in the
   repository in clear text.
 - Machine-specific headers (`X-Stainless-Arch`, `Host`, session uuids, client

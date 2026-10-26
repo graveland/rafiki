@@ -5,7 +5,7 @@
 # comes from the environment:
 #
 #   OUT       record directory (default: <repo>/testdata/claude-capture)
-#   TURNS     prompts file, one per line (default: scripts/capture-turns.txt)
+#   TURNS     prompts file, one per line (default: testdata/claude-capture-turns.txt)
 #   MODEL     model for the session (default: haiku)
 #   SYSPROMPT one-line system prompt for the capture
 #   RAFIKID   path to the rafikid binary (default: bin/rafikid)
@@ -20,7 +20,7 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${OUT:-$root/testdata/claude-capture}
-turns=${TURNS:-scripts/capture-turns.txt}
+turns=${TURNS:-testdata/claude-capture-turns.txt}
 model=${MODEL:-haiku}
 sysprompt=${SYSPROMPT:-You are a minimal capture session. Answer in one short sentence, and use a tool when asked to.}
 rafikid=${RAFIKID:-$root/bin/rafikid}

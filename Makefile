@@ -157,7 +157,7 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 .PHONY: capture-claude
 capture-claude: build ## Record a scripted claude session (MODEL=, TURNS=, OUT=, SYSPROMPT=).
 	@OUT="$${OUT:-$(CURDIR)/testdata/claude-capture}" \
-	 TURNS="$${TURNS:-scripts/capture-turns.txt}" \
+	 TURNS="$${TURNS:-testdata/claude-capture-turns.txt}" \
 	 MODEL="$${MODEL:-haiku}" \
 	 SYSPROMPT="$${SYSPROMPT:-}" \
 	 RAFIKID="$(CURDIR)/$(BIN_DIR)/$(DAEMON_BIN)" \
