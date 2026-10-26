@@ -154,6 +154,32 @@ response has been relayed, so a reader that has just read the last body byte
 must wait for the `-response.http` file to appear; its presence implies the
 request half is already there.
 
+### Driving a session instead of waiting for one
+
+`--exec` makes the recorder a harness: it runs a command with
+`ANTHROPIC_BASE_URL` pointing at its own listener, waits for it to exit, drains
+the exchanges it made, and exits with that command's status. Everything else in
+the environment passes through untouched — including the credential, which the
+recorder relays upstream and records.
+
+Composed with `rafiki claude --turns`, one command captures a real multi-turn
+session (a text turn, a tool-call turn, and the follow-up that reads its output)
+with no daemon and no manual port juggling:
+
+```bash
+rafikid proxy record \
+  --listen 127.0.0.1:0 \
+  --upstream https://api.anthropic.com \
+  --record-dir "$HOME/private/capture" \
+  --exec 'rafiki claude --model anthropic/haiku-latest --turn-file turns.txt'
+```
+
+`turns.txt` holds one prompt per line (`#` comments and blank lines are
+skipped), or pass `--turn "..."` repeatedly. The scripted session runs Claude
+Code headless in the same stream-json mode a daemon-managed claude child uses,
+so every turn is a prompt on one process, one conversation and one session id —
+rather than one independent `-p` run per prompt.
+
 **The recordings are raw.** Authorization headers, prompts and completions are
 stored unredacted for a later sanitizer to strip. Treat the directory as a
 secret: never commit it and never share it.

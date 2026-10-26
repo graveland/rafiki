@@ -20,6 +20,15 @@ latest-only per-user snapshot. `rafiki claude --limits` prints it; the
 cockpit's status line shows a live-polled summary; a `quota_status` tool lets
 a coordinator check its own headroom before deciding to fail over.
 
+`rafiki claude --turn "..."` (repeatable) or `--turn-file turns.txt` runs a
+scripted headless session instead of an interactive one: the same binary, in
+the stream-json mode a daemon-managed claude child uses, with each prompt
+awaited on its own result frame. It is how a capture run gets several turns
+(text, tool call, follow-up) in one conversation, and it works against any
+Anthropic-protocol endpoint — including `rafikid proxy record`, which sets
+`ANTHROPIC_BASE_URL` for it. `--turn-timeout` bounds a single turn so a wedged
+session fails rather than hanging.
+
 One client-side gotcha when pointing Claude Code at any proxy by hand: its
 SSE-ping stream-idle watchdog only activates when the base URL host is
 exactly `api.anthropic.com`, so a thinking phase with >300s between content

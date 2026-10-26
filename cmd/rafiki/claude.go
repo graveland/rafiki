@@ -77,6 +77,16 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().Lookup("passthrough-auth").NoOptDefVal = string(passthroughOn)
 	cmd.Flags().Bool("limits", false,
 		"print your Anthropic subscription's current rate-limit status and exit, instead of launching a session")
+	cmd.Flags().Bool("turns", false,
+		"run a scripted headless session (stream-json) instead of an interactive one;\n"+
+			"supply prompts with --turn and/or --turn-file")
+	cmd.Flags().StringArray("turn", nil,
+		"one prompt for a scripted session (repeatable, sent in order)")
+	cmd.Flags().String("turn-file", "",
+		"file of prompts for a scripted session, one per line ('-' for stdin;\n"+
+			"blank lines and lines starting with # are skipped)")
+	cmd.Flags().Duration("turn-timeout", claudeTurnTimeout,
+		"ceiling on ONE scripted turn; a wedged session fails instead of hanging")
 	// --model asks the DAEMON for claude-kind ids (see completeModel): an
 	// OpenRouter id on a claude child produces one that spawns, attaches and
 	// never answers.
@@ -132,20 +142,32 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	}
 	p := mustProfile(cmd)
 
-	url, _ := cmd.Flags().GetString("url")
-	if url == "" {
-		url = p.Proxy
-	}
 	token, _ := cmd.Flags().GetString("token")
 	model, _ := cmd.Flags().GetString("model")
 	session, _ := cmd.Flags().GetString("session")
 	passthroughFlag, _ := cmd.Flags().GetString("passthrough-auth")
 
+	turns, err := claudeTurnsFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+	// Scripted mode is selected by supplying turns: --turn/--turn-file imply it,
+	// and --turns makes the requirement explicit (and errors when it is empty).
+	scripted := len(turns) > 0
+
+	flagURL, _ := cmd.Flags().GetString("url")
+	url := resolveClaudeURL(flagURL, scripted, os.Getenv("ANTHROPIC_BASE_URL"), p.Proxy)
 	if url == "" {
 		return fmt.Errorf("profile %q has no proxy URL; pass --url, or set `proxy` in %s",
 			p.Name, profile.ProfilesFile())
 	}
-	token, err := resolveClaudeToken(token, p.Token)
+	if scripted && token == "" {
+		// A scripted run may target a recorder rather than a rafiki daemon, and
+		// a recorder relays the credential verbatim: the shell's own Anthropic
+		// credential is the one the upstream accepts.
+		token = envFirst("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+	}
+	token, err = resolveClaudeToken(token, p.Token)
 	if err != nil {
 		return err
 	}
@@ -166,7 +188,13 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	}
 	// Preflight so a dead proxy is a clear message here rather than an opaque
 	// connection error from inside Claude Code after it has taken the TTY.
-	if err := claudePreflight(url); err != nil {
+	if scripted {
+		// Passthrough omits the bearer so Claude Code prefers OAuth; a capture
+		// wants the credential it was handed to reach the upstream verbatim, and
+		// the endpoint need not be a rafiki proxy at all (so no /healthz
+		// preflight either).
+		passthrough = false
+	} else if err := claudePreflight(url); err != nil {
 		return err
 	}
 
@@ -176,7 +204,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	}
 
 	autoCompact := 0
-	if model != "" {
+	if model != "" && !scripted {
 		autoCompact = claudeAutoCompactWindow(context.Background(), cmd, model)
 	}
 
@@ -205,6 +233,29 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	// The MCP config is staged to a file immediately before Build, so its JSON —
 	// which carries the ${RAFIKI_MCP_TOKEN} placeholder, never an expanded token
 	// — does not ride argv where `ps` shows it.
+	if scripted {
+		// ModeHeadless is the stream-json contract a daemon-managed claude child
+		// runs under: -p, the two format flags and --verbose, plus the permission
+		// bypass a session with no human needs.
+		staged, err := claudeargv.Stage(claudeargv.Params{
+			Mode:      claudeargv.ModeHeadless,
+			Model:     model,
+			ModelArgs: vals.ModelArgs,
+		}, promptfile.Dir())
+		if err != nil {
+			return err
+		}
+		timeout, _ := cmd.Flags().GetDuration("turn-timeout")
+		return runClaudeTurns(claudeTurnsOptions{
+			Env:     env,
+			Args:    claudeargv.Build(staged),
+			Turns:   turns,
+			Out:     cmd.OutOrStdout(),
+			Err:     cmd.ErrOrStderr(),
+			Timeout: timeout,
+		})
+	}
+
 	staged, err := claudeargv.Stage(claudeargv.Params{
 		Mode:      claudeargv.ModeInteractive,
 		Model:     model,
@@ -304,4 +355,23 @@ func launchClaude(inv claudeInvocation) error {
 		return fmt.Errorf("claude: %w", err)
 	}
 	return nil
+}
+
+// resolveClaudeURL is the endpoint precedence for `rafiki claude`: --url, then
+// (scripted runs only) an inherited ANTHROPIC_BASE_URL, then the profile's
+// proxy.
+//
+// The env var outranks the profile for a scripted run because it is an explicit
+// instruction from the process that started us: `rafikid proxy record --exec`
+// sets it to its own listener, and letting a profile's proxy win would send the
+// capture to the daemon — a session that looks like it worked, records nothing,
+// and leaves an empty directory behind.
+func resolveClaudeURL(flagURL string, scripted bool, envURL, profileProxy string) string {
+	if flagURL != "" {
+		return flagURL
+	}
+	if scripted && envURL != "" {
+		return envURL
+	}
+	return profileProxy
 }
