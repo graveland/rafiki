@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,12 +36,14 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 	return &cp
 }
 
-// ErrOrdinalOccupied reports that a response could not be written because its
-// ordinal already held a different message. It covers both write sites: a
-// replayed request prefix re-inserts an equivalent message and succeeds
-// (appendRequestMessage), but a request message or an assistant reply landing on
-// a different occupant is never stored, so it is reported. Nine such collisions
-// dropped 22 model replies before threads were separated, and nothing said so.
+// ErrOrdinalOccupied reports that a message could not be written because its
+// ordinal already held a different one. It covers both write sites: a replayed
+// request prefix re-inserts an equivalent message and succeeds
+// (appendRequestMessage — an assistant echo of capture's own reply counts as a
+// replay, see that function), but a request message landing on a different
+// request row, or an assistant reply landing on any occupant, is never stored,
+// so it is reported. Nine such collisions dropped 22 model replies before
+// threads were separated, and nothing said so.
 //
 // Residual case: the conflict test is content-only (IS DISTINCT FROM), so an
 // occupant whose content is jsonb-equal to the incoming reply stays a silent
@@ -56,7 +59,8 @@ var ErrOrdinalOccupied = errors.New("capture: ordinal already occupied by a diff
 // An ordinal that is already occupied is not an error HERE: both statements' ON
 // CONFLICT (conversation_id, ordinal) DO NOTHING drop the new row and report
 // inserted=false. Callers decide what an occupant means:
-// appendRequestMessage accepts an equivalent one and refuses a different one,
+// appendRequestMessage accepts an equivalent one (and an assistant echo of a
+// reply capture wrote itself) and refuses a different request message,
 // appendMessageStrict refuses any different one.
 //
 // A returned ErrLeaseLost is deliberately NOT retryable: isRetryableDB only
@@ -93,21 +97,57 @@ func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal
 // a DIFFERENT message returns ErrOrdinalOccupied, because that request message
 // was not stored and nothing else will report it. "Same message" ignores
 // cache_control (sameMessage): Claude Code moves that marker between replays.
+//
+// One occupant is accepted WITHOUT an exact content comparison: a reply this
+// conversation's own capture wrote (AppendResponseMessage stamps the turn's
+// response_ordinal). The client replays that reply on the next turn, and the
+// replay carries the provider's JSON whereas capture stored the SDK-marshalled
+// response. sameAssistantContent puts both representations through the SDK
+// before comparison; an unrecognised or changed assistant block still fails
+// strict capture.
 func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok *int64, kind any) error {
 	inserted, err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, nil, nil, kind)
 	if err != nil || inserted {
 		return err
 	}
 	var stored []byte
+	var storedRole string
+	var isCapturedReply bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT content FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
-		convID, ordinal).Scan(&stored); err != nil {
+		`SELECT m.content, m.role,
+		        EXISTS (SELECT 1 FROM conversations.conversation_turn t
+		                 WHERE t.conversation_id = m.conversation_id
+		                   AND t.response_ordinal = m.ordinal)
+		   FROM conversations.conversation_message m
+		  WHERE m.conversation_id=$1::uuid AND m.ordinal=$2`,
+		convID, ordinal).Scan(&stored, &storedRole, &isCapturedReply); err != nil {
 		return fmt.Errorf("read occupant of ordinal %d: %w", ordinal, err)
 	}
-	if !sameMessage(stored, content) {
-		return fmt.Errorf("%w: conversation %s ordinal %d (request message)", ErrOrdinalOccupied, convID, ordinal)
+	if sameMessage(stored, content) {
+		return nil
 	}
-	return nil
+	// A response replay is structurally different after the SDK has marshalled
+	// its response (including zero union fields the provider omitted), so compare
+	// known Anthropic blocks through that same SDK representation. An arbitrary
+	// replacement assistant message must still fail strict capture.
+	if isCapturedReply && role == "assistant" && storedRole == "assistant" && sameAssistantContent(stored, content) {
+		return nil
+	}
+	return fmt.Errorf("%w: conversation %s ordinal %d (request message)", ErrOrdinalOccupied, convID, ordinal)
+}
+
+// sameAssistantContent compares assistant content after the Anthropic SDK has
+// decoded and encoded both values. This removes provider-only fields not modelled
+// by the SDK (such as tool_use.caller) while retaining meaningful blocks and
+// tool inputs. Invalid or unknown content is not a replay.
+func sameAssistantContent(a, b []byte) bool {
+	var am, bm []anthropic.ContentBlockUnion
+	if json.Unmarshal(a, &am) != nil || json.Unmarshal(b, &bm) != nil {
+		return false
+	}
+	ac, aerr := json.Marshal(am)
+	bc, berr := json.Marshal(bm)
+	return aerr == nil && berr == nil && bytes.Equal(ac, bc)
 }
 
 // sameMessage reports whether two stored/replayed message contents are the same
