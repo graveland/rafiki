@@ -212,6 +212,7 @@ func TestRequestUserMessageOnStoredReplyIsOrdinalOccupied(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req1, PrefixHash: h1, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req1, h1)
+	c.NoError(err, "DecomposeRequest")
 	c.NoError(s.RecordThread(ctx, "", convID, turnID, createdAt, "", "msg_1", false), "RecordThread")
 	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, []byte(storedReplyCanonical), 1, 1, "tool_use"),
 		"AppendResponseMessage")
