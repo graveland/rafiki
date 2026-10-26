@@ -142,8 +142,8 @@ func (r recordTest) postRaw(addr, raw string) (status int, body []byte) {
 }
 
 // TestProxyRecordJSONExchangeIsRecordedVerbatim pins both files of an ordinary
-// JSON exchange byte for byte: the request as it arrived (credential included)
-// and the response as the client received it.
+// JSON exchange byte for byte: the request as it arrived (credential reduced to
+// its digest) and the response as the client received it.
 func TestProxyRecordJSONExchangeIsRecordedVerbatim(t *testing.T) {
 	r := newRecordTest(t)
 	requestBody := `{"model":"claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
@@ -170,9 +170,11 @@ func TestProxyRecordJSONExchangeIsRecordedVerbatim(t *testing.T) {
 	r.c.Eq(http.StatusOK, status, "client status")
 	r.c.EqDeep([]byte(responseBody), got, "the client must receive the upstream body unchanged")
 
+	// The credential header is written as its digest: the recording proves which
+	// token was sent without holding one that still works.
 	wantRequest := "POST /v1/messages?beta=1 HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
-		"Authorization: Bearer sk-test-secret\r\n" +
+		"Authorization: Bearer sha256:" + recordTokenDigest("sk-test-secret") + "\r\n" +
 		"Content-Length: " + strconv.Itoa(len(requestBody)) + "\r\n" +
 		"Content-Type: application/json\r\n" +
 		"\r\n" + requestBody
@@ -742,4 +744,52 @@ func TestProxyRecordExecEnvPointsAtTheListener(t *testing.T) {
 		"ANTHROPIC_AUTH_TOKEN=sk-ant-real",
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:4242",
 	}, got, "the recorder's own address must replace any inherited base URL")
+}
+
+// TestProxyRecordRedactsCredentialHeaders pins the one thing the recorder does
+// NOT write verbatim. A capture must answer "which credential did this client
+// send?" and must not answer "here it is": the scheme survives, the secret
+// becomes a digest, and the same secret always digests the same way.
+func TestProxyRecordRedactsCredentialHeaders(t *testing.T) {
+	r := newRecordTest(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(upstream.Close)
+	harness := startProxyRecord(r, upstream.URL)
+	host := strings.TrimPrefix(harness.url, "http://")
+
+	body := `{"model":"m"}`
+	raw := "POST /v1/messages HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Authorization: Bearer sk-ant-oat01-secret\r\n" +
+		"X-Api-Key: sk-ant-api03-secret\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
+		"\r\n" + body
+	status, _ := r.postRaw(host, raw)
+	r.c.Eq(http.StatusOK, status, "client status")
+
+	recorded := string(r.recorded(harness.dir, "000001-request.http"))
+	r.c.NotStrContains(recorded, "sk-ant-oat01-secret", "a bearer token must never reach the file")
+	r.c.NotStrContains(recorded, "sk-ant-api03-secret", "an api key must never reach the file")
+	r.strContains(recorded, "Authorization: Bearer sha256:"+recordTokenDigest("sk-ant-oat01-secret"),
+		"the scheme survives and the token becomes its digest")
+	r.strContains(recorded, "X-Api-Key: sha256:"+recordTokenDigest("sk-ant-api03-secret"),
+		"a scheme-less key digests on its own")
+	r.strContains(recorded, body, "bodies are still recorded verbatim")
+}
+
+// TestRecordCredentialDigest pins the shape of the digest, including the
+// scheme-less case, and that two different secrets never collide by accident of
+// formatting.
+func TestRecordCredentialDigest(t *testing.T) {
+	r := newRecordTest(t)
+	r.c.Eq("Bearer sha256:"+recordTokenDigest("tok"), recordCredentialDigest("Bearer tok"),
+		"the scheme is preserved")
+	r.c.Eq("sha256:"+recordTokenDigest("sk-ant-1"), recordCredentialDigest("sk-ant-1"),
+		"a value with no scheme is digested whole")
+	r.c.NotEq(recordCredentialDigest("Bearer tok"), recordCredentialDigest("Bearer tok2"),
+		"different secrets must digest differently")
+	r.c.Eq(recordCredentialDigest("Bearer tok"), recordCredentialDigest("Bearer  tok "),
+		"surrounding whitespace must not change the digest")
 }

@@ -187,6 +187,12 @@ capture run under `env -i` on a host with no rafiki config and no daemon —
 `--turn` with none of those set is a clear error rather than a 401 from
 upstream.
 
-**The recordings are raw.** Authorization headers, prompts and completions are
-stored unredacted for a later sanitizer to strip. Treat the directory as a
-secret: never commit it and never share it.
+**The recordings are raw, except for credentials.** Bodies are stored exactly as
+they crossed the boundary, so prompts and completions are there in clear text.
+The credential headers — `Authorization`, `Proxy-Authorization`, `X-Api-Key`,
+`Anthropic-Api-Key` — are written as their scheme plus the sha256 of the token
+(`Authorization: Bearer sha256:2143…`), which keeps a capture comparable across
+runs without the recording ever holding a token that still works. Redaction is a
+recording rule only: the upstream still receives the real credential.
+
+Treat the directory as a secret anyway — the bodies are not sanitized.

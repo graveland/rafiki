@@ -129,6 +129,44 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	go run ./cmd/rafiki claude $(ARGS)
 
+##@ Capture
+
+# Records a real, scripted multi-turn Claude session through the isolated
+# recorder: no daemon, no database, no profile. The recorder runs the session
+# with ANTHROPIC_BASE_URL pointed at itself and writes every exchange to OUT as
+# NNNNNN-{request,response}.http.
+#
+# The claude session is kept minimal on purpose (--bare, no session files, no
+# MCP servers) so a request carries the conversation and little else. It runs
+# from an empty temp directory, so no CLAUDE.md is discovered either.
+#
+# Authentication is whatever this shell has: an API key (ANTHROPIC_API_KEY or
+# ANTHROPIC_AUTH_TOKEN, which --bare needs) or your own Claude Code login. Both
+# variables are removed from the child's environment so the session falls back to
+# the login; CLAUDE_CONFIG_DIR is left alone, because on a machine with more than
+# one Claude Code config that variable names the one that actually holds the
+# credential.
+#
+# The recordings hold your credential and your prompts in clear text. They are
+# written outside the repository by default and must never be committed.
+.PHONY: capture-claude
+capture-claude: build ## Record a scripted claude session (MODEL=, TURNS=, OUT=).
+	@out="$${OUT:-$(HOME)/rafiki-captures/claude-$$(date +%Y%m%d-%H%M%S)}"; \
+	turns="$${TURNS:-scripts/capture-turns.txt}"; \
+	model="$${MODEL:-haiku}"; \
+	case "$$turns" in /*) turns_abs="$$turns";; *) turns_abs="$(CURDIR)/$$turns";; esac; \
+	work=$$(mktemp -d); \
+	echo "capture: model=$$model turns=$$turns_abs"; \
+	echo "capture: recording into $$out"; \
+	$(BIN_DIR)/$(DAEMON_BIN) proxy record \
+	  --listen 127.0.0.1:0 \
+	  --upstream https://api.anthropic.com \
+	  --record-dir "$$out" \
+	  --exec "cd $$work && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN $(CURDIR)/$(BIN_DIR)/$(CLI_BIN) claude --model $$model --turn-file $$turns_abs"; \
+	status=$$?; \
+	echo "capture: exit $$status, $$(ls "$$out" | wc -l | tr -d ' ') file(s) in $$out"; \
+	exit $$status
+
 ##@ Install
 
 # Copies the built binaries to $(DESTDIR) (default ~/.local/bin), then checks

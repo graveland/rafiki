@@ -85,6 +85,9 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().String("turn-file", "",
 		"file of prompts for a scripted session, one per line ('-' for stdin;\n"+
 			"blank lines and lines starting with # are skipped)")
+	cmd.Flags().String("system-prompt", "",
+		"replace Claude Code's system prompt for a scripted session (default: its own,\n"+
+			"which is what keeps tool calls working; dynamic sections are excluded)")
 	cmd.Flags().Duration("turn-timeout", claudeTurnTimeout,
 		"ceiling on ONE scripted turn; a wedged session fails instead of hanging")
 	// --model asks the DAEMON for claude-kind ids (see completeModel): an
@@ -174,16 +177,13 @@ func runClaude(cmd *cobra.Command, args []string) error {
 			p.Name, profile.ProfilesFile())
 	}
 	if scripted {
-		// The shell's own Anthropic credential is the one an upstream accepts,
-		// and a recorder relays it verbatim: there is no profile token to fall
-		// back to, and none is resolved.
+		// The shell's own Anthropic credential, if there is one. A scripted run
+		// resolves no profile, so there is no profile token to fall back to — and
+		// a missing credential is NOT an error: Claude Code's own OAuth login is
+		// a perfectly good way to authenticate a capture, it just rules out
+		// --bare (see scriptedClaudeMinimalArgs).
 		if token == "" {
 			token = envFirst("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
-		}
-		if token == "" {
-			return errors.New("no credential: pass --token, or set ANTHROPIC_AUTH_TOKEN " +
-				"(ANTHROPIC_API_KEY is the fallback); a scripted run sends it to the endpoint " +
-				"and the recorder records it")
 		}
 	} else {
 		token, err = resolveClaudeToken(token, p.Token)
@@ -266,9 +266,10 @@ func runClaude(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		timeout, _ := cmd.Flags().GetDuration("turn-timeout")
+		systemPrompt, _ := cmd.Flags().GetString("system-prompt")
 		return runClaudeTurnsFn(claudeTurnsOptions{
-			Env:     env,
-			Args:    claudeargv.Build(staged),
+			Env:     scriptedClaudeEnv(env, token),
+			Args:    append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(systemPrompt, token != "")...),
 			Turns:   turns,
 			Out:     cmd.OutOrStdout(),
 			Err:     cmd.ErrOrStderr(),
@@ -398,4 +399,58 @@ func resolveClaudeURL(flagURL string, scripted bool, envURL, profileProxy string
 		return envURL
 	}
 	return profileProxy
+}
+
+// scriptedClaudeMinimalArgs keeps a captured session as small and as
+// reproducible as it can be.
+//
+// --bare is the load-bearing one: no CLAUDE.md auto-discovery, no hooks, LSP,
+// plugins, auto-memory or background prefetches, so the request carries the
+// conversation and nothing else. It is only available when an API key is
+// supplied, because bare mode reads ANTHROPIC_API_KEY and never OAuth — a
+// machine authenticating with its Claude login keeps Claude Code's normal auth
+// and the rest of the minimisation. Nothing here forces a key.
+//
+// The MCP pair removes every server rather than inheriting the operator's;
+// --strict-mcp-config alone would still load them from settings. The system
+// prompt is only replaced when the caller supplies one: Claude Code's own prompt
+// carries the tool-use instructions, and dropping it is a good way to get a
+// session that cannot call a tool. With the default prompt,
+// --exclude-dynamic-system-prompt-sections moves the per-machine sections out of
+// the system prompt, which shrinks it and keeps it stable across runs.
+func scriptedClaudeMinimalArgs(systemPrompt string, bare bool) []string {
+	var args []string
+	if bare {
+		args = append(args, "--bare")
+	}
+	args = append(args,
+		"--no-session-persistence",
+		"--strict-mcp-config",
+		"--mcp-config", `{"mcpServers":{}}`,
+	)
+	if systemPrompt != "" {
+		return append(args, "--system-prompt", systemPrompt)
+	}
+	return append(args, "--exclude-dynamic-system-prompt-sections")
+}
+
+// scriptedClaudeEnv repoints the credential for a --bare session, which reads
+// ANTHROPIC_API_KEY and never the bearer form.
+//
+// Both variables are removed first, unconditionally. pkg/proxyenv populates
+// ANTHROPIC_AUTH_TOKEN with a "rafiki" placeholder when there is no token, and
+// that placeholder is exactly what stops Claude Code using its own OAuth login —
+// for a capture on an OAuth machine the variable has to be absent, not empty.
+func scriptedClaudeEnv(env []string, token string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "ANTHROPIC_AUTH_TOKEN=") || strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if token == "" {
+		return out
+	}
+	return append(out, "ANTHROPIC_API_KEY="+token)
 }

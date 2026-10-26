@@ -19,6 +19,8 @@ package integration_test
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,16 +113,20 @@ func TestProxyRecordStandaloneBinary(t *testing.T) {
 	c.Eq(http.StatusOK, json.status, "the client must see the upstream status")
 	c.EqDeep([]byte(proxyRecordJSONBody), json.body, "the client must receive the upstream body unchanged")
 
-	c.EqDeep([]byte(jsonRaw), json.request.raw,
-		"the recorded request must be the bytes that arrived, header for header")
+	c.EqDeep([]byte(expectedProxyRecordRequest(rec.host, jsonRequestBody)), json.request.raw,
+		"the recorded request must be the bytes that arrived, header for header, with each credential reduced to its digest")
 	method, target := json.request.requestLine(t)
 	c.Eq("POST", method, "recorded request method")
 	c.Eq("/v1/messages?beta=1", target, "the recorded request keeps the path and query as received")
 	c.EqDeep([]byte(jsonRequestBody), json.request.body, "the recorded request body must be byte-exact")
 	c.Eq(rec.host, proxyRecordHeaderValue(t, json.request, "Host"),
 		"the recorded request carries the client's Host, which net/http lifts out of the header map")
-	c.Eq("Bearer sk-ant-oat01-proxy-record", proxyRecordHeaderValue(t, json.request, "Authorization"),
-		"credentials are recorded verbatim: this directory is forensic input")
+	c.Eq("Bearer sha256:"+proxyRecordDigest("sk-ant-oat01-proxy-record"),
+		proxyRecordHeaderValue(t, json.request, "Authorization"),
+		"a credential is recorded as its digest, so a capture proves which token was sent without holding one")
+	c.Eq("sha256:"+proxyRecordDigest("sk-ant-api03-proxy-record"),
+		proxyRecordHeaderValue(t, json.request, "X-Api-Key"),
+		"a scheme-less key digests on its own")
 
 	wantJSONResponse := "HTTP/1.1 200 OK\r\n" +
 		"Content-Length: " + strconv.Itoa(len(proxyRecordJSONBody)) + "\r\n" +
@@ -183,7 +189,7 @@ func TestProxyRecordStandaloneBinary(t *testing.T) {
 		"the recorder forwards the path and query it received")
 	c.EqDeep([]byte(jsonRequestBody), forwarded[0].body, "the recorder forwards the request body unchanged")
 	c.Eq("Bearer sk-ant-oat01-proxy-record", forwarded[0].header.Get("Authorization"),
-		"the credential must reach the upstream verbatim")
+		"the credential must reach the upstream VERBATIM: redaction is a recording rule, never a forwarding one")
 	c.Eq("sk-ant-api03-proxy-record", forwarded[0].header.Get("X-Api-Key"),
 		"the api key must reach the upstream verbatim")
 
@@ -435,10 +441,10 @@ func (r *standaloneRecorder) exchange(t *testing.T, seq int, raw string) proxyRe
 func rawProxyRecordRequest(host, body string) string {
 	return "POST /v1/messages?beta=1 HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
-		"Authorization: Bearer sk-ant-oat01-proxy-record\r\n" +
+		"Authorization: Bearer " + proxyRecordCredential + "\r\n" +
 		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
 		"Content-Type: application/json\r\n" +
-		"X-Api-Key: sk-ant-api03-proxy-record\r\n" +
+		"X-Api-Key: " + proxyRecordAPIKey + "\r\n" +
 		"\r\n" + body
 }
 
@@ -697,4 +703,30 @@ func (u *proxyRecordUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "proxy record upstream: unknown model "+req.Model, http.StatusBadRequest)
 	}
+}
+
+// The credentials every capture in this test sends. They are sent verbatim and
+// must arrive at the upstream verbatim; only the RECORDING reduces them.
+const (
+	proxyRecordCredential = "sk-ant-oat01-proxy-record"
+	proxyRecordAPIKey     = "sk-ant-api03-proxy-record"
+)
+
+// expectedProxyRecordRequest is rawProxyRecordRequest as the recorder writes it:
+// identical except that each credential header holds its digest.
+func expectedProxyRecordRequest(host, body string) string {
+	return "POST /v1/messages?beta=1 HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Authorization: Bearer sha256:" + proxyRecordDigest(proxyRecordCredential) + "\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
+		"Content-Type: application/json\r\n" +
+		"X-Api-Key: sha256:" + proxyRecordDigest(proxyRecordAPIKey) + "\r\n" +
+		"\r\n" + body
+}
+
+// proxyRecordDigest is what the recorder writes in place of a credential: the
+// hex sha256 of the token, with the scheme left in front of it.
+func proxyRecordDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }

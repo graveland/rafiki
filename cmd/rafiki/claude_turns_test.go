@@ -190,10 +190,22 @@ func TestScriptedClaudeResolvesNoProfile(t *testing.T) {
 	c.StrContains(argv, "--input-format stream-json", "a scripted run is the headless contract")
 	c.StrContains(argv, "--output-format stream-json", "a scripted run is the headless contract")
 
+	// The capture is kept as small and as reproducible as possible.
+	for _, want := range []string{
+		"--bare",                   // no CLAUDE.md, hooks, LSP, plugins, memory
+		"--no-session-persistence", // nothing written outside the record dir
+		"--strict-mcp-config",      // no inherited MCP servers
+		"--exclude-dynamic-system-prompt-sections",
+	} {
+		c.StrContains(argv, want, "a scripted run must minimise what the request carries")
+	}
+	c.StrContains(argv, `--mcp-config {"mcpServers":{}}`, "every MCP server must be excluded")
+
 	joined := strings.Join(got.Env, "\n")
 	c.StrContains(joined, "ANTHROPIC_BASE_URL=http://127.0.0.1:9", "the endpoint must be the one given")
-	c.StrContains(joined, "ANTHROPIC_AUTH_TOKEN=sk-ant-from-env",
-		"the credential must come from the environment, since there is no profile to supply one")
+	c.StrContains(joined, "ANTHROPIC_API_KEY=sk-ant-from-env",
+		"a --bare session authenticates with ANTHROPIC_API_KEY; the env credential becomes that key")
+	c.NotStrContains(joined, "ANTHROPIC_AUTH_TOKEN", "bare mode never reads the bearer form")
 
 	// The positive proof that nothing resolved a profile: resolution either
 	// bootstraps profiles.toml or leaves it absent, and this run must leave it
@@ -203,10 +215,11 @@ func TestScriptedClaudeResolvesNoProfile(t *testing.T) {
 	c.True(os.IsNotExist(err), "a scripted run must not create a profile file (stat: %v)", err)
 }
 
-// TestScriptedClaudeNeedsACredential keeps the failure honest: with no --token
-// and no Anthropic credential in the environment there is nothing to send, and
-// saying so beats launching a session that 401s upstream.
-func TestScriptedClaudeNeedsACredential(t *testing.T) {
+// TestScriptedClaudeWithoutAKeyKeepsOAuth is the OAuth-machine case: with no
+// API key anywhere there is nothing to force, so the session runs on Claude
+// Code's own login — and --bare, which only reads ANTHROPIC_API_KEY, must not be
+// passed, or the run would fail on a host whose credential is perfectly good.
+func TestScriptedClaudeWithoutAKeyKeepsOAuth(t *testing.T) {
 	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
@@ -214,15 +227,23 @@ func TestScriptedClaudeNeedsACredential(t *testing.T) {
 
 	orig := runClaudeTurnsFn
 	t.Cleanup(func() { runClaudeTurnsFn = orig })
-	runClaudeTurnsFn = func(claudeTurnsOptions) error {
-		c.Fail("a session with no credential must not start")
+	var got claudeTurnsOptions
+	runClaudeTurnsFn = func(o claudeTurnsOptions) error {
+		got = o
 		return nil
 	}
 
 	cmd := newClaudeCmd()
 	c.Require().NoError(cmd.ParseFlags([]string{"--url", "http://127.0.0.1:9", "--turn", "hi"}),
 		"parse flags")
-	err := runClaude(cmd, nil)
-	c.Require().Error(err, "no credential must be refused")
-	c.StrContains(err.Error(), "no credential", "the error must name what is missing")
+	c.Require().NoError(runClaude(cmd, nil), "a scripted run must not require an API key")
+
+	argv := strings.Join(got.Args, " ")
+	c.NotStrContains(argv, "--bare", "bare mode needs an API key, so it must not be forced on an OAuth host")
+	c.StrContains(argv, "--no-session-persistence", "the other minimisation still applies")
+	c.StrContains(argv, "--strict-mcp-config", "MCP servers are still excluded")
+
+	joined := strings.Join(got.Env, "\n")
+	c.NotStrContains(joined, "ANTHROPIC_API_KEY=", "nothing may be forced into the API key")
+	c.NotStrContains(joined, "ANTHROPIC_AUTH_TOKEN=", "no bearer either: the session keeps its own login")
 }

@@ -16,6 +16,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -64,10 +66,12 @@ const (
 	recordBadGatewayStatus = "502 Bad Gateway"
 	recordBadGatewayBody   = "rafikid proxy record: upstream request failed\n"
 
-	// recordSecretsWarning is printed on every start, because the directory is
-	// about to hold credentials in clear text.
+	// recordSecretsWarning is printed on every start. Credential headers are
+	// replaced by their digest (see recordCredentialDigest), but prompts,
+	// completions and anything else inside a body are recorded verbatim.
 	recordSecretsWarning = "rafikid proxy record: WARNING: the record directory holds raw " +
-		"HTTP headers and bodies, including credentials. Treat it as secret: " +
+		"HTTP bodies and headers. Credential headers are reduced to a sha256 digest, " +
+		"but prompts and completions are recorded verbatim. Treat it as secret: " +
 		"never commit it and never share it."
 )
 
@@ -117,8 +121,10 @@ func newProxyRecordRunCmd() *cobra.Command {
 Forwards POST /v1/messages to --upstream and writes each exchange to
 --record-dir as 000001-request.http and 000001-response.http, numbered in
 arrival order. Each file is an HTTP message: start line, headers, blank line,
-then the exact body — an SSE stream included. Nothing is redacted, so the
-directory holds credentials.
+then the exact body — an SSE stream included. Bodies are never altered, so the
+directory holds prompts and completions in clear text; credential headers
+(Authorization, x-api-key) are replaced by a sha256 digest so a capture can be
+compared without holding a live token.
 
 This process is deliberately isolated: it consults no config file, no profile
 and no database, and starts no other listener. (rafikid's shared pre-cobra
@@ -533,10 +539,60 @@ func formatRecordedRequest(r *http.Request, body []byte) []byte {
 	if r.Host != "" {
 		fmt.Fprintf(&b, "Host: %s\r\n", r.Host)
 	}
-	_ = r.Header.Write(&b) // keys sorted, one line per value
+	// Credential headers are reduced to their digest: a recording must be able
+	// to prove WHICH credential a client sent, and must not hand the next
+	// reader a live token. Everything else is written verbatim.
+	header := r.Header.Clone()
+	redactRecordedCredentials(header)
+	_ = header.Write(&b) // keys sorted, one line per value
 	b.WriteString("\r\n")
 	b.Write(body)
 	return b.Bytes()
+}
+
+// recordCredentialHeaders are the headers whose whole value is a bearer-style
+// secret. Any of them is written to disk as its digest, never as itself.
+var recordCredentialHeaders = []string{
+	"Authorization",
+	"Proxy-Authorization",
+	"X-Api-Key",
+	"Anthropic-Api-Key",
+}
+
+// redactRecordedCredentials replaces each credential header's value with its
+// digest, preserving the scheme ("Bearer", "Basic", ...) so the file still says
+// how the client authenticated.
+func redactRecordedCredentials(h http.Header) {
+	for _, name := range recordCredentialHeaders {
+		values := h.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		h.Del(name)
+		for _, v := range values {
+			h.Add(name, recordCredentialDigest(v))
+		}
+	}
+}
+
+// recordCredentialDigest renders one credential value as "<scheme> sha256:<hex>",
+// or bare "sha256:<hex>" when the value carries no scheme (x-api-key).
+//
+// A digest rather than a redaction marker is deliberate: two captures can be
+// compared to answer "did this client send the same credential as that one?",
+// and a capture still shows which scheme was used, without the recording ever
+// containing something replayable.
+func recordCredentialDigest(v string) string {
+	trimmed := strings.TrimSpace(v)
+	if scheme, token, ok := strings.Cut(trimmed, " "); ok && strings.TrimSpace(token) != "" {
+		return scheme + " sha256:" + recordTokenDigest(token)
+	}
+	return "sha256:" + recordTokenDigest(trimmed)
+}
+
+func recordTokenDigest(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
 }
 
 // formatRecordedResponse serialises a response the same way: the status line as

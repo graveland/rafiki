@@ -1,0 +1,7 @@
+# Prompts for `make capture-claude`, one per line.
+# A capture wants at least one plain turn and one that makes the model call a
+# tool, so the recording carries both a text response and a tool_use /
+# tool_result round trip.
+Reply with exactly one word: ready
+Use the Bash tool to run `echo tool-ok`, then report its exact output.
+Use the Bash tool to run `ls | wc -l`, then tell me the number.
