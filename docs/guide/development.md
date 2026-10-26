@@ -201,4 +201,10 @@ The credential headers — `Authorization`, `Proxy-Authorization`, `X-Api-Key`,
 runs without the recording ever holding a token that still works. Redaction is a
 recording rule only: the upstream still receives the real credential.
 
+`metadata.user_id` is reduced the same way, and for the same reason: Claude
+Code puts a device id and the account uuid in it, which is what makes a capture
+unshareable. Name further fields with `--redact-json-field <dotted.path>`. Like
+the credential headers, this is a recording rule — the upstream receives the
+body untouched, and every other byte of it is preserved.
+
 Treat the directory as a secret anyway — the bodies are not sanitized.

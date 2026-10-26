@@ -192,7 +192,6 @@ func TestScriptedClaudeResolvesNoProfile(t *testing.T) {
 
 	// The capture is kept as small and as reproducible as possible.
 	for _, want := range []string{
-		"--bare",                   // no CLAUDE.md, hooks, LSP, plugins, memory
 		"--no-session-persistence", // nothing written outside the record dir
 		"--safe-mode",              // no CLAUDE.md, skills, plugins, hooks, MCP, custom agents
 		"--strict-mcp-config",      // no inherited MCP servers
@@ -206,9 +205,9 @@ func TestScriptedClaudeResolvesNoProfile(t *testing.T) {
 
 	joined := strings.Join(got.Env, "\n")
 	c.StrContains(joined, "ANTHROPIC_BASE_URL=http://127.0.0.1:9", "the endpoint must be the one given")
-	c.StrContains(joined, "ANTHROPIC_API_KEY=sk-ant-from-env",
-		"a --bare session authenticates with ANTHROPIC_API_KEY; the env credential becomes that key")
-	c.NotStrContains(joined, "ANTHROPIC_AUTH_TOKEN", "bare mode never reads the bearer form")
+	c.StrContains(joined, "ANTHROPIC_AUTH_TOKEN=sk-ant-from-env",
+		"the credential the caller supplied is the one the session sends")
+	c.NotStrContains(joined, "ANTHROPIC_API_KEY=", "the api-key form is not used: the bearer serves both")
 
 	// The positive proof that nothing resolved a profile: resolution either
 	// bootstraps profiles.toml or leaves it absent, and this run must leave it
@@ -242,7 +241,7 @@ func TestScriptedClaudeWithoutAKeyKeepsOAuth(t *testing.T) {
 	c.Require().NoError(runClaude(cmd, nil), "a scripted run must not require an API key")
 
 	argv := strings.Join(got.Args, " ")
-	c.NotStrContains(argv, "--bare", "bare mode needs an API key, so it must not be forced on an OAuth host")
+	c.NotStrContains(argv, "--bare", "bare mode needs an API key, so a capture never depends on one")
 	c.StrContains(argv, "--no-session-persistence", "the other minimisation still applies")
 	c.StrContains(argv, "--strict-mcp-config", "MCP servers are still excluded")
 

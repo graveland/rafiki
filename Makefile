@@ -136,16 +136,16 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 # with ANTHROPIC_BASE_URL pointed at itself and writes every exchange to OUT as
 # NNNNNN-{request,response}.http.
 #
-# The claude session is kept minimal on purpose (--bare, no session files, no
-# MCP servers) so a request carries the conversation and little else. It runs
-# from an empty temp directory, so no CLAUDE.md is discovered either.
+# The claude session is kept minimal on purpose (--safe-mode, no session files,
+# no MCP servers, one built-in tool, a one-line system prompt) so a request
+# carries the conversation and little else. It runs from an empty temp directory,
+# so no CLAUDE.md is discovered either.
 #
 # Authentication is whatever this shell has: an API key (ANTHROPIC_API_KEY or
-# ANTHROPIC_AUTH_TOKEN, which --bare needs) or your own Claude Code login. Both
-# variables are removed from the child's environment so the session falls back to
-# the login; CLAUDE_CONFIG_DIR is left alone, because on a machine with more than
-# one Claude Code config that variable names the one that actually holds the
-# credential.
+# ANTHROPIC_AUTH_TOKEN) or your own Claude Code login. Both variables are removed
+# from the child's environment so the session falls back to the login;
+# CLAUDE_CONFIG_DIR is left alone, because on a machine with more than one Claude
+# Code config that variable names the one that actually holds the credential.
 #
 # The recordings hold your credential and your prompts in clear text. They are
 # written outside the repository by default and must never be committed.

@@ -181,8 +181,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		// The shell's own Anthropic credential, if there is one. A scripted run
 		// resolves no profile, so there is no profile token to fall back to — and
 		// a missing credential is NOT an error: Claude Code's own OAuth login is
-		// a perfectly good way to authenticate a capture, it just rules out
-		// --bare (see scriptedClaudeMinimalArgs).
+		// a perfectly good way to authenticate a capture.
 		if token == "" {
 			token = envFirst("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 		}
@@ -271,7 +270,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		tools, _ := cmd.Flags().GetString("tools")
 		return runClaudeTurnsFn(claudeTurnsOptions{
 			Env:     scriptedClaudeEnv(env, token),
-			Args:    append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(systemPrompt, tools, token != "")...),
+			Args:    append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(systemPrompt, tools)...),
 			Turns:   turns,
 			Out:     cmd.OutOrStdout(),
 			Err:     cmd.ErrOrStderr(),
@@ -416,12 +415,12 @@ const claudeCaptureTools = "Bash"
 // scriptedClaudeMinimalArgs keeps a captured session as small and as
 // reproducible as it can be.
 //
-// --bare is the load-bearing one: no CLAUDE.md auto-discovery, no hooks, LSP,
-// plugins, auto-memory or background prefetches, so the request carries the
-// conversation and nothing else. It is only available when an API key is
-// supplied, because bare mode reads ANTHROPIC_API_KEY and never OAuth — a
-// machine authenticating with its Claude login keeps Claude Code's normal auth
-// and the rest of the minimisation. Nothing here forces a key.
+// --safe-mode is the load-bearing one: no CLAUDE.md, skills, plugins, hooks,
+// MCP servers, custom agents or output styles, so the request carries the
+// conversation and nothing else. It leaves auth alone, which is why it works
+// the same with an API key and with a Claude Code login. --bare would go
+// further but reads ANTHROPIC_API_KEY only and never OAuth, so a capture on a
+// subscription machine could not use it.
 //
 // The MCP pair removes every server rather than inheriting the operator's;
 // --strict-mcp-config alone would still load them from settings. The system
@@ -430,17 +429,12 @@ const claudeCaptureTools = "Bash"
 // session that cannot call a tool. With the default prompt,
 // --exclude-dynamic-system-prompt-sections moves the per-machine sections out of
 // the system prompt, which shrinks it and keeps it stable across runs.
-func scriptedClaudeMinimalArgs(systemPrompt, tools string, bare bool) []string {
-	var args []string
-	if bare {
-		args = append(args, "--bare")
-	}
-	args = append(args,
+func scriptedClaudeMinimalArgs(systemPrompt, tools string) []string {
+	args := []string{
 		// --safe-mode disables every customization Claude Code would otherwise
 		// load (CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands
 		// and agents, output styles, workflows) while leaving auth, the built-in
-		// tools and permissions alone — which is what makes it usable on an OAuth
-		// machine, where --bare is not.
+		// tools and permissions alone.
 		"--safe-mode",
 		"--no-session-persistence",
 		"--strict-mcp-config",
@@ -448,20 +442,20 @@ func scriptedClaudeMinimalArgs(systemPrompt, tools string, bare bool) []string {
 		// The built-in tool schemas dominate a Claude Code request; a capture
 		// that only needs to prove tool traffic happened asks for one of them.
 		"--tools", tools,
-	)
+	}
 	if systemPrompt != "" {
 		return append(args, "--system-prompt", systemPrompt)
 	}
 	return append(args, "--exclude-dynamic-system-prompt-sections")
 }
 
-// scriptedClaudeEnv repoints the credential for a --bare session, which reads
-// ANTHROPIC_API_KEY and never the bearer form.
+// scriptedClaudeEnv makes the credential explicit and nothing else.
 //
-// Both variables are removed first, unconditionally. pkg/proxyenv populates
+// Both variables are removed first, unconditionally: pkg/proxyenv populates
 // ANTHROPIC_AUTH_TOKEN with a "rafiki" placeholder when there is no token, and
-// that placeholder is exactly what stops Claude Code using its own OAuth login —
-// for a capture on an OAuth machine the variable has to be absent, not empty.
+// that placeholder is exactly what stops Claude Code using its own OAuth login.
+// With a token, the bearer form is what Claude Code sends — it accepts an API
+// key there as readily as an OAuth token, so one path serves both.
 func scriptedClaudeEnv(env []string, token string) []string {
 	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
@@ -473,5 +467,5 @@ func scriptedClaudeEnv(env []string, token string) []string {
 	if token == "" {
 		return out
 	}
-	return append(out, "ANTHROPIC_API_KEY="+token)
+	return append(out, "ANTHROPIC_AUTH_TOKEN="+token)
 }

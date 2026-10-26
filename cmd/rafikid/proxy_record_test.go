@@ -827,3 +827,80 @@ func TestProxyRecordAsksForAnIdentityBody(t *testing.T) {
 	response := string(r.recorded(harness.dir, "000001-response.http"))
 	r.strContains(response, "event: message_stop", "the response body must be readable text, not a compressed blob")
 }
+
+// TestProxyRecordRedactsAccountMetadata pins the one body field a capture must
+// not carry. Claude Code's metadata.user_id holds a device id and the account
+// uuid: a capture is meant to be shareable, and those two make it not.
+func TestProxyRecordRedactsAccountMetadata(t *testing.T) {
+	r := newRecordTest(t)
+	const userID = `{"device_id":"device-abc","account_uuid":"acct-123","session_id":"sess-1"}`
+	var forwarded string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		forwarded = string(body)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(upstream.Close)
+	harness := startProxyRecord(r, upstream.URL)
+	host := strings.TrimPrefix(harness.url, "http://")
+
+	body := `{"model":"m","metadata":{"user_id":` + strconv.Quote(userID) + `},"max_tokens":1}`
+	raw := "POST /v1/messages HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
+		"\r\n" + body
+	status, _ := r.postRaw(host, raw)
+	r.c.Eq(http.StatusOK, status, "client status")
+
+	r.c.Eq(body, forwarded, "the upstream must receive the body untouched: redaction is a recording rule")
+
+	recorded := string(r.recorded(harness.dir, "000001-request.http"))
+	r.c.NotStrContains(recorded, "acct-123", "the account uuid must never reach the file")
+	r.c.NotStrContains(recorded, "device-abc", "the device id must never reach the file")
+	r.c.StrContains(recorded, `"user_id":"sha256:`+recordTokenDigest(userID)+`"`,
+		"the field keeps its place, with its value digested")
+	r.c.StrContains(recorded, `"max_tokens":1`, "every other byte of the body is preserved")
+}
+
+// TestProxyRecordRedactsExtraJSONFields pins the flag: a caller can name further
+// fields, and each is digested in place.
+func TestProxyRecordRedactsExtraJSONFields(t *testing.T) {
+	r := newRecordTest(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(upstream.Close)
+	cfg, err := resolveProxyRecord(proxyRecordOptions{
+		Listen:       "127.0.0.1:0",
+		Upstream:     upstream.URL,
+		RecordDir:    filepath.Join(t.TempDir(), "recordings"),
+		RedactFields: []string{"trace.id"},
+	})
+	r.c.Require().NoError(err, "resolveProxyRecord")
+	buf := &syncBuffer{}
+	srv := httptest.NewServer(newRecordHandler(cfg.Upstream, newExchangeRecorder(cfg.RecordDir, "trace.id"), buf))
+	r.t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	body := `{"trace":{"id":"trace-secret"},"messages":[]}`
+	raw := "POST /v1/messages HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
+		"\r\n" + body
+	status, _ := r.postRaw(host, raw)
+	r.c.Eq(http.StatusOK, status, "client status")
+
+	recorded := string(r.recorded(cfg.RecordDir, "000001-request.http"))
+	r.c.NotStrContains(recorded, "trace-secret", "a named field must be digested")
+	r.c.StrContains(recorded, `"id":"sha256:`+recordTokenDigest("trace-secret")+`"`,
+		"the named field keeps its place")
+}
+
+// TestProxyRecordLeavesNonJSONBodiesAlone keeps the redaction honest: it is a
+// JSON rule, and a body it cannot parse is written exactly as it arrived.
+func TestProxyRecordLeavesNonJSONBodiesAlone(t *testing.T) {
+	r := newRecordTest(t)
+	body := "not json at all: metadata.user_id stays"
+	r.c.EqDeep([]byte(body), redactRecordedJSONFields([]byte(body), []string{recordDefaultRedactedField}),
+		"a non-JSON body must be untouched")
+}

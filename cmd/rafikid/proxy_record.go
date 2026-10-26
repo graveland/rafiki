@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,12 @@ const (
 	recordBadGatewayStatus = "502 Bad Gateway"
 	recordBadGatewayBody   = "rafikid proxy record: upstream request failed\n"
 
+	// recordDefaultRedactedField is redacted from every recorded request without
+	// being asked. Claude Code puts a device id and the ACCOUNT uuid in it, which
+	// is exactly what makes a capture unshareable — and unlike a prompt, it is
+	// never the reason someone is reading the capture.
+	recordDefaultRedactedField = "metadata.user_id"
+
 	// recordSecretsWarning is printed on every start. Credential headers are
 	// replaced by their digest (see recordCredentialDigest), but prompts,
 	// completions and anything else inside a body are recorded verbatim.
@@ -81,6 +88,9 @@ type proxyRecordOptions struct {
 	Listen    string
 	Upstream  string
 	RecordDir string
+	// RedactFields names additional JSON fields (dotted paths) whose value is
+	// replaced by its digest in the recorded request body.
+	RedactFields []string
 	// Exec, when set, is a shell command run with ANTHROPIC_BASE_URL pointed at
 	// the recorder. It turns the recorder into a harness: the command is the
 	// session, and the recorder's lifetime is the command's.
@@ -163,6 +173,10 @@ upstream and records it.`,
 	cmd.Flags().StringVar(&opts.Listen, "listen", "", "loopback host:port to serve on (port 0 picks a free one)")
 	cmd.Flags().StringVar(&opts.Upstream, "upstream", "", "absolute http:// or https:// URL to forward to")
 	cmd.Flags().StringVar(&opts.RecordDir, "record-dir", "", "absent or empty directory for the raw recordings")
+	cmd.Flags().StringArrayVar(&opts.RedactFields, "redact-json-field", nil,
+		"additional JSON field (dotted path, e.g. metadata.user_id) whose value is\n"+
+			"replaced by its sha256 in the recorded request; "+recordDefaultRedactedField+"\n"+
+			"is always redacted")
 	cmd.Flags().StringVar(&opts.Exec, "exec", "", "run this command (sh -c) with ANTHROPIC_BASE_URL pointed at\n"+
 		"the recorder, and exit when it does; the recordings are complete when\n"+
 		"this command exits")
@@ -292,7 +306,7 @@ func runProxyRecord(ctx context.Context, opts proxyRecordOptions, stderr io.Writ
 		return err
 	}
 	srv := &http.Server{
-		Handler: newRecordHandler(cfg.Upstream, newExchangeRecorder(cfg.RecordDir), stderr),
+		Handler: newRecordHandler(cfg.Upstream, newExchangeRecorder(cfg.RecordDir, opts.RedactFields...), stderr),
 		// No WriteTimeout: an SSE stream legitimately runs for minutes.
 		ReadHeaderTimeout: 30 * time.Second,
 	}
@@ -453,7 +467,7 @@ func (p *recordProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Numbering happens at acceptance, so the files follow arrival order even
 	// though the exchanges finish in whatever order the upstream answers.
 	seq := p.rec.nextSeq()
-	recordedRequest := formatRecordedRequest(r, body)
+	recordedRequest := formatRecordedRequest(r, body, p.rec.redactFields)
 
 	resp, err := p.forward(r, body)
 	if err != nil {
@@ -533,7 +547,7 @@ func writeGeneratedResponse(w http.ResponseWriter, status int, header http.Heade
 // formatRecordedRequest serialises the request as it arrived: start line,
 // headers, blank line, exact body. Header values are kept verbatim, credentials
 // included, because these files are forensic input for a later sanitizer.
-func formatRecordedRequest(r *http.Request, body []byte) []byte {
+func formatRecordedRequest(r *http.Request, body []byte, extraFields []string) []byte {
 	var b bytes.Buffer
 	target := r.RequestURI
 	if target == "" {
@@ -552,7 +566,7 @@ func formatRecordedRequest(r *http.Request, body []byte) []byte {
 	redactRecordedCredentials(header)
 	_ = header.Write(&b) // keys sorted, one line per value
 	b.WriteString("\r\n")
-	b.Write(body)
+	b.Write(redactRecordedJSONFields(body, append([]string{recordDefaultRedactedField}, extraFields...)))
 	return b.Bytes()
 }
 
@@ -599,6 +613,69 @@ func recordCredentialDigest(v string) string {
 func recordTokenDigest(token string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
 	return hex.EncodeToString(sum[:])
+}
+
+// redactRecordedJSONFields replaces the value at each dotted path with its
+// digest, leaving every other byte of the body exactly as it arrived.
+//
+// This is a RECORDING rule, like the credential headers: the upstream still
+// receives the body untouched. It exists because a capture is meant to be
+// shareable, and Claude Code's metadata.user_id carries a device id and the
+// account uuid — the two values that make a capture something you cannot hand
+// to someone else. A digest keeps captures comparable without keeping the
+// identity.
+func redactRecordedJSONFields(body []byte, fields []string) []byte {
+	for _, field := range fields {
+		body = redactJSONFieldPath(body, strings.Split(field, "."))
+	}
+	return body
+}
+
+// redactJSONFieldPath walks a dotted path through nested JSON objects and
+// splices the digested leaf back into the original bytes.
+func redactJSONFieldPath(body []byte, path []string) []byte {
+	if len(path) == 0 || len(body) == 0 {
+		return body
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	raw, ok := obj[path[0]]
+	if !ok {
+		return body
+	}
+	if len(path) == 1 {
+		return spliceJSONValue(body, raw, recordJSONDigest(raw))
+	}
+	inner := redactJSONFieldPath(raw, path[1:])
+	if bytes.Equal(inner, raw) {
+		return body
+	}
+	return spliceJSONValue(body, raw, inner)
+}
+
+// recordJSONDigest is `"sha256:<hex>"` for a JSON string value, or for any other
+// value its raw bytes digested, so a capture never carries the original.
+func recordJSONDigest(raw []byte) []byte {
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return []byte(`"sha256:` + recordTokenDigest(asString) + `"`)
+	}
+	return []byte(`"sha256:` + recordTokenDigest(string(raw)) + `"`)
+}
+
+// spliceJSONValue replaces the first occurrence of old with new. The value comes
+// from json.RawMessage, so it is the exact byte range the body already holds.
+func spliceJSONValue(body, old, new []byte) []byte {
+	i := bytes.Index(body, old)
+	if i < 0 || bytes.Equal(old, new) {
+		return body
+	}
+	out := make([]byte, 0, len(body)-len(old)+len(new))
+	out = append(out, body[:i]...)
+	out = append(out, new...)
+	return append(out, body[i+len(old):]...)
 }
 
 // formatRecordedResponse serialises a response the same way: the status line as
@@ -655,12 +732,15 @@ func streamResponse(w http.ResponseWriter, body io.Reader) ([]byte, error) {
 // slow exchange never delays another's bytes.
 type exchangeRecorder struct {
 	dir string
-	mu  sync.Mutex
-	seq uint64
+	// redactFields are extra JSON fields (dotted paths) reduced to their digest
+	// in every recorded request body; recordDefaultRedactedField is always done.
+	redactFields []string
+	mu           sync.Mutex
+	seq          uint64
 }
 
-func newExchangeRecorder(dir string) *exchangeRecorder {
-	return &exchangeRecorder{dir: dir}
+func newExchangeRecorder(dir string, redactFields ...string) *exchangeRecorder {
+	return &exchangeRecorder{dir: dir, redactFields: redactFields}
 }
 
 // recordFileName is the on-disk name of one half of an exchange, e.g.
