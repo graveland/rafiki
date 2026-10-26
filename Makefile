@@ -147,11 +147,16 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 # CLAUDE_CONFIG_DIR is left alone, because on a machine with more than one Claude
 # Code config that variable names the one that actually holds the credential.
 #
-# The recordings hold your credential and your prompts in clear text. They are
-# written outside the repository by default and must never be committed.
+# The capture lands in testdata/claude-capture and REPLACES whatever is there,
+# so committing it after a run turns `git diff` into "what changed in Claude
+# Code's requests?" — which is the point: the client changes constantly and a
+# capture is a snapshot of one day's protocol, not an archive.
+#
+# Credentials and the account/device ids are digests, so the capture is safe to
+# commit; prompts and completions are not, so keep the turns file boring.
 .PHONY: capture-claude
 capture-claude: build ## Record a scripted claude session (MODEL=, TURNS=, OUT=, SYSPROMPT=).
-	@OUT="$${OUT:-$(HOME)/rafiki-captures/claude-$$(date +%Y%m%d-%H%M%S)}" \
+	@OUT="$${OUT:-$(CURDIR)/testdata/claude-capture}" \
 	 TURNS="$${TURNS:-scripts/capture-turns.txt}" \
 	 MODEL="$${MODEL:-haiku}" \
 	 SYSPROMPT="$${SYSPROMPT:-}" \

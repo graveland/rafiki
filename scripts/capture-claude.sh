@@ -4,7 +4,7 @@
 # Called by `make capture-claude`; also runnable directly. Everything it needs
 # comes from the environment:
 #
-#   OUT       record directory (default: ~/rafiki-captures/claude-<timestamp>)
+#   OUT       record directory (default: <repo>/testdata/claude-capture)
 #   TURNS     prompts file, one per line (default: scripts/capture-turns.txt)
 #   MODEL     model for the session (default: haiku)
 #   SYSPROMPT one-line system prompt for the capture
@@ -19,7 +19,7 @@
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-out=${OUT:-$HOME/rafiki-captures/claude-$(date +%Y%m%d-%H%M%S)}
+out=${OUT:-$root/testdata/claude-capture}
 turns=${TURNS:-scripts/capture-turns.txt}
 model=${MODEL:-haiku}
 sysprompt=${SYSPROMPT:-You are a minimal capture session. Answer in one short sentence, and use a tool when asked to.}
@@ -45,16 +45,42 @@ EOF
 chmod 0700 "$inner"
 trap 'rm -rf "$work"' EXIT INT TERM
 
+# A capture is a snapshot to diff against, not an archive: the default location
+# is replaced every run so `git diff` answers "what did Claude Code change?".
+# REPLACE=0 turns that off and lets the recorder's non-empty refusal stand.
+readme=
+if [ -f "$out/README.md" ]; then
+	readme=$(mktemp)
+	cp "$out/README.md" "$readme"
+fi
+
+if [ -d "$out" ] && [ -n "$(ls -A "$out" 2>/dev/null)" ]; then
+	if [ "${REPLACE:-1}" = 1 ]; then
+		echo "capture: replacing the existing capture at $out"
+		rm -rf "$out"
+	else
+		echo "capture: $out already holds a capture; REPLACE=1 (the default) replaces it" >&2
+		exit 1
+	fi
+fi
+
 echo "capture: model=$model"
 echo "capture: turns=$turns"
 echo "capture: recording into $out"
 
+# The README is the directory's explanation, not part of the capture: the
+# recorder refuses a non-empty directory, so it is lifted out and put back.
 status=0
 "$rafikid" proxy record \
   --listen 127.0.0.1:0 \
   --upstream https://api.anthropic.com \
   --record-dir "$out" \
   --exec "$inner" || status=$?
+
+if [ -n "$readme" ] && [ -f "$readme" ]; then
+	cp "$readme" "$out/README.md"
+	rm -f "$readme"
+fi
 
 echo "capture: exit $status, $(ls "$out" 2>/dev/null | wc -l | tr -d ' ') file(s) in $out"
 exit $status

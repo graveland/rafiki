@@ -1,0 +1,71 @@
+HTTP/1.1 200 OK
+Anthropic-Organization-Id: 0a518565-263c-4160-a9ac-6352799211db
+Anthropic-Ratelimit-Unified-5h-Reset: 1793061000
+Anthropic-Ratelimit-Unified-5h-Status: allowed
+Anthropic-Ratelimit-Unified-5h-Utilization: 0.02
+Anthropic-Ratelimit-Unified-7d-Reset: 1793383200
+Anthropic-Ratelimit-Unified-7d-Status: allowed
+Anthropic-Ratelimit-Unified-7d-Utilization: 0.45
+Anthropic-Ratelimit-Unified-Fallback-Percentage: 0.5
+Anthropic-Ratelimit-Unified-Overage-Disabled-Reason: out_of_credits
+Anthropic-Ratelimit-Unified-Overage-Status: rejected
+Anthropic-Ratelimit-Unified-Representative-Claim: five_hour
+Anthropic-Ratelimit-Unified-Reset: 1793061000
+Anthropic-Ratelimit-Unified-Status: allowed
+Anthropic-Workspace-Id: wrkspc_018b8WGdDeGtTZqBKfn7LC9J
+Cache-Control: no-cache
+Cf-Cache-Status: DYNAMIC
+Cf-Ray: a50c22dd58002005-YVR
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Content-Type: text/event-stream; charset=utf-8
+Date: Mon, 26 Oct 2026 20:16:00 GMT
+Request-Id: req_011CgRTqBjiWgN6VrnnL4iPU
+Server: cloudflare
+Server-Timing: x-originResponse;dur=111
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Traceresponse: 00-a36ca774374f57c8dd3788d2ecf9e4e7-5f86a97022872779-01
+Vary: Accept-Encoding
+X-Robots-Tag: none
+
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_011CgRTqBvt4GP1ie2f7zKy8","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":8,"cache_creation_input_tokens":135,"cache_read_input_tokens":4397,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":135},"output_tokens":6,"service_tier":"standard","inference_geo":"not_available","speed":"standard"},"input_transformations":[],"diagnostics":null,"context_management":null}       }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}              }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqoDCtABCBMYAipAC4aTdwrT2BgUwfwFKfLROhmRjFkb8ZIeOPH64RUKsIqxn7lx0rk+DEmsKQY79pooHNTZMJ8teCwQGiJaykhi6jIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okMGE1MTg1NjUtMjYzYy00MTYwLWE5YWMtNjM1Mjc5OTIxMWRichBZ5LAmMoRv377DQ65Y+P2oiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAGA6v7WBrABAhIMFFL97RFGjamO6wtrGgzg0fKMGuxsL2bT6KsiMETj/vDVxc4M7G9GEHWw2JUK3rECys54Pb5CnEKXS5utl7OzBHnqBRGaG71zsMbEWCqGAbWztq3fbzO5ulQD3zAwI5NEObRHR3NSOwKgBVHgFcUiu0ZlaO4M8dqsw5tlNVFtue+UXM03cKtEemFifY4WWoFvNzQyO7YlfbHBSmHViCr46z6nrXvfP7WOyo1Bx/8A4JmXA/lN+/nZzNpsMiVIWIN8639O73NJnhbOzy6rRtjQVkUBkMYKGAE="}  }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0           }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"The"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" exact"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" output is: `tool-"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok`"}   }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1              }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":8,"cache_creation_input_tokens":135,"cache_read_input_tokens":4397,"output_tokens":46,"output_tokens_details":{"thinking_tokens":30},"iterations":[{"input_tokens":8,"output_tokens":46,"cache_read_input_tokens":4397,"cache_creation_input_tokens":135,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":135},"type":"message"}]},"context_management":{"applied_edits":[]}             }
+
+event: message_stop
+data: {"type":"message_stop"     }
+
