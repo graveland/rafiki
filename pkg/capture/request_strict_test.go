@@ -277,3 +277,15 @@ func TestDescribeOccupantMismatchNamesPathsNotContent(t *testing.T) {
 	c.True(strings.Contains(got, "blocks stored=[tool_use] replay=[tool_use]"), "got %s", got)
 	c.True(!strings.Contains(got, "SECRET"), "diagnostic leaked content: %s", got)
 }
+
+// Postgres jsonb reorders object keys, so the stored tool_use input and the
+// client's replay of it can differ only in key order.
+func TestSameAnthropicContentIgnoresToolInputKeyOrder(t *testing.T) {
+	c := assert.NewAborting(t)
+	stored := []byte(`[{"type":"tool_use","id":"t1","name":"ToolSearch","input":{"query": "select:x", "max_results": 1}}]`)
+	replay := []byte(`[{"type":"tool_use","id":"t1","name":"ToolSearch","input":{"max_results":1,"query":"select:x"},"caller":{"type":"direct"}}]`)
+	c.True(sameAnthropicContent(stored, replay), "key order of a tool_use input is not content")
+
+	changed := []byte(`[{"type":"tool_use","id":"t1","name":"ToolSearch","input":{"max_results":2,"query":"select:x"}}]`)
+	c.True(!sameAnthropicContent(stored, changed), "a changed input value is content")
+}

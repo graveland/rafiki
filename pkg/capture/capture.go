@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"strings"
 	"time"
 
@@ -124,14 +125,35 @@ func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, 
 // Meaningful blocks and tool inputs survive the round-trip. Invalid or unknown
 // content is not a semantic replay.
 func sameAnthropicContent(a, b []byte) bool {
-	am, aok := anthropicContentBlocks(a)
-	bm, bok := anthropicContentBlocks(b)
-	if !aok || !bok {
-		return false
+	am, aok := sdkCanonicalBlocks(a)
+	bm, bok := sdkCanonicalBlocks(b)
+	return aok && bok && reflect.DeepEqual(am, bm)
+}
+
+// sdkCanonicalBlocks is the SDK round-trip of content as generic JSON. Decoding
+// it, instead of comparing the marshalled bytes, makes object key order
+// irrelevant: a tool_use input passes through the SDK as raw JSON, and
+// Postgres jsonb stores it with its keys reordered.
+func sdkCanonicalBlocks(content []byte) ([]any, bool) {
+	blocks, ok := anthropicContentBlocks(content)
+	if !ok {
+		return nil, false
 	}
-	ac, aerr := json.Marshal(am)
-	bc, berr := json.Marshal(bm)
-	return aerr == nil && berr == nil && bytes.Equal(ac, bc)
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, false
+	}
+	return decodeBlocks(raw)
+}
+
+func decodeBlocks(raw []byte) ([]any, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var out []any
+	if err := dec.Decode(&out); err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // anthropicContentBlocks decodes the two content forms Anthropic permits in

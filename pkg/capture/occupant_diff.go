@@ -39,20 +39,14 @@ func describeOccupantMismatch(storedRole, role string, stored, replay []byte) st
 // canonicalBlocks is the form capture compares: the SDK round-trip when the
 // content is Anthropic blocks, otherwise the cache_control-stripped JSON.
 func canonicalBlocks(content []byte) ([]any, bool) {
-	var raw []byte
-	if blocks, ok := anthropicContentBlocks(content); ok {
-		var err error
-		if raw, err = json.Marshal(blocks); err != nil {
-			return nil, false
-		}
-	} else if raw, ok = normalizeMessage(content); !ok {
+	if out, ok := sdkCanonicalBlocks(content); ok {
+		return out, true
+	}
+	raw, ok := normalizeMessage(content)
+	if !ok {
 		return nil, false
 	}
-	var out []any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, false
-	}
-	return out, true
+	return decodeBlocks(raw)
 }
 
 func blockTypes(blocks []any) []string {
