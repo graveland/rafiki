@@ -27,7 +27,10 @@ awaited on its own result frame. It is how a capture run gets several turns
 (text, tool call, follow-up) in one conversation, and it works against any
 Anthropic-protocol endpoint — including `rafikid proxy record`, which sets
 `ANTHROPIC_BASE_URL` for it. `--turn-timeout` bounds a single turn so a wedged
-session fails rather than hanging.
+session fails rather than hanging. A scripted run resolves no profile at all —
+endpoint from `--url` or `ANTHROPIC_BASE_URL`, credential from `--token`,
+`ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` — so it works on a host with no
+rafiki config.
 
 One client-side gotcha when pointing Claude Code at any proxy by hand: its
 SSE-ping stream-idle watchdog only activates when the base URL host is

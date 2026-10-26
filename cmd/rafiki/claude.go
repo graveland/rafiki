@@ -140,8 +140,6 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	if limits, _ := cmd.Flags().GetBool("limits"); limits {
 		return runClaudeLimits(cmd)
 	}
-	p := mustProfile(cmd)
-
 	token, _ := cmd.Flags().GetString("token")
 	model, _ := cmd.Flags().GetString("model")
 	session, _ := cmd.Flags().GetString("session")
@@ -155,21 +153,43 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	// and --turns makes the requirement explicit (and errors when it is empty).
 	scripted := len(turns) > 0
 
+	// A scripted run resolves NO profile. It is a capture, not a daemon
+	// session: it must work on a host with no rafiki config, no daemon and no
+	// token minted for anything, which is exactly the host `rafikid proxy
+	// record` exists for. Everything it needs comes from flags or the
+	// environment.
+	var p profile.Resolved
+	if !scripted {
+		p = mustProfile(cmd)
+	}
+
 	flagURL, _ := cmd.Flags().GetString("url")
 	url := resolveClaudeURL(flagURL, scripted, os.Getenv("ANTHROPIC_BASE_URL"), p.Proxy)
 	if url == "" {
+		if scripted {
+			return errors.New("no endpoint: pass --url, or run under `rafikid proxy record --exec`, " +
+				"which sets ANTHROPIC_BASE_URL to its own listener")
+		}
 		return fmt.Errorf("profile %q has no proxy URL; pass --url, or set `proxy` in %s",
 			p.Name, profile.ProfilesFile())
 	}
-	if scripted && token == "" {
-		// A scripted run may target a recorder rather than a rafiki daemon, and
-		// a recorder relays the credential verbatim: the shell's own Anthropic
-		// credential is the one the upstream accepts.
-		token = envFirst("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
-	}
-	token, err = resolveClaudeToken(token, p.Token)
-	if err != nil {
-		return err
+	if scripted {
+		// The shell's own Anthropic credential is the one an upstream accepts,
+		// and a recorder relays it verbatim: there is no profile token to fall
+		// back to, and none is resolved.
+		if token == "" {
+			token = envFirst("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+		}
+		if token == "" {
+			return errors.New("no credential: pass --token, or set ANTHROPIC_AUTH_TOKEN " +
+				"(ANTHROPIC_API_KEY is the fallback); a scripted run sends it to the endpoint " +
+				"and the recorder records it")
+		}
+	} else {
+		token, err = resolveClaudeToken(token, p.Token)
+		if err != nil {
+			return err
+		}
 	}
 	passthroughMode, err := parsePassthroughMode(passthroughFlag)
 	if err != nil {
@@ -246,7 +266,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		timeout, _ := cmd.Flags().GetDuration("turn-timeout")
-		return runClaudeTurns(claudeTurnsOptions{
+		return runClaudeTurnsFn(claudeTurnsOptions{
 			Env:     env,
 			Args:    claudeargv.Build(staged),
 			Turns:   turns,
@@ -356,6 +376,10 @@ func launchClaude(inv claudeInvocation) error {
 	}
 	return nil
 }
+
+// runClaudeTurnsFn is a variable for the same reason execClaude is: tests
+// capture the assembled scripted session instead of spawning a real claude.
+var runClaudeTurnsFn = runClaudeTurns
 
 // resolveClaudeURL is the endpoint precedence for `rafiki claude`: --url, then
 // (scripted runs only) an inherited ANTHROPIC_BASE_URL, then the profile's

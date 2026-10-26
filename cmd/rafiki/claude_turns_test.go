@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/multigres/testkit/assert"
+
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
 // fakeClaudeTurns writes a stand-in for the claude binary that speaks the
@@ -159,4 +161,68 @@ func TestResolveClaudeURLPinsScriptedPrecedence(t *testing.T) {
 		"with no env base URL a scripted run still falls back to the profile")
 	c.Eq(profile, resolveClaudeURL("", false, fromEnv, profile),
 		"an interactive run keeps the profile's proxy: the env var is not its endpoint")
+}
+
+// TestScriptedClaudeResolvesNoProfile pins the isolation property a capture
+// depends on: a scripted run must work on a host with no rafiki config at all,
+// so it resolves no profile, mints no bootstrap one, and takes its endpoint and
+// credential from flags or the environment only.
+func TestScriptedClaudeResolvesNoProfile(t *testing.T) {
+	c := assert.NewCollecting(t)
+	isolateProfiles(t)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-ant-from-env")
+
+	orig := runClaudeTurnsFn
+	t.Cleanup(func() { runClaudeTurnsFn = orig })
+	var got claudeTurnsOptions
+	runClaudeTurnsFn = func(o claudeTurnsOptions) error {
+		got = o
+		return nil
+	}
+
+	cmd := newClaudeCmd()
+	c.Require().NoError(cmd.ParseFlags([]string{"--url", "http://127.0.0.1:9", "--turn", "hello"}),
+		"parse flags")
+	c.Require().NoError(runClaude(cmd, nil), "a scripted run must not need a profile")
+
+	c.EqDeep([]string{"hello"}, got.Turns, "the prompt must reach the driver")
+	argv := strings.Join(got.Args, " ")
+	c.StrContains(argv, "--input-format stream-json", "a scripted run is the headless contract")
+	c.StrContains(argv, "--output-format stream-json", "a scripted run is the headless contract")
+
+	joined := strings.Join(got.Env, "\n")
+	c.StrContains(joined, "ANTHROPIC_BASE_URL=http://127.0.0.1:9", "the endpoint must be the one given")
+	c.StrContains(joined, "ANTHROPIC_AUTH_TOKEN=sk-ant-from-env",
+		"the credential must come from the environment, since there is no profile to supply one")
+
+	// The positive proof that nothing resolved a profile: resolution either
+	// bootstraps profiles.toml or leaves it absent, and this run must leave it
+	// absent. (A sibling test that already consumed profileOnce would resolve
+	// from ITS temp dir, so this check is about this run's own config tree.)
+	_, err := os.Stat(profile.ProfilesFile())
+	c.True(os.IsNotExist(err), "a scripted run must not create a profile file (stat: %v)", err)
+}
+
+// TestScriptedClaudeNeedsACredential keeps the failure honest: with no --token
+// and no Anthropic credential in the environment there is nothing to send, and
+// saying so beats launching a session that 401s upstream.
+func TestScriptedClaudeNeedsACredential(t *testing.T) {
+	c := assert.NewCollecting(t)
+	isolateProfiles(t)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	orig := runClaudeTurnsFn
+	t.Cleanup(func() { runClaudeTurnsFn = orig })
+	runClaudeTurnsFn = func(claudeTurnsOptions) error {
+		c.Fail("a session with no credential must not start")
+		return nil
+	}
+
+	cmd := newClaudeCmd()
+	c.Require().NoError(cmd.ParseFlags([]string{"--url", "http://127.0.0.1:9", "--turn", "hi"}),
+		"parse flags")
+	err := runClaude(cmd, nil)
+	c.Require().Error(err, "no credential must be refused")
+	c.StrContains(err.Error(), "no credential", "the error must name what is missing")
 }

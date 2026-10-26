@@ -180,6 +180,13 @@ Code headless in the same stream-json mode a daemon-managed claude child uses,
 so every turn is a prompt on one process, one conversation and one session id —
 rather than one independent `-p` run per prompt.
 
+A scripted run resolves **no profile**: it takes its endpoint from `--url` or
+the inherited `ANTHROPIC_BASE_URL`, and its credential from `--token`,
+`ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. That is what lets the whole
+capture run under `env -i` on a host with no rafiki config and no daemon —
+`--turn` with none of those set is a clear error rather than a 401 from
+upstream.
+
 **The recordings are raw.** Authorization headers, prompts and completions are
 stored unredacted for a later sanitizer to strip. Treat the directory as a
 secret: never commit it and never share it.
