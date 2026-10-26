@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
@@ -43,7 +44,11 @@ func TestCapturedClaudeSessionReplays(t *testing.T) {
 	ctx, _, s := horizonTestEnv(t)
 	convID := strictConv(t, ctx, s, "captured-session")
 
-	for n := 1; n <= 5; n++ {
+	requests, err := filepath.Glob(filepath.Join("..", "..", "testdata", "claude-capture", "*-request.http"))
+	c.NoError(err, "glob captured requests")
+	c.Greater(0, len(requests), "no captured requests")
+
+	for n := 1; n <= len(requests); n++ {
 		req := captureFixtureBody(t, fmt.Sprintf("%06d-request.http", n))
 		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, Protocol: "anthropic"})
 		c.NoError(err, "InsertTurnIntent request %d", n)
@@ -261,4 +266,14 @@ func TestRequestUserMessageOnStoredReplyIsOrdinalOccupied(t *testing.T) {
 	c.NoError(err, "InsertTurnIntent")
 	_, err = s.DecomposeRequest(ctx, convID, turn2, createdAt2, req2, "h")
 	c.ErrorIs(err, ErrOrdinalOccupied, "a user message on a stored reply")
+}
+
+func TestDescribeOccupantMismatchNamesPathsNotContent(t *testing.T) {
+	c := assert.NewAborting(t)
+	stored := []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"SECRET one"}}]`)
+	replay := []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"SECRET two"}}]`)
+	got := describeOccupantMismatch("assistant", "assistant", stored, replay)
+	c.True(strings.Contains(got, "block 0 differs at /input/command"), "got %s", got)
+	c.True(strings.Contains(got, "blocks stored=[tool_use] replay=[tool_use]"), "got %s", got)
+	c.True(!strings.Contains(got, "SECRET"), "diagnostic leaked content: %s", got)
 }

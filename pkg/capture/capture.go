@@ -113,7 +113,8 @@ func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, 
 	if storedRole == role && (sameAnthropicContent(stored, content) || sameMessage(stored, content)) {
 		return nil
 	}
-	return fmt.Errorf("%w: conversation %s ordinal %d (request message)", ErrOrdinalOccupied, convID, ordinal)
+	return fmt.Errorf("%w: conversation %s ordinal %d (request message): %s", ErrOrdinalOccupied, convID, ordinal,
+		describeOccupantMismatch(storedRole, role, stored, content))
 }
 
 // sameAnthropicContent compares request content after the Anthropic SDK has
