@@ -187,6 +187,12 @@ capture run under `env -i` on a host with no rafiki config and no daemon —
 `--turn` with none of those set is a clear error rather than a 401 from
 upstream.
 
+**Bodies are uncompressed.** The recorder forwards no `Accept-Encoding`, so the
+upstream answers with an identity body and a response file is readable text — a
+gzip blob is neither inspectable nor useful as a fixture. The client's own
+`Accept-Encoding` is still recorded in the request file, because that is what
+the client asked for.
+
 **The recordings are raw, except for credentials.** Bodies are stored exactly as
 they crossed the boundary, so prompts and completions are there in clear text.
 The credential headers — `Authorization`, `Proxy-Authorization`, `X-Api-Key`,

@@ -793,3 +793,37 @@ func TestRecordCredentialDigest(t *testing.T) {
 	r.c.Eq(recordCredentialDigest("Bearer tok"), recordCredentialDigest("Bearer  tok "),
 		"surrounding whitespace must not change the digest")
 }
+
+// TestProxyRecordAsksForAnIdentityBody pins the choice that makes a capture
+// readable: the recorder forwards no Accept-Encoding, so the upstream answers
+// with an uncompressed body and the response file is text rather than a gzip
+// blob. The client's own Accept-Encoding is still recorded in the request file,
+// which is where it belongs — it is what the client asked for.
+func TestProxyRecordAsksForAnIdentityBody(t *testing.T) {
+	r := newRecordTest(t)
+	var seenAcceptEncoding []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		seenAcceptEncoding = req.Header.Values("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	harness := startProxyRecord(r, upstream.URL)
+	host := strings.TrimPrefix(harness.url, "http://")
+
+	body := `{"model":"m"}`
+	raw := "POST /v1/messages HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Accept-Encoding: gzip, deflate, br, zstd\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n" +
+		"\r\n" + body
+	status, _ := r.postRaw(host, raw)
+	r.c.Eq(http.StatusOK, status, "client status")
+
+	r.c.Eq(0, len(seenAcceptEncoding), "the upstream must be asked for an identity body")
+	recorded := string(r.recorded(harness.dir, "000001-request.http"))
+	r.strContains(recorded, "Accept-Encoding: gzip, deflate, br, zstd",
+		"what the CLIENT asked for is still recorded")
+	response := string(r.recorded(harness.dir, "000001-response.http"))
+	r.strContains(response, "event: message_stop", "the response body must be readable text, not a compressed blob")
+}

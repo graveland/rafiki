@@ -501,6 +501,12 @@ func (p *recordProxy) forward(r *http.Request, body []byte) (*http.Response, err
 	// Host is left to the URL: the upstream names the authority the bytes are
 	// for. The client's Host is still what the request file records.
 	out.Header = r.Header.Clone()
+	// Ask the upstream for an identity body. A capture is read by a human and by
+	// a sanitizer, and a gzip blob is neither — the transport's DisableCompression
+	// stops Go transparently decompressing, it does not stop the upstream
+	// compressing. The client's own Accept-Encoding is already in the recorded
+	// request, so nothing about what it asked for is lost.
+	out.Header.Del("Accept-Encoding")
 	return p.transport.RoundTrip(out)
 }
 
