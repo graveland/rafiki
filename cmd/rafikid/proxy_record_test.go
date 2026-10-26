@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -666,4 +668,78 @@ func requestToken(message []byte) string {
 		return ""
 	}
 	return string(message[start : start+end+1])
+}
+
+// TestProxyRecordExecDrivesTheSessionAndExits is the harness contract: with
+// --exec the recorder runs the command with ANTHROPIC_BASE_URL pointing at
+// itself, records what the command sent, and returns once the command exits —
+// so the recordings are complete when this call returns, not later.
+func TestProxyRecordExecDrivesTheSessionAndExits(t *testing.T) {
+	r := newRecordTest(t)
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not on PATH; this test drives one exchange through it")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(append([]byte("echo:"), body...))
+	}))
+	t.Cleanup(upstream.Close)
+
+	dir := filepath.Join(t.TempDir(), "recordings")
+	stderr := &syncBuffer{}
+	err := runProxyRecord(context.Background(), proxyRecordOptions{
+		Listen:    "127.0.0.1:0",
+		Upstream:  upstream.URL,
+		RecordDir: dir,
+		Exec: `printf '%s' '{"n":1}' | curl -sS -X POST ` +
+			`-H 'Content-Type: application/json' --data-binary @- ` +
+			`"$ANTHROPIC_BASE_URL/v1/messages"`,
+	}, stderr)
+	r.c.NoError(err, "a command that exits 0 must not fail the recorder")
+
+	r.strContains(string(r.recorded(dir, "000001-request.http")), `{"n":1}`,
+		"the command's request must be recorded")
+	r.strContains(string(r.recorded(dir, "000001-response.http")), `echo:{"n":1}`,
+		"the command's response must be recorded")
+}
+
+// TestProxyRecordExecPropagatesTheCommandStatus pins that --exec makes the
+// recorder a wrapper: the wrapped command's status is what the process reports,
+// not a flattened 1.
+func TestProxyRecordExecPropagatesTheCommandStatus(t *testing.T) {
+	r := newRecordTest(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	err := runProxyRecord(context.Background(), proxyRecordOptions{
+		Listen:    "127.0.0.1:0",
+		Upstream:  upstream.URL,
+		RecordDir: filepath.Join(t.TempDir(), "recordings"),
+		Exec:      "exit 7",
+	}, &syncBuffer{})
+
+	var exitErr *recordExecExitError
+	r.c.Require().True(errors.As(err, &exitErr), "want a recordExecExitError, got %v", err)
+	r.c.Eq(7, exitErr.code, "the wrapped command's status")
+}
+
+// TestProxyRecordExecEnvPointsAtTheListener pins the one environment change
+// --exec makes: ANTHROPIC_BASE_URL is the bound listener, replacing an inherited
+// value, and everything else passes through in order.
+func TestProxyRecordExecEnvPointsAtTheListener(t *testing.T) {
+	r := newRecordTest(t)
+	got := recordExecEnv([]string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_BASE_URL=https://api.anthropic.com",
+		"ANTHROPIC_AUTH_TOKEN=sk-ant-real",
+	}, "http://127.0.0.1:4242")
+
+	r.c.EqDeep([]string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_AUTH_TOKEN=sk-ant-real",
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:4242",
+	}, got, "the recorder's own address must replace any inherited base URL")
 }

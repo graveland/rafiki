@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -76,6 +77,10 @@ type proxyRecordOptions struct {
 	Listen    string
 	Upstream  string
 	RecordDir string
+	// Exec, when set, is a shell command run with ANTHROPIC_BASE_URL pointed at
+	// the recorder. It turns the recorder into a harness: the command is the
+	// session, and the recorder's lifetime is the command's.
+	Exec string
 }
 
 // proxyRecordConfig is proxyRecordOptions validated and resolved: ready to bind.
@@ -123,7 +128,13 @@ so it can later be sanitized into a fixture.
 
 --record-dir must be absent (created 0700) or empty; the recorder never
 overwrites a recording. Every file is 0600 and appears only once its pair is
-complete.`,
+complete.
+
+With --exec the recorder drives the session instead of waiting for one: it runs
+the command with ANTHROPIC_BASE_URL set to the bound listener, waits for it to
+exit, drains the exchanges it made, and exits with the command's status. The
+command's own credential is passed through untouched — the recorder relays it
+upstream and records it.`,
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -132,13 +143,23 @@ complete.`,
 			// each one finishes its paired write.
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			return runProxyRecord(ctx, opts, cmd.ErrOrStderr())
+			err := runProxyRecord(ctx, opts, cmd.ErrOrStderr())
+			// --exec makes the recorder a wrapper, so it reports the wrapped
+			// command's status rather than flattening every failure to 1.
+			var exitErr *recordExecExitError
+			if errors.As(err, &exitErr) {
+				os.Exit(exitErr.code)
+			}
+			return err
 		},
 	}
 
 	cmd.Flags().StringVar(&opts.Listen, "listen", "", "loopback host:port to serve on (port 0 picks a free one)")
 	cmd.Flags().StringVar(&opts.Upstream, "upstream", "", "absolute http:// or https:// URL to forward to")
 	cmd.Flags().StringVar(&opts.RecordDir, "record-dir", "", "absent or empty directory for the raw recordings")
+	cmd.Flags().StringVar(&opts.Exec, "exec", "", "run this command (sh -c) with ANTHROPIC_BASE_URL pointed at\n"+
+		"the recorder, and exit when it does; the recordings are complete when\n"+
+		"this command exits")
 	for _, name := range []string{"listen", "upstream", "record-dir"} {
 		_ = cmd.MarkFlagRequired(name)
 	}
@@ -272,10 +293,24 @@ func runProxyRecord(ctx context.Context, opts proxyRecordOptions, stderr io.Writ
 
 	// The URL announced is the one actually bound, so --listen with port 0 is
 	// usable: the caller reads the port out of this line.
-	_, _ = fmt.Fprint(stderr, recordAnnouncement(recordListenerURL(ln), cfg.RecordDir))
+	listenURL := recordListenerURL(ln)
+	_, _ = fmt.Fprint(stderr, recordAnnouncement(listenURL, cfg.RecordDir))
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
+
+	// With --exec the recorder is a harness: the command IS the session, so its
+	// exit ends the recording. Draining afterwards is what makes the pairs on
+	// disk complete when this process returns — a caller can read the directory
+	// the moment --exec's command is done.
+	if opts.Exec != "" {
+		execErr := runRecordExec(ctx, opts.Exec, listenURL, stderr)
+		shutdownErr := drainRecordServer(srv, serveErr)
+		if execErr != nil {
+			return execErr
+		}
+		return shutdownErr
+	}
 
 	select {
 	case err := <-serveErr:
@@ -285,9 +320,12 @@ func runProxyRecord(ctx context.Context, opts proxyRecordOptions, stderr io.Writ
 		return err
 	case <-ctx.Done():
 	}
+	return drainRecordServer(srv, serveErr)
+}
 
-	// Shutdown waits for in-flight handlers, which is what lets an exchange
-	// finish its paired write before the process exits.
+// drainRecordServer shuts the listener down and waits for it, so every in-flight
+// exchange finishes its paired write before the process exits.
+func drainRecordServer(srv *http.Server, serveErr <-chan error) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), recordShutdownGrace)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -297,6 +335,54 @@ func runProxyRecord(ctx context.Context, opts proxyRecordOptions, stderr io.Writ
 		return err
 	}
 	return nil
+}
+
+// runRecordExec runs the --exec command with ANTHROPIC_BASE_URL pointed at the
+// recorder. Its stdin, stdout and stderr are the caller's: the command is the
+// foreground session, and the recorder is infrastructure behind it.
+//
+// Everything else in the environment passes through untouched, the credential
+// included — the recorder relays whatever auth it is handed and records it,
+// which is the point of the capture.
+func runRecordExec(ctx context.Context, command, listenURL string, stderr io.Writer) error {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Env = recordExecEnv(os.Environ(), listenURL)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return &recordExecExitError{command: command, code: exitErr.ExitCode()}
+	}
+	if err != nil {
+		return fmt.Errorf("--exec %q: %w", command, err)
+	}
+	return nil
+}
+
+// recordExecExitError carries the --exec command's exit status out of the
+// recorder, so `rafikid proxy record --exec ...` exits the way the wrapped
+// command did.
+type recordExecExitError struct {
+	command string
+	code    int
+}
+
+func (e *recordExecExitError) Error() string {
+	return fmt.Sprintf("--exec %q exited %d", e.command, e.code)
+}
+
+// recordExecEnv replaces any inherited ANTHROPIC_BASE_URL with the listener the
+// recorder just bound. Every other variable is passed through in order, so the
+// command sees the operator's own credential and nothing is reordered.
+func recordExecEnv(base []string, listenURL string) []string {
+	env := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "ANTHROPIC_BASE_URL=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "ANTHROPIC_BASE_URL="+listenURL)
 }
 
 // recordAnnouncement is the startup block: the URL actually bound, the
