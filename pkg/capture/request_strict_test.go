@@ -125,6 +125,28 @@ func TestRequestReplayOfStoredReplyIsNotOrdinalOccupied(t *testing.T) {
 	c.StrContains(content, `"OfWebSearchToolResultBlockArray"`, "the stored reply is untouched")
 }
 
+const storedTextReplyCanonical = `{"id":"msg_text","type":"message","content":[{"type":"text","text":"yo"}]}`
+
+// Claude Code may use the API's plain-string shorthand when replaying a prior
+// text-only assistant response. Capture stored it as the SDK's text block, so
+// the two forms must compare as the same response.
+func TestRequestPlainTextReplayOfStoredReplyIsNotOrdinalOccupied(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, _, s := horizonTestEnv(t)
+	convID := strictConv(t, ctx, s, "reply-text")
+
+	req1 := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	h1 := routing.PrefixHash(req1)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req1, PrefixHash: h1, Protocol: "anthropic"})
+	c.NoError(err, "InsertTurnIntent")
+	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req1, h1)
+	c.NoError(err, "turn 1 decompose")
+	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, []byte(storedTextReplyCanonical), 1, 1, "end_turn"), "AppendResponseMessage")
+
+	req2 := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"next"}]}`)
+	c.Eq(3, runTurn(t, ctx, s, convID, req2, 1, 1), "plain-text replay")
+}
+
 // A differing assistant message remains strict even at a captured response
 // ordinal. Its meaningful tool-use input differs from the stored reply.
 func TestRequestDifferentAssistantContentOnStoredReplyIsOrdinalOccupied(t *testing.T) {

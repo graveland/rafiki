@@ -137,17 +137,35 @@ func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, 
 }
 
 // sameAssistantContent compares assistant content after the Anthropic SDK has
-// decoded and encoded both values. This removes provider-only fields not modelled
-// by the SDK (such as tool_use.caller) while retaining meaningful blocks and
-// tool inputs. Invalid or unknown content is not a replay.
+// decoded and encoded both values. It also gives a legacy/plain-text assistant
+// content string the same text-block meaning the Anthropic API assigns it. This
+// removes provider-only fields not modelled by the SDK (such as
+// tool_use.caller) while retaining meaningful blocks and tool inputs. Invalid
+// or unknown content is not a replay.
 func sameAssistantContent(a, b []byte) bool {
-	var am, bm []anthropic.ContentBlockUnion
-	if json.Unmarshal(a, &am) != nil || json.Unmarshal(b, &bm) != nil {
+	am, aok := assistantContentBlocks(a)
+	bm, bok := assistantContentBlocks(b)
+	if !aok || !bok {
 		return false
 	}
 	ac, aerr := json.Marshal(am)
 	bc, berr := json.Marshal(bm)
 	return aerr == nil && berr == nil && bytes.Equal(ac, bc)
+}
+
+// assistantContentBlocks decodes the two content forms Anthropic permits for
+// an assistant message. A string is shorthand for one text block; capture
+// stores the response form as blocks because it comes from anthropic.Message.
+func assistantContentBlocks(content []byte) ([]anthropic.ContentBlockUnion, bool) {
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		return []anthropic.ContentBlockUnion{{Type: "text", Text: text}}, true
+	}
+	var blocks []anthropic.ContentBlockUnion
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return nil, false
+	}
+	return blocks, true
 }
 
 // sameMessage reports whether two stored/replayed message contents are the same
