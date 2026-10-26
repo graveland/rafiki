@@ -150,22 +150,14 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 # The recordings hold your credential and your prompts in clear text. They are
 # written outside the repository by default and must never be committed.
 .PHONY: capture-claude
-capture-claude: build ## Record a scripted claude session (MODEL=, TURNS=, OUT=).
-	@out="$${OUT:-$(HOME)/rafiki-captures/claude-$$(date +%Y%m%d-%H%M%S)}"; \
-	turns="$${TURNS:-scripts/capture-turns.txt}"; \
-	model="$${MODEL:-haiku}"; \
-	case "$$turns" in /*) turns_abs="$$turns";; *) turns_abs="$(CURDIR)/$$turns";; esac; \
-	work=$$(mktemp -d); \
-	echo "capture: model=$$model turns=$$turns_abs"; \
-	echo "capture: recording into $$out"; \
-	$(BIN_DIR)/$(DAEMON_BIN) proxy record \
-	  --listen 127.0.0.1:0 \
-	  --upstream https://api.anthropic.com \
-	  --record-dir "$$out" \
-	  --exec "cd $$work && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN $(CURDIR)/$(BIN_DIR)/$(CLI_BIN) claude --model $$model --turn-file $$turns_abs"; \
-	status=$$?; \
-	echo "capture: exit $$status, $$(ls "$$out" | wc -l | tr -d ' ') file(s) in $$out"; \
-	exit $$status
+capture-claude: build ## Record a scripted claude session (MODEL=, TURNS=, OUT=, SYSPROMPT=).
+	@OUT="$${OUT:-$(HOME)/rafiki-captures/claude-$$(date +%Y%m%d-%H%M%S)}" \
+	 TURNS="$${TURNS:-scripts/capture-turns.txt}" \
+	 MODEL="$${MODEL:-haiku}" \
+	 SYSPROMPT="$${SYSPROMPT:-}" \
+	 RAFIKID="$(CURDIR)/$(BIN_DIR)/$(DAEMON_BIN)" \
+	 RAFIKI="$(CURDIR)/$(BIN_DIR)/$(CLI_BIN)" \
+	 $(CURDIR)/scripts/capture-claude.sh
 
 ##@ Install
 

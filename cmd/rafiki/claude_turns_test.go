@@ -194,12 +194,15 @@ func TestScriptedClaudeResolvesNoProfile(t *testing.T) {
 	for _, want := range []string{
 		"--bare",                   // no CLAUDE.md, hooks, LSP, plugins, memory
 		"--no-session-persistence", // nothing written outside the record dir
+		"--safe-mode",              // no CLAUDE.md, skills, plugins, hooks, MCP, custom agents
 		"--strict-mcp-config",      // no inherited MCP servers
-		"--exclude-dynamic-system-prompt-sections",
 	} {
 		c.StrContains(argv, want, "a scripted run must minimise what the request carries")
 	}
 	c.StrContains(argv, `--mcp-config {"mcpServers":{}}`, "every MCP server must be excluded")
+	c.StrContains(argv, "--system-prompt "+claudeCaptureSystemPrompt,
+		"a capture sends a one-line system prompt, not Claude Code's")
+	c.StrContains(argv, "--tools "+claudeCaptureTools, "one tool schema is enough for a capture")
 
 	joined := strings.Join(got.Env, "\n")
 	c.StrContains(joined, "ANTHROPIC_BASE_URL=http://127.0.0.1:9", "the endpoint must be the one given")

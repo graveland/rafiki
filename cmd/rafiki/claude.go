@@ -85,9 +85,10 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().String("turn-file", "",
 		"file of prompts for a scripted session, one per line ('-' for stdin;\n"+
 			"blank lines and lines starting with # are skipped)")
-	cmd.Flags().String("system-prompt", "",
-		"replace Claude Code's system prompt for a scripted session (default: its own,\n"+
-			"which is what keeps tool calls working; dynamic sections are excluded)")
+	cmd.Flags().String("system-prompt", claudeCaptureSystemPrompt,
+		"system prompt for a scripted session (default: one line, so a capture stays small)")
+	cmd.Flags().String("tools", claudeCaptureTools,
+		"built-in tools a scripted session may use (default: Bash only; \"\" for none)")
 	cmd.Flags().Duration("turn-timeout", claudeTurnTimeout,
 		"ceiling on ONE scripted turn; a wedged session fails instead of hanging")
 	// --model asks the DAEMON for claude-kind ids (see completeModel): an
@@ -267,9 +268,10 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		}
 		timeout, _ := cmd.Flags().GetDuration("turn-timeout")
 		systemPrompt, _ := cmd.Flags().GetString("system-prompt")
+		tools, _ := cmd.Flags().GetString("tools")
 		return runClaudeTurnsFn(claudeTurnsOptions{
 			Env:     scriptedClaudeEnv(env, token),
-			Args:    append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(systemPrompt, token != "")...),
+			Args:    append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(systemPrompt, tools, token != "")...),
 			Turns:   turns,
 			Out:     cmd.OutOrStdout(),
 			Err:     cmd.ErrOrStderr(),
@@ -401,6 +403,16 @@ func resolveClaudeURL(flagURL string, scripted bool, envURL, profileProxy string
 	return profileProxy
 }
 
+// claudeCaptureSystemPrompt is the whole system prompt a scripted capture gets.
+// Claude Code's own is long, and a capture exists to show what the model did,
+// not to reproduce the assistant's personality.
+const claudeCaptureSystemPrompt = "You are a minimal capture session. Answer in one short sentence, and use a tool when asked to."
+
+// claudeCaptureTools is the built-in tool set a scripted capture may use. One
+// tool is enough to record a tool_use/tool_result round trip, and every schema
+// left in the request is kilobytes of noise in every recorded file.
+const claudeCaptureTools = "Bash"
+
 // scriptedClaudeMinimalArgs keeps a captured session as small and as
 // reproducible as it can be.
 //
@@ -418,15 +430,24 @@ func resolveClaudeURL(flagURL string, scripted bool, envURL, profileProxy string
 // session that cannot call a tool. With the default prompt,
 // --exclude-dynamic-system-prompt-sections moves the per-machine sections out of
 // the system prompt, which shrinks it and keeps it stable across runs.
-func scriptedClaudeMinimalArgs(systemPrompt string, bare bool) []string {
+func scriptedClaudeMinimalArgs(systemPrompt, tools string, bare bool) []string {
 	var args []string
 	if bare {
 		args = append(args, "--bare")
 	}
 	args = append(args,
+		// --safe-mode disables every customization Claude Code would otherwise
+		// load (CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands
+		// and agents, output styles, workflows) while leaving auth, the built-in
+		// tools and permissions alone — which is what makes it usable on an OAuth
+		// machine, where --bare is not.
+		"--safe-mode",
 		"--no-session-persistence",
 		"--strict-mcp-config",
 		"--mcp-config", `{"mcpServers":{}}`,
+		// The built-in tool schemas dominate a Claude Code request; a capture
+		// that only needs to prove tool traffic happened asks for one of them.
+		"--tools", tools,
 	)
 	if systemPrompt != "" {
 		return append(args, "--system-prompt", systemPrompt)
