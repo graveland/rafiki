@@ -106,6 +106,8 @@ Subcommands:
   migrate   Apply the conversations schema migration chain.
   user      Create a user directly against the database, bypassing a
             running daemon. See 'rafikid user create -h'.
+  proxy     Record raw provider HTTP exchanges to disk, with no
+            daemon or database. See 'rafikid proxy record -h'.
 
 The command-line client is a separate binary, "rafiki".
 
@@ -172,6 +174,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAgentCmd())
 	root.AddCommand(newMigrateCmd())
 	root.AddCommand(newUserCmd())
+	root.AddCommand(newProxyRecordCmd())
 
 	return root
 }

@@ -102,3 +102,52 @@ appendix and passes `--append-system-prompt-file <path>`, and
 the same content-addressed file for the claude grandchild). Any other
 Anthropic-protocol client gets the same routing via
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
+
+## Capturing a raw provider exchange
+
+`rafikid proxy record` is a standalone diagnostic: it forwards `POST
+/v1/messages` to one upstream and writes every exchange to disk byte for byte.
+It reads no config file, profile or database, opens no socket, and is the one
+`rafikid` command path that runs with `RAFIKI_DB` unset — which is what makes it
+usable when the daemon is the thing that is broken.
+
+```bash
+go run ./cmd/rafikid proxy record \
+  --listen 127.0.0.1:0 \
+  --upstream https://api.anthropic.com \
+  --record-dir /tmp/anthropic-capture
+```
+
+`--listen` must be loopback (`127.0.0.1`, `::1` or `localhost`; port `0` picks a
+free port). `--upstream` must be an absolute `http`/`https` URL with no
+userinfo. `--record-dir` must be absent (created `0700`) or empty, and never
+group/world accessible; the recorder refuses rather than relaxing permissions.
+Any other route or method is a `404` and writes nothing.
+
+Three lines go to stderr once the listener is bound:
+
+```
+rafikid proxy record: listening on http://127.0.0.1:64959
+rafikid proxy record: recording to /tmp/anthropic-capture
+rafikid proxy record: WARNING: the record directory holds raw HTTP headers and bodies, …
+```
+
+The first line's address is the one actually bound, so a port-0 listener is
+discoverable by reading it. Each exchange becomes `NNNNNN-request.http` and
+`NNNNNN-response.http`, numbered in arrival order from `000001`. Both files are
+HTTP messages — CRLF line endings, the start line, the headers sorted by name
+(one line per value, credentials included), a blank line, then the exact body,
+an SSE stream included. The request file carries a `Host:` line, which Go's
+server otherwise lifts out of the header map; a response the recorder generates
+itself (a `502 Bad Gateway` for an upstream transport failure) is recorded in
+the same file format, never a sidecar.
+
+Files are staged as `0600` temp files in the record directory and renamed into
+place only once both halves are written, so a request never appears without its
+response. The pair is committed *after* the response has been relayed, so a
+reader that has just read the last body byte must wait for the `-response.http`
+file to appear; its presence implies the request half is already there.
+
+**The recordings are raw.** Authorization headers, prompts and completions are
+stored unredacted for a later sanitizer to strip. Treat the directory as a
+secret: never commit it and never share it.
