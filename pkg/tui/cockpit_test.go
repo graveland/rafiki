@@ -2655,3 +2655,30 @@ func TestFooterShowsModelRightOfCost(t *testing.T) {
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	ck.StrContains(ansi.Strip(c.View().Content), "glm-5.3-flash", "the key hints clip to keep the model visible:\n")
 }
+
+// A model id does not name its runtime: "anthropic/claude-opus-5-5" is both a
+// fundi child the daemon routes and a claude-kind child running the Claude
+// Code binary against the subscription. The footer must say which, because the
+// two bill differently and fail differently.
+func TestModelReadoutNamesTheKind(t *testing.T) {
+	cases := []struct {
+		name  string
+		kind  string
+		model string
+		want  string
+	}{
+		{"claude kind is always prefixed", "claude", "anthropic/claude-opus-5-5", "claude/anthropic/claude-opus-5-5"},
+		{"claude kind with a bare model", "claude", "glm-5.2", "claude/glm-5.2"},
+		{"fundi keeps its provider prefix", "fundi", "openrouter/anthropic/claude-opus-5-5", "openrouter/anthropic/claude-opus-5-5"},
+		{"fundi keeps a direct provider prefix", "fundi", "anthropic/claude-opus-5-5", "anthropic/claude-opus-5-5"},
+		{"fundi gets a prefix when the id names no provider", "fundi", "glm-5.2", "fundi/glm-5.2"},
+		{"unknown kind is not guessed", "", "anthropic/claude-opus-5-5", "anthropic/claude-opus-5-5"},
+		{"no model stays empty", "claude", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := modelReadoutFor(c.kind, c.model)
+			assert.NewCollecting(t).Eq(c.want, got, "modelReadoutFor(%q, %q)", c.kind, c.model)
+		})
+	}
+}

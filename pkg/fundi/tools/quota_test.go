@@ -52,7 +52,7 @@ func TestQuotaStatusExecuteNoDataCaptured(t *testing.T) {
 func TestQuotaStatusExecuteRendersSnapshot(t *testing.T) {
 	c := assert.NewCollecting(t)
 	util := 0.42
-	reset := time.Date(2026, 9, 3, 18, 0, 0, 0, time.UTC)
+	reset := time.Now().Add(90 * time.Minute)
 	reader := &fakeQuotaReader{
 		ok: true,
 		status: QuotaStatus{
@@ -68,7 +68,7 @@ func TestQuotaStatusExecuteRendersSnapshot(t *testing.T) {
 	res, err := tool.Execute(context.Background(), nil)
 	c.Require().NoError(err, "Execute")
 	out := res.Text
-	for _, want := range []string{"42%", "allowed_warning", "5h", "7d"} {
+	for _, want := range []string{"42%", "allowed_warning", "5h", "7d", reset.Format(time.RFC3339), "(in 1h"} {
 		c.StrContains(out, want, "Execute text missing")
 	}
 }

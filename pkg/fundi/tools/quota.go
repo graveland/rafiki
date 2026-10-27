@@ -107,6 +107,12 @@ func renderQuotaWindow(sb *strings.Builder, label string, w QuotaWindow) {
 	reset := "unknown"
 	if w.ResetAt != nil {
 		reset = w.ResetAt.Format(time.RFC3339)
+		// The countdown is the actionable half for an agent choosing between
+		// waiting for a reset and routing to another provider; the RFC3339
+		// stamp alone makes that a subtraction the model has to do itself.
+		if in := quotafmt.Until(*w.ResetAt, time.Now()); in != "" {
+			reset += " (in " + in + ")"
+		}
 	}
 	fmt.Fprintf(sb, "%s: %s used, resets %s, status %s\n", label, util, reset, orDash(w.Status))
 }

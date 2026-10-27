@@ -129,6 +129,31 @@ glyph and no badge. Retries aren't badged (automatic retry means a
 recoverable stream error isn't your problem), but the `⟳` glyph keeps one
 from looking identical to progress.
 
+## The status line and footer
+
+The status line above the input carries the daemon's state for the focused
+agent on the left and, on the right, your Anthropic subscription's rate-limit
+snapshot: `5h 94% (resets in 3h2m)  7d 60% (resets in 2d1h)`. Each window
+carries its own countdown, because the two reset on very different clocks and
+a bare percentage leaves "do I wait it out or route elsewhere" as arithmetic.
+A window whose reported reset has already passed prints the percentage alone —
+the snapshot predates the rollover, so a countdown there would be a lie. The
+whole segment hides rather than showing a stale number once the poll lags by
+more than `quotaStaleAfter`, and hides entirely for an account that has never
+made a passthrough call. `rafiki claude --limits` prints the same data
+verbosely.
+
+The footer's right edge is, in order: scroll position, context usage, spend,
+and the focused agent's model. The model is disambiguated by KIND, because a
+model id alone does not name the runtime — `anthropic/claude-opus-5-5` is a
+fundi child the daemon routes to that provider *and* a claude-kind child
+running the Claude Code binary against your subscription, and those bill and
+fail differently. A claude child therefore always reads
+`claude/anthropic/claude-opus-5-5`; a fundi child needs no prefix while its id
+starts with a provider (`openrouter/…`, `anthropic/…`) and gets `fundi/` when
+it does not (`fundi/glm-5.2`). An agent row whose kind was never reported
+shows the bare id rather than a guess.
+
 ## The web UI
 
 **The web UI is a third client, served by the `rafiki` binary.** `rafiki web [--port N] [--no-open] [--dev-assets URL]` serves a browser UI from the `rafiki` binary itself: a `127.0.0.1`-only reverse proxy in front of the daemon's Connect control plane (rafikid never serves the UI). It prints a single-use link (`http://127.0.0.1:<port>/#k=<code>`) and opens it; the fragment code is exchanged for a per-tab session secret held in `sessionStorage` and sent as `X-Rafiki-Web` — no cookies, no CORS headers. A Connect `Unauthenticated` on any call the localhost gate did not refuse triggers in-browser sign-in through the daemon's OIDC login (a popup). The proxy forwards `/rafiki.v1.Control/*` verbatim — its own upstream transport adds the bearer and the protocol epoch — and never `/rafiki.v1.Login/*`. On a remote machine, forward the port with `ssh -L <port>:127.0.0.1:<port>`. See `docs/reference/control-protocol.md` §"Browser clients".

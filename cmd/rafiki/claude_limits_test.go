@@ -29,7 +29,7 @@ func TestRenderRateLimitStatus(t *testing.T) {
 	renderRateLimitStatus(&sb, st)
 	out := sb.String()
 
-	for _, want := range []string{"org_123", "42%", "allowed_warning", "5h ", "7d "} {
+	for _, want := range []string{"org_123", "42%", "allowed_warning", "5h ", "7d ", "(in 1h"} {
 		c.StrContains(out, want, "render output missing")
 	}
 	// 7d has no utilization reported -- must show the unknown marker, not "0%".

@@ -51,12 +51,17 @@ func renderRateLimitStatus(w io.Writer, st *rafikiv1.GetRateLimitStatusResponse)
 	fmt.Fprintf(w, "  overall: %s\n", orDash(st.GetOverallStatus()))
 }
 
-// renderRateLimitWindow formats one window.
+// renderRateLimitWindow formats one window. The reset is printed as both an
+// absolute time and a countdown: the absolute one is what you carry to another
+// clock, the countdown is what answers "do I wait it out".
 func renderRateLimitWindow(w io.Writer, label string, win *rafikiv1.RateLimitWindow) {
 	util := quotafmt.Utilization(win.Utilization)
 	reset := "—"
 	if win.ResetAt != nil {
 		reset = win.GetResetAt().AsTime().Format(time.RFC3339)
+		if in := quotafmt.Until(win.GetResetAt().AsTime(), time.Now()); in != "" {
+			reset += " (in " + in + ")"
+		}
 	}
 	fmt.Fprintf(w, "  %s: %s used, resets %s, status %s\n", label, util, reset, orDash(win.GetStatus()))
 }

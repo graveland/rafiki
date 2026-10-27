@@ -31,6 +31,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/quotafmt"
 	"go.graveland.dev/rafiki/pkg/slashcmd"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
@@ -2496,7 +2497,35 @@ func (c *Cockpit) modelReadout() string {
 	if !ok {
 		return ""
 	}
-	return n.Model
+	return modelReadoutFor(n.Kind, n.Model)
+}
+
+// modelReadoutFor renders one child's model, disambiguated by KIND.
+//
+// A model id alone does not name the runtime: "anthropic/claude-opus-5-5" is
+// an OpenRouter-or-direct fundi child, while a claude-kind child runs the same
+// ids through the Claude Code binary and the Anthropic subscription — the two
+// bill differently and fail differently, so the footer must not conflate them.
+// A claude child therefore always carries a "claude/" prefix, even though the
+// rest of its id already looks provider-qualified. A fundi child needs no
+// prefix when its id starts with a provider ("openrouter/…", "anthropic/…"),
+// which is the normal shape; an unqualified id (a bare alias, a default-provider
+// model) gets "fundi/" so it cannot be mistaken for a claude child either.
+// An empty kind — a row seeded before kinds were reported — stays bare rather
+// than guessing which runtime it is.
+func modelReadoutFor(kind, model string) string {
+	if model == "" {
+		return ""
+	}
+	switch kind {
+	case protocol.KindClaude:
+		return protocol.KindClaude + "/" + model
+	case protocol.KindFundi:
+		if !strings.Contains(model, "/") {
+			return protocol.KindFundi + "/" + model
+		}
+	}
+	return model
 }
 
 // contextReadout is the footer's context-window usage for the focused agent:
@@ -2986,15 +3015,28 @@ func (c *Cockpit) quotaReadout() string {
 	if c.quota == nil || c.quota.GetUpdatedAt() == nil {
 		return ""
 	}
-	if time.Since(c.quota.GetUpdatedAt().AsTime()) > quotaStaleAfter {
+	now := time.Now()
+	if now.Sub(c.quota.GetUpdatedAt().AsTime()) > quotaStaleAfter {
 		return ""
 	}
-	return quotaWindowReadout("5h", c.quota.GetFiveH()) + " " + quotaWindowReadout("7d", c.quota.GetSevenD())
+	return quotaWindowReadout("5h", c.quota.GetFiveH(), now) + " " +
+		quotaWindowReadout("7d", c.quota.GetSevenD(), now)
 }
 
-func quotaWindowReadout(label string, w *rafikiv1.RateLimitWindow) string {
+// quotaWindowReadout is one window: utilization plus, when the snapshot
+// reported a reset still in the future, how long that is. A percentage alone
+// answers "am I near the limit" but not "do I wait it out or route elsewhere",
+// and the two windows reset on very different clocks. now is the frame's
+// clock, passed down so both windows of one render agree.
+func quotaWindowReadout(label string, w *rafikiv1.RateLimitWindow, now time.Time) string {
 	if w == nil {
 		return label + " —"
 	}
-	return label + " " + quotafmt.Utilization(w.Utilization)
+	out := label + " " + quotafmt.Utilization(w.Utilization)
+	if w.ResetAt != nil {
+		if in := quotafmt.Until(w.GetResetAt().AsTime(), now); in != "" {
+			out += " (resets in " + in + ")"
+		}
+	}
+	return out
 }
