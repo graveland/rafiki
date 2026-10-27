@@ -15,7 +15,8 @@ import (
 
 // Rename renames a live child and the conversations linked to it. See
 // RenameRequest's comment in control.proto. It is userOnly in the policy
-// table, so no child scope applies.
+// table, so no child scope applies. An owner guard still applies: a non-admin
+// user may rename only its own.
 //
 // Errors go through ConnectErr, as in SetBudget.
 func (s *Server) Rename(
@@ -31,6 +32,14 @@ func (s *Server) Rename(
 	if name == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("name is required"))
+	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
 	}
 	p := s.lifecycle.Load()
 	if p == nil {

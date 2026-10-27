@@ -3827,12 +3827,20 @@ func (c *Controller) deleteSpillDir(childID string) error {
 	return nil
 }
 
-func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
+// CloseAllExited closes every exited child older than olderThan. owns is nil
+// for full authority (the operator, the anonymous unix socket); non-nil it is
+// the caller's owner guard predicate, and a child it refuses is skipped before
+// any work — the age filter and the cascade below would otherwise close
+// another user's children.
+func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID string) bool) ([]string, error) {
 	snaps := c.st.FindByStatus(protocol.StatusExited)
 	now := time.Now()
 	var closed []string
 	failed := 0
 	for _, s := range snaps {
+		if owns != nil && !owns(s.ChildID) {
+			continue
+		}
 		if olderThan > 0 && !s.ExitedAt.IsZero() {
 			age := now.Sub(s.ExitedAt)
 			if age < olderThan {
@@ -3864,7 +3872,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 		// configured window, and a recovered record — including one belonging
 		// to a still-live OTHER daemon's child — carries its old ExitedAt, so
 		// this is not merely a hypothetical race.
-		owns := c.ownsChildRow(s)
+		ownedRow := c.ownsChildRow(s)
 		// Persist before forgetting: the upsert carries the child's session_id
 		// to conversations.child before the tombstone stamps closed_at. A child
 		// whose lineage could not be recorded must not silently drop out of its
@@ -3872,7 +3880,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 		// call), log the child id, and count the failure to surface in the
 		// result. Only for a row this daemon owns — another daemon's recovered
 		// row is not ours to write (nor to tombstone below).
-		if owns {
+		if ownedRow {
 			if err := c.writeRecord(s.ChildID); err != nil {
 				slog.Warn("close-all-exited: child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))
 				failed++
@@ -3888,12 +3896,12 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 		// The other deletion path, and the one that leaks without this: a row
 		// for a child forgotten here is never pending-for-a-live-child again
 		// and never terminal, so the retention sweep can never reach it.
-		if owns {
+		if ownedRow {
 			c.dropInboxForForgotten(s.ChildID, "child forgotten")
 			c.rateWatch.drop(s.ChildID)
 			c.dropPendingResume(s.ChildID)
 		}
-		if c.children != nil && owns {
+		if c.children != nil && ownedRow {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.children.Delete(ctx, s.ChildID); err != nil {
 				slog.Warn("delete child row", "childId", s.ChildID, "error", err)

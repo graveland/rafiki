@@ -46,6 +46,14 @@ func (s *Server) Send(
 			return nil, err
 		}
 	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	inboxP := s.inbox.Load()
 	if inboxP == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
@@ -258,7 +266,11 @@ func (s *Server) ListChildren(
 	}
 	summaries := (*p).ListChildren(req.Msg.GetStatuses())
 	out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
+	g := s.ownerGuard(ctx)
 	for _, c := range summaries {
+		if g != nil && !g.Owns(c.ChildID) {
+			continue
+		}
 		if !matchesChildFilter(c, filter) {
 			continue
 		}
@@ -281,6 +293,14 @@ func (s *Server) GetChild(
 	// cannot even confirm a sibling exists.
 	if sc := s.childScope(ctx); sc != nil {
 		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
 			return nil, err
 		}
 	}
@@ -406,6 +426,16 @@ func (s *Server) Spawn(
 		}
 		sp.ParentChildID = sc.ChildID()
 	}
+	// ownerGuard: a non-admin user may parent a spawn only under a child it
+	// owns — otherwise the new child (stamped with the caller's owner) would
+	// sit in another user's tree, breaking owner inheritance for cascades.
+	if g := s.ownerGuard(ctx); g != nil {
+		if parent := sp.ParentChildID; parent != "" {
+			if err := g.Authorize(parent); err != nil {
+				return nil, err
+			}
+		}
+	}
 	id, err := (*p).Spawn(ctx, sp)
 	if err != nil {
 		var ce *ControllerError
@@ -520,6 +550,14 @@ func (s *Server) Kill(
 	// childScoped: the subtree boundary runs before the kill is attempted.
 	if sc := s.childScope(ctx); sc != nil {
 		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
 			return nil, err
 		}
 	}

@@ -95,7 +95,13 @@ Every failure is an `Error` carrying a Connect `Code` (snake_case on the wire,
 `google.rpc.ErrorInfo` — its `reason`. Nothing in this crate retries.
 `is_unavailable()` is the daemon-restarting signal a caller MAY retry on;
 `is_unauthenticated()`, `is_not_found()`, `is_protocol_mismatch()` and
-`permission_denied` are terminal. A unary call is bounded by
+`permission_denied` are terminal.
+
+A daemon authenticating several users isolates agents per owner: a non-admin
+token gets `permission_denied` naming the child for any id it does not own
+(foreign and unknown ids answer identically, so ids cannot be probed), and
+`list_children`/`status`/`search`/`close_all_exited` answer for the caller's
+own agents only. Admin tokens and the local unix socket are unrestricted. A unary call is bounded by
 `Client::with_timeout` (30s default) and its expiry is `deadline_exceeded` —
 but NOT `is_idle()`: the call's outcome is unknown, so never resend a `send` on
 it (`Send` has no idempotency key; a resend can queue the message twice).

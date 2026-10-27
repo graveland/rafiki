@@ -44,9 +44,11 @@ func (a connectChildOps) Resume(ctx context.Context, childID, apiKey string) (st
 
 // CloseAllExited closes every exited child older than olderThan. It takes
 // the seam's ctx for symmetry but Controller.CloseAllExited has never needed
-// one (its per-child deletes bound themselves internally).
-func (a connectChildOps) CloseAllExited(_ context.Context, olderThan time.Duration) ([]string, error) {
-	return a.c.CloseAllExited(olderThan)
+// one (its per-child deletes bound themselves internally). owns is the owner
+// guard's predicate form, forwarded unchanged: the Controller's loop is the
+// only place that knows which children it is about to close.
+func (a connectChildOps) CloseAllExited(_ context.Context, olderThan time.Duration, owns func(childID string) bool) ([]string, error) {
+	return a.c.CloseAllExited(olderThan, owns)
 }
 
 // SetLabels applies set entries then remove entries, and returns the full

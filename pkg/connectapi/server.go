@@ -78,6 +78,7 @@ type Server struct {
 	findingsReader atomic.Pointer[ConversationFindingsReader]
 	daraja         atomic.Pointer[*darajaHandlers]
 	scopes         atomic.Pointer[ChildScopeSource]
+	guards         atomic.Pointer[OwnerGuardSource]
 	scripts        atomic.Pointer[ScriptHub]
 	childOps       atomic.Pointer[ChildOps]
 	execAdmin      atomic.Pointer[ExecutorAdmin]
@@ -217,6 +218,15 @@ func (s *Server) GetHistory(
 	// same not-a-descendant answer).
 	if sc := s.childScope(ctx); sc != nil {
 		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
+
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
 			return nil, err
 		}
 	}

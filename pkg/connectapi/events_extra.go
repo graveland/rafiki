@@ -92,6 +92,14 @@ func (s *Server) GetStreams(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New(`which must be one of "in", "err", "all"`))
 	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	r, err := s.rawIOOp()
 	if err != nil {
 		return nil, err
@@ -126,6 +134,14 @@ func (s *Server) SendFrame(
 	}
 	if err := rawFrameIsObject(frame); err != nil {
 		return nil, err
+	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
 	}
 	r, err := s.rawIOOp()
 	if err != nil {

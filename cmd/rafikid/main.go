@@ -892,6 +892,13 @@ func runDaemon(opts runDaemonOpts) error {
 			// subtree boundary to enforce at the handler layer, so it is wired
 			// alongside the gate it completes (pinned by the wiring test).
 			face.Control.SetChildScopeSource(ctrl.childScopeFor)
+			// The non-admin user credential's owner isolation for the live-agent
+			// verbs. The policy gate admits every user credential; without this
+			// wiring the handlers would serve the unrestricted path, so it is
+			// wired alongside the child-scope source it complements (pinned end
+			// to end by TestConnectOwnerIsolationOnTheConnectPlane in
+			// test/integration).
+			face.Control.SetOwnerGuardSource(ctrl.ownerGuardFor)
 			face.Control.SetModelLister(connectModels{c: ctrl})
 			face.Control.SetConversationInsights(connectConversations{c: ctrl})
 			face.Control.SetConversationReviewer(connectReview{c: ctrl})

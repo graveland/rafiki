@@ -356,7 +356,7 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 		ExitedAt:     now,
 	})
 
-	closed, err := ctrl.CloseAllExited(0)
+	closed, err := ctrl.CloseAllExited(0, nil)
 	c.NoError(err, "ForgetAllExited")
 	c.Len(closed, 1, "ForgetAllExited count = %d, want 1", len(closed))
 

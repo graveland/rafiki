@@ -109,7 +109,7 @@ func TestCloseAllExitedReportsANativeChildOnce(t *testing.T) {
 		t.Fatalf("Kill native child: %v", err)
 	}
 
-	closed, err := c.CloseAllExited(0)
+	closed, err := c.CloseAllExited(0, nil)
 	ck.Require().NoError(err, "CloseAllExited")
 	seen := map[string]int{}
 	for _, cid := range closed {

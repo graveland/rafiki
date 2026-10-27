@@ -39,6 +39,14 @@ func (s *Server) Close(
 			return nil, err
 		}
 	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	p := s.lifecycle.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,

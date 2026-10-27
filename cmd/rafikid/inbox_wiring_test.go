@@ -627,7 +627,7 @@ func TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne(t *test
 		Labels:  map[string]string{"rafiki/daemon": "some-other-daemon"},
 	})
 
-	closed, err := c.CloseAllExited(0)
+	closed, err := c.CloseAllExited(0, nil)
 	ck.NoError(err, "ForgetAllExited")
 	ck.Len(closed, 2, "ForgetAllExited count = %d, want 2 (both are still forgotten locally)", len(closed))
 
@@ -786,7 +786,7 @@ func TestForgetPathsDropTheQueue(t *testing.T) {
 		{
 			name: "ForgetAllExited",
 			forget: func(t *testing.T, ctrl *Controller, childID string) {
-				closed, err := ctrl.CloseAllExited(0)
+				closed, err := ctrl.CloseAllExited(0, nil)
 				if err != nil || len(closed) != 1 {
 					t.Fatalf("ForgetAllExited = %d, %v; want 1, nil", len(closed), err)
 				}

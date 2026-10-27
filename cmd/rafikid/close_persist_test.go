@@ -141,7 +141,7 @@ func TestCloseAllExitedSkipsFailedChildAndClosesTheRest(t *testing.T) {
 		})
 	}
 
-	closed, err := ctrl.CloseAllExited(0)
+	closed, err := ctrl.CloseAllExited(0, nil)
 	ck.Require().Error(err, "a child that could not be persisted must be surfaced in the result")
 	ck.StrContains(err.Error(), "1", "the error must name the failure count: %v", err)
 	ck.ElementsMatch([]string{good}, closed, "only the healthy child is closed; got %v", closed)
@@ -151,6 +151,37 @@ func TestCloseAllExitedSkipsFailedChildAndClosesTheRest(t *testing.T) {
 	}
 	if _, ok := ctrl.st.Get(good); ok {
 		t.Fatal("the healthy exited child survived CloseAllExited")
+	}
+}
+
+// TestCloseAllExitedSkipsChildrenThePredicateRefuses pins the owner-isolation
+// seam: CloseAllExited's predicate is the ONLY place a non-admin user's
+// boundary can be applied, because the loop (age filter, native cascade,
+// persist-before-forget) is here. A refused child must be left completely
+// untouched — not closed, not reported — while the caller's own children still
+// close.
+func TestCloseAllExitedSkipsChildrenThePredicateRefuses(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+
+	const mine, theirs = "c_owneriso_mine", "c_owneriso_theirs"
+	now := time.Now()
+	for _, id := range []string{mine, theirs} {
+		ctrl.st.Insert(&childstore.Session{
+			ChildID: id, Kind: protocol.KindFundi, Status: protocol.StatusExited,
+			Cwd: t.TempDir(), StartedAt: now, ExitedAt: now,
+		})
+	}
+
+	closed, err := ctrl.CloseAllExited(0, func(childID string) bool { return childID == mine })
+	ck.NoError(err, "CloseAllExited with a predicate")
+	ck.ElementsMatch([]string{mine}, closed, "only the admitted child is closed; got %v", closed)
+
+	if _, ok := ctrl.st.Get(theirs); !ok {
+		t.Fatal("a child the predicate refused was closed")
+	}
+	if _, ok := ctrl.st.Get(mine); ok {
+		t.Fatal("the admitted child survived CloseAllExited")
 	}
 }
 

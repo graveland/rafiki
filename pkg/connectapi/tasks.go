@@ -78,6 +78,22 @@ func (s *Server) ListTasks(
 				"list the task ledger of one conversation inside your own subtree; every conversation is the operator's view"))
 		}
 	}
+	// ownerGuard: a non-admin user must name a ledger it owns — a
+	// conversation of one of its children, or owner_child_id it owns. Both
+	// empty means every conversation, the operator's view; refuse with the
+	// same shape the childScoped refusal uses rather than a silently empty
+	// list, which reads exactly like "you have no tasks".
+	if g := s.ownerGuard(ctx); g != nil {
+		switch {
+		case ownerID != "":
+			if err := g.Authorize(ownerID); err != nil {
+				return nil, err
+			}
+		case convID == "" || !g.OwnsConversation(convID):
+			return nil, connect.NewError(connect.CodePermissionDenied, errors.New(
+				"list the task ledger of one conversation or child you own; every conversation is the operator's view"))
+		}
+	}
 	lp := s.taskLister.Load()
 	if lp == nil || *lp == nil {
 		return connect.NewResponse(out), nil

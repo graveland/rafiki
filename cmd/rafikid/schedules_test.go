@@ -817,7 +817,7 @@ func TestCloseAndCloseAllExitedTombstoneSchedules(t *testing.T) {
 		ck.Require().NoError(err)
 		c2.st.SetStatus(id, protocol.StatusExited)
 	}
-	_, err = c2.CloseAllExited(0)
+	_, err = c2.CloseAllExited(0, nil)
 	ck.Require().NoError(err)
 	for _, id := range []string{"c_w1", "c_w2"} {
 		jobs, err := mem2.ListOpen(ctx, id)

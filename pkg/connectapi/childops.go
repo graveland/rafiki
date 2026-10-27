@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -22,7 +23,10 @@ import (
 // depending on the interface keeps the handler testable without a database.
 type ChildOps interface {
 	Resume(ctx context.Context, childID, apiKey string) (string, error)
-	CloseAllExited(ctx context.Context, olderThan time.Duration) ([]string, error)
+	// CloseAllExited closes every exited child older than olderThan. owns is
+	// nil for full authority; non-nil it drops any child id the caller may not
+	// act on (the owner guard's predicate form).
+	CloseAllExited(ctx context.Context, olderThan time.Duration, owns func(childID string) bool) ([]string, error)
 	SetLabels(ctx context.Context, childID string, set map[string]string, remove []string) (map[string]string, error)
 	Status(ctx context.Context) (*rafikiv1.StatusResponse, error)
 	Search(ctx context.Context, req *rafikiv1.SearchRequest) (*rafikiv1.SearchResponse, error)
@@ -93,6 +97,14 @@ func (s *Server) Resume(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	o, err := s.childOp()
 	if err != nil {
 		return nil, err
@@ -121,7 +133,15 @@ func (s *Server) CloseAllExited(
 	if err != nil {
 		return nil, err
 	}
-	closed, err := o.CloseAllExited(ctx, req.Msg.GetOlderThan().AsDuration())
+	// ownerGuard: the loop that decides which children close lives in the
+	// Controller (age filter, native cascade, persist-before-forget), so the
+	// boundary travels as a predicate rather than filtering the answer here —
+	// filtering afterwards would report children closed that were not.
+	var owns func(string) bool
+	if g := s.ownerGuard(ctx); g != nil {
+		owns = g.Owns
+	}
+	closed, err := o.CloseAllExited(ctx, req.Msg.GetOlderThan().AsDuration(), owns)
 	if err != nil {
 		// A partial result must not read as a bare failure: some children WERE
 		// closed before the failure, and the wire carries only the error. Record
@@ -153,6 +173,14 @@ func (s *Server) SetLabels(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("at least one of set or remove is required"))
 	}
+	// ownerGuard: a non-admin user credential acts only on children it owns;
+	// foreign, unknown and unowned ids refuse identically, before any side
+	// effect.
+	if g := s.ownerGuard(ctx); g != nil {
+		if err := g.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	o, err := s.childOp()
 	if err != nil {
 		return nil, err
@@ -177,6 +205,28 @@ func (s *Server) Status(
 	resp, err := o.Status(ctx)
 	if err != nil {
 		return nil, mapChildOpsErr(err, "connect: status failed")
+	}
+	// ownerGuard: a non-admin user's counts cover only its own children. The
+	// daemon vitals (version, memory, socket, logs) are daemon-wide facts the
+	// userOnly gate already exposes; only the child counts are owned.
+	if g := s.ownerGuard(ctx); g != nil {
+		p := s.children.Load()
+		if p == nil {
+			return nil, connect.NewError(connect.CodeUnavailable,
+				errors.New("child lister not yet wired"))
+		}
+		var live, exited int32
+		for _, c := range (*p).ListChildren(nil) {
+			if !g.Owns(c.ChildID) {
+				continue
+			}
+			if c.Status == string(protocol.StatusExited) {
+				exited++
+			} else {
+				live++
+			}
+		}
+		resp.Children = &rafikiv1.StatusResponse_ChildCounts{Live: live, Exited: exited}
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -207,6 +257,21 @@ func (s *Server) Search(
 	resp, err := o.Search(ctx, req.Msg)
 	if err != nil {
 		return nil, mapChildOpsErr(err, "connect: search failed")
+	}
+	// ownerGuard: hits from children the caller does not own are dropped and
+	// total_hits recomputed. scanned stays as returned: it counts ring events
+	// EXAMINED, a daemon-wide diagnostic — filtering it means pushing the
+	// owner predicate into Controller.Search, a follow-up recorded in the
+	// design's out-of-scope. Hit content and ids never cross the boundary.
+	if g := s.ownerGuard(ctx); g != nil {
+		kept := make([]*rafikiv1.SearchResponse_SearchHit, 0, len(resp.GetHits()))
+		for _, h := range resp.GetHits() {
+			if g.Owns(h.GetChildId()) {
+				kept = append(kept, h)
+			}
+		}
+		resp.Hits = kept
+		resp.TotalHits = int32(len(kept))
 	}
 	return connect.NewResponse(resp), nil
 }

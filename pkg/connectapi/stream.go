@@ -20,6 +20,30 @@ type EventSource interface {
 	SubscribeAll() (<-chan *rafikiv1.Event, func())
 }
 
+// eventSink is the send half of the events stream, abstracted so an
+// owner-filtering wrapper can sit between the delivery loop and the wire.
+type eventSink interface{ Send(*rafikiv1.Event) error }
+
+// ownerFilteredStream drops every event whose child id the guard does not
+// own, so a non-admin user's All-subject stream carries only its own
+// children. An event with an empty child id is dropped too: an owned child
+// always carries one, and a daemon-scoped event is not the user's to read.
+// A nil event — the headers flush — passes through untouched.
+type ownerFilteredStream struct {
+	send  eventSink
+	guard OwnerGuard
+}
+
+func (w *ownerFilteredStream) Send(ev *rafikiv1.Event) error {
+	if ev == nil {
+		return w.send.Send(ev)
+	}
+	if cid := ev.GetChildId(); cid == "" || !w.guard.Owns(cid) {
+		return nil
+	}
+	return w.send.Send(ev)
+}
+
 func filterFromRequest(req *rafikiv1.StreamEventsRequest) (eventlog.Filter, error) {
 	if req == nil || req.Subject == nil {
 		return eventlog.Filter{}, errors.New("subject is required")
@@ -88,6 +112,7 @@ func (s *Server) StreamEvents(
 			}
 		}
 	}
+	sink := eventSink(stream)
 	if sc := s.childScope(ctx); sc != nil {
 		switch filter.Subject.Scope {
 		case eventlog.ScopeAll:
@@ -96,6 +121,22 @@ func (s *Server) StreamEvents(
 			if err := sc.Authorize(filter.Subject.ChildID); err != nil {
 				return err
 			}
+		default:
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("unknown subject scope"))
+		}
+	}
+	// ownerGuard: a non-admin user streams only its own children. A child or
+	// subtree subject naming a foreign id is refused before any replay, with
+	// the same anti-probe reasoning as the childScope block above; the All
+	// subject is the user's own fleet view, filtered event by event.
+	if g := s.ownerGuard(ctx); g != nil {
+		switch filter.Subject.Scope {
+		case eventlog.ScopeChild, eventlog.ScopeSubtree:
+			if err := g.Authorize(filter.Subject.ChildID); err != nil {
+				return err
+			}
+		case eventlog.ScopeAll:
+			sink = &ownerFilteredStream{send: sink, guard: g}
 		default:
 			return connect.NewError(connect.CodeInvalidArgument, errors.New("unknown subject scope"))
 		}
@@ -122,11 +163,11 @@ func (s *Server) StreamEvents(
 	// Flush the response headers now. connect-go otherwise sends them with the
 	// first message, so a quiet stream would send nothing at all and a client
 	// could not tell a stream that opened from one that never did.
-	if err := stream.Send(nil); err != nil {
+	if err := sink.Send(nil); err != nil {
 		return err
 	}
 
-	d := &delivery{stream: stream, filter: filter, ln: ln, elog: s.eventLog(), seen: map[string]int32{}}
+	d := &delivery{stream: sink, filter: filter, ln: ln, elog: s.eventLog(), seen: map[string]int32{}}
 
 	// 1. Replay, only if a cursor was supplied.
 	if c := req.Msg.GetCursor(); c != nil {
@@ -170,7 +211,7 @@ const replayPageSize = 1000
 // delivered ordinals are never contiguous, from reading the log on every
 // event.
 type delivery struct {
-	stream *connect.ServerStream[rafikiv1.Event]
+	stream eventSink
 	filter eventlog.Filter
 	ln     eventlog.Lineage
 	elog   eventlog.Store

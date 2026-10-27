@@ -29,6 +29,7 @@ type fakeChildOps struct {
 	resumeChildID  string
 	resumeAPIKey   string
 	exitedOlder    time.Duration
+	exitedOwns     func(string) bool
 	labelsChildID  string
 	labelsSet      map[string]string
 	labelsRemove   []string
@@ -61,8 +62,9 @@ func (f *fakeChildOps) Resume(_ context.Context, childID, apiKey string) (string
 	return f.resumeID, nil
 }
 
-func (f *fakeChildOps) CloseAllExited(_ context.Context, olderThan time.Duration) ([]string, error) {
+func (f *fakeChildOps) CloseAllExited(_ context.Context, olderThan time.Duration, owns func(string) bool) ([]string, error) {
 	f.exitedOlder = olderThan
+	f.exitedOwns = owns
 	if f.exitedErr != nil {
 		return f.exitedIDs, f.exitedErr
 	}

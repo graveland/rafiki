@@ -150,6 +150,12 @@ the code), and a failed dial means the same thing and joins the same
 budget. `permission_denied` and `invalid_argument` are authority and
 caller mistakes — they raise through immediately.
 
+A daemon authenticating several users isolates agents per owner: a non-admin
+token gets `permission_denied` naming the child for any id it does not own
+(foreign and unknown ids answer identically, so ids cannot be probed), and
+`list_children`/`status`/`search`/`close_all_exited` answer for the caller's
+own agents only. Admin tokens and the local unix socket are unrestricted.
+
 Streaming calls retry too, with their delivery contracts spelled out:
 
 - After this client sends a child a prompt (`send()`, or `spawn()` with a

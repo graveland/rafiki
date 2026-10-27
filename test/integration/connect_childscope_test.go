@@ -60,18 +60,24 @@ func TestConnectChildScopedOnTheConnectPlane(t *testing.T) {
 	}
 	ck.EqDiff([]string{kid}, got, "child ListChildren = %v, want exactly [%s] (its subtree only)", got, kid)
 
-	// Control: the operator credential still sees the whole fleet.
+	// Control: a non-admin USER credential sees its own children only. This
+	// arm used to assert the user saw the UDS-spawned outsider — the fleet-wide
+	// view that was exactly the owner-isolation leak, closed by the owner guard
+	// (TestConnectOwnerIsolationOnTheConnectPlane is the per-verb proof). The
+	// MCP-spawned caller child is stamped with this user as owner; the
+	// UDS-spawned outsider is NULL-owner and therefore admin/UDS-only, so this
+	// is also the pin that the guard FILTERS the list and not merely refuses a
+	// named id.
 	ureq := connect.NewRequest(&rafikiv1.ListChildrenRequest{})
 	ureq.Header().Set("Authorization", "Bearer "+userToken)
 	uresp, err := client.ListChildren(ctx, ureq)
 	ck.NoError(err, "ListChildren as user")
-	var seen bool
+	var userSees []string
 	for _, c := range uresp.Msg.GetChildren() {
-		if c.GetChildId() == outsider {
-			seen = true
-		}
+		userSees = append(userSees, c.GetChildId())
 	}
-	ck.True(seen, "user ListChildren omitted the top-level child %s", outsider)
+	ck.Contains(userSees, childA, "user ListChildren omitted its own child %s; got %v", childA, userSees)
+	ck.NotContains(userSees, outsider, "user ListChildren leaked the unowned top-level child %s; got %v", outsider, userSees)
 
 	// Kill of the caller itself: refused — a child is not a descendant of
 	// itself.
