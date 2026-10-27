@@ -74,20 +74,35 @@ func TestRequestReplayIgnoresMovedCacheControl(t *testing.T) {
 	c.Eq(3, runTurn(t, ctx, s, convID, req2, 1, 1), "turn 2 replays ordinal 1 without the marker")
 }
 
-// An ordinal already holding a DIFFERENT message is a request message that was
-// not stored; the caller must hear about it.
-func TestRequestDifferentOccupantIsOrdinalOccupied(t *testing.T) {
+// A replay that rewrites a stored message mid-history (Claude Code swapping an
+// orphaned tool_use for a synthetic reply, or the user rewinding) is a fork:
+// the horizon moves past every stored row and the whole request is stored
+// again, its unchanged prefix as compaction_tail copies readers skip. Nothing
+// stored is touched.
+func TestRequestRewriteOfStoredMessageForksTheHorizon(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, _, s := horizonTestEnv(t)
-	convID := strictConv(t, ctx, s, "occ")
+	ctx, pool, s := horizonTestEnv(t)
+	convID := strictConv(t, ctx, s, "fork")
 
-	c.Eq(2, runTurn(t, ctx, s, convID, []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`), 1, 1), "seed")
+	c.Eq(3, runTurn(t, ctx, s, convID, []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"more"}]}`), 1, 1), "seed")
 
-	req := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"something else"}]}`)
-	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, Protocol: "anthropic"})
-	c.NoError(err, "InsertTurnIntent")
-	_, err = s.DecomposeRequest(ctx, convID, turnID, createdAt, req, "h")
-	c.ErrorIs(err, ErrOrdinalOccupied, "decompose over a different occupant")
+	req := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"something else"},{"role":"user","content":"more"}]}`)
+	c.Eq(6, runTurn(t, ctx, s, convID, req, 1, 1), "next ordinal after the fork")
+	c.Eq(3, storedHorizon(t, ctx, pool, convID), "horizon moved past the stored rows")
+
+	for ord, want := range map[int]string{0: "hi", 1: "yo", 2: "more", 3: "hi", 4: "something else", 5: "more"} {
+		_, _, _, content := requireKindRow(t, ctx, pool, convID, ord)
+		c.Eq(fmt.Sprintf("%q", want), content, "content at ordinal %d", ord)
+	}
+	kind3, _, _, _ := requireKindRow(t, ctx, pool, convID, 3)
+	c.Eq("compaction_tail", *kind3, "unchanged prefix is a tail copy")
+	kind4, _, _, _ := requireKindRow(t, ctx, pool, convID, 4)
+	c.Nil(kind4, "the rewritten message is a real row")
+
+	// The next request replays the new history and appends at the new horizon.
+	next := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"something else"},{"role":"user","content":"more"},{"role":"assistant","content":"ok"}]}`)
+	c.Eq(7, runTurn(t, ctx, s, convID, next, 1, 1), "replay after the fork")
+	c.Eq(3, storedHorizon(t, ctx, pool, convID), "no second fork")
 }
 
 // A divergent head with no compaction summary and no pending /clear used to
@@ -221,11 +236,12 @@ func TestRequestReplayDifferentPlainTextIsOrdinalOccupied(t *testing.T) {
 	c.ErrorIs(err, ErrOrdinalOccupied, "different text")
 }
 
-// A differing assistant message remains strict even at a captured response
-// ordinal. Its meaningful tool-use input differs from the stored reply.
-func TestRequestDifferentAssistantContentOnStoredReplyIsOrdinalOccupied(t *testing.T) {
+// A differing assistant message at a captured response ordinal is a rewrite of
+// history, not a replay: the stored reply stays and the request forks the
+// horizon.
+func TestRequestDifferentAssistantContentOnStoredReplyForks(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, _, s := horizonTestEnv(t)
+	ctx, pool, s := horizonTestEnv(t)
 	convID := strictConv(t, ctx, s, "reply-other-id")
 
 	req1 := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
@@ -240,15 +256,18 @@ func TestRequestDifferentAssistantContentOnStoredReplyIsOrdinalOccupied(t *testi
 	req2 := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"rewritten"}}]}]}`)
 	turn2, createdAt2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	_, err = s.DecomposeRequest(ctx, convID, turn2, createdAt2, req2, "h")
-	c.ErrorIs(err, ErrOrdinalOccupied, "different assistant content")
+	next2, err := s.DecomposeRequest(ctx, convID, turn2, createdAt2, req2, "h")
+	c.NoError(err, "different assistant content forks")
+	c.Eq(4, next2, "next ordinal after the fork")
+	_, _, _, stored := requireKindRow(t, ctx, pool, convID, 1)
+	c.True(strings.Contains(stored, "plan"), "the stored reply is untouched: %s", stored)
 }
 
 // The leniency is for an ASSISTANT echo only. A user message landing on a
-// stored reply is rewritten history and is still reported.
-func TestRequestUserMessageOnStoredReplyIsOrdinalOccupied(t *testing.T) {
+// stored reply is rewritten history and forks the horizon.
+func TestRequestUserMessageOnStoredReplyForks(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, _, s := horizonTestEnv(t)
+	ctx, pool, s := horizonTestEnv(t)
 	convID := strictConv(t, ctx, s, "reply-user")
 
 	req1 := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
@@ -264,8 +283,11 @@ func TestRequestUserMessageOnStoredReplyIsOrdinalOccupied(t *testing.T) {
 	req2 := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"user","content":"rewritten"}]}`)
 	turn2, createdAt2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	_, err = s.DecomposeRequest(ctx, convID, turn2, createdAt2, req2, "h")
-	c.ErrorIs(err, ErrOrdinalOccupied, "a user message on a stored reply")
+	next2, err := s.DecomposeRequest(ctx, convID, turn2, createdAt2, req2, "h")
+	c.NoError(err, "a user message on a stored reply forks")
+	c.Eq(4, next2, "next ordinal after the fork")
+	_, role, _, _ := requireKindRow(t, ctx, pool, convID, 1)
+	c.Eq("assistant", *role, "the stored reply is untouched")
 }
 
 func TestDescribeOccupantMismatchNamesPathsNotContent(t *testing.T) {

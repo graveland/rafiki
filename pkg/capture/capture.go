@@ -597,44 +597,78 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 		if herr != nil {
 			return fmt.Errorf("decompose: resolve horizon: %w", herr)
 		}
-		for i, m := range req.Messages {
-			content := m.Content
-			if len(content) == 0 {
-				content = json.RawMessage(`null`)
+		tailBefore := 0
+		for {
+			i, ierr := s.insertRequestMessages(ctx, convID, createdAt, req.Messages, horizon, boundary, tailBefore)
+			if ierr == nil {
+				break
 			}
-			var kind any
-			var inTok *int64
-			if i == 0 && boundary != "" {
-				kind = boundary
-				if boundary == "compaction_summary" {
-					// The approximate size of the context this boundary replaced:
-					// the PREVIOUS turn's input_tokens. This turn's own
-					// CompleteTurn already ran earlier in streamAndCapture, so
-					// excluding it by created_at is what selects the prior turn
-					// rather than this one. A clear boundary carries no size, so
-					// this lookup is skipped for it.
-					var prevIn int64
-					perr := s.pool.QueryRow(ctx,
-						`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
-						  WHERE conversation_id=$1 AND created_at < $2
-						  ORDER BY created_at DESC, id DESC LIMIT 1`,
-						convID, createdAt).Scan(&prevIn)
-					if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-						return fmt.Errorf("decompose: prior turn input_tokens: %w", perr)
-					}
-					if prevIn > 0 {
-						inTok = &prevIn
-					}
-				}
+			if !errors.Is(ierr, ErrOrdinalOccupied) || i == 0 || tailBefore > 0 {
+				return fmt.Errorf("decompose: insert message %d: %w", i, ierr)
 			}
-			if err := s.appendRequestMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, kind); err != nil {
-				return fmt.Errorf("decompose: insert message %d: %w", i, err)
+			// The client rewrote a message it had already sent (an interrupted
+			// tool call answered with a synthetic reply, a rewind): fork the
+			// horizon past every stored row and store the request again, its
+			// unchanged prefix as skipped tail copies.
+			slog.Warn("capture: request rewrites a stored message; forking the horizon",
+				"conversation", convID, "message", i, "error", ierr)
+			var berr error
+			if horizon, berr = s.bumpHorizon(ctx, convID, false); berr != nil {
+				return berr
 			}
+			tailBefore, boundary = i, ""
 		}
 		nextOrdinal = horizon + len(req.Messages)
 		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash)
 	})
 	return nextOrdinal, err
+}
+
+// insertRequestMessages stores messages at horizon+index and returns the index
+// of the one that failed. A boundary tags message 0; the first tailBefore
+// messages are tagged compaction_tail, copies of rows stored earlier that
+// full-history readers skip.
+func (s *CaptureStore) insertRequestMessages(ctx context.Context, convID string, createdAt time.Time, messages []struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}, horizon int, boundary string, tailBefore int) (int, error) {
+	for i, m := range messages {
+		content := m.Content
+		if len(content) == 0 {
+			content = json.RawMessage(`null`)
+		}
+		var kind any
+		var inTok *int64
+		if i < tailBefore {
+			kind = store.KindCompactionTail
+		} else if i == 0 && boundary != "" {
+			kind = boundary
+			if boundary == "compaction_summary" {
+				// The approximate size of the context this boundary replaced:
+				// the PREVIOUS turn's input_tokens. This turn's own
+				// CompleteTurn already ran earlier in streamAndCapture, so
+				// excluding it by created_at is what selects the prior turn
+				// rather than this one. A clear boundary carries no size, so
+				// this lookup is skipped for it.
+				var prevIn int64
+				perr := s.pool.QueryRow(ctx,
+					`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
+					  WHERE conversation_id=$1 AND created_at < $2
+					  ORDER BY created_at DESC, id DESC LIMIT 1`,
+					convID, createdAt).Scan(&prevIn)
+				if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+					return i, fmt.Errorf("prior turn input_tokens: %w", perr)
+				}
+				if prevIn > 0 {
+					inTok = &prevIn
+				}
+			}
+		}
+		if err := s.appendRequestMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, kind); err != nil {
+			return i, err
+		}
+	}
+	return len(messages), nil
 }
 
 // resolveHorizon determines the ordinal offset (horizon) this request's
