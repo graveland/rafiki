@@ -80,6 +80,9 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().Bool("turns", false,
 		"run a scripted headless session (stream-json) instead of an interactive one;\n"+
 			"supply prompts with --turn and/or --turn-file")
+	cmd.Flags().String("script", "",
+		"TOML script of several claude runs (each its own process, one can resume another\n"+
+			"or be killed mid-tool-call); exclusive with --turn and --turn-file")
 	cmd.Flags().StringArray("turn", nil,
 		"one prompt for a scripted session (repeatable, sent in order)")
 	cmd.Flags().String("turn-file", "",
@@ -149,13 +152,14 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	session, _ := cmd.Flags().GetString("session")
 	passthroughFlag, _ := cmd.Flags().GetString("passthrough-auth")
 
-	turns, err := claudeTurnsFromFlags(cmd)
+	script, err := claudeScriptFromFlags(cmd)
 	if err != nil {
 		return err
 	}
-	// Scripted mode is selected by supplying turns: --turn/--turn-file imply it,
-	// and --turns makes the requirement explicit (and errors when it is empty).
-	scripted := len(turns) > 0
+	// Scripted mode is selected by supplying turns or a script: --turn,
+	// --turn-file and --script imply it, and --turns makes the requirement
+	// explicit (and errors when it is empty).
+	scripted := script != nil
 
 	// A scripted run resolves NO profile. It is a capture, not a daemon
 	// session: it must work on a host with no rafiki config, no daemon and no
@@ -218,19 +222,38 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if scripted {
+		timeout, _ := cmd.Flags().GetDuration("turn-timeout")
+		systemPrompt, _ := cmd.Flags().GetString("system-prompt")
+		tools, _ := cmd.Flags().GetString("tools")
+		plans := script.plan(claudeScriptDefaults{
+			Model: model, SystemPrompt: systemPrompt, Tools: tools, Timeout: timeout, SessionID: session,
+		})
+		for _, plan := range plans {
+			opts, err := scriptedRunOptions(cmd, plan, url, token)
+			if err != nil {
+				return err
+			}
+			if err := runClaudeTurnsFn(opts); err != nil {
+				if plan.Name != "" {
+					return fmt.Errorf("run %q: %w", plan.Name, err)
+				}
+				return err
+			}
+		}
+		return nil
+	}
+
 	sessionID := session
 	if sessionID == "" {
 		sessionID = uuid.NewString()
 	}
 
 	autoCompact := 0
-	if model != "" && !scripted {
+	if model != "" {
 		autoCompact = claudeAutoCompactWindow(context.Background(), cmd, model)
 	}
 
-	// ClaudeEnv returns the same decisions as data (Values) rather than
-	// pre-rendered argv, so the interactive build goes through the one shared
-	// builder below instead of appending a second producer's flags by hand.
 	env, vals := proxyenv.ClaudeEnv(os.Environ(), proxyenv.ClaudeOptions{
 		URL:               url,
 		Token:             token,
@@ -253,31 +276,6 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	// The MCP config is staged to a file immediately before Build, so its JSON —
 	// which carries the ${RAFIKI_MCP_TOKEN} placeholder, never an expanded token
 	// — does not ride argv where `ps` shows it.
-	if scripted {
-		// ModeHeadless is the stream-json contract a daemon-managed claude child
-		// runs under: -p, the two format flags and --verbose, plus the permission
-		// bypass a session with no human needs.
-		staged, err := claudeargv.Stage(claudeargv.Params{
-			Mode:      claudeargv.ModeHeadless,
-			Model:     model,
-			ModelArgs: vals.ModelArgs,
-		}, promptfile.Dir())
-		if err != nil {
-			return err
-		}
-		timeout, _ := cmd.Flags().GetDuration("turn-timeout")
-		systemPrompt, _ := cmd.Flags().GetString("system-prompt")
-		tools, _ := cmd.Flags().GetString("tools")
-		return runClaudeTurnsFn(claudeTurnsOptions{
-			Env:     scriptedClaudeEnv(env, token),
-			Args:    append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(systemPrompt, tools)...),
-			Turns:   turns,
-			Out:     cmd.OutOrStdout(),
-			Err:     cmd.ErrOrStderr(),
-			Timeout: timeout,
-		})
-	}
-
 	staged, err := claudeargv.Stage(claudeargv.Params{
 		Mode:      claudeargv.ModeInteractive,
 		Model:     model,
@@ -429,24 +427,71 @@ const claudeCaptureTools = "Bash"
 // session that cannot call a tool. With the default prompt,
 // --exclude-dynamic-system-prompt-sections moves the per-machine sections out of
 // the system prompt, which shrinks it and keeps it stable across runs.
-func scriptedClaudeMinimalArgs(systemPrompt, tools string) []string {
+func scriptedClaudeMinimalArgs(systemPrompt, tools string, persist bool) []string {
 	args := []string{
 		// --safe-mode disables every customization Claude Code would otherwise
 		// load (CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands
 		// and agents, output styles, workflows) while leaving auth, the built-in
 		// tools and permissions alone.
 		"--safe-mode",
-		"--no-session-persistence",
 		"--strict-mcp-config",
 		"--mcp-config", `{"mcpServers":{}}`,
 		// The built-in tool schemas dominate a Claude Code request; a capture
 		// that only needs to prove tool traffic happened asks for one of them.
 		"--tools", tools,
 	}
+	// Nothing is written outside the record directory unless a later run has to
+	// resume this session.
+	if !persist {
+		args = append(args, "--no-session-persistence")
+	}
 	if systemPrompt != "" {
 		return append(args, "--system-prompt", systemPrompt)
 	}
 	return append(args, "--exclude-dynamic-system-prompt-sections")
+}
+
+// scriptedRunOptions assembles one run's claude invocation. The environment is
+// built per run because the session header and the model are per run: a
+// resumed run carries its predecessor's session id so both land on one
+// conversation at the proxy.
+func scriptedRunOptions(cmd *cobra.Command, plan claudeRunPlan, url, token string) (claudeTurnsOptions, error) {
+	// A scripted run never asks for passthrough auth: a capture sends the
+	// credential it was handed verbatim.
+	env, vals := proxyenv.ClaudeEnv(os.Environ(), proxyenv.ClaudeOptions{
+		URL:   url,
+		Token: token,
+		Model: plan.Model,
+		Headers: map[string]string{
+			"X-Rafiki-Session": plan.SessionID,
+			"X-Rafiki-Source":  "rafiki-claude",
+		},
+	})
+	params := claudeargv.Params{
+		Mode:      claudeargv.ModeHeadless,
+		Model:     plan.Model,
+		ModelArgs: vals.ModelArgs,
+	}
+	if plan.Resume {
+		params.ResumeSession = plan.SessionID
+	}
+	staged, err := claudeargv.Stage(params, promptfile.Dir())
+	if err != nil {
+		return claudeTurnsOptions{}, err
+	}
+	args := append(claudeargv.Build(staged), scriptedClaudeMinimalArgs(plan.SystemPrompt, plan.Tools, plan.Persist)...)
+	if plan.Persist && !plan.Resume {
+		args = append(args, "--session-id", plan.SessionID)
+	}
+	return claudeTurnsOptions{
+		Env:       scriptedClaudeEnv(env, token),
+		Args:      append(args, plan.Args...),
+		Turns:     plan.Turns,
+		Out:       cmd.OutOrStdout(),
+		Err:       cmd.ErrOrStderr(),
+		Timeout:   plan.Timeout,
+		Interrupt: plan.Interrupt,
+	}, nil
 }
 
 // scriptedClaudeEnv makes the credential explicit and nothing else.

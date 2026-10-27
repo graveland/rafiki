@@ -5,7 +5,9 @@
 # comes from the environment:
 #
 #   OUT       record directory (default: <repo>/testdata/claude-capture)
-#   TURNS     prompts file, one per line (default: testdata/claude-capture-turns.txt)
+#   SCRIPT    TOML script of several claude runs (rafiki claude --script)
+#             (default: testdata/claude-capture.toml, unless TURNS is set)
+#   TURNS     prompts file, one per line; a plain single-session capture
 #   MODEL     model for the session (default: haiku)
 #   SYSPROMPT one-line system prompt for the capture
 #   RAFIKID   path to the rafikid binary (default: bin/rafikid)
@@ -20,13 +22,27 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${OUT:-$root/testdata/claude-capture}
-turns=${TURNS:-testdata/claude-capture-turns.txt}
+turns=${TURNS:-}
 model=${MODEL:-haiku}
 sysprompt=${SYSPROMPT:-You are a minimal capture session. Answer in one short sentence, and use a tool when asked to.}
 rafikid=${RAFIKID:-$root/bin/rafikid}
 rafiki=${RAFIKI:-$root/bin/rafiki}
 
-case $turns in /*) ;; *) turns=$root/$turns ;; esac
+script=${SCRIPT:-}
+if [ -z "$script" ] && [ -z "$turns" ]; then
+	script=testdata/claude-capture.toml
+fi
+if [ -n "$turns" ]; then
+	case $turns in /*) ;; *) turns=$root/$turns ;; esac
+fi
+
+# A script replaces the turns file; the inner command differs only in that flag.
+if [ -n "$script" ]; then
+	case $script in /*) ;; *) script=$root/$script ;; esac
+	driver="--script \"$script\""
+else
+	driver="--turn-file \"$turns\""
+fi
 
 work=$(mktemp -d)
 inner=$work/session.sh
@@ -40,7 +56,7 @@ cd "$work" || exit 1
 exec env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$rafiki" claude \\
   --model "$model" \\
   --system-prompt "$sysprompt" \\
-  --turn-file "$turns"
+  $driver
 EOF
 chmod 0700 "$inner"
 trap 'rm -rf "$work"' EXIT INT TERM
@@ -65,7 +81,7 @@ if [ -d "$out" ] && [ -n "$(ls -A "$out" 2>/dev/null)" ]; then
 fi
 
 echo "capture: model=$model"
-echo "capture: turns=$turns"
+if [ -n "$script" ]; then echo "capture: script=$script"; else echo "capture: turns=$turns"; fi
 echo "capture: recording into $out"
 
 # The README is the directory's explanation, not part of the capture: the

@@ -3,6 +3,7 @@ package capture
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,9 +23,9 @@ func strictConv(t *testing.T, ctx context.Context, s *CaptureStore, _ string) st
 	return id
 }
 
-func captureFixtureBody(t *testing.T, name string) []byte {
+func captureFixtureBody(t *testing.T, dir, name string) []byte {
 	t.Helper()
-	path := filepath.Join("..", "..", "testdata", "claude-capture", name)
+	path := filepath.Join(dir, name)
 	raw, err := os.ReadFile(path)
 	assert.NewAborting(t).NoError(err, "read %s", path)
 	_, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
@@ -34,31 +35,74 @@ func captureFixtureBody(t *testing.T, name string) []byte {
 	return body
 }
 
-// TestCapturedClaudeSessionReplays proves every historical request row in a
-// real Claude Code session can be decomposed after capture writes the prior
-// response through routing.ParseCapturedResponse. The fixture includes text,
-// thinking, tool_use, and tool_result turns whose wire representations change
-// between requests.
+// TestCapturedClaudeSessionReplays proves every request in a real Claude Code
+// session (testdata/claude-capture, recorded by `make capture-claude`) can be
+// decomposed after capture writes the prior response through
+// routing.ParseCapturedResponse. The session covers text, thinking, tool_use
+// and tool_result turns whose wire representations change between requests, a
+// parallel tool call, a failed tool call, a session killed on an unanswered
+// tool_use and resumed (Claude Code replays a synthetic "No response requested."
+// where the stored reply was), /compact (whose summarization request rewrites
+// the last user message again) and /clear.
+//
+// Only structure is pinned, not ordinals: a re-record changes the model's
+// words, and a different tool-call split would move every ordinal.
 func TestCapturedClaudeSessionReplays(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, _, s := horizonTestEnv(t)
-	convID := strictConv(t, ctx, s, "captured-session")
+	ctx, pool, s := horizonTestEnv(t)
+	convID, ref := clearTestConv(t, ctx, s, "captured-session")
 
-	requests, err := filepath.Glob(filepath.Join("..", "..", "testdata", "claude-capture", "*-request.http"))
+	dir := filepath.Join("..", "..", "testdata", "claude-capture")
+	requests, err := filepath.Glob(filepath.Join(dir, "*-request.http"))
 	c.NoError(err, "glob captured requests")
 	c.Greater(0, len(requests), "no captured requests")
 
+	var next int
 	for n := 1; n <= len(requests); n++ {
-		req := captureFixtureBody(t, fmt.Sprintf("%06d-request.http", n))
+		req := captureFixtureBody(t, dir, fmt.Sprintf("%06d-request.http", n))
+		var body struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		c.NoError(json.Unmarshal(req, &body), "request %d body", n)
+		if n > 1 && len(body.Messages) == 1 {
+			// The one-message request after a long history is the turn after
+			// /clear. The daemon marks the conversation when it accepts the
+			// slash command; this replay has no daemon.
+			c.NoError(s.MarkClearPending(ctx, ref), "MarkClearPending before request %d", n)
+		}
+
 		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, Protocol: "anthropic"})
 		c.NoError(err, "InsertTurnIntent request %d", n)
-		next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, "")
+		next, err = s.DecomposeRequest(ctx, convID, turnID, createdAt, req, "")
 		c.NoError(err, "DecomposeRequest request %d", n)
 
-		_, _, canonical, _, err := routing.ParseCapturedResponse("text/event-stream", captureFixtureBody(t, fmt.Sprintf("%06d-response.http", n)))
+		_, _, canonical, _, err := routing.ParseCapturedResponse("text/event-stream", captureFixtureBody(t, dir, fmt.Sprintf("%06d-response.http", n)))
 		c.NoError(err, "ParseCapturedResponse response %d", n)
 		c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 1, 1, "end_turn"), "AppendResponseMessage response %d", n)
 	}
+
+	// The shape of the stored conversation, in order, for whoever re-records it.
+	rows, err := pool.Query(ctx,
+		`SELECT ordinal, role, coalesce(kind, ''), left(regexp_replace(content::text, '\s+', ' ', 'g'), 80)
+		   FROM conversations.conversation_message WHERE conversation_id=$1 ORDER BY ordinal`, convID)
+	c.NoError(err, "read stored rows")
+	defer rows.Close()
+	kinds := map[string]int{}
+	last := -1
+	for rows.Next() {
+		var ord int
+		var role, kind, text string
+		c.NoError(rows.Scan(&ord, &role, &kind, &text), "scan row")
+		t.Logf("%3d %-9s %-18s %s", ord, role, kind, text)
+		kinds[kind]++
+		last = ord
+	}
+	c.NoError(rows.Err(), "rows")
+
+	c.Eq(1, kinds["compaction_summary"], "one /compact, one boundary")
+	c.Eq(1, kinds["clear"], "one /clear, one boundary")
+	c.Greater(0, kinds["compaction_tail"], "rewritten history re-stores its prefix as tail copies")
+	c.Eq(last, next, "the final reply is stored at the last ordinal")
 }
 
 // A replayed prefix whose cache_control marker moved is the same message: the

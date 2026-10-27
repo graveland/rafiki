@@ -1,0 +1,62 @@
+HTTP/1.1 200 OK
+Anthropic-Organization-Id: 0a518565-263c-4160-a9ac-6352799211db
+Anthropic-Ratelimit-Unified-5h-Reset: 1793143800
+Anthropic-Ratelimit-Unified-5h-Status: allowed
+Anthropic-Ratelimit-Unified-5h-Utilization: 0.21
+Anthropic-Ratelimit-Unified-7d-Reset: 1793383200
+Anthropic-Ratelimit-Unified-7d-Status: allowed
+Anthropic-Ratelimit-Unified-7d-Utilization: 0.62
+Anthropic-Ratelimit-Unified-Fallback-Percentage: 0.5
+Anthropic-Ratelimit-Unified-Overage-Disabled-Reason: out_of_credits
+Anthropic-Ratelimit-Unified-Overage-Status: rejected
+Anthropic-Ratelimit-Unified-Representative-Claim: five_hour
+Anthropic-Ratelimit-Unified-Reset: 1793143800
+Anthropic-Ratelimit-Unified-Status: allowed
+Anthropic-Workspace-Id: wrkspc_018b8WGdDeGtTZqBKfn7LC9J
+Cache-Control: no-cache
+Cf-Cache-Status: DYNAMIC
+Cf-Ray: a513de2f8a574675-YVR
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Content-Type: text/event-stream; charset=utf-8
+Date: Tue, 27 Oct 2026 18:47:13 GMT
+Request-Id: req_011CgTEsRaxYAuB4jkvcfRw7
+Server: cloudflare
+Server-Timing: x-originResponse;dur=128
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Traceresponse: 00-7ff5fc7749df287b218b7dd671d0e4f5-453e2c39b17be333-01
+Vary: Accept-Encoding
+X-Robots-Tag: none
+
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_011CgTEsRpqvQnCmgkCDZFrV","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":5395,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":5395},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available","speed":"standard"},"input_transformations":[],"diagnostics":{"cache_miss_reason":{"type":"messages_changed","cache_missed_input_tokens":2020}},"context_management":null}            }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}        }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EpoECtABCBMYAipAAjr9qoD06JuEXQngJUHjmmhi6mSzmmV8XghTYD5hfdJ9/LN+lwesFwX33DarQil4ft/7Cn35n5a57kUd7Hv8EDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okMGE1MTg1NjUtMjYzYy00MTYwLWE5YWMtNjM1Mjc5OTIxMWRichBZ5LAmMoRv377DQ65Y+P2oiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAGy44PXBrABAhIM0csn7/nojzWGcktNGgyUxhPIxis/qQWajBsiMBFxKLqxxiSGT69TNoVH5vaTptK2BwIHW3C/sx4aYk2R4k9isObyAWe99IZWrMAJlCr2AQ19+YXd/u7Hj2HEby4GCqLwp+qtY7kZUjutYYFOY1HWOYJ/P9lEPGita/tn+Azzd0NxRSq922ihMbIFhM6KSXNW9nBBytuyFd/I1AY6yk9dswMHa9eh8tHJdQ1XhM+gzIhxr+FY32DMswHFPEUo4YyQz3OXn3d3xVe4m8ETqJ4sEWAwxksOm1jBkd3JU3/ZMvJQUOQoL/vcdFAn5G+lu3s0ZrQqX9XlT3xnjnzM7t0RYgC8zeVJ4xz9N9tRCWOlZincM2A655uqRt3GVlijSYcxnNy10dYjxzvFrHGaTJChFW528Kv9IeK/z81hZ74+xvAM2Ck0+hgB"}         }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"omega"}          }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1     }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":5395,"cache_read_input_tokens":0,"output_tokens":59,"output_tokens_details":{"thinking_tokens":52},"iterations":[{"input_tokens":10,"output_tokens":59,"cache_read_input_tokens":0,"cache_creation_input_tokens":5395,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":5395},"type":"message"}]},"context_management":{"applied_edits":[]}       }
+
+event: message_stop
+data: {"type":"message_stop"       }
+

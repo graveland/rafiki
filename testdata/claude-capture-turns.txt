@@ -1,9 +1,0 @@
-# Prompts for `make capture-claude`, one per line.
-# A capture wants at least one plain turn, one that makes the model call a
-# tool, and one that makes it call two tools in the same response, so the
-# recording carries a text response, a tool_use / tool_result round trip and a
-# parallel tool_use / tool_result replay.
-Reply with exactly one word: ready
-Use the Bash tool to run `echo tool-ok`, then report its exact output.
-Use the Bash tool to run `ls | wc -l`, then tell me the number.
-In a single response, call the Bash tool twice in parallel: once with `echo alpha` and once with `echo beta`. Then report both outputs.

@@ -32,6 +32,30 @@ endpoint from `--url` or `ANTHROPIC_BASE_URL`, credential from `--token`,
 `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` — so it works on a host with no
 rafiki config.
 
+`--script script.toml` runs several claude processes in one invocation, for
+behaviour that only exists across processes. It is exclusive with `--turn` and
+`--turn-file`, which stay a one-run script. A script is a list of `[[run]]`
+tables, each with `turns`, an optional `name`, and:
+
+- `resume = "<earlier run's name>"` launches the run with `--resume` on that
+  run's session; both runs carry the same `X-Rafiki-Session`, so they land on
+  one conversation. A run takes part in a resume only if it is named by one or
+  names one, and only those runs drop `--no-session-persistence`.
+- `interrupt = "tool_use"` kills the run (SIGKILL) the moment the last turn's
+  response carries a `tool_use` block, before the tool result goes back. The
+  kill is the run's success; a last turn that ends without a tool call is an
+  error. Claude Code then drops that unanswered `tool_use` from the history a
+  resumed run replays.
+- `model`, `system_prompt`, `tools` and `turn_timeout` override the same keys at
+  the top of the file, which override the flags. `args` at the top applies to
+  every run and a run's own `args` are appended after; flags the driver owns
+  (`-p`, the format flags, `--resume`, `--session-id`, `--model`, ...) are
+  refused. Unknown keys are an error. Each run ends by closing the process's
+  stdin once its last turn's result frame arrives.
+
+`testdata/claude-capture.toml` is the worked example and the default for
+`make capture-claude`.
+
 One client-side gotcha when pointing Claude Code at any proxy by hand: its
 SSE-ping stream-idle watchdog only activates when the base URL host is
 exactly `api.anthropic.com`, so a thinking phase with >300s between content

@@ -1,0 +1,65 @@
+HTTP/1.1 200 OK
+Anthropic-Organization-Id: 0a518565-263c-4160-a9ac-6352799211db
+Anthropic-Ratelimit-Unified-5h-Reset: 1793143800
+Anthropic-Ratelimit-Unified-5h-Status: allowed
+Anthropic-Ratelimit-Unified-5h-Utilization: 0.21
+Anthropic-Ratelimit-Unified-7d-Reset: 1793383200
+Anthropic-Ratelimit-Unified-7d-Status: allowed
+Anthropic-Ratelimit-Unified-7d-Utilization: 0.62
+Anthropic-Ratelimit-Unified-Fallback-Percentage: 0.5
+Anthropic-Ratelimit-Unified-Overage-Disabled-Reason: out_of_credits
+Anthropic-Ratelimit-Unified-Overage-Status: rejected
+Anthropic-Ratelimit-Unified-Representative-Claim: five_hour
+Anthropic-Ratelimit-Unified-Reset: 1793143800
+Anthropic-Ratelimit-Unified-Status: allowed
+Anthropic-Workspace-Id: wrkspc_018b8WGdDeGtTZqBKfn7LC9J
+Cache-Control: no-cache
+Cf-Cache-Status: DYNAMIC
+Cf-Ray: a513dd9dca984675-YVR
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Content-Type: text/event-stream; charset=utf-8
+Date: Tue, 27 Oct 2026 18:46:49 GMT
+Request-Id: req_011CgTEqhsw6DfZ7XAsuMKrJ
+Server: cloudflare
+Server-Timing: x-originResponse;dur=102
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Traceresponse: 00-aaa7c5a793a1bfb0ca71a00563f685b2-3817e0b32c16829e-01
+Vary: Accept-Encoding
+X-Robots-Tag: none
+
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_011CgTEqi5q2zMHFF8SvpRJG","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":69,"cache_read_input_tokens":13634,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":69},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available","speed":"standard"},"input_transformations":[],"diagnostics":null,"context_management":null}             }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}  }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ErYDCtABCBMYAipAAxp59z51yZu29hFylzqeEsCoaPI2FSbjNuzhIYPvg/eiNPbDKDL1EamxJKooA52J5G70VzpMHFxWac4StDIJiDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okMGE1MTg1NjUtMjYzYy00MTYwLWE5YWMtNjM1Mjc5OTIxMWRichBZ5LAmMoRv377DQ65Y+P2oiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAGa44PXBrABAhIMI5t7vuD77rNdNsiZGgxVwiE4aFL94+Mi+ckiMCk7GksjVn/9EE+vNf400FztdGf6yOfrZdZETf+IC2RlRUw1iXdcyth5F7jjzOjOiSqSAf78g27rz3Oyurp77Bt5InZXXF7iLI4uZTAqarT65TV4N3TEieeB6dOwC43/CwoA1TwjJkFRdRMLIm3uuDiMYUkEwS1s55uYZtwdIo1FzJeGOhD3fTHdYLBhaRVXRZ8+puAJjEHSQOUqGAS+JIn4J5Zg5eGNGTOBMjwh4Km0+W7oolSxmJGfL/ulmNaT/FTG3YTIGAE="}     }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0             }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"line"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" one\nline two"}     }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1 }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":69,"cache_read_input_tokens":13634,"output_tokens":47,"output_tokens_details":{"thinking_tokens":36},"iterations":[{"input_tokens":10,"output_tokens":47,"cache_read_input_tokens":13634,"cache_creation_input_tokens":69,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":69},"type":"message"}]},"context_management":{"applied_edits":[]}              }
+
+event: message_stop
+data: {"type":"message_stop"    }
+

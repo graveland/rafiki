@@ -1,8 +1,29 @@
 # A captured Claude Code session
 
-One real session, recorded through `rafikid proxy record` — the raw HTTP
+One real conversation, recorded through `rafikid proxy record` — the raw HTTP
 exchanges between Claude Code and the Anthropic API, as `NNNNNN-request.http`
 and `NNNNNN-response.http` pairs in arrival order.
+
+It is driven by `testdata/claude-capture.toml`, two `claude` processes sharing
+one session, chosen so the transcript covers the awkward shapes of request:
+
+- a plain turn, a tool call, a large tool result, two tool calls in one
+  response (both results come back in one user message), a failing tool call,
+  non-ASCII output and a multi-line prompt;
+- a session killed the instant a `tool_use` response arrives (the client never
+  answers it) and resumed by a second process. Claude Code drops the unanswered
+  `tool_use` and replays a synthetic assistant `No response requested.` at the
+  index the stored reply occupies: a client rewriting a message the proxy
+  already stored;
+- two dependent tool calls in sequence;
+- `/compact`, which goes through in headless stream-json mode as a
+  summarization request over the same history (its last user message gains a
+  "CRITICAL: Respond with TEXT ONLY" block, a second rewrite), then a request
+  that opens with the summary;
+- `/clear`, then one more turn on the fresh history.
+
+`TestCapturedClaudeSessionReplays` (`pkg/capture`) replays every request
+through capture and logs the stored ordering (`go test -v`).
 
 Regenerate it with:
 
@@ -21,7 +42,7 @@ than an archive.
   plus a sha256 of the token, never the token.
 - **`metadata.user_id`** (device id and account uuid) is recorded as a sha256
   of the whole field.
-- **Prompts and completions are verbatim.** `testdata/claude-capture-turns.txt` is
+- **Prompts and completions are verbatim.** `testdata/claude-capture.toml` is
   deliberately dull for that reason: anything you add to it lands in the
   repository in clear text.
 - Machine-specific headers (`X-Stainless-Arch`, `Host`, session uuids, client

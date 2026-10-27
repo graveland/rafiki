@@ -1,0 +1,43 @@
+# Script for `make capture-claude`: one conversation that exercises the shapes
+# of request a Claude Code session produces, across two claude processes.
+#
+# The first process runs a plain turn, tool calls (a simple one, large output,
+# two in parallel, one that fails, unicode and a multi-line prompt) and ends on
+# a Bash call killed the instant its tool_use response arrives, so the
+# recording holds an assistant tool_use the client never answered. The second
+# process resumes that session: Claude Code drops the unanswered tool_use and
+# replays a synthetic assistant "No response requested." at the same index,
+# which rewrites a message the proxy already stored. It then runs dependent
+# tool calls, /compact, and /clear.
+#
+# Prompts and completions are recorded verbatim into the repository, so keep
+# them dull.
+
+# A run that wedges fails the capture instead of hanging it.
+turn_timeout = "90s"
+
+[[run]]
+name = "first"
+interrupt = "tool_use"
+turns = [
+  "Reply with exactly one word: ready",
+  "Use the Bash tool to run `echo tool-ok`, then report its exact output.",
+  "Use the Bash tool to run `seq 1 3000`, then tell me the last number it printed.",
+  "In a single response, call the Bash tool twice in parallel: once with `echo alpha` and once with `echo beta`. Then report both outputs.",
+  "Use the Bash tool to run `ls /nonexistent-capture-dir`, then say in one sentence what went wrong.",
+  "Use the Bash tool to run `printf 'héllo ✓\\n'`, then repeat its output exactly.",
+  "Reply with exactly these two lines and nothing else:\nline one\nline two",
+  "Use the Bash tool to run `sleep 120`, then report when it finishes.",
+]
+
+[[run]]
+name = "second"
+resume = "first"
+turns = [
+  "Reply with exactly one word: recovered",
+  "Use the Bash tool to run `echo first`. After you see its output, use the Bash tool again to run `echo second`. Then report both outputs.",
+  "/compact",
+  "Reply with exactly one word: omega",
+  "/clear",
+  "Reply with exactly one word: fresh",
+]

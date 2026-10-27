@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,6 +47,11 @@ type claudeTurnsOptions struct {
 	Out     io.Writer
 	Err     io.Writer
 	Timeout time.Duration
+	// Interrupt, when set to claudeInterruptToolUse, ends the run by killing
+	// claude once the last turn's response carries a tool_use block. The kill
+	// is the run's successful end; a last turn that finishes without a tool
+	// call is an error.
+	Interrupt string
 	// Binary is the claude executable; a variable so tests drive a fixture
 	// instead of a real session.
 	Binary string
@@ -87,6 +93,10 @@ func runClaudeTurns(o claudeTurnsOptions) error {
 
 	cmd := exec.Command(o.Binary, o.Args...) //nolint:gosec // the operator's own claude
 	cmd.Env = o.Env
+	// Its own process group, so a kill takes the tool subprocesses with it: a
+	// killed claude otherwise leaves its Bash command running, reparented to
+	// init, for as long as the command takes.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = o.Err
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -120,9 +130,19 @@ func runClaudeTurns(o claudeTurnsOptions) error {
 			killAndReap(cmd)
 			return fmt.Errorf("turn %d: %w", i+1, err)
 		}
-		if err := awaitClaudeTurnResult(lines, o.Out, o.Timeout); err != nil {
+		interrupt := o.Interrupt != "" && i == len(o.Turns)-1
+		interrupted, err := awaitClaudeTurnResult(lines, o.Out, o.Timeout, interrupt)
+		if err != nil {
 			killAndReap(cmd)
 			return fmt.Errorf("turn %d: %w", i+1, err)
+		}
+		if interrupt {
+			if !interrupted {
+				killAndReap(cmd)
+				return fmt.Errorf("turn %d: interrupt %q requested but the turn finished without a tool call", i+1, o.Interrupt)
+			}
+			killAndReap(cmd)
+			return nil
 		}
 	}
 	// Closing stdin is how claude learns the session is over; waiting then
@@ -159,7 +179,10 @@ func runClaudeTurns(o claudeTurnsOptions) error {
 // The reap is bounded: a session wedged in a way that outlives SIGKILL (a shell
 // waiting on a child of its own) must not turn a failed turn into a hung one.
 func killAndReap(cmd *exec.Cmd) {
-	_ = cmd.Process.Kill()
+	// The negative pid signals the whole group; Setpgid made claude its leader.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -193,15 +216,16 @@ func writeClaudeTurn(w io.Writer, provider child.ClaudeProvider, turn string) er
 
 // awaitClaudeTurnResult reads frames until this turn's result arrives, echoing
 // assistant text as it goes. A turn that produces an error result is an error,
-// not a silent success.
-func awaitClaudeTurnResult(lines <-chan string, out io.Writer, timeout time.Duration) error {
+// not a silent success. With stopOnToolUse it returns (true, nil) as soon as an
+// assistant frame carries a tool_use block, before any result.
+func awaitClaudeTurnResult(lines <-chan string, out io.Writer, timeout time.Duration, stopOnToolUse bool) (bool, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	for {
 		select {
 		case line, ok := <-lines:
 			if !ok {
-				return errors.New("claude closed its output before the turn finished")
+				return false, errors.New("claude closed its output before the turn finished")
 			}
 			var frame claudeTurnFrame
 			if err := json.Unmarshal([]byte(line), &frame); err != nil {
@@ -212,20 +236,32 @@ func awaitClaudeTurnResult(lines <-chan string, out io.Writer, timeout time.Dura
 			switch frame.Type {
 			case "assistant":
 				echoClaudeText(out, frame)
+				if stopOnToolUse && hasToolUse(frame) {
+					return true, nil
+				}
 			case "result":
 				if frame.IsError {
 					msg := strings.TrimSpace(frame.Result)
 					if msg == "" {
 						msg = frame.Subtype
 					}
-					return fmt.Errorf("claude reported an error: %s", msg)
+					return false, fmt.Errorf("claude reported an error: %s", msg)
 				}
-				return nil
+				return false, nil
 			}
 		case <-deadline.C:
-			return fmt.Errorf("no result frame within %s", timeout)
+			return false, fmt.Errorf("no result frame within %s", timeout)
 		}
 	}
+}
+
+func hasToolUse(frame claudeTurnFrame) bool {
+	for _, block := range frame.Message.Content {
+		if block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
 }
 
 // echoClaudeText prints the assistant's text blocks, which is what makes a

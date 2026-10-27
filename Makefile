@@ -153,15 +153,20 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 # capture is a snapshot of one day's protocol, not an archive.
 #
 # Credentials and the account/device ids are digests, so the capture is safe to
-# commit; prompts and completions are not, so keep the turns file boring.
+# commit; prompts and completions are not, so keep the script boring.
+#
+# The default is testdata/claude-capture.toml, a multi-run script (a tool call
+# killed mid-flight and resumed, /compact, /clear, parallel calls); TURNS=file
+# records a plain one-prompt-per-line session instead.
 .PHONY: capture-claude
-capture-claude: build ## Record a scripted claude session (MODEL=, TURNS=, OUT=, SYSPROMPT=).
+capture-claude: build ## Record the scripted claude session (SCRIPT= or TURNS=, MODEL=, OUT=, SYSPROMPT=).
 	@OUT="$${OUT:-$(CURDIR)/testdata/claude-capture}" \
-	 TURNS="$${TURNS:-testdata/claude-capture-turns.txt}" \
+	 TURNS="$${TURNS:-}" \
 	 MODEL="$${MODEL:-haiku}" \
 	 SYSPROMPT="$${SYSPROMPT:-}" \
 	 RAFIKID="$(CURDIR)/$(BIN_DIR)/$(DAEMON_BIN)" \
 	 RAFIKI="$(CURDIR)/$(BIN_DIR)/$(CLI_BIN)" \
+	 SCRIPT="$${SCRIPT:-}" \
 	 $(CURDIR)/scripts/capture-claude.sh
 
 ##@ Install

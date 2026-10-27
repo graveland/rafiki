@@ -175,7 +175,10 @@ rafikid proxy record \
 ```
 
 `turns.txt` holds one prompt per line (`#` comments and blank lines are
-skipped), or pass `--turn "..."` repeatedly. The scripted session runs Claude
+skipped), or pass `--turn "..."` repeatedly. `--script script.toml` records several
+claude processes in one capture (a session killed mid-tool-call and resumed by
+a second one, for example); see the scripted-sessions paragraph in
+`docs/guide/claude-code.md`. The scripted session runs Claude
 Code headless in the same stream-json mode a daemon-managed claude child uses,
 so every turn is a prompt on one process, one conversation and one session id —
 rather than one independent `-p` run per prompt.
