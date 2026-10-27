@@ -205,7 +205,7 @@ def note(s):
         f.write(s + "\n")
 
 STATE = {"unary_503s": 2, "stream_503s": 0, "requests": [], "c2_cursors": [], "c3_cursors": [],
-         "c4_cursors": [], "routes": [], "history_req": None}
+         "c4_cursors": [], "c5_types": None, "routes": [], "history_req": None}
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -276,6 +276,18 @@ class H(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     time.sleep(4)
                 return
+            if sreq["subject"]["child"] == "c_5":
+                # A child CLOSED mid-watch: it leaves the daemon's store and
+                # publishes nothing more, so child_closed is the only terminal
+                # signal a settle watch can see.
+                STATE["c5_types"] = sreq.get("types")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/connect+json")
+                self.end_headers()
+                env(self.wfile, {"childId": "c_5", "ordinal": 7, "ts": "2026-09-26T15:04:05Z", "agentStatus": {"state": "streaming"}})
+                env(self.wfile, {"childId": "c_5", "ordinal": 8, "ts": "2026-09-26T15:04:06Z", "childClosed": {"ancestors": ["c_root"]}})
+                env(self.wfile, {"error": None}, end=True)
+                return
             if sreq["subject"]["child"] == "c_4":
                 # A daemon restarting mid-watch: the first stream delivers
                 # ordinal 7, then the connection dies short of its declared
@@ -334,6 +346,8 @@ class H(BaseHTTPRequestHandler):
                 self._json({"child": {"childId": "c_3", "status": "streaming", "labels": {}}})
             elif req.get("childId") == "c_4":
                 self._json({"child": {"childId": "c_4", "status": "streaming", "latestOrdinal": 6, "labels": {}}})
+            elif req.get("childId") == "c_5":
+                self._json({"child": {"childId": "c_5", "status": "streaming", "latestOrdinal": 6, "labels": {}}})
             else:
                 self._err(403, "permission_denied", "not yours")
             return
@@ -544,15 +558,24 @@ def run():
         c._prompt_floor.pop("c_3")
         note("11 unset-latest-ordinal OK")
 
-        # 12. a settle watch that has delivered events survives a transport
+        # 12. a child CLOSED mid-watch settles as "closed" instead of blocking
+        # until the timeout: closing removes it from the daemon's store, so
+        # nothing else will ever be published for it. The watch must also ASK
+        # for child_closed -- without it in the type filter the event never
+        # arrives and the wait hangs.
+        assert c.wait(["c_5"], timeout=10) == {"c_5": "closed"}
+        assert "child_closed" in STATE["c5_types"], STATE["c5_types"]
+        note("12 closed-settles OK")
+
+        # 13. a settle watch that has delivered events survives a transport
         # error mid-stream (a daemon restarting): it re-opens from the last
         # ordinal it saw instead of raising out of settled().
         settles = list(c.settled(["c_4"]))
         assert [s.state for s in settles] == ["exited"], settles
         assert STATE["c4_cursors"] == [6, 7], STATE["c4_cursors"]
-        note("12 settle-survives-reset OK")
+        note("13 settle-survives-reset OK")
 
-        # 13. get_history: limit and before ride the wire, events come back
+        # 14. get_history: limit and before ride the wire, events come back
         # with their ts.
         before = datetime.datetime(2026, 9, 26, 15, 4, 5, tzinfo=datetime.timezone.utc)
         evs = c.get_history("c_1", limit=2, before=before)
@@ -560,7 +583,7 @@ def run():
         assert [e.ordinal for e in evs] == [3, 4], evs
         assert evs[0].ts == datetime.datetime(2026, 9, 26, 15, 4, 3, tzinfo=datetime.timezone.utc), evs[0].ts
         assert STATE["requests"][-1][0].endswith("/GetHistory"), STATE["requests"][-1]
-        note("13 get-history OK")
+        note("14 get-history OK")
         srv.shutdown()
         note("TRANSPORT PASS")
     except Exception:

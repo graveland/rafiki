@@ -60,6 +60,7 @@ one  = c.get(child)                       # status, cost, latest_ordinal, result
 
 for settle in c.settled([child]):         # yields Settle(child_id, state)
     print(settle)                         #   as each child reaches idle/exited
+                                          #   ("closed" if it was finalized)
 states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
 transcript = c.export(child)              # the child's decomposed transcript (fundi or claude; last assistant turn = the answer)
@@ -155,6 +156,12 @@ Streaming calls retry too, with their delivery contracts spelled out:
   prompt), `settled()`/`wait()` settle it on the turn that prompt started — a
   busy status after the send, then idle — never on the idle it reports before
   picking the prompt up. Exited always settles.
+- A child CLOSED during the watch settles as `"closed"`. Closing finalizes a
+  child — another client's close, `rafiki forget`, the daemon's grace reaper —
+  so it leaves the daemon's store, can never be resumed, and publishes nothing
+  further; without that event a wait would sit until its timeout. A child that
+  had already left the store when the watch began raises `not_found` instead,
+  like any other read of a child that no longer exists.
 - `settled()`/`wait()` resume from the highest event ordinal actually seen
   (the daemon's replay cursor), so a settle that lands during a daemon
   restart is seen rather than waited past. That holds mid-stream too: a

@@ -35,6 +35,7 @@ from . import _gen
 from .connect import ConnectClient
 from .errors import (
     CODE_DEADLINE_EXCEEDED,
+    CODE_NOT_FOUND,
     ClientSetupError,
     ConnectError,
     StreamEnded,
@@ -67,11 +68,21 @@ STOP_TIMEOUT_SLACK = datetime.timedelta(seconds=30)
 # "running" is a script child's steady state between spawn and exit.
 SETTLED_STATES = ("idle", "exited")
 
+# CLOSED_STATE is the settle a CLOSE reports, and it is deliberately not a
+# protocol.Status: the child has left the daemon's store, so it has no status
+# left to report and can never be resumed. Reporting it as "exited" would be a
+# lie in the other direction -- Settle.exit_code documents None as "signalled",
+# and a closed child's exit code is simply gone.
+CLOSED_STATE = "closed"
+
 # The durable event types a settle arrives as. A fundi or claude child
 # publishes agent_status (idle is the settle; exited the terminal form); a
 # SCRIPT child has no turns — its whole life is one run — so its settle is
 # the child_exited event alone. Watching both is the kind-agnostic way.
-SETTLE_EVENT_TYPES = ["agent_status", "child_exited"]
+# child_closed is the third: a child closed (finalized) by anyone — another
+# client, the CLI, the daemon's grace reaper — publishes no further event, so
+# without it a wait() on that child would block until its timeout.
+SETTLE_EVENT_TYPES = ["agent_status", "child_exited", "child_closed"]
 
 
 def _latest_ordinal(summary) -> int:
@@ -107,9 +118,12 @@ def _as_timedelta(value: "datetime.timedelta | float | int | None") -> "datetime
 
 
 class Settle:
-    """One child's settle: the state it landed in (see SETTLED_STATES) and,
-    when it arrived as child_exited, the exit code (None when the child was
-    signalled)."""
+    """One child's settle: the state it landed in (see SETTLED_STATES), or
+    ``"closed"`` when the child was closed (finalized) during the watch — it
+    left the daemon's store, so it can never be resumed and no further event
+    will ever arrive for it. ``exit_code`` is set only when the settle arrived
+    as child_exited (None when the child was signalled, and always None for a
+    close, whose exit code is gone with the row)."""
 
     def __init__(self, child_id: str, state: str, exit_code: "int | None" = None):
         self.child_id = child_id
@@ -636,6 +650,14 @@ class Client:
         child_exited for a script child (whose whole life is one run, so its
         exit is its settle).
 
+        A child CLOSED during the watch settles as ``"closed"``: closing
+        finalizes a child (another client's close, ``rafiki forget``, the
+        daemon's grace reaper), it leaves the daemon's store, and nothing more
+        is ever published for it — so this is the terminal outcome a wait must
+        not sit past. A child that had ALREADY left the store when the watch
+        began is not settled but raised (``not_found``), like any other read of
+        a child that no longer exists.
+
         Each child is polled first (GetChild): one that has already settled
         is reported at once; the rest are streamed from the child's current
         latest_ordinal, so a settle that lands between the poll and the
@@ -656,7 +678,8 @@ class Client:
 
     def wait(self, children: "Iterable[str]", *, timeout: "float | None" = None) -> "dict[str, str]":
         """Block until every named child has settled; returns child_id →
-        final state. ``timeout`` bounds the WHOLE wait (seconds)."""
+        final state (``"idle"``, ``"exited"``, or ``"closed"`` for a child
+        closed during the wait). ``timeout`` bounds the WHOLE wait (seconds)."""
         ids = list(children)
         out: dict = {}
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -683,6 +706,20 @@ class Client:
         def done(state: str, exit_code=None) -> Settle:
             self._prompt_floor.pop(child_id, None)
             return Settle(child_id, state, exit_code)
+
+        def poll_after_a_stream() -> "object | None":
+            """The child's summary, or None when it has left the store.
+
+            Only used AFTER the first poll succeeded, so NotFound here can only
+            mean a close landed during the watch: that is a terminal settle, not
+            an error. The first poll still raises, because a child this client
+            never had (a typo, someone else's id) is not a close."""
+            try:
+                return self.get(child_id)
+            except ConnectError as exc:
+                if exc.code == CODE_NOT_FOUND:
+                    return None
+                raise
 
         summary = self.get(child_id)
         if settles(summary.status):
@@ -732,6 +769,14 @@ class Client:
                         # A script child's settle: its exit IS its result.
                         state = "exited"
                         exit_code = ev.child_exited.exit_code
+                    elif ev.child_closed is not None:
+                        # Closed, not exited: the child left the daemon's
+                        # store, so nothing more will ever be published for it.
+                        # This is terminal and unrecoverable -- the child can
+                        # never be resumed -- and without it the watch would sit
+                        # here until its timeout.
+                        yield done(CLOSED_STATE)
+                        return
                     if state is None:
                         continue
                     if ev.ordinal is not None:
@@ -742,8 +787,11 @@ class Client:
                         yield done(state, exit_code)
                         return
                 # Clean stream end without a settle: poll once more, in case
-                # the terminal status raced the stream closed.
-                summary = self.get(child_id)
+                # the terminal status -- or a close -- raced the stream closed.
+                summary = poll_after_a_stream()
+                if summary is None:
+                    yield done(CLOSED_STATE)
+                    return
                 if settles(summary.status):
                     yield done(summary.status)
                     return
@@ -753,7 +801,10 @@ class Client:
                 # caller-visible (StreamEnded's docstring). Treat it as the
                 # clean end it can only mean here: poll once for a settle
                 # that raced the stream closed, else keep watching.
-                summary = self.get(child_id)
+                summary = poll_after_a_stream()
+                if summary is None:
+                    yield done(CLOSED_STATE)
+                    return
                 if settles(summary.status):
                     yield done(summary.status)
                     return
