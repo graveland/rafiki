@@ -441,7 +441,7 @@ func TestSendToExitedAgentAsksToResume(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := railWith(t, "c_1")
 	exitChild(c, "c_1")
-	c.pending = "hello"
+	c.pending, c.pendingChild = "hello", "c_1"
 
 	c.Update(exitedSendFailure("c_1", "hello"))
 

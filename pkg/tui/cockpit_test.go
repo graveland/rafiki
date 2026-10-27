@@ -313,7 +313,7 @@ func TestPendingSuppressesTheWorkingSpinner(t *testing.T) {
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		{ChildId: "c_1", Name: "scout", Status: "streaming", Labels: map[string]string{}},
 	})
-	c.pending = "hello"
+	c.pending, c.pendingChild = "hello", "c_1"
 
 	got := ansi.Strip(c.View().Content)
 	ck.NotStrContains(got, "streaming…", "pending send did not suppress the working spinner")

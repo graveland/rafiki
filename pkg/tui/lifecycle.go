@@ -615,6 +615,9 @@ func (c *Cockpit) forgetChild(childID string) tea.Cmd {
 	}
 	wasFocused := c.focused() == childID
 
+	if c.pendingChild == childID {
+		c.pending, c.pendingChild = "", ""
+	}
 	c.rail.Remove(childID)
 	delete(c.sessions, childID)
 	c.evictPane(childID)

@@ -354,9 +354,12 @@ type Cockpit struct {
 	quitting      bool
 	status        string
 	pending       string
-	showHelp      bool
-	railHidden    bool
-	expandArgs    bool
+	// pendingChild is the child the unacknowledged pending message was sent to;
+	// the ⏳ line is shown only while that child is the one being viewed.
+	pendingChild string
+	showHelp     bool
+	railHidden   bool
+	expandArgs   bool
 	// railPeek records that an explicit request revealed a rail the default look
 	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
@@ -1051,6 +1054,14 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, ev := range msg.events {
 			s.ApplyHistory(ev)
 		}
+		// The message may have been persisted while this child was not being
+		// streamed (a claude child's echo only arrives with its capture), in
+		// which case the history is the acknowledgement.
+		if c.pending != "" && msg.childID == c.pendingChild && len(s.Blocks) > 0 {
+			if last := s.Blocks[len(s.Blocks)-1]; last.Kind == session.KindUser && last.Text == c.pending {
+				c.pending = ""
+			}
+		}
 		// The cursor takes the LOG watermark captured before the fetch -- never
 		// a conversation ordinal; ApplyHistory's doc has the full hazard. It is
 		// the resume point the subscription opens from. A session holding history
@@ -1085,7 +1096,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case sendFailedMsg:
-		c.pending = ""
+		if msg.childID == c.pendingChild {
+			c.pending = ""
+		}
 		if c.askToResume(msg) {
 			return c, nil
 		}
@@ -1362,7 +1375,7 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// having taken it into a turn. The echo belongs to the COMMITTED agent's
 	// conversation: while browsing, the streamed session is the viewed child's,
 	// and its user messages must not clear a send that went elsewhere.
-	if c.pending != "" && id == c.focused() && len(s.Blocks) > before &&
+	if c.pending != "" && id == c.pendingChild && len(s.Blocks) > before &&
 		s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
 		c.pending = ""
 	}
@@ -1902,6 +1915,7 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 		// user_message to acknowledge the echo, so a pending line would never clear.
 		if _, _, slash := slashcmd.Parse(text); !slash || mode != rafikiv1.SendMode_SEND_MODE_PROMPT {
 			c.pending = text
+			c.pendingChild = child
 			if text == "" {
 				c.pending = "(" + itoa(int64(len(images))) + " attached)"
 			}
@@ -2856,7 +2870,7 @@ func (c *Cockpit) View() tea.View {
 		conv = styleMeta.Render("loading…")
 	}
 	switch f := c.viewing(); {
-	case c.pending != "" && c.focus != focusRail:
+	case c.pending != "" && c.pendingChild == f && c.focus != focusRail:
 		// A message just sent takes priority over the working spinner: the
 		// two would otherwise flicker between each other for the instant
 		// between send and the first status event confirming the turn started.
