@@ -322,3 +322,85 @@ func TestStreamEventsNoFloorReplaysOnlyNamedChildren(t *testing.T) {
 	appendAndPublish(t, mem, bus, statusEvent("c_named", "idle"))
 	c.EqDeep([]string{"c_named:2"}, receiveOrdinals(t, stream, 1), "live, with nothing of c_other's before it")
 }
+
+// A child closed by another client must reach the subscriber that is still
+// drawing its row. That subscriber is scoped to an ANCESTOR, and by the time
+// the event is delivered the child is gone from the childstore the subject
+// predicate reads -- so the event's own chain is what admits it. Without that
+// fallback the close would reach only a bare all-scope attach, and the cockpit
+// attached to the coordinator would keep the dead row forever.
+func TestStreamEventsDeliversAChildClosedToAnAncestorSubscriber(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// The store knows the tree but NOT c_leaf: it has just been closed.
+	ln := &fakeLineage{
+		depth:  map[string]map[string]int{"c_root": {"c_mid": 1}},
+		labels: map[string]map[string]string{"c_mid": {"owner": "brent"}},
+	}
+	mem := eventlog.NewMemory()
+	bus := &liveBus{}
+	client := setupStreamServer(t, ln, mem, bus)
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Subtree{Subtree: "c_root"}},
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+		Types:   []string{"child_closed"},
+	}))
+	c.NoError(err, "StreamEvents")
+
+	appendAndPublish(t, mem, bus, &rafikiv1.Event{
+		ChildId: "c_leaf",
+		Payload: &rafikiv1.Event_ChildClosed{ChildClosed: &rafikiv1.ChildClosed{
+			Ancestors: []string{"c_mid", "c_root"},
+			Labels:    map[string]string{"owner": "someone"},
+		}},
+	})
+
+	c.True(stream.Receive(), "the ancestor subscriber never received the close: %v", stream.Err())
+	c.Eq("c_leaf", stream.Msg().GetChildId(), "the event names the closed child")
+	c.Require().NotNil(stream.Msg().GetChildClosed(), "payload = %T", stream.Msg().GetPayload())
+}
+
+// The fallback is the close event's alone: a child_closed whose chain does not
+// include the subscribed root must NOT be admitted, or the exception would
+// quietly widen every subtree subscription.
+func TestStreamEventsRejectsAChildClosedFromAnotherTree(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ln := &fakeLineage{
+		depth:  map[string]map[string]int{"c_root": {"c_mid": 1}},
+		labels: map[string]map[string]string{},
+	}
+	mem := eventlog.NewMemory()
+	bus := &liveBus{}
+	client := setupStreamServer(t, ln, mem, bus)
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Subtree{Subtree: "c_root"}},
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+		Types:   []string{"child_closed"},
+	}))
+	c.NoError(err, "StreamEvents")
+
+	appendAndPublish(t, mem, bus, &rafikiv1.Event{
+		ChildId: "c_stranger",
+		Payload: &rafikiv1.Event_ChildClosed{ChildClosed: &rafikiv1.ChildClosed{
+			Ancestors: []string{"c_other_root"},
+		}},
+	})
+	// A second, in-scope event proves the out-of-scope one was FILTERED rather
+	// than simply not arrived yet.
+	appendAndPublish(t, mem, bus, &rafikiv1.Event{
+		ChildId: "c_leaf",
+		Payload: &rafikiv1.Event_ChildClosed{ChildClosed: &rafikiv1.ChildClosed{
+			Ancestors: []string{"c_mid", "c_root"},
+		}},
+	})
+
+	c.True(stream.Receive(), "the in-scope close never arrived: %v", stream.Err())
+	c.Eq("c_leaf", stream.Msg().GetChildId(), "an out-of-tree close was admitted: the fallback widened the subscription")
+}

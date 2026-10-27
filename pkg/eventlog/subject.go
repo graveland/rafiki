@@ -81,6 +81,11 @@ type Filter struct {
 }
 
 // Match reports whether ev belongs to this subscription.
+//
+// ln is the live lineage (the daemon's childstore, keyed by child id). One
+// event — child_closed — is about a child that has already left it, so that
+// event carries its own ancestry and is matched against that instead; see
+// eventLineage.
 func (f Filter) Match(ev *rafikiv1.Event, ln Lineage) bool {
 	if ev == nil {
 		return false
@@ -101,7 +106,20 @@ func (f Filter) Match(ev *rafikiv1.Event, ln Lineage) bool {
 			return false
 		}
 	}
-	return f.Subject.match(ev.GetChildId(), ln)
+	if f.Subject.match(ev.GetChildId(), ln) {
+		return true
+	}
+	// A child_closed event names a child that has just LEFT the store the
+	// lineage reads, so the scope question ("is this in my subtree?") and the
+	// selector's label lookup can no longer be answered from it. That event
+	// carries its own chain and labels precisely so the subscriber still
+	// drawing the row can be told the row is gone; ask those instead. This
+	// NARROWS nothing and widens nothing: it answers exactly what the store
+	// would have answered one moment earlier.
+	if own := eventLineage(ev); own != nil {
+		return f.Subject.match(ev.GetChildId(), own)
+	}
+	return false
 }
 
 // AdmitsChild reports whether the subject admits childID's events at all,
@@ -159,6 +177,57 @@ func (s Subject) selectorAdmits(childID string, ln Lineage) bool {
 	return sel.Matches(labels)
 }
 
+// eventLineage returns a Lineage backed by a child_closed event's own ancestry,
+// or nil for every other event.
+//
+// It exists because the ONE thing a subscriber most needs to hear — "the child
+// you are drawing is gone" — is about a child the live lineage can no longer
+// resolve: closing deletes it from the childstore, which is what DescendantDepth
+// and Labels read. The event therefore carries the chain and the labels, and the
+// scope question is answered from those. Every other event is about a child that
+// is still in the store, so it keeps using the real lineage and an unknown child
+// stays excluded.
+func eventLineage(ev *rafikiv1.Event) Lineage {
+	cc := ev.GetChildClosed()
+	if cc == nil {
+		return nil
+	}
+	return closedLineage{childID: ev.GetChildId(), ancestors: cc.GetAncestors(), labels: cc.GetLabels()}
+}
+
+// closedLineage is the Lineage of one child that has left the store, as the
+// child_closed event that reported it described the child.
+type closedLineage struct {
+	childID   string
+	ancestors []string // parent first, then upward to the root
+	labels    map[string]string
+}
+
+// Labels answers for the closed child alone; every other id is unknown, exactly
+// as the store would answer.
+func (l closedLineage) Labels(childID string) (map[string]string, bool) {
+	if childID != l.childID {
+		return nil, false
+	}
+	return l.labels, true
+}
+
+// DescendantDepth counts hops from ancestorID down to the closed child, or -1
+// when the ancestor is not on its chain. ancestors[0] is the parent, so the
+// ancestor at index i is i+1 hops above the child — the same number
+// childstore.DescendantDepth would have returned before the close.
+func (l closedLineage) DescendantDepth(ancestorID, candidateID string) int {
+	if candidateID != l.childID || ancestorID == "" || ancestorID == candidateID {
+		return -1
+	}
+	for i, id := range l.ancestors {
+		if id == ancestorID {
+			return i + 1
+		}
+	}
+	return -1
+}
+
 // TypeName is the wire name of an event's payload, used by Filter.Types and by
 // the log's `type` column. It must match the proto field names in
 // Event.payload exactly — the column is queried by hand in operational SQL,
@@ -197,6 +266,8 @@ func TypeName(ev *rafikiv1.Event) string {
 		return "child_renamed"
 	case *rafikiv1.Event_TasksChanged:
 		return "tasks_changed"
+	case *rafikiv1.Event_ChildClosed:
+		return "child_closed"
 	case *rafikiv1.Event_Error:
 		return "error"
 	case *rafikiv1.Event_Retry:

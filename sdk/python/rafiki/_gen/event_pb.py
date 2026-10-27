@@ -680,6 +680,29 @@ class ChildExited:
         return obj
 
 @dataclasses.dataclass
+class ChildClosed:
+    ancestors: list[str] = dataclasses.field(default_factory=list)
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.ancestors:
+            out["ancestors"] = [x for x in self.ancestors]
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ChildClosed":
+        obj = cls()
+        _v = _d.get("ancestors")
+        if _v is not None:
+            obj.ancestors = [x for x in _v]
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        return obj
+
+@dataclasses.dataclass
 class CompactionBoundary:
     trigger: str = ""
     pre_tokens: Optional[int] = None
@@ -806,6 +829,7 @@ class Event:
     operator_state: Optional[OperatorState] = None
     child_renamed: Optional[ChildRenamed] = None
     tasks_changed: Optional[TasksChanged] = None
+    child_closed: Optional[ChildClosed] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -815,7 +839,7 @@ class Event:
             out["ordinal"] = self.ordinal
         if self.ts is not None:
             out["ts"] = _ts_out(self.ts)
-        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed) if x is not None]
+        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed, self.child_closed) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
         if self.user_message is not None:
@@ -854,6 +878,8 @@ class Event:
             out["childRenamed"] = self.child_renamed.to_dict()
         if self.tasks_changed is not None:
             out["tasksChanged"] = self.tasks_changed.to_dict()
+        if self.child_closed is not None:
+            out["childClosed"] = self.child_closed.to_dict()
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Event":
@@ -921,6 +947,9 @@ class Event:
         _v = _d.get("tasksChanged")
         if _v is not None:
             obj.tasks_changed = TasksChanged.from_dict(_v)
+        _v = _d.get("childClosed")
+        if _v is not None:
+            obj.child_closed = ChildClosed.from_dict(_v)
         return obj
 
 

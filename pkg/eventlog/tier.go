@@ -50,6 +50,9 @@ var durableTypes = map[string]bool{
 	"operator_state":       true,
 	"child_renamed":        true,
 	"tasks_changed":        true,
+	// Durable because the rail stream subscribes at this tier: an ephemeral
+	// close would never reach the cockpit that is still drawing the row.
+	"child_closed": true,
 }
 
 // ephemeralTypes is listed explicitly rather than left as a default so that

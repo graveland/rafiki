@@ -169,6 +169,13 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 			detail += fmt.Sprintf(" (lifetime %s)", fmtDur(t.Sub(born)))
 		}
 		r.status[id] = "exited"
+	case *rafikiv1.Event_ChildClosed:
+		// Closed is not exited: the child has left the daemon's store and can
+		// never be resumed. A top-level child has no ancestors to report.
+		detail = " gone"
+		if n := len(p.ChildClosed.GetAncestors()); n > 0 {
+			detail += fmt.Sprintf(" (depth %d)", n)
+		}
 	case *rafikiv1.Event_TurnEnd:
 		te := p.TurnEnd
 		// cost_usd is optional: absent reads as "not reported", while 0 is a
@@ -276,6 +283,8 @@ func typeColumn(ev *rafikiv1.Event) string {
 		return "spawn"
 	case *rafikiv1.Event_ChildExited:
 		return "exit"
+	case *rafikiv1.Event_ChildClosed:
+		return "close"
 	case *rafikiv1.Event_Error:
 		return "error"
 	case *rafikiv1.Event_Retry:

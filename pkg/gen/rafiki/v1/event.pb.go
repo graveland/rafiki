@@ -1609,6 +1609,72 @@ func (x *ChildExited) GetSignal() string {
 	return ""
 }
 
+// ChildClosed says a child has LEFT THE STORE: it was finalized (closed) and
+// can never be resumed. It is not an exit — a killed child stays listed and
+// reports through ChildExited, which is why the two are separate events.
+//
+// It carries its OWN lineage because the store no longer knows this child, and
+// the stream's subject predicate answers "is this child in my scope?" from the
+// childstore. Without the chain and labels, the one subscriber that still draws
+// the row — a cockpit attached to an ANCESTOR, which is the common case — could
+// never be told the row is gone, because the child it names is already unknown
+// to the lineage. ancestors is the chain from the child's parent upward to the
+// root (empty for a top-level child) and labels is the child's label set, so
+// the predicate can answer both the scope question and its selector without the
+// store. A client's answer to this event is to RE-LIST (ListChildren is
+// membership's authority); nothing reconstructs the rail from this payload.
+type ChildClosed struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ancestors     []string               `protobuf:"bytes,1,rep,name=ancestors,proto3" json:"ancestors,omitempty"`
+	Labels        map[string]string      `protobuf:"bytes,2,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChildClosed) Reset() {
+	*x = ChildClosed{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChildClosed) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChildClosed) ProtoMessage() {}
+
+func (x *ChildClosed) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChildClosed.ProtoReflect.Descriptor instead.
+func (*ChildClosed) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ChildClosed) GetAncestors() []string {
+	if x != nil {
+		return x.Ancestors
+	}
+	return nil
+}
+
+func (x *ChildClosed) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
 // CompactionBoundary marks a child's context having been rewritten by
 // compaction — Claude Code's own (or fundi's own compaction, published live by
 // the fundi emitter and synthesized on reattach from the stored
@@ -1627,7 +1693,7 @@ type CompactionBoundary struct {
 
 func (x *CompactionBoundary) Reset() {
 	*x = CompactionBoundary{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[22]
+	mi := &file_rafiki_v1_event_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1639,7 +1705,7 @@ func (x *CompactionBoundary) String() string {
 func (*CompactionBoundary) ProtoMessage() {}
 
 func (x *CompactionBoundary) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[22]
+	mi := &file_rafiki_v1_event_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1652,7 +1718,7 @@ func (x *CompactionBoundary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactionBoundary.ProtoReflect.Descriptor instead.
 func (*CompactionBoundary) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{22}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CompactionBoundary) GetTrigger() string {
@@ -1692,7 +1758,7 @@ type ScriptReport struct {
 
 func (x *ScriptReport) Reset() {
 	*x = ScriptReport{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[23]
+	mi := &file_rafiki_v1_event_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1704,7 +1770,7 @@ func (x *ScriptReport) String() string {
 func (*ScriptReport) ProtoMessage() {}
 
 func (x *ScriptReport) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[23]
+	mi := &file_rafiki_v1_event_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1717,7 +1783,7 @@ func (x *ScriptReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScriptReport.ProtoReflect.Descriptor instead.
 func (*ScriptReport) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{23}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ScriptReport) GetKind() string {
@@ -1750,7 +1816,7 @@ type ScriptOutput struct {
 
 func (x *ScriptOutput) Reset() {
 	*x = ScriptOutput{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[24]
+	mi := &file_rafiki_v1_event_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1762,7 +1828,7 @@ func (x *ScriptOutput) String() string {
 func (*ScriptOutput) ProtoMessage() {}
 
 func (x *ScriptOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[24]
+	mi := &file_rafiki_v1_event_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1775,7 +1841,7 @@ func (x *ScriptOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScriptOutput.ProtoReflect.Descriptor instead.
 func (*ScriptOutput) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{24}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ScriptOutput) GetStream() string {
@@ -1816,7 +1882,7 @@ type OperatorState struct {
 
 func (x *OperatorState) Reset() {
 	*x = OperatorState{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[25]
+	mi := &file_rafiki_v1_event_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1828,7 +1894,7 @@ func (x *OperatorState) String() string {
 func (*OperatorState) ProtoMessage() {}
 
 func (x *OperatorState) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[25]
+	mi := &file_rafiki_v1_event_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1841,7 +1907,7 @@ func (x *OperatorState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperatorState.ProtoReflect.Descriptor instead.
 func (*OperatorState) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{25}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *OperatorState) GetDisplayState() string {
@@ -1913,6 +1979,7 @@ type Event struct {
 	//	*Event_OperatorState
 	//	*Event_ChildRenamed
 	//	*Event_TasksChanged
+	//	*Event_ChildClosed
 	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1920,7 +1987,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[26]
+	mi := &file_rafiki_v1_event_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1932,7 +1999,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[26]
+	mi := &file_rafiki_v1_event_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1945,7 +2012,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{26}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *Event) GetChildId() string {
@@ -2138,6 +2205,15 @@ func (x *Event) GetTasksChanged() *TasksChanged {
 	return nil
 }
 
+func (x *Event) GetChildClosed() *ChildClosed {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ChildClosed); ok {
+			return x.ChildClosed
+		}
+	}
+	return nil
+}
+
 type isEvent_Payload interface {
 	isEvent_Payload()
 }
@@ -2214,6 +2290,10 @@ type Event_TasksChanged struct {
 	TasksChanged *TasksChanged `protobuf:"bytes,28,opt,name=tasks_changed,json=tasksChanged,proto3,oneof"`
 }
 
+type Event_ChildClosed struct {
+	ChildClosed *ChildClosed `protobuf:"bytes,29,opt,name=child_closed,json=childClosed,proto3,oneof"`
+}
+
 func (*Event_UserMessage) isEvent_Payload() {}
 
 func (*Event_AssistantMessage) isEvent_Payload() {}
@@ -2249,6 +2329,8 @@ func (*Event_OperatorState) isEvent_Payload() {}
 func (*Event_ChildRenamed) isEvent_Payload() {}
 
 func (*Event_TasksChanged) isEvent_Payload() {}
+
+func (*Event_ChildClosed) isEvent_Payload() {}
 
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
@@ -2367,7 +2449,13 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x16\n" +
 	"\x06signal\x18\x03 \x01(\tR\x06signalB\f\n" +
 	"\n" +
-	"_exit_code\"\x97\x01\n" +
+	"_exit_code\"\xa2\x01\n" +
+	"\vChildClosed\x12\x1c\n" +
+	"\tancestors\x18\x01 \x03(\tR\tancestors\x12:\n" +
+	"\x06labels\x18\x02 \x03(\v2\".rafiki.v1.ChildClosed.LabelsEntryR\x06labels\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x97\x01\n" +
 	"\x12CompactionBoundary\x12\x18\n" +
 	"\atrigger\x18\x01 \x01(\tR\atrigger\x12\"\n" +
 	"\n" +
@@ -2386,7 +2474,7 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\rdisplay_state\x18\x01 \x01(\tR\fdisplayState\x12\x1d\n" +
 	"\n" +
 	"waiting_on\x18\x02 \x01(\tR\twaitingOn\x12\x10\n" +
-	"\x03msg\x18\x03 \x01(\tR\x03msg\"\x9f\n" +
+	"\x03msg\x18\x03 \x01(\tR\x03msg\"\xdc\n" +
 	"\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
@@ -2411,7 +2499,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\rscript_output\x18\x18 \x01(\v2\x17.rafiki.v1.ScriptOutputH\x00R\fscriptOutput\x12A\n" +
 	"\x0eoperator_state\x18\x1a \x01(\v2\x18.rafiki.v1.OperatorStateH\x00R\roperatorState\x12>\n" +
 	"\rchild_renamed\x18\x1b \x01(\v2\x17.rafiki.v1.ChildRenamedH\x00R\fchildRenamed\x12>\n" +
-	"\rtasks_changed\x18\x1c \x01(\v2\x17.rafiki.v1.TasksChangedH\x00R\ftasksChangedB\t\n" +
+	"\rtasks_changed\x18\x1c \x01(\v2\x17.rafiki.v1.TasksChangedH\x00R\ftasksChanged\x12;\n" +
+	"\fchild_closed\x18\x1d \x01(\v2\x16.rafiki.v1.ChildClosedH\x00R\vchildClosedB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
 	"\b_ordinalJ\x04\b\x03\x10\x04R\n" +
@@ -2439,7 +2528,7 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_rafiki_v1_event_proto_goTypes = []any{
 	(StopReason)(0),               // 0: rafiki.v1.StopReason
 	(*Usage)(nil),                 // 1: rafiki.v1.Usage
@@ -2464,13 +2553,15 @@ var file_rafiki_v1_event_proto_goTypes = []any{
 	(*Retry)(nil),                 // 20: rafiki.v1.Retry
 	(*ChildSpawned)(nil),          // 21: rafiki.v1.ChildSpawned
 	(*ChildExited)(nil),           // 22: rafiki.v1.ChildExited
-	(*CompactionBoundary)(nil),    // 23: rafiki.v1.CompactionBoundary
-	(*ScriptReport)(nil),          // 24: rafiki.v1.ScriptReport
-	(*ScriptOutput)(nil),          // 25: rafiki.v1.ScriptOutput
-	(*OperatorState)(nil),         // 26: rafiki.v1.OperatorState
-	(*Event)(nil),                 // 27: rafiki.v1.Event
-	(*durationpb.Duration)(nil),   // 28: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 29: google.protobuf.Timestamp
+	(*ChildClosed)(nil),           // 23: rafiki.v1.ChildClosed
+	(*CompactionBoundary)(nil),    // 24: rafiki.v1.CompactionBoundary
+	(*ScriptReport)(nil),          // 25: rafiki.v1.ScriptReport
+	(*ScriptOutput)(nil),          // 26: rafiki.v1.ScriptOutput
+	(*OperatorState)(nil),         // 27: rafiki.v1.OperatorState
+	(*Event)(nil),                 // 28: rafiki.v1.Event
+	nil,                           // 29: rafiki.v1.ChildClosed.LabelsEntry
+	(*durationpb.Duration)(nil),   // 30: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 31: google.protobuf.Timestamp
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -2485,32 +2576,34 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	0,  // 9: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
 	1,  // 10: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
 	15, // 11: rafiki.v1.TasksChanged.tasks:type_name -> rafiki.v1.TaskChange
-	28, // 12: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
-	29, // 13: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
-	29, // 14: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	8,  // 15: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
-	9,  // 16: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
-	10, // 17: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
-	12, // 18: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
-	11, // 19: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
-	13, // 20: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
-	17, // 21: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
-	18, // 22: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
-	19, // 23: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
-	20, // 24: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
-	21, // 25: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
-	22, // 26: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
-	23, // 27: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
-	24, // 28: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
-	25, // 29: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
-	26, // 30: rafiki.v1.Event.operator_state:type_name -> rafiki.v1.OperatorState
-	14, // 31: rafiki.v1.Event.child_renamed:type_name -> rafiki.v1.ChildRenamed
-	16, // 32: rafiki.v1.Event.tasks_changed:type_name -> rafiki.v1.TasksChanged
-	33, // [33:33] is the sub-list for method output_type
-	33, // [33:33] is the sub-list for method input_type
-	33, // [33:33] is the sub-list for extension type_name
-	33, // [33:33] is the sub-list for extension extendee
-	0,  // [0:33] is the sub-list for field type_name
+	30, // 12: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
+	31, // 13: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
+	29, // 14: rafiki.v1.ChildClosed.labels:type_name -> rafiki.v1.ChildClosed.LabelsEntry
+	31, // 15: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	8,  // 16: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
+	9,  // 17: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
+	10, // 18: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
+	12, // 19: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
+	11, // 20: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
+	13, // 21: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
+	17, // 22: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
+	18, // 23: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
+	19, // 24: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
+	20, // 25: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
+	21, // 26: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
+	22, // 27: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
+	24, // 28: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
+	25, // 29: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
+	26, // 30: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
+	27, // 31: rafiki.v1.Event.operator_state:type_name -> rafiki.v1.OperatorState
+	14, // 32: rafiki.v1.Event.child_renamed:type_name -> rafiki.v1.ChildRenamed
+	16, // 33: rafiki.v1.Event.tasks_changed:type_name -> rafiki.v1.TasksChanged
+	23, // 34: rafiki.v1.Event.child_closed:type_name -> rafiki.v1.ChildClosed
+	35, // [35:35] is the sub-list for method output_type
+	35, // [35:35] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -2534,8 +2627,8 @@ func file_rafiki_v1_event_proto_init() {
 		(*ContentBlockDelta_InputJson)(nil),
 	}
 	file_rafiki_v1_event_proto_msgTypes[21].OneofWrappers = []any{}
-	file_rafiki_v1_event_proto_msgTypes[22].OneofWrappers = []any{}
-	file_rafiki_v1_event_proto_msgTypes[26].OneofWrappers = []any{
+	file_rafiki_v1_event_proto_msgTypes[23].OneofWrappers = []any{}
+	file_rafiki_v1_event_proto_msgTypes[27].OneofWrappers = []any{
 		(*Event_UserMessage)(nil),
 		(*Event_AssistantMessage)(nil),
 		(*Event_TurnStart)(nil),
@@ -2554,6 +2647,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*Event_OperatorState)(nil),
 		(*Event_ChildRenamed)(nil),
 		(*Event_TasksChanged)(nil),
+		(*Event_ChildClosed)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2561,7 +2655,7 @@ func file_rafiki_v1_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   27,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

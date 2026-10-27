@@ -3621,6 +3621,7 @@ func (c *Controller) Close(childID string) error {
 	// asking a database to forget something it was never told, so the store
 	// delete IS the close.
 	if snap.Native {
+		c.publishChildClosed(childID)
 		c.st.Delete(childID)
 		c.trace.ChildGone(childID)
 		return nil
@@ -3663,6 +3664,10 @@ func (c *Controller) Close(childID string) error {
 		c.darajaPool.DropReplay(childID)
 	}
 
+	// Announce the close before the row goes: the event carries the lineage
+	// every subscriber still drawing the row needs to admit it (see
+	// publishChildClosed).
+	c.publishChildClosed(childID)
 	c.st.Delete(childID)
 	// Its span state goes with the row: a turn no exit event ever closed (for a
 	// child closed while another daemon owned its conversation) ends here.
@@ -3845,6 +3850,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 		// store delete is its whole close. Same reasoning as Close: nothing to
 		// persist, no failure path.
 		if s.Native {
+			c.publishChildClosed(s.ChildID)
 			c.st.Delete(s.ChildID)
 			c.trace.ChildGone(s.ChildID)
 			// A cascaded child is closed and belongs in the answer; the guard above
@@ -3873,6 +3879,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration) ([]string, error) {
 				continue
 			}
 		}
+		c.publishChildClosed(s.ChildID)
 		c.st.Delete(s.ChildID)
 		// The row is gone for good; free whatever observer state a late event
 		// (or a send queued before the close) re-created for it.

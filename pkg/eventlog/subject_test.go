@@ -106,3 +106,69 @@ func TestTypeFilter(t *testing.T) {
 	turn := &rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}}}
 	c.False(f.Match(turn, ln), "turn_start admitted by a filter that names only agent_status")
 }
+
+// closedEvent is what the daemon publishes when a child leaves its store: the
+// envelope names the child, and the payload carries the chain and labels,
+// because the lineage can no longer answer for it.
+func closedEvent(childID string, ancestors []string, labels map[string]string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_ChildClosed{ChildClosed: &rafikiv1.ChildClosed{
+			Ancestors: ancestors,
+			Labels:    labels,
+		}},
+	}
+}
+
+// A closed child is GONE from the store the lineage reads, so the one
+// subscriber that is still drawing its row -- one scoped to an ancestor --
+// could never be told. The event carries its own chain, and the scope question
+// is answered from that instead.
+func TestMatchAdmitsAClosedChildFromItsOwnLineage(t *testing.T) {
+	// The store has already forgotten c_leaf; only c_root remains.
+	ln := fakeLineage{
+		depth:  map[string]map[string]int{"c_root": {"c_mid": 1}},
+		labels: map[string]map[string]string{"c_mid": {"owner": "brent"}},
+	}
+	ev := closedEvent("c_leaf", []string{"c_mid", "c_root"}, map[string]string{"owner": "someone"})
+
+	for _, tc := range []struct {
+		name string
+		subj eventlog.Subject
+		want bool
+	}{
+		{"an ancestor's subtree still hears about it", eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_root"}, true},
+		{"the immediate parent's subtree hears about it", eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_mid"}, true},
+		{"a depth-1 ancestor takes a child of its own", eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_mid", MaxDepth: 1}, true},
+		{"a depth-1 ancestor rejects a grandchild", eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_root", MaxDepth: 1}, false},
+		{"an unrelated subtree does not", eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_other"}, false},
+		{"a sibling's child subject does not", eventlog.Subject{Scope: eventlog.ScopeChild, ChildID: "c_mid"}, false},
+		{"the child's own subject does", eventlog.Subject{Scope: eventlog.ScopeChild, ChildID: "c_leaf"}, true},
+		{"all takes it", eventlog.Subject{Scope: eventlog.ScopeAll}, true},
+		{"a selector reads the carried labels", eventlog.Subject{Scope: eventlog.ScopeAll, Selector: "owner=someone"}, true},
+		{"a selector that does not match excludes", eventlog.Subject{Scope: eventlog.ScopeAll, Selector: "owner=brent"}, false},
+		{"a malformed selector still excludes", eventlog.Subject{Scope: eventlog.ScopeAll, Selector: "os="}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := eventlog.Filter{Subject: tc.subj, Tier: eventlog.TierAll}
+			assert.NewCollecting(t).Eq(tc.want, f.Match(ev, ln), "Match")
+		})
+	}
+}
+
+// The fallback is for the close event ONLY. Every other event is about a child
+// that is still in the store, and an id the lineage does not know stays
+// excluded -- otherwise any client could widen its own subscription by naming
+// an arbitrary child.
+func TestMatchDoesNotUseTheFallbackForALivingChild(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ln := fakeLineage{depth: map[string]map[string]int{"c_root": {}}, labels: map[string]map[string]string{}}
+	f := eventlog.Filter{
+		Subject: eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_root"},
+		Tier:    eventlog.TierAll,
+	}
+	// An agent_status that happens to carry the same lineage fields is still
+	// judged by the store alone: the payload is not a close.
+	ev := statusEvent("c_unknown", "idle")
+	c.False(f.Match(ev, ln), "a non-close event for an unknown child was admitted")
+}

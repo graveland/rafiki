@@ -300,6 +300,22 @@ live bus. The two are one ordered sequence per child, never a gap or a repeat:
   qualifies, a closed one never does (`eventlog.Store.ChildrenSince`). With no
   floor, only the named children replay.
 
+#### The one event that describes a child the lineage has forgotten
+
+A subject predicate answers "is this child in my scope?" from the live child
+store (`eventlog.Subject` → `Lineage`), and a **close empties that store**, so
+`ChildClosed` — the event that reports a close — would be undeliverable to
+exactly the subscriber still drawing the row: one scoped to an ancestor. It
+therefore carries its own lineage (`ancestors`, parent-first up to the root, and
+`labels`) and is matched against that when the store cannot answer
+(`eventlog.eventLineage`). The fallback is scoped to that one payload: every
+other event is about a child still in the store, so an id the lineage does not
+know stays excluded. Because a close also cascades (one event per child) and a
+closed child is never replayed, clients treat `ChildClosed` as a SIGNAL — they
+re-list with `ListChildren` rather than patching one row — and the TUI and the
+web UI also re-list on a slow timer, as a backstop for a daemon that predates
+the event.
+
 Ephemeral events and a durable event whose log append failed carry no ordinal
 and are delivered as they arrive. Pinned by the `TestStreamEvents*` hand-off
 tests (`pkg/connectapi/stream_handoff_test.go`).
@@ -1704,6 +1720,7 @@ Every event payload is classified into a tier:
 | `Retry` | durable | Turn-level retry with attempt count and reason. Today's only producer is the daemon's rate-limit auto-resume (`cmd/rafikid/ratelimit_resume.go`): `will_retry: true` announces a scheduled resume of a claude child whose turn a 429 killed — `reason` is the cause ("rate limited (HTTP 429)"), `resume_at` (a `Timestamp`) the fire instant (unset on resolution events and pre-field rows), `max_attempts` the schedule cap; `will_retry: false` resolves it (fired, cleared by a clean completion, or the attempt cap reached), with the human sentence in `reason`. Wall-clock times are never embedded in `reason`: the producing daemon's clock zone is arbitrary (a container runs UTC), so clients render `resume_at` in the viewer's local zone. The cockpit renders the scheduling half as a system block in the transcript and shows ⟳ on the rail row until the resolution half arrives |
 | `ChildSpawned` | durable | A sub-agent was created (child_id, parent_id, name) |
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
+| `ChildClosed` | durable | A child LEFT THE STORE: it was closed (`Control.Close`, `CloseAllExited`, or a cascade's native thread children) and can never be resumed. Not an exit — a killed child stays listed and reports through `ChildExited`. Fields: `ancestors` (the chain from the child's parent up to the root; empty for a top-level child) and `labels` (the child's label set). Both ride the event because the subject predicate resolves scope against the childstore, which a close has just emptied — without them the one subscriber still drawing the row, attached to an ANCESTOR, could never be told it is gone (see "The one event that describes a child the lineage has forgotten"). Published BEFORE the store delete, by every close site. Consumed as a SIGNAL: clients answer it with `ListChildren`, because a close cascades and membership has one authority. Durable because the rail stream subscribes at that tier |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
 | `Error` | durable | Turn or engine level error event. Code `capture_not_persisted` marks a claude turn whose rows could not be stored (see "Message events") |
 | `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
@@ -1713,7 +1730,7 @@ Every event payload is classified into a tier:
 | `TasksChanged` | durable | The task ledger OWNED by this event's `child_id` changed. `kind` is one of `added`, `updated`, `dropped`, `assigned`, `orphaned` (a string, like `AgentStatus.state`, so a new kind needs no wire change); `tasks` are the rows the change touched as they read AFTER it — `handle`, `content`, `active_form`, `status`, `assignee`, `drop_reason`; a `dropped` notice carries only subtree rows reading `dropped`, so a completed or failed descendant the drop left alone is not reported. Published only after the store mutation commits (`tasks.Notifying` wraps the ledger, `pkg/tasks/notify.go`; the one publisher is `Controller.publishTasksChanged`, `cmd/rafikid/task_ledger.go`), and silent on an error or a no-op mutation, so a consumer can never replay a change the ledger does not have. `assigned` (a spawned child's `task` handle) publishes on the SPAWNER's ledger (`Controller.Spawn`'s post-admission `Assign`) and `orphaned` (a dead child's unfinished rows) on the dead child's PARENT's (`Controller.handleChildExit`'s sweep); in both the event names whichever child owns that ledger |
 | `ContentBlockDelta` | ephemeral | Live token/text streaming delta |
 
-Eighteen payload types today: seventeen durable (the sixteen durable rows above
+Nineteen payload types today: eighteen durable (the seventeen durable rows above
 plus `ScriptReport`, the `Report` verb's stored payload — it reaches a child's
 own event log only when the top-level script has no parent to push to) and one
 ephemeral (`ContentBlockDelta`). The count is prose, not enforcement; the

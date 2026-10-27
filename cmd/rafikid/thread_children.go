@@ -250,6 +250,9 @@ func (c *Controller) exitNativeChildrenOf(parentChildID string) {
 func (c *Controller) closeNativeChildrenOf(parentChildID string) []string {
 	taken := c.nativeChildrenOf(parentChildID)
 	for _, id := range taken {
+		// Before the delete, like every close site: the event carries the
+		// lineage a subscriber still drawing the row needs.
+		c.publishChildClosed(id)
 		c.st.Delete(id)
 		// A thread child is gone with its session, so its observer state (a turn
 		// its sub-agent frames opened) goes too.

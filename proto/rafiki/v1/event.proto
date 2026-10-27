@@ -260,6 +260,25 @@ message ChildExited {
   string signal = 3;
 }
 
+// ChildClosed says a child has LEFT THE STORE: it was finalized (closed) and
+// can never be resumed. It is not an exit — a killed child stays listed and
+// reports through ChildExited, which is why the two are separate events.
+//
+// It carries its OWN lineage because the store no longer knows this child, and
+// the stream's subject predicate answers "is this child in my scope?" from the
+// childstore. Without the chain and labels, the one subscriber that still draws
+// the row — a cockpit attached to an ANCESTOR, which is the common case — could
+// never be told the row is gone, because the child it names is already unknown
+// to the lineage. ancestors is the chain from the child's parent upward to the
+// root (empty for a top-level child) and labels is the child's label set, so
+// the predicate can answer both the scope question and its selector without the
+// store. A client's answer to this event is to RE-LIST (ListChildren is
+// membership's authority); nothing reconstructs the rail from this payload.
+message ChildClosed {
+  repeated string ancestors = 1;
+  map<string, string> labels = 2;
+}
+
 // CompactionBoundary marks a child's context having been rewritten by
 // compaction — Claude Code's own (or fundi's own compaction, published live by
 // the fundi emitter and synthesized on reattach from the stored
@@ -363,5 +382,6 @@ message Event {
     OperatorState operator_state = 26;
     ChildRenamed child_renamed = 27;
     TasksChanged tasks_changed = 28;
+    ChildClosed child_closed = 29;
   }
 }

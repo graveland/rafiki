@@ -311,6 +311,30 @@ pub struct ChildExited {
     #[prost(string, tag = "3")]
     pub signal: ::prost::alloc::string::String,
 }
+/// ChildClosed says a child has LEFT THE STORE: it was finalized (closed) and
+/// can never be resumed. It is not an exit — a killed child stays listed and
+/// reports through ChildExited, which is why the two are separate events.
+///
+/// It carries its OWN lineage because the store no longer knows this child, and
+/// the stream's subject predicate answers "is this child in my scope?" from the
+/// childstore. Without the chain and labels, the one subscriber that still draws
+/// the row — a cockpit attached to an ANCESTOR, which is the common case — could
+/// never be told the row is gone, because the child it names is already unknown
+/// to the lineage. ancestors is the chain from the child's parent upward to the
+/// root (empty for a top-level child) and labels is the child's label set, so
+/// the predicate can answer both the scope question and its selector without the
+/// store. A client's answer to this event is to RE-LIST (ListChildren is
+/// membership's authority); nothing reconstructs the rail from this payload.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChildClosed {
+    #[prost(string, repeated, tag = "1")]
+    pub ancestors: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(map = "string, string", tag = "2")]
+    pub labels: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+}
 /// CompactionBoundary marks a child's context having been rewritten by
 /// compaction — Claude Code's own (or fundi's own compaction, published live by
 /// the fundi emitter and synthesized on reattach from the stored
@@ -408,7 +432,7 @@ pub struct Event {
     pub ts: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(
         oneof = "event::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29"
     )]
     pub payload: ::core::option::Option<event::Payload>,
 }
@@ -452,6 +476,8 @@ pub mod event {
         ChildRenamed(super::ChildRenamed),
         #[prost(message, tag = "28")]
         TasksChanged(super::TasksChanged),
+        #[prost(message, tag = "29")]
+        ChildClosed(super::ChildClosed),
     }
 }
 /// StopReason normalizes how a turn ended across providers. The provider's own
