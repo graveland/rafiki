@@ -3,6 +3,7 @@ import { Code, ConnectError } from '@connectrpc/connect'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import {
   AgentStatusSchema,
+  ChildClosedSchema,
   ChildRenamedSchema,
   ChildSpawnedSchema,
   EventSchema,
@@ -255,4 +256,75 @@ it('stops on unauthenticated', async () => {
 
   await vi.advanceTimersByTimeAsync(60_000)
   expect(fake.streamReqs.length).toBe(1)
+})
+
+function closedEvent(childId: string, ordinal?: number): Event {
+  return create(EventSchema, {
+    childId,
+    ordinal,
+    payload: {
+      case: 'childClosed',
+      value: create(ChildClosedSchema, {}),
+    },
+  })
+}
+
+it('child_closed re-lists and drops the row the daemon no longer reports', async () => {
+  fake.summaries = [summary({ childId: 'c_1' }), summary({ childId: 'c_2', status: 'exited' })]
+  // Stream 1 ends empty; the close arrives on the reconnect, after the board
+  // has been seeded with both rows.
+  fake.scripts = [{ events: [] }, { events: [closedEvent('c_2', 9)] }]
+
+  startRail()
+  await flush()
+  expect(children.has('c_2')).toBe(true)
+
+  // The close happened in another client: this board's re-list no longer
+  // reports c_2.
+  fake.summaries = [summary({ childId: 'c_1' })]
+  await vi.advanceTimersByTimeAsync(250)
+  for (let i = 0; i < 5; i++) {
+    await flush()
+  }
+
+  expect(fake.listCalls).toBe(2)
+  expect(children.has('c_2')).toBe(false)
+  expect(latest.has('c_2')).toBe(false)
+  expect(children.has('c_1')).toBe(true)
+})
+
+it('a close reconcile never rewrites a row status from a stale snapshot', async () => {
+  fake.summaries = [summary({ childId: 'c_1' }), summary({ childId: 'c_2' })]
+  fake.scripts = [{ events: [] }, { events: [closedEvent('c_2', 11)] }]
+
+  startRail()
+  await flush()
+
+  // The child died and the board folded the exit; the snapshot the reconcile
+  // reads still says idle.
+  children.set('c_2', { ...children.get('c_2')!, status: 'exited' })
+
+  await vi.advanceTimersByTimeAsync(250)
+  for (let i = 0; i < 5; i++) {
+    await flush()
+  }
+
+  expect(children.get('c_2')?.status).toBe('exited')
+})
+
+it('a seed retires rows the daemon no longer lists', async () => {
+  fake.summaries = [summary({ childId: 'c_1' }), summary({ childId: 'c_2' })]
+  startRail()
+  await flush()
+  expect(children.size).toBe(2)
+
+  // A reconnect re-seeds; the child closed during the disconnect is gone.
+  fake.summaries = [summary({ childId: 'c_1' })]
+  fake.scripts = [{ events: [] }]
+  stopRail()
+  startRail()
+  await flush()
+
+  expect(children.has('c_2')).toBe(false)
+  expect(children.size).toBe(1)
 })

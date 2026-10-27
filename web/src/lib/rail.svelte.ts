@@ -41,6 +41,10 @@ const RAIL_TYPES = [
   'child_spawned',
   'child_exited',
   'child_renamed',
+  // The only notice that membership SHRANK. It is a signal, not a row patch:
+  // the rail re-lists (see reconcile), because a close cascades and
+  // ListChildren is the authority for what is still there.
+  'child_closed',
 ]
 
 const BASE_BACKOFF_MS = 500
@@ -48,6 +52,12 @@ const MAX_BACKOFF_MS = 30_000
 // Bounds how far back a reconnect replays a child the cursor does not name,
 // mirroring the cockpit's replayFloor.
 const REPLAY_FLOOR_MS = 24 * 60 * 60 * 1000
+
+// RECONCILE_MS bounds how stale the board can be about membership when the push
+// path does not deliver: a daemon that predates child_closed publishes nothing,
+// and a reconcile whose RPC failed must not wait for the next close. Mirrors
+// the cockpit's reseedPollInterval.
+const RECONCILE_MS = 15_000
 
 /** One module-level rail per browser tab. */
 export const children = new SvelteMap<string, ChildRow>()
@@ -58,6 +68,9 @@ let running = false
 let generation = 0
 let controller: AbortController | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconcileTimer: ReturnType<typeof setInterval> | null = null
+let reconciling = false
+let reconcileAgain = false
 let backoffAttempt = 0
 
 export function setControlForTest(injected: ControlClient): void {
@@ -77,6 +90,9 @@ export function startRail(): void {
   running = true
   generation++
   backoffAttempt = 0
+  if (reconcileTimer === null) {
+    reconcileTimer = setInterval(requestReconcile, RECONCILE_MS)
+  }
   void run(generation)
 }
 
@@ -91,6 +107,12 @@ export function stopRail(): void {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  if (reconcileTimer !== null) {
+    clearInterval(reconcileTimer)
+    reconcileTimer = null
+  }
+  reconciling = false
+  reconcileAgain = false
   controller?.abort()
   controller = null
   children.clear()
@@ -121,12 +143,80 @@ async function run(gen: number): Promise<void> {
 
 async function seed(): Promise<void> {
   const response = await client.listChildren({})
+  const reported: { [id: string]: true } = {}
   for (const summary of response.children) {
+    reported[summary.childId] = true
     insertRow(summary)
     // latest_ordinal is optional: unset means the child has no events, and
     // that must seed -1, never 0 — 0 is a real ordinal.
     latest.set(summary.childId, summary.latestOrdinal ?? -1)
   }
+  // Membership is authoritative, so a row the daemon no longer reports is
+  // gone: a close publishes nothing to this board's cursor, and a child
+  // closed during a disconnect would otherwise stay forever.
+  pruneAbsent(reported)
+}
+
+/**
+ * reconcile re-lists membership after a child_closed event and NEVER rewrites
+ * a row's status.
+ *
+ * A close is not a gap: nothing was missed, so a row added or refreshed here
+ * must keep the status its own events already set. The snapshot this reads is
+ * older than any event that landed while the RPC was out, and letting it win
+ * would flip a working row back to idle — or un-exit a child that died in the
+ * window, which nothing would ever correct because a dead child publishes no
+ * further events.
+ */
+async function reconcile(): Promise<void> {
+  const response = await client.listChildren({})
+  const reported: { [id: string]: true } = {}
+  for (const summary of response.children) {
+    reported[summary.childId] = true
+    if (!children.has(summary.childId)) {
+      insertRow(summary)
+      latest.set(summary.childId, summary.latestOrdinal ?? -1)
+    }
+  }
+  pruneAbsent(reported)
+}
+
+function pruneAbsent(reported: { [id: string]: true }): void {
+  for (const id of [...children.keys()]) {
+    if (!reported[id]) {
+      children.delete(id)
+      latest.delete(id)
+    }
+  }
+}
+
+/**
+ * requestReconcile re-lists membership after a child_closed event (or on the
+ * backstop timer). Coalesced: a cascading close publishes one event per child,
+ * and the board needs one re-list, not one per row.
+ */
+function requestReconcile(): void {
+  if (reconciling) {
+    reconcileAgain = true
+    return
+  }
+  reconciling = true
+  void (async () => {
+    try {
+      await reconcile()
+    } catch {
+      // The stream still carries everything else. A missed reconcile leaves
+      // the row until the next close, the backstop timer, or a reconnect
+      // re-lists -- never for the rest of the session, which is what this
+      // replaced.
+    } finally {
+      reconciling = false
+      if (reconcileAgain) {
+        reconcileAgain = false
+        requestReconcile()
+      }
+    }
+  })()
 }
 
 async function openStream(gen: number): Promise<void> {
@@ -211,6 +301,11 @@ function applyEvent(event: Event): void {
       break
     case 'childExited':
       patchRow(id, { status: 'exited' })
+      break
+    case 'childClosed':
+      // The child left the daemon's store. Re-list rather than drop the one
+      // row: a close cascades, and ListChildren decides what is still there.
+      requestReconcile()
       break
     case 'agentStatus':
       patchRow(id, { status: payload.value.state })
