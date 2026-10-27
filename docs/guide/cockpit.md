@@ -102,6 +102,14 @@ state, since only you know whether you mean "queue this for later" or
 | `⏎` | Open the selected agent and return to the input box |
 | `esc` | Back to the input box, leaving focus where it was |
 
+The rail mirrors `rafiki list`, so it also follows changes made elsewhere: a
+child closed by another cockpit, by `rafiki forget`, or by the daemon's own
+grace reaper disappears from it. The daemon publishes a `ChildClosed` event for
+that, and the rail answers it by re-listing rather than patching the one row — a
+close cascades, and `ListChildren` is what membership means. A fifteen-second
+re-list runs as a backstop, so against a daemon older than that event a row can
+linger up to that long. A row that merely *exited* stays until you close it.
+
 ## Reading the transcript
 
 Follows new output at the bottom, holds position when scrolled back; sending

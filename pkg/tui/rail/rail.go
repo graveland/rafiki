@@ -256,10 +256,48 @@ func (r *Rail) Remove(childID string) {
 // be resumed or closed. It is idempotent and safe to call again on reconnect: a child already
 // in the rail keeps its watermark and badge, so re-seeding to discover children
 // spawned during a disconnect does not silently mark everything read.
-func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
+//
+// MEMBERSHIP IS AUTHORITATIVE, so this retires as well as installs: every row
+// the daemon did not report is dropped and returned to the caller (so it can
+// release the session, pane and selection the cockpit held for it), which is
+// what lets a child closed by ANOTHER client leave this rail. A close publishes
+// nothing -- the child is gone from the daemon's store, so nothing will ever
+// speak for it again -- which leaves ListChildren as the only thing that can
+// report it gone. An exited row is kept while the daemon still lists it: that is
+// the resume/close affordance, not a tombstone.
+//
+// The one row this can retire wrongly is a child that spawned after
+// ListChildren was computed but before its reply was applied. That is
+// self-healing rather than lossy: the child's next event is traffic from an
+// unknown id, which is exactly the cockpit's re-seed signal, so the row comes
+// straight back.
+//
+// A POLL calls Reconcile instead: same membership, no status overwrite.
+func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) []Node {
+	return r.seed(summaries, true)
+}
+
+// Reconcile is Seed for the periodic membership poll: the same install and
+// retire, but it NEVER overwrites the status family (Status/Exited/ExitCode and
+// the display fields).
+//
+// That exclusion is the whole point of having a second entry point. A poll's
+// ListChildren snapshot is a few milliseconds old by the time it lands, so a
+// status or exit event that arrived in between is NEWER than the snapshot -- and
+// letting the snapshot win would flip a working row back to idle, or worse,
+// un-exit a child that died in the window, which nothing would ever correct
+// because a dead child publishes no further events. Status belongs to the event
+// stream; a poll's job is membership.
+func (r *Rail) Reconcile(summaries []*rafikiv1.ChildSummary) []Node {
+	return r.seed(summaries, false)
+}
+
+func (r *Rail) seed(summaries []*rafikiv1.ChildSummary, refreshStatus bool) []Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	reported := make(map[string]bool, len(summaries))
 	for _, s := range summaries {
+		reported[s.GetChildId()] = true
 		exited := s.GetStatus() == "exited"
 		if existing, ok := r.nodes[s.GetChildId()]; ok {
 			// Refresh only what the daemon is authoritative for. Never touch
@@ -273,15 +311,17 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			existing.SessionID = s.GetSessionId()
 			existing.Cwd = s.GetCwd()
 			existing.Model = s.GetModel()
-			existing.Status = s.GetStatus()
-			existing.Exited = exited
-			existing.ExitCode = s.ExitCode
 			existing.Kind = s.GetKind()
 			existing.MaxCost = s.GetMaxCost()
 			existing.ContextWindow = int(s.GetContextWindow())
-			existing.DisplayState = s.GetDisplayState()
-			existing.WaitingOn = s.GetWaitingOn()
-			existing.DisplayMsg = s.GetDisplayMsg()
+			if refreshStatus {
+				existing.Status = s.GetStatus()
+				existing.Exited = exited
+				existing.ExitCode = s.ExitCode
+				existing.DisplayState = s.GetDisplayState()
+				existing.WaitingOn = s.GetWaitingOn()
+				existing.DisplayMsg = s.GetDisplayMsg()
+			}
 			continue
 		}
 		n := &Node{
@@ -316,7 +356,22 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 		}
 		r.nodes[n.ChildID] = n
 	}
+
+	var retired []Node
+	for id, n := range r.nodes {
+		if !reported[id] {
+			retired = append(retired, *n)
+		}
+	}
+	sort.Slice(retired, func(i, j int) bool { return retired[i].ChildID < retired[j].ChildID })
+	for _, n := range retired {
+		delete(r.nodes, n.ChildID)
+		if r.focused == n.ChildID {
+			r.focused = ""
+		}
+	}
 	r.recomputeDepths()
+	return retired
 }
 
 // statusOrdinalAdmits reports whether ev is new enough to update n's

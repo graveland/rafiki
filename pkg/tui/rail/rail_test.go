@@ -555,6 +555,89 @@ func TestRemoveIsIdempotent(t *testing.T) {
 	assert.NewCollecting(t).Eq(0, r.Len(), "Len()")
 }
 
+// A close publishes nothing -- the child is gone from the daemon's store, so
+// nothing will ever speak for it again -- which makes ListChildren the ONLY
+// report that a child closed elsewhere is gone. That report is worth nothing
+// unless seeding retires rows the daemon no longer lists: while Seed only
+// upserted, a row closed by another client (or by the daemon's grace reaper)
+// sat dimmed and exited for the rest of the session.
+func TestSeedRetiresRowsTheDaemonNoLongerLists(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		summary("c_keep", "kept", "", "idle", 1),
+		summary("c_gone", "closed elsewhere", "", "exited", 2),
+	})
+	r.SetFocus("c_gone")
+
+	retired := r.Seed([]*rafikiv1.ChildSummary{summary("c_keep", "kept", "", "idle", 1)})
+
+	c.Require().Eq(1, len(retired), "retired count")
+	c.Eq("c_gone", retired[0].ChildID, "retired id")
+	c.Eq("closed elsewhere", retired[0].Name, "the retired node comes back whole, so the caller can name it")
+	_, ok := r.Get("c_gone")
+	c.False(ok, "a row the daemon no longer lists is still in the rail")
+	_, ok = r.Get("c_keep")
+	c.True(ok, "seeding retired a row the daemon still lists")
+	c.Eq("", r.Focus(), "focus stayed on a retired row")
+}
+
+// An EXITED row the daemon still lists is the resume/close affordance, not a
+// tombstone: retiring is driven by absence from ListChildren, never by status.
+func TestSeedKeepsAnExitedRowTheDaemonStillLists(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	code := int32(0)
+	dead := summary("c_dead", "old worker", "", "exited", 9)
+	dead.ExitCode = &code
+	r.Seed([]*rafikiv1.ChildSummary{summary("c_live", "coordinator", "", "idle", 1), dead})
+
+	retired := r.Seed([]*rafikiv1.ChildSummary{summary("c_live", "coordinator", "", "idle", 1), dead})
+
+	c.Eq(0, len(retired), "an exited child the daemon still lists must not be retired")
+	_, ok := r.Get("c_dead")
+	c.True(ok, "the row is gone")
+}
+
+// The poll's snapshot is milliseconds old by the time it lands, so an exit that
+// arrived while the RPC was out is NEWER than it. Reconcile must not let the
+// snapshot win: un-exiting a dead child is permanent, because a dead child
+// publishes nothing that would ever correct it.
+func TestReconcileNeverRewritesStatus(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{summary("c_1", "worker", "", "idle", 1)})
+	r.Apply(exited("c_1", 1, 2))
+
+	// The snapshot predates the exit: it still says idle.
+	r.Reconcile([]*rafikiv1.ChildSummary{summary("c_1", "worker", "", "idle", 1)})
+
+	n, ok := r.Get("c_1")
+	c.Require().True(ok, "row")
+	c.True(n.Exited, "Reconcile un-exited a row on a snapshot older than its exit event")
+	c.Eq("exited", n.Status, "Status")
+	c.Require().NotNil(n.ExitCode, "ExitCode")
+	c.Eq(int32(1), *n.ExitCode, "ExitCode")
+}
+
+// Reconcile still installs a row it has never seen: a child whose child_spawned
+// this client missed is discovered by the poll, status included (there is no
+// newer event to lose to).
+func TestReconcileInstallsAnUnknownChild(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{summary("c_1", "worker", "", "idle", 1)})
+
+	r.Reconcile([]*rafikiv1.ChildSummary{
+		summary("c_1", "worker", "", "idle", 1),
+		summary("c_2", "newcomer", "", "streaming", 4),
+	})
+
+	n, ok := r.Get("c_2")
+	c.Require().True(ok, "the poll did not discover a child it had never seen")
+	c.Eq("streaming", n.Status, "Status")
+}
+
 // turn_end usage sets CtxTokens to the prompt size the NEXT call will carry:
 // input + cache-read + cache-write, and records the watermark it landed at.
 func TestTurnEndUsageSetsCtxTokens(t *testing.T) {

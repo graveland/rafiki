@@ -196,7 +196,7 @@ func TestTypesIsTheSmallStatusSet(t *testing.T) {
 	want := map[string]bool{
 		"turn_end": true, "agent_status": true, "operator_state": true,
 		"error": true, "retry": true, "child_spawned": true, "child_exited": true,
-		"child_renamed": true,
+		"child_renamed": true, "child_closed": true,
 	}
 	c.Require().Len(got, len(want), "Types() = %v, want the small set in %v", got, want)
 	for _, ty := range got {
@@ -207,7 +207,10 @@ func TestTypesIsTheSmallStatusSet(t *testing.T) {
 }
 
 // Every type the rail asks for must be one Apply or Notable actually consumes,
-// or the filter is paying for bytes nobody reads.
+// or the filter is paying for bytes nobody reads. child_closed is the one
+// consumed OUTSIDE this package: the cockpit intercepts it and reconciles
+// membership from ListChildren (Cockpit.membershipChanged), because a close
+// cascades and a rail row is not the only thing that has to be released.
 func TestEveryRequestedTypeIsConsumed(t *testing.T) {
 	consumed := map[string]bool{
 		"turn_end":       true, // Notable
@@ -218,6 +221,7 @@ func TestEveryRequestedTypeIsConsumed(t *testing.T) {
 		"child_spawned":  true, // introduces a row
 		"child_exited":   true, // Node.Exited + Notable
 		"child_renamed":  true, // Node.Name
+		"child_closed":   true, // Cockpit: triggers the ListChildren reconcile
 	}
 	for _, ty := range rail.Types() {
 		assert.NewCollecting(t).False(!consumed[ty], "rail asks for %q but nothing in the rail consumes it", ty)

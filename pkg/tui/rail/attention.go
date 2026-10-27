@@ -42,6 +42,10 @@ func Types() []string {
 		"retry",
 		"child_spawned",
 		"child_exited",
+		// child_closed is the only notice that MEMBERSHIP shrank, and it is a
+		// signal rather than a row patch: the cockpit answers it with a
+		// ListChildren reconcile (see Cockpit.membershipChanged).
+		"child_closed",
 	}
 }
 

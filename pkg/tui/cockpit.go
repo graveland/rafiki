@@ -203,10 +203,23 @@ type quotaMsg struct {
 type seedMsg struct {
 	children []*rafikiv1.ChildSummary
 	err      error
+	// membershipOnly marks a reply applied with rail.Reconcile: the periodic
+	// poll's, or the one a child_closed event asked for. It reconciles who
+	// exists and never rewrites a row's status, because its snapshot is older
+	// than any event that landed while the RPC was out.
+	membershipOnly bool
 }
 
-// seedRetryMsg fires when a failed seed's backoff timer expires.
-type seedRetryMsg struct{}
+// seedRetryMsg fires when a failed seed's backoff timer expires. It carries the
+// MODE of the attempt that failed, so a failed reconcile retries as a reconcile
+// and keeps its "never rewrite status" promise instead of silently escalating to
+// a status-refreshing full seed. Escalation is not needed to stay correct: the
+// retry issues a FRESH ListChildren, so its snapshot is as new as any full
+// seed's. A gap request arriving during the backoff still wins -- maybeReseed
+// dispatches a full seed and this pending retry defers to it.
+type seedRetryMsg struct {
+	membershipOnly bool
+}
 
 // sendFailedMsg carries enough of the attempt to retry it: the input pane is
 // already cleared by the time a send fails, so without the draft here a refused
@@ -424,6 +437,14 @@ type Cockpit struct {
 	reseeding      bool
 	reseedInFlight bool
 	seedAttempt    int
+	// membershipChanged is requested by a child_closed event: the daemon's
+	// store shrank, so the rail must be reconciled from ListChildren. It is
+	// separate from reseeding because a close is not a GAP -- nothing was
+	// missed -- and the reconcile therefore must not rewrite a row's status
+	// from a snapshot that may be older than the events already folded (see
+	// rail.Reconcile). The rail is not patched from the event itself: a close
+	// cascades, one event per child, and membership has one authority.
+	membershipChanged bool
 
 	// form is the open create modal, nil when none. A modal owns every key
 	// while it is up, so this is checked before the global bindings.
@@ -701,7 +722,7 @@ func (c *Cockpit) setNotice(s string) {
 
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
-	cmds := []tea.Cmd{c.seedCmd(), waitForRailEvent(c.railCh), waitForEvent(c.focusCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
+	cmds := []tea.Cmd{c.seedCmd(), waitForRailEvent(c.railCh), waitForEvent(c.focusCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick(), reseedTick()}
 	// The capability queries must go out before anything is drawn, or the
 	// answers — and with them this session's images — are guesses. Raw: these
 	// are queries for the terminal, not cells for the grid.
@@ -727,16 +748,22 @@ func (c *Cockpit) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (c *Cockpit) seedCmd() tea.Cmd {
+func (c *Cockpit) seedCmd() tea.Cmd { return c.seedCmdFor(false) }
+
+// reconcileCmd is seedCmd for the periodic membership poll: the reply is
+// applied with rail.Reconcile, which never rewrites a row's status.
+func (c *Cockpit) reconcileCmd() tea.Cmd { return c.seedCmdFor(true) }
+
+func (c *Cockpit) seedCmdFor(membershipOnly bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		resp, err := c.client.ListChildren(ctx,
 			connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
 		if err != nil {
-			return seedMsg{err: err}
+			return seedMsg{err: err, membershipOnly: membershipOnly}
 		}
-		return seedMsg{children: resp.Msg.GetChildren()}
+		return seedMsg{children: resp.Msg.GetChildren(), membershipOnly: membershipOnly}
 	}
 }
 
@@ -877,17 +904,38 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// -- against the slow daemon the self-heal exists for, the next
 			// event may be a long time coming. This also covers the INITIAL
 			// seed, which today leaves a cockpit with no rail stream at all when
-			// it fails.
-			return c, c.retrySeed()
+			// it fails. The retry keeps this attempt's MODE (see seedRetryMsg).
+			return c, c.retrySeed(msg.membershipOnly)
 		}
 		c.seedAttempt = 0
 		first := c.stopRail == nil
-		c.rail.Seed(c.inSubject(msg.children))
+		inSubject := c.inSubject(msg.children)
+		seed := c.rail.Seed
+		if msg.membershipOnly {
+			seed = c.rail.Reconcile
+		}
+		var cmds []tea.Cmd
+		for _, n := range seed(inSubject) {
+			// The daemon no longer lists this child, so it was closed: by
+			// another cockpit, by the CLI, or by the daemon's own grace
+			// reaper. Drop the row and everything held for it, exactly as a
+			// local close does.
+			wasViewed := c.viewing() == n.ChildID
+			name := n.Name
+			if name == "" {
+				name = n.ChildID
+			}
+			cmds = append(cmds, c.forgetChild(n.ChildID))
+			if wasViewed {
+				// The pane just jumped to a neighbour; say why.
+				c.setNotice(name + " was closed elsewhere")
+			}
+		}
 		// Seed each child's spend before any turn_end arrives: the rail resumes
 		// from the log head, so turns that predate this client are otherwise
 		// invisible to the cost readout. CostUsd nil (no rollup) seeds nothing;
 		// SetCost assigns rather than adds, so a re-seed cannot double the number.
-		for _, s := range c.inSubject(msg.children) {
+		for _, s := range inSubject {
 			if s.CostUsd != nil {
 				c.rail.SetCost(s.GetChildId(), s.GetCostUsd())
 			}
@@ -913,17 +961,18 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A re-seed request that arrived while this RPC was in flight must
 		// not be dropped -- maybeReseed picks it up.
-		return c, tea.Batch(c.maybeReseed(nil), c.syncOSC())
+		return c, tea.Batch(append(cmds, c.maybeReseed(nil), c.syncOSC())...)
 
 	case seedRetryMsg:
 		// The timer fired. If a seed is already running -- an unknown-child
-		// event may have fired one during the backoff -- let it: its
-		// completion re-checks reseeding, so skipping loses nothing.
+		// event may have fired one during the backoff, and that one is a FULL
+		// seed, which subsumes a reconcile -- let it: its completion re-checks
+		// reseeding, so skipping loses nothing.
 		if c.reseedInFlight {
 			return c, nil
 		}
 		c.reseedInFlight = true
-		return c, c.seedCmd()
+		return c, c.seedCmdFor(msg.membershipOnly)
 
 	case railEventMsg:
 		// Rail-stream events update the rail ONLY. The session is fed by the
@@ -937,12 +986,27 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c.reseeding = true
 				continue
 			}
+			if ev.GetChildClosed() != nil {
+				// A child left the daemon's store. Reconcile membership from
+				// ListChildren rather than dropping the one row here: a close
+				// cascades (one event per child) and ListChildren is the
+				// authority for what is still there.
+				c.membershipChanged = true
+				continue
+			}
 			c.applyRailEvent(ev)
 		}
 		return c, tea.Batch(waitForRailEvent(c.railCh), c.maybeReseed(nil), c.syncOSC())
 
 	case eventMsg:
 		for _, ev := range msg.evs {
+			if ev.GetChildClosed() != nil {
+				// The focus stream is child-scoped, so the closed child is the
+				// one being viewed. Same reconcile; forgetChild stops this
+				// stream once the reply says the child is gone.
+				c.membershipChanged = true
+				continue
+			}
 			c.applyEvent(ev)
 		}
 		var cmd tea.Cmd
@@ -1129,6 +1193,17 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case quotaTickMsg:
 		return c, tea.Batch(c.fetchQuotaCmd(), quotaTick())
 
+	case reseedTickMsg:
+		// Reconciliation, not retry: while a ListChildren is already running,
+		// or while the backoff is retrying a daemon that just failed, adding a
+		// second caller only doubles the load exactly when it hurts. The tick
+		// is re-armed either way -- skipping one poll must not stop polling.
+		if c.reseedInFlight || c.seedAttempt > 0 {
+			return c, reseedTick()
+		}
+		c.reseedInFlight = true
+		return c, tea.Batch(c.reconcileCmd(), reseedTick())
+
 	case quotaMsg:
 		c.quota = msg.resp
 		return c, nil
@@ -1203,16 +1278,31 @@ func (c *Cockpit) applyRailEvent(ev *rafikiv1.Event) {
 	c.rail.Apply(ev)
 }
 
-// maybeReseed turns applyRailEvent's request into the actual ListChildren.
+// maybeReseed turns a pending re-list request into the actual ListChildren.
 // reseedInFlight keeps every event arriving during the RPC from queueing
 // another one — the cockpit would otherwise self-amplify against a daemon
 // that is already slow, which is the exact condition the self-heal exists
 // for.
+//
+// Two requests share this gate and they are NOT the same call: a GAP
+// (reseeding: a reconnect, unknown-child traffic, a resume) asks for the full
+// seed, which repairs a row's status from the snapshot, while a close
+// (membershipChanged) asks for a membership reconcile, which must not. A gap
+// outranks a close — its seed reports membership too, so nothing is lost.
 func (c *Cockpit) maybeReseed(cmd tea.Cmd) tea.Cmd {
-	if c.reseeding && !c.reseedInFlight {
+	if c.reseedInFlight {
+		return cmd
+	}
+	switch {
+	case c.reseeding:
 		c.reseeding = false
+		c.membershipChanged = false
 		c.reseedInFlight = true
 		cmd = tea.Batch(cmd, c.seedCmd())
+	case c.membershipChanged:
+		c.membershipChanged = false
+		c.reseedInFlight = true
+		cmd = tea.Batch(cmd, c.reconcileCmd())
 	}
 	return cmd
 }
@@ -1220,11 +1310,13 @@ func (c *Cockpit) maybeReseed(cmd tea.Cmd) tea.Cmd {
 // retrySeed schedules the next ListChildren attempt after the same capped
 // backoff the stream layer reconnects with. The attempt count is read here,
 // not carried through the message, so a resync signal arriving mid-backoff
-// cannot reset the schedule to its fast end.
-func (c *Cockpit) retrySeed() tea.Cmd {
+// cannot reset the schedule to its fast end. membershipOnly is carried through
+// so the retry re-attempts the same KIND of list: a failed reconcile retries as
+// a reconcile, never as a status-refreshing full seed.
+func (c *Cockpit) retrySeed(membershipOnly bool) tea.Cmd {
 	attempt := c.seedAttempt
 	return tea.Tick(streams.BackoffFor(attempt), func(time.Time) tea.Msg {
-		return seedRetryMsg{}
+		return seedRetryMsg{membershipOnly: membershipOnly}
 	})
 }
 
@@ -2970,6 +3062,39 @@ func waitForEvents(ch <-chan *rafikiv1.Event, isRail bool) tea.Cmd {
 func tick() tea.Cmd {
 	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+// reseedTickMsg drives the periodic ListChildren reconciliation, separate from
+// tickMsg's 250ms animation cadence for the same reason quotaTickMsg is: this
+// is a network round trip, not a frame counter increment.
+type reseedTickMsg time.Time
+
+// reseedPollInterval bounds how stale the rail can be about MEMBERSHIP when the
+// push path does not deliver.
+//
+// The primary signal is the child_closed event: a close is published, durable,
+// with the lineage a subscriber still drawing the row needs to admit it, and
+// the cockpit answers it with this same reconcile immediately. The poll is the
+// backstop for the ways that signal can be lost:
+//
+//   - a daemon that predates child_closed (this client talking to an older
+//     rafikid) publishes nothing at all, so the row would otherwise sit dimmed
+//     and exited for the rest of the session;
+//   - a close whose reconcile RPC failed, or arrived while one was already in
+//     flight, must not wait for the next unrelated event;
+//   - a close that happened while this client was disconnected is invisible to
+//     the live bus even now: the client's cursor does not name the child and
+//     delivery.replay refuses closed children, so only a re-list can see it.
+//
+// Slow on purpose: a full re-list is cheap but not free, and a human noticing a
+// row disappear a few seconds late costs far less than a busy loop against a
+// daemon that is already loaded.
+const reseedPollInterval = 15 * time.Second
+
+func reseedTick() tea.Cmd {
+	return tea.Tick(reseedPollInterval, func(t time.Time) tea.Msg {
+		return reseedTickMsg(t)
 	})
 }
 

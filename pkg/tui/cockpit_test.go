@@ -655,6 +655,146 @@ func TestReseedDispatchesAtMostOneInFlight(t *testing.T) {
 	ck.False(c.reseedInFlight, "seedMsg must clear reseedInFlight")
 }
 
+// A child closed by ANOTHER client publishes nothing -- it is gone from the
+// daemon's store, so no event will ever mention it again -- and the only thing
+// that can report it gone is ListChildren. The row therefore has to leave the
+// rail when a re-seed stops listing it, along with everything this client held
+// for it; otherwise it sits there dimmed and exited for the rest of the
+// session, and `x` on it answers "child not found".
+func TestReseedRetiresAChildClosedByAnotherClient(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	defer c.shutdown()
+	c.selected = "c_2"
+	c.sessions["c_2"] = session.New("c_2")
+	_ = c.pane("c_2")
+	c.lru = []string{"c_1", "c_2"}
+
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "c_1", 0)}})
+
+	_, ok := c.rail.Get("c_2")
+	ck.False(ok, "a child the daemon no longer lists is still on the rail")
+	_, ok = c.rail.Get("c_1")
+	ck.True(ok, "the re-seed retired a child the daemon still lists")
+	_, ok = c.sessions["c_2"]
+	ck.False(ok, "the retired child's session outlived its row")
+	_, ok = c.panes["c_2"]
+	ck.False(ok, "the retired child's pane outlived its row")
+	ck.Require().Len(c.lru, 1, "lru still rotates a dead id")
+	ck.Eq("c_1", c.lru[0], "lru")
+	ck.Eq("c_1", c.selected, "the cursor stayed on a row that no longer exists")
+	ck.StrContains(c.notice, "closed elsewhere", "notice")
+}
+
+// The re-seed that retires a closed child must not take an unrelated row with
+// it, and an exited child the daemon still lists is a resume/close affordance,
+// not a tombstone.
+func TestReseedKeepsEveryRowTheDaemonStillLists(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	defer c.shutdown()
+	exitChild(c, "c_2")
+
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		summaryFor("c_1", "c_1", 0), summaryFor("c_2", "c_2", 0),
+	}})
+
+	ck.Eq(2, c.rail.Len(), "rail length")
+	ck.Eq("", c.notice, "notice")
+}
+
+// The poll is what makes the retirement above happen at all: nothing else asks
+// for a re-list while the event stream is healthy, and a close is silent.
+func TestReseedPollDispatchesListChildren(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1")
+	defer c.shutdown()
+
+	_, cmd := c.Update(reseedTickMsg(time.Now()))
+	batch, ok := cmd().(tea.BatchMsg)
+	ck.Require().True(ok, "the poll did not return a batch: %T", cmd())
+	ck.Eq(2, len(batch), "the poll must dispatch ListChildren AND re-arm its own tick")
+	ck.True(c.reseedInFlight, "the poll did not mark a ListChildren in flight")
+
+	// A second tick while one is running must not queue another.
+	c.reseedInFlight = false
+	c.seedAttempt = 1
+	_, cmd = c.Update(reseedTickMsg(time.Now()))
+	ck.NotNil(cmd, "a skipped poll must still re-arm the tick")
+	ck.False(c.reseedInFlight, "a poll fired while the backoff was retrying a failing daemon")
+
+	// The poll's reply reconciles membership without rewriting status, so it
+	// must not be routed through the full seed path.
+	sm, ok := c.reconcileCmd()().(seedMsg)
+	ck.Require().True(ok, "reconcileCmd did not answer a seedMsg")
+	ck.True(sm.membershipOnly, "the poll's ListChildren is a full seed")
+}
+
+// The poll path itself retires: it is the one that runs while the event stream
+// is healthy, so it is the one that actually reports a close made elsewhere.
+func TestMembershipPollRetiresAClosedChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	defer c.shutdown()
+
+	c.Update(seedMsg{membershipOnly: true,
+		children: []*rafikiv1.ChildSummary{summaryFor("c_1", "c_1", 0)}})
+
+	_, ok := c.rail.Get("c_2")
+	ck.False(ok, "the poll left a closed child on the rail")
+	ck.Eq(1, c.rail.Len(), "rail length")
+}
+
+// childClosedFor is the daemon's "this child left the store" event. The cockpit
+// uses it as a SIGNAL only.
+func childClosedFor(id string) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: id,
+		Payload: &rafikiv1.Event_ChildClosed{ChildClosed: &rafikiv1.ChildClosed{}}}
+}
+
+// The daemon now publishes a close, and the cockpit's answer is to RE-LIST
+// rather than drop the one row: a close cascades (one event per child) and
+// ListChildren is the authority for what is still there. It is a membership
+// reconcile, not a gap reseed -- nothing was missed, so the reply must not
+// rewrite a row's status from a snapshot that may already be stale.
+func TestChildClosedAsksForAMembershipReconcile(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	defer c.shutdown()
+
+	// A child this client never knew: the point is that the event is not
+	// treated as unknown-child traffic, which would demand a full reseed.
+	c.Update(railEventMsg{evs: []*rafikiv1.Event{childClosedFor("c_gone")}})
+
+	ck.True(c.reseedInFlight, "child_closed did not start a re-list")
+	ck.False(c.membershipChanged, "the request was not consumed")
+	ck.False(c.reseeding, "a close is a membership reconcile, not a gap reseed")
+	ck.Eq(2, c.rail.Len(), "the rail must not be patched from the event: ListChildren decides")
+
+	// The focus stream is child-scoped, so the closed child is the viewed one.
+	c.reseedInFlight = false
+	c.Update(eventMsg{evs: []*rafikiv1.Event{childClosedFor("c_1")}})
+	ck.True(c.reseedInFlight, "a close on the focus stream did not start a re-list")
+	ck.False(c.membershipChanged, "the request was not consumed")
+}
+
+// A gap outranks a close: its seed reports membership too, so the reconcile
+// request is folded into it rather than queued behind it.
+func TestReseedFoldsAPendingCloseIntoItsFullSeed(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	defer c.shutdown()
+
+	c.reseeding = true
+	c.membershipChanged = true
+	_, cmd := c.Update(railEventMsg{evs: []*rafikiv1.Event{childClosedFor("c_2")}})
+
+	ck.True(c.reseedInFlight, "no re-list")
+	ck.False(c.reseeding, "the gap request was not consumed")
+	ck.False(c.membershipChanged, "the close request outlived the seed that reports membership too")
+	ck.NotNil(cmd, "cmd")
+}
+
 // FINDING 5. ListChildrenRequest has no subject filter, so an unfiltered seed
 // installed a row for every live child on the daemon. Rows outside the subject
 // are frozen by construction -- their events never match -- so they keep their
@@ -749,6 +889,39 @@ func TestFailedSeedRetriesOnTheBackoffSchedule(t *testing.T) {
 	// Success resets the schedule to its fast end.
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
 	ck.Eq(0, c.seedAttempt, "seedAttempt")
+}
+
+// A retry re-attempts the same KIND of list it was retrying. A failed
+// reconcile that escalated to a full seed would quietly break rail.Reconcile's
+// promise -- a close's snapshot may be older than an exit the rail already
+// folded -- for the one case that is hardest to reason about (an RPC failure).
+func TestAFailedReconcileRetriesAsAReconcile(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := railWith(t, "c_1")
+	defer c.shutdown()
+
+	// One call per command: a tea.Tick closure waits on a single timer and
+	// blocks forever if driven twice.
+	_, cmd := c.Update(seedMsg{err: errSeedDown, membershipOnly: true})
+	ck.Require().NotNil(cmd, "a failed reconcile must schedule a retry")
+	got := cmd()
+	msg, ok := got.(seedRetryMsg)
+	ck.Require().True(ok, "retry command produced %T", got)
+	ck.True(msg.membershipOnly, "the retry forgot it was reconciling: it would run a status-refreshing full seed")
+
+	_, seedCmd := c.Update(msg)
+	ck.Require().NotNil(seedCmd, "seedRetryMsg dispatched nothing")
+	got = seedCmd()
+	sm, ok := got.(seedMsg)
+	ck.Require().True(ok, "seed command produced %T", got)
+	ck.True(sm.membershipOnly, "the re-attempt is a full seed, not the reconcile it was retrying")
+
+	// The gap path is unchanged: a failed full seed retries as a full seed.
+	_, cmd = c.Update(seedMsg{err: errSeedDown})
+	got = cmd()
+	msg, ok = got.(seedRetryMsg)
+	ck.Require().True(ok, "retry command produced %T", got)
+	ck.False(msg.membershipOnly, "a failed full seed must retry as a full seed")
 }
 
 func withParent(s *rafikiv1.ChildSummary, parent string) *rafikiv1.ChildSummary {
