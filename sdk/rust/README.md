@@ -48,6 +48,14 @@ reserved base `http://connect.rafiki.invalid` and a `tower_service::Service`
 connector dials the socket, ignoring the URI — a misconfigured dial fails
 loudly instead of reaching a real host.
 
+`Client::new_with_dial(endpoint, token, addr)` is `Client::new` with the TCP
+layer pinned to `addr`: it never resolves or dials the URL's host or port. For
+`https://` the TLS layer still takes SNI and certificate verification from the
+URL's host, and `Host` still comes from the URL, so a caller can reach one
+specific backend address while the certificate is checked against the name in
+the URL. For `http://` it is plain TCP to `addr`. A unix-socket endpoint is
+`Code::InvalidArgument`.
+
 ## The token is attached in the transport
 
 Every request — unary and streaming alike — carries `Connect-Protocol-Version:

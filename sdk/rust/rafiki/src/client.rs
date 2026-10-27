@@ -22,6 +22,7 @@
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -159,12 +160,47 @@ impl Service<Uri> for UnixConnector {
     }
 }
 
+/// The dialer behind [`Client::new_with_dial`]: it ignores the URI it is handed
+/// and always connects to `addr`. The TLS layer, when present, wraps this and
+/// still takes SNI and verification from the URI's host.
+#[derive(Clone)]
+struct DialConnector {
+    tcp: HttpConnector,
+    target: Uri,
+}
+
+impl DialConnector {
+    fn new(addr: SocketAddr) -> DialConnector {
+        DialConnector {
+            tcp: tcp_connector(),
+            target: Uri::try_from(format!("http://{addr}"))
+                .expect("a socket address is a valid URI authority"),
+        }
+    }
+}
+
+impl Service<Uri> for DialConnector {
+    type Response = TokioIo<tokio::net::TcpStream>;
+    type Error = <HttpConnector as Service<Uri>>::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.tcp.poll_ready(cx)
+    }
+
+    fn call(&mut self, _uri: Uri) -> Self::Future {
+        Box::pin(self.tcp.call(self.target.clone()))
+    }
+}
+
 /// Which client dials. One variant per endpoint form, so an `http://` endpoint
 /// never loads root certificates and a unix endpoint never resolves a host.
 #[derive(Clone)]
 enum Transport {
     Https(HttpClient<hyper_rustls::HttpsConnector<HttpConnector>, ReqBody>),
     Http(HttpClient<HttpConnector, ReqBody>),
+    HttpsDial(HttpClient<hyper_rustls::HttpsConnector<DialConnector>, ReqBody>),
+    HttpDial(HttpClient<DialConnector, ReqBody>),
     Unix(HttpClient<UnixConnector, ReqBody>),
 }
 
@@ -176,6 +212,8 @@ impl Transport {
         match self {
             Transport::Https(client) => client.request(request).await,
             Transport::Http(client) => client.request(request).await,
+            Transport::HttpsDial(client) => client.request(request).await,
+            Transport::HttpDial(client) => client.request(request).await,
             Transport::Unix(client) => client.request(request).await,
         }
     }
@@ -227,6 +265,70 @@ impl Client {
                 ),
                 base,
             ),
+        };
+        Ok(Client {
+            transport,
+            base,
+            token,
+            timeout: DEFAULT_TIMEOUT,
+            wire_epoch: EPOCH,
+        })
+    }
+
+    /// Like [`Client::new`], but the TCP layer always connects to `dial` and
+    /// never resolves or dials the URL's host or port.
+    ///
+    /// For `https://`, TLS still takes SNI and certificate verification from
+    /// the URL's host, and `Host` / `:authority` still come from the URL. For
+    /// `http://` this is plain TCP to `dial`. A unix-socket endpoint has no
+    /// use for a dial override and is [`Code::InvalidArgument`].
+    pub fn new_with_dial(
+        endpoint: &str,
+        token: Option<String>,
+        dial: SocketAddr,
+    ) -> Result<Client, Error> {
+        Client::dialed(endpoint, token, dial, &[])
+    }
+
+    /// [`Client::new_with_dial`] that additionally trusts `extra_roots` (DER
+    /// certificates), so a test can talk to a server whose certificate is not
+    /// in the native roots. Used ONLY by `tests/dial.rs`; the production
+    /// constructor delegates to the same builder with no extra roots.
+    #[cfg(feature = "test-hooks")]
+    pub fn new_with_dial_and_roots(
+        endpoint: &str,
+        token: Option<String>,
+        dial: SocketAddr,
+        extra_roots: &[Vec<u8>],
+    ) -> Result<Client, Error> {
+        Client::dialed(endpoint, token, dial, extra_roots)
+    }
+
+    fn dialed(
+        endpoint: &str,
+        token: Option<String>,
+        dial: SocketAddr,
+        extra_roots: &[Vec<u8>],
+    ) -> Result<Client, Error> {
+        let dial = DialConnector::new(dial);
+        let (transport, base) = match parse_endpoint(endpoint)? {
+            Endpoint::Tcp { base, tls: true } => (
+                Transport::HttpsDial(
+                    HttpClient::builder(TokioExecutor::new())
+                        .build(https_connector(dial, extra_roots)?),
+                ),
+                base,
+            ),
+            Endpoint::Tcp { base, tls: false } => (
+                Transport::HttpDial(HttpClient::builder(TokioExecutor::new()).build(dial)),
+                base,
+            ),
+            Endpoint::Unix { .. } => {
+                return Err(Error::new(
+                    Code::InvalidArgument,
+                    "a dial override has no meaning for a unix socket endpoint",
+                ))
+            }
         };
         Ok(Client {
             transport,
@@ -436,30 +538,47 @@ fn tcp_connector() -> HttpConnector {
 }
 
 fn tls_transport() -> Result<Transport, Error> {
+    let mut tcp = tcp_connector();
+    // The TLS layer owns the scheme check; the TCP layer must accept the
+    // https:// URIs it is handed.
+    tcp.enforce_http(false);
+    Ok(Transport::Https(
+        HttpClient::builder(TokioExecutor::new()).build(https_connector(tcp, &[])?),
+    ))
+}
+
+/// The TLS layer over `inner`: rustls + ring, SNI and verification from the
+/// URI's host. `extra_roots` (DER) are trusted instead of the native roots
+/// when non-empty; only the test-only dial constructor ever passes any.
+fn https_connector<T>(
+    inner: T,
+    extra_roots: &[Vec<u8>],
+) -> Result<hyper_rustls::HttpsConnector<T>, Error> {
     // rustls + ring, explicitly: the process default provider is never
     // consulted, so an aws-lc-rs build anywhere else cannot change the
     // handshake we run.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_provider_and_native_roots(provider)
-        .map_err(|err| {
-            Error::new(
-                Code::Internal,
-                format!("loading native root certificates: {err}"),
-            )
-        })?
-        .https_only()
-        .enable_http1()
-        .wrap_connector({
-            // The TLS layer owns the scheme check; the TCP layer must accept
-            // the https:// URIs it is handed.
-            let mut tcp = tcp_connector();
-            tcp.enforce_http(false);
-            tcp
-        });
-    Ok(Transport::Https(
-        HttpClient::builder(TokioExecutor::new()).build(connector),
-    ))
+    let tls_error =
+        |what: &str, err: &dyn fmt::Display| Error::new(Code::Internal, format!("{what}: {err}"));
+    let builder = if extra_roots.is_empty() {
+        hyper_rustls::HttpsConnectorBuilder::new()
+            .with_provider_and_native_roots(provider)
+            .map_err(|err| tls_error("loading native root certificates", &err))?
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        for der in extra_roots {
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der.clone()))
+                .map_err(|err| tls_error("adding extra root certificate", &err))?;
+        }
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|err| tls_error("selecting TLS protocol versions", &err))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(config)
+    };
+    Ok(builder.https_only().enable_http1().wrap_connector(inner))
 }
 
 /// The `Rafiki-Protocol` a response carried, if any.
