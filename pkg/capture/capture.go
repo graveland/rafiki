@@ -229,6 +229,9 @@ type TurnIntent struct {
 	AuthorKind     string // 'human' | 'agent' | 'system' (may be empty)
 	PrefixHash     string // sha256 of the static cache-prefix (request minus messages); see PrefixHash
 	Protocol       string // 'anthropic' (default when empty) | 'openai'; how to read the JSONB
+	RequestHeadID  string // conversation_message.id of the last path row the request covered; empty → NULL
+	TrimFrom       *int   // first path position a trim dropped; nil with TrimTo nil → nothing trimmed
+	TrimTo         *int   // one past the last dropped position
 }
 
 // InsertTurnIntent write-aheads the turn's request row and returns its
@@ -240,16 +243,22 @@ type TurnIntent struct {
 // Ordinal is retained only as an ordering hint, not an update key — intra-turn
 // retries and cross-run correlation must never collide on it.
 func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turnID string, createdAt time.Time, err error) {
+	if (t.TrimFrom == nil) != (t.TrimTo == nil) {
+		return "", time.Time{}, fmt.Errorf("insert turn intent: trim range must set both or neither (from=%v to=%v)", t.TrimFrom != nil, t.TrimTo != nil)
+	}
+	if t.TrimFrom != nil && *t.TrimFrom > *t.TrimTo {
+		return "", time.Time{}, fmt.Errorf("insert turn intent: trim range inverted")
+	}
 	protocol := t.Protocol
 	if protocol == "" {
 		protocol = string(store.ProtocolAnthropic)
 	}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, request, source, author_user_id, author_kind, prefix_hash, protocol)
-		 VALUES (COALESCE($10::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5,$6::uuid,$7,$8,$9) RETURNING id::text, created_at`,
+		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, request, source, author_user_id, author_kind, prefix_hash, protocol, request_head_id, request_trim_from, request_trim_to)
+		 VALUES (COALESCE($10::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5,$6::uuid,$7,$8,$9,$11::uuid,$12,$13) RETURNING id::text, created_at`,
 		t.ConversationID, t.Ordinal, nullify(t.Model), nullifyBytes(jsonbSafe(t.Request)),
 		nullify(t.Source), nullUUID(t.AuthorUserID), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol,
-		nullUUID(t.ID)).Scan(&turnID, &createdAt)
+		nullUUID(t.ID), nullUUID(t.RequestHeadID), intPtrOrNil(t.TrimFrom), intPtrOrNil(t.TrimTo)).Scan(&turnID, &createdAt)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -1111,6 +1120,15 @@ func nullify(s string) any {
 		return nil
 	}
 	return s
+}
+
+// intPtrOrNil maps a nil *int to nil so pgx writes SQL NULL rather than a zero
+// for an unset integer column.
+func intPtrOrNil(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // nullifyBytes maps a nil/empty []byte to nil so pgx writes SQL NULL instead

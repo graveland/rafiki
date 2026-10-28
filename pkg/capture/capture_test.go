@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -1595,4 +1596,98 @@ func TestMainTurn1OnAFreshSessionKeepsNullThreadID(t *testing.T) {
 		  WHERE t.id=$1::uuid`, t1).Scan(&got, &threadID), "read turn row")
 	c.Eq(session, got, "conversation external_ref")
 	c.Eq("", threadID, "main turn 1 thread_id")
+}
+
+// TestInsertTurnIntentRecordsRequestDescriptor pins the descriptor columns
+// migration 0060 adds: the id of the last path row a request covered and the
+// half-open range a trim dropped are written verbatim, and an intent carrying
+// neither stores SQL NULL in all three.
+func TestInsertTurnIntentRecordsRequestDescriptor(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, pool, s := captureTestEnv(t)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	c.Require().NoError(err, "EnsureConversation")
+
+	res, err := store.AppendChain(ctx, pool, store.Lease{}, store.ChainAppend{
+		ConversationID: convID,
+		Root:           convtree.RootKindRoot,
+		Nodes:          []store.ChainNode{{Role: "user", Content: []byte(`"hi"`)}},
+	})
+	c.Require().NoError(err, "AppendChain")
+	c.Require().Eq(1, len(res.Nodes), "AppendChain node count")
+	headID := res.Nodes[0].ID
+
+	from, to := 1, 4
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+		RequestHeadID: headID, TrimFrom: &from, TrimTo: &to,
+	})
+	c.Require().NoError(err, "InsertTurnIntent")
+
+	var gotHead *string
+	var gotFrom, gotTo *int
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT request_head_id::text, request_trim_from, request_trim_to
+		   FROM conversations.conversation_turn WHERE id=$1::uuid AND created_at=$2`,
+		turnID, createdAt).Scan(&gotHead, &gotFrom, &gotTo), "read back the request descriptor")
+	c.False(gotHead == nil || *gotHead != headID, "request_head_id = %v, want %s", gotHead, headID)
+	c.False(gotFrom == nil || *gotFrom != 1, "request_trim_from = %v, want 1", gotFrom)
+	c.False(gotTo == nil || *gotTo != 4, "request_trim_to = %v, want 4", gotTo)
+
+	t.Run("no descriptor stores NULL", func(t *testing.T) {
+		sub := assert.NewAborting(t)
+		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+			ConversationID: convID, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+		})
+		sub.Require().NoError(err, "InsertTurnIntent")
+
+		var gotHead *string
+		var gotFrom, gotTo *int
+		sub.Require().NoError(pool.QueryRow(ctx,
+			`SELECT request_head_id::text, request_trim_from, request_trim_to
+			   FROM conversations.conversation_turn WHERE id=$1::uuid AND created_at=$2`,
+			turnID, createdAt).Scan(&gotHead, &gotFrom, &gotTo), "read back the request descriptor")
+		sub.Nil(gotHead, "request_head_id")
+		sub.Nil(gotFrom, "request_trim_from")
+		sub.Nil(gotTo, "request_trim_to")
+	})
+}
+
+// TestInsertTurnIntentTrimRangeBothOrNeither pins the guard: a trim range is
+// meaningful only as a pair, and a range whose start is past its end is a
+// caller bug. Each refusal happens before the pool is touched, so no turn row
+// is written.
+func TestInsertTurnIntentTrimRangeBothOrNeither(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, pool, s := captureTestEnv(t)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	c.Require().NoError(err, "EnsureConversation")
+
+	from, to, five, two := 1, 4, 5, 2
+	for _, tc := range []struct {
+		name     string
+		from, to *int
+		want     string
+	}{
+		{"from without to", &from, nil, "both or neither"},
+		{"to without from", nil, &to, "both or neither"},
+		{"inverted", &five, &two, "inverted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := assert.NewAborting(t)
+			_, _, err := s.InsertTurnIntent(ctx, TurnIntent{
+				ConversationID: convID, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+				TrimFrom: tc.from, TrimTo: tc.to,
+			})
+			sub.ErrorContains(err, tc.want, "InsertTurnIntent trim range %s", tc.name)
+		})
+	}
+
+	var turns int
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		convID).Scan(&turns), "count turns")
+	c.Eq(0, turns, "turns written by refused intents")
 }

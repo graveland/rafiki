@@ -664,9 +664,9 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 	chain, err := loadMigrations()
 	c.Require().NoError(err, "load chain")
 	head := chain[len(chain)-1]
-	// 0059 is the migration whose rollback is observed below; a new head means
+	// 0060 is the migration whose rollback is observed below; a new head means
 	// this test must be repointed, not silently left asserting an older one.
-	c.Eq(59, head.version, "this test observes 0059's rollback")
+	c.Eq(60, head.version, "this test observes 0060's rollback")
 
 	prev, hadPrev := goSteps[head.version]
 	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
@@ -690,12 +690,12 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 		"probe the migrations table")
 	c.False(recorded, "version %d was recorded despite its go step failing", head.version)
 
-	var nodeCount bool
+	var trimFrom bool
 	c.Require().NoError(pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		                WHERE table_schema='conversations' AND table_name='conversation'
-		                  AND column_name='node_count')`).Scan(&nodeCount), "probe node_count")
-	c.False(nodeCount, "0059's column survived a failed go step; the SQL did not roll back with it")
+		                WHERE table_schema='conversations' AND table_name='conversation_turn'
+		                  AND column_name='request_trim_from')`).Scan(&trimFrom), "probe request_trim_from")
+	c.False(trimFrom, "0060's column survived a failed go step; the SQL did not roll back with it")
 }
 
 // TestMigrateGoStepUnknownVersion pins loadMigrations' refusal of a step for a
@@ -710,4 +710,42 @@ func TestMigrateGoStepUnknownVersion(t *testing.T) {
 	_, err := loadMigrations()
 	c.Error(err, "a go step for an unknown version must fail the chain")
 	c.True(err != nil && strings.Contains(err.Error(), "unknown version 9999"), "error names the version: %v", err)
+}
+
+// TestMigrate0060AddsDescriptorColumns pins 0060: the chain adds two nullable,
+// default-less integers describing which path rows a request covered, and the
+// down migration drops both.
+func TestMigrate0060AddsDescriptorColumns(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	columns := []string{"request_trim_from", "request_trim_to"}
+	for _, col := range columns {
+		var typ, nullable, hasDefault string
+		c.NoError(pool.QueryRow(ctx, `
+			SELECT data_type, is_nullable, coalesce(column_default,'')
+			  FROM information_schema.columns
+			 WHERE table_schema='conversations' AND table_name='conversation_turn'
+			   AND column_name=$1`, col).Scan(&typ, &nullable, &hasDefault), "probe %s", col)
+		c.False(typ != "integer" || nullable != "YES" || hasDefault != "",
+			"%s = (%s, nullable=%s, default=%q), want (integer, YES, no default)", col, typ, nullable, hasDefault)
+	}
+
+	// There is no MigrateTo API, so exercise the down migration directly: a
+	// no-op body must fail this test, not silently leave the columns in place.
+	down, err := os.ReadFile("migrations/0060_turn_request_descriptor.down.sql")
+	c.Require().NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	for _, col := range columns {
+		var exists bool
+		c.Require().NoError(pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			                WHERE table_schema='conversations' AND table_name='conversation_turn'
+			                  AND column_name=$1)`, col).Scan(&exists), "probe %s after down", col)
+		c.False(exists, "%s survived the down migration", col)
+	}
 }
