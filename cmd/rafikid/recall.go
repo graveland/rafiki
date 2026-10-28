@@ -33,12 +33,17 @@ type llmCompleter struct {
 	model  string
 	// catalogModel is the model id the shared catalog indexes — the provider-
 	// local half of model ("z-ai/glm-5.3-flash" for "openrouter/z-ai/glm-5.3-flash").
-	// ContextWindow and the pricing fallback query the catalog with it: the
-	// snapshot holds OpenRouter-native ids, so a provider-qualified string never
-	// matches and would silently degrade every lookup to the fallback. Falls
-	// back to model itself when model names no provider (a bare id is already
-	// catalog-shaped) or names an unknown one.
+	// The pricing fallback queries the catalog with it: the snapshot holds
+	// OpenRouter-native ids, so a provider-qualified string never matches and
+	// would silently degrade every lookup to the fallback. Falls back to model
+	// itself when model names no provider (a bare id is already catalog-shaped)
+	// or names an unknown one.
 	catalogModel string
+	// catalogIDs are the ids the catalog may index the model under, in the order
+	// to try them (providers.Set.CatalogIDs): catalogModel first, then a
+	// Responses-kind rewrite of it ("openai/gpt-…"). Empty when no provider set
+	// was supplied, in which case catalogModel alone is the one candidate.
+	catalogIDs []string
 	// pricer prices the call exactly like pkg/analyze's detector does; nil (a
 	// client with no catalog pricing) leaves CostUSD 0.
 	pricer insights.Pricer
@@ -49,13 +54,14 @@ var _ recall.Completer = (*llmCompleter)(nil)
 // newLLMCompleter resolves the configured model against the provider set once,
 // at construction: model stays the configured string (the stable identity the
 // summarizer records and keys eligibility on), catalogModel is what the shared
-// catalog indexes.
+// catalog indexes, and catalogIDs is every id it may be indexed under.
 func newLLMCompleter(client *llm.Client, prov *providers.Set, model string, pricer insights.Pricer) *llmCompleter {
 	c := &llmCompleter{client: client, model: model, catalogModel: model, pricer: pricer}
 	if prov != nil {
 		if _, id, err := prov.Split(model); err == nil {
 			c.catalogModel = id
 		}
+		c.catalogIDs = prov.CatalogIDs(c.catalogModel)
 	}
 	return c
 }
@@ -74,11 +80,24 @@ func newSummaryCompleter(client *llm.Client, prov *providers.Set, model string) 
 func (c *llmCompleter) Model() string { return c.model }
 
 // ContextWindow resolves the model's context length from the shared catalog,
-// queried with the provider-local id (see catalogModel). ok=false (unknown
-// model, cold cache) is the Summarizer's fallback signal, not an error.
+// trying every id the catalog may index the model under (see catalogIDs), the
+// same candidate list the pricer uses: a Responses-kind model sized by its bare
+// "gpt-…" alone would miss the "openai/gpt-…" entry and fall back to the
+// unknown window, silently turning a healthy conversation's segment budget into
+// the fallback. ok=false (unknown model, cold cache) is the Summarizer's
+// fallback signal, not an error, and every candidate missing still reports it.
 func (c *llmCompleter) ContextWindow() (int, bool) {
-	tokens, _, ok := c.client.Catalog().ContextWindow(c.catalogModel)
-	return tokens, ok
+	ids := c.catalogIDs
+	if len(ids) == 0 {
+		ids = []string{c.catalogModel}
+	}
+	cat := c.client.Catalog()
+	for _, id := range ids {
+		if tokens, _, ok := cat.ContextWindow(id); ok {
+			return tokens, true
+		}
+	}
+	return 0, false
 }
 
 func (c *llmCompleter) Complete(ctx context.Context, ownerUserID, system, user string, maxTokens int) (recall.Completion, error) {

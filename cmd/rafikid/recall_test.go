@@ -423,12 +423,14 @@ func TestLLMCompleterCompletionCostFallback(t *testing.T) {
 
 // TestLLMCompleterPricesResponsesModelByCatalogID pins the pricer the daemon's
 // summarizer is built with — newSummaryCompleter, the only constructor
-// buildRecallRuntime uses. A [summaries] model on an openai-responses provider
-// is priced through Set.CatalogIDs, so a pass records a real spend; the raw
-// catalog Pricing it replaced only resolves catalog-SHAPED ids, so
-// "gpt-6.1-sol" against an "openai/gpt-6.1-sol" entry missed and every summary
-// was recorded free. Summaries are not a budget input, so this is reporting
-// rather than enforcement — but a zero is indistinguishable from a free model.
+// buildRecallRuntime uses — and the context window beside it, which now goes
+// through the same catalog ids. A [summaries] model on an openai-responses
+// provider is priced and sized through Set.CatalogIDs, so a pass records a real
+// spend and a real segment budget; the raw lookups they replaced only resolve
+// catalog-SHAPED ids, so "gpt-6.1-sol" against an "openai/gpt-6.1-sol" entry
+// missed and every summary was recorded free and sized by the unknown window.
+// Summaries are not a budget input, so this is reporting rather than
+// enforcement — but a zero is indistinguishable from a free model.
 //
 // DB-backed like its sibling above, because Complete captures a conversation.
 // Rides the TestRecallWiring shim.
@@ -452,10 +454,20 @@ func TestLLMCompleterPricesResponsesModelByCatalogID(t *testing.T) {
 	)
 	c.Require().NoError(err, "llm.NewClient")
 
-	got, err := newSummaryCompleter(client, prov, "oa/gpt-6.1-sol").
-		Complete(ctx, "", "summarize this", "the transcript", 1024)
+	comp := newSummaryCompleter(client, prov, "oa/gpt-6.1-sol")
+	got, err := comp.Complete(ctx, "", "summarize this", "the transcript", 1024)
 	c.Require().NoError(err, "Complete")
 	c.Eq("the summary text", got.Text, "Text")
 	// $3/1M input for 1M + $15/1M output for 0.5M: the openai/gpt-6.1-sol entry.
 	c.LessOrEqual(1e-9, math.Abs(got.CostUSD-10.5), "CostUSD = %v, want 10.5", got.CostUSD)
+
+	// The window comes through the same candidates: the provider-local
+	// "gpt-6.1-sol" alone misses, the "openai/gpt-6.1-sol" entry answers.
+	tokens, ok := comp.ContextWindow()
+	c.True(ok, "ContextWindow missed a Responses-kind model id")
+	c.Eq(responsesContextWindow, tokens, "ContextWindow")
+	// A model the catalog does not know still reports unknown, never a guess.
+	unknown, ok := newSummaryCompleter(client, prov, "oa/no-such-model").ContextWindow()
+	c.False(ok, "ContextWindow claimed a window for a model the catalog does not know")
+	c.Eq(0, unknown, "ContextWindow for an unknown model")
 }

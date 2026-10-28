@@ -35,16 +35,21 @@ kind = "openai-responses"
 api_key_env = "OPENAI_API_KEY"
 `
 
+// responsesContextWindow is the context window seedResponsesCatalog records for
+// openai/gpt-6.1-sol: the completer test's positive control for a window looked
+// up through a provider-local id.
+const responsesContextWindow = 131072
+
 // seedResponsesCatalog seeds the catalog entries this file prices against: the
 // Responses provider's model under the id the catalog actually indexes it
-// under ("openai/gpt-6.1-sol"), an Anthropic entry, and a 10x decoy under the
-// openai/ namespace so a mapping that widened to an existing kind (or a
-// candidate offered before the raw id) would be visible as a wrong number
-// rather than a missing one.
+// under ("openai/gpt-6.1-sol", with a context window so a lookup fits it too),
+// an Anthropic entry, and a 10x decoy under the openai/ namespace so a mapping
+// that widened to an existing kind (or a candidate offered before the raw id)
+// would be visible as a wrong number rather than a missing one.
 func seedResponsesCatalog() *routing.ModelCatalog {
 	c := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]routing.CatalogEntry{
-		{ID: "openai/gpt-6.1-sol", Created: 1, Pricing: &routing.ModelPricing{
+		{ID: "openai/gpt-6.1-sol", Created: 1, ContextLength: responsesContextWindow, Pricing: &routing.ModelPricing{
 			PromptUSD: 0.000003, CompletionUSD: 0.000015,
 		}},
 		{ID: "anthropic/claude-sonnet-5", Created: 2, Pricing: &routing.ModelPricing{
