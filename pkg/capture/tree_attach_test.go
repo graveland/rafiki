@@ -421,8 +421,10 @@ func TestToolResultsWithSameIDDifferentContentAreSiblings(t *testing.T) {
 // fixtureReplay drives testdata/claude-capture through capture exactly as the
 // proxy does: each request attaches by its diagnostics.previous_message_id and
 // its response is appended under the request head. ref is the conversation's
-// external_ref, which MarkClearPending resolves.
-func fixtureReplay(t *testing.T, ctx context.Context, s *CaptureStore, convID, ref string) {
+// external_ref, which MarkClearPending resolves. before, when non-nil, is called
+// with the conversation's head immediately before each request is attached, so a
+// test can pin what a boundary was cut from.
+func fixtureReplay(t *testing.T, ctx context.Context, s *CaptureStore, convID, ref string, before func(n int, headBefore string)) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	dir := filepath.Join("..", "..", "testdata", "claude-capture")
@@ -439,6 +441,13 @@ func fixtureReplay(t *testing.T, ctx context.Context, s *CaptureStore, convID, r
 			} `json:"diagnostics"`
 		}
 		c.NoError(json.Unmarshal(req, &body), "request %d body", n)
+		if before != nil {
+			var headBefore string
+			c.NoError(s.pool.QueryRow(ctx,
+				`SELECT coalesce(head_id::text, '') FROM conversations.conversation WHERE id = $1::uuid`,
+				convID).Scan(&headBefore), "read the head before request %d", n)
+			before(n, headBefore)
+		}
 		if n > 1 && len(body.Messages) == 1 {
 			// The one-message request after a long history is the turn after
 			// /clear. The daemon marks the conversation when it accepts the
@@ -463,11 +472,11 @@ func TestReplayTwiceAddsNoRows(t *testing.T) {
 	ctx, pool, s := captureTestEnv(t)
 	convID, ref := clearTestConv(t, ctx, s, "replay-twice")
 
-	fixtureReplay(t, ctx, s, convID, ref)
+	fixtureReplay(t, ctx, s, convID, ref, nil)
 	first := mustNodeCount(t, ctx, pool, convID)
 	c.Greater(0, first, "the first replay inserted nodes")
 
-	fixtureReplay(t, ctx, s, convID, ref)
+	fixtureReplay(t, ctx, s, convID, ref, nil)
 	c.Eq(first, mustNodeCount(t, ctx, pool, convID), "node count after the second replay")
 }
 
@@ -521,7 +530,7 @@ func TestBackfillMatchesTreeCapture(t *testing.T) {
 
 	// B: the same session captured onto the tree.
 	convID, ref := clearTestConv(t, ctx, s, "backfill-parity")
-	fixtureReplay(t, ctx, s, convID, ref)
+	fixtureReplay(t, ctx, s, convID, ref, nil)
 
 	want := treeShape(t, ctx, pool, backfilled)
 	got := treeShape(t, ctx, pool, convID)
@@ -568,7 +577,10 @@ func TestCapturedClaudeSessionReplays(t *testing.T) {
 	ctx, pool, s := captureTestEnv(t)
 	convID, ref := clearTestConv(t, ctx, s, "captured-session")
 
-	fixtureReplay(t, ctx, s, convID, ref)
+	// The head each request starts from, so a boundary can be pinned to the
+	// node it actually cut rather than merely to "some node".
+	heads := map[int]string{}
+	fixtureReplay(t, ctx, s, convID, ref, func(n int, headBefore string) { heads[n] = headBefore })
 
 	_, _, fallbacks := mustStats(t, ctx, pool, convID)
 	c.Eq(0, fallbacks, "no fixture request needed the hash-chain fallback or a new root")
@@ -633,7 +645,9 @@ func TestCapturedClaudeSessionReplays(t *testing.T) {
 	c.Eq("compaction_summary", kind, "kind")
 	c.Eq(mustProviderNode(t, ctx, pool, convID, "msg_011CgTErFWwoKjKDr6q9xVGb"), derived, "the compaction root is derived from the reply request 19 names")
 
-	// Request 20 is the /clear: a clear root, derived from the head it cut.
+	// Request 20 is the /clear: a clear root, derived from the node that was the
+	// conversation's head immediately before that request — request 19's reply.
+	c.NotEq("", heads[20], "the head before the /clear request")
 	var clearDerived string
 	var clearParent *string
 	c.NoError(pool.QueryRow(ctx, `
@@ -641,16 +655,18 @@ func TestCapturedClaudeSessionReplays(t *testing.T) {
 		  FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND kind='clear'`,
 		convID).Scan(&clearDerived, &clearParent), "read the clear root")
 	c.Nil(clearParent, "the clear root has no parent")
-	c.NotEq("", clearDerived, "the clear root is derived from the node it cut")
+	c.Eq(heads[20], clearDerived, "the clear root is derived from the node it cut, not from another node")
+	c.Eq(mustProviderNode(t, ctx, pool, convID, "msg_011CgTEsRpqvQnCmgkCDZFrV"), clearDerived,
+		"the clear root is derived from request 19's reply")
 
-	// Every row is one node: no two rows share a path hash, and every captured
-	// response landed exactly once.
-	var rows, hashes int
+	// The brief's acceptance clause, for this conversation: the row count equals
+	// the number of distinct non-NULL path_hash values, so every row is exactly
+	// one node — no row without a tree position and no node stored twice.
+	var rows, placed int
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT count(*), count(DISTINCT path_hash) FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
-		convID).Scan(&rows, &hashes), "count rows and path hashes")
-	c.Eq(hashes, rows, "row count equals the number of distinct path hashes")
-	c.Eq(0, rows-hashes, "no row is without a tree position")
+		convID).Scan(&rows, &placed), "count rows and path hashes")
+	c.Eq(rows, placed, "row count equals the number of distinct non-NULL path_hash values")
 
 	var responses, distinct int
 	c.NoError(pool.QueryRow(ctx, `
