@@ -3,7 +3,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,19 +45,22 @@ func (m *Messages) WithLease(l Lease) *Messages {
 type Message struct {
 	// ID is the row's id; empty for an in-memory conversation's rows unless
 	// the caller assigns one.
-	ID         string
+	ID string
+	// Ordinal is the row's insertion sequence: gap-free, never reused, and
+	// unrelated to its position on the working path.
 	Ordinal    int
 	Param      anthropic.MessageParam
 	ToolUseIDs []string
 	StopReason string // assistant rows: stop reason of the turn that produced it
-	// Kind tags a row as something other than an ordinary turn message. Three
-	// values are written today, all by a boundary path: "compaction_summary"
-	// (the summary inserted at a rebase boundary, by pkg/capture or by fundi's
-	// compaction), "compaction_tail" (the post-compaction tail fundi appends —
-	// copies of earlier rows, which every full-history reader must skip; see
-	// docs/reference/fundi-compaction.md) and "clear" (message 0 of the
-	// post-clear request, a real user message, not a summary). Nil on every
-	// ordinary row.
+	// Kind tags a row as something other than an ordinary turn message. Two
+	// values are written today: "compaction_summary" (the root a compaction
+	// hangs its tail from, by pkg/capture or by fundi's compaction) and
+	// "compaction_tail" (the post-compaction tail fundi appends — copies of
+	// earlier rows, which every full-history reader must skip; see
+	// docs/reference/fundi-compaction.md). A clear's root row also carries
+	// "clear": for fundi it is the synthetic boundary row AppendClear writes,
+	// for a claude conversation the real first message of the new head. Nil on
+	// every ordinary row.
 	Kind *string
 	// InputTokens is set only on a kind='compaction_summary' row: the
 	// approximate size of the context that boundary replaced. Nil otherwise
@@ -73,34 +75,17 @@ type Message struct {
 	CreatedAt time.Time
 }
 
-// Load returns the conversation's FULL message history in ordinal order. It is
-// deliberately not filtered by the resume horizon: GetHistory, `rafiki logs`
-// and `Controller.dbRecent` (agent_view) all render the pre-compaction history
-// with the boundary inline. The horizon-bounded read — the working set every
-// send, orphan repair and prefill classifier uses — is LoadWorking.
+// Load returns the conversation's FULL message history in ordinal order — every
+// node ever written, including the ones the working path no longer reaches.
+// GetHistory, `rafiki logs` and `Controller.dbRecent` (agent_view) all render
+// the pre-compaction history with the boundary inline. The working set every
+// send, orphan repair and prefill classifier uses is LoadWorking, the path from
+// the head to its root.
 func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, error) {
-	return m.load(ctx, conversationID, false)
-}
-
-// load reads the conversation's messages in ordinal order. With workingOnly the
-// read is bounded at the resume horizon: only rows at or after
-// conversations.conversation.resume_from_ordinal (NULL meaning 0, i.e. full
-// replay) are returned. Everything after the query — scan, wire assembly,
-// decode — is shared between the two reads.
-func (m *Messages) load(ctx context.Context, conversationID string, workingOnly bool) ([]Message, error) {
-	query := `
+	rows, err := m.pool.Query(ctx, `
 		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text
 		  FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid ORDER BY ordinal`
-	if workingOnly {
-		query = `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text
-		  FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid
-		   AND ordinal >= coalesce((SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid), 0)
-		 ORDER BY ordinal`
-	}
-	rows, err := m.pool.Query(ctx, query, conversationID)
+		 WHERE conversation_id = $1::uuid ORDER BY ordinal`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
 	}
@@ -218,7 +203,7 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 	return out, rows.Err()
 }
 
-// Appended is the committed identity of a row Append wrote or found: its id
+// Appended is the committed identity of a row an append wrote or found: its id
 // and created_at as the database reported them, so a caller can publish the
 // same time GetHistory will later report for the row.
 type Appended struct {
@@ -230,98 +215,39 @@ type Appended struct {
 	Depth   int
 }
 
-// Append persists one message at the given ordinal and returns the committed
-// row's id and created_at. Idempotent under resume: re-appending an ordinal
-// that already exists writes nothing, returns the EXISTING row's identity when
-// the content matches, and is an error when it doesn't (two histories
-// diverged). Both identities come from committed state: the insert is one
-// autocommit statement, and the replay read sees only committed rows.
-func (m *Messages) Append(ctx context.Context, conversationID string, ordinal int, param anthropic.MessageParam, meta *AssistantMeta) (Appended, error) {
+// AppendNode appends one message under the conversation's head and returns the
+// committed row's identity. A conversation with no head yet starts a root.
+//
+// Idempotent under replay: a node the conversation already holds is matched by
+// its path hash, so re-appending it writes nothing and returns the EXISTING
+// row's identity — and the head still moves onto it, which is what makes a
+// resumed history converge on the same working path.
+//
+// providerMessageID is the upstream message id for an assistant reply ("" for
+// every other row); it is recorded for reconciliation with the provider.
+func (m *Messages) AppendNode(ctx context.Context, conversationID string, param anthropic.MessageParam, meta *AssistantMeta, providerMessageID string) (Appended, error) {
 	content, err := json.Marshal(param.Content)
 	if err != nil {
 		return Appended{}, fmt.Errorf("append message: marshal content: %w", err)
 	}
-	content = jsonbSafe(content)
-	var inTok, outTok *int64
-	stopReason := any(nil)
+	node := ChainNode{
+		Role:              string(param.Role),
+		Content:           jsonbSafe(content),
+		ToolUseIDs:        toolUseIDs(param),
+		ProviderMessageID: providerMessageID,
+	}
 	if meta != nil {
-		inTok, outTok = &meta.Input, &meta.Output
-		if meta.StopReason != "" {
-			stopReason = meta.StopReason
-		}
+		node.InputTokens, node.OutputTokens = &meta.Input, &meta.Output
+		node.StopReason = meta.StopReason
 	}
-
-	// Two statements rather than one with a conditional guard: an unfenced
-	// caller must behave exactly as it did before fencing existed, and a
-	// clever single query that tries to be both is where the subtle bugs live.
-	var row pgx.Row
-	if m.lease.Held() {
-		row = m.pool.QueryRow(ctx, appendFencedSQL,
-			conversationID, ordinal, string(param.Role), content, toolUseIDs(param),
-			inTok, outTok, stopReason, m.lease.Holder, m.lease.Token)
-	} else {
-		row = m.pool.QueryRow(ctx, appendSQL,
-			conversationID, ordinal, string(param.Role), content, toolUseIDs(param),
-			inTok, outTok, stopReason)
+	result, err := m.AppendChain(ctx, ChainAppend{
+		ConversationID: conversationID, ParentFromHead: true, Nodes: []ChainNode{node},
+	})
+	if err != nil {
+		return Appended{}, fmt.Errorf("append message: %w", err)
 	}
-	var appended Appended
-	err = row.Scan(&appended.ID, &appended.CreatedAt)
-	if err == nil {
-		return appended, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return Appended{}, fmt.Errorf("append message %d: %w", ordinal, err)
-	}
-
-	// No row came back, which has two causes once fencing is on: the ordinal
-	// already exists (a Resume replay), or the lease is gone. Check the lease
-	// first — a lost lease is the more serious answer and reporting it as a
-	// content conflict would send the caller down entirely the wrong path.
-	if m.lease.Held() {
-		valid, verr := NewLeases(m.pool).Valid(ctx, m.lease)
-		if verr != nil {
-			return Appended{}, fmt.Errorf("append message %d: lease check: %w", ordinal, verr)
-		}
-		if !valid {
-			return Appended{}, fmt.Errorf("append message %d: %w", ordinal, ErrLeaseLost)
-		}
-	}
-
-	// Conflict: verify the existing row carries the same content (a Resume
-	// replay), otherwise fail loudly rather than silently forking history.
-	var existing []byte
-	if err := m.pool.QueryRow(ctx, `
-		SELECT id::text, content, created_at FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND ordinal = $2`, conversationID, ordinal).Scan(&appended.ID, &existing, &appended.CreatedAt); err != nil {
-		return Appended{}, fmt.Errorf("append message %d: conflict readback: %w", ordinal, err)
-	}
-	if !jsonEqual(existing, content) {
-		return Appended{}, fmt.Errorf("append message %d: ordinal already holds different content (history diverged)", ordinal)
-	}
-	return appended, nil
+	return result.Nodes[0], nil
 }
-
-const appendSQL = `
-INSERT INTO conversations.conversation_message
-	(conversation_id, ordinal, role, content, tool_use_ids, input_tokens, output_tokens, stop_reason)
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (conversation_id, ordinal) DO NOTHING
-RETURNING id::text, created_at`
-
-// appendFencedSQL is appendSQL with the lease guard. The EXISTS clause is
-// evaluated in the SAME statement as the insert, which is what makes a stalled
-// writer that wakes after takeover write nothing — and why a monotonic fencing
-// token is unnecessary here.
-const appendFencedSQL = `
-INSERT INTO conversations.conversation_message
-	(conversation_id, ordinal, role, content, tool_use_ids, input_tokens, output_tokens, stop_reason)
-SELECT $1::uuid, $2, $3, $4, $5, $6, $7, $8
- WHERE EXISTS (
-   SELECT 1 FROM conversations.conversation_lease
-    WHERE conversation_id = $1::uuid AND holder = $9 AND token = $10::uuid
-      AND expires_at > now())
-ON CONFLICT (conversation_id, ordinal) DO NOTHING
-RETURNING id::text, created_at`
 
 // AssistantMeta carries per-message usage and the producing turn's stop
 // reason (assistant messages; resume consults StopReason to distinguish a
@@ -350,24 +276,6 @@ func toolUseIDs(param anthropic.MessageParam) []string {
 		}
 	}
 	return ids
-}
-
-func jsonEqual(a, b []byte) bool {
-	decode := func(raw []byte) (any, error) {
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber() // avoid float64 rounding making distinct numbers "equal"
-		var v any
-		err := dec.Decode(&v)
-		return v, err
-	}
-	av, errA := decode(a)
-	bv, errB := decode(b)
-	if errA != nil || errB != nil {
-		return false
-	}
-	ac, errA := json.Marshal(av)
-	bc, errB := json.Marshal(bv)
-	return errA == nil && errB == nil && string(ac) == string(bc)
 }
 
 // Unfinished describes a conversation with recoverable state: a pending turn
@@ -466,26 +374,6 @@ func ResetResumeAttempts(ctx context.Context, pool *pgxpool.Pool, conversationID
 		SET resume_attempts = 0, updated_at = now() WHERE id = $1::uuid`, conversationID)
 	if err != nil {
 		return fmt.Errorf("reset resume attempts: %w", err)
-	}
-	return nil
-}
-
-// DeleteTailUserMessage removes the message at ordinal ONLY when it is the
-// conversation's last row and a user message — the write-ahead retraction for
-// a first send the API rejected as too large (the host rebuilds a smaller
-// prompt and retries on the same conversation). Never usable against history
-// the model has seen.
-func DeleteTailUserMessage(ctx context.Context, pool *pgxpool.Pool, conversationID string, ordinal int) error {
-	tag, err := pool.Exec(ctx, `
-		DELETE FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND ordinal = $2 AND role = 'user'
-		   AND ordinal = (SELECT max(ordinal) FROM conversations.conversation_message
-		                   WHERE conversation_id = $1::uuid)`, conversationID, ordinal)
-	if err != nil {
-		return fmt.Errorf("delete tail user message: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("delete tail user message: ordinal %d is not the tail user row", ordinal)
 	}
 	return nil
 }

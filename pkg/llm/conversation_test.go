@@ -243,7 +243,7 @@ func TestConversationTrimRetryKeepsPrefixAndRows(t *testing.T) {
 		}
 		msg := anthropic.MessageParam{Role: role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		_, aerr := store.NewMessages(pool).Append(ctx, conv.ID, i, msg, nil)
+		_, aerr := store.NewMessages(pool).AppendNode(ctx, conv.ID, msg, nil, "")
 		ck.Require().NoError(aerr)
 	}
 
@@ -302,7 +302,7 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	msgs := store.NewMessages(pool)
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_orphan", map[string]any{"a": 1}, "service_status"))
-	_, aerr := msgs.Append(ctx, convB.ID, 0, assistant, nil)
+	_, aerr := msgs.AppendNode(ctx, convB.ID, assistant, nil, "")
 	ck.Require().NoError(aerr)
 
 	// Conversation C: clean (a full Send).
@@ -625,4 +625,113 @@ func TestCaptureRecordsServedProviderStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	ck.Eq("Together", servedProviderOfLastTurn(t, pool, conv.ID), "captured served_provider")
+}
+
+// TestRetractTailUserLeavesLeaf: a retract is a head move, never a delete. The
+// oversized first prompt stops being the working set, its row survives as a
+// leaf, and a smaller retry becomes its sibling rather than a duplicate.
+func TestRetractTailUserLeavesLeaf(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+	c := testClient(t, pool, &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"),
+	}})
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"))
+	ck.Require().NoError(err)
+
+	u, err := conv.AppendUser(ctx, UserText(strings.Repeat("x", 4096)))
+	ck.Require().NoError(err, "AppendUser")
+	ck.Require().NoError(conv.RetractTailUser(ctx, u.ID), "RetractTailUser")
+
+	hist, err := conv.History(ctx)
+	ck.Require().NoError(err, "History")
+	ck.Empty(hist, "the retracted prompt is still on the working path")
+
+	var rows int
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
+		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&rows), "count rows")
+	ck.Eq(1, rows, "the retracted row must survive")
+
+	small, err := conv.AppendUser(ctx, UserText("small"))
+	ck.Require().NoError(err, "AppendUser after retract")
+	ck.NotEq(u.ID, small.ID, "the retry must write a new row")
+	hist, err = conv.History(ctx)
+	ck.Require().NoError(err, "History")
+	ck.Require().Len(hist, 1, "working path")
+	ck.Eq(small.ID, hist[0].ID, "working path is the smaller prompt")
+
+	// Both rows hang off the same empty root slot: siblings, not a chain.
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE parent_id IS NULL)
+		FROM conversations.conversation_message WHERE conversation_id=$1::uuid`, conv.ID).Scan(&rows), "count roots")
+	ck.Eq(2, rows, "the retracted row and its retry are both roots")
+
+	// The retracted row is no longer the head, so it cannot be retracted twice.
+	ck.Error(conv.RetractTailUser(ctx, u.ID), "retracting a row that is not the head")
+}
+
+// TestResumeContinueIsIdempotent: reloading a conversation and reading its
+// history writes nothing — the stored path IS the history a Resume continues
+// from, so a resume cannot duplicate the reply it already holds.
+func TestResumeContinueIsIdempotent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+	c := testClient(t, pool, &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("the reply"),
+	}})
+	const ref = "resume-idempotent"
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), ByExternalRef(ref), Model("claude-haiku-4-5"))
+	ck.Require().NoError(err)
+
+	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	before, err := conv.History(ctx)
+	ck.Require().NoError(err, "History")
+	ck.Require().Len(before, 2, "user + assistant")
+
+	reloaded, err := c.Conversation(ctx, NewConversation("", "test"), ByExternalRef(ref), Model("claude-haiku-4-5"))
+	ck.Require().NoError(err)
+	ck.Eq(conv.ID, reloaded.ID, "same conversation")
+	after, err := reloaded.History(ctx)
+	ck.Require().NoError(err, "History after reload")
+	ck.EqDeep(before, after, "the reloaded working path")
+
+	var rows int
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
+		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&rows), "count rows")
+	ck.Eq(2, rows, "reloading a conversation must write nothing")
+}
+
+// TestFundiAssistantNodeCarriesProviderMessageID: an assistant node records the
+// upstream message id, which is what reconciles a stored reply with the
+// provider's own record. A user row has none.
+func TestFundiAssistantNodeCarriesProviderMessageID(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+			return cannedMessage(`{"id":"msg_upstream_1","type":"message","role":"assistant","model":"claude-haiku-4-5",
+				"content":[{"type":"text","text":"reply"}],
+				"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`), nil
+		},
+	}}
+	c := testClient(t, pool, sender)
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"))
+	ck.Require().NoError(err)
+	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var assistant, user *string
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT
+			max(provider_message_id) FILTER (WHERE role = 'assistant'),
+			max(provider_message_id) FILTER (WHERE role = 'user')
+		FROM conversations.conversation_message WHERE conversation_id=$1::uuid`, conv.ID).
+		Scan(&assistant, &user), "read provider_message_id")
+	ck.Require().NotNil(assistant, "the assistant node carries no provider_message_id")
+	ck.Eq("msg_upstream_1", *assistant, "assistant provider_message_id")
+	ck.True(user == nil, "a user row must carry no provider_message_id, got %v", user)
 }

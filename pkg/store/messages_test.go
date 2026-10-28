@@ -14,9 +14,9 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// Append's conflict semantics: an identical replay is a no-op, diverging
-// content at an existing ordinal is a loud error (never a silent fork).
-func TestAppendReplayAndDivergence(t *testing.T) {
+// AppendNode chains under the head: the second call's node is a child of the
+// first, and the working path is the whole chain in order.
+func TestAppendNodeChainsUnderHead(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := testPool(t)
 	ctx := context.Background()
@@ -25,28 +25,33 @@ func TestAppendReplayAndDivergence(t *testing.T) {
 	c.NoError(pool.QueryRow(ctx, `INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		VALUES ('test','server') RETURNING id::text`).Scan(&convID))
 	m := NewMessages(pool)
-	msg := anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))
 
-	first, err := m.Append(ctx, convID, 0, msg, nil)
+	first, err := m.AppendNode(ctx, convID, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil, "")
 	c.NoError(err, "first append")
-	// Identical replay: no-op, no error, still one row, and the returned
-	// identity is the existing row's.
-	replay, err := m.Append(ctx, convID, 0, msg, nil)
-	c.NoError(err, "replay append")
-	c.EqDeep(first, replay, "replay returns the existing row's id and created_at")
-	stored, err := m.Load(ctx, convID)
-	c.NoError(err, "load")
-	c.Require().Len(stored, 1, "rows after replay")
-	c.True(stored[0].CreatedAt.Equal(first.CreatedAt), "Append created_at %v, stored %v", first.CreatedAt, stored[0].CreatedAt)
+	second, err := m.AppendNode(ctx, convID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi")),
+		&AssistantMeta{Input: 3, Output: 5, StopReason: "end_turn"}, "msg_abc")
+	c.NoError(err, "second append")
+
 	c.NotEmpty(first.ID, "row id")
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
-		WHERE conversation_id=$1::uuid`, convID).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("rows = %d err=%v, want 1", n, err)
-	}
-	// Diverging content at the same ordinal: loud error.
-	_, err = m.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("DIFFERENT")), nil)
-	c.False(err == nil || !strings.Contains(err.Error(), "diverged"), "diverged append err = %v, want history-diverged error", err)
+	c.EqDeep([]int{0, 1}, []int{first.Ordinal, second.Ordinal}, "insertion ordinals")
+	c.EqDeep([]int{0, 1}, []int{first.Depth, second.Depth}, "depths")
+
+	var parent string
+	c.NoError(pool.QueryRow(ctx, `SELECT coalesce(parent_id::text,'') FROM conversations.conversation_message
+		WHERE id = $1::uuid`, second.ID).Scan(&parent), "read parent")
+	c.Eq(first.ID, parent, "the second node's parent is the first")
+
+	path, err := m.LoadWorking(ctx, convID)
+	c.NoError(err, "LoadWorking")
+	c.Require().Len(path, 2, "working path")
+	c.Eq(first.ID, path[0].ID, "path[0]")
+	c.Eq(second.ID, path[1].ID, "path[1]")
+	c.Eq("hello", path[0].Param.Content[0].OfText.Text, "path[0] content")
+	c.Eq("hi", path[1].Param.Content[0].OfText.Text, "path[1] content")
+	c.Eq(second.ID, headID(t, pool, convID), "head is the last node appended")
+
+	// Both rows are one conversation's tree, and nothing else was written.
+	c.Eq(2, rowCount(t, pool, convID), "rows")
 }
 
 // Kind/InputTokens round-trip through Load. A compaction_summary row is

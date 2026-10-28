@@ -854,8 +854,8 @@ func TestCompactionStoreLoadStaysFull(t *testing.T) {
 		if i%2 == 1 {
 			role = anthropic.MessageParamRoleAssistant
 		}
-		_, aerr := msgs.Append(ctx, conv.ID, i,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}}, nil)
+		_, aerr := msgs.AppendNode(ctx, conv.ID,
+			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}}, nil, "")
 		ck.Require().NoError(aerr)
 	}
 	conv.usedTokens = 999_000
@@ -896,8 +896,8 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 		if i%2 == 1 {
 			role = anthropic.MessageParamRoleAssistant
 		}
-		_, aerr := msgs.Append(ctx, conv.ID, i,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}}, nil)
+		_, aerr := msgs.AppendNode(ctx, conv.ID,
+			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}}, nil, "")
 		ck.Require().NoError(aerr)
 	}
 	conv.usedTokens = 999_000

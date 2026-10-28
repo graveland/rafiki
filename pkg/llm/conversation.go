@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -29,8 +28,8 @@ import (
 // evidence).
 //
 // A Conversation handle is owned by ONE goroutine at a time: methods are not
-// safe for concurrent use (concurrent sends would race on ordinals; the
-// store's ordinal uniqueness turns such races into errors, not corruption).
+// safe for concurrent use (two concurrent sends would each move the head, and
+// the capture and turn ordinals assume one writer).
 type Conversation struct {
 	client *Client
 	ID     string
@@ -47,7 +46,7 @@ type Conversation struct {
 	usedTokens int
 	// memHorizon is the index into mem of the current compaction summary row
 	// (0 = no compaction). loadHistory returns mem[memHorizon:], the working
-	// set; the DB path uses conversation.resume_from_ordinal instead.
+	// set; the DB path reads the tree's working path instead.
 	memHorizon int
 	// onCompact observes compaction boundaries; nil means no observer.
 	//
@@ -417,12 +416,8 @@ func (conv *Conversation) Send(ctx context.Context, userContent []anthropic.Cont
 // identity (see store.Appended; a store-less conversation reports the
 // wall-clock time of the append).
 func (conv *Conversation) AppendUser(ctx context.Context, content []anthropic.ContentBlockParamUnion) (store.Appended, error) {
-	history, err := conv.loadHistory(ctx)
-	if err != nil {
-		return store.Appended{}, fmt.Errorf("llm: %w", err)
-	}
 	userParam := anthropic.MessageParam{Role: anthropic.MessageParamRoleUser, Content: content}
-	row, err := conv.appendMessage(ctx, nextOrdinal(history), userParam, nil)
+	row, err := conv.appendMessage(ctx, userParam, nil, "")
 	if err != nil {
 		return store.Appended{}, fmt.Errorf("llm: %w", err)
 	}
@@ -496,7 +491,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 		}
 	}
 
-	resp, ordinal, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), mergeForRequest(history), scfg, onOverflow)
+	resp, _, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), mergeForRequest(history), scfg, onOverflow)
 	if err != nil {
 		return nil, err
 	}
@@ -504,9 +499,9 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	conv.usedTokens = int(resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.OutputTokens)
 
 	assistant := resp.ToParam()
-	row, err := conv.appendMessage(ctx, ordinal, assistant,
+	row, err := conv.appendMessage(ctx, assistant,
 		&store.AssistantMeta{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens,
-			StopReason: string(resp.StopReason)})
+			StopReason: string(resp.StopReason)}, resp.ID)
 	if err != nil {
 		// The turn is already captured; a failed message append must be loud —
 		// resume protocol depends on message rows.
@@ -523,8 +518,8 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 // auto-bump the cap when a turn is truncated.
 func (conv *Conversation) OutputCap() int64 { return conv.cfg.maxTokens }
 
-// History returns the stored WORKING set: rows from the compaction horizon
-// onward — the agent loop's orphan-analysis input.
+// History returns the stored WORKING set: the path from the conversation's head
+// to its root — the agent loop's orphan-analysis input.
 func (conv *Conversation) History(ctx context.Context) ([]store.Message, error) {
 	return conv.loadHistory(ctx)
 }
@@ -554,27 +549,28 @@ func (conv *Conversation) ResetResumeAttempts(ctx context.Context) error {
 	return store.ResetResumeAttempts(ctx, conv.client.pool, conv.ID)
 }
 
-// RetractTailUser removes the trailing user message at ordinal — write-ahead
-// retraction for a first send the API rejected as too large, so the host can
-// rebuild a smaller prompt and retry on the SAME conversation. Refuses
-// anything that isn't the tail user row.
-func (conv *Conversation) RetractTailUser(ctx context.Context, ordinal int) error {
+// RetractTailUser moves the conversation's head off the user row id — the
+// write-ahead retraction for a first send the API rejected as too large, so the
+// host can rebuild a smaller prompt and retry on the SAME conversation. The row
+// itself survives as a leaf of the tree, unreachable from the working path.
+// Refuses anything that is not the tail user row.
+func (conv *Conversation) RetractTailUser(ctx context.Context, id string) error {
 	if conv.client.messages == nil {
-		for i, m := range conv.mem {
-			if m.Ordinal == ordinal && i == len(conv.mem)-1 && m.Param.Role == anthropic.MessageParamRoleUser {
-				conv.mem = conv.mem[:i]
-				return nil
-			}
+		i := len(conv.mem) - 1
+		if i < 0 || conv.mem[i].ID != id || conv.mem[i].Param.Role != anthropic.MessageParamRoleUser {
+			return fmt.Errorf("llm: %s is not the tail user row", id)
 		}
-		return fmt.Errorf("llm: ordinal %d is not the tail user row", ordinal)
+		conv.mem = conv.mem[:i]
+		return nil
 	}
-	return store.DeleteTailUserMessage(ctx, conv.client.pool, conv.ID, ordinal)
+	return conv.client.messages.RetractHead(ctx, conv.ID, id)
 }
 
-// loadHistory reads the WORKING set through the storage seam (DB rows bounded
-// at the resume horizon, or the in-memory slice from the compaction horizon).
-// store.Messages.Load is deliberately not called here: it returns the full
-// pre-compaction history and only GetHistory/rafiki logs want that.
+// loadHistory reads the WORKING set through the storage seam: the path from the
+// conversation's head to its root (or, in memory, the slice from the compaction
+// horizon). store.Messages.Load is deliberately not called here: it returns the
+// full history, including the pre-compaction rows the working path no longer
+// reaches, and only GetHistory/rafiki logs want that.
 func (conv *Conversation) loadHistory(ctx context.Context) ([]store.Message, error) {
 	if conv.client.messages == nil {
 		return conv.mem[conv.memHorizon:], nil
@@ -582,40 +578,36 @@ func (conv *Conversation) loadHistory(ctx context.Context) ([]store.Message, err
 	return conv.client.messages.LoadWorking(ctx, conv.ID)
 }
 
-// appendMessage writes through the storage seam, preserving the store's
-// ordinal-idempotent divergence semantics in memory.
-func (conv *Conversation) appendMessage(ctx context.Context, ordinal int, param anthropic.MessageParam, meta *store.AssistantMeta) (store.Appended, error) {
+// appendMessage writes one message through the storage seam. The tree decides
+// identity, so a replayed node is matched by hash and returns the existing
+// row's identity instead of writing a second copy.
+func (conv *Conversation) appendMessage(ctx context.Context, param anthropic.MessageParam, meta *store.AssistantMeta, providerID string) (store.Appended, error) {
 	if conv.client.messages == nil {
-		for _, m := range conv.mem {
-			if m.Ordinal == ordinal {
-				a, _ := json.Marshal(m.Param.Content)
-				b, _ := json.Marshal(param.Content)
-				if string(a) != string(b) {
-					return store.Appended{}, fmt.Errorf("llm: ordinal %d already holds different content (history diverged)", ordinal)
-				}
-				return store.Appended{CreatedAt: time.Now()}, nil
-			}
-		}
-		msg := store.Message{Ordinal: ordinal, Param: param, ToolUseIDs: store.ToolUseIDsOf(param)}
+		msg := store.Message{ID: randomID(), Ordinal: nextOrdinal(conv.mem), Param: param, ToolUseIDs: store.ToolUseIDsOf(param)}
 		if meta != nil {
 			msg.StopReason = meta.StopReason
 		}
 		conv.mem = append(conv.mem, msg)
-		return store.Appended{CreatedAt: time.Now()}, nil
+		return store.Appended{ID: msg.ID, CreatedAt: time.Now(), Ordinal: msg.Ordinal}, nil
 	}
-	return conv.client.messages.Append(ctx, conv.ID, ordinal, param, meta)
+	return conv.client.messages.AppendNode(ctx, conv.ID, param, meta, providerID)
 }
 
-// SeedHistory idempotently persists msgs at ordinals 0..n-1 — the bridge for
-// hosts carrying client-side history (e.g. Slack thread continuations):
-// already-persisted identical rows no-op, diverging content errors.
+// SeedHistory idempotently persists msgs as the conversation's history from a
+// fresh root — the bridge for hosts carrying client-side history (e.g. a fundi
+// prefill, a Slack thread continuation). An existing prefix is matched by node
+// hash, so only the missing suffix is inserted and a partial earlier seed is
+// completed rather than duplicated.
 func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
-	for i, m := range msgs {
-		if _, err := conv.appendMessage(ctx, i, m, nil); err != nil {
-			return err
+	if conv.client.messages == nil {
+		for _, m := range msgs {
+			if _, err := conv.appendMessage(ctx, m, nil, ""); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	return nil
+	return conv.client.messages.SeedChain(ctx, conv.ID, msgs)
 }
 
 func randomID() string {
@@ -690,10 +682,10 @@ func replaceEmptyToolUses(param anthropic.MessageParam) []anthropic.ContentBlock
 // attempts is the regression test).
 //
 // onOverflow, when non-nil, is given ONE chance (before any trim) to compact the
-// conversation and hand back a fresh ordinal and message list; it returns
-// ok=false when it could not (too few rows, a failed summary call). The
-// returned ordinal is where the caller must append the assistant reply, which
-// differs from the input when compaction moved the horizon.
+// conversation and hand back a fresh turn ordinal and message list; it returns
+// ok=false when it could not (too few rows, a failed summary call). The returned
+// ordinal only labels the capture: the reply is appended under the head, which
+// the compaction already moved.
 func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ordinal int, reqMsgs []Message, scfg sendConfig, onOverflow func() (int, []Message, bool)) (*anthropic.Message, int, error) {
 	meta := conv.sendMeta(ordinal, scfg)
 	trimAttempt := 0
@@ -756,7 +748,7 @@ func (conv *Conversation) sendMeta(ordinal int, scfg sendConfig) SendMeta {
 		OwnerUserID:      conv.cfg.ownerUserID,
 		Persona:          conv.cfg.persona,
 		Name:             conv.cfg.name,
-		Ordinal:          ordinal, // history-derived: stable across handles and resumes
+		Ordinal:          ordinal, // history-derived turn ordinal: a decorative capture label and a stable batch id across a resume, NOT a message ordinal
 		Source:           scfg.source,
 		AuthorUserID:     scfg.authorUserID,
 		AuthorKind:       conv.cfg.authorKind,

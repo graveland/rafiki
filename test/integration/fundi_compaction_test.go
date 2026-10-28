@@ -427,28 +427,34 @@ func driveUntilCompaction(t *testing.T, d *daemon, seat *compactionSeat, cs *com
 
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
-// compactionHorizon returns the conversation's resume_from_ordinal (0 when
-// NULL) and the kind of the row at it ("" when NULL).
-func compactionHorizon(t *testing.T, dsn, conversationID string) (int, string) {
+// workingPathRoot returns the ROOT of the conversation's working path — the
+// node the head's parent chain ends at — with its kind ("" when the row is
+// ordinary) and its ordinal. A compaction's summary is a root, so this is how a
+// test sees that the working set now starts at the summary (or at a clear
+// boundary).
+func workingPathRoot(t *testing.T, dsn, conversationID string) (id, kind string, ordinal int) {
 	t.Helper()
 	pool := openPool(t, dsn)
 	defer pool.Close()
 	ctx := context.Background()
-	var horizon *int
-	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
-		`SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid`,
-		conversationID).Scan(&horizon), "read horizon")
-	if horizon == nil {
-		return 0, ""
+	var kindPtr *string
+	err := pool.QueryRow(ctx, `
+		WITH RECURSIVE up AS (
+		  SELECT m.id, m.parent_id, m.kind, m.ordinal, 0 AS dist
+		    FROM conversations.conversation_message m
+		    JOIN conversations.conversation c ON c.head_id = m.id
+		   WHERE c.id = $1::uuid
+		  UNION ALL
+		  SELECT p.id, p.parent_id, p.kind, p.ordinal, up.dist + 1
+		    FROM conversations.conversation_message p JOIN up ON p.id = up.parent_id
+		)
+		SELECT id::text, kind, ordinal FROM up ORDER BY dist DESC LIMIT 1`,
+		conversationID).Scan(&id, &kindPtr, &ordinal)
+	assert.NewAborting(t).NoError(err, "read the working path's root")
+	if kindPtr != nil {
+		kind = *kindPtr
 	}
-	var kind *string
-	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
-		`SELECT kind FROM conversations.conversation_message WHERE conversation_id = $1::uuid AND ordinal = $2`,
-		conversationID, *horizon).Scan(&kind), "read horizon row kind")
-	if kind == nil {
-		return *horizon, ""
-	}
-	return *horizon, *kind
+	return id, kind, ordinal
 }
 
 // getHistoryEvents serves the durable tier for a child (the same read rafiki
@@ -496,9 +502,9 @@ func countHistoryText(events []*rafikiv1.Event, want string) int {
 
 // TestCompactionFundiChildCompactsAndKeepsAnswering drives a fundi child past
 // the model's window and pins the whole proactive path: exactly one compaction
-// request, a post-compaction request opening with the summary, the stored
-// horizon pointing at a compaction_summary row, the full pre-compaction history
-// still readable, and a live CompactionBoundary event.
+// request, a post-compaction request opening with the summary, the working path
+// rooted at a compaction_summary row, the full pre-compaction history still
+// readable, and a live CompactionBoundary event.
 func TestCompactionFundiChildCompactsAndKeepsAnswering(t *testing.T) {
 	ck := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -520,7 +526,6 @@ func TestCompactionFundiChildCompactsAndKeepsAnswering(t *testing.T) {
 	driveUntilCompaction(t, d, seat, cs, childID, marker)
 	cs.waitIdle(t, childID)
 	convID := resumeConversationID(t, dsn, childID)
-	horizon, kind := compactionHorizon(t, dsn, convID)
 
 	reqs := seat.snapshot()
 	var compactionIdx = -1
@@ -537,8 +542,8 @@ func TestCompactionFundiChildCompactsAndKeepsAnswering(t *testing.T) {
 	ck.StrContains(next.firstText(), "SUMMARY-"+marker,
 		"the post-compaction request must open with the summary:\n%s", seat.dump())
 
-	ck.NotEq(0, horizon, "resume_from_ordinal must move off 0")
-	ck.Eq("compaction_summary", kind, "the row at the horizon")
+	_, rootKind, _ := workingPathRoot(t, dsn, convID)
+	ck.Eq("compaction_summary", rootKind, "the working path must now start at the summary")
 	events := getHistoryEvents(t, d.control(t), childID)
 	for i := 1; i <= 3; i++ {
 		ck.Eq(1, countHistoryText(events, fmt.Sprintf("prompt-%d-%s", i, marker)),
@@ -573,8 +578,8 @@ func TestCompactionFundiDisplayShowsTailOnce(t *testing.T) {
 	cs.waitIdle(t, childID)
 
 	convID := resumeConversationID(t, dsn, childID)
-	horizon, kind := compactionHorizon(t, dsn, convID)
-	ck.Eq("compaction_summary", kind, "the row at the horizon")
+	_, rootKind, rootOrdinal := workingPathRoot(t, dsn, convID)
+	ck.Eq("compaction_summary", rootKind, "the working path must now start at the summary")
 
 	// The tail is non-empty: the summary replaced only the oldest row, so the
 	// second prompt's marker is carried by BOTH an original row and a copy.
@@ -587,7 +592,7 @@ func TestCompactionFundiDisplayShowsTailOnce(t *testing.T) {
 
 	// Prove the tail really is non-empty: the row after the summary is a
 	// compaction_tail copy.
-	tailKind := rowKindAt(t, dsn, convID, horizon+1)
+	tailKind := rowKindAt(t, dsn, convID, rootOrdinal+1)
 	ck.Eq("compaction_tail", tailKind, "the row after the summary must be a tail copy")
 }
 
@@ -822,29 +827,29 @@ func startLocalExecutor(t *testing.T, d *daemon, dsn, root string) {
 	t.Fatalf("local executor never became live\nexecutor stderr:\n%s", stderr.tail(4000))
 }
 
-// waitHorizonKind polls until the row at the conversation's resume horizon has
-// the given kind (a manual /compact or /clear is asynchronous: the prompt is
-// queued behind the engine's turn queue).
-func waitHorizonKind(t *testing.T, dsn, conversationID, kind string) int {
+// waitRootKind polls until the working path's root has the given kind (a manual
+// /compact or /clear is asynchronous: the prompt is queued behind the engine's
+// turn queue). It returns the root's ordinal.
+func waitRootKind(t *testing.T, dsn, conversationID, kind string) int {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		horizon, got := compactionHorizon(t, dsn, conversationID)
+		_, got, ordinal := workingPathRoot(t, dsn, conversationID)
 		if got == kind {
-			return horizon
+			return ordinal
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("horizon row kind = %q after 30s; want %q", got, kind)
+			t.Fatalf("working-path root kind = %q after 30s; want %q", got, kind)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 // TestSlashCompactAndClearOnFundiChild drives /compact then /clear through a
-// real daemon: /compact makes one summary request and moves the horizon onto a
-// compaction_summary row without a turn; /clear moves it onto a kind='clear'
-// row, after which the next turn's request carries none of the earlier text,
-// while the full history still shows every prompt.
+// real daemon: /compact makes one summary request and makes a compaction_summary
+// row the root of the working path without a turn; /clear makes a kind='clear'
+// row the root, after which the next turn's request carries none of the earlier
+// text, while the full history still shows every prompt.
 func TestSlashCompactAndClearOnFundiChild(t *testing.T) {
 	ck := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -875,14 +880,14 @@ func TestSlashCompactAndClearOnFundiChild(t *testing.T) {
 
 	requestsBefore := seat.requestCount()
 	promptCompactionChild(t, d, childID, "c1", "/compact")
-	waitHorizonKind(t, dsn, convID, "compaction_summary")
+	waitRootKind(t, dsn, convID, "compaction_summary")
 	cs.waitBoundary(t)
 	ck.Eq(1, seat.compactionCount(), "/compact must make exactly one summary request:\n%s", seat.dump())
 	ck.Eq(requestsBefore+1, seat.requestCount(), "/compact must not run a turn:\n%s", seat.dump())
 
 	promptCompactionChild(t, d, childID, "c2", "/clear")
-	horizon := waitHorizonKind(t, dsn, convID, "clear")
-	ck.NotEq(0, horizon, "the clear horizon must move off 0")
+	clearOrdinal := waitRootKind(t, dsn, convID, "clear")
+	ck.NotEq(0, clearOrdinal, "the clear root must be a freshly appended row")
 
 	before := seat.requestCount()
 	promptCompactionChild(t, d, childID, "u4", "after-clear-"+marker)

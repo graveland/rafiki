@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -315,10 +316,10 @@ func TestResumeAlreadyComplete(t *testing.T) {
 
 	msgs := store.NewMessages(pool)
 	ctx := context.Background()
-	_, aerr := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil)
+	_, aerr := msgs.AppendNode(ctx, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
 	c.Require().NoError(aerr)
-	_, aerr = msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
-		&store.AssistantMeta{StopReason: "end_turn"})
+	_, aerr = msgs.AppendNode(ctx, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
+		&store.AssistantMeta{StopReason: "end_turn"}, "")
 	c.Require().NoError(aerr)
 
 	result, err := Resume(ctx, conv, tools, nil)
@@ -385,18 +386,18 @@ func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversati
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	msgs := store.NewMessages(pool)
-	_, aerr := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil)
+	_, aerr := msgs.AppendNode(ctx, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil, "")
 	c.NoError(aerr)
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_a", map[string]any{"k": "a"}, "alpha"),
 		anthropic.NewToolUseBlock("toolu_b", map[string]any{"k": "b"}, "beta"),
 	)
-	_, aerr = msgs.Append(ctx, conv.ID, 1, assistant, nil)
+	_, aerr = msgs.AppendNode(ctx, conv.ID, assistant, nil, "")
 	c.NoError(aerr)
-	for i, block := range partial {
-		_, aerr := msgs.Append(ctx, conv.ID, 2+i,
+	for _, block := range partial {
+		_, aerr := msgs.AppendNode(ctx, conv.ID,
 			anthropic.MessageParam{Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{block}}, nil)
+				Content: []anthropic.ContentBlockParamUnion{block}}, nil, "")
 		c.NoError(aerr)
 	}
 }
@@ -462,10 +463,10 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
 	msgs := store.NewMessages(pool)
-	_, aerr := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil)
+	_, aerr := msgs.AppendNode(ctx, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
 	c.Require().NoError(aerr)
-	_, aerr = msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
-		&store.AssistantMeta{StopReason: "max_tokens"})
+	_, aerr = msgs.AppendNode(ctx, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
+		&store.AssistantMeta{StopReason: "max_tokens"}, "")
 	c.Require().NoError(aerr)
 
 	result, err := Resume(ctx, conv, tools, nil)
@@ -1034,4 +1035,41 @@ func slicesEqualInt(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+// promptTooLargeErr fabricates the API's prompt-size rejection (HTTP 400 whose
+// body says the prompt is too long) — the trigger for the write-ahead
+// retraction.
+func promptTooLargeErr() *anthropic.Error {
+	e := &anthropic.Error{StatusCode: http.StatusBadRequest}
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	e.Request = req
+	e.Response = &http.Response{StatusCode: http.StatusBadRequest}
+	_ = e.UnmarshalJSON([]byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`))
+	return e
+}
+
+// TestOversizedFirstPromptRetractsTheUserRow pins the write-ahead retraction: a
+// first send the API rejects as too large moves the head back off the user row
+// it just wrote, so the host can retry on the SAME conversation with a smaller
+// prompt. The row survives as a leaf — a retract is a head move, not a delete.
+func TestOversizedFirstPromptRetractsTheUserRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := testPool(t)
+	conv := newConv(t, pool, &erroringSender{err: promptTooLargeErr()})
+	ctx := context.Background()
+
+	_, err := Run(ctx, conv, &fakeTools{}, nil,
+		[]anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(strings.Repeat("x", 4096))})
+	ck.Require().Error(err, "an oversized first prompt must fail the run")
+	ck.True(llm.IsPromptTooLarge(err), "error = %v, want the prompt-too-large rejection", err)
+
+	hist, herr := conv.History(ctx)
+	ck.Require().NoError(herr, "History")
+	ck.Empty(hist, "the retracted prompt is still on the working path")
+
+	var rows int
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
+		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&rows), "count rows")
+	ck.Eq(1, rows, "the retracted row must survive")
 }

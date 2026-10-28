@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"os"
 	"testing"
 	"time"
@@ -156,8 +155,8 @@ func TestFencedAppendSucceedsWithLiveLease(t *testing.T) {
 	c.False(err != nil || !ok, "Acquire: ok=%v err=%v", ok, err)
 
 	msgs := NewMessages(pool).WithLease(lease)
-	_, aerr := msgs.Append(ctx, conv, 0, userMessage("hello"), nil)
-	c.NoError(aerr, "Append with a live lease")
+	_, aerr := msgs.AppendNode(ctx, conv, userMessage("hello"), nil, "")
+	c.NoError(aerr, "AppendNode with a live lease")
 
 	loaded, err := NewMessages(pool).Load(ctx, conv)
 	c.NoError(err, "Load")
@@ -181,8 +180,8 @@ func TestFencedAppendFailsAfterTakeover(t *testing.T) {
 	}
 
 	msgs := NewMessages(pool).WithLease(stale)
-	_, err = msgs.Append(ctx, conv, 0, userMessage("should not land"), nil)
-	c.Require().ErrorIs(err, ErrLeaseLost, "Append error")
+	_, err = msgs.AppendNode(ctx, conv, userMessage("should not land"), nil, "")
+	c.Require().ErrorIs(err, ErrLeaseLost, "AppendNode error")
 
 	loaded, lerr := NewMessages(pool).Load(ctx, conv)
 	c.Require().NoError(lerr, "Load")
@@ -190,40 +189,14 @@ func TestFencedAppendFailsAfterTakeover(t *testing.T) {
 }
 
 // TestUnfencedAppendStillWorks pins the escape hatch: a caller with no lease
-// (the proxy path, a client-driven conversation) writes exactly as before.
+// (a client-driven conversation, a migration) writes exactly as before.
 func TestUnfencedAppendStillWorks(t *testing.T) {
 	pool := leasePool(t)
 	ctx := context.Background()
 	conv := newConversation(t, pool)
 
-	_, aerr := NewMessages(pool).Append(ctx, conv, 0, userMessage("unfenced"), nil)
-	assert.NewAborting(t).NoError(aerr, "unfenced Append")
-}
-
-// TestFencedAppendConflictIsNotLeaseLost proves the zero-rows path still tells
-// an ordinal conflict (a Resume replay) apart from a lost lease. Collapsing the
-// two would make every resume look like a takeover.
-func TestFencedAppendConflictIsNotLeaseLost(t *testing.T) {
-	c := assert.NewCollecting(t)
-	pool := leasePool(t)
-	ls := NewLeases(pool)
-	ctx := context.Background()
-	conv := newConversation(t, pool)
-
-	lease, ok, err := ls.Acquire(ctx, conv, "daemon-a", 5*time.Minute)
-	c.Require().False(err != nil || !ok, "Acquire: ok=%v err=%v", ok, err)
-	msgs := NewMessages(pool).WithLease(lease)
-
-	_, aerr := msgs.Append(ctx, conv, 0, userMessage("same"), nil)
-	c.Require().NoError(aerr, "first Append")
-	// Re-appending identical content at the same ordinal is a replay, not a
-	// takeover, and must succeed.
-	_, aerr = msgs.Append(ctx, conv, 0, userMessage("same"), nil)
-	c.NoError(aerr, "replay Append")
-	// Different content at the same ordinal is a diverged history.
-	_, err = msgs.Append(ctx, conv, 0, userMessage("different"), nil)
-	c.Error(err, "diverging content at an existing ordinal was accepted")
-	c.False(errors.Is(err, ErrLeaseLost), "a content divergence was reported as a lost lease")
+	_, aerr := NewMessages(pool).AppendNode(ctx, conv, userMessage("unfenced"), nil, "")
+	assert.NewAborting(t).NoError(aerr, "unfenced AppendNode")
 }
 
 func userMessage(text string) anthropic.MessageParam {

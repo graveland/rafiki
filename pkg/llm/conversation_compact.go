@@ -15,16 +15,16 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// compact summarises history and moves the conversation's working-set horizon
-// to the summary, keeping a verbatim tail beside it. It returns ok=false when
-// nothing was written — too few rows, a summary call that failed, a truncated
-// summary, or no extractable summary — and the caller then continues on the
-// unchanged history.
+// compact summarises history and makes the summary a new ROOT of the
+// conversation's tree, keeping a verbatim tail hung under it. It returns
+// ok=false when nothing was written — too few rows, a summary call that failed,
+// a truncated summary, or no extractable summary — and the caller then
+// continues on the unchanged history.
 //
 // Nothing is ever deleted or renumbered: the summary and the tail copies are
-// appended at fresh ordinals and only the horizon moves. A failed attempt
-// leaves no partial state; an End event is still emitted so observers stay
-// balanced with the Start event (with zero tokens on failure).
+// appended under a fresh root and only the head moves. A failed attempt leaves
+// no partial state; an End event is still emitted so observers stay balanced
+// with the Start event (with zero tokens on failure).
 func (conv *Conversation) compact(ctx context.Context, span trace.Span, history []store.Message, scfg sendConfig, trigger, instructions string) (bool, error) {
 	p := *conv.cfg.compaction
 	if conv.onCompact != nil {
@@ -180,8 +180,8 @@ func (conv *Conversation) Compact(ctx context.Context, instructions string, opts
 }
 
 // Clear restarts the working set at a fresh boundary row: nothing is deleted or
-// renumbered, only the resume horizon moves. It is a no-op on a conversation
-// with no working rows.
+// renumbered, only the head moves onto a new clear root. It is a no-op on a
+// conversation with no working rows.
 func (conv *Conversation) Clear(ctx context.Context) error {
 	history, err := conv.loadHistory(ctx)
 	if err != nil {

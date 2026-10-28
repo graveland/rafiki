@@ -27,13 +27,13 @@ func assistantToolUse(id string) anthropic.MessageParam {
 	return anthropic.NewAssistantMessage(anthropic.NewToolUseBlock(id, map[string]any{}, "some_tool"))
 }
 
-// appendRows appends n user messages at ordinals 0..n-1.
+// appendRows appends n user messages under the conversation's head.
 func appendRows(t *testing.T, pool *pgxpool.Pool, convID string, n int) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	for i := range n {
-		_, aerr := NewMessages(pool).Append(ctx, convID, i, userMessage("row"), nil)
+		_, aerr := NewMessages(pool).AppendNode(ctx, convID, userMessage("row"), nil, "")
 		c.NoError(aerr, "append row %d", i)
 	}
 }
@@ -57,28 +57,30 @@ func rowOrdinals(t *testing.T, pool *pgxpool.Pool, convID string) []int {
 	return out
 }
 
-// rowKind returns the kind column of the row at ordinal.
-func rowKind(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int) *string {
+// headID returns the conversation's head_id, "" when it has none.
+func headID(t *testing.T, pool *pgxpool.Pool, convID string) string {
 	t.Helper()
-	var kind *string
+	var head string
 	err := pool.QueryRow(context.Background(), `
-		SELECT kind FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND ordinal = $2`, convID, ordinal).Scan(&kind)
-	assert.NewAborting(t).NoError(err, "query kind at %d", ordinal)
-	return kind
+		SELECT coalesce(head_id::text, '') FROM conversations.conversation
+		 WHERE id = $1::uuid`, convID).Scan(&head)
+	assert.NewAborting(t).NoError(err, "query head")
+	return head
 }
 
-// horizon reads resume_from_ordinal; the bool is false when it is NULL.
-func horizon(t *testing.T, pool *pgxpool.Pool, convID string) (int, bool) {
+// textOf returns the text of the row at ordinal's first block.
+func textOf(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int) string {
 	t.Helper()
-	var h *int
-	err := pool.QueryRow(context.Background(), `
-		SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid`, convID).Scan(&h)
-	assert.NewAborting(t).NoError(err, "query horizon")
-	if h == nil {
-		return 0, false
+	c := assert.NewAborting(t)
+	rows, err := NewMessages(pool).Load(context.Background(), convID)
+	c.NoError(err, "Load")
+	for _, m := range rows {
+		if m.Ordinal == ordinal && len(m.Param.Content) > 0 && m.Param.Content[0].OfText != nil {
+			return m.Param.Content[0].OfText.Text
+		}
 	}
-	return *h, true
+	t.Fatalf("no row at ordinal %d", ordinal)
+	return ""
 }
 
 func rowCount(t *testing.T, pool *pgxpool.Pool, convID string) int {
@@ -90,36 +92,79 @@ func rowCount(t *testing.T, pool *pgxpool.Pool, convID string) int {
 	return n
 }
 
-// TestCompactionLoadWorkingFiltersAtHorizon: LoadWorking returns only the
-// summary and its tail copies, while Load still returns the full history.
-func TestCompactionLoadWorkingFiltersAtHorizon(t *testing.T) {
+// pathTexts renders the working path's text blocks, the shape the assertions
+// compare.
+func pathTexts(t *testing.T, pool *pgxpool.Pool, convID string) []string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	path, err := NewMessages(pool).LoadWorking(context.Background(), convID)
+	c.NoError(err, "LoadWorking")
+	out := make([]string, len(path))
+	for i, m := range path {
+		if len(m.Param.Content) > 0 && m.Param.Content[0].OfText != nil {
+			out[i] = m.Param.Content[0].OfText.Text
+		}
+	}
+	return out
+}
+
+// TestCompactionRootWithTailUnderIt pins the tree shape a compaction writes: the
+// summary is a compaction_summary ROOT derived from the old head, the tail
+// copies hang under it tagged compaction_tail, the working path is
+// [summary, tail…], and the pre-compaction rows are untouched.
+func TestCompactionRootWithTailUnderIt(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
 	ctx := context.Background()
 	conv := newConversation(t, pool)
-	appendRows(t, pool, conv, 6)
+	for _, text := range []string{"a", "b", "c"} {
+		_, err := NewMessages(pool).AppendNode(ctx, conv, userMessage(text), nil, "")
+		c.NoError(err, "append %q", text)
+	}
+	a, b, before := readTreeRow(t, pool, conv, 0), readTreeRow(t, pool, conv, 1), readTreeRow(t, pool, conv, 2)
 
 	tail := []Message{
-		{Param: userMessage("tail user")},
-		{Param: assistantMessage("tail assistant"), StopReason: "end_turn"},
+		{Param: userMessage("b")},
+		{Param: assistantMessage("c"), StopReason: "end_turn"},
 	}
-	summaryOrdinal, err := NewMessages(pool).AppendCompaction(ctx, conv, userMessage("the summary"), 111, tail)
+	summaryOrdinal, err := NewMessages(pool).AppendCompaction(ctx, conv, userMessage("the summary"), 100, tail)
 	c.NoError(err, "AppendCompaction")
-	c.Eq(6, summaryOrdinal, "summary ordinal")
+	c.Eq(3, summaryOrdinal, "summary ordinal")
 
-	working, err := NewMessages(pool).LoadWorking(ctx, conv)
-	c.NoError(err, "LoadWorking")
-	c.Len(working, 3, "working set")
-	c.EqDeep([]int{6, 7, 8}, []int{working[0].Ordinal, working[1].Ordinal, working[2].Ordinal}, "working ordinals")
+	summary := readTreeRow(t, pool, conv, 3)
+	c.Require().NotNil(summary.kind, "summary kind")
+	c.Eq(KindCompactionSummary, *summary.kind, "summary kind")
+	c.Eq("", summary.parent, "the summary is a root")
+	c.Eq(0, summary.depth, "root depth")
+	c.Eq(before.id, summary.derived, "the summary is derived from the old head")
 
-	full, err := NewMessages(pool).Load(ctx, conv)
-	c.NoError(err, "Load")
-	c.Len(full, 9, "full history")
+	for i, want := range []string{"b", "c"} {
+		row := readTreeRow(t, pool, conv, 4+i)
+		c.Require().NotNil(row.kind, "tail %d kind", i)
+		c.Eq(KindCompactionTail, *row.kind, "tail %d kind", i)
+		c.Eq(1+i, row.depth, "tail %d depth", i)
+		if i == 0 {
+			c.Eq(summary.id, row.parent, "tail 0 hangs under the summary")
+		} else {
+			c.Eq(readTreeRow(t, pool, conv, 4).id, row.parent, "tail 1 hangs under tail 0")
+		}
+		c.Eq(want, textOf(t, pool, conv, 4+i), "tail %d content", i)
+	}
+	c.Eq(readTreeRow(t, pool, conv, 5).id, headID(t, pool, conv), "head is the last tail copy")
+
+	c.EqDeep([]string{"the summary", "b", "c"}, pathTexts(t, pool, conv), "working path")
+
+	// The pre-compaction rows are exactly as they were.
+	c.EqDeep([]int{0, 1, 2, 3, 4, 5}, rowOrdinals(t, pool, conv), "ordinals")
+	c.False(a.kind != nil || b.kind != nil || before.kind != nil, "pre-compaction rows keep their nil kind")
+	c.Eq(a.id, b.parent, "row b still hangs under a")
+	c.Eq(b.id, before.parent, "row c still hangs under b")
+	c.Eq(6, rowCount(t, pool, conv), "no row was deleted or rewritten")
 }
 
-// TestCompactionLoadWorkingWithoutHorizonEqualsLoad: with no compaction the
-// horizon is NULL (0) and the two reads are identical.
-func TestCompactionLoadWorkingWithoutHorizonEqualsLoad(t *testing.T) {
+// TestCompactionWorkingPathEqualsLoadWhenLinear: a conversation with no boundary
+// has one path, so the working read and the full read agree.
+func TestCompactionWorkingPathEqualsLoadWhenLinear(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
 	ctx := context.Background()
@@ -130,34 +175,8 @@ func TestCompactionLoadWorkingWithoutHorizonEqualsLoad(t *testing.T) {
 	c.NoError(err, "LoadWorking")
 	full, err := NewMessages(pool).Load(ctx, conv)
 	c.NoError(err, "Load")
-	c.EqDeep(full, working, "working set with no horizon")
+	c.EqDeep(full, working, "working set with no boundary")
 	c.Len(working, 4, "rows")
-}
-
-// TestCompactionAppendWritesSummaryTailAndHorizon: contiguous ordinals from
-// max+1, kinds tagged, horizon at the summary.
-func TestCompactionAppendWritesSummaryTailAndHorizon(t *testing.T) {
-	c := assert.NewAborting(t)
-	pool := leasePool(t)
-	ctx := context.Background()
-	conv := newConversation(t, pool)
-	appendRows(t, pool, conv, 3)
-
-	tail := []Message{
-		{Param: userMessage("a")},
-		{Param: assistantMessage("b"), StopReason: "end_turn"},
-	}
-	summaryOrdinal, err := NewMessages(pool).AppendCompaction(ctx, conv, userMessage("summary"), 500, tail)
-	c.NoError(err, "AppendCompaction")
-	c.Eq(3, summaryOrdinal, "summary ordinal")
-
-	c.EqDeep([]int{0, 1, 2, 3, 4, 5}, rowOrdinals(t, pool, conv), "ordinals contiguous from max+1")
-	c.Eq(KindCompactionSummary, *rowKind(t, pool, conv, 3), "summary kind")
-	c.Eq(KindCompactionTail, *rowKind(t, pool, conv, 4), "tail 0 kind")
-	c.Eq(KindCompactionTail, *rowKind(t, pool, conv, 5), "tail 1 kind")
-
-	h, ok := horizon(t, pool, conv)
-	c.False(!ok || h != summaryOrdinal, "horizon = (%d,%v), want %d", h, ok, summaryOrdinal)
 }
 
 // TestCompactionTailCopiesKeepStopReasonAndNullTokens: a tail copy carries the
@@ -206,8 +225,8 @@ func TestCompactionSummaryCarriesReplacedTokens(t *testing.T) {
 	c.False(inTok == nil || *inTok != 182000, "summary input_tokens = %v, want 182000", inTok)
 }
 
-// TestCompactionEmptyTail: a nil tail writes exactly one row and moves the
-// horizon to it.
+// TestCompactionEmptyTail: a nil tail writes exactly one row and the working
+// path is that summary alone.
 func TestCompactionEmptyTail(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
@@ -219,14 +238,13 @@ func TestCompactionEmptyTail(t *testing.T) {
 	c.NoError(err, "AppendCompaction")
 	c.Eq(2, summaryOrdinal, "summary ordinal")
 	c.Eq(3, rowCount(t, pool, conv), "row count")
-	h, ok := horizon(t, pool, conv)
-	c.False(!ok || h != summaryOrdinal, "horizon = (%d,%v), want %d", h, ok, summaryOrdinal)
+	c.EqDeep([]string{"summary"}, pathTexts(t, pool, conv), "working path")
 }
 
-// TestCompactionSecondCompactionMovesHorizon: the second summary lands after
-// everything including the first tail copies, and LoadWorking returns only the
-// newest boundary.
-func TestCompactionSecondCompactionMovesHorizon(t *testing.T) {
+// TestCompactionSecondCompactionIsANewRoot: the second summary lands after
+// everything including the first tail copies, is derived from the first
+// compaction's last node, and the working path is only the newest boundary.
+func TestCompactionSecondCompactionIsANewRoot(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
 	ctx := context.Background()
@@ -245,19 +263,20 @@ func TestCompactionSecondCompactionMovesHorizon(t *testing.T) {
 	c.NoError(err, "second AppendCompaction")
 	c.Eq(6, second, "second summary ordinal")
 
-	h, ok := horizon(t, pool, conv)
-	c.False(!ok || h != second, "horizon = (%d,%v), want %d", h, ok, second)
+	firstTail := readTreeRow(t, pool, conv, 5)
+	secondSummary := readTreeRow(t, pool, conv, 6)
+	c.Eq("", secondSummary.parent, "the second summary is a root too")
+	c.Eq(firstTail.id, secondSummary.derived, "derived from the first compaction's last node")
 
 	working, err := NewMessages(pool).LoadWorking(ctx, conv)
 	c.NoError(err, "LoadWorking")
-	c.Len(working, 2, "working set")
+	c.Require().Len(working, 2, "working set")
 	c.EqDeep([]int{6, 7}, []int{working[0].Ordinal, working[1].Ordinal}, "working ordinals")
 	c.Eq(KindCompactionSummary, *working[0].Kind, "working[0] kind")
 }
 
 // TestCompactionFencedLeaseLostWritesNothing: a stale holder writes nothing and
-// the horizon is unchanged. Delete the EXISTS clause from the fenced insert and
-// this test must fail.
+// the head is unchanged.
 func TestCompactionFencedLeaseLostWritesNothing(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
@@ -265,6 +284,7 @@ func TestCompactionFencedLeaseLostWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	conv := newConversation(t, pool)
 	appendRows(t, pool, conv, 2)
+	before := headID(t, pool, conv)
 
 	stale, ok, err := ls.Acquire(ctx, conv, "daemon-a", -time.Minute)
 	c.False(err != nil || !ok, "acquire stale: ok=%v err=%v", ok, err)
@@ -277,8 +297,7 @@ func TestCompactionFencedLeaseLostWritesNothing(t *testing.T) {
 	})
 	c.ErrorIs(err, ErrLeaseLost, "AppendCompaction error")
 	c.Eq(2, rowCount(t, pool, conv), "row count after refused compaction")
-	_, ok = horizon(t, pool, conv)
-	c.False(ok, "horizon was set by a refused compaction")
+	c.Eq(before, headID(t, pool, conv), "head moved by a refused compaction")
 }
 
 // TestCompactionFencedLeaseHeldWrites: with a live lease the guard is invisible.
@@ -312,7 +331,7 @@ func TestCompactionUnfinishedOrphansUnchanged(t *testing.T) {
 	conv := newConversation(t, pool)
 
 	orphan := "orphan-" + conv
-	_, aerr := NewMessages(pool).Append(ctx, conv, 0, assistantToolUse(orphan), nil)
+	_, aerr := NewMessages(pool).AppendNode(ctx, conv, assistantToolUse(orphan), nil, "")
 	c.NoError(aerr, "append assistant tool_use")
 
 	_, err := NewMessages(pool).AppendCompaction(ctx, conv, userMessage("summary"), 7, []Message{
@@ -372,30 +391,64 @@ func TestCompactionLoadIsUnfiltered(t *testing.T) {
 	c.False(full[0].Kind != nil, "pre-compaction row kind = %v, want nil", full[0].Kind)
 }
 
-// TestAppendClearWritesBoundaryAndMovesHorizon: a clear appends one kind='clear'
-// row, moves the horizon onto it, touches nothing else, and the working set is
-// exactly that row.
-func TestAppendClearWritesBoundaryAndMovesHorizon(t *testing.T) {
+// TestAppendClearWritesRootAndMovesHead: a clear appends one kind='clear' root,
+// moves the head onto it, touches nothing else, and the working path is exactly
+// that row.
+func TestAppendClearWritesRootAndMovesHead(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
 	ctx := context.Background()
 	conv := newConversation(t, pool)
 	appendRows(t, pool, conv, 3)
+	before := headID(t, pool, conv)
 
 	ord, err := NewMessages(pool).AppendClear(ctx, conv, userMessage(ClearBoundaryText))
 	c.NoError(err, "AppendClear")
 	c.Eq(3, ord, "boundary ordinal")
 	c.Eq(4, rowCount(t, pool, conv), "no row is deleted or duplicated")
-	k := rowKind(t, pool, conv, ord)
-	c.Require().NotNil(k, "boundary kind")
-	c.Eq(KindClear, *k, "boundary kind")
-	h, ok := horizon(t, pool, conv)
-	c.False(!ok || h != ord, "horizon = (%d,%v), want %d", h, ok, ord)
+	boundary := readTreeRow(t, pool, conv, ord)
+	c.Require().NotNil(boundary.kind, "boundary kind")
+	c.Eq(KindClear, *boundary.kind, "boundary kind")
+	c.Eq("", boundary.parent, "the boundary is a root")
+	c.Eq(0, boundary.depth, "root depth")
+	c.Eq(before, boundary.derived, "derived from the pre-clear head")
+	c.Eq(boundary.id, headID(t, pool, conv), "head is the boundary")
 
 	working, err := NewMessages(pool).LoadWorking(ctx, conv)
 	c.NoError(err, "LoadWorking")
-	c.Require().Len(working, 1, "working set")
-	c.True(IsClearBoundary(working[0]), "the working set must be the synthetic boundary row")
+	c.Require().Len(working, 1, "working path")
+	c.True(IsClearBoundary(working[0]), "the working path must be the synthetic boundary row")
+}
+
+// TestTwoClearsAreDistinctRoots: a clear root's seed mixes in the node it is
+// derived from, so the SAME boundary text twice is two distinct roots rather
+// than one node reached twice — otherwise the second clear would write nothing
+// and the working path would still hold the first.
+func TestTwoClearsAreDistinctRoots(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+	appendRows(t, pool, conv, 2)
+	msgs := NewMessages(pool)
+
+	first, err := msgs.AppendClear(ctx, conv, userMessage(ClearBoundaryText))
+	c.NoError(err, "first AppendClear")
+	second, err := msgs.AppendClear(ctx, conv, userMessage(ClearBoundaryText))
+	c.NoError(err, "second AppendClear")
+	c.Eq(first+1, second, "the second clear is a new row")
+
+	c.Eq(4, rowCount(t, pool, conv), "two clears are two rows")
+	firstRow, secondRow := readTreeRow(t, pool, conv, first), readTreeRow(t, pool, conv, second)
+	c.NotEq(firstRow.id, secondRow.id, "two distinct rows")
+	c.Eq("", secondRow.parent, "the second clear is a root too")
+	c.Eq(firstRow.id, secondRow.derived, "derived from the first boundary")
+	c.False(string(firstRow.hash) == string(secondRow.hash), "two clears must hash differently")
+
+	working, err := msgs.LoadWorking(ctx, conv)
+	c.NoError(err, "LoadWorking")
+	c.Require().Len(working, 1, "working path")
+	c.Eq(secondRow.id, working[0].ID, "working path is the SECOND boundary")
 }
 
 // TestAppendClearFencedLeaseLostWritesNothing mirrors the compaction fence.
@@ -406,6 +459,7 @@ func TestAppendClearFencedLeaseLostWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	conv := newConversation(t, pool)
 	appendRows(t, pool, conv, 2)
+	before := headID(t, pool, conv)
 
 	stale, ok, err := ls.Acquire(ctx, conv, "daemon-a", -time.Minute)
 	c.False(err != nil || !ok, "acquire stale: ok=%v err=%v", ok, err)
@@ -416,6 +470,34 @@ func TestAppendClearFencedLeaseLostWritesNothing(t *testing.T) {
 	_, err = NewMessages(pool).WithLease(stale).AppendClear(ctx, conv, userMessage(ClearBoundaryText))
 	c.ErrorIs(err, ErrLeaseLost, "AppendClear error")
 	c.Eq(2, rowCount(t, pool, conv), "a refused clear writes nothing")
-	_, ok = horizon(t, pool, conv)
-	c.False(ok, "a refused clear must not move the horizon")
+	c.Eq(before, headID(t, pool, conv), "a refused clear must not move the head")
+}
+
+// TestSeedChainIdempotentAndCompletesPartial: seeding a prefix then the whole
+// history inserts only the missing suffix and never duplicates the prefix.
+func TestSeedChainIdempotentAndCompletesPartial(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+	msgs := NewMessages(pool)
+
+	r0 := userMessage("r0")
+	r1 := assistantMessage("r1")
+	r2 := userMessage("r2")
+
+	c.NoError(msgs.SeedChain(ctx, conv, []anthropic.MessageParam{r0}), "seed r0")
+	c.Eq(1, rowCount(t, pool, conv), "rows after seeding r0")
+	r0Row := readTreeRow(t, pool, conv, 0)
+
+	c.NoError(msgs.SeedChain(ctx, conv, []anthropic.MessageParam{r0, r1, r2}), "seed r0,r1,r2")
+	c.Eq(3, rowCount(t, pool, conv), "rows after completing the chain")
+	c.Eq(0, readTreeRow(t, pool, conv, 0).ordinal, "r0 ordinal")
+	c.Eq(r0Row.id, readTreeRow(t, pool, conv, 0).id, "r0 is not duplicated")
+	c.EqDeep([]string{"r0", "r1", "r2"}, pathTexts(t, pool, conv), "working path")
+	c.Eq(readTreeRow(t, pool, conv, 2).id, headID(t, pool, conv), "head is the last seeded node")
+
+	// Seeding the same history again writes nothing.
+	c.NoError(msgs.SeedChain(ctx, conv, []anthropic.MessageParam{r0, r1, r2}), "re-seed")
+	c.Eq(3, rowCount(t, pool, conv), "rows after re-seeding")
 }

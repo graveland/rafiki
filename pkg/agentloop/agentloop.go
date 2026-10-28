@@ -140,13 +140,13 @@ func (e *Events) assistantRow(resp *anthropic.Message, row store.Appended) {
 }
 
 // appendUser persists content as a user row and reports it through OnUserRow.
-func appendUser(ctx context.Context, conv *llm.Conversation, ev *Events, content []anthropic.ContentBlockParamUnion) error {
+func appendUser(ctx context.Context, conv *llm.Conversation, ev *Events, content []anthropic.ContentBlockParamUnion) (store.Appended, error) {
 	row, err := conv.AppendUser(ctx, content)
 	if err != nil {
-		return err
+		return store.Appended{}, err
 	}
 	ev.userRow(content, row)
-	return nil
+	return row, nil
 }
 
 // persistedInto returns opts plus an option that records the committed
@@ -225,22 +225,20 @@ func Run(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events,
 	if err != nil {
 		return nil, err
 	}
-	ordinal := 0
-	if len(before) > 0 {
-		ordinal = before[len(before)-1].Ordinal + 1
-	}
-	if err := appendUser(ctx, conv, ev, userContent); err != nil {
+	userRow, err := appendUser(ctx, conv, ev, userContent)
+	if err != nil {
 		return nil, err
 	}
 	result, err := drive(ctx, conv, tools, ev, opts...)
 	if err != nil && llm.IsPromptTooLarge(err) {
 		// The very first call overflowed even after the library's own trim
 		// retries (a too-large FIRST message is structurally untrimmable).
-		// Retract the write-ahead user row so the host can rebuild a smaller
-		// prompt and retry on the SAME conversation instead of minting a new
-		// one per attempt. Only when nothing was persisted after it.
+		// Retract the write-ahead user row — a head move, the row itself
+		// survives — so the host can rebuild a smaller prompt and retry on the
+		// SAME conversation instead of minting a new one per attempt. Only when
+		// nothing was persisted after it.
 		if after, hErr := conv.History(ctx); hErr == nil && len(after) == len(before)+1 {
-			if rErr := conv.RetractTailUser(ctx, ordinal); rErr != nil {
+			if rErr := conv.RetractTailUser(ctx, userRow.ID); rErr != nil {
 				return result, fmt.Errorf("%w (retracting oversized prompt also failed: %v)", err, rErr)
 			}
 		}
@@ -430,7 +428,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			// closes that gap the same way the other two branches already do.
 			if ev != nil && ev.PendingUser != nil {
 				if extra := ev.PendingUser(); len(extra) > 0 {
-					if err := appendUser(ctx, conv, ev, extra); err != nil {
+					if _, err := appendUser(ctx, conv, ev, extra); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content after end_turn: %w", err)
 					}
 					continue
@@ -461,7 +459,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			}
 			if ev != nil && ev.PendingUser != nil {
 				if extra := ev.PendingUser(); len(extra) > 0 {
-					if err := appendUser(ctx, conv, ev, extra); err != nil {
+					if _, err := appendUser(ctx, conv, ev, extra); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
 					}
 				}
@@ -489,7 +487,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 				}
 				if ev != nil && ev.PendingUser != nil {
 					if extra := ev.PendingUser(); len(extra) > 0 {
-						if err := appendUser(ctx, conv, ev, extra); err != nil {
+						if _, err := appendUser(ctx, conv, ev, extra); err != nil {
 							return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
 						}
 					}
