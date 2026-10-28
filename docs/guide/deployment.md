@@ -44,10 +44,13 @@ in the database, so there is no database-less mode.
   migrates, and `pg_textsearch` must be in `shared_preload_libraries`. The
   daemon's role does not need to be, and in production should not be, a
   superuser.
-- **The daemon owns the schema.** `rafikid migrate` (and the daemon at
-  startup) bring the database to the head of the embedded migration chain. It
-  is idempotent, and concurrent callers are serialized by an advisory lock, so
-  two daemons booting together apply it exactly once.
+- **The daemon owns the schema.** `rafikid migrate` brings the database to the
+  head of the embedded migration chain. It is idempotent, and concurrent callers
+  are serialized by an advisory lock, so two daemons booting together apply it
+  exactly once. The daemon itself migrates **only with `--dev`**
+  (`cmd/rafikid/main.go`); a production daemon started without it runs against
+  whatever schema is there and fails loudly on the first write a new column
+  needs, so run `rafikid migrate` as its own step.
 
 ## The daemon image
 
@@ -190,8 +193,8 @@ response codes and the deploy-order rule for notify tokens are in
 
 ## Upgrading
 
-1. Upgrade the **daemon** first and let it migrate the database
-   (`rafikid migrate`, or simply start it).
+1. Upgrade the **daemon** first, and run `rafikid migrate` before starting it
+   (a production daemon does not migrate itself — only `--dev` does).
 2. Then upgrade executors and clients. The wire protocol carries an epoch that
    is bumped on every breaking change; a mismatched peer is refused loudly
    rather than misbehaving, so a client or executor left behind shows up as an
@@ -206,6 +209,34 @@ response codes and the deploy-order rule for notify tokens are in
    reads a notify-scoped token as a full-authority one.
 5. Before adding a migration while another branch is deployed, check the
    highest version in the target database: the chain must stay contiguous.
+
+### Upgrading across a backfill
+
+A migration that rewrites data (migration 0057, which places every existing
+conversation on the content-addressed tree, is the worked example) is a
+**stop-the-daemon** upgrade: it holds `ACCESS EXCLUSIVE` on the message table
+while it runs, and a daemon of the *old* release still writing afterwards leaves
+rows the new one cannot see. The full procedure and its reasoning are in
+[Conversation tree → Cutover procedure](../reference/conversation-tree.md); the
+order that matters:
+
+1. Truncate the debugging tables you do not need in the backup
+   (`conversations.raw_http_request`), then `pg_dump -Fc` with the daemon
+   stopped. **The dump is the rollback** — a migration that rewrites data has no
+   down path worth trusting.
+2. Rehearse the restore (`timescaledb_pre_restore()` / `…_post_restore()` for a
+   hypertable), migrate, `rafikid tree check --cutover`, repeat until clean.
+3. On the real database: stop every daemon writing to it, `rafikid migrate`
+   (capture the log — the backfill's own validity signal is a line only it
+   prints), `rafikid tree check --cutover` (must exit 0), `VACUUM FULL` the
+   rewritten table if the migration changed its `fillfactor`, then start the new
+   daemon.
+4. After go-live, `rafikid tree check` **without** `--cutover` is the health
+   probe and must exit 0; `--cutover` compares legacy working sets and is only
+   valid before the new daemon starts writing.
+
+Measured on a 3,583-conversation / 321,165-message database: 1 m 07 s to migrate
+and 49 s for the check, about 2 minutes of downtime, 63 MB peak RSS.
 
 ## Production checklist
 

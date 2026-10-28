@@ -495,6 +495,20 @@ and compacts a legacy-horizon conversation through the real writers).
 release. Anything captured after the cutover is lost, which is why the dump is
 taken with the daemon stopped and the cutover is a short window.
 
+**Measured on the real cutover** (3,583 conversations, 321,165 messages, a remote
+database): `rafikid migrate` 1 m 07 s — the backfill line reads
+`conversations=3583 nodes=321165 interim_copies=1500 unmatched_copies=0
+other_duplicates=2` — then `rafikid tree check --cutover` 49 s, exit 0, with
+`bad_hash 0`, `missing_hash 0`, `provider_id_missing 0`,
+`working_set_mismatch 0`, `duplicate_rows 2` and `working_set_loose_match 2`. The
+two loose matches name the same conversations the pre-cutover rehearsal on a
+data-only shadow copy had found (`01a17b36-4701…`, `01a17bd7-627a…`), which is
+the agreement that makes the rehearsal worth running. Peak RSS of the migrating
+process is 61-63 MB — the backfill is bounded per conversation, so its memory
+does not track the size of the database. Expect roughly 2 minutes of downtime;
+budget the rehearsal's number for the machine it will really run on, because the
+same migration took 24 s against a local copy of the same data.
+
 **Ordering: migrate, then start — never start, then migrate.**
 `conversation.next_ordinal` is seeded by the backfill step (migration 0057), not
 by 0059, and only a pre-tree daemon writing after the migration leaves it stale.
