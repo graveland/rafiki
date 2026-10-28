@@ -1260,8 +1260,10 @@ func runDaemon(opts runDaemonOpts) error {
 	// Drain credential work before the pool goes: a refresh that completed
 	// upstream but whose write has not landed yet is retried on its own
 	// goroutine with context.WithoutCancel, and closing the pool underneath it
-	// would lose a rotated token the issuer has already spent. Wait returns only
-	// once every flight, save and the sweep have finished.
+	// would lose a rotated token the issuer has already spent. Wait returns once
+	// every flight, save and the sweep have finished, or at its own bound when
+	// the database has stopped answering; then it logs the rotations it could
+	// not save and shutdown continues.
 	creds.Wait()
 	if pool != nil {
 		closePoolBounded(pool, poolCloseTimeout)

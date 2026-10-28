@@ -27,10 +27,13 @@ package main
 //  1. Refresh tokens are single use. The issuer rotates on every use, so a
 //     token that came back MUST be stored even when the response that carried
 //     it was an error (chatgptauth.Refresh's contract).
-//  2. A rotation the database did not accept is HANDED OFF, not dropped: it
-//     lives in `pending` until a background save lands it, and while it is there
-//     no caller may spend the token it already replaced (that comes back
-//     refresh_token_reused and tombstones a login that works).
+//  2. A rotation the database did not accept is HANDED OFF, not dropped: it is
+//     recorded in `pending` from INSIDE the refresh callback, while the store's
+//     row lock is still held, and stays there until a background save lands it.
+//     While a record matches the row's token no caller may spend that token
+//     again (the issuer would answer refresh_token_reused and tombstone a login
+//     that works), and a record carries a sequence so an older save can neither
+//     overwrite nor clear a newer rotation.
 //  3. A refresh runs on the DAEMON's lifetime context with a deadline, never
 //     on the turn's context: a cancelled turn must not abandon a rotated token
 //     between the issuer's answer and the store's write, while a hung upstream
@@ -43,7 +46,9 @@ package main
 //  5. Shutdown drains every flight and save (Wait) before the pool closes, and
 //     the saves' final writes ignore the cancelled daemon context
 //     (context.WithoutCancel), because a rotation that lands during shutdown is
-//     exactly the one most likely to be lost.
+//     exactly the one most likely to be lost. The drain itself is BOUNDED: a
+//     hung database must not hold process exit, and what it gave up on is
+//     logged by key, never by token.
 
 import (
 	"context"
@@ -51,6 +56,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +82,14 @@ const (
 	// the daemon's lifetime context, not the caller's: the caller may give up
 	// (its turn was cancelled) while the refresh keeps running to the store.
 	refreshTimeout = 2 * time.Minute
+
+	// drainTimeout bounds Wait. A save makes at most persistTries attempts, each
+	// bounded only by refreshTimeout, so a database that HANGS rather than
+	// refusing a write could otherwise hold shutdown for persistTries x
+	// refreshTimeout per pending key. Past this bound the rotations still unsaved
+	// are logged rather than waited for: holding the process open is the worse
+	// outcome.
+	drainTimeout = 30 * time.Second
 
 	// sweepInterval and sweepAge are the idle sweep: once an hour, refresh
 	// every credential last refreshed more than 8 days ago. Codex refreshes on
@@ -127,6 +142,14 @@ func (c cachedAccess) String() string {
 		c.accountID, redactedToken, c.expiry.UTC().Format(time.RFC3339))
 }
 
+// GoString redacts the token in the Go-syntax rendering too: %#v consults
+// GoStringer where %v consults Stringer, and a debug dump is exactly where a
+// live token must not appear.
+func (c cachedAccess) GoString() string {
+	return fmt.Sprintf("providerCreds.cachedAccess{token:%q, accountID:%q, expiry:%s}",
+		redactedToken, c.accountID, c.expiry.UTC().Format(time.RFC3339))
+}
+
 // LogValue keeps the token out of structured logs, so slog.Any on one logs a
 // redacted group rather than the live secret. It satisfies slog.LogValuer.
 func (c cachedAccess) LogValue() slog.Value {
@@ -138,15 +161,18 @@ func (c cachedAccess) LogValue() slog.Value {
 }
 
 // pendingRotation is a refresh the issuer already completed but the database did
-// not accept: sent is the refresh token that was spent, want is the credential
-// the issuer handed back in its place.
+// not accept: sent is the refresh token the ROW held when the rotation was
+// recorded, want is the credential the issuer handed back in its place, and seq
+// orders hand-offs for one key.
 //
-// It is the design's "never lose a rotated token" rule made concrete. While it
-// is set, a refresh that finds the row STILL holding sent adopts want instead of
-// spending sent a second time: the issuer would answer refresh_token_reused, the
-// re-read would find the same spent token, and the credential would be
-// tombstoned while the working token sat in the retry goroutine.
+// It is the design's "never lose a rotated token" rule made concrete. The record
+// is written INSIDE the store callback, while the row lock is held, so any
+// refresh that acquires the row afterwards already sees it; one that finds the
+// row STILL holding sent adopts want instead of spending sent a second time. A
+// save may write or clear only the record whose seq is still current, so an
+// older save can never overwrite or clear a newer rotation.
 type pendingRotation struct {
+	seq  uint64
 	sent string
 	want providercreds.Credential
 }
@@ -181,8 +207,12 @@ type providerCreds struct {
 	// before it starts and a cachePut is discarded unless it still matches, so
 	// a logout or a re-login always beats a refresh that started earlier.
 	gen map[credKey]uint64
-	// pending holds rotations whose database write has not landed yet.
-	pending map[credKey]pendingRotation
+	// pending holds rotations whose database write has not landed yet, keyed by
+	// credential, and nextRotation numbers them. Only the newest record for a key
+	// may be written or cleared: that is what stops an older save from undoing a
+	// newer rotation (the second hand-off an adopted rotation creates).
+	pending      map[credKey]pendingRotation
+	nextRotation uint64
 	// logins is the owner binding of every login in flight, pruned on Begin.
 	logins map[string]loginBinding
 
@@ -202,6 +232,10 @@ type providerCreds struct {
 	workMu   sync.Mutex
 	draining bool
 	wg       sync.WaitGroup
+
+	// drainWait overrides drainTimeout; zero means drainTimeout. A test sets it
+	// so the bound is observable without waiting 30 seconds.
+	drainWait time.Duration
 }
 
 // newProviderCreds builds the daemon's credential machinery and starts its
@@ -239,6 +273,12 @@ func newProviderCreds(bg context.Context, store providercreds.Store, auth *chatg
 // cancels the daemon context first, which stops the sweeper and makes each save
 // attempt its write immediately, and calls this BEFORE closing the database
 // pool: a rotation that landed during shutdown must still reach the row.
+//
+// The wait is BOUNDED. A save retries at most persistTries times with each
+// attempt bounded only by refreshTimeout, so a database that hangs rather than
+// refusing its writes would otherwise hold shutdown for hours. Past drainTimeout
+// the rotations still unsaved are reported and Wait returns: the pool closes
+// underneath them, and the operator sees which keys lost one.
 func (p *providerCreds) Wait() {
 	if p == nil {
 		return
@@ -246,7 +286,41 @@ func (p *providerCreds) Wait() {
 	p.workMu.Lock()
 	p.draining = true
 	p.workMu.Unlock()
-	p.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	limit := p.drainWait
+	if limit <= 0 {
+		limit = drainTimeout
+	}
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		// Name what cannot be waited for any longer. Keys, never tokens: a
+		// drain log that named the credential would be a leak.
+		unsaved := p.unsavedRotations()
+		slog.Error("provider credentials: shutdown drain timed out; these rotations may not be saved",
+			"timeout", limit, "count", len(unsaved), "keys", strings.Join(unsaved, ","))
+	}
+}
+
+// unsavedRotations names the hand-offs still waiting to be written, as
+// "owner/provider" pairs, sorted so the log line is stable.
+func (p *providerCreds) unsavedRotations() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	keys := make([]string, 0, len(p.pending))
+	for key := range p.pending {
+		keys = append(keys, key.owner+"/"+key.provider)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // startWork registers one refresh flight. It refuses once Wait has begun, so no
@@ -442,39 +516,56 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 	ctx, cancel := context.WithTimeout(p.bg, refreshTimeout)
 	defer cancel()
 
-	// sent is the refresh token this attempt spends; rotated is a credential
-	// carrying a NEW refresh token the issuer handed back alongside an error.
-	// Both are captured from the callback for use after the transaction ends.
+	// sent is the refresh token the ROW holds as this refresh begins: what a
+	// hand-off replaces and what the reuse re-read compares against.
+	//
+	// recorded is the sequence of the hand-off this refresh created for a
+	// rotation the issuer has already completed; adopted is the sequence of the
+	// one it continued. Both are captured from the callback for use after the
+	// transaction: recorded identifies the save that must run if the write did
+	// not land, and either identifies the record a successful commit clears.
 	var (
-		sent    string
-		rotated providercreds.Credential
+		sent     string
+		recorded uint64
+		adopted  uint64
 	)
 
 	next, err := p.store.Refresh(ctx, owner, provider, func(cur providercreds.Credential) (providercreds.Credential, error) {
 		sent = cur.RefreshToken
 		// A rotation this daemon already completed whose write has not landed:
 		// while the row still holds the spent token, adopt the rotation. Sending
-		// `sent` again would come back refresh_token_reused and tombstone a
-		// login that works.
-		if pend, ok := p.pendingFor(key); ok && pend.sent == cur.RefreshToken {
-			cur = pend.want
-			if !force {
+		// `sent` again would come back refresh_token_reused and tombstone a login
+		// that works. This is the ONLY place a hand-off is consulted, and it is
+		// under the same row lock that records one.
+		continuing := false
+		if pend, ok := p.pendingFor(key); ok {
+			if pend.sent != cur.RefreshToken {
+				// The row has moved past this hand-off: whatever token it holds
+				// now is newer, so the record can never be adopted again.
+				p.clearRotation(key, pend.seq)
+			} else {
+				cur = pend.want
+				adopted, continuing = pend.seq, true
+			}
+		}
+		if !force {
+			if continuing {
 				// A routine caller is still holding the access token that worked:
 				// keep it, and let this write land the rotation so the NEXT
 				// refresh has a usable refresh token.
 				return cur, nil
 			}
-			// A 401 recovery must not be handed back the token that just failed.
-			// The sender allows a forced refresh one retry, and a second 401 is
-			// terminal, so returning the stale access token turns a recoverable
-			// 401 into a failed turn: continue into a real refresh, using the
-			// rotation's (valid) refresh token rather than the spent one.
-		} else if !force && usableAccess(cur.AccessToken, cur.AccessExpiry) {
-			// Another holder (another daemon, another goroutine) refreshed
-			// already: the row is the newer answer, and rewriting it would hide
-			// a credential going stale.
-			return cur, nil
+			if usableAccess(cur.AccessToken, cur.AccessExpiry) {
+				// Another holder (another daemon, another goroutine) refreshed
+				// already: the row is the newer answer, and rewriting it would
+				// hide a credential going stale.
+				return cur, nil
+			}
 		}
+		// A 401 recovery takes neither early return above: the access token it
+		// holds is the one the server just refused, and the sender treats a
+		// second 401 as terminal. It refreshes for real, using the rotation's
+		// (valid) refresh token rather than the spent one.
 		tokens, rerr := p.auth.Refresh(ctx, cur.RefreshToken, reason)
 		switch {
 		case rerr == nil:
@@ -492,6 +583,13 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 			if tokens.AccountID != "" {
 				out.AccountID = tokens.AccountID
 			}
+			if out.RefreshToken != sent {
+				// Record the hand-off HERE, while the row lock is still held:
+				// another refresh waiting on this row must find the rotation the
+				// moment the lock is released, and a write that then fails must
+				// not lose it. A successful commit clears it below.
+				recorded = p.recordRotation(key, sent, out).seq
+			}
 			return out, nil
 		case errors.Is(rerr, chatgptauth.ErrRefreshReused):
 			// The issuer says this token was already spent. It may have been
@@ -501,12 +599,13 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 			return cur, fmt.Errorf("%w: %v", providercreds.ErrDead, rerr)
 		}
 		// Transient: the row is untouched and the turn's own retry handles it.
-		// The issuer may still have rotated the refresh token on the way, and
-		// the old one is already dead upstream, so that credential is captured
-		// for a hand-off outside this transaction.
+		// The issuer may still have rotated the refresh token on the way, and the
+		// old one is already dead upstream, so the credential is recorded now,
+		// under this row lock, for a save outside the transaction.
 		if tokens.RefreshToken != "" && tokens.RefreshToken != cur.RefreshToken {
-			rotated = cur
-			rotated.RefreshToken = tokens.RefreshToken
+			out := cur
+			out.RefreshToken = tokens.RefreshToken
+			recorded = p.recordRotation(key, sent, out).seq
 		}
 		return cur, rerr
 	})
@@ -515,18 +614,18 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 	case errors.Is(err, errRefreshReused):
 		return p.rereadAfterReuse(ctx, key, gen, sent)
 	case errors.Is(err, providercreds.ErrNotPersisted):
+		// The upstream has already invalidated the old refresh token, so the new
+		// one must not be dropped: turns keep working from memory while the write
+		// is retried, and the hand-off stops any other refresh from spending the
+		// token it replaced. Even a credential that cannot serve a request is
+		// worth saving the rotation for.
+		slog.Error("provider credential refresh not persisted",
+			"owner", owner, "provider", provider, "error", err)
+		p.resumeRotationSave(key, recorded, adopted)
 		if stored, ok := usableCredential(next); ok {
-			// The upstream has already invalidated the old refresh token, so
-			// the new one must not be dropped: turns keep working from memory
-			// while the write is retried, and the pending hand-off stops any
-			// other refresh from spending the token it replaced.
 			p.cachePut(key, accessFrom(stored), gen)
-			slog.Error("provider credential refresh not persisted",
-				"owner", owner, "provider", provider, "error", err)
-			p.handOffRotation(key, sent, stored)
 			return accessFrom(stored), nil
 		}
-		p.clearPending(key, sent)
 		return cachedAccess{}, deadErr(provider)
 	case errors.Is(err, providercreds.ErrDead):
 		// The stored reason is worth a log line even though the user gets the
@@ -540,14 +639,18 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 		p.forget(key)
 		return cachedAccess{}, deadErr(provider)
 	case err != nil:
-		if rotated.RefreshToken != "" {
-			p.handOffRotation(key, sent, rotated)
-		}
+		p.resumeRotationSave(key, recorded, adopted)
 		return cachedAccess{}, err
 	}
 
-	// The rotation is now in the row, so there is nothing left to hand off.
-	p.clearPending(key, sent)
+	// The rotation is now in the row, so the hand-off this refresh continued or
+	// created has done its job.
+	switch {
+	case recorded != 0:
+		p.clearRotation(key, recorded)
+	case adopted != 0:
+		p.clearRotation(key, adopted)
+	}
 	stored, ok := usableCredential(next)
 	if !ok {
 		p.forget(key)
@@ -593,20 +696,34 @@ func (p *providerCreds) rereadAfterReuse(ctx context.Context, key credKey, gen u
 	return accessFrom(stored), nil
 }
 
-// handOffRotation records a rotation the database did not accept and starts the
-// save that will finish it. The pending entry is the hand-off: while it is set,
-// any refresh that finds the row still holding the spent token adopts this
-// credential rather than spending that token again.
-func (p *providerCreds) handOffRotation(key credKey, sent string, want providercreds.Credential) {
-	p.setPending(key, pendingRotation{sent: sent, want: want})
+// startRotationSave starts the goroutine that will land an ALREADY RECORDED
+// rotation. The record itself is written by recordRotation from inside the
+// refresh callback, under the row lock; this only schedules the retry, so there
+// is no window in which a rotation exists upstream and nowhere in memory.
+func (p *providerCreds) startRotationSave(key credKey, rot pendingRotation) {
 	p.addSave()
 	go func() {
 		defer p.wg.Done()
-		p.persistUntilSaved(key, sent, want)
+		p.persistRotation(key, rot)
 	}()
 }
 
-// persistUntilSaved retries the write a refresh could not persist, 1s doubling
+// resumeRotationSave starts a save for the hand-off this refresh is still
+// responsible for, if it is still current. A recorded hand-off wins over an
+// adopted one: recording supersedes it.
+func (p *providerCreds) resumeRotationSave(key credKey, recorded, adopted uint64) {
+	for _, seq := range []uint64{recorded, adopted} {
+		if seq == 0 {
+			continue
+		}
+		if rot, ok := p.pendingFor(key); ok && rot.seq == seq {
+			p.startRotationSave(key, rot)
+			return
+		}
+	}
+}
+
+// persistRotation retries the write a refresh could not persist, 1s doubling
 // to a 1 minute cap, at most persistTries times.
 //
 // Put is deliberately not used: it clears dead_at, so a retry through Put would
@@ -617,7 +734,12 @@ func (p *providerCreds) handOffRotation(key credKey, sent string, want providerc
 // Every attempt writes with context.WithoutCancel: the daemon may be shutting
 // down, which is exactly when an unpersisted rotation is most likely, and the
 // write must still land (Wait holds shutdown until this returns).
-func (p *providerCreds) persistUntilSaved(key credKey, sent string, want providercreds.Credential) {
+//
+// Every attempt is guarded twice: this hand-off must still be the CURRENT one
+// for the key (so a newer rotation is never undone), and the row must still hold
+// the token this rotation replaced (so another daemon's rotation or a re-login
+// is never undone either).
+func (p *providerCreds) persistRotation(key credKey, rot pendingRotation) {
 	delay := p.retryDelay
 	if delay <= 0 {
 		delay = persistRetryBase
@@ -631,37 +753,46 @@ func (p *providerCreds) persistUntilSaved(key credKey, sent string, want provide
 			// rotation.
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(p.bg), refreshTimeout)
-		wrote := false
+		var wrote, superseded bool
 		_, err := p.store.Refresh(ctx, key.owner, key.provider, func(cur providercreds.Credential) (providercreds.Credential, error) {
-			if cur.RefreshToken != sent {
+			if !p.rotationIsCurrent(key, rot.seq) {
+				// A newer rotation took over while this save waited. Writing ours
+				// now would undo it, so this save is finished.
+				superseded = true
+				return cur, nil
+			}
+			if cur.RefreshToken != rot.sent {
 				// Somebody else moved the row on: their token is newer than the
 				// one this save carries, so writing ours would undo a re-login
 				// (or another daemon's rotation).
 				return cur, nil
 			}
 			wrote = true
-			return want, nil
+			return rot.want, nil
 		})
 		cancel()
 		switch {
+		case superseded:
+			// The newer hand-off owns the row now; its own save is running.
+			return
 		case err == nil && wrote:
-			p.clearPending(key, sent)
+			p.clearRotation(key, rot.seq)
 			slog.Info("provider credential refresh persisted after retry",
 				"owner", key.owner, "provider", key.provider, "attempts", attempt)
 			return
 		case err == nil:
-			p.clearPending(key, sent)
+			p.clearRotation(key, rot.seq)
 			slog.Info("provider credential already holds a newer token; nothing to save",
 				"owner", key.owner, "provider", key.provider)
 			return
 		case errors.Is(err, providercreds.ErrNotFound):
 			// A logout deleted the row while this retried. It stays deleted.
-			p.clearPending(key, sent)
+			p.clearRotation(key, rot.seq)
 			slog.Info("provider credential row is gone; refreshed token not persisted",
 				"owner", key.owner, "provider", key.provider)
 			return
 		case errors.Is(err, providercreds.ErrDead):
-			p.clearPending(key, sent)
+			p.clearRotation(key, rot.seq)
 			slog.Error("provider credential is dead; the refreshed token was lost",
 				"owner", key.owner, "provider", key.provider)
 			return
@@ -673,8 +804,11 @@ func (p *providerCreds) persistUntilSaved(key credKey, sent string, want provide
 			delay = persistRetryMax
 		}
 	}
-	p.clearPending(key, sent)
-	slog.Error("provider credential rotation lost: the refreshed token could not be persisted",
+	// Giving up does NOT drop the hand-off: the refresh token it carries is the
+	// only live one for this credential, and the next refresh must adopt it
+	// rather than spend the token it replaced. A login or a logout clears it,
+	// and an adopting refresh lands it.
+	slog.Error("provider credential rotation not yet persisted; it stays in memory for the next refresh",
 		"owner", key.owner, "provider", key.provider, "tries", persistTries)
 }
 
@@ -788,22 +922,37 @@ func (p *providerCreds) pendingFor(key credKey) (pendingRotation, bool) {
 	return pend, ok
 }
 
-func (p *providerCreds) setPending(key credKey, pend pendingRotation) {
+// recordRotation replaces this key's hand-off with want and returns it. It is
+// called from INSIDE a store callback, i.e. while that key's row lock is held:
+// the record therefore exists before the lock is released, so a refresh that
+// acquires the row next cannot spend the token this one replaced.
+func (p *providerCreds) recordRotation(key credKey, sent string, want providercreds.Credential) pendingRotation {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.pending == nil {
 		p.pending = make(map[credKey]pendingRotation)
 	}
-	p.pending[key] = pend
+	p.nextRotation++
+	rot := pendingRotation{seq: p.nextRotation, sent: sent, want: want}
+	p.pending[key] = rot
+	return rot
 }
 
-// clearPending drops the hand-off for one key, and only if it is still the
-// rotation described by sent: a newer hand-off must never be cleared by an older
-// one finishing.
-func (p *providerCreds) clearPending(key credKey, sent string) {
+// rotationIsCurrent reports whether seq is still this key's newest hand-off.
+func (p *providerCreds) rotationIsCurrent(key credKey, seq uint64) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if pend, ok := p.pending[key]; ok && pend.sent == sent {
+	pend, ok := p.pending[key]
+	return ok && pend.seq == seq
+}
+
+// clearRotation drops the hand-off for one key, and only if it is still the
+// rotation identified by seq: a newer hand-off must never be cleared by an older
+// one finishing.
+func (p *providerCreds) clearRotation(key credKey, seq uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pend, ok := p.pending[key]; ok && pend.seq == seq {
 		delete(p.pending, key)
 	}
 }

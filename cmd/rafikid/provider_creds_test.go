@@ -65,10 +65,11 @@ type fakeCredStore struct {
 	// recoverable. Applied once, on the first Refresh after it is set.
 	rotateOnRefresh map[credKey]providercreds.Credential
 
-	// failWriteOnce makes the next CHANGED write fail with ErrNotPersisted,
+	// failWrites makes the next N CHANGED writes fail with ErrNotPersisted,
 	// which is the "upstream already rotated, the database write did not land"
-	// case.
-	failWriteOnce bool
+	// case. A count, not a flag: one credential can lose more than one write in
+	// a row when a rotation is adopted and rotated again.
+	failWrites int
 
 	// puts and refreshCalls count calls, so a test can prove a path never used
 	// Put and how many transactions the store saw.
@@ -100,6 +101,13 @@ func (f *fakeCredStore) refreshCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.refreshCalls
+}
+
+// failNextWrite makes the next n changed writes fail with ErrNotPersisted.
+func (f *fakeCredStore) failNextWrite(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failWrites += n
 }
 
 func (f *fakeCredStore) putCount() int {
@@ -181,8 +189,8 @@ func (f *fakeCredStore) Refresh(ctx context.Context, owner, provider string, fn 
 		next.AccountID = cur.AccountID
 	}
 	next.ModelsJSON, next.ModelsETag = cur.ModelsJSON, cur.ModelsETag
-	if f.failWriteOnce {
-		f.failWriteOnce = false
+	if f.failWrites > 0 {
+		f.failWrites--
 		return next, fmt.Errorf("%w: fake write failure", providercreds.ErrNotPersisted)
 	}
 	// The real store's write is ctx-bound: a cancelled context leaves the row
@@ -323,8 +331,14 @@ func (f *fakeIssuer) body(i int) map[string]any {
 // defaultTokenBody is a healthy refresh response: a rotated refresh token, a new
 // access token, and an id_token naming the account.
 func defaultTokenBody(accountID string) string {
-	return fmt.Sprintf(`{"access_token":"new-access","refresh_token":"rotated-refresh","expires_in":3600,"id_token":%q}`,
-		idToken(accountID))
+	return tokenBody("new-access", "rotated-refresh", accountID)
+}
+
+// tokenBody is one refresh answer naming both tokens, so a test can tell which
+// rotation reached the row and which token a later call spent upstream.
+func tokenBody(access, refresh, accountID string) string {
+	return fmt.Sprintf(`{"access_token":%q,"refresh_token":%q,"expires_in":3600,"id_token":%q}`,
+		access, refresh, idToken(accountID))
 }
 
 // idToken builds a JWT-shaped string whose payload carries the ChatGPT account
@@ -559,7 +573,7 @@ func TestTokenSourceNotPersistedKeepsToken(t *testing.T) {
 	c := assert.NewAborting(t)
 	store := newFakeCredStore()
 	store.seed(staleCredential(time.Now().Add(time.Minute)))
-	store.failWriteOnce = true
+	store.failNextWrite(1)
 	iss := newFakeIssuer(t)
 	p := testCreds(t, store, iss, "")
 
@@ -928,7 +942,7 @@ func TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation(t *testing.T) 
 	c := assert.NewAborting(t)
 	store := newFakeCredStore()
 	store.seed(staleCredential(time.Now().Add(time.Minute)))
-	store.failWriteOnce = true
+	store.failNextWrite(1)
 	iss := newFakeIssuer(t)
 	// The real issuer refuses a spent token, so a second use of `r0` would answer
 	// refresh_token_reused and tombstone the row.
@@ -991,7 +1005,7 @@ func TestTokenSourceForcedAdoptionRefreshesForReal(t *testing.T) {
 		store.seed(cur)
 		rotated := cur
 		rotated.RefreshToken = "rotated-refresh"
-		p.setPending(testKey, pendingRotation{sent: cur.RefreshToken, want: rotated})
+		p.recordRotation(testKey, cur.RefreshToken, rotated)
 	}
 
 	t.Run("forced refreshes with the rotation", func(t *testing.T) {
@@ -1041,7 +1055,7 @@ func TestTokenSourceRetryDoesNotClobberANewerLogin(t *testing.T) {
 	c := assert.NewAborting(t)
 	store := newFakeCredStore()
 	store.seed(staleCredential(time.Now().Add(time.Minute)))
-	store.failWriteOnce = true
+	store.failNextWrite(1)
 	iss := newFakeIssuer(t)
 	p := testCreds(t, store, iss, "")
 	p.retryDelay = 100 * time.Millisecond
@@ -1126,7 +1140,7 @@ func TestProviderCredsWaitDrainsInFlightSave(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	store := newFakeCredStore()
 	store.seed(staleCredential(time.Now().Add(time.Minute)))
-	store.failWriteOnce = true
+	store.failNextWrite(1)
 	iss := newFakeIssuer(t)
 	p := newProviderCreds(ctx, store, iss.engine(), "", testProviderSet(t))
 	// Long enough that the save cannot land before the cancel below: it fires on
@@ -1226,7 +1240,9 @@ func TestCachedAccessRedactsToken(t *testing.T) {
 	c := assert.NewAborting(t)
 	tok := cachedAccess{token: "sekrit-access-token", accountID: "acct_1", expiry: time.Now()}
 
-	for _, rendered := range []string{fmt.Sprintf("%v", tok), fmt.Sprintf("%+v", tok), tok.String()} {
+	for _, rendered := range []string{
+		fmt.Sprintf("%v", tok), fmt.Sprintf("%+v", tok), fmt.Sprintf("%#v", tok), tok.String(),
+	} {
 		c.NotStrContains(rendered, "sekrit-access-token", "rendering: %s", rendered)
 	}
 
@@ -1260,5 +1276,475 @@ func TestCachePutLosesToAForget(t *testing.T) {
 	p.cachePut(testKey, tok, p.generation(testKey))
 	if _, ok := p.cached(testKey); !ok {
 		c.Fail("a cache write on the current generation must be stored")
+	}
+}
+
+// ─── Rotations that must never be lost ───────────────────────────────────────
+
+// blockStore hangs chosen Refresh calls until release, so a test can hold a
+// background save inside the store the way a hung database would. Calls are
+// numbered from one across every method call on this wrapper.
+type blockStore struct {
+	*fakeCredStore
+	from, to int // 1-based call numbers to hang: [from, to)
+
+	mu      sync.Mutex
+	calls   int
+	block   chan struct{}
+	reached chan struct{}
+	once    sync.Once
+}
+
+func newBlockStore(inner *fakeCredStore, from, to int) *blockStore {
+	return &blockStore{
+		fakeCredStore: inner,
+		from:          from,
+		to:            to,
+		block:         make(chan struct{}),
+		reached:       make(chan struct{}),
+	}
+}
+
+func (s *blockStore) Refresh(ctx context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
+	s.mu.Lock()
+	s.calls++
+	n := s.calls
+	s.mu.Unlock()
+	if n >= s.from && n < s.to {
+		s.once.Do(func() { close(s.reached) })
+		<-s.block
+	}
+	return s.fakeCredStore.Refresh(ctx, owner, provider, fn)
+}
+
+// waitHeld fails unless the store call under test has reached its hang.
+func (s *blockStore) waitHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the store call under test never hung")
+	}
+}
+
+func (s *blockStore) release() { close(s.block) }
+
+var _ providercreds.Store = (*blockStore)(nil)
+
+// gateStore holds chosen Refresh calls until the test releases them, and
+// reports when each one reaches its gate and when it finishes. Two saves can
+// then be ordered exactly, rather than by racing timers.
+type gateStore struct {
+	*fakeCredStore
+	mu     sync.Mutex
+	calls  int
+	gates  map[int]chan struct{}
+	opened map[int]chan struct{}
+	done   map[int]chan struct{}
+}
+
+func newGateStore(inner *fakeCredStore, calls ...int) *gateStore {
+	s := &gateStore{
+		fakeCredStore: inner,
+		gates:         map[int]chan struct{}{},
+		opened:        map[int]chan struct{}{},
+		done:          map[int]chan struct{}{},
+	}
+	for _, n := range calls {
+		s.gates[n] = make(chan struct{})
+		s.opened[n] = make(chan struct{})
+		s.done[n] = make(chan struct{})
+	}
+	return s
+}
+
+func (s *gateStore) Refresh(ctx context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
+	s.mu.Lock()
+	s.calls++
+	n := s.calls
+	gate, opened, done := s.gates[n], s.opened[n], s.done[n]
+	s.mu.Unlock()
+	if opened != nil {
+		close(opened)
+		<-gate
+	}
+	next, err := s.fakeCredStore.Refresh(ctx, owner, provider, fn)
+	if done != nil {
+		close(done)
+	}
+	return next, err
+}
+
+// waitOpened fails unless call n has reached its gate.
+func (s *gateStore) waitOpened(t *testing.T, n int) {
+	t.Helper()
+	select {
+	case <-s.opened[n]:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("store call %d never reached its gate", n)
+	}
+}
+
+// release opens call n's gate and waits for that call to return.
+func (s *gateStore) release(t *testing.T, n int) {
+	t.Helper()
+	s.waitOpened(t, n)
+	close(s.gates[n])
+	select {
+	case <-s.done[n]:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("store call %d never finished", n)
+	}
+}
+
+var _ providercreds.Store = (*gateStore)(nil)
+
+// notPersistedHookStore runs a hook the moment the wrapped store reports
+// ErrNotPersisted: after the row lock has been released and before the caller
+// sees the error. That is the A1-b gap made observable.
+type notPersistedHookStore struct {
+	*fakeCredStore
+	once sync.Once
+	hook func()
+}
+
+func (s *notPersistedHookStore) Refresh(ctx context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
+	next, err := s.fakeCredStore.Refresh(ctx, owner, provider, fn)
+	if errors.Is(err, providercreds.ErrNotPersisted) {
+		s.once.Do(s.hook)
+	}
+	return next, err
+}
+
+var _ providercreds.Store = (*notPersistedHookStore)(nil)
+
+// TestTokenSourceTwoHandOffsNeverLoseTheNewestRotation is A1-a. A routine
+// refresh rotates the token and cannot write it; a 401 recovery adopts that
+// rotation, rotates again, and cannot write that either. Two hand-offs now
+// describe the same spent row token, and the OLDER one must neither write (it
+// would put a spent token in the row) nor clear the newer one (which would drop
+// the only live token).
+//
+// Both saves are gated, so the interleaving is exact: each hand-off is recorded
+// while the other save is held in the store, and only then is either let write.
+func TestTokenSourceTwoHandOffsNeverLoseTheNewestRotation(t *testing.T) {
+	c := assert.NewAborting(t)
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		switch call {
+		case 1:
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		case 2:
+			return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
+		case 3:
+			return http.StatusOK, tokenBody("access-c", "refresh-c", "acct_1")
+		}
+		// Any later call is spending a token the issuer has already retired.
+		return http.StatusBadRequest, `{"error":"refresh_token_reused"}`
+	}
+	// Call 1 is the routine transaction, 2 the first save, 3 the recovery's
+	// transaction, 4 the second save.
+	store := newGateStore(inner, 2, 4)
+	p := testCreds(t, inner, iss, "")
+	p.store = store
+	p.retryDelay = time.Millisecond
+	src := p.TokenSourceFor(testOwner, testProvider)
+
+	tok, _, err := src.Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	c.Eq("access-a", tok, "token")
+	store.waitOpened(t, 2) // the first save holds; the row still has r0
+
+	inner.failNextWrite(1) // the recovery's write fails too
+	tok, _, err = src.Token(context.Background(), true)
+	c.NoError(err, "the recovery adopts the rotation and refreshes with it")
+	c.Eq("access-b", tok, "a 401 recovery gets the freshly issued token")
+	c.Eq("refresh-a", iss.body(1)["refresh_token"], "the recovery must spend the rotation, never the spent r0")
+
+	// The second save holds too, so BOTH hand-offs now exist. Let the older one
+	// write first: it must refuse, because its rotation has been superseded.
+	store.waitOpened(t, 4)
+	store.release(t, 2)
+	store.release(t, 4)
+
+	c.EventuallyTrue(time.Second, time.Millisecond, func() bool {
+		stored, ok := inner.row(testOwner, testProvider)
+		return ok && stored.RefreshToken == "refresh-b"
+	}, "the newest rotation must reach the row")
+	stored, ok := inner.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.False(stored.Dead, "a second hand-off must not kill the credential")
+	c.EventuallyTrue(time.Second, time.Millisecond, func() bool {
+		_, ok := p.pendingFor(testKey)
+		return !ok
+	}, "a landed rotation must leave nothing pending")
+
+	// And the row is usable: the next refresh spends refresh-b.
+	tok, _, err = src.Token(context.Background(), true)
+	c.NoError(err, "a refresh after both hand-offs must succeed")
+	c.Eq("access-c", tok, "token")
+	c.Eq("refresh-b", iss.body(2)["refresh_token"], "the next refresh spends the newest token")
+}
+
+// TestTokenSourceHandOffExistsWhenTheRowLockIsReleased is A1-b. The store
+// releases the row lock before Refresh reports ErrNotPersisted, so a 401
+// recovery waiting on that lock enters the gap. A hand-off recorded only after
+// the store returned would be invisible there, and the recovery would spend the
+// token the issuer has already retired.
+func TestTokenSourceHandOffExistsWhenTheRowLockIsReleased(t *testing.T) {
+	c := assert.NewAborting(t)
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		switch call {
+		case 1:
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		case 2:
+			return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
+		}
+		return http.StatusBadRequest, `{"error":"refresh_token_reused"}`
+	}
+	p := testCreds(t, inner, iss, "")
+	p.retryDelay = time.Hour // this test is about the gap, not the retry
+
+	var (
+		recoveryTok string
+		recoveryErr error
+	)
+	// The hook runs at the exact point the real store has released the row lock
+	// and reported ErrNotPersisted: before the caller could record anything.
+	p.store = &notPersistedHookStore{fakeCredStore: inner, hook: func() {
+		recoveryTok, _, recoveryErr = p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	}}
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	c.NoError(recoveryErr, "the 401 recovery must find the rotation that is already in memory")
+	c.Eq("access-b", recoveryTok, "the recovery gets its own freshly issued token")
+	c.Eq("refresh-a", iss.body(1)["refresh_token"], "the recovery must spend the rotation, never the spent r0")
+
+	stored, ok := inner.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.False(stored.Dead, "a credential that works must not be tombstoned")
+	c.Eq("refresh-b", stored.RefreshToken, "the recovery's rotation reaches the row")
+}
+
+// TestTokenSourceGiveUpKeepsTheRotation is A1-c. A save that exhausts its
+// retries must KEEP the hand-off: it holds the only live refresh token this
+// credential has. Dropping it hands the next refresh a token the issuer already
+// retired, which tombstones a login that works.
+func TestTokenSourceGiveUpKeepsTheRotation(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	store.failNextWrite(1 + persistTries)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
+	}
+	p := testCreds(t, store, iss, "")
+	p.retryDelay = time.Microsecond // the backoff is not what this test is about
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+
+	// One transaction plus persistTries save attempts, all refused.
+	c.EventuallyTrue(5*time.Second, time.Millisecond, func() bool {
+		return store.refreshCallCount() >= 1+persistTries
+	}, "the save must exhaust its retries")
+	time.Sleep(50 * time.Millisecond) // let the give-up complete
+
+	if _, ok := p.pendingFor(testKey); !ok {
+		c.Fail("a save that gives up must keep the rotation in memory")
+	}
+
+	tok, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.NoError(err, "a recovery after the give-up must adopt the kept rotation")
+	c.Eq("access-b", tok, "token")
+	c.Eq("refresh-a", iss.body(1)["refresh_token"], "the recovery must spend the kept rotation, never r0")
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.False(stored.Dead, "the credential must survive")
+	c.Eq("refresh-b", stored.RefreshToken, "the adopted rotation lands")
+}
+
+// TestTokenSourceForcedRecoveryNeverServesTheRefusedToken is I5. A 401 recovery
+// must come back with a token the server has not just refused. After a save has
+// given up, the rotation in memory is the only live refresh token, so the
+// recovery adopts it and refreshes for real: never the row's access token, never
+// the cached one.
+func TestTokenSourceForcedRecoveryNeverServesTheRefusedToken(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	// Inside the refresh window, so the routine call refreshes and its write
+	// fails: old-access is already spent by the server, cached-access cannot be
+	// written, and the rotation is the only live refresh token.
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	store.failNextWrite(1 + persistTries)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("cached-access", "refresh-a", "acct_1")
+		}
+		return http.StatusOK, tokenBody("recovered-access", "refresh-b", "acct_1")
+	}
+	p := testCreds(t, store, iss, "")
+	p.retryDelay = time.Microsecond
+	src := p.TokenSourceFor(testOwner, testProvider)
+
+	tok, _, err := src.Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	c.Eq("cached-access", tok, "the failed write still serves turns")
+	if _, ok := p.cached(testKey); !ok {
+		c.Fail("fixture: the refreshed access token must be cached")
+	}
+
+	c.EventuallyTrue(5*time.Second, time.Millisecond, func() bool {
+		return store.refreshCallCount() >= 1+persistTries
+	}, "the save must exhaust its retries")
+	time.Sleep(50 * time.Millisecond)
+
+	// The server refused the cached token, so this is a 401 recovery.
+	tok, _, err = src.Token(context.Background(), true)
+	c.NoError(err, "the recovery must succeed from the kept rotation")
+	c.Eq("recovered-access", tok, "a forced caller gets a token the server has not refused")
+	c.NotEq("cached-access", tok, "never the refused cached token")
+	c.NotEq("old-access", tok, "never the stored token")
+	c.Eq("refresh-a", iss.body(1)["refresh_token"], "the recovery refreshes with the kept rotation")
+}
+
+// TestTokenSourceSaveDoesNotClobberAnotherDaemonsRotation pins the save's second
+// guard. The hand-off is still this daemon's current one, but the row moved on:
+// another daemon rotated the credential while this save waited. Writing our want
+// over it would undo their rotation.
+func TestTokenSourceSaveDoesNotClobberAnotherDaemonsRotation(t *testing.T) {
+	c := assert.NewAborting(t)
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	store := newGateStore(inner, 2)
+	p := testCreds(t, inner, iss, "")
+	p.store = store
+	p.retryDelay = time.Millisecond
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	store.waitOpened(t, 2) // the save holds, and its hand-off is still current
+
+	// Another daemon commits its own rotation: only the row moves, so the
+	// hand-off is still current and only the row guard can stop the write.
+	other := staleCredential(time.Now().Add(time.Hour))
+	other.RefreshToken = "other-daemon-refresh"
+	other.AccessToken = "other-daemon-access"
+	inner.seed(other)
+
+	store.release(t, 2)
+	c.EventuallyTrue(time.Second, time.Millisecond, func() bool {
+		_, ok := p.pendingFor(testKey)
+		return !ok
+	}, "a hand-off the row has moved past must be cleared")
+
+	stored, ok := inner.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("other-daemon-refresh", stored.RefreshToken, "a save must never undo another daemon's rotation")
+	c.Eq("other-daemon-access", stored.AccessToken, "a save must never undo another daemon's rotation")
+}
+
+// TestProviderCredsWaitIsBounded pins the drain's upper bound. A save makes at
+// most persistTries attempts, each bounded only by refreshTimeout, so a database
+// that HANGS rather than refusing must not hold shutdown for hours per key. What
+// the drain gave up on is logged by key, never by token.
+func TestProviderCredsWaitIsBounded(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	p := newProviderCreds(ctx, inner, iss.engine(), "", testProviderSet(t))
+	p.retryDelay = time.Millisecond
+	p.drainWait = 100 * time.Millisecond
+	// The save's first attempt hangs inside the store: a database that stopped
+	// answering, not one that refuses.
+	store := newBlockStore(inner, 2, 3)
+	p.store = store
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	store.waitHeld(t)
+
+	cancel()
+	start := time.Now()
+	p.Wait()
+	elapsed := time.Since(start)
+	c.True(elapsed < 2*time.Second, "Wait must be bounded; it took %s", elapsed)
+
+	if _, ok := p.pendingFor(testKey); !ok {
+		c.Fail("the unsaved rotation must still be identifiable after the timeout")
+	}
+	c.StrContains(logs.String(), "shutdown drain timed out", "the timeout must be logged: %s", logs.String())
+	c.StrContains(logs.String(), testOwner+"/"+testProvider, "the log names the key it gave up on: %s", logs.String())
+	c.NotStrContains(logs.String(), "access", "the log must not name a token: %s", logs.String())
+
+	// Unblock the save so nothing outlives the test.
+	store.release()
+	p.wg.Wait()
+}
+
+// TestProviderCredsWaitRefusesNewFlights pins the draining guard: once Wait has
+// begun no new flight may be added to the WaitGroup, because a WaitGroup must
+// never Add from zero while Wait is blocked.
+func TestProviderCredsWaitRefusesNewFlights(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	p := newProviderCreds(ctx, inner, iss.engine(), "", testProviderSet(t))
+	p.retryDelay = time.Millisecond
+	// Only the save's first attempt hangs; anything else the store handles.
+	store := newBlockStore(inner, 2, 3)
+	p.store = store
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	store.waitHeld(t)
+
+	waited := make(chan struct{})
+	go func() {
+		p.Wait()
+		close(waited)
+	}()
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		p.workMu.Lock()
+		defer p.workMu.Unlock()
+		return p.draining
+	}, "Wait must begin the drain")
+
+	_, _, err = p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.ErrorIs(err, errProviderCredsDraining, "a flight must be refused once the drain has begun")
+
+	store.release()
+	cancel()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		c.Fail("Wait never returned after the drain finished")
 	}
 }
