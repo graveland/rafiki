@@ -84,9 +84,10 @@ type fakeCredStore struct {
 	deleteAllErr error
 
 	// onDead, when set, runs ONCE at the moment a refresh callback's ErrDead is
-	// committed: the tombstone is written and visible to every other store call,
-	// and the refresh that caused it has not seen the error yet. That is the
-	// window a retrying rotation save wakes up in.
+	// committed, with this store's lock still held and before the refresh that
+	// caused it sees the error. Nothing else can call the store in that window,
+	// which is what lets a test observe the state the tombstone was written in
+	// (see afterOwnDeadStore for the hook that runs once the lock is free).
 	onDead func()
 }
 
@@ -2051,10 +2052,16 @@ func TestTokenSourceSaveLeavesADeadRowThatIsNotOurs(t *testing.T) {
 	c.NotStrContains(logs.String(), "refresh-a", "the log must never name a token: %s", logs.String())
 }
 
-// heldRotationCreds is the pose both revival orders start from: a rotation the
+// heldRotationCreds is the pose every revival order starts from: a rotation the
 // issuer completed whose write never landed, so refresh-a exists only in the
 // hand-off while the row still holds the spent r0.
 func heldRotationCreds(t *testing.T, answer func(call int) (int, string)) (*fakeCredStore, *fakeIssuer, *providerCreds) {
+	return heldRotation(t, nil, answer)
+}
+
+// heldRotation is heldRotationCreds with an optional store wrapper in front of
+// the fake, for the orders that need a hook in the tombstone's window.
+func heldRotation(t *testing.T, wrap func(*fakeCredStore) providercreds.Store, answer func(call int) (int, string)) (*fakeCredStore, *fakeIssuer, *providerCreds) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	store := newFakeCredStore()
@@ -2062,7 +2069,11 @@ func heldRotationCreds(t *testing.T, answer func(call int) (int, string)) (*fake
 	store.failNextWrite(1 + persistTries)
 	iss := newFakeIssuer(t)
 	iss.answer = answer
-	p := testCreds(t, store, iss, "")
+	var wrapped providercreds.Store = store
+	if wrap != nil {
+		wrapped = wrap(store)
+	}
+	p := testCreds(t, wrapped, iss, "")
 	p.retryDelay = time.Microsecond
 
 	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
@@ -2244,6 +2255,129 @@ func TestTokenSourceOwnTombstoneIsNeverRevivedWithARecordInHand(t *testing.T) {
 	c.True(ok, "row still present")
 	c.True(stored.Dead, "the row stays dead")
 	c.Eq("r0", stored.RefreshToken, "the refused rotation is not written back into the row")
+}
+
+// afterOwnDeadStore runs a hook ONCE, synchronously, after a Refresh whose
+// callback returned ErrDead has COMMITTED the tombstone and released the row
+// lock, and before that error reaches the caller. That is the window a second
+// transaction runs in: a save still retrying the record, or a concurrent
+// refresh of the same key. It sits OUTSIDE fakeCredStore because the hook
+// itself calls the store, and the fake's own onDead hook runs under its lock.
+//
+// A Refresh whose callback did not run is never hooked, so a nested call made
+// from the hook (a dead row is answered before the callback) cannot recurse.
+type afterOwnDeadStore struct {
+	*fakeCredStore
+	once sync.Once
+	hook func()
+}
+
+func (s *afterOwnDeadStore) Refresh(ctx context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
+	ran := false
+	out, err := s.fakeCredStore.Refresh(ctx, owner, provider, func(c providercreds.Credential) (providercreds.Credential, error) {
+		ran = true
+		return fn(c)
+	})
+	if ran && errors.Is(err, providercreds.ErrDead) && s.hook != nil {
+		s.once.Do(s.hook)
+	}
+	return out, err
+}
+
+var _ providercreds.Store = (*afterOwnDeadStore)(nil)
+
+// heldRotationAfterOwnDead is the held-rotation pose behind the tombstone-window
+// hook: the row is still live on the spent r0, refresh-a exists only in the
+// hand-off, and `answer` decides what the forced refresh that ADOPTS it is told.
+func heldRotationAfterOwnDead(t *testing.T, answer func(call int) (int, string)) (*afterOwnDeadStore, *providerCreds, pendingRotation) {
+	t.Helper()
+	var store *afterOwnDeadStore
+	_, _, p := heldRotation(t, func(f *fakeCredStore) providercreds.Store {
+		store = &afterOwnDeadStore{fakeCredStore: f}
+		return store
+	}, answer)
+	c := assert.NewAborting(t)
+	rot, ok := p.pendingFor(testKey)
+	c.True(ok, "fixture: the give-up must keep the rotation")
+	return store, p, rot
+}
+
+// TestTokenSourceRetryingSaveNeverRevivesThisRefreshesTombstone is the order
+// the guard cannot see at all: a save is a SEPARATE transaction, so the
+// tombstone this refresh wrote predates it, and only the drop (in the same
+// transaction, before the tombstone commits) keeps the save from reviving the
+// row with the token the issuer just refused.
+func TestTokenSourceRetryingSaveNeverRevivesThisRefreshesTombstone(t *testing.T) {
+	c := assert.NewAborting(t)
+	store, p, rot := heldRotationAfterOwnDead(t, func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusBadRequest, `{"error":"invalid_grant"}`
+	})
+	// The save wakes when this refresh's tombstone is committed.
+	store.hook = func() { p.persistRotation(testKey, rot) }
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.Error(err, "the refused rotation leaves nothing usable")
+	c.Eq(0, store.reviveCount(), "a retrying save must not revive this refresh's own tombstone")
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.True(stored.Dead, "the row stays dead")
+	c.Eq("r0", stored.RefreshToken, "and keeps the token the rotation replaced")
+}
+
+// TestTokenSourceConcurrentRefreshNeverRevivesASiblingsTombstone is the other
+// reviver outside the guard's view: a second refresh of the same key meets the
+// tombstone as one that predates its own transaction. Only the drop stops it.
+func TestTokenSourceConcurrentRefreshNeverRevivesASiblingsTombstone(t *testing.T) {
+	c := assert.NewAborting(t)
+	store, p, _ := heldRotationAfterOwnDead(t, func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusBadRequest, `{"error":"invalid_grant"}`
+	})
+	var siblingErr error
+	store.hook = func() {
+		// refresh directly, not through the token source: DoChan would coalesce
+		// this into the flight already under test, and the point is a SECOND
+		// transaction on the same row.
+		_, siblingErr = p.refresh(testOwner, testProvider, true, chatgptauth.ReasonUnauthorizedRecovery)
+	}
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.Error(err, "the refused rotation leaves nothing usable")
+	c.Error(siblingErr, "a concurrent refresh must not be handed a usable token")
+	c.Eq(0, store.reviveCount(), "a concurrent refresh must not revive a sibling's own tombstone")
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.True(stored.Dead, "the row stays dead")
+}
+
+// TestTokenSourceRetryingSaveNeverRevivesTheRereadTombstone is the same rule on
+// the refresh_token_reused path, where the tombstone comes from the re-read's
+// transaction rather than the callback that decided it. The adopted refresh-a
+// was spent upstream by an answer the daemon never saw, so the re-read finds the
+// row still on r0 and tombstones it; a save still retrying the record wakes in
+// that window and must not revive the row with the spent token.
+func TestTokenSourceRetryingSaveNeverRevivesTheRereadTombstone(t *testing.T) {
+	c := assert.NewAborting(t)
+	store, p, rot := heldRotationAfterOwnDead(t, func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusBadRequest, `{"error":"refresh_token_reused"}`
+	})
+	store.hook = func() { p.persistRotation(testKey, rot) }
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.Error(err, "a spent rotation leaves nothing usable")
+	c.Eq(0, store.reviveCount(), "a retrying save must not revive the re-read's own tombstone with the spent token")
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.True(stored.Dead, "the row stays dead")
+	c.Eq("r0", stored.RefreshToken, "and keeps the token the re-read died on")
 }
 
 // TestProviderCredDeleteRevokesTheUnpersistedRotation pins logout's revoke of

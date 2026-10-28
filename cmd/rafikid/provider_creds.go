@@ -639,9 +639,12 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 	// the row for. The store calls the callback only for a row that is live at
 	// this transaction's first read, and it writes dead_at alone (leaving the
 	// token columns holding `sent`), so a dead row this refresh meets and did not
-	// tombstone itself predates the transaction. That distinction is the whole
-	// revival rule below: only a tombstone that was already there can be
-	// contradicted by the rotation in hand.
+	// tombstone itself predates the transaction.
+	//
+	// That is necessary but NOT sufficient: a retrying save and a concurrent
+	// refresh are separate transactions, so this call's own tombstone predates
+	// theirs and only dropping the record under the row lock stops them
+	// (dropRejectedRotation). The guard below covers this call alone.
 	var (
 		sent           string
 		recorded       uint64
@@ -724,6 +727,15 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 		case errors.Is(rerr, chatgptauth.ErrRefreshReused):
 			// The issuer says this token was already spent. It may have been
 			// another holder of this same row, so roll back and re-read once.
+			//
+			// Any tombstone this refresh call writes is accompanied by dropping
+			// the record it was holding, in the same transaction and before the
+			// tombstone commits. The re-read is the transaction that can tombstone
+			// this row, and it runs only after this rollback, so the drop lands
+			// strictly before that tombstone can exist: no later reviver (a
+			// retrying save, or a concurrent refresh) may resurrect the row with
+			// the token the issuer has just called spent.
+			p.dropRejectedRotation(key, adopted)
 			return cur, errRefreshReused
 		case errors.Is(rerr, chatgptauth.ErrRefreshRejected):
 			tombstonedHere = true
@@ -972,16 +984,18 @@ func (p *providerCreds) persistRotation(key credKey, rot pendingRotation) {
 		"owner", key.owner, "provider", key.provider, "tries", persistTries)
 }
 
-// dropRejectedRotation drops the hand-off this refresh adopted, because the
-// issuer refused that rotation's own token (invalid_grant) or would only honour
-// it for another account. Two things follow from dropping it HERE, inside the
-// callback and before the store commits the tombstone:
+// dropRejectedRotation drops the hand-off this refresh adopted because the
+// issuer refused that rotation's own token (invalid_grant), called it already
+// spent (refresh_token_reused), or would only honour it for another account.
+// Two things follow from dropping it HERE, inside the callback and before the
+// store commits the tombstone:
 //
 //   - it is never adopted again, not even by this daemon's next refresh; and
-//   - a save still retrying the same record cannot revive the dead row with it.
-//     That save is a separate transaction, so it sees the tombstone as another
-//     holder's and would otherwise revive the row with the token that was just
-//     refused.
+//   - no later reviver can resurrect the dead row with it. Both kinds are
+//     separate transactions, so each reads this call's tombstone as one that
+//     predates it: a save still retrying the same record, and a concurrent
+//     refresh of the same key. Without the drop either could write the refused
+//     or spent token back into a live row.
 //
 // A seq of 0 means no hand-off was adopted, so there is nothing to drop.
 func (p *providerCreds) dropRejectedRotation(key credKey, seq uint64) {
@@ -1007,11 +1021,12 @@ func (p *providerCreds) dropRejectedRotation(key credKey, seq uint64) {
 // row are all left alone.
 //
 // The caller owes the one judgment the store cannot make: the tombstone must
-// have existed BEFORE its own transaction began. A tombstone its own refresh
-// callback just wrote sits on the very token the rotation replaced, so the store
-// would read it as another holder's and write back a token the issuer has
-// refused. `refresh` refuses that revival outright, and drops the refused
-// rotation under the row lock so a retrying save has nothing to revive with.
+// have existed BEFORE its own transaction began. A tombstone this daemon's own
+// refresh wrote sits on the very token the rotation replaced, so the store would
+// read it as another holder's and write back a token the issuer has refused or
+// called spent. `refresh` refuses that revival outright in its own call, and
+// drops the record under the row lock so no later reviver (a retrying save or a
+// concurrent refresh) has anything to revive with.
 //
 // It reports the now-live credential, and whether it revived anything. The log
 // line names the owner and the provider, never a token.

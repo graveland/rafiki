@@ -2208,10 +2208,13 @@ token the row died on AND the tombstone already existed when that transaction
 began, the tombstone was another holder's `refresh_token_reused` rather than a
 refusal, so the rotation is written and `dead_at` cleared
 (`providercreds.Store.Revive`; see `ErrDead`'s doc). A tombstone the daemon's
-own refresh just wrote is never revived by it: when the issuer refuses the
-rotation it adopted (or answers for a different account), that rotation is
-dropped and the row stays dead, so the owner is asked to log in instead of
-every later turn failing on a refused token.
+own refresh writes never resurrects the row: when the issuer refuses the
+rotation it adopted, calls it already spent, or answers for a different account,
+that rotation is dropped under the row lock before the tombstone commits, and
+the row stays dead. Dropping it is what stops EVERY later reviver, because a
+retrying save and a concurrent refresh are separate transactions that would
+otherwise read that tombstone as one predating them; the owner is then asked to
+log in again instead of every later turn failing on a dead token.
 
 ### The Login service (`rafiki.v1.Login`: `BeginLogin`, `CompleteLogin`)
 
