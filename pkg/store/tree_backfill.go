@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"reflect"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
@@ -256,7 +255,7 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 // Canonical equality alone is not enough on real data: capture stored an
 // assistant reply as the SDK's marshalled message, which carries every
 // zero-valued union field, while the client replays the provider's own JSON for
-// the same reply. Both decode to the same blocks, and that decode is how capture
+// the same reply. Both are the same blocks, and the SDK decode is how capture
 // itself decided a replay was the same message (pkg/capture's
 // sameAnthropicContent) — the backfill must not disagree with the writer about
 // which rows are one message. Content the SDK cannot model falls back to the
@@ -266,33 +265,51 @@ func backfillSameMessage(node, copy convtree.Msg) bool {
 	if convtree.Equal(node, copy) {
 		return true
 	}
-	a, aok := backfillCanonicalBlocks(node.Content)
-	b, bok := backfillCanonicalBlocks(copy.Content)
-	return aok && bok && reflect.DeepEqual(a, b)
+	a, aok := backfillCanonicalForm(node)
+	b, bok := backfillCanonicalForm(copy)
+	return aok && bok && bytes.Equal(a, b)
 }
 
-// backfillCanonicalBlocks is content as the SDK decodes and re-encodes it: the
-// marshalled round-trip makes object key order irrelevant and fills every block
-// with the same field set on both sides.
-func backfillCanonicalBlocks(content []byte) ([]any, bool) {
-	var text string
-	blocks := []anthropic.ContentBlockUnion{}
-	if err := json.Unmarshal(content, &text); err == nil {
-		blocks = append(blocks, anthropic.ContentBlockUnion{Type: "text", Text: text})
-	} else if err := json.Unmarshal(content, &blocks); err != nil {
+// backfillCanonicalForm is one message as the SDK models it, in convtree's
+// canonical form: decode into the SDK's block union, re-encode, then apply
+// Canon — which drops cache_control (a transport hint the client moves between
+// requests) and nulls, and sorts object keys.
+//
+// The PARAM union, not the response union: a response block carries every field
+// of every variant (zero-valued when unused), which is what capture stored, but
+// the response union has no tool_result variant at all — decoding a tool_result
+// into it drops the tool output, so two different tool results would compare
+// equal. The param union keeps each variant's own fields and marshals only the
+// variant that is set, so a field a message does not use cannot distinguish it
+// from one that omits it, and a field it does use always does.
+func backfillCanonicalForm(m convtree.Msg) ([]byte, bool) {
+	blocks, ok := backfillSDKBlocks(m.Content)
+	if !ok {
 		return nil, false
 	}
 	raw, err := json.Marshal(blocks)
 	if err != nil {
 		return nil, false
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var out []any
-	if err := dec.Decode(&out); err != nil {
+	canon, err := convtree.Canon(m.Role, raw)
+	if err != nil {
 		return nil, false
 	}
-	return out, true
+	return canon, true
+}
+
+// backfillSDKBlocks decodes the two content forms Anthropic permits in every
+// message role. A string is shorthand for one text block.
+func backfillSDKBlocks(content []byte) ([]anthropic.ContentBlockParamUnion, bool) {
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		return []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: text}}}, true
+	}
+	var blocks []anthropic.ContentBlockParamUnion
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return nil, false
+	}
+	return blocks, true
 }
 
 // backfillPathTo rebuilds the chain from the root to nodes[idx] by walking

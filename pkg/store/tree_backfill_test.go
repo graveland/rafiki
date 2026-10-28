@@ -323,19 +323,48 @@ func TestBackfillProviderMessageID(t *testing.T) {
 // interimSnapshot is the committed fixture: a real claude session replayed
 // through the pre-tree capture code (pkg/capture's TestWriteInterimCaptureSnapshot).
 type interimSnapshot struct {
-	ResumeFromOrdinal *int `json:"resume_from_ordinal"`
-	Messages          []struct {
-		Ordinal     int             `json:"ordinal"`
-		Role        string          `json:"role"`
-		Content     json.RawMessage `json:"content"`
-		Kind        *string         `json:"kind"`
-		InputTokens *int64          `json:"input_tokens"`
-		StopReason  *string         `json:"stop_reason"`
-	} `json:"messages"`
-	Turns []struct {
-		ResponseOrdinal   int    `json:"response_ordinal"`
-		ResponseMessageID string `json:"response_message_id"`
-	} `json:"turns"`
+	ResumeFromOrdinal *int                  `json:"resume_from_ordinal"`
+	Messages          []interimSnapshotRow  `json:"messages"`
+	Turns             []interimSnapshotTurn `json:"turns"`
+}
+
+type interimSnapshotRow struct {
+	Ordinal     int             `json:"ordinal"`
+	Role        string          `json:"role"`
+	Content     json.RawMessage `json:"content"`
+	Kind        *string         `json:"kind"`
+	InputTokens *int64          `json:"input_tokens"`
+	StopReason  *string         `json:"stop_reason"`
+}
+
+type interimSnapshotTurn struct {
+	ResponseOrdinal   int    `json:"response_ordinal"`
+	ResponseMessageID string `json:"response_message_id"`
+}
+
+// loadInterimSnapshot reads the committed fixture: a real claude session as the
+// pre-tree capture path stored it.
+func loadInterimSnapshot(t *testing.T) interimSnapshot {
+	t.Helper()
+	c := assert.NewAborting(t)
+	raw, err := os.ReadFile(filepath.Join("..", "capture", "testdata", "interim-capture-rows.json"))
+	c.Require().NoError(err, "read the interim snapshot")
+	var snapshot interimSnapshot
+	c.Require().NoError(json.Unmarshal(raw, &snapshot), "decode the interim snapshot")
+	return snapshot
+}
+
+// message returns the snapshot's row at ordinal, which the tests name by the
+// fixture's own ordinals so a shape can be traced back to the recording.
+func (s interimSnapshot) message(t *testing.T, ordinal int) interimSnapshotRow {
+	t.Helper()
+	for _, m := range s.Messages {
+		if m.Ordinal == ordinal {
+			return m
+		}
+	}
+	t.Fatalf("the interim snapshot has no message at ordinal %d", ordinal)
+	return interimSnapshotRow{}
 }
 
 // TestBackfillSnapshotFixture is the backfill against real shapes: the rows
@@ -347,10 +376,7 @@ func TestBackfillSnapshotFixture(t *testing.T) {
 	ctx := context.Background()
 	pool := testPool(t)
 
-	raw, err := os.ReadFile(filepath.Join("..", "capture", "testdata", "interim-capture-rows.json"))
-	c.Require().NoError(err, "read the interim snapshot")
-	var snapshot interimSnapshot
-	c.Require().NoError(json.Unmarshal(raw, &snapshot), "decode the interim snapshot")
+	snapshot := loadInterimSnapshot(t)
 	c.Greater(0, len(snapshot.Messages), "the snapshot has messages")
 
 	// Stop one version short of the tree columns, write the legacy rows, then

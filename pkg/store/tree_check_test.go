@@ -3,6 +3,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"strconv"
@@ -165,4 +166,111 @@ func TestCheckTreeAcceptsABackfilledTree(t *testing.T) {
 	c.Require().NoError(err, "checkTree")
 	c.True(report.OK(), "report: %+v", report)
 	c.Eq(1, report.Conversations, "conversations checked")
+}
+
+// checkInsertSnapshotRow writes one row of the committed interim-capture
+// fixture at the given ordinal, with the tree columns the test needs. The
+// fixture's content is real: it is what capture stored for a recorded claude
+// session, which is the only way to test the representation differences that
+// only real data has.
+func checkInsertSnapshotRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string, ordinal, fixtureOrdinal int, kind *string, parentOrdinal *int, hash []byte, depth *int32) {
+	t.Helper()
+	row := loadInterimSnapshot(t).message(t, fixtureOrdinal)
+	checkInsertRow(t, ctx, pool, convID, ordinal, row.Role, string(row.Content), kind, parentOrdinal, hash, depth)
+}
+
+// checkTamperedContent rewrites one string inside a message's JSON, the way a
+// client that changed a message it had already sent would.
+func checkTamperedContent(t *testing.T, content []byte, from, to string) string {
+	t.Helper()
+	if !bytes.Contains(content, []byte(from)) {
+		t.Fatalf("fixture content does not contain %q", from)
+	}
+	return string(bytes.Replace(content, []byte(from), []byte(to), 1))
+}
+
+// TestCheckTreeLooseMatchForRepresentationOnlyCopy: a forked conversation whose
+// copies differ from the originals only in how the message was written down —
+// the SDK's zero-valued union fields capture stored, and a cache_control the
+// client moved — is not a mismatch. It is the looser identity the backfill used,
+// reported separately so a rehearsal can see how much of the data relies on it.
+//
+// Built from the fixture's own rows: 0 and 26 differ by cache_control alone, 1
+// and 27 are the same reply as capture stored it and as the client replayed it.
+func TestCheckTreeLooseMatchForRepresentationOnlyCopy(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	tail := KindCompactionTail
+	checkInsertSnapshotRow(t, ctx, pool, convID, 0, 0, nil, nil, checkFakeHash(convID, 0), checkDepth(0))
+	checkInsertSnapshotRow(t, ctx, pool, convID, 1, 1, nil, checkInt(0), checkFakeHash(convID, 1), checkDepth(1))
+	checkInsertSnapshotRow(t, ctx, pool, convID, 2, 26, &tail, nil, nil, nil)
+	checkInsertSnapshotRow(t, ctx, pool, convID, 3, 27, &tail, nil, nil, nil)
+	checkInsertSnapshotRow(t, ctx, pool, convID, 4, 52, nil, checkInt(1), checkFakeHash(convID, 4), checkDepth(2))
+	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(2))
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Empty(report.WorkingSetMismatch, "a representation-only copy is not a mismatch")
+	c.EqDeep([]string{convID}, report.WorkingSetLooseMatch, "the conversation matches only under the looser identity")
+	c.Eq(0, report.MissingHash, "copies need no path hash")
+	c.Eq(0, report.DuplicateRows, "copies are not duplicates")
+	c.True(report.OK(), "report: %+v", report)
+}
+
+// TestCheckTreeRejectsAGenuineCopyDifference: the looser identity is not
+// permissive. A copy whose tool output actually changed is a mismatch — the SDK
+// union keeps a tool_result's content, so this is where "same message" has to
+// mean it.
+func TestCheckTreeRejectsAGenuineCopyDifference(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	tail := KindCompactionTail
+	original := loadInterimSnapshot(t).message(t, 4)
+	checkInsertSnapshotRow(t, ctx, pool, convID, 0, 4, nil, nil, checkFakeHash(convID, 0), checkDepth(0))
+	checkInsertSnapshotRow(t, ctx, pool, convID, 1, 5, nil, checkInt(0), checkFakeHash(convID, 1), checkDepth(1))
+	checkInsertRow(t, ctx, pool, convID, 2, original.Role, checkTamperedContent(t, original.Content, "tool-ok", "tampered"), &tail, nil, nil, nil)
+	checkInsertSnapshotRow(t, ctx, pool, convID, 3, 5, &tail, nil, nil, nil)
+	checkInsertSnapshotRow(t, ctx, pool, convID, 4, 52, nil, checkInt(1), checkFakeHash(convID, 4), checkDepth(2))
+	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(2))
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.EqDeep([]string{convID}, report.WorkingSetMismatch, "a changed tool output is a mismatch")
+	c.Empty(report.WorkingSetLooseMatch, "it does not match under the looser identity either")
+	c.False(report.OK(), "a mismatch fails the check")
+}
+
+// TestCheckTreeCountsDuplicateRows: a compaction root's seed ignores
+// derived-from, so a second summary with identical content is the SAME node. The
+// row that re-states it holds no tree position by design and is counted as a
+// duplicate, not as a missing position.
+func TestCheckTreeCountsDuplicateRows(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	summary := KindCompactionSummary
+	clearKind := KindClear
+	checkInsertRow(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"a"}]`, nil, nil, checkFakeHash(convID, 0), checkDepth(0))
+	checkInsertRow(t, ctx, pool, convID, 1, "user", `[{"type":"text","text":"the summary"}]`, &summary, nil, checkFakeHash(convID, 1), checkDepth(0))
+	checkInsertRow(t, ctx, pool, convID, 2, "assistant", `[{"type":"text","text":"b"}]`, nil, checkInt(1), checkFakeHash(convID, 2), checkDepth(1))
+	checkInsertRow(t, ctx, pool, convID, 3, "user", `[{"type":"text","text":"the summary"}]`, &summary, nil, nil, nil)
+	checkInsertRow(t, ctx, pool, convID, 4, "user", `[{"type":"text","text":"fresh"}]`, &clearKind, nil, checkFakeHash(convID, 4), checkDepth(0))
+	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(4))
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.DuplicateRows, "the repeated summary is a duplicate")
+	c.Eq(0, report.MissingHash, "a duplicate is not a missing position")
+	c.True(report.OK(), "report: %+v", report)
 }
