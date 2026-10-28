@@ -121,3 +121,34 @@ Token-less work on the local unix socket is UNOWNED — the anonymous socket
 owns nothing — so it runs only on executors that were minted without a
 token-profile identity. See `docs/reference/control-protocol.md`'s
 "Executor administration" for the full rule.
+
+## Provider logins at rest (`RAFIKI_SECRETS_KEY`)
+
+A provider whose kind is `openai-responses-chatgpt` bills the user's own
+ChatGPT subscription, so its credential is a per-user login rather than an API
+key (see
+[proxy.md](proxy.md#provider-subscription-logins-rafiki-providers-login)). What
+that login returns is stored sealed, never usable in plaintext:
+
+- **What is stored**, one row per user AND provider in
+  `conversations.provider_credential`: the OAuth refresh token, the access token,
+  the access token's expiry, the id of the key that sealed them, the ChatGPT
+  account id, and that provider's cached model list with its etag. Only the two
+  tokens are sealed; the model list is not a secret.
+- **How**: AES-256-GCM under `RAFIKI_SECRETS_KEY` (base64 of exactly 32 bytes),
+  with the associated data `owner_user_id|provider|field`, so a row copied to
+  another owner, provider or field fails to open instead of yielding someone
+  else's credential. No RPC returns a token and no child process is given one: a
+  child gets a sender bound to its owner.
+- **Where the key lives**: the daemon's `service.env` (0600). `rafiki setup`
+  generates one on a machine that has none and prints the path it wrote, so keep
+  a copy of that file somewhere safe.
+
+**Never rotate the key by replacing the value.** A new key opens nothing that was
+sealed under the old one, so replacing it logs every user out of the ChatGPT
+providers; rotating on purpose means re-registering every login afterwards.
+
+A daemon that starts without the key (or with a value that is not base64 of 32
+bytes) does not refuse to start: it runs, reports those providers UNAVAILABLE
+with the reason, and refuses a login rather than storing a token unsealed. There
+is no plaintext fallback and no daemon-wide credential.

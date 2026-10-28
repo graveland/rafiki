@@ -21,6 +21,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/secretbox"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -60,7 +61,8 @@ func newSetupCmd() *cobra.Command {
 		Long: `Set up rafiki on this machine: prerequisites, a database, LLM providers (providers.toml), the daemon service, your identity, and a local executor.
 
 It is safe to re-run. Every answer is saved to ` + installstate.FileName + ` and
-every secret (the database DSN and your API keys) to ` + filepath.Base(paths.ServiceEnvFile()) + ` (0600),
+every secret (the database DSN, your API keys, and the key that encrypts
+provider logins) to ` + filepath.Base(paths.ServiceEnvFile()) + ` (0600),
 so a re-run resumes from where it got to and only asks for what changed.
 
 With --non-interactive no question is asked: every answer comes from a flag, a
@@ -163,6 +165,11 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 		return err
 	}
 	track(setRes)
+	keyRes, err := ensureSecretsKey(out)
+	if err != nil {
+		return err
+	}
+	track(keyRes)
 	if err := saveStep(st, stepDatabase); err != nil {
 		return err
 	}
@@ -325,6 +332,36 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 		fmt.Fprintln(out, "  (or: rafiki create --kind fundi --model <model>)")
 	}
 	return nil
+}
+
+// ensureSecretsKey generates RAFIKI_SECRETS_KEY into service.env when the file
+// does not already carry one, and reports the write so an installed daemon gets
+// restarted onto it.
+//
+// It NEVER replaces an existing value, and never rotates: the key is the only
+// way to open a stored provider login, so a new key does not re-encrypt them,
+// it orphans them, and every user logs in to the ChatGPT-subscription providers
+// again. Only service.env is consulted (not this process's environment) because
+// that is the file the daemon reads.
+func ensureSecretsKey(out io.Writer) (paths.SetResult, error) {
+	path := paths.ServiceEnvFile()
+	cur, err := readEnvFile(path)
+	if err != nil {
+		return paths.SetResult{}, err
+	}
+	if cur[secretbox.EnvKey] != "" {
+		return paths.SetResult{}, nil
+	}
+	key, err := secretbox.GenerateKey()
+	if err != nil {
+		return paths.SetResult{}, err
+	}
+	res, err := paths.SetEnvFile(path, map[string]string{secretbox.EnvKey: key}, "rafiki setup")
+	if err != nil {
+		return paths.SetResult{}, err
+	}
+	fmt.Fprintf(out, "    generated %s in %s; back it up: losing it logs every user out of ChatGPT providers\n", secretbox.EnvKey, path)
+	return res, nil
 }
 
 // repointExecutorService moves an installed executor unit onto this binary when

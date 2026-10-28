@@ -354,3 +354,92 @@ func TestProvidersStepOwnedKeepsSummariesModel(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupProvidersOffersResponsesKinds pins the two Responses entries the
+// providers step now offers: what gets written for each, that the api-key kind's
+// key goes to service.env rather than providers.toml, and that a re-run over a
+// file setup already wrote keeps both (they are builtin menu names, so a re-run
+// must not re-offer them as custom OpenAI-compatible endpoints).
+func TestSetupProvidersOffersResponsesKinds(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(containsString(providerMenu, responsesProviderName), "the menu must offer %q: %v", responsesProviderName, providerMenu)
+	c.True(containsString(providerMenu, chatgptProviderName), "the menu must offer %q: %v", chatgptProviderName, providerMenu)
+	for _, name := range []string{responsesProviderName, chatgptProviderName} {
+		c.True(isBuiltinProvider(name), "%q must be a builtin menu name, else a re-run treats it as a custom endpoint", name)
+	}
+
+	t.Run("api-key kind from a saved key", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newProvidersFixture(t)
+
+		// A key in service.env preselects the provider non-interactively, and an
+		// unchanged key is never re-validated (no network on a re-run).
+		res, err := f.run(map[string]string{openaiAPIKeyEnv: "sk-openai"})
+		c.NoError(err, "providers step")
+		c.EqDeep([]string{responsesProviderName}, res.Providers, "configured providers")
+		c.Eq(responsesProviderName, res.Default, "the only provider is the default")
+
+		set := f.parse()
+		p, ok := set.Providers[responsesProviderName]
+		c.True(ok, "providers.toml must carry %q:\n%s", responsesProviderName, f.fileBytes())
+		c.Eq(providers.KindOpenAIResponses, p.Kind, "kind")
+		c.Eq(responsesDefaultBaseURL, p.BaseURL, "base_url default")
+		c.Eq(openaiAPIKeyEnv, p.APIKeyEnv, "api_key_env default")
+		c.NotStrContains(string(f.fileBytes()), "sk-openai", "the key must never reach providers.toml:\n")
+		c.StrContains(f.serviceEnv(), openaiAPIKeyEnv, "the key must reach service.env:\n")
+		c.NotStrContains(f.out.String(), "rafiki providers login", "only the subscription kind needs a login:\n")
+	})
+
+	t.Run("subscription kind survives a re-run", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newProvidersFixture(t)
+		owned := &providers.Set{
+			DefaultProvider: responsesProviderName,
+			Providers: map[string]providers.Provider{
+				responsesProviderName: {Kind: providers.KindOpenAIResponses, BaseURL: "https://api.openai.com/v1", APIKeyEnv: openaiAPIKeyEnv},
+				chatgptProviderName:   {Kind: providers.KindOpenAIResponsesChatGPT},
+			},
+		}
+		b, err := renderProviders(owned)
+		c.NoError(err, "render owned file")
+		c.NoError(os.WriteFile(f.path, b, 0o644), "write owned file")
+		f.st.Providers.FileSHA256 = sha256Hex(b)
+		// The key is already in service.env, so a re-run has nothing to change.
+		_, err = paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{openaiAPIKeyEnv: "sk-openai"}, "test fixture")
+		c.NoError(err, "seed service.env")
+
+		res, err := f.run(map[string]string{openaiAPIKeyEnv: "sk-openai"})
+		c.NoError(err, "providers step")
+		c.False(res.Changed, "an unchanged re-run must report Changed=false")
+		c.Eq(string(b), string(f.fileBytes()), "the owned file must survive byte-identically")
+
+		set := f.parse()
+		c.Eq(providers.KindOpenAIResponsesChatGPT, set.Providers[chatgptProviderName].Kind, "the subscription kind must be kept")
+		c.Eq("", set.Providers[chatgptProviderName].APIKeyEnv, "the subscription kind carries no api_key_env")
+		c.Eq("", set.Providers[chatgptProviderName].BaseURL, "the subscription kind carries no base_url")
+		c.StrContains(f.out.String(), "each user runs: rafiki providers login "+chatgptProviderName,
+			"the subscription kind must say how to get a credential:\n")
+	})
+}
+
+// TestSetupValidateResponsesKey pins the api-key kind's live check: the endpoint
+// setup is about to write answers GET /models, and only a 200 validates.
+func TestSetupValidateResponsesKey(t *testing.T) {
+	c := assert.NewAborting(t)
+	var path, auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth = r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c.NoError(validateResponsesKey(context.Background(), srv.URL+"/", "sk-openai"), "a 200 must validate")
+	c.Eq("/models", path, "the check is GET <base_url>/models")
+	c.Eq("Bearer sk-openai", auth, "the key rides a bearer header")
+
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(fail.Close)
+	c.Error(validateResponsesKey(context.Background(), fail.URL, "sk-bad"), "a non-200 must not validate")
+}

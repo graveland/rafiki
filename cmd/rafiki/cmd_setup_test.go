@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/installstate"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/secretbox"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -31,6 +33,11 @@ import (
 // constSetupDSN is the DSN the fixtures write to service.env. Its password must
 // never reach argv or stdout.
 const constSetupDSN = "postgres://postgres:secretpw@127.0.0.1:5432/rafiki?sslmode=disable"
+
+// constSetupSecretsKey is what a fully configured machine's service.env holds
+// for RAFIKI_SECRETS_KEY: base64 of 32 bytes, the shape setup generates. No test
+// seals anything with it.
+const constSetupSecretsKey = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
 
 // ── the fake Control server ──────────────────────────────────────────────────
 
@@ -238,6 +245,7 @@ func newSetupFixture(t *testing.T) *setupFixture {
 	f.seedServiceEnv(map[string]string{
 		"RAFIKI_DB":           constSetupDSN,
 		"RAFIKI_PROXY_LISTEN": setupProxyListenLoopback,
+		secretbox.EnvKey:      constSetupSecretsKey,
 	})
 	f.seedProfile("default", "sk-live")
 
@@ -671,4 +679,46 @@ func TestSetupLeavesExecutorServiceOnThisBinaryAlone(t *testing.T) {
 	c.NoError(f.runSetup(), "setup")
 
 	c.Eq("", f.execFB.repointed)
+}
+
+// TestSetupGeneratesSecretsKey: a service.env with no RAFIKI_SECRETS_KEY gets
+// one, in the shape pkg/secretbox.FromEnv accepts, and the operator is told to
+// back it up. A generated key is a service.env change, so an installed daemon is
+// restarted onto it.
+func TestSetupGeneratesSecretsKey(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.seedServiceEnv(map[string]string{
+		"RAFIKI_DB":           constSetupDSN,
+		"RAFIKI_PROXY_LISTEN": setupProxyListenLoopback,
+	})
+
+	c.NoError(f.runSetup(), "setup with no secrets key")
+
+	vars, err := readEnvFile(paths.ServiceEnvFile())
+	c.NoError(err, "readEnvFile")
+	raw := vars[secretbox.EnvKey]
+	c.NotEq("", raw, "setup must generate a key:\n%s", f.serviceEnvBytes())
+	key, derr := base64.StdEncoding.DecodeString(raw)
+	c.NoError(derr, "the generated key must be base64 of 32 bytes")
+	c.Len(key, 32, "the generated key must be 32 bytes")
+
+	c.StrContains(f.out.String(), "generated RAFIKI_SECRETS_KEY in", "the operator must be told a key was generated:\n")
+	c.StrContains(f.out.String(), "back it up: losing it logs every user out of ChatGPT providers", "the backup warning is missing:\n")
+	c.True(f.fb.restarted, "a generated key must reach an installed daemon")
+}
+
+// TestSetupKeepsExistingSecretsKey: an existing key is never replaced. A new key
+// cannot open a single stored login, so replacing it would log every user out of
+// the ChatGPT-subscription providers.
+func TestSetupKeepsExistingSecretsKey(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t) // the baseline service.env already carries one
+
+	c.NoError(f.runSetup(), "setup")
+
+	vars, err := readEnvFile(paths.ServiceEnvFile())
+	c.NoError(err, "readEnvFile")
+	c.Eq(constSetupSecretsKey, vars[secretbox.EnvKey], "an existing key must be left alone")
+	c.NotStrContains(f.out.String(), "generated RAFIKI_SECRETS_KEY", "an existing key must not be reported as generated:\n")
 }

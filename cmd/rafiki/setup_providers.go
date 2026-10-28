@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -31,16 +32,36 @@ type providersResult struct {
 }
 
 // providerMenu is the multi-select order. "other" is a single option standing
-// for every custom OpenAI-compatible endpoint.
-var providerMenu = []string{"anthropic", "openrouter", "ollama", "other"}
+// for every custom OpenAI-compatible endpoint. The two Responses entries are
+// the kinds under a fixed provider name each: "openai" for the api-key dialect
+// (so model ids read openai/<id>, the spelling the OpenRouter catalog prices)
+// and "chatgpt" for the subscription dialect (the name `rafiki providers
+// login` takes).
+var providerMenu = []string{"anthropic", "openrouter", responsesProviderName, chatgptProviderName, "ollama", "other"}
+
+const (
+	// responsesProviderName and chatgptProviderName are the providers.toml
+	// names the two Responses kinds are written under.
+	responsesProviderName = "openai"
+	chatgptProviderName   = "chatgpt"
+	// openaiAPIKeyEnv is the default api_key_env of the api-key Responses kind.
+	openaiAPIKeyEnv = "OPENAI_API_KEY"
+	// responsesDefaultBaseURL is the api-key Responses kind's default endpoint,
+	// the one pkg/llm's sender assumes for an empty base_url too.
+	responsesDefaultBaseURL = "https://api.openai.com/v1"
+)
+
+// envNameRE is the shape of an api_key_env value: setup writes the key into
+// service.env under exactly this name, so it must be a variable name.
+var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // customProviderNameRE mirrors providers' name rule, which is unexported there.
 var customProviderNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
-// isBuiltinProvider reports whether name is one of the three menu providers.
+// isBuiltinProvider reports whether name is one of the menu providers.
 func isBuiltinProvider(name string) bool {
 	switch name {
-	case "anthropic", "openrouter", "ollama":
+	case "anthropic", "openrouter", "ollama", responsesProviderName, chatgptProviderName:
 		return true
 	}
 	return false
@@ -136,6 +157,16 @@ func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, s
 			vars[openrouterAPIKeyEnv] = key
 			set.Providers["openrouter"] = providers.Provider{Kind: providers.KindAnthropicOpenRouter, APIKeyEnv: openrouterAPIKeyEnv}
 		}
+	}
+	if containsString(chosen, responsesProviderName) {
+		if err := configureResponsesProvider(ctx, w, out, providerAt(base, responsesProviderName), set, vars, savedEnv); err != nil {
+			return res, err
+		}
+	}
+	if containsString(chosen, chatgptProviderName) {
+		// No prompts: the kind owns its endpoint and its credential, which is
+		// each user's own ChatGPT login. Setup can only say how to get one.
+		set.Providers[chatgptProviderName] = providers.Provider{Kind: providers.KindOpenAIResponsesChatGPT}
 	}
 	if containsString(chosen, "ollama") {
 		ok, model, err := configureOllama(ctx, w, r, out, st)
@@ -234,6 +265,11 @@ func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, s
 	res.Providers = ordered
 	res.Default = def
 	res.OllamaModel = ollamaModel
+	if _, ok := set.Providers[chatgptProviderName]; ok {
+		// Every user bills their own subscription, so one login per user is
+		// the remaining step and it needs a real user credential.
+		fmt.Fprintf(out, "    %s: each user runs: rafiki providers login %s\n", chatgptProviderName, chatgptProviderName)
+	}
 	return res, nil
 }
 
@@ -250,10 +286,10 @@ func writeEnvVars(vars map[string]string) (bool, error) {
 }
 
 // orderedProviderNames returns set's names in menu order (anthropic, openrouter,
-// ollama) followed by the custom names sorted.
+// openai, chatgpt, ollama) followed by the custom names sorted.
 func orderedProviderNames(set *providers.Set) []string {
 	ordered := make([]string, 0, len(set.Providers))
-	for _, n := range []string{"anthropic", "openrouter", "ollama"} {
+	for _, n := range []string{"anthropic", "openrouter", responsesProviderName, chatgptProviderName, "ollama"} {
 		if _, ok := set.Providers[n]; ok {
 			ordered = append(ordered, n)
 		}
@@ -275,7 +311,7 @@ func menuSaved(base *providers.Set) []string {
 		return nil
 	}
 	var out []string
-	for _, n := range []string{"anthropic", "openrouter", "ollama"} {
+	for _, n := range []string{"anthropic", "openrouter", responsesProviderName, chatgptProviderName, "ollama"} {
 		if _, ok := base.Providers[n]; ok {
 			out = append(out, n)
 		}
@@ -298,6 +334,9 @@ func menuDetected(w *wizard, st *installstate.State, savedEnv map[string]string)
 	}
 	if w.cmd.Flags().Changed(keyOpenRouterFlag) || savedEnv[openrouterAPIKeyEnv] != "" {
 		detected = append(detected, "openrouter")
+	}
+	if savedEnv[openaiAPIKeyEnv] != "" {
+		detected = append(detected, responsesProviderName)
 	}
 	if containsString(st.Optional, "ollama") {
 		detected = append(detected, "ollama")
@@ -501,6 +540,151 @@ func ollamaInstaller() func(goos string, hasBrew bool) [][]string {
 	return nil
 }
 
+// providerAt returns base's entry for name, or nil when setup does not own a
+// file for that name (so the questions start from the defaults).
+func providerAt(base *providers.Set, name string) *providers.Provider {
+	if base == nil {
+		return nil
+	}
+	p, ok := base.Providers[name]
+	if !ok {
+		return nil
+	}
+	return &p
+}
+
+// configureResponsesProvider asks for the api-key Responses provider (base URL,
+// key variable, key) and stores it with the key in service.env under that
+// variable. The key NEVER reaches providers.toml: api_key_env names where the
+// daemon finds it, and setup is what puts it there.
+func configureResponsesProvider(ctx context.Context, w *wizard, out io.Writer, saved *providers.Provider, set *providers.Set, vars, savedEnv map[string]string) error {
+	savedBase, savedEnvName := responsesDefaultBaseURL, openaiAPIKeyEnv
+	if saved != nil {
+		if saved.BaseURL != "" {
+			savedBase = saved.BaseURL
+		}
+		if saved.APIKeyEnv != "" {
+			savedEnvName = saved.APIKeyEnv
+		}
+	}
+
+	baseURL, err := askResponsesBaseURL(w, out, savedBase)
+	if err != nil {
+		return err
+	}
+	envName, err := askResponsesKeyEnv(w, out, savedEnvName)
+	if err != nil {
+		return err
+	}
+	key, err := resolveResponsesKey(ctx, w, out, baseURL, envName, savedEnv)
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		fmt.Fprintf(out, "    %s: no key; not configured\n", responsesProviderName)
+		return nil
+	}
+	vars[envName] = key
+	set.Providers[responsesProviderName] = providers.Provider{
+		Kind:      providers.KindOpenAIResponses,
+		BaseURL:   baseURL,
+		APIKeyEnv: envName,
+	}
+	return nil
+}
+
+// askResponsesBaseURL asks for the Responses endpoint, re-asking interactively
+// until it is an absolute http(s) URL.
+func askResponsesBaseURL(w *wizard, out io.Writer, saved string) (string, error) {
+	for {
+		raw, err := w.askString("Responses base URL (…/v1)", "", saved, responsesDefaultBaseURL, true)
+		if err != nil {
+			return "", err
+		}
+		if validBaseURL(raw) {
+			return raw, nil
+		}
+		if !w.interactive {
+			return "", fmt.Errorf("invalid base URL %q", raw)
+		}
+		fmt.Fprintf(out, "    %q is not an absolute http(s) URL\n", raw)
+		saved = ""
+	}
+}
+
+// askResponsesKeyEnv asks for the api_key_env name the provider reads its key
+// from, re-asking interactively until it is a variable name.
+func askResponsesKeyEnv(w *wizard, out io.Writer, saved string) (string, error) {
+	for {
+		name, err := w.askString("API key variable name", "", saved, openaiAPIKeyEnv, true)
+		if err != nil {
+			return "", err
+		}
+		if envNameRE.MatchString(name) {
+			return name, nil
+		}
+		if !w.interactive {
+			return "", fmt.Errorf("invalid API key variable name %q", name)
+		}
+		fmt.Fprintf(out, "    %q is not a variable name (want [A-Za-z_][A-Za-z0-9_]*)\n", name)
+		saved = ""
+	}
+}
+
+// resolveResponsesKey asks for the api-key Responses provider's key and, when a
+// NEW or CHANGED non-empty answer is given, validates it against the endpoint
+// setup is about to write (GET <base_url>/models). The unchanged-key and empty
+// rules are resolveValidKey's: setup must stay safe to re-run offline, and no
+// key means the provider is not configured.
+func resolveResponsesKey(ctx context.Context, w *wizard, out io.Writer, baseURL, envName string, savedEnv map[string]string) (string, error) {
+	savedValue := savedEnv[envName]
+	saved := savedValue
+	for {
+		key, err := w.askSecret("OpenAI API key (optional)", "", saved, "", false)
+		if err != nil {
+			return "", err
+		}
+		if key == "" {
+			return "", nil
+		}
+		if savedValue != "" && key == savedValue {
+			return key, nil
+		}
+		if verr := validateResponsesKey(ctx, baseURL, key); verr != nil {
+			if !w.interactive {
+				return "", fmt.Errorf("%s API key is invalid: %w", envName, verr)
+			}
+			fmt.Fprintf(out, "    %s was rejected (%v); try again\n", envName, verr)
+			saved = ""
+			continue
+		}
+		return key, nil
+	}
+}
+
+// validateResponsesKey makes one live check against the endpoint: a 200 from
+// GET <base_url>/models with the key as a bearer means it works. Like every
+// other writer here it never sets Accept-Encoding by hand, which would disable
+// Go's transparent gzip handling.
+func validateResponsesKey(ctx context.Context, baseURL, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // configureCustomProviders copies a base file's custom endpoints and — when
 // interactive — offers to keep each and to add more. It writes providers into
 // set and any key values into vars.
@@ -636,16 +820,20 @@ func askProviderBaseURL(w *wizard, out io.Writer) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		u, err := url.Parse(raw)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			fmt.Fprintf(out, "    %q is not an absolute http(s) URL\n", raw)
-			if !w.interactive {
-				return "", fmt.Errorf("invalid base URL %q", raw)
-			}
-			continue
+		if validBaseURL(raw) {
+			return raw, nil
 		}
-		return raw, nil
+		if !w.interactive {
+			return "", fmt.Errorf("invalid base URL %q", raw)
+		}
+		fmt.Fprintf(out, "    %q is not an absolute http(s) URL\n", raw)
 	}
+}
+
+// validBaseURL reports whether raw is an absolute http(s) URL with a host.
+func validBaseURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // validateEndpointWithRetry checks a custom endpoint with GET /models. On

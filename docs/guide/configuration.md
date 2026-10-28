@@ -121,6 +121,66 @@ never refuses its spawn — the load-time refusals above are a property of the
 file, not of this child, so a malformed entry refuses every child that reads it
 whatever their allowlist says.
 
+## OpenAI Responses providers
+
+Besides `anthropic`, `anthropic-openrouter` and the generic `openai` kind (Chat
+Completions), `providers.toml` takes two OpenAI **Responses API** kinds:
+
+```toml
+# The Responses API with an API key. base_url defaults to
+# https://api.openai.com/v1 and may point at any Responses-compatible server.
+[providers.openai]
+kind        = "openai-responses"
+base_url    = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+# A ChatGPT subscription. No credential, no base_url, no via_executor: the
+# endpoint is fixed and the credential is each owner's own stored login.
+[providers.chatgpt]
+kind = "openai-responses-chatgpt"
+```
+
+The names are yours; these two are what `rafiki setup` writes when its
+providers step offers them. Model ids stay provider-qualified, so the pair above
+serves `openai/gpt-5-codex` and `chatgpt/gpt-5-codex`.
+
+**Billing is per owner, and there is no fallback.** A turn on an
+`openai-responses-chatgpt` provider bills the OWNER's ChatGPT subscription,
+which is why the credential is a per-user login
+(`rafiki providers login <name>`, see
+[proxy.md](proxy.md#provider-subscription-logins-rafiki-providers-login)) and
+never a key in `providers.toml`. Three consequences:
+
+- another user's login is never usable by you;
+- a child with NO owner is refused at spawn with an error naming the provider,
+  because a subscription turn always bills a person. Daemon-internal LLM jobs
+  (recall summaries, `rafiki conversations review`, `rafikid agent analyze`) are
+  ownerless for this purpose, so point their model at a provider with a key;
+- a user with no login for that provider is refused at spawn too, with
+  `no ChatGPT login for <name>; run: rafiki providers login <name>`.
+
+**Models, context windows and reasoning come from the owner's `/models`.** For a
+ChatGPT-kind provider the list is fetched per owner (cached with its etag), so
+`rafiki models` shows a user their own subscription's models: only entries whose
+`visibility` is `list` (the field also takes `hide` and `none`; `supported_in_api`
+describes API-key access and is never the filter). The same cache carries each
+model's context window and whether it accepts `reasoning.summary` and
+`text.verbosity`, and those are applied per turn rather than guessed. The client
+version rafiki sends is `RAFIKI_CHATGPT_CLIENT_VERSION` (see
+[`.env.example`](../../.env.example)).
+
+**Price comes from the OpenRouter catalog**, under `openai/<model>` (so
+`chatgpt/gpt-5-codex` prices as `openai/gpt-5-codex`), because the ChatGPT model
+list carries no prices. A model the catalog does not price records cost 0 with
+one WARN naming it, so a budget cannot stop such a child on cost.
+
+**The ChatGPT endpoint is undocumented.** `https://chatgpt.com/backend-api/codex`
+is not a published API: rafiki speaks the dialect codex 0.165.0 does, and the
+provider can change it without notice. `openai-responses` against
+`https://api.openai.com/v1` is the kind with a contract. The stored logins are
+sealed with the key in
+[authentication.md](authentication.md#provider-logins-at-rest-rafiki_secrets_key).
+
 ## Environment
 
 rafiki's variables are `RAFIKI_`-prefixed; `pkg/paths.Get` reads exactly the
