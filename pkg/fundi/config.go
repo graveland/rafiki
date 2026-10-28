@@ -65,6 +65,11 @@ type Config struct {
 	// disables it) — see ThinkingBudgetFor.
 	ThinkingBudget int64
 
+	// ContextWindow, when > 0, is the model's context window as the serving
+	// provider reports it (the owner's ChatGPT /models entry). It outranks
+	// the catalog. 0 = ask the catalog.
+	ContextWindow int
+
 	// MaxOutputTokens is the per-turn output cap sent as max_tokens to the
 	// upstream API. Zero means use the default (16384). This is NOT a hard
 	// limit the agent enforces — the upstream enforces it — and hitting it
@@ -328,11 +333,13 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		// Proactive compaction: when the child's context nears the model's
 		// window, summarise older history rather than let the request overflow.
 		// modelID is the provider-local id — the same value prefillContextWindow
-		// documents it needs, since the catalog indexes OpenRouter-native ids.
+		// documents it needs, since the catalog indexes OpenRouter-native ids
+		// and both lookups map it through catalogModelID for p.Kind (a
+		// Responses-kind provider's bare "gpt-…" finds "openai/gpt-…").
 		// An unknown window resolves to 0, which the policy reads as "no
 		// proactive trigger" (overflow still handled reactively).
 		llm.WithCompaction(llm.CompactionPolicy{
-			ContextWindowFn: func() int { return compactionContextWindow(client, modelID) },
+			ContextWindowFn: func() int { return compactionContextWindow(client, p.Kind, modelID, c.ContextWindow) },
 		}),
 	}
 	if c.Ref != "" {
@@ -348,6 +355,8 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		Tools:          c.Tools,
 		Provider:       p.Name,
 		ModelID:        modelID,
+		Kind:           p.Kind,
+		ContextWindow:  c.ContextWindow,
 		Name:           c.Name,
 		BaseCtx:        ctx,
 		AutoResume:     c.AutoResume,

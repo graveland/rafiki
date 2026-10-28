@@ -39,6 +39,10 @@ type RuntimeOptions struct {
 	MaxOutputTokens      int // 0 = default (4096); per-turn output cap sent to upstream
 	SystemPromptOverride string
 	AppendSystemPrompt   string
+	// ContextWindow, when > 0, is the model's context window as the serving
+	// provider reports it (the owner's ChatGPT /models entry). It outranks
+	// the catalog. 0 = ask the catalog.
+	ContextWindow int
 	// Prefill is the spawn's pre-fill (see protocol.PrefillRead), run by the
 	// engine at worker start on a fresh conversation. Empty means none.
 	Prefill []protocol.PrefillRead
@@ -822,6 +826,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		MaxOutputTokens:      opts.MaxOutputTokens,
 		SystemPromptOverride: opts.SystemPromptOverride,
 		AppendSystemPrompt:   opts.AppendSystemPrompt,
+		ContextWindow:        opts.ContextWindow,
 		Prefill:              opts.Prefill,
 		PrefillTools:         prefillTools,
 		ContextFiles:         contextFiles,

@@ -18,6 +18,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/slashcmd"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -72,6 +73,17 @@ type EngineConfig struct {
 	Provider string
 	ModelID  string
 	Name     string
+	// ContextWindow, when > 0, is the model's context window as the serving
+	// provider reports it (the owner's ChatGPT /models entry). It outranks
+	// the catalog. 0 = ask the catalog.
+	ContextWindow int
+	// Kind is the kind of the provider ModelID is served by
+	// (providers.Set.Split's Provider.Kind). It decides how a bare,
+	// provider-local id maps onto the catalog: a Responses-kind provider
+	// serves OpenAI models under ids the OpenRouter catalog prefixes with
+	// "openai/". The zero Kind changes nothing, so an EngineConfig built
+	// without it keeps the pre-Responses catalog behavior.
+	Kind providers.Kind
 	// BaseCtx is the engine-lifetime root every turn's cancellable context
 	// derives from — the seam for wiring process shutdown (a
 	// signal.NotifyContext parent) into in-flight turns. Nil defaults to
@@ -203,6 +215,12 @@ type Engine struct {
 	// halted, when non-nil, is consulted by stopReason BEFORE the cost
 	// guardrail. See EngineConfig.Halted.
 	halted func() (bool, string)
+	// kind is the kind of the provider state.ModelID is served by. See
+	// EngineConfig.Kind.
+	kind providers.Kind
+	// contextWindow, when > 0, outranks the catalog's figure for the model's
+	// context window. See EngineConfig.ContextWindow.
+	contextWindow int
 
 	mu       sync.Mutex
 	pending  []queued           // FIFO of queued prompts awaiting execution
@@ -305,7 +323,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		client:         cfg.Client,
 		tools:          tools,
 		fe:             fe,
-		em:             NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
+		em:             NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client, cfg.Kind)),
 		baseCtx:        baseCtx,
 		autoResume:     cfg.AutoResume,
 		prefill:        cfg.Prefill,
@@ -316,6 +334,8 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		maxCost:        cfg.MaxCost,
 		currentMaxCost: cfg.CurrentMaxCost,
 		halted:         cfg.Halted,
+		kind:           cfg.Kind,
+		contextWindow:  cfg.ContextWindow,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -379,35 +399,83 @@ func catalogOf(c *llm.Client) *routing.ModelCatalog {
 	return c.Catalog()
 }
 
+// catalogModelID maps a provider-local model id to the id the OpenRouter
+// catalog indexes. Responses-kind providers serve OpenAI models under bare
+// ids; everything else is already catalog-shaped.
+func catalogModelID(kind providers.Kind, modelID string) string {
+	if !isResponsesKind(kind) {
+		return modelID
+	}
+	// A slashed id is already qualified (an operator's full catalog id), so
+	// prefixing it again would guarantee a miss.
+	if strings.Contains(modelID, "/") {
+		return modelID
+	}
+	return "openai/" + modelID
+}
+
+// isResponsesKind reports whether kind is one of the OpenAI Responses kinds:
+// the pair whose provider-local ids are bare OpenAI model names.
+func isResponsesKind(kind providers.Kind) bool {
+	return kind == providers.KindOpenAIResponses || kind == providers.KindOpenAIResponsesChatGPT
+}
+
 // compactionContextWindow returns the context window compaction is measured
-// against: the catalog's figure for the child's model when it knows it, else 0.
+// against: the override when the serving provider reported one, else the
+// catalog's figure for the child's model when it knows it, else 0.
 //
 // 0 is deliberate and is NOT prefillFallbackContext. The policy reads a
 // non-positive window as "unknown", which never triggers proactive compaction —
 // a guessed window would summarise a healthy conversation, and an overflow the
 // model genuinely cannot hold is handled reactively by the overflow net. modelID
 // must be the provider-local id (EngineConfig.ModelID), the same value
-// prefillContextWindow needs: the catalog indexes OpenRouter-native ids, so a
-// provider-qualified id never matches.
-func compactionContextWindow(client *llm.Client, modelID string) int {
+// prefillContextWindow needs: the catalog indexes OpenRouter-native ids, so the
+// id goes through catalogModelID (which is what lets a Responses-kind provider's
+// bare "gpt-…" find its "openai/gpt-…" entry).
+func compactionContextWindow(client *llm.Client, kind providers.Kind, modelID string, override int) int {
+	if override > 0 {
+		return override
+	}
 	if cat := catalogOf(client); cat != nil {
-		if ctxLen, _, ok := cat.ContextWindow(modelID); ok {
+		if ctxLen, _, ok := cat.ContextWindow(catalogModelID(kind, modelID)); ok {
 			return ctxLen
 		}
 	}
 	return 0
 }
 
-// pricerFor derives the turn pricer from the client's model catalog.
+// pricerFor derives the turn pricer from the client's model catalog, mapping
+// the provider-local model id through catalogModelID first.
+//
 // llm.NewClient always defaults a catalog in when the caller supplies none, so
 // this is non-nil in practice; it stays nil-tolerant because tests construct
 // Engines with hand-built Configs.
-func pricerFor(c *llm.Client) Pricer {
+//
+// An unpriced Responses-kind model is warned about once per model per engine: a
+// ChatGPT-only model may be absent from the catalog entirely, and a turn priced
+// at 0 with no word said looks like a free model rather than a lookup that
+// missed. Other kinds stay silent: their ids were catalog-shaped all along, so
+// a miss there is the pre-existing cold-catalog case, not news.
+func pricerFor(c *llm.Client, kind providers.Kind) Pricer {
 	cat := catalogOf(c)
 	if cat == nil {
 		return nil
 	}
-	return cat.Pricing
+	var warned sync.Map
+	return func(model string) (routing.ModelPricing, bool) {
+		id := catalogModelID(kind, model)
+		price, ok := cat.Pricing(id)
+		if ok {
+			return price, true
+		}
+		if isResponsesKind(kind) {
+			if _, seen := warned.LoadOrStore(model, struct{}{}); !seen {
+				slog.Warn("agent: no list price for model; turn cost recorded as 0",
+					"model", model, "catalog_id", id)
+			}
+		}
+		return price, false
+	}
 }
 
 // HandlePrompt queues text as a turn with no inbox id behind it.

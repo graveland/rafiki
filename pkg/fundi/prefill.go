@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -301,7 +302,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 		}
 	}
 	est := (total + 3) / 4
-	ctxLen := prefillContextWindow(e.client, e.state.ModelID)
+	ctxLen := prefillContextWindow(e.client, e.kind, e.state.ModelID, e.contextWindow)
 	tokenCap := ctxLen * prefillCapPercent / 100
 	if est > tokenCap {
 		return fmt.Errorf("prefill: estimated %d tokens exceeds the %d-token cap (%d%% of the model's context window); largest reads: %s",
@@ -595,16 +596,22 @@ func renderPrefillText(calls []prefillCall) string {
 }
 
 // prefillContextWindow returns the context window the token cap is computed
-// against: the catalog's figure for the child's model when it knows it, else
+// against: the override when the serving provider reported one, else the
+// catalog's figure for the child's model when it knows it, else
 // prefillFallbackContext.
 //
 // modelID must be the provider-local id (EngineConfig.ModelID, already split
 // and alias-resolved by Providers.Split). The catalog indexes OpenRouter-native
 // ids, so a provider-qualified "openrouter/z-ai/…" never matches and would
-// silently cap every pre-fill at the fallback's 60%.
-func prefillContextWindow(client *llm.Client, modelID string) int {
+// silently cap every pre-fill at the fallback's 60%; the id goes through
+// catalogModelID for the same reason, which is how a Responses-kind provider's
+// bare "gpt-…" finds its "openai/gpt-…" entry.
+func prefillContextWindow(client *llm.Client, kind providers.Kind, modelID string, override int) int {
+	if override > 0 {
+		return override
+	}
 	if cat := catalogOf(client); cat != nil {
-		if ctxLen, _, ok := cat.ContextWindow(modelID); ok {
+		if ctxLen, _, ok := cat.ContextWindow(catalogModelID(kind, modelID)); ok {
 			return ctxLen
 		}
 	}

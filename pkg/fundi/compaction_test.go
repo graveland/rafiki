@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -112,7 +113,7 @@ func TestCompactionStatusPushesAndPops(t *testing.T) {
 func TestCompactionContextWindowUnknownIsZero(t *testing.T) {
 	c := assert.NewCollecting(t)
 
-	c.Eq(0, compactionContextWindow(nil, "claude-x"), "nil client")
+	c.Eq(0, compactionContextWindow(nil, providers.KindAnthropic, "claude-x", 0), "nil client")
 
 	// A seeded catalog is "fresh" (SeedForTest pins fetched), so querying a
 	// model it does not carry answers ok=false without ever hitting the network.
@@ -120,15 +121,78 @@ func TestCompactionContextWindowUnknownIsZero(t *testing.T) {
 	empty.SeedForTest([]routing.CatalogEntry{{ID: "some-other-model", Created: 1}})
 	unknown, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(empty), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
-	c.Eq(0, compactionContextWindow(unknown, "not-in-catalog"), "model the catalog does not know")
+	c.Eq(0, compactionContextWindow(unknown, providers.KindAnthropic, "not-in-catalog", 0), "model the catalog does not know")
 
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
 	cat.SeedForTest([]routing.CatalogEntry{{ID: "z-ai/glm-5.3-flash", Created: 1, ContextLength: 1048576}})
 	known, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
-	c.Eq(1048576, compactionContextWindow(known, "z-ai/glm-5.3-flash"), "known model")
-	c.NotEq(prefillFallbackContext, compactionContextWindow(unknown, "not-in-catalog"),
+	c.Eq(1048576, compactionContextWindow(known, providers.KindAnthropicOpenRouter, "z-ai/glm-5.3-flash", 0), "known model")
+	c.NotEq(prefillFallbackContext, compactionContextWindow(unknown, providers.KindAnthropic, "not-in-catalog", 0),
 		"unknown window fell back to the prefill window")
+}
+
+// TestCompactionContextWindowOverrideWins pins the precedence the Responses
+// providers depend on: a window the serving provider reported beats the
+// catalog's figure for the very same model. Without it a ChatGPT-kind model
+// absent from (or misdescribed by) the catalog could only ever compact against
+// a guess, and override 0 must still ask the catalog exactly as before.
+func TestCompactionContextWindowOverrideWins(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "openai/gpt-6.1-sol", Created: 1, ContextLength: 400000}})
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
+	c.Require().NoError(err)
+
+	c.Eq(400000, compactionContextWindow(client, providers.KindOpenAIResponsesChatGPT, "gpt-6.1-sol", 0),
+		"override 0 did not ask the catalog through catalogModelID")
+	c.Eq(500000, compactionContextWindow(client, providers.KindOpenAIResponsesChatGPT, "gpt-6.1-sol", 500000),
+		"the provider-reported window did not beat a catalog that knows the model")
+}
+
+// TestCatalogModelIDForResponsesKinds pins the mapping both catalog lookups go
+// through: a Responses-kind provider serves OpenAI models under bare ids while
+// the catalog indexes them with the "openai/" vendor prefix, and every other
+// kind is already catalog-shaped.
+func TestCatalogModelIDForResponsesKinds(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	c.Eq("openai/gpt-6.1-sol", catalogModelID(providers.KindOpenAIResponses, "gpt-6.1-sol"),
+		"openai-responses bare id")
+	c.Eq("openai/gpt-6.1-sol", catalogModelID(providers.KindOpenAIResponsesChatGPT, "gpt-6.1-sol"),
+		"openai-responses-chatgpt bare id")
+	c.Eq("openai/gpt-6.1-sol", catalogModelID(providers.KindOpenAIResponsesChatGPT, "openai/gpt-6.1-sol"),
+		"an already-slashed id must not be prefixed twice")
+	c.Eq("gpt-6.1-sol", catalogModelID(providers.KindOpenAI, "gpt-6.1-sol"),
+		"kind openai is already catalog-shaped")
+	c.Eq("z-ai/glm-5.3-flash", catalogModelID(providers.KindAnthropicOpenRouter, "z-ai/glm-5.3-flash"),
+		"an OpenRouter id passes through unchanged")
+}
+
+// TestPricerMapsResponsesModelToCatalogID pins that the turn pricer resolves a
+// Responses-kind model through catalogModelID: the catalog knows only
+// "openai/gpt-x", so a bare "gpt-x" prices ONLY for a Responses kind. For any
+// other kind the id is left alone and the lookup misses, which is the
+// pre-existing behavior.
+func TestPricerMapsResponsesModelToCatalogID(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "openai/gpt-x", Created: 1, Pricing: &routing.ModelPricing{
+		PromptUSD:     0.000001,
+		CompletionUSD: 0.000002,
+	}}})
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
+	c.Require().NoError(err)
+
+	responses := pricerFor(client, providers.KindOpenAIResponses)
+	c.Require().NotNil(responses, "pricerFor must return a pricer for a client with a catalog")
+	price, ok := responses("gpt-x")
+	c.True(ok, "a Responses kind did not price gpt-x from the openai/gpt-x catalog entry")
+	c.Eq(0.000001, price.PromptUSD, "prompt price for gpt-x")
+
+	anthropic := pricerFor(client, providers.KindAnthropic)
+	_, ok = anthropic("gpt-x")
+	c.False(ok, "kind anthropic must not map gpt-x to openai/gpt-x")
 }
 
 // TestCompactionEngineRegistersHook drives a real turn over an in-memory

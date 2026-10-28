@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -856,7 +857,7 @@ func TestPrefillContextWindowUsesProviderLocalID(t *testing.T) {
 		{"claude-haiku-4-5", 200000}, // anthropic provider: bare id mapped by the catalog
 		{"unknown/model", prefillFallbackContext},
 	} {
-		got := prefillContextWindow(client, tc.modelID)
+		got := prefillContextWindow(client, providers.KindAnthropic, tc.modelID, 0)
 		c.Eq(tc.want, got, "prefillContextWindow(%q) = %d, want", tc.modelID, got)
 	}
 }
