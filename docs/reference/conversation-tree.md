@@ -396,7 +396,7 @@ probe. Output, one field per line:
 | `bad_depth` | children whose depth is not their parent's + 1 |
 | `missing_head` | conversations with messages but no `head_id` |
 | `ordinal_counter_behind` | conversations whose `next_ordinal` is not ahead of their highest ordinal |
-| `provider_id_missing` | assistant nodes whose conversation turn recorded a `response_message_id` for their ordinal while the row's `provider_message_id` is NULL — that column is what capture's rule 2 attaches by, so a miss silently degrades the next request to the hash-chain fallback |
+| `provider_id_missing` | assistant rows whose turn recorded a `response_message_id` for their ordinal but that carry no `provider_message_id`. A non-zero value is a warning about attach quality, not corruption: such a turn names a row capture cannot attach by, so the next request naming it degrades to the hash-chain fallback, and there is nothing to repair |
 | `working_set_mismatch` | with `--cutover`, conversations whose working path carries different messages from the legacy working set, listed by id |
 | `working_set_loose_match` | with `--cutover`, conversations that match only under `SameMessage` (informational; it is what a rehearsal reads to see how much of the data relies on the looser rule) |
 
@@ -407,22 +407,25 @@ can gate a cutover.
 
 **Scope.** Two different conversation lists, and the difference matters.
 `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`,
-`missing_hash` and `duplicate_rows` cover **every conversation with messages**:
-`bad_hash` walks every conversation with messages
-(`checkConversationsWithMessages`), `bad_depth`, `missing_head` and
-`ordinal_counter_behind` are single queries over every conversation, and the two
-legacy-row counters classify the unplaced rows of every conversation that holds
-one (`checkConversationsWithLegacyRows`, `pkg/store/tree_check.go`), so a
-conversation with no unplaced row contributes nothing. A tree's shape and its hashes
-are properties of the tree, however its storage was written. Only the working-set
-comparison — `working_set_mismatch` and `working_set_loose_match`, and only under
-`--cutover` — is scoped, to conversations that still carry a legacy
-`resume_from_ordinal` (`checkConversationsWithHorizon`). That column is read by
-the check and written by nobody any more, and after go-live the daemon
-legitimately compacts and forks those same conversations, so the legacy equality
-no longer holds. Pinned by `TestCheckTreeDetectsEachClass`,
-`TestCheckTreeDetectsABadHash`, `TestCheckTreeScopesWorkingSetsToLegacyHorizons`
-and `TestCheckTreeAcceptsABackfilledTree` (`pkg/store`).
+`provider_id_missing`, `missing_hash` and `duplicate_rows` cover **every
+conversation with messages**: `bad_hash` walks every conversation with messages
+(`checkConversationsWithMessages`), `bad_depth`, `missing_head`,
+`ordinal_counter_behind` and `provider_id_missing` are single queries over every
+conversation, and the two legacy-row counters classify the unplaced rows of every
+conversation that holds one (`checkConversationsWithLegacyRows`,
+`pkg/store/tree_check.go`), so a conversation with no unplaced row contributes
+nothing. A tree's shape and its hashes are properties of the tree, however its
+storage was written. Only the working-set comparison — `working_set_mismatch` and
+`working_set_loose_match`, and only under `--cutover` — is scoped, to
+conversations that still carry a legacy `resume_from_ordinal`
+(`checkConversationsWithHorizon`). That column is read by the check and written
+by nobody any more, and after go-live the daemon legitimately compacts and forks
+those same conversations, so the legacy equality no longer holds. Pinned by
+`TestCheckTreeDetectsEachClass`, `TestCheckTreeDetectsABadHash`,
+`TestCheckTreeScopesWorkingSetsToLegacyHorizons`,
+`TestCheckTreeWorkingSetComparisonIsCutoverOnly`,
+`TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites` and
+`TestCheckTreeAcceptsABackfilledTree` (`pkg/store`).
 
 ## Cutover procedure
 
@@ -457,7 +460,9 @@ cutover is a restart.
 **The gate is `rafikid tree check --cutover` BEFORE the new daemon starts.** After
 go-live the daemon legitimately compacts and forks those same conversations, so
 the legacy working-set equality no longer holds: a later plain `rafikid tree
-check` is a structural health probe, and it must exit 0.
+check` is a structural health probe, and it must exit 0 (pinned by
+`TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites`, `pkg/store`, which forks
+and compacts a legacy-horizon conversation through the real writers).
 
 **Rollback** is: stop the daemon, restore the dump from step 2, start the previous
 release. Anything captured after the cutover is lost, which is why the dump is

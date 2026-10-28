@@ -928,6 +928,58 @@ func TestAppendResponseMessage(t *testing.T) {
 	c.Eq(replyOrdinal, respOrd, "response_ordinal is the reply node's ordinal")
 }
 
+// TestAppendResponseMessageFailsWhenTheTurnKeyMoved drives the zero-rows branch
+// of AppendResponseMessage's response_ordinal UPDATE. The turn's key is
+// (id, created_at) — created_at is the hypertable's partition column — so moving
+// created_at leaves the UPDATE matching nothing. That is the state a lost turn
+// row puts the reply in: the node is already committed by AppendChain, and
+// without the pointer nothing on the turn names it. The call must fail the turn
+// rather than return success over a half-recorded response.
+func TestAppendResponseMessageFailsWhenTheTurnKeyMoved(t *testing.T) {
+	c := assert.NewAborting(t)
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	c.NoError(err, "connect")
+	t.Cleanup(pool.Close)
+	c.NoError(store.Migrate(ctx, pool), "Migrate")
+	s := NewCaptureStore(pool)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	c.NoError(err, "EnsureConversation")
+
+	req := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
+	c.NoError(err, "InsertTurnIntent")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
+	c.NoError(err, "DecomposeRequest")
+
+	// Move the turn's key out from under the caller's createdAt, which is what a
+	// row that was rewritten or re-partitioned underneath the append looks like.
+	_, err = pool.Exec(ctx, `
+		UPDATE conversations.conversation_turn SET created_at = created_at + interval '1 hour'
+		 WHERE id = $1 AND created_at = $2`, turnID, createdAt)
+	c.Require().NoError(err, "move the turn's created_at key")
+
+	canonical := []byte(`{"id":"msg_hello","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`)
+	err = s.AppendResponseMessage(ctx, convID, turnID, createdAt, head, canonical, 10, 5, "end_turn")
+	c.Require().Error(err, "an UPDATE that matches no turn row must fail the response append")
+	c.ErrorContains(err, "expected 1 row", "the failure is the zero-rows branch, not an earlier step")
+
+	// The pointer is what the branch protects: it must still be NULL, because
+	// nothing on the turn names the reply the append stored.
+	var respOrd *int
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT response_ordinal FROM conversations.conversation_turn WHERE id = $1::uuid`, turnID).Scan(&respOrd),
+		"read response_ordinal")
+	c.Nil(respOrd, "response_ordinal stays unset when the turn row cannot be found")
+}
+
 func TestIsRetryableDB(t *testing.T) {
 	liveCtx := context.Background()
 	cancelledCtx, cancel := context.WithCancel(context.Background())

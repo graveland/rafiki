@@ -599,6 +599,103 @@ func TestCheckTreeWorkingSetComparisonIsCutoverOnly(t *testing.T) {
 	c.False(cutover.OK(), "the cutover gate fails on a divergent working set")
 }
 
+// TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites pins the property that
+// motivated scoping the working-set comparison: A HEALTH PROBE MUST EXIT 0 AFTER
+// GO-LIVE. The conversation is a backfilled one — it still carries the legacy
+// resume_from_ordinal horizon — and it then forks and compacts through the real
+// writers, exactly as a post-cutover daemon does. Both writes legitimately leave
+// rows off the head path, so the legacy working set no longer describes it.
+//
+// The plain CheckTree (TreeCheckOptions{}, the run `rafikid tree check` does
+// without --cutover) must report nothing: no working-set mismatch, every
+// structural count zero, OK() true. TreeCheckOptions{Cutover: true} must report
+// the mismatch, because comparing against the legacy working set is the only
+// thing that gate does. The cutover gate is the ONLY thing allowed to look at
+// that set — a structural run that compared it, or that narrowed its conversation
+// list to the horizon-scoped one, would exit non-zero on correct data and read as
+// a corrupted migration.
+func TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	// The backfill's output: a request and its reply, both placed, and the legacy
+	// horizon left on the conversation — this is a conversation whose storage used
+	// resume_from_ordinal.
+	convID := checkTestConv(t, ctx, pool)
+	rootHash := checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"reply"}]`, nil, checkInt(0), rootHash, 1)
+	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(2), checkInt(0))
+
+	// Go-live write 1: a fork — a second child under the request, as AppendChain
+	// with ParentID writes it — and the head moves onto the fork, so the reply it
+	// left behind is no longer on the working path.
+	forked, err := AppendChain(ctx, pool, Lease{}, ChainAppend{
+		ConversationID: convID,
+		ParentID:       checkRowID(t, ctx, pool, convID, 0),
+		Nodes: []ChainNode{{
+			Role:    "user",
+			Content: []byte(`[{"type":"text","text":"forked"}]`),
+		}},
+	})
+	c.Require().NoError(err, "append the fork")
+	c.Eq(1, forked.Inserted, "the fork is a new node")
+
+	// Go-live write 2: a compaction, exactly as AppendCompaction writes it — a
+	// compaction_summary root derived from the current head, with the tail copied
+	// verbatim under it. The head restarts at the summary.
+	compacted, err := AppendChain(ctx, pool, Lease{}, ChainAppend{
+		ConversationID:  convID,
+		Root:            convtree.RootKindCompaction,
+		DerivedFromHead: true,
+		Nodes: []ChainNode{
+			{Role: "user", Content: []byte(`[{"type":"text","text":"the summary"}]`)},
+			{Role: "assistant", Content: []byte(`[{"type":"text","text":"reply"}]`), Kind: ptrTo(KindCompactionTail)},
+		},
+	})
+	c.Require().NoError(err, "append the compaction")
+	c.Eq(2, compacted.Inserted, "the summary root and its tail copy")
+
+	// The structural health check, the run an operator does after go-live: it must
+	// be clean. Nothing here is wrong data — the tree is exactly what the writers
+	// produce.
+	structural, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
+	c.Require().NoError(err, "structural checkTree")
+	c.Eq(1, structural.Conversations, "the conversation is still checked")
+	c.Empty(structural.WorkingSetMismatch, "a structural run does not look at the legacy working set")
+	c.Empty(structural.WorkingSetLooseMatch, "a structural run does not look at the legacy working set")
+	c.Eq(0, structural.MissingHash, "every row holds a position or is a tail copy")
+	c.Eq(0, structural.BadHash, "the writers' hashes verify")
+	c.Eq(0, structural.BadDepth, "the writers' depths are right")
+	c.Eq(0, structural.MissingHead, "the head moved with every append")
+	c.Eq(0, structural.OrdinalCounterBehind, "the ordinal allocator advanced")
+	c.Eq(0, structural.ProviderIDMissing, "no turn recorded a reply id")
+	c.True(structural.OK(), "the health probe must exit 0 after go-live: %+v", structural)
+
+	// The cutover gate, over the same data: the working path no longer reproduces
+	// the rows at and after the horizon, which is exactly what it exists to see.
+	cutover, err := checkTreeCutover(ctx, pool, []string{convID})
+	c.Require().NoError(err, "cutover checkTree")
+	c.EqDeep([]string{convID}, cutover.WorkingSetMismatch, "the cutover gate reports the divergence")
+	c.Empty(cutover.WorkingSetLooseMatch, "the working path is not the working set under any identity")
+	c.Eq(0, cutover.MissingHash, "the two runs agree on every structural count")
+	c.Eq(0, cutover.BadHash, "the two runs agree on every structural count")
+	c.Eq(0, cutover.BadDepth, "the two runs agree on every structural count")
+	c.False(cutover.OK(), "the cutover gate fails on the divergent working set")
+}
+
+// checkRowID reads the id of the row at ordinal.
+func checkRowID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string, ordinal int) string {
+	t.Helper()
+	var id string
+	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
+		`SELECT id::text FROM conversations.conversation_message
+		  WHERE conversation_id = $1::uuid AND ordinal = $2`, convID, ordinal).Scan(&id),
+		"read the id of the row at ordinal %d", ordinal)
+	return id
+}
+
 // TestCheckTreeCountsAssistantNodesMissingAProviderID is the design's provider-id
 // coverage invariant: a turn that recorded a response_message_id for an ordinal
 // means the row stored there is that reply, so a NULL provider_message_id on it
