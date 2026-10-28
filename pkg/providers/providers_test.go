@@ -496,3 +496,74 @@ kind = "openai-responses-chatgpt"
 	c.EqDeep([]string{"claude-sonnet-5"}, providers.Default().CatalogIDs("claude-sonnet-5"),
 		"a catalog-shaped-only set adds nothing")
 }
+
+// TestCatalogModelIDsMapsAQualifiedIDThroughItsProvider pins the arm a stored
+// row needs when it DOES name its provider: the messages proxy records the id
+// it resolved, which for a spawn that named "oa" is "oa/gpt-6.1-sol". That
+// string never resolves against the catalog on its own (CatalogModelID leaves a
+// slashed id alone), so the qualified arm strips the provider name and rewrites
+// the remainder by THAT provider's kind. The raw id stays first, and the
+// stripped candidate is offered only when a configured provider rewrites the
+// remainder: an Anthropic provider maps to the identity, an unknown first
+// segment maps to nothing, and a catalog-shaped provider
+// ("openrouter/deepseek/deepseek-chat") must never be stripped into a
+// different, wrong id.
+func TestCatalogModelIDsMapsAQualifiedIDThroughItsProvider(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	parse := func(t *testing.T, body string) *providers.Set {
+		t.Helper()
+		set, err := providers.Parse([]byte(body))
+		c.Require().NoError(err, "Parse")
+		return set
+	}
+
+	responses := parse(t, `
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.oa]
+kind = "openai-responses"
+api_key_env = "OPENAI_API_KEY"
+`)
+
+	// oa is a Responses provider: the prefix comes off and the remainder is
+	// rewritten to the catalog id, offered AFTER the raw id.
+	c.EqDeep([]string{"oa/gpt-6.1-sol", "openai/gpt-6.1-sol"}, responses.CatalogIDs("oa/gpt-6.1-sol"),
+		"a qualified Responses-kind id must offer its catalog id")
+
+	// The qualified arm must not change what a BARE id offers: the same list
+	// as before, and in the same order.
+	c.EqDeep([]string{"gpt-6.1-sol", "openai/gpt-6.1-sol"}, responses.CatalogIDs("gpt-6.1-sol"),
+		"a bare id is unchanged")
+
+	// oa as an Anthropic provider rewrites nothing, so stripping its prefix
+	// would only offer the bare id, which is a different model's address.
+	anthropicOa := parse(t, `
+default_provider = "oa"
+
+[providers.oa]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+`)
+	c.EqDeep([]string{"oa/gpt-6.1-sol"}, anthropicOa.CatalogIDs("oa/gpt-6.1-sol"),
+		"an Anthropic provider adds no stripped candidate")
+
+	// An unknown first segment names no configured provider.
+	c.EqDeep([]string{"zz/gpt-6.1-sol"}, responses.CatalogIDs("zz/gpt-6.1-sol"),
+		"an unknown provider segment adds nothing")
+
+	// A catalog-shaped provider's ids are already catalog ids.
+	catalogShaped := parse(t, `
+default_provider = "openrouter"
+
+[providers.openrouter]
+kind = "anthropic-openrouter"
+base_url = "https://openrouter.ai/api"
+`)
+	c.EqDeep([]string{"openrouter/deepseek/deepseek-chat"}, catalogShaped.CatalogIDs("openrouter/deepseek/deepseek-chat"),
+		"a catalog-shaped provider must not have its prefix stripped")
+}

@@ -274,37 +274,20 @@ func (p *MessagesProxy) pricingFor(model string) (routing.ModelPricing, bool) {
 // catalogIDs lists the catalog ids a recorded model id may be indexed under, in
 // the order to try them. A row does not always hold a catalog-shaped id, and a
 // missed lookup bills a real-money turn at 0 (costFields then logs nothing, and
-// nothing else in the daemon learns what the turn cost):
+// nothing else in the daemon learns what the turn cost).
 //
-//   - the raw id. Tried FIRST, so a conversation that failed over BETWEEN
-//     provider kinds still bills each turn at its own model's rate.
-//   - the provider registry's rewrites of it (providers.Set.CatalogIDs). A
-//     Responses-kind provider serves OpenAI models under bare ids
-//     ("gpt-6.1-sol") while the catalog indexes "openai/gpt-6.1-sol"; every
-//     other kind maps to the identity, so an existing kind's price is unchanged
-//     bit for bit.
-//   - a provider-QUALIFIED id mapped back through the same rewrite. A spawn
-//     that names its provider ("oa/gpt-6.1-sol") stores the qualified string,
-//     because routing.ResolveModel, the proxy's own resolution, leaves a slash
-//     id unchanged and CatalogIDs correctly adds nothing for it. The candidate
-//     is offered only when the mapping actually REWRITES the part after the
-//     provider name, which is what keeps an id whose provider is a
-//     catalog-shaped kind ("openrouter/deepseek/deepseek-chat") priced exactly
-//     as before: there the "mapping" is the stripped id, a different and wrong
-//     candidate.
+// The candidate list itself is providers.Set.CatalogIDs, which owns the rule:
+// the raw id FIRST (so a conversation that failed over BETWEEN provider kinds
+// still bills each turn at its own model's rate), then each configured kind's
+// rewrite of it, then the rewrite of a provider-QUALIFIED id ("oa/gpt-6.1-sol",
+// the string this proxy records once it has resolved a spawn's provider) with
+// the prefix stripped. A nil registry has no rewrites, so the raw id is all
+// there is.
 func (p *MessagesProxy) catalogIDs(model string) []string {
 	if p.providerSet == nil {
 		return []string{model}
 	}
-	ids := p.providerSet.CatalogIDs(model)
-	if name, rest := providers.SplitRaw(model); rest != model {
-		if prov, ok := p.providerSet.Get(name); ok {
-			if id := providers.CatalogModelID(prov.Kind, rest); id != rest {
-				ids = append(ids, id)
-			}
-		}
-	}
-	return ids
+	return p.providerSet.CatalogIDs(model)
 }
 
 // cachePct returns the percentage of input tokens served from cache, rounded to

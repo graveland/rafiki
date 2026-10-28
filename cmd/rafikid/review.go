@@ -196,7 +196,7 @@ func (q *reviewQueue) runJob(ctx context.Context, job reviewJob) {
 	if stage != "rank" {
 		stage = "detect"
 	}
-	backend := local.New(local.Options{Pool: q.pool, LLM: client, Pricer: client.Catalog().Pricing})
+	backend := local.New(q.localOptions(client))
 	events, err := backend.Analyze(ctx, agentcli.AnalyzeRequest{
 		ConversationIDs: []string{job.conversationID},
 		Profile:         profile,
@@ -250,6 +250,22 @@ func (q *reviewQueue) client() (*llm.Client, error) {
 		q.llmClient, q.llmErr = llm.NewClient(opts...)
 	})
 	return q.llmClient, q.llmErr
+}
+
+// localOptions is the option set every review job's analyze Backend is built
+// with. The pricer goes through catalogPricer, the same resolver the analyze
+// verb gets (analyzePricer) and SetCatalog injects into the insight backends,
+// because the raw catalog lookup only knows catalog-SHAPED ids: a review run
+// on an openai-responses provider records its turns under the provider's own id
+// ("gpt-6.1-sol", or the qualified "oa/gpt-6.1-sol" when the spawn named its
+// provider), and pricing those raw records the analysis at 0, which reads as a
+// review that cost nothing. A nil catalog leaves the pricer nil (unpriced), as
+// before.
+//
+// A method rather than an inline literal so a test can assert on exactly what
+// runJob hands local.New without a daemon or an LLM.
+func (q *reviewQueue) localOptions(client *llm.Client) local.Options {
+	return local.Options{Pool: q.pool, LLM: client, Pricer: catalogPricer(q.catalog, q.prov)}
 }
 
 // envFloat reads one float-valued env var. ("", false) means unset — the

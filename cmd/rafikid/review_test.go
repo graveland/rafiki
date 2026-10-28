@@ -158,6 +158,43 @@ func TestReviewQueueInFlightClearsOnJobCompletion(t *testing.T) {
 	c.Eq("enqueued", q.tryAccept(job), "tryAccept after completion")
 }
 
+// TestReviewQueuePricerPricesResponsesModelByCatalogID pins the pricer runJob
+// hands local.New. A review run on an openai-responses provider records its
+// analysis turns under the provider's own model id, so a pricer that only knows
+// catalog-shaped ids records the whole review at 0 — indistinguishable from a
+// free one — and nothing downstream can tell. The queue holds the catalog and
+// the provider registry for exactly this; the seam (localOptions) is the value
+// local.New is called with, asserted here because running a job end to end
+// needs a daemon, a database and a live model.
+func TestReviewQueuePricerPricesResponsesModelByCatalogID(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cat := seedResponsesCatalog()
+	q := newReviewQueue(nil, mustParseProviders(t, responsesProvidersTOML), cat)
+	client, err := q.client()
+	c.Require().NoError(err, "the review queue built no client")
+	c.Require().True(client.Catalog() == cat, "the queue's client does not share the queue's catalog")
+
+	// The real worker builds its options from this queue; the only substitution
+	// is the client, which q.client() just built the way runJob builds it.
+	pricer := q.localOptions(client).Pricer
+	c.Require().True(pricer != nil, "the review backend was built unpriced")
+
+	// 1M input on gpt-6.1-sol = $3.00, the openai/gpt-6.1-sol catalog entry.
+	price, ok := pricer("gpt-6.1-sol")
+	c.Require().True(ok, "the review pricer missed a Responses-kind model id")
+	c.Eq(3.0, price.CostOf(1_000_000, 0, 0, 0).Total, "bare Responses id is priced")
+
+	// The qualified spelling the messages proxy records once a spawn named its
+	// provider resolves to the same entry, not to nothing.
+	price, ok = pricer("oa/gpt-6.1-sol")
+	c.Require().True(ok, "the review pricer missed a provider-qualified Responses-kind model id")
+	c.Eq(3.0, price.CostOf(1_000_000, 0, 0, 0).Total, "qualified Responses id is priced")
+
+	// No catalog: unpriced, exactly as before this pricer was wired in.
+	c.Nil(newReviewQueue(nil, nil, nil).localOptions(nil).Pricer,
+		"a queue with no catalog must hand local.New a nil pricer")
+}
+
 func TestConversationReviewClampsBudgetToMaxEnv(t *testing.T) {
 	conv := "00000000-0000-0000-0000-0000000000aa"
 	t.Run("request above max clamps down", func(t *testing.T) {

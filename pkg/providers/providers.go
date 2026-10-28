@@ -72,8 +72,9 @@ func CatalogModelID(kind Kind, modelID string) string {
 
 // CatalogIDs returns the catalog ids a provider-local model id may be indexed
 // under, in the order they should be tried: the id itself first, then whatever
-// each configured provider KIND rewrites it to. Only the Responses kinds
-// rewrite anything, so a set of catalog-shaped kinds yields the id alone.
+// each configured provider KIND rewrites it to, then the same rewrite applied
+// to a provider-QUALIFIED id with its prefix stripped. Only the Responses
+// kinds rewrite anything, so a set of catalog-shaped kinds yields the id alone.
 //
 // It exists because a stored model id does not always name its provider: a
 // conversation_turn row records the provider-local id (pkg/llm's prepareSend
@@ -81,16 +82,36 @@ func CatalogModelID(kind Kind, modelID string) string {
 // has no provider name to consult. Offering every shape this configuration
 // could have produced, id first, keeps a catalog-shaped id priced exactly as
 // before while a Responses kind's bare id still finds its catalog entry.
+//
+// The qualified arm covers the row that DOES name its provider: the messages
+// proxy records the id it resolved, so a spawn that named "oa" stores
+// "oa/gpt-6.1-sol". CatalogModelID leaves a slashed id alone (a catalog-shaped
+// id must not be prefixed twice), so without stripping the name that row never
+// reaches "openai/gpt-6.1-sol" and the child's spend prices at 0. The stripped
+// candidate is offered only when the first segment names a configured provider
+// AND that provider's kind actually rewrites the remainder: stripping an id
+// whose provider is catalog-shaped ("openrouter/deepseek/deepseek-chat") would
+// offer a different, wrong id, and pricing an unpriced model at another
+// provider's rate is worse than leaving it unpriced.
 func (s *Set) CatalogIDs(modelID string) []string {
 	ids := []string{modelID}
 	seen := map[string]bool{modelID: true}
-	for _, name := range s.Names() {
-		id := CatalogModelID(s.Providers[name].Kind, modelID)
+	add := func(id string) {
 		if seen[id] {
-			continue
+			return
 		}
 		seen[id] = true
 		ids = append(ids, id)
+	}
+	for _, name := range s.Names() {
+		add(CatalogModelID(s.Providers[name].Kind, modelID))
+	}
+	if name, rest := SplitRaw(modelID); rest != modelID {
+		if prov, ok := s.Get(name); ok {
+			if id := CatalogModelID(prov.Kind, rest); id != rest {
+				add(id)
+			}
+		}
 	}
 	return ids
 }

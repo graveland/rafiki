@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -141,4 +142,45 @@ func TestListChildrenPricesResponsesModelByCatalogID(t *testing.T) {
 	if math.Abs(*got-10.5) > 1e-9 {
 		t.Errorf("CostUSD = %v, want 10.5 ($3/1M input for 1M in + $15/1M output for 0.5M out)", *got)
 	}
+}
+
+// TestSubtreeCostPricesQualifiedResponsesModelID pins the QUALIFIED-id arm at
+// the spend consumer a budget is enforced against: SubtreeCost, the number
+// budgetHalted compares a child's lifetime maxCost to. A turn row can record
+// "oa/gpt-6.1-sol" — the qualified string the messages proxy stores once it has
+// resolved a spawn's provider — and CatalogModelID leaves a slashed id alone, so
+// before the qualified arm existed the canonical candidate list held only that
+// raw id, the lookup missed, and the child priced at 0 with no indication of it.
+//
+// Mutation-checked: reverting the stripped candidate leaves the model in
+// SubtreeCostDetailed's unpriced list and the total at 0.
+func TestSubtreeCostPricesQualifiedResponsesModelID(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := openTestPool(t)
+	ctx := context.Background()
+
+	// Unique per run: openTestPool shares the RAFIKI_TEST_DSN database with every
+	// other run, and conversation.external_ref is globally unique.
+	extRef := fmt.Sprintf("c_responses_qualified_%d", time.Now().UnixNano())
+	convID := insertConvForCost(t, pool, extRef)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation_turn WHERE conversation_id = $1::uuid`, convID)
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation WHERE id = $1::uuid`, convID)
+	})
+
+	// The row as the PROXY path writes it: the resolved, provider-qualified id.
+	insertTurnForCost(t, pool, convID, "oa/gpt-6.1-sol", 1_000_000, 500_000)
+
+	dir := t.TempDir()
+	ctrl := NewController(childstore.New(), filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
+		filepath.Join(dir, "c.sock"), nil, pool, nil, false, ctx, nil, nil, nil,
+		mustParseProviders(t, responsesProvidersTOML))
+	ctrl.SetCatalog(seedResponsesCatalog())
+
+	// The selector shape and the interface method budget enforcement uses.
+	got, err := ctrl.coster.SubtreeCost(ctx, insights.SubtreeSelector{ConversationIDs: []string{convID}})
+	c.NoError(err, "SubtreeCost")
+	c.LessOrEqual(1e-9, math.Abs(got-10.5), "SubtreeCost = %v, want 10.5 ($3/1M in for 1M + $15/1M out for 0.5M)", got)
 }
