@@ -367,7 +367,10 @@ they follow until its row is reported.
 
 **Capture failures.** If capture fails after the stream, the rows that were
 stored publish first, then an `Error` event with code `capture_not_persisted`
-and message `turn not persisted: <reason>`. If capture cannot begin for a
+and message `turn not persisted: <reason>`. A turn that failed upstream or
+mid-stream (a transport error, a provider rejection, a client hang-up) while
+capture itself worked publishes `turn_failed` with message
+`turn failed: <reason>` instead. If capture cannot begin for a
 request carrying `X-Rafiki-Session`, the Anthropic proxy answers `503` with body
 `rafiki capture unavailable: <reason>`.
 
@@ -1818,7 +1821,7 @@ Every event payload is classified into a tier:
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
 | `ChildClosed` | durable | A child LEFT THE STORE: it was closed (`Control.Close`, `CloseAllExited`, or a cascade's native thread children) and can never be resumed. Not an exit — a killed child stays listed and reports through `ChildExited`. Fields: `ancestors` (the chain from the child's parent up to the root; empty for a top-level child) and `labels` (the child's label set). Both ride the event because the subject predicate resolves scope against the childstore, which a close has just emptied — without them the one subscriber still drawing the row, attached to an ANCESTOR, could never be told it is gone (see "The one event that describes a child the lineage has forgotten"). Published BEFORE the store delete, by every close site. Consumed as a SIGNAL: clients answer it with `ListChildren`, because a close cascades and membership has one authority. Durable because the rail stream subscribes at that tier |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
-| `Error` | durable | Turn or engine level error event. Code `capture_not_persisted` marks a claude turn whose rows could not be stored (see "Message events") |
+| `Error` | durable | Turn or engine level error event. Code `capture_not_persisted` marks a claude turn whose rows could not be stored, `turn_failed` one that failed upstream with capture intact (see "Message events") |
 | `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
 | `ScriptOutput` | durable | One coalesced chunk of a script child's stdout or stderr. Fields: `stream` (`"stdout"`/`"stderr"`) and `text` — the newline-terminated lines or split pieces carried verbatim. Produced by the daemon's per-child coalescer (`cmd/rafikid/script_output.go`); see "Script output" below |
 | `OperatorState` | durable | The operator-facing display state of a child changed (see "Operator display state" below). Fields: `display_state` (working/waiting/failed/idle/exited), `waiting_on` (set only when `display_state` is `waiting`: operator/schedule/job/children/events) and `msg` (the human sentence). Server-derived and deduplicated: published only when the (state, waiting_on, msg) tuple differs from the last published one. `AgentStatus` remains the machine status and is unchanged |

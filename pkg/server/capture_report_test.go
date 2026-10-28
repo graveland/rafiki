@@ -103,7 +103,7 @@ func TestCaptureReportOnSuccess(t *testing.T) {
 	c.True(fs.lastSince.Equal(time.Unix(0, 0)), "MessagesSince since = %v, want the turn intent's createdAt", fs.lastSince)
 }
 
-func TestCaptureReportOnUpstreamErrorCarriesPromptAndErr(t *testing.T) {
+func TestCaptureReportOnUpstreamErrorCarriesPromptAndTurnErr(t *testing.T) {
 	c := assert.NewAborting(t)
 	rows := []store.Message{{Ordinal: 0}}
 	fs := &fakeProxyStore{sinceRows: rows}
@@ -113,8 +113,9 @@ func TestCaptureReportOnUpstreamErrorCarriesPromptAndErr(t *testing.T) {
 
 	got := sink.all()
 	c.Require().Len(got, 1, "reports")
-	c.NotEmpty(got[0].Err, "Err")
-	c.StrContains(got[0].Err, "429")
+	c.Eq("", got[0].Err, "an upstream failure is not a persistence failure")
+	c.NotEmpty(got[0].TurnErr, "TurnErr")
+	c.StrContains(got[0].TurnErr, "429")
 	c.Eq("", got[0].ResponseMessageID)
 	c.EqDeep(rows, got[0].Rows)
 }

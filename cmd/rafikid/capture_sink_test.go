@@ -330,3 +330,15 @@ func TestCaptureReportReleaseOnlyWithoutResponseNeverFlushesHeldEvents(t *testin
 	ck.Eq(0, len(h.got), "events: a helper's failure is not the agent's turn")
 	ck.Eq(0, len(h.log), "gate calls")
 }
+
+func TestCaptureReportTurnErrPublishesTurnFailedNotNotPersisted(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	h := newCaptureHarness(t)
+
+	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv",
+		TurnErr: `Post "https://api.anthropic.com/v1/messages": http2: client connection lost`})
+	h.drain()
+
+	ck.EqDeep([]string{"error:turn_failed", "released"}, h.log, "order")
+	ck.StrContains(h.got[0].GetError().GetMessage(), "turn failed: Post", "message")
+}

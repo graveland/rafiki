@@ -681,9 +681,12 @@ type captureRef struct {
 }
 
 // captureOutcome is what the request's exit paths learned, read by the
-// deferred report: the first failure reason, or the stored response's id.
+// deferred report: the first failure reason of each kind, or the stored
+// response's id. failure is a capture write that failed; turnFailure is a turn
+// that failed upstream or mid-stream, with the capture itself intact.
 type captureOutcome struct {
 	failure           string
+	turnFailure       string
 	responseMessageID string
 }
 
@@ -875,6 +878,21 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		// leads to OpenRouter on rafiki's key. An upstream error surfaces to
 		// the caller verbatim instead.
 		resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, path, false, reqBody, r)
+		// Only a transport error is retried: it means no response byte arrived
+		// (a pooled h2 connection that died, a reset on connect), so the replay
+		// is invisible to the caller and the next attempt dials fresh. A status
+		// the upstream actually returned goes back verbatim for the client to
+		// judge, and the retry never leaves Anthropic.
+		for i := 0; err != nil && routing.ClassifyFailure(0, err) && i < len(routing.RetryBackoffs); i++ {
+			select {
+			case <-time.After(routing.RetryBackoffs[i]):
+			case <-r.Context().Done():
+				return nil, "anthropic", r.Context().Err(), false
+			}
+			p.logger.WarnContext(r.Context(), "proxy: passthrough upstream transport error, retrying",
+				"attempt", i+1, "error", err)
+			resp, err = p.doUpstream(r.Context(), p.upstreamURL, "", path, false, reqBody, r)
+		}
 		return resp, "anthropic", err, false
 	}
 	now := time.Now()
@@ -1244,7 +1262,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.logger.WarnContext(r.Context(), "proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
 		// Don't leave the turn stranded 'pending' on a completion write failure;
 		// mark it errored so it isn't a false orphan for the sweep.
-		p.failTurn(r, cr, "complete-turn failed: "+cerr.Error())
+		p.failPersist(r, cr, "complete-turn failed: "+cerr.Error())
 		return
 	}
 	// Attach the request to the conversation's tree (the DB I/O deliberately
@@ -1287,13 +1305,13 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	headID, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID)
 	if derr != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
-		p.failTurn(r, cr, "decompose request failed: "+derr.Error())
+		p.failPersist(r, cr, "decompose request failed: "+derr.Error())
 		return
 	}
 	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
 		headID, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
-		p.failTurn(r, cr, "append response failed: "+aerr.Error())
+		p.failPersist(r, cr, "append response failed: "+aerr.Error())
 		return
 	}
 	cr.outcome.responseMessageID = ownMsg
@@ -1311,12 +1329,21 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 	p.failTurnCtx(capCtx, cr, reason)
 }
 
+// failPersist is failTurn for a capture write that failed, so the report
+// carries the reason as a persistence failure rather than a turn failure.
+func (p *MessagesProxy) failPersist(r *http.Request, cr captureRef, reason string) {
+	if cr.on && cr.outcome != nil && cr.outcome.failure == "" {
+		cr.outcome.failure = reason
+	}
+	p.failTurn(r, cr, reason)
+}
+
 // failTurnCtx is failTurn against a caller-supplied context, so a fail path that
 // also issues other capture writes can share one detached context instead of
 // opening a second. No-op when capture is off.
 func (p *MessagesProxy) failTurnCtx(ctx context.Context, cr captureRef, reason string) {
-	if cr.outcome != nil && cr.outcome.failure == "" {
-		cr.outcome.failure = reason
+	if cr.outcome != nil && cr.outcome.turnFailure == "" {
+		cr.outcome.turnFailure = reason
 	}
 	if !cr.on {
 		return
@@ -1434,6 +1461,9 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	if cr.on {
 		p.failTurnCtx(capCtx, cr, reason)
 		if derr := p.decomposeRequestCtx(capCtx, cr); derr != nil {
+			if cr.outcome != nil && cr.outcome.failure == "" {
+				cr.outcome.failure = "decompose request failed: " + derr.Error()
+			}
 			p.failTurnCtx(capCtx, cr, reason+"; decompose request failed: "+derr.Error())
 		}
 	}

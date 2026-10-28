@@ -12,7 +12,11 @@ no rafiki token, no forwardable credential, a typoed flag value — never
 silently falling back to the daemon's key. Daemon-spawned `--kind claude`
 children take the same switch (`passthrough_auth` on Spawn, resolved by
 `proxyenv.PassthroughAuthFor` in `cmd/rafikid/agent_runtime.go`), so on a
-laptop with no API key they run on the operator's own Claude login.
+laptop with no API key they run on the operator's own Claude login. A
+passthrough request never fails over to OpenRouter, but a transport error
+before any response byte (a pooled HTTP/2 connection that died) is replayed
+against Anthropic on `routing.RetryBackoffs`; a status Anthropic returned is
+passed back verbatim, not retried.
 
 Every passthrough response carries Anthropic's `anthropic-ratelimit-unified-*`
 headers (your subscription's 5h/7d utilization), captured best-effort into a

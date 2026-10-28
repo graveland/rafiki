@@ -20,6 +20,7 @@ type CaptureReport struct {
 	ResponseMessageID string // the response's message id; "" when it was not stored
 	Rows              []store.Message
 	Err               string // non-empty: the capture failed
+	TurnErr           string // non-empty: the turn failed upstream or mid-stream; the capture itself is intact
 	// ReleaseOnly marks a report from a request that is NOT the child's own
 	// conversation — Claude Code's titler, its quota probe and the per-tool
 	// model helpers all ride the session header, and none of them declares a
@@ -84,9 +85,9 @@ func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []
 	}
 	report := CaptureReport{
 		Session: cr.session, ThreadID: cr.threadID, ConversationID: cr.convID,
-		Rows: rows, Err: errText, ReleaseOnly: releaseOnly,
+		Rows: rows, Err: errText, TurnErr: cr.outcome.turnFailure, ReleaseOnly: releaseOnly,
 	}
-	if errText == "" {
+	if errText == "" && report.TurnErr == "" {
 		report.ResponseMessageID = cr.outcome.responseMessageID
 	}
 	p.captureSink.CaptureReported(report)

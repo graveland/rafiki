@@ -97,15 +97,23 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	if len(kept) > 0 {
 		c.capturePub.mark[r.ConversationID] = kept[len(kept)-1].Ordinal
 	}
-	if r.Err != "" && !r.ReleaseOnly {
-		c.publishEvent(childID, &rafikiv1.Event{
-			ChildId: childID,
-			Ts:      timestamppb.Now(),
-			Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
-				Code:    "capture_not_persisted",
-				Message: "turn not persisted: " + r.Err,
-			}},
-		})
+	if !r.ReleaseOnly {
+		for _, e := range []struct{ code, prefix, text string }{
+			{"turn_failed", "turn failed: ", r.TurnErr},
+			{"capture_not_persisted", "turn not persisted: ", r.Err},
+		} {
+			if e.text == "" {
+				continue
+			}
+			c.publishEvent(childID, &rafikiv1.Event{
+				ChildId: childID,
+				Ts:      timestamppb.Now(),
+				Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+					Code:    e.code,
+					Message: e.prefix + e.text,
+				}},
+			})
+		}
 	}
 	c.capturePub.mu.Unlock()
 
@@ -116,7 +124,7 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	if !ok {
 		return
 	}
-	if r.Err == "" && r.ResponseMessageID != "" {
+	if r.Err == "" && r.TurnErr == "" && r.ResponseMessageID != "" {
 		g.MessagePersisted(r.ResponseMessageID)
 		return
 	}
