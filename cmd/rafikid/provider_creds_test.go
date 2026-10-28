@@ -17,12 +17,14 @@ package main
 // reason this daemon sends is read out of the body the engine actually built.
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -140,7 +142,7 @@ func (f *fakeCredStore) Delete(_ context.Context, owner, provider string) (provi
 	return c, nil
 }
 
-func (f *fakeCredStore) Refresh(_ context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
+func (f *fakeCredStore) Refresh(ctx context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := credKey{owner: owner, provider: provider}
@@ -182,6 +184,12 @@ func (f *fakeCredStore) Refresh(_ context.Context, owner, provider string, fn fu
 	if f.failWriteOnce {
 		f.failWriteOnce = false
 		return next, fmt.Errorf("%w: fake write failure", providercreds.ErrNotPersisted)
+	}
+	// The real store's write is ctx-bound: a cancelled context leaves the row
+	// untouched and reports ErrNotPersisted with the rotated credential. That is
+	// what makes a shutdown-time save observable.
+	if err := ctx.Err(); err != nil {
+		return next, fmt.Errorf("%w: %v", providercreds.ErrNotPersisted, err)
 	}
 	f.rows[key] = next
 	return next, nil
@@ -583,9 +591,12 @@ func TestTokenSourceRotatedTokenPersistedOnTransientError(t *testing.T) {
 	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
 	c.Require().Error(err, "a response with no access token is a failure")
 
+	c.EventuallyTrue(2*time.Second, 2*time.Millisecond, func() bool {
+		stored, ok := store.row(testOwner, testProvider)
+		return ok && stored.RefreshToken == "rotated-refresh"
+	}, "the rotated refresh token must be stored")
 	stored, ok := store.row(testOwner, testProvider)
 	c.True(ok, "row still present")
-	c.Eq("rotated-refresh", stored.RefreshToken, "the rotated refresh token must be stored")
 	c.False(stored.Dead, "a transient failure must not tombstone the credential")
 }
 
@@ -842,7 +853,8 @@ func TestProviderCredDeleteRevokesBestEffort(t *testing.T) {
 	iss := newFakeIssuer(t)
 	iss.revokeStatus = http.StatusInternalServerError
 	p := testCreds(t, store, iss, "")
-	p.cachePut(testKey, cachedAccess{token: "cached", accountID: "acct_1", expiry: time.Now().Add(time.Hour)})
+	p.cachePut(testKey, cachedAccess{token: "cached", accountID: "acct_1", expiry: time.Now().Add(time.Hour)},
+		p.generation(testKey))
 
 	err := p.DeleteProviderCredential(context.Background(), testOwner, testProvider)
 	c.NoError(err, "a failed revoke must not fail the logout")
@@ -899,4 +911,284 @@ func TestProviderCredsAvailable(t *testing.T) {
 
 	ok, _ = testCreds(t, newFakeCredStore(), newFakeIssuer(t), "").Available()
 	c.True(ok, "a wired engine")
+}
+
+// TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation is the fix round's
+// A1: a rotation the database did not accept must not be lost when a 401
+// recovery (or the sweep) refreshes during the retry window. The store still
+// holds the SPENT refresh token, so sending it again comes back
+// refresh_token_reused, the re-read finds the same spent token, and the row is
+// tombstoned while the working token sits in the save goroutine. The pending
+// hand-off makes the refresh adopt the rotation instead.
+func TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	store.failWriteOnce = true
+	iss := newFakeIssuer(t)
+	// The real issuer refuses a spent token. Answering reused on the second call
+	// is what makes this test fail if the forced refresh spends `sent` again.
+	iss.answer = func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, defaultTokenBody("acct_1")
+		}
+		return http.StatusBadRequest, `{"error":"refresh_token_reused"}`
+	}
+	p := testCreds(t, store, iss, "")
+	p.retryDelay = time.Hour // hold the save back: the forced refresh must land it
+
+	src := p.TokenSourceFor(testOwner, testProvider)
+	tok, _, err := src.Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory despite the failed write")
+	c.Eq("new-access", tok, "token")
+
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("r0", stored.RefreshToken, "the row still holds the spent token")
+	if _, ok := p.pendingFor(testKey); !ok {
+		c.Fail("a failed write must leave the rotation pending")
+	}
+
+	// The 401 recovery arrives before the save has run.
+	tok, _, err = src.Token(context.Background(), true)
+	c.NoError(err, "the forced refresh must adopt the pending rotation, not die on it")
+	c.Eq("new-access", tok, "token")
+	c.Eq(1, iss.calls(), "the spent refresh token must not be sent upstream again")
+
+	stored, ok = store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("rotated-refresh", stored.RefreshToken, "the adopted rotation must be stored")
+	c.False(stored.Dead, "adopting the rotation must not tombstone the credential")
+	forced, _, err := src.Token(context.Background(), false)
+	c.NoError(err, "a routine refresh after the adoption")
+	c.Eq("new-access", forced, "token")
+}
+
+// TestTokenSourceRetryDoesNotClobberANewerLogin is the re-login-during-retry
+// case: a save that started before another login must never undo it. The guard
+// is the row's refresh token, not a timer.
+func TestTokenSourceRetryDoesNotClobberANewerLogin(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	store.failWriteOnce = true
+	iss := newFakeIssuer(t)
+	p := testCreds(t, store, iss, "")
+	p.retryDelay = 100 * time.Millisecond
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+
+	// The owner logs in again while the save is still waiting: a fresh row, and
+	// the daemon forgetting everything it remembered about the old one.
+	login := providercreds.Credential{
+		OwnerUserID:  testOwner,
+		Provider:     testProvider,
+		AccountID:    "acct_1",
+		RefreshToken: "login-refresh",
+		AccessToken:  "login-access",
+		AccessExpiry: time.Now().Add(time.Hour),
+		LastRefresh:  time.Now(),
+	}
+	c.NoError(store.Put(context.Background(), login), "Put")
+	p.forget(testKey)
+
+	// Wait for the save to have attempted its write, then check it left the row
+	// alone. Without the row guard it would write the OLD rotation over the
+	// login's tokens.
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		return store.refreshCallCount() >= 2
+	}, "the save must attempt its write")
+
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("login-refresh", stored.RefreshToken, "a save must never overwrite a newer login")
+	c.Eq("login-access", stored.AccessToken, "a save must never overwrite a newer login")
+}
+
+// TestTokenSourceForcedFlightIsNotShared pins the 401 recovery owning its
+// refresh: a forced caller that joined an ordinary flight would be handed the
+// very token the server just refused.
+func TestTokenSourceForcedFlightIsNotShared(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	iss := newFakeIssuer(t)
+	release := make(chan struct{})
+	iss.block = release
+	p := testCreds(t, store, iss, "")
+	src := p.TokenSourceFor(testOwner, testProvider)
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	call := func(force bool) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := src.Token(context.Background(), force); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}()
+	}
+	call(false)
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool { return iss.calls() == 1 },
+		"the ordinary refresh must reach the issuer")
+	call(true) // must NOT join the ordinary flight
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	c.Len(errs, 0, "Token errors: %v", errs)
+	c.Eq(2, iss.calls(), "a forced refresh must make its own upstream call")
+}
+
+// TestProviderCredsWaitDrainsInFlightSave is the shutdown rule: cancel the
+// daemon context and Wait, and the rotation still reaches the row before the
+// caller closes the pool. The write survives the cancelled context
+// (WithoutCancel), and Wait is what gives it the time.
+func TestProviderCredsWaitDrainsInFlightSave(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	store.failWriteOnce = true
+	iss := newFakeIssuer(t)
+	p := newProviderCreds(ctx, store, iss.engine(), "", testProviderSet(t))
+	// Long enough that the save cannot land before the cancel below: it fires on
+	// bg.Done instead, which is the shutdown path.
+	p.retryDelay = 2 * time.Second
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+
+	cancel()
+	p.Wait()
+
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("rotated-refresh", stored.RefreshToken, "the save must land before Wait returns")
+}
+
+// TestProviderLoginReplacesCachedToken kills the "no eviction after a login"
+// mutation: an access token cached for the key must not survive the login that
+// replaced the account behind it.
+func TestProviderLoginReplacesCachedToken(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	iss := newFakeIssuer(t)
+	p := testCreds(t, store, iss, "")
+
+	// A previous account's token, cached and healthy.
+	p.cachePut(testKey, cachedAccess{
+		token:     "previous-account-access",
+		accountID: "acct_previous",
+		expiry:    time.Now().Add(time.Hour),
+	}, p.generation(testKey))
+	if _, ok := p.cached(testKey); !ok {
+		c.Fail("fixture: the previous token must be cached")
+	}
+
+	begin, err := p.BeginProviderLogin(context.Background(), testOwner, testProvider)
+	c.NoError(err, "BeginProviderLogin")
+	authURL, err := url.Parse(begin.AuthorizeURL)
+	c.NoError(err, "authorize URL must parse")
+	query := "code=auth-code&state=" + url.QueryEscape(authURL.Query().Get("state"))
+	_, accountID, err := p.CompleteProviderLogin(context.Background(), testOwner, begin.LoginID, query)
+	c.NoError(err, "CompleteProviderLogin")
+	c.Eq("acct_1", accountID, "account id")
+
+	if _, ok := p.cached(testKey); ok {
+		c.Fail("a login must evict the previous account's cached token")
+	}
+	tok, headers, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "Token after the login")
+	c.Eq("new-access", tok, "the login's own access token")
+	c.Eq("acct_1", headers.Get(chatGPTAccountHeader), "the login's own account")
+}
+
+// TestProviderLoginRefusesLoginWithoutAccountID pins the account pin at login
+// time: a credential that cannot be pinned to an account is refused, rather than
+// stored and discovered on the first turn.
+func TestProviderLoginRefusesLoginWithoutAccountID(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	iss := newFakeIssuer(t)
+	iss.answer = func(int) (int, string) {
+		// A healthy token response carrying an id_token with no account claim.
+		return http.StatusOK, fmt.Sprintf(
+			`{"access_token":"access","refresh_token":"refresh","expires_in":3600,"id_token":%q}`,
+			idTokenWithoutAccount())
+	}
+	p := testCreds(t, store, iss, "")
+
+	begin, err := p.BeginProviderLogin(context.Background(), testOwner, testProvider)
+	c.NoError(err, "BeginProviderLogin")
+	authURL, err := url.Parse(begin.AuthorizeURL)
+	c.NoError(err, "authorize URL must parse")
+	query := "code=auth-code&state=" + url.QueryEscape(authURL.Query().Get("state"))
+
+	_, _, err = p.CompleteProviderLogin(context.Background(), testOwner, begin.LoginID, query)
+	ce := c.ErrorAs[*connectapi.ControllerError](err)
+	c.Eq(protocol.ErrFailedPrecondition, ce.Code, "code")
+	c.StrContains(ce.Message, "pinned", "the error must say why an account id is required")
+
+	if _, ok := store.row(testOwner, testProvider); ok {
+		c.Fail("a login with no account id must not be stored")
+	}
+	c.Eq(0, store.putCount(), "a login with no account id must not be stored")
+}
+
+// idTokenWithoutAccount is an id_token whose payload carries no ChatGPT account
+// claim, which is the shape that leaves Tokens.AccountID empty.
+func idTokenWithoutAccount() string {
+	payload := `{"sub":"user-1","email":"alice@example.test"}`
+	return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+}
+
+// TestCachedAccessRedactsToken is the same leak-closing rule
+// providercreds.Credential follows: %v and slog must never render a live token.
+func TestCachedAccessRedactsToken(t *testing.T) {
+	c := assert.NewAborting(t)
+	tok := cachedAccess{token: "sekrit-access-token", accountID: "acct_1", expiry: time.Now()}
+
+	for _, rendered := range []string{fmt.Sprintf("%v", tok), fmt.Sprintf("%+v", tok), tok.String()} {
+		c.NotStrContains(rendered, "sekrit-access-token", "rendering: %s", rendered)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("cache", "access", tok)
+	c.NotStrContains(buf.String(), "sekrit-access-token", "slog output: %s", buf.String())
+	c.StrContains(buf.String(), redactedToken, "slog output names the redaction")
+}
+
+// TestCachePutLosesToAForget is the D1 race at its narrowest: a refresh reads the
+// generation before it starts, a logout forgets the key while it runs, and its
+// late cachePut must then be discarded. Without that test, a logged-out (or
+// previous-account) access token stays served from cache until it expires, and
+// the design's "the next turn fails with the re-login error" is a promise the
+// daemon does not keep.
+func TestCachePutLosesToAForget(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := testCreds(t, newFakeCredStore(), newFakeIssuer(t), "")
+	tok := cachedAccess{token: "late-access", accountID: "acct_1", expiry: time.Now().Add(time.Hour)}
+
+	// A flight that captured the generation, then lost the race to a logout.
+	gen := p.generation(testKey)
+	p.forget(testKey)
+	p.cachePut(testKey, tok, gen)
+	if _, ok := p.cached(testKey); ok {
+		c.Fail("a cache write from before the forget must be discarded")
+	}
+
+	// The same write on the CURRENT generation must store, otherwise this test
+	// would pass on an implementation that never caches anything.
+	p.cachePut(testKey, tok, p.generation(testKey))
+	if _, ok := p.cached(testKey); !ok {
+		c.Fail("a cache write on the current generation must be stored")
+	}
 }

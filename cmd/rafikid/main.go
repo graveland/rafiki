@@ -1257,6 +1257,12 @@ func runDaemon(opts runDaemonOpts) error {
 	// CancelFunc is idempotent, so the deferred baseCancel() at the top of
 	// main is a harmless no-op once this fires.
 	baseCancel()
+	// Drain credential work before the pool goes: a refresh that completed
+	// upstream but whose write has not landed yet is retried on its own
+	// goroutine with context.WithoutCancel, and closing the pool underneath it
+	// would lose a rotated token the issuer has already spent. Wait returns only
+	// once every flight, save and the sweep have finished.
+	creds.Wait()
 	if pool != nil {
 		closePoolBounded(pool, poolCloseTimeout)
 	}
