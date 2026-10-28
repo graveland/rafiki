@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	anthropic "github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -162,54 +164,88 @@ func TestProviderSendersFailsWhenModelsOwnProviderUnavailable(t *testing.T) {
 
 // ─── ChatGPT-login senders ──────────────────────────────────────────────────
 
-// fakeSenderCreds is a providerSenderCreds that records the owner of every
-// sender it is asked to build for.
+// fakeSenderCreds is a providerSenderCreds that records, for one build, which
+// owner the sender was asked to bind: the token source, the model facts, and
+// every Token call a built sender makes.
 //
-// It exists because a built sender is a pkg/llm value whose token source cannot
-// be read back out, so the property that matters (owner A's sender spends A's
-// bearer, never B's) is only observable at this seam: which owner each build
-// asked for, and that the source it was handed answers for that owner alone.
+// The Token call is the point. A built sender exposes neither its token source
+// nor its facts closure, so the only way to pin the binding AFTER construction
+// is to drive the sender and see whose credential it reaches for. Token is
+// therefore recorded and then FAILS: pkg/llm resolves the credential before it
+// dials, so the failure stops the request inside the process and the test never
+// touches the network.
 type fakeSenderCreds struct {
-	mu    sync.Mutex
-	avail bool
-	why   string
-	built []credKey
+	mu       sync.Mutex
+	avail    bool
+	why      string
+	sources  []credKey // TokenSourceFor calls, in order
+	factsFor []credKey // ModelFactsFor calls, in order
+	tokens   []credKey // Token calls from a built sender, in order
 }
 
 func (f *fakeSenderCreds) Available() (bool, string) { return f.avail, f.why }
 
 func (f *fakeSenderCreds) TokenSourceFor(owner, provider string) llm.TokenSource {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.built = append(f.built, credKey{owner: owner, provider: provider})
-	return ownerBearer{owner: owner, provider: provider}
+	key := credKey{owner: owner, provider: provider}
+	f.record(&f.sources, key)
+	return ownerBearer{creds: f, key: key}
 }
 
-func (f *fakeSenderCreds) ModelFactsFor(_, _ string) llm.ModelFacts { return nil }
-
-// builtFor is every (owner, provider) a sender was built for, in order.
-func (f *fakeSenderCreds) builtFor() []credKey {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]credKey(nil), f.built...)
+func (f *fakeSenderCreds) ModelFactsFor(owner, provider string) llm.ModelFacts {
+	f.record(&f.factsFor, credKey{owner: owner, provider: provider})
+	return func(string) (llm.ModelFact, bool) { return llm.ModelFact{}, false }
 }
 
-// ownerBearer is one owner's token source. Token answers with a bearer naming
-// the owner it was built for, so an owner leak is visible as a bearer.
-type ownerBearer struct{ owner, provider string }
+func (f *fakeSenderCreds) record(dst *[]credKey, key credKey) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	*dst = append(*dst, key)
+}
+
+func (f *fakeSenderCreds) recorded(dst func(*fakeSenderCreds) *[]credKey) []credKey {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]credKey(nil), (*dst(f))...)
+}
+
+// ownerBearer is one owner's token source. It answers for the owner it was
+// built with, never for another, and it refuses so a send stops before dialing.
+type ownerBearer struct {
+	creds *fakeSenderCreds
+	key   credKey
+}
 
 func (s ownerBearer) Token(context.Context, bool) (string, http.Header, error) {
-	return "bearer-" + s.owner, nil, nil
+	s.creds.record(&s.creds.tokens, s.key)
+	return "", nil, fmt.Errorf("fake credential for %s: refusing so the request never leaves the process", s.key.owner)
+}
+
+// exerciseSender drives a built sender far enough to resolve its credential. It
+// must fail (the fake token source refuses), and the failure is what proves the
+// request never reached an endpoint.
+func exerciseSender(t *testing.T, sender llm.Sender) {
+	t.Helper()
+	_, err := sender.New(context.Background(), anthropic.MessageNewParams{
+		Model:     "gpt-6.1-sol",
+		MaxTokens: 16,
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	assert.NewAborting(t).Error(err, "sender.New succeeded; the sender never resolved a credential, so this test observed nothing")
 }
 
 // Two owners spawning on the same ChatGPT provider must get two senders, each
 // bound to its own owner's credential. A shared sender would let one user's
 // turns spend another user's subscription, and would share the sender's cookie
 // jar with it.
+//
+// The assertion runs through the BUILT senders, not through fresh literals: each
+// send resolves a credential, so the recorded Token calls say which owner each
+// sender actually reaches for.
 func TestProviderSendersOwnerIsolation(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	set := chatGPTProviderSet()
 	creds := &fakeSenderCreds{avail: true}
+	const provider = chatGPTTestProvider
 	const model = chatGPTTestProvider + "/gpt-6.1-sol"
 
 	sendersA, err := providerSenders(set, nil, model, ownerA, creds)
@@ -217,26 +253,27 @@ func TestProviderSendersOwnerIsolation(t *testing.T) {
 	sendersB, err := providerSenders(set, nil, model, ownerB, creds)
 	ck.Require().NoError(err, "providerSenders(owner B)")
 
-	senderA, okA := sendersA[chatGPTTestProvider]
-	senderB, okB := sendersB[chatGPTTestProvider]
+	senderA, okA := sendersA[provider]
+	senderB, okB := sendersB[provider]
 	ck.Require().True(okA && okB, "a ChatGPT-login provider with an owner and a usable credential got no sender")
 	ck.False(senderA == senderB, "both owners were handed the same sender, so one's credential (and cookie jar) serves the other")
 
-	// Each build asked for its OWN owner's token source, once.
-	ck.EqDeep([]credKey{
-		{owner: ownerA, provider: chatGPTTestProvider},
-		{owner: ownerB, provider: chatGPTTestProvider},
-	}, creds.builtFor(), "TokenSourceFor calls, in order")
+	// Each build bound its OWN owner's token source and facts, once.
+	ck.EqDeep([]credKey{{owner: ownerA, provider: provider}, {owner: ownerB, provider: provider}},
+		creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.sources }), "TokenSourceFor calls, in order")
+	ck.EqDeep([]credKey{{owner: ownerA, provider: provider}, {owner: ownerB, provider: provider}},
+		creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.factsFor }), "ModelFactsFor calls, in order")
 
-	// And the sources it handed out answer for their own owner only.
-	ctx := context.Background()
-	bearerA, _, err := ownerBearer{owner: ownerA, provider: chatGPTTestProvider}.Token(ctx, false)
-	ck.Require().NoError(err, "owner A's token")
-	bearerB, _, err := ownerBearer{owner: ownerB, provider: chatGPTTestProvider}.Token(ctx, false)
-	ck.Require().NoError(err, "owner B's token")
-	ck.Eq("bearer-"+ownerA, bearerA, "owner A's bearer")
-	ck.Eq("bearer-"+ownerB, bearerB, "owner B's bearer")
-	ck.False(bearerB == "bearer-"+ownerA, "owner B's token source answered with owner A's bearer")
+	// And the senders themselves reach for their own owner's credential.
+	exerciseSender(t, senderA)
+	ck.EqDeep([]credKey{{owner: ownerA, provider: provider}},
+		creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.tokens }),
+		"owner A's sender did not spend owner A's credential")
+
+	exerciseSender(t, senderB)
+	ck.EqDeep([]credKey{{owner: ownerA, provider: provider}, {owner: ownerB, provider: provider}},
+		creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.tokens }),
+		"owner B's sender must spend owner B's credential, and must not re-spend owner A's")
 }
 
 // Without an owner (and without usable credential machinery) a ChatGPT-login
@@ -257,15 +294,24 @@ func TestProviderSendersNoOwnerNoChatGPTSender(t *testing.T) {
 		{"no credential machinery", ownerA, nil},
 		{"unavailable", ownerA, &fakeSenderCreds{avail: false, why: "set RAFIKI_SECRETS_KEY"}},
 	} {
+		creds, _ := tc.creds.(*fakeSenderCreds)
 		senders, err := providerSenders(set, nil, model, tc.owner, tc.creds)
 		ck.Require().NoError(err, "providerSenders(%s)", tc.name)
 		ck.NotHasKey(senders, chatGPTTestProvider, "providerSenders(%s) built a ChatGPT sender anyway", tc.name)
+		if creds != nil {
+			ck.Empty(creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.sources }),
+				"providerSenders(%s) asked for a token source anyway", tc.name)
+			ck.Empty(creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.factsFor }),
+				"providerSenders(%s) asked for model facts anyway", tc.name)
+		}
 	}
 
 	// The owner+credential case is the control: the same call DOES build one.
-	senders, err := providerSenders(set, nil, model, ownerA, &fakeSenderCreds{avail: true})
+	creds := &fakeSenderCreds{avail: true}
+	senders, err := providerSenders(set, nil, model, ownerA, creds)
 	ck.Require().NoError(err, "providerSenders(control)")
 	ck.HasKey(senders, chatGPTTestProvider, "providerSenders built nothing for an owner with usable credentials")
+	ck.Len(creds.recorded(func(f *fakeSenderCreds) *[]credKey { return &f.sources }), 1, "one token source for one sender")
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────

@@ -1207,7 +1207,7 @@ func (p *providerCreds) ownerModels(ctx context.Context, owner, provider string)
 		return nil, err
 	}
 	dir := parseOwnerModels(cred.ModelsJSON)
-	p.rememberModels(key, dir)
+	p.rememberReadModels(key, dir)
 	return dir, nil
 }
 
@@ -1224,19 +1224,52 @@ func (p *providerCreds) rememberedModels(key credKey) (*ownerModels, bool) {
 	return e.dir, true
 }
 
-// rememberModels installs a parsed directory, keeping a fetch attempt's stamp.
-func (p *providerCreds) rememberModels(key credKey, dir *ownerModels) {
+// rememberReadModels installs the parse of what the ROW holds, and only when
+// nothing has answered for this key yet.
+//
+// The guard is what keeps a slow read from overwriting a newer FETCH: a read at
+// T1 and a fetch that started at T0 but lands at T2 both want to install, and
+// the fetch's document is the newer one. A fetch therefore always installs
+// (rememberFetchedModels) and a read never overwrites one.
+func (p *providerCreds) rememberReadModels(key credKey, dir *ownerModels) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	e := p.modelsEntryLocked(key)
+	if e.read {
+		return
+	}
+	e.dir, e.read = dir, true
+}
+
+// rememberFetchedModels installs the parse of a document this daemon just
+// fetched, unless the credential changed while the fetch was in flight.
+//
+// gen is the eviction generation captured when the fetch STARTED. A logout, a
+// re-login or a dead row bumps it (forget), so a fetch that started as account A
+// and finishes as account B is dropped rather than installed: the directory and
+// the etag belong to the account, and adopting the old one would offer models
+// the new account cannot address.
+func (p *providerCreds) rememberFetchedModels(key credKey, dir *ownerModels, gen uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gen[key] != gen {
+		return
+	}
+	e := p.modelsEntryLocked(key)
+	e.dir, e.read = dir, true
+}
+
+// modelsEntryLocked returns this key's entry, creating it. Callers hold p.mu.
+func (p *providerCreds) modelsEntryLocked(key credKey) *ownerModelsEntry {
 	e := p.models[key]
 	if e == nil {
-		e = &ownerModelsEntry{}
 		if p.models == nil {
 			p.models = make(map[credKey]*ownerModelsEntry)
 		}
+		e = &ownerModelsEntry{}
 		p.models[key] = e
 	}
-	e.dir, e.read = dir, true
+	return e
 }
 
 // modelsFetchDue reports whether a fetch is due and stamps the attempt, so an
@@ -1245,14 +1278,7 @@ func (p *providerCreds) rememberModels(key credKey, dir *ownerModels) {
 func (p *providerCreds) modelsFetchDue(key credKey) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	e := p.models[key]
-	if e == nil {
-		e = &ownerModelsEntry{}
-		if p.models == nil {
-			p.models = make(map[credKey]*ownerModelsEntry)
-		}
-		p.models[key] = e
-	}
+	e := p.modelsEntryLocked(key)
 	now := time.Now()
 	if !e.triedAt.IsZero() && now.Sub(e.triedAt) < modelsRefreshInterval {
 		return false
@@ -1306,6 +1332,13 @@ func (p *providerCreds) refreshModelsInBackground(owner, provider string) {
 // work while an empty one offers nothing. A 304 keeps the cache (the etag is
 // the whole point of sending it), and a 200 lands only after the document
 // PARSES: an unrecognised answer must never replace a usable directory.
+//
+// The whole fetch is bound to the credential's GENERATION, captured here before
+// any work. A fetch in flight across a logout and a re-login to a different
+// account must not write the old account's directory and etag onto the new
+// account's row: the directory is per account, and the models in it would be
+// ones the new login cannot address. Same discipline as the access-token cache
+// (cachePut), for the same reason.
 func (p *providerCreds) refreshModels(ctx context.Context, owner, provider string) {
 	if ok, _ := p.Available(); !ok {
 		return
@@ -1314,6 +1347,7 @@ func (p *providerCreds) refreshModels(ctx context.Context, owner, provider strin
 		ctx = p.bgCtx()
 	}
 	key := credKey{owner: owner, provider: provider}
+	gen := p.generation(key)
 	cred, err := p.store.Get(ctx, owner, provider)
 	switch {
 	case errors.Is(err, providercreds.ErrNotFound), errors.Is(err, providercreds.ErrDead):
@@ -1392,14 +1426,24 @@ func (p *providerCreds) refreshModels(ctx context.Context, owner, provider strin
 			"owner", owner, "provider", provider, "bytes", len(body))
 		return
 	}
+	if p.generation(key) != gen {
+		// The credential was logged out, re-logged-in or marked dead while this
+		// fetch was in flight. The answer describes an account that is no longer
+		// the owner's, so it is dropped unread rather than written to the row.
+		slog.Info("provider models: credential changed during the fetch; discarding the directory",
+			"owner", owner, "provider", provider)
+		return
+	}
 	if err := p.store.SetModels(ctx, owner, provider, body, resp.Header.Get("ETag")); err != nil {
 		slog.Warn("provider models: store the model directory failed",
 			"owner", owner, "provider", provider, "error", err)
 		return
 	}
 	// The parse of the document that was just stored: every reader of this
-	// fetch's answer (facts, context window, listing) shares this one value.
-	p.rememberModels(key, dir)
+	// fetch's answer (facts, context window, listing) shares this one value. The
+	// generation is re-checked here too, closing the window between the test
+	// above and the write.
+	p.rememberFetchedModels(key, dir, gen)
 }
 
 // ─── Provider login backend ──────────────────────────────────────────────────

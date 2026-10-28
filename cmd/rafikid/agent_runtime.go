@@ -126,7 +126,7 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
 	switch req.Kind {
 	case protocol.KindFundi:
-		ro, err := c.agentRuntimeOptions(req, childID, autoResume, ownerName, ownerUserID)
+		ro, err := c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, credentialOwnerUserID(ownerUserID, snap))
 		if err != nil {
 			return nil, err
 		}
@@ -309,16 +309,57 @@ func (c *Controller) stashDarajaBinding(childID, executorID string, pgid int32) 
 	c.wsLabels[childID] = wl
 }
 
-// agentRuntimeOptions builds the RuntimeOptions for an agent-kind req, and is
+// credentialOwnerUserID is the ONLY owner a per-user provider credential may be
+// bound to, and it is deliberately narrower than the child's attribution owner.
+//
+// A fresh spawn (snap == nil) already has an authenticated identity, so
+// ownerUserID came from the connection and is exactly what may be spent. On
+// resume and recovery there is no connection: ownerUserID came from
+// resumeOwnerUserID, which falls back to Labels["owner"] for rows older than the
+// owner_user_id column, and that label is an OS USERNAME written at spawn time.
+// Binding a ChatGPT sender to a rafiki user merely because they share that
+// username would spend one person's subscription on another person's child, so
+// the label is never consulted here: only the stored column counts. An empty
+// column means no credential-bound provider works for this child, which is the
+// documented degradation (the turn fails with the token source's error) rather
+// than a silent borrow.
+func credentialOwnerUserID(ownerUserID string, snap *childstore.Snapshot) string {
+	if snap != nil {
+		return snap.OwnerUserID
+	}
+	return ownerUserID
+}
+
+// agentRuntimeOptions builds the RuntimeOptions for an agent-kind req on the
+// SPAWN path, where there is no stored snapshot yet and the child's owner IS the
+// authenticated identity, so it is also the only user whose per-user provider
+// credential may be spent.
+//
+// Keep it that way: a resume or a recovery must call agentRuntimeOptionsFor with
+// credentialOwnerUserID, never this one, or the child's ATTRIBUTION owner (which
+// can come from the owner label) would silently become the BILLING owner.
+func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (fundi.RuntimeOptions, error) {
+	return c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, ownerUserID)
+}
+
+// agentRuntimeOptionsFor builds the RuntimeOptions for an agent-kind req, and is
 // split out of agentRunner so a test can assert on the options directly
 // (e.g. that Ref/APIKey ended up right) rather than only on whether a Runner
 // came back non-nil, which cannot observe either.
+//
+// ownerUserID and credentialOwner differ on purpose. ownerUserID is the child's
+// ATTRIBUTION (conversations, quota, pymodules, presets, the recall identity),
+// and on resume/recovery it is best-effort, so a legacy row with no owner column
+// resolves it from the owner label. credentialOwner is the user a PER-USER
+// PROVIDER CREDENTIAL is spent as, and only a stored, authenticated identity may
+// ever fill it: see credentialOwnerUserID. Nothing else in this function reads
+// credentialOwner.
 //
 // argv is built the same way for every spawn path (buildAgentArgv, the single
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (fundi.RuntimeOptions, error) {
+func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID, credentialOwner string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
@@ -375,7 +416,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// entry warmed here) and this child's context window. Reading it BEFORE the
 	// senders are built is what makes it one parse: the sender's first Send finds
 	// the parse already in memory. Every other provider pays nothing here.
-	if dir, modelID := c.ownerChatGPTModels(ownerUserID, ro.Providers, ro.Model); dir != nil {
+	if dir, modelID := c.ownerChatGPTModels(credentialOwner, ro.Providers, ro.Model); dir != nil {
 		// RuntimeOptions.ContextWindow outranks the catalog; its plumbing down to
 		// the engine is pinned by pkg/fundi's own end-to-end test, and 0 means
 		// "ask the catalog".
@@ -389,7 +430,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if c.providerCreds != nil {
 		senderCreds = c.providerCreds
 	}
-	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model, ownerUserID, senderCreds)
+	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model, credentialOwner, senderCreds)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}

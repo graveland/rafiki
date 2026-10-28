@@ -1958,6 +1958,13 @@ func (c *Controller) claimSiblingName(ctx context.Context, ownerUserID, parentID
 // attaches, and dies on its first turn with a 401 (or, worse, bills a
 // credential the caller did not know was involved).
 //
+// It checks the SAME provider set providerSenders will build senders for, which
+// is the model's own provider plus that provider's one-level Fallback chain and
+// nothing else (llm.Client sends to a fallback directly and never recurses into
+// a fallback's own Fallback, so a two-hop target is unreachable and is not
+// checked). A ChatGPT provider reachable only through Fallback is exactly as
+// billable as the primary, so it gets the same three refusals.
+//
 // Three refusals, each a different repair:
 //
 //   - no owner: the daemon has no login to spend and there is deliberately no
@@ -1970,6 +1977,10 @@ func (c *Controller) claimSiblingName(ctx context.Context, ownerUserID, parentID
 //     setting.
 //   - no login for this owner: FailedPrecondition naming the fix, because the
 //     request is fine and one command makes it work.
+//   - the store could not answer at all: Unavailable, the code every other
+//     store outage on this daemon answers with. A failed lookup is NOT "no
+//     login": telling a user to log in again when the database is down sends
+//     them to fix the wrong thing.
 //
 // Only a spawn checks. A resume or a startup recovery re-checks nothing: the
 // child already exists, and a credential that has since expired surfaces as the
@@ -1983,30 +1994,66 @@ func (c *Controller) checkLoginProviderUsable(ctx context.Context, req protocol.
 		return nil
 	}
 	p, _, err := set.Split(req.Model)
-	if err != nil || p.Kind != providers.KindOpenAIResponsesChatGPT {
+	if err != nil {
 		// An unresolvable model is another check's business (agentRuntimeOptions
-		// reports it), and every other kind authenticates from the environment.
+		// reports it), and nothing is reachable from it.
 		return nil
 	}
+	for _, name := range loginProviderChain(set, p) {
+		if err := c.checkLoginProvider(ctx, name, ownerUserID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loginProviderChain is every provider this spawn could bill a per-user login
+// to: the ChatGPT-kind members of the model's own provider and its Fallback
+// chain, primary first. It is the billing counterpart of reachableProviders,
+// which providerSenders uses to decide which providers it may build at all.
+func loginProviderChain(set *providers.Set, primary providers.Provider) []string {
+	var out []string
+	seen := map[string]bool{}
+	consider := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		if p, ok := set.Get(name); ok && p.Kind == providers.KindOpenAIResponsesChatGPT {
+			out = append(out, name)
+		}
+	}
+	consider(primary.Name)
+	for _, fb := range primary.Fallback {
+		consider(fb)
+	}
+	return out
+}
+
+// checkLoginProvider is checkLoginProviderUsable's body for one provider.
+func (c *Controller) checkLoginProvider(ctx context.Context, name, ownerUserID string) error {
 	if ownerUserID == "" {
 		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: fmt.Sprintf("provider %s bills a user's ChatGPT subscription; "+
-				"spawn with a user credential (this child has no owner)", p.Name),
+				"spawn with a user credential (this child has no owner)", name),
 		}
 	}
 	creds := c.providerCreds
 	if ok, why := creds.Available(); !ok {
 		return &connectapi.ControllerError{Code: protocol.ErrUnavailable, Message: why}
 	}
-	has, err := creds.HasCredential(ctx, ownerUserID, p.Name)
+	has, err := creds.HasCredential(ctx, ownerUserID, name)
 	if err != nil {
-		return fmt.Errorf("provider %s: check the ChatGPT login: %w", p.Name, err)
+		return &connectapi.ControllerError{
+			Code:    protocol.ErrUnavailable,
+			Message: fmt.Sprintf("cannot read the ChatGPT login for %s: %v", name, err),
+		}
 	}
 	if !has {
 		return &connectapi.ControllerError{
 			Code:    protocol.ErrFailedPrecondition,
-			Message: fmt.Sprintf("no ChatGPT login for %s; run: rafiki providers login %s", p.Name, p.Name),
+			Message: fmt.Sprintf("no ChatGPT login for %s; run: rafiki providers login %s", name, name),
 		}
 	}
 	return nil

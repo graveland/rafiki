@@ -25,12 +25,14 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providercreds"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -92,7 +94,9 @@ func chatGPTTestCreds(t *testing.T, store providercreds.Store) *providerCreds {
 
 func chatGPTTestCredsWithModels(t *testing.T, store providercreds.Store, fx *modelsFixture) *providerCreds {
 	t.Helper()
-	creds := newProviderCreds(t.Context(), store, newFakeIssuer(t).engine(), "", nil)
+	// The registry is the login backend's provider lookup: CompleteProviderLogin
+	// refuses a provider name it cannot resolve to a ChatGPT-kind entry.
+	creds := newProviderCreds(t.Context(), store, newFakeIssuer(t).engine(), "", chatGPTProviderSet)
 	creds.modelsURL = fx.srv.URL
 	creds.modelsClient = fx.srv.Client()
 	t.Cleanup(creds.Wait)
@@ -106,6 +110,10 @@ type modelsFixture struct {
 	status int
 	body   string
 	etag   string
+	// before, when set, runs after the request is recorded and before it is
+	// answered. It is how a test changes the credential while a fetch is in
+	// flight (a logout plus a re-login under the same key).
+	before func()
 
 	mu       sync.Mutex
 	requests []modelsFixtureRequest
@@ -130,7 +138,11 @@ func newModelsFixture(t *testing.T, status int, body string) *modelsFixture {
 			AccountID:     r.Header.Get(chatGPTAccountHeader),
 			IfNoneMatch:   r.Header.Get("If-None-Match"),
 		})
+		before := fx.before
 		fx.mu.Unlock()
+		if before != nil {
+			before()
+		}
 		if fx.status == http.StatusNotModified {
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -166,29 +178,62 @@ func liveCredential(owner, modelsJSON string) providercreds.Credential {
 	}
 }
 
-// countingCredStore counts the store reads a path performs. It is how "one parse
-// per fetch" is observable: the context window and the sender's per-model facts
-// must share ONE read of the same cached document, not one each.
+// recordingCredStore records what a path asked the store, and for WHICH owner.
 //
-// The count is mutex-guarded even though this test's path has no concurrent
-// reader, so a future fetch on the same creds cannot make it a race report.
-type countingCredStore struct {
+// It answers three questions this file's tests could not otherwise ask: how many
+// reads a path performs (one parse per fetch), whether a fetch ever WROTE a
+// directory it should have dropped (SetModels), and whose credential a child was
+// bound to (every owner a Get or Refresh named).
+type recordingCredStore struct {
 	*fakeCredStore
-	mu   sync.Mutex
-	gets int
+
+	mu          sync.Mutex
+	gets        int
+	getOwners   []string
+	setModels   int
+	refreshOwns []string
 }
 
-func (s *countingCredStore) Get(ctx context.Context, owner, provider string) (providercreds.Credential, error) {
+func (s *recordingCredStore) Get(ctx context.Context, owner, provider string) (providercreds.Credential, error) {
 	s.mu.Lock()
 	s.gets++
+	s.getOwners = append(s.getOwners, owner)
 	s.mu.Unlock()
 	return s.fakeCredStore.Get(ctx, owner, provider)
 }
 
-func (s *countingCredStore) readCount() int {
+func (s *recordingCredStore) SetModels(ctx context.Context, owner, provider string, modelsJSON []byte, etag string) error {
+	s.mu.Lock()
+	s.setModels++
+	s.mu.Unlock()
+	return s.fakeCredStore.SetModels(ctx, owner, provider, modelsJSON, etag)
+}
+
+func (s *recordingCredStore) Refresh(ctx context.Context, owner, provider string, fn func(providercreds.Credential) (providercreds.Credential, error)) (providercreds.Credential, error) {
+	s.mu.Lock()
+	s.refreshOwns = append(s.refreshOwns, owner)
+	s.mu.Unlock()
+	return s.fakeCredStore.Refresh(ctx, owner, provider, fn)
+}
+
+func (s *recordingCredStore) readCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gets
+}
+
+// ownersRead is every owner a Get named.
+func (s *recordingCredStore) ownersRead() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.getOwners...)
+}
+
+// writes is how many model directories were stored.
+func (s *recordingCredStore) writes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setModels
 }
 
 // spawnTestChatGPTController is a Controller wired with the ChatGPT registry,
@@ -262,6 +307,30 @@ func TestProviderSpawnRefusedWhenUnavailable(t *testing.T) {
 	ck.StrContains(ce.Message, "RAFIKI_SECRETS_KEY", "message")
 }
 
+// A store that cannot answer is Unavailable, never "no login": sending a user to
+// run a login command because the database is down has them fix the wrong thing.
+func TestProviderSpawnRefusedWhenStoreFails(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := brokenCredStore{fakeCredStore: newFakeCredStore()}
+	c := spawnTestChatGPTController(t, chatGPTTestCreds(t, store))
+
+	err := c.checkLoginProviderUsable(context.Background(),
+		protocol.SpawnRequest{Kind: protocol.KindFundi, Model: chatGPTTestProvider + "/gpt-6.1-sol"}, ownerA)
+	ck.Require().Error(err, "a spawn was admitted over a failed credential read")
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrUnavailable, ce.Code, "a store fault must be Unavailable, not a missing-login refusal")
+	ck.StrContains(ce.Message, "connection refused", "the refusal must carry the store's fault")
+	ck.False(strings.Contains(ce.Message, "rafiki providers login"),
+		"a store fault told the user to log in again: %q", ce.Message)
+}
+
+// brokenCredStore answers every read with a store fault.
+type brokenCredStore struct{ *fakeCredStore }
+
+func (b brokenCredStore) Get(context.Context, string, string) (providercreds.Credential, error) {
+	return providercreds.Credential{}, errors.New("connection refused")
+}
+
 // The admitted case, so the three refusals above are known to be refusals of
 // something that otherwise works.
 func TestProviderSpawnAdmittedWithCredential(t *testing.T) {
@@ -322,7 +391,7 @@ func TestOwnerModelFacts(t *testing.T) {
 // read there would be a second parse of the same document.
 func TestContextWindowFromOwnerModels(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	store := &countingCredStore{fakeCredStore: newFakeCredStore()}
+	store := &recordingCredStore{fakeCredStore: newFakeCredStore()}
 	store.seed(liveCredential(ownerA, chatGPTModelsJSON))
 	creds := chatGPTTestCreds(t, store)
 	c := spawnTestChatGPTController(t, creds)
@@ -529,6 +598,145 @@ func TestOwnerModelsListingKeepsCacheWhenFetchFails(t *testing.T) {
 	ck.Len(fx.recorded(), 1, "model directory fetches for three listings")
 }
 
+// A stored etag rides `If-None-Match`, and a 304 KEEPS the cache: the answer is
+// "what you have is current", so nothing is written and the cached directory
+// keeps serving the listing.
+func TestOwnerModelsFetchSendsIfNoneMatchAndKeepsCacheOn304(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := &recordingCredStore{fakeCredStore: newFakeCredStore()}
+	cred := liveCredential(ownerA, chatGPTModelsJSON)
+	cred.ModelsETag = `"v1"`
+	store.seed(cred)
+	fx := newModelsFixture(t, http.StatusNotModified, "")
+	c := spawnTestChatGPTController(t, chatGPTTestCredsWithModels(t, store, fx))
+
+	rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	ck.Require().NoError(err, "ListModelRows")
+	ck.HasKey(rowsByID(rows), chatGPTTestProvider+"/gpt-6.1-sol", "the cached directory is not listed")
+
+	waitForModelsRequests(t, fx, 1)
+	ck.Eq(`"v1"`, fx.recorded()[0].IfNoneMatch, "If-None-Match must carry the stored etag")
+
+	ck.Eq(0, store.writes(), "a 304 stored a directory: there was nothing new to store")
+	stored, ok := store.row(ownerA, chatGPTTestProvider)
+	ck.Require().True(ok, "the credential row vanished")
+	ck.Eq(`"v1"`, stored.ModelsETag, "a 304 must not clear the etag")
+	ck.Eq(chatGPTModelsJSON, string(stored.ModelsJSON), "a 304 must not touch the stored directory")
+
+	// And the cache still answers: a 304 means the parse we hold is current.
+	ck.Eq(500000, dirContextWindow(t, c.providerCreds, ownerA, "gpt-6.1-sol"), "cached context window after a 304")
+}
+
+// A 200 whose body is not a model directory is NOT stored: a malformed answer
+// must not replace a working cache (nor leave an unparsable row for the next
+// daemon to read).
+func TestOwnerModelsFetchDoesNotStoreUnparsableBody(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := &recordingCredStore{fakeCredStore: newFakeCredStore()}
+	cred := liveCredential(ownerA, chatGPTModelsJSON)
+	cred.ModelsETag = `"v1"`
+	store.seed(cred)
+	fx := newModelsFixture(t, http.StatusOK, "<html>not a model directory</html>")
+	c := spawnTestChatGPTController(t, chatGPTTestCredsWithModels(t, store, fx))
+
+	rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	ck.Require().NoError(err, "ListModelRows")
+	ck.HasKey(rowsByID(rows), chatGPTTestProvider+"/gpt-6.1-sol", "the cached directory is not listed")
+
+	waitForModelsRequests(t, fx, 1)
+	ck.Eq(0, store.writes(), "an unparsable model directory was stored")
+	stored, ok := store.row(ownerA, chatGPTTestProvider)
+	ck.Require().True(ok, "the credential row vanished")
+	ck.Eq(`"v1"`, stored.ModelsETag, "an unparsable answer must not replace the etag")
+	ck.Eq(chatGPTModelsJSON, string(stored.ModelsJSON), "an unparsable answer must not replace the directory")
+}
+
+// A successful login TRIGGERS the fetch. Without it a user who just logged in
+// sees an empty model list until something else happens to ask, and the child's
+// context window stays at the catalog's answer.
+func TestProviderLoginTriggersModelsFetch(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := &recordingCredStore{fakeCredStore: newFakeCredStore()}
+	fx := newModelsFixture(t, http.StatusOK, ownerBModelsJSON)
+	creds := chatGPTTestCredsWithModels(t, store, fx)
+
+	begin, err := creds.BeginProviderLogin(context.Background(), ownerA, chatGPTTestProvider)
+	ck.Require().NoError(err, "BeginProviderLogin")
+	authURL, err := url.Parse(begin.AuthorizeURL)
+	ck.Require().NoError(err, "authorize URL must parse")
+	_, _, err = creds.CompleteProviderLogin(context.Background(), ownerA, begin.LoginID,
+		"code=auth-code&state="+url.QueryEscape(authURL.Query().Get("state")))
+	ck.Require().NoError(err, "CompleteProviderLogin")
+
+	waitForModelsRequests(t, fx, 1)
+	ck.Eq(1, store.writes(), "the login did not store a model directory")
+	stored, ok := store.row(ownerA, chatGPTTestProvider)
+	ck.Require().True(ok, "the login stored no credential")
+	ck.False(len(stored.ModelsJSON) == 0, "the login stored no directory")
+}
+
+// A fetch that outlives its credential must not write: a logout plus a re-login
+// to ANOTHER account bumps the credential's generation, and the directory (and
+// its etag) describe the account that is gone.
+func TestOwnerModelsFetchDropsDirectoryWhenCredentialChanges(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := &recordingCredStore{fakeCredStore: newFakeCredStore()}
+	store.seed(liveCredential(ownerA, chatGPTModelsJSON)) // the old account's directory
+	fx := newModelsFixture(t, http.StatusOK, ownerBModelsJSON)
+	creds := chatGPTTestCredsWithModels(t, store, fx)
+	key := credKey{owner: ownerA, provider: chatGPTTestProvider}
+	fx.before = func() {
+		// The user logs out and back in as a different account while the fetch is
+		// in flight. Both go through forget, which bumps the generation.
+		store.seed(liveCredential(ownerA, ""))
+		creds.forget(key)
+	}
+
+	creds.refreshModels(t.Context(), ownerA, chatGPTTestProvider)
+
+	ck.Eq(0, store.writes(), "a fetch across a re-login wrote the OLD account's model directory")
+	stored, ok := store.row(ownerA, chatGPTTestProvider)
+	ck.Require().True(ok, "the credential row vanished")
+	ck.Eq("", stored.ModelsETag, "the old account's etag landed on the new account's row")
+	ck.Empty(stored.ModelsJSON, "the old account's directory landed on the new account's row")
+	if _, known := creds.rememberedModels(key); known {
+		t.Error("the discarded fetch's parse was remembered")
+	}
+}
+
+// A read that started BEFORE a fetch landed must not overwrite the fetch's
+// parse: the fetched document is the newer one, and losing it would leave the
+// directory stale for up to an hour.
+func TestOwnerModelsReadDoesNotOverwriteFetchedParse(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	creds := chatGPTTestCreds(t, newFakeCredStore())
+	key := credKey{owner: ownerA, provider: chatGPTTestProvider}
+
+	// The fetch lands first (it started earlier, and its document is newer than
+	// anything a row read can see once it has been stored).
+	creds.rememberFetchedModels(key, parseOwnerModels([]byte(ownerBModelsJSON)), creds.generation(key))
+	// Then the slow read installs the parse of what the row held.
+	creds.rememberReadModels(key, parseOwnerModels([]byte(chatGPTModelsJSON)))
+
+	dir, known := creds.rememberedModels(key)
+	ck.Require().True(known, "neither parse was remembered")
+	ck.Eq(123, dir.contextWindow("gpt-b-only"), "the fetch's parse must win")
+	ck.Eq(0, dir.contextWindow("gpt-6.1-sol"), "the older read's parse overwrote the fetched one")
+
+	// A first read still installs: the guard is "never overwrite", not "never
+	// remember".
+	fresh := chatGPTTestCreds(t, newFakeCredStore())
+	fresh.rememberReadModels(key, parseOwnerModels([]byte(chatGPTModelsJSON)))
+	dir, known = fresh.rememberedModels(key)
+	ck.Require().True(known, "a first read was not remembered")
+	ck.Eq(500000, dir.contextWindow("gpt-6.1-sol"), "a first read must install its parse")
+
+	// And a fetch still wins over a fetch: nothing else can replace a parse.
+	creds.rememberFetchedModels(key, parseOwnerModels([]byte(chatGPTModelsJSON)), creds.generation(key))
+	dir, _ = creds.rememberedModels(key)
+	ck.Eq(500000, dir.contextWindow("gpt-6.1-sol"), "a later fetch must replace the earlier parse")
+}
+
 // chatGPTModelsClientVersion is the operator's override when set, the codex
 // constant otherwise.
 func TestChatGPTModelsClientVersion(t *testing.T) {
@@ -539,7 +747,134 @@ func TestChatGPTModelsClientVersion(t *testing.T) {
 	ck.Eq("1.2.3", chatGPTModelsClientVersion(), "overridden client_version")
 }
 
+// A ChatGPT provider reached only through the primary provider's Fallback chain
+// is exactly as billable as the primary itself, so it gets the same refusal. The
+// chain is the model's own provider plus its one-level Fallback list, the same
+// set providerSenders builds senders for (llm.Client never recurses into a
+// fallback's own Fallback).
+func TestProviderSpawnRefusedWhenChatGPTReachableOnlyViaFallback(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := newFakeCredStore()
+	c := newTestController(t)
+	c.providers = &providers.Set{
+		DefaultProvider: "anthropic",
+		Providers: map[string]providers.Provider{
+			"anthropic":         {Name: "anthropic", Kind: providers.KindAnthropic, Fallback: []string{chatGPTTestProvider}},
+			chatGPTTestProvider: {Name: chatGPTTestProvider, Kind: providers.KindOpenAIResponsesChatGPT},
+		},
+	}
+	c.providerCreds = chatGPTTestCreds(t, store)
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/claude-sonnet-4-5"}
+
+	// No owner: the fallback would need one, so the spawn is refused by name.
+	err := c.checkLoginProviderUsable(context.Background(), req, "")
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "ownerless spawn whose FALLBACK is a ChatGPT provider")
+	ck.StrContains(ce.Message, chatGPTTestProvider, "the refusal must name the fallback provider")
+
+	// An owner with no login for that provider: refused with the fix.
+	err = c.checkLoginProviderUsable(context.Background(), req, ownerA)
+	ce = controllerErr(t, err)
+	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "spawn whose fallback has no login")
+	ck.Eq("no ChatGPT login for chatgpt; run: rafiki providers login chatgpt", ce.Message, "message")
+
+	// And admitted once the login exists, so the refusal above is a refusal of
+	// something that otherwise works.
+	store.seed(liveCredential(ownerA, chatGPTModelsJSON))
+	ck.NoError(c.checkLoginProviderUsable(context.Background(), req, ownerA),
+		"a spawn whose fallback provider has a login was refused")
+}
+
+// Spawn itself must call the check. The unit tests above would all still pass
+// with the call deleted, so this drives the real entry point and asserts both
+// halves of the refusal: a coded error, and no child row.
+func TestSpawnRefusesChatGPTModelWithoutLogin(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	store := newFakeCredStore()
+	c := spawnTestChatGPTController(t, chatGPTTestCreds(t, store))
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: chatGPTTestProvider + "/gpt-6.1-sol",
+	}
+
+	res, err := c.Spawn(context.Background(), req, users.Identity{UserID: ownerA})
+	ck.Require().Error(err, "Spawn admitted a ChatGPT child with no login, child id %q", res.ChildID)
+	ce := controllerErr(t, err)
+	ck.Eq(protocol.ErrFailedPrecondition, ce.Code, "code")
+	ck.Eq("no ChatGPT login for chatgpt; run: rafiki providers login chatgpt", ce.Message, "message")
+	ck.Len(c.st.List(), 0, "a refused spawn wrote a child row: %+v", c.st.List())
+
+	// The same spawn with the login in place gets past the check (and past the
+	// refusal's position in the pipeline), so the assertion above is about the
+	// login and not about some earlier refusal.
+	store.seed(liveCredential(ownerA, chatGPTModelsJSON))
+	if _, err := c.Spawn(context.Background(), req, users.Identity{UserID: ownerA}); err != nil {
+		ck.False(controllerErrCodeIs(err, protocol.ErrFailedPrecondition),
+			"the control spawn was still refused for a missing login: %v", err)
+	}
+}
+
+// controllerErrCodeIs reports whether err is a ControllerError carrying code.
+func controllerErrCodeIs(err error, code string) bool {
+	var ce *connectapi.ControllerError
+	return errors.As(err, &ce) && ce.Code == code
+}
+
+// ─── Owner model directory ───────────────────────────────────────────────────
+
+// The credential owner is the STORED owner, never the owner LABEL.
+//
+// On resume and recovery there is no connection, and a child row older than
+// owner_user_id carries only Labels["owner"], which is an OS USERNAME. Spending
+// whichever rafiki account shares that username is the owner-isolation hole this
+// rule closes.
+func TestCredentialOwnerIsNeverTheOwnerLabel(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	// A fresh spawn has an authenticated identity and no snapshot.
+	ck.Eq(ownerA, credentialOwnerUserID(ownerA, nil), "spawn: the authenticated owner is the credential owner")
+	// Resume / recovery: the stored column only.
+	ck.Eq(ownerA, credentialOwnerUserID("user-who-happens-to-share-the-username",
+		&childstore.Snapshot{OwnerUserID: ownerA, Labels: map[string]string{"owner": "brent"}}), "resume: stored owner")
+	// A legacy row with no stored owner gets NO credential owner at all, even
+	// though its label resolves to somebody.
+	ck.Eq("", credentialOwnerUserID("user-who-happens-to-share-the-username",
+		&childstore.Snapshot{Labels: map[string]string{"owner": "brent"}}), "legacy row: no stored owner means nobody")
+
+	// And the spawn builder never asks the store about the label-resolved user.
+	store := &recordingCredStore{fakeCredStore: newFakeCredStore()}
+	store.seed(liveCredential(ownerA, chatGPTModelsJSON))
+	c := spawnTestChatGPTController(t, chatGPTTestCreds(t, store))
+	const labelOwner = "user-who-happens-to-share-the-username"
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: chatGPTTestProvider + "/gpt-6.1-sol"}
+	_, err := c.agentRunner(req, "c_resume_owner", false, "brent", labelOwner,
+		&childstore.Snapshot{OwnerUserID: ownerA, Labels: map[string]string{"owner": "brent"}})
+	ck.Require().NoError(err, "agentRunner(resume)")
+	ck.EqDeep([]string{ownerA}, store.ownersRead(),
+		"a resume read the credential of an owner the label named instead of the stored one")
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+// waitForModelsRequests waits until the fixture has seen at least n requests.
+func waitForModelsRequests(t *testing.T, fx *modelsFixture, n int) {
+	t.Helper()
+	assert.Eventually(t, 10*time.Second, "the model directory fetch to arrive", func() error {
+		if len(fx.recorded()) < n {
+			return errors.New("no request yet")
+		}
+		return nil
+	})
+}
+
+// dirContextWindow reads the cached directory the way the spawn path does.
+func dirContextWindow(t *testing.T, creds *providerCreds, owner, slug string) int {
+	t.Helper()
+	dir, err := creds.ownerModels(t.Context(), owner, chatGPTTestProvider)
+	assert.NewAborting(t).NoError(err, "ownerModels")
+	return dir.contextWindow(slug)
+}
 
 func rowsByID(rows []connectapi.ModelRow) map[string]connectapi.ModelRow {
 	out := make(map[string]connectapi.ModelRow, len(rows))
