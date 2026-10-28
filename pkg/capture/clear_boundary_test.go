@@ -28,29 +28,20 @@ func clearTestConv(t *testing.T, ctx context.Context, s *CaptureStore, label str
 	return convID, ref
 }
 
-// clearDecompose runs one InsertTurnIntent + DecomposeRequest pair (the
-// proxy's request-side sequence) and returns DecomposeRequest's horizon-aware
-// next ordinal. It does not complete the turn: the clear path's boundary write
-// does not consult a prior turn's usage.
-func clearDecompose(t *testing.T, ctx context.Context, s *CaptureStore, convID string, req []byte) int {
+// clearDecompose runs one InsertTurnIntent + DecomposeRequest pair (the proxy's
+// request-side sequence) for a request that names no predecessor and returns
+// the request head. It does not complete the turn: the clear root's write does
+// not consult a prior turn's usage.
+func clearDecompose(t *testing.T, ctx context.Context, s *CaptureStore, convID string, req []byte) string {
 	t.Helper()
 	c := assert.NewAborting(t)
 	h := routing.PrefixHash(req)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, Request: req, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h)
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, "")
 	c.NoError(err, "DecomposeRequest")
-	return next
-}
-
-func storedHorizon(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string) int {
-	t.Helper()
-	var h int
-	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1::uuid`,
-		convID).Scan(&h), "read resume_from_ordinal")
-	return h
+	return head
 }
 
 func clearPendingOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string) bool {
@@ -62,159 +53,146 @@ func clearPendingOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convI
 	return p
 }
 
-// TestClearBoundaryWritesClearRow: a request whose head diverges from the
-// stored head, with a /clear pending, records a kind='clear' boundary at
-// H'=max(ordinal)+1, consumes clear_pending in the same transaction, and
-// leaves the old rows untouched. Fails if the transaction doesn't clear the
-// flag, if the tag is missing, or if H' is wrong.
+// TestClearBoundaryWritesClearRow: a predecessor-less request with a /clear
+// pending opens a clear root derived from the head it cut, consumes the flag in
+// the same transaction, and leaves the old rows untouched. Fails if the
+// transaction does not clear the flag, if the root is not tagged, or if it
+// carries a size (a /clear replaces the context, it does not summarise it).
 func TestClearBoundaryWritesClearRow(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, ref := clearTestConv(t, ctx, s, "writes-clear-row")
 
 	seed := []byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"},{"role":"user","content":"m2"},{"role":"assistant","content":"m3"}]}`)
-	c.Eq(4, runTurn(t, ctx, s, convID, seed, 100, 10), "seed next ordinal")
+	runTurn(t, ctx, s, convID, seed, 100, 10)
+	previousHead := mustHead(t, ctx, pool, convID)
 	c.NoError(s.MarkClearPending(ctx, ref), "MarkClearPending")
 	c.True(clearPendingOf(t, ctx, pool, convID), "clear_pending set by MarkClearPending")
 
-	// A different, non-summary head: divergence with a /clear pending.
-	clearReq := []byte(`{"model":"claude","messages":[{"role":"user","content":"fresh after clear"}]}`)
-	next := clearDecompose(t, ctx, s, convID, clearReq)
+	head := clearDecompose(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"fresh after clear"}]}`))
 
-	c.Eq(5, next, "next ordinal")
-	c.Eq(4, storedHorizon(t, ctx, pool, convID), "resume_from_ordinal")
-	c.False(clearPendingOf(t, ctx, pool, convID), "clear_pending must be consumed by the boundary write")
+	kind, derived, depth := mustNodeKind(t, ctx, pool, head)
+	c.Eq("clear", kind, "kind")
+	c.Eq(0, depth, "root depth")
+	c.Eq(previousHead, derived, "derived_from_id is the head the clear cut")
+	c.False(clearPendingOf(t, ctx, pool, convID), "clear_pending must be consumed by the root write")
 
-	kind, role, inTok, content := requireKindRow(t, ctx, pool, convID, 4)
-	c.False(kind == nil || *kind != "clear", "ordinal 4 kind = %v, want clear", kind)
-	c.False(role == nil || *role != "user", "ordinal 4 role = %v, want user", role)
-	// A /clear boundary replaces the context, it does not summarise it, so the
-	// boundary row carries no size: the prior-turn input_tokens lookup is gated
-	// on kind='compaction_summary' and must stay nil here.
-	c.Nil(inTok, "ordinal 4 input_tokens = %v, want nil (a /clear carries no size)", inTok)
+	var inTok *int64
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT input_tokens FROM conversations.conversation_message WHERE id=$1::uuid`, head).Scan(&inTok), "read input_tokens")
+	c.Nil(inTok, "input_tokens = %v, want nil (a /clear carries no size)", inTok)
+
+	var content string
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT content::text FROM conversations.conversation_message WHERE id=$1::uuid`, head).Scan(&content), "read content")
 	requireJSONEqual(t, content, `"fresh after clear"`)
 
-	// Old rows 0..3 are untouched.
+	// Old rows 0..3 are untouched, each still under the one before it.
 	want := []string{`"m0"`, `"m1"`, `"m2"`, `"m3"`}
 	for i, w := range want {
 		_, _, _, got := requireKindRow(t, ctx, pool, convID, i)
 		requireJSONEqual(t, got, w)
 	}
+	c.Eq(mustNodeByContent(t, ctx, pool, convID, `"m0"`), mustParent(t, ctx, pool, mustNodeByContent(t, ctx, pool, convID, `"m1"`)),
+		"the pre-clear history still hangs together")
 }
 
-// TestClearBoundarySkipsReanchor: the re-anchor guard is skipped while a
-// /clear is pending. The request's two messages positionally match stored rows
-// 0 and 1 (the shape TestDecomposeRequest_ReAnchorRewind relies on), so without
-// the skip the horizon would re-anchor to 0; instead a clear boundary is
-// written at H'=max(ordinal)+1. Fails if the skip is deleted.
-func TestClearBoundarySkipsReanchor(t *testing.T) {
+// TestAClearWinsOverAMatchingRoot: the clear is checked before the root match,
+// so a post-/clear history that happens to repeat an old root's message still
+// opens a clear root rather than attaching to the pre-clear one.
+func TestAClearWinsOverAMatchingRoot(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
-	convID, ref := clearTestConv(t, ctx, s, "skips-reanchor")
+	ctx, pool, s := captureTestEnv(t)
+	convID, ref := clearTestConv(t, ctx, s, "clear-beats-root")
 
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 100, 10), "turn 1 next ordinal")
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"}]}`)
-	c.Eq(3, runTurn(t, ctx, s, convID, req2, 110, 11), "turn 2 next ordinal")
-	// Compact: horizon moves to 3, rows 3=summary, 4=q2.
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q2"}]}`)
-	c.Eq(5, runTurn(t, ctx, s, convID, req3, 120, 12), "turn 3 next ordinal")
-	c.Eq(3, storedHorizon(t, ctx, pool, convID), "horizon after compaction")
-
+	runTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`), 100, 10)
 	c.NoError(s.MarkClearPending(ctx, ref), "MarkClearPending")
 
-	// "hi","yo" match stored ordinals 0 and 1 — a re-anchor candidate — but the
-	// pending clear must win.
-	req4 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	next := clearDecompose(t, ctx, s, convID, req4)
+	// "hi" is the existing root's message, so the root match would fire if it
+	// were consulted first.
+	head := clearDecompose(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`))
 
-	c.Eq(7, next, "next ordinal")
-	c.Eq(5, storedHorizon(t, ctx, pool, convID), "resume_from_ordinal must be H', not the re-anchor target 0")
+	kind, _, depth := mustNodeKind(t, ctx, pool, head)
+	c.Eq("clear", kind, "kind")
+	c.Eq(0, depth, "root depth")
+	c.NotEq(mustNodeByContent(t, ctx, pool, convID, `"hi"`), head, "the request did not attach to the pre-clear root")
 	c.False(clearPendingOf(t, ctx, pool, convID), "clear_pending consumed")
-
-	kind, _, _, content := requireKindRow(t, ctx, pool, convID, 5)
-	c.False(kind == nil || *kind != "clear", "ordinal 5 kind = %v, want clear (a boundary, not a re-anchor)", kind)
-	requireJSONEqual(t, content, `"hi"`)
 }
 
-// TestClearBoundaryStaysPendingOnMatchingHead: when the request's head equals
-// the stored head at the horizon, the early return leaves clear_pending
-// untouched — the clear has not happened yet. Fails if the flag is consumed on
-// a matching head.
-func TestClearBoundaryStaysPendingOnMatchingHead(t *testing.T) {
+// TestClearPendingSurvivesAChainedRequest: a /clear is consumed by the first
+// request that names no predecessor. A request that chains to a stored reply is
+// an ordinary continuation, so the flag survives it and no clear root appears.
+func TestClearPendingSurvivesAChainedRequest(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, ref := clearTestConv(t, ctx, s, "stays-pending")
 
-	seed := []byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"},{"role":"user","content":"m2"},{"role":"assistant","content":"m3"}]}`)
-	c.Eq(4, runTurn(t, ctx, s, convID, seed, 100, 10), "seed next ordinal")
+	runTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"}]}`), 100, 10)
+	mustAppendReply(t, ctx, pool, s, convID, mustHead(t, ctx, pool, convID),
+		[]byte(`{"id":"msg_pending","content":[{"type":"text","text":"reply"}]}`), "end_turn")
 	c.NoError(s.MarkClearPending(ctx, ref), "MarkClearPending")
 
-	// Same head at the horizon: a stable prefix, no divergence. Messages insert
-	// at h=0 (DO NOTHING against the stored rows) and the return is h+len.
-	sameReq := []byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"}]}`)
-	next := clearDecompose(t, ctx, s, convID, sameReq)
+	runTurnFrom(t, ctx, s, convID,
+		[]byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"},{"role":"user","content":"next"}]}`),
+		"msg_pending", 110, 11)
 
-	c.Eq(2, next, "next ordinal")
-	c.Eq(0, storedHorizon(t, ctx, pool, convID), "horizon unchanged")
-	c.True(clearPendingOf(t, ctx, pool, convID), "clear_pending must survive a matching head")
-
-	var kindCount int
+	c.True(clearPendingOf(t, ctx, pool, convID), "clear_pending must survive a chained request")
+	var clears int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind IS NOT NULL`, convID).Scan(&kindCount), "count kind rows")
-	c.Eq(0, kindCount, "kind-tagged rows")
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND kind='clear'`,
+		convID).Scan(&clears), "count clear roots")
+	c.Eq(0, clears, "clear roots")
 }
 
-// TestClearBoundaryNotPendingRefusesDivergentHead: the same divergent request as
-// TestClearBoundaryWritesClearRow but with no /clear pending is reported as
-// ErrOrdinalOccupied — horizon unchanged, no clear row, nothing written. Fails
-// if the branch ignores the flag.
-func TestClearBoundaryNotPendingRefusesDivergentHead(t *testing.T) {
+// TestAPredecessorlessRequestWithoutAClearAttachesToAMatchingRoot: a retried
+// first request — including the first request after a /clear whose flag the
+// original already consumed — lands on the root it created instead of opening a
+// second one.
+func TestAPredecessorlessRequestWithoutAClearAttachesToAMatchingRoot(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
-	convID, _ := clearTestConv(t, ctx, s, "not-pending-drops")
+	ctx, pool, s := captureTestEnv(t)
+	convID, _ := clearTestConv(t, ctx, s, "matching-root")
 
-	seed := []byte(`{"model":"claude","messages":[{"role":"user","content":"m0"},{"role":"assistant","content":"m1"},{"role":"user","content":"m2"},{"role":"assistant","content":"m3"}]}`)
-	c.Eq(4, runTurn(t, ctx, s, convID, seed, 100, 10), "seed next ordinal")
+	fresh := []byte(`{"model":"claude","messages":[{"role":"user","content":"fresh after clear"},{"role":"user","content":"and more"}]}`)
+	first := clearDecompose(t, ctx, s, convID, fresh)
+	nodes := mustNodeCount(t, ctx, pool, convID)
 
-	// No MarkClearPending.
-	clearReq := []byte(`{"model":"claude","messages":[{"role":"user","content":"fresh after clear"}]}`)
-	hc := routing.PrefixHash(clearReq)
-	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: clearReq, PrefixHash: hc, Protocol: "anthropic"})
-	c.NoError(err, "InsertTurnIntent")
-	_, err = s.DecomposeRequest(ctx, convID, turnID, createdAt, clearReq, hc)
-	c.ErrorIs(err, ErrOrdinalOccupied, "divergent head without a pending clear")
-	c.Eq(0, storedHorizon(t, ctx, pool, convID), "horizon unchanged")
+	retry := clearDecompose(t, ctx, s, convID, fresh)
 
-	var clearRows int
+	c.Eq(nodes, mustNodeCount(t, ctx, pool, convID), "the retry inserts nothing")
+	c.Eq(first, retry, "the retry lands on the head the original created")
+	var roots int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind='clear'`, convID).Scan(&clearRows), "count clear rows")
-	c.Eq(0, clearRows, "clear rows")
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND parent_id IS NULL`,
+		convID).Scan(&roots), "count roots")
+	c.Eq(1, roots, "one root")
 }
 
-// TestClearBoundaryPendingWithCompactionSummary: a divergent head that reads as
-// a compaction summary takes the compaction path even with a /clear pending,
-// and leaves clear_pending as it is.
-func TestClearBoundaryPendingWithCompactionSummary(t *testing.T) {
+// TestAClearWinsOverACompactionSummary pins the rule order: the pending clear
+// is checked before the summary shape, so a summary arriving with a clear
+// pending opens a clear root and leaves the summary as ordinary content.
+func TestAClearWinsOverACompactionSummary(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, ref := clearTestConv(t, ctx, s, "pending-compaction")
 
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 100, 10), "turn 1 next ordinal")
+	runTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`), 100, 10)
 	c.NoError(s.MarkClearPending(ctx, ref), "MarkClearPending")
 
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q1"}]}`)
-	next := clearDecompose(t, ctx, s, convID, req2)
+	head := clearDecompose(t, ctx, s, convID,
+		[]byte(`{"model":"claude","messages":[{"role":"user","content":`+summaryContent("SUMMARY-A details")+`},{"role":"user","content":"q1"}]}`))
 
-	c.Eq(4, next, "next ordinal")
-	c.Eq(2, storedHorizon(t, ctx, pool, convID), "horizon advanced to the compaction boundary")
-	c.True(clearPendingOf(t, ctx, pool, convID), "clear_pending left as it is on the compaction path")
-
-	kind, _, _, content := requireKindRow(t, ctx, pool, convID, 2)
-	c.False(kind == nil || *kind != "compaction_summary", "ordinal 2 kind = %v, want compaction_summary", kind)
-	requireJSONEqual(t, content, summaryContent("SUMMARY-A details"))
+	// The head is the request's last message; the root is its first.
+	root := mustParent(t, ctx, pool, head)
+	kind, _, depth := mustNodeKind(t, ctx, pool, root)
+	c.Eq("clear", kind, "kind")
+	c.Eq(0, depth, "root depth")
+	c.False(clearPendingOf(t, ctx, pool, convID), "clear_pending consumed")
+	var summaries int
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND kind='compaction_summary'`,
+		convID).Scan(&summaries), "count summary roots")
+	c.Eq(0, summaries, "the clear won, so no compaction root was written")
 }
 
 // TestMarkClearPendingTargetsOnlyTheMainConversation: MarkClearPending matches
@@ -222,7 +200,7 @@ func TestClearBoundaryPendingWithCompactionSummary(t *testing.T) {
 // flagged, and an unknown ref is not an error.
 func TestMarkClearPendingTargetsOnlyTheMainConversation(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	label := "targets-main-" + time.Now().Format(time.RFC3339Nano)
 	ref := "clear-boundary-" + label
 

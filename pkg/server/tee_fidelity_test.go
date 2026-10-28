@@ -288,11 +288,11 @@ func (f *recordingChatStore) FailTurn(_ context.Context, _ string, _ time.Time, 
 	return nil
 }
 
-func (f *recordingChatStore) DecomposeRequest(_ context.Context, _, _ string, _ time.Time, _ []byte, _ string) (int, error) {
-	return 0, nil
+func (f *recordingChatStore) DecomposeRequest(_ context.Context, _, _ string, _ time.Time, _ []byte, _, _ string) (string, error) {
+	return "head-1", nil
 }
 
-func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ string, _ time.Time, _ int, _ []byte, _, _ int64, _ string) error {
+func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ string, _ time.Time, _ string, _ []byte, _, _ int64, _ string) error {
 	return nil
 }
 

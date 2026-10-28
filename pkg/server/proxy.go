@@ -38,8 +38,8 @@ type proxyStore interface {
 	InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (turnID string, createdAt time.Time, err error)
 	CompleteTurn(ctx context.Context, r capture.TurnResult) error
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
-	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error)
-	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
+	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (headID string, err error)
+	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, parentID string, canonical []byte, in, out int64, stopReason string) error
 	RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 	MessagesSince(ctx context.Context, convID string, since time.Time) ([]store.Message, error)
@@ -1247,16 +1247,17 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.failTurn(r, cr, "complete-turn failed: "+cerr.Error())
 		return
 	}
-	// Decompose the request into conversation_message rows (the DB I/O deliberately
-	// deferred from beginCapture — see its comment) before appending the response,
-	// so request messages at the horizon..horizon+N-1 range exist before the
-	// response lands at horizon+N. Both numbers come from DecomposeRequest's
-	// return value — it resolves the (possibly rebased) horizon itself, post-stream,
-	// where the DB read belongs — not from a precomputed field. CompleteTurn above
-	// already recorded the turn complete, so a capture-write failure here would
-	// otherwise leave a clean-looking completion with its response captured nowhere
-	// (append) or a response orphaned past missing request rows (decompose).
-	// Re-mark the turn errored instead, so the gap is visible rather than a silent
+	// Attach the request to the conversation's tree (the DB I/O deliberately
+	// deferred from beginCapture — see its comment) before appending the
+	// response: DecomposeRequest returns the request's head node, and the
+	// response is appended as its child. The attach point is resolved from
+	// diagnostics.previous_message_id (cr.prevMessageID, parsed once in
+	// beginCapture), post-stream, where the DB read belongs — not from a
+	// precomputed ordinal. CompleteTurn above already recorded the turn
+	// complete, so a capture-write failure here would otherwise leave a
+	// clean-looking completion with its response captured nowhere (append) or a
+	// response orphaned above missing request nodes (decompose). Re-mark the
+	// turn errored instead, so the gap is visible rather than a silent
 	// complete-without-response.
 	// Thread classification and routing (native-subagent attribution). The
 	// lookup in beginCapture chose the conversation row; this write is what
@@ -1268,8 +1269,8 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	//
 	// RecordThread runs BEFORE the append-error early returns below, on
 	// purpose: the thread identity must not be a casualty of a capture write
-	// failure. A founding turn whose response is lost (an ordinal collision, a
-	// decompose failure) still gets its thread_id stamped here, so the
+	// failure. A founding turn whose response is lost (an append or decompose
+	// failure) still gets its thread_id stamped here, so the
 	// thread's next turn resolves to the branch instead of re-founding on the
 	// root row. RecordThread is best-effort and never fails the turn.
 	ownMsg := capture.MessageIDFromCanonical(canonical)
@@ -1283,14 +1284,14 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if terr := p.store.RecordThread(capCtx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
 	}
-	nextOrdinal, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash)
+	headID, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID)
 	if derr != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
 		p.failTurn(r, cr, "decompose request failed: "+derr.Error())
 		return
 	}
 	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
-		nextOrdinal, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
+		headID, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
@@ -1354,7 +1355,7 @@ func (p *MessagesProxy) decomposeRequestCtx(ctx context.Context, cr captureRef) 
 	if !cr.on {
 		return nil
 	}
-	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
+	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID); derr != nil {
 		p.logger.WarnContext(ctx, "proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
 		return derr
 	}
@@ -1646,11 +1647,10 @@ func authorAttributionParsed(b claudethread.Billing, ok bool, source string) (au
 //     measured traffic and keep the root-row behavior): the turn id is
 //     pre-minted HERE, threadID = that id, and the request routes to
 //     <session>:<id> from its first request. Founding on
-//     the branch is what keeps the founding request's ordinal space off the
-//     main thread's rows: landed on the root, its small message count collides
-//     with ordinals the main thread already occupies and the strict response
-//     append fails, which (before the pre-mint) both lost the founding
-//     response and destroyed the thread identity. A synthetic child is
+//     the branch is what gives the thread its own conversation, and therefore
+//     its own tree: landed on the root row, a founding request that names no
+//     predecessor opens a second root inside the main thread's history, and the
+//     thread has no row of its own for later turns to resolve. A synthetic child is
 //     materialized here too — but only when the founder DECLARES CLIENT TOOLS,
 //     so a single-turn subagent still appears in the rail while Claude Code's
 //     tool-call helpers (WebFetch, WebSearch), which carry the same flag and
@@ -1701,7 +1701,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	// Which of the session's threads is this? Claude Code sends the main
 	// thread, every Task subagent and the titler under one session header, so
-	// without this they share a conversation row and race on one ordinal space.
+	// without this they share a conversation row and therefore one tree.
 	// One indexed lookup; a miss is a thread root, never a guess.
 	// PreviousMessageID and BillingFromRequest are parsed ONCE here and carried
 	// on the captureRef: streamAndCapture and RecordThread's call site use the

@@ -196,7 +196,7 @@ func checkRestatesARoot(roots []checkRoot, row checkLegacyRow) bool {
 		if root.kind == nil || *root.kind != *row.kind {
 			continue
 		}
-		if backfillSameMessage(root.msg, row.msg) {
+		if SameMessage(root.msg, row.msg) {
 			return true
 		}
 	}
@@ -489,7 +489,7 @@ func checkSameMessages(a, b []convtree.Msg) bool {
 // checkSameMessagesLoose is the same comparison under the identity the backfill
 // uses to decide two rows are one message.
 func checkSameMessagesLoose(a, b []convtree.Msg) bool {
-	return checkCompareMessages(a, b, backfillSameMessage)
+	return checkCompareMessages(a, b, SameMessage)
 }
 
 func checkCompareMessages(a, b []convtree.Msg, same func(x, y convtree.Msg) bool) bool {

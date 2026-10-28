@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -44,6 +45,10 @@ type fakeProxyStore struct {
 	lastIntentAuthorKind string
 	lastFailMsg          string   // errMsg passed to the last FailTurn
 	decomposes           int      // DecomposeRequest call count
+	headID               string   // what DecomposeRequest answers as the request head (default head-1)
+	lastDecomposePrev    string   // prevMessageID the last DecomposeRequest received
+	lastAppendParent     string   // parentID the last AppendResponseMessage received
+	lastAppendMsgID      string   // provider message id the last AppendResponseMessage stored
 	completeErr          error    // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
 	threads              int      // RecordThread call count
 	lastSession          string   // session passed to the last RecordThread
@@ -139,12 +144,21 @@ func (f *fakeProxyStore) FailTurn(ctx context.Context, turnID string, createdAt 
 	return nil
 }
 
-func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
+func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
 	f.decomposes++
-	return 0, f.decomposeErr
+	f.lastDecomposePrev = prevMessageID
+	if f.decomposeErr != nil {
+		return "", f.decomposeErr
+	}
+	if f.headID != "" {
+		return f.headID, nil
+	}
+	return "head-1", nil
 }
 
-func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
+func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, parentID string, canonical []byte, in, out int64, stopReason string) error {
+	f.lastAppendParent = parentID
+	f.lastAppendMsgID = capture.MessageIDFromCanonical(canonical)
 	return f.appendErr
 }
 
@@ -261,7 +275,7 @@ func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
 	defer upstream.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	fs := &fakeProxyStore{appendErr: fmt.Errorf("%w: conversation c ordinal 5", capture.ErrOrdinalOccupied)}
+	fs := &fakeProxyStore{appendErr: fmt.Errorf("append response: conversation c: %w", store.ErrLeaseLost)}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
 
@@ -274,8 +288,8 @@ func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
 	c.StrContains(fs.lastFailMsg, "append response failed:", "fail message")
 }
 
-// A request-message collision from DecomposeRequest reaches the turn as an
-// errored turn, not a log line.
+// A DecomposeRequest failure reaches the turn as an errored turn, not a log
+// line.
 func TestMessagesProxyDecomposeCollisionFailsTurn(t *testing.T) {
 	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -289,7 +303,7 @@ func TestMessagesProxyDecomposeCollisionFailsTurn(t *testing.T) {
 	defer upstream.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	fs := &fakeProxyStore{decomposeErr: fmt.Errorf("%w: conversation c ordinal 3 (request message)", capture.ErrOrdinalOccupied)}
+	fs := &fakeProxyStore{decomposeErr: fmt.Errorf("decompose: attach: %w", store.ErrLeaseLost)}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs
 
@@ -300,7 +314,7 @@ func TestMessagesProxyDecomposeCollisionFailsTurn(t *testing.T) {
 
 	c.Eq(1, fs.fails, "FailTurn calls")
 	c.StrContains(fs.lastFailMsg, "decompose request failed:", "fail message")
-	c.StrContains(fs.lastFailMsg, "ordinal already occupied", "fail message carries the capture error")
+	c.StrContains(fs.lastFailMsg, store.ErrLeaseLost.Error(), "fail message carries the capture error")
 }
 
 // An upstream-failed turn whose request rows cannot be stored keeps the
@@ -314,7 +328,7 @@ func TestMessagesProxyUpstreamErrorDecomposeFailureReachesTurn(t *testing.T) {
 	defer upstream.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	fs := &fakeProxyStore{decomposeErr: fmt.Errorf("%w: conversation c ordinal 3 (request message)", capture.ErrOrdinalOccupied)}
+	fs := &fakeProxyStore{decomposeErr: fmt.Errorf("decompose: attach: %w", store.ErrLeaseLost)}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs
 
@@ -1319,17 +1333,17 @@ func TestCatalogIDsLeavesCatalogShapedProvidersAlone(t *testing.T) {
 // TestMessagesProxyCompactionRebases drives the REAL MessagesProxy over
 // ServeHTTP against the REAL (Postgres-backed) *capture.CaptureStore — not the
 // fakeProxyStore pattern the fixtures above use — because its whole point is
-// the wiring: the proxy consuming DecomposeRequest's horizon-aware return
-// value when Claude Code really drives it. pkg/capture's own tests cover
-// DecomposeRequest's mechanics directly; this one covers the end-to-end path
-// ServeHTTP → streamAndCapture → DecomposeRequest → AppendResponseMessage for
-// a post-compaction request whose message 0 differs from the stored anchor.
+// the wiring: the proxy passing cr.prevMessageID into DecomposeRequest and
+// appending the response under the head DecomposeRequest returns. pkg/capture's
+// own tests cover the attach decision directly; this one covers the end-to-end
+// path ServeHTTP → streamAndCapture → DecomposeRequest → AppendResponseMessage
+// for a post-compaction request that names the reply it summarised.
 //
-// The pre-fix behavior being guarded against: the proxy used to append the
-// response at captureRef.nextOrdinal (the request's message count, computed
-// I/O-free in beginCapture). For a two-message post-compaction request that
-// was ordinal 2 — colliding with the compaction_summary boundary row and
-// putting the response before the horizon instead of after it.
+// The pre-fix behaviour being guarded against: the proxy used to append the
+// response at captureRef.nextOrdinal, a request-message count computed
+// I/O-free in beginCapture, which for a two-message post-compaction request
+// collided with the compaction_summary boundary row and put the response
+// before the history instead of after it.
 func TestMessagesProxyCompactionRebases(t *testing.T) {
 	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -1345,13 +1359,16 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 
 	c.Require().NoError(store.Migrate(ctx, pool), "Migrate")
 
-	// Fake Anthropic upstream: the same minimal SSE stream
-	// TestMessagesProxyStreamsAndCaptures uses — message_start carries input
-	// usage, message_delta the stop reason and cumulative output tokens.
+	// Fake Anthropic upstream: a minimal SSE stream, with a distinct response id
+	// per request (message_start carries it, and it is what a later request names
+	// as its diagnostics.previous_message_id) and input usage; message_delta the
+	// stop reason and cumulative output tokens.
+	var served atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		id := fmt.Sprintf("msg_proxy_%d", served.Add(1))
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
-			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			`data: {"type":"message_start","message":{"id":"`+id+`","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
 			"event: message_delta\n"+
 			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
 			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
@@ -1367,8 +1384,7 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 	// against the shared test DB.
 	session := "compaction-test-" + time.Now().Format(time.RFC3339Nano)
 
-	// Turn 1 — the pre-compaction conversation: "hello" lands at ordinal 0,
-	// the turn's response at ordinal 1 (horizon 0 + 1 request message).
+	// Turn 1 — the pre-compaction conversation.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"claude","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
@@ -1377,18 +1393,18 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 	c.Require().Eq(http.StatusOK, rec.Code, "first request: status = %d, body=%s", rec.Code, rec.Body.String())
 
 	// Turn 2 — the post-compaction request, exactly how Claude Code drives the
-	// proxy after its own context compaction: full history replaced by a
-	// summary, re-sent under the same X-Rafiki-Session. Message 0 differs from
-	// everything stored, so the anchor comparison diverges; the re-anchor guard
-	// finds no positional rematch and the genuine boundary path runs. The
-	// summary text is the prose Claude Code's real summaries open with: task
-	// 5.1's classifier requires it, and the bare "[summary text]" fixture this
-	// test carried before encoded the mis-tagging bug (any divergent message 0
-	// was tagged a boundary, which is how 19 session preambles became
-	// compaction_summary rows).
+	// proxy after its own context compaction: the full history is replaced by a
+	// summary, and the request names the reply it summarised. Message 0 is the
+	// summary, so the named reply is not at the index it occupies in the
+	// request; the summary opens a compaction root derived from it. The summary
+	// text is the prose Claude Code's real summaries open with: the classifier
+	// requires it, and the bare "[summary text]" fixture this test carried
+	// before encoded the mis-tagging bug.
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages",
-		strings.NewReader(`{"model":"claude","stream":true,"messages":[`+
+		strings.NewReader(`{"model":"claude","stream":true,`+
+			`"diagnostics":{"previous_message_id":"msg_proxy_1"},`+
+			`"messages":[`+
 			`{"role":"user","content":[{"type":"text","text":"This session is being continued from a previous conversation that ran out of context. The conversation is summarized below: Analysis: the user asked about the proxy"}]},`+
 			`{"role":"user","content":"continue"}]}`))
 	req2.Header.Set("X-Rafiki-Session", session)
@@ -1401,86 +1417,93 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 		`SELECT id::text FROM conversations.conversation WHERE external_ref = $1`,
 		session).Scan(&convID), "resolve conversation by external_ref %q", session)
 
-	// A boundary was recorded: the horizon is non-zero.
-	var horizon int
+	// The pre-compaction history survives: "hello" is still a root, and turn 1's
+	// reply is its child, carrying the response id the next request named.
+	var helloID string
 	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1::uuid`,
-		convID).Scan(&horizon), "read resume_from_ordinal")
-	c.Require().NotEq(0, horizon, "resume_from_ordinal = 0, want non-zero: the post-compaction request diverged from the anchor but no boundary was recorded")
-
-	// Load through the same API the reattach display path uses, so the
-	// assertions below are about what a reader of the conversation sees.
-	msgs, err := store.NewMessages(pool).Load(ctx, convID)
-	c.Require().NoError(err, "Load")
-	c.Require().Len(msgs, 5, "Load returned %d messages, want 5 (ordinals 0..4 dense); ordinals seen: %v", len(msgs), func() []int {
-		out := make([]int, 0, len(msgs))
-		for _, m := range msgs {
-			out = append(out, m.Ordinal)
-		}
-		return out
-	}())
-	byOrdinal := make(map[int]store.Message, len(msgs))
-	for _, m := range msgs {
-		byOrdinal[m.Ordinal] = m
-	}
-
-	// The ORIGINAL first message is still present at its original ordinal with
-	// its content intact — the exact regression design §5 exists to prevent
-	// (Load serves GetHistory/reattach; it must never be horizon-filtered).
-	// Checked two ways: the Load shape a reader sees, and the same JSONB
-	// equality resolveHorizon's own anchor comparison uses.
-	if m0 := byOrdinal[0]; m0.Param.Role != "user" {
-		t.Errorf("ordinal 0 role = %q, want user", m0.Param.Role)
-	} else if b, merr := json.Marshal(m0.Param.Content); merr != nil || !strings.Contains(string(b), "hello") {
-		t.Errorf("ordinal 0 content = %s (marshal err %v), want the original %q message still present", b, merr, "hello")
-	}
-	var helloPresent bool
+		`SELECT id::text FROM conversations.conversation_message
+		  WHERE conversation_id=$1::uuid AND content='"hello"'::jsonb AND parent_id IS NULL`,
+		convID).Scan(&helloID), `the original "hello" message is no longer a root — pre-compaction history was lost`)
+	var reply1 string
 	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message
-		   WHERE conversation_id=$1::uuid AND ordinal=0 AND role='user' AND content='"hello"'::jsonb)`,
-		convID).Scan(&helloPresent), "check original message survived")
-	c.True(helloPresent, `original message "hello" no longer present at ordinal 0 — pre-compaction history was lost (design §5 regression)`)
-
-	// The row at the horizon is the compaction summary boundary.
-	mb := byOrdinal[horizon]
-	c.False(mb.Kind == nil || *mb.Kind != "compaction_summary", "row at resume_from_ordinal %d: kind = %v, want compaction_summary", horizon, mb.Kind)
-	c.NotNil(mb.InputTokens, "compaction_summary row at %d carries no input_tokens (the replaced-context size), want non-nil", horizon)
-
-	// The second request's messages and response landed at horizon-relative
-	// ordinals: continuation at horizon+1, response at horizon+2. The pre-fix
-	// proxy would have appended the response at the request-message count (2),
-	// colliding with the boundary row at the horizon.
-	if mc := byOrdinal[horizon+1]; mc.Param.Role != "user" {
-		t.Errorf("ordinal %d role = %q, want user (the continuation message)", horizon+1, mc.Param.Role)
-	}
-	if mr := byOrdinal[horizon+2]; mr.Param.Role != "assistant" {
-		t.Errorf("ordinal %d role = %q, want assistant (the second request's response)", horizon+2, mr.Param.Role)
-	}
-
-	// Each turn recorded its response at the right ordinal — turn 1 at 1 (the
-	// pre-compaction path unchanged), turn 2 at horizon+2. The turn row is the
-	// direct witness that AppendResponseMessage consumed DecomposeRequest's
-	// return value rather than a precomputed request-message count.
-	var turnCount int
+		`SELECT id::text FROM conversations.conversation_message
+		  WHERE conversation_id=$1::uuid AND provider_message_id='msg_proxy_1'`,
+		convID).Scan(&reply1), "the first response was not stored with its provider id")
+	var reply1Parent string
 	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_turn WHERE conversation_id=$1`,
-		convID).Scan(&turnCount), "count turns")
-	c.Require().Eq(2, turnCount, "conversation has")
-	rows, err := pool.Query(ctx,
-		`SELECT coalesce(response_ordinal,-1) FROM conversations.conversation_turn
-		  WHERE conversation_id=$1 ORDER BY created_at, id`, convID)
-	c.Require().NoError(err, "read turn response ordinals")
+		`SELECT coalesce(parent_id::text,'') FROM conversations.conversation_message WHERE id=$1::uuid`,
+		reply1).Scan(&reply1Parent), "read the first reply's parent")
+	c.Eq(helloID, reply1Parent, "the first reply hangs off the first message")
+
+	// The summary is a compaction root derived from the reply the request named,
+	// carrying the size of the context it replaced.
+	var (
+		summaryID string
+		derived   string
+		inTok     *int64
+	)
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT id::text, coalesce(derived_from_id::text,''), input_tokens
+		  FROM conversations.conversation_message
+		 WHERE conversation_id=$1::uuid AND kind='compaction_summary' AND parent_id IS NULL`,
+		convID).Scan(&summaryID, &derived, &inTok), "no compaction root was recorded for the post-compaction request")
+	c.Eq(reply1, derived, "the compaction root is derived from the reply the request named")
+	c.NotNil(inTok, "the compaction root carries no input_tokens (the replaced-context size)")
+
+	// The continuation is the summary's child, and turn 2's response is the
+	// continuation's child — the response lands AFTER the post-compaction
+	// history, not at a request-message count that collides with the root.
+	var continuation string
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT id::text FROM conversations.conversation_message
+		 WHERE conversation_id=$1::uuid AND parent_id=$2::uuid AND role='user'`,
+		convID, summaryID).Scan(&continuation), "the continuation message")
+	var (
+		reply2       string
+		reply2Parent string
+	)
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT id::text, coalesce(parent_id::text,'') FROM conversations.conversation_message
+		 WHERE conversation_id=$1::uuid AND provider_message_id='msg_proxy_2'`,
+		convID).Scan(&reply2, &reply2Parent), "the second response was not stored with its provider id")
+	c.Eq(continuation, reply2Parent, "the second response hangs off the continuation")
+
+	var nodes int
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid`, convID).Scan(&nodes), "count messages")
+	c.Eq(5, nodes, "message count")
+
+	// Each turn recorded its response at its node's ordinal, and its request
+	// head at the request's last node: the direct witness that the proxy
+	// consumed DecomposeRequest's return value rather than a precomputed count.
+	rows, err := pool.Query(ctx, `
+		SELECT coalesce(t.response_ordinal, -1), coalesce(t.request_head_id::text, '')
+		  FROM conversations.conversation_turn t
+		 WHERE t.conversation_id=$1::uuid ORDER BY t.created_at, t.id`, convID)
+	c.Require().NoError(err, "read turns")
 	defer rows.Close()
-	var respOrdinals []int
+	type turnRow struct {
+		responseOrdinal int
+		requestHead     string
+	}
+	var turns []turnRow
 	for rows.Next() {
-		var o int
-		c.Require().NoError(rows.Scan(&o), "scan response_ordinal")
-		respOrdinals = append(respOrdinals, o)
+		var tr turnRow
+		c.Require().NoError(rows.Scan(&tr.responseOrdinal, &tr.requestHead), "scan turn")
+		turns = append(turns, tr)
 	}
-	c.Require().NoError(rows.Err(), "read turn response ordinals")
-	if len(respOrdinals) != 2 || respOrdinals[0] != 1 || respOrdinals[1] != horizon+2 {
-		t.Errorf("turn response ordinals = %v, want [1 %d] (turn 1 pre-compaction; turn 2 horizon-relative, not the request-message count 2)", respOrdinals, horizon+2)
-	}
+	c.Require().NoError(rows.Err(), "read turns")
+	c.Require().Len(turns, 2, "turn count")
+
+	var reply1Ordinal, reply2Ordinal int
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT ordinal FROM conversations.conversation_message WHERE id=$1::uuid`, reply1).Scan(&reply1Ordinal), "read reply 1 ordinal")
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT ordinal FROM conversations.conversation_message WHERE id=$1::uuid`, reply2).Scan(&reply2Ordinal), "read reply 2 ordinal")
+	c.Eq(reply1Ordinal, turns[0].responseOrdinal, "turn 1 response_ordinal")
+	c.Eq(reply2Ordinal, turns[1].responseOrdinal, "turn 2 response_ordinal")
+	c.Eq(helloID, turns[0].requestHead, "turn 1 request head")
+	c.Eq(continuation, turns[1].requestHead, "turn 2 request head")
 }
 
 type fakeRawTrace struct {
@@ -1684,6 +1707,39 @@ func TestProxyRecordsTheThreadAfterAppendingTheResponse(t *testing.T) {
 	c.Eq("msg_own", fs.lastOwnMsg, "ownMessageID")
 	c.Eq("", fs.lastSession, "session")
 	c.False(fs.lastIsSubagent, "isSubagent = true, want false (no billing header on the request)")
+}
+
+// TestProxyAttachesByTheNamedPredecessor pins the capture wiring this task
+// adds: the request's diagnostics.previous_message_id reaches DecomposeRequest
+// (which is what attaches the request to the tree), and the response is
+// appended under the head DecomposeRequest returned, with its own provider id.
+// Drop either half and every turn of a real session attaches as a new root.
+func TestProxyAttachesByTheNamedPredecessor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"msg_own","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{headID: "head-from-decompose"}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[{"role":"user","content":"hi"}],
+			"diagnostics":{"previous_message_id":"msg_prev"}}`))
+	p.ServeHTTP(rec, req)
+
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Require().Eq(1, fs.decomposes, "DecomposeRequest calls")
+	c.Eq("msg_prev", fs.lastDecomposePrev, "prevMessageID passed to DecomposeRequest")
+	c.Eq("head-from-decompose", fs.lastAppendParent, "the response is appended under the head DecomposeRequest returned")
+	c.Eq("msg_own", fs.lastAppendMsgID, "the response's provider id is stored")
 }
 
 // TestProxyClassifiesTheThreadFromTheBillingHeader pins the other half of the
@@ -2044,7 +2100,7 @@ func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
 	defer upstream.Close()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{
-		appendErr: fmt.Errorf("%w: conversation c ordinal 5", capture.ErrOrdinalOccupied),
+		appendErr: fmt.Errorf("append response: conversation c: %w", store.ErrLeaseLost),
 	}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs

@@ -10,15 +10,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"reflect"
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -36,232 +35,6 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 	cp.lease = l
 	return &cp
 }
-
-// ErrOrdinalOccupied reports that a message could not be written because its
-// ordinal already held a different one. It covers both write sites: a replayed
-// request prefix re-inserts an equivalent message and succeeds
-// (appendRequestMessage — an assistant echo of capture's own reply counts as a
-// replay, see that function), but a request message landing on a different
-// request row, or an assistant reply landing on any occupant, is never stored,
-// so it is reported. Nine such collisions dropped 22 model replies before
-// threads were separated, and nothing said so.
-//
-// Residual case: the conflict test is content-only (IS DISTINCT FROM), so an
-// occupant whose content is jsonb-equal to the incoming reply stays a silent
-// success. That needs a client retry re-emitting byte-identical content and is
-// not covered here.
-var ErrOrdinalOccupied = errors.New("capture: ordinal already occupied by a different message")
-
-// appendMessage is the single guarded insert both message write sites use.
-// inTok, outTok, stopReason and kind are nil/nil-able for the
-// request-decomposition path's ordinary rows (kind is set only on a
-// compaction-summary boundary row).
-//
-// An ordinal that is already occupied is not an error HERE: both statements' ON
-// CONFLICT (conversation_id, ordinal) DO NOTHING drop the new row and report
-// inserted=false. Callers decide what an occupant means:
-// appendRequestMessage accepts an equivalent one (and an assistant echo of a
-// reply capture wrote itself) and refuses a different request message,
-// appendMessageStrict refuses any different one.
-//
-// A returned ErrLeaseLost is deliberately NOT retryable: isRetryableDB only
-// classifies DeadlineExceeded, net.OpError and SQLSTATE 40P01/40001, so retryDB
-// surfaces it on the first attempt. Do not add it to the retryable set — a lost
-// lease is an answer, not a blip.
-func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason any, kind any) (inserted bool, err error) {
-	var tag pgconn.CommandTag
-	if s.lease.Held() {
-		tag, err = s.pool.Exec(ctx, captureAppendFencedSQL,
-			convID, ordinal, role, content, inTok, outTok, stopReason, kind,
-			s.lease.Holder, s.lease.Token)
-	} else {
-		tag, err = s.pool.Exec(ctx, captureAppendSQL,
-			convID, ordinal, role, content, inTok, outTok, stopReason, kind)
-	}
-	if err != nil {
-		return false, err
-	}
-	if tag.RowsAffected() == 0 && s.lease.Held() {
-		valid, verr := store.NewLeases(s.pool).Valid(ctx, s.lease)
-		if verr != nil {
-			return false, verr
-		}
-		if !valid {
-			return false, store.ErrLeaseLost
-		}
-	}
-	return tag.RowsAffected() > 0, nil
-}
-
-// appendRequestMessage persists one request-decomposition row. A replayed
-// prefix finds its own message already stored and succeeds; an ordinal held by
-// A replayed prefix whose cached semantic content was written by a supported
-// Anthropic client representation succeeds. A role change, invalid/unknown
-// semantic content, or changed meaningful block remains ErrOrdinalOccupied.
-func (s *CaptureStore) appendRequestMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok *int64, kind any) error {
-	inserted, err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, nil, nil, kind)
-	if err != nil || inserted {
-		return err
-	}
-	var stored []byte
-	var storedRole string
-	if err := s.pool.QueryRow(ctx,
-		`SELECT content, role FROM conversations.conversation_message
-		  WHERE conversation_id=$1::uuid AND ordinal=$2`,
-		convID, ordinal).Scan(&stored, &storedRole); err != nil {
-		return fmt.Errorf("read occupant of ordinal %d: %w", ordinal, err)
-	}
-	if storedRole == role && (sameAnthropicContent(stored, content) || sameMessage(stored, content)) {
-		return nil
-	}
-	return fmt.Errorf("%w: conversation %s ordinal %d (request message): %s", ErrOrdinalOccupied, convID, ordinal,
-		describeOccupantMismatch(storedRole, role, stored, content))
-}
-
-// sameAnthropicContent compares request content after the Anthropic SDK has
-// decoded and encoded both values. Claude Code replays all historical roles in
-// a different wire representation from what capture stored: strings replace
-// text blocks, cache_control moves, and provider-only union fields disappear.
-// Meaningful blocks and tool inputs survive the round-trip. Invalid or unknown
-// content is not a semantic replay.
-func sameAnthropicContent(a, b []byte) bool {
-	am, aok := sdkCanonicalBlocks(a)
-	bm, bok := sdkCanonicalBlocks(b)
-	return aok && bok && reflect.DeepEqual(am, bm)
-}
-
-// sdkCanonicalBlocks is the SDK round-trip of content as generic JSON. Decoding
-// it, instead of comparing the marshalled bytes, makes object key order
-// irrelevant: a tool_use input passes through the SDK as raw JSON, and
-// Postgres jsonb stores it with its keys reordered.
-func sdkCanonicalBlocks(content []byte) ([]any, bool) {
-	blocks, ok := anthropicContentBlocks(content)
-	if !ok {
-		return nil, false
-	}
-	raw, err := json.Marshal(blocks)
-	if err != nil {
-		return nil, false
-	}
-	return decodeBlocks(raw)
-}
-
-func decodeBlocks(raw []byte) ([]any, bool) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var out []any
-	if err := dec.Decode(&out); err != nil {
-		return nil, false
-	}
-	return out, true
-}
-
-// anthropicContentBlocks decodes the two content forms Anthropic permits in
-// every message role. A string is shorthand for one text block; capture stores
-// response content as blocks because it comes from anthropic.Message.
-func anthropicContentBlocks(content []byte) ([]anthropic.ContentBlockUnion, bool) {
-	var text string
-	if err := json.Unmarshal(content, &text); err == nil {
-		return []anthropic.ContentBlockUnion{{Type: "text", Text: text}}, true
-	}
-	var blocks []anthropic.ContentBlockUnion
-	if err := json.Unmarshal(content, &blocks); err != nil {
-		return nil, false
-	}
-	return blocks, true
-}
-
-// `cache_control` is a per-request caching hint. sameAnthropicContent handles
-// it as part of SDK canonicalisation; sameMessage remains the generic fallback
-// for request forms that are not Anthropic content blocks.
-func sameMessage(a, b []byte) bool {
-	na, aok := normalizeMessage(a)
-	nb, bok := normalizeMessage(b)
-	if !aok || !bok {
-		return bytes.Equal(a, b)
-	}
-	return bytes.Equal(na, nb)
-}
-
-func normalizeMessage(raw []byte) ([]byte, bool) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, false
-	}
-	if text, ok := v.(string); ok {
-		v = []any{map[string]any{"type": "text", "text": text}}
-	}
-	out, err := json.Marshal(stripCacheControl(v))
-	if err != nil {
-		return nil, false
-	}
-	return out, true
-}
-
-// stripCacheControl removes cache_control from every content block. A tool_use
-// block's input is user data and is left alone.
-func stripCacheControl(v any) any {
-	switch t := v.(type) {
-	case []any:
-		for i := range t {
-			t[i] = stripCacheControl(t[i])
-		}
-	case map[string]any:
-		delete(t, "cache_control")
-		for k, e := range t {
-			if k != "input" {
-				t[k] = stripCacheControl(e)
-			}
-		}
-	}
-	return v
-}
-
-// appendMessageForTest exposes appendMessage to this package's tests.
-func (s *CaptureStore) appendMessageForTest(ctx context.Context, convID string, ordinal int, role string, content []byte) error {
-	_, err := s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil, nil)
-	return err
-}
-
-// appendMessageStrict is appendMessage that distinguishes a conflict from a
-// lost lease. appendMessage cannot: both yield RowsAffected() == 0.
-func (s *CaptureStore) appendMessageStrict(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason, kind any) error {
-	if _, err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, outTok, stopReason, kind); err != nil {
-		return err
-	}
-	var occupied bool
-	if qerr := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message
-		   WHERE conversation_id=$1::uuid AND ordinal=$2 AND content IS DISTINCT FROM $3::jsonb)`,
-		convID, ordinal, content).Scan(&occupied); qerr != nil {
-		return qerr
-	}
-	if occupied {
-		return fmt.Errorf("%w: conversation %s ordinal %d", ErrOrdinalOccupied, convID, ordinal)
-	}
-	return nil
-}
-
-const captureAppendSQL = `
-INSERT INTO conversations.conversation_message
-	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason, kind)
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (conversation_id, ordinal) DO NOTHING`
-
-// captureAppendFencedSQL is captureAppendSQL with the lease guard. The EXISTS
-// clause is evaluated in the SAME statement as the insert, which is what makes
-// a stalled writer that wakes after takeover write nothing.
-const captureAppendFencedSQL = `
-INSERT INTO conversations.conversation_message
-	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason, kind)
-SELECT $1::uuid, $2, $3, $4, $5, $6, $7, $8
- WHERE EXISTS (
-   SELECT 1 FROM conversations.conversation_lease
-    WHERE conversation_id = $1::uuid AND holder = $9 AND token = $10::uuid
-      AND expires_at > now())
-ON CONFLICT (conversation_id, ordinal) DO NOTHING`
 
 type ConversationRef struct {
 	ID               string // empty → insert a new conversation and return its id
@@ -433,9 +206,9 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 
 // MarkClearPending flags the conversation whose external_ref is externalRef
 // (a claude child's main-thread conversation is linked by external_ref =
-// child id) so the next divergent request head is recorded as a clear
-// boundary. No such conversation is not an error: a child that has captured
-// nothing has nothing to clear.
+// child id) so the next predecessor-less request opens a clear root and
+// consumes the flag. No such conversation is not an error: a child that has
+// captured nothing has nothing to clear.
 func (s *CaptureStore) MarkClearPending(ctx context.Context, externalRef string) error {
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE conversations.conversation SET clear_pending=true WHERE external_ref=$1`,
@@ -568,16 +341,47 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 	})
 }
 
-// DecomposeRequest parses reqBody's messages[] into conversation_message rows,
-// appended at an ordinal computed from the conversation's resume horizon (see
-// resolveHorizon and docs/plans/2026-09-09-claude-compaction-design.md).
-// Content is stored verbatim, ON CONFLICT (conversation_id,ordinal) DO
-// NOTHING. Also stores prefix_content on this turn iff prefixHash != the
-// previous turn's, and records cache-breakpoint ordinals on the turn.
-// Returns the error for the caller to escalate (the proxy fails the turn),
-// never panics, never alters reqBody. Returns the ordinal the assistant response belongs at
-// (horizon + message count) -- NOT a bare message count.
-func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
+// DecomposeRequest attaches reqBody's messages[] to the conversation's tree and
+// records the request's head node on the turn. The returned id is the parent the
+// response is appended under.
+//
+// The attach point comes from the request itself, first match wins:
+//
+//  1. No diagnostics.previous_message_id: a clear root when a /clear is pending
+//     (the flag is consumed in the same transaction as the root), else the rest
+//     of the request under an existing root whose content equals message 0 — a
+//     retried first request, including the first request after a /clear whose
+//     flag the original already consumed, lands on the root it created — else a
+//     new plain root.
+//  2. The named id resolves to a node of THIS conversation and messages[depth]
+//     is the assistant message that node holds: the rest of the request hangs
+//     off that node. A message already stored hashes to the node it occupies and
+//     is not duplicated; one that differs (the synthetic "No response
+//     requested." where a tool_use was stored) becomes a sibling.
+//  3. The named id resolves, message 0 reads as a compaction summary and the
+//     verification failed: a compaction root derived from that node, carrying
+//     the prior turn's input_tokens as the size of the context it replaced.
+//  4. Otherwise the request's whole chain is matched by path hash against this
+//     conversation's stored nodes and attached at the deepest match, counted as
+//     a fallback.
+//  5. Nothing matched: a new plain root, derived from the named node when there
+//     is one, counted as a fallback.
+//
+// A parent is always in the same conversation: a hit in another is unknown, so
+// a thread's founding request (which names nothing) cannot attach to a sibling
+// thread's tree.
+//
+// Known limit: the hash-chain fallback only finds chains under a plain root with
+// no derived-from, because those are the only nodes hashed from
+// RootSeed(RootKindRoot, nil). A request whose history starts at a compaction or
+// clear root and names no usable id therefore attaches as a new root.
+//
+// Content is stored verbatim (jsonbSafe'd; empty content becomes JSON null).
+// Also stores prefix_content on this turn iff prefixHash differs from the
+// previous turn's, and records cache-breakpoints on the turn. Returns the error
+// for the caller to escalate (the proxy fails the turn), never panics, never
+// alters reqBody.
+func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
 	var req struct {
 		Messages []struct {
 			Role    string          `json:"role"`
@@ -585,236 +389,302 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(reqBody, &req); err != nil {
-		return 0, fmt.Errorf("decompose: unmarshal request: %w", err)
+		return "", fmt.Errorf("decompose: unmarshal request: %w", err)
 	}
-	var nextOrdinal int
-	err := retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
-		contents := make([]json.RawMessage, len(req.Messages))
-		for i, m := range req.Messages {
-			contents[i] = m.Content
-		}
-		horizon, boundary, herr := s.resolveHorizon(ctx, convID, contents)
-		if herr != nil {
-			return fmt.Errorf("decompose: resolve horizon: %w", herr)
-		}
-		tailBefore := 0
-		for {
-			i, ierr := s.insertRequestMessages(ctx, convID, createdAt, req.Messages, horizon, boundary, tailBefore)
-			if ierr == nil {
-				break
-			}
-			if !errors.Is(ierr, ErrOrdinalOccupied) || i == 0 || tailBefore > 0 {
-				return fmt.Errorf("decompose: insert message %d: %w", i, ierr)
-			}
-			// The client rewrote a message it had already sent (an interrupted
-			// tool call answered with a synthetic reply, a rewind): fork the
-			// horizon past every stored row and store the request again, its
-			// unchanged prefix as skipped tail copies.
-			slog.Warn("capture: request rewrites a stored message; forking the horizon",
-				"conversation", convID, "message", i, "error", ierr)
-			var berr error
-			if horizon, berr = s.bumpHorizon(ctx, convID, false); berr != nil {
-				return berr
-			}
-			tailBefore, boundary = i, ""
-		}
-		nextOrdinal = horizon + len(req.Messages)
-		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash)
-	})
-	return nextOrdinal, err
-}
-
-// insertRequestMessages stores messages at horizon+index and returns the index
-// of the one that failed. A boundary tags message 0; the first tailBefore
-// messages are tagged compaction_tail, copies of rows stored earlier that
-// full-history readers skip.
-func (s *CaptureStore) insertRequestMessages(ctx context.Context, convID string, createdAt time.Time, messages []struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-}, horizon int, boundary string, tailBefore int) (int, error) {
-	for i, m := range messages {
+	msgs := make([]convtree.Msg, len(req.Messages))
+	for i, m := range req.Messages {
 		content := m.Content
 		if len(content) == 0 {
 			content = json.RawMessage(`null`)
 		}
-		var kind any
-		var inTok *int64
-		if i < tailBefore {
-			kind = store.KindCompactionTail
-		} else if i == 0 && boundary != "" {
-			kind = boundary
-			if boundary == "compaction_summary" {
-				// The approximate size of the context this boundary replaced:
-				// the PREVIOUS turn's input_tokens. This turn's own
-				// CompleteTurn already ran earlier in streamAndCapture, so
-				// excluding it by created_at is what selects the prior turn
-				// rather than this one. A clear boundary carries no size, so
-				// this lookup is skipped for it.
-				var prevIn int64
-				perr := s.pool.QueryRow(ctx,
-					`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
-					  WHERE conversation_id=$1 AND created_at < $2
-					  ORDER BY created_at DESC, id DESC LIMIT 1`,
-					convID, createdAt).Scan(&prevIn)
-				if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
-					return i, fmt.Errorf("prior turn input_tokens: %w", perr)
-				}
-				if prevIn > 0 {
-					inTok = &prevIn
-				}
-			}
-		}
-		if err := s.appendRequestMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, kind); err != nil {
-			return i, err
-		}
+		msgs[i] = convtree.Msg{Role: m.Role, Content: jsonbSafe(content)}
 	}
-	return len(messages), nil
+	var head string
+	err := retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
+		h, aerr := s.attachRequest(ctx, convID, turnID, createdAt, msgs, prevMessageID)
+		if aerr != nil {
+			return fmt.Errorf("decompose: %w", aerr)
+		}
+		head = h
+		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash)
+	})
+	if err != nil {
+		return "", err
+	}
+	return head, nil
 }
 
-// resolveHorizon determines the ordinal offset (horizon) this request's
-// messages should be inserted at, and whether request message 0 opens a NEW
-// boundary that must be tagged: kind='compaction_summary' when it reads as a
-// Claude Code compaction summary, kind='clear' when the daemon accepted a
-// /clear for this conversation (clear_pending) and this is the first request
-// whose head diverges from the stored head. boundary is "" when no boundary is
-// recorded. See docs/plans/2026-09-09-claude-compaction-design.md §3-4.
-//
-// Comparison is Postgres JSONB equality (content = $n::jsonb), not a Go-side
-// byte or struct compare -- it is whitespace/key-order-insensitive, which a
-// re-serialized request is not guaranteed to be.
-func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messages []json.RawMessage) (horizon int, boundary string, err error) {
-	var h int
+// attachRequest performs the attach decision, appends the chain and records the
+// request's head node on the turn. Both writes are idempotent (a chain is
+// addressed by its hashes), which is what makes the caller's retry safe.
+func (s *CaptureStore) attachRequest(ctx context.Context, convID, turnID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (string, error) {
+	if len(msgs) == 0 {
+		// A request carrying no history appends nothing: the response hangs off
+		// whatever the conversation's head already is.
+		var head string
+		if err := s.pool.QueryRow(ctx,
+			`SELECT coalesce(head_id::text, '') FROM conversations.conversation WHERE id = $1::uuid`,
+			convID).Scan(&head); err != nil {
+			return "", fmt.Errorf("attach: read head: %w", err)
+		}
+		if head == "" {
+			return "", fmt.Errorf("attach: conversation %s has no messages and no head", convID)
+		}
+		return head, s.setRequestHead(ctx, turnID, createdAt, head)
+	}
+
+	req, err := s.planAttach(ctx, convID, createdAt, msgs, prevMessageID)
+	if err != nil {
+		return "", err
+	}
+	res, err := store.AppendChain(ctx, s.pool, s.lease, req)
+	if err != nil {
+		return "", fmt.Errorf("attach: append chain: %w", err)
+	}
+	head := req.ParentID
+	if n := len(res.Nodes); n > 0 {
+		head = res.Nodes[n-1].ID
+	}
+	if head == "" {
+		return "", fmt.Errorf("attach: append produced no head node")
+	}
+	return head, s.setRequestHead(ctx, turnID, createdAt, head)
+}
+
+// planAttach decides where the request hangs and what to append there.
+func (s *CaptureStore) planAttach(ctx context.Context, convID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (store.ChainAppend, error) {
+	nodes := chainNodes(msgs)
+	if prevMessageID == "" {
+		return s.planWithoutPredecessor(ctx, convID, nodes, msgs)
+	}
+
+	node, found, err := s.nodeByProviderMessageID(ctx, convID, prevMessageID)
+	if err != nil {
+		return store.ChainAppend{}, err
+	}
+	reason := "no previous_message_id match"
+	if found {
+		if d := node.depth; d < len(msgs) && msgs[d].Role == "assistant" && store.SameMessage(node.msg, msgs[d]) {
+			return store.ChainAppend{ConversationID: convID, ParentID: node.id, Nodes: nodes[d+1:]}, nil
+		}
+		if looksLikeCompactionSummary(msgs[0].Content) {
+			inTok, ierr := s.priorTurnInputTokens(ctx, convID, createdAt)
+			if ierr != nil {
+				return store.ChainAppend{}, ierr
+			}
+			nodes[0].InputTokens = inTok
+			return store.ChainAppend{
+				ConversationID: convID,
+				Root:           convtree.RootKindCompaction,
+				DerivedFromID:  node.id,
+				Nodes:          nodes,
+			}, nil
+		}
+		reason = "attach message differs"
+	}
+
+	parent, depth, ok, err := s.deepestChainMatch(ctx, convID, msgs)
+	if err != nil {
+		return store.ChainAppend{}, err
+	}
+	if ok {
+		slog.Warn("capture: attached by hash-chain fallback",
+			"conversation", convID, "reason", reason, "depth", depth)
+		return store.ChainAppend{ConversationID: convID, ParentID: parent, Nodes: nodes[depth+1:], Fallback: true}, nil
+	}
+
+	slog.Warn("capture: attached as a new root", "conversation", convID, "reason", reason)
+	var derivedFrom string
+	if found {
+		derivedFrom = node.id
+	}
+	return store.ChainAppend{
+		ConversationID: convID,
+		Root:           convtree.RootKindRoot,
+		DerivedFromID:  derivedFrom,
+		Nodes:          nodes,
+		Fallback:       true,
+	}, nil
+}
+
+// planWithoutPredecessor handles a request that names no predecessor: the
+// request itself decides where it starts.
+func (s *CaptureStore) planWithoutPredecessor(ctx context.Context, convID string, nodes []store.ChainNode, msgs []convtree.Msg) (store.ChainAppend, error) {
 	var clearPending bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0), clear_pending FROM conversations.conversation WHERE id=$1::uuid`,
-		convID).Scan(&h, &clearPending); err != nil {
-		return 0, "", fmt.Errorf("resolve horizon: read conversation: %w", err)
+		`SELECT clear_pending FROM conversations.conversation WHERE id = $1::uuid`,
+		convID).Scan(&clearPending); err != nil {
+		return store.ChainAppend{}, fmt.Errorf("attach: read clear_pending: %w", err)
 	}
-	if len(messages) == 0 {
-		return h, "", nil
+	if clearPending {
+		return store.ChainAppend{
+			ConversationID:      convID,
+			Root:                convtree.RootKindClear,
+			DerivedFromHead:     true,
+			ConsumeClearPending: true,
+			Nodes:               nodes,
+		}, nil
 	}
-	msg0 := nonEmptyJSON(messages[0])
-
-	var rowExists, matches bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2),
-		        EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2 AND content=$3::jsonb)`,
-		convID, h, jsonbSafe(msg0)).Scan(&rowExists, &matches); err != nil {
-		return 0, "", fmt.Errorf("resolve horizon: read anchor: %w", err)
+	root, ok, err := s.rootMatching(ctx, convID, msgs[0])
+	if err != nil {
+		return store.ChainAppend{}, err
 	}
-	if rowExists && !matches {
-		// The exact jsonb compare is stricter than a replay guarantees:
-		// cache_control moves between requests. A head equal modulo that
-		// marker is the same head.
-		var stored []byte
-		if err := s.pool.QueryRow(ctx,
-			`SELECT content FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
-			convID, h).Scan(&stored); err != nil {
-			return 0, "", fmt.Errorf("resolve horizon: read anchor content: %w", err)
-		}
-		matches = sameMessage(stored, jsonbSafe(msg0))
+	if ok {
+		return store.ChainAppend{ConversationID: convID, ParentID: root, Nodes: nodes[1:]}, nil
 	}
-	if !rowExists || matches {
-		// Bootstrap (no anchor row yet -- the conversation's first-ever
-		// request) or stable prefix: proceed unchanged. These two cases are
-		// deliberately not distinguished; both mean "insert at h, no tag." A
-		// matching head leaves clear_pending untouched: the clear has not
-		// happened yet, or the new head equals the old one.
-		return h, "", nil
-	}
-
-	// Divergence. Try the re-anchor guard before recording a new boundary, but
-	// skip it when a /clear is pending: a short fresh post-clear history can
-	// positionally match old rows, and the clear must override that re-anchor.
-	if !clearPending && len(messages) >= 2 {
-		reanchored, ok, rerr := s.reanchorHorizon(ctx, convID, msg0, nonEmptyJSON(messages[1]))
-		if rerr != nil {
-			return 0, "", fmt.Errorf("resolve horizon: re-anchor: %w", rerr)
-		}
-		if ok {
-			return reanchored, "", nil
-		}
-	}
-
-	// Genuine new boundary. Compute H' and bump the horizon atomically in one
-	// transaction (design §4, step 1-2). The marker row itself is inserted by
-	// the caller's normal insert loop, NOT in this transaction: if that insert
-	// fails and retryDB retries the whole DecomposeRequest call, the next
-	// attempt's anchor read finds !rowExists at the (already-bumped) H' and
-	// takes the branch above, re-running the insert loop at the correct
-	// horizon via the existing ON CONFLICT DO NOTHING idempotency -- at the
-	// cost of losing the boundary tag on that one retry.
-	// That degraded outcome is acceptable; a torn write that bumped nothing
-	// while a marker row existed would not be, which is why the horizon bump
-	// itself is transactional.
-	if !looksLikeCompactionSummary(msg0) {
-		if clearPending {
-			// A /clear the daemon accepted: record the clear boundary and
-			// consume the flag in the same transaction.
-			hPrime, berr := s.bumpHorizon(ctx, convID, true)
-			if berr != nil {
-				return 0, "", berr
-			}
-			return hPrime, "clear", nil
-		}
-		// Structurally divergent but not a summary and no clear pending: a new
-		// thread's preamble, or a client that rewrote its head. Its messages
-		// would insert against the rows at the horizon and be dropped, and
-		// nothing re-anchors later (reanchorHorizon cannot match what was never
-		// written), so this is reported as ErrOrdinalOccupied rather than
-		// silently losing them. The stored occupant is named beside the
-		// request's head: a fresh client session landing in an old conversation
-		// (a relaunch without --resume) looks identical to a rewritten head from
-		// this side, and the two heads side by side tell them apart. A /clear
-		// the daemon accepted is distinguished by clear_pending and takes the
-		// branch above.
-		var storedHead string
-		if qerr := s.pool.QueryRow(ctx,
-			`SELECT left(content::text, 120) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2`,
-			convID, h).Scan(&storedHead); qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
-			storedHead = "unreadable: " + qerr.Error()
-		}
-		return 0, "", fmt.Errorf("%w: conversation %s horizon %d: message 0 diverges from the stored head and is not a compaction summary (%d request messages not stored; request head %q, stored head %q)",
-			ErrOrdinalOccupied, convID, h, len(messages),
-			string(msg0[:min(len(msg0), 120)]), storedHead)
-	}
-	// A divergent head that reads as a compaction summary takes the compaction
-	// path and leaves clear_pending as it is.
-	hPrime, berr := s.bumpHorizon(ctx, convID, false)
-	if berr != nil {
-		return 0, "", berr
-	}
-	return hPrime, "compaction_summary", nil
+	return store.ChainAppend{ConversationID: convID, Root: convtree.RootKindRoot, Nodes: nodes}, nil
 }
 
-// bumpHorizon computes H' (the max stored ordinal + 1) and moves the
-// conversation's resume horizon onto it in one transaction. clearPending
-// additionally consumes the clear_pending flag in the same statement, so a
-// /clear boundary is recorded atomically with the flag it was waiting on; the
-// compaction path passes false and leaves the flag untouched.
-func (s *CaptureStore) bumpHorizon(ctx context.Context, convID string, clearPending bool) (int, error) {
-	tx, err := s.pool.Begin(ctx)
+// rootMatching returns the id of a root of this conversation that holds the same
+// message as m.
+func (s *CaptureStore) rootMatching(ctx context.Context, convID string, m convtree.Msg) (string, bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, role, content FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND parent_id IS NULL AND path_hash IS NOT NULL
+		 ORDER BY ordinal DESC`, convID)
 	if err != nil {
-		return 0, fmt.Errorf("resolve horizon: begin: %w", err)
+		return "", false, fmt.Errorf("attach: read roots: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var hPrime int
-	if err := tx.QueryRow(ctx,
-		`SELECT coalesce(max(ordinal),-1)+1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
-		convID).Scan(&hPrime); err != nil {
-		return 0, fmt.Errorf("resolve horizon: compute H': %w", err)
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id      string
+			role    string
+			content []byte
+		)
+		if err := rows.Scan(&id, &role, &content); err != nil {
+			return "", false, fmt.Errorf("attach: scan root: %w", err)
+		}
+		if convtree.Equal(convtree.Msg{Role: role, Content: content}, m) {
+			return id, true, nil
+		}
 	}
-	update := `UPDATE conversations.conversation SET resume_from_ordinal=$2 WHERE id=$1::uuid`
-	if clearPending {
-		update = `UPDATE conversations.conversation SET resume_from_ordinal=$2, clear_pending=false WHERE id=$1::uuid`
+	if err := rows.Err(); err != nil {
+		return "", false, fmt.Errorf("attach: read roots: %w", err)
 	}
-	if _, err := tx.Exec(ctx, update, convID, hPrime); err != nil {
-		return 0, fmt.Errorf("resolve horizon: bump horizon: %w", err)
+	return "", false, nil
+}
+
+// providerNode is a stored node a request named by its provider message id.
+type providerNode struct {
+	id    string
+	depth int
+	msg   convtree.Msg
+}
+
+// nodeByProviderMessageID resolves diagnostics.previous_message_id to a node of
+// this conversation, and only this conversation.
+//
+// A node without a tree position — a legacy row the backfill has not placed — is
+// not an attach point: reporting it unknown lets the hash chain degrade the
+// attach instead of failing the turn on a parent AppendChain cannot chain from.
+func (s *CaptureStore) nodeByProviderMessageID(ctx context.Context, convID, providerMessageID string) (providerNode, bool, error) {
+	var (
+		node    providerNode
+		content []byte
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT id::text, coalesce(depth, 0), role, content
+		  FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND provider_message_id = $2 AND path_hash IS NOT NULL
+		 ORDER BY ordinal DESC LIMIT 1`,
+		convID, providerMessageID).Scan(&node.id, &node.depth, &node.msg.Role, &content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return providerNode{}, false, nil
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("resolve horizon: commit: %w", err)
+	if err != nil {
+		return providerNode{}, false, fmt.Errorf("attach: resolve previous_message_id: %w", err)
 	}
-	return hPrime, nil
+	node.msg.Content = content
+	return node, true, nil
+}
+
+// deepestChainMatch hashes the request's whole chain from a plain root and finds
+// the deepest node of this conversation whose stored path hash it matches,
+// returning that node's id and its index in msgs.
+func (s *CaptureStore) deepestChainMatch(ctx context.Context, convID string, msgs []convtree.Msg) (string, int, bool, error) {
+	hashes, err := convtree.Chain(convtree.RootSeed(convtree.RootKindRoot, nil), msgs)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("attach: hash chain: %w", err)
+	}
+	raw := make([][]byte, len(hashes))
+	for i, h := range hashes {
+		raw[i] = h[:]
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, path_hash FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND path_hash = ANY($2::bytea[])`, convID, raw)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("attach: match chain: %w", err)
+	}
+	defer rows.Close()
+	byHash := make(map[string]string, len(hashes))
+	for rows.Next() {
+		var (
+			nodeID string
+			key    []byte
+		)
+		if err := rows.Scan(&nodeID, &key); err != nil {
+			return "", 0, false, fmt.Errorf("attach: scan chain match: %w", err)
+		}
+		byHash[string(key)] = nodeID
+	}
+	if err := rows.Err(); err != nil {
+		return "", 0, false, fmt.Errorf("attach: match chain: %w", err)
+	}
+	for i := len(hashes) - 1; i >= 0; i-- {
+		if nodeID, hit := byHash[string(hashes[i][:])]; hit {
+			return nodeID, i, true, nil
+		}
+	}
+	return "", 0, false, nil
+}
+
+// priorTurnInputTokens is the approximate size of the context a compaction
+// summary replaced: the PREVIOUS turn's input_tokens. This turn's own
+// CompleteTurn already ran earlier in streamAndCapture, so excluding it by
+// created_at is what selects the prior turn rather than this one. A /clear
+// carries no size, so it never asks.
+func (s *CaptureStore) priorTurnInputTokens(ctx context.Context, convID string, createdAt time.Time) (*int64, error) {
+	var prevIn int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
+		  WHERE conversation_id=$1 AND created_at < $2
+		  ORDER BY created_at DESC, id DESC LIMIT 1`,
+		convID, createdAt).Scan(&prevIn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("attach: prior turn input_tokens: %w", err)
+	}
+	if prevIn <= 0 {
+		return nil, nil
+	}
+	return &prevIn, nil
+}
+
+// chainNodes renders parsed messages as chain nodes.
+func chainNodes(msgs []convtree.Msg) []store.ChainNode {
+	nodes := make([]store.ChainNode, len(msgs))
+	for i, m := range msgs {
+		nodes[i] = store.ChainNode{Role: m.Role, Content: m.Content}
+	}
+	return nodes
+}
+
+// setRequestHead records the request's head node on the turn.
+func (s *CaptureStore) setRequestHead(ctx context.Context, turnID string, createdAt time.Time, head string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE conversations.conversation_turn SET request_head_id = $3::uuid WHERE id = $1::uuid AND created_at = $2`,
+		turnID, createdAt, head)
+	if err != nil {
+		return fmt.Errorf("set request head: %w", err)
+	}
+	if n := tag.RowsAffected(); n != 1 {
+		return fmt.Errorf("set request head: expected 1 row, updated %d (stale/skewed key)", n)
+	}
+	return nil
 }
 
 // compactionMarkers are the phrases Claude Code's own compaction summary opens
@@ -851,9 +721,8 @@ func looksLikeCompactionSummary(content []byte) bool {
 // shapes the Anthropic API allows for `content`: a bare JSON string, and an
 // array of content blocks (first block's text). Claude Code sends its
 // compaction summary as the bare-string form, so an array-only decode read a
-// real boundary as "not a summary", left the horizon where it was, and the
-// response append then collided with a pre-compaction row at the same ordinal
-// (ErrOrdinalOccupied, which fails the turn).
+// real boundary as "not a summary" and left the summary attached as an ordinary
+// message instead of opening the root the history continues from.
 func headText(content []byte) string {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) > 0 && trimmed[0] == '"' {
@@ -870,53 +739,6 @@ func headText(content []byte) string {
 		return ""
 	}
 	return blocks[0].Text
-}
-
-// reanchorHorizon searches for a positional re-match of the request's head
-// (message 0 then message 1 at two consecutive stored ordinals), scoped to
-// this conversation's own rows (conversation_id is indexed; no new index is
-// added -- this runs only on divergence, at most once per compaction). The
-// earliest matching ordinal wins. See design §4 "Guard against pathological
-// re-anchoring."
-func (s *CaptureStore) reanchorHorizon(ctx context.Context, convID string, msg0, msg1 json.RawMessage) (horizon int, ok bool, err error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT ordinal FROM conversations.conversation_message
-		  WHERE conversation_id=$1::uuid AND content=$2::jsonb ORDER BY ordinal`,
-		convID, jsonbSafe(msg0))
-	if err != nil {
-		return 0, false, err
-	}
-	defer rows.Close()
-	var candidates []int
-	for rows.Next() {
-		var o int
-		if err := rows.Scan(&o); err != nil {
-			return 0, false, err
-		}
-		candidates = append(candidates, o)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, false, err
-	}
-	for _, o := range candidates {
-		var matches bool
-		if err := s.pool.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2 AND content=$3::jsonb)`,
-			convID, o+1, jsonbSafe(msg1)).Scan(&matches); err != nil {
-			return 0, false, err
-		}
-		if matches {
-			return o, true, nil
-		}
-	}
-	return 0, false, nil
-}
-
-func nonEmptyJSON(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return json.RawMessage(`null`)
-	}
-	return raw
 }
 
 // StoreTurnPrefix records a turn's cache_breakpoints (always) and its
@@ -1085,16 +907,20 @@ func stripNUL(v any) any {
 }
 
 // AppendResponseMessage appends the canonical assistant Message (canonical, an
-// anthropic.Message JSON) as a conversation_message at `ordinal`, content
-// stored verbatim from canonical.content, plus token usage and stop_reason.
-// Unlike DecomposeRequest's request rows, a response that lands on an occupied
-// ordinal is never a benign replay: it is a lost reply, so appendMessageStrict
-// surfaces it as ErrOrdinalOccupied and the caller fails the turn rather than
-// dropping the reply silently. Also sets the turn's response_ordinal to
-// `ordinal`. `ordinal` is expected to be DecomposeRequest's return value (the
-// horizon-aware ordinal the response belongs at), so the assistant lands right
-// after the request's horizon..ordinal-1 messages.
-func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
+// anthropic.Message JSON) as a child of `parentID` — the request head
+// DecomposeRequest returned — with content stored verbatim from
+// canonical.content, plus token usage, stop_reason and the response's provider
+// message id. Also sets the turn's response_ordinal to the node's ordinal.
+//
+// The tree makes the old ordinal collision impossible to lose a reply to: the
+// same reply appended twice is the same node (no new row, head still moves to
+// it), and a different reply to the same history is a sibling, not an error. A
+// missing parent is a real error and fails the turn: a reply with no request
+// head above it would be an orphan.
+func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, parentID string, canonical []byte, in, out int64, stopReason string) error {
+	if parentID == "" {
+		return fmt.Errorf("append response: no request head to append under (conversation %s)", convID)
+	}
 	var msg struct {
 		Content json.RawMessage `json:"content"`
 	}
@@ -1106,12 +932,27 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		content = json.RawMessage(`null`)
 	}
 	return retryDB(ctx, "appendResponse", func(ctx context.Context) error {
-		if err := s.appendMessageStrict(ctx, convID, ordinal, "assistant", jsonbSafe(content), &in, &out, nullify(stopReason), nil); err != nil {
-			return fmt.Errorf("append response: insert: %w", err)
+		res, err := store.AppendChain(ctx, s.pool, s.lease, store.ChainAppend{
+			ConversationID: convID,
+			ParentID:       parentID,
+			Nodes: []store.ChainNode{{
+				Role:              "assistant",
+				Content:           jsonbSafe(content),
+				InputTokens:       &in,
+				OutputTokens:      &out,
+				StopReason:        stopReason,
+				ProviderMessageID: MessageIDFromCanonical(canonical),
+			}},
+		})
+		if err != nil {
+			return fmt.Errorf("append response: %w", err)
+		}
+		if len(res.Nodes) != 1 {
+			return fmt.Errorf("append response: expected 1 node, got %d", len(res.Nodes))
 		}
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET response_ordinal=$3 WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, ordinal); err != nil {
+			turnID, createdAt, res.Nodes[0].Ordinal); err != nil {
 			return fmt.Errorf("append response: set response_ordinal: %w", err)
 		}
 		return nil
@@ -1308,8 +1149,8 @@ func retryDB(ctx context.Context, op string, fn func(context.Context) error) err
 // shape — mirrors agentloop.isRetryable, and (unlike relying on retryDB's
 // own select against ctx.Done()) makes cancellation deterministic rather
 // than racing time.After when both fire on an already-canceled context.
-// ErrOrdinalOccupied is likewise deliberately not retryable: a reply that lost
-// its ordinal will lose it again.
+// A lost lease is likewise deliberately not retryable: it is an answer, not a
+// blip.
 func isRetryableDB(err error, ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false

@@ -48,8 +48,11 @@ func TestCaptureRespectsLease(t *testing.T) {
 	}
 
 	cs := NewCaptureStore(pool).WithLease(stale)
-	err = cs.appendMessageForTest(ctx, conv, 0, "user", []byte(`[{"type":"text","text":"nope"}]`))
-	c.Require().ErrorIs(err, store.ErrLeaseLost, "append error")
+	req := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"nope"}]}]}`)
+	turnID, createdAt, err := cs.InsertTurnIntent(ctx, TurnIntent{ConversationID: conv, Request: req})
+	c.Require().NoError(err, "InsertTurnIntent")
+	_, err = cs.DecomposeRequest(ctx, conv, turnID, createdAt, req, "", "")
+	c.Require().ErrorIs(err, store.ErrLeaseLost, "decompose error")
 
 	var n int
 	c.Require().NoError(pool.QueryRow(ctx,

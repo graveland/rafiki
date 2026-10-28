@@ -92,7 +92,7 @@ func (r *backfillInterimRun) match(nodes []backfillNode, m convtree.Msg) bool {
 	if r.broken || r.idx >= len(r.start) {
 		return false
 	}
-	if !backfillSameMessage(nodes[r.start[r.idx]].msg, m) {
+	if !SameMessage(nodes[r.start[r.idx]].msg, m) {
 		return false
 	}
 	r.idx++
@@ -262,12 +262,17 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 	return report, nil
 }
 
-// backfillSameMessage reports whether a copy re-stores the same message as the
-// node it duplicates.
+// SameMessage reports whether two stored messages are the same message.
+//
+// It is the one identity the backfill, the tree check and live capture share:
+// capture compares a request's replayed message with the node a
+// previous_message_id names, the backfill compares a re-stored copy with the
+// node it duplicates, and the check compares a legacy working set with the path
+// that replaced it. One rule, one implementation — two would drift.
 //
 // Canonical equality alone is not enough on real data. Capture stored an
-// assistant reply as the SDK's marshalled message, so one side of a real copy
-// pair carries a field for every variant of the block union — "text":"",
+// assistant reply as the SDK's marshalled message, so one side of a real pair
+// carries a field for every variant of the block union — "text":"",
 // "id":"", "name":"", "signature":"", "data":"", "tool_use_id":"",
 // "content":{"type":"web_search_tool_result_error","error_code":""} — while the
 // other side is the provider's own JSON and may carry provider fields the SDK
@@ -281,7 +286,7 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 // one-sided field whose value is not zero — a tool result's content, an
 // is_error, an image, a citation — is a difference, never noise, so a rewritten
 // message stays distinct.
-func backfillSameMessage(node, copy convtree.Msg) bool {
+func SameMessage(node, copy convtree.Msg) bool {
 	if convtree.Equal(node, copy) {
 		return true
 	}

@@ -81,13 +81,6 @@ func newTestStore(t *testing.T) (*CaptureStore, *pgxpool.Pool) {
 	return NewCaptureStore(pool), pool
 }
 
-func mustTurn(t *testing.T, s *CaptureStore, convID string) string {
-	t.Helper()
-	id, _, err := s.InsertTurnIntent(context.Background(), TurnIntent{ConversationID: convID, Model: "m"})
-	assert.NewAborting(t).NoError(err, "InsertTurnIntent")
-	return id
-}
-
 func testEnsureConversationByExternalRef(t *testing.T, ctx context.Context, cs *CaptureStore) {
 	c := assert.NewAborting(t)
 	ref1 := "ext-ref-" + time.Now().Format(time.RFC3339Nano)
@@ -288,15 +281,17 @@ func TestDecomposeRequest_MessagesAndPrefix(t *testing.T) {
 		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req), Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req))
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
-	c.Eq(2, next, "next ordinal")
 
-	// two message rows, content stored verbatim
+	// two message rows, the second hanging off the first, and the head is the
+	// second: content stored verbatim.
 	var cnt int
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1`, convID).Scan(&cnt), "count messages")
 	c.Eq(2, cnt, "message count")
+	c.Eq(mustNodeByContent(t, ctx, pool, convID, `[{"type":"text","text":"hi"}]`), mustParent(t, ctx, pool, head), "the head hangs off the request's first message")
+	c.Eq(head, mustHead(t, ctx, pool, convID), "head_id is the request head")
 
 	// content stored byte-for-byte (modulo JSON normalization) for message 0
 	var gotContent string
@@ -339,7 +334,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 	h := routing.PrefixHash(req)
 	t1, c1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
 	c.NoError(err, "InsertTurnIntent (t1)")
-	if _, err := s.DecomposeRequest(ctx, convID, t1, c1, req, h); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, t1, c1, req, h, ""); err != nil {
 		t.Fatalf("DecomposeRequest (t1): %v", err)
 	}
 
@@ -347,7 +342,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 	req2 := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
 	t2, c2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, PrefixHash: h})
 	c.NoError(err, "InsertTurnIntent (t2)")
-	if _, err := s.DecomposeRequest(ctx, convID, t2, c2, req2, h); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, t2, c2, req2, h, ""); err != nil {
 		t.Fatalf("DecomposeRequest (t2): %v", err)
 	}
 
@@ -424,7 +419,7 @@ func TestDecomposeRequest_NullEscapeInContent(t *testing.T) {
 	req := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before\u0000after"}]}]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
 	c.Require().NoError(err, "InsertTurnIntent with a \\u0000 in request")
-	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req)); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), ""); err != nil {
 		t.Fatalf("DecomposeRequest with a \\u0000 in content should succeed, got: %v", err)
 	}
 
@@ -463,7 +458,7 @@ func TestDecomposeRequest_PrefixChangeReStores(t *testing.T) {
 	decompose := func(req []byte, h string) (string, time.Time) {
 		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
 		c.NoError(err, "InsertTurnIntent")
-		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h); err != nil {
+		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h, ""); err != nil {
 			t.Fatalf("DecomposeRequest: %v", err)
 		}
 		return id, ca
@@ -510,7 +505,7 @@ func TestDecomposeRequest_CrossTurnIdempotent(t *testing.T) {
 		h := routing.PrefixHash(req)
 		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
 		c.NoError(err, "InsertTurnIntent")
-		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h); err != nil {
+		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h, ""); err != nil {
 			t.Fatalf("DecomposeRequest: %v", err)
 		}
 	}
@@ -534,10 +529,10 @@ func TestDecomposeRequest_CrossTurnIdempotent(t *testing.T) {
 	c.EqDeep(want, got, "conversation_message")
 }
 
-// horizonTestEnv is the shared preamble for the horizon-rebase tests: the
+// captureTestEnv is the shared preamble for the capture-path tests: the
 // RAFIKI_TEST_DSN skip, connect, migrate, store. The pool is returned for
 // direct assertion queries.
-func horizonTestEnv(t *testing.T) (context.Context, *pgxpool.Pool, *CaptureStore) {
+func captureTestEnv(t *testing.T) (context.Context, *pgxpool.Pool, *CaptureStore) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -552,25 +547,54 @@ func horizonTestEnv(t *testing.T) (context.Context, *pgxpool.Pool, *CaptureStore
 	return ctx, pool, NewCaptureStore(pool)
 }
 
-// runTurn mirrors the proxy's per-turn sequence: InsertTurnIntent, then
-// DecomposeRequest, then CompleteTurn — completion BEFORE the next turn's
-// decompose is what the boundary path's prior-turn input_tokens lookup reads.
-// Returns DecomposeRequest's horizon-aware ordinal.
-func runTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID string, req []byte, inTok, outTok int64) int {
+// runTurn mirrors the proxy's per-turn sequence for one request that names no
+// predecessor: InsertTurnIntent, DecomposeRequest, then CompleteTurn —
+// completion BEFORE the next turn's decompose is what the compaction root's
+// prior-turn input_tokens lookup reads. Returns the request head's node id.
+func runTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID string, req []byte, inTok, outTok int64) string {
+	t.Helper()
+	return runTurnFrom(t, ctx, s, convID, req, "", inTok, outTok)
+}
+
+// runTurnFrom is runTurn with the request's diagnostics.previous_message_id,
+// which is what a replaying client (Claude Code) sends.
+func runTurnFrom(t *testing.T, ctx context.Context, s *CaptureStore, convID string, req []byte, prevMessageID string, inTok, outTok int64) string {
 	t.Helper()
 	c := assert.NewAborting(t)
 	h := routing.PrefixHash(req)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, Request: req, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h)
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, prevMessageID)
 	c.NoError(err, "DecomposeRequest")
 	c.NoError(s.CompleteTurn(ctx, TurnResult{
 		TurnID: turnID, CreatedAt: createdAt, Response: []byte(`{"content":[]}`),
 		StopReason: "end_turn", Upstream: "anthropic",
 		InputTokens: inTok, OutputTokens: outTok,
 	}), "CompleteTurn")
-	return next
+	return head
+}
+
+// runFullTurn is runTurnFrom plus the response the request produced, appended
+// under the request head: the proxy's whole sequence on ONE turn row, so the
+// next turn's prior-usage lookup sees this turn's usage. Returns the request
+// head.
+func runFullTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID string, req []byte, prevMessageID string, reply []byte, inTok, outTok int64) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	h := routing.PrefixHash(req)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: req, PrefixHash: h, Protocol: "anthropic"})
+	c.NoError(err, "InsertTurnIntent")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, prevMessageID)
+	c.NoError(err, "DecomposeRequest")
+	c.NoError(s.CompleteTurn(ctx, TurnResult{
+		TurnID: turnID, CreatedAt: createdAt, Response: []byte(`{"content":[]}`),
+		StopReason: "end_turn", Upstream: "anthropic",
+		InputTokens: inTok, OutputTokens: outTok,
+	}), "CompleteTurn")
+	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, head, reply, inTok, outTok, "end_turn"), "AppendResponseMessage")
+	return head
 }
 
 // requireKindRow reads one message row's kind/role/content/input_tokens.
@@ -594,259 +618,206 @@ func requireJSONEqual(t *testing.T, got, want string) {
 
 // summaryContent renders message-0 content that reads as a genuine Claude Code
 // compaction summary: one text block opening with the phrases a real summary
-// carries. The fixtures these tests used before ("SUMMARY: earlier
-// conversation", "SUMMARY-A") encoded the bug resolveHorizon's classifier
-// exists to fix: structurally divergent, but no summary prose, so they must
-// not be tagged a boundary.
+// carries. A structurally divergent message without that prose must not be
+// treated as one.
 func summaryContent(analysis string) string {
 	return `[{"type":"text","text":"This session is being continued from a previous conversation that ran out of context. The conversation is summarized below: Analysis: ` + analysis + `"}]`
 }
 
-// TestDecomposeRequest_FirstPostCompactRebases: the first request whose message
-// 0 diverges from the stored anchor rebases to a new horizon, tags message 0
-// kind='compaction_summary', and returns horizon+len(messages).
-func TestDecomposeRequest_FirstPostCompactRebases(t *testing.T) {
+// TestACompactionSummaryAfterAKnownReplyIsARoot: a request that names the reply
+// it continues but whose message 0 is a summary no longer replays that reply as
+// its first message (the summary replaced the history), so it opens a
+// compaction root derived from the named node, carrying the prior turn's
+// input_tokens as the size of the context it replaced.
+func TestACompactionSummaryAfterAKnownReplyIsARoot(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	c.NoError(err, "EnsureConversation")
 
-	// Pre-compact turns: accumulate rows 0..1, then 2.
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 1234, 50), "turn 1 next ordinal")
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"}]}`)
-	c.Eq(3, runTurn(t, ctx, s, convID, req2, 1400, 60), "turn 2 next ordinal")
+	runFullTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`), "",
+		[]byte(`{"id":"msg_a","content":[{"type":"text","text":"yo"}]}`), 1400, 60)
+	replyID := mustProviderNode(t, ctx, pool, convID, "msg_a")
 
-	// Post-compact: Claude Code sends a compaction summary as message 0.
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("the user asked for a refactor") + `},{"role":"user","content":"next question"}]}`)
-	next := runTurn(t, ctx, s, convID, req3, 90, 8)
-	c.Eq(5, next, "turn 3 next ordinal")
+	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("the user asked for a refactor") + `},{"role":"user","content":"next question"}]}`)
+	head := runTurnFrom(t, ctx, s, convID, req2, "msg_a", 90, 8)
 
-	// Horizon advanced to the boundary (H' = max stored ordinal + 1 = 3).
-	var horizon int
+	// The summary is a root: no parent, kind compaction_summary, derived from
+	// the reply it names, and as large as the context it replaced.
+	summary := mustParent(t, ctx, pool, head)
+	c.Eq("", mustParent(t, ctx, pool, summary), "the summary opened a root of its own")
+	kind, derived, depth := mustNodeKind(t, ctx, pool, summary)
+	c.Eq("compaction_summary", kind, "kind")
+	c.Eq(replyID, derived, "derived_from_id is the reply the request named")
+	c.Eq(0, depth, "root depth")
+
+	var inTok *int64
+	var content string
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1`, convID).Scan(&horizon), "read resume_from_ordinal")
-	c.Eq(3, horizon, "resume_from_ordinal")
-
-	// Boundary row: kind, role user, prior turn's input_tokens as the
-	// approximate replaced-context size, summary content verbatim.
-	kind, role, inTok, content := requireKindRow(t, ctx, pool, convID, 3)
-	c.False(kind == nil || *kind != "compaction_summary", "ordinal 3 kind = %v, want compaction_summary", kind)
-	c.False(role == nil || *role != "user", "ordinal 3 role = %v, want user", role)
-	c.False(inTok == nil || *inTok != 1400, "ordinal 3 input_tokens = %v, want 1400 (the immediately prior turn's usage)", inTok)
+		`SELECT input_tokens, content::text FROM conversations.conversation_message WHERE id=$1::uuid`, summary).Scan(&inTok, &content), "read the summary")
+	c.False(inTok == nil || *inTok != 1400, "input_tokens = %v, want 1400 (the replaced context's size)", inTok)
 	requireJSONEqual(t, content, summaryContent("the user asked for a refactor"))
 
-	// The post-boundary ordinary row carries no kind.
-	kind4, _, _, content4 := requireKindRow(t, ctx, pool, convID, 4)
-	c.Nil(kind4, "ordinal 4 kind")
-	requireJSONEqual(t, content4, `"next question"`)
+	// The pre-compaction history is untouched: "hi" is still the plain root.
+	var rootRole, rootContent string
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT role, content::text FROM conversations.conversation_message
+		 WHERE conversation_id=$1::uuid AND parent_id IS NULL AND kind IS NULL`, convID).Scan(&rootRole, &rootContent), "read the plain root")
+	c.Eq("user", rootRole, "plain root role")
+	requireJSONEqual(t, rootContent, `"hi"`)
 }
 
-// TestDecomposeRequest_SecondPostCompactDedups: the next request carrying the
-// SAME summary as message 0 dedups positionally (DO NOTHING) — horizon
-// unchanged, no second marker row, the boundary row's kind and input_tokens
-// survive untouched.
-func TestDecomposeRequest_SecondPostCompactDedups(t *testing.T) {
+// TestReplayingACompactionSummaryAddsNoRows: the next request carrying the SAME
+// summary as message 0 hashes to the root that already exists, so it inserts
+// nothing and only moves the head; the root's kind and input_tokens are
+// first-seen and untouched.
+func TestReplayingACompactionSummaryAddsNoRows(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	c.NoError(err, "EnsureConversation")
 
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 1234, 10), "turn 1 next ordinal")
+	runFullTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`), "",
+		[]byte(`{"id":"msg_b","content":[{"type":"text","text":"yo"}]}`), 1234, 10)
+
 	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("the user asked for a refactor") + `},{"role":"user","content":"next question"}]}`)
-	c.Eq(4, runTurn(t, ctx, s, convID, req2, 90, 8), "turn 2 next ordinal")
+	runTurnFrom(t, ctx, s, convID, req2, "msg_b", 90, 8)
+	before := mustNodeCount(t, ctx, pool, convID)
 
-	// Same summary again: stable prefix from the horizon, DO NOTHING.
-	req3 := req2
-	c.Eq(4, runTurn(t, ctx, s, convID, req3, 91, 9), "turn 3 next ordinal")
+	// The same summary again: it hashes to the root and its child, so nothing is
+	// inserted and no second boundary appears.
+	runTurnFrom(t, ctx, s, convID, req2, "msg_b", 91, 9)
+	c.Eq(before, mustNodeCount(t, ctx, pool, convID), "node count after replaying the same summary")
 
-	var horizon int
+	var summaries int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1`, convID).Scan(&horizon), "read resume_from_ordinal")
-	c.Eq(2, horizon, "resume_from_ordinal")
-	var cnt int
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND kind='compaction_summary'`, convID).Scan(&summaries), "count summary roots")
+	c.Eq(1, summaries, "compaction_summary roots")
+
+	var inTok *int64
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1`, convID).Scan(&cnt), "count messages")
-	c.Eq(4, cnt, "message count")
-	// The boundary row survived the DO NOTHING: kind and approximate
-	// input_tokens are still the first boundary's.
-	kind, _, inTok, _ := requireKindRow(t, ctx, pool, convID, 2)
-	c.False(kind == nil || *kind != "compaction_summary", "ordinal 2 kind = %v, want compaction_summary (untouched by the dedup insert)", kind)
-	c.False(inTok == nil || *inTok != 1234, "ordinal 2 input_tokens = %v, want 1234 (DO NOTHING keeps first-seen)", inTok)
+		`SELECT input_tokens FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND kind='compaction_summary'`, convID).Scan(&inTok), "read the summary's input_tokens")
+	c.False(inTok == nil || *inTok != 1234, "summary input_tokens = %v, want 1234 (first-seen, untouched by the replay)", inTok)
 }
 
-// TestDecomposeRequest_SecondDifferentSummaryRebasesAgain: a second, different
-// compaction summary diverges again and rebases forward; the first boundary's
-// marker row is untouched (append-only — nothing deleted or renumbered).
-func TestDecomposeRequest_SecondDifferentSummaryRebasesAgain(t *testing.T) {
+// TestTwoDifferentSummariesAreTwoRoots: a second, different compaction summary
+// is a different root (a summary is unique model output, so equal content is
+// the same history and different content is not), and the first root's row is
+// untouched.
+func TestTwoDifferentSummariesAreTwoRoots(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	c.NoError(err, "EnsureConversation")
 
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 1234, 10), "turn 1 next ordinal")
+	runFullTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`), "",
+		[]byte(`{"id":"msg_c","content":[{"type":"text","text":"yo"}]}`), 1234, 10)
+
 	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q1"}]}`)
-	c.Eq(4, runTurn(t, ctx, s, convID, req2, 90, 8), "turn 2 next ordinal")
-
-	// A different summary: rebase again.
+	runTurnFrom(t, ctx, s, convID, req2, "msg_c", 90, 8)
 	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-B details") + `},{"role":"user","content":"q2"}]}`)
-	next := runTurn(t, ctx, s, convID, req3, 60, 6)
-	c.Eq(6, next, "turn 3 next ordinal")
+	runTurnFrom(t, ctx, s, convID, req3, "msg_c", 60, 6)
 
-	var horizon int
+	var summaries int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1`, convID).Scan(&horizon), "read resume_from_ordinal")
-	c.Eq(4, horizon, "resume_from_ordinal")
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND kind='compaction_summary'`, convID).Scan(&summaries), "count summary roots")
+	c.Eq(2, summaries, "compaction_summary roots")
 
-	// The FIRST boundary's marker row is untouched.
-	kind, role, inTok, content := requireKindRow(t, ctx, pool, convID, 2)
-	c.False(kind == nil || *kind != "compaction_summary" || role == nil || *role != "user", "ordinal 2 kind/role = %v/%v, want compaction_summary/user (first boundary preserved)", kind, role)
+	// The first summary's content and size survive: nothing is deleted or
+	// rewritten when a second root is cut.
+	var content string
+	var inTok *int64
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT content::text, input_tokens FROM conversations.conversation_message
+		 WHERE conversation_id=$1::uuid AND kind='compaction_summary' ORDER BY ordinal LIMIT 1`, convID).Scan(&content, &inTok), "read the first summary")
 	requireJSONEqual(t, content, summaryContent("SUMMARY-A details"))
-	c.False(inTok == nil || *inTok != 1234, "ordinal 2 input_tokens = %v, want 1234 (first boundary preserved)", inTok)
-
-	// The SECOND boundary row sits at the new horizon.
-	kind, _, inTok, content = requireKindRow(t, ctx, pool, convID, 4)
-	c.False(kind == nil || *kind != "compaction_summary", "ordinal 4 kind = %v, want compaction_summary", kind)
-	requireJSONEqual(t, content, summaryContent("SUMMARY-B details"))
-	// Prior turn by created_at is turn 2 (turn 1 is older), whose usage was 90.
-	c.False(inTok == nil || *inTok != 90, "ordinal 4 input_tokens = %v, want 90 (the immediately prior turn's usage)", inTok)
+	c.False(inTok == nil || *inTok != 1234, "first summary input_tokens = %v, want 1234", inTok)
 }
 
-// TestDecomposeRequest_ReAnchorRewind: a request whose messages 0 and 1 match
-// two consecutive EARLIER stored ordinals (a rewind/resume from an older
-// session) re-anchors the horizon to that match — appending positionally from
-// it — WITHOUT recording a new kind='compaction_summary' boundary row. Where
-// the rewound history then meets a different stored row, the request forks the
-// horizon instead of being dropped.
-func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
+// TestARewindAttachesAtTheNamedNode: a client that resumes from an older reply
+// names it and replays the history up to it, so the request's later messages
+// hang off that node — the messages already stored there are the same nodes, so
+// only the new tail is inserted and the abandoned branch stays where it was.
+func TestARewindAttachesAtTheNamedNode(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	c.NoError(err, "EnsureConversation")
 
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 100, 10), "turn 1 next ordinal")
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"}]}`)
-	c.Eq(3, runTurn(t, ctx, s, convID, req2, 110, 11), "turn 2 next ordinal")
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q2"}]}`)
-	c.Eq(5, runTurn(t, ctx, s, convID, req3, 120, 12), "turn 3 next ordinal")
+	runFullTurn(t, ctx, s, convID, []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`), "",
+		[]byte(`{"id":"msg_r1","content":[{"type":"text","text":"r1"}]}`), 100, 10)
+	firstReply := mustProviderNode(t, ctx, pool, convID, "msg_r1")
 
-	var boundaryCount int
+	// The branch that will be abandoned: "q1" and its reply.
+	runFullTurn(t, ctx, s, convID,
+		[]byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"text","text":"r1"}]},{"role":"user","content":"q1"}]}`),
+		"msg_r1", []byte(`{"id":"msg_r2","content":[{"type":"text","text":"r2"}]}`), 110, 11)
+	before := mustNodeCount(t, ctx, pool, convID)
+
+	// The rewind: the client resumes from the FIRST reply and asks something
+	// else, replaying that reply at the index the tree holds it at.
+	rewound := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"r1"}]},{"role":"user","content":"another"}]}`)
+	head := runTurnFrom(t, ctx, s, convID, rewound, "msg_r1", 130, 13)
+
+	c.Eq(before+1, mustNodeCount(t, ctx, pool, convID), "the rewind inserts only its new message")
+	c.Eq(firstReply, mustParent(t, ctx, pool, head), "the new message hangs off the reply the request named")
+
+	// The abandoned branch is untouched: "q1" and its reply are still there.
+	var q1 int
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind='compaction_summary'`, convID).Scan(&boundaryCount), "count boundary rows")
-	c.Eq(1, boundaryCount, "boundary rows")
-
-	// Rewind: the client resumes from the older, pre-compact session. Messages
-	// 0..2 match rows 0..2 positionally; "r1" at ordinal 3 meets the stored
-	// SUMMARY-A boundary row, a different occupant, so the request forks the
-	// horizon past every stored row (max ordinal 4) and is stored again at 5..8,
-	// its matching prefix as compaction_tail copies.
-	req4 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"},{"role":"assistant","content":"r1"}]}`)
-	c.Eq(9, runTurn(t, ctx, s, convID, req4, 130, 13), "rewound request next ordinal")
-
-	// No NEW boundary was recorded, and the stored boundary row is untouched.
-	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind='compaction_summary'`, convID).Scan(&boundaryCount), "count boundary rows")
-	c.Eq(1, boundaryCount, "boundary rows")
-	_, _, _, content := requireKindRow(t, ctx, pool, convID, 3)
-	requireJSONEqual(t, content, summaryContent("SUMMARY-A details"))
-
-	kind, _, _, content := requireKindRow(t, ctx, pool, convID, 8)
-	c.Nil(kind, "the rewritten message is a real row")
-	c.Eq(`"r1"`, content, "rewritten message")
-	kind, _, _, _ = requireKindRow(t, ctx, pool, convID, 5)
-	c.Eq("compaction_tail", *kind, "re-stored prefix")
-	c.Eq(5, storedHorizon(t, ctx, pool, convID), "resume_from_ordinal")
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND content='"q1"'::jsonb`, convID).Scan(&q1), "count q1")
+	c.Eq(1, q1, "the abandoned branch's q1 row")
 }
 
-// TestDecomposeRequest_BootstrapNoBoundary: a brand-new conversation's first
-// request has no anchor row at the horizon — it proceeds unchanged, records no
-// boundary, and returns the plain message count.
-func TestDecomposeRequest_BootstrapNoBoundary(t *testing.T) {
+// TestTheFirstRequestIsAPlainRoot: a brand-new conversation's first request has
+// nothing to attach to, so its first message is a plain root at depth 0 and its
+// rest is a chain under it. No boundary is recorded.
+func TestTheFirstRequestIsAPlainRoot(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
+	ctx, pool, s := captureTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	c.NoError(err, "EnsureConversation")
 
 	req := []byte(`{"model":"claude","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"reply"},{"role":"user","content":"second"}]}`)
-	c.Eq(3, runTurn(t, ctx, s, convID, req, 50, 5), "next ordinal")
+	head := runTurn(t, ctx, s, convID, req, 50, 5)
 
-	// resume_from_ordinal still NULL (never bumped) — coalesce reads 0.
-	var resume *int
-	c.NoError(pool.QueryRow(ctx,
-		`SELECT resume_from_ordinal FROM conversations.conversation WHERE id=$1`, convID).Scan(&resume), "read resume_from_ordinal")
-	if resume != nil {
-		t.Fatalf("resume_from_ordinal = %d, want NULL (bootstrap recorded no boundary)", *resume)
-	}
 	var kindCount int
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind IS NOT NULL`, convID).Scan(&kindCount), "count kind rows")
 	c.Eq(0, kindCount, "kind-tagged rows")
-}
 
-// TestASessionPreambleIsNotACompactionBoundary pins the classifier on the
-// shape that mis-tagged 19 rows: a thread's first message is its own session
-// preamble, and it always diverges structurally.
-func TestASessionPreambleIsNotACompactionBoundary(t *testing.T) {
-	// All 19 compaction_summary rows in the investigated database were session
-	// preambles: CLAUDE.md contents, the userEmail system-reminder, the
-	// environment block. Not one was a summary.
-	preamble := `[{"type":"text","text":"<system-reminder>\nCodebase and user instructions are shown below.\n# userEmail\nThe user's email address is someone@example.com.\n</system-reminder>"}]`
-	assert.NewCollecting(t).False(looksLikeCompactionSummary([]byte(preamble)), "a session preamble must not be classified as a compaction summary")
-}
+	rows, err := pool.Query(ctx, `
+		SELECT role, coalesce(depth, -1), parent_id IS NULL FROM conversations.conversation_message
+		 WHERE conversation_id=$1::uuid ORDER BY ordinal`, convID)
+	c.NoError(err, "read rows")
+	defer rows.Close()
+	var roles []string
+	var depths []int
+	var roots []bool
+	for rows.Next() {
+		var role string
+		var depth int
+		var isRoot bool
+		c.NoError(rows.Scan(&role, &depth, &isRoot), "scan row")
+		roles = append(roles, role)
+		depths = append(depths, depth)
+		roots = append(roots, isRoot)
+	}
+	c.NoError(rows.Err(), "rows")
+	c.EqDeep([]string{"user", "assistant", "user"}, roles, "roles")
+	c.EqDeep([]int{0, 1, 2}, depths, "depths")
+	c.EqDeep([]bool{true, false, false}, roots, "roots")
 
-func TestARealCompactionSummaryIsRecognised(t *testing.T) {
-	summary := `[{"type":"text","text":"This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:\nAnalysis: the user asked for..."}]`
-	assert.NewCollecting(t).True(looksLikeCompactionSummary([]byte(summary)), "a real compaction summary must be recognised")
-}
+	var headDepth int
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT coalesce(depth,-1) FROM conversations.conversation_message WHERE id=$1::uuid`, head).Scan(&headDepth), "read head depth")
+	c.Eq(2, headDepth, "the head is the request's last node")
 
-// TestABareStringCompactionSummaryIsRecognised pins the shape observed in
-// production: Claude Code sends the compaction summary with `content` as a bare
-// JSON string, not a block array. The array-only decode returned false, so the
-// boundary went unrecorded and the response append collided with a
-// pre-compaction row (ErrOrdinalOccupied), failing the turn.
-func TestABareStringCompactionSummaryIsRecognised(t *testing.T) {
-	c := assert.NewCollecting(t)
-	summary := `"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier turns.\nAnalysis: ..."`
-	c.True(looksLikeCompactionSummary([]byte(summary)), "a bare-string compaction summary must be recognised")
-	c.False(looksLikeCompactionSummary([]byte(`"take a look at ssh greyshift and check on the cluster"`)), "an ordinary bare-string prompt must not be classified as a summary")
-}
-
-// TestDecomposeRequest_DivergentPreambleDoesNotRebase pins the guard itself,
-// end to end: a request whose message 0 diverges from the stored anchor but
-// carries no summary prose (a thread's own session preamble, the shape all 19
-// mis-tagged rows had) is reported as ErrOrdinalOccupied and the horizon stays put. Without
-// the prose check this request would move the resume point and tag a boundary.
-func TestDecomposeRequest_DivergentPreambleDoesNotRebase(t *testing.T) {
-	c := assert.NewAborting(t)
-	ctx, pool, s := horizonTestEnv(t)
-	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
-	c.NoError(err, "EnsureConversation")
-
-	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
-	c.Eq(2, runTurn(t, ctx, s, convID, req1, 1234, 10), "turn 1 next ordinal")
-
-	preamble := `[{"type":"text","text":"<system-reminder>\nCodebase and user instructions are shown below.\n</system-reminder>"}]`
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + preamble + `},{"role":"user","content":"q1"}]}`)
-	h2 := routing.PrefixHash(req2)
-	turn2, at2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, PrefixHash: h2, Protocol: "anthropic"})
-	c.NoError(err, "InsertTurnIntent")
-	_, err = s.DecomposeRequest(ctx, convID, turn2, at2, req2, h2)
-	c.ErrorIs(err, ErrOrdinalOccupied, "divergent preamble is reported, not dropped")
-
-	// The horizon did not move: resume_from_ordinal is still NULL.
 	var resume *int
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT resume_from_ordinal FROM conversations.conversation WHERE id=$1`, convID).Scan(&resume), "read resume_from_ordinal")
-	if resume != nil {
-		t.Fatalf("resume_from_ordinal = %d, want NULL (a preamble must not move the horizon)", *resume)
-	}
-	var kindCount int
-	c.NoError(pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind IS NOT NULL`, convID).Scan(&kindCount), "count kind rows")
-	c.Eq(0, kindCount, "kind-tagged rows")
+	c.Nil(resume, "capture must not write resume_from_ordinal any more")
 }
 
 // TestDecomposeRequest_CacheBreakpoints verifies breakpoint detection is
@@ -879,7 +850,7 @@ func TestDecomposeRequest_CacheBreakpoints(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
-	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req)); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), ""); err != nil {
 		t.Fatalf("DecomposeRequest: %v", err)
 	}
 
@@ -895,9 +866,9 @@ func TestDecomposeRequest_CacheBreakpoints(t *testing.T) {
 }
 
 // TestAppendResponseMessage verifies the canonical assistant response is
-// appended as a conversation_message at the caller-supplied ordinal (verbatim
-// content, token usage, stop_reason) and that the turn's response_ordinal is
-// set to that same ordinal.
+// appended as a child of the caller-supplied request head (verbatim content,
+// token usage, stop_reason, the response's provider id) and that the turn's
+// response_ordinal is set to that node's ordinal.
 func TestAppendResponseMessage(t *testing.T) {
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -919,26 +890,28 @@ func TestAppendResponseMessage(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req))
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
-	c.Eq(1, next, "next ordinal")
 
-	canonical := []byte(`{"role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`)
-	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 10, 5, "end_turn"), "AppendResponseMessage")
+	canonical := []byte(`{"id":"msg_hello","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`)
+	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, head, canonical, 10, 5, "end_turn"), "AppendResponseMessage")
+
+	replyNode := mustProviderNode(t, ctx, pool, convID, "msg_hello")
+	c.Eq(head, mustParent(t, ctx, pool, replyNode), "the reply hangs off the request head")
 
 	var role, stop string
 	var out int64
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT role, coalesce(stop_reason,''), coalesce(output_tokens,0) FROM conversations.conversation_message
-		  WHERE conversation_id=$1 AND ordinal=$2`, convID, next).Scan(&role, &stop, &out), "read conversation_message")
+		  WHERE id=$1::uuid`, replyNode).Scan(&role, &stop, &out), "read conversation_message")
 	c.Eq("assistant", role, "role")
 	c.Eq("end_turn", stop, "stop_reason")
 	c.Eq(5, out, "output_tokens")
 
 	var gotContent string
 	c.NoError(pool.QueryRow(ctx,
-		`SELECT content::text FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=$2`,
-		convID, next).Scan(&gotContent), "read content")
+		`SELECT content::text FROM conversations.conversation_message WHERE id=$1::uuid`,
+		replyNode).Scan(&gotContent), "read content")
 	wantContent := `[{"type":"text","text":"hello"}]`
 	var gotNorm, wantNorm any
 	c.NoError(json.Unmarshal([]byte(gotContent), &gotNorm), "unmarshal got content")
@@ -949,7 +922,10 @@ func TestAppendResponseMessage(t *testing.T) {
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT response_ordinal FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`,
 		turnID, createdAt).Scan(&respOrd), "read response_ordinal")
-	c.Eq(next, respOrd, "response_ordinal")
+	var replyOrdinal int
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT ordinal FROM conversations.conversation_message WHERE id=$1::uuid`, replyNode).Scan(&replyOrdinal), "read the reply's ordinal")
+	c.Eq(replyOrdinal, respOrd, "response_ordinal is the reply node's ordinal")
 }
 
 func TestIsRetryableDB(t *testing.T) {
@@ -968,7 +944,7 @@ func TestIsRetryableDB(t *testing.T) {
 		{"deadline exceeded", context.DeadlineExceeded, liveCtx, true},
 		{"net.OpError", &net.OpError{Op: "read", Err: errors.New("connection refused")}, liveCtx, true},
 		{"plain error", errors.New("something failed"), liveCtx, false},
-		{"ErrOrdinalOccupied wrapped as the proxy delivers it", fmt.Errorf("append response: insert: %w", ErrOrdinalOccupied), liveCtx, false},
+		{"a lost lease as the store reports it", fmt.Errorf("append chain: %w", store.ErrLeaseLost), liveCtx, false},
 		{"pgconn deadlock", &pgconn.PgError{Code: "40P01"}, liveCtx, true},
 		{"pgconn serialization", &pgconn.PgError{Code: "40001"}, liveCtx, true},
 		{"pgconn not-null violation", &pgconn.PgError{Code: "23502"}, liveCtx, false},
@@ -1155,26 +1131,6 @@ func TestRecordThreadLinksConsecutiveTurns(t *testing.T) {
 	c.Eq(t3, threadOf(t4), "turn 4 thread")
 }
 
-func TestOrdinalCollisionOnAResponseIsLoud(t *testing.T) {
-	c := assert.NewAborting(t)
-	// A replayed request prefix legitimately re-inserts identical content and
-	// stays lenient. A SECOND assistant reply at one ordinal is always a lost
-	// response, so it must surface rather than vanish.
-	s, _ := newTestStore(t)
-	ctx := context.Background()
-	convID, _ := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
-
-	t1, at1, _ := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
-	first := []byte(`{"id":"msg_a","content":[{"type":"text","text":"first"}]}`)
-	c.NoError(s.AppendResponseMessage(ctx, convID, t1, at1, 5, first, 1, 1, "end_turn"), "first append")
-
-	t2, at2, _ := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
-	second := []byte(`{"id":"msg_b","content":[{"type":"text","text":"second"}]}`)
-	err := s.AppendResponseMessage(ctx, convID, t2, at2, 5, second, 1, 1, "end_turn")
-	c.Error(err, "a second response at ordinal 5 must not be silently dropped")
-	c.ErrorIs(err, ErrOrdinalOccupied, "err")
-}
-
 func TestRequestMessageReplayStaysLenient(t *testing.T) {
 	// The other half of the rule: re-decomposing the same request is normal and
 	// must stay silent, or every turn of a conversation errors.
@@ -1182,11 +1138,18 @@ func TestRequestMessageReplayStaysLenient(t *testing.T) {
 	ctx := context.Background()
 	convID, _ := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	if _, err := s.DecomposeRequest(ctx, convID, mustTurn(t, s, convID), time.Now(), body, "h"); err != nil {
+	decompose := func() error {
+		id, at, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+		if err != nil {
+			return err
+		}
+		_, err = s.DecomposeRequest(ctx, convID, id, at, body, "h", "")
+		return err
+	}
+	if err := decompose(); err != nil {
 		t.Fatalf("first decompose: %v", err)
 	}
-	_, err := s.DecomposeRequest(ctx, convID, mustTurn(t, s, convID), time.Now(), body, "h")
-	assert.NewAborting(t).NoError(err, "replay decompose must stay lenient, got")
+	assert.NewAborting(t).NoError(decompose(), "replay decompose must stay lenient, got")
 }
 
 func TestRecordThreadUnresolvablePredecessorStaysMainThreadUnlessSubagent(t *testing.T) {
@@ -1219,13 +1182,14 @@ func TestRecordThreadUnresolvablePredecessorStaysMainThreadUnlessSubagent(t *tes
 	c.Eq(subID, threadOf(subID), "subagent with an unresolvable predecessor: thread_id")
 }
 
-func TestConcurrentThreadsDoNotShareAnOrdinalSpace(t *testing.T) {
+// TestConcurrentThreadsDoNotShareATree: two threads of one session are two
+// conversations, so each has its own tree and neither can land a message where
+// the other's history sits.
+func TestConcurrentThreadsDoNotShareATree(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	// The corruption this closes: two threads with equal message counts computed
-	// identical ordinals, and ON CONFLICT DO NOTHING dropped the loser's reply.
 	s, pool := newTestStore(t)
 	ctx := context.Background()
-	session := "c_" + t.Name()
+	session := "c_" + t.Name() + "_" + time.Now().Format("150405.000000000")
 
 	root, err := s.ResolveThreadConversation(ctx, ConversationRef{
 		OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session,
@@ -1237,14 +1201,15 @@ func TestConcurrentThreadsDoNotShareAnOrdinalSpace(t *testing.T) {
 	ck.Require().NoError(err, "ResolveThreadConversation branch")
 	ck.Require().NotEq(branch, root, "a non-root thread must get its own conversation row")
 
-	// Both threads write a message at ordinal 0. Before the fix, the second was
-	// silently dropped.
+	// Both threads open the same-shaped history. In one conversation the second
+	// would be a sibling of the first; in separate trees each gets its own root.
 	body := []byte(`{"messages":[{"role":"user","content":"same shape"}]}`)
-	if _, err := s.DecomposeRequest(ctx, root, mustTurn(t, s, root), time.Now(), body, "h"); err != nil {
-		t.Fatalf("decompose root: %v", err)
-	}
-	if _, err := s.DecomposeRequest(ctx, branch, mustTurn(t, s, branch), time.Now(), body, "h"); err != nil {
-		t.Fatalf("decompose branch: %v", err)
+	for _, conv := range []string{root, branch} {
+		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: conv, Model: "m"})
+		ck.Require().NoError(err, "InsertTurnIntent")
+		if _, err := s.DecomposeRequest(ctx, conv, turnID, createdAt, body, "h", ""); err != nil {
+			t.Fatalf("decompose %s: %v", conv, err)
+		}
 	}
 	for _, c := range []struct{ name, id string }{{"root", root}, {"branch", branch}} {
 		var n int
@@ -1501,10 +1466,9 @@ func TestIndependentFoundingRequestLandsOnItsOwnBranch(t *testing.T) {
 	tMain, atMain, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
 	c.Require().NoError(err, "InsertTurnIntent main")
 	c.Require().NoError(s.RecordThread(ctx, session, root, tMain, atMain, "", "msg_main", false), "RecordThread main")
-	next, err := s.DecomposeRequest(ctx, root, tMain, atMain, []byte(`{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}`), "h")
+	mainHead, err := s.DecomposeRequest(ctx, root, tMain, atMain, []byte(`{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}`), "h", "")
 	c.Require().NoError(err, "decompose main")
-	c.Require().Eq(2, next, "root horizon")
-	c.Require().NoError(s.AppendResponseMessage(ctx, root, tMain, atMain, next, []byte(`{"id":"msg_main","role":"assistant","content":[]}`), 1, 1, "end_turn"), "append main response")
+	c.Require().NoError(s.AppendResponseMessage(ctx, root, tMain, atMain, mainHead, []byte(`{"id":"msg_main","role":"assistant","content":[]}`), 1, 1, "end_turn"), "append main response")
 
 	// The founding request: family exists, no resolvable predecessor. The
 	// proxy mints the turn id and routes to <session>:<id> BEFORE the row
@@ -1521,10 +1485,11 @@ func TestIndependentFoundingRequestLandsOnItsOwnBranch(t *testing.T) {
 	c.Require().NoError(s.RecordThread(ctx, session, branch, tF, atF, "", "msg_sub1", true), "RecordThread founding")
 
 	// The probe's failing step, now green: the founding response appends on
-	// the BRANCH at ordinal 1 even though the root row holds ordinals 0..2.
-	nextF, err := s.DecomposeRequest(ctx, branch, tF, atF, []byte(`{"messages":[{"role":"user","content":"quick task"}]}`), "h")
+	// the BRANCH, under the branch's own tree, while the root row keeps its
+	// three nodes.
+	foundingHead, err := s.DecomposeRequest(ctx, branch, tF, atF, []byte(`{"messages":[{"role":"user","content":"quick task"}]}`), "h", "")
 	c.Require().NoError(err, "decompose founding")
-	c.Require().NoError(s.AppendResponseMessage(ctx, branch, tF, atF, nextF, []byte(`{"id":"msg_sub1","role":"assistant","content":[]}`), 1, 1, "end_turn"), "append founding response")
+	c.Require().NoError(s.AppendResponseMessage(ctx, branch, tF, atF, foundingHead, []byte(`{"id":"msg_sub1","role":"assistant","content":[]}`), 1, 1, "end_turn"), "append founding response")
 
 	// Thread identity: the founding turn is its own thread root, and turn 2
 	// resolves to the same branch.

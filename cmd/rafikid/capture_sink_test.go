@@ -256,10 +256,10 @@ func assertPublishedTsMatchesHistory(t *testing.T, role string) {
 	req := []byte(`{"messages":[{"role":"user","content":"hello contract"}]}`)
 	turnID, createdAt, err := cs.InsertTurnIntent(ctx, capture.TurnIntent{ConversationID: convID, Model: "m", Request: req})
 	ck.Require().NoError(err, "InsertTurnIntent")
-	next, err := cs.DecomposeRequest(ctx, convID, turnID, createdAt, req, "")
+	head, err := cs.DecomposeRequest(ctx, convID, turnID, createdAt, req, "", "")
 	ck.Require().NoError(err, "DecomposeRequest")
 	canonical := []byte(`{"role":"assistant","content":[{"type":"text","text":"reply"}],"stop_reason":"end_turn"}`)
-	ck.Require().NoError(cs.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 10, 5, "end_turn"), "AppendResponseMessage")
+	ck.Require().NoError(cs.AppendResponseMessage(ctx, convID, turnID, createdAt, head, canonical, 10, 5, "end_turn"), "AppendResponseMessage")
 
 	rows, err := cs.MessagesSince(ctx, convID, createdAt)
 	ck.Require().NoError(err, "MessagesSince")

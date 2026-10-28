@@ -462,10 +462,10 @@ func TestBackfillSameMessage(t *testing.T) {
 		// unused, plus a provider marker); the other is the client's replay.
 		stored := `[{"type":"thinking","thinking":"","signature":"sig","id":"","name":"","text":"","data":"","tool_use_id":"","content":{"type":"web_search_tool_result_error","error_code":""}},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"},"caller":{"type":"direct"}}]`
 		replay := `[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"}}]`
-		c.True(backfillSameMessage(convtree.Msg{Role: "assistant", Content: []byte(stored)}, convtree.Msg{Role: "assistant", Content: []byte(replay)}), "zero-valued union noise is not a difference")
+		c.True(SameMessage(convtree.Msg{Role: "assistant", Content: []byte(stored)}, convtree.Msg{Role: "assistant", Content: []byte(replay)}), "zero-valued union noise is not a difference")
 
 		// An empty list and a moved cache_control are the same kind of noise.
-		c.True(backfillSameMessage(
+		c.True(SameMessage(
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi","citations":[]}]`)},
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`)}),
 			"an empty list and a transport hint are not content")
@@ -473,7 +473,7 @@ func TestBackfillSameMessage(t *testing.T) {
 
 	t.Run("a tool result's content is a difference", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		c.False(backfillSameMessage(
+		c.False(SameMessage(
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]`)},
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"bad"}]`)}),
 			"ok and bad are different tool output")
@@ -481,7 +481,7 @@ func TestBackfillSameMessage(t *testing.T) {
 
 	t.Run("is_error on one side only is a difference", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		c.False(backfillSameMessage(
+		c.False(SameMessage(
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":true}]`)},
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]`)}),
 			"a failed tool call is not a successful one")
@@ -489,7 +489,7 @@ func TestBackfillSameMessage(t *testing.T) {
 
 	t.Run("an image's source is a difference", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		c.False(backfillSameMessage(
+		c.False(SameMessage(
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}]`)},
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BBB"}}]`)}),
 			"two images are not one image")
@@ -497,7 +497,7 @@ func TestBackfillSameMessage(t *testing.T) {
 
 	t.Run("a non-zero field on one side only is a difference", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		c.False(backfillSameMessage(
+		c.False(SameMessage(
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi","citations":[{"url":"x"}]}]`)},
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi"}]`)}),
 			"a citation one side carries is content")
@@ -508,13 +508,13 @@ func TestBackfillSameMessage(t *testing.T) {
 		// The tag is ignored whatever it names — not only "direct": an object that
 		// carries nothing but a type tag has no payload, so the tag names nothing
 		// two messages can disagree about.
-		c.True(backfillSameMessage(
+		c.True(SameMessage(
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"},"caller":{"type":"code_execution"}}]`)},
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"}}]`)}),
 			"a tag alone is not content")
 		// A tag that carries a payload is a difference, like any other non-zero
 		// one-sided field.
-		c.False(backfillSameMessage(
+		c.False(SameMessage(
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"},"caller":{"type":"code_execution","tool_id":"c1"}}]`)},
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"}}]`)}),
 			"a tag with a payload is content")
@@ -522,7 +522,7 @@ func TestBackfillSameMessage(t *testing.T) {
 
 	t.Run("a different role is a difference", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		c.False(backfillSameMessage(
+		c.False(SameMessage(
 			convtree.Msg{Role: "user", Content: []byte(`[{"type":"text","text":"hi"}]`)},
 			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi"}]`)}),
 			"role is part of the message")
