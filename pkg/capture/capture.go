@@ -910,7 +910,9 @@ func stripNUL(v any) any {
 // anthropic.Message JSON) as a child of `parentID` — the request head
 // DecomposeRequest returned — with content stored verbatim from
 // canonical.content, plus token usage, stop_reason and the response's provider
-// message id. Also sets the turn's response_ordinal to the node's ordinal.
+// message id. Also sets the turn's response_ordinal to the node's ordinal; a
+// turn row that cannot be found to point at the reply fails the turn rather than
+// leaving the reply unaccounted for.
 //
 // The tree makes the old ordinal collision impossible to lose a reply to: the
 // same reply appended twice is the same node (no new row, head still moves to
@@ -950,10 +952,18 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		if len(res.Nodes) != 1 {
 			return fmt.Errorf("append response: expected 1 node, got %d", len(res.Nodes))
 		}
-		if _, err := s.pool.Exec(ctx,
+		tag, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET response_ordinal=$3 WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, res.Nodes[0].Ordinal); err != nil {
+			turnID, createdAt, res.Nodes[0].Ordinal)
+		if err != nil {
 			return fmt.Errorf("append response: set response_ordinal: %w", err)
+		}
+		// Zero rows means the turn row is gone or its key moved (id + created_at is
+		// the hypertable's primary key), so the reply is stored with no pointer back
+		// to it from the turn. Fail the turn rather than complete it half-recorded;
+		// setRequestHead checks the same thing for the request side.
+		if n := tag.RowsAffected(); n != 1 {
+			return fmt.Errorf("append response: set response_ordinal: expected 1 row, updated %d (turn row missing or its key moved)", n)
 		}
 		return nil
 	})

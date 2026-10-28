@@ -106,6 +106,13 @@ func checkInt(v int) *int { return &v }
 
 func checkDepth(v int32) *int32 { return &v }
 
+// checkTreeCutover is checkTree with the cutover-only working-set comparison
+// armed. Every test that asserts on WorkingSet* uses it; a test that means to
+// run the structural check calls checkTree with zero options.
+func checkTreeCutover(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheckReport, error) {
+	return checkTree(ctx, pool, ids, TreeCheckOptions{Cutover: true})
+}
+
 // TestCheckTreeDetectsEachClass plants one defect per conversation — a row with
 // no path hash, a child at the wrong depth, a conversation with no head, an
 // ordinal counter behind the rows, and a working path that is not the working
@@ -150,7 +157,7 @@ func TestCheckTreeDetectsEachClass(t *testing.T) {
 	checkSetConversation(t, ctx, pool, mismatch, checkInt(0), checkInt(2), checkInt(0))
 
 	ids := []string{missingHash, badDepth, missingHead, counterBehind, mismatch}
-	report, err := checkTree(ctx, pool, ids)
+	report, err := checkTreeCutover(ctx, pool, ids)
 	c.Require().NoError(err, "checkTree")
 
 	c.Eq(5, report.Conversations, "conversations checked")
@@ -182,7 +189,7 @@ func TestCheckTreeAcceptsACompactionTailCopy(t *testing.T) {
 	checkInsertNode(t, ctx, pool, convID, 2, "user", `[{"type":"text","text":"after the fork"}]`, nil, checkInt(0), rootHash, 1)
 	checkSetConversation(t, ctx, pool, convID, checkInt(2), checkInt(3), checkInt(1))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(0, report.MissingHash, "a tail copy needs no path hash")
 	c.True(report.OK(), "report: %+v", report)
@@ -206,7 +213,7 @@ func TestCheckTreeAcceptsABackfilledTree(t *testing.T) {
 		SET next_ordinal = 4, resume_from_ordinal = 2 WHERE id = $1::uuid`, convID)
 	c.Require().NoError(err, "seed next_ordinal and horizon")
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(0, report.BadHash, "the backfill's own hashes verify")
 	c.True(report.OK(), "report: %+v", report)
@@ -236,7 +243,7 @@ func TestCheckTreeLooseMatchForRepresentationOnlyCopy(t *testing.T) {
 	checkInsertSnapshotNode(t, ctx, pool, convID, 4, 52, nil, checkInt(1), replyHash, 2)
 	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(2))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.Empty(report.WorkingSetMismatch, "a representation-only copy is not a mismatch")
 	c.EqDeep([]string{convID}, report.WorkingSetLooseMatch, "the conversation matches only under the looser identity")
@@ -265,7 +272,7 @@ func TestCheckTreeRejectsAGenuineCopyDifference(t *testing.T) {
 	checkInsertSnapshotNode(t, ctx, pool, convID, 4, 52, nil, checkInt(1), replyHash, 2)
 	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(2))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.EqDeep([]string{convID}, report.WorkingSetMismatch, "a changed tool output is a mismatch")
 	c.Empty(report.WorkingSetLooseMatch, "it does not match under the looser identity either")
@@ -303,7 +310,7 @@ func TestCheckTreeCountsDuplicateRows(t *testing.T) {
 	checkInsertNode(t, ctx, pool, convID, 4, "user", `[{"type":"text","text":"fresh"}]`, &clearKind, nil, nil, 0)
 	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(4))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(1, report.DuplicateRows, "the repeated summary is a duplicate")
 	c.Eq(0, report.MissingHash, "a duplicate is not a missing position")
@@ -335,7 +342,7 @@ func TestCheckTreeMissingHashForARepeatedOrdinaryRow(t *testing.T) {
 	checkInsertNode(t, ctx, pool, convID, 4, "user", `[{"type":"text","text":"fresh"}]`, &clearKind, nil, nil, 0)
 	checkSetConversation(t, ctx, pool, convID, checkInt(4), checkInt(5), checkInt(4))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(2, report.MissingHash, "an ordinary row and a different-kind boundary are both missing positions")
 	c.Eq(0, report.DuplicateRows, "duplicate rows")
@@ -363,7 +370,7 @@ func TestCheckTreeDoesNotExcuseAClearCopy(t *testing.T) {
 	checkInsertNode(t, ctx, pool, convID, 2, "user", `[{"type":"text","text":"after"}]`, nil, checkInt(0), clearHash, 1)
 	checkSetConversation(t, ctx, pool, convID, checkInt(2), checkInt(3), checkInt(1))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(1, report.MissingHash, "a clear with no position is a missing position")
 	c.Eq(0, report.DuplicateRows, "equal content under equal kind does not make it the same clear")
@@ -385,7 +392,7 @@ func TestCheckTreeDetectsABadHash(t *testing.T) {
 		checkInsertRow(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, checkForeignHash(convID, 0), checkDepth(0))
 		checkSetConversation(t, ctx, pool, convID, checkInt(0), checkInt(1), checkInt(0))
 
-		report, err := checkTree(ctx, pool, []string{convID})
+		report, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
 		c.Require().NoError(err, "checkTree")
 		c.Eq(1, report.BadHash, "a hash that is not the hash of its position")
 		c.Eq(0, report.MissingHash, "it has a position")
@@ -407,7 +414,7 @@ func TestCheckTreeDetectsABadHash(t *testing.T) {
 		c.Require().NoError(err, "point the child at another conversation's row")
 		checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(2), checkInt(0))
 
-		report, err := checkTree(ctx, pool, []string{convID})
+		report, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
 		c.Require().NoError(err, "checkTree")
 		c.Eq(1, report.BadHash, "a parent outside the conversation")
 		c.Eq(0, report.BadDepth, "its depth is arithmetically fine")
@@ -420,7 +427,7 @@ func TestCheckTreeDetectsABadHash(t *testing.T) {
 		checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 1)
 		checkSetConversation(t, ctx, pool, convID, checkInt(0), checkInt(1), checkInt(0))
 
-		report, err := checkTree(ctx, pool, []string{convID})
+		report, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
 		c.Require().NoError(err, "checkTree")
 		c.Eq(1, report.BadHash, "a root that is not at depth 0")
 		c.False(report.OK(), "a root below depth zero fails the check")
@@ -437,7 +444,8 @@ func TestCheckTreeDetectsABadHash(t *testing.T) {
 // TestCheckTreeDetectsABadHash's fixtures all set a resume horizon, which is
 // exactly why the regression was invisible to them: they exercise the check
 // through the one list that was still being read. This one deliberately leaves
-// the horizon NULL.
+// the horizon NULL — and it runs the STRUCTURAL check, with no cutover
+// comparison, which is the run an operator does after go-live.
 func TestCheckTreeDetectsABadHashWithoutALegacyHorizon(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
@@ -451,11 +459,12 @@ func TestCheckTreeDetectsABadHashWithoutALegacyHorizon(t *testing.T) {
 		checkForeignHash(convID, 1), checkDepth(1))
 	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(2), nil)
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(1, report.BadHash, "a bad hash in a conversation with no legacy horizon")
 	c.Eq(0, report.MissingHash, "every row holds a position")
 	c.Eq(0, report.BadDepth, "its depth is right")
+	c.Empty(report.WorkingSetMismatch, "the structural run does not compare working sets")
 	c.False(report.OK(), "a bad hash fails the check whatever the storage")
 }
 
@@ -477,7 +486,7 @@ func TestCheckTreeDetectsBadDepthWithoutALegacyHorizon(t *testing.T) {
 	checkInsertNode(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"child"}]`, nil, checkInt(0), rootHash, 4)
 	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(2), nil)
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(1, report.BadDepth, "a child at the wrong depth, with no legacy horizon")
 	c.Eq(0, report.BadHash, "its hash is the hash of its position")
@@ -503,7 +512,7 @@ func TestCheckTreeSeedsANonBoundaryRootLikeTheBackfill(t *testing.T) {
 	checkInsertRow(t, ctx, pool, convID, 0, "user", content, &tailKind, nil, hash[:], checkDepth(0))
 	checkSetConversation(t, ctx, pool, convID, checkInt(0), checkInt(1), checkInt(0))
 
-	report, err := checkTree(ctx, pool, []string{convID})
+	report, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
 	c.Require().NoError(err, "checkTree")
 	c.Eq(0, report.BadHash, "a non-boundary root is seeded with RootKindRoot, as the backfill seeds it")
 	c.True(report.OK(), "report: %+v", report)
@@ -539,7 +548,7 @@ func TestCheckTreeScopesWorkingSetsToLegacyHorizons(t *testing.T) {
 	checkInsertNode(t, ctx, pool, legacy, 2, "assistant", `[{"type":"text","text":"head"}]`, nil, checkInt(0), legacyRoot, 1)
 	checkSetConversation(t, ctx, pool, legacy, checkInt(2), checkInt(3), checkInt(0))
 
-	report, err := checkTree(ctx, pool, []string{native, legacy})
+	report, err := checkTreeCutover(ctx, pool, []string{native, legacy})
 	c.Require().NoError(err, "checkTree")
 	c.EqDeep([]string{legacy}, report.WorkingSetMismatch,
 		"only the conversation with a legacy horizon is compared")
@@ -547,4 +556,115 @@ func TestCheckTreeScopesWorkingSetsToLegacyHorizons(t *testing.T) {
 	c.Eq(0, report.MissingHash, "every row holds a tree position")
 	c.Eq(0, report.BadHash, "hashes verify")
 	c.False(report.OK(), "a divergent legacy working set still fails the check")
+}
+
+// TestCheckTreeWorkingSetComparisonIsCutoverOnly: the working-set comparison is
+// a cutover-time gate, not a standing property of the data. A conversation that
+// still carries a legacy horizon and then forks or compacts under the new daemon
+// has a head path that legitimately leaves the rows it abandoned off — so the
+// comparison must be OFF by default, or `rafikid tree check` exits non-zero on
+// correct data and reads as a corrupted migration.
+//
+// The same conversation is checked twice: structurally (no comparison, and the
+// report is clean) and as the cutover gate (the comparison runs, and the
+// divergence is reported). Everything structural must be identical in both runs.
+func TestCheckTreeWorkingSetComparisonIsCutoverOnly(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	root := checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"abandoned"}]`, nil, checkInt(0), root, 1)
+	checkInsertNode(t, ctx, pool, convID, 2, "assistant", `[{"type":"text","text":"head"}]`, nil, checkInt(0), root, 1)
+	checkSetConversation(t, ctx, pool, convID, checkInt(2), checkInt(3), checkInt(0))
+
+	structural, err := checkTree(ctx, pool, []string{convID}, TreeCheckOptions{})
+	c.Require().NoError(err, "structural checkTree")
+	c.Empty(structural.WorkingSetMismatch, "a structural run does not compare working sets")
+	c.Empty(structural.WorkingSetLooseMatch, "a structural run does not compare working sets")
+	c.Eq(0, structural.MissingHash, "every row holds a tree position")
+	c.Eq(0, structural.BadHash, "hashes verify")
+	c.Eq(0, structural.BadDepth, "depths are right")
+	c.Eq(1, structural.Conversations, "the conversation is still checked structurally")
+	c.True(structural.OK(), "the structural run is clean over correct data: %+v", structural)
+
+	cutover, err := checkTreeCutover(ctx, pool, []string{convID})
+	c.Require().NoError(err, "cutover checkTree")
+	c.EqDeep([]string{convID}, cutover.WorkingSetMismatch,
+		"with the cutover flag on, the divergent working set is reported")
+	c.Eq(0, cutover.BadHash, "the two runs agree on every structural count")
+	c.Eq(0, cutover.MissingHash, "the two runs agree on every structural count")
+	c.False(cutover.OK(), "the cutover gate fails on a divergent working set")
+}
+
+// TestCheckTreeCountsAssistantNodesMissingAProviderID is the design's provider-id
+// coverage invariant: a turn that recorded a response_message_id for an ordinal
+// means the row stored there is that reply, so a NULL provider_message_id on it
+// is a miss. The backfill writes the column from the turn map, so a miss here is
+// the two disagreeing — and it silently degrades capture's rule 2 to the
+// hash-chain fallback, which finds nothing under a compaction or clear root.
+func TestCheckTreeCountsAssistantNodesMissingAProviderID(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	// A: the turn names the reply at ordinal 1, and the row does not carry it.
+	missing := checkTestConv(t, ctx, pool)
+	missingRoot := checkInsertNode(t, ctx, pool, missing, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, missing, 1, "assistant", `[{"type":"text","text":"reply"}]`, nil, checkInt(0), missingRoot, 1)
+	checkSetConversation(t, ctx, pool, missing, checkInt(1), checkInt(2), nil)
+	checkInsertTurn(t, ctx, pool, missing, 1, "msg_missing")
+
+	// B: the same shape with the id written, which is what the backfill does.
+	covered := checkTestConv(t, ctx, pool)
+	coveredRoot := checkInsertNode(t, ctx, pool, covered, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, covered, 1, "assistant", `[{"type":"text","text":"reply"}]`, nil, checkInt(0), coveredRoot, 1)
+	checkSetConversation(t, ctx, pool, covered, checkInt(1), checkInt(2), nil)
+	checkInsertTurn(t, ctx, pool, covered, 1, "msg_covered")
+	_, err := pool.Exec(ctx, `UPDATE conversations.conversation_message
+		SET provider_message_id = 'msg_covered'
+		WHERE conversation_id = $1::uuid AND ordinal = 1`, covered)
+	c.Require().NoError(err, "write the provider id the turn named")
+
+	// C: no turn names the reply, so there is no id to be missing.
+	uncovered := checkTestConv(t, ctx, pool)
+	uncoveredRoot := checkInsertNode(t, ctx, pool, uncovered, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, uncovered, 1, "assistant", `[{"type":"text","text":"reply"}]`, nil, checkInt(0), uncoveredRoot, 1)
+	checkSetConversation(t, ctx, pool, uncovered, checkInt(1), checkInt(2), nil)
+
+	report, err := checkTree(ctx, pool, []string{missing, covered, uncovered}, TreeCheckOptions{})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.ProviderIDMissing, "only the row the turn names and that lacks the id is counted")
+	c.Eq(0, report.BadHash, "the hashes verify, so only coverage is at fault")
+	c.False(report.OK(), "a missing provider id fails the check")
+
+	// Each conversation on its own, so a count that happens to be right over the
+	// three of them cannot stand in for the rule: the covered row is not counted,
+	// the uncovered one has nothing to be missing, and the row the turn names is.
+	for _, tc := range []struct {
+		name string
+		conv string
+		want int
+	}{
+		{"the turn names a row without the id", missing, 1},
+		{"the turn names a row that carries the id", covered, 0},
+		{"no turn names the row", uncovered, 0},
+	} {
+		one, err := checkTree(ctx, pool, []string{tc.conv}, TreeCheckOptions{})
+		c.Require().NoError(err, "checkTree %s", tc.name)
+		c.Eq(tc.want, one.ProviderIDMissing, "%s", tc.name)
+	}
+}
+
+// checkInsertTurn writes a completed turn that named a reply at responseOrdinal.
+func checkInsertTurn(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string, responseOrdinal int, responseMessageID string) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO conversations.conversation_turn
+			(conversation_id, ordinal, status, response_ordinal, response_message_id)
+		VALUES ($1::uuid, 0, 'complete', $2, $3)`, convID, responseOrdinal, responseMessageID)
+	assert.NewAborting(t).NoError(err, "insert turn")
 }

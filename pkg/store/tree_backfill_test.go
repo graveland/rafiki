@@ -426,7 +426,7 @@ func TestBackfillSnapshotFixture(t *testing.T) {
 	c.Require().NotNil(head, "head")
 	c.Eq(len(snapshot.Messages)-1, *head, "head is the last row")
 
-	check, err := checkTree(ctx, pool, []string{convID})
+	check, err := checkTreeCutover(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.True(check.OK(), "tree check over the fixture: %+v", check)
 }

@@ -110,6 +110,69 @@ func TestRootSeedDistinguishesKindAndDerivedFrom(t *testing.T) {
 		"a plain root ignores derived-from entirely")
 }
 
+// TestRootSeedBytesAreTheCompatibilityContract pins the literal hash input of
+// RootSeed, byte for byte. Every stored root's path hash is computed from it, so
+// reordering its components (the kind before or after the derived-from hash, a
+// different separator, dropping the "root" prefix) would change every root hash
+// in the database while passing every other test in this package — and passing
+// the tree check too, because the check calls this same function. A stored root
+// hash that no longer recomputes is an orphan: AppendChain cannot find the node a
+// compaction or clear retry would land on.
+//
+// These bytes are the compatibility contract. Changing them requires bumping
+// HashVersion, so that no hash written under the old rule can collide with one
+// written under the new.
+func TestRootSeedBytesAreTheCompatibilityContract(t *testing.T) {
+	c := assert.NewAborting(t)
+	// Fixed derived-from hashes, not NodeHash output, so this pins RootSeed's own
+	// bytes and nothing else.
+	var d1, d2 Hash
+	for i := range d1 {
+		d1[i] = 0x01
+		d2[i] = 0x02
+	}
+	hashOf := func(hexBytes string) Hash {
+		raw, err := hex.DecodeString(hexBytes)
+		c.NoError(err, "decode golden seed")
+		var h Hash
+		copy(h[:], raw)
+		return h
+	}
+
+	cases := []struct {
+		name string
+		got  Hash
+		want string
+	}{
+		{"root without derived-from", RootSeed(RootKindRoot, nil),
+			"9c4f9b0dd19d7add2737999f9226a374ec7483c8dd63021a288c25776f69fb80"},
+		{"root with a derived-from", RootSeed(RootKindRoot, &d1),
+			"9c4f9b0dd19d7add2737999f9226a374ec7483c8dd63021a288c25776f69fb80"},
+		{"compaction_summary without derived-from", RootSeed(RootKindCompaction, nil),
+			"0e1bd354aaa5ab15f8fe581368d5938059b9984966217e307e028958cc71f0ee"},
+		{"compaction_summary with a derived-from", RootSeed(RootKindCompaction, &d1),
+			"0e1bd354aaa5ab15f8fe581368d5938059b9984966217e307e028958cc71f0ee"},
+		{"clear without derived-from", RootSeed(RootKindClear, nil),
+			"3a6b6e8f744b2aad8f267fe4649dbbeec70942aaa7b3c875310f6e91bbfaf24d"},
+		{"clear derived from d1", RootSeed(RootKindClear, &d1),
+			"db9d68b2d25fb9d11d9225c3ae700e2d1ecb45c599dc9706081a7ecf1d5ed1ca"},
+		{"clear derived from d2", RootSeed(RootKindClear, &d2),
+			"74f4ac25125e6b138a53ab587703033464f6e60c4e86c5c75dfcca8d5ea3c0da"},
+	}
+	for _, tc := range cases {
+		c.Eq(hashOf(tc.want), tc.got, "%s: RootSeed bytes changed; bump HashVersion if this is intended", tc.name)
+	}
+
+	c.Eq(RootSeed(RootKindRoot, &d1), RootSeed(RootKindRoot, nil),
+		"a plain root ignores derived-from")
+	c.Eq(RootSeed(RootKindCompaction, &d1), RootSeed(RootKindCompaction, nil),
+		"a compaction root ignores derived-from")
+	c.NotEq(RootSeed(RootKindClear, &d1), RootSeed(RootKindClear, &d2),
+		"a clear is distinguished by the node it was cut from")
+	c.NotEq(RootSeed(RootKindClear, nil), RootSeed(RootKindClear, &d1),
+		"a clear cut from a node differs from one with no derived-from")
+}
+
 func TestChainIsParentSensitive(t *testing.T) {
 	c := assert.NewAborting(t)
 	p1 := RootSeed(RootKindRoot, nil)

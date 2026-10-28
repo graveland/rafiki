@@ -43,6 +43,18 @@ type TreeCheckReport struct {
 	// OrdinalCounterBehind counts conversations whose next_ordinal is not
 	// ahead of their highest ordinal.
 	OrdinalCounterBehind int
+	// ProviderIDMissing counts assistant nodes whose conversation turn recorded
+	// a response_message_id for their ordinal, but whose row carries no
+	// provider_message_id. That column is the attach key capture rule 2 resolves
+	// a later request's previous_message_id with, so a miss silently degrades
+	// that rule to the hash-chain fallback instead of failing.
+	//
+	// The backfill writes the id from the turn map, so a non-zero count means the
+	// two disagreed at migration time. The count of interim-fork copies the
+	// backfill could not match is deliberately NOT reproduced here: that needs
+	// the walk, and the backfill's own unmatched_copies log line remains the only
+	// record of it.
+	ProviderIDMissing int
 	// WorkingSetMismatch lists conversations whose working path carries
 	// different messages from the legacy working set it replaced.
 	WorkingSetMismatch []string
@@ -50,25 +62,50 @@ type TreeCheckReport struct {
 	// message identity the backfill used — the same message as the SDK models
 	// it, not byte-for-byte. Informational: it does not fail the check, and it
 	// is what a cutover rehearsal reads to see how much of the data relies on
-	// the looser rule.
+	// the looser rule. Empty unless TreeCheckOptions.Cutover is set.
 	WorkingSetLooseMatch []string
 }
 
-// OK reports whether every invariant holds.
+// OK reports whether every invariant holds. Both working-set fields are empty
+// unless the run asked for the cutover comparison, so a structural run's OK says
+// nothing about them.
 func (r TreeCheckReport) OK() bool {
 	return r.MissingHash == 0 && r.BadHash == 0 && r.BadDepth == 0 && r.MissingHead == 0 &&
-		r.OrdinalCounterBehind == 0 && len(r.WorkingSetMismatch) == 0
+		r.OrdinalCounterBehind == 0 && r.ProviderIDMissing == 0 && len(r.WorkingSetMismatch) == 0
 }
 
-// CheckTree checks every conversation's tree invariants. It is the cutover's
-// acceptance test: the backfill is judged by it, not by the fact that it ran.
+// TreeCheckOptions selects the checks a run performs.
+type TreeCheckOptions struct {
+	// Cutover adds the working-set comparison: the working path against the
+	// legacy working set a resume_from_ordinal horizon described.
+	//
+	// It is a CUTOVER-TIME gate and nothing else. The comparison is only
+	// meaningful on the database as the backfill left it, before the new daemon
+	// writes: after go-live a conversation that compacts, forks or retracts
+	// legitimately leaves the siblings it left behind off its head path, so the
+	// first such write on a conversation that still carries the legacy horizon
+	// would make the comparison fail on correct data. Leave it false to run the
+	// structural health check, which is valid at any time.
+	Cutover bool
+}
+
+// CheckTree checks every conversation's tree invariants, structurally.
+//
+// It does NOT run the working-set comparison: that is the cutover gate, and it
+// is only valid before the new daemon writes. Use CheckTreeWithOptions with
+// TreeCheckOptions{Cutover: true} for it.
 func CheckTree(ctx context.Context, pool *pgxpool.Pool) (TreeCheckReport, error) {
-	return checkTree(ctx, pool, nil)
+	return CheckTreeWithOptions(ctx, pool, TreeCheckOptions{})
 }
 
-// checkTree is CheckTree scoped to ids, or to every conversation when ids is
-// nil. Tests scope it because the database they run against is shared.
-func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheckReport, error) {
+// CheckTreeWithOptions is CheckTree with the checks opts selects.
+func CheckTreeWithOptions(ctx context.Context, pool *pgxpool.Pool, opts TreeCheckOptions) (TreeCheckReport, error) {
+	return checkTree(ctx, pool, nil, opts)
+}
+
+// checkTree is CheckTreeWithOptions scoped to ids, or to every conversation when
+// ids is nil. Tests scope it because the database they run against is shared.
+func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string, opts TreeCheckOptions) (TreeCheckReport, error) {
 	var report TreeCheckReport
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation c
@@ -124,6 +161,15 @@ func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheck
 	}
 	report.BadHash = badHashes
 
+	providerMissing, err := checkProviderIDs(ctx, pool, ids)
+	if err != nil {
+		return report, err
+	}
+	report.ProviderIDMissing = providerMissing
+
+	if !opts.Cutover {
+		return report, nil
+	}
 	mismatches, loose, err := checkWorkingSets(ctx, pool, ids)
 	if err != nil {
 		return report, err
@@ -381,9 +427,40 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 	return bytes.Equal(want[:], row.hash)
 }
 
+// checkProviderIDs counts assistant nodes whose turn recorded a provider message
+// id for their ordinal but whose row does not carry it. provider_message_id is
+// the attach key capture rule 2 resolves a later request's
+// diagnostics.previous_message_id with; a row missing it degrades that rule to
+// the hash-chain fallback, which finds nothing under a compaction or clear root.
+//
+// This is a coverage check, not a comparison: it asks only whether the backfill's
+// turn map and the rows it wrote agree, so it is valid at any time — a row that
+// capture wrote itself carries the id from the response.
+func checkProviderIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) (int, error) {
+	var missing int
+	err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM conversations.conversation_message m
+		 WHERE m.role = 'assistant'
+		   AND m.provider_message_id IS NULL
+		   AND EXISTS (SELECT 1 FROM conversations.conversation_turn t
+		                WHERE t.conversation_id = m.conversation_id
+		                  AND t.response_ordinal = m.ordinal
+		                  AND t.response_message_id IS NOT NULL)
+		   AND ($1::uuid[] IS NULL OR m.conversation_id = ANY($1::uuid[]))`, ids).Scan(&missing)
+	if err != nil {
+		return 0, fmt.Errorf("tree check: provider id coverage: %w", err)
+	}
+	return missing, nil
+}
+
 // checkWorkingSets compares the working path of every conversation that still
 // carries a LEGACY RESUME HORIZON against the working set that horizon
 // described: the rows at and after it, in ordinal order.
+//
+// It runs only under TreeCheckOptions.Cutover, and that is a property of the
+// check, not a convenience. It is the PRE-START gate: once the new daemon writes,
+// the comparison no longer describes correct data even for a conversation whose
+// storage used the horizon.
 //
 // The horizon filter is what makes this check mean anything after the cutover.
 // Nothing writes resume_from_ordinal any more, so "the working path equals every
