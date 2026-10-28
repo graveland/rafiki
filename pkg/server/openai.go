@@ -274,8 +274,12 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 		return captureRef{}
 	}
 	authorKind, turnSource := authorAttribution(reqBody, source)
+	// The request body is not stored on the turn: the exchange is decomposed
+	// into conversation_message rows, which already carry it. The turn row
+	// keeps the model, the protocol, and — once the turn completes — usage,
+	// cost and status.
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
-		ConversationID: convID, Ordinal: 0, Model: model, Request: reqBody,
+		ConversationID: convID, Ordinal: 0, Model: model,
 		Source: turnSource, AuthorUserID: ownerUserID, AuthorKind: authorKind,
 		PrefixHash: routing.PrefixHash(reqBody), Protocol: string(store.ProtocolOpenAI),
 	})
