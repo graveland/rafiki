@@ -454,7 +454,7 @@ func fixtureReplay(t *testing.T, ctx context.Context, s *CaptureStore, convID, r
 			// slash command; this replay has no daemon.
 			c.NoError(s.MarkClearPending(ctx, ref), "MarkClearPending before request %d", n)
 		}
-		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, Protocol: "anthropic"})
+		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Protocol: "anthropic"})
 		c.NoError(err, "InsertTurnIntent request %d", n)
 		head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, "", body.Diagnostics.PreviousMessageID)
 		c.NoError(err, "DecomposeRequest request %d", n)

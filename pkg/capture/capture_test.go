@@ -114,7 +114,6 @@ func testInsertTurnIntentAndCompleteTurn(t *testing.T, ctx context.Context, pool
 		ConversationID: convID,
 		Ordinal:        1,
 		Model:          "claude-test",
-		Request:        []byte(`{"messages":[]}`),
 	})
 	c.Require().NoError(err, "InsertTurnIntent")
 
@@ -175,7 +174,7 @@ func testCompleteTurnServedProvider(t *testing.T, ctx context.Context, pool *pgx
 	newTurn := func() (string, time.Time) {
 		t.Helper()
 		id, createdAt, err := cs.InsertTurnIntent(ctx, TurnIntent{
-			ConversationID: convID, Ordinal: 1, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+			ConversationID: convID, Ordinal: 1, Model: "claude-test",
 		})
 		c.Require().NoError(err, "InsertTurnIntent")
 		return id, createdAt
@@ -224,7 +223,7 @@ func testConversationModelBackfill(t *testing.T, ctx context.Context, pool *pgxp
 	}
 	c.Nil(model(), "pre-turn model")
 	if _, _, err := cs.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Model: "claude-haiku-4-5", Request: []byte(`{}`),
+		ConversationID: convID, Model: "claude-haiku-4-5",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +232,7 @@ func testConversationModelBackfill(t *testing.T, ctx context.Context, pool *pgxp
 	}
 	// A later turn with a DIFFERENT model must not overwrite: first-seen wins.
 	if _, _, err := cs.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Model: "openai/gpt-4o", Request: []byte(`{}`),
+		ConversationID: convID, Model: "openai/gpt-4o",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +245,7 @@ func testConversationModelBackfill(t *testing.T, ctx context.Context, pool *pgxp
 	})
 	c.NoError(err)
 	if _, _, err := cs.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: pinnedID, Model: "claude-opus-4-8", Request: []byte(`{}`),
+		ConversationID: pinnedID, Model: "claude-opus-4-8",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +278,7 @@ func TestDecomposeRequest_MessagesAndPrefix(t *testing.T) {
 			{"role":"assistant","content":[{"type":"text","text":"yo"}]}
 		]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req), Protocol: "anthropic"})
+		ConversationID: convID, PrefixHash: routing.PrefixHash(req), Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 
 	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
@@ -333,7 +332,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 
 	req := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"}]}`)
 	h := routing.PrefixHash(req)
-	t1, c1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
+	t1, c1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 	c.NoError(err, "InsertTurnIntent (t1)")
 	if _, err := s.DecomposeRequest(ctx, convID, t1, c1, req, h, ""); err != nil {
 		t.Fatalf("DecomposeRequest (t1): %v", err)
@@ -341,7 +340,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 
 	// second turn, same prefix hash → prefix_content must be NULL
 	req2 := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
-	t2, c2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, PrefixHash: h})
+	t2, c2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 	c.NoError(err, "InsertTurnIntent (t2)")
 	if _, err := s.DecomposeRequest(ctx, convID, t2, c2, req2, h, ""); err != nil {
 		t.Fatalf("DecomposeRequest (t2): %v", err)
@@ -418,7 +417,7 @@ func TestDecomposeRequest_NullEscapeInContent(t *testing.T) {
 	c.Require().NoError(err, "EnsureConversation")
 
 	req := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before\u0000after"}]}]}`)
-	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.Require().NoError(err, "InsertTurnIntent with a \\u0000 in request")
 	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), ""); err != nil {
 		t.Fatalf("DecomposeRequest with a \\u0000 in content should succeed, got: %v", err)
@@ -457,7 +456,7 @@ func TestDecomposeRequest_PrefixChangeReStores(t *testing.T) {
 	c.NotEq(hA, hC, "precondition: reqC must differ (new tool), got same hash")
 
 	decompose := func(req []byte, h string) (string, time.Time) {
-		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
+		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 		c.NoError(err, "InsertTurnIntent")
 		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h, ""); err != nil {
 			t.Fatalf("DecomposeRequest: %v", err)
@@ -504,7 +503,7 @@ func TestDecomposeRequest_CrossTurnIdempotent(t *testing.T) {
 	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
 	for _, req := range [][]byte{req1, req2} {
 		h := routing.PrefixHash(req)
-		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
+		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 		c.NoError(err, "InsertTurnIntent")
 		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h, ""); err != nil {
 			t.Fatalf("DecomposeRequest: %v", err)
@@ -564,7 +563,7 @@ func runTurnFrom(t *testing.T, ctx context.Context, s *CaptureStore, convID stri
 	c := assert.NewAborting(t)
 	h := routing.PrefixHash(req)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: h, Protocol: "anthropic"})
+		ConversationID: convID, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, prevMessageID)
 	c.NoError(err, "DecomposeRequest")
@@ -585,7 +584,7 @@ func runFullTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID stri
 	c := assert.NewAborting(t)
 	h := routing.PrefixHash(req)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: h, Protocol: "anthropic"})
+		ConversationID: convID, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, prevMessageID)
 	c.NoError(err, "DecomposeRequest")
@@ -849,7 +848,7 @@ func TestDecomposeRequest_CacheBreakpoints(t *testing.T) {
 			{"role":"user","content":[{"type":"text","text":"this text literally says cache_control but has no such field"}]}
 		]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
+		ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
 	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), ""); err != nil {
 		t.Fatalf("DecomposeRequest: %v", err)
@@ -889,7 +888,7 @@ func TestAppendResponseMessage(t *testing.T) {
 
 	req := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
+		ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
 	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
@@ -955,7 +954,7 @@ func TestAppendResponseMessageFailsWhenTheTurnKeyMoved(t *testing.T) {
 
 	req := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
+		ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
 	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
@@ -1620,7 +1619,7 @@ func TestInsertTurnIntentRecordsRequestDescriptor(t *testing.T) {
 
 	from, to := 1, 4
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+		ConversationID: convID, Model: "claude-test",
 		RequestHeadID: headID, TrimFrom: &from, TrimTo: &to,
 	})
 	c.Require().NoError(err, "InsertTurnIntent")
@@ -1638,7 +1637,7 @@ func TestInsertTurnIntentRecordsRequestDescriptor(t *testing.T) {
 	t.Run("no descriptor stores NULL", func(t *testing.T) {
 		sub := assert.NewAborting(t)
 		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-			ConversationID: convID, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+			ConversationID: convID, Model: "claude-test",
 		})
 		sub.Require().NoError(err, "InsertTurnIntent")
 
@@ -1678,7 +1677,7 @@ func TestInsertTurnIntentTrimRangeBothOrNeither(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := assert.NewAborting(t)
 			_, _, err := s.InsertTurnIntent(ctx, TurnIntent{
-				ConversationID: convID, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+				ConversationID: convID, Model: "claude-test",
 				TrimFrom: tc.from, TrimTo: tc.to,
 			})
 			sub.ErrorContains(err, tc.want, "InsertTurnIntent trim range %s", tc.name)

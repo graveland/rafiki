@@ -1810,7 +1810,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	prefixHash := routing.PrefixHash(reqBody)
 	authorKind, turnSource := authorAttributionParsed(billing, hasBilling, source)
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
-		ID: mintedTurnID, ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
+		ID: mintedTurnID, ConversationID: convID, Ordinal: 0, Model: model,
 		Source: turnSource, AuthorUserID: ownerUserID, AuthorKind: authorKind, PrefixHash: prefixHash,
 	})
 	if err != nil {

@@ -223,7 +223,6 @@ type TurnIntent struct {
 	ConversationID string
 	Ordinal        int
 	Model          string
-	Request        []byte // marshaled request JSON
 	Source         string // inbound entrypoint: 'claude' | 'tui' | 'slack' | 'diagnose' | ...
 	AuthorUserID   string // conversations.users.id; empty → unattributed (SQL NULL)
 	AuthorKind     string // 'human' | 'agent' | 'system' (may be empty)
@@ -254,9 +253,9 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 		protocol = string(store.ProtocolAnthropic)
 	}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, request, source, author_user_id, author_kind, prefix_hash, protocol, request_head_id, request_trim_from, request_trim_to)
-		 VALUES (COALESCE($10::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5,$6::uuid,$7,$8,$9,$11::uuid,$12,$13) RETURNING id::text, created_at`,
-		t.ConversationID, t.Ordinal, nullify(t.Model), nullifyBytes(jsonbSafe(t.Request)),
+		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, source, author_user_id, author_kind, prefix_hash, protocol, request_head_id, request_trim_from, request_trim_to)
+		 VALUES (COALESCE($9::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5::uuid,$6,$7,$8,$10::uuid,$11,$12) RETURNING id::text, created_at`,
+		t.ConversationID, t.Ordinal, nullify(t.Model),
 		nullify(t.Source), nullUUID(t.AuthorUserID), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol,
 		nullUUID(t.ID), nullUUID(t.RequestHeadID), intPtrOrNil(t.TrimFrom), intPtrOrNil(t.TrimTo)).Scan(&turnID, &createdAt)
 	if err != nil {

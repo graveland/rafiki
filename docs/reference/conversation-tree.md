@@ -294,6 +294,27 @@ keeps its slice and its `memHorizon`; it has no tree.
 See `docs/reference/fundi-compaction.md` for the policy, the tail rule and the
 events.
 
+## The turn descriptor: a pointer into the path, not the request body
+
+`conversation_turn` does not store the request body. It stores a descriptor of
+where in the tree that body's content already lives:
+
+- `request_head_id` — the `conversation_message.id` of the last path row the
+  request covered. The claude proxy sets it itself, from the head
+  `DecomposeRequest` returned; an `llm.Client` turn sets it from its own working
+  path. Empty records NULL (an in-memory conversation, whose row ids are
+  synthetic).
+- `request_trim_from` / `request_trim_to` — the half-open range of path
+  positions the request dropped, as indexes into the working path. They are set
+  together or not at all, and an inverted range is refused before the row is
+  written (`InsertTurnIntent`); both NULL means nothing was trimmed.
+  `request_trim_from` is where the **anchor message ends**, not a constant 1: a
+  merged run of consecutive user rows makes the first wire message cover several
+  path rows, so the dropped run starts at the anchor message's end.
+
+The body is reconstructed from the path rows up to `request_head_id` plus the
+stored prefix (`prefix_content`), which is why nothing has to keep it whole.
+
 ## Reading
 
 - **Chronological** — `store.Messages.Load`, `ORDER BY ordinal`: every row ever

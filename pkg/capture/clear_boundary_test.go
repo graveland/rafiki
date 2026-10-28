@@ -37,7 +37,7 @@ func clearDecompose(t *testing.T, ctx context.Context, s *CaptureStore, convID s
 	c := assert.NewAborting(t)
 	h := routing.PrefixHash(req)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: h, Protocol: "anthropic"})
+		ConversationID: convID, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, "")
 	c.NoError(err, "DecomposeRequest")

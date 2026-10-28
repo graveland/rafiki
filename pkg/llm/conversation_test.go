@@ -291,7 +291,6 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	ck.Require().NoError(err)
 	if _, _, err := c.capture.InsertTurnIntent(ctx, capture.TurnIntent{
 		ConversationID: convA.ID, Ordinal: 1, Model: "claude-haiku-4-5",
-		Request: []byte(`{"messages":[]}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
