@@ -46,6 +46,10 @@ func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	// convert-and-delegate adapter), so this line is the pin that the type
 	// wirePathSync hands to SetPathSyncer keeps satisfying the interface.
 	var _ connectapi.PathSyncer = (*pathSyncer)(nil)
+	// The provider-login backend is wired as *providerCreds itself (its method
+	// names match the seam, so main.go needs no adapter). A rename there would
+	// otherwise silently leave every login RPC answering "not yet wired".
+	var _ connectapi.ProviderLoginBackend = (*providerCreds)(nil)
 }
 
 // stubChildStore is a no-op childstore.ChildStore; stubLineageStore embeds it

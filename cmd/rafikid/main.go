@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"go.graveland.dev/rafiki/pkg/chatgptauth"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapool"
@@ -36,6 +37,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/presetsdb"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providercreds"
+	"go.graveland.dev/rafiki/pkg/providercredsdb"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/pymodulesdb"
@@ -48,6 +51,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/sandbox"
 	"go.graveland.dev/rafiki/pkg/sandboxdb"
 	"go.graveland.dev/rafiki/pkg/schedulesdb"
+	"go.graveland.dev/rafiki/pkg/secretbox"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
@@ -497,6 +501,37 @@ func runDaemon(opts runDaemonOpts) error {
 		slog.Info("provider registry loaded", "providers", prov.Names())
 	}
 
+	// Per-owner provider credentials: the ChatGPT subscription login, its
+	// access-token cache, its idle sweep and the login backend the Connect
+	// plane calls. Built ONCE here, after the pool and the registry it reads,
+	// and handed to the Controller below for the spawn path.
+	//
+	// A missing or malformed RAFIKI_SECRETS_KEY does not stop the daemon: the
+	// store is not constructed at all (providercredsdb.New panics on a nil box,
+	// deliberately, because a plaintext fallback must be impossible), the
+	// capability is unavailable with the reason, and every ChatGPT-kind
+	// provider refuses with it.
+	var credStore providercreds.Store
+	var credsWhy string
+	if pool == nil {
+		credsWhy = "provider credentials need a database; no agent database is configured"
+	} else if box, err := secretbox.FromEnv(); err != nil {
+		if errors.Is(err, secretbox.ErrNoKey) {
+			credsWhy = "RAFIKI_SECRETS_KEY is not set; run rafiki setup or set it in service.env"
+		} else {
+			credsWhy = err.Error()
+		}
+	} else {
+		credStore = providercredsdb.New(pool, box)
+	}
+	creds := newProviderCreds(baseCtx, credStore, chatgptauth.New(http.DefaultClient), credsWhy,
+		func() *providers.Set { return prov })
+	if credsWhy != "" && usesProviderLogins(prov) {
+		// Only warn when a configured provider actually needs this: a daemon
+		// with no ChatGPT-kind provider has nothing to be unavailable about.
+		slog.Warn("ChatGPT logins are unavailable", "reason", credsWhy)
+	}
+
 	// Validate [telemetry] once providers.toml's names are known: a rule
 	// naming a provider that does not exist must fail startup, not silently
 	// never match.
@@ -634,6 +669,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// the socket.
 	ctrl.sandboxBootTime = time.Now()
 	ctrl.streamRevoke = streamRevoke
+	ctrl.providerCreds = creds
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	ctrl.SetProviderGuard(guard)
@@ -900,6 +936,11 @@ func runDaemon(opts runDaemonOpts) error {
 			// test/integration).
 			face.Control.SetOwnerGuardSource(ctrl.ownerGuardFor)
 			face.Control.SetModelLister(connectModels{c: ctrl})
+			// The provider-login surface: *providerCreds IS the backend (its
+			// method names match the seam), and it answers Unavailable with its
+			// reason rather than "not yet wired" when the key or the database is
+			// missing.
+			face.Control.SetProviderLoginBackend(creds)
 			face.Control.SetConversationInsights(connectConversations{c: ctrl})
 			face.Control.SetConversationReviewer(connectReview{c: ctrl})
 			face.Control.SetConversationFindingsReader(connectFindingsReader{c: ctrl})

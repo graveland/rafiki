@@ -492,6 +492,13 @@ type Controller struct {
 	// same contract as sweeperWg.
 	recallWg sync.WaitGroup
 
+	// providerCreds owns every per-user provider credential (today the ChatGPT
+	// subscription login) and the access-token cache its senders draw from. Nil
+	// on a Controller a test built by hand, and on a daemon whose
+	// RAFIKI_SECRETS_KEY or database is missing: the spawn path then treats a
+	// ChatGPT-kind provider as having no usable credential and says why.
+	providerCreds *providerCreds
+
 	// display-state refresh worker (see display_state_service.go). displayWake
 	// is nil on a hand-built Controller that never ran NewController, which is
 	// what makes refreshDisplayState a no-op there. displayMu guards the
