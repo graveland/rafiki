@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -1213,6 +1214,106 @@ func TestCostFieldsUnpricedModelIsSilent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 
 	assert.NewCollecting(t).Nil(p.costFields(req, "conv-1", "some/unknown-model", routing.CapturedUsage{OutputTokens: 5}), "costFields for an unpriced model")
+}
+
+// responsesProxySet is a provider registry with one Responses-kind provider
+// ("oa") beside the shipped defaults, so a bare OpenAI id records the shape
+// providers.CatalogModelID rewrites and a catalog-shaped id records the shape
+// it leaves alone. No network: the catalog is seeded.
+func responsesProxySet(t *testing.T) *providers.Set {
+	t.Helper()
+	set := providers.Default()
+	set.Providers["oa"] = providers.Provider{Name: "oa", Kind: providers.KindOpenAIResponses}
+	return set
+}
+
+// TestCostFieldsPricesResponsesModelByCatalogID proves a proxied turn on a
+// Responses-kind provider is priced, not logged as free. The provider serves
+// OpenAI models under bare ids ("gpt-6.1-sol") while the catalog indexes
+// "openai/gpt-6.1-sol", so a lookup on the raw id misses, and costFields then
+// logs NO cost fields at all, which is indistinguishable from a turn that cost
+// nothing.
+//
+// All three arms are covered, because a stored row may hold any of them:
+//   - the turn's own model, bare (a fundi-style row) and provider-qualified
+//     ("oa/gpt-6.1-sol", what routing.ResolveModel leaves for a spawn that
+//     named its provider);
+//   - the conversation rollup, priced per row through the same mapping;
+//   - an Anthropic turn, unchanged: the mapping must not reach a kind whose
+//     ids are already catalog-shaped.
+func TestCostFieldsPricesResponsesModelByCatalogID(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "openai/gpt-6.1-sol", Created: 1, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.000003, CompletionUSD: 0.000015,
+		}},
+		{ID: "anthropic/claude-sonnet-5", Created: 2, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.000003, CompletionUSD: 0.000015,
+		}},
+		// A 10x decoy under the OPENAI namespace: if the mapping (or the ordering
+		// that tries the raw id first) ever prices an Anthropic id by a
+		// prefixed candidate, this is what it would bill.
+		{ID: "openai/claude-sonnet-5", Created: 3, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.00003, CompletionUSD: 0.00015,
+		}},
+	})
+	fs := &fakeProxyStore{convTokens: []capture.ModelTokens{
+		{Model: "gpt-6.1-sol", InputTokens: 1_000_000},     // $3.00  (bare)
+		{Model: "oa/gpt-6.1-sol", OutputTokens: 500_000},   // $7.50  (qualified)
+		{Model: "claude-sonnet-5", InputTokens: 1_000_000}, // $3.00  (unchanged)
+	}}
+	p := &MessagesProxy{store: fs, catalog: cat, logger: slog.New(slog.DiscardHandler), providerSet: responsesProxySet(t)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	// The turn: 1M output on gpt-6.1-sol = $15.00; total 15 + 3 + 7.5 + 3 = $28.50.
+	want := []any{"cost_turn", "15.000000", "cost_total", "28.50"}
+	c.EqDeep(want, p.costFields(req, "conv-1", "gpt-6.1-sol", routing.CapturedUsage{OutputTokens: 1_000_000}),
+		"bare Responses id")
+
+	// The same model recorded provider-qualified (a spawn given --model
+	// oa/gpt-6.1-sol): the second arm, which the mapping alone cannot reach.
+	c.EqDeep(want, p.costFields(req, "conv-1", "oa/gpt-6.1-sol", routing.CapturedUsage{OutputTokens: 1_000_000}),
+		"provider-qualified Responses id")
+
+	// Anthropic, on a configuration that DOES have a Responses provider: $15.00
+	// from anthropic/claude-sonnet-5, never $150.00 from the openai/ decoy.
+	got := p.costFields(req, "conv-1", "claude-sonnet-5", routing.CapturedUsage{OutputTokens: 1_000_000})
+	if len(got) != 4 {
+		t.Fatalf("costFields for an Anthropic turn = %v, want cost_turn and cost_total", got)
+	}
+	c.EqDeep([]any{"cost_turn", "15.000000"}, got[:2], "Anthropic turn")
+	c.Eq("28.50", got[3], "Anthropic turn cost_total")
+
+	// With no registry (the client-driven path) the raw lookup is all there is,
+	// and a Responses id stays unpriced: the pre-fix behaviour, which is why the
+	// daemon must call SetProviders.
+	bare := &MessagesProxy{store: &fakeProxyStore{}, catalog: cat, logger: slog.New(slog.DiscardHandler)}
+	c.Nil(bare.costFields(req, "conv-1", "gpt-6.1-sol", routing.CapturedUsage{OutputTokens: 1}), "costFields without a provider registry")
+}
+
+// TestCatalogIDsLeavesCatalogShapedProvidersAlone pins the qualified-id arm's
+// guard: "openrouter/deepseek/deepseek-chat" names a provider whose ids are
+// ALREADY catalog-shaped, so stripping the prefix would offer
+// "deepseek/deepseek-chat" (a different candidate, correctly missing here),
+// and pricing it would bill an unpriced model at another provider's rate.
+func TestCatalogIDsLeavesCatalogShapedProvidersAlone(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "deepseek/deepseek-chat", Created: 1, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.000001, CompletionUSD: 0.000002,
+		}},
+	})
+	set := providers.Default()
+	set.Providers["openrouter"] = providers.Provider{Name: "openrouter", Kind: providers.KindAnthropicOpenRouter}
+	p := &MessagesProxy{catalog: cat, logger: slog.New(slog.DiscardHandler), providerSet: set}
+
+	c.EqDeep([]string{"openrouter/deepseek/deepseek-chat"}, p.catalogIDs("openrouter/deepseek/deepseek-chat"),
+		"a catalog-shaped provider must add no stripped candidate")
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Nil(p.costFields(req, "conv-1", "openrouter/deepseek/deepseek-chat", routing.CapturedUsage{OutputTokens: 1}),
+		"a provider-qualified catalog-shaped id stays unpriced, as before")
 }
 
 // TestMessagesProxyCompactionRebases drives the REAL MessagesProxy over

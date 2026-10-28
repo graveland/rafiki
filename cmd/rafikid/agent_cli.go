@@ -841,6 +841,31 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 	return client, false, err
 }
 
+// analyzePricer builds the price resolver an Analyze run's totals are computed
+// with. A nil client (the compact stage, which prices nothing) yields a nil
+// pricer, which local.New treats as unpriced.
+//
+// It wraps the client's catalog Pricing through catalogPricer, the same
+// function the daemon's SetCatalog installs, so an Analyze run and the daemon
+// agree on what a model costs. A turn on an openai-responses provider is
+// recorded under a provider-LOCAL id ("gpt-6.1-sol") while the catalog indexes
+// "openai/gpt-6.1-sol", so pricing the raw string reports a real-money run as
+// free.
+//
+// The registry is loaded here rather than read off the client because the client
+// keeps its *providers.Set unexported. A load error is not fatal: the pricer
+// degrades to the raw id, exactly as it priced before.
+func analyzePricer(client *llm.Client) insights.Pricer {
+	if client == nil {
+		return nil
+	}
+	set, err := providers.Load(paths.ProvidersFile())
+	if err != nil {
+		set = nil
+	}
+	return catalogPricer(client.Catalog(), set)
+}
+
 // loadSkillFiles walks repo's two conventional skill layouts
 // (.claude/skills/*/SKILL.md and skills/*/SKILL.md) into the
 // []analyze.SkillFile candidate list agentcli.AnalyzeRequest.SkillFiles
@@ -965,19 +990,11 @@ func runAnalyze(a analyzeArgs) error {
 		defer pool.Close()
 	}
 
-	// llmClient.Catalog() is guaranteed non-nil (llm.NewClient defaults one in
-	// when the caller doesn't supply one via WithCatalog), and its Pricing
-	// method matches insights.Pricer's signature
-	// (func(model string) (routing.ModelPricing, bool)) exactly, so it's
-	// assignable directly — every Analyze run below now reports a real
-	// Totals.CostUSD instead of the hardcoded 0 every local.Options{} call
-	// site left it at before. llmClient is nil for the compact stage (which
-	// never prices anything), so the pricer stays nil there too.
-	var pricer insights.Pricer
-	if llmClient != nil {
-		pricer = llmClient.Catalog().Pricing
-	}
-	b := local.New(local.Options{Pool: pool, LLM: llmClient, Pricer: pricer})
+	// The pricer is what makes every Analyze run below report a real
+	// Totals.CostUSD instead of the hardcoded 0 every local.Options{} call site
+	// left it at before. llmClient is nil for the compact stage (which never
+	// prices anything), so the pricer stays nil there too.
+	b := local.New(local.Options{Pool: pool, LLM: llmClient, Pricer: analyzePricer(llmClient)})
 
 	jsonMode := a.Indent || a.Compact
 

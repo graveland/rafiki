@@ -227,6 +227,39 @@ func TestResolveUpstreamProxyDoesNotLeakAPIKey(t *testing.T) {
 	c.Eq("Bearer proxy-bearer-token", gotAuth, "Authorization")
 }
 
+// TestAnalyzePricerPricesResponsesModelByCatalogID pins the analyze path's
+// pricer, the third place the daemon injects `cat.Pricing` into an insights
+// backend. A run whose turns record a Responses-kind provider's provider-LOCAL
+// id ("gpt-6.1-sol") must report that model's real cost, not 0, and the
+// registry it consults is read from providers.toml exactly as resolveUpstream
+// reads it for the client's own senders.
+func TestAnalyzePricerPricesResponsesModelByCatalogID(t *testing.T) {
+	c := assert.NewCollecting(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "providers.toml")
+	c.Require().NoError(os.WriteFile(file, []byte(responsesProvidersTOML), 0o600), "write providers.toml")
+	t.Setenv("RAFIKI_PROVIDERS", file)
+
+	client, err := llm.NewClient(llm.WithCatalog(seedResponsesCatalog()))
+	c.Require().NoError(err, "llm.NewClient")
+
+	pricer := analyzePricer(client)
+	c.Require().True(pricer != nil, "analyzePricer returned a nil pricer for a live client")
+
+	price, ok := pricer("gpt-6.1-sol")
+	c.Require().True(ok, "the analyze pricer missed a Responses-kind model id")
+	c.Eq(3.0, price.CostOf(1_000_000, 0, 0, 0).Total, "priced cost")
+
+	// Unchanged for a kind whose ids are already catalog-shaped: $15.00 from
+	// anthropic/claude-sonnet-5, never the $150.00 openai/ decoy.
+	price, ok = pricer("claude-sonnet-5")
+	c.Require().True(ok, "the analyze pricer missed an Anthropic model id")
+	c.Eq(15.0, price.CostOf(0, 1_000_000, 0, 0).Total, "Anthropic cost is unchanged")
+
+	// The compact stage runs with no client and prices nothing.
+	c.Nil(analyzePricer(nil), "analyzePricer(nil)")
+}
+
 // Fix 2: the compact stage must print the compacted transcript to stdout
 // when --out is absent, in both human and JSON mode — previously it was
 // silently dropped.

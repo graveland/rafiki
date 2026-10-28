@@ -650,7 +650,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 		// The initial backend in NewController is pricer-less because the catalog
 		// is not yet available; by the time SetCatalog returns the socket is not
 		// yet listening, so no concurrent read can observe the intermediate state.
-		c.insights = local.New(local.Options{Pool: c.pool, Pricer: cat.Pricing})
+		c.insights = local.New(local.Options{Pool: c.pool, Pricer: catalogPricer(cat, c.providers)})
 		// The COSTER gets the same pricer, for the same reason. NewController
 		// built it as a bare insights.New(pool), and CostsByConversation
 		// short-circuits to NO rows while unpriced (pkg/insights/subtree.go) —
@@ -659,8 +659,47 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 		// own turn_end stream, even though every turn was captured. Priced here
 		// rather than in NewController because the catalog does not exist yet.
 		if c.pool != nil {
-			c.coster = insights.New(c.pool).WithPricer(cat.Pricing)
+			c.coster = insights.New(c.pool).WithPricer(catalogPricer(cat, c.providers))
 		}
+	}
+}
+
+// catalogPricer wraps a model catalog's Pricing lookup with the provider
+// registry's catalog-id candidates (providers.Set.CatalogIDs), so a turn
+// recorded under a provider-LOCAL model id is priced at its catalog entry.
+//
+// A stored model id does not name its provider: conversation_turn.model holds
+// the provider-local id (pkg/llm's prepareSend rewrites the request's model
+// before capture), so an openai-responses provider's "gpt-6.1-sol" is stored
+// bare while the catalog indexes "openai/gpt-6.1-sol". Pricing that row by its
+// raw id MISSES, and a missed row is indistinguishable from a free one. Every
+// spend consumer built on this pricer then reports 0 for a turn that cost real
+// money (`rafiki stats spend`, CostsByConversation, which feeds the daemon's
+// subtree and budgetHalted input, and the cockpit's per-child cost), so a
+// maxCost budget can never stop a ChatGPT-billed child.
+//
+// Candidates are tried in CatalogIDs' order: the raw id FIRST, then whatever
+// each configured provider KIND rewrites it to. Every catalog-shaped kind maps
+// to the identity, so an existing kind's price is unchanged bit for bit, and a
+// conversation that failed over BETWEEN kinds still bills each turn at its own
+// model's rate rather than at whatever the newest kind's id shape implies.
+// A nil catalog leaves the pricer nil (as before); a nil set leaves the raw
+// lookup alone.
+func catalogPricer(cat *routing.ModelCatalog, set *providers.Set) insights.Pricer {
+	if cat == nil {
+		return nil
+	}
+	raw := cat.Pricing
+	if set == nil {
+		return raw
+	}
+	return func(model string) (routing.ModelPricing, bool) {
+		for _, id := range set.CatalogIDs(model) {
+			if mp, ok := raw(id); ok {
+				return mp, true
+			}
+		}
+		return routing.ModelPricing{}, false
 	}
 }
 

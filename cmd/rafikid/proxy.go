@@ -327,6 +327,12 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	auth := server.ContextAuthenticator{}
 	messages := server.NewMessagesProxy(captureStore, auth, anthropicKey,
 		"https://api.anthropic.com", defaultModel, client.Catalog(), logger)
+	// The SAME registry the client's senders were built from, so a turn it
+	// prices is the turn they sent: without it costFields looks a
+	// provider-local id up raw, and a Responses-kind model's row (recorded bare,
+	// "gpt-6.1-sol", or provider-qualified, "oa/gpt-6.1-sol") logs no cost at all
+	// for a turn that spent real money.
+	messages.SetProviders(providersOrDefault(opts.Providers))
 	if openrouterKey != "" {
 		messages.SetFallback(openrouterKey, "https://openrouter.ai/api", client.Breaker("anthropic"))
 	}

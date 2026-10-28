@@ -24,6 +24,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/claudethread"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -111,6 +112,11 @@ type MessagesProxy struct {
 	// captureSink receives one CaptureReport per begun capture of a request that
 	// declares client tools. Optional; nil on the client-driven path.
 	captureSink CaptureSink
+
+	// providerSet is the provider registry, consulted only to map a model id to
+	// the id the catalog indexes it under (see catalogIDs). Optional: nil prices
+	// by the raw id, exactly as before.
+	providerSet *providers.Set
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -193,6 +199,13 @@ func (p *MessagesProxy) SetQuotaStore(s *quota.Store) { p.quotaStore = s }
 // every call site.
 func (p *MessagesProxy) SetProviderGuard(g *routing.ProviderGuard) { p.guard = g }
 
+// SetProviders attaches the daemon's provider registry, used only to map a
+// provider-local model id to the id the catalog indexes it under (see
+// catalogIDs). Optional, same startup-once ordering guarantee as
+// SetRateLimitObserver, and not synchronized: nil prices by the raw id, which
+// is what every client-driven proxy (no providers.toml behind it) still does.
+func (p *MessagesProxy) SetProviders(s *providers.Set) { p.providerSet = s }
+
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
 
@@ -213,7 +226,7 @@ func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).St
 // CompleteTurn writes it — reordering those to avoid the addition would put a
 // DB write between the stream ending and the operator seeing the line.
 func (p *MessagesProxy) costFields(r *http.Request, convID, model string, usage routing.CapturedUsage) []any {
-	price, ok := p.catalog.Pricing(model)
+	price, ok := p.pricingFor(model)
 	if !ok {
 		return nil
 	}
@@ -236,13 +249,62 @@ func (p *MessagesProxy) costFields(r *http.Request, convID, model string, usage 
 	for _, m := range prior {
 		// Each model prices separately: a conversation that switched models
 		// mid-flight cannot be summed and priced once.
-		mp, ok := p.catalog.Pricing(m.Model)
+		mp, ok := p.pricingFor(m.Model)
 		if !ok {
 			continue
 		}
 		total += mp.CostOf(m.InputTokens, m.OutputTokens, m.CacheReadTokens, m.CacheCreationTokens).Total
 	}
 	return append(fields, "cost_total", fmt.Sprintf("%.2f", total))
+}
+
+// pricingFor resolves a model id recorded on a turn to its list price, trying
+// every catalog id that id may be indexed under (see catalogIDs). ok=false
+// when none of them resolves, which costFields renders as no cost fields at
+// all rather than a confident 0.00.
+func (p *MessagesProxy) pricingFor(model string) (routing.ModelPricing, bool) {
+	for _, id := range p.catalogIDs(model) {
+		if mp, ok := p.catalog.Pricing(id); ok {
+			return mp, true
+		}
+	}
+	return routing.ModelPricing{}, false
+}
+
+// catalogIDs lists the catalog ids a recorded model id may be indexed under, in
+// the order to try them. A row does not always hold a catalog-shaped id, and a
+// missed lookup bills a real-money turn at 0 (costFields then logs nothing, and
+// nothing else in the daemon learns what the turn cost):
+//
+//   - the raw id. Tried FIRST, so a conversation that failed over BETWEEN
+//     provider kinds still bills each turn at its own model's rate.
+//   - the provider registry's rewrites of it (providers.Set.CatalogIDs). A
+//     Responses-kind provider serves OpenAI models under bare ids
+//     ("gpt-6.1-sol") while the catalog indexes "openai/gpt-6.1-sol"; every
+//     other kind maps to the identity, so an existing kind's price is unchanged
+//     bit for bit.
+//   - a provider-QUALIFIED id mapped back through the same rewrite. A spawn
+//     that names its provider ("oa/gpt-6.1-sol") stores the qualified string,
+//     because routing.ResolveModel, the proxy's own resolution, leaves a slash
+//     id unchanged and CatalogIDs correctly adds nothing for it. The candidate
+//     is offered only when the mapping actually REWRITES the part after the
+//     provider name, which is what keeps an id whose provider is a
+//     catalog-shaped kind ("openrouter/deepseek/deepseek-chat") priced exactly
+//     as before: there the "mapping" is the stripped id, a different and wrong
+//     candidate.
+func (p *MessagesProxy) catalogIDs(model string) []string {
+	if p.providerSet == nil {
+		return []string{model}
+	}
+	ids := p.providerSet.CatalogIDs(model)
+	if name, rest := providers.SplitRaw(model); rest != model {
+		if prov, ok := p.providerSet.Get(name); ok {
+			if id := providers.CatalogModelID(prov.Kind, rest); id != rest {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
 }
 
 // cachePct returns the percentage of input tokens served from cache, rounded to
