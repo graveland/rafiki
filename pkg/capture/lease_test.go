@@ -28,7 +28,7 @@ func capturePool(t *testing.T) *pgxpool.Pool {
 }
 
 // TestCaptureRespectsLease proves the capture path is fenced too. Fencing only
-// Messages.Append would leave the second writer to conversation_message
+// one of the two writers to conversation_message would leave the other
 // unguarded, which is the same corruption by a different door.
 func TestCaptureRespectsLease(t *testing.T) {
 	c := assert.NewCollecting(t)

@@ -95,6 +95,7 @@ Three Swahili words, three roles:
 | [Development](docs/guide/development.md) | building from source, running locally, tests |
 | [`rafikid agent` CLI](docs/agent-cli.md) | every verb and flag |
 | [Control protocol](docs/reference/control-protocol.md) | the Connect API |
+| [Conversation tree](docs/reference/conversation-tree.md) | content-addressed conversation storage: nodes, hashes, the cutover |
 | [Executor protocol](docs/reference/executor-protocol.md) | the daemon-executor wire format |
 | [Vision and architecture](docs/rafiki.md) | where this is going |
 | [Migrating](docs/MIGRATING.md) | changes that need you to do something |

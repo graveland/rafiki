@@ -330,8 +330,9 @@ identifies a message together with its position and role, not alone.
 
 **Fundi children.** A fundi child publishes a message event
 only after the row it describes has been inserted, and takes `ts` from that
-insert's `RETURNING created_at` (`store.Messages.Append`; on a resume replay of
-an existing ordinal, the existing row's). Event content for a user row is the
+insert's `RETURNING created_at` (`store.AppendNode` → `store.AppendChain`; a node
+the conversation already holds keeps its stored row, and with it its original
+`ts`). Event content for a user row is the
 stored content converted exactly as `GetHistory` converts it
 (`eventconv.BlocksFromParam`). Every other event (`TurnStart`, `TurnEnd`,
 deltas, tool events, errors) keeps its emit-time `ts`. Behaviour this implies:
