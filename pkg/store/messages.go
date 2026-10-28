@@ -44,6 +44,9 @@ func (m *Messages) WithLease(l Lease) *Messages {
 // Anthropic SDK's MessageParam JSON form byte-identically (verified for text,
 // tool_use and tool_result blocks), so the stored JSONB is the working state.
 type Message struct {
+	// ID is the row's id; empty for an in-memory conversation's rows unless
+	// the caller assigns one.
+	ID         string
 	Ordinal    int
 	Param      anthropic.MessageParam
 	ToolUseIDs []string
@@ -86,12 +89,12 @@ func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, 
 // decode — is shared between the two reads.
 func (m *Messages) load(ctx context.Context, conversationID string, workingOnly bool) ([]Message, error) {
 	query := `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid ORDER BY ordinal`
 	if workingOnly {
 		query = `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid
 		   AND ordinal >= coalesce((SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid), 0)
@@ -149,7 +152,7 @@ const historyPageSQL = `
 		), -1) AS ordinal
 		 WHERE $4::int IS NOT NULL AND EXISTS (SELECT 1 FROM edge)
 	)
-	SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
+	SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text
 	  FROM conversations.conversation_message
 	 WHERE conversation_id = $1::uuid AND kind IS DISTINCT FROM $5
 	   AND ($2::int IS NULL OR ordinal > $2::int)
@@ -178,7 +181,7 @@ func (m *Messages) LoadPage(ctx context.Context, conversationID string, page His
 // ordinal order, omitting kind='compaction_tail' rows.
 func (m *Messages) LoadSince(ctx context.Context, conversationID string, since time.Time) ([]Message, error) {
 	rows, err := m.pool.Query(ctx, `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid AND created_at >= $2 AND kind IS DISTINCT FROM $3
 		 ORDER BY ordinal`, conversationID, since, KindCompactionTail)
@@ -198,7 +201,7 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 			role    string
 			content []byte
 		)
-		if err := rows.Scan(&msg.Ordinal, &role, &content, &msg.ToolUseIDs, &msg.StopReason, &msg.Kind, &msg.InputTokens, &msg.CreatedAt); err != nil {
+		if err := rows.Scan(&msg.Ordinal, &role, &content, &msg.ToolUseIDs, &msg.StopReason, &msg.Kind, &msg.InputTokens, &msg.CreatedAt, &msg.ID); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		wire, err := json.Marshal(map[string]json.RawMessage{
@@ -221,6 +224,10 @@ func scanMessages(rows pgx.Rows) ([]Message, error) {
 type Appended struct {
 	ID        string
 	CreatedAt time.Time
+	// Ordinal is the row's insertion sequence and Depth its distance from a
+	// root; both stay zero for a caller that does not track tree position.
+	Ordinal int
+	Depth   int
 }
 
 // Append persists one message at the given ordinal and returns the committed
