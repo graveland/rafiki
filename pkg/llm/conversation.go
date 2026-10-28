@@ -706,7 +706,7 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 	haveTrim := false
 	for try := 0; try < 4; try++ {
 		// Fresh pointers per attempt: a retry must not alias the previous
-		// attempt's range, which InsertTurnIntent keeps.
+		// attempt's range, which InsertTurnIntent dereferences at insert time.
 		attemptMeta := meta
 		attemptMeta.RequestHeadID = headID
 		if haveAnchor && haveTrim {

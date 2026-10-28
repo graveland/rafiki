@@ -307,13 +307,17 @@ where in the tree that body's content already lives:
 - `request_trim_from` / `request_trim_to` — the half-open range of path
   positions the request dropped, as indexes into the working path. They are set
   together or not at all, and an inverted range is refused before the row is
-  written (`InsertTurnIntent`); both NULL means nothing was trimmed.
+  written (`InsertTurnIntent`); both NULL means no trim was recorded.
   `request_trim_from` is where the **anchor message ends**, not a constant 1: a
   merged run of consecutive user rows makes the first wire message cover several
   path rows, so the dropped run starts at the anchor message's end.
 
-The body is reconstructed from the path rows up to `request_head_id` plus the
-stored prefix (`prefix_content`), which is why nothing has to keep it whole.
+The rows a request covered are the working path up to `request_head_id`, minus
+`[request_trim_from, request_trim_to)`. The exact wire body is not reproducible
+from them — the descriptor is best-effort, not a rebuild: consecutive user rows
+merge into one message, empty tool names are rewritten, and cache markers are
+added. `prefix_content` holds the envelope (the request minus `messages`), stored
+on change.
 
 ## Reading
 
