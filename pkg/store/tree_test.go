@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/convtree"
@@ -97,6 +99,24 @@ func pathIDs(msgs []Message) []string {
 		out[i] = m.ID
 	}
 	return out
+}
+
+// expiredLease takes a lease on conv that is already expired. Acquire's
+// negative TTL writes exactly that row, so the fence's `expires_at > now()`
+// predicate — not a missing row — is what has to refuse it.
+func expiredLease(t *testing.T, pool *pgxpool.Pool, conv, holder string) Lease {
+	t.Helper()
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	lease, ok, err := NewLeases(pool).Acquire(ctx, conv, holder, -1*time.Second)
+	c.NoError(err, "acquire an expired lease")
+	c.True(ok, "acquire an expired lease")
+	var live bool
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT expires_at > now() FROM conversations.conversation_lease
+		 WHERE conversation_id = $1::uuid`, conv).Scan(&live), "read lease expiry")
+	c.False(live, "the lease row must be expired for this test to mean anything")
+	return lease
 }
 
 func TestAppendChainInsertsChainWithConsecutiveOrdinals(t *testing.T) {
@@ -503,4 +523,168 @@ func TestRetractHeadMovesHeadAndKeepsRow(t *testing.T) {
 
 	c.Error(m.RetractHead(ctx, conv, user.Nodes[0].ID), "retracting a non-head row")
 	c.Eq(root.Nodes[0].ID, readConvState(t, pool, conv).head, "a refused retract leaves the head")
+}
+
+// TestAppendChainExpiredLeaseIsRefused pins the fence's expiry half: a lease
+// row that exists but has lapsed is a lost lease, and a refused append must
+// leave both the head and the ordinal allocator exactly as they were.
+func TestAppendChainExpiredLeaseIsRefused(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+	m := NewMessages(pool)
+
+	expired := expiredLease(t, pool, conv, "daemon-a")
+	_, err := AppendChain(ctx, pool, expired, ChainAppend{
+		ConversationID: conv, Root: convtree.RootKindRoot, Nodes: []ChainNode{chainText("user", "a")},
+	})
+	c.ErrorIs(err, ErrLeaseLost, "an expired lease is a lost lease")
+	c.Eq(0, rowCount(t, pool, conv), "a refused append inserts nothing")
+	c.Eq("", readConvState(t, pool, conv).head, "a refused append does not move the head")
+
+	// A successful append first, then the expired attempt: the allocator must
+	// not have moved either.
+	_, err = m.AppendChain(ctx, ChainAppend{
+		ConversationID: conv, Root: convtree.RootKindRoot, Nodes: []ChainNode{chainText("user", "b")},
+	})
+	c.NoError(err, "unfenced append")
+	before := readConvState(t, pool, conv)
+
+	_, err = AppendChain(ctx, pool, expired, ChainAppend{
+		ConversationID: conv, ParentFromHead: true, Nodes: []ChainNode{chainText("user", "c")},
+	})
+	c.ErrorIs(err, ErrLeaseLost, "the expired lease is refused after a successful append too")
+	after := readConvState(t, pool, conv)
+	c.Eq(before.nextOrdinal, after.nextOrdinal, "next_ordinal untouched")
+	c.Eq(before.head, after.head, "head untouched")
+	c.Eq(before.nodeCount, after.nodeCount, "node_count untouched")
+	c.Eq(1, rowCount(t, pool, conv), "still one row")
+}
+
+// TestRetractHeadExpiredLeaseIsRefused is the same fence on the head move: the
+// row the retract would target is a legitimate user head, so only the lease can
+// be what refuses it.
+func TestRetractHeadExpiredLeaseIsRefused(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+
+	live, ok, err := NewLeases(pool).Acquire(ctx, conv, "daemon-a", 5*time.Minute)
+	c.NoError(err, "Acquire")
+	c.True(ok, "Acquire on a free conversation")
+	m := NewMessages(pool).WithLease(live)
+
+	_, err = m.AppendChain(ctx, ChainAppend{
+		ConversationID: conv, Root: convtree.RootKindRoot, Nodes: []ChainNode{chainText("user", "a")},
+	})
+	c.NoError(err, "root append under a live lease")
+	user, err := m.AppendChain(ctx, ChainAppend{
+		ConversationID: conv, ParentFromHead: true, Nodes: []ChainNode{chainText("user", "u")},
+	})
+	c.NoError(err, "user append under a live lease")
+	c.Eq(user.Nodes[0].ID, readConvState(t, pool, conv).head, "the user row is the head")
+
+	expired := expiredLease(t, pool, conv, "daemon-a")
+	c.NotEq(live.Token, expired.Token, "the reclaim minted a new token")
+	err = m.WithLease(expired).RetractHead(ctx, conv, user.Nodes[0].ID)
+	c.ErrorIs(err, ErrLeaseLost, "an expired lease cannot retract the head")
+	c.Eq(user.Nodes[0].ID, readConvState(t, pool, conv).head, "the head did not move")
+	c.Eq(2, rowCount(t, pool, conv), "nothing was deleted")
+}
+
+// TestRetractHeadRefusesANonUserHead pins the two refusals that are not about
+// the lease: the head must be a user row, and it must be the head. A lease the
+// caller does not hold refuses an otherwise valid retract as well.
+func TestRetractHeadRefusesANonUserHead(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+	m := NewMessages(pool)
+
+	chain, err := m.AppendChain(ctx, ChainAppend{
+		ConversationID: conv, Root: convtree.RootKindRoot,
+		Nodes: []ChainNode{chainText("user", "a"), chainText("assistant", "b")},
+	})
+	c.NoError(err, "root chain")
+	c.Eq(chain.Nodes[1].ID, readConvState(t, pool, conv).head, "the assistant row is the head")
+
+	c.Error(m.RetractHead(ctx, conv, chain.Nodes[1].ID), "an assistant head cannot be retracted")
+	c.Eq(chain.Nodes[1].ID, readConvState(t, pool, conv).head, "a refused retract leaves the head")
+	c.Error(m.RetractHead(ctx, conv, chain.Nodes[0].ID), "a user row that is not the head cannot be retracted")
+	c.Eq(chain.Nodes[1].ID, readConvState(t, pool, conv).head, "a refused retract leaves the head")
+
+	lease, ok, err := NewLeases(pool).Acquire(ctx, conv, "daemon-a", 5*time.Minute)
+	c.NoError(err, "Acquire")
+	c.True(ok, "Acquire on a free conversation")
+	user, err := NewMessages(pool).WithLease(lease).AppendChain(ctx, ChainAppend{
+		ConversationID: conv, ParentFromHead: true, Nodes: []ChainNode{chainText("user", "u")},
+	})
+	c.NoError(err, "append under a live lease")
+	c.Eq(user.Nodes[0].ID, readConvState(t, pool, conv).head, "the user row is the head")
+
+	stale := lease
+	stale.Token = uuid.NewString()
+	err = NewMessages(pool).WithLease(stale).RetractHead(ctx, conv, user.Nodes[0].ID)
+	c.ErrorIs(err, ErrLeaseLost, "a wrong token cannot retract the head")
+	c.Eq(user.Nodes[0].ID, readConvState(t, pool, conv).head, "a refused retract leaves the head")
+}
+
+// TestAppendChainLeaseFenceBlocksTakeover pins the LOCK MODE the fence depends
+// on, not just its outcome. An AppendChain test cannot observe the block
+// without a pause hook inside the transaction, so this drives fenceLease — the
+// production fence — on one connection, holding its lock open, and runs the
+// takeover's UPDATE on a second. Dropping FOR SHARE from fenceLease makes the
+// UPDATE succeed here while every other test in this file stays green, which is
+// exactly why this test exists.
+func TestAppendChainLeaseFenceBlocksTakeover(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+
+	lease, ok, err := NewLeases(pool).Acquire(ctx, conv, "daemon-a", 5*time.Minute)
+	c.NoError(err, "Acquire")
+	c.True(ok, "Acquire on a free conversation")
+
+	fence, err := pool.Begin(ctx)
+	c.NoError(err, "begin the fence transaction")
+	defer func() { _ = fence.Rollback(ctx) }()
+	c.NoError(fenceLease(ctx, fence, conv, lease), "the fence finds and locks the lease row")
+
+	// The takeover's UPDATE needs the row exclusively. lock_timeout is what
+	// turns the block into a bounded, assertable 55P03; statement_timeout is
+	// only a backstop so this test can never hang. (statement_timeout alone
+	// reports 57014, query_canceled, not the lock error.)
+	takeover, err := pool.Begin(ctx)
+	c.NoError(err, "begin the takeover transaction")
+	defer func() { _ = takeover.Rollback(ctx) }()
+	_, err = takeover.Exec(ctx, `SET LOCAL lock_timeout = '150ms'`)
+	c.NoError(err, "lock_timeout")
+	_, err = takeover.Exec(ctx, `SET LOCAL statement_timeout = '2s'`)
+	c.NoError(err, "statement_timeout")
+
+	newToken := uuid.NewString()
+	_, err = takeover.Exec(ctx, `
+		UPDATE conversations.conversation_lease SET token = $2::uuid WHERE conversation_id = $1::uuid`,
+		conv, newToken)
+	c.Error(err, "a takeover must block on the fence's share lock")
+	var pgErr *pgconn.PgError
+	c.True(errors.As(err, &pgErr), "the takeover failed with a Postgres error, got %v", err)
+	c.Eq("55P03", pgErr.Code, "lock_not_available: the takeover could not take the row")
+	c.NoError(takeover.Rollback(ctx), "roll back the takeover")
+
+	// Once the fence's transaction ends, the same takeover goes through.
+	c.NoError(fence.Rollback(ctx), "release the fence")
+	_, err = pool.Exec(ctx, `
+		UPDATE conversations.conversation_lease SET token = $2::uuid WHERE conversation_id = $1::uuid`,
+		conv, newToken)
+	c.NoError(err, "the takeover succeeds once the fence transaction ends")
+	var token string
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT token::text FROM conversations.conversation_lease WHERE conversation_id = $1::uuid`,
+		conv).Scan(&token), "read the lease token")
+	c.Eq(newToken, token, "the takeover took the lease")
 }
