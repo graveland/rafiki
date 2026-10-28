@@ -12,6 +12,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/multigres/testkit/assert"
+
+	"go.graveland.dev/rafiki/pkg/convtree"
 )
 
 // AppendNode chains under the head: the second call's node is a child of the
@@ -230,12 +232,28 @@ func TestResponsesSignatureSurvivesTheStoreRoundTrip(t *testing.T) {
 	msg := anthropic.NewAssistantMessage(
 		anthropic.NewThinkingBlock(signature, "reasoning text"),
 		anthropic.NewTextBlock("the answer"))
-	first, err := m.Append(ctx, convID, 0, msg, nil)
+	// The message is its own root, so a replay attaches at the same place (the
+	// root seed) that the first append did. Attaching from the head instead
+	// would chain the replay UNDER the row it is replaying and silently fork.
+	blob, err := json.Marshal(msg.Content)
+	c.NoError(err, "marshal content")
+	appendAtRoot := func() (Appended, error) {
+		r, err := m.AppendChain(ctx, ChainAppend{
+			ConversationID: convID,
+			Root:           convtree.RootKindRoot,
+			Nodes:          []ChainNode{{Role: string(msg.Role), Content: jsonbSafe(blob)}},
+		})
+		if err != nil {
+			return Appended{}, err
+		}
+		return r.Nodes[0], nil
+	}
+	first, err := appendAtRoot()
 	c.NoError(err, "append")
 
-	// A resume replays the same message at the same ordinal; the blobs must
-	// compare equal, or every resume would look like a history divergence.
-	replay, err := m.Append(ctx, convID, 0, msg, nil)
+	// A resume replays the same message at the same attach point; the blobs
+	// must compare equal, or every resume would look like a history divergence.
+	replay, err := appendAtRoot()
 	c.NoError(err, "replay append")
 	c.EqDeep(first, replay, "a replay is the same row")
 
