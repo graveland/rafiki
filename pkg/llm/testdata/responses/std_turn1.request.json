@@ -1,0 +1,48 @@
+{
+ "model": "gpt-6.1-sol",
+ "instructions": "You are a careful assistant. Use the tool when asked.",
+ "tools": [
+  {
+   "type": "function",
+   "name": "get_weather",
+   "description": "Get the weather for a city",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "city": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "city"
+    ],
+    "additionalProperties": false
+   },
+   "strict": false
+  }
+ ],
+ "tool_choice": "auto",
+ "parallel_tool_calls": true,
+ "reasoning": {
+  "effort": "high",
+  "summary": "auto"
+ },
+ "input": [
+  {
+   "type": "message",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "Think step by step: a train leaves at 09:47 and the trip takes 2h 38m; what time does it arrive? Then call get_weather for that arrival city, Oslo."
+    }
+   ]
+  }
+ ],
+ "store": false,
+ "stream": true,
+ "include": [
+  "reasoning.encrypted_content"
+ ],
+ "prompt_cache_key": "74f25229-6e30-4eb3-9e3f-24b777c4f083"
+}
