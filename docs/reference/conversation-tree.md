@@ -396,11 +396,12 @@ probe. Output, one field per line:
 | `bad_depth` | children whose depth is not their parent's + 1 |
 | `missing_head` | conversations with messages but no `head_id` |
 | `ordinal_counter_behind` | conversations whose `next_ordinal` is not ahead of their highest ordinal |
+| `provider_id_missing` | assistant nodes whose conversation turn recorded a `response_message_id` for their ordinal while the row's `provider_message_id` is NULL — that column is what capture's rule 2 attaches by, so a miss silently degrades the next request to the hash-chain fallback |
 | `working_set_mismatch` | with `--cutover`, conversations whose working path carries different messages from the legacy working set, listed by id |
 | `working_set_loose_match` | with `--cutover`, conversations that match only under `SameMessage` (informational; it is what a rehearsal reads to see how much of the data relies on the looser rule) |
 
-`missing_hash`, `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`
-and any `working_set_mismatch` fail the check; `duplicate_rows` and
+`missing_hash`, `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`,
+`provider_id_missing` and any `working_set_mismatch` fail the check; `duplicate_rows` and
 `working_set_loose_match` do not. It exits non-zero when the check fails, so it
 can gate a cutover.
 
