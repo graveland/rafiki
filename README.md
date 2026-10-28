@@ -35,6 +35,11 @@ including upgrades. Running a shared daemon on a server instead of a laptop is
 - **A routing proxy** (Anthropic and OpenAI faces) with breaker-gated
   failover, declarative OpenRouter routing, a provider cache guard, model
   aliases and per-model cost accounting.
+- **Bring your own subscription.** A provider of kind
+  `openai-responses-chatgpt` bills each user's own ChatGPT plan, not an API
+  key: `rafiki providers login chatgpt` runs the OAuth flow for that user and
+  the daemon seals the tokens at rest. `rafiki claude` can bill a Claude
+  subscription the same way.
 - **Multi-user and multi-daemon.** Per-user tokens or OIDC single sign-on;
   one client reaches many daemons through named profiles.
 
@@ -74,7 +79,7 @@ Three Swahili words, three roles:
 | [Executors, daraja and sandboxes](docs/guide/executors.md) | where agents run and what they can touch |
 | [Repos, skills and the Python SDK](docs/guide/repos-and-skills.md) | shared code and skills; scripting rafiki |
 | [Recall and memory](docs/guide/recall.md) | searching past conversations |
-| [The proxy and library](docs/guide/proxy.md) | model selection, routing, the cache guard, aliases |
+| [The proxy and library](docs/guide/proxy.md) | model selection, routing, the cache guard, aliases, per-user subscription logins |
 | [Claude Code and subscription billing](docs/guide/claude-code.md) | `rafiki claude` |
 | [Features](docs/guide/features.md) | the full list |
 

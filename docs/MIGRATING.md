@@ -263,3 +263,37 @@ structural reason: those two commands never resolve a client profile at
 all — they never call `mustDial`/`newConnectEndpoint` — because a headless
 executor box has no profile to select and still needs `--connect` derivable
 from `RAFIKI_URL`.
+
+## Provider credentials (2026-10)
+
+rafiki can now bill a **per-user provider subscription** instead of one API key
+for everyone: a provider of kind `openai-responses-chatgpt` carries no secret in
+`providers.toml`, and each user logs in with `rafiki providers login chatgpt`
+(see [proxy.md](guide/proxy.md#provider-subscription-logins-rafiki-providers-login)).
+The tokens are stored in the database, encrypted.
+
+One manual step, before anyone logs in:
+
+```sh
+export RAFIKI_SECRETS_KEY="$(openssl rand -base64 32)"   # base64 of exactly 32 bytes
+```
+
+Put it in the daemon's service environment (`~/.config/rafiki/service.env`, or
+your container's secret), then restart the daemon. Three things follow from
+that key and none of them are recoverable afterwards:
+
+- **Keep a copy somewhere safe.** It seals the stored credentials; without it
+  they are unreadable and every user has to log in again. The daemon cannot
+  reconstruct it.
+- **Set it before the first login, not after.** A daemon started without it
+  reports ChatGPT-subscription providers as unavailable — nothing else breaks,
+  but no login can succeed until the key is there.
+- **Never export an empty `RAFIKI_SECRETS_KEY`.** An empty value in the
+  environment outranks `service.env`, and the daemon then reports a key that is
+  set as unset: logins fail with "not set" while the variable looks configured,
+  which is the hardest version of this mistake to see in a container spec.
+
+The credential table arrives with `rafikid migrate` (migration
+`0056_provider_credentials`); the daemon does not migrate itself, so run it as
+its own step in the upgrade. Existing API-key providers are untouched — they
+keep their `api_key` in `providers.toml` and need no key of their own.

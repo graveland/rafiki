@@ -102,6 +102,15 @@
 - **Model aliasing** — short names for long local/custom model ids, with a
   declared context window so Claude Code doesn't assume 200K against a
   16K-context local model and blow past it.
+- **Per-user provider logins, not just API keys.** A provider of kind
+  `openai-responses-chatgpt` bills each user's own ChatGPT plan: `rafiki
+  providers login chatgpt` runs the OAuth flow for that user (a browser, or
+  `--no-browser` to paste the redirect back), and the daemon stores the tokens
+  sealed with AES-256-GCM under `RAFIKI_SECRETS_KEY`. Refresh runs under a row
+  lock because a refresh token is single-use; the tokens never leave the
+  daemon — a child is handed a sender, not a credential — and `rafiki
+  providers logout` revokes them. Without the key the daemon reports these
+  providers as unavailable rather than failing a turn.
 - **Claude Code integration** — `rafiki claude` launches Claude Code through
   the proxy with full capture, routing, and cost accounting, plus the injected
   agent-control surface described under subagent trees — and can bill your own Claude subscription
