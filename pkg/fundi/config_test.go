@@ -243,3 +243,52 @@ func TestBuildEngineWithoutSharedCatalogBuildsOwn(t *testing.T) {
 	c.False(catA == nil || catB == nil, "standalone engines' catalogs = %p, %p; llm.NewClient was expected to default one in for each", catA, catB)
 	c.NotEq(catB, catA, "two standalone engines share one catalog instance (")
 }
+
+// TestContextWindowOverrideReachesEngine is the end-to-end guard for the
+// ContextWindow plumbing, which nothing else covers: the value travels
+// RuntimeOptions.ContextWindow -> Config.ContextWindow ->
+// EngineConfig.ContextWindow -> Engine.contextWindow, and every hop is a plain
+// struct copy that the compiler will not miss and no reader will notice. Drop
+// one and every other test stays green while a child whose model the catalog
+// cannot describe (a ChatGPT-only model) silently compacts and caps its
+// pre-fill against a guess.
+//
+// So this builds through the REAL constructors, one hop per constructor, and
+// reads the value back out of the engine and through both window functions the
+// production call sites use. The catalog is seeded with a model it DOES know,
+// at a window far from the override: without that, "the override arrived" and
+// "the catalog had nothing to say" are the same observation, and the test would
+// pass on a broken chain by accident. The no-override build is the other half
+// of that discriminator.
+func TestContextWindowOverrideReachesEngine(t *testing.T) {
+	c := assert.NewCollecting(t)
+	silenceSlog(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-sonnet-4-5", Created: 1, ContextLength: 1_000_000}})
+
+	build := func(contextWindow int) *Engine {
+		opts := fakeRuntimeOptions(t, t.TempDir())
+		opts.ContextWindow = contextWindow
+		opts.Catalog = cat
+		eng, shutdown, err := BuildRuntime(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil), opts)
+		c.Require().NoError(err, "BuildRuntime with ContextWindow=%d", contextWindow)
+		t.Cleanup(shutdown)
+		return eng
+	}
+
+	overridden := build(500_000)
+	c.Eq(500_000, overridden.contextWindow,
+		"Engine.contextWindow: a hop in RuntimeOptions->Config->EngineConfig->Engine dropped the override")
+	c.Eq(providers.KindAnthropic, overridden.kind, "Engine.kind")
+	c.Eq(500_000, compactionContextWindow(overridden.client, overridden.kind, overridden.state.ModelID, overridden.contextWindow),
+		"compaction window, read the way the policy closure reads it")
+	c.Eq(500_000, prefillContextWindow(overridden.client, overridden.kind, overridden.state.ModelID, overridden.contextWindow),
+		"pre-fill window, read the way runPrefill reads it")
+
+	plain := build(0)
+	c.Eq(0, plain.contextWindow, "an unset override must stay 0, meaning ask the catalog")
+	c.Eq(1_000_000, compactionContextWindow(plain.client, plain.kind, plain.state.ModelID, plain.contextWindow),
+		"the catalog's window must still answer the compaction policy when no override is set")
+	c.Eq(1_000_000, prefillContextWindow(plain.client, plain.kind, plain.state.ModelID, plain.contextWindow),
+		"the catalog's window must still answer the pre-fill when no override is set")
+}

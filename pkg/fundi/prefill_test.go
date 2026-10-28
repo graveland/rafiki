@@ -861,3 +861,46 @@ func TestPrefillContextWindowUsesProviderLocalID(t *testing.T) {
 		c.Eq(tc.want, got, "prefillContextWindow(%q) = %d, want", tc.modelID, got)
 	}
 }
+
+// TestContextWindowOverrideCapsPrefill pins the pre-fill's CONSUMER side of the
+// override: runPrefill computes its token cap from
+// prefillContextWindow(e.client, e.kind, e.state.ModelID, e.contextWindow), so
+// an override that never reached the Engine caps the pre-fill at 60% of the
+// CATALOG's window instead. Nothing else observes that hop.
+//
+// The fake read returns 300KB, about 75k estimated tokens: over the 60k cap a
+// 100k override allows, comfortably inside the 600k cap the catalog's 1M window
+// allows. Both builds go through BuildRuntime, so the override is supplied
+// exactly where cmd/rafikid supplies it and nowhere else.
+func TestContextWindowOverrideCapsPrefill(t *testing.T) {
+	c := assert.NewCollecting(t)
+	silenceSlog(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-sonnet-4-5", Created: 1, ContextLength: 1_000_000}})
+
+	build := func(contextWindow int) *Engine {
+		opts := fakeRuntimeOptions(t, t.TempDir())
+		opts.ContextWindow = contextWindow
+		opts.Catalog = cat
+		opts.Prefill = []protocol.PrefillRead{{Path: "/repo/big.go"}}
+		// The internal reader the pre-fill executes through. 300KB of read
+		// output is the only thing this test needs from it.
+		opts.PrefillTools = fakeToolSet{"read": func(_ context.Context, _ json.RawMessage) (string, error) {
+			return strings.Repeat("y", 300_000), nil
+		}}
+		eng, shutdown, err := BuildRuntime(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil), opts)
+		c.Require().NoError(err, "BuildRuntime with ContextWindow=%d", contextWindow)
+		t.Cleanup(shutdown)
+		return eng
+	}
+
+	overridden := build(100_000)
+	err := overridden.runPrefill(context.Background(), nil, prefillEmpty)
+	c.Require().Error(err, "a ~75k-token pre-fill fit inside the 60k cap a 100k override allows; the override did not reach runPrefill")
+	c.StrContains(err.Error(), "60000-token cap",
+		"the cap is not 60%% of the 100k override: %q", err.Error())
+
+	plain := build(0)
+	c.NoError(plain.runPrefill(context.Background(), nil, prefillEmpty),
+		"the same pre-fill must fit inside 60%% of the catalog's 1M window when no override is set")
+}

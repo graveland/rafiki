@@ -195,6 +195,60 @@ func TestPricerMapsResponsesModelToCatalogID(t *testing.T) {
 	c.False(ok, "kind anthropic must not map gpt-x to openai/gpt-x")
 }
 
+// TestContextWindowOverrideDrivesCompaction covers the CONSUMER side of the
+// override, which TestContextWindowOverrideReachesEngine cannot see: the
+// compaction policy Config.BuildEngine installs closes over Config.ContextWindow
+// directly, not over Engine.contextWindow, so the engine field can be perfectly
+// plumbed while the policy quietly keeps asking the catalog.
+//
+// The catalog claims a 1M window, far above the seeded history, so the first
+// Continue's proactive check fires only when the 100k override is the window it
+// measured against: a dropped override leaves the turn uncompacted.
+func TestContextWindowOverrideDrivesCompaction(t *testing.T) {
+	c := assert.NewCollecting(t)
+	silenceSlog(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-x", Created: 1, ContextLength: 1_000_000}})
+
+	out := &syncBuffer{}
+	cfg := Config{
+		Model: "anthropic/claude-x",
+		Cwd:   t.TempDir(),
+		Name:  "window-override",
+		// 1. the compaction summary call, 2. the call the compacted turn proceeds with.
+		FakeTurns: writeFakeTurns(t,
+			`{"id":"msg_s","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn",
+			 "content":[{"type":"text","text":"<summary>handover</summary>"}],
+			 "usage":{"input_tokens":200,"output_tokens":20}}`,
+			sampleEndTurn),
+		Tools:         fakeToolSet{},
+		Providers:     providers.Default(),
+		Catalog:       cat,
+		ContextWindow: 100_000,
+	}
+	eng, shutdown, err := cfg.BuildEngine(context.Background(), NewFrontend(strings.NewReader(""), out, nil))
+	c.Require().NoError(err, "BuildEngine")
+	defer shutdown()
+
+	// Four large rows push the byte-estimated history past the 100k override
+	// (and nowhere near the catalog's 1M). Alternating roles keep
+	// mergeForRequest from collapsing them.
+	big := strings.Repeat("x", 100_000)
+	c.Require().NoError(eng.conv.SeedHistory(context.Background(), []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock(big)),
+		anthropic.NewAssistantMessage(anthropic.NewTextBlock(big)),
+		anthropic.NewUserMessage(anthropic.NewTextBlock(big)),
+		anthropic.NewAssistantMessage(anthropic.NewTextBlock(big)),
+	}), "seed history")
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+	eng.Close()
+
+	c.StrContains(out.String(), "compaction_start",
+		"the turn did not compact: Config.ContextWindow did not reach the compaction policy, so it measured against the catalog's 1M window")
+}
+
 // TestCompactionEngineRegistersHook drives a real turn over an in-memory
 // conversation seeded with enough history to sit past the window, and pins the
 // wire order: compaction_start, then compaction_end, then the turn's agent_end.
