@@ -259,13 +259,15 @@ func TestLoginListenerCallbackPathEndToEnd(t *testing.T) {
 	c.True(port != 0, "BeginLoginRequest.RedirectPort must carry the client's bound port")
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	// A stray path 404s — asked first so it cannot race the flow's shutdown.
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/other", port))
-	c.Require().NoError(err, "GET /other")
+	// A stray path 404s — asked first so it cannot race the flow's shutdown,
+	// and retried until the listener answers: the flow's first bind exists only
+	// to have a port to announce to BeginLogin, so the callback server binds the
+	// same port a moment later.
+	resp := getCallbackWhenServing(t, client, fmt.Sprintf("http://127.0.0.1:%d/other", port))
 	resp.Body.Close()
 	c.Eq(http.StatusNotFound, resp.StatusCode, "other paths 404")
 
-	resp, err = client.Get(fmt.Sprintf("http://127.0.0.1:%d/oidc/callback?code=abc&state=def", port))
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/oidc/callback?code=abc&state=def", port))
 	c.Require().NoError(err, "GET /oidc/callback")
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -511,7 +513,7 @@ func readStubLog(t *testing.T, path string) string {
 func TestLoginCallbackHandlerFirstQueryOnly(t *testing.T) {
 	c := assert.NewAborting(t)
 	queries := make(chan string, 1)
-	h := loginCallbackHandler(queries)
+	h := loginCallbackHandler(loginCallbackPath, queries)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/oidc/callback?code=one&state=s", nil))

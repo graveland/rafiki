@@ -183,6 +183,46 @@ unbanning require an admin user credential or the local socket. The provider
 is OpenRouter's slug; a display name is lowercased with spaces turned into
 dashes. See `docs/reference/control-protocol.md` §"Provider bans".
 
+### Provider subscription logins (`rafiki providers login`)
+
+A provider whose kind is `openai-responses-chatgpt` bills the user's own
+ChatGPT subscription instead of an API key, so it cannot carry a secret in
+`providers.toml`: it authenticates by a browser login, once per user.
+
+```
+rafiki providers login chatgpt              # opens a browser, then stores the tokens
+rafiki providers login chatgpt --no-browser # print the URL, paste the redirect back
+rafiki providers logout chatgpt
+```
+
+The daemon runs the OAuth exchange and keeps the refresh and access tokens: the
+credential is stored encrypted (AES-256-GCM under `RAFIKI_SECRETS_KEY`, base64
+of exactly 32 bytes) against the CALLER's user id, is never returned by any
+RPC, and never reaches this CLI or any child process. There is no daemon-wide
+fallback credential: a child of a user with no login for that provider is
+refused at spawn, and another user's login is not usable by you. A daemon
+started without `RAFIKI_SECRETS_KEY` reports these providers as unavailable
+rather than storing anything in plaintext. A second `login` replaces the stored
+tokens, and `logout` deletes them (a provider with nothing stored is
+`not_found`).
+
+The callback is the ISSUER's, not rafiki's: port 1455 at `/auth/callback`, which
+is what the redirect URI registered with the provider says. A `codex login`
+running on the same machine holds that exact port, so a second login fails here
+instead of quietly listening somewhere else:
+
+```
+cannot listen on callback port 1455 (fixed by the provider's OAuth registration): …
+free the port, or retry with --no-browser and paste the redirect URL
+```
+
+`--no-browser` is the way out on a headless box, and the way to log in with a
+browser on another machine: rafiki prints the authorize URL, does not open
+anything, and accepts the URL the browser was redirected to when it is pasted
+back. Both verbs need a real user credential (a child credential, and the local
+socket's identity-less trust, are refused), because the credential belongs to
+the person, not to the daemon.
+
 ### Batch transport (`:batch` model ids)
 
 A fundi child on an OpenRouter model id ending `:batch` (e.g.

@@ -20,19 +20,22 @@ import (
 func newProvidersCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "providers",
-		Short: "Exclude OpenRouter providers from routing at runtime",
-		Long: `Operator controls over which OpenRouter providers serve requests: ban a
-provider outright, or set per-model-line routing policy. Both reach running
-children — a ban or a row written now governs the daemon's next OpenRouter
-request, whoever sends it.
+		Short: "Provider subscription logins, routing bans and per-model-line policy",
+		Long: `Provider-wide controls: log in to a provider that bills your own
+subscription, ban an OpenRouter provider outright, or set per-model-line
+routing policy. A ban or a policy row reaches running children: one written
+now governs the daemon's next OpenRouter request, whoever sends it.
 
 Subcommands:
   bans          what is excluded right now, and why
   ban/unban     exclude a provider for every model, until lifted or --for
   route         per-model-line specs: sort, quantization floor, provider
-                allowlist, data policy`,
+                allowlist, data policy
+  login         log in to a provider that authenticates with your subscription
+  logout        forget the subscription credential stored against your user`,
 	}
-	cmd.AddCommand(newProvidersBansCmd(), newProvidersBanCmd(), newProvidersUnbanCmd(), newProvidersRouteCmd())
+	cmd.AddCommand(newProvidersBansCmd(), newProvidersBanCmd(), newProvidersUnbanCmd(),
+		newProvidersRouteCmd(), newProvidersLoginCmd(), newProvidersLogoutCmd())
 	return cmd
 }
 
@@ -390,6 +393,126 @@ Example:
 				return err
 			}
 			fmt.Printf("lifted the ban on %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+// --- provider subscription logins -------------------------------------------
+
+// providerLoginPinnedBy is why a provider-login callback port cannot move: the
+// redirect URI is registered with the provider's issuer, so only that port
+// receives the redirect. It is the parenthetical of a bind failure, the way
+// loginPinnedBy is for `rafiki login`.
+const providerLoginPinnedBy = "fixed by the provider's OAuth registration"
+
+// newProvidersLoginCmd builds `rafiki providers login`. The daemon does the
+// code exchange and holds the tokens (encrypted, against the caller's own user
+// id); the CLI only ferries the redirect query, so no credential ever reaches
+// this process or a child it spawns.
+func newProvidersLoginCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "login <provider>",
+		Short: "Log in to a provider that authenticates with your own subscription",
+		Long: `Authenticate against a providers.toml entry whose kind logs in with the
+owner's own subscription (openai-responses-chatgpt) instead of an API key. The
+daemon runs the OAuth exchange and stores the resulting refresh and access
+tokens encrypted against YOUR user id; nothing but the authorize URL, the
+callback query and the account id crosses the wire, and no other user and no
+child can use them.
+
+The callback port and path are the provider's, not rafiki's: they are part of
+the redirect URI registered with the issuer, so a port already in use fails
+here rather than moving. A running ` + "`codex login`" + ` holds port 1455, which is the
+usual cause; the flow names the port and offers --no-browser, which prints the
+authorize URL and accepts the redirect URL pasted back instead.
+
+A second login for the same provider replaces the stored credential.
+
+Example:
+  rafiki providers login chatgpt
+  rafiki providers login chatgpt --no-browser   # browser on another machine`,
+		Args: cobra.ExactArgs(1),
+		RunE: runProvidersLogin,
+	}
+	cmd.Flags().Bool("no-browser", false,
+		"do not open a browser; print the authorize URL and wait for the pasted redirect URL")
+	return cmd
+}
+
+// runProvidersLogin drives begin, the loopback (or paste) wait, and complete
+// over ONE Control client, so all three verbs land on the endpoint
+// newConnectEndpoint resolved. Every message goes to stderr, like `rafiki
+// login`: this verb leaves a credential behind, not command output.
+func runProvidersLogin(cmd *cobra.Command, args []string) error {
+	provider := args[0]
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	noBrowser, _ := cmd.Flags().GetBool("no-browser")
+	ctx := cmdCtx(cmd)
+	ctrl := ep.control()
+
+	begin, err := ctrl.BeginProviderLogin(ctx,
+		connect.NewRequest(&rafikiv1.BeginProviderLoginRequest{Provider: provider}))
+	if err != nil {
+		return diagnoseConnectError(err, ep.describe)
+	}
+
+	query, err := loopbackCallback(ctx, loginIO{
+		noBrowser: noBrowser,
+		stdin:     cmd.InOrStdin(),
+		stderr:    cmd.ErrOrStderr(),
+	}, begin.Msg.GetRedirectHosts(), begin.Msg.GetRedirectPort(), begin.Msg.GetCallbackPath(),
+		begin.Msg.GetAuthorizeUrl(), providerLoginPinnedBy)
+	if err != nil {
+		return err
+	}
+
+	complete, err := ctrl.CompleteProviderLogin(ctx,
+		connect.NewRequest(&rafikiv1.CompleteProviderLoginRequest{
+			LoginId:       begin.Msg.GetLoginId(),
+			CallbackQuery: query,
+		}))
+	if err != nil {
+		return diagnoseConnectError(err, ep.describe)
+	}
+
+	// The daemon names what it stored; the argument is the fallback for a
+	// daemon that resolved the name and did not echo it.
+	name := complete.Msg.GetProvider()
+	if name == "" {
+		name = provider
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "logged in to %s (account %s)\n", name, complete.Msg.GetAccountId())
+	return nil
+}
+
+func newProvidersLogoutCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout <provider>",
+		Short: "Forget the subscription credential stored against your user for a provider",
+		Long: `Delete the subscription credential this user has stored for a provider. The
+tokens are destroyed in the daemon, so children of this user on a model served
+by that provider are refused at their next spawn until ` + "`login`" + ` runs again.
+A provider with no stored credential is refused with not_found; neither the
+credential nor the provider's token endpoint is touched, and a login still in
+flight is simply forgotten when it is completed.
+
+Example:
+  rafiki providers logout chatgpt`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ep, err := newConnectEndpoint(cmd)
+			if err != nil {
+				return err
+			}
+			if _, err := ep.control().DeleteProviderCredential(cmdCtx(cmd),
+				connect.NewRequest(&rafikiv1.DeleteProviderCredentialRequest{Provider: args[0]})); err != nil {
+				return diagnoseConnectError(err, ep.describe)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "logged out of %s\n", args[0])
 			return nil
 		},
 	}
