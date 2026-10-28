@@ -111,7 +111,8 @@ c.delete_route("z-ai/glm-5.3")                         # not_found when there is
 # Provider login (per-user provider credentials). The credential belongs to
 # the CALLING USER and is never returned: the daemon holds the tokens, and a
 # child resolves its owner's credential at spawn. Needs a user credential on
-# the client (failed_precondition otherwise).
+# the client: a child's credential gets permission_denied, and a connection
+# with no user identity at all gets failed_precondition.
 begin = c.begin_provider_login("chatgpt")  # provider = the NAME of a
                                            # providers.toml entry whose KIND is
                                            # openai-responses-chatgpt; an entry
