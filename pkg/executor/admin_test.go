@@ -787,7 +787,15 @@ import (
 )
 
 func main() {
-	_ = os.WriteFile(os.Getenv("RAFIKI_TEST_ENV_DUMP"), []byte(strings.Join(os.Environ(), "\n")), 0o600)
+	// Rename a same-directory temp file onto the dump path: the reader polls for
+	// that path's existence, and os.WriteFile's create-then-write would let it
+	// observe an existing but empty or partial dump (zero environment lines).
+	if path := os.Getenv("RAFIKI_TEST_ENV_DUMP"); path != "" {
+		tmp := path + ".tmp"
+		if os.WriteFile(tmp, []byte(strings.Join(os.Environ(), "\n")), 0o600) == nil {
+			_ = os.Rename(tmp, path)
+		}
+	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
@@ -836,17 +844,7 @@ func TestLaunchCarriesTheMCPTokenByEnvNotArgv(t *testing.T) {
 	// The positive half: the stub's environ dump must carry the variable.
 	// Line-based, because the token is the LAST entry Launch appends and the
 	// dump is newline-joined with no trailing newline.
-	dumpPath := os.Getenv("RAFIKI_TEST_ENV_DUMP")
-	var envDump []byte
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		envDump, err = os.ReadFile(dumpPath)
-		if err == nil {
-			break
-		}
-		c.Require().False(time.Now().After(deadline), "stub environ dump never appeared at %s: %v", dumpPath, err)
-		time.Sleep(10 * time.Millisecond)
-	}
+	envDump := waitForStubEnvDump(t)
 	want := "RAFIKI_MCP_TOKEN=" + token
 	found := false
 	for _, line := range strings.Split(string(envDump), "\n") {
@@ -880,25 +878,17 @@ func TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone(t *testing.T) {
 	}))
 	c.Require().NoError(err, "Launch")
 
-	deadline := time.Now().Add(5 * time.Second)
-	var envDump []byte
-	var readErr error
-	for {
-		envDump, readErr = os.ReadFile(os.Getenv("RAFIKI_TEST_ENV_DUMP"))
-		if readErr == nil {
-			break
-		}
-		c.Require().False(time.Now().After(deadline), "stub environ dump never appeared: %v", readErr)
-		time.Sleep(10 * time.Millisecond)
-	}
+	envDump := waitForStubEnvDump(t)
 	for _, line := range strings.Split(string(envDump), "\n") {
 		c.False(strings.HasPrefix(line, "RAFIKI_MCP_TOKEN="), "spec carried no mcp_token, but the environment has %q", line)
 	}
 }
 
 // waitForStubEnvDump reads the dump buildEnvDumpStub's binary writes, polling
-// until it appears — the same loop the tests above inline, factored for the
-// scrub tests.
+// until the file EXISTS. That is enough to read the whole dump only because the
+// stub renames a same-directory temp file onto the dump path: existence implies
+// completeness, so one read with no error is the full environ. Every reader of
+// the dump goes through here, so the poll loop lives in one place.
 func waitForStubEnvDump(t *testing.T) []byte {
 	t.Helper()
 	dumpPath := os.Getenv("RAFIKI_TEST_ENV_DUMP")

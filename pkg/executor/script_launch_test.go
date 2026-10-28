@@ -324,7 +324,10 @@ func TestResolveScriptLaunchFoldsInheritedPythonPath(t *testing.T) {
 // buildEnvDumperStub compiles a stand-in for the rafiki binary that dumps its
 // argv and environment to files named by RAFIKI_DUMP_DIR, then sleeps. This is
 // how the launch's environment is observed for real: not by asserting on the
-// slice Launch built, but by reading back what the launched process SAW.
+// slice Launch built, but by reading back what the launched process SAW. Each
+// dump is written by rename from a same-directory temp file, so a reader that
+// polls dumpFiles sees the file either absent or complete; never an existing
+// but empty/partial one, which would look like a launch that forwarded nothing.
 func buildEnvDumperStub(t *testing.T) string {
 	t.Helper()
 	c := assert.NewAborting(t)
@@ -342,16 +345,28 @@ import (
 
 func main() {
 	if d := os.Getenv("RAFIKI_DUMP_DIR"); d != "" {
-		os.WriteFile(filepath.Join(d, "argv"), []byte(fmt.Sprint(os.Args)), 0o600)
+		writeDump(filepath.Join(d, "argv"), []byte(fmt.Sprint(os.Args)))
 		var sb []byte
 		for _, kv := range os.Environ() {
 			sb = append(sb, []byte(kv+"\n")...)
 		}
-		os.WriteFile(filepath.Join(d, "env"), sb, 0o600)
+		writeDump(filepath.Join(d, "env"), sb)
 	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
+}
+
+// writeDump renames a same-directory temp file onto path, because the reader
+// polls for the dump's existence: os.WriteFile's create-then-write would let it
+// observe an existing but empty or partial file, which reads as an empty argv
+// or environ and fails an assertion about the launch itself.
+func writeDump(path string, data []byte) {
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) != nil {
+		return
+	}
+	os.Rename(tmp, path)
 }
 `), 0o600))
 	bin := filepath.Join(dir, "stub")
