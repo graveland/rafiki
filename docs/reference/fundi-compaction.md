@@ -8,16 +8,18 @@ Code children compact themselves; this is fundi's own compaction, run by
 ## What it does
 
 When a fundi conversation approaches its model's context window, rafiki asks the
-model for a plain-text handover summary of the older history and then moves the
-conversation's resume horizon past it. The working context becomes one summary
-row plus a verbatim copy of the most recent tail; every earlier row is kept on
-disk, untouched. Nothing is deleted or renumbered.
+model for a plain-text handover summary of the older history and then appends it
+as a new ROOT of the conversation's tree, with a verbatim copy of the most recent
+tail hung under it. The working path restarts at the summary; every earlier row
+is kept on disk, untouched, as a branch the head no longer reaches. Nothing is
+deleted or renumbered.
 
 The mechanism lives in `pkg/llm`: `CompactionPolicy`
 (`pkg/llm/compact_policy.go`) decides when and how much, `Conversation.compact`
 (`pkg/llm/conversation_compact.go`) runs the summary call and writes the
 boundary, and `store.Messages.AppendCompaction` (`pkg/store/compaction.go`)
-persists it.
+persists it — one `store.AppendChain` call, so the boundary is one transaction.
+The tree model itself is `docs/reference/conversation-tree.md`.
 
 ## Triggers
 
@@ -67,33 +69,45 @@ catalog does not know returns 0 and so never triggers proactively.
 
 ## Rows
 
-`AppendCompaction` writes the boundary in one transaction, locking the
-conversation row `FOR UPDATE` first (serialising concurrent compactors) and
-fencing every insert on the held conversation lease:
+`AppendCompaction` is one `store.AppendChain` call, which locks the conversation
+row `FOR UPDATE` first (serialising concurrent compactors) and fences the write
+on the held conversation lease:
 
-- **Summary** at the next ordinal (`max(ordinal) + 1`), with the summary
-  message's role (user), `kind='compaction_summary'`, and `input_tokens` = the
-  size of the context it replaced (the summary response's
-  input + cache read + cache creation).
-- **Tail copies** at the ordinals after the summary, `kind='compaction_tail'`,
-  each carrying the original row's `stop_reason` and NULL token columns — a
-  verbatim duplicate of a row that still exists earlier in the table.
-- **Horizon**: `conversation.resume_from_ordinal` is set to the summary's
-  ordinal, in the same transaction.
+- **Summary** as the first node of the chain, a ROOT of kind
+  `compaction_summary` with `derived_from_id` = the head it replaced, and
+  `input_tokens` = the size of the context it replaced (the summary response's
+  input + cache read + cache creation). A summary is unique model output, so its
+  root seed does not mix in `derived_from` — derived-from is lineage here, not
+  identity.
+- **Tail copies** as the nodes after it, `kind='compaction_tail'`, each carrying
+  the original row's `stop_reason` and NULL token columns — a verbatim duplicate
+  of a row that still exists earlier in the table.
+- **Head**: moves onto the last tail node (the summary itself when the tail is
+  empty), so the working path is summary-plus-tail and the pre-compaction path is
+  simply no longer reachable from it.
 
-Nothing is deleted or renumbered; the call only appends. Any error rolls back,
-leaving the horizon and the row set exactly as they were.
+The ordinals are the conversation's insertion sequence, allocated by the counter
+under that lock — not `max(ordinal) + 1` computed by the caller. Nothing is
+deleted or renumbered; the call only appends. Any error rolls back, leaving the
+head and the row set exactly as they were.
+
+Two compactions in a row are two roots, and the second's working path is its own
+summary plus tail (`TestCompactionSecondCompactionIsANewRoot`,
+`TestCompactionRootWithTailUnderIt`, `pkg/store`).
 
 ## Clear
 
-`/clear` is the same horizon move with no summary: `Conversation.Clear` →
+`/clear` is the same shape with no summary: `Conversation.Clear` →
 `store.Messages.AppendClear` appends ONE synthetic user row
-(`store.ClearBoundaryText`, `kind='clear'`) at the next ordinal and sets
-`resume_from_ordinal` onto it, in one lease-fenced transaction. The working set
-is then that row alone, so the next prompt merges into it at request assembly;
-nothing is deleted or renumbered, and `usedTokens` resets. The row must carry
-content because an empty working set cannot be continued and would hand the next
-`AppendUser` ordinal 0. `Engine.runSlash` then publishes a native
+(`store.ClearBoundaryText`, `kind='clear'`) as a ROOT derived from the current
+head, and the head moves onto it, in one lease-fenced transaction. The working
+path is then that row alone, so the next prompt merges into it at request
+assembly; nothing is deleted or renumbered, and `usedTokens` resets. Two clears
+in a row are two distinct roots, because a clear root's seed mixes in the node it
+was cut from (`convtree.RootSeed`) — otherwise the second `/clear` would find the
+first clear's node and graft the new history under it. The row must carry content
+because an empty working set cannot be continued (`Continue` refuses one) and the
+next prompt has nothing to merge into. `Engine.runSlash` then publishes a native
 `CompactionBoundary{trigger:"clear"}`.
 
 A claude `/clear` shares `kind='clear'` but its row is the real first message of
@@ -117,12 +131,14 @@ frame's `trigger`).
 Two reads of `conversations.conversation_message` exist, and which one a caller
 uses is the whole point:
 
-- **Working set** — `store.Messages.LoadWorking` returns rows at or after
-  `resume_from_ordinal`. `llm.Conversation.loadHistory` (and so `History`,
+- **Working set** — `store.Messages.LoadWorking` (an alias for `LoadPath`)
+  returns the chain from `conversation.head_id` up `parent_id` to a root, in
+  depth order. `llm.Conversation.loadHistory` (and so `History`,
   `agentloop.Resume`, orphan repair and `classifyPrefill`) reads only this.
-- **Full history** — `store.Messages.Load` is deliberately NOT filtered by the
-  horizon. `GetHistory` (which serves `rafiki logs`), `Controller.dbRecent`
-  (which serves GetRecent / the `agent_view` tool) and recall read every row.
+- **Full history** — `store.Messages.Load` returns every row in ordinal order and
+  is deliberately NOT path-filtered. `GetHistory` (which serves `rafiki logs`),
+  `Controller.dbRecent` (which serves GetRecent / the `agent_view` tool) and
+  recall read every row.
 
 A full-history reader must skip `kind='compaction_tail'` rows or it shows the
 tail twice: `eventconv.EventsFromMessages` skips them and synthesises a
@@ -181,8 +197,8 @@ A compaction failure is **invisible at the default log level**: the child's own
 `llm.Client` logs at ERROR, so pkg/llm's Warn on a failed compaction is dropped.
 The daemon-side diagnostic is `Engine.onCompaction` logging an ERROR for a
 non-`Succeeded` End event, and the ground truth is the DB: no
-`conversation_message` row at `resume_from_ordinal` with
-`kind='compaction_summary'`. The summary call is itself captured as a
+`conversation_message` root of `kind='compaction_summary'` derived from the head
+that was current at the attempt. The summary call is itself captured as a
 `conversation_turn` with `source='compaction'` at the ordinal the summary row
 lands on, so insights' `turnMetricsByOrdinal` attributes it to that row.
 
