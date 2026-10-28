@@ -71,6 +71,17 @@ json.Marshal([]any{role, v})                   (encoding/json sorts map keys)
 `NodeHash(parentSlot, msg) = sha256(byte(HashVersion) ‖ parentSlot ‖ Canon(msg))`,
 where `parentSlot` is the parent's `path_hash` or, for a root, a `RootSeed`.
 
+**The hashed bytes are Go's `encoding/json` output, exactly.** `Canon` returns
+`json.Marshal([]any{role, v})` verbatim and `NodeHash` hashes those bytes, so the
+standard library's string escaping is part of the compatibility contract: `<`,
+`>`, `&` are written `\u003c`, `\u003e`, `\u0026`, and U+2028/U+2029 are written
+`\u2028`/`\u2029`. That is `json.Marshal`'s default HTML-safe escaping, not an
+option this code turns off — a reimplementation in another language must
+reproduce it (Go's `json.Encoder` only avoids it behind `SetEscapeHTML(false)`,
+which would change every hash). No test names this behaviour explicitly; it
+follows from calling `json.Marshal` with no options, which is why the doc states
+it rather than leaving it to be discovered.
+
 ```
 RootSeed(kind, derivedFrom) = sha256("root" ‖ kind ‖ d)
     d = *derivedFrom   only when kind == "clear" and derivedFrom != nil
@@ -315,7 +326,10 @@ the per-turn update stays HOT, since none of them is indexed):
 
 0058 seeds `node_count`/`payload_bytes`/`fork_count` from the rows that exist
 (`fork_count` there counts parents with more than one child, the same quantity by
-another route). Derived on read, not stored: active length (`head.depth + 1`),
+another route — exact for a two-way fork, and an upper bound beyond it: a
+3+-way fork is one seeded fork point against the live counter's one increment
+per branch-creating insert, so the two diverge only in that case; all real forks
+are two-way). Derived on read, not stored: active length (`head.depth + 1`),
 abandoned nodes (`node_count − active length`), branch points. Token and cost
 totals stay on `conversation_turn`.
 
@@ -396,7 +410,7 @@ probe. Output, one field per line:
 | `bad_depth` | children whose depth is not their parent's + 1 |
 | `missing_head` | conversations with messages but no `head_id` |
 | `ordinal_counter_behind` | conversations whose `next_ordinal` is not ahead of their highest ordinal |
-| `provider_id_missing` | assistant rows whose turn recorded a `response_message_id` for their ordinal but that carry no `provider_message_id`. A non-zero value is a warning about attach quality, not corruption: such a turn names a row capture cannot attach by, so the next request naming it degrades to the hash-chain fallback, and there is nothing to repair |
+| `provider_id_missing` | **placed** assistant rows (`path_hash` set) whose turn recorded a `response_message_id` for their ordinal but that carry no `provider_message_id`. A row with no tree position is expected and NOT counted: the backfill deliberately leaves an interim-fork copy and a duplicate summary root positionless, and neither ever gets the id. Among placed rows a non-zero value is a real defect — a backfill or writer that lost the id its turn named — so it gates the cutover |
 | `working_set_mismatch` | with `--cutover`, conversations whose working path carries different messages from the legacy working set, listed by id |
 | `working_set_loose_match` | with `--cutover`, conversations that match only under `SameMessage` (informational; it is what a rehearsal reads to see how much of the data relies on the looser rule) |
 
@@ -426,6 +440,19 @@ those same conversations, so the legacy equality no longer holds. Pinned by
 `TestCheckTreeWorkingSetComparisonIsCutoverOnly`,
 `TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites` and
 `TestCheckTreeAcceptsABackfilledTree` (`pkg/store`).
+
+**What the check cannot see.** Three blind spots to hold alongside a clean run.
+The backfill's `unmatched_copies` appears only in the migrate log line
+(`conversation tree backfill … unmatched_copies=`), never in this report, so the
+migrate output is what a rehearsal has to capture. A `compaction_tail` row with a
+NULL `path_hash` is invisible to every count — expected for a recognised
+interim-fork copy, but a backfill misclassification outside a legacy-horizon
+conversation leaves no trace (only `--cutover`'s working-set comparison can catch
+one). A non-root row with a NULL `depth` escapes both `bad_depth` (`NULL <> x` is
+not TRUE) and `bad_hash` (depth is checked only for roots). No defect here is
+one the writers can produce: `AppendChain` always writes a position and a depth,
+and the only positionless rows the backfill leaves are the copies it recognised.
+Each therefore means data edited by hand — which is also why none is repaired.
 
 ## Cutover procedure
 

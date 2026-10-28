@@ -698,10 +698,16 @@ func checkRowID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID st
 
 // TestCheckTreeCountsAssistantNodesMissingAProviderID is the design's provider-id
 // coverage invariant: a turn that recorded a response_message_id for an ordinal
-// means the row stored there is that reply, so a NULL provider_message_id on it
-// is a miss. The backfill writes the column from the turn map, so a miss here is
-// the two disagreeing — and it silently degrades capture's rule 2 to the
+// means the PLACED row stored there is that reply, so a NULL provider_message_id
+// on it is a miss. The backfill writes the column from the turn map, so a miss
+// here is the two disagreeing — and it silently degrades capture's rule 2 to the
 // hash-chain fallback, which finds nothing under a compaction or clear root.
+//
+// A row the backfill deliberately left positionless is NOT a miss: an interim-fork
+// copy and a duplicate summary root never carry a provider id, so counting them
+// would keep this field non-zero on a correct tree. Case D pins that exclusion,
+// and case A pins its breadth — a placed row in the same situation must still be
+// counted, so an over-broad `path_hash IS NULL` predicate cannot pass.
 func TestCheckTreeCountsAssistantNodesMissingAProviderID(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
@@ -732,28 +738,49 @@ func TestCheckTreeCountsAssistantNodesMissingAProviderID(t *testing.T) {
 	checkInsertNode(t, ctx, pool, uncovered, 1, "assistant", `[{"type":"text","text":"reply"}]`, nil, checkInt(0), uncoveredRoot, 1)
 	checkSetConversation(t, ctx, pool, uncovered, checkInt(1), checkInt(2), nil)
 
-	report, err := checkTree(ctx, pool, []string{missing, covered, uncovered}, TreeCheckOptions{})
+	// D: the turn names the reply, but the row holds no tree position — what the
+	// backfill leaves for an interim-fork copy or a duplicate summary root. Such a
+	// row is EXPECTED to have no provider id, so it must not count: counting it
+	// would make the field non-zero on a correct tree. Its missing hash is the
+	// legacy-row check's business, asserted below to show the row really is
+	// positionless rather than silently placed.
+	positionless := checkTestConv(t, ctx, pool)
+	checkInsertNode(t, ctx, pool, positionless, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkInsertRow(t, ctx, pool, positionless, 1, "assistant", `[{"type":"text","text":"reply"}]`, nil, checkInt(0), nil, nil)
+	checkSetConversation(t, ctx, pool, positionless, checkInt(1), checkInt(2), nil)
+	checkInsertTurn(t, ctx, pool, positionless, 1, "msg_positionless")
+
+	report, err := checkTree(ctx, pool, []string{missing, covered, uncovered, positionless}, TreeCheckOptions{})
 	c.Require().NoError(err, "checkTree")
-	c.Eq(1, report.ProviderIDMissing, "only the row the turn names and that lacks the id is counted")
+	c.Eq(1, report.ProviderIDMissing, "only the PLACED row the turn names and that lacks the id is counted")
 	c.Eq(0, report.BadHash, "the hashes verify, so only coverage is at fault")
 	c.False(report.OK(), "a missing provider id fails the check")
 
 	// Each conversation on its own, so a count that happens to be right over the
-	// three of them cannot stand in for the rule: the covered row is not counted,
-	// the uncovered one has nothing to be missing, and the row the turn names is.
+	// four of them cannot stand in for the rule: the covered row is not counted,
+	// the uncovered one has nothing to be missing, the row the turn names is, and
+	// a positionless row is expected rather than a miss.
 	for _, tc := range []struct {
 		name string
 		conv string
 		want int
 	}{
-		{"the turn names a row without the id", missing, 1},
+		{"the turn names a placed row without the id", missing, 1},
 		{"the turn names a row that carries the id", covered, 0},
 		{"no turn names the row", uncovered, 0},
+		{"the turn names a row with no tree position", positionless, 0},
 	} {
 		one, err := checkTree(ctx, pool, []string{tc.conv}, TreeCheckOptions{})
 		c.Require().NoError(err, "checkTree %s", tc.name)
 		c.Eq(tc.want, one.ProviderIDMissing, "%s", tc.name)
 	}
+
+	// D is genuinely positionless — that is what makes its exclusion the rule under
+	// test rather than a row that would have been counted anyway.
+	alone, err := checkTree(ctx, pool, []string{positionless}, TreeCheckOptions{})
+	c.Require().NoError(err, "checkTree the positionless conversation")
+	c.Eq(1, alone.MissingHash, "the row holds no tree position")
+	c.Eq(0, alone.ProviderIDMissing, "a positionless row is expected, never a missing provider id")
 }
 
 // checkInsertTurn writes a completed turn that named a reply at responseOrdinal.

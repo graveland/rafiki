@@ -186,8 +186,11 @@ func prefillRowIsTextPrefill(m store.Message) bool {
 
 // prefillReadInput marshals a read call's input. Field order is the byte
 // stability contract: two runs over the same entries must produce identical
-// r1 content, which SeedHistory's divergence check (and
-// TestPrefillInputsAreByteStable) rely on.
+// r1 content, which is what makes `SeedChain` match the rows a previous run
+// already wrote by hash (and what `TestPrefillInputsAreByteStable` pins).
+// `SeedChain` compares by hash only; a divergent seed would become a sibling
+// root rather than an error, which is unreachable because `classifyPrefill`
+// gates the persisted content before anything is seeded.
 type prefillReadInput struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset"`

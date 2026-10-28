@@ -43,17 +43,24 @@ type TreeCheckReport struct {
 	// OrdinalCounterBehind counts conversations whose next_ordinal is not
 	// ahead of their highest ordinal.
 	OrdinalCounterBehind int
-	// ProviderIDMissing counts assistant nodes whose conversation turn recorded
-	// a response_message_id for their ordinal, but whose row carries no
+	// ProviderIDMissing counts PLACED assistant nodes whose conversation turn
+	// recorded a response_message_id for their ordinal, but whose row carries no
 	// provider_message_id. That column is the attach key capture rule 2 resolves
 	// a later request's previous_message_id with, so a miss silently degrades
 	// that rule to the hash-chain fallback instead of failing.
 	//
-	// The backfill writes the id from the turn map, so a non-zero count means the
-	// two disagreed at migration time. The count of interim-fork copies the
-	// backfill could not match is deliberately NOT reproduced here: that needs
-	// the walk, and the backfill's own unmatched_copies log line remains the only
-	// record of it.
+	// A row with no position (path_hash IS NULL) is EXPECTED and not counted: the
+	// backfill deliberately leaves an interim-fork copy and a duplicate summary
+	// root positionless, and neither ever carries the id, so counting them would
+	// keep this field non-zero on correct data. Among placed rows the backfill
+	// writes the id from the turn map, so a non-zero count means a real defect —
+	// the backfill's map and the rows it wrote disagreed, or a live writer stored
+	// a reply without the id its turn named. Either way the row a turn names is
+	// unattachable by rule 2, which is why this gates OK().
+	//
+	// The count of interim-fork copies the backfill could not match is
+	// deliberately NOT reproduced here: that needs the walk, and the backfill's
+	// own unmatched_copies log line remains the only record of it.
 	ProviderIDMissing int
 	// WorkingSetMismatch lists conversations whose working path carries
 	// different messages from the legacy working set it replaced.
@@ -427,20 +434,29 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 	return bytes.Equal(want[:], row.hash)
 }
 
-// checkProviderIDs counts assistant nodes whose turn recorded a provider message
-// id for their ordinal but whose row does not carry it. provider_message_id is
-// the attach key capture rule 2 resolves a later request's
-// diagnostics.previous_message_id with; a row missing it degrades that rule to
-// the hash-chain fallback, which finds nothing under a compaction or clear root.
+// checkProviderIDs counts PLACED assistant nodes whose turn recorded a provider
+// message id for their ordinal but whose row does not carry it.
+// provider_message_id is the attach key capture rule 2 resolves a later
+// request's diagnostics.previous_message_id with; a row missing it degrades that
+// rule to the hash-chain fallback, which finds nothing under a compaction or
+// clear root.
+//
+// Rows with no position (path_hash IS NULL) are excluded on purpose. The backfill
+// leaves an interim-fork copy and a duplicate summary root positionless and never
+// gives either a provider id, so counting them would keep this field non-zero on
+// a correct tree — a warning nothing can act on. Excluded, a non-zero count names
+// a placed row that lost the id its turn recorded: a backfill or writer defect,
+// which is worth gating a cutover on.
 //
 // This is a coverage check, not a comparison: it asks only whether the backfill's
-// turn map and the rows it wrote agree, so it is valid at any time — a row that
+// turn map and the rows it placed agree, so it is valid at any time — a row that
 // capture wrote itself carries the id from the response.
 func checkProviderIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) (int, error) {
 	var missing int
 	err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM conversations.conversation_message m
 		 WHERE m.role = 'assistant'
+		   AND m.path_hash IS NOT NULL
 		   AND m.provider_message_id IS NULL
 		   AND EXISTS (SELECT 1 FROM conversations.conversation_turn t
 		                WHERE t.conversation_id = m.conversation_id
