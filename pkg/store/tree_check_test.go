@@ -427,6 +427,63 @@ func TestCheckTreeDetectsABadHash(t *testing.T) {
 	})
 }
 
+// TestCheckTreeDetectsABadHashWithoutALegacyHorizon is the regression test for
+// a check that stopped checking: the hash check used the horizon-scoped
+// conversation list, so it never walked a conversation written since the cutover
+// — which is every conversation written now, and the 3,536 of 3,997 backfilled
+// ones that never used a horizon. A tree is content-addressed only if EVERY
+// node's hash is recomputed; scoping the walk left a corrupted hash invisible.
+//
+// TestCheckTreeDetectsABadHash's fixtures all set a resume horizon, which is
+// exactly why the regression was invisible to them: they exercise the check
+// through the one list that was still being read. This one deliberately leaves
+// the horizon NULL.
+func TestCheckTreeDetectsABadHashWithoutALegacyHorizon(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	// The head's hash is not the hash its position implies; the root is intact.
+	checkInsertRow(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"head"}]`, nil, checkInt(0),
+		checkForeignHash(convID, 1), checkDepth(1))
+	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(2), nil)
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.BadHash, "a bad hash in a conversation with no legacy horizon")
+	c.Eq(0, report.MissingHash, "every row holds a position")
+	c.Eq(0, report.BadDepth, "its depth is right")
+	c.False(report.OK(), "a bad hash fails the check whatever the storage")
+}
+
+// TestCheckTreeDetectsBadDepthWithoutALegacyHorizon pins that the structural
+// checks are not silently narrowed either: a conversation with no horizon whose
+// child sits at the wrong depth is still counted. BadDepth is its own SQL count
+// over every row, not a walk of a conversation list, so it never lost the
+// post-cutover conversations — this test is what keeps that true if it is ever
+// rewritten as a walk.
+func TestCheckTreeDetectsBadDepthWithoutALegacyHorizon(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	rootHash := checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	// Correct hash for the position, wrong depth: only BadDepth has anything to say.
+	checkInsertNode(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"child"}]`, nil, checkInt(0), rootHash, 4)
+	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(2), nil)
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.BadDepth, "a child at the wrong depth, with no legacy horizon")
+	c.Eq(0, report.BadHash, "its hash is the hash of its position")
+	c.False(report.OK(), "a bad depth fails the check whatever the storage")
+}
+
 // TestCheckTreeSeedsANonBoundaryRootLikeTheBackfill: the backfill seeds a root
 // with RootKindRoot unless the row's kind is a boundary kind, so a root row of
 // any other kind carries the plain root's seed. Seeding it from the row's kind

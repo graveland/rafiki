@@ -282,6 +282,12 @@ type checkTreeRow struct {
 // content-addressed rather than merely well-shaped: without it a tree with
 // consistent parents, depths and heads can still be addressed by hashes that
 // describe a different history.
+//
+// It walks EVERY conversation with messages, via
+// checkConversationsWithMessages. A structural check must never use the
+// horizon-scoped list: hashes are a property of the tree, not of the legacy
+// storage a conversation happened to use, so scoping this one would leave every
+// post-cutover conversation unchecked.
 func checkBadHashes(ctx context.Context, pool *pgxpool.Pool, ids []string) (int, error) {
 	conversations, err := checkConversationsWithMessages(ctx, pool, ids)
 	if err != nil {
@@ -387,6 +393,11 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 // backfill had to reproduce — are still expected to match, so this comparison is
 // the cutover's net over pre-tree conversations and nothing else.
 //
+// This is the ONLY check allowed to narrow the conversation list, and it does so
+// with checkConversationsWithHorizon. Every structural check uses
+// checkConversationsWithMessages instead, because a tree's shape and its hashes
+// are properties of every conversation regardless of how it was stored.
+//
 // The comparison is on messages, not on rows: an interim fork's copies are the
 // same messages as the nodes they duplicate, so a forked conversation still
 // compares equal — and that equality is exactly the property the tree relies on.
@@ -395,7 +406,7 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 // are the same message in a different representation" is a fact a rehearsal
 // wants to see rather than a failure.
 func checkWorkingSets(ctx context.Context, pool *pgxpool.Pool, ids []string) (mismatches, loose []string, err error) {
-	conversations, err := checkConversationsWithMessages(ctx, pool, ids)
+	conversations, err := checkConversationsWithHorizon(ctx, pool, ids)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -419,11 +430,35 @@ func checkWorkingSets(ctx context.Context, pool *pgxpool.Pool, ids []string) (mi
 	return mismatches, loose, nil
 }
 
-// checkConversationsWithMessages lists the conversations this check compares:
-// the ones with messages AND a legacy resume horizon. A conversation without the
-// horizon was never stored that way (or was written after the cutover), so it has
-// no legacy working set to reproduce — see checkWorkingSets.
+// checkConversationsWithMessages lists EVERY conversation that has messages,
+// whatever storage it was written with. This is the list for STRUCTURAL checks —
+// the tree's shape and its hashes are properties of every conversation, and the
+// absence of a legacy resume horizon says nothing about them.
+//
+// Its callers are checkBadHashes and anything else that inspects a tree. Only a
+// comparison against a LEGACY representation may narrow the list, and that is
+// checkConversationsWithHorizon: a check that silently stopped walking
+// post-cutover conversations would report a clean tree it never looked at.
 func checkConversationsWithMessages(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]string, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT c.id::text FROM conversations.conversation c
+		  WHERE ($1::uuid[] IS NULL OR c.id = ANY($1::uuid[]))
+		    AND EXISTS (SELECT 1 FROM conversations.conversation_message m WHERE m.conversation_id = c.id)
+		  ORDER BY c.id`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("tree check: list conversations: %w", err)
+	}
+	return checkScanStrings(rows)
+}
+
+// checkConversationsWithHorizon lists the conversations that still carry a
+// legacy resume horizon, which is the subset the working-set comparison is
+// defined over — see checkWorkingSets for why. NOTHING else may use it: a
+// conversation without the horizon has no legacy working set to reproduce, but it
+// is still a tree, and a structural check that read this list instead of
+// checkConversationsWithMessages would skip every conversation written since the
+// cutover and the majority of the backfilled ones.
+func checkConversationsWithHorizon(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]string, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT c.id::text FROM conversations.conversation c
 		  WHERE ($1::uuid[] IS NULL OR c.id = ANY($1::uuid[]))
@@ -431,7 +466,7 @@ func checkConversationsWithMessages(ctx context.Context, pool *pgxpool.Pool, ids
 		    AND EXISTS (SELECT 1 FROM conversations.conversation_message m WHERE m.conversation_id = c.id)
 		  ORDER BY c.id`, ids)
 	if err != nil {
-		return nil, fmt.Errorf("tree check: list conversations: %w", err)
+		return nil, fmt.Errorf("tree check: list conversations with a legacy horizon: %w", err)
 	}
 	return checkScanStrings(rows)
 }

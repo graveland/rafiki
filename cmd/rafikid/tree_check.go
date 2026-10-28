@@ -36,12 +36,16 @@ func newTreeCheckCmd() *cobra.Command {
 		Long: `Checks every conversation's tree against the history it was built from: every
 row that is neither a replay's copy nor a duplicate of a summary root has a path
 hash, every node's hash is the hash its position implies, every child sits one
-below its parent, every conversation with messages has a head, the ordinal
-allocator is ahead of the rows, and — for the conversations still carrying a
-legacy resume horizon — the working path carries the same messages as the working
-set that horizon described. Nothing writes that horizon any more, so a
-conversation written since the cutover is not compared: its head path legitimately
-leaves the siblings it forked or compacted away from off.
+below its parent, every conversation with messages has a head, and the ordinal
+allocator is ahead of the rows. Those fields cover EVERY conversation.
+
+The working-set comparison is the cutover-only part: working_set_mismatch and
+working_set_loose_match compare the working path against the legacy working set,
+so they apply only to conversations that still carry a legacy
+resume_from_ordinal. Nothing writes that horizon any more, so a conversation
+written since the cutover is not compared there — its head path legitimately
+leaves the siblings it forked or compacted away from off. Its hashes and shape
+are still checked.
 
 duplicate_rows and working_set_loose_match are informational: they count rows
 and conversations that are the same message in a different representation, and
