@@ -7,9 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 
 	"go.graveland.dev/rafiki/pkg/convtree"
@@ -156,7 +156,10 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 			}
 			if run.match(nodes, msg) {
 				report.InterimCopies++
-				path = run.start[:run.idx]
+				// A copy of the run's prefix, never a slice of it: the path is
+				// appended to as soon as the run ends, and an alias would write
+				// through into the run's own start.
+				path = append([]int32(nil), run.start[:run.idx]...)
 				continue
 			}
 			slog.Warn("backfill: interim copy matched nothing",
@@ -208,13 +211,23 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 		if existing, ok := byHash[hash]; ok {
 			report.OtherDuplicates++
 			path = backfillPathTo(nodes, existing)
-			inRealTail = false
+			// A duplicate root re-states the root it matched, so it opens the
+			// same kind of boundary: a repeated summary is still followed by a
+			// real tail.
+			inRealTail = isRoot && boundary && *row.kind == KindCompactionSummary
 			continue
 		}
 
 		nodes = append(nodes, backfillNode{id: row.id, hash: hash, depth: depth, msg: msg, parent: parent})
-		path = append(path, int32(len(nodes)-1))
-		byHash[hash] = int32(len(nodes) - 1)
+		index := int32(len(nodes) - 1)
+		if isRoot {
+			// A root is a chain of its own: the cursor restarts at it, or the
+			// next row would be appended to a path from before the boundary.
+			path = []int32{index}
+		} else {
+			path = append(path, index)
+		}
+		byHash[hash] = index
 		report.Nodes++
 
 		var providerID *string
@@ -252,64 +265,155 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 // backfillSameMessage reports whether a copy re-stores the same message as the
 // node it duplicates.
 //
-// Canonical equality alone is not enough on real data: capture stored an
-// assistant reply as the SDK's marshalled message, which carries every
-// zero-valued union field, while the client replays the provider's own JSON for
-// the same reply. Both are the same blocks, and the SDK decode is how capture
-// itself decided a replay was the same message (pkg/capture's
-// sameAnthropicContent) — the backfill must not disagree with the writer about
-// which rows are one message. Content the SDK cannot model falls back to the
-// strict comparison, which is the safe direction: an unrecognised shape becomes
-// a node and is counted, never silently merged.
+// Canonical equality alone is not enough on real data. Capture stored an
+// assistant reply as the SDK's marshalled message, so one side of a real copy
+// pair carries a field for every variant of the block union — "text":"",
+// "id":"", "name":"", "signature":"", "data":"", "tool_use_id":"",
+// "content":{"type":"web_search_tool_result_error","error_code":""} — while the
+// other side is the provider's own JSON and may carry provider fields the SDK
+// models but the raw form omits, such as "caller":{"type":"direct"}. Round-
+// tripping both through the SDK does not remove that asymmetry, so the second
+// pass compares the two decoded values by projection instead: a field present on
+// only one side is ignored when its value cannot carry meaning, and every other
+// difference is a difference.
+//
+// The rule's only leniency is a ZERO-VALUED field that one side omits. A
+// one-sided field whose value is not zero — a tool result's content, an
+// is_error, an image, a citation — is a difference, never noise, so a rewritten
+// message stays distinct.
 func backfillSameMessage(node, copy convtree.Msg) bool {
 	if convtree.Equal(node, copy) {
 		return true
 	}
-	a, aok := backfillCanonicalForm(node)
-	b, bok := backfillCanonicalForm(copy)
-	return aok && bok && bytes.Equal(a, b)
-}
-
-// backfillCanonicalForm is one message as the SDK models it, in convtree's
-// canonical form: decode into the SDK's block union, re-encode, then apply
-// Canon — which drops cache_control (a transport hint the client moves between
-// requests) and nulls, and sorts object keys.
-//
-// The PARAM union, not the response union: a response block carries every field
-// of every variant (zero-valued when unused), which is what capture stored, but
-// the response union has no tool_result variant at all — decoding a tool_result
-// into it drops the tool output, so two different tool results would compare
-// equal. The param union keeps each variant's own fields and marshals only the
-// variant that is set, so a field a message does not use cannot distinguish it
-// from one that omits it, and a field it does use always does.
-func backfillCanonicalForm(m convtree.Msg) ([]byte, bool) {
-	blocks, ok := backfillSDKBlocks(m.Content)
+	if node.Role != copy.Role {
+		return false
+	}
+	a, ok := backfillDecodeMessage(node.Content)
 	if !ok {
-		return nil, false
+		return false
 	}
-	raw, err := json.Marshal(blocks)
-	if err != nil {
-		return nil, false
+	b, ok := backfillDecodeMessage(copy.Content)
+	if !ok {
+		return false
 	}
-	canon, err := convtree.Canon(m.Role, raw)
-	if err != nil {
-		return nil, false
-	}
-	return canon, true
+	return backfillSameValue(a, b)
 }
 
-// backfillSDKBlocks decodes the two content forms Anthropic permits in every
-// message role. A string is shorthand for one text block.
-func backfillSDKBlocks(content []byte) ([]anthropic.ContentBlockParamUnion, bool) {
-	var text string
-	if err := json.Unmarshal(content, &text); err == nil {
-		return []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: text}}}, true
-	}
-	var blocks []anthropic.ContentBlockParamUnion
-	if err := json.Unmarshal(content, &blocks); err != nil {
+// backfillDecodeMessage decodes stored content the way Canon does: numbers stay
+// exact, and a bare JSON string is the shorthand for one text block. Content
+// that is not one JSON value is not a message and compares equal to nothing.
+func backfillDecodeMessage(content []byte) (any, bool) {
+	dec := json.NewDecoder(bytes.NewReader(content))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
 		return nil, false
 	}
-	return blocks, true
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	if text, ok := v.(string); ok {
+		v = []any{map[string]any{"type": "text", "text": text}}
+	}
+	return v, true
+}
+
+// backfillSameValue reports whether two decoded JSON values are the same
+// message: object keys are compared pairwise, a key only one side has is
+// tolerated when its value is zero (backfillZeroValue), cache_control is dropped
+// exactly as Canon drops it, and lists must agree element for element.
+func backfillSameValue(a, b any) bool {
+	switch av := a.(type) {
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok {
+			return false
+		}
+		for key, aValue := range av {
+			if key == "cache_control" {
+				continue
+			}
+			bValue, both := bv[key]
+			if !both {
+				if !backfillZeroValue(aValue) {
+					return false
+				}
+				continue
+			}
+			if !backfillSameValue(aValue, bValue) {
+				return false
+			}
+		}
+		for key, bValue := range bv {
+			if key == "cache_control" {
+				continue
+			}
+			if _, both := av[key]; both {
+				continue
+			}
+			if !backfillZeroValue(bValue) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !backfillSameValue(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	aj, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bj, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(aj, bj)
+}
+
+// backfillZeroValue reports whether a value cannot carry meaning: null, false,
+// "", zero, a list whose elements are all such values, or an object whose every
+// value other than its type tag is such a value. That last clause is what makes
+// {"type":"direct"} — a provider field marking a directly-called tool — noise
+// rather than a difference.
+func backfillZeroValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !t
+	case string:
+		return t == ""
+	case json.Number:
+		n, err := t.Float64()
+		return err == nil && n == 0
+	case []any:
+		for _, element := range t {
+			if !backfillZeroValue(element) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for key, element := range t {
+			if key == "type" {
+				continue
+			}
+			if !backfillZeroValue(element) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // backfillPathTo rebuilds the chain from the root to nodes[idx] by walking

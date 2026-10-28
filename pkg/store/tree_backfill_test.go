@@ -450,3 +450,168 @@ func TestBackfillIsIdempotent(t *testing.T) {
 	c.EqDeep(first, second, "the same walk twice")
 	c.EqDeep(before, after, "the same tree twice")
 }
+
+// TestBackfillSameMessage pins the identity rule the backfill and the check
+// share. Its only leniency is a ZERO-VALUED field that one side omits — the
+// noise the SDK's marshalling adds — and every subtest here is a clause of that
+// sentence.
+func TestBackfillSameMessage(t *testing.T) {
+	t.Run("SDK union noise is the same message", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		// One side is what capture stored (every union field, zero-valued when
+		// unused, plus a provider marker); the other is the client's replay.
+		stored := `[{"type":"thinking","thinking":"","signature":"sig","id":"","name":"","text":"","data":"","tool_use_id":"","content":{"type":"web_search_tool_result_error","error_code":""}},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"},"caller":{"type":"direct"}}]`
+		replay := `[{"type":"thinking","thinking":"","signature":"sig"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"}}]`
+		c.True(backfillSameMessage(convtree.Msg{Role: "assistant", Content: []byte(stored)}, convtree.Msg{Role: "assistant", Content: []byte(replay)}), "zero-valued union noise is not a difference")
+
+		// An empty list and a moved cache_control are the same kind of noise.
+		c.True(backfillSameMessage(
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi","citations":[]}]`)},
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`)}),
+			"an empty list and a transport hint are not content")
+	})
+
+	t.Run("a tool result's content is a difference", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		c.False(backfillSameMessage(
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]`)},
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"bad"}]`)}),
+			"ok and bad are different tool output")
+	})
+
+	t.Run("is_error on one side only is a difference", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		c.False(backfillSameMessage(
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":true}]`)},
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]`)}),
+			"a failed tool call is not a successful one")
+	})
+
+	t.Run("an image's source is a difference", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		c.False(backfillSameMessage(
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}]`)},
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BBB"}}]`)}),
+			"two images are not one image")
+	})
+
+	t.Run("a non-zero field on one side only is a difference", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		c.False(backfillSameMessage(
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi","citations":[{"url":"x"}]}]`)},
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi"}]`)}),
+			"a citation one side carries is content")
+	})
+
+	t.Run("a different role is a difference", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		c.False(backfillSameMessage(
+			convtree.Msg{Role: "user", Content: []byte(`[{"type":"text","text":"hi"}]`)},
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"hi"}]`)}),
+			"role is part of the message")
+	})
+}
+
+// TestBackfillRootResetsThePath: a boundary starts a chain of its own, so an
+// interim run that follows one is measured against the new root — not merged
+// onto nodes from before the boundary, which would put the replay's copies on
+// the wrong branch.
+func TestBackfillRootResetsThePath(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, pool, convID := backfillTestEnv(t)
+	summary := KindCompactionSummary
+	tail := KindCompactionTail
+	backfillInsertRow(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"a"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"b"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 2, "user", `[{"type":"text","text":"the summary"}]`, &summary)
+	// A real row after the summary ends its tail, so the compaction_tail rows
+	// that follow are a replay's copies — of nodes from BEFORE the boundary.
+	backfillInsertRow(t, ctx, pool, convID, 3, "user", `[{"type":"text","text":"c"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 4, "user", `[{"type":"text","text":"a"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 5, "assistant", `[{"type":"text","text":"b"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 6, "user", `[{"type":"text","text":"d"}]`, nil)
+
+	report := backfillRun(t, ctx, pool, convID)
+	c.Eq(0, report.InterimCopies, "the copies match nothing under the summary")
+	c.Eq(2, report.UnmatchedCopies, "both copies of the run are unexplained")
+
+	rows := backfillTestRows(t, ctx, pool, convID)
+	c.Nil(rows[2].parent, "the summary is a root")
+	c.Require().NotNil(rows[4].parent, "the first copy became a node")
+	c.Eq(3, *rows[4].parent, "it hangs off the post-boundary chain, not off the pre-boundary nodes")
+	c.Eq(int32(2), *rows[4].depth, "its depth")
+	c.Require().NotNil(rows[5].parent, "the second copy became a node")
+	c.Eq(4, *rows[5].parent, "under the first")
+	c.Require().NotNil(rows[6].parent, "the row after the run became a node")
+	c.Eq(5, *rows[6].parent, "under the second")
+	c.Eq(int32(4), *rows[6].depth, "its depth")
+
+	head := backfillTestHead(t, ctx, pool, convID)
+	c.Require().NotNil(head, "head")
+	c.Eq(6, *head, "head is the last row")
+}
+
+// TestBackfillDuplicateSummaryKeepsItsTailReal: a repeated compaction summary is
+// the same node, and it opens the same boundary, so the copies after it are
+// fundi's real tail rather than a replay's leftovers.
+func TestBackfillDuplicateSummaryKeepsItsTailReal(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, pool, convID := backfillTestEnv(t)
+	summary := KindCompactionSummary
+	tail := KindCompactionTail
+	backfillInsertRow(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"a"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 1, "user", `[{"type":"text","text":"the summary"}]`, &summary)
+	backfillInsertRow(t, ctx, pool, convID, 2, "assistant", `[{"type":"text","text":"b"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 3, "user", `[{"type":"text","text":"the summary"}]`, &summary)
+	backfillInsertRow(t, ctx, pool, convID, 4, "user", `[{"type":"text","text":"a"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 5, "user", `[{"type":"text","text":"d"}]`, nil)
+
+	report := backfillRun(t, ctx, pool, convID)
+	c.Eq(1, report.OtherDuplicates, "the second summary is the same node")
+	c.Eq(0, report.InterimCopies, "the tail is not an interim copy")
+	c.Eq(0, report.UnmatchedCopies, "unmatched copies")
+
+	rows := backfillTestRows(t, ctx, pool, convID)
+	c.Nil(rows[3].hash, "the duplicate summary holds no position")
+	c.Require().NotNil(rows[4].parent, "the tail copy is a node")
+	c.Eq(1, *rows[4].parent, "it hangs off the summary the duplicate re-stated")
+	c.Require().NotNil(rows[5].parent, "the next row is a node")
+	c.Eq(4, *rows[5].parent, "under the tail")
+}
+
+// TestBackfillTwoInterimRunsInSequence: each run is matched against the path as
+// it stood when that run began, so a second fork later in the conversation
+// merges onto the second fork's prefix — never onto the first run's.
+func TestBackfillTwoInterimRunsInSequence(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, pool, convID := backfillTestEnv(t)
+	tail := KindCompactionTail
+	backfillInsertRow(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"a"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"b"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 2, "assistant", `[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 3, "user", `[{"type":"text","text":"a"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 4, "assistant", `[{"type":"text","text":"b"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 5, "assistant", `[{"type":"text","text":"first rewrite"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 6, "assistant", `[{"type":"text","text":"d"}]`, nil)
+	backfillInsertRow(t, ctx, pool, convID, 7, "user", `[{"type":"text","text":"a"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 8, "assistant", `[{"type":"text","text":"b"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 9, "assistant", `[{"type":"text","text":"first rewrite"}]`, &tail)
+	backfillInsertRow(t, ctx, pool, convID, 10, "user", `[{"type":"text","text":"second rewrite"}]`, nil)
+
+	report := backfillRun(t, ctx, pool, convID)
+	c.Eq(5, report.InterimCopies, "two copies in the first run, three in the second")
+	c.Eq(0, report.UnmatchedCopies, "unmatched copies")
+
+	rows := backfillTestRows(t, ctx, pool, convID)
+	for _, ordinal := range []int{3, 4, 7, 8, 9} {
+		c.Nil(rows[ordinal].hash, "copy at ordinal %d holds no position", ordinal)
+	}
+	c.Require().NotNil(rows[5].parent, "the first rewrite is a node")
+	c.Eq(1, *rows[5].parent, "a sibling of the row it replaced")
+	c.Require().NotNil(rows[10].parent, "the second rewrite is a node")
+	c.Eq(5, *rows[10].parent, "a sibling of the first rewrite")
+
+	head := backfillTestHead(t, ctx, pool, convID)
+	c.Require().NotNil(head, "head")
+	c.Eq(10, *head, "head is the second rewrite")
+}

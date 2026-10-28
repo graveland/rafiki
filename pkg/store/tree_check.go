@@ -3,6 +3,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -21,11 +22,18 @@ type TreeCheckReport struct {
 	// MissingHash counts rows with no tree position that are neither an
 	// interim-fork copy nor a duplicate of a node of the same conversation.
 	MissingHash int
-	// DuplicateRows counts rows whose content is already a node of this
-	// conversation, so they hold no tree position. A compaction root's seed
-	// ignores derived-from, so two summaries with the same content are one node
-	// — the later row is a legitimate duplicate, not a missing position.
+	// DuplicateRows counts rows whose content is already a root of the same
+	// kind in this conversation, so they hold no tree position. A root's parent
+	// slot is its kind's seed, so equal content under equal kind is the same
+	// node — the later row is a legitimate duplicate, not a missing position.
+	// Nothing else without a position is excused: a repeated ordinary message is
+	// still a missing position, because nothing proves it is one node.
 	DuplicateRows int
+	// BadHash counts nodes whose stored hash is not the hash their position
+	// implies, plus the two states that make a node's position meaningless: a
+	// root that is not at depth 0, and a node whose parent is not a row of this
+	// conversation (or has no position itself).
+	BadHash int
 	// BadDepth counts children whose depth is not their parent's depth + 1.
 	BadDepth int
 	// MissingHead counts conversations with messages but no head_id.
@@ -46,7 +54,7 @@ type TreeCheckReport struct {
 
 // OK reports whether every invariant holds.
 func (r TreeCheckReport) OK() bool {
-	return r.MissingHash == 0 && r.BadDepth == 0 && r.MissingHead == 0 &&
+	return r.MissingHash == 0 && r.BadHash == 0 && r.BadDepth == 0 && r.MissingHead == 0 &&
 		r.OrdinalCounterBehind == 0 && len(r.WorkingSetMismatch) == 0
 }
 
@@ -108,6 +116,12 @@ func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheck
 	report.MissingHash = missing
 	report.DuplicateRows = duplicates
 
+	badHashes, err := checkBadHashes(ctx, pool, ids)
+	if err != nil {
+		return report, err
+	}
+	report.BadHash = badHashes
+
 	mismatches, loose, err := checkWorkingSets(ctx, pool, ids)
 	if err != nil {
 		return report, err
@@ -117,61 +131,40 @@ func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheck
 	return report, nil
 }
 
-// checkNodeKeys is a conversation's nodes as the two identities a message can
-// share with one: its canonical form, and the form the SDK models it in. They
-// are the same two forms backfillSameMessage compares, as set keys.
-type checkNodeKeys struct {
-	strict map[string]struct{}
-	loose  map[string]struct{}
+// checkRoot is a root of the conversation: a node with no parent.
+type checkRoot struct {
+	kind *string
+	msg  convtree.Msg
 }
 
-func newCheckNodeKeys() checkNodeKeys {
-	return checkNodeKeys{strict: map[string]struct{}{}, loose: map[string]struct{}{}}
-}
-
-func (k checkNodeKeys) add(msg convtree.Msg) {
-	if canon, err := convtree.Canon(msg.Role, msg.Content); err == nil {
-		k.strict[string(canon)] = struct{}{}
-	}
-	if form, ok := backfillCanonicalForm(msg); ok {
-		k.loose[string(form)] = struct{}{}
-	}
-}
-
-func (k checkNodeKeys) has(msg convtree.Msg) bool {
-	if canon, err := convtree.Canon(msg.Role, msg.Content); err == nil {
-		if _, ok := k.strict[string(canon)]; ok {
-			return true
-		}
-	}
-	if form, ok := backfillCanonicalForm(msg); ok {
-		if _, ok := k.loose[string(form)]; ok {
-			return true
-		}
-	}
-	return false
+// checkLegacyRow is a row that holds no tree position and is not an
+// interim-fork copy.
+type checkLegacyRow struct {
+	kind *string
+	msg  convtree.Msg
 }
 
 // checkLegacyRows classifies the rows that hold no tree position. A row is a
-// duplicate when a node of the same conversation carries the same message — the
-// backfill's own notion of identity, so the check cannot disagree with it.
-// Everything else without a position is missing.
+// duplicate only when it re-states a root of the same kind — a root's parent
+// slot is its kind's seed, so equal content under equal kind is provably the
+// same node. Every other row without a position is missing, which is loud on
+// purpose: nothing proves a repeated ordinary message is one node.
 func checkLegacyRows(ctx context.Context, pool *pgxpool.Pool, ids []string) (missing, duplicates int, err error) {
 	conversations, err := checkConversationsWithLegacyRows(ctx, pool, ids)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, id := range conversations {
-		nodes, err := checkNodeKeysOf(ctx, pool, id)
+		roots, err := checkRootsOf(ctx, pool, id)
 		if err != nil {
 			return 0, 0, err
 		}
-		legacy, err := checkLegacyMessages(ctx, pool, id)
+		legacy, err := checkLegacyRowsOf(ctx, pool, id)
 		if err != nil {
 			return 0, 0, err
 		}
-		for _, msg := range legacy {
-			if nodes.has(msg) {
+		for _, row := range legacy {
+			if checkRestatesARoot(roots, row) {
 				duplicates++
 				continue
 			}
@@ -179,6 +172,24 @@ func checkLegacyRows(ctx context.Context, pool *pgxpool.Pool, ids []string) (mis
 		}
 	}
 	return missing, duplicates, nil
+}
+
+// checkRestatesARoot reports whether a row is a second copy of a root of the
+// same kind. Only a boundary row can be: a plain root's seed carries no kind of
+// its own, so two ordinary rows with equal content are two positions.
+func checkRestatesARoot(roots []checkRoot, row checkLegacyRow) bool {
+	if row.kind == nil || (*row.kind != KindCompactionSummary && *row.kind != KindClear) {
+		return false
+	}
+	for _, root := range roots {
+		if root.kind == nil || *root.kind != *row.kind {
+			continue
+		}
+		if backfillSameMessage(root.msg, row.msg) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkConversationsWithLegacyRows lists the conversations holding a row with no
@@ -196,37 +207,157 @@ func checkConversationsWithLegacyRows(ctx context.Context, pool *pgxpool.Pool, i
 	return checkScanStrings(rows)
 }
 
-// checkNodeKeysOf reads the conversation's nodes — the rows that do hold a
-// position — as the keys a duplicate is matched against.
-func checkNodeKeysOf(ctx context.Context, pool *pgxpool.Pool, conversationID string) (checkNodeKeys, error) {
-	keys := newCheckNodeKeys()
+// checkRootsOf reads the conversation's roots: the nodes with no parent.
+func checkRootsOf(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]checkRoot, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT role, content::text FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND path_hash IS NOT NULL`, conversationID)
+		SELECT kind, role, content::text FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND parent_id IS NULL AND path_hash IS NOT NULL`, conversationID)
 	if err != nil {
-		return keys, fmt.Errorf("tree check: read nodes of %s: %w", conversationID, err)
+		return nil, fmt.Errorf("tree check: read roots of %s: %w", conversationID, err)
 	}
-	messages, err := checkScanMessages(rows)
-	if err != nil {
-		return keys, err
+	defer rows.Close()
+	var out []checkRoot
+	for rows.Next() {
+		var root checkRoot
+		if err := rows.Scan(&root.kind, &root.msg.Role, &root.msg.Content); err != nil {
+			return nil, fmt.Errorf("tree check: scan root: %w", err)
+		}
+		out = append(out, root)
 	}
-	for _, msg := range messages {
-		keys.add(msg)
-	}
-	return keys, nil
+	return out, rows.Err()
 }
 
-// checkLegacyMessages reads the conversation's rows that should have a position
+// checkLegacyRowsOf reads the conversation's rows that should have a position
 // but do not.
-func checkLegacyMessages(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]convtree.Msg, error) {
+func checkLegacyRowsOf(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]checkLegacyRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT role, content::text FROM conversations.conversation_message
+		SELECT kind, role, content::text FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid AND path_hash IS NULL AND kind IS DISTINCT FROM $2
 		 ORDER BY ordinal`, conversationID, KindCompactionTail)
 	if err != nil {
 		return nil, fmt.Errorf("tree check: read legacy rows of %s: %w", conversationID, err)
 	}
-	return checkScanMessages(rows)
+	defer rows.Close()
+	var out []checkLegacyRow
+	for rows.Next() {
+		var row checkLegacyRow
+		if err := rows.Scan(&row.kind, &row.msg.Role, &row.msg.Content); err != nil {
+			return nil, fmt.Errorf("tree check: scan legacy row: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// checkHashLen is the width of a path hash, which a bytea column does not
+// enforce.
+const checkHashLen = len(convtree.Hash{})
+
+// checkTreeRow is one message row with the columns a hash check needs.
+type checkTreeRow struct {
+	id      string
+	parent  *string
+	derived *string
+	kind    *string
+	role    string
+	content []byte
+	hash    []byte
+	version *int16
+	depth   *int32
+}
+
+// checkBadHashes recomputes every node's path hash from its position and counts
+// the ones that do not match. This is the check that makes the tree
+// content-addressed rather than merely well-shaped: without it a tree with
+// consistent parents, depths and heads can still be addressed by hashes that
+// describe a different history.
+func checkBadHashes(ctx context.Context, pool *pgxpool.Pool, ids []string) (int, error) {
+	conversations, err := checkConversationsWithMessages(ctx, pool, ids)
+	if err != nil {
+		return 0, err
+	}
+	var bad int
+	for _, id := range conversations {
+		rows, err := checkTreeRowsOf(ctx, pool, id)
+		if err != nil {
+			return 0, err
+		}
+		byID := make(map[string]checkTreeRow, len(rows))
+		for _, row := range rows {
+			byID[row.id] = row
+		}
+		for _, row := range rows {
+			if row.hash == nil {
+				continue
+			}
+			if !checkHashMatches(byID, row) {
+				bad++
+			}
+		}
+	}
+	return bad, nil
+}
+
+func checkTreeRowsOf(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]checkTreeRow, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT id::text, parent_id::text, derived_from_id::text, kind, role, content::text,
+		       path_hash, hash_version, depth
+		  FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("tree check: read tree rows of %s: %w", conversationID, err)
+	}
+	defer rows.Close()
+	var out []checkTreeRow
+	for rows.Next() {
+		var row checkTreeRow
+		if err := rows.Scan(&row.id, &row.parent, &row.derived, &row.kind, &row.role, &row.content,
+			&row.hash, &row.version, &row.depth); err != nil {
+			return nil, fmt.Errorf("tree check: scan tree row: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// checkHashMatches reports whether a node's stored hash is the hash its position
+// implies. byID holds every row of the conversation, so a parent from another
+// conversation is simply absent.
+func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
+	if row.version == nil || *row.version != convtree.HashVersion {
+		return false
+	}
+	var slot convtree.Hash
+	if row.parent == nil {
+		if row.depth == nil || *row.depth != 0 {
+			return false
+		}
+		kind := convtree.RootKindRoot
+		if row.kind != nil {
+			kind = *row.kind
+		}
+		var derivedFrom *convtree.Hash
+		if row.derived != nil {
+			derived, ok := byID[*row.derived]
+			if !ok || len(derived.hash) != checkHashLen {
+				return false
+			}
+			h := convtree.Hash(derived.hash)
+			derivedFrom = &h
+		}
+		slot = convtree.RootSeed(kind, derivedFrom)
+	} else {
+		parent, ok := byID[*row.parent]
+		if !ok || len(parent.hash) != checkHashLen {
+			return false
+		}
+		slot = convtree.Hash(parent.hash)
+	}
+	want, err := convtree.NodeHash(slot, convtree.Msg{Role: row.role, Content: row.content})
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(want[:], row.hash)
 }
 
 // checkWorkingSets compares every conversation's working path against the
