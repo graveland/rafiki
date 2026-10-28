@@ -68,6 +68,10 @@ type responsesSSEDecoder struct {
 	// newResponsesSSEDecoder), settable so tests can exercise the overflow
 	// without materialising 64 MiB.
 	maxLineBytes int
+	// mode is the Responses dialect this stream came from, and so the mode its
+	// reasoning signatures are minted under. The encrypted content is only
+	// meaningful to the backend that produced it.
+	mode ResponsesSignatureMode
 
 	// lines is fed by the ONE reader goroutine, which is the only code that
 	// touches the bufio.Reader. Two readers on one buffered reader is a data
@@ -118,8 +122,9 @@ const (
 // newResponsesSSEDecoder builds the decoder and starts its one reader goroutine.
 // maxLine caps a single line; <= 0 means responsesMaxLineBytes. It is a parameter
 // (rather than a field written after construction) because the reader goroutine
-// starts here: mutating it afterwards would race the reader.
-func newResponsesSSEDecoder(rc io.ReadCloser, idle time.Duration, maxLine int) *responsesSSEDecoder {
+// starts here: mutating it afterwards would race the reader. mode is the dialect
+// that minted this stream, recorded on every reasoning signature.
+func newResponsesSSEDecoder(rc io.ReadCloser, idle time.Duration, maxLine int, mode ResponsesSignatureMode) *responsesSSEDecoder {
 	if maxLine <= 0 {
 		maxLine = responsesMaxLineBytes
 	}
@@ -127,6 +132,7 @@ func newResponsesSSEDecoder(rc io.ReadCloser, idle time.Duration, maxLine int) *
 		rc:           rc,
 		idle:         idle,
 		maxLineBytes: maxLine,
+		mode:         mode,
 		lines:        make(chan responsesLine, 1),
 		closeCh:      make(chan struct{}),
 		closedBlocks: map[int]bool{},
@@ -483,18 +489,18 @@ func (d *responsesSSEDecoder) openItem(item responsesOutputItem, idx int) {
 }
 
 // finishItem closes the block for one output item. A reasoning item gets its
-// signature first (id plus encrypted content, in the format
+// signature first (mode, id and encrypted content, in the format
 // responsesSignature writes), and is what makes the reasoning resendable on the
-// next turn.
+// next turn by the backend that minted it.
 //
 // A reasoning item with NO encrypted content is still signed, with an empty blob
-// ("openai-responses:<id>:"). The signature is not only a resend token: it is how
-// the block announces which provider owns it. An unsigned thinking block is
-// indistinguishable from an Anthropic one, so StripForeignThinking keeps it on a
-// failover to an Anthropic API-key provider, which then rejects a signature it
-// cannot verify. With the empty-blob signature the block is recognisably ours
-// (Anthropic strips it) while this sender still drops it when resending (the
-// parsed blob is empty, so there is nothing to resume).
+// ("openai-responses:<mode>:<id>:"). The signature is not only a resend token:
+// it is how the block announces which provider owns it. An unsigned thinking
+// block is indistinguishable from an Anthropic one, so StripForeignThinking
+// keeps it on a failover to an Anthropic API-key provider, which then rejects a
+// signature it cannot verify. With the empty-blob signature the block is
+// recognisably ours (Anthropic strips it) while this sender still drops it when
+// resending (the parsed blob is empty, so there is nothing to resume).
 //
 // A done for an index whose block is already closed (a late event under
 // interleaving) is ignored: reopening it would duplicate a tool_use block.
@@ -522,7 +528,7 @@ func (d *responsesSSEDecoder) finishItem(item responsesOutputItem, idx int) {
 		if id == "" {
 			id = d.active.itemID
 		}
-		d.emitSignatureDelta(d.active.index, responsesSignature(id, item.EncryptedContent))
+		d.emitSignatureDelta(d.active.index, responsesSignature(d.mode, id, item.EncryptedContent))
 	case responsesBlockTool:
 		if item.CallID != "" {
 			d.active.itemID = item.CallID
@@ -996,8 +1002,8 @@ type responsesEventErrorBody struct {
 // rules: function calls become tool_use blocks keyed by call_id, and reasoning
 // items become thinking blocks carrying the Responses signature (empty blob when
 // the item carried no encrypted content: see finishItem for why it is still
-// signed).
-func parseResponsesResponse(resp *responsesResponseObject) (*anthropic.Message, error) {
+// signed), under the mode that produced the response.
+func parseResponsesResponse(resp *responsesResponseObject, mode ResponsesSignatureMode) (*anthropic.Message, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("llm: openai-responses: response body carries no response object")
 	}
@@ -1042,7 +1048,7 @@ func parseResponsesResponse(resp *responsesResponseObject) (*anthropic.Message, 
 			msg.Content = append(msg.Content, anthropic.ContentBlockUnion{
 				Type:      "thinking",
 				Thinking:  responsesSummaryText(item.Summary),
-				Signature: responsesSignature(item.ID, item.EncryptedContent),
+				Signature: responsesSignature(mode, item.ID, item.EncryptedContent),
 			})
 		}
 	}

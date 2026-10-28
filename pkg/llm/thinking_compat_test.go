@@ -13,16 +13,18 @@ import (
 )
 
 // TestThinkingCompatStripsBothDirections pins the foreign-thinking rule in both
-// directions of provider failover: a Responses signature is dropped on the way to
-// Anthropic, an Anthropic signature is dropped on the way to Responses, text
-// blocks are untouched, and the caller's history is never mutated (a filter on the
-// way out must not rewrite the stored conversation).
+// directions of provider failover: every Responses signature is dropped on the
+// way to Anthropic (whichever mode minted it), an Anthropic signature is dropped
+// on the way to Responses, text blocks are untouched, and the caller's history is
+// never mutated (a filter on the way out must not rewrite the stored
+// conversation).
 func TestThinkingCompatStripsBothDirections(t *testing.T) {
 	c := assert.NewCollecting(t)
 
 	const (
 		anthropicSig = "EqQBCgIYAhIM-sig-from-claude"
-		responsesSig = "openai-responses:rs_abc:gAAAA-blob"
+		apiSig       = "openai-responses:api:rs_api:gAAAA-api-blob"
+		chatgptSig   = "openai-responses:chatgpt:rs_chat:gAAAA-chat-blob"
 	)
 	mkMessages := func() []anthropic.MessageParam {
 		return []anthropic.MessageParam{
@@ -31,7 +33,8 @@ func TestThinkingCompatStripsBothDirections(t *testing.T) {
 			}},
 			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
 				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "claude thought", Signature: anthropicSig}},
-				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "openai thought", Signature: responsesSig}},
+				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "api thought", Signature: apiSig}},
+				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "chatgpt thought", Signature: chatgptSig}},
 				{OfText: &anthropic.TextBlockParam{Text: "answer"}},
 			}},
 		}
@@ -39,14 +42,18 @@ func TestThinkingCompatStripsBothDirections(t *testing.T) {
 
 	msgs := mkMessages()
 
-	// Toward Responses: only the Responses signature survives.
+	// Toward Responses: both Responses modes survive the FAMILY filter, which
+	// says nothing about which dialect may resume them (the sender applies that
+	// with StripForeignResponsesThinking).
 	toResponses := llm.StripForeignThinking(msgs, true)
 	c.Require().Len(toResponses, 2, "messages")
-	c.Require().Len(toResponses[1].Content, 2, "assistant blocks toward Responses")
-	c.Eq(responsesSig, toResponses[1].Content[0].OfThinking.Signature, "kept signature")
-	c.Eq("answer", toResponses[1].Content[1].OfText.Text, "text block")
+	c.Require().Len(toResponses[1].Content, 3, "assistant blocks toward Responses")
+	c.Eq(apiSig, toResponses[1].Content[0].OfThinking.Signature, "kept api signature")
+	c.Eq(chatgptSig, toResponses[1].Content[1].OfThinking.Signature, "kept chatgpt signature")
+	c.Eq("answer", toResponses[1].Content[2].OfText.Text, "text block")
 
-	// Toward Anthropic: only the Anthropic signature survives.
+	// Toward Anthropic: only the Anthropic signature survives; NO Responses
+	// mode does.
 	toAnthropic := llm.StripForeignThinking(msgs, false)
 	c.Require().Len(toAnthropic, 2, "messages")
 	c.Require().Len(toAnthropic[1].Content, 2, "assistant blocks toward Anthropic")
@@ -54,9 +61,10 @@ func TestThinkingCompatStripsBothDirections(t *testing.T) {
 	c.Eq("answer", toAnthropic[1].Content[1].OfText.Text, "text block")
 
 	// The caller's slice and its blocks are untouched.
-	c.Require().Len(msgs[1].Content, 3, "caller's assistant blocks")
+	c.Require().Len(msgs[1].Content, 4, "caller's assistant blocks")
 	c.Eq(anthropicSig, msgs[1].Content[0].OfThinking.Signature, "caller block 0")
-	c.Eq(responsesSig, msgs[1].Content[1].OfThinking.Signature, "caller block 1")
+	c.Eq(apiSig, msgs[1].Content[1].OfThinking.Signature, "caller block 1")
+	c.Eq(chatgptSig, msgs[1].Content[2].OfThinking.Signature, "caller block 2")
 
 	// A message whose every block was foreign keeps an empty content slice: a
 	// caller tolerates it (llm.UserContent documents the shape), and dropping
@@ -72,9 +80,53 @@ func TestThinkingCompatStripsBothDirections(t *testing.T) {
 	c.Len(stripped[0].Content, 0, "content blocks")
 }
 
-// TestThinkingCompatSignatureShapes pins the signature format both senders agree
-// on: "<prefix><item id>:<blob>", with a blob that may be empty and an id that may
-// not.
+// TestStripForeignResponsesThinkingKeepsOnlyOwnMode pins the dialect rule one
+// level below the family split: the encrypted blob is bound to the backend that
+// produced it, so a Responses sender may resend only the mode it talks to. The
+// other Responses mode is dropped exactly as an Anthropic signature is.
+func TestStripForeignResponsesThinkingKeepsOnlyOwnMode(t *testing.T) {
+	const (
+		anthropicSig = "EqQBCgIYAhIM-sig-from-claude"
+		apiSig       = "openai-responses:api:rs_api:gAAAA-api-blob"
+		chatgptSig   = "openai-responses:chatgpt:rs_chat:gAAAA-chat-blob"
+	)
+	mkMessages := func() []anthropic.MessageParam {
+		return []anthropic.MessageParam{
+			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
+				{OfThinking: &anthropic.ThinkingBlockParam{Signature: anthropicSig}},
+				{OfThinking: &anthropic.ThinkingBlockParam{Signature: apiSig}},
+				{OfThinking: &anthropic.ThinkingBlockParam{Signature: chatgptSig}},
+				{OfText: &anthropic.TextBlockParam{Text: "answer"}},
+			}},
+		}
+	}
+
+	cases := []struct {
+		mode     llm.ResponsesSignatureMode
+		wantKept string
+	}{
+		{llm.ResponsesModeAPI, apiSig},
+		{llm.ResponsesModeChatGPT, chatgptSig},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			msgs := mkMessages()
+			got := llm.StripForeignResponsesThinking(msgs, tc.mode)
+			c.Require().Len(got, 1, "messages")
+			c.Require().Len(got[0].Content, 2, "assistant blocks toward %s", tc.mode)
+			c.Eq(tc.wantKept, got[0].Content[0].OfThinking.Signature, "kept signature")
+			c.Eq("answer", got[0].Content[1].OfText.Text, "text block")
+			// The caller's history is never mutated.
+			c.Require().Len(msgs[0].Content, 4, "caller's assistant blocks")
+		})
+	}
+}
+
+// TestThinkingCompatSignatureShapes pins the signature format every Responses
+// sender agrees on: "<prefix><mode>:<item id>:<blob>", with a blob that may be
+// empty and an id that may not. The mode names which backend minted the blob;
+// the older two-field shape, which did not, no longer parses.
 func TestThinkingCompatSignatureShapes(t *testing.T) {
 	// IsResponsesSignature is a prefix test and ParseResponsesSignature a shape
 	// test: a Responses-PREFIXED signature that does not parse still belongs to
@@ -83,25 +135,30 @@ func TestThinkingCompatSignatureShapes(t *testing.T) {
 	cases := []struct {
 		name       string
 		sig        string
+		wantMode   llm.ResponsesSignatureMode
 		wantOK     bool
 		wantPrefix bool
 		wantID     string
 		wantBlob   string
 	}{
-		{"well formed", "openai-responses:rs_1:gAAAA-blob", true, true, "rs_1", "gAAAA-blob"},
-		{"empty blob", "openai-responses:rs_1:", true, true, "rs_1", ""},
-		{"blob keeps its colons", "openai-responses:rs_1:a:b", true, true, "rs_1", "a:b"},
-		{"no prefix", "EqQBCgIYAhIM", false, false, "", ""},
-		{"prefix only", "openai-responses:", false, true, "", ""},
-		{"no separator", "openai-responses:rs_1", false, true, "", ""},
-		{"empty id", "openai-responses::blob", false, true, "", ""},
-		{"prefix of another name", "openai-lite:rs_1:blob", false, false, "", ""},
+		{"api mode", "openai-responses:api:rs_1:gAAAA-blob", llm.ResponsesModeAPI, true, true, "rs_1", "gAAAA-blob"},
+		{"chatgpt mode", "openai-responses:chatgpt:rs_1:gAAAA-blob", llm.ResponsesModeChatGPT, true, true, "rs_1", "gAAAA-blob"},
+		{"empty blob", "openai-responses:chatgpt:rs_1:", llm.ResponsesModeChatGPT, true, true, "rs_1", ""},
+		{"blob keeps its colons", "openai-responses:api:rs_1:a:b", llm.ResponsesModeAPI, true, true, "rs_1", "a:b"},
+		{"no prefix", "EqQBCgIYAhIM", "", false, false, "", ""},
+		{"prefix only", "openai-responses:", "", false, true, "", ""},
+		{"no separator after mode", "openai-responses:api", "", false, true, "", ""},
+		{"missing id", "openai-responses:api::blob", "", false, true, "", ""},
+		{"unknown mode", "openai-responses:other:rs_1:blob", "", false, true, "", ""},
+		{"old two-field shape", "openai-responses:rs_1:gAAAA-blob", "", false, true, "", ""},
+		{"prefix of another name", "openai-lite:rs_1:blob", "", false, false, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewCollecting(t)
-			id, blob, ok := llm.ParseResponsesSignature(tc.sig)
+			mode, id, blob, ok := llm.ParseResponsesSignature(tc.sig)
 			c.Eq(tc.wantOK, ok, "ok")
+			c.Eq(tc.wantMode, mode, "mode")
 			c.Eq(tc.wantID, id, "id")
 			c.Eq(tc.wantBlob, blob, "blob")
 			c.Eq(tc.wantPrefix, llm.IsResponsesSignature(tc.sig), "IsResponsesSignature")
@@ -109,4 +166,10 @@ func TestThinkingCompatSignatureShapes(t *testing.T) {
 	}
 	c := assert.NewCollecting(t)
 	c.Eq("openai-responses:", llm.ResponsesSignaturePrefix, "prefix")
+
+	// IsResponsesSignature is deliberately mode-blind: the Anthropic direction
+	// must drop every Responses signature, including one that does not parse.
+	c.True(llm.IsResponsesSignature("openai-responses:api:rs_1:blob"), "api mode")
+	c.True(llm.IsResponsesSignature("openai-responses:chatgpt:rs_1:blob"), "chatgpt mode")
+	c.True(llm.IsResponsesSignature("openai-responses:rs_1:blob"), "old two-field shape")
 }

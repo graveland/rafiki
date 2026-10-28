@@ -209,7 +209,19 @@ func (s *responsesSender) New(ctx context.Context, params anthropic.MessageNewPa
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("llm: openai-responses: decode response (status %d): %w: %.200s", resp.StatusCode, err, body)
 	}
-	return parseResponsesResponse(&wire)
+	return parseResponsesResponse(&wire, s.signatureMode())
+}
+
+// signatureMode is the Responses dialect this sender talks to, and therefore
+// the only mode of reasoning blob it may mint or resend. The encrypted content
+// is bound to the backend that produced it, so a failover between the two
+// Responses kinds has to drop the foreign blob exactly as a failover to
+// Anthropic does.
+func (s *responsesSender) signatureMode() ResponsesSignatureMode {
+	if s.chatGPT {
+		return ResponsesModeChatGPT
+	}
+	return ResponsesModeAPI
 }
 
 // newFromStream is ChatGPT mode's New: stream, accumulate, and hand back the
@@ -257,7 +269,7 @@ func (s *responsesSender) NewStreaming(ctx context.Context, params anthropic.Mes
 		// errorFor only returns nil for a 2xx; defensive.
 		return nil, &anthropic.Error{StatusCode: resp.StatusCode, Request: req, Response: resp}
 	}
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](newResponsesSSEDecoder(resp.Body, s.streamIdleTimeout, s.maxLineBytes), nil), nil
+	return ssestream.NewStream[anthropic.MessageStreamEventUnion](newResponsesSSEDecoder(resp.Body, s.streamIdleTimeout, s.maxLineBytes, s.signatureMode()), nil), nil
 }
 
 // post issues one request, retrying once after a 401 with a forced credential
@@ -492,10 +504,15 @@ func buildResponsesRequestBody(params anthropic.MessageNewParams, opts responses
 		req.Instructions = &system
 	}
 
-	// Foreign thinking has no meaning for this endpoint and a Responses
-	// reasoning id means nothing to Anthropic; StripForeignThinking is the one
-	// place that decides which is which.
-	for _, mp := range StripForeignThinking(params.Messages, true) {
+	// Foreign thinking has no meaning for this endpoint, and a Responses
+	// reasoning blob is only meaningful to the backend that produced it: a
+	// ChatGPT blob is not resumable on api.openai.com and vice versa. Keep this
+	// sender's own mode only; Anthropic signatures go too.
+	mode := ResponsesModeAPI
+	if opts.chatGPT {
+		mode = ResponsesModeChatGPT
+	}
+	for _, mp := range StripForeignResponsesThinking(params.Messages, mode) {
 		items, err := responsesMessageItems(&mp)
 		if err != nil {
 			return nil, err
@@ -739,12 +756,13 @@ func responsesMessageItems(mp *anthropic.MessageParam) ([]any, error) {
 			}
 			textParts = append(textParts, img)
 		case b.OfThinking != nil:
-			id, blob, ok := ParseResponsesSignature(b.OfThinking.Signature)
+			_, id, blob, ok := ParseResponsesSignature(b.OfThinking.Signature)
 			if !ok || blob == "" {
-				// Either not our reasoning (dropped by StripForeignThinking
-				// already, so this is a block that names no item) or a
-				// reasoning item whose encrypted content is empty: an empty blob
-				// carries nothing, so resending it only costs tokens.
+				// Not our reasoning (dropped by StripForeignResponsesThinking
+				// already, so this is a block that names no item: unparseable or
+				// the other Responses dialect), or a reasoning item whose encrypted
+				// content is empty: an empty blob carries nothing, so resending it
+				// only costs tokens.
 				continue
 			}
 			flush()

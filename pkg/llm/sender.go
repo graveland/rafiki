@@ -149,10 +149,10 @@ func (t headerCaptureTransport) RoundTrip(req *http.Request) (*http.Response, er
 type sdkSender struct{ client anthropic.Client }
 
 // New sends one Messages call with foreign thinking removed: a thinking block
-// whose signature was minted by another provider (the Responses sender writes
-// openai-responses:<id>:<blob>) is unverifiable here, and Anthropic rejects a
-// request carrying one. params is copied first: this is a filter on the way
-// out, never a mutation of the caller's history.
+// whose signature was minted by another provider (the Responses senders write
+// openai-responses:<mode>:<id>:<blob>) is unverifiable here, and Anthropic
+// rejects a request carrying one. params is copied first: this is a filter on
+// the way out, never a mutation of the caller's history.
 func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
 	params = withoutForeignThinking(params, false)
 	return s.client.Messages.New(ctx, params)

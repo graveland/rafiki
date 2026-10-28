@@ -184,7 +184,7 @@ func responsesGoldenParams(t *testing.T) anthropic.MessageNewParams {
 			}},
 			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
 				{OfThinking: &anthropic.ThinkingBlockParam{
-					Signature: responsesSignature(reasoningID, reasoningBlob),
+					Signature: responsesSignature(ResponsesModeChatGPT, reasoningID, reasoningBlob),
 				}},
 				{OfToolUse: &anthropic.ToolUseBlockParam{
 					ID:    "call_70b6c42145b04a3eac6712e9e23c36df",
@@ -383,9 +383,10 @@ func TestResponsesStreamTranslatesFixture(t *testing.T) {
 	c.Eq("resp_0cf3ceb209f8671c016ae18df08954819ba356b3c5b74b1d53", acc.ID, "message id")
 	c.Eq("gpt-6.1-sol", acc.Model, "message model")
 
-	// The thinking block carries the Responses signature: prefix, item id, blob.
-	id, blob, ok := ParseResponsesSignature(acc.Content[0].Signature)
+	// The thinking block carries the Responses signature: mode, item id, blob.
+	mode, id, blob, ok := ParseResponsesSignature(acc.Content[0].Signature)
 	c.True(ok, "thinking signature %q is not a Responses signature", acc.Content[0].Signature)
+	c.Eq(ResponsesModeAPI, mode, "signature mode (plain api.openai.com sender)")
 	c.Eq("rs_0cf3ceb209f8671c016ae18df1d0b8819baece265f64916983", id, "signature item id")
 	c.True(blob != "", "signature blob is empty")
 	c.True(IsResponsesSignature(acc.Content[0].Signature), "IsResponsesSignature")
@@ -438,7 +439,7 @@ func TestResponsesNoReasoningIsFine(t *testing.T) {
 // is where the endpoint expects it (before the call it led to).
 func TestResponsesReasoningRoundTrip(t *testing.T) {
 	c := assert.NewCollecting(t)
-	sig := responsesSignature("rs_abc", "gAAAA-big-blob")
+	sig := responsesSignature(ResponsesModeChatGPT, "rs_abc", "gAAAA-big-blob")
 	params := anthropic.MessageNewParams{
 		Model:     "gpt-6.1-sol",
 		MaxTokens: 64,
@@ -481,6 +482,116 @@ func TestResponsesReasoningRoundTrip(t *testing.T) {
 	c.Eq("weighing options", reasoning.Summary[0].Text, "summary text")
 }
 
+// TestResponsesSignatureRoundTripByteIdentical pins that the signature survives
+// a parse and a re-emit unchanged: the item id and the encrypted blob are opaque
+// to rafiki, so the only thing that may change between minting and resending is
+// nothing at all.
+func TestResponsesSignatureRoundTripByteIdentical(t *testing.T) {
+	for _, mode := range []ResponsesSignatureMode{ResponsesModeAPI, ResponsesModeChatGPT} {
+		t.Run(string(mode), func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			const (
+				id = "rs_1"
+				// A colon proves the blob is cut only once, past the id, and is
+				// then reproduced verbatim.
+				blob = "gAAAA:a-blob"
+			)
+			sig := responsesSignature(mode, id, blob)
+			gotMode, gotID, gotBlob, ok := ParseResponsesSignature(sig)
+			c.True(ok, "ParseResponsesSignature(%q)", sig)
+			c.Eq(mode, gotMode, "mode")
+			c.Eq(id, gotID, "id")
+			c.Eq(blob, gotBlob, "blob")
+			c.Eq(sig, responsesSignature(gotMode, gotID, gotBlob), "re-emitted signature")
+		})
+	}
+}
+
+// TestResponsesSendersResendOnlyTheirOwnDialect pins the design's cross-provider
+// rule one level below the family split: the encrypted blob is bound to the
+// backend that produced it, so a ChatGPT-mode sender drops an api-mode reasoning
+// item (and vice versa) instead of failing every turn after the first one.
+func TestResponsesSendersResendOnlyTheirOwnDialect(t *testing.T) {
+	const (
+		apiSig     = "openai-responses:api:rs_api:gAAAA-api-blob"
+		chatgptSig = "openai-responses:chatgpt:rs_chat:gAAAA-chat-blob"
+	)
+	params := anthropic.MessageNewParams{
+		Model:     "gpt-6.1-sol",
+		MaxTokens: 64,
+		Messages: []anthropic.MessageParam{
+			{Role: "user", Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "hi"}},
+			}},
+			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
+				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "api thought", Signature: apiSig}},
+				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "chatgpt thought", Signature: chatgptSig}},
+				{OfText: &anthropic.TextBlockParam{Text: "answer"}},
+			}},
+		},
+	}
+	cases := []struct {
+		name      string
+		chatGPT   bool
+		wantID    string
+		wantBlob  string
+		droppedID string
+	}{
+		{"chatgpt sender", true, "rs_chat", "gAAAA-chat-blob", "rs_api"},
+		{"plain api-key sender", false, "rs_api", "gAAAA-api-blob", "rs_chat"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			var (
+				mu  sync.Mutex
+				raw []byte
+			)
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				body := readRequestBody(t, r)
+				mu.Lock()
+				raw = body
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, responsesSSE(responsesCompleted(``)))
+			}
+			var s *responsesSender
+			if tc.chatGPT {
+				s = newChatGPTResponsesSenderForTest(t, StaticToken("k"), nil, handler)
+			} else {
+				s = newResponsesSenderForTest(t, "k", handler)
+			}
+			stream, err := s.NewStreaming(context.Background(), params)
+			c.Require().NoError(err, "NewStreaming")
+			stream.Close()
+
+			mu.Lock()
+			defer mu.Unlock()
+			var wire struct {
+				Input []struct {
+					Type             string `json:"type"`
+					ID               string `json:"id"`
+					EncryptedContent string `json:"encrypted_content"`
+				} `json:"input"`
+			}
+			c.Require().NoError(json.Unmarshal(raw, &wire), "unmarshal body")
+			var reasoning []string
+			var items []string
+			for _, it := range wire.Input {
+				items = append(items, it.Type)
+				if it.Type != "reasoning" {
+					continue
+				}
+				c.Eq(tc.wantID, it.ID, "resend item id")
+				c.Eq(tc.wantBlob, it.EncryptedContent, "resend encrypted_content")
+				reasoning = append(reasoning, it.ID)
+			}
+			c.Require().Len(reasoning, 1, "reasoning items (input items %v)", strings.Join(items, ","))
+			c.NotStrContains(string(raw), tc.droppedID, "the other dialect's item id must not be sent")
+		})
+	}
+}
+
 // TestResponsesDropsEmptyReasoning pins that a reasoning item whose encrypted
 // content is empty is not resent: an empty blob carries nothing, so resending it
 // only costs tokens.
@@ -494,7 +605,7 @@ func TestResponsesDropsEmptyReasoning(t *testing.T) {
 				{OfText: &anthropic.TextBlockParam{Text: "hi"}},
 			}},
 			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
-				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "kept in the transcript only", Signature: ResponsesSignaturePrefix + "rs_empty:"}},
+				{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "kept in the transcript only", Signature: ResponsesSignaturePrefix + "chatgpt:rs_empty:"}},
 				{OfText: &anthropic.TextBlockParam{Text: "answer"}},
 			}},
 		},
@@ -1221,7 +1332,7 @@ func TestSDKSenderDropsResponsesThinking(t *testing.T) {
 			{OfText: &anthropic.TextBlockParam{Text: "hi"}},
 		}},
 		{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
-			{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "foreign", Signature: responsesSignature("rs_1", "blob")}},
+			{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "foreign", Signature: responsesSignature(ResponsesModeAPI, "rs_1", "blob")}},
 			{OfText: &anthropic.TextBlockParam{Text: "answer"}},
 		}},
 	}
@@ -1270,7 +1381,7 @@ func TestResponsesNonStreamingResponse(t *testing.T) {
 				c.Require().Len(msg.Content, 3, "blocks")
 				c.Eq("thinking", string(msg.Content[0].Type), "block 0")
 				c.Eq("weighing", msg.Content[0].Thinking, "thinking text")
-				_, _, ok := ParseResponsesSignature(msg.Content[0].Signature)
+				_, _, _, ok := ParseResponsesSignature(msg.Content[0].Signature)
 				c.True(ok, "signature %q is not a Responses signature", msg.Content[0].Signature)
 				c.Eq("text", string(msg.Content[1].Type), "block 1")
 				c.Eq("calling get_weather", msg.Content[1].Text, "text")
@@ -1289,10 +1400,11 @@ func TestResponsesNonStreamingResponse(t *testing.T) {
 				c := assert.NewCollecting(t)
 				c.Require().Len(msg.Content, 2, "blocks")
 				c.Eq("thinking", string(msg.Content[0].Type), "block 0")
-				c.Eq(ResponsesSignaturePrefix+"rs_nosig:", msg.Content[0].Signature,
+				c.Eq(ResponsesSignaturePrefix+"api:rs_nosig:", msg.Content[0].Signature,
 					"a reasoning item with no encrypted_content must still be signed, with an empty blob")
-				id, blob, ok := ParseResponsesSignature(msg.Content[0].Signature)
+				mode, id, blob, ok := ParseResponsesSignature(msg.Content[0].Signature)
 				c.True(ok, "ParseResponsesSignature(%q)", msg.Content[0].Signature)
+				c.Eq(ResponsesModeAPI, mode, "signature mode")
 				c.Eq("rs_nosig", id, "item id")
 				c.Eq("", blob, "blob")
 				c.Eq("text", string(msg.Content[1].Type), "block 1")
@@ -1346,10 +1458,11 @@ func TestResponsesReasoningWithoutEncryptedContentStillSigned(t *testing.T) {
 	c.Require().Len(acc.Content, 1, "blocks")
 	c.Eq("thinking", string(acc.Content[0].Type), "block type")
 	sig := acc.Content[0].Signature
-	c.Eq(ResponsesSignaturePrefix+"rs_nosig:", sig, "an unsigned reasoning item still gets a signature with an empty blob")
+	c.Eq(ResponsesSignaturePrefix+"api:rs_nosig:", sig, "an unsigned reasoning item still gets a signature with an empty blob")
 	c.True(IsResponsesSignature(sig), "IsResponsesSignature")
-	id, blob, ok := ParseResponsesSignature(sig)
+	mode, id, blob, ok := ParseResponsesSignature(sig)
 	c.True(ok, "ParseResponsesSignature(%q)", sig)
+	c.Eq(ResponsesModeAPI, mode, "signature mode")
 	c.Eq("rs_nosig", id, "item id")
 	c.Eq("", blob, "blob")
 
@@ -1369,12 +1482,14 @@ func TestResponsesReasoningWithoutEncryptedContentStillSigned(t *testing.T) {
 	kept := towardAnthropic[1].Content[0]
 	c.True(kept.OfText != nil, "kept block is %v, want the text block", kept.GetType())
 
-	// Half 2: this sender drops it on resend (nothing to resume).
+	// Half 2: this sender drops it on resend (nothing to resume). The build
+	// options match the mode the signature was minted under, so the drop is the
+	// empty blob and not a dialect mismatch.
 	body, err := buildResponsesRequestBody(anthropic.MessageNewParams{
 		Model:     "gpt-6.1-sol",
 		MaxTokens: 64,
 		Messages:  history,
-	}, responsesBuildOptions{chatGPT: true, stream: true})
+	}, responsesBuildOptions{stream: true})
 	c.Require().NoError(err, "buildResponsesRequestBody")
 	var wire map[string]any
 	c.Require().NoError(json.Unmarshal(body, &wire), "unmarshal body")
