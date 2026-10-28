@@ -330,15 +330,22 @@ func credentialOwnerUserID(ownerUserID string, snap *childstore.Snapshot) string
 	return ownerUserID
 }
 
-// agentRuntimeOptions builds the RuntimeOptions for an agent-kind req on the
-// SPAWN path, where there is no stored snapshot yet and the child's owner IS the
-// authenticated identity, so it is also the only user whose per-user provider
+// spawnAgentRuntimeOptions builds the RuntimeOptions for an agent-kind req on
+// the SPAWN path, where there is no stored snapshot yet and the child's owner IS
+// the authenticated identity, so it is also the only user whose per-user provider
 // credential may be spent.
 //
-// Keep it that way: a resume or a recovery must call agentRuntimeOptionsFor with
-// credentialOwnerUserID, never this one, or the child's ATTRIBUTION owner (which
-// can come from the owner label) would silently become the BILLING owner.
-func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (fundi.RuntimeOptions, error) {
+// The name carries the constraint on purpose, because this is the shape that
+// already shipped an owner-isolation bug once: an entry point whose safety lives
+// only in a comment gets reused from a path the comment did not reach. A resume
+// or a recovery has no authenticated identity to work from, so it must NOT call
+// this: those paths go Controller.Resume -> resumeClaimed -> agentRunner and
+// Controller.RespawnChild -> agentRunner, and agentRunner is the one place that
+// calls agentRuntimeOptionsFor with credentialOwnerUserID(ownerUserID, snap),
+// which takes the owner from the STORED snapshot column and never from the owner
+// label. Start there, not here, or the child's ATTRIBUTION owner (which can come
+// from that label) silently becomes the BILLING owner.
+func (c *Controller) spawnAgentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (fundi.RuntimeOptions, error) {
 	return c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, ownerUserID)
 }
 
@@ -999,7 +1006,7 @@ func (f nativeSinkFunc) Publish(ev *rafikiv1.Event) { f(ev) }
 // owns one shared pool for every in-process child, passed in as pool, and
 // f.db's own default is sourced from the same env var the daemon used to open
 // that pool in the first place - so silently ignoring it is correct, not lossy.
-// agentRuntimeOptions rejects an explicit --db in req.ExtraArgs before this is
+// agentRuntimeOptionsFor rejects an explicit --db in req.ExtraArgs before this is
 // ever reached, so a caller who deliberately asked for a different database
 // learns it was refused rather than discovering later their DSN was ignored.
 func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor bool, prov *providers.Set) (fundi.RuntimeOptions, error) {
@@ -1047,7 +1054,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		NoBuiltinTools:       f.noBuiltinTools,
 		// The daemon's once-resolved routing spec, carried verbatim into
 		// RuntimeOptions.Routing (→ Config.Routing → llm.WithRouting).
-		// agentRuntimeOptions adds RuntimeOptions.RoutingSource, which overrides
+		// agentRuntimeOptionsFor adds RuntimeOptions.RoutingSource, which overrides
 		// this static value with the child's live stored spec.
 		Routing:            f.routing,
 		NoContextFiles:     f.noContextFiles,

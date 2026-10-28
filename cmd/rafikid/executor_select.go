@@ -428,7 +428,7 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 //
 // A top-level spawn (no parent) has nothing to inherit; on a daemon with an
 // executor pool it still gets an executor — an empty selector means "any live
-// executor that admits this child" (see agentRuntimeOptions), never "none".
+// executor that admits this child" (see agentRuntimeOptionsFor), never "none".
 func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.SpawnRequest {
 	if req.ParentChildID == "" {
 		return req
@@ -459,7 +459,7 @@ func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.Sp
 //     escape inheritExecutorGrant's doc comment describes — and loses the pin
 //     on resume/respawn, which rebuild the request from the snapshot;
 //  2. the workspace block, whose row fallback reads the request;
-//  3. nothing else, since agentRuntimeOptions keys off the pool, not the
+//  3. nothing else, since agentRuntimeOptionsFor keys off the pool, not the
 //     selector — but "the selector is the grant" is the invariant every other
 //     reader (limits, ListExecutorRows) is written against.
 //

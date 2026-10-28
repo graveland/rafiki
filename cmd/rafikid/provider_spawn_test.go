@@ -386,7 +386,7 @@ func TestOwnerModelFacts(t *testing.T) {
 // The child's context window comes from the owner's directory entry, and the
 // sender's facts come from the SAME parse: one store read for both.
 //
-// That second half is why this test goes through agentRuntimeOptions rather
+// That second half is why this test goes through spawnAgentRuntimeOptions rather
 // than the helpers: the spawn path is where the directory is read, and a second
 // read there would be a second parse of the same document.
 func TestContextWindowFromOwnerModels(t *testing.T) {
@@ -401,8 +401,8 @@ func TestContextWindowFromOwnerModels(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: chatGPTTestProvider + "/gpt-6.1-sol",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_owner_window", false, "brent", ownerA)
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_owner_window", false, "brent", ownerA)
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	// RuntimeOptions.ContextWindow outranks the catalog; its plumbing down to the
 	// engine is pinned by pkg/fundi's own end-to-end test, so the override
 	// landing here is the assertion this side owes.
@@ -421,8 +421,8 @@ func TestContextWindowFromOwnerModels(t *testing.T) {
 	// fundi reads as "ask the catalog".
 	unknown := req
 	unknown.Model = chatGPTTestProvider + "/gpt-unknown"
-	ro, err = c.agentRuntimeOptions(unknown, "c_owner_unknown", false, "brent", ownerA)
-	ck.Require().NoError(err, "agentRuntimeOptions(unknown model)")
+	ro, err = c.spawnAgentRuntimeOptions(unknown, "c_owner_unknown", false, "brent", ownerA)
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions(unknown model)")
 	ck.Eq(0, ro.ContextWindow, "ContextWindow for a slug the directory does not carry")
 }
 

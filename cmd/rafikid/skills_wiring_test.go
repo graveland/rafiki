@@ -21,7 +21,7 @@ import (
 
 // TestInlineSkillBodyServesTheSpawnTimeInventory pins the C1 seam end to end: a
 // controller with a real Postgres skills store, the InlineSkillBody closure
-// agentRuntimeOptions wires into the child, and the inventory it was spawned
+// spawnAgentRuntimeOptions wires into the child, and the inventory it was spawned
 // with. The closure answers from the rows that inventory named — by id, not by
 // re-looking-up a name — so a skill that appeared after the spawn (or one that
 // was disabled) is ErrNotFound rather than a body the model was never offered.
@@ -55,12 +55,12 @@ func TestInlineSkillBodyServesTheSpawnTimeInventory(t *testing.T) {
 
 	put(rec("before", "before body"))
 
-	ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
+	ro, err := c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}, "c_skill_seam", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 
 	// The spawn-time inventory names the row, and carries its id — the key the
 	// closure resolves with. The shared test DB also holds the embedded core
@@ -234,12 +234,12 @@ func TestSkillsWiringUsesResolve(t *testing.T) {
 
 	spawn := func() fundi.RuntimeOptions {
 		t.Helper()
-		ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
+		ro, err := c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
 			Kind:  protocol.KindFundi,
 			Cwd:   t.TempDir(),
 			Model: "anthropic/claude-sonnet-4-5",
 		}, "c_skill_resolve", false, "", owner)
-		ck.Require().NoError(err, "agentRuntimeOptions")
+		ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 		return ro
 	}
 	inventory := func(ro fundi.RuntimeOptions) []skills.SkillMeta {

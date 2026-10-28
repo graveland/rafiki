@@ -151,7 +151,7 @@ func TestResumedChildQuotaStatusReturnsCapturedData(t *testing.T) {
 
 	// The resume path: label only (the shape a restart leaves behind), resolved
 	// through the store, then bound into the reader exactly as
-	// agentRuntimeOptions does.
+	// spawnAgentRuntimeOptions does.
 	resolved := ctrl.resumeOwnerUserID(t.Context(), "c_resume_quota",
 		childstore.Snapshot{Labels: map[string]string{"owner": username}})
 	c.Require().Eq(u.ID, resolved, "resumeOwnerUserID")
@@ -333,8 +333,8 @@ func TestAgentRuntimeOptionsCarriesTheOwnerID(t *testing.T) {
 	ctrl.pool = openTestPool(t)
 
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-x"}
-	ro, err := ctrl.agentRuntimeOptions(req, "c_owned", false, "carol", "u_carol")
-	c.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := ctrl.spawnAgentRuntimeOptions(req, "c_owned", false, "carol", "u_carol")
+	c.Require().NoError(err, "spawnAgentRuntimeOptions")
 	c.Eq("u_carol", ro.OwnerUserID, "ro.OwnerUserID")
 	qr, ok := ro.Quota.(*quotaReader)
 	c.Require().False(!ok || qr == nil, "ro.Quota = %T (%v), want *quotaReader", ro.Quota, ro.Quota)
@@ -342,7 +342,7 @@ func TestAgentRuntimeOptionsCarriesTheOwnerID(t *testing.T) {
 
 	// The anonymous shape stays legal and unattributed: empty in, empty out,
 	// and quota_status answers "no data captured" rather than guessing.
-	ro2, err := ctrl.agentRuntimeOptions(req, "c_anon", false, "carol", "")
-	c.Require().NoError(err, "agentRuntimeOptions (anonymous)")
+	ro2, err := ctrl.spawnAgentRuntimeOptions(req, "c_anon", false, "carol", "")
+	c.Require().NoError(err, "spawnAgentRuntimeOptions (anonymous)")
 	c.Eq("", ro2.OwnerUserID, "ro.OwnerUserID")
 }

@@ -458,7 +458,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// database pool so per-session opt-in via --record-requests always works.
 	// RAFIKI_RECORD_REQUESTS=1 lifts the per-request gate on BOTH faces: the
 	// Claude Code proxy (MessagesProxy.rawTraceAll) and every daemon-managed
-	// fundi child (Controller.rawTraceAll, consulted in agentRuntimeOptions) —
+	// fundi child (Controller.rawTraceAll, consulted in agentRuntimeOptionsFor),
 	// every request is recorded unconditionally, regardless of header or
 	// --record-requests.
 	var rawTrace *rawtrace.RawTraceStore

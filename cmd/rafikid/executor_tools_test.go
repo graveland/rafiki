@@ -9,7 +9,7 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// executorToolsFor is what agentRuntimeOptions uses to filter the child's
+// executorToolsFor is what spawnAgentRuntimeOptions uses to filter the child's
 // routed set to what the chosen executor actually serves. It reads the pool's
 // last Describe; nil (not an empty list) means "unknown, don't filter".
 func TestExecutorToolsForReadsDescribe(t *testing.T) {

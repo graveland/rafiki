@@ -150,7 +150,7 @@ func TestAgentRunnerKind(t *testing.T) {
 // TestAgentRefIsDaemonControlled: it goes through the full agentRunner path
 // (not just buildAgentArgv/parseAgentFlags/toRuntimeOptions directly), so it
 // is the test that actually catches a dropped appendDaemonRef call inside
-// agentRunner/agentRuntimeOptions itself — the earlier tests call
+// agentRunner/spawnAgentRuntimeOptions itself, so the earlier tests call
 // appendDaemonRef directly and would keep passing even if agentRunner forgot
 // to call it.
 func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
@@ -162,8 +162,8 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 		Model:     "anthropic/claude-sonnet-4-5",
 		ExtraArgs: []string{"--ref", "spoofed-child-id"},
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_authoritative", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_authoritative", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq("c_authoritative", ro.Ref, "Ref")
 }
 
@@ -181,8 +181,8 @@ func TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_no_db", false, "brent", "user-id-123")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_no_db", false, "brent", "user-id-123")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Nil(ro.Quota, "Quota")
 }
 
@@ -201,8 +201,8 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		Model:  "anthropic/claude-sonnet-4-5",
 		APIKey: "sk-ant-test-key",
 	}
-	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(anthropicReq, "c_key_anthropic", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq(anthropicReq.APIKey, ro.APIKeyOverride, "APIKeyOverride")
 
 	openrouterReq := protocol.SpawnRequest{
@@ -211,8 +211,8 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		Model:  "openrouter/deepseek/deepseek-chat",
 		APIKey: "sk-or-test-key",
 	}
-	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err = c.spawnAgentRuntimeOptions(openrouterReq, "c_key_openrouter", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq(openrouterReq.APIKey, ro.APIKeyOverride, "APIKeyOverride")
 }
 
@@ -231,8 +231,8 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 		ExtraArgs: []string{"--model", "openrouter/deepseek/y"},
 		APIKey:    "sk-test-key",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_model_override_key", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_model_override_key", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq(req.APIKey, ro.APIKeyOverride, "APIKeyOverride")
 }
 
@@ -255,8 +255,8 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 			"http_proxy":        "http://example.invalid:8080",
 		},
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_env_overlay", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_env_overlay", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	// API key env vars are NOT forwarded to Env
 	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
 		_, ok := ro.Env[key]
@@ -267,8 +267,8 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 
 	// An explicit req.APIKey must be forwarded as APIKeyOverride.
 	req.APIKey = "explicit-key"
-	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err = c.spawnAgentRuntimeOptions(req, "c_env_overlay_explicit_wins", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq("explicit-key", ro.APIKeyOverride, "APIKeyOverride")
 }
 
@@ -303,8 +303,8 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 			Model:     "anthropic/claude-sonnet-4-5",
 			ExtraArgs: extraArgs,
 		}
-		_, err := c.agentRuntimeOptions(req, "c_explicit_db", false, "", "")
-		assert.NewCollecting(t).Error(err, "agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
+		_, err := c.spawnAgentRuntimeOptions(req, "c_explicit_db", false, "", "")
+		assert.NewCollecting(t).Error(err, "spawnAgentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
 	}
 }
 
@@ -312,7 +312,7 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 // agent child gets the controller's ONE shared model catalog in its runtime
 // options: without this wiring each child's llm.Client builds its own catalog
 // and fetches OpenRouter's whole model list itself, so 200 children meant 200
-// fetches and hundreds of MB. agentRuntimeOptions covers spawn, resume and
+// fetches and hundreds of MB. spawnAgentRuntimeOptions covers spawn, resume and
 // startup recovery, so one assertion here pins all three paths.
 func TestAgentRuntimeOptionsSharesControllerCatalog(t *testing.T) {
 	ck := assert.NewCollecting(t)
@@ -325,8 +325,8 @@ func TestAgentRuntimeOptionsSharesControllerCatalog(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_shared_catalog", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_shared_catalog", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq(cat, ro.Catalog, "ro.Catalog")
 }
 
@@ -345,8 +345,8 @@ func TestAgentRuntimeOptionsSharesProviderGuard(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_shared_guard", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_shared_guard", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.True(ro.ProviderGuard == g, "ro.ProviderGuard is not the controller's guard")
 }
 
@@ -364,8 +364,8 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	_, err := c.agentRuntimeOptions(req, "c_env_default_db", false, "", "")
-	assert.NewCollecting(t).NoError(err, "agentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error")
+	_, err := c.spawnAgentRuntimeOptions(req, "c_env_default_db", false, "", "")
+	assert.NewCollecting(t).NoError(err, "spawnAgentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error")
 }
 
 // TestArgvRoundTripsIntoRuntimeOptions is the anti-drop guard for this task.
@@ -560,7 +560,7 @@ func TestTopLevelSpawnWithAnUnmatchedSelectorIsRefused(t *testing.T) {
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
-	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	_, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.Error(err, "a top-level spawn whose selector matches nothing must be refused")
 	ck.StrContains(err.Error(), "env=nowhere", "the refusal must carry explainNoMatch's diagnostic, got: %v", err)
 }
@@ -577,7 +577,7 @@ func TestParentedSpawnWithNoLiveExecutorStartsUnbound(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.NoError(err, "a parented spawn must be allowed to start unbound")
 	ck.NotNil(ro.Executor, "Executor must still be non-nil, or MaterializeAll drops the "+
 		"whole workspace tier and the child silently runs tools in the daemon")
@@ -593,7 +593,7 @@ func TestAutoResumeWithNoLiveExecutorStartsUnbound(t *testing.T) {
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
-	ro, err := c.agentRuntimeOptions(req, "c1", true, "brent", "")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c1", true, "brent", "")
 	ck.NoError(err, "an auto-resumed spawn must be allowed to start unbound")
 	ck.NotNil(ro.Executor, "Executor must still be non-nil, or MaterializeAll drops the "+
 		"whole workspace tier and the child silently runs tools in the daemon")
@@ -610,7 +610,7 @@ func TestAnUnboundChildSaysSoInItsLabels(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
-	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	_, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.NoError(err)
 	wl, ok := c.takeWorkspaceLabels("c1")
 	ck.True(ok, "markUnbound must stash the 'unbound' state for Spawn to pick up")
@@ -640,7 +640,7 @@ func TestABoundChildGetsTheWorkspaceBlock(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=home"
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.NoError(err)
 	ck.NotNil(ro.Workspace, "a child that binds at spawn must get the workspace block; the "+
 		"system prompt is fixed for its lifetime")
@@ -659,7 +659,7 @@ func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.NoError(err)
 	ck.Nil(ro.Workspace, "with no live candidate, workspace block must be nil; a block "+
 		"naming the wrong machine is worse than none")
@@ -682,8 +682,8 @@ func TestAgentRuntimeOptionsWiresOnConsumed(t *testing.T) {
 	c.inbox = c.newInboxQueue(mem)
 
 	req := baseRequest()
-	ro, err := c.agentRuntimeOptions(req, "c_1", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_1", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Require().NotNil(ro.OnConsumed, "OnConsumed must be wired: without it every delivered message stays 'sent' forever")
 
 	ctx := context.Background()
@@ -715,8 +715,8 @@ func TestAgentRunnerGrantsMaxCostToTheEngine(t *testing.T) {
 		Model:   "anthropic/claude-sonnet-4-5",
 		MaxCost: &budget,
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_budgeted", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_budgeted", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq(12.50, ro.MaxCost, "ro.MaxCost")
 }
 
@@ -728,8 +728,8 @@ func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_unbudgeted", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_unbudgeted", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq(0, ro.MaxCost, "ro.MaxCost")
 }
 
@@ -749,8 +749,8 @@ func TestAgentRunnerCurrentMaxCostReadsLiveStoreValue(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_live_budget", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_live_budget", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Require().NotNil(ro.CurrentMaxCost, "CurrentMaxCost accessor is nil; a live budget raise can never reach the engine")
 	ck.Eq(5.00, ro.CurrentMaxCost(), "CurrentMaxCost()")
 

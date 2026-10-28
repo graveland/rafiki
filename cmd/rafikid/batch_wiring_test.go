@@ -85,7 +85,7 @@ func TestNewBatcherNeedsOpenRouterKey(t *testing.T) {
 
 // TestSetBatcherNilIsRefused pins the typed-nil trap: SetBatcher must leave
 // the controller's batcher field nil when handed a nil *batch.Batcher, so
-// agentRuntimeOptions' ro.Batcher ends up a true nil llm.Batcher. Storing the
+// spawnAgentRuntimeOptions' ro.Batcher ends up a true nil llm.Batcher. Storing the
 // typed nil would widen it into a NON-nil interface value and make pkg/llm
 // nil-panic on the first :batch send.
 func TestSetBatcherNilIsRefused(t *testing.T) {
@@ -95,29 +95,29 @@ func TestSetBatcherNilIsRefused(t *testing.T) {
 	c.SetBatcher(nil)
 	ck.Require().Nil(c.batcher, "SetBatcher(nil) stored a non-nil batcher")
 
-	ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
+	ro, err := c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}, "c_batch_nil", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Nil(ro.Batcher, "ro.Batcher")
 }
 
 // TestSetBatcherReachesRuntimeOptions proves the happy wiring end to end at
-// the unit level: SetBatcher(b) → agentRuntimeOptions → ro.Batcher != nil.
+// the unit level: SetBatcher(b) → spawnAgentRuntimeOptions → ro.Batcher != nil.
 func TestSetBatcherReachesRuntimeOptions(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	b := batch.New(nil, nil, batch.Options{}) // store-less batcher: nothing Parks in a unit test
 	c.SetBatcher(b)
 
-	ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
+	ro, err := c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}, "c_batch_ok", false, "", "")
-	ck.NoError(err, "agentRuntimeOptions")
+	ck.NoError(err, "spawnAgentRuntimeOptions")
 	ck.NotNil(ro.Batcher, "ro.Batcher = nil, want the SetBatcher'd batcher")
 }
 

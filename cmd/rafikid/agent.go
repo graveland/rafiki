@@ -210,7 +210,7 @@ func prefillFromFlag(s string) ([]protocol.PrefillRead, error) {
 
 // runAgentWithFlags is the post-flag-parsing body, shared by both the
 // cobra path (newFundiCmd.RunE) and the in-process daemon path
-// (agentRuntimeOptions → parseAgentFlags → toRuntimeOptions).
+// (agentRuntimeOptionsFor → parseAgentFlags → toRuntimeOptions).
 //
 // Exit codes: 0 or the reader's clean EOF/graceful-shutdown path, 1 for a
 // setup or run error, 2 for a thinking-budget validation error.

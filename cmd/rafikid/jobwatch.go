@@ -232,7 +232,7 @@ func (c *Controller) ackJobExit(executorID, handle string) {
 
 // noteBoundExecutor retains the child's boundExecutor, so a per-call consumer
 // (and the teardown that drops it) has a handle on the child's current binding.
-// agentRuntimeOptions creates it per child and otherwise hands it only to the
+// agentRuntimeOptionsFor creates it per child and otherwise hands it only to the
 // fundi runtime; without this retention the binding would be unreachable. A
 // resume replaces the entry (recovery rebuilds the binding).
 func (c *Controller) noteBoundExecutor(childID string, be *boundExecutor) {

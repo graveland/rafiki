@@ -66,7 +66,7 @@ func TestResumeRequestFromSnapshot_Pi(t *testing.T) {
 // TestResumeRequestFromSnapshot_CarriesRecordRequests guards against the bug
 // where a child spawned with --record-requests silently stopped capturing on
 // its very first resume: resumeRequestFromSnapshot rebuilt ~30 spawn fields
-// but dropped RecordRequests, and agentRuntimeOptions nils out ro.RawTrace
+// but dropped RecordRequests, and spawnAgentRuntimeOptions nils out ro.RawTrace
 // whenever req.RecordRequests is false (see agent_runtime.go). Covers both
 // values so a future change that hardcodes true cannot pass silently.
 func TestResumeRequestFromSnapshot_CarriesRecordRequests(t *testing.T) {

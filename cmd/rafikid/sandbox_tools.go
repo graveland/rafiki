@@ -50,7 +50,7 @@ var _ pathSyncBackend = (*pathSyncer)(nil)
 // passed as an argument is a tool argument, and a tool argument is produced by
 // an LLM that can be prompt-injected into naming somebody else. The identity is
 // the owner's NON-admin one, exactly as the fundi recall binding builds it
-// (agentRuntimeOptions) and the MCP/Connect faces resolve it (recallOwner): a
+// (agentRuntimeOptionsFor) and the MCP/Connect faces resolve it (recallOwner): a
 // child of an admin can never reach daemon-wide sandbox state.
 //
 // The two faces change together: this binding must grant a child the same
@@ -102,7 +102,7 @@ func pathSyncOf(c *Controller) pathSyncBackend {
 
 // owner is the identity every verb passes to the Controller: the owner's user id
 // with NO admin bit. Non-admin is structural — the literal never sets IsAdmin —
-// the same shape agentRuntimeOptions uses for the recall binding.
+// the same shape agentRuntimeOptionsFor uses for the recall binding.
 func (m *controllerSandboxes) owner() users.Identity {
 	return users.Identity{UserID: m.ownerUserID}
 }

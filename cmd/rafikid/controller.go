@@ -184,7 +184,7 @@ type Controller struct {
 	// capture writes to (the debug raw_http_request hypertable). Created at
 	// daemon startup whenever a DB pool exists, independent of
 	// RAFIKI_RECORD_REQUESTS — whether a given spawn actually records is
-	// req.RecordRequests OR rawTraceAll, decided in agentRuntimeOptions.
+	// req.RecordRequests OR rawTraceAll, decided in agentRuntimeOptionsFor.
 	// Handed to agent children via fundi.RuntimeOptions.RawTrace.
 	rawTrace *rawtrace.RawTraceStore
 
@@ -242,7 +242,7 @@ type Controller struct {
 
 	// providerGuard is the daemon's ONE provider cache guard (operator bans
 	// plus cache ejections), set once at startup via SetProviderGuard — the
-	// same instance the proxy face routes through. agentRuntimeOptions hands
+	// same instance the proxy face routes through. agentRuntimeOptionsFor hands
 	// it to every in-process child; nil means their requests carry no
 	// provider.ignore at all.
 	providerGuard *routing.ProviderGuard
@@ -717,7 +717,7 @@ func (c *Controller) SetRoutePolicy(p *routepolicy.Policy) {
 }
 
 // SetBatcher records the daemon's parked-call batcher, consulted by
-// agentRuntimeOptions (ro.Batcher) so every in-process child's llm.Client can
+// agentRuntimeOptionsFor (ro.Batcher) so every in-process child's llm.Client can
 // park :batch first calls. Called once at startup, before the socket accepts
 // anything — mirrors SetCatalog. Passing nil (the no-batcher case) leaves the
 // controller with none, which is fine; passing a nil *batch.Batcher is REFUSED
@@ -734,7 +734,7 @@ func (c *Controller) SetBatcher(b *batch.Batcher) {
 }
 
 // SetProviderGuard records the daemon's provider cache guard, consulted by
-// agentRuntimeOptions (ro.ProviderGuard). Called once at startup, before the
+// agentRuntimeOptionsFor (ro.ProviderGuard). Called once at startup, before the
 // socket accepts anything — mirrors SetCatalog.
 func (c *Controller) SetProviderGuard(g *routing.ProviderGuard) {
 	c.providerGuard = g
@@ -1995,7 +1995,7 @@ func (c *Controller) checkLoginProviderUsable(ctx context.Context, req protocol.
 	}
 	p, _, err := set.Split(req.Model)
 	if err != nil {
-		// An unresolvable model is another check's business (agentRuntimeOptions
+		// An unresolvable model is another check's business (agentRuntimeOptionsFor
 		// reports it), and nothing is reachable from it.
 		return nil
 	}
@@ -2271,7 +2271,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	childID := newChildID()
 
 	// A spawn block: create the sandbox NOW, before the runtime is built.
-	// agentRuntimeOptions eagerly binds below, and a correct bind needs the
+	// spawnAgentRuntimeOptions eagerly binds below, and a correct bind needs the
 	// sandbox row in place; the row itself records every access-gating fact the
 	// bind relies on. A failure REFUSES the spawn — a sandboxed child must never
 	// start toolless or native.
@@ -2434,7 +2434,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		initLabels[childstore.LabelParent] = parentLabel
 		initLabels[childstore.LabelRoot] = rootLabel
 	}
-	// Merge the binding agentRuntimeOptions made before this record existed.
+	// Merge the binding spawnAgentRuntimeOptions made before this record existed.
 	// A binding made AFTER it exists goes straight to the store — see NoteBinding.
 	//
 	// Guarded on non-empty rather than written unconditionally: a claude
@@ -3061,7 +3061,7 @@ func (s *childClaimSet) isClaimed(id string) bool {
 // an older daemon wrote, and refusing a resume over attribution would trade a
 // working child for a bookkeeping field. The child continues unattributed,
 // exactly the shape an anonymous spawn has always been. The same resolution
-// feeds quota_status (agentRuntimeOptions), which is why a resumed child's
+// feeds quota_status (agentRuntimeOptionsFor), which is why a resumed child's
 // quota_status returns real data after a daemon restart instead of always
 // reporting "no data captured".
 func (c *Controller) resumeOwnerUserID(ctx context.Context, childID string, snap childstore.Snapshot) string {

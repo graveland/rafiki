@@ -53,8 +53,8 @@ func TestAgentRuntimeOptionsNoExecutorLeavesProjectContextNil(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_noexec", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_noexec", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Nil(ro.Executor, "Executor should be nil for a child with no executor")
 	if ro.ProjectContext != nil {
 		t.Errorf("ProjectContext = %v, want nil for a child with no executor", *ro.ProjectContext)

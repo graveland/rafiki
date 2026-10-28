@@ -154,13 +154,13 @@ func TestSandboxToolBindingWiredIntoRuntimeOptions(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 
-	ro, err := ctrl.agentRuntimeOptions(req, "c_kid", false, "brent", "u-owner")
-	ck.Require().NoError(err, "agentRuntimeOptions without a sandbox store")
+	ro, err := ctrl.spawnAgentRuntimeOptions(req, "c_kid", false, "brent", "u-owner")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions without a sandbox store")
 	ck.Nil(ro.Sandboxes, "a daemon with no sandbox table declines the sandbox tools")
 
 	ctrl.sandboxStore = newFakeSandboxStore()
-	ro, err = ctrl.agentRuntimeOptions(req, "c_kid", false, "brent", "u-owner")
-	ck.Require().NoError(err, "agentRuntimeOptions with a sandbox store")
+	ro, err = ctrl.spawnAgentRuntimeOptions(req, "c_kid", false, "brent", "u-owner")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions with a sandbox store")
 	ck.NotNil(ro.Sandboxes, "a daemon with a sandbox table binds the sandbox tools")
 }
 

@@ -179,7 +179,7 @@ func (c *Controller) takeWorkspaceLabels(childID string) (workspaceLabels, bool)
 // markUnbound records that a child started without an executor, so rafiki
 // list/get can show why its tools are failing. Written through the same
 // store-then-stash path NoteBinding uses, because the child record may not
-// exist yet when the eager bind fails inside agentRuntimeOptions.
+// exist yet when the eager bind fails inside agentRuntimeOptionsFor.
 func (c *Controller) markUnbound(childID string) {
 	_, err := c.st.SetLabels(childID, map[string]string{
 		"rafiki/executor-state": "unbound",

@@ -105,7 +105,7 @@ func TestRawTrace_InsertNilStore(t *testing.T) {
 
 // TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag pins the actual bug:
 // RAFIKI_RECORD_REQUESTS=1 (Controller.rawTraceAll) was documented as lifting
-// capture for "every session... regardless of header", but agentRuntimeOptions
+// capture for "every session... regardless of header", but spawnAgentRuntimeOptions
 // only ever consulted req.RecordRequests — a native fundi child spawned
 // without --record-requests recorded nothing even with the daemon-wide switch
 // on. No DB is needed: rawTrace only needs to be a non-nil sentinel, since
@@ -120,8 +120,8 @@ func TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag(t *testing.T) {
 		Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5",
 		// RecordRequests deliberately left false: rawTraceAll must still win.
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_rawtraceall", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_rawtraceall", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.NotNil(ro.RawTrace, "RawTrace = nil, want non-nil: RAFIKI_RECORD_REQUESTS=1 must capture every spawn, not just ones passing --record-requests")
 }
 
@@ -136,7 +136,7 @@ func TestAgentRuntimeOptionsRawTraceOffByDefault(t *testing.T) {
 	req := protocol.SpawnRequest{
 		Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_rawtraceoff", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c_rawtraceoff", false, "", "")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Nil(ro.RawTrace, "RawTrace != nil, want nil: neither --record-requests nor RAFIKI_RECORD_REQUESTS is set")
 }

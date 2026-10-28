@@ -309,21 +309,21 @@ func TestAgentRuntimeOptionsCarriesRouting(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 
-	ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
+	ro, err := c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
 		Kind:    protocol.KindFundi,
 		Cwd:     t.TempDir(),
 		Model:   "openrouter/z-ai/glm-5.3-flash",
 		Routing: "sort=price,nodata",
 	}, "c_routing", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions")
 	ck.Eq("sort=price,nodata", ro.Routing, "RuntimeOptions.Routing must carry the resolved spec verbatim")
 
-	ro, err = c.agentRuntimeOptions(protocol.SpawnRequest{
+	ro, err = c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "openrouter/z-ai/glm-5.3-flash",
 	}, "c_no_routing", false, "", "")
-	ck.Require().NoError(err, "agentRuntimeOptions (spec-less)")
+	ck.Require().NoError(err, "spawnAgentRuntimeOptions (spec-less)")
 	ck.Eq("", ro.Routing, "a spec-less request must leave RuntimeOptions.Routing empty")
 }
 

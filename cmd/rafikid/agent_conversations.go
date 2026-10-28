@@ -36,7 +36,7 @@ func newControllerConversationReader(c *Controller, ownerUserID string) *convers
 // newMCPConversationReader binds the authenticated MCP caller. Unlike the
 // fundi-runtime constructor above, this one DOES grant ScopeAll for an admin
 // owner -- the MCP caller's own IsAdmin bit is directly available here,
-// where a fundi child's is not (agentRuntimeOptions only resolves an owner
+// where a fundi child's is not (agentRuntimeOptionsFor only resolves an owner
 // user id, not that user's admin status).
 func newMCPConversationReader(ctrl *Controller, owner users.Identity) *conversationReader {
 	switch {

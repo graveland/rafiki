@@ -141,7 +141,7 @@ func (b *controllerBinder) IsLive(executorID string) bool {
 // The childstore is the authority, not c.wsLabels: handleChildExit releases the
 // workspace by snap.Labels, and HandleExecutorLost finds affected children by
 // them. c.wsLabels is only a BRIDGE for the window before Spawn has inserted
-// the record -- an eager bind happens inside agentRuntimeOptions, which runs
+// the record -- an eager bind happens inside spawnAgentRuntimeOptions, which runs
 // before the session is stored -- and Spawn consumes it exactly once.
 func (b *controllerBinder) NoteBinding(childID, executorID, workspaceID string) {
 	mode := "pinned"

@@ -155,7 +155,7 @@ func TestEmptySelectorOnAPoolDaemonStillGetsABoundExecutor(t *testing.T) {
 	parentID := seedChild(t, c)
 	req := baseRequest()
 	req.ParentChildID = parentID // parented: tolerates the fake pool's failed provision
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	ro, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.NoError(err, "an empty selector on a pool daemon must not mean no executor")
 	ck.NotNil(ro.Executor, "Executor is nil: MaterializeAll will drop the whole workspace tier and the child silently runs without filesystem tools")
 	// hasExecutor is threaded from the pool, not the selector, so the
@@ -174,7 +174,7 @@ func TestTopLevelSpawnWithNoSelectorAndNoLiveExecutorIsRefused(t *testing.T) {
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest() // top-level, no selector
-	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
+	_, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.Error(err, "a top-level spawn with no executor available must be refused, not started toolless")
 	ck.StrContains(err.Error(), "live executor", "the refusal must carry explainNoMatch's diagnostic: %v", err)
 }

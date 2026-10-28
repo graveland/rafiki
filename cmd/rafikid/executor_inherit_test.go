@@ -73,10 +73,10 @@ func TestTopLevelSpawnWithNoSelectorStaysLocal(t *testing.T) {
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{}) // no ParentChildID
 	assert.NewAborting(t).Eq("", req.ExecutorSelector, "a top-level spawn has nothing to inherit; got")
 
-	// With no selector and no pool, agentRuntimeOptions leaves exec nil.
+	// With no selector and no pool, spawnAgentRuntimeOptions leaves exec nil.
 	// The old resolveExecutor returned (nil, nil) for this case; the new
 	// path does the same through the 'if req.ExecutorSelector != "" && c.execPool != nil'
-	// guard in agentRuntimeOptions.
+	// guard in spawnAgentRuntimeOptions.
 }
 
 // Inheritance is a floor, not an override. A child that names its own selector
