@@ -790,3 +790,229 @@ func TestFundiAssistantNodeCarriesProviderMessageID(t *testing.T) {
 	ck.Eq("msg_upstream_1", *assistant, "assistant provider_message_id")
 	ck.True(user == nil, "a user row must carry no provider_message_id, got %v", user)
 }
+
+// anchorTailTrim is the deterministic trim policy the descriptor tests use: it
+// keeps the anchor plus the last two messages, the shape trimDropped
+// recognises. The byte-budgeted default policy would depend on fixture sizes.
+type anchorTailTrim struct{}
+
+func (anchorTailTrim) Trim(msgs []Message, _ int) ([]Message, bool) {
+	if len(msgs) <= 3 {
+		return msgs, false
+	}
+	return []Message{msgs[0], msgs[len(msgs)-2], msgs[len(msgs)-1]}, true
+}
+
+// TestTurnRecordsRequestHeadAndNoRequest pins a turn row's shape after one
+// send: it names the stored row the request ended at and stores no body of its
+// own, and it carries no trim range when nothing was dropped.
+func TestTurnRecordsRequestHeadAndNoRequest(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"),
+	}}
+	c := testClient(t, pool, sender)
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"))
+	ck.Require().NoError(err)
+
+	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// At send time the working path was the single user row Send appended (the
+	// assistant row lands after), so that row is the head the turn must name.
+	var wantHead string
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT id::text FROM conversations.conversation_message
+		WHERE conversation_id=$1::uuid AND ordinal=0`, conv.ID).Scan(&wantHead), "read the user row id")
+
+	var head *string
+	var hasRequest bool
+	var from, to *int
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT request_head_id::text, request IS NOT NULL,
+		request_trim_from, request_trim_to FROM conversations.conversation_turn
+		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&head, &hasRequest, &from, &to), "read the turn row")
+	ck.Require().NotNil(head, "the turn names no request head")
+	ck.Eq(wantHead, *head, "request_head_id")
+	ck.False(hasRequest, "the turn still stores the request body")
+	ck.True(from == nil && to == nil, "an untrimmed turn recorded a trim range: from=%v to=%v", from, to)
+}
+
+// TestRequestDescriptorTrimRetryRecordsDroppedRange pins that a trimmed retry
+// records the range it dropped, in path positions, while the attempt before it
+// records none. Both attempts name the same head: a trim changes what was sent,
+// never which rows the conversation holds.
+func TestRequestDescriptorTrimRetryRecordsDroppedRange(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondErr(promptTooLargeErr()),
+		respondText("after trim"),
+	}}
+	c := testClient(t, pool, sender)
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"),
+		WithTrimPolicy(anchorTailTrim{}))
+	ck.Require().NoError(err)
+
+	// Six seeded rows alternating user/assistant, then Send appends ordinal 6:
+	// no consecutive user rows, so every wire message is exactly one row.
+	roles := []anthropic.MessageParamRole{
+		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
+		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
+		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
+	}
+	for i, role := range roles {
+		_, aerr := store.NewMessages(pool).AppendNode(ctx, conv.ID, anthropic.MessageParam{
+			Role:    role,
+			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("seeded %d", i))},
+		}, nil, "")
+		ck.Require().NoError(aerr, "seed row %d", i)
+	}
+	if _, err := conv.Send(ctx, UserText("question")); err != nil {
+		t.Fatalf("Send with trim-retry: %v", err)
+	}
+	ck.Require().Len(sender.lastReq, 2, "attempts")
+
+	var wantHead string
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT id::text FROM conversations.conversation_message
+		WHERE conversation_id=$1::uuid AND ordinal=6`, conv.ID).Scan(&wantHead), "read the tail user row id")
+
+	type turnRow struct {
+		head *string
+		from *int
+		to   *int
+	}
+	var got []turnRow
+	rows, err := pool.Query(ctx, `SELECT request_head_id::text, request_trim_from, request_trim_to
+		FROM conversations.conversation_turn WHERE conversation_id=$1::uuid ORDER BY created_at, id`, conv.ID)
+	ck.Require().NoError(err, "read turn rows")
+	for rows.Next() {
+		var r turnRow
+		ck.Require().NoError(rows.Scan(&r.head, &r.from, &r.to))
+		got = append(got, r)
+	}
+	rows.Close()
+	ck.Require().Len(got, 2, "turn rows (each attempt is its own turn)")
+
+	ck.Require().NotNil(got[0].head, "first attempt names no head")
+	ck.Eq(wantHead, *got[0].head, "first attempt head")
+	ck.True(got[0].from == nil && got[0].to == nil,
+		"the untrimmed attempt recorded a trim range: from=%v to=%v", got[0].from, got[0].to)
+
+	// The anchor (row 0) plus rows 5 and 6 were kept, so rows 1..4 were dropped:
+	// anchorEnd 1, one past the last dropped position 5.
+	ck.Require().NotNil(got[1].from, "the trimmed attempt recorded no trim range")
+	ck.Require().NotNil(got[1].to, "the trimmed attempt recorded no trim end")
+	ck.Eq(1, *got[1].from, "request_trim_from")
+	ck.Eq(5, *got[1].to, "request_trim_to")
+	ck.Require().NotNil(got[1].head, "the trimmed attempt names no head")
+	ck.Eq(wantHead, *got[1].head, "the trimmed attempt head")
+}
+
+// TestCompactionOverflowRecordsNewHead pins the overflow net's descriptor: the
+// retry after a compaction names the head the compaction moved to (a different
+// node from the pre-compaction attempt) and records no trim range, because
+// compaction is not a trim.
+func TestCompactionOverflowRecordsNewHead(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondErr(promptTooLargeErr()),
+		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
+		respondUsage(10, 5, 0, 0, "real"),
+	}}
+	c := testClient(t, pool, sender)
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"),
+		WithCompaction(CompactionPolicy{})) // unknown window: overflow only
+	ck.Require().NoError(err)
+
+	roles := []anthropic.MessageParamRole{
+		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
+		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
+	}
+	for i, role := range roles {
+		_, aerr := store.NewMessages(pool).AppendNode(ctx, conv.ID, anthropic.MessageParam{
+			Role:    role,
+			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("seeded %d", i))},
+		}, nil, "")
+		ck.Require().NoError(aerr, "seed row %d", i)
+	}
+
+	resp, err := conv.Continue(ctx)
+	ck.Require().NoError(err, "the retried call after compaction must succeed")
+	ck.Eq("real", resp.Content[0].Text, "response")
+
+	type turnRow struct {
+		head   *string
+		source *string
+		from   *int
+		to     *int
+	}
+	var got []turnRow
+	rows, err := pool.Query(ctx, `SELECT request_head_id::text, source, request_trim_from, request_trim_to
+		FROM conversations.conversation_turn WHERE conversation_id=$1::uuid ORDER BY created_at, id`, conv.ID)
+	ck.Require().NoError(err, "read turn rows")
+	for rows.Next() {
+		var r turnRow
+		ck.Require().NoError(rows.Scan(&r.head, &r.source, &r.from, &r.to))
+		got = append(got, r)
+	}
+	rows.Close()
+	// The too-large attempt, the summary call, then the retry.
+	ck.Require().Len(got, 3, "turn rows (attempt, summary, retry)")
+	ck.Require().NotNil(got[2].source, "the retry turn has no source")
+	ck.Eq("compaction", *got[1].source, "the middle turn is the summary call")
+
+	// The post-compaction head is the last tail node the compaction wrote.
+	var postHead string
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT id::text FROM conversations.conversation_message
+		WHERE conversation_id=$1::uuid AND kind='compaction_tail' ORDER BY ordinal DESC LIMIT 1`,
+		conv.ID).Scan(&postHead), "read the post-compaction head")
+
+	ck.Require().NotNil(got[0].head, "the pre-compaction attempt names no head")
+	ck.Require().NotNil(got[1].head, "the summary call names no head")
+	ck.Require().NotNil(got[2].head, "the retry names no head")
+	ck.Eq(*got[0].head, *got[1].head, "the summary call covers the pre-compaction rows")
+	ck.Eq(postHead, *got[2].head, "the retry's head after compaction")
+	ab := assert.NewAborting(t)
+	ab.NotEq(*got[0].head, *got[2].head, "compaction moved the head but the retry kept the old one")
+	ck.True(got[2].from == nil && got[2].to == nil,
+		"the post-compaction retry recorded a trim range: from=%v to=%v", got[2].from, got[2].to)
+}
+
+// TestRequestDescriptorInMemoryConversationHasNoHead pins the in-memory rule:
+// an in-memory row id is synthetic, never a conversation_message node, so it
+// must stay out of the uuid column. The client's capture store is concrete (no
+// stub seam), so this asserts at the head-resolution seam the send consults.
+func TestRequestDescriptorInMemoryConversationHasNoHead(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"),
+	}}
+	cl := memClient(t, sender)
+	ck := assert.NewCollecting(t)
+	conv, err := cl.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"))
+	ck.Require().NoError(err)
+	ck.Require().Nil(cl.messages, "a store-less client must have no message store")
+
+	conv.mem = append(conv.mem, store.Message{
+		ID:      "mem-row-id",
+		Ordinal: 0,
+		Param:   anthropic.NewUserMessage(anthropic.NewTextBlock("hi")),
+	})
+	ck.Eq("", conv.requestHeadID(conv.mem), "an in-memory history must resolve no head")
+
+	if _, err := conv.Continue(ctx); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	ck.Eq("", conv.requestHeadID(conv.mem), "the head stays empty after a send")
+	c.True(conv.mem[len(conv.mem)-1].ID != "", "the appended reply has no id of its own")
+}

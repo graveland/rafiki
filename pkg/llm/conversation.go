@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -476,22 +475,24 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	// The reactive overflow net: if the API rejects the request as too large and
 	// compaction is available, summarise once and retry on the compacted history
 	// before falling back to the destructive trim policy.
-	var onOverflow func() (int, []Message, bool)
+	var onOverflow func() (int, []Message, []int, string, bool)
 	if conv.cfg.compaction != nil && len(history) >= minCompactableRows {
-		onOverflow = func() (int, []Message, bool) {
+		onOverflow = func() (int, []Message, []int, string, bool) {
 			ok, err := conv.compact(ctx, span, history, scfg, "overflow", "")
 			if err != nil || !ok {
-				return 0, nil, false
+				return 0, nil, nil, "", false
 			}
 			h, err := conv.loadHistory(ctx)
 			if err != nil {
-				return 0, nil, false
+				return 0, nil, nil, "", false
 			}
-			return nextOrdinal(h), mergeForRequest(h), true
+			msgs, rowStart := mergeForRequestRows(h)
+			return nextOrdinal(h), msgs, rowStart, conv.requestHeadID(h), true
 		}
 	}
 
-	resp, _, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), mergeForRequest(history), scfg, onOverflow)
+	msgs, rowStart := mergeForRequestRows(history)
+	resp, _, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), msgs, rowStart, conv.requestHeadID(history), scfg, onOverflow)
 	if err != nil {
 		return nil, err
 	}
@@ -633,26 +634,11 @@ func randomID() string {
 // user message the API requires after an assistant tool_use turn). Block
 // order within the merge follows row ordinal order.
 //
-// Replaces tool_use blocks with empty names with explanatory text blocks —
-// a model hallucination that, if forwarded as-is, causes a 400 rejection
-// ("tool_calls[0].function.name must be a non-empty string"). The matching
-// tool_result blocks (is_error feedback from the agent loop) are kept so the
-// model sees the error and can self-correct.
+// The merge rules live in mergeForRequestRows, which also reports where each
+// wire message began; a request that does not need the row mapping calls this.
 func mergeForRequest(history []store.Message) []Message {
-	out := make([]Message, 0, len(history))
-	for _, m := range history {
-		m.Param.Content = replaceEmptyToolUses(m.Param)
-		if m.Param.Role == anthropic.MessageParamRoleUser && len(out) > 0 &&
-			out[len(out)-1].Role == anthropic.MessageParamRoleUser {
-			last := &out[len(out)-1]
-			// Clone before appending: appending into a stored param's backing
-			// array would mutate history the caller may still hold.
-			last.Content = append(slices.Clone(last.Content), m.Param.Content...)
-			continue
-		}
-		out = append(out, m.Param)
-	}
-	return out
+	msgs, _ := mergeForRequestRows(history)
+	return msgs
 }
 
 // replaceEmptyToolUses replaces assistant tool_use blocks with empty names
@@ -691,18 +677,44 @@ func replaceEmptyToolUses(param anthropic.MessageParam) []anthropic.ContentBlock
 // so the cached prefix survives every retry (prefix_hash equality across
 // attempts is the regression test).
 //
+// rowStart maps reqMsgs to history positions and headID names the row the
+// request ends at; together they let each attempt record WHICH rows it sent
+// rather than their content (the rows are already stored). A trim is recorded
+// as the contiguous range it dropped, which always begins where the anchor
+// message ends — anchorEnd is read once, from the untrimmed list, because
+// repeated trims drop a growing range from that same position.
+//
 // onOverflow, when non-nil, is given ONE chance (before any trim) to compact the
-// conversation and hand back a fresh turn ordinal and message list; it returns
-// ok=false when it could not (too few rows, a failed summary call). The returned
-// ordinal only labels the capture: the reply is appended under the head, which
-// the compaction already moved.
-func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ordinal int, reqMsgs []Message, scfg sendConfig, onOverflow func() (int, []Message, bool)) (*anthropic.Message, int, error) {
+// conversation and hand back a fresh turn ordinal, message list, row mapping and
+// head; it returns ok=false when it could not (too few rows, a failed summary
+// call). The returned ordinal only labels the capture: the reply is appended
+// under the head, which the compaction already moved.
+func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ordinal int,
+	reqMsgs []Message, rowStart []int, headID string, scfg sendConfig,
+	onOverflow func() (ordinal int, msgs []Message, rowStart []int, headID string, ok bool)) (*anthropic.Message, int, error) {
 	meta := conv.sendMeta(ordinal, scfg)
 	trimAttempt := 0
 	compacted := false
+	var anchorEnd int
+	haveAnchor := len(rowStart) > 1
+	if haveAnchor {
+		anchorEnd = rowStart[1]
+	}
+	// dropTo is the history position one past the last dropped message; it is
+	// meaningless unless haveTrim is set.
+	var dropTo int
+	haveTrim := false
 	for try := 0; try < 4; try++ {
+		// Fresh pointers per attempt: a retry must not alias the previous
+		// attempt's range, which InsertTurnIntent keeps.
+		attemptMeta := meta
+		attemptMeta.RequestHeadID = headID
+		if haveAnchor && haveTrim {
+			from, to := anchorEnd, dropTo
+			attemptMeta.TrimFrom, attemptMeta.TrimTo = &from, &to
+		}
 		params := conv.assemble(reqMsgs, scfg)
-		resp, delivered, err := conv.sendAttempt(ctx, meta, params, scfg.streamHandler)
+		resp, delivered, err := conv.sendAttempt(ctx, attemptMeta, params, scfg.streamHandler)
 		if err == nil {
 			return resp, ordinal, nil
 		}
@@ -721,12 +733,19 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		}
 		if !compacted && onOverflow != nil {
 			compacted = true
-			if newOrdinal, newMsgs, ok := onOverflow(); ok {
-				ordinal, reqMsgs = newOrdinal, newMsgs
+			if newOrdinal, newMsgs, newRowStart, newHead, ok := onOverflow(); ok {
+				ordinal, reqMsgs, rowStart, headID = newOrdinal, newMsgs, newRowStart, newHead
 				// Rebuild meta: the overflow compaction moved the ordinal, so
 				// the stale meta would attribute this turn's capture to the
 				// summary row's ordinal.
 				meta = conv.sendMeta(ordinal, scfg)
+				// The new list is a different set of rows: the old trim range
+				// describes positions that are no longer part of the request.
+				haveAnchor = len(rowStart) > 1
+				if haveAnchor {
+					anchorEnd = rowStart[1]
+				}
+				haveTrim = false
 				continue
 			}
 		}
@@ -741,6 +760,13 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		))
 		conv.client.logger.Warn("prompt too large; trimmed history for retry",
 			"conversation", conv.ID, "attempt", trimAttempt, "messages_before", len(reqMsgs), "messages_after", len(trimmed))
+		if to, keptRowStart, dok := trimDropped(reqMsgs, trimmed, rowStart); dok {
+			dropTo, rowStart, haveTrim = to, keptRowStart, true
+		} else {
+			// An unrecognised trim shape: the rows this list maps to are
+			// unknown now, so no later attempt may claim a range either.
+			dropTo, rowStart, haveTrim = 0, nil, false
+		}
 		reqMsgs = trimmed
 		trimAttempt++
 	}

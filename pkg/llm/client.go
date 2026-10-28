@@ -389,6 +389,19 @@ type SendMeta struct {
 
 	Primary  string   // empty = the provider named by the model id
 	Fallback []string // nil = the provider's configured chain; empty non-nil = no failover
+
+	// RequestHeadID is the conversation_message id of the last stored row this
+	// request covered — the turn's head. It feeds the turn row's
+	// request_head_id, which names the content the request sent instead of
+	// re-storing the body. Empty (in-memory conversations, whose row ids are
+	// synthetic) records NULL.
+	RequestHeadID string
+
+	// TrimFrom and TrimTo are the history positions a trim dropped from this
+	// request: TrimFrom is the first dropped position (where the anchor message
+	// ends) and TrimTo one past the last. Both nil when nothing was trimmed.
+	// They feed the turn row's request_trim_from/request_trim_to.
+	TrimFrom, TrimTo *int
 }
 
 // prepareSend is the ONE place that decides how a request is routed. Every
@@ -1318,9 +1331,12 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	}
 	prefixHash := routing.PrefixHash(reqJSON)
 	turnID, createdAt, iErr := c.capture.InsertTurnIntent(ctx, capture.TurnIntent{
-		ConversationID: convID, Ordinal: meta.Ordinal, Model: string(params.Model), Request: reqJSON,
+		ConversationID: convID, Ordinal: meta.Ordinal, Model: string(params.Model),
 		Source: source, AuthorUserID: meta.AuthorUserID, AuthorKind: meta.AuthorKind,
 		PrefixHash: prefixHash, Protocol: string(store.ProtocolAnthropic),
+		// The request body is not stored: the head names the rows it sent and
+		// the trim range names what it left out.
+		RequestHeadID: meta.RequestHeadID, TrimFrom: meta.TrimFrom, TrimTo: meta.TrimTo,
 	})
 	if iErr != nil {
 		c.logger.Warn("capture: insert-intent failed (capturing disabled for this turn)", "error", iErr)

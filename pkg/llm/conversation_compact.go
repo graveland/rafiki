@@ -67,7 +67,10 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	}
 	sc.maxTokens = base + conv.cfg.thinkingBudget
 
+	// The summary request covers the same rows a real turn would send, so it
+	// names the same head. It never carries a trim range: nothing was dropped.
 	meta := conv.sendMeta(nextOrdinal(history), sc)
+	meta.RequestHeadID = conv.requestHeadID(history)
 	params := conv.assemble(reqMsgs, sc)
 	resp, _, err := conv.sendAttempt(ctx, meta, params, nil)
 	if err != nil {
