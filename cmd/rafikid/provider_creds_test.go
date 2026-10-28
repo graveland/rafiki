@@ -913,23 +913,30 @@ func TestProviderCredsAvailable(t *testing.T) {
 	c.True(ok, "a wired engine")
 }
 
-// TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation is the fix round's
+// TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation is fix round 1's
 // A1: a rotation the database did not accept must not be lost when a 401
-// recovery (or the sweep) refreshes during the retry window. The store still
-// holds the SPENT refresh token, so sending it again comes back
-// refresh_token_reused, the re-read finds the same spent token, and the row is
-// tombstoned while the working token sits in the save goroutine. The pending
-// hand-off makes the refresh adopt the rotation instead.
+// recovery refreshes during the retry window. The store still holds the SPENT
+// refresh token, so sending it again comes back refresh_token_reused, the re-read
+// finds the same spent token, and the row is tombstoned while the working token
+// sits in the save goroutine.
+//
+// Since fix round 2 the forced caller adopts the rotation AND refreshes with it,
+// because a 401 recovery cannot be answered with an access token the server just
+// refused. What must never happen is the SPENT token going upstream again, which
+// is what the recorded request bodies prove.
 func TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation(t *testing.T) {
 	c := assert.NewAborting(t)
 	store := newFakeCredStore()
 	store.seed(staleCredential(time.Now().Add(time.Minute)))
 	store.failWriteOnce = true
 	iss := newFakeIssuer(t)
-	// The real issuer refuses a spent token. Answering reused on the second call
-	// is what makes this test fail if the forced refresh spends `sent` again.
+	// The real issuer refuses a spent token, so a second use of `r0` would answer
+	// refresh_token_reused and tombstone the row.
 	iss.answer = func(call int) (int, string) {
 		if call == 1 {
+			return http.StatusOK, defaultTokenBody("acct_1")
+		}
+		if call == 2 {
 			return http.StatusOK, defaultTokenBody("acct_1")
 		}
 		return http.StatusBadRequest, `{"error":"refresh_token_reused"}`
@@ -953,15 +960,78 @@ func TestTokenSourceForcedRefreshDuringRetryAdoptsPendingRotation(t *testing.T) 
 	tok, _, err = src.Token(context.Background(), true)
 	c.NoError(err, "the forced refresh must adopt the pending rotation, not die on it")
 	c.Eq("new-access", tok, "token")
-	c.Eq(1, iss.calls(), "the spent refresh token must not be sent upstream again")
+	c.Eq(2, iss.calls(), "the recovery refreshes once, with the rotation")
+	c.Eq("rotated-refresh", iss.body(1)["refresh_token"], "the recovery must refresh with the rotation, never the spent token")
 
 	stored, ok = store.row(testOwner, testProvider)
 	c.True(ok, "row still present")
 	c.Eq("rotated-refresh", stored.RefreshToken, "the adopted rotation must be stored")
 	c.False(stored.Dead, "adopting the rotation must not tombstone the credential")
+	if _, ok := p.pendingFor(testKey); ok {
+		c.Fail("the adopted rotation is in the row, so nothing may stay pending")
+	}
 	forced, _, err := src.Token(context.Background(), false)
 	c.NoError(err, "a routine refresh after the adoption")
 	c.Eq("new-access", forced, "token")
+}
+
+// TestTokenSourceForcedAdoptionRefreshesForReal is fix round 2's ruling: when a
+// pending rotation supplies the refresh token, a FORCED caller must not be handed
+// the old access token (the server just refused it, and the sender treats a
+// second 401 as terminal), while a routine caller keeps it.
+//
+// The pending entry here is seeded directly, so the only upstream call in either
+// subtest is the one the forced caller makes.
+func TestTokenSourceForcedAdoptionRefreshesForReal(t *testing.T) {
+	// The rotation as the TRANSIENT path leaves it: the issuer rotated the
+	// refresh token but issued no access token, so the pending credential still
+	// carries the old one.
+	seedPending := func(p *providerCreds, store *fakeCredStore) {
+		cur := staleCredential(time.Now().Add(time.Minute))
+		store.seed(cur)
+		rotated := cur
+		rotated.RefreshToken = "rotated-refresh"
+		p.setPending(testKey, pendingRotation{sent: cur.RefreshToken, want: rotated})
+	}
+
+	t.Run("forced refreshes with the rotation", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		store := newFakeCredStore()
+		iss := newFakeIssuer(t)
+		p := testCreds(t, store, iss, "")
+		seedPending(p, store)
+
+		tok, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+		c.NoError(err, "the forced refresh must succeed")
+		c.Eq("new-access", tok, "a 401 recovery must get the freshly issued access token")
+		c.Eq(1, iss.calls(), "exactly one upstream refresh")
+		c.Eq("rotated-refresh", iss.body(0)["refresh_token"], "it must refresh with the rotation, not the spent token")
+
+		stored, ok := store.row(testOwner, testProvider)
+		c.True(ok, "row still present")
+		c.Eq("rotated-refresh", stored.RefreshToken, "the row is rotated")
+		c.False(stored.Dead, "a recovery must not tombstone the credential")
+		if _, ok := p.pendingFor(testKey); ok {
+			c.Fail("the rotation is in the row, so nothing may stay pending")
+		}
+	})
+
+	t.Run("routine keeps the working token", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		store := newFakeCredStore()
+		iss := newFakeIssuer(t)
+		p := testCreds(t, store, iss, "")
+		seedPending(p, store)
+
+		tok, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+		c.NoError(err, "the routine call must succeed")
+		c.Eq("old-access", tok, "a routine caller keeps the access token that was working")
+		c.Eq(0, iss.calls(), "and spends nothing upstream")
+
+		stored, ok := store.row(testOwner, testProvider)
+		c.True(ok, "row still present")
+		c.Eq("rotated-refresh", stored.RefreshToken, "the rotation still lands, so the next refresh has a usable token")
+	})
 }
 
 // TestTokenSourceRetryDoesNotClobberANewerLogin is the re-login-during-retry

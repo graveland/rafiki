@@ -457,9 +457,19 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 		// `sent` again would come back refresh_token_reused and tombstone a
 		// login that works.
 		if pend, ok := p.pendingFor(key); ok && pend.sent == cur.RefreshToken {
-			return pend.want, nil
-		}
-		if !force && usableAccess(cur.AccessToken, cur.AccessExpiry) {
+			cur = pend.want
+			if !force {
+				// A routine caller is still holding the access token that worked:
+				// keep it, and let this write land the rotation so the NEXT
+				// refresh has a usable refresh token.
+				return cur, nil
+			}
+			// A 401 recovery must not be handed back the token that just failed.
+			// The sender allows a forced refresh one retry, and a second 401 is
+			// terminal, so returning the stale access token turns a recoverable
+			// 401 into a failed turn: continue into a real refresh, using the
+			// rotation's (valid) refresh token rather than the spent one.
+		} else if !force && usableAccess(cur.AccessToken, cur.AccessExpiry) {
 			// Another holder (another daemon, another goroutine) refreshed
 			// already: the row is the newer answer, and rewriting it would hide
 			// a credential going stale.
