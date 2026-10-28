@@ -44,7 +44,10 @@ type goStep func(ctx context.Context, tx pgx.Tx) error
 // goSteps holds the Go half of a migration, keyed by version. It runs in the
 // migration's own transaction immediately after that version's SQL, so the two
 // commit or roll back together.
-var goSteps = map[int]goStep{}
+var goSteps = map[int]goStep{
+	// 0056 adds the tree columns; this places the rows that predate them.
+	56: backfillAllConversations,
+}
 
 // Migrate brings the database to the head of the embedded migration chain,
 // creating the tracking table on first run and then applying every migration
@@ -55,10 +58,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return migrateTo(ctx, pool, 0)
 }
 
-// migrateTo applies the chain up to and including max, or to the head when max
-// is 0. Only tests pass a max: it exists so a test can stop one version short
-// of the head and then exercise the head's own behaviour.
-func migrateTo(ctx context.Context, pool *pgxpool.Pool, max int) error {
+// migrateTo applies the chain up to and including maxVersion, or to the head
+// when maxVersion is 0. Only tests pass a maxVersion: it exists so a test can
+// stop one version short of the head and then exercise the head's own
+// behaviour.
+func migrateTo(ctx context.Context, pool *pgxpool.Pool, maxVersion int) error {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return err
@@ -101,7 +105,7 @@ func migrateTo(ctx context.Context, pool *pgxpool.Pool, max int) error {
 		return err
 	}
 	for _, m := range migrations {
-		if applied[m.version] || (max > 0 && m.version > max) {
+		if applied[m.version] || (maxVersion > 0 && m.version > maxVersion) {
 			continue
 		}
 		if err := apply(ctx, conn, m); err != nil {

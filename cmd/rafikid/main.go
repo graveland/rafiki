@@ -108,6 +108,8 @@ Subcommands:
   agent     DSN-backed insights CLI: stats|search|export|
             analyze|findings. See 'rafikid agent' with no verb.
   migrate   Apply the conversations schema migration chain.
+  tree      Inspect the conversation tree; 'tree check' verifies its
+            invariants.
   user      Create a user directly against the database, bypassing a
             running daemon. See 'rafikid user create -h'.
   proxy     Record raw provider HTTP exchanges to disk, with no
@@ -177,6 +179,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newFundiCmd())
 	root.AddCommand(newAgentCmd())
 	root.AddCommand(newMigrateCmd())
+	root.AddCommand(newTreeCmd())
 	root.AddCommand(newUserCmd())
 	root.AddCommand(newProxyRecordCmd())
 
