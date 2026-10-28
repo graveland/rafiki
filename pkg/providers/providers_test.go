@@ -442,3 +442,57 @@ api_key_env = "OPENAI_API_KEY"
 	c.Eq("", p.BaseURL, "BaseURL =")
 	c.Eq(providers.KindOpenAIResponses, p.Kind, "Kind")
 }
+
+// TestCatalogModelIDForEveryKind pins the shared mapping: only the two
+// Responses kinds rewrite a provider-local id, they leave an already qualified
+// id alone, and every other kind passes its id through untouched. A mapping
+// that widened to an existing kind would silently reprice or re-window models
+// that were catalog-shaped all along.
+func TestCatalogModelIDForEveryKind(t *testing.T) {
+	c := assert.NewCollecting(t)
+	const (
+		bare    = "gpt-6.1-sol"
+		slashed = "openai/gpt-6.1-sol"
+	)
+	for _, kind := range []providers.Kind{providers.KindOpenAIResponses, providers.KindOpenAIResponsesChatGPT} {
+		c.Eq(slashed, providers.CatalogModelID(kind, bare), "CatalogModelID(%q, bare)", kind)
+		c.Eq(slashed, providers.CatalogModelID(kind, slashed), "CatalogModelID(%q, slashed) must not be prefixed twice", kind)
+	}
+	c.Eq(bare, providers.CatalogModelID(providers.KindOpenAI, bare), "KindOpenAI is not rewritten")
+	c.Eq("claude-sonnet-5", providers.CatalogModelID(providers.KindAnthropic, "claude-sonnet-5"), "KindAnthropic is not rewritten")
+	c.Eq("z-ai/glm-5.3-flash", providers.CatalogModelID(providers.KindAnthropicOpenRouter, "z-ai/glm-5.3-flash"), "KindAnthropicOpenRouter is not rewritten")
+	c.Eq(bare, providers.CatalogModelID(providers.Kind(""), bare), "an empty kind is not rewritten")
+}
+
+// TestCatalogModelIDsFromConfiguredKinds pins the candidate list a cost rollup
+// offers the catalog for a stored model id: the id itself first, then only the
+// shapes this configuration's kinds could have produced. A set with no
+// Responses kind must add nothing, which is what keeps every existing provider
+// priced exactly as before.
+func TestCatalogModelIDsFromConfiguredKinds(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	set, err := providers.Parse([]byte(`
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.oa]
+kind = "openai-responses"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.chatgpt]
+kind = "openai-responses-chatgpt"
+`))
+	c.Require().NoError(err, "Parse")
+	c.EqDeep([]string{"gpt-6.1-sol", "openai/gpt-6.1-sol"}, set.CatalogIDs("gpt-6.1-sol"),
+		"both Responses kinds map to one candidate, deduped")
+	c.EqDeep([]string{"openai/gpt-6.1-sol"}, set.CatalogIDs("openai/gpt-6.1-sol"),
+		"an already-qualified id adds no candidate")
+
+	// The shipped default has no Responses kind: one candidate, the id itself.
+	c.EqDeep([]string{"claude-sonnet-5"}, providers.Default().CatalogIDs("claude-sonnet-5"),
+		"a catalog-shaped-only set adds nothing")
+}

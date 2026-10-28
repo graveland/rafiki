@@ -402,16 +402,11 @@ func catalogOf(c *llm.Client) *routing.ModelCatalog {
 // catalogModelID maps a provider-local model id to the id the OpenRouter
 // catalog indexes. Responses-kind providers serve OpenAI models under bare
 // ids; everything else is already catalog-shaped.
+//
+// It delegates to providers.CatalogModelID, the one implementation: pkg/llm's
+// cost rollups price the same ids, and two copies of this rule would drift.
 func catalogModelID(kind providers.Kind, modelID string) string {
-	if !isResponsesKind(kind) {
-		return modelID
-	}
-	// A slashed id is already qualified (an operator's full catalog id), so
-	// prefixing it again would guarantee a miss.
-	if strings.Contains(modelID, "/") {
-		return modelID
-	}
-	return "openai/" + modelID
+	return providers.CatalogModelID(kind, modelID)
 }
 
 // isResponsesKind reports whether kind is one of the OpenAI Responses kinds:

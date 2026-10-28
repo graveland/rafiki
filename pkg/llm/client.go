@@ -299,13 +299,38 @@ func (c *Client) ConversationCost(ctx context.Context, convID string) float64 {
 	}
 	var total float64
 	for _, m := range prior {
-		mp, ok := c.catalog.Pricing(m.Model)
+		mp, ok := c.turnPricing(m.Model)
 		if !ok {
 			continue
 		}
 		total += mp.CostOf(m.InputTokens, m.OutputTokens, m.CacheReadTokens, m.CacheCreationTokens).Total
 	}
 	return total
+}
+
+// turnPricing resolves a captured turn's model id to its list price.
+//
+// conversation_turn.model records the PROVIDER-LOCAL id (prepareSend rewrites
+// params.Model to the model id providers.Set.Resolve returned, and the
+// completed turn takes the upstream's reported model), so a Responses-kind
+// provider's "gpt-6.1-sol" is stored bare while the catalog indexes
+// "openai/gpt-6.1-sol". Pricing that row by its raw id misses, and a skipped
+// row is the same number as a free one: it silently resets a child's lifetime
+// maxCost guardrail to the current turn.
+//
+// The row carries no provider name, so the candidate ids come from the
+// provider registry this client already holds (providers.Set.CatalogIDs) and
+// the raw id is tried FIRST. Every non-Responses kind maps to the identity, so
+// a catalog-shaped id prices exactly as it did before, and a conversation that
+// failed over BETWEEN kinds still bills each turn at its own model's rate
+// rather than at whatever the newest kind's id shape implies.
+func (c *Client) turnPricing(model string) (routing.ModelPricing, bool) {
+	for _, id := range c.set.CatalogIDs(model) {
+		if mp, ok := c.catalog.Pricing(id); ok {
+			return mp, true
+		}
+	}
+	return routing.ModelPricing{}, false
 }
 
 // SetProviderGuard attaches the provider cache guard, which ejects an

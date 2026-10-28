@@ -47,6 +47,54 @@ const (
 	KindOpenAIResponsesChatGPT Kind = "openai-responses-chatgpt"
 )
 
+// CatalogModelID maps a provider-local model id to the id the OpenRouter
+// catalog indexes. Responses-kind providers serve OpenAI models under bare ids
+// ("gpt-6.1-sol"), while the catalog indexes them as "openai/gpt-6.1-sol";
+// every other kind's ids are already catalog-shaped and pass through
+// unchanged.
+//
+// This is the ONE implementation. pkg/fundi's context-window and per-turn
+// price lookups and pkg/llm's cost rollups all go through it, because pricing
+// or measuring a model by its provider-local id silently resolves to nothing:
+// a cost of 0 is indistinguishable from a free model, and a missing context
+// window turns proactive compaction off.
+func CatalogModelID(kind Kind, modelID string) string {
+	if kind != KindOpenAIResponses && kind != KindOpenAIResponsesChatGPT {
+		return modelID
+	}
+	// A slashed id is already qualified (an operator's full catalog id, or an
+	// OpenRouter id), so prefixing it again would guarantee a miss.
+	if strings.Contains(modelID, "/") {
+		return modelID
+	}
+	return "openai/" + modelID
+}
+
+// CatalogIDs returns the catalog ids a provider-local model id may be indexed
+// under, in the order they should be tried: the id itself first, then whatever
+// each configured provider KIND rewrites it to. Only the Responses kinds
+// rewrite anything, so a set of catalog-shaped kinds yields the id alone.
+//
+// It exists because a stored model id does not always name its provider: a
+// conversation_turn row records the provider-local id (pkg/llm's prepareSend
+// rewrites the request's model before capture), and a lookup keyed on that row
+// has no provider name to consult. Offering every shape this configuration
+// could have produced, id first, keeps a catalog-shaped id priced exactly as
+// before while a Responses kind's bare id still finds its catalog entry.
+func (s *Set) CatalogIDs(modelID string) []string {
+	ids := []string{modelID}
+	seen := map[string]bool{modelID: true}
+	for _, name := range s.Names() {
+		id := CatalogModelID(s.Providers[name].Kind, modelID)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // nameRE is the legal shape of a provider name. Slash-free is load-bearing:
 // model addressing splits on the FIRST slash, so a name containing one would
 // make the split ambiguous.
