@@ -383,7 +383,10 @@ func backfillSameValue(a, b any) bool {
 // "", zero, a list whose elements are all such values, or an object whose every
 // value other than its type tag is such a value. That last clause is what makes
 // {"type":"direct"} — a provider field marking a directly-called tool — noise
-// rather than a difference.
+// rather than a difference, and it holds for ANY such tag, not for "direct"
+// alone: an object carrying nothing but a type tag has no payload, so the tag by
+// itself names nothing two messages can disagree about. A one-sided tag WITH a
+// payload is a difference, like any other non-zero one-sided field.
 func backfillZeroValue(v any) bool {
 	switch t := v.(type) {
 	case nil:

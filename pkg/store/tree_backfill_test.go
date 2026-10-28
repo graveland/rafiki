@@ -503,6 +503,23 @@ func TestBackfillSameMessage(t *testing.T) {
 			"a citation one side carries is content")
 	})
 
+	t.Run("a one-sided type tag with no payload is not a difference", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		// The tag is ignored whatever it names — not only "direct": an object that
+		// carries nothing but a type tag has no payload, so the tag names nothing
+		// two messages can disagree about.
+		c.True(backfillSameMessage(
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"},"caller":{"type":"code_execution"}}]`)},
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"}}]`)}),
+			"a tag alone is not content")
+		// A tag that carries a payload is a difference, like any other non-zero
+		// one-sided field.
+		c.False(backfillSameMessage(
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"},"caller":{"type":"code_execution","tool_id":"c1"}}]`)},
+			convtree.Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"x"}}]`)}),
+			"a tag with a payload is content")
+	})
+
 	t.Run("a different role is a difference", func(t *testing.T) {
 		c := assert.NewAborting(t)
 		c.False(backfillSameMessage(

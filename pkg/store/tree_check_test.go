@@ -342,6 +342,35 @@ func TestCheckTreeMissingHashForARepeatedOrdinaryRow(t *testing.T) {
 	c.False(report.OK(), "a missing position fails the check")
 }
 
+// TestCheckTreeDoesNotExcuseAClearCopy: a clear's seed is the node it was cut
+// from, and a clear's text is a constant, so equal content under an equal kind
+// proves nothing — two clears from different cursors are different nodes. A
+// clear holding no position is therefore a MISSING position, loud, not a
+// duplicate of whatever clear root happens to have the same words.
+func TestCheckTreeDoesNotExcuseAClearCopy(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	clearKind := KindClear
+	boundary := `[{"type":"text","text":"the boundary"}]`
+	clearHash := checkInsertNode(t, ctx, pool, convID, 0, "user", boundary, &clearKind, nil, nil, 0)
+	// The same text under the same kind, with no position: a clear re-cut from a
+	// different cursor, which is a different node.
+	checkInsertRow(t, ctx, pool, convID, 1, "user", boundary, &clearKind, nil, nil, nil)
+	checkInsertNode(t, ctx, pool, convID, 2, "user", `[{"type":"text","text":"after"}]`, nil, checkInt(0), clearHash, 1)
+	checkSetConversation(t, ctx, pool, convID, checkInt(2), checkInt(3), checkInt(1))
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.MissingHash, "a clear with no position is a missing position")
+	c.Eq(0, report.DuplicateRows, "equal content under equal kind does not make it the same clear")
+	c.Eq(0, report.BadHash, "hashes verify")
+	c.False(report.OK(), "a missing position fails the check")
+}
+
 // TestCheckTreeDetectsABadHash: the check recomputes every node's hash from its
 // position, so a tree that is well-shaped but addressed by the wrong hashes is
 // caught. Each subtest plants one of the three states BadHash covers.
@@ -396,4 +425,29 @@ func TestCheckTreeDetectsABadHash(t *testing.T) {
 		c.Eq(1, report.BadHash, "a root that is not at depth 0")
 		c.False(report.OK(), "a root below depth zero fails the check")
 	})
+}
+
+// TestCheckTreeSeedsANonBoundaryRootLikeTheBackfill: the backfill seeds a root
+// with RootKindRoot unless the row's kind is a boundary kind, so a root row of
+// any other kind carries the plain root's seed. Seeding it from the row's kind
+// verbatim would report a correctly hashed tree as a bad hash.
+func TestCheckTreeSeedsANonBoundaryRootLikeTheBackfill(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	tailKind := KindCompactionTail
+	content := `[{"type":"text","text":"root"}]`
+	hash, err := convtree.NodeHash(convtree.RootSeed(convtree.RootKindRoot, nil),
+		convtree.Msg{Role: "user", Content: []byte(content)})
+	c.Require().NoError(err, "hash the root")
+	checkInsertRow(t, ctx, pool, convID, 0, "user", content, &tailKind, nil, hash[:], checkDepth(0))
+	checkSetConversation(t, ctx, pool, convID, checkInt(0), checkInt(1), checkInt(0))
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(0, report.BadHash, "a non-boundary root is seeded with RootKindRoot, as the backfill seeds it")
+	c.True(report.OK(), "report: %+v", report)
 }

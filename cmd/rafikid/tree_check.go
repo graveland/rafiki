@@ -34,11 +34,11 @@ func newTreeCheckCmd() *cobra.Command {
 		Use:   "check",
 		Short: "Verify the conversation tree's invariants against the stored history",
 		Long: `Checks every conversation's tree against the history it was built from: every
-row that is neither a replay's copy nor a duplicate of a root has a path hash,
-every node's hash is the hash its position implies, every child sits one below
-its parent, every conversation with messages has a head, the ordinal allocator is
-ahead of the rows, and every conversation's working path carries the same
-messages as the working set it replaced.
+row that is neither a replay's copy nor a duplicate of a summary root has a path
+hash, every node's hash is the hash its position implies, every child sits one
+below its parent, every conversation with messages has a head, the ordinal
+allocator is ahead of the rows, and every conversation's working path carries the
+same messages as the working set it replaced.
 
 duplicate_rows and working_set_loose_match are informational: they count rows
 and conversations that are the same message in a different representation, and

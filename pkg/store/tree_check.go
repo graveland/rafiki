@@ -22,12 +22,14 @@ type TreeCheckReport struct {
 	// MissingHash counts rows with no tree position that are neither an
 	// interim-fork copy nor a duplicate of a node of the same conversation.
 	MissingHash int
-	// DuplicateRows counts rows whose content is already a root of the same
-	// kind in this conversation, so they hold no tree position. A root's parent
-	// slot is its kind's seed, so equal content under equal kind is the same
-	// node — the later row is a legitimate duplicate, not a missing position.
-	// Nothing else without a position is excused: a repeated ordinary message is
-	// still a missing position, because nothing proves it is one node.
+	// DuplicateRows counts rows whose content is already a compaction_summary
+	// root of this conversation, so they hold no tree position. A root's parent
+	// slot is convtree.RootSeed(kind, derivedFrom), which ignores derivedFrom for
+	// every kind but clear — so for a summary, and only for a summary, equal
+	// content under an equal kind is provably the same node, and the later row is
+	// a legitimate duplicate rather than a missing position. Nothing else without
+	// a position is excused: a clear's seed IS its derived-from, and a repeated
+	// ordinary message has no seed of its own, so neither can be proven one node.
 	DuplicateRows int
 	// BadHash counts nodes whose stored hash is not the hash their position
 	// implies, plus the two states that make a node's position meaningless: a
@@ -145,10 +147,11 @@ type checkLegacyRow struct {
 }
 
 // checkLegacyRows classifies the rows that hold no tree position. A row is a
-// duplicate only when it re-states a root of the same kind — a root's parent
-// slot is its kind's seed, so equal content under equal kind is provably the
-// same node. Every other row without a position is missing, which is loud on
-// purpose: nothing proves a repeated ordinary message is one node.
+// duplicate only when it re-states a compaction_summary root — that kind's seed
+// carries no derived-from component, so equal content under an equal kind is
+// provably the same node. Every other row without a position is missing, which
+// is loud on purpose: a clear's seed is the node it was cut from, and a repeated
+// ordinary message has no seed at all, so neither is proven to be one node.
 func checkLegacyRows(ctx context.Context, pool *pgxpool.Pool, ids []string) (missing, duplicates int, err error) {
 	conversations, err := checkConversationsWithLegacyRows(ctx, pool, ids)
 	if err != nil {
@@ -174,11 +177,19 @@ func checkLegacyRows(ctx context.Context, pool *pgxpool.Pool, ids []string) (mis
 	return missing, duplicates, nil
 }
 
-// checkRestatesARoot reports whether a row is a second copy of a root of the
-// same kind. Only a boundary row can be: a plain root's seed carries no kind of
-// its own, so two ordinary rows with equal content are two positions.
+// checkRestatesARoot reports whether a row is a second copy of a compaction
+// summary root of the same kind, which is the only case that is provable.
+//
+// A root's parent slot is convtree.RootSeed(kind, derivedFrom), and the seed
+// ignores derivedFrom for every kind except clear. So a summary root's slot is
+// its kind and nothing else: equal content under an equal kind IS the same node.
+// A clear root's slot is the node it was cut from, and a clear's text is a
+// constant, so two clears from different cursors are different nodes however
+// equal their content — excusing one would be explaining away a row the backfill
+// failed to place. A plain root's seed carries no kind of its own either, so two
+// ordinary rows with equal content are two positions.
 func checkRestatesARoot(roots []checkRoot, row checkLegacyRow) bool {
-	if row.kind == nil || (*row.kind != KindCompactionSummary && *row.kind != KindClear) {
+	if row.kind == nil || *row.kind != KindCompactionSummary {
 		return false
 	}
 	for _, root := range roots {
@@ -332,8 +343,12 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 		if row.depth == nil || *row.depth != 0 {
 			return false
 		}
+		// The seed kind is the BACKFILL's rule, not the row's: the backfill seeds a
+		// root with RootKindRoot unless the row's kind is a boundary kind (see its
+		// root branch), so a root row of any other kind is seeded the same way here
+		// or a correctly hashed tree reads as a bad hash.
 		kind := convtree.RootKindRoot
-		if row.kind != nil {
+		if row.kind != nil && (*row.kind == KindCompactionSummary || *row.kind == KindClear) {
 			kind = *row.kind
 		}
 		var derivedFrom *convtree.Hash
