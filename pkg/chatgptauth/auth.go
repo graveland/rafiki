@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -84,6 +85,39 @@ type Tokens struct {
 	IDToken      string
 	Expiry       time.Time
 	AccountID    string // from the id_token's https://api.openai.com/auth claim, field chatgpt_account_id
+}
+
+// redacted is what a token field prints as. Nothing here ever renders one: a
+// token reaching a log line, an error message or a panic trace is a credential
+// leak.
+const redacted = "<redacted>"
+
+// String redacts all three tokens, so an errant %v or a value dumped into a
+// message cannot leak a credential. fmt prefers Stringer to the struct's own
+// rendering, so this covers %s and %+v too.
+func (t Tokens) String() string {
+	return fmt.Sprintf("chatgptauth.Tokens{account:%s access:%s refresh:%s id:%s expiry:%s}",
+		t.AccountID, redacted, redacted, redacted, t.Expiry.UTC().Format(time.RFC3339))
+}
+
+// GoString redacts the tokens in the Go-syntax rendering too: %#v consults
+// GoStringer where %v consults Stringer, and a debug dump or a panic trace is
+// exactly where a live token must not appear.
+func (t Tokens) GoString() string {
+	return fmt.Sprintf("chatgptauth.Tokens{AccessToken:%q, RefreshToken:%q, IDToken:%q, Expiry:%s, AccountID:%q}",
+		redacted, redacted, redacted, t.Expiry.UTC().Format(time.RFC3339), t.AccountID)
+}
+
+// LogValue keeps the tokens out of structured logs, so slog.Any on one logs a
+// redacted group rather than the live secret. It satisfies slog.LogValuer.
+func (t Tokens) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("account", t.AccountID),
+		slog.String("access_token", redacted),
+		slog.String("refresh_token", redacted),
+		slog.String("id_token", redacted),
+		slog.Time("expiry", t.Expiry),
+	)
 }
 
 // ErrRefreshRejected: the refresh token is permanently unusable; the user must log in again.

@@ -37,18 +37,23 @@ package main
 //  3. A refresh runs on the DAEMON's lifetime context with a deadline, never
 //     on the turn's context: a cancelled turn must not abandon a rotated token
 //     between the issuer's answer and the store's write, while a hung upstream
-//     must not leak a goroutine forever.
+//     must not leak a goroutine forever. The issuer call itself additionally
+//     ignores the daemon's OWN cancellation (context.WithoutCancel plus a fresh
+//     deadline), because a graceful shutdown cancels that context and a
+//     rotation already in flight would otherwise be dropped with the old token
+//     spent upstream.
 //  4. A save that is not a login must never go through Store.Put. Put clears
 //     dead_at, so a background retry through Put would resurrect a credential a
 //     logout deleted. Store.Refresh writes the token columns and leaves the
 //     tombstone alone, which is what makes "retry the save" and "the row is
 //     gone" both safe.
 //  5. Shutdown drains every flight and save (Wait) before the pool closes, and
-//     the saves' final writes ignore the cancelled daemon context
-//     (context.WithoutCancel), because a rotation that lands during shutdown is
+//     both halves of a refresh ignore the cancelled daemon context: the issuer
+//     call runs on context.WithoutCancel with its own deadline, and the saves'
+//     final writes do the same, because a rotation that lands during shutdown is
 //     exactly the one most likely to be lost. The drain itself is BOUNDED: a
-//     hung database must not hold process exit, and what it gave up on is
-//     logged by key, never by token.
+//     hung database (or a hung issuer) must not hold process exit, and what it
+//     gave up on is logged by key, never by token.
 
 import (
 	"context"
@@ -207,6 +212,33 @@ type pendingRotation struct {
 	want providercreds.Credential
 }
 
+// String redacts the rotation's two tokens. fmt does not reach String() through
+// an unexported field, but a pendingRotation printed as a whole (%v on the
+// struct) would otherwise render both of them.
+func (r pendingRotation) String() string {
+	return fmt.Sprintf("providerCreds.pendingRotation{seq:%d sent:%s want:%s}",
+		r.seq, redactedToken, r.want.String())
+}
+
+// GoString redacts the tokens in the Go-syntax rendering too: %#v consults
+// GoStringer where %v consults Stringer, and a debug dump is exactly where a
+// live token must not appear.
+func (r pendingRotation) GoString() string {
+	return fmt.Sprintf("providerCreds.pendingRotation{seq:%d, sent:%q, want:%#v}",
+		r.seq, redactedToken, r.want)
+}
+
+// LogValue keeps the tokens out of structured logs, so slog.Any on one logs a
+// redacted group. It satisfies slog.LogValuer.
+func (r pendingRotation) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Uint64("seq", r.seq),
+		slog.String("sent", redactedToken),
+		slog.String("provider", r.want.Provider),
+		slog.String("owner", r.want.OwnerUserID),
+	)
+}
+
 // loginBinding is which owner began a login id. chatgptauth binds the id to its
 // owner as well, but its refusal is an unexported error the daemon cannot
 // classify, so the binding lives here too: this map is what lets an id belonging
@@ -336,10 +368,7 @@ func (p *providerCreds) Wait() {
 		close(done)
 	}()
 
-	limit := p.drainWait
-	if limit <= 0 {
-		limit = drainTimeout
-	}
+	limit := p.drainBound()
 	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	select {
@@ -384,6 +413,44 @@ func (p *providerCreds) startWork() bool {
 // flight, or another save), so the counter is never zero when it runs.
 func (p *providerCreds) addSave() {
 	p.wg.Add(1)
+}
+
+// isDraining reports whether Wait has begun.
+func (p *providerCreds) isDraining() bool {
+	p.workMu.Lock()
+	defer p.workMu.Unlock()
+	return p.draining
+}
+
+// drainBound is how long Wait waits for work to finish: drainWait in a test,
+// drainTimeout in the daemon.
+func (p *providerCreds) drainBound() time.Duration {
+	if p.drainWait > 0 {
+		return p.drainWait
+	}
+	return drainTimeout
+}
+
+// upstreamCtx is the context the issuer call itself runs on.
+//
+// It deliberately ignores the daemon's cancellation. A graceful shutdown
+// cancels p.bg, and the HTTP request (or its body read) would then be aborted
+// mid-flight: a rotation the issuer had already completed would be dropped with
+// the old token spent upstream, and the next boot would get
+// refresh_token_reused and tombstone a login that works. The call keeps a
+// deadline of its own instead, so a hung issuer still cannot outlive the
+// process.
+//
+// Once the drain has begun the deadline shrinks to half of it: a call started
+// then must leave room inside the same drain for the write it produces, and a
+// call that cannot finish in it would spend a single-use token this process
+// will not live to store.
+func (p *providerCreds) upstreamCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	limit := refreshTimeout
+	if p.isDraining() {
+		limit = p.drainBound() / 2
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), limit)
 }
 
 // errProviderCredsDraining is what a flight answers once shutdown has begun. A
@@ -609,7 +676,12 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 		// holds is the one the server just refused, and the sender treats a
 		// second 401 as terminal. It refreshes for real, using the rotation's
 		// (valid) refresh token rather than the spent one.
-		tokens, rerr := p.auth.Refresh(ctx, cur.RefreshToken, reason)
+		// The issuer call runs on its own context (upstreamCtx): a graceful
+		// shutdown cancels the transaction's context, and aborting here would
+		// lose a rotation the issuer has already completed.
+		actx, acancel := p.upstreamCtx(ctx)
+		tokens, rerr := p.auth.Refresh(actx, cur.RefreshToken, reason)
+		acancel()
 		switch {
 		case rerr == nil:
 			if tokens.AccountID != "" && cur.AccountID != "" && tokens.AccountID != cur.AccountID {
@@ -671,6 +743,19 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 		}
 		return cachedAccess{}, deadErr(provider)
 	case errors.Is(err, providercreds.ErrDead):
+		// A row can go dead underneath this daemon: another holder refreshed
+		// with the token this one already spent, was told
+		// refresh_token_reused, and tombstoned it. If the rotation in hand
+		// replaces exactly that token, the tombstone is false and the rotation
+		// is the only working login (see reviveRotation).
+		if pend, ok := p.pendingFor(key); ok {
+			if stored, revived := p.reviveRotation(key, pend); revived {
+				if live, usable := usableCredential(stored); usable {
+					p.cachePut(key, accessFrom(live), gen)
+					return accessFrom(live), nil
+				}
+			}
+		}
 		// The stored reason is worth a log line even though the user gets the
 		// actionable form: "refused" and "this login is now another account" send
 		// an operator to different places.
@@ -835,6 +920,12 @@ func (p *providerCreds) persistRotation(key credKey, rot pendingRotation) {
 				"owner", key.owner, "provider", key.provider)
 			return
 		case errors.Is(err, providercreds.ErrDead):
+			// A row tombstoned by another holder's refresh_token_reused while this
+			// save holds the rotation that replaces the token it died on is the one
+			// dead row whose tombstone is known to be false.
+			if _, revived := p.reviveRotation(key, rot); revived {
+				return
+			}
 			p.clearRotation(key, rot.seq)
 			slog.Error("provider credential is dead; the refreshed token was lost",
 				"owner", key.owner, "provider", key.provider)
@@ -853,6 +944,51 @@ func (p *providerCreds) persistRotation(key credKey, rot pendingRotation) {
 	// and an adopting refresh lands it.
 	slog.Error("provider credential rotation not yet persisted; it stays in memory for the next refresh",
 		"owner", key.owner, "provider", key.provider, "tries", persistTries)
+}
+
+// reviveRotation is the ONE sanctioned resurrection of a dead credential.
+//
+// The interleaving it exists for: this daemon rotated the refresh token but its
+// write failed, so the rotation lives only in `pending`; meanwhile another
+// holder of the same row refreshed with the spent token, was told
+// refresh_token_reused, re-read the row once, found it unchanged, and
+// tombstoned it. The tombstone is therefore a statement about a token THIS
+// daemon has the successor to, not a refusal of the login, and the rotation it
+// holds is the only working one: dropping it turns a recoverable credential
+// into a forced re-login.
+//
+// Every other dead row stays dead. The comparison happens inside the store's row
+// lock (Store.Revive writes only when the row is dead AND still holds sent), so
+// a logout, a deleted user, a genuinely rejected token, another holder's newer
+// rotation and an undecryptable row are all left alone.
+//
+// It reports the now-live credential, and whether it revived anything. The log
+// line names the owner and the provider, never a token.
+func (p *providerCreds) reviveRotation(key credKey, rot pendingRotation) (providercreds.Credential, bool) {
+	if p == nil || p.store == nil {
+		return providercreds.Credential{}, false
+	}
+	if !p.rotationIsCurrent(key, rot.seq) {
+		// A newer hand-off owns this key now; its own save is the one to run.
+		return providercreds.Credential{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(p.bgCtx()), refreshTimeout)
+	defer cancel()
+	wrote, err := p.store.Revive(ctx, key.owner, key.provider, rot.sent, rot.want)
+	if err != nil {
+		slog.Warn("provider credential revival failed; the refreshed token stays unsaved",
+			"owner", key.owner, "provider", key.provider, "error", err)
+		return providercreds.Credential{}, false
+	}
+	if !wrote {
+		// The row is gone, or it is dead on some other token: not a tombstone this
+		// rotation can contradict.
+		return providercreds.Credential{}, false
+	}
+	p.clearRotation(key, rot.seq)
+	slog.Warn("revived a provider credential another holder tombstoned with the token this daemon already rotated",
+		"owner", key.owner, "provider", key.provider)
+	return rot.want, true
 }
 
 // ─── Idle sweep ──────────────────────────────────────────────────────────────
@@ -1586,10 +1722,17 @@ func (p *providerCreds) CompleteProviderLogin(ctx context.Context, ownerUserID, 
 // DeleteProviderCredential forgets an owner's login and revokes it upstream.
 // The revoke is best effort: the row is already gone, and a failure there must
 // not look like a failed logout.
+//
+// It revokes BOTH live refresh tokens when there are two: the row's, and one a
+// rotation this daemon completed but never persisted is holding. The row's is
+// the older, already spent one in that case, so revoking only it would leave the
+// grant usable upstream until it expired on its own, which is the opposite of
+// what a logout means. `forget` drops the rotation, so it has to be read first.
 func (p *providerCreds) DeleteProviderCredential(ctx context.Context, ownerUserID, provider string) error {
 	if ok, why := p.Available(); !ok {
 		return &connectapi.ControllerError{Code: protocol.ErrUnavailable, Message: why}
 	}
+	key := credKey{owner: ownerUserID, provider: provider}
 	deleted, err := p.store.Delete(ctx, ownerUserID, provider)
 	if errors.Is(err, providercreds.ErrNotFound) {
 		return &connectapi.ControllerError{
@@ -1600,22 +1743,79 @@ func (p *providerCreds) DeleteProviderCredential(ctx context.Context, ownerUserI
 	if err != nil {
 		return fmt.Errorf("delete the %s credential: %w", provider, err)
 	}
-	p.forget(credKey{owner: ownerUserID, provider: provider})
-	if deleted.RefreshToken == "" {
-		// The row existed but could not be decrypted with the current key: the
-		// logout happened, and there is no token to revoke.
-		return nil
+	tokens := []string{deleted.RefreshToken}
+	if pend, ok := p.pendingFor(key); ok {
+		tokens = append(tokens, pend.want.RefreshToken)
 	}
-	// On the daemon's context with a deadline: a stuck issuer must not hang a
-	// logout, and a client that disconnects mid-call must not cancel a revoke
-	// the daemon already committed to.
-	rctx, cancel := context.WithTimeout(p.bg, refreshTimeout)
-	defer cancel()
-	if err := p.auth.Revoke(rctx, deleted.RefreshToken); err != nil {
-		slog.Warn("provider credential revoke failed after logout",
-			"owner", ownerUserID, "provider", provider, "error", err)
-	}
+	p.forget(key)
+	// The row existed but could not be decrypted with the current key: the logout
+	// happened, and there is no token to revoke.
+	p.revokeRefreshTokens(ownerUserID, provider, tokens)
 	return nil
+}
+
+// DeleteOwnerCredentials forgets and revokes every credential one owner holds.
+// It is what a user removal needs: conversations.users rows are tombstoned, not
+// deleted, and the credential rows are separate, so nothing else would stop the
+// idle sweep from refreshing a removed user's grant every eight days forever, or
+// stop a resumed child of theirs from keeping the account billed.
+//
+// Best effort by design: the removal itself has already happened and is not the
+// daemon's to undo, so a store failure is a WARN naming the owner and the error
+// (never a token) and nothing more.
+func (p *providerCreds) DeleteOwnerCredentials(ctx context.Context, ownerUserID string) {
+	if p == nil || p.store == nil || ownerUserID == "" {
+		return
+	}
+	// On a context the caller cannot cancel: deleting a removed user's logins is
+	// a privacy action, and an admin's client disconnecting mid-call must not
+	// leave half of them behind. Bounded, so a hung store cannot wedge it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+	defer cancel()
+	deleted, err := p.store.DeleteAll(ctx, ownerUserID)
+	if err != nil {
+		slog.Warn("provider credentials: deleting a removed user's logins failed",
+			"owner", ownerUserID, "error", err)
+		return
+	}
+	for _, c := range deleted {
+		key := credKey{owner: ownerUserID, provider: c.Provider}
+		tokens := []string{c.RefreshToken}
+		if pend, ok := p.pendingFor(key); ok {
+			tokens = append(tokens, pend.want.RefreshToken)
+		}
+		p.forget(key)
+		if p.auth != nil {
+			p.revokeRefreshTokens(ownerUserID, c.Provider, tokens)
+		}
+	}
+	slog.Info("provider credentials deleted with the user",
+		"owner", ownerUserID, "count", len(deleted))
+}
+
+// revokeRefreshTokens revokes each of these refresh tokens upstream, best
+// effort: the rows are already gone, so a failure here logs by key and moves on
+// (an unrevoked token is worth knowing about, never worth failing a logout for).
+// Empty and repeated tokens are skipped, so an undecryptable row and a rotation
+// that matches the row's token cost nothing.
+func (p *providerCreds) revokeRefreshTokens(owner, provider string, tokens []string) {
+	seen := make(map[string]bool, len(tokens))
+	for _, tok := range tokens {
+		if tok == "" || seen[tok] {
+			continue
+		}
+		seen[tok] = true
+		// On the daemon's context with a deadline: a stuck issuer must not hang a
+		// logout, and a client that disconnects mid-call must not cancel a revoke
+		// the daemon already committed to.
+		rctx, cancel := context.WithTimeout(p.bgCtx(), refreshTimeout)
+		err := p.auth.Revoke(rctx, tok)
+		cancel()
+		if err != nil {
+			slog.Warn("provider credential revoke failed after logout",
+				"owner", owner, "provider", provider, "error", err)
+		}
+	}
 }
 
 // bindLogin records which owner began a login id, pruning expired entries and

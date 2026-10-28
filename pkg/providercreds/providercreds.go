@@ -66,6 +66,16 @@ func (c Credential) String() string {
 		c.LastRefresh.UTC().Format(time.RFC3339), len(c.ModelsJSON))
 }
 
+// GoString redacts both tokens in the Go-syntax rendering too: %#v consults
+// GoStringer where %v consults Stringer, and a debug dump or a panic trace is
+// exactly where a live token must not appear.
+func (c Credential) GoString() string {
+	return fmt.Sprintf("providercreds.Credential{owner:%q, provider:%q, account:%q, refresh_token:%q, access_token:%q, access_expiry:%s, dead:%t, last_refresh:%s, models_json:%d bytes}",
+		c.OwnerUserID, c.Provider, c.AccountID, redacted, redacted,
+		c.AccessExpiry.UTC().Format(time.RFC3339), c.Dead,
+		c.LastRefresh.UTC().Format(time.RFC3339), len(c.ModelsJSON))
+}
+
 // LogValue keeps the tokens out of structured logs for the same reason, so
 // slog.String("credential", ...) and slog.Any log a redacted group rather than
 // the live secret. It satisfies slog.LogValuer.
@@ -88,6 +98,14 @@ var (
 	// ErrDead means the stored credential can no longer be used: the provider
 	// refused the refresh token, or the row cannot be decrypted with the
 	// current RAFIKI_SECRETS_KEY. The owner has to log in again.
+	//
+	// A dead row is normally final, with ONE sanctioned exception: Store.Revive
+	// clears the tombstone for a caller that holds the rotation replacing the
+	// very token the row died on. That tombstone was another holder's
+	// refresh_token_reused rather than a refusal, so it is known to be false,
+	// and the caller's rotation is the only working login; dropping it would
+	// turn a recoverable row into a forced re-login. Every other dead row stays
+	// dead.
 	ErrDead = errors.New("providercreds: credential is dead; log in again")
 	// ErrNotPersisted means fn produced a new credential but writing it
 	// failed. Refresh returns the NEW credential alongside this error: the
@@ -139,4 +157,27 @@ type Store interface {
 	// ListStale lists live (not dead) credentials whose last_refresh_at is
 	// older than age.
 	ListStale(ctx context.Context, age time.Duration) ([]Key, error)
+
+	// Revive writes want onto a DEAD row and clears dead_at, but only when the
+	// row's stored refresh token is still sent, and reports whether it wrote.
+	//
+	// It exists for one interleaving: this process completed a rotation whose
+	// write failed, while another holder of the same row refreshed with the
+	// spent token, was told refresh_token_reused, and tombstoned the row. That
+	// tombstone is known to be false for the holder of the successor, so the
+	// rotation is written and the row comes back to life. It is the only
+	// sanctioned resurrection of a dead credential (see ErrDead): a row that is
+	// gone, not dead, holds a different token, or cannot be decrypted is left
+	// alone, because none of those is a tombstone this caller can contradict.
+	//
+	// A true answer means the row now holds want's tokens and a fresh
+	// last_refresh_at. The caller must revoke nothing: the rotation is live.
+	Revive(ctx context.Context, owner, provider, sent string, want Credential) (bool, error)
+
+	// DeleteAll removes every credential belonging to owner and returns what it
+	// held, so a caller can revoke the tokens upstream (removing a user). Rows
+	// whose ciphertext cannot be opened are still deleted and are returned with
+	// their metadata and no tokens, like Delete. An owner with no credentials
+	// returns an empty slice, never an error.
+	DeleteAll(ctx context.Context, owner string) ([]Credential, error)
 }

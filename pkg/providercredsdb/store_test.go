@@ -965,3 +965,138 @@ func TestProviderCredSetModels(t *testing.T) {
 	c.ErrorIs(st.SetModels(ctx, owner, "no-such-provider", []byte(`[]`), ""), providercreds.ErrNotFound,
 		"SetModels for an unknown provider")
 }
+
+// Revive is the one sanctioned resurrection: a row another holder tombstoned
+// with refresh_token_reused on exactly the token this caller has the successor
+// to comes back to life with the successor's tokens. Two Store handles over one
+// pool stand in for two daemons, which is the interleaving that produces it.
+func TestProviderCredReviveWritesTheHeldRotationAndClearsDead(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := testPool(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool)
+	box := newBox(t, 0x81)
+	// Two handles over one row: daemon A holds the rotation, daemon B tombstoned
+	// the row with the token A already spent.
+	a, b := New(pool, box), New(pool, box)
+	spent := fixture(owner)
+	c.NoError(a.Put(ctx, spent), "put")
+
+	// B spends the stored token, is told refresh_token_reused, re-reads the
+	// unchanged row, and tombstones it.
+	_, err := b.Refresh(ctx, owner, testProvider, func(providercreds.Credential) (providercreds.Credential, error) {
+		return providercreds.Credential{}, fmt.Errorf("%w: refresh_token_reused", providercreds.ErrDead)
+	})
+	c.ErrorIs(err, providercreds.ErrDead, "B's refresh must tombstone the row")
+
+	// A holds the rotation the issuer handed back for that very token.
+	held := spent
+	held.RefreshToken = "refresh-token-held-by-a"
+	held.AccessToken = "access-token-held-by-a"
+	held.AccessExpiry = time.Now().Add(time.Hour).Truncate(time.Microsecond)
+	wrote, err := a.Revive(ctx, owner, testProvider, spent.RefreshToken, held)
+	c.NoError(err, "Revive")
+	c.True(wrote, "the held rotation must be written")
+
+	got, err := a.Get(ctx, owner, testProvider)
+	c.NoError(err, "Get after the revival")
+	c.False(got.Dead, "the row is live again")
+	c.Eq(held.RefreshToken, got.RefreshToken, "the row holds the rotation")
+	c.Eq(held.AccessToken, got.AccessToken, "the row holds the rotation's access token")
+	c.Eq(spent.AccountID, got.AccountID, "the account id is preserved")
+
+	// A refresh works again, which is what the revival is for.
+	after, err := a.Refresh(ctx, owner, testProvider, func(cur providercreds.Credential) (providercreds.Credential, error) {
+		c.Eq(held.RefreshToken, cur.RefreshToken, "the survived token is the one the next refresh spends")
+		next := cur
+		next.RefreshToken = "refresh-token-after-revival"
+		next.AccessToken = "access-token-after-revival"
+		return next, nil
+	})
+	c.NoError(err, "refresh after the revival")
+	c.Eq("refresh-token-after-revival", after.RefreshToken, "the row accepts rotations again")
+}
+
+// Every other dead row stays dead: a tombstone on a DIFFERENT token (a logout's
+// replacement login, a genuine refusal, another holder's newer rotation) is not
+// something the caller's rotation can contradict.
+func TestProviderCredReviveLeavesOtherDeadRowsAlone(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := testPool(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool)
+	st := New(pool, newBox(t, 0x82))
+	want := fixture(owner)
+	c.NoError(st.Put(ctx, want), "put")
+	markDead(t, pool, owner, testProvider)
+
+	// A token this row never held.
+	held := want
+	held.RefreshToken = "refresh-token-held-elsewhere"
+	held.AccessToken = "access-token-held-elsewhere"
+	wrote, err := st.Revive(ctx, owner, testProvider, "refresh-token-the-row-never-had", held)
+	c.NoError(err, "Revive on a mismatched token")
+	c.False(wrote, "a tombstone on another token is not revived")
+
+	got, err := st.Get(ctx, owner, testProvider)
+	c.ErrorIs(err, providercreds.ErrDead, "the row is still dead")
+	c.Eq(want.RefreshToken, got.RefreshToken, "the row's tokens are untouched")
+
+	// A live row is never rewritten by Revive either: only a tombstone is a
+	// statement this call may contradict.
+	live := providercreds.Key{Owner: owner, Provider: "live-provider"}
+	liveCred := fixture(owner)
+	liveCred.Provider = live.Provider
+	c.NoError(st.Put(ctx, liveCred), "put live")
+	wrote, err = st.Revive(ctx, owner, live.Provider, liveCred.RefreshToken, held)
+	c.NoError(err, "Revive on a live row")
+	c.False(wrote, "a live row is not revived")
+	afterLive, err := st.Get(ctx, owner, live.Provider)
+	c.NoError(err, "get live row")
+	c.Eq(liveCred.RefreshToken, afterLive.RefreshToken, "a live row's tokens are untouched")
+
+	// And a row that is gone is ErrNotFound, never a silent success.
+	_, err = st.Revive(ctx, owner, "no-such-provider", "whatever", held)
+	c.ErrorIs(err, providercreds.ErrNotFound, "Revive on a missing row")
+}
+
+// DeleteAll is how a removed user's logins stop existing: every row for the
+// owner is deleted and handed back for revocation, and nobody else's is touched.
+func TestProviderCredDeleteAllRemovesOnlyThatOwner(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := testPool(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool)
+	other := newOwner(t, pool)
+	st := New(pool, newBox(t, 0x83))
+
+	for _, provider := range []string{testProvider, "second-provider"} {
+		cred := fixture(owner)
+		cred.Provider = provider
+		c.NoError(st.Put(ctx, cred), "put %s", provider)
+	}
+	kept := fixture(other)
+	c.NoError(st.Put(ctx, kept), "put other owner")
+
+	deleted, err := st.DeleteAll(ctx, owner)
+	c.NoError(err, "DeleteAll")
+	c.Len(deleted, 2, "deleted credentials")
+	providers := []string{deleted[0].Provider, deleted[1].Provider}
+	c.Contains(providers, testProvider, "the first provider was returned")
+	c.Contains(providers, "second-provider", "the second provider was returned")
+	for _, d := range deleted {
+		c.NotEmpty(d.RefreshToken, "the deleted credential carries its token for revocation")
+	}
+
+	if _, err := st.Get(ctx, owner, testProvider); !errors.Is(err, providercreds.ErrNotFound) {
+		c.Fatalf("Get after DeleteAll = %v, want ErrNotFound", err)
+	}
+	survivor, err := st.Get(ctx, other, testProvider)
+	c.NoError(err, "the other owner's credential must survive")
+	c.Eq(kept.RefreshToken, survivor.RefreshToken, "the other owner's tokens are untouched")
+
+	// No rows is an empty answer, not an error.
+	again, err := st.DeleteAll(ctx, owner)
+	c.NoError(err, "DeleteAll with nothing left")
+	c.Len(again, 0, "second DeleteAll deleted nothing")
+}

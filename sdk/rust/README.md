@@ -98,11 +98,14 @@ provider's registered redirect URI is fixed), complete hands back the raw
 callback query and answers the `provider` and `account_id`. Tokens never cross
 the wire: the daemon stores them, and a child resolves its owner's credential
 at spawn. Each needs a user credential on the client (`failed_precondition`
-otherwise, and `permission_denied` for a child's credential). A provider that
-is unknown or does not login-authenticate is `invalid_argument`; a missing
-credential, and a login id that is unknown, expired or was begun by another
-user, are all `not_found` (one identical answer, so no caller can probe which
-logins exist).
+otherwise, and `permission_denied` for a child's credential). `begin` and
+`complete` answer `invalid_argument` for a provider that is unknown or does not
+login-authenticate; `delete` never resolves the provider entry, so it answers
+`not_found` for a provider with no stored credential whether or not it is
+configured (a login stored under a name since removed from `providers.toml`
+can still be cleared). A login id that is unknown, expired or was begun by
+another user is `not_found` too (one identical answer, so no caller can probe
+which logins exist).
 
 ## Errors: nothing is retried
 

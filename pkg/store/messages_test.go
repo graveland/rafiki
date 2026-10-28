@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -198,3 +199,57 @@ func TestLoadPageRefusesNonPositiveLimit(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// TestResponsesSignatureSurvivesTheStoreRoundTrip pins the design's "the
+// encrypted reasoning round-trips into the next request, including across a
+// resume" claim where it is actually decided: the stored JSONB. A resumed or
+// recovered child reloads these rows and resends the thinking blocks, so a
+// signature that comes back mangled (or dropped) silently loses the provider's
+// continuation state, and one that comes back byte-different is a signature the
+// provider did not mint.
+//
+// The blob is a long base64url string with the two characters JSON escaping is
+// most likely to touch (_, -), so a re-encoding that is not byte-faithful shows
+// up here rather than on a live turn.
+func TestResponsesSignatureSurvivesTheStoreRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := testPool(t)
+	ctx := context.Background()
+	c.NoError(Migrate(ctx, pool))
+	var convID string
+	c.NoError(pool.QueryRow(ctx, `INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('test','server') RETURNING id::text`).Scan(&convID))
+	m := NewMessages(pool)
+
+	signature := "openai-responses:rs_0f1e2d3c:" + strings.Repeat("A-_9", 4096)
+	msg := anthropic.NewAssistantMessage(
+		anthropic.NewThinkingBlock(signature, "reasoning text"),
+		anthropic.NewTextBlock("the answer"))
+	first, err := m.Append(ctx, convID, 0, msg, nil)
+	c.NoError(err, "append")
+
+	// A resume replays the same message at the same ordinal; the blobs must
+	// compare equal, or every resume would look like a history divergence.
+	replay, err := m.Append(ctx, convID, 0, msg, nil)
+	c.NoError(err, "replay append")
+	c.EqDeep(first, replay, "a replay is the same row")
+
+	stored, err := m.Load(ctx, convID)
+	c.NoError(err, "load")
+	c.Require().Len(stored, 1, "rows after load")
+
+	content := stored[0].Param.Content
+	c.Require().Len(content, 2, "content blocks")
+	c.Require().NotNil(content[0].OfThinking, "the first block is thinking")
+	c.Eq(signature, content[0].OfThinking.Signature,
+		"the reasoning signature must come back byte-identical")
+	c.Eq("reasoning text", content[0].OfThinking.Thinking, "the reasoning text")
+	c.Require().NotNil(content[1].OfText, "the second block is text")
+	c.Eq("the answer", content[1].OfText.Text, "the text block")
+
+	// And what a resumed child would resend is the same bytes on the wire,
+	// which is what the sender's parser reads.
+	reencoded, err := json.Marshal(stored[0].Param.Content)
+	c.NoError(err, "re-encode the loaded content")
+	c.StrContains(string(reencoded), signature, "the signature survives re-encoding")
+}

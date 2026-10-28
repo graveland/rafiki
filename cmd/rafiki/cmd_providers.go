@@ -528,11 +528,14 @@ func newProvidersLogoutCmd() *cobra.Command {
 		Use:   "logout <provider>",
 		Short: "Forget the subscription credential stored against your user for a provider",
 		Long: `Delete the subscription credential this user has stored for a provider. The
-tokens are destroyed in the daemon, so children of this user on a model served
-by that provider are refused at their next spawn until ` + "`login`" + ` runs again.
-A provider with no stored credential is refused with not_found; neither the
-credential nor the provider's token endpoint is touched, and a login still in
-flight is simply forgotten when it is completed.
+tokens are destroyed in the daemon, so a running child of this user on a model
+served by that provider fails its next TURN with the re-login error, and a new
+spawn is refused until ` + "`login`" + ` runs again.
+A provider with no stored credential is refused with not_found, whether or not
+it is configured: the logout does not resolve the provider entry, so a login
+stored under a name since removed from providers.toml can still be cleared.
+Neither the credential nor the provider's token endpoint is touched, and a
+login still in flight is simply forgotten when it is completed.
 
 Example:
   rafiki providers logout chatgpt`,

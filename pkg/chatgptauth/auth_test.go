@@ -3,11 +3,14 @@
 package chatgptauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -329,4 +332,35 @@ func TestAccountIDFromIDToken(t *testing.T) {
 			c.Eq(tt.want, got)
 		})
 	}
+}
+
+// TestTokensRedactSecrets pins the leak-closing rule for the issuer's own answer
+// type: %v/%s/%+v go through String, %#v through GoString, slog through
+// LogValue, and none of the three tokens may appear in any of them.
+func TestTokensRedactSecrets(t *testing.T) {
+	c := assert.NewAborting(t)
+	tok := Tokens{
+		AccessToken:  "access-token-must-not-print",
+		RefreshToken: "refresh-token-must-not-print",
+		IDToken:      "id-token-must-not-print",
+		Expiry:       time.Date(2026, 5, 4, 3, 2, 1, 0, time.UTC),
+		AccountID:    "acct_1",
+	}
+
+	for _, format := range []string{"%v", "%+v", "%s", "%#v"} {
+		out := fmt.Sprintf(format, tok)
+		for _, secret := range []string{tok.AccessToken, tok.RefreshToken, tok.IDToken} {
+			c.NotStrContains(out, secret, "%s leaked %q: %s", format, secret, out)
+		}
+		c.StrContains(out, "<redacted>", "%s does not mark the tokens redacted: %s", format, out)
+		c.StrContains(out, tok.AccountID, "%s dropped the non-secret fields: %s", format, out)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("tokens", "tokens", tok)
+	for _, secret := range []string{tok.AccessToken, tok.RefreshToken, tok.IDToken} {
+		c.NotStrContains(buf.String(), secret, "slog leaked %q: %s", secret, buf.String())
+	}
+	c.StrContains(buf.String(), "<redacted>", "slog does not mark the tokens redacted: %s", buf.String())
+	c.StrContains(buf.String(), tok.AccountID, "slog dropped the non-secret fields: %s", buf.String())
 }

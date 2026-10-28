@@ -369,6 +369,97 @@ func sameWritable(a, b providercreds.Credential) bool {
 		a.Dead == b.Dead
 }
 
+// DeleteAll removes every credential belonging to owner, returning what each
+// row held so the caller can revoke the grants upstream. It is how removing a
+// rafiki user stops their logins existing at all: the user row is tombstoned,
+// not deleted, so nothing else would ever stop the idle sweep refreshing them.
+//
+// Like Delete it succeeds for rows that cannot be decrypted (the row is gone;
+// only the revoke is lost), and such a credential comes back with its metadata
+// and no tokens, so the caller skips a revoke it cannot perform.
+func (s *Store) DeleteAll(ctx context.Context, owner string) ([]providercreds.Credential, error) {
+	rows, err := s.pool.Query(ctx, `DELETE FROM conversations.provider_credential
+		WHERE owner_user_id = $1::uuid
+		RETURNING `+credentialCols, owner)
+	if err != nil {
+		return nil, fmt.Errorf("providercredsdb: delete all credentials: %w", err)
+	}
+	defer rows.Close()
+	var stored []storedRow
+	for rows.Next() {
+		r, scanErr := scanStored(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("providercredsdb: delete all credentials: %w", scanErr)
+		}
+		stored = append(stored, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("providercredsdb: delete all credentials: %w", err)
+	}
+	out := make([]providercreds.Credential, 0, len(stored))
+	for _, r := range stored {
+		c, openErr := s.openStored(r)
+		if openErr != nil {
+			slog.Warn("providercredsdb: deleted a credential that could not be decrypted; revoke skipped",
+				"owner", r.owner, "provider", r.provider, "error", openErr)
+			c.RefreshToken, c.AccessToken = "", ""
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// Revive writes a rotation onto a row another holder tombstoned with
+// refresh_token_reused, and clears the tombstone. See providercreds.Store.Revive
+// for when that is allowed and why it is right.
+//
+// Everything happens under the row lock, so the comparison and the write cannot
+// be separated by another holder's refresh or by a logout: a row that is dead
+// on exactly the token this rotation replaced is the one shape that is revived,
+// and the same transaction that decides it writes it.
+func (s *Store) Revive(ctx context.Context, owner, provider, sent string, want providercreds.Credential) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("providercredsdb: begin revive: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	r, err := read(ctx, tx, selectCredentialForUpdate, owner, provider)
+	if err != nil {
+		return false, err
+	}
+	cur, err := s.openStored(r)
+	if err != nil {
+		// The row cannot be opened, so nothing here can prove the tombstone
+		// false: it stays dead.
+		return false, err
+	}
+	if !cur.Dead || cur.RefreshToken != sent {
+		// Not a tombstone this rotation can contradict: the row is live (someone
+		// already saved), it died on a different token (a logout, a genuine
+		// refusal, another holder's rotation), or both.
+		return false, nil
+	}
+	accountID := want.AccountID
+	if accountID == "" {
+		accountID = cur.AccountID
+	}
+	if _, err := tx.Exec(ctx, `UPDATE conversations.provider_credential
+		SET key_id = $3, refresh_sealed = $4, access_sealed = $5, access_expiry = $6,
+			account_id = $7, dead_at = NULL, last_refresh_at = now(), updated_at = now()
+		WHERE owner_user_id = $1::uuid AND provider = $2`,
+		cur.OwnerUserID, cur.Provider, s.box.KeyID(),
+		s.box.Seal([]byte(want.RefreshToken), aad(cur.OwnerUserID, cur.Provider, fieldRefresh)),
+		s.box.Seal([]byte(want.AccessToken), aad(cur.OwnerUserID, cur.Provider, fieldAccess)),
+		want.AccessExpiry, accountID); err != nil {
+		return false, fmt.Errorf("providercredsdb: revive credential: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("providercredsdb: commit revive: %w", err)
+	}
+	return true, nil
+}
+
 // SetModels caches the provider's model directory, and the ETag to revalidate
 // it with. A nil modelsJSON stores SQL NULL, which reads back as nil: "never
 // fetched", not "an empty directory".

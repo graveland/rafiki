@@ -573,7 +573,7 @@ call at all — and is described under "Owner isolation between users" below.
 | `ExecutorSession` | server-streaming · userOnly | exempt — executor surface; owner checks are the executor admin seam's concern (out of scope) | The session-executor stream: mint or find the caller's own executor for this machine (§"ExecutorSession" below) |
 | `CreateUser` | unary · userOnly (admin-gated) | exempt — admin check in the handler | Mint a user row and, conditionally, a bearer token: `mint_token` ABSENT means the daemon mints iff OIDC login is NOT configured on it (so the user can authenticate at all); PRESENT is honoured as given. `email` stores a normalized, unique-among-active-users address. The response carries `created_at` (a `Timestamp`), `token` (empty when none), `token_reason` ("requested" / "oidc not configured" / "") and `login_configured`, so a client can word its hint without guessing. NEVER mints an admin — admins come only from `rafikid user create --admin` (§"User administration") |
 | `ListUsers` | unary · userOnly (admin-gated) | exempt — admin check in the handler | Enumerate users. Tokens are never returned |
-| `RemoveUser` | unary · userOnly (admin-gated) | exempt — admin check in the handler | Tombstone a user: its token stops authenticating, but history keeps resolving the username |
+| `RemoveUser` | unary · userOnly (admin-gated) | exempt — admin check in the handler | Tombstone a user: its token stops authenticating, but history keeps resolving the username. Their provider logins go with them — every `provider_credential` row is deleted and its tokens revoked (best effort, WARN on failure), because a tombstoned user's row left behind would be refreshed by the idle sweep forever (§"Provider login") |
 | `UpdateUser` | unary · userOnly (admin-gated) | exempt — admin check in the handler | Edit a user: `email` is the only editable field (`optional` — an unset request is refused "nothing to update"; empty clears the address). The admin bit is deliberately NOT editable here — it comes only from `rafikid user create --admin` (§"User administration") |
 | `MintToken` | unary · userOnly | exempt — self-scoped: a user manages its own credentials | Mint a service token (`origin "service"`) for the target user — the caller by default, another user with admin authority; `ttl` (a `Duration`; unset or zero = never expires, negative refused). The plaintext rides the response exactly once (§"User administration") |
 | `ListTokens` | unary · userOnly | exempt — self-scoped: a user manages its own credentials | The target's credential rows — metadata only, never secrets. `username` empty = the caller; `all_users` (every user) requires admin authority (§"User administration") |
@@ -2133,7 +2133,11 @@ ordering is pinned by `TestUserRPCsRefuseNonAdmin`.
 - **`RemoveUser`** tombstones the row: the token stops authenticating, but
   history keeps resolving the username. An unknown or already-tombstoned
   name is `CodeNotFound`. Deleting the last active user is what re-arms the
-  zero-users state above.
+  zero-users state above. Their stored provider logins (the `provider_credential`
+  rows) are deleted and revoked in the same call, best effort and logged at WARN
+  on failure (`providerCreds.DeleteOwnerCredentials`): user rows are tombstoned,
+  never deleted, so nothing else would stop the idle sweep refreshing a removed
+  user's ChatGPT grant, and a resumed child of theirs would keep billing it.
 
 All three answer `unavailable` (`no_agent_db` as the `ErrorInfo` reason) when
 the daemon has no database pool — there is no in-memory fallback for
@@ -2191,7 +2195,18 @@ AAD = owner + provider + field) and is resolvable only inside the daemon, so
 a CLI client, a child process and the wire all see a login id and an account
 id at most. `DeleteProviderCredential` removes the caller's own grant for one
 provider (`CodeNotFound` when there is none), after which that provider's
-login-authenticated kind no longer resolves for the user's children.
+login-authenticated kind no longer resolves for the user's children: a running
+child fails its next TURN with the re-login error, and a new spawn is refused.
+The verb never resolves the provider entry, so `not_found` is also the answer for
+a provider name since removed from `providers.toml`, which lets a user clear a
+login nothing else could. Both live refresh tokens are revoked best effort: the
+row's, and one a rotation completed but never persisted is holding.
+
+A dead row (the issuer refused the refresh token) stays dead, with one
+sanctioned exception: if the daemon holds the rotation that replaces the very
+token the row died on, the tombstone was another holder's
+`refresh_token_reused` rather than a refusal, so the rotation is written and
+`dead_at` cleared (`providercreds.Store.Revive`; see `ErrDead`'s doc).
 
 ### The Login service (`rafiki.v1.Login`: `BeginLogin`, `CompleteLogin`)
 

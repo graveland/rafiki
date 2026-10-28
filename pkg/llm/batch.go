@@ -137,6 +137,12 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 		defer meta.OnBatchWait(false)
 	}
 
+	// A parked call can name an Anthropic batch model in a conversation that
+	// started on OpenAI Responses, and the sender-level strip lives in
+	// sdkSender's New/NewStreaming, which this path never reaches. Strip here,
+	// before the write-ahead, so the recorded request is the request parked.
+	params = withoutForeignThinking(params, false)
+
 	ref := c.beginTurn(ctx, meta, params)
 	// ref.convID equals meta.ConversationID for a captured conversation; when
 	// capture is off (store-less), beginTurn leaves it empty and the caller's

@@ -147,6 +147,14 @@ that login returns is stored sealed, never usable in plaintext:
   file somewhere safe. Do not export an EMPTY `RAFIKI_SECRETS_KEY` in a shell you
   source: an empty value outranks the file, and the daemon then reports a key that
   is set as unset.
+- **It is not inherited by anything the daemon starts.** Once the box exists the
+  daemon removes `RAFIKI_SECRETS_KEY` from its OWN environment
+  (`newCredentialStore`, `cmd/rafikid/main.go`), so a stdio MCP server, a child's
+  shell or an executor enrolled from the daemon's shell cannot read it. The key
+  stays in memory for the life of the process. An executor you start BY HAND from
+  a shell that exports the key is a different story: that shell's environment is
+  the executor's, and it is passed on to every agent bash it runs there, so do not
+  export the key (or `RAFIKI_DB`) in a shell you use to run executors.
 
 **Never rotate the key by replacing the value.** A new key opens nothing that was
 sealed under the old one, so replacing it logs every user out of the ChatGPT

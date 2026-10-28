@@ -133,9 +133,11 @@ impl Client {
 
     /// Delete the calling user's stored credential for one provider, so that
     /// provider's login-authenticated kind stops resolving for this user's
-    /// children. `not_found` when the user has no credential for it;
-    /// `invalid_argument` when the provider entry is unknown or does not
-    /// login-authenticate.
+    /// children, whose next turn then fails with the re-login error.
+    /// `not_found` when the user has no credential stored for that provider
+    /// name, whether or not the provider is configured: the delete never
+    /// resolves the provider entry, so a login stored under a name removed from
+    /// providers.toml can still be cleared.
     pub async fn delete_provider_credential(
         &self,
         req: &pb::DeleteProviderCredentialRequest,

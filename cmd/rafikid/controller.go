@@ -6444,6 +6444,12 @@ func (c *Controller) UserRm(ctx context.Context, username string) error {
 	if c.execPool != nil {
 		disconnected = c.execPool.DisconnectOwner(userID)
 	}
+	// The user row is tombstoned, not deleted, and their provider credentials
+	// (the ChatGPT logins) are separate rows: left alone, the idle sweep keeps
+	// refreshing a removed user's grant forever and a resumed child of theirs
+	// keeps billing the account. Deleting them is best effort — it logs a WARN
+	// and does not fail the removal, which has already happened.
+	c.providerCreds.DeleteOwnerCredentials(ctx, userID)
 	slog.Info("user removed", "username", username, "streams_cancelled", streams, "executors_disconnected", disconnected)
 	return nil
 }

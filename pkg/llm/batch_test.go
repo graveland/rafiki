@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -23,14 +24,17 @@ type fakeBatcher struct {
 	calls    int
 	lastIDs  []string
 	lastMods []string
-	scripts  []func() (*anthropic.Message, error)
+	// lastParams is the request the batcher parked, as it received it.
+	lastParams anthropic.MessageNewParams
+	scripts    []func() (*anthropic.Message, error)
 }
 
-func (b *fakeBatcher) Park(_ context.Context, customID, model string, _ anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
+func (b *fakeBatcher) Park(_ context.Context, customID, model string, params anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
 	b.mu.Lock()
 	b.calls++
 	b.lastIDs = append(b.lastIDs, customID)
 	b.lastMods = append(b.lastMods, model)
+	b.lastParams = params
 	b.mu.Unlock()
 	i := b.calls - 1
 	if i >= len(b.scripts) {
@@ -288,4 +292,47 @@ func TestBatchTurnCaptured(t *testing.T) {
 	_, err := conv2.Send(ctx, UserText("hi"))
 	ck.Require().Error(err, "Send with a failing batcher must error")
 	ck.Eq("error", turnStatus(t, c2, conv2.ID), "turn status")
+}
+
+// TestBatchParkStripsForeignThinking is the :batch twin of the sender-level
+// strip. A conversation that started on OpenAI Responses carries reasoning
+// signatures in its thinking blocks, and this path never reaches
+// sdkSender.New/NewStreaming, so without a strip here a parked request would
+// carry a signature the batch provider cannot verify.
+//
+// It calls parkSend DIRECTLY rather than through SendParams, and that is the
+// point: prepareSend parks only a first call (no assistant message), so today a
+// parked request cannot carry a thinking block. The strip is defence in depth
+// for the day that rule relaxes, and this pins parkSend's own contract instead
+// of a caller's.
+func TestBatchParkStripsForeignThinking(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("must not be reached"),
+	}}
+	c := newBatchClient(t, b, sender)
+
+	params := batchParams()
+	params.Messages = append(params.Messages, anthropic.NewAssistantMessage(
+		anthropic.NewThinkingBlock("openai-responses:rs_1:encrypted-blob", "reasoning text"),
+		anthropic.NewTextBlock("reply")))
+
+	_, err := c.parkSend(context.Background(), trace.SpanFromContext(context.Background()),
+		SendMeta{ConversationID: "conv"}, params, "openrouter", nil)
+	ck.Require().NoError(err, "parkSend")
+	ck.Require().Eq(1, b.calls, "batcher called")
+
+	for _, msg := range b.lastParams.Messages {
+		for _, block := range msg.Content {
+			if block.OfThinking != nil {
+				ck.Fail("a foreign thinking block reached the batcher: %q", block.OfThinking.Signature)
+			}
+		}
+	}
+	// The text block beside it is untouched: only the foreign thinking goes.
+	last := b.lastParams.Messages[len(b.lastParams.Messages)-1]
+	ck.Require().Len(last.Content, 1, "content after the strip")
+	ck.Require().NotNil(last.Content[0].OfText, "the surviving block is text")
+	ck.Eq("reply", last.Content[0].OfText.Text, "the text block survives")
 }

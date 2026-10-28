@@ -614,9 +614,11 @@ class Client:
     def delete_provider_credential(self, provider: str) -> None:
         """Delete the calling user's stored credential for one provider, so
         that provider's ``login``-authenticated kind stops resolving for this
-        user's children. ``not_found`` when the user has no credential for it;
-        ``invalid_argument`` when the provider entry is unknown or does not
-        login-authenticate."""
+        user's children, whose next turn then fails with the re-login error.
+        ``not_found`` when the user has no credential stored for that provider
+        name, whether or not the provider is configured: the delete never
+        resolves the provider entry, so a login stored under a name removed
+        from providers.toml can still be cleared."""
         req = _gen.control_pb.DeleteProviderCredentialRequest(provider=provider)
         self._call("DeleteProviderCredential", req, _gen.control_pb.DeleteProviderCredentialResponse)
 

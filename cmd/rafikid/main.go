@@ -510,20 +510,10 @@ func runDaemon(opts runDaemonOpts) error {
 	// store is not constructed at all (providercredsdb.New panics on a nil box,
 	// deliberately, because a plaintext fallback must be impossible), the
 	// capability is unavailable with the reason, and every ChatGPT-kind
-	// provider refuses with it.
-	var credStore providercreds.Store
-	var credsWhy string
-	if pool == nil {
-		credsWhy = "provider credentials need a database; no agent database is configured"
-	} else if box, err := secretbox.FromEnv(); err != nil {
-		if errors.Is(err, secretbox.ErrNoKey) {
-			credsWhy = "RAFIKI_SECRETS_KEY is not set; run rafiki setup or set it in service.env"
-		} else {
-			credsWhy = err.Error()
-		}
-	} else {
-		credStore = providercredsdb.New(pool, box)
-	}
+	// provider refuses with it. newCredentialStore also strips the key from the
+	// environment once it is in memory, so nothing this daemon execs can read
+	// it.
+	credStore, credsWhy := newCredentialStore(pool)
 	creds := newProviderCreds(baseCtx, credStore, chatgptauth.New(http.DefaultClient), credsWhy,
 		func() *providers.Set { return prov })
 	if credsWhy != "" && usesProviderLogins(prov) {
@@ -1271,6 +1261,33 @@ func runDaemon(opts runDaemonOpts) error {
 
 	slog.Info("done")
 	return nil
+}
+
+// newCredentialStore builds the sealed provider-credential store, or explains
+// why the capability is unavailable (the store is then nil, and every
+// ChatGPT-kind provider reports that reason instead of failing startup).
+//
+// The key is REMOVED from the process environment as soon as the box exists.
+// Nothing after this point reads RAFIKI_SECRETS_KEY: the box holds it in
+// memory, and the environment is inherited by every process this daemon starts
+// (a stdio MCP server, a child's shell, an executor enrolled from the same
+// shell), so an exported key beside a DSN would open every user's ChatGPT grant
+// to agent-run code. On the failure paths the variable is left exactly as it
+// was: there is no box, and the variable is what the operator's service file
+// sets for the next start.
+func newCredentialStore(pool *pgxpool.Pool) (providercreds.Store, string) {
+	if pool == nil {
+		return nil, "provider credentials need a database; no agent database is configured"
+	}
+	box, err := secretbox.FromEnv()
+	if err != nil {
+		if errors.Is(err, secretbox.ErrNoKey) {
+			return nil, "RAFIKI_SECRETS_KEY is not set; run rafiki setup or set it in service.env"
+		}
+		return nil, err.Error()
+	}
+	os.Unsetenv(secretbox.EnvKey)
+	return providercredsdb.New(pool, box), ""
 }
 
 // wirePathSync installs the path-sync backend on the Controller and on the

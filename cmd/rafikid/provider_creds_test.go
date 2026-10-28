@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +76,12 @@ type fakeCredStore struct {
 	// Put and how many transactions the store saw.
 	puts         int
 	refreshCalls int
+
+	// revives counts Revive calls that actually wrote, and reviveErr /
+	// deleteAllErr make those two methods fail on demand.
+	revives      int
+	reviveErr    error
+	deleteAllErr error
 }
 
 var _ providercreds.Store = (*fakeCredStore)(nil)
@@ -233,6 +240,70 @@ func (f *fakeCredStore) ListStale(_ context.Context, age time.Duration) ([]provi
 	return append([]providercreds.Key(nil), f.stale...), nil
 }
 
+// Revive mirrors the real store: it writes only a row that is DEAD on exactly
+// sent, and clears the tombstone.
+func (f *fakeCredStore) Revive(_ context.Context, owner, provider, sent string, want providercreds.Credential) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reviveErr != nil {
+		return false, f.reviveErr
+	}
+	key := credKey{owner: owner, provider: provider}
+	cur, ok := f.rows[key]
+	if !ok {
+		return false, providercreds.ErrNotFound
+	}
+	if !cur.Dead || cur.RefreshToken != sent {
+		return false, nil
+	}
+	next := cur
+	next.RefreshToken, next.AccessToken, next.AccessExpiry = want.RefreshToken, want.AccessToken, want.AccessExpiry
+	if want.AccountID != "" {
+		next.AccountID = want.AccountID
+	}
+	next.Dead = false
+	f.rows[key] = next
+	f.revives++
+	return true, nil
+}
+
+// DeleteAll removes one owner's rows and hands them back, like the real store.
+func (f *fakeCredStore) DeleteAll(_ context.Context, owner string) ([]providercreds.Credential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteAllErr != nil {
+		return nil, f.deleteAllErr
+	}
+	var out []providercreds.Credential
+	for key, c := range f.rows {
+		if key.owner == owner {
+			out = append(out, c)
+			delete(f.rows, key)
+		}
+	}
+	return out, nil
+}
+
+// reviveCount is how many rows this store actually revived.
+func (f *fakeCredStore) reviveCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revives
+}
+
+// ownerRows counts the rows stored for one owner, for a removal test.
+func (f *fakeCredStore) ownerRows(owner string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for key := range f.rows {
+		if key.owner == owner {
+			n++
+		}
+	}
+	return n
+}
+
 // ─── Fake issuer ─────────────────────────────────────────────────────────────
 
 // fakeIssuer is the ChatGPT issuer as an httptest server: the refresh endpoint,
@@ -244,6 +315,8 @@ type fakeIssuer struct {
 	bodies     []map[string]any
 	tokenCalls int
 	revokes    int
+	// revokedTokens is every token the revoke endpoint was handed, in order.
+	revokedTokens []string
 
 	// answer, when set, overrides the token endpoint's response.
 	answer func(call int) (status int, body string)
@@ -295,9 +368,16 @@ func (f *fakeIssuer) token(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, body)
 }
 
-func (f *fakeIssuer) revoke(w http.ResponseWriter, _ *http.Request) {
+func (f *fakeIssuer) revoke(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.revokes++
+	var decoded map[string]any
+	if json.Unmarshal(raw, &decoded) == nil {
+		if tok, ok := decoded["token"].(string); ok {
+			f.revokedTokens = append(f.revokedTokens, tok)
+		}
+	}
 	status := f.revokeStatus
 	f.mu.Unlock()
 	if status == 0 {
@@ -317,6 +397,13 @@ func (f *fakeIssuer) revokeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.revokes
+}
+
+// revoked is the tokens the revoke endpoint was handed, in order.
+func (f *fakeIssuer) revoked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.revokedTokens...)
 }
 
 func (f *fakeIssuer) body(i int) map[string]any {
@@ -1666,9 +1753,9 @@ func TestTokenSourceSaveDoesNotClobberAnotherDaemonsRotation(t *testing.T) {
 func TestProviderCredsWaitIsBounded(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	var logs bytes.Buffer
+	logs := &syncBuffer{}
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1747,4 +1834,363 @@ func TestProviderCredsWaitRefusesNewFlights(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		c.Fail("Wait never returned after the drain finished")
 	}
+}
+
+// TestProviderCredsShutdownDoesNotAbortAnInFlightRefresh is the shutdown half
+// of "a rotated token is never lost". A graceful shutdown cancels the daemon
+// context, and the issuer call must NOT die with it: the issuer has already
+// rotated, so an aborted request drops the only working refresh token and the
+// next boot gets refresh_token_reused and tombstones a login that works. The
+// call keeps its own deadline, and the drain waits for the rotation to land.
+func TestProviderCredsShutdownDoesNotAbortAnInFlightRefresh(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	iss := newFakeIssuer(t)
+	release := make(chan struct{})
+	iss.block = release
+	p := newProviderCreds(ctx, store, iss.engine(), "", testProviderSet(t))
+	p.retryDelay = time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+		done <- err
+	}()
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool { return iss.calls() == 1 },
+		"the refresh must reach the issuer")
+
+	// The daemon starts going down while the issuer has not answered yet.
+	cancel()
+	waited := make(chan struct{})
+	go func() {
+		p.Wait()
+		close(waited)
+	}()
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		p.workMu.Lock()
+		defer p.workMu.Unlock()
+		return p.draining
+	}, "Wait must begin the drain before the issuer answers")
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		c.Fail("the in-flight refresh never returned")
+	}
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		c.Fail("Wait never returned after the refresh landed")
+	}
+
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("rotated-refresh", stored.RefreshToken, "the rotation the issuer completed must reach the row")
+	c.Eq("new-access", stored.AccessToken, "and its access token with it")
+	c.False(stored.Dead, "a shutdown must not tombstone the credential")
+	if _, ok := p.pendingFor(testKey); ok {
+		c.Fail("a landed rotation must leave nothing pending")
+	}
+}
+
+// TestTokenSourceSaveRevivesARowTombstonedByAnotherDaemon is the two-daemon
+// interleaving I1 does not cover. Daemon A rotates r0 to refresh-a and cannot
+// write; daemon B (separate in-memory state, same row) then spends r0, is told
+// refresh_token_reused, re-reads the unchanged row and tombstones it. A's save
+// must recognise the tombstone as false: the row died on exactly the token A
+// holds the successor to, so the pending rotation is written and dead_at
+// cleared, rather than dropped with the only working login in it.
+func TestTokenSourceSaveRevivesARowTombstonedByAnotherDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
+	logs := &syncBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		switch call {
+		case 1:
+			// A's rotation: r0 is spent from here on.
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		case 2:
+			// B spends the token A already spent.
+			return http.StatusBadRequest, `{"error":"refresh_token_reused"}`
+		}
+		return http.StatusOK, tokenBody("access-c", "refresh-c", "acct_1")
+	}
+
+	// A's first save is held in the store, so B's refresh happens while A still
+	// holds refresh-a.
+	gate := newGateStore(inner, 2)
+	a := testCreds(t, inner, iss, "")
+	a.store = gate
+	a.retryDelay = time.Millisecond
+	b := testCreds(t, inner, iss, "")
+
+	_, _, err := a.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "A's first refresh answers from memory")
+	gate.waitOpened(t, 2)
+	if _, ok := a.pendingFor(testKey); !ok {
+		c.Fail("fixture: A must hold the unpersisted rotation")
+	}
+
+	_, _, err = b.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.Error(err, "B has no valid login left to offer")
+	stored, ok := inner.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.True(stored.Dead, "fixture: B tombstoned the row with the spent token")
+
+	gate.release(t, 2)
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		row, ok := inner.row(testOwner, testProvider)
+		return ok && !row.Dead
+	}, "A's save must revive the row it holds the successor for")
+	c.Eq(1, inner.reviveCount(), "exactly one revival")
+
+	stored, ok = inner.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.Eq("refresh-a", stored.RefreshToken, "the row now holds A's rotation")
+	c.Eq("access-a", stored.AccessToken, "and its access token")
+	if _, ok := a.pendingFor(testKey); ok {
+		c.Fail("a revived rotation must leave nothing pending")
+	}
+	// The row is written before the log line, so wait for the line itself.
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		return strings.Contains(logs.String(), "revived a provider credential")
+	}, "the revival must be logged: %s", logs.String())
+	c.StrContains(logs.String(), testOwner, "the log names the owner: %s", logs.String())
+	c.StrContains(logs.String(), testProvider, "the log names the provider: %s", logs.String())
+	c.NotStrContains(logs.String(), "refresh-a", "the log must never name a token: %s", logs.String())
+
+	// The resurrected row is usable: the next refresh spends the held rotation,
+	// which is the whole point of keeping it.
+	tok, _, err := a.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.NoError(err, "the revived credential must serve a recovery")
+	c.Eq("access-c", tok, "token")
+	c.Eq("refresh-a", iss.body(2)["refresh_token"], "the recovery spends the token A held, not the spent one")
+}
+
+// TestTokenSourceSaveLeavesADeadRowThatIsNotOurs is the other side of the
+// revival rule: a dead row the rotation in hand cannot contradict stays dead.
+// Another daemon's rotation moved the row on before it died, so the tombstone
+// is not about A's token, and A's save must drop its record rather than
+// overwrite a login someone else has since replaced.
+func TestTokenSourceSaveLeavesADeadRowThatIsNotOurs(t *testing.T) {
+	c := assert.NewAborting(t)
+	logs := &syncBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	inner := newFakeCredStore()
+	inner.seed(staleCredential(time.Now().Add(time.Minute)))
+	inner.failNextWrite(1)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
+	}
+	gate := newGateStore(inner, 2)
+	p := testCreds(t, inner, iss, "")
+	p.store = gate
+	p.retryDelay = time.Millisecond
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	gate.waitOpened(t, 2)
+
+	// Another daemon rotated the row AND it is now dead: not on the token this
+	// hand-off replaced, so this save has nothing to resurrect.
+	other := staleCredential(time.Now().Add(time.Hour))
+	other.RefreshToken = "other-daemon-refresh"
+	other.AccessToken = "other-daemon-access"
+	other.Dead = true
+	inner.seed(other)
+
+	gate.release(t, 2)
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		_, ok := p.pendingFor(testKey)
+		return !ok
+	}, "a hand-off that cannot be written must be cleared")
+
+	c.Eq(0, inner.reviveCount(), "a tombstone on another token is never revived")
+	stored, ok := inner.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.True(stored.Dead, "the row stays dead")
+	c.Eq("other-daemon-refresh", stored.RefreshToken, "the row keeps the other daemon's token")
+	c.EventuallyTrue(2*time.Second, time.Millisecond, func() bool {
+		return strings.Contains(logs.String(), "the refreshed token was lost")
+	}, "the loss must be logged: %s", logs.String())
+	c.NotStrContains(logs.String(), "refresh-a", "the log must never name a token: %s", logs.String())
+}
+
+// TestTokenSourceAdoptionRevivesARowTombstoned is the same rule at the other
+// place the daemon can meet a dead row: a save that already gave up kept the
+// rotation in memory, and the tombstone landed afterwards. The next refresh
+// must adopt the held rotation (and revive the row with it) instead of
+// forgetting a credential it can still prove alive.
+func TestTokenSourceAdoptionRevivesARowTombstoned(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	store.seed(staleCredential(time.Now().Add(time.Minute)))
+	store.failNextWrite(1 + persistTries)
+	iss := newFakeIssuer(t)
+	iss.answer = func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
+	}
+	p := testCreds(t, store, iss, "")
+	p.retryDelay = time.Microsecond
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), false)
+	c.NoError(err, "the first refresh answers from memory")
+	c.EventuallyTrue(5*time.Second, time.Millisecond, func() bool {
+		return store.refreshCallCount() >= 1+persistTries
+	}, "the save must exhaust its retries")
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := p.pendingFor(testKey); !ok {
+		c.Fail("fixture: the give-up must keep the rotation")
+	}
+
+	// The tombstone lands after the give-up: the row is dead on r0, which is
+	// exactly the token the kept rotation replaces.
+	dead := staleCredential(time.Now().Add(time.Minute))
+	dead.Dead = true
+	store.seed(dead)
+
+	tok, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.NoError(err, "a held rotation makes the tombstone false")
+	c.Eq("access-a", tok, "the rotation's own access token")
+	c.Eq(1, store.reviveCount(), "the row is revived, not forgotten")
+
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.False(stored.Dead, "the row is live again")
+	c.Eq("refresh-a", stored.RefreshToken, "and holds the held rotation")
+}
+
+// TestProviderCredDeleteRevokesTheUnpersistedRotation pins logout's revoke of
+// BOTH live tokens. While a rotation is unpersisted the ROW holds the token
+// that was already spent, so revoking only the row's token leaves the working
+// one usable upstream until it expires.
+func TestProviderCredDeleteRevokesTheUnpersistedRotation(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	cur := staleCredential(time.Now().Add(time.Minute))
+	store.seed(cur)
+	iss := newFakeIssuer(t)
+	p := testCreds(t, store, iss, "")
+
+	rotated := cur
+	rotated.RefreshToken = "rotated-refresh"
+	rotated.AccessToken = "rotated-access"
+	p.recordRotation(testKey, cur.RefreshToken, rotated)
+
+	c.NoError(p.DeleteProviderCredential(context.Background(), testOwner, testProvider), "logout")
+
+	c.Eq(2, iss.revokeCount(), "both the stored and the pending refresh token are revoked")
+	c.EqDeep([]string{"r0", "rotated-refresh"}, iss.revoked(), "revoked tokens")
+	if _, ok := p.pendingFor(testKey); ok {
+		c.Fail("logout must forget the rotation it just revoked")
+	}
+	if _, ok := store.row(testOwner, testProvider); ok {
+		c.Fail("logout must delete the row")
+	}
+}
+
+// TestUserRmDeletesProviderCredentials is the privacy rule for a removed user:
+// the user row is tombstoned, not deleted, and the provider credentials are
+// separate rows, so removing the user must delete them (and revoke them) or the
+// idle sweep keeps refreshing a removed user's grant forever.
+func TestUserRmDeletesProviderCredentials(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeCredStore()
+	iss := newFakeIssuer(t)
+	p := testCreds(t, store, iss, "")
+
+	// The user store resolves the username to "id_alice", so the credentials are
+	// stored against that id.
+	const owner = "id_alice"
+	for _, provider := range []string{testProvider, "other"} {
+		cred := staleCredential(time.Now().Add(time.Hour))
+		cred.OwnerUserID, cred.Provider = owner, provider
+		cred.RefreshToken = "refresh-" + provider
+		store.seed(cred)
+	}
+	// Another user's credential, which the removal must not touch.
+	other := staleCredential(time.Now().Add(time.Hour))
+	other.OwnerUserID = "id_bob"
+	store.seed(other)
+
+	ctrl := &Controller{users: &userAdminFakeStore{}, providerCreds: p}
+	c.NoError(ctrl.UserRm(context.Background(), "alice"), "UserRm")
+
+	c.Eq(0, store.ownerRows(owner), "every credential of the removed user is deleted")
+	c.Eq(1, store.ownerRows("id_bob"), "another user's credential is untouched")
+	c.Eq(2, iss.revokeCount(), "each deleted credential is revoked upstream")
+}
+
+// TestUserRmSurvivesACredentialDeleteFailure pins the best-effort contract: the
+// removal has already happened, so a store failure deleting the credentials is
+// logged and does not fail the call.
+func TestUserRmSurvivesACredentialDeleteFailure(t *testing.T) {
+	c := assert.NewAborting(t)
+	logs := &syncBuffer{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	store := newFakeCredStore()
+	store.deleteAllErr = errors.New("store is down")
+	p := testCreds(t, store, newFakeIssuer(t), "")
+	ctrl := &Controller{users: &userAdminFakeStore{}, providerCreds: p}
+
+	c.NoError(ctrl.UserRm(context.Background(), "alice"), "a credential failure must not fail the removal")
+	c.StrContains(logs.String(), "deleting a removed user's logins failed", "the failure must be logged: %s", logs.String())
+}
+
+// TestPendingRotationRedactsTokens closes the leak fmt has through an
+// UNEXPORTED field: a whole pendingRotation printed with %v or %+v renders its
+// embedded Credential's own fields, because fmt does not call the inner type's
+// String there.
+func TestPendingRotationRedactsTokens(t *testing.T) {
+	c := assert.NewAborting(t)
+	rot := pendingRotation{
+		seq:  7,
+		sent: "refresh-token-must-not-print",
+		want: providercreds.Credential{
+			OwnerUserID:  testOwner,
+			Provider:     testProvider,
+			AccountID:    "acct_1",
+			RefreshToken: "wanted-refresh-token-must-not-print",
+			AccessToken:  "wanted-access-token-must-not-print",
+			AccessExpiry: time.Now().Add(time.Hour),
+		},
+	}
+
+	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
+		out := fmt.Sprintf(format, rot)
+		c.NotStrContains(out, rot.sent, "%s leaked the spent token: %s", format, out)
+		c.NotStrContains(out, rot.want.RefreshToken, "%s leaked the rotation's refresh token: %s", format, out)
+		c.NotStrContains(out, rot.want.AccessToken, "%s leaked the rotation's access token: %s", format, out)
+		c.StrContains(out, redactedToken, "%s does not mark the tokens redacted: %s", format, out)
+	}
+
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("rotation", "pending", rot)
+	c.NotStrContains(buf.String(), rot.sent, "slog leaked the spent token: %s", buf.String())
+	c.NotStrContains(buf.String(), rot.want.RefreshToken, "slog leaked the refresh token: %s", buf.String())
+	c.NotStrContains(buf.String(), rot.want.AccessToken, "slog leaked the access token: %s", buf.String())
+	c.StrContains(buf.String(), testProvider, "slog keeps the non-secret fields: %s", buf.String())
 }

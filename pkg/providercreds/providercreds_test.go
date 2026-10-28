@@ -15,7 +15,8 @@ import (
 )
 
 // A Credential holds two live bearer tokens, so no formatting verb and no log
-// handler may print them. String covers %v/%s/%+v, LogValue covers slog.
+// handler may print them. String covers %v/%s/%+v, GoString covers %#v (fmt
+// consults GoStringer there, never Stringer), and LogValue covers slog.
 func TestProviderCredentialRedactsTokens(t *testing.T) {
 	c := assert.NewAborting(t)
 	cred := providercreds.Credential{
@@ -30,7 +31,7 @@ func TestProviderCredentialRedactsTokens(t *testing.T) {
 		LastRefresh:  time.Date(2026, 5, 4, 2, 0, 0, 0, time.UTC),
 	}
 
-	for _, format := range []string{"%v", "%+v", "%s"} {
+	for _, format := range []string{"%v", "%+v", "%s", "%#v"} {
 		out := fmt.Sprintf(format, cred)
 		c.NotStrContains(out, cred.RefreshToken, "%s leaked the refresh token: %s", format, out)
 		c.NotStrContains(out, cred.AccessToken, "%s leaked the access token: %s", format, out)
