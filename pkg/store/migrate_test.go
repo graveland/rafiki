@@ -549,11 +549,11 @@ func insertMigrationOwner(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	return id
 }
 
-// TestMigrate0056TreeColumns pins 0056-0058: the tree columns on the message,
+// TestMigrate0057TreeColumns pins 0057-0059: the tree columns on the message,
 // conversation and turn tables, the four counters, and the unique path index —
 // exercised rather than merely catalogued, because an index that exists but is
 // not unique would still satisfy information_schema.
-func TestMigrate0056TreeColumns(t *testing.T) {
+func TestMigrate0057TreeColumns(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := testPool(t)
@@ -631,7 +631,7 @@ func TestMigrate0056TreeColumns(t *testing.T) {
 
 	// There is no MigrateTo API, so exercise the down migration directly: a
 	// no-op body must fail this test, not silently leave the tree in place.
-	down, err := os.ReadFile("migrations/0056_conversation_tree.down.sql")
+	down, err := os.ReadFile("migrations/0057_conversation_tree.down.sql")
 	c.Require().NoError(err, "read down migration")
 	if _, err := pool.Exec(ctx, string(down)); err != nil {
 		t.Fatalf("apply down migration: %v", err)
@@ -664,9 +664,9 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 	chain, err := loadMigrations()
 	c.Require().NoError(err, "load chain")
 	head := chain[len(chain)-1]
-	// 0058 is the migration whose rollback is observed below; a new head means
+	// 0059 is the migration whose rollback is observed below; a new head means
 	// this test must be repointed, not silently left asserting an older one.
-	c.Eq(58, head.version, "this test observes 0058's rollback")
+	c.Eq(59, head.version, "this test observes 0059's rollback")
 
 	prev, hadPrev := goSteps[head.version]
 	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
@@ -695,7 +695,7 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 		SELECT EXISTS (SELECT 1 FROM information_schema.columns
 		                WHERE table_schema='conversations' AND table_name='conversation'
 		                  AND column_name='node_count')`).Scan(&nodeCount), "probe node_count")
-	c.False(nodeCount, "0058's column survived a failed go step; the SQL did not roll back with it")
+	c.False(nodeCount, "0059's column survived a failed go step; the SQL did not roll back with it")
 }
 
 // TestMigrateGoStepUnknownVersion pins loadMigrations' refusal of a step for a

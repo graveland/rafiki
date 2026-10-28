@@ -40,7 +40,7 @@ func backfillInsertRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, co
 	assert.NewAborting(t).NoError(err, "insert message ordinal %d", ordinal)
 }
 
-// backfillRun walks one conversation in its own transaction, as migration 0056's
+// backfillRun walks one conversation in its own transaction, as migration 0057's
 // step does, and returns the report.
 func backfillRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string) BackfillReport {
 	t.Helper()
@@ -380,7 +380,7 @@ func TestBackfillSnapshotFixture(t *testing.T) {
 	c.Greater(0, len(snapshot.Messages), "the snapshot has messages")
 
 	// Stop one version short of the tree columns, write the legacy rows, then
-	// let the chain — 0056's SQL and its go step together — place them.
+	// let the chain — 0057's SQL and its go step together — place them.
 	c.Require().NoError(migrateTo(ctx, pool, 55), "migrate to 55")
 	var convID string
 	c.Require().NoError(pool.QueryRow(ctx, `

@@ -497,10 +497,10 @@ func backfillReadProviderIDs(ctx context.Context, tx pgx.Tx, conversationID stri
 	return out, rows.Err()
 }
 
-// backfillAllConversations is the Go half of migration 0056: it places every
+// backfillAllConversations is the Go half of migration 0057: it places every
 // message row written before the tree existed, then seeds the ordinal
-// allocator. It runs inside 0056's transaction, which commits before 0058 adds
-// the denormalised counters — 0058 seeds those from the rows this places, so
+// allocator. It runs inside 0057's transaction, which commits before 0059 adds
+// the denormalised counters — 0059 seeds those from the rows this places, so
 // writing them here would name columns that do not exist yet.
 func backfillAllConversations(ctx context.Context, tx pgx.Tx) error {
 	ids, err := backfillConversationsWithLegacyRows(ctx, tx)

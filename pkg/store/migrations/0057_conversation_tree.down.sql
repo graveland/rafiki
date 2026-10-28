@@ -1,4 +1,4 @@
--- Reverses 0056. Order is the reverse of the up migration: the child-side
+-- Reverses 0057. Order is the reverse of the up migration: the child-side
 -- columns and indexes first, then the constraints, then the columns they
 -- constrain. Dropping head_id and next_ordinal makes the tree unreachable but
 -- does NOT delete any node — the message rows survive as legacy linear rows,

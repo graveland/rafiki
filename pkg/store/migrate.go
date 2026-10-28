@@ -45,8 +45,8 @@ type goStep func(ctx context.Context, tx pgx.Tx) error
 // migration's own transaction immediately after that version's SQL, so the two
 // commit or roll back together.
 var goSteps = map[int]goStep{
-	// 0056 adds the tree columns; this places the rows that predate them.
-	56: backfillAllConversations,
+	// 0057 adds the tree columns; this places the rows that predate them.
+	57: backfillAllConversations,
 }
 
 // Migrate brings the database to the head of the embedded migration chain,

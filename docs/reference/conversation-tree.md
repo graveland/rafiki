@@ -11,7 +11,7 @@ The code, in the order this doc reads it:
 |---|---|
 | `pkg/convtree/convtree.go` | `Canon`, `RootSeed`, `NodeHash`, `Chain`, `HashVersion` — the identity |
 | `pkg/store/tree.go` | `AppendChain`, `LoadPath`, `RetractHead` — the write path |
-| `pkg/store/tree_backfill.go` | migration 0056's Go step, and `SameMessage` |
+| `pkg/store/tree_backfill.go` | migration 0057's Go step, and `SameMessage` |
 | `pkg/store/tree_check.go` | `CheckTree` — the invariant check |
 | `pkg/capture/capture.go` | claude's attach decision |
 | `pkg/store/compaction.go`, `pkg/llm/` | fundi's mapping onto the tree |
@@ -314,7 +314,7 @@ that wants the working set asks for it by name.
 ## Stats
 
 Four denormalised counters on the `conversation` row, updated by the same
-statement that reserves ordinals (migration 0058; `fillfactor 85` on the table so
+statement that reserves ordinals (migration 0059; `fillfactor 85` on the table so
 the per-turn update stays HOT, since none of them is indexed):
 
 | Column | Meaning |
@@ -324,7 +324,7 @@ the per-turn update stays HOT, since none of them is indexed):
 | `fallback_count` | appends that attached by hash-chain match or as a new root without a usable `previous_message_id` |
 | `payload_bytes` | stored content bytes of the inserted nodes |
 
-0058 seeds `node_count`/`payload_bytes`/`fork_count` from the rows that exist
+0059 seeds `node_count`/`payload_bytes`/`fork_count` from the rows that exist
 (`fork_count` there counts parents with more than one child, the same quantity by
 another route — exact for a two-way fork, and an upper bound beyond it: a
 3+-way fork is one seeded fork point against the live counter's one increment
@@ -333,10 +333,10 @@ are two-way). Derived on read, not stored: active length (`head.depth + 1`),
 abandoned nodes (`node_count − active length`), branch points. Token and cost
 totals stay on `conversation_turn`.
 
-## The backfill (migration 0056's Go step)
+## The backfill (migration 0057's Go step)
 
 `pkg/store/migrate.go` embeds `*.up.sql` only, so the backfill is a version-keyed
-Go step (`goSteps[56] = backfillAllConversations`) that runs in 0056's own
+Go step (`goSteps[57] = backfillAllConversations`) that runs in 0057's own
 transaction, immediately after its SQL: SQL and backfill commit together or not
 at all. On a fresh database it finds no rows and is a no-op.
 
@@ -496,8 +496,8 @@ release. Anything captured after the cutover is lost, which is why the dump is
 taken with the daemon stopped and the cutover is a short window.
 
 **Ordering: migrate, then start — never start, then migrate.**
-`conversation.next_ordinal` is seeded by the backfill step (migration 0056), not
-by 0058, and only a pre-tree daemon writing after the migration leaves it stale.
+`conversation.next_ordinal` is seeded by the backfill step (migration 0057), not
+by 0059, and only a pre-tree daemon writing after the migration leaves it stale.
 The next tree append then fails loudly on `UNIQUE (conversation_id, ordinal)`
 rather than corrupting anything. The one-line repair for a database that broke the
 rule is the statement the backfill itself runs:

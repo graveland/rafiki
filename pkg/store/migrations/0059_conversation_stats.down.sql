@@ -1,4 +1,4 @@
--- Reverses 0058. The counters are derived from the message rows, so dropping
+-- Reverses 0059. The counters are derived from the message rows, so dropping
 -- them loses nothing that cannot be recomputed; fillfactor returns to the
 -- table default.
 ALTER TABLE conversations.conversation RESET (fillfactor);

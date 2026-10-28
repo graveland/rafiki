@@ -10,7 +10,7 @@
 -- moves together, hence the CHECK.
 --
 -- The FKs are added NOT VALID so this migration does not scan the message
--- table; 0057 validates them in its own transaction. ON DELETE RESTRICT is
+-- table; 0058 validates them in its own transaction. ON DELETE RESTRICT is
 -- deliberate — a node with children (or a head) cannot be deleted, and
 -- messages are never deleted anyway.
 ALTER TABLE conversations.conversation_message
@@ -51,6 +51,6 @@ ALTER TABLE conversations.conversation
 -- The head each turn started from, so a fork can be attributed to the turn
 -- that made it. No FK: conversation_turn is a hypertable with columnstore,
 -- which rejects ADD COLUMN ... REFERENCES (0030 hit the same wall), and every
--- row written before 0056 has NULL here anyway.
+-- row written before 0057 has NULL here anyway.
 ALTER TABLE conversations.conversation_turn
   ADD COLUMN request_head_id uuid;
