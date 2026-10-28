@@ -405,6 +405,16 @@ event and never count toward `limit`.
 Both fields are additive optional proto fields, so `protocol.Epoch` is
 unchanged.
 
+**A history read shows the whole stored history, not the working path.** The rows
+come back in `ordinal` order (`store.Messages.Load`/`LoadPage`), so two kinds of
+row that the tree legitimately leaves off its working path appear here: a prompt
+retracted before it was answered — `RetractHead` moves `head_id` back and deletes
+nothing, so the retracted row survives as an unreachable leaf — and the sibling
+branches a fork or a compaction left behind. `agent_view` and `rafiki
+logs`/`tail` read the same rows and show them too. This is the tree keeping
+history, not a leak; a path-aware reader (one that renders the head→root chain)
+is a later plan, and nothing in this contract promises one.
+
 #### `EventSubject`
 
 | Field | Meaning |
@@ -1697,7 +1707,7 @@ regardless.
 
 | command | claude | fundi | script |
 |---|---|---|---|
-| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | queue the text; the engine moves the resume horizon onto a `kind='clear'` boundary row | `InvalidArgument` |
+| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | queue the text; the engine appends a `clear` root through `AppendClear` → `AppendChain`, which starts a fresh working set and writes no horizon | `InvalidArgument` |
 | `/compact [text]` | forward the text as a user message | queue the text; the engine runs a manual compaction (`text` = extra summary instructions) | `InvalidArgument` |
 | `/exit` | `Kill` | `Kill` | `Kill` |
 

@@ -356,7 +356,10 @@ Nothing is deleted or renumbered, and re-running the walk over the same rows
 assigns the same values (`TestBackfillIsIdempotent`).
 
 **A copy that matches nothing is logged and becomes a node.** A rehearsal must
-report zero `UnmatchedCopies`, or the rule is wrong. Over the committed fixture
+report zero `UnmatchedCopies`, or the rule is wrong. That count appears ONLY in
+the migrate log line (`conversation tree backfill … unmatched_copies=`), so
+capture the migrate output: `tree check` cannot reproduce it. Over the
+committed fixture
 (`pkg/capture/testdata/interim-capture-rows.json`, 100 rows) the report is 43
 nodes, 57 interim copies, 0 unmatched, 0 other duplicates
 (`TestBackfillSnapshotFixture`), and the tree it builds equals live capture of the
@@ -365,19 +368,24 @@ same session node for node (`TestBackfillMatchesTreeCapture`, `pkg/capture`).
 **Residual risk of the looser copy rule, and the net that covers it.** A copy
 wrongly recognised as a duplicate is content-different from the node it claims to
 duplicate, and it keeps no position of its own — so the tree would be missing a
-message. The counters cannot see this. What does is `rafikid tree check`'s
-working-set comparison, which compares the working path against the legacy working
-set on the stored bytes and names the conversation that differs; the shadow
-database and the cutover rehearsal are where that runs before prod.
+message. The counters cannot see this. What does is `rafikid tree check
+--cutover`'s working-set comparison, which compares the working path against the
+legacy working set on the stored bytes and names the conversation that differs;
+the shadow database and the cutover rehearsal are where that runs before prod.
 
 ## `rafikid tree check`
 
 ```
-rafikid tree check [--db <dsn>]
+rafikid tree check [--cutover] [--db <dsn>]
 ```
 
 `--db` defaults to `RAFIKI_DB`, then `RAFIKI_TEST_DSN`. It opens the database
-directly — no daemon, no socket. Output, one field per line:
+directly — no daemon, no socket. `--cutover` runs the working-set comparison,
+the cutover-only part: it compares each legacy conversation's working path
+against the working set its `resume_from_ordinal` described, and populates
+`working_set_mismatch` and `working_set_loose_match`. Without the flag those two
+fields stay empty — nothing is compared — and the check is a structural health
+probe. Output, one field per line:
 
 | Field | Meaning |
 |---|---|
@@ -388,25 +396,32 @@ directly — no daemon, no socket. Output, one field per line:
 | `bad_depth` | children whose depth is not their parent's + 1 |
 | `missing_head` | conversations with messages but no `head_id` |
 | `ordinal_counter_behind` | conversations whose `next_ordinal` is not ahead of their highest ordinal |
-| `working_set_mismatch` | conversations whose working path carries different messages from the legacy working set, listed by id |
-| `working_set_loose_match` | conversations that match only under `SameMessage` (informational; it is what a rehearsal reads to see how much of the data relies on the looser rule) |
+| `working_set_mismatch` | with `--cutover`, conversations whose working path carries different messages from the legacy working set, listed by id |
+| `working_set_loose_match` | with `--cutover`, conversations that match only under `SameMessage` (informational; it is what a rehearsal reads to see how much of the data relies on the looser rule) |
 
 `missing_hash`, `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`
 and any `working_set_mismatch` fail the check; `duplicate_rows` and
 `working_set_loose_match` do not. It exits non-zero when the check fails, so it
 can gate a cutover.
 
-**Scope.** The working-set comparison — and, with it, the hash recomputation —
-runs over the conversations that still carry a legacy `resume_from_ordinal`
-(`checkConversationsWithMessages`, `pkg/store/tree_check.go`). That column is
-read by the check and written by nobody any more; a conversation written after
-the cutover legitimately leaves the siblings it forked or compacted away from off
-its head path, so comparing it against "every row in ordinal order" would report
-correct data as a mismatch. The other counters (`missing_hash`, `duplicate_rows`,
-`bad_depth`, `missing_head`, `ordinal_counter_behind`) cover every conversation.
-Pinned by `TestCheckTreeDetectsEachClass`, `TestCheckTreeDetectsABadHash`,
-`TestCheckTreeScopesWorkingSetsToLegacyHorizons` and `TestCheckTreeAcceptsABackfilledTree`
-(`pkg/store`).
+**Scope.** Two different conversation lists, and the difference matters.
+`bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`,
+`missing_hash` and `duplicate_rows` cover **every conversation with messages**:
+`bad_hash` walks every conversation with messages
+(`checkConversationsWithMessages`), `bad_depth`, `missing_head` and
+`ordinal_counter_behind` are single queries over every conversation, and the two
+legacy-row counters classify the unplaced rows of every conversation that holds
+one (`checkConversationsWithLegacyRows`, `pkg/store/tree_check.go`), so a
+conversation with no unplaced row contributes nothing. A tree's shape and its hashes
+are properties of the tree, however its storage was written. Only the working-set
+comparison — `working_set_mismatch` and `working_set_loose_match`, and only under
+`--cutover` — is scoped, to conversations that still carry a legacy
+`resume_from_ordinal` (`checkConversationsWithHorizon`). That column is read by
+the check and written by nobody any more, and after go-live the daemon
+legitimately compacts and forks those same conversations, so the legacy equality
+no longer holds. Pinned by `TestCheckTreeDetectsEachClass`,
+`TestCheckTreeDetectsABadHash`, `TestCheckTreeScopesWorkingSetsToLegacyHorizons`
+and `TestCheckTreeAcceptsABackfilledTree` (`pkg/store`).
 
 ## Cutover procedure
 
@@ -424,7 +439,8 @@ cutover is a restart.
    (`timescaledb_pre_restore()` before, `timescaledb_post_restore()` after).
    Restoring, rather than `CREATE DATABASE … TEMPLATE`, is the point: it proves
    the backup restores. Run `rafikid migrate` against it, then `rafikid tree
-   check`, and record the time of each step. Repeat from the dump until clean.
+   check --cutover`, and record the time of each step. Repeat from the dump until
+   clean.
    The restore needs prod's extension versions (timescaledb 2.30.1,
    pg_textsearch 1.5.0-dev at the time of writing): restore on prod's own host as
    a superuser, or on a local server upgraded to match — the local `pg` container
@@ -432,10 +448,15 @@ cutover is a restart.
    `rafikid` command: `service.env` sets `RAFIKI_DB` to prod and every invocation
    loads it. Earlier iterations run against a data-only shadow copy instead
    (schema from our own migrations, so the version skew does not apply).
-4. Migrate the real database, run `rafikid tree check`, `VACUUM FULL
+4. Migrate the real database, run `rafikid tree check --cutover`, `VACUUM FULL
    conversations.conversation` (repacks the pages `fillfactor 85` only applies to
    new writes), start the new daemon. Keep the dump until the new daemon has run
    for a while.
+
+**The gate is `rafikid tree check --cutover` BEFORE the new daemon starts.** After
+go-live the daemon legitimately compacts and forks those same conversations, so
+the legacy working-set equality no longer holds: a later plain `rafikid tree
+check` is a structural health probe, and it must exit 0.
 
 **Rollback** is: stop the daemon, restore the dump from step 2, start the previous
 release. Anything captured after the cutover is lost, which is why the dump is
@@ -454,10 +475,15 @@ UPDATE conversations.conversation SET next_ordinal = coalesce((
    WHERE conversation_id = conversation.id), 0);
 ```
 
-**Capture refuses a conversation that predates the tree and was never backfilled**
-— `next_ordinal` 0 against existing ordinals — for the same reason: a
-conversation captured between the migration and the backfill (possible only by
-skipping the stop-the-daemon rule) fails loudly rather than corrupting the tree.
+**A conversation that predates the tree and was never backfilled fails loudly,
+but incidentally.** There is no explicit refusal: `next_ordinal` is still 0
+against existing ordinals, so the first append collides on the pre-existing
+`UNIQUE (conversation_id, ordinal)` (SQLSTATE 23505) and the write errors. That is
+loud and never silent, but it is a by-product of the unique index rather than a
+designed check; it catches a conversation captured between the migration and the
+backfill, which is possible only by skipping the stop-the-daemon rule. The repair
+is the backfill, or the one-line `UPDATE` above, which is the same statement it
+runs — never a retry.
 
 ## Tests
 
