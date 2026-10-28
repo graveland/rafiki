@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -153,6 +154,7 @@ func TestRecallWiring(t *testing.T) {
 	t.Run("llm-completer-uses-summary-entrypoint", TestLLMCompleterUsesSummaryEntrypoint)
 	t.Run("llm-completer-resolves-catalog-model", TestLLMCompleterResolvesCatalogModel)
 	t.Run("llm-completer-completion-cost-fallback", TestLLMCompleterCompletionCostFallback)
+	t.Run("llm-completer-prices-responses-model", TestLLMCompleterPricesResponsesModelByCatalogID)
 }
 
 func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
@@ -417,4 +419,43 @@ func TestLLMCompleterCompletionCostFallback(t *testing.T) {
 	c.Len(saw, 1, "pricer saw")
 	saw = nil
 	c.Eq(0, completionCost(known("echoed-id"), "echoed-id", "z-ai/glm-5.3-flash", usage), "cost")
+}
+
+// TestLLMCompleterPricesResponsesModelByCatalogID pins the pricer the daemon's
+// summarizer is built with — newSummaryCompleter, the only constructor
+// buildRecallRuntime uses. A [summaries] model on an openai-responses provider
+// is priced through Set.CatalogIDs, so a pass records a real spend; the raw
+// catalog Pricing it replaced only resolves catalog-SHAPED ids, so
+// "gpt-6.1-sol" against an "openai/gpt-6.1-sol" entry missed and every summary
+// was recorded free. Summaries are not a budget input, so this is reporting
+// rather than enforcement — but a zero is indistinguishable from a free model.
+//
+// DB-backed like its sibling above, because Complete captures a conversation.
+// Rides the TestRecallWiring shim.
+func TestLLMCompleterPricesResponsesModelByCatalogID(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := scratchPool(t)
+	ctx := t.Context()
+	cat := seedResponsesCatalog()
+	prov := mustParseProviders(t, responsesProvidersTOML)
+	sender := &fakeSender{reply: &anthropic.Message{
+		Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "the summary text"}},
+		Model:   "gpt-6.1-sol", // the provider-local spelling the upstream echoes
+		Usage:   anthropic.Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+	}}
+	client, err := llm.NewClient(
+		llm.WithProviders(prov),
+		llm.WithCatalog(cat),
+		llm.WithProviderSender("oa", sender),
+		llm.WithStore(pool),
+		llm.WithLogger(discardLogger()),
+	)
+	c.Require().NoError(err, "llm.NewClient")
+
+	got, err := newSummaryCompleter(client, prov, "oa/gpt-6.1-sol").
+		Complete(ctx, "", "summarize this", "the transcript", 1024)
+	c.Require().NoError(err, "Complete")
+	c.Eq("the summary text", got.Text, "Text")
+	// $3/1M input for 1M + $15/1M output for 0.5M: the openai/gpt-6.1-sol entry.
+	c.LessOrEqual(1e-9, math.Abs(got.CostUSD-10.5), "CostUSD = %v, want 10.5", got.CostUSD)
 }

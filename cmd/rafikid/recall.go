@@ -60,6 +60,17 @@ func newLLMCompleter(client *llm.Client, prov *providers.Set, model string, pric
 	return c
 }
 
+// newSummaryCompleter builds the completer a summarizer pass prices its calls
+// with. The pricer is catalogPricer over the client's catalog and the same
+// provider registry, not the catalog's Pricing, for the reason every other
+// daemon pricer goes through it: the raw lookup only resolves catalog-SHAPED
+// ids, so a [summaries] model on an openai-responses provider ("gpt-6.1-sol",
+// or the qualified "oa/gpt-6.1-sol") priced as 0 and the pass recorded a real
+// spend as free. A nil catalog still leaves the pricer nil (unpriced).
+func newSummaryCompleter(client *llm.Client, prov *providers.Set, model string) *llmCompleter {
+	return newLLMCompleter(client, prov, model, catalogPricer(client.Catalog(), prov))
+}
+
 func (c *llmCompleter) Model() string { return c.model }
 
 // ContextWindow resolves the model's context length from the shared catalog,
@@ -344,7 +355,7 @@ func buildRecallRuntime(pool *pgxpool.Pool, prov *providers.Set, client *llm.Cli
 			if client != nil {
 				sums = recall.NewSummarizer(recall.SummarizerOptions{
 					Store:            st,
-					Completer:        newLLMCompleter(client, prov, prov.Summaries.Model, client.Catalog().Pricing),
+					Completer:        newSummaryCompleter(client, prov, prov.Summaries.Model),
 					MaxSegmentTokens: prov.Summaries.MaxSegmentTokens,
 					Logger:           logger,
 				})
