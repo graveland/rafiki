@@ -21,7 +21,7 @@ import (
 )
 
 // noProviderNote is printed when the operator selects no provider at all.
-const noProviderNote = "    note: no LLM provider — claude-kind agents run on your Claude login; fundi agents and recall summaries need a provider (an OpenRouter or Anthropic key, or a local Ollama — re-run rafiki setup to add one)"
+const noProviderNote = "    note: no LLM provider: claude-kind agents run on your Claude login, while fundi agents, recall summaries and reviews need one (an OpenRouter or Anthropic key, a local Ollama, an OpenAI Responses endpoint, or a ChatGPT-subscription login; re-run rafiki setup to add one)"
 
 // providersResult is what runSetup needs back from the providers step.
 type providersResult struct {
@@ -33,17 +33,23 @@ type providersResult struct {
 
 // providerMenu is the multi-select order. "other" is a single option standing
 // for every custom OpenAI-compatible endpoint. The two Responses entries are
-// the kinds under a fixed provider name each: "openai" for the api-key dialect
-// (so model ids read openai/<id>, the spelling the OpenRouter catalog prices)
-// and "chatgpt" for the subscription dialect (the name `rafiki providers
-// login` takes).
+// the kinds under a preferred provider name each: "openai" for the api-key
+// dialect (so model ids read openai/<id>, the spelling the OpenRouter catalog
+// prices) and "chatgpt" for the subscription dialect (the name `rafiki
+// providers login` takes). A name an operator's entry of another kind already
+// holds is never reused: reserveProviderName moves the kind to its alternate.
 var providerMenu = []string{"anthropic", "openrouter", responsesProviderName, chatgptProviderName, "ollama", "other"}
 
 const (
 	// responsesProviderName and chatgptProviderName are the providers.toml
-	// names the two Responses kinds are written under.
+	// names the two Responses kinds are written under when nothing else holds
+	// them.
 	responsesProviderName = "openai"
 	chatgptProviderName   = "chatgpt"
+	// responsesAltName and chatgptAltName are the next names to try when the
+	// preferred one is held by an entry of a different kind.
+	responsesAltName = "openai-responses"
+	chatgptAltName   = "chatgpt-subscription"
 	// openaiAPIKeyEnv is the default api_key_env of the api-key Responses kind.
 	openaiAPIKeyEnv = "OPENAI_API_KEY"
 	// responsesDefaultBaseURL is the api-key Responses kind's default endpoint,
@@ -58,13 +64,30 @@ var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // customProviderNameRE mirrors providers' name rule, which is unexported there.
 var customProviderNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
-// isBuiltinProvider reports whether name is one of the menu providers.
+// isBuiltinProvider reports whether name is one of the menu providers. It is
+// about the NAME only: an entry can hold one of these names with another kind,
+// which is what isBuiltinEntry answers.
 func isBuiltinProvider(name string) bool {
 	switch name {
 	case "anthropic", "openrouter", "ollama", responsesProviderName, chatgptProviderName:
 		return true
 	}
 	return false
+}
+
+// isBuiltinEntry reports whether this entry is the one its menu name writes. A
+// providers.toml entry that reuses a menu name with a DIFFERENT kind (a custom
+// OpenAI-compatible endpoint the operator called "openai" or "chatgpt") is a
+// custom endpoint: the step must copy it as it is, never retype it, drop it, or
+// write over it.
+func isBuiltinEntry(name string, p providers.Provider) bool {
+	switch name {
+	case responsesProviderName:
+		return p.Kind == providers.KindOpenAIResponses
+	case chatgptProviderName:
+		return p.Kind == providers.KindOpenAIResponsesChatGPT
+	}
+	return isBuiltinProvider(name)
 }
 
 // runProvidersStep writes providers.toml and the provider keys in service.env,
@@ -159,14 +182,16 @@ func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, s
 		}
 	}
 	if containsString(chosen, responsesProviderName) {
-		if err := configureResponsesProvider(ctx, w, out, providerAt(base, responsesProviderName), set, vars, savedEnv); err != nil {
+		name := reserveProviderName(base, set, responsesProviderName, responsesAltName, providers.KindOpenAIResponses, out)
+		if err := configureResponsesProvider(ctx, w, out, name, providerAt(base, name), set, vars, savedEnv); err != nil {
 			return res, err
 		}
 	}
 	if containsString(chosen, chatgptProviderName) {
 		// No prompts: the kind owns its endpoint and its credential, which is
 		// each user's own ChatGPT login. Setup can only say how to get one.
-		set.Providers[chatgptProviderName] = providers.Provider{Kind: providers.KindOpenAIResponsesChatGPT}
+		name := reserveProviderName(base, set, chatgptProviderName, chatgptAltName, providers.KindOpenAIResponsesChatGPT, out)
+		set.Providers[name] = providers.Provider{Kind: providers.KindOpenAIResponsesChatGPT}
 	}
 	if containsString(chosen, "ollama") {
 		ok, model, err := configureOllama(ctx, w, r, out, st)
@@ -265,10 +290,13 @@ func runProvidersStep(ctx context.Context, w *wizard, r runner, out io.Writer, s
 	res.Providers = ordered
 	res.Default = def
 	res.OllamaModel = ollamaModel
-	if _, ok := set.Providers[chatgptProviderName]; ok {
-		// Every user bills their own subscription, so one login per user is
-		// the remaining step and it needs a real user credential.
-		fmt.Fprintf(out, "    %s: each user runs: rafiki providers login %s\n", chatgptProviderName, chatgptProviderName)
+	for _, name := range ordered {
+		// Every user bills their own subscription, so one login per user is the
+		// remaining step, and it needs a real user credential. A provider under
+		// an alternate name (the preferred one was taken) needs it just as much.
+		if set.Providers[name].Kind == providers.KindOpenAIResponsesChatGPT {
+			fmt.Fprintf(out, "    %s: each user runs: rafiki providers login %s\n", name, name)
+		}
 	}
 	return res, nil
 }
@@ -304,20 +332,21 @@ func orderedProviderNames(set *providers.Set) []string {
 	return append(ordered, customs...)
 }
 
-// menuSaved maps an owned file's provider names onto the menu: a custom name
-// becomes "other", so a re-run keeps it without naming it.
+// menuSaved maps an owned file's provider names onto the menu: a name held by an
+// entry of another kind is a custom endpoint, so it becomes "other" and a re-run
+// keeps it without naming it.
 func menuSaved(base *providers.Set) []string {
 	if base == nil {
 		return nil
 	}
 	var out []string
 	for _, n := range []string{"anthropic", "openrouter", responsesProviderName, chatgptProviderName, "ollama"} {
-		if _, ok := base.Providers[n]; ok {
+		if p, ok := base.Providers[n]; ok && isBuiltinEntry(n, p) {
 			out = append(out, n)
 		}
 	}
-	for n := range base.Providers {
-		if !isBuiltinProvider(n) {
+	for n, p := range base.Providers {
+		if !isBuiltinEntry(n, p) {
 			out = append(out, "other")
 			break
 		}
@@ -553,11 +582,48 @@ func providerAt(base *providers.Set, name string) *providers.Provider {
 	return &p
 }
 
+// providerKindAt returns the kind base or set holds name under, and whether
+// either holds it at all.
+func providerKindAt(base, set *providers.Set, name string) (providers.Kind, bool) {
+	for _, s := range []*providers.Set{base, set} {
+		if s == nil {
+			continue
+		}
+		if p, ok := s.Providers[name]; ok {
+			return p.Kind, true
+		}
+	}
+	return "", false
+}
+
+// reserveProviderName returns the name to write a new provider of kind under.
+//
+// The preferred name is used when nothing holds it, or when the entry holding it
+// is already this kind (a re-run). An entry of ANOTHER kind is never touched: a
+// key-less custom endpoint would be dropped (its entry moved to a backup), and a
+// keyed one would be silently retyped to the new kind, so the kind moves to alt
+// (then alt-2, alt-3, ...) and the operator is told why.
+func reserveProviderName(base, set *providers.Set, name, alt string, kind providers.Kind, out io.Writer) string {
+	held, taken := providerKindAt(base, set, name)
+	if !taken || held == kind {
+		return name
+	}
+	cand := alt
+	for i := 2; ; i++ {
+		if h, ok := providerKindAt(base, set, cand); !ok || h == kind {
+			break
+		}
+		cand = fmt.Sprintf("%s-%d", alt, i)
+	}
+	fmt.Fprintf(out, "    note: %s is already a %s provider; writing the %s provider as %s instead\n", name, held, kind, cand)
+	return cand
+}
+
 // configureResponsesProvider asks for the api-key Responses provider (base URL,
-// key variable, key) and stores it with the key in service.env under that
-// variable. The key NEVER reaches providers.toml: api_key_env names where the
-// daemon finds it, and setup is what puts it there.
-func configureResponsesProvider(ctx context.Context, w *wizard, out io.Writer, saved *providers.Provider, set *providers.Set, vars, savedEnv map[string]string) error {
+// key variable, key) and stores it under name, with the key in service.env under
+// that variable. The key NEVER reaches providers.toml: api_key_env names where
+// the daemon finds it, and setup is what puts it there.
+func configureResponsesProvider(ctx context.Context, w *wizard, out io.Writer, name string, saved *providers.Provider, set *providers.Set, vars, savedEnv map[string]string) error {
 	savedBase, savedEnvName := responsesDefaultBaseURL, openaiAPIKeyEnv
 	if saved != nil {
 		if saved.BaseURL != "" {
@@ -581,11 +647,11 @@ func configureResponsesProvider(ctx context.Context, w *wizard, out io.Writer, s
 		return err
 	}
 	if key == "" {
-		fmt.Fprintf(out, "    %s: no key; not configured\n", responsesProviderName)
+		fmt.Fprintf(out, "    %s: no key; not configured\n", name)
 		return nil
 	}
 	vars[envName] = key
-	set.Providers[responsesProviderName] = providers.Provider{
+	set.Providers[name] = providers.Provider{
 		Kind:      providers.KindOpenAIResponses,
 		BaseURL:   baseURL,
 		APIKeyEnv: envName,
@@ -692,10 +758,10 @@ func configureCustomProviders(ctx context.Context, w *wizard, r runner, out io.W
 	kept := 0
 	if base != nil {
 		for _, name := range base.Names() {
-			if isBuiltinProvider(name) {
+			p := base.Providers[name]
+			if isBuiltinEntry(name, p) {
 				continue
 			}
-			p := base.Providers[name]
 			if w.interactive {
 				keep, err := w.askConfirm(fmt.Sprintf("Keep endpoint %s (%s)?", name, p.BaseURL), "", nil, true)
 				if err != nil {

@@ -467,6 +467,19 @@ func redact(env map[string]string) map[string]string {
 // prefixes are stripped from the forwarded environment.
 func TestLaunchScriptCarriesResolvedArgvAndEnv(t *testing.T) {
 	c := assert.NewCollecting(t)
+	// The launched process inherits THIS process's environment on top of the
+	// forwarded payload, so the assertions below are only about the payload when
+	// the parent does not already carry the names they expect to be absent. An
+	// ambient export (a developer's shell, a gate script that sourced .env)
+	// would fail them for a reason the launch code cannot control. t.Setenv
+	// cannot unset, and an empty value is still an export that rides along, so
+	// clear the parent by hand and put it back afterwards.
+	for _, name := range []string{"RAFIKI_PROFILE", "ANTHROPIC_API_KEY", "PYTHONPATH"} {
+		if old, ok := os.LookupEnv(name); ok {
+			t.Cleanup(func() { _ = os.Setenv(name, old) })
+			_ = os.Unsetenv(name)
+		}
+	}
 	dump := t.TempDir()
 	t.Setenv("RAFIKI_DUMP_DIR", dump)
 	a := NewAdminServer(AdminOptions{

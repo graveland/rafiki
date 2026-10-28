@@ -443,3 +443,88 @@ func TestSetupValidateResponsesKey(t *testing.T) {
 	t.Cleanup(fail.Close)
 	c.Error(validateResponsesKey(context.Background(), fail.URL, "sk-bad"), "a non-200 must not validate")
 }
+
+// TestSetupProvidersNeverClobbersANameTakenByAnotherKind: setup's menu names
+// "openai" and "chatgpt" are only PREFERRED names. A setup-owned file whose
+// custom OpenAI-compatible endpoint already holds one of them must survive a
+// re-run byte-identically: reusing the name would move a key-less endpoint to a
+// backup and silently retype a keyed one to the new kind.
+func TestSetupProvidersNeverClobbersANameTakenByAnotherKind(t *testing.T) {
+	for _, name := range []string{responsesProviderName, chatgptProviderName} {
+		t.Run(name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			f := newProvidersFixture(t)
+			owned := &providers.Set{
+				DefaultProvider: name,
+				Providers: map[string]providers.Provider{
+					name: {Kind: providers.KindOpenAI, BaseURL: "http://127.0.0.1:9/v1", APIKeyEnv: "CUSTOM_KEY"},
+				},
+			}
+			b, err := renderProviders(owned)
+			c.NoError(err, "render owned file")
+			c.NoError(os.WriteFile(f.path, b, 0o644), "write owned file")
+			f.st.Providers.FileSHA256 = sha256Hex(b)
+
+			res, err := f.run(nil)
+			c.NoError(err, "providers step")
+			c.False(res.Changed, "a re-run over an untouched custom endpoint must report Changed=false")
+			c.Eq(string(b), string(f.fileBytes()), "the operator's entry must survive byte-identically")
+			c.Empty(f.backups(), "nothing may be moved to a backup")
+
+			set := f.parse()
+			c.Eq(providers.KindOpenAI, set.Providers[name].Kind, "the operator's endpoint must keep its kind")
+			c.Eq("http://127.0.0.1:9/v1", set.Providers[name].BaseURL, "base_url preserved")
+			c.Eq("CUSTOM_KEY", set.Providers[name].APIKeyEnv, "api_key_env preserved")
+			c.NotStrContains(f.out.String(), "each user runs", "no subscription provider may be added from a name collision:\n")
+		})
+	}
+}
+
+// TestSetupReserveProviderName pins the naming rule itself: a preferred name is
+// reused only by an entry of the same kind, and every other holder moves the
+// kind to its alternate (then alternate-2, ...) with a note.
+func TestSetupReserveProviderName(t *testing.T) {
+	c := assert.NewAborting(t)
+	custom := providers.Provider{Kind: providers.KindOpenAI, BaseURL: "http://127.0.0.1:9/v1"}
+
+	for _, tc := range []struct {
+		label string
+		base  *providers.Set
+		set   *providers.Set
+		name  string
+		alt   string
+		kind  providers.Kind
+		want  string
+		note  string
+	}{
+		{label: "no file at all", name: responsesProviderName, alt: responsesAltName, kind: providers.KindOpenAIResponses, want: responsesProviderName},
+		{label: "no entry of that name", base: &providers.Set{Providers: map[string]providers.Provider{"other": custom}},
+			name: chatgptProviderName, alt: chatgptAltName, kind: providers.KindOpenAIResponsesChatGPT, want: chatgptProviderName},
+		{label: "re-run over our own entry", base: &providers.Set{Providers: map[string]providers.Provider{
+			chatgptProviderName: {Kind: providers.KindOpenAIResponsesChatGPT}}},
+			name: chatgptProviderName, alt: chatgptAltName, kind: providers.KindOpenAIResponsesChatGPT, want: chatgptProviderName},
+		{label: "a custom endpoint holds the preferred name", base: &providers.Set{Providers: map[string]providers.Provider{
+			responsesProviderName: custom}},
+			name: responsesProviderName, alt: responsesAltName, kind: providers.KindOpenAIResponses,
+			want: responsesAltName, note: "note: openai is already a openai provider"},
+		{label: "the alternate is taken too", base: &providers.Set{Providers: map[string]providers.Provider{
+			chatgptProviderName: custom, chatgptAltName: custom}},
+			name: chatgptProviderName, alt: chatgptAltName, kind: providers.KindOpenAIResponsesChatGPT,
+			want: chatgptAltName + "-2", note: "note: chatgpt is already a openai provider"},
+		{label: "this run already added the name", set: &providers.Set{Providers: map[string]providers.Provider{
+			responsesProviderName: custom}},
+			name: responsesProviderName, alt: responsesAltName, kind: providers.KindOpenAIResponses,
+			want: responsesAltName, note: "writing the openai-responses provider as openai-responses instead"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			var out bytes.Buffer
+			got := reserveProviderName(tc.base, tc.set, tc.name, tc.alt, tc.kind, &out)
+			c.Eq(tc.want, got, "reserved name")
+			if tc.note == "" {
+				c.Eq("", out.String(), "no note when the preferred name is usable")
+				return
+			}
+			c.StrContains(out.String(), tc.note, "the note must say why the name moved:\n")
+		})
+	}
+}

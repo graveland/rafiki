@@ -140,9 +140,13 @@ that login returns is stored sealed, never usable in plaintext:
   another owner, provider or field fails to open instead of yielding someone
   else's credential. No RPC returns a token and no child process is given one: a
   child gets a sender bound to its owner.
-- **Where the key lives**: the daemon's `service.env` (0600). `rafiki setup`
-  generates one on a machine that has none and prints the path it wrote, so keep
-  a copy of that file somewhere safe.
+- **Where the key lives**: the daemon's `service.env` (0600), read with the real
+  environment outranking the file. `rafiki setup` writes one on a machine that has
+  none, carries an already EXPORTED one into the file (a hand-started daemon's key
+  is the one that stays), and prints the path it wrote, so keep a copy of that
+  file somewhere safe. Do not export an EMPTY `RAFIKI_SECRETS_KEY` in a shell you
+  source: an empty value outranks the file, and the daemon then reports a key that
+  is set as unset.
 
 **Never rotate the key by replacing the value.** A new key opens nothing that was
 sealed under the old one, so replacing it logs every user out of the ChatGPT

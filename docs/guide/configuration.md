@@ -142,20 +142,49 @@ kind = "openai-responses-chatgpt"
 
 The names are yours; these two are what `rafiki setup` writes when its
 providers step offers them. Model ids stay provider-qualified, so the pair above
-serves `openai/gpt-5-codex` and `chatgpt/gpt-5-codex`.
+serves `openai/gpt-5-codex` and `chatgpt/gpt-5-codex`. `openai` and `chatgpt` are
+only PREFERRED names: if the file already holds one of them under another kind
+(a custom OpenAI-compatible endpoint the operator called `openai`), setup leaves
+that entry alone and writes the new provider as `openai-responses` (or
+`chatgpt-subscription`) instead, saying so.
+
+**What a request carries.** Both kinds follow the same translation; they differ
+where the dialect does:
+
+- `reasoning.summary` is `auto` whenever a reasoning block is sent on a plain
+  `openai-responses` provider, unconditionally. On an
+  `openai-responses-chatgpt` provider both `reasoning.summary` and
+  `text.verbosity` are sent only for a model whose `/models` entry says it
+  supports them.
+- `temperature` is sent on `openai-responses` when the turn sets one, and NEVER
+  on `openai-responses-chatgpt`: the ChatGPT dialect rejects it as an unsupported
+  parameter.
+- ChatGPT mode is stream-only and never asks the endpoint to store the response.
+
+**Adding one with `rafiki setup`.** The `openai-responses` provider is offered on
+a first run: setup asks for its base URL and for the NAME of the variable its key
+lives in (`OPENAI_API_KEY` by default), and stores the key in `service.env` under
+that name, never in `providers.toml`. The `openai-responses-chatgpt` provider is
+added by an INTERACTIVE run only: it has a fixed endpoint and no credential of
+its own, so nothing in the environment can select it under `--non-interactive` on
+a first run (the same restriction custom OpenAI-compatible endpoints already
+have). A scripted install adds the `[providers.chatgpt]` block to
+`providers.toml` by hand; a `--non-interactive` re-run of a file setup already
+wrote keeps it.
 
 **Billing is per owner, and there is no fallback.** A turn on an
 `openai-responses-chatgpt` provider bills the OWNER's ChatGPT subscription,
 which is why the credential is a per-user login
 (`rafiki providers login <name>`, see
 [proxy.md](proxy.md#provider-subscription-logins-rafiki-providers-login)) and
-never a key in `providers.toml`. Three consequences:
+never a key in `providers.toml`. The rule: such a provider is refused for a child
+with NO owner wherever it appears in that child's fallback chain, because a
+subscription turn always bills a person and there is no daemon-level credential.
+Daemon-internal LLM jobs (recall summaries, `rafiki conversations review`,
+`rafikid agent analyze`) are ownerless for this purpose, so point their model at
+a provider with a key. Two more consequences:
 
 - another user's login is never usable by you;
-- a child with NO owner is refused at spawn with an error naming the provider,
-  because a subscription turn always bills a person. Daemon-internal LLM jobs
-  (recall summaries, `rafiki conversations review`, `rafikid agent analyze`) are
-  ownerless for this purpose, so point their model at a provider with a key;
 - a user with no login for that provider is refused at spawn too, with
   `no ChatGPT login for <name>; run: rafiki providers login <name>`.
 
@@ -171,8 +200,9 @@ version rafiki sends is `RAFIKI_CHATGPT_CLIENT_VERSION` (see
 
 **Price comes from the OpenRouter catalog**, under `openai/<model>` (so
 `chatgpt/gpt-5-codex` prices as `openai/gpt-5-codex`), because the ChatGPT model
-list carries no prices. A model the catalog does not price records cost 0 with
-one WARN naming it, so a budget cannot stop such a child on cost.
+list carries no prices. A model the catalog does not price records cost 0, and
+the miss is WARNed once per model per child (each child prices its own turns),
+so a budget cannot stop such a child on cost.
 
 **The ChatGPT endpoint is undocumented.** `https://chatgpt.com/backend-api/codex`
 is not a published API: rafiki speaks the dialect codex 0.165.0 does, and the

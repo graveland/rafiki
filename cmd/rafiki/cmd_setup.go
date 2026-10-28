@@ -334,15 +334,20 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	return nil
 }
 
-// ensureSecretsKey generates RAFIKI_SECRETS_KEY into service.env when the file
-// does not already carry one, and reports the write so an installed daemon gets
-// restarted onto it.
+// ensureSecretsKey carries RAFIKI_SECRETS_KEY into service.env and reports the
+// write so an installed daemon gets restarted onto it.
 //
-// It NEVER replaces an existing value, and never rotates: the key is the only
-// way to open a stored provider login, so a new key does not re-encrypt them,
-// it orphans them, and every user logs in to the ChatGPT-subscription providers
-// again. Only service.env is consulted (not this process's environment) because
-// that is the file the daemon reads.
+// The daemon's precedence is real environment first, then service.env, so a key
+// EXPORTED in the shell wins over the file. A key set there is therefore the one
+// the daemon may already be sealing logins under (a daemon started by hand), and
+// setup ADOPTS it into the file rather than generating a second key that would
+// leave those logins unopenable; only when neither the file nor the environment
+// has one does it generate one.
+//
+// It never replaces a value the file already holds, and never rotates: the key
+// is the only way to open a stored provider login, so a new key does not
+// re-encrypt them, it orphans them, and every user logs in to the
+// ChatGPT-subscription providers again.
 func ensureSecretsKey(out io.Writer) (paths.SetResult, error) {
 	path := paths.ServiceEnvFile()
 	cur, err := readEnvFile(path)
@@ -352,15 +357,23 @@ func ensureSecretsKey(out io.Writer) (paths.SetResult, error) {
 	if cur[secretbox.EnvKey] != "" {
 		return paths.SetResult{}, nil
 	}
-	key, err := secretbox.GenerateKey()
-	if err != nil {
-		return paths.SetResult{}, err
+
+	key := os.Getenv(secretbox.EnvKey)
+	adopted := key != ""
+	if !adopted {
+		if key, err = secretbox.GenerateKey(); err != nil {
+			return paths.SetResult{}, err
+		}
 	}
 	res, err := paths.SetEnvFile(path, map[string]string{secretbox.EnvKey: key}, "rafiki setup")
 	if err != nil {
 		return paths.SetResult{}, err
 	}
-	fmt.Fprintf(out, "    generated %s in %s; back it up: losing it logs every user out of ChatGPT providers\n", secretbox.EnvKey, path)
+	if adopted {
+		fmt.Fprintf(out, "    adopted %s from the environment into %s; back it up: losing it logs every user out of ChatGPT providers\n", secretbox.EnvKey, path)
+	} else {
+		fmt.Fprintf(out, "    generated %s in %s; back it up: losing it logs every user out of ChatGPT providers\n", secretbox.EnvKey, path)
+	}
 	return res, nil
 }
 

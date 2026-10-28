@@ -197,6 +197,11 @@ func newSetupFixture(t *testing.T) *setupFixture {
 	// reads RAFIKI_PROVIDERS first, and a developer's exported value would send
 	// the step's writes to their real file.
 	t.Setenv("RAFIKI_PROVIDERS", filepath.Join(runDir, "providers.toml"))
+	// A key exported in the developer's shell is ADOPTED into service.env (the
+	// daemon's real precedence puts the environment above the file), which would
+	// make every seeded fixture depend on that shell. Empty it: no value is not
+	// an exported value, and t.Setenv restores whatever was there.
+	t.Setenv(secretbox.EnvKey, "")
 	// Never let a probe reach a real local Ollama.
 	origOllama := ollamaBaseURL
 	ollamaBaseURL = "http://127.0.0.1:1"
@@ -721,4 +726,27 @@ func TestSetupKeepsExistingSecretsKey(t *testing.T) {
 	c.NoError(err, "readEnvFile")
 	c.Eq(constSetupSecretsKey, vars[secretbox.EnvKey], "an existing key must be left alone")
 	c.NotStrContains(f.out.String(), "generated RAFIKI_SECRETS_KEY", "an existing key must not be reported as generated:\n")
+}
+
+// TestSetupAdoptsSecretsKeyFromEnv: a key EXPORTED in the shell is the one the
+// daemon is using (the environment outranks service.env), so setup carries that
+// value into service.env rather than generating a second key, which would leave
+// every login sealed under the exported one unopenable.
+func TestSetupAdoptsSecretsKeyFromEnv(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t) // the baseline file already carries a key
+	f.seedServiceEnv(map[string]string{
+		"RAFIKI_DB":           constSetupDSN,
+		"RAFIKI_PROXY_LISTEN": setupProxyListenLoopback,
+	})
+	exported := constSetupSecretsKey
+	t.Setenv(secretbox.EnvKey, exported)
+
+	c.NoError(f.runSetup(), "setup with the key exported in the shell")
+
+	vars, err := readEnvFile(paths.ServiceEnvFile())
+	c.NoError(err, "readEnvFile")
+	c.Eq(exported, vars[secretbox.EnvKey], "the exported key must be the one written")
+	c.StrContains(f.out.String(), "adopted RAFIKI_SECRETS_KEY from the environment", "the operator must be told the key was adopted:\n")
+	c.NotStrContains(f.out.String(), "generated RAFIKI_SECRETS_KEY", "an adopted key is not a generated one:\n")
 }
