@@ -1,0 +1,249 @@
+package convtree
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
+
+var update = flag.Bool("update", false, "rewrite testdata/golden.json from the fixture")
+
+const (
+	captureDir = "../../testdata/claude-capture"
+	goldenPath = "testdata/golden.json"
+)
+
+func TestCanonStringEqualsTextBlock(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(Equal(
+		Msg{Role: "user", Content: []byte(`"hi"`)},
+		Msg{Role: "user", Content: []byte(`[{"type":"text","text":"hi"}]`)},
+	), `"hi" and its text block must canonicalise equal`)
+}
+
+func TestCanonStripsCacheControl(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(Equal(
+		Msg{Role: "user", Content: []byte(`[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]`)},
+		Msg{Role: "user", Content: []byte(`[{"type":"text","text":"a"}]`)},
+	), "cache_control on a block is a transport hint, not content")
+	c.True(Equal(
+		Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","cache_control":{"type":"ephemeral"},"content":[{"type":"text","text":"A","cache_control":{"type":"ephemeral"}}]}]`)},
+		Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"A"}]}]`)},
+	), "cache_control is stripped at every depth, including inside a tool_result's content")
+}
+
+func TestCanonDropsNullKeys(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(Equal(
+		Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"a","citations":null}]`)},
+		Msg{Role: "assistant", Content: []byte(`[{"type":"text","text":"a"}]`)},
+	), "an explicit null and an absent key mean the same thing")
+}
+
+func TestCanonKeyOrderIrrelevant(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(Equal(
+		Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"x","input":{"b":1,"a":2}}]`)},
+		Msg{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"t1","name":"x","input":{"a":2,"b":1}}]`)},
+	), "encoding/json sorts map keys, so key order cannot change the hash")
+}
+
+// TestCanonKeepsToolResultContent is the regression the SDK round trip had:
+// decoding into the API's content union dropped tool_result.content,
+// tool_result.is_error and image.source, so three different messages
+// canonicalised to one shape.
+func TestCanonKeepsToolResultContent(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.False(Equal(
+		Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"A"}]`)},
+		Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"B"}]`)},
+	), "tool_result.content is content")
+	c.False(Equal(
+		Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"A","is_error":false}]`)},
+		Msg{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"t1","content":"A","is_error":true}]`)},
+	), "tool_result.is_error is content")
+	c.False(Equal(
+		Msg{Role: "user", Content: []byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`)},
+		Msg{Role: "user", Content: []byte(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BBBB"}}]`)},
+	), "image.source.data is content")
+}
+
+func TestCanonPreservesNumbers(t *testing.T) {
+	c := assert.NewAborting(t)
+	got, err := Canon("user", []byte(`[{"type":"text","text":"x","n":1.50}]`))
+	c.NoError(err, "Canon")
+	c.True(bytes.Contains(got, []byte(`1.50`)), "UseNumber must keep the literal 1.50, got %s", got)
+	other, err := Canon("user", []byte(`[{"type":"text","text":"x","n":1.5}]`))
+	c.NoError(err, "Canon")
+	c.False(bytes.Equal(got, other), "1.50 and 1.5 are different literals")
+}
+
+func TestCanonInvalidJSON(t *testing.T) {
+	c := assert.NewAborting(t)
+	_, err := Canon("user", []byte(`{"type":`))
+	c.Error(err, "truncated JSON must not canonicalise")
+}
+
+func TestRootSeedDistinguishesKindAndDerivedFrom(t *testing.T) {
+	c := assert.NewAborting(t)
+	h1 := mustNodeHash(t, RootSeed(RootKindRoot, nil), Msg{Role: "user", Content: []byte(`"one"`)})
+	h2 := mustNodeHash(t, RootSeed(RootKindRoot, nil), Msg{Role: "user", Content: []byte(`"two"`)})
+
+	c.NotEq(RootSeed(RootKindClear, &h1), RootSeed(RootKindClear, &h2),
+		"a clear boundary is a constant, so the node it was cut from must distinguish two clears")
+	c.NotEq(RootSeed(RootKindClear, &h1), RootSeed(RootKindCompaction, &h1),
+		"the root kind is part of the seed")
+	c.Eq(RootSeed(RootKindCompaction, &h1), RootSeed(RootKindCompaction, &h2),
+		"a compaction summary is unique model output; derived-from must not seed it")
+	c.Eq(RootSeed(RootKindCompaction, &h1), RootSeed(RootKindCompaction, nil),
+		"a compaction root ignores derived-from entirely")
+	c.Eq(RootSeed(RootKindRoot, &h1), RootSeed(RootKindRoot, nil),
+		"a plain root ignores derived-from entirely")
+}
+
+func TestChainIsParentSensitive(t *testing.T) {
+	c := assert.NewAborting(t)
+	p1 := RootSeed(RootKindRoot, nil)
+	p2 := RootSeed(RootKindClear, nil)
+	a := Msg{Role: "user", Content: []byte(`"a"`)}
+	b := Msg{Role: "assistant", Content: []byte(`"b"`)}
+
+	ha := mustNodeHash(t, p1, a)
+	hb := mustNodeHash(t, p2, a)
+	c.NotEq(ha, hb, "the same message under two parent slots must hash differently")
+
+	want := []Hash{ha, mustNodeHash(t, ha, b)}
+
+	got, err := Chain(p1, []Msg{a, b})
+	c.NoError(err, "Chain")
+	c.EqDeep(want, got, "Chain must chain each hash onto the previous one")
+}
+
+// TestGoldenFixtureChains pins the path hashes of a real captured Claude Code
+// session. The capture is the awkward shapes of request in one conversation:
+// tool calls and results, a failed tool, a killed-and-resumed turn that
+// replays a rewritten assistant message, /compact and /clear. Regenerate with
+// -update, which rewrites testdata/golden.json.
+func TestGoldenFixtureChains(t *testing.T) {
+	c := assert.NewAborting(t)
+	golden := map[string][]string{}
+	for _, name := range requestFiles(t) {
+		msgs := readMessages(t, filepath.Join(captureDir, name))
+		hashes, err := Chain(RootSeed(RootKindRoot, nil), msgs)
+		c.NoError(err, "Chain %s", name)
+		hexes := make([]string, len(hashes))
+		for i, h := range hashes {
+			hexes[i] = hex.EncodeToString(h[:])
+		}
+		golden[name] = hexes
+	}
+
+	if *update {
+		buf, err := json.MarshalIndent(golden, "", "  ")
+		c.NoError(err, "marshal golden")
+		c.NoError(os.MkdirAll(filepath.Dir(goldenPath), 0o755), "mkdir testdata")
+		c.NoError(os.WriteFile(goldenPath, append(buf, '\n'), 0o644), "write golden")
+		return
+	}
+
+	raw, err := os.ReadFile(goldenPath)
+	c.NoError(err, "read %s (regenerate with -update)", goldenPath)
+	want := map[string][]string{}
+	c.NoError(json.Unmarshal(raw, &want), "unmarshal golden")
+	c.EqDeep(want, golden, "captured session path hashes changed")
+}
+
+// TestParityStoredVersusReplayed proves the hash survives the round trip a
+// stored message makes: decoded into generic JSON and re-marshalled, which
+// changes whitespace and key order but nothing the hash covers.
+func TestParityStoredVersusReplayed(t *testing.T) {
+	c := assert.NewAborting(t)
+	files := requestFiles(t)
+	last := files[len(files)-1]
+	msgs := readMessages(t, filepath.Join(captureDir, last))
+	c.NotEmpty(msgs, "%s has no messages", last)
+
+	slot := RootSeed(RootKindRoot, nil)
+	rewritten := 0
+	for i, m := range msgs {
+		dec := json.NewDecoder(bytes.NewReader(m.Content))
+		dec.UseNumber()
+		var v any
+		c.NoError(dec.Decode(&v), "%s message %d: decode content", last, i)
+		replayed, err := json.Marshal(v)
+		c.NoError(err, "%s message %d: marshal content", last, i)
+		if !bytes.Equal(replayed, m.Content) {
+			rewritten++
+		}
+		want, err := NodeHash(slot, m)
+		c.NoError(err, "%s message %d: NodeHash", last, i)
+		got, err := NodeHash(slot, Msg{Role: m.Role, Content: replayed})
+		c.NoError(err, "%s message %d: NodeHash replayed", last, i)
+		c.Eq(want, got, "%s message %d: re-marshalling changed the hash", last, i)
+		slot = want
+	}
+	c.NotZero(rewritten, "%s: no message was re-marshalled, so this proves nothing", last)
+}
+
+func mustNodeHash(t *testing.T, parent Hash, m Msg) Hash {
+	t.Helper()
+	c := assert.NewAborting(t)
+	h, err := NodeHash(parent, m)
+	c.NoError(err, "NodeHash")
+	return h
+}
+
+func requestFiles(t *testing.T) []string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	entries, err := os.ReadDir(captureDir)
+	c.NoError(err, "ReadDir %s", captureDir)
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), "-request.http") {
+			names = append(names, e.Name())
+		}
+	}
+	c.NotEmpty(names, "no captured requests under %s", captureDir)
+	sort.Strings(names)
+	return names
+}
+
+func readMessages(t *testing.T, path string) []Msg {
+	t.Helper()
+	c := assert.NewAborting(t)
+	raw, err := os.ReadFile(path)
+	c.NoError(err, "read %s", path)
+	body := httpBody(raw)
+	var req struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	c.NoError(json.Unmarshal(body, &req), "unmarshal %s", path)
+	msgs := make([]Msg, len(req.Messages))
+	for i, m := range req.Messages {
+		msgs[i] = Msg{Role: m.Role, Content: m.Content}
+	}
+	return msgs
+}
+
+func httpBody(raw []byte) []byte {
+	if i := bytes.Index(raw, []byte("\r\n\r\n")); i >= 0 {
+		return raw[i+4:]
+	}
+	if i := bytes.Index(raw, []byte("\n\n")); i >= 0 {
+		return raw[i+2:]
+	}
+	return raw
+}
