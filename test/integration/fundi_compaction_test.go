@@ -427,34 +427,71 @@ func driveUntilCompaction(t *testing.T, d *daemon, seat *compactionSeat, cs *com
 
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
-// workingPathRoot returns the ROOT of the conversation's working path — the
-// node the head's parent chain ends at — with its kind ("" when the row is
-// ordinary) and its ordinal. A compaction's summary is a root, so this is how a
-// test sees that the working set now starts at the summary (or at a clear
-// boundary).
-func workingPathRoot(t *testing.T, dsn, conversationID string) (id, kind string, ordinal int) {
+// convNode is one conversation_message row as a tree assertion reads it: its
+// kind ("" when ordinary), its parent ("" when it is a root) and whether it
+// carries a path hash (i.e. whether it is on the tree at all).
+type convNode struct {
+	ID       string
+	Kind     string
+	ParentID string
+	HasHash  bool
+	Ordinal  int
+}
+
+// convNodeWhere reads the one row a scoped query selects. The query must return
+// (id::text, kind, parent_id::text, path_hash IS NOT NULL, ordinal); no row is a
+// test failure via the caller's message.
+func convNodeWhere(t *testing.T, dsn, what, query, arg string) convNode {
 	t.Helper()
 	pool := openPool(t, dsn)
 	defer pool.Close()
-	ctx := context.Background()
-	var kindPtr *string
-	err := pool.QueryRow(ctx, `
+	var (
+		n       convNode
+		kind    *string
+		parent  *string
+		ordinal int
+	)
+	err := pool.QueryRow(context.Background(), query, arg).Scan(&n.ID, &kind, &parent, &n.HasHash, &ordinal)
+	assert.NewAborting(t).NoError(err, "read %s", what)
+	n.Ordinal = ordinal
+	if kind != nil {
+		n.Kind = *kind
+	}
+	if parent != nil {
+		n.ParentID = *parent
+	}
+	return n
+}
+
+const convNodeColumns = `id::text, kind, parent_id::text, path_hash IS NOT NULL, ordinal`
+
+// workingPathRoot returns the ROOT of the conversation's working path — the node
+// the head's parent chain ends at. A compaction's summary is a root, so this is
+// how a test sees that the working set now restarts at the summary.
+func workingPathRoot(t *testing.T, dsn, conversationID string) convNode {
+	t.Helper()
+	return convNodeWhere(t, dsn, "the working path's root", `
 		WITH RECURSIVE up AS (
-		  SELECT m.id, m.parent_id, m.kind, m.ordinal, 0 AS dist
+		  SELECT m.id, m.parent_id, m.kind, m.path_hash, m.ordinal, 0 AS dist
 		    FROM conversations.conversation_message m
 		    JOIN conversations.conversation c ON c.head_id = m.id
 		   WHERE c.id = $1::uuid
 		  UNION ALL
-		  SELECT p.id, p.parent_id, p.kind, p.ordinal, up.dist + 1
+		  SELECT p.id, p.parent_id, p.kind, p.path_hash, p.ordinal, up.dist + 1
 		    FROM conversations.conversation_message p JOIN up ON p.id = up.parent_id
 		)
-		SELECT id::text, kind, ordinal FROM up ORDER BY dist DESC LIMIT 1`,
-		conversationID).Scan(&id, &kindPtr, &ordinal)
-	assert.NewAborting(t).NoError(err, "read the working path's root")
-	if kindPtr != nil {
-		kind = *kindPtr
-	}
-	return id, kind, ordinal
+		SELECT `+convNodeColumns+` FROM up ORDER BY dist DESC LIMIT 1`, conversationID)
+}
+
+// headNode returns the conversation's head row. The columns are qualified: the
+// join with conversation would make a bare id/kind ambiguous.
+func headNode(t *testing.T, dsn, conversationID string) convNode {
+	t.Helper()
+	return convNodeWhere(t, dsn, "the head row", `
+		SELECT m.id::text, m.kind, m.parent_id::text, m.path_hash IS NOT NULL, m.ordinal
+		  FROM conversations.conversation_message m
+		  JOIN conversations.conversation c ON c.head_id = m.id
+		 WHERE c.id = $1::uuid`, conversationID)
 }
 
 // getHistoryEvents serves the durable tier for a child (the same read rafiki
@@ -542,8 +579,10 @@ func TestCompactionFundiChildCompactsAndKeepsAnswering(t *testing.T) {
 	ck.StrContains(next.firstText(), "SUMMARY-"+marker,
 		"the post-compaction request must open with the summary:\n%s", seat.dump())
 
-	_, rootKind, _ := workingPathRoot(t, dsn, convID)
-	ck.Eq("compaction_summary", rootKind, "the working path must now start at the summary")
+	root := workingPathRoot(t, dsn, convID)
+	ck.Eq("compaction_summary", root.Kind, "the working path's root must be the summary")
+	ck.Eq("", root.ParentID, "the summary is a root: it starts the new path (parent_id must be NULL)")
+	ck.True(root.HasHash, "the summary must be on the tree: path_hash must not be NULL")
 	events := getHistoryEvents(t, d.control(t), childID)
 	for i := 1; i <= 3; i++ {
 		ck.Eq(1, countHistoryText(events, fmt.Sprintf("prompt-%d-%s", i, marker)),
@@ -578,8 +617,10 @@ func TestCompactionFundiDisplayShowsTailOnce(t *testing.T) {
 	cs.waitIdle(t, childID)
 
 	convID := resumeConversationID(t, dsn, childID)
-	_, rootKind, rootOrdinal := workingPathRoot(t, dsn, convID)
-	ck.Eq("compaction_summary", rootKind, "the working path must now start at the summary")
+	root := workingPathRoot(t, dsn, convID)
+	ck.Eq("compaction_summary", root.Kind, "the working path's root must be the summary")
+	ck.Eq("", root.ParentID, "the summary is a root: parent_id must be NULL")
+	ck.True(root.HasHash, "the summary must be on the tree: path_hash must not be NULL")
 
 	// The tail is non-empty: the summary replaced only the oldest row, so the
 	// second prompt's marker is carried by BOTH an original row and a copy.
@@ -592,7 +633,7 @@ func TestCompactionFundiDisplayShowsTailOnce(t *testing.T) {
 
 	// Prove the tail really is non-empty: the row after the summary is a
 	// compaction_tail copy.
-	tailKind := rowKindAt(t, dsn, convID, rootOrdinal+1)
+	tailKind := rowKindAt(t, dsn, convID, root.Ordinal+1)
 	ck.Eq("compaction_tail", tailKind, "the row after the summary must be a tail copy")
 }
 
@@ -834,12 +875,29 @@ func waitRootKind(t *testing.T, dsn, conversationID, kind string) int {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		_, got, ordinal := workingPathRoot(t, dsn, conversationID)
-		if got == kind {
-			return ordinal
+		root := workingPathRoot(t, dsn, conversationID)
+		if root.Kind == kind {
+			return root.Ordinal
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("working-path root kind = %q after 30s; want %q", got, kind)
+			t.Fatalf("working-path root kind = %q after 30s; want %q", root.Kind, kind)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// waitHeadKind polls until the conversation's HEAD row has the given kind and
+// returns it — the shape a /clear leaves behind, where the boundary IS the head.
+func waitHeadKind(t *testing.T, dsn, conversationID, kind string) convNode {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		head := headNode(t, dsn, conversationID)
+		if head.Kind == kind {
+			return head
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("head row kind = %q after 30s; want %q", head.Kind, kind)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -886,8 +944,11 @@ func TestSlashCompactAndClearOnFundiChild(t *testing.T) {
 	ck.Eq(requestsBefore+1, seat.requestCount(), "/compact must not run a turn:\n%s", seat.dump())
 
 	promptCompactionChild(t, d, childID, "c2", "/clear")
-	clearOrdinal := waitRootKind(t, dsn, convID, "clear")
-	ck.NotEq(0, clearOrdinal, "the clear root must be a freshly appended row")
+	clear := waitHeadKind(t, dsn, convID, "clear")
+	ck.Eq("clear", clear.Kind, "the head must be the clear row")
+	ck.Eq("", clear.ParentID, "the clear row is a root: it starts the new path (parent_id must be NULL)")
+	ck.True(clear.HasHash, "the clear root must be on the tree: path_hash must not be NULL")
+	ck.NotEq(0, clear.Ordinal, "the clear root must be a freshly appended row")
 
 	before := seat.requestCount()
 	promptCompactionChild(t, d, childID, "u4", "after-clear-"+marker)
