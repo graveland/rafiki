@@ -17,6 +17,8 @@ package providercreds
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -47,6 +49,37 @@ type Credential struct {
 	// LastRefresh is when the last successful refresh happened. ListStale
 	// reads it.
 	LastRefresh time.Time
+}
+
+// redacted is what a token field prints as. Nothing in this package ever
+// renders a token: a Credential is a live secret, and one reaching a log line,
+// an error message or a panic trace is a credential leak.
+const redacted = "<redacted>"
+
+// String redacts both tokens, so an errant %v or a value dumped into a message
+// cannot leak a credential. It is also what %+v uses: fmt prefers Stringer to
+// the struct's own rendering.
+func (c Credential) String() string {
+	return fmt.Sprintf("providercreds.Credential{owner:%s provider:%s account:%s refresh:%s access:%s expiry:%s dead:%t last_refresh:%s models:%d bytes}",
+		c.OwnerUserID, c.Provider, c.AccountID, redacted, redacted,
+		c.AccessExpiry.UTC().Format(time.RFC3339), c.Dead,
+		c.LastRefresh.UTC().Format(time.RFC3339), len(c.ModelsJSON))
+}
+
+// LogValue keeps the tokens out of structured logs for the same reason, so
+// slog.String("credential", ...) and slog.Any log a redacted group rather than
+// the live secret. It satisfies slog.LogValuer.
+func (c Credential) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("owner", c.OwnerUserID),
+		slog.String("provider", c.Provider),
+		slog.String("account", c.AccountID),
+		slog.String("refresh_token", redacted),
+		slog.String("access_token", redacted),
+		slog.Time("access_expiry", c.AccessExpiry),
+		slog.Bool("dead", c.Dead),
+		slog.Time("last_refresh", c.LastRefresh),
+	)
 }
 
 var (
@@ -84,6 +117,12 @@ type Store interface {
 
 	// Delete removes the row and returns the deleted credential (so a caller
 	// can revoke the tokens upstream). ErrNotFound if there was none.
+	//
+	// It succeeds even when the stored ciphertext cannot be opened (the
+	// RAFIKI_SECRETS_KEY changed): logout must always work, so the row is
+	// deleted and NO error is returned, and the returned credential carries the
+	// metadata but no tokens -- a revoke the caller cannot perform is skipped,
+	// never attempted with empty tokens.
 	Delete(ctx context.Context, owner, provider string) (Credential, error)
 
 	// Refresh runs fn under a row lock. fn receives the CURRENT stored

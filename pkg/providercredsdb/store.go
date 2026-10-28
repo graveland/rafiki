@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -51,10 +53,8 @@ func New(pool *pgxpool.Pool, box *secretbox.Box) providercreds.Store {
 	return &Store{pool: pool, box: box}
 }
 
-// The token columns of the credential table. AAD names the position of a
-// ciphertext in the schema; the field is the column it lives in. It is built
-// HERE, once, and used by both Seal and Open at every call site, so the two
-// can never disagree about what a ciphertext was bound to.
+// The token columns of the credential table: the field name is the column a
+// ciphertext lives in.
 const (
 	fieldRefresh = "refresh"
 	fieldAccess  = "access"
@@ -62,8 +62,17 @@ const (
 
 // aad is the associated data a token ciphertext is bound to:
 // owner|provider|field. It is authenticated but not encrypted.
+//
+// This is the ONE place that shape is built, used by both Seal and Open at
+// every call site, so the two can never disagree about what a ciphertext was
+// bound to. It also NORMALISES the owner, because the two sides get it from
+// different places: Seal gets whatever the caller typed, Open gets the row's
+// canonical owner_user_id::text, and Postgres renders a UUID in lowercase. A
+// caller who spells the id in uppercase would otherwise seal a row nothing can
+// ever open, and a refresh under that spelling would corrupt a good row. The
+// column is a UUID, so lowercasing loses nothing.
 func aad(owner, provider, field string) []byte {
-	return []byte(owner + "|" + provider + "|" + field)
+	return []byte(strings.ToLower(owner) + "|" + provider + "|" + field)
 }
 
 // errUndecryptable is the one report for a ciphertext this box cannot open.
@@ -203,8 +212,13 @@ func (s *Store) Put(ctx context.Context, c providercreds.Credential) error {
 }
 
 // Delete removes the row and hands back what it held, so a caller can revoke
-// the tokens upstream. A dead credential is deleted rather than refused:
-// deleting one is how an owner clears it.
+// the tokens upstream.
+//
+// It succeeds even when the row cannot be decrypted: the deletion has already
+// happened, and logout must not be blocked by a key rotation. The returned
+// credential then carries the metadata but NO tokens, so the caller skips a
+// revoke it has no way to perform (see providercreds.Store.Delete). It also
+// succeeds for a dead credential: deleting one is how an owner clears it.
 func (s *Store) Delete(ctx context.Context, owner, provider string) (providercreds.Credential, error) {
 	r, err := scanStored(s.pool.QueryRow(ctx, `DELETE FROM conversations.provider_credential
 		WHERE owner_user_id = $1::uuid AND provider = $2
@@ -215,7 +229,15 @@ func (s *Store) Delete(ctx context.Context, owner, provider string) (providercre
 	if err != nil {
 		return providercreds.Credential{}, fmt.Errorf("providercredsdb: delete credential: %w", err)
 	}
-	return s.openStored(r)
+	c, openErr := s.openStored(r)
+	if openErr != nil {
+		// The row is gone; only the revoke is lost. Say so once, in the daemon
+		// log, because an unrevoked token is worth knowing about.
+		slog.Warn("providercredsdb: deleted a credential that could not be decrypted; revoke skipped",
+			"owner", r.owner, "provider", r.provider, "error", openErr)
+		return c, nil
+	}
+	return c, nil
 }
 
 // Refresh runs fn while holding the owner's row lock, then writes what fn
@@ -226,11 +248,19 @@ func (s *Store) Delete(ctx context.Context, owner, provider string) (providercre
 // return it unchanged instead of spending the old one upstream.
 //
 // fn is not called for a missing row (ErrNotFound) or a dead one (ErrDead).
-// If fn reports ErrDead, dead_at is set and that error returned. Any other fn
-// error rolls back and is returned with the still-stored credential. If fn
-// succeeds but the write or commit fails, the ROTATED credential is returned
-// with ErrNotPersisted: upstream has already spent the old refresh token, so
-// the new one must not be dropped.
+// If fn reports ErrDead, dead_at is set and that error returned; if even that
+// write fails, the error still wraps ErrDead (a caller must log in again, never
+// retry a refused token), with the write failure reported alongside it and in
+// the daemon log. Any other fn error rolls back and is returned with the
+// still-stored credential.
+//
+// An fn that returns the credential UNCHANGED writes nothing at all: that is
+// the "another holder already refreshed" answer, and rewriting the row would
+// both re-seal identical tokens and hide a credential that is going stale.
+// Consequently ErrNotPersisted can only ever describe a credential that
+// actually changed: if the write or the COMMIT then fails, the ROTATED
+// credential is returned with it, because upstream has already spent the old
+// refresh token and the new one must not be dropped.
 //
 // Refresh writes the token columns, the expiry, the account id and dead_at. It
 // does NOT write models_json/models_etag (SetModels owns those): the returned
@@ -251,6 +281,8 @@ func (s *Store) Refresh(ctx context.Context, owner, provider string, fn func(cur
 	if err != nil {
 		return providercreds.Credential{}, err
 	}
+	// Everything after the read speaks in the ROW's terms: r.owner is the
+	// canonical owner_user_id::text, which is exactly what Open will use.
 	cur, err := s.openStored(r)
 	if err != nil {
 		return cur, err
@@ -262,29 +294,21 @@ func (s *Store) Refresh(ctx context.Context, owner, provider string, fn func(cur
 	next, fnErr := fn(cur)
 	if fnErr != nil {
 		if errors.Is(fnErr, providercreds.ErrDead) {
-			if _, err := tx.Exec(ctx, `UPDATE conversations.provider_credential
-				SET dead_at = now(), updated_at = now()
-				WHERE owner_user_id = $1::uuid AND provider = $2`, owner, provider); err != nil {
-				return cur, fmt.Errorf("providercredsdb: mark credential dead: %w", err)
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return cur, fmt.Errorf("providercredsdb: mark credential dead: %w", err)
-			}
-			cur.Dead = true
-			return cur, fnErr
+			return s.markDead(ctx, tx, r, cur, fnErr)
 		}
 		return cur, fnErr
 	}
 
-	// The returned credential must describe what the row will hold, not just
-	// what fn produced.
-	next.OwnerUserID, next.Provider = owner, provider
+	// The returned credential must describe what the row holds, not just what
+	// fn produced.
+	next.OwnerUserID, next.Provider = cur.OwnerUserID, cur.Provider
 	next.ModelsJSON, next.ModelsETag = cur.ModelsJSON, cur.ModelsETag
 	if next.AccountID == "" {
 		next.AccountID = cur.AccountID
 	}
-	if next.LastRefresh.IsZero() {
-		next.LastRefresh = cur.LastRefresh
+	if sameWritable(next, cur) {
+		// Nothing to write. The deferred rollback releases the lock.
+		return cur, nil
 	}
 	bumped := next.RefreshToken != cur.RefreshToken || next.AccessToken != cur.AccessToken
 	var deadAt any
@@ -298,9 +322,9 @@ func (s *Store) Refresh(ctx context.Context, owner, provider string, fn func(cur
 			updated_at = now()
 		WHERE owner_user_id = $1::uuid AND provider = $2
 		RETURNING last_refresh_at`,
-		owner, provider, s.box.KeyID(),
-		s.box.Seal([]byte(next.RefreshToken), aad(owner, provider, fieldRefresh)),
-		s.box.Seal([]byte(next.AccessToken), aad(owner, provider, fieldAccess)),
+		cur.OwnerUserID, cur.Provider, s.box.KeyID(),
+		s.box.Seal([]byte(next.RefreshToken), aad(cur.OwnerUserID, cur.Provider, fieldRefresh)),
+		s.box.Seal([]byte(next.AccessToken), aad(cur.OwnerUserID, cur.Provider, fieldAccess)),
 		next.AccessExpiry, next.AccountID, deadAt, bumped).Scan(&next.LastRefresh); err != nil {
 		// The rotated token exists only in memory: upstream has already spent
 		// the old one, so the new one must reach the caller even though the
@@ -311,6 +335,38 @@ func (s *Store) Refresh(ctx context.Context, owner, provider string, fn func(cur
 		return next, fmt.Errorf("%w: %v", providercreds.ErrNotPersisted, err)
 	}
 	return next, nil
+}
+
+// markDead tombstones a row whose refresh fn reported ErrDead. Its contract is
+// the one thing that must survive every failure here: the returned error still
+// wraps ErrDead, because the upstream has refused this credential and a caller
+// told only "the write failed" would retry the refused token forever.
+func (s *Store) markDead(ctx context.Context, tx pgx.Tx, r storedRow, cur providercreds.Credential, fnErr error) (providercreds.Credential, error) {
+	if _, err := tx.Exec(ctx, `UPDATE conversations.provider_credential
+		SET dead_at = now(), updated_at = now()
+		WHERE owner_user_id = $1::uuid AND provider = $2`, r.owner, r.provider); err != nil {
+		slog.Warn("providercredsdb: could not mark a dead credential; row not tombstoned",
+			"owner", r.owner, "provider", r.provider, "error", err)
+		return cur, fmt.Errorf("%w; additionally the row could not be marked dead: %v", fnErr, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slog.Warn("providercredsdb: could not commit a dead credential; row not tombstoned",
+			"owner", r.owner, "provider", r.provider, "error", err)
+		return cur, fmt.Errorf("%w; additionally the commit marking the row dead failed: %v", fnErr, err)
+	}
+	cur.Dead = true
+	return cur, fnErr
+}
+
+// sameWritable reports whether two credentials would write the same row in the
+// columns Refresh owns. AccessExpiry is compared as an instant, so the value
+// that came back from Postgres equals the one this process sent.
+func sameWritable(a, b providercreds.Credential) bool {
+	return a.RefreshToken == b.RefreshToken &&
+		a.AccessToken == b.AccessToken &&
+		a.AccessExpiry.Equal(b.AccessExpiry) &&
+		a.AccountID == b.AccountID &&
+		a.Dead == b.Dead
 }
 
 // SetModels caches the provider's model directory, and the ETag to revalidate
