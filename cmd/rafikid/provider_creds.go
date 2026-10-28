@@ -634,13 +634,26 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 	// one it continued. Both are captured from the callback for use after the
 	// transaction: recorded identifies the save that must run if the write did
 	// not land, and either identifies the record a successful commit clears.
+	//
+	// tombstonedHere records that THIS callback is what the store will tombstone
+	// the row for. The store calls the callback only for a row that is live at
+	// this transaction's first read, and it writes dead_at alone (leaving the
+	// token columns holding `sent`), so a dead row this refresh meets and did not
+	// tombstone itself predates the transaction. That distinction is the whole
+	// revival rule below: only a tombstone that was already there can be
+	// contradicted by the rotation in hand.
 	var (
-		sent     string
-		recorded uint64
-		adopted  uint64
+		sent           string
+		recorded       uint64
+		adopted        uint64
+		tombstonedHere bool
 	)
 
 	next, err := p.store.Refresh(ctx, owner, provider, func(cur providercreds.Credential) (providercreds.Credential, error) {
+		// The callback's FIRST read of the row, taken before anything this
+		// refresh can write: `sent` is the token a tombstone written from here
+		// would leave behind, and the row is live (a dead one is answered before
+		// the callback runs).
 		sent = cur.RefreshToken
 		// A rotation this daemon already completed whose write has not landed:
 		// while the row still holds the spent token, adopt the rotation. Sending
@@ -687,6 +700,8 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 			if tokens.AccountID != "" && cur.AccountID != "" && tokens.AccountID != cur.AccountID {
 				// Never switch accounts silently: the owner's spend and their
 				// conversation history belong to the account they logged in as.
+				tombstonedHere = true
+				p.dropRejectedRotation(key, adopted)
 				return cur, fmt.Errorf("%w: refreshed login belongs to a different ChatGPT account", providercreds.ErrDead)
 			}
 			out := cur
@@ -711,6 +726,8 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 			// another holder of this same row, so roll back and re-read once.
 			return cur, errRefreshReused
 		case errors.Is(rerr, chatgptauth.ErrRefreshRejected):
+			tombstonedHere = true
+			p.dropRejectedRotation(key, adopted)
 			return cur, fmt.Errorf("%w: %v", providercreds.ErrDead, rerr)
 		}
 		// Transient: the row is untouched and the turn's own retry handles it.
@@ -748,11 +765,20 @@ func (p *providerCreds) refresh(owner, provider string, force bool, reason chatg
 		// refresh_token_reused, and tombstoned it. If the rotation in hand
 		// replaces exactly that token, the tombstone is false and the rotation
 		// is the only working login (see reviveRotation).
-		if pend, ok := p.pendingFor(key); ok {
-			if stored, revived := p.reviveRotation(key, pend); revived {
-				if live, usable := usableCredential(stored); usable {
-					p.cachePut(key, accessFrom(live), gen)
-					return accessFrom(live), nil
+		//
+		// ONLY a tombstone that was already there when this transaction began.
+		// A tombstone this callback wrote is the issuer refusing the token it
+		// sent, or refusing to stay on the same account, and the row still holds
+		// the spent token that refusal replaced, so a revival here would write
+		// the refused rotation back into a live row and every later turn would
+		// fail with it instead of the owner being asked to log in.
+		if !tombstonedHere {
+			if pend, ok := p.pendingFor(key); ok {
+				if stored, revived := p.reviveRotation(key, pend); revived {
+					if live, usable := usableCredential(stored); usable {
+						p.cachePut(key, accessFrom(live), gen)
+						return accessFrom(live), nil
+					}
 				}
 			}
 		}
@@ -946,6 +972,24 @@ func (p *providerCreds) persistRotation(key credKey, rot pendingRotation) {
 		"owner", key.owner, "provider", key.provider, "tries", persistTries)
 }
 
+// dropRejectedRotation drops the hand-off this refresh adopted, because the
+// issuer refused that rotation's own token (invalid_grant) or would only honour
+// it for another account. Two things follow from dropping it HERE, inside the
+// callback and before the store commits the tombstone:
+//
+//   - it is never adopted again, not even by this daemon's next refresh; and
+//   - a save still retrying the same record cannot revive the dead row with it.
+//     That save is a separate transaction, so it sees the tombstone as another
+//     holder's and would otherwise revive the row with the token that was just
+//     refused.
+//
+// A seq of 0 means no hand-off was adopted, so there is nothing to drop.
+func (p *providerCreds) dropRejectedRotation(key credKey, seq uint64) {
+	if seq != 0 {
+		p.clearRotation(key, seq)
+	}
+}
+
 // reviveRotation is the ONE sanctioned resurrection of a dead credential.
 //
 // The interleaving it exists for: this daemon rotated the refresh token but its
@@ -959,8 +1003,15 @@ func (p *providerCreds) persistRotation(key credKey, rot pendingRotation) {
 //
 // Every other dead row stays dead. The comparison happens inside the store's row
 // lock (Store.Revive writes only when the row is dead AND still holds sent), so
-// a logout, a deleted user, a genuinely rejected token, another holder's newer
-// rotation and an undecryptable row are all left alone.
+// a logout, a deleted user, another holder's newer rotation and an undecryptable
+// row are all left alone.
+//
+// The caller owes the one judgment the store cannot make: the tombstone must
+// have existed BEFORE its own transaction began. A tombstone its own refresh
+// callback just wrote sits on the very token the rotation replaced, so the store
+// would read it as another holder's and write back a token the issuer has
+// refused. `refresh` refuses that revival outright, and drops the refused
+// rotation under the row lock so a retrying save has nothing to revive with.
 //
 // It reports the now-live credential, and whether it revived anything. The log
 // line names the owner and the provider, never a token.

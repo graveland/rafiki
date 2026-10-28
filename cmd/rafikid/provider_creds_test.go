@@ -82,6 +82,12 @@ type fakeCredStore struct {
 	revives      int
 	reviveErr    error
 	deleteAllErr error
+
+	// onDead, when set, runs ONCE at the moment a refresh callback's ErrDead is
+	// committed: the tombstone is written and visible to every other store call,
+	// and the refresh that caused it has not seen the error yet. That is the
+	// window a retrying rotation save wakes up in.
+	onDead func()
 }
 
 var _ providercreds.Store = (*fakeCredStore)(nil)
@@ -108,6 +114,14 @@ func (f *fakeCredStore) refreshCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.refreshCalls
+}
+
+// setOnDead installs the hook run when a refresh callback's ErrDead is
+// committed, once.
+func (f *fakeCredStore) setOnDead(hook func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onDead = hook
 }
 
 // failNextWrite makes the next n changed writes fail with ErrNotPersisted.
@@ -176,6 +190,10 @@ func (f *fakeCredStore) Refresh(ctx context.Context, owner, provider string, fn 
 		if errors.Is(err, providercreds.ErrDead) {
 			cur.Dead = true
 			f.rows[key] = cur
+			if hook := f.onDead; hook != nil {
+				f.onDead = nil
+				hook()
+			}
 			return cur, err
 		}
 		// Rolled back. The other daemon's commit still lands: it is a
@@ -2033,23 +2051,17 @@ func TestTokenSourceSaveLeavesADeadRowThatIsNotOurs(t *testing.T) {
 	c.NotStrContains(logs.String(), "refresh-a", "the log must never name a token: %s", logs.String())
 }
 
-// TestTokenSourceAdoptionRevivesARowTombstoned is the same rule at the other
-// place the daemon can meet a dead row: a save that already gave up kept the
-// rotation in memory, and the tombstone landed afterwards. The next refresh
-// must adopt the held rotation (and revive the row with it) instead of
-// forgetting a credential it can still prove alive.
-func TestTokenSourceAdoptionRevivesARowTombstoned(t *testing.T) {
+// heldRotationCreds is the pose both revival orders start from: a rotation the
+// issuer completed whose write never landed, so refresh-a exists only in the
+// hand-off while the row still holds the spent r0.
+func heldRotationCreds(t *testing.T, answer func(call int) (int, string)) (*fakeCredStore, *fakeIssuer, *providerCreds) {
+	t.Helper()
 	c := assert.NewAborting(t)
 	store := newFakeCredStore()
 	store.seed(staleCredential(time.Now().Add(time.Minute)))
 	store.failNextWrite(1 + persistTries)
 	iss := newFakeIssuer(t)
-	iss.answer = func(call int) (int, string) {
-		if call == 1 {
-			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
-		}
-		return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
-	}
+	iss.answer = answer
 	p := testCreds(t, store, iss, "")
 	p.retryDelay = time.Microsecond
 
@@ -2062,22 +2074,176 @@ func TestTokenSourceAdoptionRevivesARowTombstoned(t *testing.T) {
 	if _, ok := p.pendingFor(testKey); !ok {
 		c.Fail("fixture: the give-up must keep the rotation")
 	}
-
-	// The tombstone lands after the give-up: the row is dead on r0, which is
-	// exactly the token the kept rotation replaces.
-	dead := staleCredential(time.Now().Add(time.Minute))
-	dead.Dead = true
-	store.seed(dead)
-
-	tok, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
-	c.NoError(err, "a held rotation makes the tombstone false")
-	c.Eq("access-a", tok, "the rotation's own access token")
-	c.Eq(1, store.reviveCount(), "the row is revived, not forgotten")
-
 	stored, ok := store.row(testOwner, testProvider)
 	c.True(ok, "row still present")
-	c.False(stored.Dead, "the row is live again")
-	c.Eq("refresh-a", stored.RefreshToken, "and holds the held rotation")
+	c.False(stored.Dead, "fixture: the row is still live on the spent token")
+	c.Eq("r0", stored.RefreshToken, "fixture: the row still holds the token the rotation replaced")
+	return store, iss, p
+}
+
+// TestTokenSourceRevivesOnlyATombstoneThatPredatesTheRefresh pins the judgment
+// the store's token comparison cannot make: whether a daemon looking at a dead
+// row is seeing a tombstone ANOTHER holder wrote or one its OWN refresh just
+// wrote.
+//
+// The starting pose is a save that gave up holding refresh-a, so the row still
+// holds the spent r0 and refresh-a survives nowhere but the hand-off. A forced
+// refresh then ADOPTS refresh-a and spends it. From there the two orders
+// diverge:
+//
+//   - the row was already dead when the transaction began (another daemon's
+//     refresh_token_reused): that tombstone is about r0, the token this daemon
+//     holds the successor to, so it is contradicted and the row is revived with
+//     refresh-a;
+//   - the issuer REFUSES the adopted refresh-a, or answers for a different
+//     account: THIS callback tombstoned the row, and the store's markDead writes
+//     dead_at only, leaving r0 in the token column. A revival judged on the row
+//     alone would read that tombstone as another holder's and write the refused
+//     refresh-a back into a live credential, which is a login that fails on
+//     every later turn instead of a login that asks for one.
+func TestTokenSourceRevivesOnlyATombstoneThatPredatesTheRefresh(t *testing.T) {
+	t.Run("another holder's tombstone before the transaction revives", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		store, iss, p := heldRotationCreds(t, func(call int) (int, string) {
+			if call == 1 {
+				return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+			}
+			return http.StatusOK, tokenBody("access-b", "refresh-b", "acct_1")
+		})
+
+		// The tombstone is already in the row when this transaction begins: the
+		// store answers ErrDead without calling the refresh callback at all, so
+		// nothing this daemon did in this transaction wrote it.
+		dead := staleCredential(time.Now().Add(time.Minute))
+		dead.Dead = true
+		store.seed(dead)
+
+		tok, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+		c.NoError(err, "a held rotation makes the tombstone false")
+		c.Eq("access-a", tok, "the rotation's own access token")
+		c.Eq(1, store.reviveCount(), "the row is revived, not forgotten")
+
+		stored, ok := store.row(testOwner, testProvider)
+		c.True(ok, "row still present")
+		c.False(stored.Dead, "the row is live again")
+		c.Eq("refresh-a", stored.RefreshToken, "and holds the held rotation")
+		if _, ok := p.pendingFor(testKey); ok {
+			c.Fail("a revived rotation must leave nothing pending")
+		}
+
+		// The resurrected row is usable: the next recovery spends the rotation
+		// whose tombstone was false, which is the whole point of keeping it.
+		tok, _, err = p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+		c.NoError(err, "the revived credential must serve a recovery")
+		c.Eq("access-b", tok, "token")
+		c.Eq("refresh-a", iss.body(1)["refresh_token"], "the recovery spends the token this daemon held")
+	})
+
+	for _, tc := range []struct {
+		name   string
+		answer func(call int) (int, string)
+	}{
+		{
+			// The user revoked the grant: the adopted token is genuinely dead.
+			name: "the issuer refuses the adopted rotation",
+			answer: func(call int) (int, string) {
+				if call == 1 {
+					return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+				}
+				return http.StatusBadRequest, `{"error":"invalid_grant"}`
+			},
+		},
+		{
+			// The grant now belongs to another account: a deliberate tombstone.
+			name: "the adopted rotation names another account",
+			answer: func(call int) (int, string) {
+				if call == 1 {
+					return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+				}
+				return http.StatusOK, tokenBody("access-x", "refresh-x", "acct_2")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			logs := &syncBuffer{}
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(old) })
+
+			store, iss, p := heldRotationCreds(t, tc.answer)
+			// The refused rotation must already be gone when the tombstone becomes
+			// visible to any other store call: a save still retrying it is a
+			// separate transaction, reads that tombstone as another holder's, and
+			// would otherwise revive the row with the token the issuer just refused.
+			var (
+				sawTombstone   bool
+				pendingAtDeath bool
+			)
+			store.setOnDead(func() {
+				sawTombstone = true
+				_, pendingAtDeath = p.pendingFor(testKey)
+			})
+
+			_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+			c.Error(err, "a refused rotation leaves nothing usable")
+
+			c.Eq(0, store.reviveCount(), "a row this daemon's own refresh tombstoned must not be revived")
+			c.True(sawTombstone, "fixture: this refresh must be the one that tombstoned the row")
+			c.False(pendingAtDeath, "the refused rotation is dropped before the tombstone is visible")
+			stored, ok := store.row(testOwner, testProvider)
+			c.True(ok, "row still present")
+			c.True(stored.Dead, "the row stays dead: the owner has to log in again")
+			c.Eq("r0", stored.RefreshToken, "the row keeps the token the refused rotation replaced")
+			c.NotStrContains(logs.String(), "revived a provider credential",
+				"no revival may be logged: %s", logs.String())
+			if _, ok := p.pendingFor(testKey); ok {
+				c.Fail("the refused rotation must be dropped, never adopted again")
+			}
+
+			// And a later recovery does not resurrect it either: nothing is left
+			// to adopt, and the dead row stays dead.
+			_, _, err = p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+			c.Error(err, "a dead credential keeps asking for a login")
+			c.Eq(0, store.reviveCount(), "a second recovery revives nothing")
+			c.Eq(2, iss.calls(), "neither recovery spends a refused token upstream")
+			stored, ok = store.row(testOwner, testProvider)
+			c.True(ok, "row still present")
+			c.True(stored.Dead, "still dead")
+		})
+	}
+}
+
+// TestTokenSourceOwnTombstoneIsNeverRevivedWithARecordInHand pins the rule on
+// its own, with the record the rejection drops put back: even when a hand-off
+// replacing the row's spent token is in hand, a tombstone THIS callback wrote is
+// not revived. The rejection path drops that hand-off under the row lock, so
+// only a rejection site that forgot to drop it reaches this state; the guard is
+// what keeps that mistake from resurrecting a refused login.
+func TestTokenSourceOwnTombstoneIsNeverRevivedWithARecordInHand(t *testing.T) {
+	c := assert.NewAborting(t)
+	store, _, p := heldRotationCreds(t, func(call int) (int, string) {
+		if call == 1 {
+			return http.StatusOK, tokenBody("access-a", "refresh-a", "acct_1")
+		}
+		return http.StatusBadRequest, `{"error":"invalid_grant"}`
+	})
+	// The rotation the rejection drops, reinstated as this refresh's own
+	// tombstone becomes visible: it replaces r0, the token the row died on, so
+	// the store alone would read that tombstone as another holder's.
+	refused := staleCredential(time.Now().Add(time.Hour))
+	refused.RefreshToken, refused.AccessToken = "refresh-a", "access-a"
+	store.setOnDead(func() {
+		p.recordRotation(testKey, "r0", refused)
+	})
+
+	_, _, err := p.TokenSourceFor(testOwner, testProvider).Token(context.Background(), true)
+	c.Error(err, "the refused rotation leaves nothing usable")
+	c.Eq(0, store.reviveCount(), "a tombstone this callback wrote is never revived, record or no record")
+	stored, ok := store.row(testOwner, testProvider)
+	c.True(ok, "row still present")
+	c.True(stored.Dead, "the row stays dead")
+	c.Eq("r0", stored.RefreshToken, "the refused rotation is not written back into the row")
 }
 
 // TestProviderCredDeleteRevokesTheUnpersistedRotation pins logout's revoke of

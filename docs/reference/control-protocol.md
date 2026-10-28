@@ -2204,9 +2204,14 @@ row's, and one a rotation completed but never persisted is holding.
 
 A dead row (the issuer refused the refresh token) stays dead, with one
 sanctioned exception: if the daemon holds the rotation that replaces the very
-token the row died on, the tombstone was another holder's
-`refresh_token_reused` rather than a refusal, so the rotation is written and
-`dead_at` cleared (`providercreds.Store.Revive`; see `ErrDead`'s doc).
+token the row died on AND the tombstone already existed when that transaction
+began, the tombstone was another holder's `refresh_token_reused` rather than a
+refusal, so the rotation is written and `dead_at` cleared
+(`providercreds.Store.Revive`; see `ErrDead`'s doc). A tombstone the daemon's
+own refresh just wrote is never revived by it: when the issuer refuses the
+rotation it adopted (or answers for a different account), that rotation is
+dropped and the row stays dead, so the owner is asked to log in instead of
+every later turn failing on a refused token.
 
 ### The Login service (`rafiki.v1.Login`: `BeginLogin`, `CompleteLogin`)
 
