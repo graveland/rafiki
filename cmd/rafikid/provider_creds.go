@@ -52,10 +52,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +69,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/chatgptauth"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providercreds"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -114,6 +118,32 @@ const (
 	// The ChatGPT backend wants it beside the bearer, and the credential store
 	// (which knows it) is the only thing that has to.
 	chatGPTAccountHeader = "chatgpt-account-id"
+
+	// chatGPTModelsURL is the per-account model directory the codex CLI reads.
+	// Like the Responses endpoint it is undocumented and can change.
+	chatGPTModelsURL = "https://chatgpt.com/backend-api/codex/models"
+
+	// chatgptClientVersion is the codex client version the directory request
+	// claims. The server gates entries by a minimal client version, so an older
+	// string silently hides models the account can run; 0.165.0 is the version
+	// the captured fixtures came from. RAFIKI_CHATGPT_CLIENT_VERSION overrides
+	// it.
+	chatgptClientVersion = "0.165.0"
+
+	// modelsRefreshInterval is how long a model directory stays fresh before a
+	// listing asks upstream again. An hour: the directory changes when OpenAI
+	// ships a model, and a listing is the only thing that reads it eagerly.
+	modelsRefreshInterval = time.Hour
+
+	// modelsResponseCap bounds a model directory body. The captured document is
+	// a few hundred KB; anything past this is not a directory, and reading it
+	// would only spend memory.
+	modelsResponseCap = 16 << 20
+
+	// modelsReadTimeout bounds the store read a sender's facts lookup may do when
+	// nothing is warm yet. It is a bound, not a budget: the common case is a
+	// memory hit that never reaches the store.
+	modelsReadTimeout = 5 * time.Second
 
 	// redactedToken is what a token field prints as. Nothing here ever renders
 	// one: a token reaching a log line, an error message or a panic trace is a
@@ -215,6 +245,11 @@ type providerCreds struct {
 	nextRotation uint64
 	// logins is the owner binding of every login in flight, pruned on Begin.
 	logins map[string]loginBinding
+	// models is every owner's parsed model directory, keyed like the cache, plus
+	// when a fetch was last ATTEMPTED for it. A parse is replaced only by a fetch
+	// (or by a login/logout, through forget), so it is one parse per fetch,
+	// shared by the sender's facts, the child's context window and the listing.
+	models map[credKey]*ownerModelsEntry
 
 	sf singleflight.Group // coalesces concurrent refreshes per (owner, provider)
 
@@ -236,6 +271,13 @@ type providerCreds struct {
 	// drainWait overrides drainTimeout; zero means drainTimeout. A test sets it
 	// so the bound is observable without waiting 30 seconds.
 	drainWait time.Duration
+
+	// modelsURL and modelsClient override the model-directory endpoint and its
+	// HTTP client; empty and nil mean the fixed ChatGPT endpoint and the default
+	// client. A test sets them to an httptest server, the same way retryDelay and
+	// drainWait are overridden.
+	modelsURL    string
+	modelsClient *http.Client
 }
 
 // newProviderCreds builds the daemon's credential machinery and starts its
@@ -256,6 +298,7 @@ func newProviderCreds(bg context.Context, store providercreds.Store, auth *chatg
 		gen:       make(map[credKey]uint64),
 		pending:   make(map[credKey]pendingRotation),
 		logins:    make(map[string]loginBinding),
+		models:    make(map[credKey]*ownerModelsEntry),
 		bg:        bg,
 	}
 	if store != nil && auth != nil {
@@ -908,6 +951,9 @@ func (p *providerCreds) forget(key credKey) {
 	defer p.mu.Unlock()
 	delete(p.cache, key)
 	delete(p.pending, key)
+	// The model directory belongs to the credential: a logout, a re-login to
+	// another account and a dead row all invalidate it.
+	delete(p.models, key)
 	if p.gen == nil {
 		p.gen = make(map[credKey]uint64)
 	}
@@ -965,6 +1011,395 @@ func usableAccess(token string, expiry time.Time) bool {
 
 func accessFrom(c providercreds.Credential) cachedAccess {
 	return cachedAccess{token: c.AccessToken, accountID: c.AccountID, expiry: c.AccessExpiry}
+}
+
+// ─── Model directory ─────────────────────────────────────────────────────────
+
+// ownerModelsEntry is one owner's parsed model directory, whether anything has
+// answered for it yet, and when a fetch was last attempted.
+//
+// dir is nil when the row holds no directory, or holds one this daemon could not
+// parse: the two are the same answer to every reader, and a fetch replaces it in
+// place. read is what separates "there is none" from "nobody has looked yet",
+// which a fetch attempt alone must not change: stamping a fetch attempt must not
+// make a directory that IS stored read as empty.
+type ownerModelsEntry struct {
+	dir     *ownerModels
+	read    bool
+	triedAt time.Time
+}
+
+// codexModel is one entry of the owner's /models directory.
+//
+// supported_in_api is deliberately NOT a field: it describes API-key access, so
+// an account whose subscription can run a model frequently reports false for
+// it, and filtering on it would hide exactly the models this kind exists for.
+// The listing filters on visibility alone.
+type codexModel struct {
+	Slug            string   `json:"slug"`
+	DisplayName     string   `json:"display_name"`
+	Visibility      string   `json:"visibility"`
+	ContextWindow   int      `json:"context_window"`
+	InputModalities []string `json:"input_modalities"`
+
+	SupportVerbosity         bool   `json:"support_verbosity"`
+	DefaultVerbosity         string `json:"default_verbosity"`
+	SupportsReasoningSummary bool   `json:"supports_reasoning_summary_parameter"`
+	SupportedReasoningLevels []struct {
+		Effort string `json:"effort"`
+	} `json:"supported_reasoning_levels"`
+}
+
+// ownerModels is one owner's /models document, parsed ONCE per fetch.
+//
+// Three readers share it: the sender's per-model facts (ModelFactsFor), a
+// child's context window, and the model listing. Sharing the parsed value is
+// what keeps them from disagreeing about the same document, and it is why
+// nothing here re-reads or re-parses on a lookup.
+type ownerModels struct {
+	entries []codexModel // server order, duplicates and slugless entries included
+	bySlug  map[string]int
+}
+
+// parseOwnerModels parses a /models document. A body that is not the expected
+// shape is nil, never a partial directory: a malformed or empty answer must
+// leave the previous cache alone rather than half-replace it, and an account
+// whose directory is genuinely empty has nothing to list either way.
+func parseOwnerModels(raw []byte) *ownerModels {
+	if len(raw) == 0 {
+		return nil
+	}
+	var doc struct {
+		Models []codexModel `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	if len(doc.Models) == 0 {
+		return nil
+	}
+	m := &ownerModels{entries: doc.Models, bySlug: make(map[string]int, len(doc.Models))}
+	for i, e := range doc.Models {
+		if e.Slug == "" {
+			continue
+		}
+		if _, dup := m.bySlug[e.Slug]; dup {
+			continue // first entry wins, matching the server's own ordering
+		}
+		m.bySlug[e.Slug] = i
+	}
+	return m
+}
+
+// fact maps one entry onto the fields the Responses sender gates its request
+// on. ok is false for a slug the account's directory does not carry, which is
+// the sender's conservative case rather than an error.
+func (m *ownerModels) fact(slug string) (llm.ModelFact, bool) {
+	if m == nil {
+		return llm.ModelFact{}, false
+	}
+	i, ok := m.bySlug[slug]
+	if !ok {
+		return llm.ModelFact{}, false
+	}
+	e := m.entries[i]
+	f := llm.ModelFact{
+		SupportsReasoningSummary: e.SupportsReasoningSummary,
+		SupportsVerbosity:        e.SupportVerbosity,
+		DefaultVerbosity:         e.DefaultVerbosity,
+	}
+	for _, lvl := range e.SupportedReasoningLevels {
+		if lvl.Effort != "" {
+			f.ReasoningLevels = append(f.ReasoningLevels, lvl.Effort)
+		}
+	}
+	return f, true
+}
+
+// contextWindow is the entry's context_window, 0 when the directory does not
+// carry the slug or does not report one. 0 is what fundi reads as "ask the
+// catalog".
+func (m *ownerModels) contextWindow(slug string) int {
+	if m == nil {
+		return 0
+	}
+	i, ok := m.bySlug[slug]
+	if !ok {
+		return 0
+	}
+	return m.entries[i].ContextWindow
+}
+
+// listable returns the entries the account offers for listing, in the server's
+// order. Only visibility == "list" qualifies: the field also takes "hide" and
+// "none", and both mean the account cannot address the model, so offering one
+// would hand the picker a model whose every turn fails.
+func (m *ownerModels) listable() []codexModel {
+	if m == nil {
+		return nil
+	}
+	out := make([]codexModel, 0, len(m.entries))
+	for _, e := range m.entries {
+		if e.Slug == "" || e.Visibility != "list" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// bgCtx is the daemon's lifetime context, with a background one as the fallback
+// for a providerCreds a test built without one.
+func (p *providerCreds) bgCtx() context.Context {
+	if p == nil || p.bg == nil {
+		return context.Background()
+	}
+	return p.bg
+}
+
+// ModelFactsFor returns the per-model facts one owner's ChatGPT sender gates
+// its request on, read from that owner's cached model directory.
+//
+// It is deliberately a lookup over the directory this daemon already parsed,
+// never a fetch: a model's facts arriving a turn late is nothing, while a store
+// or network round trip inside request construction would be a stall on every
+// send. A slug nothing is known about answers ok=false.
+func (p *providerCreds) ModelFactsFor(owner, provider string) llm.ModelFacts {
+	key := credKey{owner: owner, provider: provider}
+	return func(model string) (llm.ModelFact, bool) {
+		if p == nil || owner == "" || provider == "" {
+			return llm.ModelFact{}, false
+		}
+		if dir, known := p.rememberedModels(key); known {
+			return dir.fact(model)
+		}
+		// Nothing parsed yet (a sender built for a provider this spawn did not
+		// warm). One bounded read fills the entry for every later call.
+		ctx, cancel := context.WithTimeout(p.bgCtx(), modelsReadTimeout)
+		defer cancel()
+		dir, err := p.ownerModels(ctx, owner, provider)
+		if err != nil {
+			return llm.ModelFact{}, false
+		}
+		return dir.fact(model)
+	}
+}
+
+// ownerModels returns the owner's cached model directory, reading and parsing
+// the stored document at most once (a later fetch replaces the parse).
+//
+// A missing or dead credential answers (nil, nil): it is not an error to ask
+// about an owner with no login, and it is never remembered, so a login fills
+// the entry straight after.
+func (p *providerCreds) ownerModels(ctx context.Context, owner, provider string) (*ownerModels, error) {
+	if p == nil || p.store == nil || owner == "" || provider == "" {
+		return nil, nil
+	}
+	key := credKey{owner: owner, provider: provider}
+	if dir, known := p.rememberedModels(key); known {
+		return dir, nil
+	}
+	cred, err := p.store.Get(ctx, owner, provider)
+	switch {
+	case errors.Is(err, providercreds.ErrNotFound), errors.Is(err, providercreds.ErrDead):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	dir := parseOwnerModels(cred.ModelsJSON)
+	p.rememberModels(key, dir)
+	return dir, nil
+}
+
+// rememberedModels returns the parsed directory and whether one has been read
+// or fetched at all. known=true with a nil directory means "this daemon knows
+// the account has none", which is an answer, not a miss.
+func (p *providerCreds) rememberedModels(key credKey) (*ownerModels, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.models[key]
+	if !ok || !e.read {
+		return nil, false
+	}
+	return e.dir, true
+}
+
+// rememberModels installs a parsed directory, keeping a fetch attempt's stamp.
+func (p *providerCreds) rememberModels(key credKey, dir *ownerModels) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.models[key]
+	if e == nil {
+		e = &ownerModelsEntry{}
+		if p.models == nil {
+			p.models = make(map[credKey]*ownerModelsEntry)
+		}
+		p.models[key] = e
+	}
+	e.dir, e.read = dir, true
+}
+
+// modelsFetchDue reports whether a fetch is due and stamps the attempt, so an
+// upstream that is down is retried on the cadence rather than on every listing
+// (and every listing does not log a WARN).
+func (p *providerCreds) modelsFetchDue(key credKey) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.models[key]
+	if e == nil {
+		e = &ownerModelsEntry{}
+		if p.models == nil {
+			p.models = make(map[credKey]*ownerModelsEntry)
+		}
+		p.models[key] = e
+	}
+	now := time.Now()
+	if !e.triedAt.IsZero() && now.Sub(e.triedAt) < modelsRefreshInterval {
+		return false
+	}
+	e.triedAt = now
+	return true
+}
+
+// chatGPTModelsClientVersion is the client_version the directory request
+// claims: the operator's override when set, else the constant.
+func chatGPTModelsClientVersion() string {
+	if v := strings.TrimSpace(paths.Get("RAFIKI_CHATGPT_CLIENT_VERSION")); v != "" {
+		return v
+	}
+	return chatgptClientVersion
+}
+
+// refreshModelsInBackground starts a fetch when one is due and returns
+// immediately.
+//
+// It is the ONLY way a listing or a login triggers one: neither may wait for
+// the upstream (a listing is answered from the cache), and neither may be told
+// the fetch failed. The fetch runs on the daemon's context and is counted, so
+// shutdown drains it.
+func (p *providerCreds) refreshModelsInBackground(owner, provider string) {
+	if p == nil || owner == "" || provider == "" {
+		return
+	}
+	if ok, _ := p.Available(); !ok {
+		return
+	}
+	key := credKey{owner: owner, provider: provider}
+	if !p.modelsFetchDue(key) {
+		return
+	}
+	if !p.startWork() {
+		return
+	}
+	go func() {
+		defer p.wg.Done()
+		ctx, cancel := context.WithTimeout(p.bgCtx(), refreshTimeout)
+		defer cancel()
+		p.refreshModels(ctx, owner, provider)
+	}()
+}
+
+// refreshModels fetches one owner's model directory and replaces the cache.
+//
+// Best effort by contract: every failure is logged at WARN and leaves the
+// previous cache in place, because a stale directory still names models that
+// work while an empty one offers nothing. A 304 keeps the cache (the etag is
+// the whole point of sending it), and a 200 lands only after the document
+// PARSES: an unrecognised answer must never replace a usable directory.
+func (p *providerCreds) refreshModels(ctx context.Context, owner, provider string) {
+	if ok, _ := p.Available(); !ok {
+		return
+	}
+	if ctx == nil {
+		ctx = p.bgCtx()
+	}
+	key := credKey{owner: owner, provider: provider}
+	cred, err := p.store.Get(ctx, owner, provider)
+	switch {
+	case errors.Is(err, providercreds.ErrNotFound), errors.Is(err, providercreds.ErrDead):
+		return
+	case err != nil:
+		slog.Warn("provider models: read the credential failed",
+			"owner", owner, "provider", provider, "error", err)
+		return
+	}
+	bearer, headers, err := p.TokenSourceFor(owner, provider).Token(ctx, false)
+	if err != nil {
+		slog.Warn("provider models: no usable credential",
+			"owner", owner, "provider", provider, "error", err)
+		return
+	}
+
+	endpoint := p.modelsURL
+	if endpoint == "" {
+		endpoint = chatGPTModelsURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		endpoint+"?client_version="+url.QueryEscape(chatGPTModelsClientVersion()), nil)
+	if err != nil {
+		slog.Warn("provider models: build the request failed",
+			"owner", owner, "provider", provider, "error", err)
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	// The credential's own headers (the account id) ride beside the bearer, the
+	// same way the sender replays them.
+	for name, values := range headers {
+		for _, v := range values {
+			req.Header.Add(name, v)
+		}
+	}
+	if cred.ModelsETag != "" {
+		req.Header.Set("If-None-Match", cred.ModelsETag)
+	}
+
+	client := p.modelsClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("provider models: fetch failed",
+			"owner", owner, "provider", provider, "error", err)
+		return
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		// The cached directory is still current. Nothing to store, nothing to log.
+		return
+	case http.StatusOK:
+	default:
+		slog.Warn("provider models: unexpected status; keeping the cached directory",
+			"owner", owner, "provider", provider, "status", resp.StatusCode)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, modelsResponseCap+1))
+	if err != nil {
+		slog.Warn("provider models: read the body failed",
+			"owner", owner, "provider", provider, "error", err)
+		return
+	}
+	if len(body) > modelsResponseCap {
+		slog.Warn("provider models: model directory exceeds the size cap; keeping the cached one",
+			"owner", owner, "provider", provider, "cap", modelsResponseCap)
+		return
+	}
+	dir := parseOwnerModels(body)
+	if dir == nil {
+		slog.Warn("provider models: unrecognised model directory; keeping the cached one",
+			"owner", owner, "provider", provider, "bytes", len(body))
+		return
+	}
+	if err := p.store.SetModels(ctx, owner, provider, body, resp.Header.Get("ETag")); err != nil {
+		slog.Warn("provider models: store the model directory failed",
+			"owner", owner, "provider", provider, "error", err)
+		return
+	}
+	// The parse of the document that was just stored: every reader of this
+	// fetch's answer (facts, context window, listing) shares this one value.
+	p.rememberModels(key, dir)
 }
 
 // ─── Provider login backend ──────────────────────────────────────────────────
@@ -1096,6 +1531,11 @@ func (p *providerCreds) CompleteProviderLogin(ctx context.Context, ownerUserID, 
 	p.forget(credKey{owner: ownerUserID, provider: provider})
 	slog.Info("provider login stored",
 		"owner", ownerUserID, "provider", provider, "account_id", tokens.AccountID)
+	// A fresh login has no model directory, and a login is the moment the
+	// credential is known good. Fetch it in the background: a listing (and the
+	// child's context window) would otherwise stay empty until something else
+	// happened to trigger a fetch.
+	p.refreshModelsInBackground(ownerUserID, provider)
 	return provider, tokens.AccountID, nil
 }
 

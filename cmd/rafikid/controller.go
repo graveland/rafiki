@@ -1913,6 +1913,66 @@ func (c *Controller) claimSiblingName(ctx context.Context, ownerUserID, parentID
 	}
 }
 
+// checkLoginProviderUsable refuses, at spawn, a fundi child whose model is
+// billed to a per-user ChatGPT login that this spawn cannot use. It sits beside
+// checkClaudeModelRoutable and for the same reason: without it the child starts,
+// attaches, and dies on its first turn with a 401 (or, worse, bills a
+// credential the caller did not know was involved).
+//
+// Three refusals, each a different repair:
+//
+//   - no owner: the daemon has no login to spend and there is deliberately no
+//     daemon-wide fallback credential for this kind, so the caller must spawn
+//     with a user credential. InvalidArgs, matching checkClaudeModelRoutable's
+//     neighbour, because the request as made cannot be served.
+//   - credential machinery unavailable (no RAFIKI_SECRETS_KEY, or no store):
+//     Unavailable with the reason, the same answer BeginProviderLogin gives and
+//     for the same cause. Nothing the caller did; the daemon is missing a
+//     setting.
+//   - no login for this owner: FailedPrecondition naming the fix, because the
+//     request is fine and one command makes it work.
+//
+// Only a spawn checks. A resume or a startup recovery re-checks nothing: the
+// child already exists, and a credential that has since expired surfaces as the
+// turn's own error from the token source, which is where the owner can see it.
+func (c *Controller) checkLoginProviderUsable(ctx context.Context, req protocol.SpawnRequest, ownerUserID string) error {
+	if req.Kind != protocol.KindFundi || req.Model == "" {
+		return nil
+	}
+	set := providersOrDefault(c.providers)
+	if set == nil {
+		return nil
+	}
+	p, _, err := set.Split(req.Model)
+	if err != nil || p.Kind != providers.KindOpenAIResponsesChatGPT {
+		// An unresolvable model is another check's business (agentRuntimeOptions
+		// reports it), and every other kind authenticates from the environment.
+		return nil
+	}
+	if ownerUserID == "" {
+		return &connectapi.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: fmt.Sprintf("provider %s bills a user's ChatGPT subscription; "+
+				"spawn with a user credential (this child has no owner)", p.Name),
+		}
+	}
+	creds := c.providerCreds
+	if ok, why := creds.Available(); !ok {
+		return &connectapi.ControllerError{Code: protocol.ErrUnavailable, Message: why}
+	}
+	has, err := creds.HasCredential(ctx, ownerUserID, p.Name)
+	if err != nil {
+		return fmt.Errorf("provider %s: check the ChatGPT login: %w", p.Name, err)
+	}
+	if !has {
+		return &connectapi.ControllerError{
+			Code:    protocol.ErrFailedPrecondition,
+			Message: fmt.Sprintf("no ChatGPT login for %s; run: rafiki providers login %s", p.Name, p.Name),
+		}
+	}
+	return nil
+}
+
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (protocol.SpawnResponseData, error) {
 	// The model the REQUEST named, captured before applyPreset can replace it
 	// with the preset's: resolveRouting parses both and merges spawn over
@@ -1980,6 +2040,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	}
 
 	if err := c.checkClaudeModelRoutable(req); err != nil {
+		return protocol.SpawnResponseData{}, err
+	}
+
+	// A child on a ChatGPT-login provider is billed to its owner's subscription,
+	// so it needs an owner with a working login. Refused here, next to the
+	// routing check and before anything is minted or written, so a spawn that
+	// could only fail its first turn starts nothing.
+	if err := c.checkLoginProviderUsable(ctx, req, owner.UserID); err != nil {
 		return protocol.SpawnResponseData{}, err
 	}
 

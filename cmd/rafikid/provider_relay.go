@@ -69,22 +69,49 @@ func hasProxy(names []string, proxyName string) bool {
 	return false
 }
 
-// providerSenders resolves relayTransport for every provider in set that
-// declares via_executor and builds each one's sender. It still resolves the
-// relay once, at client-construction time, rather than per-send — an
-// executor arriving after the child's client is built stays invisible to
-// that child until it is rebuilt (recorded in the design doc's Scope
-// section) — but it is scoped to the providers THIS spawn's model can
-// actually reach: the model's own provider plus that provider's configured
-// Fallback chain (reachableProviders). A via_executor provider outside that
-// set with no live executor is unrelated to this spawn — it is logged and
-// skipped, not treated as a spawn-ending error. A provider inside the
-// reachable set behaves as before: no live executor fails the spawn.
+// providerSenderCreds is the slice of *providerCreds providerSenders reads: the
+// availability gate, one owner's token source, and that owner's per-model facts.
 //
-// A registry with no via_executor providers at all — providers.Default(), and
-// every providers.toml until an operator opts in — returns a nil map: no
-// executor lookup, no error, no behaviour change.
-func providerSenders(set *providers.Set, pool *execpool.Pool, model string) (map[string]llm.Sender, error) {
+// It is an interface rather than the concrete pointer so a test can hand it a
+// fake that records which owner each sender was built for: a built sender is a
+// pkg/llm value whose token source cannot be read back out, and the property
+// that matters here (owner A's sender spends A's bearer, never B's) is
+// otherwise unobservable.
+type providerSenderCreds interface {
+	Available() (bool, string)
+	TokenSourceFor(owner, provider string) llm.TokenSource
+	ModelFactsFor(owner, provider string) llm.ModelFacts
+}
+
+var _ providerSenderCreds = (*providerCreds)(nil)
+
+// providerSenders resolves a sender for every provider in set that needs one
+// built here rather than from the daemon's environment.
+//
+// Two kinds qualify:
+//
+//   - via_executor providers (below), whose relay it resolves once, at
+//     client-construction time, rather than per-send. An executor arriving
+//     after the child's client is built stays invisible to that child until it
+//     is rebuilt (recorded in the design doc's Scope section). It is scoped to
+//     the providers THIS spawn's model can actually reach: the model's own
+//     provider plus that provider's configured Fallback chain
+//     (reachableProviders). A via_executor provider outside that set with no
+//     live executor is unrelated to this spawn: it is logged and skipped, not
+//     treated as a spawn-ending error. A provider inside the reachable set
+//     behaves as before, so no live executor fails the spawn.
+//   - openai-responses-chatgpt providers, which authenticate as the OWNING USER
+//     and so can only be built when this spawn has an owner and the daemon's
+//     credential store is usable. The sender it builds is bound to that one
+//     owner's token source and that owner's model facts; nothing is shared
+//     between two owners' senders, not even a cookie jar. An ownerless spawn
+//     gets no sender at all for such a provider, and Spawn refuses it up front
+//     (checkLoginProviderUsable) rather than letting the first turn discover it.
+//
+// A registry that needs neither (providers.Default(), and every providers.toml
+// until an operator opts in) returns a nil map: no lookup, no error, no
+// behaviour change.
+func providerSenders(set *providers.Set, pool *execpool.Pool, model, owner string, creds providerSenderCreds) (map[string]llm.Sender, error) {
 	if set == nil {
 		return nil, nil
 	}
@@ -95,7 +122,28 @@ func providerSenders(set *providers.Set, pool *execpool.Pool, model string) (map
 	var out map[string]llm.Sender
 	for _, name := range set.Names() {
 		p, ok := set.Get(name)
-		if !ok || p.ViaExecutor == nil {
+		if !ok {
+			continue
+		}
+		if p.Kind == providers.KindOpenAIResponsesChatGPT {
+			sender, why, err := chatGPTSenderFor(p, owner, creds)
+			if err != nil {
+				return nil, err
+			}
+			if sender == nil {
+				if reachable[name] {
+					slog.Warn("ChatGPT-login provider has no usable sender for this spawn; it will be unavailable to the child",
+						"provider", name, "model", model, "owner", owner, "reason", why)
+				}
+				continue
+			}
+			if out == nil {
+				out = make(map[string]llm.Sender, 1)
+			}
+			out[name] = sender
+			continue
+		}
+		if p.ViaExecutor == nil {
 			continue
 		}
 		rt, err := relayTransport(p, pool)
@@ -117,6 +165,29 @@ func providerSenders(set *providers.Set, pool *execpool.Pool, model string) (map
 		out[name] = sender
 	}
 	return out, nil
+}
+
+// chatGPTSenderFor builds one owner's sender for a ChatGPT-login provider. A
+// nil sender with a nil error means there is nothing to build for this spawn
+// (no owner, no credential machinery, or unavailable credential machinery), and
+// why says which. p.ViaExecutor and p.BaseURL cannot be set on this kind
+// (providers.Set.Validate refuses both), which is why the transport is nil: the
+// endpoint is fixed and the credential never leaves the daemon.
+func chatGPTSenderFor(p providers.Provider, owner string, creds providerSenderCreds) (llm.Sender, string, error) {
+	if owner == "" {
+		return nil, "no owner", nil
+	}
+	if creds == nil {
+		return nil, "provider credentials are not configured", nil
+	}
+	if ok, why := creds.Available(); !ok {
+		return nil, why, nil
+	}
+	sender, err := llm.NewChatGPTResponsesSender(p, creds.TokenSourceFor(owner, p.Name), creds.ModelFactsFor(owner, p.Name), nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("provider %q: %w", p.Name, err)
+	}
+	return sender, "", nil
 }
 
 // reachableProviders returns the names of every provider model can send to:

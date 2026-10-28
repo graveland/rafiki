@@ -369,7 +369,27 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// resume AND startup recovery (see loadChildren), so all three get the live
 	// reader.
 	ro.RoutingSource = c.liveRoutingSource(childID, f.routing)
-	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model)
+
+	// The owner's ChatGPT model directory feeds TWO things from ONE parse: the
+	// per-model facts the sender gates its request on (ModelFactsFor reads the
+	// entry warmed here) and this child's context window. Reading it BEFORE the
+	// senders are built is what makes it one parse: the sender's first Send finds
+	// the parse already in memory. Every other provider pays nothing here.
+	if dir, modelID := c.ownerChatGPTModels(ownerUserID, ro.Providers, ro.Model); dir != nil {
+		// RuntimeOptions.ContextWindow outranks the catalog; its plumbing down to
+		// the engine is pinned by pkg/fundi's own end-to-end test, and 0 means
+		// "ask the catalog".
+		ro.ContextWindow = dir.contextWindow(modelID)
+	}
+
+	// A nil *providerCreds must not become a non-nil interface here, or
+	// providerSenders would call Available on a nil receiver through it and a
+	// typed nil would look like a wired credential store.
+	var senderCreds providerSenderCreds
+	if c.providerCreds != nil {
+		senderCreds = c.providerCreds
+	}
+	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model, ownerUserID, senderCreds)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
@@ -778,6 +798,44 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 // the model is told not to go looking for the files rather than being handed a
 // directory that does not exist.
 const noSkillFilesNote = "(This skill has supporting files, but this agent has no executor to read them from.)"
+
+// ownerChatGPTModels returns the owner's parsed ChatGPT model directory, and the
+// provider-local model id the directory is keyed by, when model names an
+// openai-responses-chatgpt provider. Every other case answers (nil, ""): the
+// directory is a per-OWNER, per-provider artifact, so a child with no owner, a
+// provider of another kind, or a daemon whose credential store is unavailable
+// has none, and none of them is an error.
+//
+// It reads through providerCreds' in-memory parse, so the spawn path pays a
+// store read only for the first spawn after a fetch. The daemon's own context is
+// deliberate: the answer is a cached directory shared by every spawn of that
+// owner, so it must not die with one caller's spawn (a client that disconnects
+// mid-spawn would otherwise leave the entry unparsed for the next one).
+func (c *Controller) ownerChatGPTModels(owner string, set *providers.Set, model string) (*ownerModels, string) {
+	if c == nil || c.providerCreds == nil || owner == "" || model == "" {
+		return nil, ""
+	}
+	set = providersOrDefault(set)
+	if set == nil {
+		return nil, ""
+	}
+	p, modelID, err := set.Split(model)
+	if err != nil || p.Kind != providers.KindOpenAIResponsesChatGPT {
+		return nil, ""
+	}
+	if ok, _ := c.providerCreds.Available(); !ok {
+		return nil, ""
+	}
+	dir, err := c.providerCreds.ownerModels(c.baseCtx, owner, p.Name)
+	if err != nil {
+		// A store that cannot answer leaves the child on the catalog's window:
+		// degraded, and the turn itself will report the store.
+		slog.Warn("provider models: read the owner's model directory failed",
+			"owner", owner, "provider", p.Name, "error", err)
+		return nil, ""
+	}
+	return dir, modelID
+}
 
 // skillFileMaterializer writes a skill's supporting files onto the machine that
 // will read them and returns the directory holding them. ok is false when there

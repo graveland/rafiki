@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
@@ -128,7 +131,7 @@ func TestProviderSendersSkipsUnreachableViaExecutorProvider(t *testing.T) {
 	}
 	pool := execpool.New(relayFakeStore{}) // empty: vmlx advertises no live executor
 
-	senders, err := providerSenders(set, pool, "openrouter/deepseek-v4-pro")
+	senders, err := providerSenders(set, pool, "openrouter/deepseek-v4-pro", "", nil)
 	c.Require().NoError(err, "providerSenders")
 	_, ok := senders["vmlx"]
 	c.False(ok, `senders contains "vmlx", want it omitted (no live executor, and unreachable by this model)`)
@@ -153,8 +156,116 @@ func TestProviderSendersFailsWhenModelsOwnProviderUnavailable(t *testing.T) {
 	}
 	pool := execpool.New(relayFakeStore{})
 
-	_, err := providerSenders(set, pool, "vmlx/qwen")
+	_, err := providerSenders(set, pool, "vmlx/qwen", "", nil)
 	assert.NewAborting(t).Error(err, "providerSenders succeeded for a model whose own provider has no live executor")
+}
+
+// ─── ChatGPT-login senders ──────────────────────────────────────────────────
+
+// fakeSenderCreds is a providerSenderCreds that records the owner of every
+// sender it is asked to build for.
+//
+// It exists because a built sender is a pkg/llm value whose token source cannot
+// be read back out, so the property that matters (owner A's sender spends A's
+// bearer, never B's) is only observable at this seam: which owner each build
+// asked for, and that the source it was handed answers for that owner alone.
+type fakeSenderCreds struct {
+	mu    sync.Mutex
+	avail bool
+	why   string
+	built []credKey
+}
+
+func (f *fakeSenderCreds) Available() (bool, string) { return f.avail, f.why }
+
+func (f *fakeSenderCreds) TokenSourceFor(owner, provider string) llm.TokenSource {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.built = append(f.built, credKey{owner: owner, provider: provider})
+	return ownerBearer{owner: owner, provider: provider}
+}
+
+func (f *fakeSenderCreds) ModelFactsFor(_, _ string) llm.ModelFacts { return nil }
+
+// builtFor is every (owner, provider) a sender was built for, in order.
+func (f *fakeSenderCreds) builtFor() []credKey {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]credKey(nil), f.built...)
+}
+
+// ownerBearer is one owner's token source. Token answers with a bearer naming
+// the owner it was built for, so an owner leak is visible as a bearer.
+type ownerBearer struct{ owner, provider string }
+
+func (s ownerBearer) Token(context.Context, bool) (string, http.Header, error) {
+	return "bearer-" + s.owner, nil, nil
+}
+
+// Two owners spawning on the same ChatGPT provider must get two senders, each
+// bound to its own owner's credential. A shared sender would let one user's
+// turns spend another user's subscription, and would share the sender's cookie
+// jar with it.
+func TestProviderSendersOwnerIsolation(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	set := chatGPTProviderSet()
+	creds := &fakeSenderCreds{avail: true}
+	const model = chatGPTTestProvider + "/gpt-6.1-sol"
+
+	sendersA, err := providerSenders(set, nil, model, ownerA, creds)
+	ck.Require().NoError(err, "providerSenders(owner A)")
+	sendersB, err := providerSenders(set, nil, model, ownerB, creds)
+	ck.Require().NoError(err, "providerSenders(owner B)")
+
+	senderA, okA := sendersA[chatGPTTestProvider]
+	senderB, okB := sendersB[chatGPTTestProvider]
+	ck.Require().True(okA && okB, "a ChatGPT-login provider with an owner and a usable credential got no sender")
+	ck.False(senderA == senderB, "both owners were handed the same sender, so one's credential (and cookie jar) serves the other")
+
+	// Each build asked for its OWN owner's token source, once.
+	ck.EqDeep([]credKey{
+		{owner: ownerA, provider: chatGPTTestProvider},
+		{owner: ownerB, provider: chatGPTTestProvider},
+	}, creds.builtFor(), "TokenSourceFor calls, in order")
+
+	// And the sources it handed out answer for their own owner only.
+	ctx := context.Background()
+	bearerA, _, err := ownerBearer{owner: ownerA, provider: chatGPTTestProvider}.Token(ctx, false)
+	ck.Require().NoError(err, "owner A's token")
+	bearerB, _, err := ownerBearer{owner: ownerB, provider: chatGPTTestProvider}.Token(ctx, false)
+	ck.Require().NoError(err, "owner B's token")
+	ck.Eq("bearer-"+ownerA, bearerA, "owner A's bearer")
+	ck.Eq("bearer-"+ownerB, bearerB, "owner B's bearer")
+	ck.False(bearerB == "bearer-"+ownerA, "owner B's token source answered with owner A's bearer")
+}
+
+// Without an owner (and without usable credential machinery) a ChatGPT-login
+// provider contributes NO sender. Nothing is built from a daemon-wide
+// credential, because the kind has none: the first turn fails loudly on the
+// missing sender rather than billing an account nobody chose.
+func TestProviderSendersNoOwnerNoChatGPTSender(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	set := chatGPTProviderSet()
+	const model = chatGPTTestProvider + "/gpt-6.1-sol"
+
+	for _, tc := range []struct {
+		name  string
+		owner string
+		creds providerSenderCreds
+	}{
+		{"no owner", "", &fakeSenderCreds{avail: true}},
+		{"no credential machinery", ownerA, nil},
+		{"unavailable", ownerA, &fakeSenderCreds{avail: false, why: "set RAFIKI_SECRETS_KEY"}},
+	} {
+		senders, err := providerSenders(set, nil, model, tc.owner, tc.creds)
+		ck.Require().NoError(err, "providerSenders(%s)", tc.name)
+		ck.NotHasKey(senders, chatGPTTestProvider, "providerSenders(%s) built a ChatGPT sender anyway", tc.name)
+	}
+
+	// The owner+credential case is the control: the same call DOES build one.
+	senders, err := providerSenders(set, nil, model, ownerA, &fakeSenderCreds{avail: true})
+	ck.Require().NoError(err, "providerSenders(control)")
+	ck.HasKey(senders, chatGPTTestProvider, "providerSenders built nothing for an owner with usable credentials")
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────

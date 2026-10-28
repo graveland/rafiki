@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -299,6 +300,131 @@ func (c *Controller) catalogFactsByID(rows []routing.CatalogRow) map[string]cata
 	return out
 }
 
+// modelSourceLogin marks the rows a user's own ChatGPT login contributes. It is
+// spelled as a source of its own (not one of pkg/models' Sources) so a client
+// can tell a subscription model from anything the catalog or the operator's
+// config declared.
+const modelSourceLogin = "login"
+
+// ownerModelRows appends the caller's OWN ChatGPT-subscription models, one row
+// per listable entry of the owner's cached /models directory.
+//
+// Three rules, and each is a way this listing can leak or lie:
+//
+//   - The directory is the CALLER's (spawnOwner, i.e. the authenticated
+//     connection), read through the same per-owner cache the spawn path uses.
+//     Another user's login is never consulted, because the store is keyed by
+//     owner and this function only ever names one.
+//   - Only visibility == "list" entries appear. The field also takes "hide" and
+//     "none"; those models cannot be addressed by the account, so offering one
+//     hands the picker a model whose every turn fails. supported_in_api is
+//     deliberately NOT consulted: it describes API-key access and is false for
+//     subscription models this account can run.
+//   - No owner, no credential, no cached directory and a failed read all answer
+//     NO ROWS for that provider, never an error. A model listing is a picker;
+//     failing it because one provider has no directory would take the picker
+//     down over the least important source on it.
+//
+// declared is the ids the registry's own sources already produced. An id the
+// operator declared in providers.toml is not added twice: the declared row wins,
+// because a duplicate id in a picker is a key collision in every client that
+// keys rows by it.
+//
+// The rows are Source "login" so a client can tell them from the catalog's, and
+// they carry the entry's own context_window and input_modalities rather than a
+// catalog guess: for a subscription model the account's answer is the only one
+// that is right.
+func (c *Controller) ownerModelRows(ctx context.Context, facts map[string]catalogFacts, declared map[string]bool) []connectapi.ModelRow {
+	if c == nil || c.providerCreds == nil {
+		return nil
+	}
+	owner := spawnOwner(ctx).UserID
+	if owner == "" {
+		return nil
+	}
+	set := providersOrDefault(c.providers)
+	if set == nil {
+		return nil
+	}
+	if ok, _ := c.providerCreds.Available(); !ok {
+		return nil
+	}
+	var out []connectapi.ModelRow
+	for _, name := range set.Names() {
+		p, ok := set.Get(name)
+		if !ok || p.Kind != providers.KindOpenAIResponsesChatGPT {
+			continue
+		}
+		has, err := c.providerCreds.HasCredential(ctx, owner, name)
+		if err != nil {
+			// The provider simply contributes nothing; the rest of the listing
+			// still answers.
+			slog.Warn("model listing: check the ChatGPT login failed",
+				"owner", owner, "provider", name, "error", err)
+			continue
+		}
+		if !has {
+			continue
+		}
+		// Kick the refresh and answer from whatever is cached: the listing never
+		// waits for the upstream, and a failed fetch is logged there, not here.
+		c.providerCreds.refreshModelsInBackground(owner, name)
+		dir, err := c.providerCreds.ownerModels(ctx, owner, name)
+		if err != nil {
+			slog.Warn("model listing: read the owner's model directory failed",
+				"owner", owner, "provider", name, "error", err)
+			continue
+		}
+		for _, m := range dir.listable() {
+			id := name + "/" + m.Slug
+			if declared[id] {
+				continue
+			}
+			row := connectapi.ModelRow{
+				ID:              id,
+				Provider:        name,
+				Model:           m.Slug,
+				Name:            m.DisplayName,
+				Source:          modelSourceLogin,
+				ContextWindow:   optionalInt(m.ContextWindow),
+				InputModalities: m.InputModalities,
+			}
+			applyOwnerModelPrice(&row, m.Slug, facts)
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// applyOwnerModelPrice copies the catalog's price fields onto a login-sourced
+// row.
+//
+// The lookup id is the CATALOG id for the slug (openai/<slug>), not the row's
+// own <provider>/<slug>: the row is spelled after the operator's provider name,
+// while the catalog only ever hears OpenRouter's id, so joining on the row id
+// would find nothing and silently leave every subscription model unpriced. A
+// miss leaves the fields nil (unknown), never zero.
+func applyOwnerModelPrice(row *connectapi.ModelRow, slug string, facts map[string]catalogFacts) {
+	f, ok := facts["openai/"+slug]
+	if !ok {
+		return
+	}
+	row.PromptUSD = f.promptUSD
+	row.CompletionUSD = f.completionUSD
+	row.CacheReadUSD = f.cacheReadUSD
+	row.CacheWriteUSD = f.cacheWriteUSD
+}
+
+// optionalInt reports n as present when it is set, and as absent when it is 0.
+// The directory's context_window is an int with no presence bit, and a model
+// whose window the server did not report must not claim a zero-token window.
+func optionalInt(n int) *int {
+	if n <= 0 {
+		return nil
+	}
+	return &n
+}
+
 // ListModelRows answers the Connect ListModels RPC.
 //
 // The daemon's OpenRouter rows come from routing.ModelCatalog, NOT from
@@ -349,7 +475,13 @@ func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) (
 		}
 	}
 
-	rows := filterRowsForKind(filterByProvider(decorateRows(spine, facts), provider), kind)
+	rows := decorateRows(spine, facts)
+	declared := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		declared[r.ID] = true
+	}
+	rows = append(rows, c.ownerModelRows(ctx, facts, declared)...)
+	rows = filterRowsForKind(filterByProvider(rows, provider), kind)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	return rows, nil
 }
