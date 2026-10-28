@@ -234,6 +234,15 @@ type sendFailedMsg struct {
 	images []stagedAttachment
 }
 
+// sendAckedMsg reports a send the daemon accepted for a claude child. Such a
+// child's transcript echo is published only once its request has been captured,
+// after the whole upstream response, so the accepted RPC is the only prompt
+// acknowledgement the cockpit gets.
+type sendAckedMsg struct {
+	childID string
+	pending string
+}
+
 // previewTickMsg fires previewDebounce after the rail cursor landed on a row
 // whose transcript the pane is not already live on. Several can be pending at
 // once -- one per keystroke -- and that is fine: each acts only if the cursor
@@ -1095,6 +1104,12 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// opens a stream here.
 		return c, nil
 
+	case sendAckedMsg:
+		if msg.childID == c.pendingChild && msg.pending == c.pending {
+			c.pending = ""
+		}
+		return c, nil
+
 	case sendFailedMsg:
 		if msg.childID == c.pendingChild {
 			c.pending = ""
@@ -1921,11 +1936,17 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 			}
 		}
 	}
+	pending := c.pending
+	n, known := c.rail.Get(child)
+	ackOnAccept := known && n.Kind == protocol.KindClaude
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, err := c.client.Send(ctx, connect.NewRequest(req)); err != nil {
 			return sendFailedMsg{err: err, childID: child, mode: asked, text: text, images: images}
+		}
+		if ackOnAccept {
+			return sendAckedMsg{childID: child, pending: pending}
 		}
 		return nil
 	}

@@ -2855,3 +2855,21 @@ func TestModelReadoutNamesTheKind(t *testing.T) {
 		})
 	}
 }
+
+// A claude child's echo arrives only after its whole upstream response is
+// captured, so an accepted Send clears the ⏳ -- but only the send it answers.
+func TestAcceptedSendClearsOnlyItsOwnPending(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+
+	c.pending, c.pendingChild = "second", "c_1"
+	c.Update(sendAckedMsg{childID: "c_1", pending: "first"})
+	ck.Eq("second", c.pending, "an older send's ack cleared a newer pending message")
+
+	c.Update(sendAckedMsg{childID: "c_2", pending: "second"})
+	ck.Eq("second", c.pending, "another child's ack cleared the pending message")
+
+	c.Update(sendAckedMsg{childID: "c_1", pending: "second"})
+	ck.Eq("", c.pending, "the accepted send left its pending marker")
+}
