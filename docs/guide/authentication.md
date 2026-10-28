@@ -40,10 +40,11 @@ rafiki login --no-browser   # headless: print the authorize URL, paste the redir
 
 The client binds a loopback listener, gets an authorize URL from the daemon's
 `Login` service, and the IdP's redirect completes the flow; every message
-goes to stderr, stdout stays silent. `--no-browser` skips opening a browser
-and accepts the redirect URL pasted on stdin (an `ssh -L` forward landing on
-another machine, a headless box). The flow waits 10 minutes; a pasted URL
-parses only for its query string.
+goes to stderr, stdout stays silent. `--no-browser` skips the browser AND the
+listener (nothing is bound, so a callback port another process holds cannot
+fail it) and accepts the redirect URL pasted on stdin (an `ssh -L` forward
+landing on another machine, a headless box). The flow waits 10 minutes; a
+pasted URL parses only for its query string.
 
 **`oidc.toml` keys** (all validated at daemon startup; a broken file logs and
 disables login rather than stopping the daemon — a missing file is the

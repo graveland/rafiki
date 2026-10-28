@@ -198,21 +198,40 @@ func saveProfile(t *testing.T, p profile.Profile) {
 }
 
 // runLoginAsync starts the flow the way a browser login runs: stdin at EOF (no
-// paste will come) so only the listener can answer. noBrowser is ALWAYS true:
-// these tests drive the listener path themselves and must never exec the
-// platform opener — a real browser opening per `go test` on a dev machine is
-// exactly the failure the shadowed-opener probe caught once.
+// paste will come) so only the listener can answer. It is BROWSER mode
+// (noBrowser false), because --no-browser is paste-only and binds no port at
+// all; the platform opener is shadowed by a stub so these tests drive the
+// listener without a real browser opening per `go test`.
 func runLoginAsync(t *testing.T, ep connectEndpoint, stderr *bytes.Buffer) chan error {
 	t.Helper()
+	stubBrowserOpener(t)
 	done := make(chan error, 1)
 	go func() {
 		done <- loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-			noBrowser: true,
-			stdin:     strings.NewReader(""),
-			stderr:    stderr,
+			stdin:  strings.NewReader(""),
+			stderr: stderr,
 		})
 	}()
 	return done
+}
+
+// stubBrowserOpener shadows the platform opener at the front of PATH, so a
+// browser-mode flow really exec's something (a logging stub) instead of opening
+// a browser on the developer's desktop, and returns the stub's log path.
+// TestLoginBrowserOpeningHonorsNoBrowser builds the same stub by hand to pin
+// both directions of the flag.
+func stubBrowserOpener(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "open.log")
+	script := fmt.Sprintf("#!/bin/sh\necho \"OPEN-CALLED: $*\" >> %q\n", logPath)
+	for _, name := range []string{"open", "xdg-open"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatalf("write stub %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
 }
 
 // waitBegan waits for BeginLogin to reach the fake.
@@ -259,7 +278,7 @@ func TestLoginListenerCallbackPathEndToEnd(t *testing.T) {
 	c.True(port != 0, "BeginLoginRequest.RedirectPort must carry the client's bound port")
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	// A stray path 404s — asked first so it cannot race the flow's shutdown,
+	// A stray path 404s, asked first so it cannot race the flow's shutdown,
 	// and retried until the listener answers: the flow's first bind exists only
 	// to have a port to announce to BeginLogin, so the callback server binds the
 	// same port a moment later.
@@ -362,11 +381,11 @@ func TestLoginPinnedPortInUseNamesThePort(t *testing.T) {
 	)
 	ep := fakeLoginEndpoint(t, fake)
 
+	stubBrowserOpener(t) // the bind fails before any open; never rely on that
 	var stderr bytes.Buffer
 	err = loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-		noBrowser: true, // the rebind fails before any open; never rely on that
-		stdin:     strings.NewReader(""),
-		stderr:    &stderr,
+		stdin:  strings.NewReader(""),
+		stderr: &stderr,
 	})
 	c.Require().Error(err, "rebinding to an occupied port must fail")
 	msg := err.Error()

@@ -3,9 +3,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -406,6 +408,37 @@ Example:
 // loginPinnedBy is for `rafiki login`.
 const providerLoginPinnedBy = "fixed by the provider's OAuth registration"
 
+// providerRetryHint is what a timed-out provider login tells the user to
+// re-run, the way loginRetryHint does for `rafiki login`.
+func providerRetryHint(provider string) string {
+	return fmt.Sprintf("rerun 'rafiki providers login %s'", provider)
+}
+
+// providerConnectError maps a Connect failure for the provider-login verbs.
+//
+// diagnoseConnectError's Unavailable rewrite ("is rafikid running?") is right
+// for a transport failure and wrong for a daemon-authored one: an unwired
+// backend today, and a daemon with no RAFIKI_SECRETS_KEY later, answer
+// Unavailable with a message that names the reason. Replacing that with a guess
+// about the process being down sends the operator to the wrong machine.
+//
+// connect.IsWireError is the distinction: a code the client synthesized itself
+// (a refused dial, an unrouted proxy) is not the daemon speaking, and keeps the
+// reachability hint. `rafiki login` is deliberately not routed through this: its
+// only Unavailable is a transport one.
+func providerConnectError(err error, endpoint string) error {
+	if err == nil {
+		return nil
+	}
+	var ce *connect.Error
+	if errors.As(err, &ce) && ce.Code() == connect.CodeUnavailable && connect.IsWireError(err) {
+		if msg := strings.TrimSpace(ce.Message()); msg != "" {
+			return fmt.Errorf("the rafiki daemon at %s reports: %s", endpoint, msg)
+		}
+	}
+	return diagnoseConnectError(err, endpoint)
+}
+
 // newProvidersLoginCmd builds `rafiki providers login`. The daemon does the
 // code exchange and holds the tokens (encrypted, against the caller's own user
 // id); the CLI only ferries the redirect query, so no credential ever reaches
@@ -424,8 +457,9 @@ child can use them.
 The callback port and path are the provider's, not rafiki's: they are part of
 the redirect URI registered with the issuer, so a port already in use fails
 here rather than moving. A running ` + "`codex login`" + ` holds port 1455, which is the
-usual cause; the flow names the port and offers --no-browser, which prints the
-authorize URL and accepts the redirect URL pasted back instead.
+usual cause; the flow names the port and offers --no-browser, which binds no
+port at all: it prints the authorize URL and accepts the redirect URL pasted
+back instead.
 
 A second login for the same provider replaces the stored credential.
 
@@ -457,7 +491,7 @@ func runProvidersLogin(cmd *cobra.Command, args []string) error {
 	begin, err := ctrl.BeginProviderLogin(ctx,
 		connect.NewRequest(&rafikiv1.BeginProviderLoginRequest{Provider: provider}))
 	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+		return providerConnectError(err, ep.describe)
 	}
 
 	query, err := loopbackCallback(ctx, loginIO{
@@ -465,7 +499,7 @@ func runProvidersLogin(cmd *cobra.Command, args []string) error {
 		stdin:     cmd.InOrStdin(),
 		stderr:    cmd.ErrOrStderr(),
 	}, begin.Msg.GetRedirectHosts(), begin.Msg.GetRedirectPort(), begin.Msg.GetCallbackPath(),
-		begin.Msg.GetAuthorizeUrl(), providerLoginPinnedBy)
+		begin.Msg.GetAuthorizeUrl(), providerLoginPinnedBy, providerRetryHint(provider))
 	if err != nil {
 		return err
 	}
@@ -476,7 +510,7 @@ func runProvidersLogin(cmd *cobra.Command, args []string) error {
 			CallbackQuery: query,
 		}))
 	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+		return providerConnectError(err, ep.describe)
 	}
 
 	// The daemon names what it stored; the argument is the fallback for a
@@ -510,7 +544,7 @@ Example:
 			}
 			if _, err := ep.control().DeleteProviderCredential(cmdCtx(cmd),
 				connect.NewRequest(&rafikiv1.DeleteProviderCredentialRequest{Provider: args[0]})); err != nil {
-				return diagnoseConnectError(err, ep.describe)
+				return providerConnectError(err, ep.describe)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "logged out of %s\n", args[0])
 			return nil

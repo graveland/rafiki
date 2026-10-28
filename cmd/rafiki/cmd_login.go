@@ -50,6 +50,11 @@ const loopbackHost = "127.0.0.1"
 // can receive the redirect. It is the parenthetical of a bind failure.
 const loginPinnedBy = "pinned by the daemon's oidc.toml"
 
+// loginRetryHint is the suggestion a timed-out login prints. It names the verb
+// that was running, so a provider login never tells the user to rerun
+// `rafiki login`.
+const loginRetryHint = "rerun 'rafiki login'"
+
 // loginPastePrompt is the stderr prompt shown while waiting. The listener
 // covers a browser on this machine; a browser on another one (an ssh -L
 // forward that lands elsewhere, a headless box) still delivers the redirect
@@ -61,6 +66,9 @@ const loginPastePrompt = "…or paste the URL your browser was redirected to:"
 // and stderr ride it so tests can drive the flow without a terminal. Both
 // browser-login flows (`rafiki login` and `rafiki providers login`) take it.
 type loginIO struct {
+	// noBrowser selects paste-only: no browser is opened AND no port is bound
+	// (see loopbackCallback), which is what makes it the escape a busy callback
+	// port suggests.
 	noBrowser bool
 	stdin     io.Reader
 	stderr    io.Writer
@@ -74,15 +82,15 @@ func newLoginCmd() *cobra.Command {
 		Long: "Authenticates through the daemon's OIDC provider and writes the minted " +
 			"token to the profile. The daemon is reached exactly like every other verb " +
 			"(the profile's socket or url), but the Login service itself needs no " +
-			"credential — a tokenless remote profile is its normal caller.\n\n" +
+			"credential: a tokenless remote profile is its normal caller.\n\n" +
 			"A local callback listener receives the IdP's redirect; if your browser runs " +
-			"on another machine, paste the redirect URL instead (--no-browser skips opening " +
-			"a browser at all).",
+			"on another machine, paste the redirect URL instead (--no-browser opens no " +
+			"browser and binds no port, taking the pasted redirect URL only).",
 		Args: cobra.NoArgs,
 		RunE: runLogin,
 	}
 	cmd.Flags().Bool("no-browser", false,
-		"do not open a browser; print the authorize URL and wait for the pasted redirect URL")
+		"do not open a browser or bind the callback port; print the authorize URL and wait for the pasted redirect URL")
 	return cmd
 }
 
@@ -118,13 +126,15 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 // server, and is closed before loopbackCallback binds, which is what keeps the
 // two from racing for the same port.
 //
-// Every message goes to stderr — including the final success line. The verb
+// Every message goes to stderr, including the final success line. The verb
 // writes a token file, not command output; stdout stays silent so the flow can
 // be observed with 2>&1 | tee without the URL or token summary reading as data.
 //
-// Shutdown: the flow's only listener belongs to loopbackCallback, which stops
-// it before returning on every path (see shutdownLoginServer); the probe above
-// is closed on both of its exits (BeginLogin error, successful round trip).
+// Shutdown: in browser mode the flow's only listener belongs to
+// loopbackCallback, which stops it before returning on every path (see
+// shutdownLoginServer); the probe above is closed on both of its exits
+// (BeginLogin error, successful round trip). A paste-only flow binds nothing at
+// all beyond that probe.
 func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui loginIO) error {
 	ln, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
 	if err != nil {
@@ -150,7 +160,7 @@ func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui l
 	_ = ln.Close()
 
 	query, err := loopbackCallback(ctx, ui, []string{loopbackHost}, callbackPort,
-		loginCallbackPath, begin.Msg.GetAuthorizeUrl(), loginPinnedBy)
+		loginCallbackPath, begin.Msg.GetAuthorizeUrl(), loginPinnedBy, loginRetryHint)
 	if err != nil {
 		return err
 	}
@@ -174,9 +184,26 @@ func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui l
 // failure is also what a second login holding the same port looks like, which
 // is why the message names the port and not just the system error.
 //
+// The escape is taken literally: ui.noBrowser binds NOTHING. The reason a user
+// asks for it is exactly the case where the port is unavailable (another login
+// holding it) or unreachable (a browser on another machine, no ssh -L), so
+// binding it anyway would fail the flow for the user who asked not to need it.
+//
 // Shutdown is this function's guarantee, not the caller's: no listener is left
 // behind when it returns, on success and failure alike.
-func loopbackCallback(ctx context.Context, ui loginIO, hosts []string, port uint32, path, authorize, pinnedBy string) (string, error) {
+func loopbackCallback(ctx context.Context, ui loginIO, hosts []string, port uint32, path, authorize, pinnedBy, retryHint string) (string, error) {
+	hosts = callbackHosts(hosts)
+	if err := validateCallbackTarget(hosts, port, path); err != nil {
+		return "", err
+	}
+
+	if ui.noBrowser {
+		printAuthorizeAndPaste(ui, authorize)
+		// Nil listener and error channels never fire, which is how the same wait
+		// serves a flow that has no listener at all.
+		return awaitCallback(ctx, nil, ui.stdin, nil, ui.stderr, path, retryHint)
+	}
+
 	listeners, err := listenCallbackHosts(hosts, port, pinnedBy)
 	if err != nil {
 		return "", err
@@ -191,13 +218,10 @@ func loopbackCallback(ctx context.Context, ui loginIO, hosts []string, port uint
 		go func(ln net.Listener) { serveErr <- srv.Serve(ln) }(ln)
 	}
 
-	fmt.Fprintf(ui.stderr, "open this URL in a browser to log in:\n%s\n", authorize)
-	if !ui.noBrowser {
-		openBrowser(authorize)
-	}
-	fmt.Fprintln(ui.stderr, loginPastePrompt)
+	printAuthorizeAndPaste(ui, authorize)
+	openBrowser(authorize)
 
-	query, err := awaitCallback(ctx, queries, ui.stdin, serveErr, ui.stderr, path)
+	query, err := awaitCallback(ctx, queries, ui.stdin, serveErr, ui.stderr, path, retryHint)
 	// One Server serves every listener, so Shutdown stops all of them (it
 	// closes the listeners each Serve call registered) before the query is
 	// returned to a caller about to act on it.
@@ -208,23 +232,57 @@ func loopbackCallback(ctx context.Context, ui loginIO, hosts []string, port uint
 	return query, nil
 }
 
-// listenCallbackHosts binds port on every host in hosts and returns the
-// listeners in the order given. An empty host list means the daemon named no
-// host, which can only mean this machine's loopback.
-//
-// A port of 0 asks for any free port, and every host must then share the one
-// the first bind picked: listeners on unrelated ephemeral ports would all
-// answer, while only one of them can match the redirect URI the caller
-// announced. A failure on any host closes what was already bound and reports
-// the port it was trying to take.
-func listenCallbackHosts(hosts []string, port uint32, pinnedBy string) ([]net.Listener, error) {
+// printAuthorizeAndPaste tells the user where to go, in both modes: the URL
+// always, and the paste prompt because even a browser-mode flow can be finished
+// from a browser on another machine.
+func printAuthorizeAndPaste(ui loginIO, authorize string) {
+	fmt.Fprintf(ui.stderr, "open this URL in a browser to log in:\n%s\n", authorize)
+	fmt.Fprintln(ui.stderr, loginPastePrompt)
+}
+
+// callbackHosts fills in the loopback address when the daemon named no host.
+func callbackHosts(hosts []string) []string {
 	if len(hosts) == 0 {
-		hosts = []string{loopbackHost}
+		return []string{loopbackHost}
 	}
-	listeners := make([]net.Listener, 0, len(hosts))
-	bindPort := port
+	return hosts
+}
+
+// validateCallbackTarget refuses a callback the client cannot safely serve,
+// before anything is bound or printed. These values come off the wire, so a
+// broken daemon must not be able to make this process listen anywhere it should
+// not, take a port no issuer would ever redirect to, or wait for a redirect at
+// a path it can never receive.
+func validateCallbackTarget(hosts []string, port uint32, path string) error {
+	if port == 0 {
+		return errors.New("the daemon sent no callback port: the port its redirect URI was registered with must be named")
+	}
+	if path == "" {
+		return errors.New("the daemon sent no callback path: the path its redirect URI was registered with must be named")
+	}
 	for _, host := range hosts {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.FormatUint(uint64(bindPort), 10)))
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf(
+				"the daemon sent callback host %q, which is not a loopback IP: a login callback is only ever served on loopback",
+				host)
+		}
+	}
+	return nil
+}
+
+// listenCallbackHosts binds port on every host in hosts and returns the
+// listeners in the order given. Every host gets a listener: redirect_hosts is
+// the set of addresses the issuer may send the browser back to, so binding one
+// and skipping the rest would leave the redirect unanswered from whichever host
+// the browser used.
+//
+// A failure on any host closes what was already bound and reports the port it
+// was trying to take, so a partial bind never leaves a listener behind.
+func listenCallbackHosts(hosts []string, port uint32, pinnedBy string) ([]net.Listener, error) {
+	listeners := make([]net.Listener, 0, len(hosts))
+	for _, host := range hosts {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)))
 		if err != nil {
 			for _, bound := range listeners {
 				_ = bound.Close()
@@ -232,10 +290,7 @@ func listenCallbackHosts(hosts []string, port uint32, pinnedBy string) ([]net.Li
 			return nil, fmt.Errorf(
 				"cannot listen on callback port %d (%s): %w; free the port, "+
 					"or retry with --no-browser and paste the redirect URL",
-				bindPort, pinnedBy, err)
-		}
-		if bindPort == 0 {
-			bindPort = uint32(ln.Addr().(*net.TCPAddr).Port)
+				port, pinnedBy, err)
 		}
 		listeners = append(listeners, ln)
 	}
@@ -268,7 +323,7 @@ func completeLogin(ctx context.Context, ep connectEndpoint, p profile.Resolved, 
 // bare Close: it closes the listener at once (new connections refused) but
 // lets the in-flight confirmation page finish, so the browser actually sees
 // "you can close this tab" instead of a reset connection. The grace is
-// bounded, and anything still active when it expires is hard-closed — the
+// bounded, and anything still active when it expires is hard-closed, so the
 // guarantee the flow relies on (nothing left listening once the wait is over)
 // holds either way. Errors are deliberately dropped: the server's only job is
 // done, or the flow is leaving regardless.
@@ -281,14 +336,17 @@ func shutdownLoginServer(srv *http.Server) {
 }
 
 // awaitCallback waits for the redirect query to arrive: over the local
-// listener, or as a URL pasted on stdin. A pasted line is parsed with
-// url.Parse and only its RawQuery is used, and only when it carried the
-// callback path the daemon asked for: a URL that parses to nothing, or to
-// some other path, is warned about and the wait continues: the listener may
-// still deliver, and the pasted line may simply have been a stray one. stdin
-// EOF only retires the paste path: a --no-browser login behind an ssh -L
-// forward has no local stdin, and its listener is exactly what still answers.
-func awaitCallback(ctx context.Context, queries <-chan string, stdin io.Reader, serveErr <-chan error, stderr io.Writer, path string) (string, error) {
+// listener, or as a URL pasted on stdin. A nil queries or serveErr channel
+// never fires, which is how a paste-only flow waits without a listener.
+//
+// A pasted line is parsed with url.Parse and only its RawQuery is used, and
+// only when it carried the callback path the daemon asked for: a URL that
+// parses to nothing, or to some other path, is warned about and the wait
+// continues, because the listener may still deliver and the pasted line may
+// simply have been a stray one. stdin EOF only retires the paste path: a
+// browser-mode login behind an ssh -L forward has no local stdin, and its
+// listener is exactly what still answers.
+func awaitCallback(ctx context.Context, queries <-chan string, stdin io.Reader, serveErr <-chan error, stderr io.Writer, path, retryHint string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, loginCallbackDeadline)
 	defer cancel()
 
@@ -322,7 +380,7 @@ func awaitCallback(ctx context.Context, queries <-chan string, stdin io.Reader, 
 			return "", fmt.Errorf("callback listener failed: %w", err)
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return "", fmt.Errorf("timed out waiting for the login callback after %s; rerun 'rafiki login'", loginCallbackDeadline)
+				return "", fmt.Errorf("timed out waiting for the login callback after %s; %s", loginCallbackDeadline, retryHint)
 			}
 			return "", errors.New("login canceled")
 		}
@@ -358,8 +416,8 @@ func loginCallbackHandler(path string, queries chan<- string) http.Handler {
 // openBrowser tries to open rawURL with the platform's opener and reports
 // nothing: a missing xdg-open (headless server) or a refused launch is exactly
 // the situation the pasted-URL path exists for, and it is not worth an error
-// the user can do nothing about. Start rather than Run — the opener must not
-// be waited on.
+// the user can do nothing about. Start rather than Run, because the opener must
+// not be waited on.
 func openBrowser(rawURL string) {
 	name := "xdg-open"
 	if runtime.GOOS == "darwin" {
