@@ -78,9 +78,9 @@ standard library's string escaping is part of the compatibility contract: `<`,
 `\u2028`/`\u2029`. That is `json.Marshal`'s default HTML-safe escaping, not an
 option this code turns off — a reimplementation in another language must
 reproduce it (Go's `json.Encoder` only avoids it behind `SetEscapeHTML(false)`,
-which would change every hash). No test names this behaviour explicitly; it
-follows from calling `json.Marshal` with no options, which is why the doc states
-it rather than leaving it to be discovered.
+which would change every hash). Pinned by
+`TestCanonEscapesHTMLAndLineSeparators` (`pkg/convtree`), which asserts the
+escaped sequences are present and the raw characters are not.
 
 ```
 RootSeed(kind, derivedFrom) = sha256("root" ‖ kind ‖ d)
@@ -520,7 +520,8 @@ runs — never a retry.
 
 ## Tests
 
-- `pkg/convtree` — the canon rules, the root seed, and `TestGoldenFixtureChains`
+- `pkg/convtree` — the canon rules (including `TestCanonEscapesHTMLAndLineSeparators`,
+  the escaped-bytes pin), the root seed, and `TestGoldenFixtureChains`
   / `TestParityStoredVersusReplayed` over `testdata/claude-capture`.
 - `pkg/store` — `TestAppendChain*`, `TestLoadPath*`, `TestRetractHead*`,
   `TestBackfill*`, `TestCheckTree*`, `TestCompaction*`, `TestTwoClearsAreDistinctRoots`.

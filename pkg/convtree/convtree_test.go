@@ -87,6 +87,42 @@ func TestCanonPreservesNumbers(t *testing.T) {
 	c.False(bytes.Equal(got, other), "1.50 and 1.5 are different literals")
 }
 
+// TestCanonEscapesHTMLAndLineSeparators pins the exact bytes Canon produces for
+// the characters encoding/json escapes by default: <, > and & become \u003c,
+// \u003e and \u0026, and U+2028/U+2029 become \u2028/\u2029. Those bytes are
+// what NodeHash hashes, and the reference doc states them as the compatibility
+// contract a non-Go reimplementation must reproduce — so a change to the
+// marshalling (an Encoder with SetEscapeHTML(false), say) has to fail here
+// rather than silently rehash every stored root.
+//
+// The assertion is on the canon alone: NodeHash mixes Canon's output verbatim,
+// so there is nothing separate left to check in the hash.
+func TestCanonEscapesHTMLAndLineSeparators(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// A bare JSON string, so the message is one text block; the two separators are
+	// written as Go escapes so the source stays readable.
+	got, err := Canon("user", []byte("\"<>&\u2028\u2029\""))
+	c.NoError(err, "Canon")
+
+	for _, tc := range []struct {
+		escaped string
+		raw     string
+		why     string
+	}{
+		{`\u003c`, "<", "less-than"},
+		{`\u003e`, ">", "greater-than"},
+		{`\u0026`, "&", "ampersand"},
+		{`\u2028`, "\u2028", "U+2028 line separator"},
+		{`\u2029`, "\u2029", "U+2029 paragraph separator"},
+	} {
+		c.True(bytes.Contains(got, []byte(tc.escaped)),
+			"Canon must write %s as the escape sequence %s, got %q", tc.why, tc.escaped, got)
+		c.False(bytes.Contains(got, []byte(tc.raw)),
+			"Canon must not carry %s raw: its bytes are what the hash covers, got %q", tc.why, got)
+	}
+}
+
 func TestCanonInvalidJSON(t *testing.T) {
 	c := assert.NewAborting(t)
 	_, err := Canon("user", []byte(`{"type":`))
