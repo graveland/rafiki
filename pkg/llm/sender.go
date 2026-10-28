@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -180,6 +181,13 @@ func FromSDK(client anthropic.Client) Sender {
 	return sdkSender{client: client}
 }
 
+// ErrNeedsOwnerSender marks the one refusal SenderForKey makes that is not a
+// fault: a kind that authenticates as an OWNER (openai-responses-chatgpt) has
+// no key-based sender by design, so its sender is bound per owner at spawn
+// instead. Callers that only warn about unusable providers can tell this apart
+// from a genuinely broken entry with errors.Is and stay quiet.
+var ErrNeedsOwnerSender = errors.New("llm: needs an owner-bound sender")
+
 // SenderFor builds a Sender for a provider, resolving its credential from the
 // environment (empty for a keyless provider).
 func SenderFor(p providers.Provider, rt http.RoundTripper) (Sender, error) {
@@ -226,7 +234,7 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 		// daemon holds; there is no key to build it from, and inventing one
 		// (an env var, a daemon-wide login) is exactly what the kind exists to
 		// prevent. NewChatGPTResponsesSender is the only constructor.
-		return nil, fmt.Errorf("llm: provider %q: kind %q needs an owner-bound sender (NewChatGPTResponsesSender); it cannot be built from a key", p.Name, p.Kind)
+		return nil, fmt.Errorf("%w: provider %q: kind %q uses NewChatGPTResponsesSender and cannot be built from a key", ErrNeedsOwnerSender, p.Name, p.Kind)
 	default:
 		return nil, fmt.Errorf("llm: provider %q: unknown kind %q", p.Name, p.Kind)
 	}

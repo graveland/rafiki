@@ -474,15 +474,22 @@ func TestExecutorVerbErrRendersReasonAndInfraAdvice(t *testing.T) {
 
 	t.Run("infra failure renders the advice", func(t *testing.T) {
 		c := assert.NewCollecting(t)
-		srv := &executorStubControl{}
-		srv.disableErr = connect.NewError(connect.CodeUnavailable, errors.New("socket gone"))
-		executorTestDaemon(t, srv)
+		// A socket nobody listens on: the CLIENT synthesizes Unavailable, which
+		// is the transport case the reachability advice is for. A stub handler
+		// answering Unavailable is the daemon speaking, and the verb surfaces the
+		// daemon's own message instead (see the TestDiagnoseUnavailable* tests).
+		isolateProfiles(t)
+		resetProfileCache()
+		dir, err := os.MkdirTemp("", "rafific-dead")
+		c.Require().NoError(err, "MkdirTemp")
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		writeTokenedProfile(t, filepath.Join(dir, "nothing.sock"), "")
 
 		root := newRootCmd()
 		root.SetArgs([]string{"executor", "disable", "abc123"})
 		var errOut bytes.Buffer
 		root.SetErr(&errOut)
-		err := root.Execute()
+		err = root.Execute()
 		c.Require().Error(err, "disable against a down daemon succeeded")
 		c.StrContains(err.Error(), "is rafikid running?", "error")
 	})

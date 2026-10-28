@@ -77,3 +77,42 @@ func TestConnectEndpointForRemoteNoTokenWrapsSentinel(t *testing.T) {
 		`profile "remote" names a remote daemon but has no token`,
 		"the original message prefix must still be present")
 }
+
+// TestDiagnoseUnavailableSurfacesTheDaemonsMessage is the ruling that a
+// daemon-authored Unavailable keeps its own words: an unwired backend, or a
+// spawn refused for a missing RAFIKI_SECRETS_KEY, is the daemon TELLING the
+// operator what is wrong. Answering "is rafikid running?" would send them to
+// check a process that is plainly alive.
+func TestDiagnoseUnavailableSurfacesTheDaemonsMessage(t *testing.T) {
+	c := assert.NewAborting(t)
+	orig := connect.NewWireError(connect.CodeUnavailable,
+		errors.New("spawn refused: RAFIKI_SECRETS_KEY is not set"))
+	err := diagnoseConnectError(orig, "/run/rafiki/controller.sock")
+	c.Eq("the rafiki daemon at /run/rafiki/controller.sock reports: spawn refused: RAFIKI_SECRETS_KEY is not set",
+		err.Error(), "a daemon-authored Unavailable")
+	c.NotStrContains(err.Error(), "is rafikid running", "the reachability guess must not replace the daemon's reason")
+}
+
+// TestDiagnoseUnavailableKeepsTheHintForATransportFailure is the other branch:
+// a code the CLIENT synthesized (a refused dial, an unrouted proxy) never
+// reached a daemon, so the hint is the whole diagnosis and the cause stays
+// wrapped for errors.Is.
+func TestDiagnoseUnavailableKeepsTheHintForATransportFailure(t *testing.T) {
+	c := assert.NewAborting(t)
+	orig := connect.NewError(connect.CodeUnavailable, errors.New("dial unix: connect: connection refused"))
+	err := diagnoseConnectError(orig, "/run/rafiki/controller.sock")
+	c.StrContains(err.Error(), "cannot reach the rafiki daemon at /run/rafiki/controller.sock",
+		"a transport failure keeps the reachability advice, got: %s", err)
+	c.StrContains(err.Error(), "is rafikid running", "error text")
+	c.StrContains(err.Error(), "connection refused", "the transport cause must survive")
+	c.ErrorIs(err, orig, "the original error is no longer wrapped")
+}
+
+// TestDiagnoseUnavailableFallsBackWhenTheDaemonSaysNothing pins the boundary of
+// the branch above: a wire error with an empty message has nothing to surface,
+// so the reachability text (which always says something) wins.
+func TestDiagnoseUnavailableFallsBackWhenTheDaemonSaysNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+	err := diagnoseConnectError(connect.NewWireError(connect.CodeUnavailable, errors.New("  ")), "sock")
+	c.StrContains(err.Error(), "is rafikid running", "an empty daemon message must not swallow the hint")
+}

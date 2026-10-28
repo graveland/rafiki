@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -349,6 +350,14 @@ func (e connectEndpoint) login() rafikiv1connect.LoginClient {
 // than the Connect control plane, or — remotely — one older than the mount
 // that puts those routes on the TLS listener, where the proxy face's "/"
 // answers the cockpit's path instead.
+//
+// CodeUnavailable splits the same way. A transport failure is the client's own
+// Unavailable, and "is rafikid running?" is the right advice. A daemon-authored
+// Unavailable (an unwired backend, a spawn refused for a missing
+// RAFIKI_SECRETS_KEY) is the daemon speaking, and its message names the reason:
+// replacing that with a guess about the process being down sends the operator
+// to the wrong machine. connect.IsWireError is the distinction, and it is
+// decided HERE so every verb inherits it.
 func diagnoseConnectError(err error, endpoint string) error {
 	if err == nil {
 		return nil
@@ -365,10 +374,25 @@ func diagnoseConnectError(err error, endpoint string) error {
 			"the rafiki daemon at %s rejected the profile's credential: your token is invalid or expired; run 'rafiki login' to mint a new one, or check its token file: %w",
 			endpoint, err)
 	case connect.CodeUnavailable:
+		if msg := daemonReportedMessage(err); msg != "" {
+			return fmt.Errorf("the rafiki daemon at %s reports: %s", endpoint, msg)
+		}
 		return fmt.Errorf(
 			"cannot reach the rafiki daemon at %s — is rafikid running? (`rafiki status`): %w",
 			endpoint, err)
 	default:
 		return err
 	}
+}
+
+// daemonReportedMessage returns the message of a CodeUnavailable the daemon
+// itself sent, or "" when the code was synthesized client-side (a refused dial,
+// an unrouted proxy) or the daemon sent no message. Only a wire error counts as
+// the daemon speaking.
+func daemonReportedMessage(err error) string {
+	var ce *connect.Error
+	if !errors.As(err, &ce) || ce.Code() != connect.CodeUnavailable || !connect.IsWireError(err) {
+		return ""
+	}
+	return strings.TrimSpace(ce.Message())
 }

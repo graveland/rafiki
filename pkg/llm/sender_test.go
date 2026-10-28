@@ -53,6 +53,10 @@ func TestSenderForKeyChatGPTKindRefused(t *testing.T) {
 	c.Nil(s, "SenderForKey(openai-responses-chatgpt) returned a sender")
 	c.StrContains(err.Error(), "NewChatGPTResponsesSender", "error names the constructor to use")
 	c.StrContains(err.Error(), "cannot be built from a key", "error")
+	// The refusal is a distinguishable fact, not an anonymous failure: the
+	// client logs this one quietly and keeps WARN for real breakage.
+	c.ErrorIs(err, llm.ErrNeedsOwnerSender, "SenderForKey(openai-responses-chatgpt) must carry ErrNeedsOwnerSender")
+	c.StrContains(err.Error(), "chatgpt", "error names the provider")
 }
 
 // TestSenderForKeyBuildsResponsesSender pins that the api-key dialect is an

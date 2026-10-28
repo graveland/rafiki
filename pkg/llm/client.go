@@ -222,12 +222,23 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	// kind, say) is skipped rather than fatal: the process may never use it,
 	// and callModel's "provider not configured" error names it precisely if
 	// something does.
+	//
+	// A kind with no key-based sender by design (openai-responses-chatgpt,
+	// bound per owner at spawn) is not a fault and is not reported as one:
+	// warning "provider unavailable" at every boot for a provider that works
+	// sends the operator looking for a bug that is not there.
 	for _, name := range c.set.Names() {
 		if c.senders[name] != nil {
 			continue
 		}
 		s, err := SenderFor(c.set.Providers[name], nil)
 		if err != nil {
+			if errors.Is(err, ErrNeedsOwnerSender) {
+				c.logger.Debug(
+					"llm: provider has no key-based sender; it is bound per owner at spawn",
+					"provider", name)
+				continue
+			}
 			c.logger.Warn("llm: provider unavailable", "provider", name, "error", err)
 			continue
 		}
