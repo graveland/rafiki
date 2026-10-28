@@ -307,6 +307,22 @@ func (s *Set) Validate() error {
 		default:
 			return fmt.Errorf("providers: provider %q: unknown kind %q", name, p.Kind)
 		}
+		// The ChatGPT-subscription kind owns its endpoint and its credential:
+		// the endpoint is fixed (chatgpt.com/backend-api/codex) and the
+		// credential is the owning user's stored login, resolved per request by
+		// the daemon. Each of the three fields below would silently change one
+		// of those facts, so each is refused rather than ignored.
+		if p.Kind == KindOpenAIResponsesChatGPT {
+			if p.APIKeyEnv != "" {
+				return fmt.Errorf("providers: provider %q: kind %q authenticates with the owner's ChatGPT login (rafiki providers login %s); remove api_key_env", name, p.Kind, name)
+			}
+			if p.ViaExecutor != nil {
+				return fmt.Errorf("providers: provider %q: kind %q does not support via_executor (the credential never leaves the daemon)", name, p.Kind)
+			}
+			if p.BaseURL != "" {
+				return fmt.Errorf("providers: provider %q: kind %q has a fixed base_url; remove it", name, p.Kind)
+			}
+		}
 		// SetExtraFields replaces the whole map, so a user-supplied "provider"
 		// key would delete the cache guard's provider.ignore silently. Refusing
 		// it here is the only version of this that fails loudly.

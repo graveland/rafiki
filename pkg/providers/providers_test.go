@@ -362,3 +362,83 @@ kind = "anthropic"
 		})
 	}
 }
+
+// The ChatGPT-subscription kind owns its endpoint and its credential: a key in
+// the environment would shadow the owner's login, via_executor would put the
+// bearer on someone else's host, and a base_url would point at a different
+// service. Each is refused by name so the fix is in the editor, not a
+// 401 from a request that looked configured.
+func TestValidateChatGPTKindRefusesAPIKeyEnv(t *testing.T) {
+	c := assert.NewCollecting(t)
+	_, err := providers.Parse([]byte(`
+default_provider = "chatgpt"
+[providers.chatgpt]
+kind = "openai-responses-chatgpt"
+api_key_env = "OPENAI_API_KEY"
+`))
+	c.Require().Error(err, "Parse accepted api_key_env on kind openai-responses-chatgpt")
+	c.Eq("providers: provider \"chatgpt\": kind \"openai-responses-chatgpt\" authenticates with the owner's ChatGPT login (rafiki providers login chatgpt); remove api_key_env", err.Error(), "error")
+}
+
+func TestValidateChatGPTKindRefusesViaExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	_, err := providers.Parse([]byte(`
+default_provider = "chatgpt"
+[providers.chatgpt]
+kind = "openai-responses-chatgpt"
+[providers.chatgpt.via_executor]
+selector = "pool"
+proxy = "http://127.0.0.1:8080"
+`))
+	c.Require().Error(err, "Parse accepted via_executor on kind openai-responses-chatgpt")
+	c.Eq("providers: provider \"chatgpt\": kind \"openai-responses-chatgpt\" does not support via_executor (the credential never leaves the daemon)", err.Error(), "error")
+}
+
+func TestValidateChatGPTKindRefusesBaseURL(t *testing.T) {
+	c := assert.NewCollecting(t)
+	_, err := providers.Parse([]byte(`
+default_provider = "chatgpt"
+[providers.chatgpt]
+kind = "openai-responses-chatgpt"
+base_url = "https://example.test/v1"
+`))
+	c.Require().Error(err, "Parse accepted base_url on kind openai-responses-chatgpt")
+	c.Eq("providers: provider \"chatgpt\": kind \"openai-responses-chatgpt\" has a fixed base_url; remove it", err.Error(), "error")
+}
+
+// The api-key Responses kind is an ordinary endpoint: it may be reached
+// through an executor (base_url is the target either way) and it may name its
+// own base_url, since api.openai.com is only the default.
+func TestValidateResponsesKindAllowsViaExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	set, err := providers.Parse([]byte(`
+default_provider = "oa"
+[providers.oa]
+kind = "openai-responses"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+[providers.oa.via_executor]
+selector = "pool"
+proxy = "http://127.0.0.1:8080"
+`))
+	c.Require().NoError(err, "Parse rejected a valid openai-responses provider")
+	p, ok := set.Get("oa")
+	c.Require().True(ok, "Get(oa) not found")
+	c.Require().True(p.ViaExecutor != nil, "ViaExecutor was dropped")
+	c.Eq("http://127.0.0.1:8080", p.ViaExecutor.Proxy, "ViaExecutor.Proxy")
+	c.Eq("https://api.openai.com/v1", p.BaseURL, "BaseURL")
+}
+
+func TestValidateResponsesKindAllowsNoBaseURL(t *testing.T) {
+	c := assert.NewCollecting(t)
+	set, err := providers.Parse([]byte(`
+default_provider = "oa"
+[providers.oa]
+kind = "openai-responses"
+api_key_env = "OPENAI_API_KEY"
+`))
+	c.Require().NoError(err, "Parse rejected openai-responses with no base_url")
+	p, _ := set.Get("oa")
+	c.Eq("", p.BaseURL, "BaseURL =")
+	c.Eq(providers.KindOpenAIResponses, p.Kind, "Kind")
+}

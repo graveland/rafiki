@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -223,4 +224,30 @@ func (s *conditionalSender) New(_ context.Context, _ anthropic.MessageNewParams)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fn()
+}
+
+// TestUsageLimitErrorNotRetried pins a subscription usage limit as terminal: the
+// reset is hours or days away, so a retry loop against it only burns budget. The
+// type is deliberately not an *anthropic.Error, and its text avoids every string
+// fragment the fallback below looks for, so nothing in isRetryable can rescue it
+// into a retry.
+func TestUsageLimitErrorNotRetried(t *testing.T) {
+	c := assert.NewCollecting(t)
+	limit := &llm.UsageLimitError{
+		Code:     "usage_limit_reached",
+		PlanType: "plus",
+		ResetsAt: time.Now().Add(5 * time.Hour),
+	}
+	c.False(isRetryable(limit, context.Background()), "isRetryable(UsageLimitError)")
+	// Also when wrapped, and when the reset time is unknown.
+	c.False(isRetryable(fmt.Errorf("wrapped: %w", limit), context.Background()), "isRetryable(wrapped UsageLimitError)")
+	c.False(isRetryable(&llm.UsageLimitError{Code: "insufficient_quota"}, context.Background()), "isRetryable(UsageLimitError with no reset time)")
+	// The rendered text names the code and the plan, and never looks transient.
+	text := limit.Error()
+	c.StrContains(text, "usage_limit_reached", "error text")
+	c.StrContains(text, "plan plus", "error text")
+	for _, forbidden := range []string{"EOF", "connection reset", "broken pipe", "i/o timeout", "tls:"} {
+		c.NotStrContains(text, forbidden, "error text must not contain %q", forbidden)
+	}
+	c.False(strings.HasPrefix(text, "batch: "), "error text must not look like a parked batch")
 }

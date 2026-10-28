@@ -148,8 +148,21 @@ func (t headerCaptureTransport) RoundTrip(req *http.Request) (*http.Response, er
 
 type sdkSender struct{ client anthropic.Client }
 
+// New sends one Messages call with foreign thinking removed: a thinking block
+// whose signature was minted by another provider (the Responses sender writes
+// openai-responses:<id>:<blob>) is unverifiable here, and Anthropic rejects a
+// request carrying one. params is copied first: this is a filter on the way
+// out, never a mutation of the caller's history.
 func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	params = withoutForeignThinking(params, false)
 	return s.client.Messages.New(ctx, params)
+}
+
+// withoutForeignThinking applies StripForeignThinking to a shallow copy of
+// params: the filter lives in the Messages slice, so nothing else needs copying.
+func withoutForeignThinking(params anthropic.MessageNewParams, forResponses bool) anthropic.MessageNewParams {
+	params.Messages = StripForeignThinking(params.Messages, forResponses)
+	return params
 }
 
 // NewStreaming opens a streaming Messages call. The SDK's NewStreaming does
@@ -157,6 +170,7 @@ func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (
 // or from the stream's Err() after iteration), so the nil here is not a
 // stub — it matches the real signature.
 func (s sdkSender) NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+	params = withoutForeignThinking(params, false)
 	return s.client.Messages.NewStreaming(ctx, params), nil
 }
 
@@ -205,6 +219,14 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 		}
 	case providers.KindOpenAI:
 		return newOpenAISender(p, key, rt)
+	case providers.KindOpenAIResponses:
+		return newResponsesSender(p, key, rt)
+	case providers.KindOpenAIResponsesChatGPT:
+		// The ChatGPT dialect authenticates as an OWNER, from a credential the
+		// daemon holds; there is no key to build it from, and inventing one
+		// (an env var, a daemon-wide login) is exactly what the kind exists to
+		// prevent. NewChatGPTResponsesSender is the only constructor.
+		return nil, fmt.Errorf("llm: provider %q: kind %q needs an owner-bound sender (NewChatGPTResponsesSender); it cannot be built from a key", p.Name, p.Kind)
 	default:
 		return nil, fmt.Errorf("llm: provider %q: unknown kind %q", p.Name, p.Kind)
 	}

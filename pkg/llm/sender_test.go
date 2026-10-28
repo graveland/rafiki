@@ -41,3 +41,29 @@ func (nonStreamingSender) New(context.Context, anthropic.MessageNewParams) (*ant
 }
 
 var _ llm.Sender = nonStreamingSender{}
+
+// TestSenderForKeyChatGPTKindRefused pins the owner-bound constructor as the only
+// way to build the ChatGPT dialect: a key cannot stand in for an owner's login, and
+// a sender built from one would send daemon-wide credentials on a user's behalf.
+func TestSenderForKeyChatGPTKindRefused(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := providers.Provider{Name: "chatgpt", Kind: providers.KindOpenAIResponsesChatGPT}
+	s, err := llm.SenderForKey(p, "sk-not-a-login", nil)
+	c.Error(err, "SenderForKey(openai-responses-chatgpt) must refuse a key")
+	c.Nil(s, "SenderForKey(openai-responses-chatgpt) returned a sender")
+	c.StrContains(err.Error(), "NewChatGPTResponsesSender", "error names the constructor to use")
+	c.StrContains(err.Error(), "cannot be built from a key", "error")
+}
+
+// TestSenderForKeyBuildsResponsesSender pins that the api-key dialect is an
+// ordinary SenderForKey case, and that a keyless entry builds without one.
+func TestSenderForKeyBuildsResponsesSender(t *testing.T) {
+	c := assert.NewAborting(t)
+	for _, key := range []string{"sk-test", ""} {
+		s, err := llm.SenderForKey(providers.Provider{Name: "oa", Kind: providers.KindOpenAIResponses}, key, nil)
+		c.NoError(err, "SenderForKey(openai-responses, key=%q)", key)
+		if _, ok := s.(llm.StreamingSender); !ok {
+			t.Fatalf("SenderForKey(openai-responses, key=%q) must also satisfy StreamingSender", key)
+		}
+	}
+}
