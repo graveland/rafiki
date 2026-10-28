@@ -868,6 +868,13 @@ func TestPrefillContextWindowUsesProviderLocalID(t *testing.T) {
 // an override that never reached the Engine caps the pre-fill at 60% of the
 // CATALOG's window instead. Nothing else observes that hop.
 //
+// It drives the REAL spawn path rather than runPrefill by hand: BuildRuntime
+// starts the worker, and the worker is the only thing that may touch the
+// conversation (calling runPrefill on a live engine races the worker's own
+// history load). The worker runs the pre-fill before the first turn, and a
+// refused pre-fill ends the child with an agent_error naming the cap, so the
+// frames ARE the assertion.
+//
 // The fake read returns 300KB, about 75k estimated tokens: over the 60k cap a
 // 100k override allows, comfortably inside the 600k cap the catalog's 1M window
 // allows. Both builds go through BuildRuntime, so the override is supplied
@@ -878,7 +885,7 @@ func TestContextWindowOverrideCapsPrefill(t *testing.T) {
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
 	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-sonnet-4-5", Created: 1, ContextLength: 1_000_000}})
 
-	build := func(contextWindow int) *Engine {
+	build := func(contextWindow int) (*Engine, *syncBuffer) {
 		opts := fakeRuntimeOptions(t, t.TempDir())
 		opts.ContextWindow = contextWindow
 		opts.Catalog = cat
@@ -888,19 +895,36 @@ func TestContextWindowOverrideCapsPrefill(t *testing.T) {
 		opts.PrefillTools = fakeToolSet{"read": func(_ context.Context, _ json.RawMessage) (string, error) {
 			return strings.Repeat("y", 300_000), nil
 		}}
-		eng, shutdown, err := BuildRuntime(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil), opts)
+		out := &syncBuffer{}
+		eng, shutdown, err := BuildRuntime(context.Background(), NewFrontend(strings.NewReader(""), out, nil), opts)
 		c.Require().NoError(err, "BuildRuntime with ContextWindow=%d", contextWindow)
 		t.Cleanup(shutdown)
-		return eng
+		return eng, out
 	}
 
-	overridden := build(100_000)
-	err := overridden.runPrefill(context.Background(), nil, prefillEmpty)
-	c.Require().Error(err, "a ~75k-token pre-fill fit inside the 60k cap a 100k override allows; the override did not reach runPrefill")
-	c.StrContains(err.Error(), "60000-token cap",
-		"the cap is not 60%% of the 100k override: %q", err.Error())
+	// Refused: ~75k estimated tokens is past the 60k cap a 100k window allows.
+	refused, refusedOut := build(100_000)
+	refused.HandlePrompt("go")
+	refused.Wait()
+	c.StrContains(refusedOut.String(), "60000-token cap",
+		"the pre-fill was not refused at 60%% of the 100k override; frames: %s", refusedOut.String())
+	c.NotStrContains(refusedOut.String(), "agent_end",
+		"a refused pre-fill must end the child before any turn runs")
+	refusedHist, err := refused.conv.History(context.Background())
+	c.Require().NoError(err, "history after a refused pre-fill")
+	c.Len(refusedHist, 0, "a refused pre-fill must persist nothing, got %d rows", len(refusedHist))
 
-	plain := build(0)
-	c.NoError(plain.runPrefill(context.Background(), nil, prefillEmpty),
-		"the same pre-fill must fit inside 60%% of the catalog's 1M window when no override is set")
+	// Accepted: the SAME read fits inside 60% of the catalog's 1M window, so the
+	// pre-fill lands and the turn runs. Without this half, a pre-fill that never
+	// ran at all would look refused-free and the test would pass vacuously.
+	accepted, acceptedOut := build(0)
+	accepted.HandlePrompt("go")
+	accepted.Wait()
+	c.NotStrContains(acceptedOut.String(), "agent_error",
+		"the pre-fill was refused even though the catalog's 1M window allows it; frames: %s", acceptedOut.String())
+	c.StrContains(acceptedOut.String(), "agent_end", "the turn after an accepted pre-fill never ran")
+	acceptedHist, err := accepted.conv.History(context.Background())
+	c.Require().NoError(err, "history after an accepted pre-fill")
+	c.Greater(2, len(acceptedHist),
+		"history has %d rows, want the persisted pre-fill rows plus the task and reply", len(acceptedHist))
 }
