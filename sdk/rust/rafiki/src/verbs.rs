@@ -97,4 +97,43 @@ impl Client {
     ) -> Result<pb::ListExecutorsResponse, Error> {
         self.unary("ListExecutors", req).await
     }
+
+    /// Start an OAuth login for one provider: `provider` names a
+    /// `providers.toml` entry whose kind authenticates by login
+    /// (`openai-responses-chatgpt`). The answer carries the `login_id` to
+    /// complete with, the `authorize_url` to open, and where the provider
+    /// sends the browser back: listen on `redirect_port` at `callback_path`
+    /// on every host in `redirect_hosts` (the redirect URI is fixed by the
+    /// provider's registration), or accept a pasted redirect URL. The
+    /// credential is stored against the calling user and never returned;
+    /// the daemon holds the tokens. Needs a user credential on the client:
+    /// `failed_precondition` when the connection has none.
+    pub async fn begin_provider_login(
+        &self,
+        req: &pb::BeginProviderLoginRequest,
+    ) -> Result<pb::BeginProviderLoginResponse, Error> {
+        self.unary("BeginProviderLogin", req).await
+    }
+
+    /// Finish the login [`Client::begin_provider_login`] started, handing
+    /// back the raw query string the provider redirected to loopback with
+    /// (`callback_query`). The answer names the `provider` and the
+    /// authenticated `account_id`; the tokens stay in the daemon.
+    /// `not_found` for an unknown or expired login id.
+    pub async fn complete_provider_login(
+        &self,
+        req: &pb::CompleteProviderLoginRequest,
+    ) -> Result<pb::CompleteProviderLoginResponse, Error> {
+        self.unary("CompleteProviderLogin", req).await
+    }
+
+    /// Delete the calling user's stored credential for one provider, so that
+    /// provider's login-authenticated kind stops resolving for this user's
+    /// children. `not_found` when the user has no credential for it.
+    pub async fn delete_provider_credential(
+        &self,
+        req: &pb::DeleteProviderCredentialRequest,
+    ) -> Result<pb::DeleteProviderCredentialResponse, Error> {
+        self.unary("DeleteProviderCredential", req).await
+    }
 }

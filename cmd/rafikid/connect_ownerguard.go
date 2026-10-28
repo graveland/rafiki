@@ -214,6 +214,10 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"ListTokens":  ownerExempt,
 	"RevokeToken": ownerExempt,
 
+	"BeginProviderLogin":       ownerExempt,
+	"CompleteProviderLogin":    ownerExempt,
+	"DeleteProviderCredential": ownerExempt,
+
 	"ListSkills":      ownerExempt,
 	"GetSkill":        ownerExempt,
 	"DeleteSkill":     ownerExempt,
@@ -306,6 +310,10 @@ var ownerExemptReasons = map[string]string{
 	"MintToken":   "self-scoped: a user manages its own credentials",
 	"ListTokens":  "self-scoped: a user manages its own credentials",
 	"RevokeToken": "self-scoped: a user manages its own credentials",
+
+	"BeginProviderLogin":       "self-scoped: a user manages its own provider logins",
+	"CompleteProviderLogin":    "self-scoped: a user manages its own provider logins",
+	"DeleteProviderCredential": "self-scoped: a user manages its own provider logins",
 
 	"ListSkills":      "owner-layered skill store",
 	"GetSkill":        "owner-layered skill store",

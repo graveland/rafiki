@@ -220,6 +220,15 @@ const (
 	ControlListTokensProcedure = "/rafiki.v1.Control/ListTokens"
 	// ControlRevokeTokenProcedure is the fully-qualified name of the Control's RevokeToken RPC.
 	ControlRevokeTokenProcedure = "/rafiki.v1.Control/RevokeToken"
+	// ControlBeginProviderLoginProcedure is the fully-qualified name of the Control's
+	// BeginProviderLogin RPC.
+	ControlBeginProviderLoginProcedure = "/rafiki.v1.Control/BeginProviderLogin"
+	// ControlCompleteProviderLoginProcedure is the fully-qualified name of the Control's
+	// CompleteProviderLogin RPC.
+	ControlCompleteProviderLoginProcedure = "/rafiki.v1.Control/CompleteProviderLogin"
+	// ControlDeleteProviderCredentialProcedure is the fully-qualified name of the Control's
+	// DeleteProviderCredential RPC.
+	ControlDeleteProviderCredentialProcedure = "/rafiki.v1.Control/DeleteProviderCredential"
 	// ControlGetStreamsProcedure is the fully-qualified name of the Control's GetStreams RPC.
 	ControlGetStreamsProcedure = "/rafiki.v1.Control/GetStreams"
 	// ControlSendFrameProcedure is the fully-qualified name of the Control's SendFrame RPC.
@@ -341,6 +350,9 @@ type ControlClient interface {
 	MintToken(context.Context, *connect.Request[v1.MintTokenRequest]) (*connect.Response[v1.MintTokenResponse], error)
 	ListTokens(context.Context, *connect.Request[v1.ListTokensRequest]) (*connect.Response[v1.ListTokensResponse], error)
 	RevokeToken(context.Context, *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error)
+	BeginProviderLogin(context.Context, *connect.Request[v1.BeginProviderLoginRequest]) (*connect.Response[v1.BeginProviderLoginResponse], error)
+	CompleteProviderLogin(context.Context, *connect.Request[v1.CompleteProviderLoginRequest]) (*connect.Response[v1.CompleteProviderLoginResponse], error)
+	DeleteProviderCredential(context.Context, *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error)
 	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
@@ -874,6 +886,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("RevokeToken")),
 			connect.WithClientOptions(opts...),
 		),
+		beginProviderLogin: connect.NewClient[v1.BeginProviderLoginRequest, v1.BeginProviderLoginResponse](
+			httpClient,
+			baseURL+ControlBeginProviderLoginProcedure,
+			connect.WithSchema(controlMethods.ByName("BeginProviderLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		completeProviderLogin: connect.NewClient[v1.CompleteProviderLoginRequest, v1.CompleteProviderLoginResponse](
+			httpClient,
+			baseURL+ControlCompleteProviderLoginProcedure,
+			connect.WithSchema(controlMethods.ByName("CompleteProviderLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteProviderCredential: connect.NewClient[v1.DeleteProviderCredentialRequest, v1.DeleteProviderCredentialResponse](
+			httpClient,
+			baseURL+ControlDeleteProviderCredentialProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteProviderCredential")),
+			connect.WithClientOptions(opts...),
+		),
 		getStreams: connect.NewClient[v1.GetStreamsRequest, v1.GetStreamsResponse](
 			httpClient,
 			baseURL+ControlGetStreamsProcedure,
@@ -891,94 +921,97 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	getHistory           *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
-	streamEvents         *connect.Client[v1.StreamEventsRequest, v1.Event]
-	send                 *connect.Client[v1.SendRequest, v1.SendResponse]
-	listChildren         *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
-	getChild             *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
-	spawn                *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
-	kill                 *connect.Client[v1.KillRequest, v1.KillResponse]
-	close                *connect.Client[v1.CloseRequest, v1.CloseResponse]
-	setBudget            *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
-	rename               *connect.Client[v1.RenameRequest, v1.RenameResponse]
-	notify               *connect.Client[v1.NotifyRequest, v1.NotifyResponse]
-	setRouting           *connect.Client[v1.SetRoutingRequest, v1.SetRoutingResponse]
-	listTasks            *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
-	listModels           *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
-	listExecutors        *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
-	getRateLimitStatus   *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
-	listSkills           *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
-	getSkill             *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
-	deleteSkill          *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
-	setSkillEnabled      *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
-	listPymodules        *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
-	getPymodule          *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
-	putPymodule          *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
-	deletePymodule       *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
-	addRepo              *connect.Client[v1.AddRepoRequest, v1.AddRepoResponse]
-	listRepos            *connect.Client[v1.ListReposRequest, v1.ListReposResponse]
-	refreshRepo          *connect.Client[v1.RefreshRepoRequest, v1.RefreshRepoResponse]
-	setRepo              *connect.Client[v1.SetRepoRequest, v1.SetRepoResponse]
-	removeRepo           *connect.Client[v1.RemoveRepoRequest, v1.RemoveRepoResponse]
-	listPresets          *connect.Client[v1.ListPresetsRequest, v1.ListPresetsResponse]
-	getPreset            *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
-	putPreset            *connect.Client[v1.PutPresetRequest, v1.PutPresetResponse]
-	deletePreset         *connect.Client[v1.DeletePresetRequest, v1.DeletePresetResponse]
-	recall               *connect.Client[v1.RecallRequest, v1.RecallResponse]
-	recallContext        *connect.Client[v1.RecallContextRequest, v1.RecallContextResponse]
-	getMemory            *connect.Client[v1.GetMemoryRequest, v1.GetMemoryResponse]
-	memoryTree           *connect.Client[v1.MemoryTreeRequest, v1.MemoryTreeResponse]
-	putMemory            *connect.Client[v1.PutMemoryRequest, v1.PutMemoryResponse]
-	deleteMemory         *connect.Client[v1.DeleteMemoryRequest, v1.DeleteMemoryResponse]
-	recallBackfill       *connect.Client[v1.RecallBackfillRequest, v1.RecallBackfillResponse]
-	recallStatus         *connect.Client[v1.RecallStatusRequest, v1.RecallStatusResponse]
-	conversationSearch   *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
-	conversationExport   *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
-	conversationQuery    *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
-	conversationReview   *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
-	conversationFindings *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
-	darajaLaunch         *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
-	darajaSend           *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
-	darajaWatch          *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
-	listProviderBans     *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
-	banProvider          *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
-	unbanProvider        *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
-	listRoutes           *connect.Client[v1.ListRoutesRequest, v1.ListRoutesResponse]
-	setRoute             *connect.Client[v1.SetRouteRequest, v1.SetRouteResponse]
-	deleteRoute          *connect.Client[v1.DeleteRouteRequest, v1.DeleteRouteResponse]
-	report               *connect.Client[v1.ReportRequest, v1.ReportResponse]
-	receive              *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
-	setResult            *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
-	resume               *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
-	closeAllExited       *connect.Client[v1.CloseAllExitedRequest, v1.CloseAllExitedResponse]
-	setLabels            *connect.Client[v1.SetLabelsRequest, v1.SetLabelsResponse]
-	status               *connect.Client[v1.StatusRequest, v1.StatusResponse]
-	search               *connect.Client[v1.SearchRequest, v1.SearchResponse]
-	shutdownDaemon       *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
-	modelInfo            *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
-	createSandbox        *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
-	syncPath             *connect.Client[v1.SyncPathRequest, v1.SyncPathResponse]
-	syncRepo             *connect.Client[v1.SyncRepoRequest, v1.SyncRepoResponse]
-	listSandboxes        *connect.Client[v1.ListSandboxesRequest, v1.ListSandboxesResponse]
-	removeSandbox        *connect.Client[v1.RemoveSandboxRequest, v1.RemoveSandboxResponse]
-	modelRoutes          *connect.Client[v1.ModelRoutesRequest, v1.ModelRoutesResponse]
-	conversationStats    *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
-	enrollExecutor       *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
-	createExecutor       *connect.Client[v1.CreateExecutorRequest, v1.CreateExecutorResponse]
-	labelExecutor        *connect.Client[v1.LabelExecutorRequest, v1.LabelExecutorResponse]
-	disableExecutor      *connect.Client[v1.DisableExecutorRequest, v1.DisableExecutorResponse]
-	enableExecutor       *connect.Client[v1.EnableExecutorRequest, v1.EnableExecutorResponse]
-	deleteExecutor       *connect.Client[v1.DeleteExecutorRequest, v1.DeleteExecutorResponse]
-	executorSession      *connect.Client[v1.ExecutorSessionRequest, v1.ExecutorSessionEvent]
-	createUser           *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
-	listUsers            *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
-	removeUser           *connect.Client[v1.RemoveUserRequest, v1.RemoveUserResponse]
-	updateUser           *connect.Client[v1.UpdateUserRequest, v1.UpdateUserResponse]
-	mintToken            *connect.Client[v1.MintTokenRequest, v1.MintTokenResponse]
-	listTokens           *connect.Client[v1.ListTokensRequest, v1.ListTokensResponse]
-	revokeToken          *connect.Client[v1.RevokeTokenRequest, v1.RevokeTokenResponse]
-	getStreams           *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
-	sendFrame            *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
+	getHistory               *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	streamEvents             *connect.Client[v1.StreamEventsRequest, v1.Event]
+	send                     *connect.Client[v1.SendRequest, v1.SendResponse]
+	listChildren             *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
+	getChild                 *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
+	spawn                    *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
+	kill                     *connect.Client[v1.KillRequest, v1.KillResponse]
+	close                    *connect.Client[v1.CloseRequest, v1.CloseResponse]
+	setBudget                *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
+	rename                   *connect.Client[v1.RenameRequest, v1.RenameResponse]
+	notify                   *connect.Client[v1.NotifyRequest, v1.NotifyResponse]
+	setRouting               *connect.Client[v1.SetRoutingRequest, v1.SetRoutingResponse]
+	listTasks                *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
+	listModels               *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	listExecutors            *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
+	getRateLimitStatus       *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
+	listSkills               *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
+	getSkill                 *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
+	deleteSkill              *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
+	setSkillEnabled          *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
+	listPymodules            *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
+	getPymodule              *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
+	putPymodule              *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
+	deletePymodule           *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
+	addRepo                  *connect.Client[v1.AddRepoRequest, v1.AddRepoResponse]
+	listRepos                *connect.Client[v1.ListReposRequest, v1.ListReposResponse]
+	refreshRepo              *connect.Client[v1.RefreshRepoRequest, v1.RefreshRepoResponse]
+	setRepo                  *connect.Client[v1.SetRepoRequest, v1.SetRepoResponse]
+	removeRepo               *connect.Client[v1.RemoveRepoRequest, v1.RemoveRepoResponse]
+	listPresets              *connect.Client[v1.ListPresetsRequest, v1.ListPresetsResponse]
+	getPreset                *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
+	putPreset                *connect.Client[v1.PutPresetRequest, v1.PutPresetResponse]
+	deletePreset             *connect.Client[v1.DeletePresetRequest, v1.DeletePresetResponse]
+	recall                   *connect.Client[v1.RecallRequest, v1.RecallResponse]
+	recallContext            *connect.Client[v1.RecallContextRequest, v1.RecallContextResponse]
+	getMemory                *connect.Client[v1.GetMemoryRequest, v1.GetMemoryResponse]
+	memoryTree               *connect.Client[v1.MemoryTreeRequest, v1.MemoryTreeResponse]
+	putMemory                *connect.Client[v1.PutMemoryRequest, v1.PutMemoryResponse]
+	deleteMemory             *connect.Client[v1.DeleteMemoryRequest, v1.DeleteMemoryResponse]
+	recallBackfill           *connect.Client[v1.RecallBackfillRequest, v1.RecallBackfillResponse]
+	recallStatus             *connect.Client[v1.RecallStatusRequest, v1.RecallStatusResponse]
+	conversationSearch       *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
+	conversationExport       *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
+	conversationQuery        *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
+	conversationReview       *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
+	conversationFindings     *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
+	darajaLaunch             *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
+	darajaSend               *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
+	darajaWatch              *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
+	listProviderBans         *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
+	banProvider              *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
+	unbanProvider            *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
+	listRoutes               *connect.Client[v1.ListRoutesRequest, v1.ListRoutesResponse]
+	setRoute                 *connect.Client[v1.SetRouteRequest, v1.SetRouteResponse]
+	deleteRoute              *connect.Client[v1.DeleteRouteRequest, v1.DeleteRouteResponse]
+	report                   *connect.Client[v1.ReportRequest, v1.ReportResponse]
+	receive                  *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
+	setResult                *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
+	resume                   *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
+	closeAllExited           *connect.Client[v1.CloseAllExitedRequest, v1.CloseAllExitedResponse]
+	setLabels                *connect.Client[v1.SetLabelsRequest, v1.SetLabelsResponse]
+	status                   *connect.Client[v1.StatusRequest, v1.StatusResponse]
+	search                   *connect.Client[v1.SearchRequest, v1.SearchResponse]
+	shutdownDaemon           *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
+	modelInfo                *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
+	createSandbox            *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
+	syncPath                 *connect.Client[v1.SyncPathRequest, v1.SyncPathResponse]
+	syncRepo                 *connect.Client[v1.SyncRepoRequest, v1.SyncRepoResponse]
+	listSandboxes            *connect.Client[v1.ListSandboxesRequest, v1.ListSandboxesResponse]
+	removeSandbox            *connect.Client[v1.RemoveSandboxRequest, v1.RemoveSandboxResponse]
+	modelRoutes              *connect.Client[v1.ModelRoutesRequest, v1.ModelRoutesResponse]
+	conversationStats        *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
+	enrollExecutor           *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
+	createExecutor           *connect.Client[v1.CreateExecutorRequest, v1.CreateExecutorResponse]
+	labelExecutor            *connect.Client[v1.LabelExecutorRequest, v1.LabelExecutorResponse]
+	disableExecutor          *connect.Client[v1.DisableExecutorRequest, v1.DisableExecutorResponse]
+	enableExecutor           *connect.Client[v1.EnableExecutorRequest, v1.EnableExecutorResponse]
+	deleteExecutor           *connect.Client[v1.DeleteExecutorRequest, v1.DeleteExecutorResponse]
+	executorSession          *connect.Client[v1.ExecutorSessionRequest, v1.ExecutorSessionEvent]
+	createUser               *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
+	listUsers                *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
+	removeUser               *connect.Client[v1.RemoveUserRequest, v1.RemoveUserResponse]
+	updateUser               *connect.Client[v1.UpdateUserRequest, v1.UpdateUserResponse]
+	mintToken                *connect.Client[v1.MintTokenRequest, v1.MintTokenResponse]
+	listTokens               *connect.Client[v1.ListTokensRequest, v1.ListTokensResponse]
+	revokeToken              *connect.Client[v1.RevokeTokenRequest, v1.RevokeTokenResponse]
+	beginProviderLogin       *connect.Client[v1.BeginProviderLoginRequest, v1.BeginProviderLoginResponse]
+	completeProviderLogin    *connect.Client[v1.CompleteProviderLoginRequest, v1.CompleteProviderLoginResponse]
+	deleteProviderCredential *connect.Client[v1.DeleteProviderCredentialRequest, v1.DeleteProviderCredentialResponse]
+	getStreams               *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
+	sendFrame                *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -1411,6 +1444,21 @@ func (c *controlClient) RevokeToken(ctx context.Context, req *connect.Request[v1
 	return c.revokeToken.CallUnary(ctx, req)
 }
 
+// BeginProviderLogin calls rafiki.v1.Control.BeginProviderLogin.
+func (c *controlClient) BeginProviderLogin(ctx context.Context, req *connect.Request[v1.BeginProviderLoginRequest]) (*connect.Response[v1.BeginProviderLoginResponse], error) {
+	return c.beginProviderLogin.CallUnary(ctx, req)
+}
+
+// CompleteProviderLogin calls rafiki.v1.Control.CompleteProviderLogin.
+func (c *controlClient) CompleteProviderLogin(ctx context.Context, req *connect.Request[v1.CompleteProviderLoginRequest]) (*connect.Response[v1.CompleteProviderLoginResponse], error) {
+	return c.completeProviderLogin.CallUnary(ctx, req)
+}
+
+// DeleteProviderCredential calls rafiki.v1.Control.DeleteProviderCredential.
+func (c *controlClient) DeleteProviderCredential(ctx context.Context, req *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error) {
+	return c.deleteProviderCredential.CallUnary(ctx, req)
+}
+
 // GetStreams calls rafiki.v1.Control.GetStreams.
 func (c *controlClient) GetStreams(ctx context.Context, req *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {
 	return c.getStreams.CallUnary(ctx, req)
@@ -1532,6 +1580,9 @@ type ControlHandler interface {
 	MintToken(context.Context, *connect.Request[v1.MintTokenRequest]) (*connect.Response[v1.MintTokenResponse], error)
 	ListTokens(context.Context, *connect.Request[v1.ListTokensRequest]) (*connect.Response[v1.ListTokensResponse], error)
 	RevokeToken(context.Context, *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error)
+	BeginProviderLogin(context.Context, *connect.Request[v1.BeginProviderLoginRequest]) (*connect.Response[v1.BeginProviderLoginResponse], error)
+	CompleteProviderLogin(context.Context, *connect.Request[v1.CompleteProviderLoginRequest]) (*connect.Response[v1.CompleteProviderLoginResponse], error)
+	DeleteProviderCredential(context.Context, *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error)
 	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
@@ -2061,6 +2112,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("RevokeToken")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlBeginProviderLoginHandler := connect.NewUnaryHandler(
+		ControlBeginProviderLoginProcedure,
+		svc.BeginProviderLogin,
+		connect.WithSchema(controlMethods.ByName("BeginProviderLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlCompleteProviderLoginHandler := connect.NewUnaryHandler(
+		ControlCompleteProviderLoginProcedure,
+		svc.CompleteProviderLogin,
+		connect.WithSchema(controlMethods.ByName("CompleteProviderLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteProviderCredentialHandler := connect.NewUnaryHandler(
+		ControlDeleteProviderCredentialProcedure,
+		svc.DeleteProviderCredential,
+		connect.WithSchema(controlMethods.ByName("DeleteProviderCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlGetStreamsHandler := connect.NewUnaryHandler(
 		ControlGetStreamsProcedure,
 		svc.GetStreams,
@@ -2247,6 +2316,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListTokensHandler.ServeHTTP(w, r)
 		case ControlRevokeTokenProcedure:
 			controlRevokeTokenHandler.ServeHTTP(w, r)
+		case ControlBeginProviderLoginProcedure:
+			controlBeginProviderLoginHandler.ServeHTTP(w, r)
+		case ControlCompleteProviderLoginProcedure:
+			controlCompleteProviderLoginHandler.ServeHTTP(w, r)
+		case ControlDeleteProviderCredentialProcedure:
+			controlDeleteProviderCredentialHandler.ServeHTTP(w, r)
 		case ControlGetStreamsProcedure:
 			controlGetStreamsHandler.ServeHTTP(w, r)
 		case ControlSendFrameProcedure:
@@ -2602,6 +2677,18 @@ func (UnimplementedControlHandler) ListTokens(context.Context, *connect.Request[
 
 func (UnimplementedControlHandler) RevokeToken(context.Context, *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RevokeToken is not implemented"))
+}
+
+func (UnimplementedControlHandler) BeginProviderLogin(context.Context, *connect.Request[v1.BeginProviderLoginRequest]) (*connect.Response[v1.BeginProviderLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.BeginProviderLogin is not implemented"))
+}
+
+func (UnimplementedControlHandler) CompleteProviderLogin(context.Context, *connect.Request[v1.CompleteProviderLoginRequest]) (*connect.Response[v1.CompleteProviderLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.CompleteProviderLogin is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteProviderCredential(context.Context, *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteProviderCredential is not implemented"))
 }
 
 func (UnimplementedControlHandler) GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {

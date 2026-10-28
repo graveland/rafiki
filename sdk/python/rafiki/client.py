@@ -580,6 +580,40 @@ class Client:
         req = _gen.control_pb.DeleteRouteRequest(model_line=model_line)
         self._call("DeleteRoute", req, _gen.control_pb.DeleteRouteResponse)
 
+    # ── provider login (per-user provider credentials) ───────────────────────
+
+    def begin_provider_login(self, provider: str) -> _gen.control_pb.BeginProviderLoginResponse:
+        """Start an OAuth login for one provider (``provider`` names a
+        providers.toml entry whose kind authenticates by login, e.g.
+        ``openai-responses-chatgpt``). Returns the ``login_id`` to complete
+        with, the ``authorize_url`` to open in a browser, and where the
+        provider sends the browser back: listen on ``redirect_port`` at
+        ``callback_path`` on every host in ``redirect_hosts`` (the redirect URI
+        is fixed by the provider's registration) or accept a pasted redirect
+        URL. The credential is stored against the calling user and is never
+        returned: the daemon holds the tokens. Needs a user credential:
+        ``failed_precondition`` when the profile has none."""
+        req = _gen.control_pb.BeginProviderLoginRequest(provider=provider)
+        return self._call("BeginProviderLogin", req, _gen.control_pb.BeginProviderLoginResponse)
+
+    def complete_provider_login(
+        self, login_id: str, callback_query: str
+    ) -> _gen.control_pb.CompleteProviderLoginResponse:
+        """Finish the login ``begin_provider_login`` started, handing back the
+        raw query string the provider redirected to loopback with
+        (``callback_query``, leading ``?`` optional). Returns the ``provider``
+        and the authenticated ``account_id``; the tokens stay in the daemon.
+        ``not_found`` for an unknown or expired login id."""
+        req = _gen.control_pb.CompleteProviderLoginRequest(login_id=login_id, callback_query=callback_query)
+        return self._call("CompleteProviderLogin", req, _gen.control_pb.CompleteProviderLoginResponse)
+
+    def delete_provider_credential(self, provider: str) -> None:
+        """Delete the calling user's stored credential for one provider, so
+        that provider's ``login``-authenticated kind stops resolving for this
+        user's children. ``not_found`` when the user has no credential for it."""
+        req = _gen.control_pb.DeleteProviderCredentialRequest(provider=provider)
+        self._call("DeleteProviderCredential", req, _gen.control_pb.DeleteProviderCredentialResponse)
+
     # ── script-child verbs (Report / Receive / SetResult) ────────────────────
 
     def report(self, kind: str, data) -> None:

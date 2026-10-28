@@ -264,8 +264,17 @@ var controlPolicyTable = map[string]controlPolicy{
 	"MintToken":   policyUserOnly,
 	"ListTokens":  policyUserOnly,
 	"RevokeToken": policyUserOnly,
-	"GetStreams":  policyUserOnly,
-	"SendFrame":   policyUserOnly,
+	// The provider-login RPCs are userOnly for the same reason as the token
+	// RPCs, one notch stricter in effect: the credential they manage is a
+	// provider OAuth grant stored against the CALLER's own user id, and the
+	// handler refuses an identity with no user id at all (a unix-socket
+	// caller has no user to store a grant for). No child credential reaches
+	// them, so no fork of an owner's tokens can be planted by a child.
+	"BeginProviderLogin":       policyUserOnly,
+	"CompleteProviderLogin":    policyUserOnly,
+	"DeleteProviderCredential": policyUserOnly,
+	"GetStreams":               policyUserOnly,
+	"SendFrame":                policyUserOnly,
 }
 
 // policyFor resolves a Connect procedure path to its policy. A path that is

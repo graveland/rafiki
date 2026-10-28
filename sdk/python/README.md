@@ -108,6 +108,23 @@ c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")   # daemon-validates the sp
 rows = c.list_routes()                                 # one RouteRow per live line
 c.delete_route("z-ai/glm-5.3")                         # not_found when there is none
 
+# Provider login (per-user provider credentials). The credential belongs to
+# the CALLING USER and is never returned: the daemon holds the tokens, and a
+# child resolves its owner's credential at spawn. Needs a user credential on
+# the client (failed_precondition otherwise).
+begin = c.begin_provider_login("chatgpt")  # a providers.toml entry whose kind
+                                           # authenticates by login
+print(begin.authorize_url)                 # open it in a browser; then listen on
+                                           # begin.redirect_port at
+                                           # begin.callback_path on every host in
+                                           # begin.redirect_hosts (the redirect
+                                           # URI is fixed by the provider's
+                                           # registration) or accept a pasted
+                                           # redirect URL
+done = c.complete_provider_login(begin.login_id, "code=...&state=...")
+                                           # -> provider, account_id (never tokens)
+c.delete_provider_credential("chatgpt")    # not_found when there is none
+
 # Script-child verbs (identity = the child; from a user credential they
 # are refused — a user has no position in the tree to report from):
 c.report("progress", {"stage": "halfway"})     # → the parent's event buffer

@@ -1404,6 +1404,9 @@ service Control {
   rpc MintToken(MintTokenRequest) returns (MintTokenResponse);
   rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  rpc BeginProviderLogin(BeginProviderLoginRequest) returns (BeginProviderLoginResponse);
+  rpc CompleteProviderLogin(CompleteProviderLoginRequest) returns (CompleteProviderLoginResponse);
+  rpc DeleteProviderCredential(DeleteProviderCredentialRequest) returns (DeleteProviderCredentialResponse);
   rpc GetStreams(GetStreamsRequest) returns (GetStreamsResponse);
   // A raw child-protocol frame, for debugging/scripting. userOnly: children
   // use Send.
@@ -2285,6 +2288,26 @@ message ListTokensRequest { string username = 1; bool include_revoked = 2; bool 
 message ListTokensResponse { repeated TokenRow tokens = 1; }
 message RevokeTokenRequest { string id = 1; }
 message RevokeTokenResponse { TokenRow info = 1; }
+
+// ─── Provider login (per-user OAuth credentials for providers) ───────────
+// provider names a providers.toml entry whose kind authenticates by login
+// (openai-responses-chatgpt). The caller must be a user: the credential is
+// stored against the caller's own user id and never returned.
+message BeginProviderLoginRequest { string provider = 1; }
+// The client must listen on redirect_port at callback_path on every host in
+// redirect_hosts (the IdP's registered redirect URI is fixed), or accept a
+// pasted redirect URL.
+message BeginProviderLoginResponse {
+  string login_id = 1;
+  string authorize_url = 2;
+  uint32 redirect_port = 3;
+  string callback_path = 4;
+  repeated string redirect_hosts = 5;
+}
+message CompleteProviderLoginRequest { string login_id = 1; string callback_query = 2; }
+message CompleteProviderLoginResponse { string provider = 1; string account_id = 2; }
+message DeleteProviderCredentialRequest { string provider = 1; }
+message DeleteProviderCredentialResponse {}
 
 // ─── OIDC login service ───────────────────────────────────────────────────
 

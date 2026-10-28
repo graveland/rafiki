@@ -6958,6 +6958,139 @@ class RevokeTokenResponse:
         return obj
 
 @dataclasses.dataclass
+class BeginProviderLoginRequest:
+    provider: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BeginProviderLoginRequest":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        return obj
+
+@dataclasses.dataclass
+class BeginProviderLoginResponse:
+    login_id: str = ""
+    authorize_url: str = ""
+    redirect_port: int = 0
+    callback_path: str = ""
+    redirect_hosts: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.login_id != "":
+            out["loginId"] = self.login_id
+        if self.authorize_url != "":
+            out["authorizeUrl"] = self.authorize_url
+        if self.redirect_port != 0:
+            out["redirectPort"] = self.redirect_port
+        if self.callback_path != "":
+            out["callbackPath"] = self.callback_path
+        if self.redirect_hosts:
+            out["redirectHosts"] = [x for x in self.redirect_hosts]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BeginProviderLoginResponse":
+        obj = cls()
+        _v = _d.get("loginId")
+        if _v is not None:
+            obj.login_id = _v
+        _v = _d.get("authorizeUrl")
+        if _v is not None:
+            obj.authorize_url = _v
+        _v = _d.get("redirectPort")
+        if _v is not None:
+            obj.redirect_port = _int_in(_v)
+        _v = _d.get("callbackPath")
+        if _v is not None:
+            obj.callback_path = _v
+        _v = _d.get("redirectHosts")
+        if _v is not None:
+            obj.redirect_hosts = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class CompleteProviderLoginRequest:
+    login_id: str = ""
+    callback_query: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.login_id != "":
+            out["loginId"] = self.login_id
+        if self.callback_query != "":
+            out["callbackQuery"] = self.callback_query
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CompleteProviderLoginRequest":
+        obj = cls()
+        _v = _d.get("loginId")
+        if _v is not None:
+            obj.login_id = _v
+        _v = _d.get("callbackQuery")
+        if _v is not None:
+            obj.callback_query = _v
+        return obj
+
+@dataclasses.dataclass
+class CompleteProviderLoginResponse:
+    provider: str = ""
+    account_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        if self.account_id != "":
+            out["accountId"] = self.account_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CompleteProviderLoginResponse":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        _v = _d.get("accountId")
+        if _v is not None:
+            obj.account_id = _v
+        return obj
+
+@dataclasses.dataclass
+class DeleteProviderCredentialRequest:
+    provider: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteProviderCredentialRequest":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        return obj
+
+@dataclasses.dataclass
+class DeleteProviderCredentialResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteProviderCredentialResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
 class BeginLoginRequest:
     redirect_port: int = 0
     client_host: str = ""

@@ -75,8 +75,10 @@ Typed wrappers over `Client::unary` and `Client::server_stream`, taking and
 returning the generated `pb::` types: `get_history`, `stream_events(req,
 idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
-`list_executors`. `unary` and `server_stream` are public, so an RPC added to
-`control.proto` is callable immediately (regenerate first). `pb` holds the
+`list_executors`, `begin_provider_login`, `complete_provider_login`,
+`delete_provider_credential`. `unary` and `server_stream` are public, so an
+RPC added to `control.proto` is callable immediately (regenerate first). `pb`
+holds the
 `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the `Daraja*`
 RPCs carry.
 
@@ -87,6 +89,17 @@ child that spawned it and is empty for a top-level child.
 with `before` set to the oldest `ts` you hold. A page never splits events that
 share a `ts`, so it can hold more than `limit`; an empty page is the start of
 the conversation.
+
+`begin_provider_login` / `complete_provider_login` / `delete_provider_credential`
+manage the CALLING USER's own provider credentials (a `providers.toml` entry
+whose kind authenticates by login, e.g. `openai-responses-chatgpt`): begin
+returns the `login_id`, the `authorize_url` to open, and the loopback port,
+callback path and hosts to listen on (the provider's registered redirect URI
+is fixed), complete hands back the raw callback query and answers the
+`provider` and `account_id`. Tokens never cross the wire: the daemon stores
+them, and a child resolves its owner's credential at spawn. Each needs a user
+credential on the client (`failed_precondition` otherwise); an unknown login
+id or a missing credential is `not_found`.
 
 ## Errors: nothing is retried
 

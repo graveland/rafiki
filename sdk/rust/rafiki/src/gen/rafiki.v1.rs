@@ -3484,6 +3484,52 @@ pub struct RevokeTokenResponse {
     #[prost(message, optional, tag = "1")]
     pub info: ::core::option::Option<TokenRow>,
 }
+/// ─── Provider login (per-user OAuth credentials for providers) ───────────
+/// provider names a providers.toml entry whose kind authenticates by login
+/// (openai-responses-chatgpt). The caller must be a user: the credential is
+/// stored against the caller's own user id and never returned.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BeginProviderLoginRequest {
+    #[prost(string, tag = "1")]
+    pub provider: ::prost::alloc::string::String,
+}
+/// The client must listen on redirect_port at callback_path on every host in
+/// redirect_hosts (the IdP's registered redirect URI is fixed), or accept a
+/// pasted redirect URL.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BeginProviderLoginResponse {
+    #[prost(string, tag = "1")]
+    pub login_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub authorize_url: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub redirect_port: u32,
+    #[prost(string, tag = "4")]
+    pub callback_path: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "5")]
+    pub redirect_hosts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CompleteProviderLoginRequest {
+    #[prost(string, tag = "1")]
+    pub login_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub callback_query: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CompleteProviderLoginResponse {
+    #[prost(string, tag = "1")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub account_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeleteProviderCredentialRequest {
+    #[prost(string, tag = "1")]
+    pub provider: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteProviderCredentialResponse {}
 /// redirect_port: the loopback port the client bound. client_host names the
 /// token ("login <client_host> <date>").
 #[derive(Clone, PartialEq, ::prost::Message)]
