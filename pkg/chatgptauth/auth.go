@@ -451,13 +451,17 @@ var tokenFields = []string{"access_token", "refresh_token", "id_token"}
 // object, its token values redacted. Nothing else of the body is reported: an
 // error message ends up in a log line, and a response can echo the credential
 // it was about to hand out.
+//
+// Keys match CASE-INSENSITIVELY, which is the point: encoding/json reads
+// {"Refresh_Token": ...} into a refresh_token struct field, so a token written
+// with a different case is one this package honours and has to redact.
 func describeBody(status int, raw []byte) string {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return fmt.Sprintf("HTTP %d", status)
 	}
-	for _, key := range tokenFields {
-		if _, ok := fields[key]; ok {
+	for key := range fields {
+		if isTokenField(key) {
 			fields[key] = json.RawMessage(`"<redacted>"`)
 		}
 	}
@@ -466,6 +470,16 @@ func describeBody(status int, raw []byte) string {
 		return fmt.Sprintf("HTTP %d", status)
 	}
 	return fmt.Sprintf("HTTP %d: %s", status, truncate(redacted, errorTextLimit))
+}
+
+// isTokenField reports whether a body key names a credential, ignoring case.
+func isTokenField(key string) bool {
+	for _, field := range tokenFields {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
 }
 
 // marshalPlain encodes v without HTML escaping, so the "<redacted>"

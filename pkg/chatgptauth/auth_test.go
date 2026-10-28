@@ -151,22 +151,40 @@ func TestRefreshDefaultsToAnHour(t *testing.T) {
 }
 
 func TestRefreshRotatedTokenSurvivesMissingAccessToken(t *testing.T) {
-	c := assert.NewAborting(t)
 	// A rotation with no access token: the old refresh token is already dead
-	// upstream, so the new one has to come back with the error.
-	const rotated = "rotated-refresh-token-value"
-	fake := newJSONServer(t, 200, `{"refresh_token":"`+rotated+`"}`)
-	e := engineFor(fake.srv)
+	// upstream, so the new one has to come back with the error. The MIXED-CASE
+	// row matters as much as the exact one: encoding/json reads
+	// {"Refresh_Token": ...} into a refresh_token field, so that shape is
+	// honoured by this package and must be redacted like the exact key.
+	tests := []struct {
+		name string
+		body func(token string) string
+	}{
+		{name: "exact key", body: func(token string) string {
+			return `{"refresh_token":"` + token + `"}`
+		}},
+		{name: "mixed case key", body: func(token string) string {
+			return `{"Refresh_Token":"` + token + `"}`
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			const token = "rotated-refresh-token-value"
+			fake := newJSONServer(t, 200, tt.body(token))
+			e := engineFor(fake.srv)
 
-	tok, err := e.Refresh(context.Background(), "refresh-1", ReasonForced)
-	c.Error(err, "a response with no access token is a failure")
-	c.NotErrorIs(err, ErrRefreshRejected, "and not a permanent one")
-	c.Eq(rotated, tok.RefreshToken, "the rotated token must ride back with the error")
+			tok, err := e.Refresh(context.Background(), "refresh-1", ReasonForced)
+			c.Error(err, "a response with no access token is a failure")
+			c.NotErrorIs(err, ErrRefreshRejected, "and not a permanent one")
+			c.Eq(token, tok.RefreshToken, "the rotated token must ride back with the error")
 
-	// The message ends up in a log line, so the token must not be in it.
-	c.NotStrContains(err.Error(), rotated, "the error must not leak the rotated token")
-	c.StrContains(err.Error(), "HTTP 200")
-	c.StrContains(err.Error(), "<redacted>")
+			// The message ends up in a log line, so the token must not be in it.
+			c.NotStrContains(err.Error(), token, "the error must not leak the rotated token")
+			c.StrContains(err.Error(), "HTTP 200")
+			c.StrContains(err.Error(), "<redacted>")
+		})
+	}
 }
 
 func TestRefreshErrorBodyIsRedacted(t *testing.T) {
