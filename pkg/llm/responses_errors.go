@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,16 +42,20 @@ var usageLimitCodes = map[string]bool{
 
 // Error renders the limit in the terms the operator can act on: which code, the
 // plan, and when it lifts.
+//
+// The text says "provider usage limit", not "ChatGPT": the same type is produced
+// for an api-key provider's insufficient_quota, and naming a product the request
+// never reached would send the operator looking in the wrong place.
 func (e *UsageLimitError) Error() string {
 	plan := e.PlanType
 	if plan == "" {
 		plan = "unknown"
 	}
 	if e.ResetsAt.IsZero() {
-		return fmt.Sprintf("ChatGPT usage limit reached (%s, plan %s); reset time unknown", e.Code, plan)
+		return fmt.Sprintf("provider usage limit reached (%s, plan %s); reset time unknown", e.Code, plan)
 	}
 	rest := time.Until(e.ResetsAt).Round(time.Minute)
-	return fmt.Sprintf("ChatGPT usage limit reached (%s, plan %s); resets at %s (in %s)",
+	return fmt.Sprintf("provider usage limit reached (%s, plan %s); resets at %s (in %s)",
 		e.Code, plan, e.ResetsAt.UTC().Format(time.RFC3339), rest)
 }
 
@@ -84,6 +89,42 @@ func decodeResponsesAPIError(body []byte) responsesAPIErrorEnvelope {
 	}
 	_ = json.Unmarshal(body, &env)
 	return env
+}
+
+// codes lists the names this payload carries, most specific first: the nested
+// error's code then type, then the flat code then type, deduped and with empties
+// dropped.
+//
+// Both are listed because the endpoint does not keep the two fields distinct: a
+// usage limit can arrive as type=usage_limit_reached with some other code, and
+// codex classifies on TYPE. Reading only the code field turns exactly that into a
+// retryable 429 that burns the turn's budget.
+func (env responsesAPIErrorEnvelope) codes() []string {
+	var raw []string
+	if e := env.Error; e != nil {
+		raw = append(raw, rawJSONCode(e.Code), e.Type)
+	}
+	raw = append(raw, rawJSONCode(env.Code), env.Type)
+	out := make([]string, 0, len(raw))
+	for _, c := range raw {
+		if c == "" || slices.Contains(out, c) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// usageLimitCode reports the usage-limit code this payload carries and whether it
+// carries one at all (see codes for why either field may be the one that names
+// it).
+func (env responsesAPIErrorEnvelope) usageLimitCode() (string, bool) {
+	for _, c := range env.codes() {
+		if isUsageLimitCode(c) {
+			return c, true
+		}
+	}
+	return "", false
 }
 
 // info flattens the envelope into the fields the classifiers read, preferring
@@ -137,10 +178,11 @@ func responsesUsageLimitError(status int, header http.Header, body []byte) *Usag
 		return nil
 	}
 	env := decodeResponsesAPIError(body)
-	code, planType, _, resetsAt := env.info()
-	if !isUsageLimitCode(code) {
+	code, ok := env.usageLimitCode()
+	if !ok {
 		return nil
 	}
+	_, planType, _, resetsAt := env.info()
 	if planType == "" {
 		planType = header.Get("x-codex-plan-type")
 	}
@@ -156,10 +198,11 @@ func responsesUsageLimitError(status int, header http.Header, body []byte) *Usag
 // responsesUsageLimitFromEvent builds the same error from an in-stream error
 // payload, where no HTTP headers exist to fall back on.
 func responsesUsageLimitFromEvent(env responsesAPIErrorEnvelope) *UsageLimitError {
-	code, planType, _, resetsAt := env.info()
-	if !isUsageLimitCode(code) {
+	code, ok := env.usageLimitCode()
+	if !ok {
 		return nil
 	}
+	_, planType, _, resetsAt := env.info()
 	e := &UsageLimitError{Code: code, PlanType: planType}
 	if resetsAt != nil {
 		e.ResetsAt = time.Unix(*resetsAt, 0)

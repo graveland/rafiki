@@ -6,9 +6,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -61,8 +63,20 @@ const responsesContentFilterMessage = "response blocked by the provider's conten
 // arrive for a block other than the most recently started one.
 type responsesSSEDecoder struct {
 	rc   io.ReadCloser
-	br   *bufio.Reader
 	idle time.Duration
+	// maxLineBytes is responsesMaxLineBytes in production (see
+	// newResponsesSSEDecoder), settable so tests can exercise the overflow
+	// without materialising 64 MiB.
+	maxLineBytes int
+
+	// lines is fed by the ONE reader goroutine, which is the only code that
+	// touches the bufio.Reader. Two readers on one buffered reader is a data
+	// race and a torn frame, so the timeout path stops the reader instead of
+	// racing it (see readLine).
+	lines    chan responsesLine
+	closeCh  chan struct{}
+	stopOnce sync.Once
+	stopErr  error // set by stopReading, read after it
 
 	queue  []ssestream.Event
 	cur    ssestream.Event
@@ -76,6 +90,13 @@ type responsesSSEDecoder struct {
 	blocksIssued int64 // Anthropic content-block indexes handed out
 	toolCalls    int   // function_call blocks emitted, for the stop reason
 	active       *responsesOpenBlock
+	closedBlocks map[int]bool // output indexes whose block is already closed
+}
+
+// responsesLine is one line handed from the reader goroutine to the decoder.
+type responsesLine struct {
+	line []byte
+	err  error
 }
 
 // responsesOpenBlock is the content block currently being streamed, keyed by the
@@ -94,8 +115,46 @@ const (
 	responsesBlockThinking = "thinking"
 )
 
-func newResponsesSSEDecoder(rc io.ReadCloser, idle time.Duration) *responsesSSEDecoder {
-	return &responsesSSEDecoder{rc: rc, br: bufio.NewReaderSize(rc, 64<<10), idle: idle}
+// newResponsesSSEDecoder builds the decoder and starts its one reader goroutine.
+// maxLine caps a single line; <= 0 means responsesMaxLineBytes. It is a parameter
+// (rather than a field written after construction) because the reader goroutine
+// starts here: mutating it afterwards would race the reader.
+func newResponsesSSEDecoder(rc io.ReadCloser, idle time.Duration, maxLine int) *responsesSSEDecoder {
+	if maxLine <= 0 {
+		maxLine = responsesMaxLineBytes
+	}
+	d := &responsesSSEDecoder{
+		rc:           rc,
+		idle:         idle,
+		maxLineBytes: maxLine,
+		lines:        make(chan responsesLine, 1),
+		closeCh:      make(chan struct{}),
+		closedBlocks: map[int]bool{},
+	}
+	go d.readLoop()
+	return d
+}
+
+// readLoop is the ONLY goroutine that reads the body. It hands one line at a
+// time to readLine and exits on the first error (or when the decoder closes).
+//
+// The send is unbuffered-or-buffered with a select on closeCh so a consumer that
+// stops reading (a terminal event reached, Close called) can never block this
+// goroutine forever.
+func (d *responsesSSEDecoder) readLoop() {
+	defer close(d.lines)
+	br := bufio.NewReaderSize(d.rc, 64<<10)
+	for {
+		line, err := d.readLineCapped(br)
+		select {
+		case d.lines <- responsesLine{line: line, err: err}:
+		case <-d.closeCh:
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (d *responsesSSEDecoder) Event() ssestream.Event { return d.cur }
@@ -104,7 +163,20 @@ func (d *responsesSSEDecoder) Err() error { return d.err }
 
 func (d *responsesSSEDecoder) Close() error {
 	d.closed = true
-	return d.rc.Close()
+	d.stopReading(errResponsesClosed)
+	return nil
+}
+
+// stopReading stops the reader goroutine for good: it closes closeCh (so a
+// pending send cannot block) and closes the body (so a blocked read returns).
+// Exactly one goroutine may own the reader, so once this has run there is no
+// further read, whoever calls it.
+func (d *responsesSSEDecoder) stopReading(cause error) {
+	d.stopOnce.Do(func() {
+		d.stopErr = cause
+		close(d.closeCh)
+		_ = d.rc.Close()
+	})
 }
 
 func (d *responsesSSEDecoder) Next() bool {
@@ -125,6 +197,11 @@ func (d *responsesSSEDecoder) Next() bool {
 // pull reads one SSE frame (its `event:` and `data:` lines up to the next blank
 // line) and dispatches it. Comment lines are skipped; split data lines are
 // joined with '\n' as the SSE spec requires.
+//
+// A frame is dispatched only when its terminating blank line arrived. A read
+// failure mid-frame (a timeout, a truncated body, an over-long line) never
+// dispatches what it collected: a half frame is not an event, and treating one
+// as an event can turn a partial `response.completed` into a completed turn.
 func (d *responsesSSEDecoder) pull() {
 	var data []byte
 	var eventName string
@@ -133,8 +210,7 @@ func (d *responsesSSEDecoder) pull() {
 		var line []byte
 		line, readErr = d.readLine()
 		trimmed := bytes.TrimRight(line, "\r\n")
-		switch {
-		case len(trimmed) == 0 && len(line) > 0:
+		if len(trimmed) == 0 && len(line) > 0 {
 			// A blank line ends the frame.
 			if len(data) > 0 {
 				d.dispatch(data, eventName)
@@ -143,7 +219,9 @@ func (d *responsesSSEDecoder) pull() {
 			if readErr == nil {
 				continue
 			}
-		case len(trimmed) > 0 && trimmed[0] != ':':
+			break
+		}
+		if len(trimmed) > 0 && trimmed[0] != ':' {
 			name, value, _ := bytes.Cut(trimmed, []byte(":"))
 			if len(value) > 0 && value[0] == ' ' {
 				value = value[1:]
@@ -157,56 +235,72 @@ func (d *responsesSSEDecoder) pull() {
 			}
 		}
 		if readErr != nil {
-			// EOF, possibly with one last frame that lacked its terminating
-			// blank line: dispatch what arrived and let the dispatch decide
-			// whether the stream actually completed.
-			if len(data) > 0 {
-				d.dispatch(data, eventName)
-				return
-			}
 			break
 		}
 	}
-	if readErr != nil && readErr != io.EOF {
-		d.emitStreamError("api_error", fmt.Sprintf("llm: openai-responses: stream read failed: %v", readErr))
-		return
-	}
-	if !d.done {
-		// A stream that ends with no terminal event never completed the
-		// response: surfacing it beats silently persisting a truncated turn.
+	d.failRead(readErr, len(data) > 0)
+}
+
+// failRead reports the read failure that ended the stream, split by whether a
+// retry can plausibly help:
+//
+//   - an over-long line is DETERMINISTIC: the same request produces it again, so
+//     it is non-retryable (see errResponsesLineTooLong);
+//   - any other read failure, and a stream that ends without a terminal event,
+//     is transient: a dead connection or a silent backend is worth re-issuing.
+//
+// partial says a frame was cut short by the failure, which is always reported as
+// truncated (it is never dispatched).
+func (d *responsesSSEDecoder) failRead(err error, partial bool) {
+	switch {
+	case errors.Is(err, errResponsesLineTooLong):
+		d.emitStreamError("invalid_request_error", err.Error())
+	case err != nil && !errors.Is(err, io.EOF):
+		d.emitStreamError("api_error", fmt.Sprintf("llm: openai-responses: stream read failed: %v", err))
+	case d.done:
+		// A terminal event was already processed; the stream simply ended.
+	case partial || err != nil:
 		d.emitStreamError("api_error", "llm: openai-responses: stream ended without response.completed, response.incomplete or response.failed (response truncated)")
-		return
+	default:
+		d.done = true
 	}
-	d.done = true
 }
 
 // readLine returns one line INCLUDING its terminator (which the caller may
-// ignore), or the bytes read before EOF alongside that error. Reading is
-// length-capped and, when an idle timeout is configured, time-capped: the read
-// runs in its own goroutine and a timeout closes the body (which is what
-// unblocks it) before reporting a transient failure.
+// ignore), or the bytes read before EOF alongside that error.
+//
+// Reading is time-capped when an idle timeout is configured. The timeout does
+// not race the reader: it stops it (closing the body) and reports the timeout,
+// so after it fires no code reads the buffered reader ever again.
 func (d *responsesSSEDecoder) readLine() ([]byte, error) {
-	if d.idle <= 0 {
-		return d.readLineCapped()
+	if d.idle > 0 {
+		timer := time.NewTimer(d.idle)
+		defer timer.Stop()
+		select {
+		case r, ok := <-d.lines:
+			if !ok {
+				return nil, d.readEnded()
+			}
+			return r.line, r.err
+		case <-timer.C:
+			d.stopReading(errResponsesIdleTimeout)
+			return nil, errResponsesIdleTimeout
+		}
 	}
-	type result struct {
-		line []byte
-		err  error
+	r, ok := <-d.lines
+	if !ok {
+		return nil, d.readEnded()
 	}
-	ch := make(chan result, 1)
-	go func() {
-		line, err := d.readLineCapped()
-		ch <- result{line, err}
-	}()
-	select {
-	case r := <-ch:
-		return r.line, r.err
-	case <-time.After(d.idle):
-		// Closing the body is what releases the reader goroutine; the write to
-		// ch is buffered so it cannot leak even if nobody is listening.
-		_ = d.rc.Close()
-		return nil, errResponsesIdleTimeout
+	return r.line, r.err
+}
+
+// readEnded is what a closed lines channel means: whichever cause stopped the
+// reader, or a clean EOF when nothing did.
+func (d *responsesSSEDecoder) readEnded() error {
+	if d.stopErr != nil {
+		return d.stopErr
 	}
+	return io.EOF
 }
 
 // errResponsesIdleTimeout marks the idle-timeout read failure. It never escapes
@@ -214,16 +308,41 @@ func (d *responsesSSEDecoder) readLine() ([]byte, error) {
 // silent backend is a retryable condition, not a broken turn.
 var errResponsesIdleTimeout = fmt.Errorf("idle timeout")
 
-// readLineCapped reads one line, allowing up to responsesMaxLineBytes. It is the
+// errResponsesClosed marks a stream the caller closed before it finished. It is
+// not an error to report: reading simply stops.
+var errResponsesClosed = fmt.Errorf("stream closed")
+
+// errResponsesLineTooLong marks a line that exceeded the cap. It is DETERMINISTIC
+// (the same request produces the same oversized line), so pull classifies it as
+// non-retryable; a malformed payload, which may be a one-off corruption, stays
+// transient.
+type responsesLineTooLongError struct {
+	limit int
+}
+
+func (e *responsesLineTooLongError) Error() string {
+	return fmt.Sprintf("llm: openai-responses: stream line exceeds %d bytes", e.limit)
+}
+
+func (e *responsesLineTooLongError) Is(target error) bool {
+	_, ok := target.(*responsesLineTooLongError)
+	return ok
+}
+
+// errResponsesLineTooLong is the sentinel every overflow matches, whatever the
+// cap was.
+var errResponsesLineTooLong = &responsesLineTooLongError{}
+
+// readLineCapped reads one line, allowing up to d.maxLineBytes. It is the
 // explicit replacement for bufio.Scanner's fixed 64 KiB ceiling (see
-// responsesMaxLineBytes).
-func (d *responsesSSEDecoder) readLineCapped() ([]byte, error) {
+// responsesMaxLineBytes). Only the reader goroutine calls it.
+func (d *responsesSSEDecoder) readLineCapped(br *bufio.Reader) ([]byte, error) {
 	var buf []byte
 	for {
-		frag, err := d.br.ReadSlice('\n')
+		frag, err := br.ReadSlice('\n')
 		buf = append(buf, frag...)
-		if len(buf) > responsesMaxLineBytes {
-			return nil, fmt.Errorf("llm: openai-responses: stream line exceeds %d bytes", responsesMaxLineBytes)
+		if len(buf) > d.maxLineBytes {
+			return nil, &responsesLineTooLongError{limit: d.maxLineBytes}
 		}
 		if err == bufio.ErrBufferFull {
 			continue
@@ -367,11 +486,25 @@ func (d *responsesSSEDecoder) openItem(item responsesOutputItem, idx int) {
 // signature first (id plus encrypted content, in the format
 // responsesSignature writes), and is what makes the reasoning resendable on the
 // next turn.
+//
+// A reasoning item with NO encrypted content is still signed, with an empty blob
+// ("openai-responses:<id>:"). The signature is not only a resend token: it is how
+// the block announces which provider owns it. An unsigned thinking block is
+// indistinguishable from an Anthropic one, so StripForeignThinking keeps it on a
+// failover to an Anthropic API-key provider, which then rejects a signature it
+// cannot verify. With the empty-blob signature the block is recognisably ours
+// (Anthropic strips it) while this sender still drops it when resending (the
+// parsed blob is empty, so there is nothing to resume).
+//
+// A done for an index whose block is already closed (a late event under
+// interleaving) is ignored: reopening it would duplicate a tool_use block.
 func (d *responsesSSEDecoder) finishItem(item responsesOutputItem, idx int) {
+	if d.closedBlocks[idx] {
+		return
+	}
 	if d.active == nil || d.active.outputIndex != idx {
-		// The item never had an `added` event (or its block was already closed
-		// by a newer one). Open it now so a done-only item still reaches the
-		// caller, then close it below.
+		// The item had no `added` event, so nothing is open for it. Open it now
+		// so a done-only item still reaches the caller, then close it below.
 		d.openItem(item, idx)
 		if d.active == nil {
 			return
@@ -385,9 +518,11 @@ func (d *responsesSSEDecoder) finishItem(item responsesOutputItem, idx int) {
 				d.emitThinkingDelta(d.active.index, text)
 			}
 		}
-		if item.EncryptedContent != "" {
-			d.emitSignatureDelta(d.active.index, responsesSignature(d.active.itemID, item.EncryptedContent))
+		id := item.ID
+		if id == "" {
+			id = d.active.itemID
 		}
+		d.emitSignatureDelta(d.active.index, responsesSignature(id, item.EncryptedContent))
 	case responsesBlockTool:
 		if item.CallID != "" {
 			d.active.itemID = item.CallID
@@ -456,12 +591,13 @@ func (d *responsesSSEDecoder) failEvent(ev responsesStreamEvent) {
 // need a Go type are set as the decoder's error, everything else becomes an
 // in-band error event the stream classifiers can read.
 func (d *responsesSSEDecoder) failWith(env responsesAPIErrorEnvelope) {
-	code, _, message, _ := env.info()
+	_, _, message, _ := env.info()
 	if u := responsesUsageLimitFromEvent(env); u != nil {
 		d.err = u
 		d.done = true
 		return
 	}
+	code := responsesErrorCode(env)
 	switch code {
 	case "context_length_exceeded":
 		d.err = newResponsesPromptTooLargeError(message)
@@ -477,6 +613,27 @@ func (d *responsesSSEDecoder) failWith(env responsesAPIErrorEnvelope) {
 		// yet must not fail an otherwise-recoverable turn.
 		d.emitStreamError("api_error", responsesErrorText(code, message))
 	}
+}
+
+// responsesErrorCode picks the name to classify an endpoint error on: the first
+// one this decoder recognises, else the first the payload names ("" when it names
+// none). It reads every name the payload carries because the endpoint puts the
+// meaningful code in either field: codex keys on `type`, and a payload whose
+// `code` is something else must not fall through to "unknown, therefore
+// transient".
+func responsesErrorCode(env responsesAPIErrorEnvelope) string {
+	codes := env.codes()
+	for _, c := range codes {
+		switch c {
+		case "context_length_exceeded", "invalid_prompt", "cyber_policy",
+			"rate_limit_exceeded", "slow_down", "server_is_overloaded":
+			return c
+		}
+	}
+	if len(codes) > 0 {
+		return codes[0]
+	}
+	return ""
 }
 
 // responsesErrorText renders one endpoint error for a stream event message,
@@ -526,6 +683,11 @@ func (d *responsesSSEDecoder) closeActiveBlock() {
 		return
 	}
 	d.emit("content_block_stop", responsesEventBlockStop{Type: "content_block_stop", Index: d.active.index})
+	// Remember the index: a later done for a block that is no longer open must
+	// not reopen it (see finishItem).
+	if d.closedBlocks != nil {
+		d.closedBlocks[d.active.outputIndex] = true
+	}
 	d.active = nil
 }
 
@@ -831,10 +993,10 @@ type responsesEventErrorBody struct {
 // parseResponsesResponse translates a complete (stream:false) Responses body into
 // an *anthropic.Message, the shape every rafiki caller already consumes. It is
 // the non-streaming twin of responsesSSEDecoder and shares its item handling
-// rules: function calls become tool_use blocks keyed by call_id, reasoning items
-// become thinking blocks carrying the Responses signature, and a reasoning item
-// with no encrypted content is dropped (a thinking block with an empty signature
-// would be unverifiable for every provider).
+// rules: function calls become tool_use blocks keyed by call_id, and reasoning
+// items become thinking blocks carrying the Responses signature (empty blob when
+// the item carried no encrypted content: see finishItem for why it is still
+// signed).
 func parseResponsesResponse(resp *responsesResponseObject) (*anthropic.Message, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("llm: openai-responses: response body carries no response object")
@@ -874,9 +1036,9 @@ func parseResponsesResponse(resp *responsesResponseObject) (*anthropic.Message, 
 			})
 			sawTool = true
 		case "reasoning":
-			if item.EncryptedContent == "" {
-				continue
-			}
+			// Always signed, even with no encrypted content: the signature is
+			// what marks the block as Responses-owned so an Anthropic failover
+			// strips it instead of rejecting it (see finishItem).
 			msg.Content = append(msg.Content, anthropic.ContentBlockUnion{
 				Type:      "thinking",
 				Thinking:  responsesSummaryText(item.Summary),
@@ -918,7 +1080,8 @@ func responsesTerminalError(e responsesAPIError) error {
 	if u := responsesUsageLimitFromEvent(env); u != nil {
 		return u
 	}
-	code, _, message, _ := env.info()
+	_, _, message, _ := env.info()
+	code := responsesErrorCode(env)
 	if code == "context_length_exceeded" {
 		return newResponsesPromptTooLargeError(message)
 	}

@@ -71,6 +71,13 @@ func ParseResponsesSignature(sig string) (id, blob string, ok bool) {
 // silently loses the reasoning rather than failing. Dropping the foreign block
 // is the one behavior both sides agree on.
 //
+// Stripping is not free: a message whose only non-text block was foreign can be
+// left with no thinking block at all, and an extended-thinking Anthropic provider
+// may reject an assistant turn that carries text but no thinking after one that
+// had it. That consequence is accepted by the design: a turn that cannot resume
+// its reasoning is still a turn that can continue, where a signature the provider
+// rejects fails the request outright.
+//
 // Shared by sender failover (both senders below) and conversation cloning, which
 // is why it is exported and takes no receiver.
 func StripForeignThinking(msgs []anthropic.MessageParam, forResponses bool) []anthropic.MessageParam {

@@ -219,48 +219,61 @@ func responsesGoldenParams(t *testing.T) anthropic.MessageNewParams {
 // hand-built std_turn2 capture (the STANDARD Responses shape). The codex
 // captures (turn1/turn2 without the std_ prefix) are the lite dialect and are
 // reference only: they are not a translation target.
+//
+// This compares the WHOLE request document, value for value, minus four
+// documented exclusions (below). Comparing only item types let the contents drift:
+// the text parts, the function-call arguments, the tool-result output (the string
+// and the image-array form) and the presence or absence of every optional
+// top-level key are all pinned here.
 func TestResponsesGoldenRequestTranslation(t *testing.T) {
 	c := assert.NewCollecting(t)
 	fixtureRaw, err := os.ReadFile(responsesFixtureReq2)
 	c.Require().NoError(err, "read request fixture")
-	var want map[string]any
+	// Two decodes of each document: one to normalise for the diff, one pristine for
+	// the assertions about the fields the normalisation removes.
+	var want, wantPristine map[string]any
 	c.Require().NoError(json.Unmarshal(fixtureRaw, &want), "unmarshal request fixture")
+	c.Require().NoError(json.Unmarshal(fixtureRaw, &wantPristine), "unmarshal request fixture")
 
-	gotRaw, err := buildResponsesRequestBody(responsesGoldenParams(t), responsesBuildOptions{
+	// Facts allow summary but NOT verbosity, which is the shape the fixture pins:
+	// the hand-built capture carries "reasoning":{"effort","summary"} and no
+	// "text" key at all.
+	params := responsesGoldenParams(t)
+	gotRaw, err := buildResponsesRequestBody(params, responsesBuildOptions{
 		chatGPT:   true,
 		stream:    true,
 		sessionID: "74f25229-6e30-4eb3-9e3f-24b777c4f083",
 		facts: func(string) (ModelFact, bool) {
-			return ModelFact{SupportsReasoningSummary: true, SupportsVerbosity: true, DefaultVerbosity: "low"}, true
+			return ModelFact{SupportsReasoningSummary: true}, true
 		},
 	})
 	c.Require().NoError(err, "buildResponsesRequestBody")
-	var got map[string]any
+	var got, gotPristine map[string]any
 	c.Require().NoError(json.Unmarshal(gotRaw, &got), "unmarshal built request")
+	c.Require().NoError(json.Unmarshal(gotRaw, &gotPristine), "unmarshal built request")
 
-	// Input item types and order.
-	wantTypes := inputItemTypes(want["input"])
-	gotTypes := inputItemTypes(got["input"])
-	c.Eq("message,reasoning,function_call,function_call_output", strings.Join(wantTypes, ","), "fixture input item order")
-	c.Eq(strings.Join(wantTypes, ","), strings.Join(gotTypes, ","), "input item types and order")
+	// The four exclusions, each applied to BOTH sides by the same function so a
+	// field cannot be dropped from one and kept in the other by accident.
+	c.EqDiff(goldenShape(want, c), goldenShape(got, c), "request document")
 
-	// The scalar structural fields the fixture pins.
-	for _, key := range []string{"model", "instructions", "tool_choice", "parallel_tool_calls", "store", "stream", "prompt_cache_key"} {
-		c.EqDiff(want[key], got[key], "%s", key)
-	}
-	c.EqDiff(want["include"], got["include"], "include")
-	c.EqDiff(want["reasoning"], got["reasoning"], "reasoning")
+	// The one exclusion that removes a field we DO send: the fixture omits
+	// max_output_tokens, and this sender always sends it. Assert it here rather
+	// than in the diff.
+	c.EqDiff(any(float64(params.MaxTokens)), gotPristine["max_output_tokens"], "max_output_tokens is always sent")
+	c.NotHasKey(wantPristine, "max_output_tokens", "exclusion 1 no longer applies: the fixture gained max_output_tokens")
 
-	// tools: the fixture's parameters carry additionalProperties:false, a
-	// JSON-schema keyword an Anthropic ToolInputSchemaParam cannot express (see
-	// responsesToolSchema), so it is normalised out of both sides before the
-	// comparison rather than invented on the wire.
-	c.EqDiff(normaliseToolParameters(want["tools"]), normaliseToolParameters(got["tools"]), "tools")
+	// Exclusions 2 and 3 remove fields the fixture carries and we never send.
+	// Assert the omission, so re-adding one of them fails loudly.
+	call := findInputItem(c, gotPristine, "function_call")
+	c.NotHasKey(call, "id", "a function_call item must never carry an id")
+	c.NotHasKey(call, "status", "a function_call item must never carry a status")
+	c.NotHasKey(findInputItem(c, gotPristine, "reasoning"), "content", "a reasoning item must never carry a content array")
+	c.HasKey(findInputItem(c, wantPristine, "function_call"), "id", "exclusion 2 no longer applies: the fixture dropped the id")
 
 	// The documented three-argument entry point is this same builder with no
 	// facts known and ChatGPT-mode streaming defaults: pin that it is wired to
 	// the one builder (and that with no facts nothing claims summary support).
-	plainRaw, err := buildResponsesRequest(responsesGoldenParams(t), true, "sess")
+	plainRaw, err := buildResponsesRequest(params, true, "sess")
 	c.Require().NoError(err, "buildResponsesRequest")
 	var plain map[string]any
 	c.Require().NoError(json.Unmarshal(plainRaw, &plain), "unmarshal body")
@@ -269,7 +282,71 @@ func TestResponsesGoldenRequestTranslation(t *testing.T) {
 	plainReasoning, _ := plain["reasoning"].(map[string]any)
 	c.EqDiff(any("high"), plainReasoning["effort"], "effort")
 	c.NotHasKey(plainReasoning, "summary", "with no facts, ChatGPT mode must not claim summary support")
-	c.EqDiff(strings.Join(gotTypes, ","), strings.Join(inputItemTypes(plain["input"]), ","), "input item order")
+	c.EqDiff(strings.Join(inputItemTypes(got["input"]), ","), strings.Join(inputItemTypes(plain["input"]), ","), "input item order")
+}
+
+// goldenShape applies the four documented exclusions to a request document, in
+// place (the map is the test's own decoded copy, never a caller's params). It
+// returns the same map for chaining.
+//
+// The exclusions are exactly the fields this translation cannot express or has
+// decided never to send, and nothing else:
+//
+//  1. top-level "max_output_tokens": the fixture predates the always-send rule.
+//     Asserted separately as present.
+//  2. "id" and "status" on a function_call item: an Anthropic tool_use block has
+//     nowhere to keep the endpoint's fc_… item id, and the endpoint rejects any
+//     other prefix (a resent toolu_… id after failover would be one), while
+//     status is server-assigned. Both are asserted absent separately.
+//  3. "content" on a reasoning item: an empty content array. An Anthropic
+//     thinking block cannot carry a second content list, and spike B4 confirmed
+//     the endpoint accepts a reasoning item without it.
+//  4. "additionalProperties" inside a tool's parameters: an
+//     anthropic.ToolInputSchemaParam has no field for it, so reproducing it
+//     would mean inventing a schema keyword that silently narrows a caller's
+//     schema.
+func goldenShape(doc map[string]any, c *assert.C) map[string]any {
+	delete(doc, "max_output_tokens")
+	items, _ := doc["input"].([]any)
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch item["type"] {
+		case "function_call":
+			delete(item, "id")
+			delete(item, "status")
+		case "reasoning":
+			delete(item, "content")
+		}
+	}
+	tools, _ := doc["tools"].([]any)
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if p, ok := tool["parameters"].(map[string]any); ok {
+			delete(p, "additionalProperties")
+		}
+	}
+	c.Require().NotEmpty(doc["input"], "input items")
+	return doc
+}
+
+// findInputItem returns the first input item of a given type, failing the test
+// when the document has none.
+func findInputItem(c *assert.C, doc map[string]any, typ string) map[string]any {
+	items, _ := doc["input"].([]any)
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if ok && item["type"] == typ {
+			return item
+		}
+	}
+	c.Fail("no %q input item in the request document", typ)
+	return map[string]any{}
 }
 
 // inputItemTypes lists the "type" of every input item, in order.
@@ -280,39 +357,6 @@ func inputItemTypes(v any) []string {
 		m, _ := it.(map[string]any)
 		s, _ := m["type"].(string)
 		out = append(out, s)
-	}
-	return out
-}
-
-// normaliseToolParameters strips the one schema keyword the Anthropic tool shape
-// cannot carry, so a fixture written with it still compares.
-func normaliseToolParameters(v any) any {
-	tools, ok := v.([]any)
-	if !ok {
-		return v
-	}
-	out := make([]any, len(tools))
-	for i, tool := range tools {
-		m, ok := tool.(map[string]any)
-		if !ok {
-			out[i] = tool
-			continue
-		}
-		clone := make(map[string]any, len(m))
-		for k, v := range m {
-			clone[k] = v
-		}
-		if params, ok := clone["parameters"].(map[string]any); ok {
-			cp := make(map[string]any, len(params))
-			for k, v := range params {
-				if k == "additionalProperties" {
-					continue
-				}
-				cp[k] = v
-			}
-			clone["parameters"] = cp
-		}
-		out[i] = clone
 	}
 	return out
 }
@@ -816,7 +860,7 @@ func TestResponsesUsageLimitIsTerminal(t *testing.T) {
 	c.Eq(time.Unix(1900000000, 0).UTC().Format(time.RFC3339), u.ResetsAt.UTC().Format(time.RFC3339), "resets_at")
 	var apiErr *anthropic.Error
 	c.False(errors.As(err, &apiErr), "UsageLimitError must not be an *anthropic.Error")
-	c.StrContains(err.Error(), "ChatGPT usage limit reached (usage_limit_reached, plan plus); resets at ", "error text")
+	c.StrContains(err.Error(), "provider usage limit reached (usage_limit_reached, plan plus); resets at ", "error text")
 	for _, forbidden := range []string{"EOF", "connection reset", "broken pipe", "i/o timeout", "tls:"} {
 		c.NotStrContains(err.Error(), forbidden, "error text must not contain %q (agentloop would retry it)", forbidden)
 	}
@@ -1012,13 +1056,22 @@ func TestResponsesLargeEventLine(t *testing.T) {
 }
 
 // TestResponsesStreamIdleTimeout pins the idle timeout: a backend that goes
-// silent after the first event is a transient failure, not a hung turn.
+// silent mid-frame is a transient failure, not a hung turn, and the half frame it
+// left behind is never dispatched.
+//
+// The partial-frame half is the concurrency half: the timeout must STOP the
+// reader (closing the body) rather than race a second goroutine over the same
+// bufio.Reader, and a `data:` line without its terminating blank line is not an
+// event. Run under -race, this is the test that pins it.
 func TestResponsesStreamIdleTimeout(t *testing.T) {
 	c := assert.NewCollecting(t)
 	done := make(chan struct{})
 	s := newResponsesSenderForTest(t, "k", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		// One complete frame, then the beginning of a second one: the data line
+		// arrives, its blank line never does.
 		_, _ = io.WriteString(w, responsesSSE(`{"type":"response.created","response":{"id":"resp_1","model":"m"}}`))
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"leaked\"}\n")
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -1032,9 +1085,14 @@ func TestResponsesStreamIdleTimeout(t *testing.T) {
 
 	stream, err := s.NewStreaming(context.Background(), minimalParams())
 	c.Require().NoError(err, "NewStreaming")
-	_, _, serr := runResponsesStream(t, stream)
+	types, acc, serr := runResponsesStream(t, stream)
 	c.Require().Error(serr, "stream error")
 	c.True(IsTransientStreamError(serr), "IsTransientStreamError")
+	c.NotContains(types, "content_block_delta", "the partial frame was dispatched")
+	c.NotContains(types, "content_block_start", "the partial frame was dispatched")
+	for _, b := range acc.Content {
+		c.NotEq("leaked", b.Text, "the partial frame's text reached the message")
+	}
 }
 
 // ---- transport behaviour ----
@@ -1215,4 +1273,205 @@ func TestResponsesNonStreamingResponse(t *testing.T) {
 	c.Eq(int64(15), msg.Usage.InputTokens, "input tokens (20 - 5 cached)")
 	c.Eq(int64(5), msg.Usage.CacheReadInputTokens, "cache read tokens")
 	c.Eq(int64(7), msg.Usage.OutputTokens, "output tokens")
+}
+
+// ---- fix round: reasoning without encrypted content ----
+
+// TestResponsesReasoningWithoutEncryptedContentStillSigned pins both halves of the
+// always-sign rule. A reasoning item with no encrypted_content still becomes a
+// SIGNED thinking block, with an empty blob, so:
+//
+//	half 1: the block is recognisably Responses-owned, so a failover to an
+//	        Anthropic provider strips it instead of rejecting a signature it
+//	        cannot verify; and
+//	half 2: this sender drops it on resend, because the parsed blob is empty.
+func TestResponsesReasoningWithoutEncryptedContentStillSigned(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sse := responsesSSE(
+		`{"type":"response.created","response":{"id":"resp_ns","model":"m"}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_nosig","summary":[]}}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_nosig","summary":[]}}`,
+		responsesCompleted(``),
+	)
+	s := newResponsesSenderForTest(t, "k", openAIStreamHandler(sse))
+	stream, err := s.NewStreaming(context.Background(), minimalParams())
+	c.Require().NoError(err, "NewStreaming")
+	_, acc, serr := runResponsesStream(t, stream)
+	c.Require().NoError(serr, "stream error")
+	c.Require().Len(acc.Content, 1, "blocks")
+	c.Eq("thinking", string(acc.Content[0].Type), "block type")
+	sig := acc.Content[0].Signature
+	c.Eq(ResponsesSignaturePrefix+"rs_nosig:", sig, "an unsigned reasoning item still gets a signature with an empty blob")
+	c.True(IsResponsesSignature(sig), "IsResponsesSignature")
+	id, blob, ok := ParseResponsesSignature(sig)
+	c.True(ok, "ParseResponsesSignature(%q)", sig)
+	c.Eq("rs_nosig", id, "item id")
+	c.Eq("", blob, "blob")
+
+	// Half 1: the Anthropic direction strips it, so no unverifiable signature can
+	// reach an Anthropic provider after a failover.
+	history := []anthropic.MessageParam{
+		{Role: "user", Content: []anthropic.ContentBlockParamUnion{
+			{OfText: &anthropic.TextBlockParam{Text: "hi"}},
+		}},
+		{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
+			{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "", Signature: sig}},
+			{OfText: &anthropic.TextBlockParam{Text: "answer"}},
+		}},
+	}
+	towardAnthropic := StripForeignThinking(history, false)
+	c.Require().Len(towardAnthropic[1].Content, 1, "assistant blocks toward Anthropic")
+	kept := towardAnthropic[1].Content[0]
+	c.True(kept.OfText != nil, "kept block is %v, want the text block", kept.GetType())
+
+	// Half 2: this sender drops it on resend (nothing to resume).
+	body, err := buildResponsesRequestBody(anthropic.MessageNewParams{
+		Model:     "gpt-6.1-sol",
+		MaxTokens: 64,
+		Messages:  history,
+	}, responsesBuildOptions{chatGPT: true, stream: true})
+	c.Require().NoError(err, "buildResponsesRequestBody")
+	var wire map[string]any
+	c.Require().NoError(json.Unmarshal(body, &wire), "unmarshal body")
+	c.EqDiff("message,message", strings.Join(inputItemTypes(wire["input"]), ","), "input item types")
+}
+
+// ---- fix round: deterministic vs transient reader failures ----
+
+// TestResponsesLineCapOverflowNotRetried pins the split between the two reader
+// failures: an over-long line is deterministic (the same request produces it
+// again) so it must never be retried, while a malformed payload may be one-off
+// corruption and stays transient.
+func TestResponsesLineCapOverflowNotRetried(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// A cap a few bytes long: the very first data line overflows it, so no 64 MiB
+	// string has to be materialised to exercise the bound.
+	long := responsesSSE(
+		`{"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		`{"type":"response.output_text.delta","output_index":0,"delta":"`+strings.Repeat("x", 512)+`"}`,
+	)
+	s := newResponsesSenderForTest(t, "k", openAIStreamHandler(long))
+	s.maxLineBytes = 64
+	stream, err := s.NewStreaming(context.Background(), minimalParams())
+	c.Require().NoError(err, "NewStreaming")
+	_, _, serr := runResponsesStream(t, stream)
+	c.Require().Error(serr, "stream error")
+	c.StrContains(serr.Error(), "stream line exceeds", "error")
+	c.False(IsTransientStreamError(serr), "an over-long line is deterministic and must not be retried")
+	c.False(IsRateLimitStreamError(serr), "an over-long line is not a rate limit")
+
+	// A malformed payload stays transient: the parser cannot know whether the
+	// corruption will repeat.
+	bad := responsesSSE(
+		`{"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		`not-json`,
+	)
+	badSender := newResponsesSenderForTest(t, "k", openAIStreamHandler(bad))
+	badStream, err := badSender.NewStreaming(context.Background(), minimalParams())
+	c.Require().NoError(err, "NewStreaming")
+	_, _, badErr := runResponsesStream(t, badStream)
+	c.Require().Error(badErr, "stream error")
+	c.True(IsTransientStreamError(badErr), "a malformed payload stays transient")
+}
+
+// ---- fix round: non-streamed context overflow, usage limit by type ----
+
+// TestResponsesHTTPContextOverflowIsPromptTooLarge pins the non-streamed trim path:
+// a 400 whose body carries context_length_exceeded must be an error the trim
+// predicate recognizes, or TrimPolicy never fires on this provider.
+func TestResponsesHTTPContextOverflowIsPromptTooLarge(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := newResponsesSenderForTest(t, "k", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window"}}`)
+	})
+	_, err := s.New(context.Background(), minimalParams())
+	c.Require().Error(err, "New")
+	c.True(IsPromptTooLarge(err), "IsPromptTooLarge(%T) = false, so trimming never fires", err)
+	c.StrContains(err.Error(), "context window", "error keeps the endpoint's detail")
+
+	// An ordinary 400 is still an ordinary non-retryable HTTP error.
+	plain := newResponsesSenderForTest(t, "k", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad request"}}`)
+	})
+	_, err = plain.New(context.Background(), minimalParams())
+	c.Require().Error(err, "New")
+	var apiErr *anthropic.Error
+	c.True(errors.As(err, &apiErr), "error %T is not an *anthropic.Error", err)
+	c.Eq(http.StatusBadRequest, apiErr.StatusCode, "status")
+	c.False(IsPromptTooLarge(err), "an ordinary 400 is not a context overflow")
+}
+
+// TestResponsesUsageLimitMatchesTypeNotJustCode pins the code/type rule: the
+// endpoint does not keep the two fields distinct, and codex classifies on TYPE, so
+// a usage limit whose code says something else must still be terminal.
+func TestResponsesUsageLimitMatchesTypeNotJustCode(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := newResponsesSenderForTest(t, "k", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"type":"usage_limit_reached","code":"rate_limit_error","plan_type":"pro","resets_at":1900000000}}`)
+	})
+	_, err := s.New(context.Background(), minimalParams())
+	c.Require().Error(err, "New")
+	var u *UsageLimitError
+	c.True(errors.As(err, &u), "error %T is not a *UsageLimitError", err)
+	c.Eq("usage_limit_reached", u.Code, "code comes from the type field")
+	c.Eq("pro", u.PlanType, "plan")
+	isRL, _ := isRateLimit(err)
+	c.False(isRL, "a usage limit must not be retried as a rate limit")
+
+	// The same shape in-stream.
+	sse := responsesSSE(
+		`{"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		`{"type":"error","code":"rate_limit_exceeded","error":{"type":"usage_limit_reached","plan_type":"pro"}}`,
+	)
+	streamSender := newResponsesSenderForTest(t, "k", openAIStreamHandler(sse))
+	stream, serr := streamSender.NewStreaming(context.Background(), minimalParams())
+	c.Require().NoError(serr, "NewStreaming")
+	_, _, err = runResponsesStream(t, stream)
+	c.Require().Error(err, "stream error")
+	c.True(errors.As(err, &u), "stream error %T is not a *UsageLimitError", err)
+}
+
+// ---- fix round: interleaved output_item.done ----
+
+// TestResponsesInterleavedDoneDoesNotDuplicate pins that a late
+// response.output_item.done for an index whose block is already closed is ignored:
+// reopening it would emit a second block of the same kind (under interleaving, a
+// duplicate tool_use).
+func TestResponsesInterleavedDoneDoesNotDuplicate(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sse := responsesSSE(
+		`{"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant"}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"get_weather"}}`,
+		// Late done for index 0, whose text block was closed when index 1 opened.
+		`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"late"}]}}`,
+		`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"city\":\"Oslo\"}"}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Oslo\"}"}}`,
+		responsesCompleted(``),
+	)
+	s := newResponsesSenderForTest(t, "k", openAIStreamHandler(sse))
+	stream, err := s.NewStreaming(context.Background(), minimalParams())
+	c.Require().NoError(err, "NewStreaming")
+	types, acc, serr := runResponsesStream(t, stream)
+	c.Require().NoError(serr, "stream error")
+
+	var starts, stops int
+	for _, typ := range types {
+		switch typ {
+		case "content_block_start":
+			starts++
+		case "content_block_stop":
+			stops++
+		}
+	}
+	c.Eq(2, starts, "content blocks started")
+	c.Eq(2, stops, "content blocks stopped")
+	c.Require().Len(acc.Content, 2, "accumulated blocks")
+	c.Eq("text", string(acc.Content[0].Type), "block 0")
+	c.Eq("tool_use", string(acc.Content[1].Type), "block 1")
+	c.Eq("call_1", acc.Content[1].ID, "single tool_use block, keyed by call_id")
+	c.Eq("tool_use", string(acc.StopReason), "stop reason")
 }

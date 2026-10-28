@@ -117,6 +117,9 @@ type responsesSender struct {
 	// before declaring the connection dead. A field (not the package constant)
 	// so tests can shorten it.
 	streamIdleTimeout time.Duration
+	// maxLineBytes is the per-line ceiling handed to the stream decoder;
+	// responsesMaxLineBytes unless a test lowers it.
+	maxLineBytes int
 
 	// turnState is x-codex-turn-state, the sticky-routing token the ChatGPT
 	// backend issues and expects replayed within a turn. Codex scopes it to one
@@ -125,6 +128,12 @@ type responsesSender struct {
 	// per session, which spike 2 showed is accepted either way.
 	mu        sync.Mutex
 	turnState map[string]string
+
+	// zstdEnc is created once per sender and reused: a fresh encoder per request
+	// allocates its window per turn, and the window is the expensive part. The
+	// mutex is what makes reuse safe (an encoder is not reentrant), and it is the
+	// same mutex as the turn-state map's only for convenience.
+	zstdEnc *zstd.Encoder
 }
 
 // newResponsesSender builds the KindOpenAIResponses sender, the api-key
@@ -139,6 +148,7 @@ func newResponsesSender(p providers.Provider, key string, rt http.RoundTripper) 
 		tokens:            StaticToken(key),
 		client:            &http.Client{Transport: headerCaptureTransport{base: rt}},
 		streamIdleTimeout: defaultResponsesStreamIdleTimeout,
+		maxLineBytes:      responsesMaxLineBytes,
 	}, nil
 }
 
@@ -169,6 +179,7 @@ func NewChatGPTResponsesSender(p providers.Provider, ts TokenSource, facts Model
 		facts:             facts,
 		client:            &http.Client{Transport: headerCaptureTransport{base: rt}, Jar: jar},
 		streamIdleTimeout: defaultResponsesStreamIdleTimeout,
+		maxLineBytes:      responsesMaxLineBytes,
 	}, nil
 }
 
@@ -246,7 +257,7 @@ func (s *responsesSender) NewStreaming(ctx context.Context, params anthropic.Mes
 		// errorFor only returns nil for a 2xx; defensive.
 		return nil, &anthropic.Error{StatusCode: resp.StatusCode, Request: req, Response: resp}
 	}
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](newResponsesSSEDecoder(resp.Body, s.streamIdleTimeout), nil), nil
+	return ssestream.NewStream[anthropic.MessageStreamEventUnion](newResponsesSSEDecoder(resp.Body, s.streamIdleTimeout, s.maxLineBytes), nil), nil
 }
 
 // post issues one request, retrying once after a 401 with a forced credential
@@ -308,12 +319,16 @@ func (s *responsesSender) encodeBody(body []byte) ([]byte, error) {
 	if !s.chatGPT {
 		return body, nil
 	}
-	enc, err := zstd.NewWriter(nil)
-	if err != nil {
-		return nil, fmt.Errorf("llm: openai-responses: zstd encoder: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.zstdEnc == nil {
+		enc, err := zstd.NewWriter(nil)
+		if err != nil {
+			return nil, fmt.Errorf("llm: openai-responses: zstd encoder: %w", err)
+		}
+		s.zstdEnc = enc
 	}
-	defer enc.Close()
-	return enc.EncodeAll(body, nil), nil
+	return s.zstdEnc.EncodeAll(body, nil), nil
 }
 
 // newRequest builds one request with every header the mode requires.
@@ -355,7 +370,9 @@ func (s *responsesSender) newRequest(ctx context.Context, payload []byte, stream
 }
 
 // errorFor classifies a non-2xx response. A subscription usage limit becomes its
-// own terminal type; everything else is an *anthropic.Error carrying the status,
+// own terminal type; a context-length overflow becomes the error pkg/llm's trim
+// predicate recognises (so a non-streamed send trims and retries instead of
+// failing the turn); everything else is an *anthropic.Error carrying the status,
 // exactly what openAISender.New returns, so pkg/agentloop's retry classification
 // works unchanged.
 func (s *responsesSender) errorFor(req *http.Request, resp *http.Response, body []byte) error {
@@ -364,6 +381,17 @@ func (s *responsesSender) errorFor(req *http.Request, resp *http.Response, body 
 	}
 	if u := responsesUsageLimitError(resp.StatusCode, resp.Header, body); u != nil {
 		return u
+	}
+	// The endpoint reports a context overflow in-band on the streaming path; a
+	// non-streamed call gets it as a 400 whose body carries the same code. Without
+	// this the body was discarded and IsPromptTooLarge could never be true, so
+	// TrimPolicy never fired on this provider.
+	if resp.StatusCode == http.StatusBadRequest {
+		env := decodeResponsesAPIError(body)
+		if responsesErrorCode(env) == "context_length_exceeded" {
+			_, _, message, _ := env.info()
+			return newResponsesPromptTooLargeError(message)
+		}
 	}
 	return &anthropic.Error{StatusCode: resp.StatusCode, Request: req, Response: resp}
 }
