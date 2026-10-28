@@ -597,13 +597,23 @@ func (conv *Conversation) appendMessage(ctx context.Context, param anthropic.Mes
 // fresh root — the bridge for hosts carrying client-side history (e.g. a fundi
 // prefill, a Slack thread continuation). An existing prefix is matched by node
 // hash, so only the missing suffix is inserted and a partial earlier seed is
-// completed rather than duplicated.
+// completed rather than duplicated. A store-less conversation has no hashes to
+// match on, so there ORDINAL PLACEMENT is the invariant: message i lands at
+// ordinal i, replacing whatever held that ordinal, so re-seeding a prefix is
+// equally a no-op.
 func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
 	if conv.client.messages == nil {
-		for _, m := range msgs {
-			if _, err := conv.appendMessage(ctx, m, nil, ""); err != nil {
-				return err
+		for i, m := range msgs {
+			row := store.Message{ID: randomID(), Ordinal: i, Param: m, ToolUseIDs: store.ToolUseIDsOf(m)}
+			if i < len(conv.mem) {
+				// The row already at this ordinal keeps its identity: a re-seed
+				// of the same prefix must leave the history byte-identical, not
+				// merely the same length.
+				row.ID = conv.mem[i].ID
+				conv.mem[i] = row
+				continue
 			}
+			conv.mem = append(conv.mem, row)
 		}
 		return nil
 	}

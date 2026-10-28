@@ -106,11 +106,23 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 
 	if conv.client.messages == nil {
 		n := nextOrdinal(conv.mem)
+		summaryRow.ID = randomID()
 		summaryRow.Ordinal = n
 		conv.memHorizon = len(conv.mem)
 		conv.mem = append(conv.mem, summaryRow)
 		for i, t := range tail {
+			// Every copied row carries an identity of its own: RetractTailUser
+			// finds the tail user row by id, and a mid-send compaction sits
+			// between the write-ahead append and the retraction of it. The copy
+			// keeps the source row's id — in memory the row IS the same message,
+			// there is no new node to name — and a seeded row that arrived
+			// without one gets a fresh id.
+			id := t.ID
+			if id == "" {
+				id = randomID()
+			}
 			conv.mem = append(conv.mem, store.Message{
+				ID:         id,
 				Ordinal:    n + 1 + i,
 				Param:      t.Param,
 				ToolUseIDs: t.ToolUseIDs,
@@ -194,6 +206,7 @@ func (conv *Conversation) Clear(ctx context.Context) error {
 	if conv.client.messages == nil {
 		conv.memHorizon = len(conv.mem)
 		conv.mem = append(conv.mem, store.Message{
+			ID:      randomID(),
 			Ordinal: nextOrdinal(conv.mem),
 			Param:   boundary,
 			Kind:    ptr(store.KindClear),

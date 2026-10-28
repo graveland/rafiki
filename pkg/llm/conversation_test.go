@@ -670,38 +670,93 @@ func TestRetractTailUserLeavesLeaf(t *testing.T) {
 	ck.Error(conv.RetractTailUser(ctx, u.ID), "retracting a row that is not the head")
 }
 
-// TestResumeContinueIsIdempotent: reloading a conversation and reading its
-// history writes nothing — the stored path IS the history a Resume continues
-// from, so a resume cannot duplicate the reply it already holds.
+// TestResumeContinueIsIdempotent: a resumed conversation cannot duplicate what it
+// already holds — not by reloading it, not by re-seeding the prefix it was given,
+// and not by continuing it again.
+//
+// Store-backed, all three are no-ops: the seed chain matches by node hash, and a
+// re-sent reply lands under the same parent with the same content, so it IS the
+// node already there and the tree hands it back instead of writing a second copy.
+// A store-less conversation has no hashes to dedupe by, so ordinal placement is
+// the invariant instead: message i lives at ordinal i, so re-seeding a prefix
+// rewrites nothing.
 func TestResumeContinueIsIdempotent(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	pool := convTestPool(t)
-	ctx := context.Background()
-	c := testClient(t, pool, &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		respondText("the reply"),
-	}})
-	const ref = "resume-idempotent"
-	conv, err := c.Conversation(ctx, NewConversation("", "test"), ByExternalRef(ref), Model("claude-haiku-4-5"))
-	ck.Require().NoError(err)
+	t.Run("store", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		pool := convTestPool(t)
+		ctx := context.Background()
+		c := testClient(t, pool, &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+			respondText("the reply"),
+			respondText("the reply"),
+		}})
+		const ref = "resume-idempotent"
+		conv, err := c.Conversation(ctx, NewConversation("", "test"), ByExternalRef(ref), Model("claude-haiku-4-5"))
+		ck.Require().NoError(err)
 
-	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	before, err := conv.History(ctx)
-	ck.Require().NoError(err, "History")
-	ck.Require().Len(before, 2, "user + assistant")
+		if _, err := conv.Send(ctx, UserText("hello")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		before, err := conv.History(ctx)
+		ck.Require().NoError(err, "History")
+		ck.Require().Len(before, 2, "user + assistant")
 
-	reloaded, err := c.Conversation(ctx, NewConversation("", "test"), ByExternalRef(ref), Model("claude-haiku-4-5"))
-	ck.Require().NoError(err)
-	ck.Eq(conv.ID, reloaded.ID, "same conversation")
-	after, err := reloaded.History(ctx)
-	ck.Require().NoError(err, "History after reload")
-	ck.EqDeep(before, after, "the reloaded working path")
+		reloaded, err := c.Conversation(ctx, NewConversation("", "test"), ByExternalRef(ref), Model("claude-haiku-4-5"))
+		ck.Require().NoError(err)
+		ck.Eq(conv.ID, reloaded.ID, "same conversation")
+		after, err := reloaded.History(ctx)
+		ck.Require().NoError(err, "History after reload")
+		ck.EqDeep(before, after, "the reloaded working path")
 
-	var rows int
-	ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
-		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&rows), "count rows")
-	ck.Eq(2, rows, "reloading a conversation must write nothing")
+		// Re-seed the prefix the conversation was given, then continue again: the
+		// seed leaves the head on the row the reply was written under, so the
+		// re-sent reply is the node that is already there.
+		ck.Require().NoError(reloaded.SeedHistory(ctx, []Message{
+			anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
+		}), "re-seeding the same prefix")
+		if _, err := reloaded.Continue(ctx); err != nil {
+			t.Fatalf("Continue: %v", err)
+		}
+		resumed, err := reloaded.History(ctx)
+		ck.Require().NoError(err, "History after re-seed and continue")
+		ck.EqDeep(before, resumed, "a re-seed and a re-continue must not change the working path")
+
+		var rows int
+		ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
+			WHERE conversation_id=$1::uuid`, conv.ID).Scan(&rows), "count rows")
+		ck.Eq(2, rows, "reloading, re-seeding and re-continuing must write nothing")
+	})
+
+	t.Run("memory", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		ctx := context.Background()
+		sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+			respondText("the reply"),
+		}}
+		conv := newTestConversation(t, sender)
+		r0 := anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))
+		r1 := anthropic.NewAssistantMessage(anthropic.NewTextBlock("the reply"))
+		r2 := anthropic.NewUserMessage(anthropic.NewTextBlock("again"))
+
+		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0}), "seed the first message")
+		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0, r1, r2}), "complete the prefix")
+		ck.Len(conv.mem, 3, "completing a seeded prefix must not duplicate it")
+		for i, m := range conv.mem {
+			ck.Eq(i, m.Ordinal, "message %d sits at its own ordinal", i)
+		}
+
+		if _, err := conv.Continue(ctx); err != nil {
+			t.Fatalf("Continue: %v", err)
+		}
+		before, err := conv.History(ctx)
+		ck.Require().NoError(err, "History")
+		ck.Require().Len(before, 4, "the seed plus the reply")
+
+		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0, r1, r2}), "re-seed the same prefix")
+		after, err := conv.History(ctx)
+		ck.Require().NoError(err, "History after the re-seed")
+		ck.EqDeep(before, after, "re-seeding a prefix must leave the history unchanged")
+		ck.Len(conv.mem, 4, "re-seeding a prefix must not append")
+	})
 }
 
 // TestFundiAssistantNodeCarriesProviderMessageID: an assistant node records the

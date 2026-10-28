@@ -451,3 +451,43 @@ func TestCheckTreeSeedsANonBoundaryRootLikeTheBackfill(t *testing.T) {
 	c.Eq(0, report.BadHash, "a non-boundary root is seeded with RootKindRoot, as the backfill seeds it")
 	c.True(report.OK(), "report: %+v", report)
 }
+
+// TestCheckTreeScopesWorkingSetsToLegacyHorizons: the working-set comparison is
+// the cutover's net over conversations that were stored with a resume horizon,
+// and nothing else. A tree-native conversation — written by a post-cutover
+// writer that forked or compacted — has a head path that legitimately excludes
+// the sibling rows it left behind, so comparing it against "every row in ordinal
+// order" would report correct data as a mismatch. A conversation that still
+// carries the horizon is still expected to match, and a divergent path there is
+// still a mismatch.
+func TestCheckTreeScopesWorkingSetsToLegacyHorizons(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	// Tree-native: a head branch and an abandoned sibling off the same root, and
+	// no horizon at all.
+	native := checkTestConv(t, ctx, pool)
+	nativeRoot := checkInsertNode(t, ctx, pool, native, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, native, 1, "assistant", `[{"type":"text","text":"abandoned"}]`, nil, checkInt(0), nativeRoot, 1)
+	checkInsertNode(t, ctx, pool, native, 2, "assistant", `[{"type":"text","text":"head"}]`, nil, checkInt(0), nativeRoot, 1)
+	checkSetConversation(t, ctx, pool, native, checkInt(2), checkInt(3), nil)
+
+	// The same shape, but with the legacy horizon still set: the working path no
+	// longer reproduces the rows at and after it, which is what the check is for.
+	legacy := checkTestConv(t, ctx, pool)
+	legacyRoot := checkInsertNode(t, ctx, pool, legacy, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, legacy, 1, "assistant", `[{"type":"text","text":"abandoned"}]`, nil, checkInt(0), legacyRoot, 1)
+	checkInsertNode(t, ctx, pool, legacy, 2, "assistant", `[{"type":"text","text":"head"}]`, nil, checkInt(0), legacyRoot, 1)
+	checkSetConversation(t, ctx, pool, legacy, checkInt(2), checkInt(3), checkInt(0))
+
+	report, err := checkTree(ctx, pool, []string{native, legacy})
+	c.Require().NoError(err, "checkTree")
+	c.EqDeep([]string{legacy}, report.WorkingSetMismatch,
+		"only the conversation with a legacy horizon is compared")
+	c.Empty(report.WorkingSetLooseMatch, "the legacy conversation matches under neither identity")
+	c.Eq(0, report.MissingHash, "every row holds a tree position")
+	c.Eq(0, report.BadHash, "hashes verify")
+	c.False(report.OK(), "a divergent legacy working set still fails the check")
+}

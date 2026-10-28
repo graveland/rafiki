@@ -1000,3 +1000,48 @@ func TestClearRestartsWorkingSet(t *testing.T) {
 	ck.NoError(empty.Clear(ctx), "Clear on an empty conversation is a no-op")
 	ck.Empty(empty.mem, "nothing written")
 }
+
+// TestStorelessCompactionKeepsTailRowsRetractable: the in-memory compaction
+// copies the verbatim tail under the summary, and those copies must stay
+// addressable. A mid-send compaction sits between the write-ahead user row and
+// the retraction of it, so the copied user row has to answer to the id
+// AppendUser returned; a copy with no identity makes RetractTailUser refuse and
+// leaves the oversized prompt in the working set.
+func TestStorelessCompactionKeepsTailRowsRetractable(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
+	}}
+	c := memClient(t, sender)
+	ctx := context.Background()
+	conv, err := c.Conversation(ctx, NewConversation("", "test"),
+		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
+	ck.Require().NoError(err)
+	conv.mem = append(conv.mem,
+		textRow(0, anthropic.MessageParamRoleUser, "a"),
+		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
+		textRow(2, anthropic.MessageParamRoleUser, "c"),
+		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+
+	row, err := conv.AppendUser(ctx, UserText("the oversized prompt"))
+	ck.Require().NoError(err)
+	ck.Require().NotEmpty(row.ID, "an in-memory append reports an id")
+
+	ok, err := conv.Compact(ctx, "")
+	ck.Require().NoError(err)
+	ck.True(ok, "Compact reported nothing written")
+
+	// The summary replaces the oldest row; the tail (everything after it) is
+	// copied, so the working set's last row is a copy of the user row.
+	hist, err := conv.History(ctx)
+	ck.Require().NoError(err)
+	ck.Require().Len(hist, 5, "the summary plus the four-row tail")
+	ck.Eq(row.ID, hist[len(hist)-1].ID, "the copied tail user row keeps the append's identity")
+
+	ck.Require().NoError(conv.RetractTailUser(ctx, row.ID),
+		"the copied tail user row must be retractable by the id AppendUser returned")
+	after, err := conv.History(ctx)
+	ck.Require().NoError(err)
+	ck.Require().Len(after, 4, "the retract drops the copied user row")
+	ck.Eq(anthropic.MessageParamRoleAssistant, after[len(after)-1].Param.Role, "the retract leaves the reply above it")
+}

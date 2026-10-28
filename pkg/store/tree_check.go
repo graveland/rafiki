@@ -375,9 +375,17 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 	return bytes.Equal(want[:], row.hash)
 }
 
-// checkWorkingSets compares every conversation's working path against the
-// legacy working set it was built from: the rows at and after the resume
-// horizon, in ordinal order.
+// checkWorkingSets compares the working path of every conversation that still
+// carries a LEGACY RESUME HORIZON against the working set that horizon
+// described: the rows at and after it, in ordinal order.
+//
+// The horizon filter is what makes this check mean anything after the cutover.
+// Nothing writes resume_from_ordinal any more, so "the working path equals every
+// row in ordinal order" is no longer a property of correct data: a conversation
+// that compacts or forks now legitimately leaves sibling rows off its head path.
+// Only conversations whose storage actually used the horizon — the ones the
+// backfill had to reproduce — are still expected to match, so this comparison is
+// the cutover's net over pre-tree conversations and nothing else.
 //
 // The comparison is on messages, not on rows: an interim fork's copies are the
 // same messages as the nodes they duplicate, so a forked conversation still
@@ -411,10 +419,15 @@ func checkWorkingSets(ctx context.Context, pool *pgxpool.Pool, ids []string) (mi
 	return mismatches, loose, nil
 }
 
+// checkConversationsWithMessages lists the conversations this check compares:
+// the ones with messages AND a legacy resume horizon. A conversation without the
+// horizon was never stored that way (or was written after the cutover), so it has
+// no legacy working set to reproduce — see checkWorkingSets.
 func checkConversationsWithMessages(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]string, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT c.id::text FROM conversations.conversation c
 		  WHERE ($1::uuid[] IS NULL OR c.id = ANY($1::uuid[]))
+		    AND c.resume_from_ordinal IS NOT NULL
 		    AND EXISTS (SELECT 1 FROM conversations.conversation_message m WHERE m.conversation_id = c.id)
 		  ORDER BY c.id`, ids)
 	if err != nil {
