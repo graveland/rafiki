@@ -398,15 +398,16 @@ func newRenderer() *renderer {
 }
 
 var (
-	styleUser       = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)   // cyan
-	styleMeta       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))              // grey
-	styleTool       = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))              // yellow
-	styleThink      = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true) // grey italic
-	styleError      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))              // red
-	stylePending    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true) // yellow italic
-	styleRunning    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))              // cyan
-	styleToolResult = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))              // grey
-	styleToolArg    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))              // arg summary
+	styleUser       = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)                        // cyan
+	styleMeta       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))                                   // grey
+	styleTool       = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))                                   // yellow
+	styleThink      = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)                      // grey italic
+	styleError      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))                                   // red
+	styleGhost      = lipgloss.NewStyle().Foreground(lipgloss.Color("7")).Background(lipgloss.Color("236")) // unacknowledged send
+	stylePending    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true)                      // yellow italic
+	styleRunning    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))                                   // cyan
+	styleToolResult = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))                                   // grey
+	styleToolArg    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))                                   // arg summary
 
 	// styleWorking marks the transcript's tail spinner -- the only on-screen
 	// cue that an agent is mid-turn during a stretch (composing a reply,

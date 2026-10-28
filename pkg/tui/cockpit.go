@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -234,13 +235,10 @@ type sendFailedMsg struct {
 	images []stagedAttachment
 }
 
-// sendAckedMsg reports a send the daemon accepted for a claude child. Such a
-// child's transcript echo is published only once its request has been captured,
-// after the whole upstream response, so the accepted RPC is the only prompt
-// acknowledgement the cockpit gets.
-type sendAckedMsg struct {
+// pendingSend is one message sent to childID and not yet echoed.
+type pendingSend struct {
 	childID string
-	pending string
+	text    string
 }
 
 // previewTickMsg fires previewDebounce after the rail cursor landed on a row
@@ -362,13 +360,13 @@ type Cockpit struct {
 	ready         bool
 	quitting      bool
 	status        string
-	pending       string
-	// pendingChild is the child the unacknowledged pending message was sent to;
-	// the ⏳ line is shown only while that child is the one being viewed.
-	pendingChild string
-	showHelp     bool
-	railHidden   bool
-	expandArgs   bool
+	// pending is the sends the daemon has not yet echoed back, oldest first.
+	// Each is drawn as a ghost user message at the foot of its own child's
+	// transcript until the real one arrives.
+	pending    []pendingSend
+	showHelp   bool
+	railHidden bool
+	expandArgs bool
 	// railPeek records that an explicit request revealed a rail the default look
 	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
@@ -1066,9 +1064,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The message may have been persisted while this child was not being
 		// streamed (a claude child's echo only arrives with its capture), in
 		// which case the history is the acknowledgement.
-		if c.pending != "" && msg.childID == c.pendingChild && len(s.Blocks) > 0 {
-			if last := s.Blocks[len(s.Blocks)-1]; last.Kind == session.KindUser && last.Text == c.pending {
-				c.pending = ""
+		if len(s.Blocks) > 0 {
+			if last := s.Blocks[len(s.Blocks)-1]; last.Kind == session.KindUser {
+				c.ackPending(msg.childID, last.Text)
 			}
 		}
 		// The cursor takes the LOG watermark captured before the fetch -- never
@@ -1104,16 +1102,8 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// opens a stream here.
 		return c, nil
 
-	case sendAckedMsg:
-		if msg.childID == c.pendingChild && msg.pending == c.pending {
-			c.pending = ""
-		}
-		return c, nil
-
 	case sendFailedMsg:
-		if msg.childID == c.pendingChild {
-			c.pending = ""
-		}
+		c.dropPending(msg.childID, msg.text)
 		if c.askToResume(msg) {
 			return c, nil
 		}
@@ -1390,9 +1380,8 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// having taken it into a turn. The echo belongs to the COMMITTED agent's
 	// conversation: while browsing, the streamed session is the viewed child's,
 	// and its user messages must not clear a send that went elsewhere.
-	if c.pending != "" && id == c.pendingChild && len(s.Blocks) > before &&
-		s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
-		c.pending = ""
+	if len(s.Blocks) > before && s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
+		c.ackPending(id, s.Blocks[len(s.Blocks)-1].Text)
 	}
 	// A durable ledger mutation for the focused child is the refresh trigger;
 	// there is no polling.
@@ -1929,24 +1918,18 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 		// A slash command is consumed by the daemon: /clear and /exit produce no
 		// user_message to acknowledge the echo, so a pending line would never clear.
 		if _, _, slash := slashcmd.Parse(text); !slash || mode != rafikiv1.SendMode_SEND_MODE_PROMPT {
-			c.pending = text
-			c.pendingChild = child
-			if text == "" {
-				c.pending = "(" + itoa(int64(len(images))) + " attached)"
+			shown := text
+			if shown == "" {
+				shown = "(" + itoa(int64(len(images))) + " attached)"
 			}
+			c.pending = append(c.pending, pendingSend{childID: child, text: shown})
 		}
 	}
-	pending := c.pending
-	n, known := c.rail.Get(child)
-	ackOnAccept := known && n.Kind == protocol.KindClaude
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, err := c.client.Send(ctx, connect.NewRequest(req)); err != nil {
 			return sendFailedMsg{err: err, childID: child, mode: asked, text: text, images: images}
-		}
-		if ackOnAccept {
-			return sendAckedMsg{childID: child, pending: pending}
 		}
 		return nil
 	}
@@ -2872,7 +2855,7 @@ func (c *Cockpit) View() tea.View {
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)
-		lines := p.linesFor(s, convWidth, bodyHeight, c.expandArgs, c.drawImages(), c.caps.smallIDs())
+		lines := p.linesFor(s, convWidth, bodyHeight, c.expandArgs, c.drawImages(), c.caps.smallIDs(), c.ghostRows(f, convWidth))
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to
@@ -2891,15 +2874,6 @@ func (c *Cockpit) View() tea.View {
 		conv = styleMeta.Render("loading…")
 	}
 	switch f := c.viewing(); {
-	case c.pending != "" && c.pendingChild == f && c.focus != focusRail:
-		// A message just sent takes priority over the working spinner: the
-		// two would otherwise flicker between each other for the instant
-		// between send and the first status event confirming the turn started.
-		// While browsing the rail it stays hidden: it names a message sent to
-		// the focused child, and pinning it under a DIFFERENT agent's preview
-		// would read as if the preview sent it. Coming back to the input
-		// restores it while it is still unacknowledged.
-		conv += "\n" + stylePending.Render("⏳ "+c.pending)
 	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && !c.showHelp && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
@@ -3199,4 +3173,52 @@ func quotaWindowReadout(label string, w *rafikiv1.RateLimitWindow, now time.Time
 		}
 	}
 	return out
+}
+
+// ghostRows draws child's unacknowledged sends as user messages on a grey
+// ground, to follow its transcript until the real user message replaces them.
+func (c *Cockpit) ghostRows(child string, width int) []string {
+	var rows []string
+	for _, p := range c.pending {
+		if p.childID != child {
+			continue
+		}
+		rows = append(rows, "")
+		for _, line := range strings.Split(sanitizeControlChars(p.text), "\n") {
+			for _, row := range wrapTo("▌ ", line, width) {
+				rows = append(rows, styleGhost.Width(width).Render(row))
+			}
+		}
+	}
+	return rows
+}
+
+// ackPending retires the oldest pending send to child that the echoed text
+// answers: an exact match if there is one, else the oldest (an image-only
+// message echoes no text to match).
+func (c *Cockpit) ackPending(child, text string) {
+	first := -1
+	for i, p := range c.pending {
+		if p.childID != child {
+			continue
+		}
+		if p.text == text {
+			c.pending = slices.Delete(c.pending, i, i+1)
+			return
+		}
+		if first < 0 {
+			first = i
+		}
+	}
+	if first >= 0 {
+		c.pending = slices.Delete(c.pending, first, first+1)
+	}
+}
+
+// dropPending removes the pending send to child with this text, or every one
+// to child when text is empty.
+func (c *Cockpit) dropPending(child, text string) {
+	c.pending = slices.DeleteFunc(c.pending, func(p pendingSend) bool {
+		return p.childID == child && (text == "" || p.text == text)
+	})
 }

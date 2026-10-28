@@ -3,6 +3,9 @@
 package tui
 
 import (
+	"slices"
+	"strings"
+
 	"charm.land/bubbles/v2/viewport"
 
 	"go.graveland.dev/rafiki/pkg/tui/session"
@@ -51,12 +54,15 @@ type paneSig struct {
 	drawImages bool
 	smallIDs   bool
 	liveFP     string
+	// ghost is the unacknowledged sends drawn after the transcript; they come
+	// and go without any block changing.
+	ghost string
 }
 
 // linesFor returns the rendered transcript, or NIL when the pane is already
 // showing it. A nil result means "nothing to do" and is distinct from an empty
 // one, which means "this transcript has no lines".
-func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs, drawImages, smallIDs bool) []string {
+func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs, drawImages, smallIDs bool, ghost []string) []string {
 	sig := paneSig{
 		blocks:    len(s.Blocks),
 		finalized: s.Finalized,
@@ -73,6 +79,7 @@ func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs, 
 		expandArgs: expandArgs,
 		drawImages: drawImages,
 		smallIDs:   smallIDs,
+		ghost:      strings.Join(ghost, "\x00"),
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
@@ -81,7 +88,12 @@ func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs, 
 	p.renderer.expandArgs = expandArgs
 	p.renderer.drawImages = drawImages
 	p.renderer.smallIDs = smallIDs
-	return p.renderer.Lines(s.Blocks, s.Finalized, width)
+	lines := p.renderer.Lines(s.Blocks, s.Finalized, width)
+	if len(ghost) == 0 {
+		return lines
+	}
+	// A copy: lines may be the renderer's cached slice.
+	return append(slices.Clone(lines), ghost...)
 }
 
 // invalidate forces the next linesFor to rebuild, discarding the renderer's

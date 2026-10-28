@@ -441,13 +441,13 @@ func TestSendToExitedAgentAsksToResume(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := railWith(t, "c_1")
 	exitChild(c, "c_1")
-	c.pending, c.pendingChild = "hello", "c_1"
+	c.pending = []pendingSend{{"c_1", "hello"}}
 
 	c.Update(exitedSendFailure("c_1", "hello"))
 
 	ck.Require().NotNil(c.resumeAsk, "an exited-agent send failure must open the resume question")
 	ck.Eq("hello", c.resumeAsk.text, "draft held by the question")
-	ck.Eq("", c.pending, "the pending marker must clear")
+	ck.EqDeep([]string(nil), pendingTexts(c), "the pending marker must clear")
 	ck.StrContains(c.notice, "resume", "notice")
 }
 
@@ -484,7 +484,7 @@ func TestResumeAskYesResumesAndSendsAfterwards(t *testing.T) {
 		childID: "c_1", name: "c_1", mode: rafikiv1.SendMode_SEND_MODE_PROMPT, text: "hello",
 	}})
 	ck.NotNil(cmd, "a successful resume must carry the held message on")
-	ck.Eq("hello", c.pending, "the re-send shows the message as pending")
+	ck.EqDeep([]string{"hello"}, pendingTexts(c), "the re-send shows the message as pending")
 }
 
 func TestResumeAskAnyOtherKeyKeepsTheDraft(t *testing.T) {

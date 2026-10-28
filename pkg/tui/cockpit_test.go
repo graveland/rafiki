@@ -303,21 +303,21 @@ func TestTranscriptHasNoWorkingSpinnerWhenIdle(t *testing.T) {
 	}
 }
 
-// A pending send takes priority over the working spinner so the two do not
-// flicker between each other in the instant before the first status event
-// confirms the turn started.
-func TestPendingSuppressesTheWorkingSpinner(t *testing.T) {
+// The ghost message sits in the transcript above the working spinner: the send
+// is shown AND the agent is seen working on it.
+func TestPendingGhostSitsAboveTheWorkingSpinner(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		{ChildId: "c_1", Name: "scout", Status: "streaming", Labels: map[string]string{}},
 	})
-	c.pending, c.pendingChild = "hello", "c_1"
+	c.pending = []pendingSend{{"c_1", "hello"}}
 
 	got := ansi.Strip(c.View().Content)
-	ck.NotStrContains(got, "streaming…", "pending send did not suppress the working spinner")
-	ck.StrContains(got, "⏳ hello", "pending line missing:\n")
+	ck.StrContains(got, "▌ hello", "ghost missing")
+	ck.StrContains(got, "streaming…", "spinner missing")
+	ck.True(strings.Index(got, "▌ hello") < strings.Index(got, "streaming…"), "ghost must precede the spinner")
 }
 
 func TestRailIndentsByDepth(t *testing.T) {
@@ -1435,7 +1435,7 @@ func TestShiftEnterInsertsANewlineAndDoesNotSend(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
 
 	ck.Eq("a\nb", c.ta.Value(), "textarea value")
-	ck.Eq("", c.pending, "⇧⏎ sent")
+	ck.EqDeep([]string(nil), pendingTexts(c), "⇧⏎ sent")
 }
 
 // ^J is the fallback. A terminal has to speak the Kitty keyboard protocol for
@@ -1461,7 +1461,7 @@ func TestEnterStillSendsTheWholeMultilinePrompt(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	ck.Eq("a\nb", c.pending, "pending")
+	ck.EqDeep([]string{"a\nb"}, pendingTexts(c), "pending")
 	ck.Eq("", c.ta.Value(), "textarea not cleared after send")
 }
 
@@ -1681,10 +1681,10 @@ func TestPendingClearsWhenTheMessageComesBack(t *testing.T) {
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
-	ck.Require().Eq("hello", c.pending, "pending")
+	ck.Require().EqDeep([]string{"hello"}, pendingTexts(c), "pending")
 
 	c.applyEvent(userMessageEventFor("c_1", "hello", 5))
-	ck.Eq("", c.pending, "the message came back and pending")
+	ck.EqDeep([]string(nil), pendingTexts(c), "the message came back and pending")
 }
 
 // A slash command is interpreted by the daemon and may never echo back as a
@@ -1697,7 +1697,7 @@ func TestSlashCommandLeavesNoPendingEcho(t *testing.T) {
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "/clear", nil)
-	ck.Eq("", c.pending, "/clear must not leave a pending echo")
+	ck.EqDeep([]string(nil), pendingTexts(c), "/clear must not leave a pending echo")
 }
 
 // The rail and focus streams are independent feeds, and only the focus one
@@ -1721,7 +1721,7 @@ func TestRailDeliveryAheadOfFocusDoesNotEatTheUserMessage(t *testing.T) {
 	c.Update(railEventMsg{evs: []*rafikiv1.Event{statusEventFor("c_1", "streaming", 148)}})
 	c.Update(eventMsg{evs: []*rafikiv1.Event{userMessageEventFor("c_1", "go for it", 147)}})
 
-	assert.NewCollecting(t).Eq("", c.pending, "pending")
+	assert.NewCollecting(t).EqDeep([]string(nil), pendingTexts(c), "pending")
 	s := c.sessions["c_1"]
 	if n := len(s.Blocks); n == 0 || s.Blocks[n-1].Kind != session.KindUser || s.Blocks[n-1].Text != "go for it" {
 		t.Errorf("the sent message never reached the transcript; blocks = %d", n)
@@ -2487,7 +2487,8 @@ func TestSendExpandsAndClearsPastes(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	ck.StrContains(c.pending, "a line", "the sent prompt kept the token instead of the text: %q", truncate(c.pending, 60))
+	ck.Require().Len(c.pending, 1, "pending")
+	ck.StrContains(c.pending[0].text, "a line", "the sent prompt kept the token instead of the text: %q", truncate(c.pending[0].text, 60))
 	ck.Empty(c.pastes, "pastes outlived the prompt they belonged to")
 }
 
@@ -2704,10 +2705,10 @@ func TestRedrawInvalidatesThePaneCache(t *testing.T) {
 	s.Blocks = []session.Block{{Kind: session.KindUser, Text: "hello", Final: true}}
 	s.Finalized = 1
 
-	c.Require().NotNil(p.linesFor(s, 80, 24, false, false, false), "first render returned nil")
-	c.Require().Nil(p.linesFor(s, 80, 24, false, false, false), "second render should have been a cache hit")
+	c.Require().NotNil(p.linesFor(s, 80, 24, false, false, false, nil), "first render returned nil")
+	c.Require().Nil(p.linesFor(s, 80, 24, false, false, false, nil), "second render should have been a cache hit")
 	p.invalidate()
-	c.NotNil(p.linesFor(s, 80, 24, false, false, false), "invalidate did not force a rebuild")
+	c.NotNil(p.linesFor(s, 80, 24, false, false, false, nil), "invalidate did not force a rebuild")
 }
 
 // TestClosingARowKeepsTheCursorWhereTheRowWas pins that the cursor lands on the
@@ -2856,20 +2857,66 @@ func TestModelReadoutNamesTheKind(t *testing.T) {
 	}
 }
 
-// A claude child's echo arrives only after its whole upstream response is
-// captured, so an accepted Send clears the ⏳ -- but only the send it answers.
-func TestAcceptedSendClearsOnlyItsOwnPending(t *testing.T) {
+// pendingTexts is the unacknowledged sends' text, oldest first, nil when none.
+func pendingTexts(c *Cockpit) []string {
+	var out []string
+	for _, p := range c.pending {
+		out = append(out, p.text)
+	}
+	return out
+}
+
+// An unacknowledged send is drawn inside the transcript pane, after the real
+// messages, and is replaced -- not stacked with -- the user message that echoes
+// it.
+func TestPendingSendIsGhostedInTheTranscriptUntilItsEchoArrives(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
-	c.pending, c.pendingChild = "second", "c_1"
-	c.Update(sendAckedMsg{childID: "c_1", pending: "first"})
-	ck.Eq("second", c.pending, "an older send's ack cleared a newer pending message")
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello there", nil)
+	ck.StrContains(ansi.Strip(c.View().Content), "▌ hello there", "the ghost is missing from the transcript")
+	ck.NotStrContains(ansi.Strip(c.View().Content), "⏳", "the old pending line is back")
 
-	c.Update(sendAckedMsg{childID: "c_2", pending: "second"})
-	ck.Eq("second", c.pending, "another child's ack cleared the pending message")
+	c.applyEvent(userMessageEventFor("c_1", "hello there", 5))
+	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello there"), "the echo must replace the ghost, not stack with it")
+}
 
-	c.Update(sendAckedMsg{childID: "c_1", pending: "second"})
-	ck.Eq("", c.pending, "the accepted send left its pending marker")
+// Two sends before either echoes both stay ghosted, and each echo retires its
+// own, not the other.
+func TestPendingSendsRetireInOrderOfTheirEchoes(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "first", nil)
+	c.sendTo("c_2", rafikiv1.SendMode_SEND_MODE_PROMPT, "other agent", nil)
+	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "second", nil)
+
+	c.applyEvent(userMessageEventFor("c_1", "second", 5))
+	ck.EqDeep([]string{"first", "other agent"}, pendingTexts(c), "an echo retired the wrong send")
+
+	c.applyEvent(userMessageEventFor("c_1", "first", 6))
+	ck.EqDeep([]string{"other agent"}, pendingTexts(c), "another agent's pending send was touched")
+}
+
+// The ghost belongs to the agent it was sent to; switching away must not carry
+// it along.
+func TestPendingGhostStaysWithItsAgent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Labels: map[string]string{}},
+		{ChildId: "c_2", Name: "other", Labels: map[string]string{}},
+	})
+	ck.EqDeep([]string(nil), c.ghostRows("c_2", 80), "no ghost for an agent with nothing pending")
+	c.pending = []pendingSend{{"c_1", "hello"}}
+	ck.Len(c.ghostRows("c_1", 80), 2, "blank separator plus one row")
+	ck.Len(c.ghostRows("c_2", 80), 0, "ghost followed the user to another agent")
 }
