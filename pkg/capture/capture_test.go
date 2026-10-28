@@ -961,8 +961,13 @@ func TestAppendResponseMessageFailsWhenTheTurnKeyMoved(t *testing.T) {
 
 	// Move the turn's key out from under the caller's createdAt, which is what a
 	// row that was rewritten or re-partitioned underneath the append looks like.
+	// The move is deliberately sub-second: created_at is the hypertable's
+	// partition column and each chunk carries a check constraint bounding it, so
+	// a whole-hour move crosses the chunk boundary and Postgres refuses the
+	// UPDATE. Any difference in the key produces the zero-row match this test
+	// needs.
 	_, err = pool.Exec(ctx, `
-		UPDATE conversations.conversation_turn SET created_at = created_at + interval '1 hour'
+		UPDATE conversations.conversation_turn SET created_at = created_at + interval '1 millisecond'
 		 WHERE id = $1 AND created_at = $2`, turnID, createdAt)
 	c.Require().NoError(err, "move the turn's created_at key")
 
