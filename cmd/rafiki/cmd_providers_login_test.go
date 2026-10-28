@@ -7,8 +7,8 @@ package main
 // `rafiki providers` subtree over the profile's socket, so the endpoint the CLI
 // resolves, the Connect verbs it sends and the output contract are all pinned
 // together. The callback tests exercise loopbackCallback directly: they need a
-// listener mode the paste-only flag turns off, and a second loopback address no
-// daemon fake has to produce.
+// second loopback address no daemon fake has to produce, and a port they can
+// hold while the flow binds.
 
 import (
 	"bytes"
@@ -244,8 +244,9 @@ func getCallbackWhenServing(t *testing.T, client *http.Client, url string) *http
 // TestProvidersLoginUsesDaemonPathAndHosts is the whole verb over the real
 // wire: BeginProviderLogin on the profile's socket, a callback served at the
 // PATH the daemon named (rafiki login's own path must 404 there), Complete with
-// the query the listener received, and the confirmation on stderr. Browser
-// mode, because the listener is what is being tested; the opener is a stub.
+// the query the listener received, and the confirmation on stderr. It passes
+// --no-browser, as every listener-driving test does, so the platform opener is
+// never looked up: the flag suppresses the opener and nothing else.
 func TestProvidersLoginUsesDaemonPathAndHosts(t *testing.T) {
 	c := assert.NewAborting(t)
 	port := freeCallbackPort(t)
@@ -259,12 +260,11 @@ func TestProvidersLoginUsesDaemonPathAndHosts(t *testing.T) {
 	}
 	fake.completeResp = &rafikiv1.CompleteProviderLoginResponse{Provider: "chatgpt", AccountId: "acct-7"}
 	serveProvidersScratch(t, fake)
-	stubBrowserOpener(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	root, stdout, stderr := providersCLIRoot(t, ctx, strings.NewReader(""),
-		"providers", "login", "chatgpt")
+		"providers", "login", "chatgpt", "--no-browser")
 	exec := make(chan error, 1)
 	go func() { exec <- root.Execute() }()
 
@@ -303,8 +303,9 @@ func TestProvidersLoginUsesDaemonPathAndHosts(t *testing.T) {
 // TestProvidersLoginPasteFallback drives the browser-on-another-machine path: a
 // pasted redirect URL supplies the query, and a paste for any other path is
 // ignored with a warning, since the daemon's callback path is the one the
-// issuer redirects to. --no-browser binds nothing, so the port it was told is
-// never touched (TestLoginPasteOnlySkipsTheCallbackPort pins that directly).
+// issuer redirects to. The flow still binds the port the daemon named (that is
+// what --no-browser leaves alone); nothing delivers a redirect to it here, so
+// the paste wins.
 func TestProvidersLoginPasteFallback(t *testing.T) {
 	c := assert.NewAborting(t)
 	fake := newFakeProviderLogin()
@@ -317,7 +318,6 @@ func TestProvidersLoginPasteFallback(t *testing.T) {
 	}
 	fake.completeResp = &rafikiv1.CompleteProviderLoginResponse{Provider: "chatgpt", AccountId: "acct-9"}
 	serveProvidersScratch(t, fake)
-	stubBrowserOpener(t)
 
 	stdin := strings.NewReader(strings.Join([]string{
 		"http://localhost:1/oidc/callback?code=wrong&state=s",
@@ -386,11 +386,10 @@ func TestProvidersLoginKeepsTheReachabilityHintForATransportFailure(t *testing.T
 // port a provider or the daemon fixed is held (a running `codex login` is the
 // usual holder), so the error names the port, who fixed it, and the escape.
 // Nothing is printed before the bind succeeds, so no browser is ever sent to a
-// listener that is not there. Browser mode: paste-only binds nothing and so
-// cannot fail this way, and the bind fails before the opener would run.
+// listener that is not there. The advice in it is "free the port, then retry",
+// because --no-browser still binds this port and would hit the same wall.
 func TestLoginLoopbackPortBusyError(t *testing.T) {
 	c := assert.NewAborting(t)
-	stubBrowserOpener(t)
 	held, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
 	c.Require().NoError(err, "listen")
 	t.Cleanup(func() { _ = held.Close() })
@@ -398,7 +397,7 @@ func TestLoginLoopbackPortBusyError(t *testing.T) {
 
 	var stderr bytes.Buffer
 	_, err = loopbackCallback(context.Background(),
-		loginIO{stdin: strings.NewReader(""), stderr: &stderr},
+		loginIO{noBrowser: true, stdin: strings.NewReader(""), stderr: &stderr},
 		[]string{loopbackHost}, port, "/auth/callback", "https://auth.example.net/oauth/authorize",
 		providerLoginPinnedBy, providerRetryHint("chatgpt"))
 	c.Require().Error(err, "a held callback port must fail")
@@ -406,15 +405,16 @@ func TestLoginLoopbackPortBusyError(t *testing.T) {
 	msg := err.Error()
 	c.StrContains(msg, "cannot listen on callback port "+strconv.FormatUint(uint64(port), 10), "the port must be named")
 	c.StrContains(msg, providerLoginPinnedBy, "who fixed the port must be named")
-	c.StrContains(msg, "--no-browser", "the escape must be suggested")
-	c.StrContains(msg, "paste the redirect URL", "the escape must say what to paste")
+	c.StrContains(msg, "free the port, then retry", "the advice must work under --no-browser too")
 	c.NotStrContains(stderr.String(), "open this URL in a browser", "no prompt may be printed before the bind succeeds:\n%s", stderr.String())
 }
 
-// TestLoginPasteOnlySkipsTheCallbackPort is what makes the busy-port advice
-// true: --no-browser binds nothing at all, so a port another process holds
-// (the usual `codex login`) cannot fail the paste path.
-func TestLoginPasteOnlySkipsTheCallbackPort(t *testing.T) {
+// TestLoginNoBrowserStillBindsTheCallbackPort pins what --no-browser means: it
+// suppresses the platform opener and nothing else. The listener still binds, so
+// a held port fails the flow exactly as it does in browser mode, and the opener
+// never runs. test/integration/oidc_login_test.go relies on the binding half of
+// this for every `rafiki login` it drives.
+func TestLoginNoBrowserStillBindsTheCallbackPort(t *testing.T) {
 	c := assert.NewAborting(t)
 	logPath := stubBrowserOpener(t)
 	held, err := net.Listen("tcp", net.JoinHostPort(loopbackHost, "0"))
@@ -423,7 +423,7 @@ func TestLoginPasteOnlySkipsTheCallbackPort(t *testing.T) {
 	port := uint32(held.Addr().(*net.TCPAddr).Port)
 
 	var stderr bytes.Buffer
-	query, err := loopbackCallback(context.Background(),
+	_, err = loopbackCallback(context.Background(),
 		loginIO{
 			noBrowser: true,
 			stdin:     strings.NewReader("http://localhost:1/auth/callback?code=pasted&state=s\n"),
@@ -431,11 +431,11 @@ func TestLoginPasteOnlySkipsTheCallbackPort(t *testing.T) {
 		},
 		[]string{loopbackHost}, port, "/auth/callback", "https://auth.example.net/oauth/authorize",
 		providerLoginPinnedBy, providerRetryHint("chatgpt"))
-	c.Require().NoError(err, "a paste-only flow must not care that the port is held:\n%s", stderr.String())
-	c.Eq("code=pasted&state=s", query, "the pasted query")
-	c.StrContains(stderr.String(), "open this URL in a browser to log in", "the authorize URL is printed anyway")
+	c.Require().Error(err, "--no-browser must still bind the callback port, so a held port must fail")
+	c.StrContains(err.Error(), "cannot listen on callback port "+strconv.FormatUint(uint64(port), 10),
+		"the bind failure must name the port it could not take")
 	c.False(strings.Contains(readStubLog(t, logPath), "OPEN-CALLED"),
-		"paste-only must not open a browser either (log = %q)", readStubLog(t, logPath))
+		"--no-browser must not open a browser (log = %q)", readStubLog(t, logPath))
 }
 
 // TestLoginTimeoutNamesTheVerb pins that the timeout suggestion names the verb
@@ -464,7 +464,6 @@ func TestLoginLoopbackCallbackBindsEveryHost(t *testing.T) {
 	c := assert.NewAborting(t)
 	first, second := twoLoopbackHosts(t)
 	port := freePortFor(t, first)
-	stubBrowserOpener(t)
 
 	firstAddr := net.JoinHostPort(first, strconv.FormatUint(uint64(port), 10))
 	secondAddr := net.JoinHostPort(second, strconv.FormatUint(uint64(port), 10))
@@ -477,7 +476,7 @@ func TestLoginLoopbackCallbackBindsEveryHost(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		q, err := loopbackCallback(context.Background(),
-			loginIO{stdin: strings.NewReader(""), stderr: &stderr},
+			loginIO{noBrowser: true, stdin: strings.NewReader(""), stderr: &stderr},
 			[]string{first, second}, port, "/auth/callback",
 			"https://auth.example.net/oauth/authorize", providerLoginPinnedBy,
 			providerRetryHint("chatgpt"))
@@ -516,7 +515,6 @@ func TestLoginLoopbackCallbackPartialBindFailure(t *testing.T) {
 	c := assert.NewAborting(t)
 	first, second := twoLoopbackHosts(t)
 	port := freePortFor(t, first)
-	stubBrowserOpener(t)
 
 	held, err := net.Listen("tcp", net.JoinHostPort(second, strconv.FormatUint(uint64(port), 10)))
 	c.Require().NoError(err, "hold the port on the second host")
@@ -524,7 +522,7 @@ func TestLoginLoopbackCallbackPartialBindFailure(t *testing.T) {
 
 	var stderr bytes.Buffer
 	_, err = loopbackCallback(context.Background(),
-		loginIO{stdin: strings.NewReader(""), stderr: &stderr},
+		loginIO{noBrowser: true, stdin: strings.NewReader(""), stderr: &stderr},
 		[]string{first, second}, port, "/auth/callback",
 		"https://auth.example.net/oauth/authorize", providerLoginPinnedBy,
 		providerRetryHint("chatgpt"))
@@ -533,7 +531,7 @@ func TestLoginLoopbackCallbackPartialBindFailure(t *testing.T) {
 	msg := err.Error()
 	c.StrContains(msg, "cannot listen on callback port "+strconv.FormatUint(uint64(port), 10), "the busy-port text must name the port")
 	c.StrContains(msg, providerLoginPinnedBy, "who fixed the port")
-	c.StrContains(msg, "--no-browser", "the escape")
+	c.StrContains(msg, "free the port, then retry", "the advice")
 	c.NotStrContains(stderr.String(), "open this URL in a browser", "nothing is printed before the bind succeeds")
 
 	// The first host's listener must be gone: connection refused, not a timeout,

@@ -197,27 +197,27 @@ func saveProfile(t *testing.T, p profile.Profile) {
 	}
 }
 
-// runLoginAsync starts the flow the way a browser login runs: stdin at EOF (no
-// paste will come) so only the listener can answer. It is BROWSER mode
-// (noBrowser false), because --no-browser is paste-only and binds no port at
-// all; the platform opener is shadowed by a stub so these tests drive the
-// listener without a real browser opening per `go test`.
+// runLoginAsync starts the flow the way a headless login runs: stdin at EOF (no
+// paste will come) so only the listener can answer, and --no-browser so the
+// platform opener is never looked up. The flag does NOT stop the listener: it
+// binds either way, and that listener is what these tests drive (the same
+// invariant test/integration/oidc_login_test.go states for the real binary).
 func runLoginAsync(t *testing.T, ep connectEndpoint, stderr *bytes.Buffer) chan error {
 	t.Helper()
-	stubBrowserOpener(t)
 	done := make(chan error, 1)
 	go func() {
 		done <- loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-			stdin:  strings.NewReader(""),
-			stderr: stderr,
+			noBrowser: true,
+			stdin:     strings.NewReader(""),
+			stderr:    stderr,
 		})
 	}()
 	return done
 }
 
-// stubBrowserOpener shadows the platform opener at the front of PATH, so a
-// browser-mode flow really exec's something (a logging stub) instead of opening
-// a browser on the developer's desktop, and returns the stub's log path.
+// stubBrowserOpener shadows the platform opener at the front of PATH, so a flow
+// that is allowed to open one exec's a logging stub instead of opening a browser
+// on the developer's desktop, and returns the stub's log path.
 // TestLoginBrowserOpeningHonorsNoBrowser builds the same stub by hand to pin
 // both directions of the flag.
 func stubBrowserOpener(t *testing.T) string {
@@ -365,7 +365,8 @@ func TestLoginRebindsToTheDaemonPinnedPort(t *testing.T) {
 }
 
 // When the pinned port is taken the flow must fail naming the port, why it is
-// pinned, and the --no-browser escape.
+// pinned, and the advice that actually works (free the port, then retry:
+// --no-browser still binds this port, so suggesting it would be a dead end).
 func TestLoginPinnedPortInUseNamesThePort(t *testing.T) {
 	c := assert.NewAborting(t)
 	isolateProfiles(t)
@@ -381,17 +382,17 @@ func TestLoginPinnedPortInUseNamesThePort(t *testing.T) {
 	)
 	ep := fakeLoginEndpoint(t, fake)
 
-	stubBrowserOpener(t) // the bind fails before any open; never rely on that
 	var stderr bytes.Buffer
 	err = loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-		stdin:  strings.NewReader(""),
-		stderr: &stderr,
+		noBrowser: true, // the bind fails before any open; never rely on that
+		stdin:     strings.NewReader(""),
+		stderr:    &stderr,
 	})
 	c.Require().Error(err, "rebinding to an occupied port must fail")
 	msg := err.Error()
 	c.StrContains(msg, strconv.Itoa(port), "the port must be named")
 	c.StrContains(msg, "pinned by the daemon's oidc.toml", "the reason must be named")
-	c.StrContains(msg, "--no-browser", "the escape must be suggested")
+	c.StrContains(msg, "free the port, then retry", "the advice must be one that works")
 	// The failed BeginLogin reached the fake, but no CompleteLogin ever can.
 	waitBegan(t, fake)
 	c.Len(fake.completeCallsSnapshot(t), 0, "no CompleteLogin on a failed rebind")

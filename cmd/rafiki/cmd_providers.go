@@ -457,9 +457,9 @@ child can use them.
 The callback port and path are the provider's, not rafiki's: they are part of
 the redirect URI registered with the issuer, so a port already in use fails
 here rather than moving. A running ` + "`codex login`" + ` holds port 1455, which is the
-usual cause; the flow names the port and offers --no-browser, which binds no
-port at all: it prints the authorize URL and accepts the redirect URL pasted
-back instead.
+usual cause; the flow names the port, and --no-browser (which opens no browser
+but still binds the port, so it must be free) also accepts the redirect URL
+pasted back instead.
 
 A second login for the same provider replaces the stored credential.
 

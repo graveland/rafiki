@@ -213,15 +213,16 @@ instead of quietly listening somewhere else:
 
 ```
 cannot listen on callback port 1455 (fixed by the provider's OAuth registration): …
-free the port, or retry with --no-browser and paste the redirect URL
+free the port, then retry
 ```
 
-`--no-browser` is the way out on a headless box, and the way to log in with a
-browser on another machine: rafiki prints the authorize URL, opens nothing and
-binds no port at all (so a held 1455 does not matter), and accepts the URL the
-browser was redirected to when it is pasted back. Both verbs need a real user
-credential (a child credential, and the local socket's identity-less trust, are
-refused), because the credential belongs to the person, not to the daemon.
+`--no-browser` is for a headless box, or for logging in with a browser on
+another machine: rafiki prints the authorize URL, opens nothing, and accepts the
+URL the browser was redirected to when it is pasted back. The callback port is
+still bound either way (the redirect URI is the issuer's), so it must be free;
+the flow says so when it is not. Both verbs need a real user credential (a child
+credential, and the local socket's identity-less trust, are refused), because
+the credential belongs to the person, not to the daemon.
 
 ### Batch transport (`:batch` model ids)
 

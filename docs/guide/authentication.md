@@ -40,10 +40,10 @@ rafiki login --no-browser   # headless: print the authorize URL, paste the redir
 
 The client binds a loopback listener, gets an authorize URL from the daemon's
 `Login` service, and the IdP's redirect completes the flow; every message
-goes to stderr, stdout stays silent. `--no-browser` skips the browser AND the
-listener (nothing is bound, so a callback port another process holds cannot
-fail it) and accepts the redirect URL pasted on stdin (an `ssh -L` forward
-landing on another machine, a headless box). The flow waits 10 minutes; a
+goes to stderr, stdout stays silent. `--no-browser` skips the browser only:
+the callback listener still binds (so a pinned port must be free), and the flag
+also accepts the redirect URL pasted on stdin (an `ssh -L` forward landing on
+another machine, a headless box). The flow waits 10 minutes; a
 pasted URL parses only for its query string.
 
 **`oidc.toml` keys** (all validated at daemon startup; a broken file logs and
@@ -94,8 +94,8 @@ rafiki token revoke <id>                              # the token stops working 
   `http://127.0.0.1:<port>/oidc/callback`, and `redirect_port = <port>` in
   `oidc.toml`: Okta does not implement RFC 8252's any-port loopback, so the
   daemon pins the port and every client must listen there (`rafiki login`
-  rebinds automatically; a taken port tells you to free it or fall back to
-  `--no-browser` and paste).
+  rebinds automatically; a taken port tells you to free it and retry, since
+  `--no-browser` still needs that port).
 
 **Service tokens for automation.** Something that cannot walk an SSO flow (CI,
 a script, a cron job) uses a minted token instead:
