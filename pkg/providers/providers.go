@@ -37,6 +37,14 @@ const (
 	// (pkg/llm/openai_sender.go). base_url is required — there is no
 	// canonical default, so SenderForKey rejects an empty one.
 	KindOpenAI Kind = "openai"
+	// KindOpenAIResponses is an OpenAI Responses API provider authenticated by
+	// api_key_env (pkg/llm/responses_sender.go). base_url defaults to
+	// https://api.openai.com/v1.
+	KindOpenAIResponses Kind = "openai-responses"
+	// KindOpenAIResponsesChatGPT is the ChatGPT-subscription dialect of the
+	// Responses API at https://chatgpt.com/backend-api/codex, authenticated by
+	// the owning user's stored login, never an env key.
+	KindOpenAIResponsesChatGPT Kind = "openai-responses-chatgpt"
 )
 
 // nameRE is the legal shape of a provider name. Slash-free is load-bearing:
@@ -293,7 +301,7 @@ func (s *Set) Validate() error {
 			return fmt.Errorf("providers: invalid provider name %q (want [a-z0-9][a-z0-9_-]*, no slashes)", name)
 		}
 		switch p.Kind {
-		case KindAnthropic, KindAnthropicOpenRouter, KindOpenAI:
+		case KindAnthropic, KindAnthropicOpenRouter, KindOpenAI, KindOpenAIResponses, KindOpenAIResponsesChatGPT:
 		case "":
 			return fmt.Errorf("providers: provider %q: kind is required", name)
 		default:
