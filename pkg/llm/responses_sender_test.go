@@ -1242,37 +1242,82 @@ func TestSDKSenderDropsResponsesThinking(t *testing.T) {
 // the streaming path produces (text, tool_use keyed by call_id, reasoning as a
 // thinking block carrying the Responses signature, and usage).
 func TestResponsesNonStreamingResponse(t *testing.T) {
-	c := assert.NewCollecting(t)
-	const body = `{"id":"resp_ns","model":"gpt-6.1-sol","status":"completed","output":[
+	// The full response: reasoning with encrypted content, text, a tool call.
+	const fullBody = `{"id":"resp_ns","model":"gpt-6.1-sol","status":"completed","output":[
 		{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"weighing"}],"encrypted_content":"blob-1"},
 		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"calling get_weather"}]},
 		{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Oslo\"}"}
 	],"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":1},"output_tokens":7}}`
-	var method, path string
-	s := newResponsesSenderForTest(t, "sk", func(w http.ResponseWriter, r *http.Request) {
-		method, path = r.Method, r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, body)
-	})
-	msg, err := s.New(context.Background(), minimalParams())
-	c.Require().NoError(err, "New")
-	c.Eq("POST", method, "method")
-	c.Eq("/responses", path, "path")
-	c.Eq("resp_ns", msg.ID, "id")
-	c.Eq("gpt-6.1-sol", msg.Model, "model")
-	c.Require().Len(msg.Content, 3, "blocks")
-	c.Eq("thinking", string(msg.Content[0].Type), "block 0")
-	c.Eq("weighing", msg.Content[0].Thinking, "thinking text")
-	_, _, ok := ParseResponsesSignature(msg.Content[0].Signature)
-	c.True(ok, "signature %q is not a Responses signature", msg.Content[0].Signature)
-	c.Eq("text", string(msg.Content[1].Type), "block 1")
-	c.Eq("calling get_weather", msg.Content[1].Text, "text")
-	c.Eq("tool_use", string(msg.Content[2].Type), "block 2")
-	c.Eq("call_1", msg.Content[2].ID, "tool_use id")
-	c.Eq("tool_use", string(msg.StopReason), "stop reason")
-	c.Eq(int64(15), msg.Usage.InputTokens, "input tokens (20 - 5 cached)")
-	c.Eq(int64(5), msg.Usage.CacheReadInputTokens, "cache read tokens")
-	c.Eq(int64(7), msg.Usage.OutputTokens, "output tokens")
+
+	// A reasoning item with NO encrypted_content: the non-streamed twin of the
+	// always-sign rule. It must still become a thinking block, signed with an empty
+	// blob, so an Anthropic failover strips it instead of rejecting it.
+	const noEncryptedBody = `{"id":"resp_ns2","model":"gpt-6.1-sol","status":"completed","output":[
+		{"type":"reasoning","id":"rs_nosig","summary":[]},
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
+	],"usage":{"input_tokens":3,"output_tokens":2}}`
+
+	cases := []struct {
+		name  string
+		body  string
+		check func(t *testing.T, msg *anthropic.Message)
+	}{
+		{
+			name: "reasoning, text and a tool call",
+			body: fullBody,
+			check: func(t *testing.T, msg *anthropic.Message) {
+				c := assert.NewCollecting(t)
+				c.Require().Len(msg.Content, 3, "blocks")
+				c.Eq("thinking", string(msg.Content[0].Type), "block 0")
+				c.Eq("weighing", msg.Content[0].Thinking, "thinking text")
+				_, _, ok := ParseResponsesSignature(msg.Content[0].Signature)
+				c.True(ok, "signature %q is not a Responses signature", msg.Content[0].Signature)
+				c.Eq("text", string(msg.Content[1].Type), "block 1")
+				c.Eq("calling get_weather", msg.Content[1].Text, "text")
+				c.Eq("tool_use", string(msg.Content[2].Type), "block 2")
+				c.Eq("call_1", msg.Content[2].ID, "tool_use id")
+				c.Eq("tool_use", string(msg.StopReason), "stop reason")
+				c.Eq(int64(15), msg.Usage.InputTokens, "input tokens (20 - 5 cached)")
+				c.Eq(int64(5), msg.Usage.CacheReadInputTokens, "cache read tokens")
+				c.Eq(int64(7), msg.Usage.OutputTokens, "output tokens")
+			},
+		},
+		{
+			name: "reasoning with no encrypted content is still signed",
+			body: noEncryptedBody,
+			check: func(t *testing.T, msg *anthropic.Message) {
+				c := assert.NewCollecting(t)
+				c.Require().Len(msg.Content, 2, "blocks")
+				c.Eq("thinking", string(msg.Content[0].Type), "block 0")
+				c.Eq(ResponsesSignaturePrefix+"rs_nosig:", msg.Content[0].Signature,
+					"a reasoning item with no encrypted_content must still be signed, with an empty blob")
+				id, blob, ok := ParseResponsesSignature(msg.Content[0].Signature)
+				c.True(ok, "ParseResponsesSignature(%q)", msg.Content[0].Signature)
+				c.Eq("rs_nosig", id, "item id")
+				c.Eq("", blob, "blob")
+				c.Eq("text", string(msg.Content[1].Type), "block 1")
+				c.Eq("done", msg.Content[1].Text, "text")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			var method, path string
+			s := newResponsesSenderForTest(t, "sk", func(w http.ResponseWriter, r *http.Request) {
+				method, path = r.Method, r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			})
+			msg, err := s.New(context.Background(), minimalParams())
+			c.Require().NoError(err, "New")
+			c.Eq("POST", method, "method")
+			c.Eq("/responses", path, "path")
+			c.Eq("gpt-6.1-sol", msg.Model, "model")
+			c.True(msg.ID != "", "message id")
+			tc.check(t, msg)
+		})
+	}
 }
 
 // ---- fix round: reasoning without encrypted content ----
@@ -1474,4 +1519,116 @@ func TestResponsesInterleavedDoneDoesNotDuplicate(t *testing.T) {
 	c.Eq("tool_use", string(acc.Content[1].Type), "block 1")
 	c.Eq("call_1", acc.Content[1].ID, "single tool_use block, keyed by call_id")
 	c.Eq("tool_use", string(acc.StopReason), "stop reason")
+}
+
+// ---- fix round 2: input-part shapes the std fixture cannot reach ----
+
+// TestResponsesInputPartShapes pins the three content shapes std_turn2 cannot
+// exercise: it has no assistant message and no image anywhere. Left unpinned, a
+// regression in any of them passes the whole package (confirmed by mutation):
+//
+//   - an assistant text block becomes ONE message item whose parts are
+//     "output_text" (not "input_text", which the endpoint treats as a different
+//     role's content);
+//   - a user image becomes an "input_image" part with a data URL, alongside the
+//     user's text;
+//   - a tool result carrying an image switches "output" to the ARRAY form, whose
+//     text half is still an "input_text" part (the string form carries no parts
+//     at all, so this is the only place that part type appears in a tool result).
+//
+// The params are built here rather than added to the fixture: the fixture is a
+// capture, and a capture cannot be edited into a shape it never contained.
+func TestResponsesInputPartShapes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	png := func() anthropic.ImageBlockParam {
+		return anthropic.ImageBlockParam{Source: anthropic.ImageBlockParamSourceUnion{
+			OfBase64: &anthropic.Base64ImageSourceParam{MediaType: "image/png", Data: "QUJD"},
+		}}
+	}
+	image := png()
+	params := anthropic.MessageNewParams{
+		Model:     "gpt-6.1-sol",
+		MaxTokens: 64,
+		Messages: []anthropic.MessageParam{
+			// 1. user text + image.
+			{Role: "user", Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "what is this"}},
+				{OfImage: &image},
+			}},
+			// 2. assistant text + tool_use (the pre-call narration).
+			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "looking"}},
+				{OfToolUse: &anthropic.ToolUseBlockParam{ID: "call_1", Name: "screenshot", Input: map[string]any{}}},
+			}},
+			// 3. the tool result: text + image, so "output" takes the array form.
+			{Role: "user", Content: []anthropic.ContentBlockParamUnion{
+				{OfToolResult: &anthropic.ToolResultBlockParam{
+					ToolUseID: "call_1",
+					Content: []anthropic.ToolResultBlockParamContentUnion{
+						{OfText: &anthropic.TextBlockParam{Text: "here it is"}},
+						{OfImage: &image},
+					},
+				}},
+			}},
+		},
+	}
+
+	body, err := buildResponsesRequestBody(params, responsesBuildOptions{chatGPT: true, stream: true})
+	c.Require().NoError(err, "buildResponsesRequestBody")
+	var got map[string]any
+	c.Require().NoError(json.Unmarshal(body, &got), "unmarshal built request")
+
+	// The exact expected input array, compared with the same EqDiff discipline as
+	// the golden translation: no wildcards, no key subsets.
+	const wantInput = `[
+	 {
+	  "type": "message",
+	  "role": "user",
+	  "content": [
+	   {"type": "input_text", "text": "what is this"},
+	   {"type": "input_image", "image_url": "data:image/png;base64,QUJD"}
+	  ]
+	 },
+	 {
+	  "type": "message",
+	  "role": "assistant",
+	  "content": [
+	   {"type": "output_text", "text": "looking"}
+	  ]
+	 },
+	 {
+	  "type": "function_call",
+	  "call_id": "call_1",
+	  "name": "screenshot",
+	  "arguments": "{}"
+	 },
+	 {
+	  "type": "function_call_output",
+	  "call_id": "call_1",
+	  "output": [
+	   {"type": "input_text", "text": "here it is"},
+	   {"type": "input_image", "image_url": "data:image/png;base64,QUJD"}
+	  ]
+	 }
+	]`
+	var want []any
+	c.Require().NoError(json.Unmarshal([]byte(wantInput), &want), "unmarshal expected input")
+	c.EqDiff(any(want), got["input"], "input items")
+
+	// Spelled out per finding, so a failure names which shape broke rather than
+	// just diffing the array.
+	items, _ := got["input"].([]any)
+	c.Require().Len(items, 4, "input items")
+	userParts, _ := items[0].(map[string]any)["content"].([]any)
+	c.Require().Len(userParts, 2, "user content parts")
+	c.EqDiff(any("input_image"), userParts[1].(map[string]any)["type"], "user image part type")
+	assistantParts, _ := items[1].(map[string]any)["content"].([]any)
+	c.Require().Len(assistantParts, 1, "assistant content parts")
+	c.EqDiff(any("output_text"), assistantParts[0].(map[string]any)["type"], "assistant text part type")
+	output, ok := items[3].(map[string]any)["output"].([]any)
+	c.True(ok, "a tool result with an image must use the array form of output, got %T", items[3].(map[string]any)["output"])
+	c.Require().Len(output, 2, "tool result output parts")
+	c.EqDiff(any("input_text"), output[0].(map[string]any)["type"], "tool result text part type")
+	c.EqDiff(any("input_image"), output[1].(map[string]any)["type"], "tool result image part type")
+	c.EqDiff(any("here it is"), output[0].(map[string]any)["text"], "tool result text part")
 }
