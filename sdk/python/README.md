@@ -112,8 +112,11 @@ c.delete_route("z-ai/glm-5.3")                         # not_found when there is
 # the CALLING USER and is never returned: the daemon holds the tokens, and a
 # child resolves its owner's credential at spawn. Needs a user credential on
 # the client (failed_precondition otherwise).
-begin = c.begin_provider_login("chatgpt")  # a providers.toml entry whose kind
-                                           # authenticates by login
+begin = c.begin_provider_login("chatgpt")  # provider = the NAME of a
+                                           # providers.toml entry whose KIND is
+                                           # openai-responses-chatgpt; an entry
+                                           # that does not login-authenticate is
+                                           # invalid_argument
 print(begin.authorize_url)                 # open it in a browser; then listen on
                                            # begin.redirect_port at
                                            # begin.callback_path on every host in
@@ -122,7 +125,9 @@ print(begin.authorize_url)                 # open it in a browser; then listen o
                                            # registration) or accept a pasted
                                            # redirect URL
 done = c.complete_provider_login(begin.login_id, "code=...&state=...")
-                                           # -> provider, account_id (never tokens)
+                                           # -> provider, account_id (never tokens);
+                                           # not_found for an unknown or expired
+                                           # login id, or one another user began
 c.delete_provider_credential("chatgpt")    # not_found when there is none
 
 # Script-child verbs (identity = the child; from a user credential they

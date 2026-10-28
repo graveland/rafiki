@@ -130,6 +130,47 @@ func TestProviderLoginNeedsAUserCredential(t *testing.T) {
 	}
 }
 
+// TestProviderLoginRefusesAChildCredential is the handler-layer half of the
+// security boundary. Every one of these identities carries a real UserID, so a
+// UserID-shaped check cannot tell them from a user: a per-child secret carries
+// its owner's id (pkg/server/usertoken.go), so does the per-boot+session shape,
+// and a {notify} token names the user whose agents it may notify. Each is
+// refused PermissionDenied by every verb and the backend is never called, which
+// is what keeps the refusal from resting on the policy table alone.
+func TestProviderLoginRefusesAChildCredential(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	for _, tc := range []struct {
+		name string
+		id   *server.Identity
+	}{
+		{"per-child secret", &server.Identity{UserID: "u1", ChildID: "c_child", Via: server.ProvenanceChildToken}},
+		{"per-boot + session", &server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed}},
+		{"notify-scoped token", &server.Identity{UserID: "u1", TokenID: "tok-1", Via: server.ProvenanceNotify}},
+		{"unknown provenance with a user id", &server.Identity{UserID: "u1"}},
+	} {
+		ctx := server.WithIdentity(context.Background(), tc.id)
+		f := &fakeProviderLogin{}
+		s := &Server{}
+		s.SetProviderLoginBackend(f)
+
+		_, err := s.BeginProviderLogin(ctx,
+			connect.NewRequest(&rafikiv1.BeginProviderLoginRequest{Provider: "chatgpt"}))
+		c.Require().Error(err, "%s: BeginProviderLogin", tc.name)
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s: BeginProviderLogin code", tc.name)
+
+		_, err = s.CompleteProviderLogin(ctx,
+			connect.NewRequest(&rafikiv1.CompleteProviderLoginRequest{LoginId: "l1"}))
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s: CompleteProviderLogin code", tc.name)
+
+		_, err = s.DeleteProviderCredential(ctx,
+			connect.NewRequest(&rafikiv1.DeleteProviderCredentialRequest{Provider: "chatgpt"}))
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s: DeleteProviderCredential code", tc.name)
+
+		c.Eq("", f.owner, "%s: a non-user credential must never reach the backend", tc.name)
+	}
+}
+
 // TestBeginProviderLoginMapsTheBackendAnswer pins the request/response
 // mapping, that the backend receives the CALLER's user id (the request
 // carries none), and that an empty provider never reaches it.
@@ -207,11 +248,13 @@ func TestDeleteProviderCredentialMapsTheRequest(t *testing.T) {
 	c.EqDeep([]string{"chatgpt"}, f.deleted, "deleted provider")
 }
 
-// TestProviderLoginErrorMapping pins the two error paths a backend can take:
-// an absent credential arrives as CodeNotFound (a ControllerError carrying
-// protocol.ErrNotFound, the package's typed mapping), an already-coded
-// refusal keeps its code, and an uncoded failure is redacted to internal
-// rather than forwarding text the daemon did not author.
+// TestProviderLoginErrorMapping pins the error paths a backend can take: an
+// absent credential or an unknown/expired/foreign login id arrives as
+// CodeNotFound (a ControllerError carrying protocol.ErrNotFound, the package's
+// typed mapping), a provider that is unknown or does not use login
+// authentication as CodeInvalidArgument (protocol.ErrInvalidArgs), an
+// already-coded refusal keeps its code, and an uncoded failure is redacted to
+// internal rather than forwarding text the daemon did not author.
 func TestProviderLoginErrorMapping(t *testing.T) {
 	c := assert.NewCollecting(t)
 
@@ -223,6 +266,21 @@ func TestProviderLoginErrorMapping(t *testing.T) {
 	_, err := s.DeleteProviderCredential(providerLoginUserCtx(),
 		connect.NewRequest(&rafikiv1.DeleteProviderCredentialRequest{Provider: "chatgpt"}))
 	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "absent credential")
+
+	// An unknown provider, or one whose kind does not authenticate by login,
+	// is the caller's mistake about the request, not a missing row: the backend
+	// promotes it as protocol.ErrInvalidArgs and it arrives InvalidArgument,
+	// never NotFound (which would suggest a credential exists somewhere).
+	f = &fakeProviderLogin{beginErr: &ControllerError{
+		Code:    protocol.ErrInvalidArgs,
+		Message: "provider \"nope\" is not configured for login",
+	}}
+	s = &Server{}
+	s.SetProviderLoginBackend(f)
+
+	_, err = s.BeginProviderLogin(providerLoginUserCtx(),
+		connect.NewRequest(&rafikiv1.BeginProviderLoginRequest{Provider: "nope"}))
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "unknown provider")
 
 	coded := connect.NewError(connect.CodePermissionDenied, errors.New("refused"))
 	f = &fakeProviderLogin{beginErr: coded}

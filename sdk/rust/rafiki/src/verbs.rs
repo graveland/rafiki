@@ -98,8 +98,8 @@ impl Client {
         self.unary("ListExecutors", req).await
     }
 
-    /// Start an OAuth login for one provider: `provider` names a
-    /// `providers.toml` entry whose kind authenticates by login
+    /// Start an OAuth login for one provider. `provider` is the NAME of a
+    /// `providers.toml` entry whose KIND authenticates by login
     /// (`openai-responses-chatgpt`). The answer carries the `login_id` to
     /// complete with, the `authorize_url` to open, and where the provider
     /// sends the browser back: listen on `redirect_port` at `callback_path`
@@ -107,7 +107,9 @@ impl Client {
     /// provider's registration), or accept a pasted redirect URL. The
     /// credential is stored against the calling user and never returned;
     /// the daemon holds the tokens. Needs a user credential on the client:
-    /// `failed_precondition` when the connection has none.
+    /// `failed_precondition` when the connection has none, `permission_denied`
+    /// for a child's credential. A provider that is unknown, or whose entry
+    /// does not login-authenticate, is `invalid_argument`.
     pub async fn begin_provider_login(
         &self,
         req: &pb::BeginProviderLoginRequest,
@@ -119,7 +121,9 @@ impl Client {
     /// back the raw query string the provider redirected to loopback with
     /// (`callback_query`). The answer names the `provider` and the
     /// authenticated `account_id`; the tokens stay in the daemon.
-    /// `not_found` for an unknown or expired login id.
+    /// `not_found` for a login id that is unknown, expired, or was begun by
+    /// another user: one identical answer for all three, so no caller can
+    /// probe which logins exist.
     pub async fn complete_provider_login(
         &self,
         req: &pb::CompleteProviderLoginRequest,
@@ -129,7 +133,9 @@ impl Client {
 
     /// Delete the calling user's stored credential for one provider, so that
     /// provider's login-authenticated kind stops resolving for this user's
-    /// children. `not_found` when the user has no credential for it.
+    /// children. `not_found` when the user has no credential for it;
+    /// `invalid_argument` when the provider entry is unknown or does not
+    /// login-authenticate.
     pub async fn delete_provider_credential(
         &self,
         req: &pb::DeleteProviderCredentialRequest,

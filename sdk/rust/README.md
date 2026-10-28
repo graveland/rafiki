@@ -78,9 +78,8 @@ idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, 
 `list_executors`, `begin_provider_login`, `complete_provider_login`,
 `delete_provider_credential`. `unary` and `server_stream` are public, so an
 RPC added to `control.proto` is callable immediately (regenerate first). `pb`
-holds the
-`rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the `Daraja*`
-RPCs carry.
+holds the `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the
+`Daraja*` RPCs carry.
 
 `get_child` and `list_children` return `ChildSummary`; its `parent_child_id` names the
 child that spawned it and is empty for a top-level child.
@@ -91,15 +90,19 @@ share a `ts`, so it can hold more than `limit`; an empty page is the start of
 the conversation.
 
 `begin_provider_login` / `complete_provider_login` / `delete_provider_credential`
-manage the CALLING USER's own provider credentials (a `providers.toml` entry
-whose kind authenticates by login, e.g. `openai-responses-chatgpt`): begin
-returns the `login_id`, the `authorize_url` to open, and the loopback port,
-callback path and hosts to listen on (the provider's registered redirect URI
-is fixed), complete hands back the raw callback query and answers the
-`provider` and `account_id`. Tokens never cross the wire: the daemon stores
-them, and a child resolves its owner's credential at spawn. Each needs a user
-credential on the client (`failed_precondition` otherwise); an unknown login
-id or a missing credential is `not_found`.
+manage the CALLING USER's own provider credentials. `provider` is the NAME of a
+`providers.toml` entry whose KIND authenticates by login (e.g.
+`openai-responses-chatgpt`): begin returns the `login_id`, the `authorize_url`
+to open, and the loopback port, callback path and hosts to listen on (the
+provider's registered redirect URI is fixed), complete hands back the raw
+callback query and answers the `provider` and `account_id`. Tokens never cross
+the wire: the daemon stores them, and a child resolves its owner's credential
+at spawn. Each needs a user credential on the client (`failed_precondition`
+otherwise, and `permission_denied` for a child's credential). A provider that
+is unknown or does not login-authenticate is `invalid_argument`; a missing
+credential, and a login id that is unknown, expired or was begun by another
+user, are all `not_found` (one identical answer, so no caller can probe which
+logins exist).
 
 ## Errors: nothing is retried
 

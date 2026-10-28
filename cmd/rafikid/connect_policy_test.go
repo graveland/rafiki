@@ -501,6 +501,56 @@ func TestRecallBackfillAndStatusRefuseEveryChild(t *testing.T) {
 	}
 }
 
+// TestProviderLoginRPCsRefuseEveryChildCredential is the gate-level half of
+// the provider-login security boundary: all three verbs stay userOnly, so no
+// child credential reaches them through the real policy decision. That matters
+// more here than on the token RPCs, because a child credential CARRIES its
+// owner's user id (pkg/server/usertoken.go): a child that got past this gate
+// would be acting on its OWNER's provider logins, not its own. A {notify}
+// token is refused too, by the branch ahead of the table, and the two admitted
+// shapes (a real user credential, and the unix socket's nil identity) still
+// pass, so the row is userOnly and not accidentally stricter.
+func TestProviderLoginRPCsRefuseEveryChildCredential(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"BeginProviderLogin", "CompleteProviderLogin", "DeleteProviderCredential"} {
+		procedure := controlProcedurePrefix + name
+		for _, id := range []*server.Identity{
+			{UserID: "u1", ChildID: "c_child", Via: server.ProvenanceChildToken},
+			{UserID: "u1", Via: server.ProvenanceChildAttributed},
+			{},
+		} {
+			ctx := server.WithIdentity(context.Background(), id)
+			err := authorizeControlProcedure(ctx, procedure)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a %s credential: %v, want", procedure, childCredentialKind(id), err)
+		}
+
+		notifyCtx := server.WithIdentity(context.Background(),
+			&server.Identity{UserID: "u1", TokenID: "tok-1", Via: server.ProvenanceNotify})
+		err := authorizeControlProcedure(notifyCtx, procedure)
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a notify-scoped token: %v, want", procedure, err)
+
+		c.NoError(authorizeControlProcedure(server.WithIdentity(context.Background(),
+			&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser}), procedure),
+			"%s must admit a real user credential", procedure)
+		c.NoError(authorizeControlProcedure(context.Background(), procedure),
+			"%s must admit the unix socket's nil identity", procedure)
+	}
+}
+
+// TestProviderLoginRPCsAreUserOnly pins the VALUE, not just the presence:
+// TestControlPolicyTableCoversEveryProcedure accepts any in-range policy, so a
+// flip of one of these three from userOnly to childScoped would keep that walk
+// green while handing a child credential its owner's provider logins. The same
+// assertion for the owner-isolation table lives next to its own completeness
+// walk (TestProviderLoginRPCsAreOwnerExempt, connect_ownerguard_test.go).
+func TestProviderLoginRPCsAreUserOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"BeginProviderLogin", "CompleteProviderLogin", "DeleteProviderCredential"} {
+		got := policyFor(controlProcedurePrefix + name)
+		c.Eq(policyUserOnly, got, "policyFor(Control.%s) = %v, want policyUserOnly", name, got)
+	}
+}
+
 // TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs pins the OTHER
 // mount of the Control service: the local socket composes the same policy
 // gate behind its optional identity interceptor, and the same child-subtree

@@ -2148,9 +2148,18 @@ authenticates by login rather than by a static API key
 owner-exempt below it, because the credential is stored against the CALLER's
 own user id (`pkg/connectapi/provider_login.go`, behind
 `Server.SetProviderLoginBackend`), so there is no target to authorize and no
-cross-user surface to filter. A caller with no identity, or one that names no
-user id (the unix socket's local trust), is refused `CodeFailedPrecondition`
-before the backend is reached: there is no user to store a grant for.
+cross-user surface to filter.
+
+The handler refuses two identity shapes itself, before the backend is reached,
+so the boundary does not rest on the policy table alone: a caller with no
+identity or no user id (the unix socket's local trust) is
+`CodeFailedPrecondition`, since there is no user to store a grant for, and a
+credential that names a user but is NOT a user credential is
+`CodePermissionDenied` (`!Identity.IsUserCredential()`, so a child's per-child
+secret, the per-boot+session shape and a `{notify}` token are all refused).
+The second check exists because a child credential CARRIES its owner's user
+id: a `UserID`-shaped test cannot tell a user from a child holding its owner's
+identity.
 
 The flow is a browser round trip the CLIENT drives, mirroring the Login
 service. `BeginProviderLogin` returns a `login_id`, the `authorize_url` to
@@ -2162,6 +2171,19 @@ daemon never invents a different one. `CompleteProviderLogin` hands the raw
 callback query string back to the daemon, which does the code exchange
 itself; the response carries the `provider` and the authenticated
 `account_id`.
+
+The backend binds a login to the owner that BEGAN it, and the errors are
+mapped so the answer leaks nothing. A `login_id` that is unknown, expired, or
+was begun by a DIFFERENT owner answers `CodeNotFound`: one identical answer
+for all three, so a caller cannot learn that another user's login exists. A
+provider that is unknown, or whose `providers.toml` entry does not
+authenticate by login, is a mistake about the request and answers
+`CodeInvalidArgument` (never `CodeNotFound`, which would suggest a credential
+exists somewhere). A missing credential is `CodeNotFound` as well, for
+`DeleteProviderCredential` and for a completion that finds nothing stored. The
+mapping is `providerLoginError` (`pkg/connectapi/provider_login.go`): an error
+the daemon already coded keeps its code, and an uncoded one is redacted to
+`CodeInternal`.
 
 **Tokens never leave the daemon**: no response field on this plane carries an
 access or refresh token, the credential is stored encrypted (AES-256-GCM,

@@ -56,6 +56,23 @@ func TestControlOwnerIsolationCoversEveryProcedure(t *testing.T) {
 	}
 }
 
+// TestProviderLoginRPCsAreOwnerExempt pins the VALUE for the three
+// provider-login verbs, the pessimistic twin of the walk above: the walk
+// accepts any in-range class, so reclassifying one of these to ownerGuarded (or
+// dropping its reason) would keep it green. They must stay ownerExempt with
+// exactly the self-scoped reason, because the credential is stored against the
+// caller's own user id and there is no target to authorize. The policy half of
+// this assertion is TestProviderLoginRPCsAreUserOnly (connect_policy_test.go).
+func TestProviderLoginRPCsAreOwnerExempt(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"BeginProviderLogin", "CompleteProviderLogin", "DeleteProviderCredential"} {
+		got := ownerIsolationTable[name]
+		c.Eq(ownerExempt, got, "ownerIsolationTable[%q] = %v, want ownerExempt", name, got)
+		c.Eq("self-scoped: a user manages its own provider logins", ownerExemptReasons[name],
+			"ownerExemptReasons[%q]", name)
+	}
+}
+
 // TestOwnerGuardForIdentityShapes pins the source's identity table: only a
 // non-admin user credential resolves a guard. Everything else — the unix
 // socket's local trust, an admin, a child credential (ChildScope governs), and

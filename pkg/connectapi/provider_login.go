@@ -24,7 +24,17 @@ type ProviderLoginBegin struct {
 }
 
 // ProviderLoginBackend is the daemon's provider-login engine. ownerUserID is
-// never empty: the handler refuses identity-less callers before calling it.
+// never empty and always names a REAL user credential: the handler refuses an
+// identity-less caller (FailedPrecondition) and a non-user credential such as
+// a child's (PermissionDenied) before calling any method.
+//
+// The backend binds a login to the owner that began it. CompleteProviderLogin
+// answers NotFound for a login id that is unknown, expired, or was begun by a
+// DIFFERENT owner: one identical answer for all three, so a caller cannot
+// learn that another user's login exists. Provider resolution is the other
+// half of the contract: a provider name that is unknown, or whose kind does
+// not authenticate by login, is protocol.ErrInvalidArgs (InvalidArgument on
+// the wire), never NotFound.
 //
 // Tokens never cross this seam: Begin returns a URL, Complete returns the
 // provider and the authenticated account id, and the credential itself stays
@@ -59,23 +69,44 @@ func (s *Server) providerLoginBackend() (ProviderLoginBackend, error) {
 }
 
 // providerLoginOwner is the caller's own user id, the only owner a provider
-// credential is ever stored against. The check is on UserID rather than on
-// IsUserCredential(): the policy gate refuses every non-user credential shape
-// before a handler runs, and the unix socket's nil local trust has no user to
-// store a credential for, which is exactly what FailedPrecondition says.
+// credential is ever stored against, and it refuses the shapes that must not
+// reach the backend.
+//
+// The provenance clause is defence in depth, not the primary boundary: the
+// policy gate (connectPolicyTable, all three verbs policyUserOnly) already
+// refuses every non-user credential, and it is the layer that runs first. But
+// a child credential CARRIES its owner's UserID (pkg/server/usertoken.go), so
+// a UserID-shaped check alone cannot tell a user from a child holding its
+// owner's identity: one policy row between a child and its owner's provider
+// logins is one row too few. IsUserCredential() is the repo's predicate for
+// "resolved from a real user token", and it is false for a per-child secret,
+// for the per-boot shapes and for a {notify} token alike.
+//
+// The two refusals say different things on purpose: an identity with no user
+// id at all (the unix socket's nil local trust) has nothing to bind a
+// credential to, which is FailedPrecondition, while a real identity of the
+// wrong KIND is a refusal of authority, which is PermissionDenied.
 func providerLoginOwner(ctx context.Context) (string, error) {
 	id := server.IdentityFromContext(ctx)
 	if id == nil || id.UserID == "" {
 		return "", connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("provider login needs a user credential; log in with `rafiki login` or use a profile with a user token"))
 	}
+	if !id.IsUserCredential() {
+		return "", connect.NewError(connect.CodePermissionDenied,
+			errors.New("provider login is a user-credential surface; a child credential cannot begin, complete or delete its owner's provider logins"))
+	}
 	return id.UserID, nil
 }
 
 // providerLoginError maps a backend error. An error the daemon already coded
 // keeps its code; anything else takes the package's standard fallthrough, so a
-// *ControllerError carrying protocol.ErrNotFound (an absent credential)
-// arrives as CodeNotFound and an uncoded failure is redacted to internal.
+// *ControllerError arrives with the code its protocol.Err* reason names and an
+// uncoded failure is redacted to internal. Two reasons carry the contract:
+// protocol.ErrInvalidArgs (InvalidArgument) for a provider name that is
+// unknown or whose kind does not authenticate by login, and
+// protocol.ErrNotFound (NotFound) for a missing credential or a login id that
+// is unknown, expired or belongs to another owner.
 func providerLoginError(err error) error {
 	var ce *connect.Error
 	if errors.As(err, &ce) {
