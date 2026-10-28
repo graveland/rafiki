@@ -4,11 +4,15 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multigres/testkit/assert"
@@ -543,4 +547,167 @@ func insertMigrationOwner(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 		t.Fatalf("insert owner %q: %v", name, err)
 	}
 	return id
+}
+
+// TestMigrate0056TreeColumns pins 0056-0058: the tree columns on the message,
+// conversation and turn tables, the four counters, and the unique path index —
+// exercised rather than merely catalogued, because an index that exists but is
+// not unique would still satisfy information_schema.
+func TestMigrate0056TreeColumns(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	for _, col := range []struct{ table, name string }{
+		{"conversation_message", "parent_id"},
+		{"conversation_message", "derived_from_id"},
+		{"conversation_message", "path_hash"},
+		{"conversation_message", "hash_version"},
+		{"conversation_message", "depth"},
+		{"conversation_message", "provider_message_id"},
+		{"conversation", "head_id"},
+		{"conversation", "next_ordinal"},
+		{"conversation", "node_count"},
+		{"conversation", "fork_count"},
+		{"conversation", "fallback_count"},
+		{"conversation", "payload_bytes"},
+		{"conversation_turn", "request_head_id"},
+	} {
+		var exists bool
+		c.Require().NoError(pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			                WHERE table_schema='conversations' AND table_name=$1 AND column_name=$2)`,
+			col.table, col.name).Scan(&exists), "probe %s.%s", col.table, col.name)
+		c.True(exists, "conversations.%s.%s missing after Migrate", col.table, col.name)
+	}
+
+	var unique bool
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT i.indisunique
+		  FROM pg_index i
+		  JOIN pg_class ic ON ic.oid = i.indexrelid
+		  JOIN pg_namespace n ON n.oid = ic.relnamespace
+		 WHERE n.nspname = 'conversations' AND ic.relname = 'conversation_message_path_uniq'`).Scan(&unique),
+		"probe conversation_message_path_uniq")
+	c.True(unique, "conversation_message_path_uniq is not unique")
+
+	var convID string
+	c.Require().NoError(pool.QueryRow(ctx, `
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('test','server') RETURNING id::text`).Scan(&convID), "insert conversation")
+
+	insertNode := func(ordinal int, pathHash []byte, hashVersion *int16) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO conversations.conversation_message
+			   (conversation_id, ordinal, role, content, path_hash, hash_version)
+			VALUES ($1::uuid, $2, 'user', '[{"type":"text","text":"hi"}]'::jsonb, $3, $4)`,
+			convID, ordinal, pathHash, hashVersion)
+		return err
+	}
+	version := int16(1)
+
+	c.Require().NoError(insertNode(0, []byte{0x01, 0x02}, &version), "insert the first node")
+
+	// One path is one node per conversation: a second claim on it is refused by
+	// the unique index, and the refusal is the 23505 a caller must retry on.
+	err := insertNode(1, []byte{0x01, 0x02}, &version)
+	c.Error(err, "a second node with the same path_hash was accepted")
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		c.Eq("23505", pgErr.Code, "duplicate path_hash sqlstate")
+	} else {
+		c.True(false, "duplicate path_hash err = %v, want a *pgconn.PgError", err)
+	}
+
+	// Legacy rows carry no tree position, and NULLs are distinct in a unique
+	// index — so any number of them coexist.
+	c.Require().NoError(insertNode(2, nil, nil), "insert a legacy row")
+	c.Require().NoError(insertNode(3, nil, nil), "insert a second legacy row")
+
+	// path_hash and hash_version move together.
+	err = insertNode(4, []byte{0x03}, nil)
+	c.Error(err, "path_hash without hash_version was accepted; the hash_pair CHECK is missing")
+
+	// There is no MigrateTo API, so exercise the down migration directly: a
+	// no-op body must fail this test, not silently leave the tree in place.
+	down, err := os.ReadFile("migrations/0056_conversation_tree.down.sql")
+	c.Require().NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	for _, col := range []struct{ table, name string }{
+		{"conversation_message", "parent_id"},
+		{"conversation_message", "path_hash"},
+		{"conversation", "head_id"},
+		{"conversation", "next_ordinal"},
+	} {
+		var exists bool
+		c.Require().NoError(pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			                WHERE table_schema='conversations' AND table_name=$1 AND column_name=$2)`,
+			col.table, col.name).Scan(&exists), "probe %s.%s after down", col.table, col.name)
+		c.False(exists, "conversations.%s.%s survived the down migration", col.table, col.name)
+	}
+}
+
+// TestMigrateGoStepRunsInMigrationTransaction pins the contract the tree
+// backfill depends on: a Go step runs INSIDE its migration's transaction, so a
+// failing step leaves neither the SQL nor the version recorded. A step that ran
+// after the commit — or in a transaction of its own — would leave a database
+// that believes it is migrated with half the work done.
+func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+
+	chain, err := loadMigrations()
+	c.Require().NoError(err, "load chain")
+	head := chain[len(chain)-1]
+	// 0058 is the migration whose rollback is observed below; a new head means
+	// this test must be repointed, not silently left asserting an older one.
+	c.Eq(58, head.version, "this test observes 0058's rollback")
+
+	prev, hadPrev := goSteps[head.version]
+	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
+	t.Cleanup(func() {
+		if hadPrev {
+			goSteps[head.version] = prev
+			return
+		}
+		delete(goSteps, head.version)
+	})
+
+	c.Require().NoError(migrateTo(ctx, pool, head.version-1), "migrate to one version below the head")
+
+	err = Migrate(ctx, pool)
+	c.Error(err, "Migrate must fail when the head's go step fails")
+	c.True(err != nil && strings.Contains(err.Error(), "go step"), "error names the go step: %v", err)
+
+	var recorded bool
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM `+migrationsTable+` WHERE version=$1)`, head.version).Scan(&recorded),
+		"probe the migrations table")
+	c.False(recorded, "version %d was recorded despite its go step failing", head.version)
+
+	var nodeCount bool
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema='conversations' AND table_name='conversation'
+		                  AND column_name='node_count')`).Scan(&nodeCount), "probe node_count")
+	c.False(nodeCount, "0058's column survived a failed go step; the SQL did not roll back with it")
+}
+
+// TestMigrateGoStepUnknownVersion pins loadMigrations' refusal of a step for a
+// version the chain does not have: such a step never runs, so the feature it
+// implements would silently not exist.
+func TestMigrateGoStepUnknownVersion(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	goSteps[9999] = func(context.Context, pgx.Tx) error { return nil }
+	t.Cleanup(func() { delete(goSteps, 9999) })
+
+	_, err := loadMigrations()
+	c.Error(err, "a go step for an unknown version must fail the chain")
+	c.True(err != nil && strings.Contains(err.Error(), "unknown version 9999"), "error names the version: %v", err)
 }

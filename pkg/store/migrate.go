@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -36,12 +37,28 @@ type migration struct {
 	sql     string
 }
 
+// goStep is the Go half of a migration: work SQL cannot express, such as
+// hashing rows that already exist.
+type goStep func(ctx context.Context, tx pgx.Tx) error
+
+// goSteps holds the Go half of a migration, keyed by version. It runs in the
+// migration's own transaction immediately after that version's SQL, so the two
+// commit or roll back together.
+var goSteps = map[int]goStep{}
+
 // Migrate brings the database to the head of the embedded migration chain,
 // creating the tracking table on first run and then applying every migration
 // the table does not already record. Idempotent: re-running is a no-op.
 // Concurrent callers are serialized by an advisory lock, so two servers booting
 // at once apply the chain exactly once.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	return migrateTo(ctx, pool, 0)
+}
+
+// migrateTo applies the chain up to and including max, or to the head when max
+// is 0. Only tests pass a max: it exists so a test can stop one version short
+// of the head and then exercise the head's own behaviour.
+func migrateTo(ctx context.Context, pool *pgxpool.Pool, max int) error {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return err
@@ -84,7 +101,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	for _, m := range migrations {
-		if applied[m.version] {
+		if applied[m.version] || (max > 0 && m.version > max) {
 			continue
 		}
 		if err := apply(ctx, conn, m); err != nil {
@@ -146,6 +163,11 @@ func apply(ctx context.Context, conn *pgxpool.Conn, m migration) error {
 	if _, err := tx.Exec(ctx, m.sql); err != nil {
 		return fmt.Errorf("migrate %04d_%s: %w", m.version, m.name, err)
 	}
+	if step, ok := goSteps[m.version]; ok {
+		if err := step(ctx, tx); err != nil {
+			return fmt.Errorf("migrate %04d_%s: go step: %w", m.version, m.name, err)
+		}
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO `+migrationsTable+` (version, name) VALUES ($1, $2)`,
 		m.version, m.name); err != nil {
@@ -188,6 +210,13 @@ func loadMigrations() ([]migration, error) {
 	for i, m := range out {
 		if m.version != baselineVersion+i {
 			return nil, fmt.Errorf("migrate: chain not contiguous at %04d_%s (want version %d)", m.version, m.name, baselineVersion+i)
+		}
+	}
+	// A step for a version that is not in the chain would never run, so the
+	// feature it implements would silently not exist.
+	for v := range goSteps {
+		if v < baselineVersion || v >= baselineVersion+len(out) {
+			return nil, fmt.Errorf("migrate: go step registered for unknown version %d", v)
 		}
 	}
 	return out, nil
