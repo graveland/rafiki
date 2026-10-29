@@ -94,8 +94,8 @@ func newModelsAliasListCmd() *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List your model aliases and the model strings they stand for",
-		Long: `List the model aliases YOU own, newest write first, with when each was last
-changed. Nobody else's aliases are ever listed: they are per user, with no
+		Long: `List the model aliases YOU own by name (alphabetically), with when each was
+last changed. Nobody else's aliases are ever listed: they are per user, with no
 shared layer beneath them.
 
 Example:
