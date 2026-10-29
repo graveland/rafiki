@@ -74,9 +74,9 @@ profile add <name> --url … --token …`, or paste it where the profile's token
 file lives), and `rafiki claude` picks it up with nothing further to export.
 
 ```bash
-make claude                                   # Claude Code through the local proxy
-make claude ARGS='--model glm-5.2'            # …on any model the proxy can route
-make claude ARGS='-- --permission-mode plan'  # …passing claude its own flags
+make claude                                        # Claude Code through the local proxy
+make claude ARGS='--model openrouter/z-ai/glm-5.2' # …on any model the proxy can route
+make claude ARGS='-- --permission-mode plan'       # …passing claude its own flags
 ```
 
 `--model` accepts a concrete id, a `<family>-latest` alias, or an OpenRouter
