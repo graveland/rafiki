@@ -18,11 +18,15 @@ Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
 - a `<family>-latest` alias (`opus-latest`) — resolved live from the
   OpenRouter catalog to the family's newest Anthropic model;
 - any OpenRouter slash id (`moonshotai/kimi-k3`) — routed directly to
-  OpenRouter with no failover.
+  OpenRouter with no failover;
+- one of your **model aliases** (`ds`) — a slash-free name you saved with
+  `rafiki models alias set` (below), resolved to its full model string for the
+  request's owner. A miss falls through to the rules above, because Claude
+  Code's own background calls and its `/model` menu send bare Anthropic ids.
 
-Nothing else is resolved: a slash-free name that is not a `<family>-latest`
-alias is passed through as written. The daemon ships no built-in per-line
-provider pin.
+Nothing else is resolved: a slash-free name that is neither a `<family>-latest`
+alias nor one of your model aliases is passed through as written. The daemon
+ships no built-in per-line provider pin.
 
 ### Routing specs
 
@@ -249,6 +253,51 @@ records the constraint in an in-memory (per-process, never persisted) cache,
 clamps the effort, and retries once. Subsequent requests to that model clamp
 proactively. See `pkg/routing/effortmap.go` (`EffortCache`) and
 `pkg/server/proxy.go` (`effortRetry`).
+
+## Model aliases
+
+A **model alias** is one of your own slash-free names for a full model string,
+stored by the daemon and strictly per user (`conversations.model_alias`,
+`rafiki models alias`):
+
+```
+rafiki models alias set ds 'openrouter/~deepseek/deepseek-flash-latest[sort=price]'
+rafiki models alias list
+rafiki models alias delete ds
+```
+
+The naming rule is the whole grammar: **a model string with a `/` is a model
+id; a slash-free one is your alias.** That holds wherever the control surface
+accepts a model — `rafiki create --model ds`, a preset's model, `agent_spawn`'s
+`model` — and an unknown slash-free name there is refused (`no model alias
+"x"`), never guessed at. A name matches `^[a-z0-9][a-z0-9._-]*$`, and a target
+must be `provider/id`, so an alias can never chain to another alias. The target
+is stored as written: it is not checked against the catalog or your configured
+providers at put time, so an alias for a model you have not configured yet
+still stores.
+
+A target may carry its own routing spec, and the caller's bracket merges over
+it key by key — the caller's keys win, `nodata`/`zdr` stay monotone:
+
+```
+rafiki create --model 'ds[sort=latency]'    # the target's spec, sort replaced
+```
+
+On the `/v1/messages` face the alias is tried FIRST and a miss falls back to
+the plain rules above, because Claude Code's background calls and `/model` menu
+send bare Anthropic ids that are not aliases and must keep resolving exactly as
+they always have. A target naming a provider other than `anthropic/` or
+`openrouter/` is refused with a 400 — this face has no route to it. `rafiki
+claude --model ds` works because the launcher passes the model verbatim and the
+request reaches this face with `ds` as its model; note that
+`--passthrough-auth=on` classifies the NAME, not the target, so it refuses a
+slash-free alias it cannot recognise as Anthropic — leave passthrough on `auto`
+with aliases.
+
+A spawn resolves its alias ONCE and the child keeps that model — the stored
+session is never rewritten. On this face each request resolves its own. Either
+way, repointing or deleting an alias reaches future spawns and future requests,
+never a running or resumed child.
 
 ## Model declarations
 

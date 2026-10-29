@@ -1636,13 +1636,22 @@ only, like `rafiki/routing`. `ConversationReview`'s request model is strict the
 same way; its `RAFIKI_REVIEW_MODEL` fallback is an operator declaration and is
 not resolved.
 
-**Lenient** read sites are `ModelInfo` and `ModelRoutes`: a miss passes the
-model through unchanged, while a store error is `CodeUnavailable` (an outage
-must never read as "no such model"). `ListModels` appends the connection
-owner's alias rows — id = the alias name, provider/model = the target's, every
-catalog fact copied from the target's own row, `source = "alias"` — at the front
-of the list, ordered by name; the provider and kind filters apply to the
-TARGET (a claude child is offered only anthropic-target aliases).
+**Lenient** sites are `ModelInfo`, `ModelRoutes` and the proxy face
+(`POST /v1/messages`): a miss passes the model through unchanged, while a store
+error is `CodeUnavailable` — or, on the proxy face, a 503 — because an outage
+must never read as "no such model". The proxy face MUST be lenient: Claude
+Code's background calls and its `/model` menu send bare `claude-*` ids, which
+are model ids that happen to contain no slash, not aliases. Its other alias
+refusals are 400s, not Connect codes: an unparsable target, or one naming a
+provider other than `anthropic/`/`openrouter/`, is the caller's own
+configuration and this face has no route to it. So a slash-free string is an
+alias ONLY on the strict sites above; every lenient site hands a miss through.
+`ListModels` appends the
+connection owner's alias rows — id = the alias name, provider/model = the
+target's, every catalog fact copied from the target's own row, `source =
+"alias"` — at the front of the list, ordered by name; the provider and kind
+filters apply to the TARGET (a claude child is offered only anthropic-target
+aliases).
 
 Authority: listing is anyCaller (a child reads its owner's aliases); writing
 is userOnly — no child credential and no MCP tool may author one, refused by

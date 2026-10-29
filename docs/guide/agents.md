@@ -25,7 +25,11 @@ through `pkg/llm`/`pkg/agentloop` directly.
 The kinds have **different model universes**, and `--model` completion is
 scoped to the one you picked: `fundi` takes concrete Anthropic ids,
 `<family>-latest` aliases, and OpenRouter slash ids; a script child takes no
-model at all. `fundi` needs
+model at all. Your own model aliases (`rafiki models alias`, see
+[the proxy guide](proxy.md#model-aliases)) are offered wherever their target
+is eligible — an Anthropic-target alias in either kind, an OpenRouter-target
+one in `fundi` — and a slash-free `--model` that names no alias is refused.
+`fundi` needs
 `ANTHROPIC_API_KEY` in the **daemon-visible** environment (unconditionally),
 plus `OPENROUTER_API_KEY` for any non-`anthropic/` model — both reach a
 spawned child from the caller's shell via `rafiki create --forward-env`, on

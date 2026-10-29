@@ -262,7 +262,9 @@ draft):
 **Model / profile:**
 
 - `--model` overrides the detector/rank/draft model directly, regardless of
-  what `--analyzer-dir`/`--profile` resolved.
+  what `--analyzer-dir`/`--profile` resolved. This CLI runs no model-alias
+  resolution (it is DSN-backed, not a Connect client), so a slash-free name
+  here is a bare model id, never one of your `rafiki models alias` entries.
 - `--analyzer-dir DIR` (or `RAFIKI_ANALYZER_DIR`) points at a directory
   containing `profiles.yaml` (required) plus optional `detector.md`/
   `draft.md` base prompts.
@@ -384,8 +386,11 @@ Every optional field resolves flag > `~/.config/rafiki/review.json`
 env > the analyzer profile's own defaults; a missing file is a working
 configuration. `--model` must be provider-qualified — `openrouter/<id>` for
 OpenRouter (a bare OpenRouter id reads as an unknown provider), a
-providers.toml alias as `<provider>/<alias>`, or an Anthropic id — and an id
-that resolves nowhere fails the whole request before anything is enqueued.
+providers.toml model declaration as `<provider>/<key>`, or an Anthropic id —
+or it may be one of YOUR model aliases, a slash-free name (`rafiki models
+alias`): a slash-free string here is resolved for your user and an unknown one
+is refused, exactly as `rafiki create --model` refuses it. A model that
+resolves nowhere fails the whole request before anything is enqueued.
 The analyzer-profile flag is `--analyzer-profile`, not `--profile`: the
 global `-P/--profile` selects the DAEMON profile and keeps that meaning
 here. `min_turns` gates when a job DEQUEUES, not at accept, so a

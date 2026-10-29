@@ -14,7 +14,7 @@ Rafiki is designed to be the **central LLM system for the whole company**. Every
 
 - **Multiple clients connect to the same conversation.** An incident fires via Rootly → a conversation starts from savannah-admin, Eon, or another bot. An engineer joins from Slack. Another connects from a TUI. They all see the same transcript, the same tools, the same state. Rafiki is the shared conversation bus, not a point-to-point pipe.
 
-- **Model selection and fallback are infrastructure, not application code.** Anthropic as primary, OpenRouter as fallback — configured once, inherited by all consumers. Model aliases (`opus-latest`, `kimi-k3`) resolve live. Circuit breakers and retry are transparent. Adding a new model is a catalog entry, not a code change.
+- **Model selection and fallback are infrastructure, not application code.** Anthropic as primary, OpenRouter as fallback — configured once, inherited by all consumers. `<family>-latest` model aliases (`opus-latest`) resolve live, and a providers.toml model declaration's `only` pins open-weight models to specific hosts. Circuit breakers and retry are transparent. Adding a new model is a catalog entry, not a code change.
 
 - **Out-of-band self-improvement replaces in-loop instruction-following.** Instead of asking a running agent to "learn from this conversation," conversations are stored in the DB and analyzed after the fact. The `analyze/` pipeline runs an LLM over captured conversations to find skill gaps, knowledge to persist, and wasted effort. Findings are ranked, deduplicated, and can auto-generate proposed skill edits. You can also re-analyze the same conversation with different prompts and different models to compare results — something impossible with in-loop self-improvement.
 
@@ -149,7 +149,7 @@ Prompt caching is a 90% discount on input tokens, and input tokens are 86-98% of
 
 - **Library:** `llm.Client` + `llm.Conversation` with cache hygiene (static-first ordering, prefix_hash drift detection, trim policy). `agentloop.Run`/`Resume` with crash-safe recovery (synthetic errors for orphaned tool calls, max 3 resume attempts). Bounded concurrency (6), 50KB tool-result truncation.
 
-- **Routing:** Per-upstream circuit breaker. OpenRouter catalog with live model resolution. Short aliases (`kimi-k3`, `deepseek-v4-pro`). Provider pins for open-weight models. Runtime effort adaptation. SSE capture parsing.
+- **Routing:** Per-upstream circuit breaker. OpenRouter catalog with live model resolution. Per-owner model aliases (slash-free names for full model strings, resolved at spawn). Provider pins (`only`) on open-weight model declarations. Runtime effort adaptation. SSE capture parsing.
 
 - **Storage:** TimescaleDB hypertable schema for `conversation`, `conversation_turn`, `conversation_msg`. Price-correct token cost tracking. Schema migration chain with baseline adoption of existing data.
 

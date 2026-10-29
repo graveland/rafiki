@@ -5,7 +5,10 @@
 Claude subscription instead of the daemon's `ANTHROPIC_API_KEY` (by omitting
 `ANTHROPIC_AUTH_TOKEN`, the only thing that makes Claude Code prefer
 API-key auth over OAuth); `off` always bills the daemon's key; `auto` picks
-`on` whenever `--model` resolves to an Anthropic id. It's Anthropic-only
+`on` whenever `--model` resolves to an Anthropic id (`auto` classifies the
+model STRING, not an alias's target — `proxyenv.AnthropicModel` — so a
+slash-free [model alias](proxy.md#model-aliases) reads as non-Anthropic unless
+its name itself looks Anthropic). It's Anthropic-only
 (rejected outright against a non-Anthropic model, with OpenRouter failover
 disabled for these requests too) and fails closed on every ambiguous case —
 no rafiki token, no forwardable credential, a typoed flag value — never

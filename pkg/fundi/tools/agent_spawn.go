@@ -72,7 +72,9 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 				Description: "Short human-readable name (\"reviewer\", \"impl-auth\"). Optional but makes agent_list readable."},
 			{Name: "model", Type: "string",
 				Description: "Overrides the preset's model; only set this when the human named a model. " +
-					"Model id to run it on. Omit to inherit the daemon default. Use agent_models to see the options. " +
+					"Model id to run it on. Either provider/id or one of your owner's model aliases " +
+					"(slash-free names; agent_models lists them). Omit to inherit the daemon default. " +
+					"Use agent_models to see the options. " +
 					"An id may end in a routing spec in brackets that decides where its requests are served, " +
 					"e.g. \"openrouter/z-ai/glm-5.3[sort=throughput,nodata]\": comma-separated items " +
 					"sort=price|throughput|latency|balanced, quant=<floor like fp8+ or a list a|b>, " +

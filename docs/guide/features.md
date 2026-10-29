@@ -99,9 +99,14 @@
   `rafiki providers route set` stores operator defaults per model line;
   `rafiki providers ban` ejects a bad host by hand at runtime. `nodata`/`zdr`
   are monotone — data policy cannot be routed around by any of it.
-- **Model aliasing** — short names for long local/custom model ids, with a
-  declared context window so Claude Code doesn't assume 200K against a
-  16K-context local model and blow past it.
+- **Model declarations and per-user model aliases.** A providers.toml *model
+  declaration* gives a long local/custom model id a short key, with a declared
+  context window so Claude Code doesn't assume 200K against a 16K-context local
+  model and blow past it. Separately, a *model alias* is yours: any slash-free
+  name for any full model string (`rafiki models alias set ds
+  'openrouter/~deepseek/deepseek-flash-latest[sort=price]'`), strictly per user,
+  accepted wherever the control surface takes a model — `rafiki create --model
+  ds`, a preset's model, `agent_spawn`.
 - **Per-user provider logins, not just API keys.** A provider of kind
   `openai-responses-chatgpt` bills each user's own ChatGPT plan: `rafiki
   providers login chatgpt` runs the OAuth flow for that user (a browser, or
