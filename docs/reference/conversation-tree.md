@@ -457,8 +457,9 @@ The backfill's `unmatched_copies` appears only in the migrate log line
 (`conversation tree backfill … unmatched_copies=`), never in this report, so the
 migrate output is what a rehearsal has to capture. A `compaction_tail` row with a
 NULL `path_hash` is invisible to every count — expected for a recognised
-interim-fork copy, but a backfill misclassification leaves no trace. A non-root row with a NULL `depth` escapes both `bad_depth` (`NULL <> x` is
-not TRUE) and `bad_hash` (depth is checked only for roots). No defect here is
+interim-fork copy, but a backfill misclassification leaves no trace. A non-root
+row with a NULL `depth` escapes both `bad_depth` (`NULL <> x` is not TRUE) and
+`bad_hash` (depth is checked only for roots). No defect here is
 one the writers can produce: `AppendChain` always writes a position and a depth,
 and the only positionless rows the backfill leaves are the copies it recognised.
 Each therefore means data edited by hand — which is also why none is repaired.
