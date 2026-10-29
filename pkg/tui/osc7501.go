@@ -41,8 +41,9 @@ const (
 	// schedule firing) and the child's status flipping to working would
 	// otherwise flash `done` for a coordinator that is waking: the hold lets
 	// any following working/blocked/error supersede it, and only a child that
-	// stays idle for the whole delay settles to done.
-	osc7501DoneDelay = 1500 * time.Millisecond
+	// stays idle for the whole delay settles to done. It is sized to outlast a
+	// typical LLM round trip, since the flip waits on the model's first token.
+	osc7501DoneDelay = 15 * time.Second
 )
 
 // The state= values a record can carry. They are deliberately NOT
@@ -414,7 +415,11 @@ func (e *osc7501Emitter) record(d rail.TopLevelDisplay) string {
 //   - waiting on the operator  -> blocked, kind=question, msg = the question
 //   - failed                   -> error, msg = the error
 //   - working                  -> working
-//   - any other wait           -> idle, but ONLY if the last record was working
+//   - waiting on children, a job
+//     or events                -> working: the child is not finished and needs
+//     nothing from the operator, and an idle here would let a coordinator
+//     waiting on its workers read as stopped
+//   - waiting on a schedule    -> idle, but ONLY if the last record was working
 //     or blocked, so a spinner or badge is dropped and nothing else is said
 //   - idle                     -> done, but only if the child has worked since
 //     its last done
@@ -440,6 +445,10 @@ func (e *osc7501Emitter) sequence(d rail.TopLevelDisplay) string {
 				kv{"msg", osc7501Value(d.DisplayMsg, osc7501MaxMsg)},
 				kv{"title", osc7501Value(title, osc7501MaxTitle)},
 			)
+		}
+		if protocol.WaitingOn(d.WaitingOn) != protocol.WaitingOnSchedule {
+			e.worked[id] = true
+			return osc7501(osc7501Working, id)
 		}
 		switch e.lastState[id] {
 		case osc7501Working, osc7501Blocked:

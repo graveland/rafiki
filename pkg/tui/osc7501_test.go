@@ -89,8 +89,8 @@ func TestOSC7501SequenceGolden(t *testing.T) {
 	idle := supportedEmitter()
 	ck.NotEmpty(idle.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "work first")
 	ck.Eq("\x1b]7501;state=idle:id="+id+":app=rafiki\x1b\\",
-		idle.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnEvents, "")}),
-		"a non-operator wait drops a prior working with idle")
+		idle.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnSchedule, "")}),
+		"a schedule wait drops a prior working with idle")
 
 	clear := supportedEmitter()
 	ck.NotEmpty(clear.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "something emitted first")
@@ -168,31 +168,49 @@ func TestOSC7501NeverIdleOverDone(t *testing.T) {
 	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "work")
 	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}), "idle after work emits done")
 	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}), "another idle emits nothing")
-	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnEvents, "")}),
+	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnSchedule, "")}),
 		"a later idle must not overwrite the done")
 }
 
-// TestOSC7501WaitingMapsToIdleOnlyAfterWorkingOrBlocked pins the one rule that
-// needs the prior state: a non-operator wait drops a spinner or badge, and
+// TestOSC7501ScheduleWaitMapsToIdleOnlyAfterWorkingOrBlocked pins the one rule
+// that needs the prior state: a schedule wait drops a spinner or badge, and
 // otherwise says nothing.
-func TestOSC7501WaitingMapsToIdleOnlyAfterWorkingOrBlocked(t *testing.T) {
+func TestOSC7501ScheduleWaitMapsToIdleOnlyAfterWorkingOrBlocked(t *testing.T) {
 	ck := assert.NewCollecting(t)
+	sched := dsp(protocol.DisplayWaiting, protocol.WaitingOnSchedule, "")
 
 	e := supportedEmitter()
-	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnEvents, "")}),
-		"a wait with nothing prior emits nothing")
+	ck.Eq("", e.Sync([]rail.TopLevelDisplay{sched}), "a wait with nothing prior emits nothing")
 	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "work")
-	ck.Eq(osc7501(osc7501Idle, testChildID),
-		e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnEvents, "")}),
-		"working then a wait emits idle")
-	ck.Eq("", e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnJob, "")}),
-		"a second wait, with last idle, emits nothing")
+	ck.Eq(osc7501(osc7501Idle, testChildID), e.Sync([]rail.TopLevelDisplay{sched}),
+		"working then a schedule wait emits idle")
+	ck.Eq("", e.Sync([]rail.TopLevelDisplay{sched}), "a second wait, with last idle, emits nothing")
 
 	b := supportedEmitter()
 	ck.NotEmpty(b.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnOperator, "hi")}), "blocked")
-	ck.Eq(osc7501(osc7501Idle, testChildID),
-		b.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnChildren, "")}),
-		"blocked then a wait emits idle")
+	ck.Eq(osc7501(osc7501Idle, testChildID), b.Sync([]rail.TopLevelDisplay{sched}),
+		"blocked then a schedule wait emits idle")
+}
+
+// TestOSC7501WaitOnWorkStaysWorking pins that a child waiting on its children,
+// a job or events is still working to the terminal, not idle, and that it
+// settles to done once the wait ends.
+func TestOSC7501WaitOnWorkStaysWorking(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	working := osc7501(osc7501Working, testChildID)
+
+	for _, w := range []protocol.WaitingOn{protocol.WaitingOnChildren, protocol.WaitingOnJob, protocol.WaitingOnEvents} {
+		e := supportedEmitter()
+		wait := dsp(protocol.DisplayWaiting, w, "")
+		ck.Eq(working, e.Sync([]rail.TopLevelDisplay{wait}), string(w)+": a wait with nothing prior is working")
+		ck.Eq("", e.Sync([]rail.TopLevelDisplay{wait}), string(w)+": edge-triggered")
+		ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayIdle, "", "")}), string(w)+": settles to done")
+	}
+
+	b := supportedEmitter()
+	ck.NotEmpty(b.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnOperator, "hi")}), "blocked")
+	ck.Eq(working, b.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWaiting, protocol.WaitingOnChildren, "")}),
+		"blocked then a children wait is working")
 }
 
 // TestOSC7501IdleWithoutWorkEmitsNothing pins that a child that never worked
