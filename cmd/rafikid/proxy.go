@@ -528,6 +528,9 @@ func (f *proxyFace) SetController(c *Controller) {
 	// face carries the routing spec recorded on the request's child (or the
 	// policy's), resolved by the same Controller that recorded it.
 	f.messages.SetRoutingResolver(c)
+	// And the model-alias resolver: a slash-free model name on this face is a
+	// user alias, looked up for the request's authenticated owner.
+	f.messages.SetModelAliasResolver(c)
 }
 
 // startBroadcastListener binds a dedicated HTTP listener for OpenRouter's OTLP

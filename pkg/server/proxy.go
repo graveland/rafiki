@@ -104,6 +104,11 @@ type MessagesProxy struct {
 	// path, which keeps the pre-spec provider-routing behaviour exactly.
 	routingResolver RoutingResolver
 
+	// aliasResolver resolves a slash-free model name a client sent through the
+	// request owner's model aliases (see ModelAliasResolver). Optional; nil on
+	// the client-driven path, which never consults an alias.
+	aliasResolver ModelAliasResolver
+
 	// tracer and spanParent instrument the proxy's LLM calls (see
 	// SetTracing). Both are inert until wiring calls SetTracing.
 	tracer     trace.Tracer
@@ -187,6 +192,24 @@ type RoutingResolver interface {
 // (optional). Same startup-once ordering guarantee as SetRateLimitObserver;
 // not synchronized.
 func (p *MessagesProxy) SetRoutingResolver(o RoutingResolver) { p.routingResolver = o }
+
+// ModelAliasResolver resolves a slash-free model name through the request
+// owner's model aliases. ownerUserID is the identity the request's credential
+// resolved to (empty for an anonymous caller). model is the raw, slash-free,
+// bracket-free string the client sent. A miss — no alias of that name for that
+// owner — is ("", false, nil); a hit is the alias's target with the caller's
+// spec merged over the target's, rendered base or base[spec]. An error means
+// the lookup itself failed (a store outage) and must never be read as a miss.
+//
+// Implemented by the daemon's Controller.
+type ModelAliasResolver interface {
+	LookupModelAlias(ctx context.Context, ownerUserID, model string) (target string, ok bool, err error)
+}
+
+// SetModelAliasResolver attaches the alias resolver (optional; nil = no
+// aliases). Same startup-once ordering guarantee as SetRoutingResolver; not
+// synchronized.
+func (p *MessagesProxy) SetModelAliasResolver(o ModelAliasResolver) { p.aliasResolver = o }
 
 // SetQuotaStore enables capture of Anthropic's per-account subscription
 // rate-limit headers off OAuth-passthrough responses. Pass nil to disable
@@ -494,6 +517,74 @@ func routingSessionID(r *http.Request) string {
 	return r.Header.Get("X-Rafiki-Session")
 }
 
+// requestOwner is the OWNER the request's credential resolves to, or "" for an
+// anonymous caller. It is the authenticator's answer and nothing else: an
+// owner-scoped lookup driven by a caller-supplied header or body field would let
+// any caller read another user's aliases (or conversations — capture uses this
+// same owner).
+func (p *MessagesProxy) requestOwner(r *http.Request) string {
+	if p.auth == nil {
+		return ""
+	}
+	if id := p.auth.Identify(r); id != nil {
+		return id.UserID
+	}
+	return ""
+}
+
+// aliasSpecKey is the request-context key carrying the routing spec an alias
+// target declared (see withAliasSpec). A private struct type, so no other
+// package can collide with or forge it.
+type aliasSpecKey struct{}
+
+// withAliasSpec attaches the spec an alias target carried ("ds" ->
+// "openrouter/x/y[sort=price]") to the request, so the provider-routing layer
+// can apply it without re-parsing anything downstream.
+func withAliasSpec(ctx context.Context, spec routing.Spec) context.Context {
+	return context.WithValue(ctx, aliasSpecKey{}, spec)
+}
+
+// aliasSpecFrom reads the spec withAliasSpec attached. ok=false when the request
+// resolved no alias, which is the ordinary case.
+func aliasSpecFrom(ctx context.Context) (routing.Spec, bool) {
+	spec, ok := ctx.Value(aliasSpecKey{}).(routing.Spec)
+	return spec, ok
+}
+
+// modelAliasLookupError is a request whose alias lookup failed — a store
+// outage, never a miss. Both callers answer it 503: forwarding the alias NAME
+// upstream instead would silently send traffic somewhere the caller did not ask
+// for.
+type modelAliasLookupError struct{ err error }
+
+func (e *modelAliasLookupError) Error() string { return "model alias lookup failed: " + e.err.Error() }
+func (e *modelAliasLookupError) Unwrap() error { return e.err }
+
+// modelAliasTargetError is an alias this proxy cannot serve: a target naming a
+// provider this face does not route to (anything but openrouter/ or anthropic/),
+// or a target that does not parse. Answered 400 — the alias is the caller's own
+// configuration, so the fix is theirs.
+type modelAliasTargetError struct{ msg string }
+
+func (e *modelAliasTargetError) Error() string { return e.msg }
+
+// writeModelAliasError answers a request whose model resolution failed for a
+// reason alias resolution owns, returning false for any other error so the
+// caller applies its own (pre-existing) mapping.
+func writeModelAliasError(w http.ResponseWriter, err error) bool {
+	var lookup *modelAliasLookupError
+	if errors.As(err, &lookup) {
+		http.Error(w, lookup.Error(), http.StatusServiceUnavailable)
+		return true
+	}
+	var target *modelAliasTargetError
+	if errors.As(err, &target) {
+		http.Error(w, target.Error(), http.StatusBadRequest)
+		return true
+	}
+	return false
+}
+
 // applyProviderRouting decides the OpenRouter provider-routing object for one
 // request, mutating payload in place. Three layers, weakest first:
 //
@@ -509,7 +600,9 @@ func routingSessionID(r *http.Request) string {
 //     caller-supplied object it forces the one boundary a spec exists to hold,
 //     data_collection "deny" and zdr, over whatever the caller asked for. No
 //     resolver means none of this runs: the pre-spec behaviour, exactly, which
-//     now sends no provider object unless the guard has something to ignore.
+//     now sends no provider object unless the guard has something to ignore —
+//     and, for the same reason, an alias target's own spec (see withAliasSpec)
+//     is NOT applied when there is no routing resolver: nobody consults it.
 func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model string, r *http.Request) {
 	ignore := p.guard.IgnoredFor(time.Now(), model)
 	_, hasCaller := payload["provider"]
@@ -534,6 +627,12 @@ func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model strin
 			}
 		}
 		spec := p.routingResolver.RoutingFor(routingSessionID(r), model)
+		// An alias target's spec is the caller's own, most specific declaration:
+		// it merges OVER the session/policy spec (its keys win; nodata/zdr stay
+		// monotone, so an alias can never clear a policy's data boundary).
+		if a, ok := aliasSpecFrom(r.Context()); ok {
+			spec = a.Merge(spec)
+		}
 		if !hasCaller {
 			// spec.Prefs owns the whole object — its only drops the bans, the
 			// ignore fills in otherwise, and the data flags are built in — so
@@ -577,27 +676,63 @@ func callerCarriesOnly(v any) bool {
 }
 
 // resolveAndAdapt rewrites the request body in one decode/marshal pass: it
-// resolves "model" via routing.ResolveModel (empty -> default, "<family>-latest"
-// -> concrete newest) and proactively adapts output_config.effort to what the
-// resolved model is known to allow (clamp/strip per the runtime effort cache; a
-// cold cache is a no-op and any rejection is caught by effortRetry). Best-effort:
-// a decode/marshal failure forwards the input unchanged. An unresolvable
-// "<family>-latest" returns
-// an error so the caller fails cleanly. Returns the (possibly-rewritten) body and
-// the resolved model.
-func (p *MessagesProxy) resolveAndAdapt(reqBody []byte) ([]byte, string, error) {
+// resolves "model" through the request owner's model aliases (a slash-free,
+// bracket-free name, see ModelAliasResolver) and then via routing.ResolveModel
+// (empty -> default, "<family>-latest" -> concrete newest), and proactively
+// adapts output_config.effort to what the resolved model is known to allow
+// (clamp/strip per the runtime effort cache; a cold cache is a no-op and any
+// rejection is caught by effortRetry). Best-effort: a decode/marshal failure
+// forwards the input unchanged. An unresolvable "<family>-latest" returns an
+// error so the caller fails cleanly. Returns the (possibly-rewritten) body, the
+// resolved model, and the routing spec the alias target carried (zero when no
+// alias was resolved).
+//
+// An alias miss falls through to ResolveModel unchanged: Claude Code's
+// background calls and its own /model menu send bare claude-* ids, which are
+// not aliases and must keep resolving exactly as they do without this face.
+// A slashed id is never an alias, so it never reaches the store.
+func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte, string, routing.Spec, error) {
 	var body map[string]any
 	if err := json.Unmarshal(reqBody, &body); err != nil {
 		p.logger.Warn("proxy: request rewrite decode failed", "error", err)
-		return reqBody, "", nil
+		return reqBody, "", routing.Spec{}, nil
 	}
 	requested, _ := body["model"].(string)
-	resolved, err := routing.ResolveModel(p.catalog, p.defaultModel, requested)
+	model := requested
+	var aliasSpec routing.Spec
+	aliasHit := false
+	if p.aliasResolver != nil && model != "" && !strings.ContainsAny(model, "/[") {
+		target, ok, err := p.aliasResolver.LookupModelAlias(r.Context(), p.requestOwner(r), model)
+		if err != nil {
+			return reqBody, "", routing.Spec{}, &modelAliasLookupError{err: err}
+		}
+		if ok {
+			base, spec, perr := routing.ParseModel(target)
+			if perr != nil {
+				return reqBody, "", routing.Spec{}, &modelAliasTargetError{msg: fmt.Sprintf(
+					"model alias %q has an unparsable target %q: %v", model, target, perr)}
+			}
+			// The target names its provider. openrouter/ is the OpenRouter
+			// prefix this face strips (an OR id is already slash-shaped for
+			// RouteModel); anthropic/ is fine as-is, because ResolveModel strips
+			// it into the native-Anthropic path. Any other leading provider
+			// segment names a provider this proxy has no route to.
+			if name, _ := providers.SplitRaw(base); name != "" && name != "openrouter" && name != "anthropic" {
+				return reqBody, "", routing.Spec{}, &modelAliasTargetError{msg: fmt.Sprintf(
+					"model alias %q targets provider %q, which this proxy cannot route", model, name)}
+			}
+			base = strings.TrimPrefix(base, "openrouter/")
+			model = base
+			aliasSpec = spec
+			aliasHit = true
+		}
+	}
+	resolved, err := routing.ResolveModel(p.catalog, p.defaultModel, model)
 	if err != nil {
-		return reqBody, "", err
+		return reqBody, "", routing.Spec{}, err
 	}
 	changed := false
-	if resolved != requested {
+	if aliasHit || resolved != requested {
 		body["model"] = resolved
 		changed = true
 	}
@@ -605,14 +740,14 @@ func (p *MessagesProxy) resolveAndAdapt(reqBody []byte) ([]byte, string, error) 
 		changed = true
 	}
 	if !changed {
-		return reqBody, resolved, nil
+		return reqBody, resolved, aliasSpec, nil
 	}
 	out, err := json.Marshal(body)
 	if err != nil {
 		p.logger.Warn("proxy: request rewrite marshal failed; forwarding original", "model", requested, "error", err)
-		return reqBody, requested, nil
+		return reqBody, requested, aliasSpec, nil
 	}
-	return out, resolved, nil
+	return out, resolved, aliasSpec, nil
 }
 
 // adaptEffortMap clamps or strips body["output_config"]["effort"] for the model
@@ -690,12 +825,20 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	reqBody, model, err := p.resolveAndAdapt(reqBody)
+	reqBody, model, aliasSpec, err := p.resolveAndAdapt(r, reqBody)
 	if err != nil {
+		if writeModelAliasError(w, err) {
+			return
+		}
 		// An unresolvable "<family>-latest" (offline cold catalog): fail cleanly
 		// before capture begins rather than forward an unusable alias upstream.
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	// An alias target's spec rides the request context to the provider-routing
+	// layer (applyProviderRouting), which merges it over the session's spec.
+	if !aliasSpec.IsZero() {
+		r = r.WithContext(withAliasSpec(r.Context(), aliasSpec))
 	}
 	// The chat span is opened once the model is known (it names the span) and
 	// before capture, so every downstream log and step carries it.
@@ -1692,12 +1835,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)
 	}
-	ownerUserID := ""
-	if p.auth != nil {
-		if id := p.auth.Identify(r); id != nil {
-			ownerUserID = id.UserID
-		}
-	}
+	ownerUserID := p.requestOwner(r)
 	// Source lets a single proxy serve multiple entrypoints (Claude Code, a TUI, a
 	// slack bot): the client stamps X-Rafiki-Source; default to the conversation's
 	// own entrypoint. These are interactive, human-driven sessions.
@@ -1898,8 +2036,11 @@ func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	reqBody, model, err := p.resolveAndAdapt(reqBody)
+	reqBody, model, _, err := p.resolveAndAdapt(r, reqBody)
 	if err != nil {
+		if writeModelAliasError(w, err) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}

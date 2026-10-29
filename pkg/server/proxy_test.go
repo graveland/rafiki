@@ -956,33 +956,33 @@ func TestProxyResolveModel(t *testing.T) {
 	})
 
 	// empty model -> default (haiku-latest) -> concrete anthropic id
-	body, resolved, err := p.resolveAndAdapt([]byte(`{"max_tokens":1,"messages":[]}`))
+	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"max_tokens":1,"messages":[]}`))
 	c.Require().NoError(err, "empty->default errored")
 	c.Eq("claude-haiku-4-5", modelOf(t, body), "empty->default")
 	c.Eq("claude-haiku-4-5", resolved, "empty->default resolved")
 	// explicit sonnet-latest -> concrete
-	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"sonnet-latest","max_tokens":1}`))
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"sonnet-latest","max_tokens":1}`))
 	c.Require().NoError(err, "sonnet-latest errored")
 	c.Eq("claude-sonnet-5", modelOf(t, body), "sonnet-latest")
 	c.Eq("claude-sonnet-5", resolved, "sonnet-latest resolved")
 	// concrete id -> untouched
-	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"claude-opus-4-8"}`))
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"claude-opus-4-8"}`))
 	c.Require().NoError(err, "concrete errored")
 	c.Eq("claude-opus-4-8", modelOf(t, body), "concrete")
 	c.Eq("claude-opus-4-8", resolved, "concrete resolved")
 	// a short name is not a built-in alias: it passes through untouched even
 	// though the catalog contains the model line it spells
-	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"kimi-k3","max_tokens":1}`))
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"kimi-k3","max_tokens":1}`))
 	c.Require().NoError(err, "kimi-k3 errored")
 	c.Eq("kimi-k3", modelOf(t, body), "kimi-k3")
 	c.Eq("kimi-k3", resolved, "kimi-k3 resolved")
 	// a "<family>-latest" the catalog can't resolve -> error (no hardcoded fallback)
-	if _, _, err = p.resolveAndAdapt([]byte(`{"model":"opus-latest"}`)); err == nil {
+	if _, _, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"opus-latest"}`)); err == nil {
 		t.Error("opus-latest absent from catalog must error")
 	}
 	// malformed body -> best-effort passthrough, no error
 	garbage := []byte(`not json`)
-	body, resolved, err = p.resolveAndAdapt(garbage)
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), garbage)
 	c.False(err != nil || resolved != "" || string(body) != string(garbage), "malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
 }
 
