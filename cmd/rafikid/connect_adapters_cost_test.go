@@ -136,10 +136,10 @@ func insertTurnForCost(t *testing.T, pool *pgxpool.Pool, convID, model string, i
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO conversations.conversation_turn
-		   (conversation_id, ordinal, status, model, request, response, stop_reason,
+		   (conversation_id, ordinal, status, model, response, stop_reason,
 		    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		    upstream, latency_ms, source, created_at)
-		 VALUES ($1, 0, 'complete', $2, '{}'::jsonb, NULL, 'end_turn',
+		 VALUES ($1, 0, 'complete', $2, NULL, 'end_turn',
 		         $3, $4, 0, 0, 'openrouter', 100, 'test', now())`,
 		convID, model, inTok, outTok)
 	assert.NewAborting(t).NoError(err, "insert turn")

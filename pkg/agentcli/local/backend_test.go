@@ -110,9 +110,9 @@ func insertTurn(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int, in
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO conversations.conversation_turn
-		   (conversation_id, ordinal, status, model, request, response, stop_reason,
+		   (conversation_id, ordinal, status, model, response, stop_reason,
 		    input_tokens, output_tokens, source, created_at)
-		 VALUES ($1, $2, 'complete', 'claude-fable-5', '{}'::jsonb, NULL, 'end_turn',
+		 VALUES ($1, $2, 'complete', 'claude-fable-5', NULL, 'end_turn',
 		         $3, $4, 'claude', now())`,
 		convID, ordinal, inTok, outTok)
 	assert.NewAborting(t).NoError(err, "insert turn")

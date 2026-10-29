@@ -145,11 +145,11 @@ func insertTurn(t *testing.T, pool *pgxpool.Pool, convID string, st seedTurn) st
 	var id string
 	err := pool.QueryRow(context.Background(),
 		`INSERT INTO conversations.conversation_turn
-		   (conversation_id, ordinal, status, model, request, response, stop_reason,
+		   (conversation_id, ordinal, status, model, response, stop_reason,
 		    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		    upstream, latency_ms, source, prefix_hash, response_ordinal, prefix_content, created_at,
 		    served_provider)
-		 VALUES ($1, $2, $3, $4, '{}'::jsonb, NULL, 'end_turn',
+		 VALUES ($1, $2, $3, $4, NULL, 'end_turn',
 		         $5, $6, $7, $8,
 		         $9, $10, $11, $12, $13, $14, $15, $16)
 		 RETURNING id::text`,
