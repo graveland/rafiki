@@ -993,8 +993,8 @@ func TestProxyResolveModel(t *testing.T) {
 }
 
 // End-to-end: a real proxied turn decomposes into conversation_message rows
-// (user + assistant) and leaves conversation_turn.request NULL — the bulky
-// full-request JSONB is no longer written now that decomposition covers it.
+// (user + assistant) and records one turn row beside them, instead of a turn
+// carrying the bulky full-request JSONB.
 func TestProxy_DecomposesConversation(t *testing.T) {
 	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -1037,15 +1037,15 @@ func TestProxy_DecomposesConversation(t *testing.T) {
 	p.ServeHTTP(rec, req)
 	c.Require().Eq(http.StatusOK, rec.Code, "status = %d, body=%s", rec.Code, rec.Body.String())
 
-	// user message + assistant response decomposed; turn.request left NULL
+	// user message + assistant response decomposed, one turn row beside them
 	var msgs int
 	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation_message`).Scan(&msgs))
 	c.Eq(2, msgs, "conversation_message count")
-	var reqNull bool
+	var turns int
 	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT request IS NULL FROM conversations.conversation_turn LIMIT 1`).Scan(&reqNull))
-	c.True(reqNull, "conversation_turn.request should be NULL; decomposition replaces the full-JSONB write")
+		`SELECT count(*) FROM conversations.conversation_turn`).Scan(&turns))
+	c.Eq(1, turns, "turn count")
 }
 
 func modelOf(t *testing.T, body []byte) string {

@@ -130,9 +130,9 @@ func TestTurnCostUnpricedModelFlagged(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, model, request, input_tokens, output_tokens)
-		VALUES ($1, 0, 'complete', 'claude-opus-5', '{}'::jsonb, 1000, 100),
-		       ($1, 1, 'complete', 'gpt-5.6',       '{}'::jsonb, 1000, 100)`, convID); err != nil {
+			(conversation_id, ordinal, status, model, input_tokens, output_tokens)
+		VALUES ($1, 0, 'complete', 'claude-opus-5', 1000, 100),
+		       ($1, 1, 'complete', 'gpt-5.6',       1000, 100)`, convID); err != nil {
 		t.Fatalf("insert turns: %v", err)
 	}
 
@@ -183,8 +183,8 @@ func TestTurnCostPartialPricingRowFlaggedUnpriced(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, model, request, input_tokens, output_tokens)
-		VALUES ($1, 0, 'complete', 'half-priced-model', '{}'::jsonb, 1000, 100)`, convID); err != nil {
+			(conversation_id, ordinal, status, model, input_tokens, output_tokens)
+		VALUES ($1, 0, 'complete', 'half-priced-model', 1000, 100)`, convID); err != nil {
 		t.Fatalf("insert turn: %v", err)
 	}
 
@@ -243,9 +243,9 @@ func TestSyncModelPricingPricesCatalogAndObservedModels(t *testing.T) {
 		VALUES ('claude', 'client') RETURNING id`).Scan(&convID), "insert conversation")
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, model, request)
-		VALUES ($1, 0, 'complete', 'claude-opus-5', '{}'::jsonb),
-		       ($1, 1, 'complete', 'gpt-5.6',       '{}'::jsonb)`, convID); err != nil {
+			(conversation_id, ordinal, status, model)
+		VALUES ($1, 0, 'complete', 'claude-opus-5'),
+		       ($1, 1, 'complete', 'gpt-5.6')`, convID); err != nil {
 		t.Fatalf("insert turns: %v", err)
 	}
 
@@ -366,8 +366,8 @@ func TestTurnNullDimensionsReadAsSentinelNotNull(t *testing.T) {
 	// model, source and upstream all NULL — the shape of a real errored turn.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, request, error)
-		VALUES ($1, 0, 'error', '{}'::jsonb, 'upstream status 429')`, convID); err != nil {
+			(conversation_id, ordinal, status, error)
+		VALUES ($1, 0, 'error', 'upstream status 429')`, convID); err != nil {
 		t.Fatalf("insert turn: %v", err)
 	}
 
@@ -403,8 +403,8 @@ func TestTurnOrphanedTurnStillAppearsUnattributed(t *testing.T) {
 	var turnConv string
 	ck.Require().NoError(pool.QueryRow(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, model, request, input_tokens, output_tokens)
-		VALUES (gen_random_uuid(), 0, 'complete', 'claude-opus-5', '{}'::jsonb, 1000, 100)
+			(conversation_id, ordinal, status, model, input_tokens, output_tokens)
+		VALUES (gen_random_uuid(), 0, 'complete', 'claude-opus-5', 1000, 100)
 		RETURNING conversation_id`).Scan(&turnConv), "insert orphaned turn")
 
 	var owner, entrypoint, drivenBy string
@@ -444,10 +444,10 @@ func TestTurnCacheSavingsUnknownWhenCacheUnpriced(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, model, request, input_tokens, output_tokens,
+			(conversation_id, ordinal, status, model, input_tokens, output_tokens,
 			 cache_read_tokens, cache_creation_tokens)
-		VALUES ($1, 0, 'complete', 'no-cache-model', '{}'::jsonb, 1000, 100, 50000, 0),
-		       ($1, 1, 'complete', 'no-cache-model', '{}'::jsonb, 1000, 100, 0, 0)`,
+		VALUES ($1, 0, 'complete', 'no-cache-model', 1000, 100, 50000, 0),
+		       ($1, 1, 'complete', 'no-cache-model', 1000, 100, 0, 0)`,
 		convID); err != nil {
 		t.Fatalf("insert turns: %v", err)
 	}
@@ -541,9 +541,9 @@ func TestSyncModelPricingBoundsObservedModelsButKeepsKnownOnes(t *testing.T) {
 		VALUES ('claude', 'client') RETURNING id`).Scan(&convID), "insert conversation")
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO conversations.conversation_turn
-			(conversation_id, ordinal, status, model, request, created_at)
-		VALUES ($1, 0, 'complete', 'recent-model',  '{}'::jsonb, now()),
-		       ($1, 1, 'complete', 'ancient-model', '{}'::jsonb, now() - interval '90 days')`,
+			(conversation_id, ordinal, status, model, created_at)
+		VALUES ($1, 0, 'complete', 'recent-model',  now()),
+		       ($1, 1, 'complete', 'ancient-model', now() - interval '90 days')`,
 		convID); err != nil {
 		t.Fatalf("insert turns: %v", err)
 	}

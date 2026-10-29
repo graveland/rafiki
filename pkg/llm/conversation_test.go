@@ -802,10 +802,10 @@ func (anchorTailTrim) Trim(msgs []Message, _ int) ([]Message, bool) {
 	return []Message{msgs[0], msgs[len(msgs)-2], msgs[len(msgs)-1]}, true
 }
 
-// TestTurnRecordsRequestHeadAndNoRequest pins a turn row's shape after one
-// send: it names the stored row the request ended at and stores no body of its
-// own, and it carries no trim range when nothing was dropped.
-func TestTurnRecordsRequestHeadAndNoRequest(t *testing.T) {
+// TestTurnRecordsRequestHeadAndNoTrimRange pins a turn row's shape after one
+// send: it names the stored row the request ended at and carries no trim range
+// when nothing was dropped.
+func TestTurnRecordsRequestHeadAndNoTrimRange(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
@@ -828,14 +828,12 @@ func TestTurnRecordsRequestHeadAndNoRequest(t *testing.T) {
 		WHERE conversation_id=$1::uuid AND ordinal=0`, conv.ID).Scan(&wantHead), "read the user row id")
 
 	var head *string
-	var hasRequest bool
 	var from, to *int
-	ck.Require().NoError(pool.QueryRow(ctx, `SELECT request_head_id::text, request IS NOT NULL,
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT request_head_id::text,
 		request_trim_from, request_trim_to FROM conversations.conversation_turn
-		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&head, &hasRequest, &from, &to), "read the turn row")
+		WHERE conversation_id=$1::uuid`, conv.ID).Scan(&head, &from, &to), "read the turn row")
 	ck.Require().NotNil(head, "the turn names no request head")
 	ck.Eq(wantHead, *head, "request_head_id")
-	ck.False(hasRequest, "the turn still stores the request body")
 	ck.True(from == nil && to == nil, "an untrimmed turn recorded a trim range: from=%v to=%v", from, to)
 }
 

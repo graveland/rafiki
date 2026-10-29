@@ -22,10 +22,9 @@ import (
 )
 
 // End-to-end against a REAL capture store (RAFIKI_TEST_DSN): the OpenAI face
-// decomposes the exchange into conversation_message rows, so the turn row
-// keeps protocol/openai and the usage/cost accounting but no longer carries the
-// full request body.
-func TestChatCompletionsProxyStoresNoRequest(t *testing.T) {
+// decomposes the exchange into conversation_message rows and records the turn
+// under its own protocol, which is what routes v_turn's pricing.
+func TestChatCompletionsProxyRecordsOpenAITurn(t *testing.T) {
 	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
@@ -69,10 +68,8 @@ func TestChatCompletionsProxyStoresNoRequest(t *testing.T) {
 	p.ServeHTTP(rec, req)
 	c.Require().Eq(http.StatusOK, rec.Code, "status = %d, body=%s", rec.Code, rec.Body.String())
 
-	var reqNull bool
 	var protocol string
 	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT request IS NULL, protocol FROM conversations.conversation_turn LIMIT 1`).Scan(&reqNull, &protocol))
-	c.True(reqNull, "conversation_turn.request should be NULL; the exchange is decomposed into messages")
+		`SELECT protocol FROM conversations.conversation_turn LIMIT 1`).Scan(&protocol))
 	c.Eq("openai", protocol, "protocol")
 }
