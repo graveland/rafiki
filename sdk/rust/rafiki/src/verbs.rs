@@ -91,6 +91,41 @@ impl Client {
         self.unary("ListModels", req).await
     }
 
+    /// The calling connection owner's model aliases, ordered by name. An
+    /// alias is a slash-free model name the owner resolves through: `ds`
+    /// means whatever [`Client::put_model_alias`] stored for it. Strictly per
+    /// owner — no daemon-wide or fallback layer.
+    pub async fn list_model_aliases(
+        &self,
+        req: &pb::ListModelAliasesRequest,
+    ) -> Result<pb::ListModelAliasesResponse, Error> {
+        self.unary("ListModelAliases", req).await
+    }
+
+    /// Create or replace one alias of the calling connection's owner
+    /// (`created_at` survives a replace). `name` is `^[a-z0-9][a-z0-9._-]*$`
+    /// — no `/`, no `[`; `target` is a model string whose base names a
+    /// provider (`openrouter/~deepseek/...`), so an alias never chains to
+    /// another alias. Neither is resolved against the catalog at put: a bad
+    /// name or target is `invalid_argument`. Writing needs a user credential
+    /// or the local socket — a child credential is `permission_denied`.
+    pub async fn put_model_alias(
+        &self,
+        req: &pb::PutModelAliasRequest,
+    ) -> Result<pb::PutModelAliasResponse, Error> {
+        self.unary("PutModelAlias", req).await
+    }
+
+    /// Remove one of the calling owner's aliases. `not_found` when the owner
+    /// has no alias by that name; needs a user credential or the local
+    /// socket, like [`Client::put_model_alias`].
+    pub async fn delete_model_alias(
+        &self,
+        req: &pb::DeleteModelAliasRequest,
+    ) -> Result<pb::DeleteModelAliasResponse, Error> {
+        self.unary("DeleteModelAlias", req).await
+    }
+
     pub async fn list_executors(
         &self,
         req: &pb::ListExecutorsRequest,

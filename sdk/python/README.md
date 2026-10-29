@@ -108,6 +108,14 @@ c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")   # daemon-validates the sp
 rows = c.list_routes()                                 # one RouteRow per live line
 c.delete_route("z-ai/glm-5.3")                         # not_found when there is none
 
+# Model aliases (strictly per the connection OWNER; a child credential may
+# read them but never write). A name is slash-free and an alias target names a
+# provider, so an alias never chains to another alias. A bad name or target is
+# invalid_argument; delete is not_found when the owner has no such alias.
+c.put_model_alias("ds", "openrouter/~deepseek/deepseek-flash-latest")  # create or replace
+rows = c.list_model_aliases()                          # one ModelAliasRow per alias
+c.delete_model_alias("ds")                             # not_found when there is none
+
 # Provider login (per-user provider credentials). The credential belongs to
 # the CALLING USER and is never returned: the daemon holds the tokens, and a
 # child resolves its owner's credential at spawn. Needs a user credential on

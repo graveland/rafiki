@@ -14,12 +14,13 @@ package integration_test
 //   - TestPythonSDK_StandaloneLifecycle runs Client.from_profile() against a
 //     scratch daemon's control socket: spawn (with the fake-LLM seat), send,
 //     list with a label filter, wait for the settle, export the transcript,
-//     routing-policy rows (set, list, delete), stop. export is the test that
-//     pins the Connect-plane spawn's owner attribution: ConversationExport is
-//     owner-scoped, so it answers not-found when the child's conversation row
-//     lands unattributed — which is exactly what an un-defaulted empty spawn
-//     kind used to do (controller.Spawn now resolves the fundi default
-//     itself).
+//     routing-policy rows (set, list, delete), model aliases (put, list,
+//     delete, and the invalid_argument/not_found refusals), stop. export is
+//     the test that pins the Connect-plane spawn's owner attribution:
+//     ConversationExport is owner-scoped, so it answers not-found when the
+//     child's conversation row lands unattributed — which is exactly what an
+//     un-defaulted empty spawn kind used to do (controller.Spawn now resolves
+//     the fundi default itself).
 //
 //   - TestPythonSDK_ScriptChild runs a script child whose pymodule IS the
 //     SDK: Client.inside() over the per-child socket, report/receive/result
@@ -675,6 +676,33 @@ def run():
         c.delete_route("z-ai/glm-5.3")
         assert not [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"], c.list_routes()
         note("routes OK")
+
+        # model aliases: the connection owner's own name -> model map. A
+        # target names a provider, so an alias can never chain to another
+        # alias, and the daemon validates both halves before storing.
+        alias = "sdkds"
+        row = c.put_model_alias(alias, "openrouter/~deepseek/deepseek-flash-latest")
+        assert row.name == alias and row.target == "openrouter/~deepseek/deepseek-flash-latest", row
+        assert row.created_at is not None, row
+        listed = [r for r in c.list_model_aliases() if r.name == alias]
+        assert listed and listed[0].target == row.target, listed
+        replaced = c.put_model_alias(alias, "openrouter/~deepseek/deepseek-chat-latest")
+        assert replaced.target == "openrouter/~deepseek/deepseek-chat-latest", replaced
+        assert replaced.created_at == row.created_at, (replaced.created_at, row.created_at)
+        for bad_name, bad_target in (("Ds", "openrouter/x"), ("a/b", "openrouter/x"), (alias, alias)):
+            try:
+                c.put_model_alias(bad_name, bad_target)
+                raise AssertionError("invalid alias %r -> %r was accepted" % (bad_name, bad_target))
+            except ConnectError as e:
+                assert e.code == "invalid_argument", (bad_name, bad_target, e)
+        c.delete_model_alias(alias)
+        assert not [r for r in c.list_model_aliases() if r.name == alias], c.list_model_aliases()
+        try:
+            c.delete_model_alias(alias)
+            raise AssertionError("deleting an absent alias succeeded")
+        except ConnectError as e:
+            assert e.code == "not_found", e
+        note("aliases OK")
 
         # send lands an inbox row with a durable id.
         mid = c.send(cid, "a steer, unsteerable but durable")

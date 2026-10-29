@@ -75,11 +75,27 @@ Typed wrappers over `Client::unary` and `Client::server_stream`, taking and
 returning the generated `pb::` types: `get_history`, `stream_events(req,
 idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
-`list_executors`, `begin_provider_login`, `complete_provider_login`,
+`list_model_aliases`, `put_model_alias`, `delete_model_alias`, `list_executors`, `begin_provider_login`, `complete_provider_login`,
 `delete_provider_credential`. `unary` and `server_stream` are public, so an
 RPC added to `control.proto` is callable immediately (regenerate first). `pb`
 holds the `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the
 `Daraja*` RPCs carry.
+
+`list_model_aliases` / `put_model_alias` / `delete_model_alias` manage the
+calling connection OWNER's model aliases: a slash-free `name` the owner
+resolves through, and a `target` whose base names a provider (so an alias never
+chains to another alias). `put` creates or replaces and answers
+`invalid_argument` for a bad name or target; `delete` answers `not_found` when
+the owner has no such alias. A child credential may read them and never write.
+
+```rust
+client.put_model_alias(&pb::PutModelAliasRequest {
+    name: "ds".into(),
+    target: "openrouter/~deepseek/deepseek-flash-latest".into(),
+}).await?;
+let rows = client.list_model_aliases(&pb::ListModelAliasesRequest::default()).await?.rows;
+client.delete_model_alias(&pb::DeleteModelAliasRequest { name: "ds".into() }).await?;
+```
 
 `get_child` and `list_children` return `ChildSummary`; its `parent_child_id` names the
 child that spawned it and is empty for a top-level child.

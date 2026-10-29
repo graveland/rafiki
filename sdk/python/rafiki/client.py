@@ -580,6 +580,36 @@ class Client:
         req = _gen.control_pb.DeleteRouteRequest(model_line=model_line)
         self._call("DeleteRoute", req, _gen.control_pb.DeleteRouteResponse)
 
+    # ── model aliases ────────────────────────────────────────────────────────
+
+    def list_model_aliases(self) -> "list":
+        """The calling connection owner's model aliases as ``ModelAliasRow``s,
+        ordered by name. An alias is a slash-free model name the owner (and
+        the owner's children) resolves through: ``ds`` means whatever
+        ``put_model_alias`` stored for it. Strictly per owner — no daemon-wide
+        or fallback layer — and readable by any caller for its own owner."""
+        req = _gen.control_pb.ListModelAliasesRequest()
+        return self._call("ListModelAliases", req, _gen.control_pb.ListModelAliasesResponse).rows
+
+    def put_model_alias(self, name: str, target: str) -> _gen.control_pb.ModelAliasRow:
+        """Create or replace one alias for the calling connection's owner, and
+        return the stored row (``created_at`` survives a replace). ``name`` is
+        ``^[a-z0-9][a-z0-9._-]*$`` — no ``/``, no ``[``; ``target`` is a model
+        string whose base names a provider (``openrouter/~deepseek/...``), so
+        an alias never chains to another alias. Neither is resolved against
+        the catalog at put; the daemon refuses a bad name or target with
+        invalid_argument. Writing needs a user credential or the local socket:
+        a child credential is permission_denied."""
+        req = _gen.control_pb.PutModelAliasRequest(name=name, target=target)
+        return self._call("PutModelAlias", req, _gen.control_pb.PutModelAliasResponse).row
+
+    def delete_model_alias(self, name: str) -> None:
+        """Remove one of the calling owner's aliases. not_found when the owner
+        has no alias by that name; needs a user credential or the local
+        socket, like ``put_model_alias``."""
+        req = _gen.control_pb.DeleteModelAliasRequest(name=name)
+        self._call("DeleteModelAlias", req, _gen.control_pb.DeleteModelAliasResponse)
+
     # ── provider login (per-user provider credentials) ───────────────────────
 
     def begin_provider_login(self, provider: str) -> _gen.control_pb.BeginProviderLoginResponse:
