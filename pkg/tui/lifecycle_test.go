@@ -141,6 +141,22 @@ func TestCloseRemovesTheRow(t *testing.T) {
 	ck.NotEq("c_1", c.selected, "selection left on a row that no longer exists")
 }
 
+// Closing the viewed row moves the cursor to its successor, and the pane has to
+// follow without another keypress: the subscription is re-pointed at the
+// successor (here, its history fetch is issued) rather than left on the dead id.
+func TestCloseRepointsTheViewAtTheSuccessor(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_1", "c_2")
+	c.rail.SetFocus("c_1")
+	c.focusChild = "c_1"
+	c.applyClosed(closedMsg{childID: "c_1", name: "c_1"})
+
+	ck.Eq("c_2", c.selected, "selected")
+	ck.Eq("c_2", c.viewing(), "viewing")
+	ck.True(c.historyInFlight["c_2"], "successor's transcript was never requested; pane stays empty until the user arrows")
+	ck.NotEq("c_1", c.focusChild, "subscription still owned by the closed child")
+}
+
 func TestCloseFailureKeepsTheRow(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := railWith(t, "c_1")

@@ -925,7 +925,8 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			seed = c.rail.Reconcile
 		}
 		var cmds []tea.Cmd
-		for _, n := range seed(inSubject) {
+		retired := seed(inSubject)
+		for _, n := range retired {
 			// The daemon no longer lists this child, so it was closed: by
 			// another cockpit, by the CLI, or by the daemon's own grace
 			// reaper. Drop the row and everything held for it, exactly as a
@@ -940,6 +941,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// The pane just jumped to a neighbour; say why.
 				c.setNotice(name + " was closed elsewhere")
 			}
+		}
+		if len(retired) > 0 && !first {
+			cmds = append(cmds, c.refocus())
 		}
 		// Seed each child's spend before any turn_end arrives: the rail resumes
 		// from the log head, so turns that predate this client are otherwise

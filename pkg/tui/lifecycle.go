@@ -579,7 +579,7 @@ func (c *Cockpit) applyClosed(m closedMsg) tea.Cmd {
 		} else {
 			c.setNotice("closed " + pluralSubagents(len(m.descendants)) + " of " + m.name)
 		}
-		return tea.Batch(cmds...)
+		return tea.Batch(append(cmds, c.refocus())...)
 	}
 	cmds = append(cmds, c.forgetChild(m.childID))
 	if len(m.descendants) > 0 {
@@ -587,7 +587,21 @@ func (c *Cockpit) applyClosed(m closedMsg) tea.Cmd {
 	} else {
 		c.setNotice("closed " + m.name)
 	}
-	return tea.Batch(cmds...)
+	return tea.Batch(append(cmds, c.refocus())...)
+}
+
+// refocus points the focus subscription at the child now being viewed after
+// rows were forgotten. forgetChild moves the cursor onto the successor row but
+// the stream stays on (or was stopped for) the dead child, and previewSettle
+// only fires from a cursor move, so without this the pane stays empty until
+// the user arrows away and back. Callers run it once after their whole batch of
+// forgets, so a row about to be forgotten is never opened.
+func (c *Cockpit) refocus() tea.Cmd {
+	v := c.viewing()
+	if v == "" || v == c.focusChild {
+		return nil
+	}
+	return tea.Batch(c.openFocus(v), c.fetchTasks(v))
 }
 
 // trimRPCError strips connect-go's transport prefix so the daemon's own
@@ -630,11 +644,14 @@ func (c *Cockpit) forgetChild(childID string) tea.Cmd {
 	// nothing. Stop its stream and land on a neighbour rather than rendering
 	// a transcript for a child the daemon has forgotten.
 	if wasFocused {
+		c.rail.SetFocus("")
+	}
+	if c.focusChild == childID {
 		if c.stopFocus != nil {
 			c.stopFocus()
 			c.stopFocus = nil
 		}
-		c.rail.SetFocus("")
+		c.focusChild = ""
 	}
 
 	// Closing the last row out of the rail leaves nothing to view, the same
