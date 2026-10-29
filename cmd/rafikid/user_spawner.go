@@ -61,7 +61,9 @@ func (s *userSpawner) List(context.Context) ([]tools.AgentInfo, error) {
 }
 
 func (s *userSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	return spawnerModels(ctx, s.c, q)
+	// An MCP caller is not a node in the tree, so the bound user is the only
+	// owner there is.
+	return spawnerModels(ctx, s.c, s.owner.UserID, q)
 }
 
 // Spawn starts a TOP-LEVEL child owned by the bound user. ParentChildID,

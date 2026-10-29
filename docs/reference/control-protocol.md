@@ -1613,14 +1613,36 @@ method resolves its owner from the credential via `spawnOwner`: a child sees
 its OWNER's aliases, never its own bucket.
 
 Resolution (`Controller.lookupModelAlias`, `cmd/rafikid/model_alias.go`) is
-LENIENT at the read sites: a non-candidate, a nil store or a miss leaves the
-model unchanged. On a hit the caller's bracketed spec is merged OVER the
-target's (`callerSpec.Merge(targetSpec)` — the caller's keys win and
-`nodata`/`zdr` are monotone) and re-rendered as `base` or `base[spec]` in
-`routing.Spec.String()`'s canonical form. A store error is never swallowed —
-the lookup returns it instead of reporting a miss, so no caller can silently
-fall through to an unresolved model — and a stored target that no longer
-parses is `CodeInvalidArgument` naming the alias.
+LENIENT: a non-candidate, a nil store or a miss leaves the model unchanged. On
+a hit the caller's bracketed spec is merged OVER the target's
+(`callerSpec.Merge(targetSpec)` — the caller's keys win and `nodata`/`zdr` are
+monotone) and re-rendered as `base` or `base[spec]` in `routing.Spec.String()`'s
+canonical form. A store error is never swallowed — the lookup returns it
+instead of reporting a miss, so no caller can silently fall through to an
+unresolved model — and a stored target that no longer parses is
+`CodeInvalidArgument` naming the alias.
+
+Sites. **Spawn is STRICT** (`Controller.resolveModelAlias` wraps the lookup for
+the strict callers): a slash-free spawn model, or a preset's model, that names
+no alias is `CodeInvalidArgument` (`no model alias "x"`, plus
+`; did you mean anthropic/x?` for a `claude-`-prefixed name), and a store
+outage is `CodeUnavailable` — never a fall-through. Both resolve ONCE, in
+`Spawn`, before `resolveRouting` parses the specs, so the routing merge still
+happens in exactly one place; the preset is resolved on a COPY, which is what
+keeps the stored preset saying the alias name (repointing an alias reaches that
+preset's future spawns, never a running or resumed child). The alias actually
+applied is recorded as the `rafiki/model-alias` label, daemon-written at spawn
+only, like `rafiki/routing`. `ConversationReview`'s request model is strict the
+same way; its `RAFIKI_REVIEW_MODEL` fallback is an operator declaration and is
+not resolved.
+
+**Lenient** read sites are `ModelInfo` and `ModelRoutes`: a miss passes the
+model through unchanged, while a store error is `CodeUnavailable` (an outage
+must never read as "no such model"). `ListModels` appends the connection
+owner's alias rows — id = the alias name, provider/model = the target's, every
+catalog fact copied from the target's own row, `source = "alias"` — at the front
+of the list, ordered by name; the provider and kind filters apply to the
+TARGET (a claude child is offered only anthropic-target aliases).
 
 Authority: listing is anyCaller (a child reads its owner's aliases); writing
 is userOnly — no child credential and no MCP tool may author one, refused by

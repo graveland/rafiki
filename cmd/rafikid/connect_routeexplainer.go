@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -30,6 +31,13 @@ type connectRouteExplainer struct {
 	stats routing.StatsSource
 	guard *routing.ProviderGuard
 
+	// c is the Controller the owner-scoped model-alias lookup lives on. It is
+	// wired AFTER construction (main builds the explainer before the
+	// Controller), so it may be nil in a test that does not care about
+	// aliases — nil means no alias resolution at all, exactly like a daemon
+	// with no alias store.
+	c *Controller
+
 	// now is the clock IgnoredFor reads; nil means time.Now. Injectable so a
 	// test with a TTL-less ban doesn't depend on wall time.
 	now func() time.Time
@@ -40,6 +48,24 @@ type connectRouteExplainer struct {
 // (ErrInvalidArgs), and a catalog fetch failure is a connect.Error
 // (Unavailable); connectapi.modelRoutesError passes both through.
 func (c connectRouteExplainer) ExplainModelRoutes(ctx context.Context, model string) (*rafikiv1.ModelRoutesResponse, error) {
+	// A model alias resolves LENIENTLY here, before the openrouter/ trim: a
+	// slash-free target becomes the real model string (with its merged spec),
+	// and a miss passes the caller's string through untouched. An alias-store
+	// failure is Unavailable — an outage is never reported as "no endpoints".
+	if c.c != nil {
+		resolved, _, err := c.c.lookupModelAlias(ctx, spawnOwner(ctx).UserID, strings.TrimSpace(model))
+		if err != nil {
+			// An already-classified refusal (a malformed bracket on an alias
+			// candidate) keeps its code; the store's own error becomes
+			// Unavailable.
+			var ce *connectapi.ControllerError
+			if errors.As(err, &ce) {
+				return nil, err
+			}
+			return nil, &connectapi.ControllerError{Code: protocol.ErrUnavailable, Message: err.Error()}
+		}
+		model = resolved
+	}
 	model = strings.TrimPrefix(strings.TrimSpace(model), "openrouter/")
 	base, spec, err := routing.ParseModel(model)
 	if err != nil {

@@ -149,10 +149,19 @@ type catalogFacts struct {
 //     native runtime, so it takes what rafiki resolves: the curated ids and
 //     family aliases, the operator's declared models, plus any OpenRouter
 //     slash id.
+//
+// models.SourceAlias is in BOTH sets: an alias is a spelling of its target, so
+// it is offered wherever its target is. pkg/models has no alias loader (the
+// store is owner-scoped and daemon-side), so this entry only records the
+// kind's eligibility — ListModelRows appends the rows itself, narrowing a
+// claude kind again by the target's provider.
 func sourcesForKind(kind string) map[models.Source]bool {
 	switch kind {
 	case protocol.KindClaude:
-		return map[models.Source]bool{models.SourceBuiltin: true}
+		return map[models.Source]bool{
+			models.SourceBuiltin: true,
+			models.SourceAlias:   true,
+		}
 	default:
 		return map[models.Source]bool{
 			models.SourceUserConfig: true,
@@ -160,6 +169,7 @@ func sourcesForKind(kind string) map[models.Source]bool {
 			models.SourceDeclared:   true,
 			models.SourceOpenRouter: true,
 			models.SourceLocal:      true,
+			models.SourceAlias:      true,
 		}
 	}
 }
@@ -433,7 +443,11 @@ func optionalInt(n int) *int {
 // models.loadOpenRouter: the daemon warms the catalog for routing already, and
 // consulting models' own OpenRouter source would run a second HTTP fetch with a
 // second disk cache and a different TTL in the same process.
-func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) ([]connectapi.ModelRow, error) {
+//
+// ownerUserID scopes the ALIAS rows appended at the front: an alias is
+// per-owner data, so a listing never shows another user's names (the same rule
+// ownerModelRows follows for a login).
+func (c *Controller) ListModelRows(ctx context.Context, ownerUserID, provider, kind string) ([]connectapi.ModelRow, error) {
 	want := sourcesForKind(kind)
 	spineWant := make(map[models.Source]bool, len(want))
 	for s, on := range want {
@@ -485,5 +499,84 @@ func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) (
 	rows = append(rows, c.ownerModelRows(ctx, facts, declared)...)
 	rows = filterRowsForKind(filterByProvider(rows, provider), kind)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	return rows, nil
+	// The caller's own aliases lead the listing, by name: they are the shortest
+	// thing to type, which is the whole point of having them.
+	aliasRows, err := c.aliasModelRows(ctx, ownerUserID, provider, kind, rows)
+	if err != nil {
+		return nil, err
+	}
+	return append(aliasRows, rows...), nil
+}
+
+// aliasModelRows builds the listing's alias rows from ownerUserID's alias
+// store, or returns none when the daemon has no store (a DB-less daemon holds
+// no aliases).
+//
+// A row's ID is the ALIAS NAME and its provider/model are the TARGET's, so a
+// picker offers `ds` and a spawn of `ds` resolves to the target. Every catalog
+// fact is copied from the target's row in rows (already built, already filtered
+// for this provider/kind): a target this listing does not offer leaves them
+// nil, which reads as UNKNOWN, never as zero.
+//
+// The provider and kind filters apply to the TARGET — an alias is a spelling of
+// its target, so `provider=anthropic` must not list an OpenRouter-target alias,
+// and a claude child (whose models are all native Anthropic) must not be
+// offered one either. A target that no longer parses is skipped rather than
+// failing the whole listing: a picker is not an authorization decision, and the
+// strict spawn path refuses such an alias with a message that names it.
+//
+// A store error IS returned: silently dropping the caller's aliases would look
+// exactly like having none.
+func (c *Controller) aliasModelRows(ctx context.Context, ownerUserID, provider, kind string, rows []connectapi.ModelRow) ([]connectapi.ModelRow, error) {
+	if c.modelAliasStore == nil {
+		return nil, nil
+	}
+	aliases, err := c.modelAliasStore.List(ctx, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]connectapi.ModelRow, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	out := make([]connectapi.ModelRow, 0, len(aliases))
+	for _, a := range aliases {
+		target, _, perr := routing.ParseModel(a.Target)
+		if perr != nil {
+			continue
+		}
+		name, modelID := providers.SplitRaw(target)
+		if provider != "" && provider != name {
+			continue
+		}
+		if kind == protocol.KindClaude && name != "anthropic" {
+			continue
+		}
+		row := connectapi.ModelRow{
+			ID:       a.Name,
+			Provider: name,
+			Model:    modelID,
+			Source:   string(models.SourceAlias),
+		}
+		if t, ok := byID[target]; ok {
+			row.Name = t.Name
+			row.ContextWindow = t.ContextWindow
+			row.MaxCompletionTokens = t.MaxCompletionTokens
+			row.PromptUSD = t.PromptUSD
+			row.CompletionUSD = t.CompletionUSD
+			row.CacheReadUSD = t.CacheReadUSD
+			row.CacheWriteUSD = t.CacheWriteUSD
+			row.InputModalities = t.InputModalities
+			row.Created = t.Created
+			row.SupportedParameters = t.SupportedParameters
+			row.ExpiresAt = t.ExpiresAt
+			row.KnowledgeCutoff = t.KnowledgeCutoff
+			row.IntelligenceIndex = t.IntelligenceIndex
+			row.CodingIndex = t.CodingIndex
+			row.AgenticIndex = t.AgenticIndex
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }

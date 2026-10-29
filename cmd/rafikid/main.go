@@ -949,6 +949,13 @@ func runDaemon(opts runDaemonOpts) error {
 				face.Control.SetRouteManager(newConnectRoutes(routeStore, routePolicy))
 			}
 			if routeExplainer != nil {
+				// The explainer resolves an alias through the Controller, which
+				// does not exist where the explainer is built (above): wire it
+				// here, before the face serves a single request.
+				if exp, ok := routeExplainer.(connectRouteExplainer); ok {
+					exp.c = ctrl
+					routeExplainer = exp
+				}
 				face.Control.SetRouteExplainer(routeExplainer)
 			}
 			// The new-seam backends: child ops, executor admin, user admin,

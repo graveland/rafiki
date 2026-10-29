@@ -141,9 +141,12 @@ func sortAgents(a []tools.AgentInfo) {
 	})
 }
 
-// Models answers agent_models.
+// Models answers agent_models. The alias rows come from the caller's owner,
+// read off the spawning child itself: a child has no Connect identity on this
+// path, so its OWN lineage is what names whose aliases it may see.
 func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	return spawnerModels(ctx, s.c, q)
+	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	return spawnerModels(ctx, s.c, owner, q)
 }
 
 // spawnerModels backs the Models verb for every AgentSpawner implementation.
@@ -159,8 +162,8 @@ func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]t
 // picker, so both surfaces agree on the three absence rules: a bound admits a
 // row the catalog cannot answer for, an absent value sorts last in BOTH
 // directions, and unknown capability is kept rather than read as "no".
-func spawnerModels(ctx context.Context, c *Controller, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	rows, err := c.ListModelRows(ctx, "", q.Kind)
+func spawnerModels(ctx context.Context, c *Controller, ownerUserID string, q tools.ModelQuery) ([]tools.ModelInfo, error) {
+	rows, err := c.ListModelRows(ctx, ownerUserID, "", q.Kind)
 	if err != nil {
 		return nil, err
 	}

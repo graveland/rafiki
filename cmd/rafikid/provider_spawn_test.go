@@ -439,7 +439,7 @@ func TestOwnerModelsListingHidesHiddenAndOtherOwners(t *testing.T) {
 	store.seed(liveCredential(ownerB, ownerBModelsJSON))
 	c := spawnTestChatGPTController(t, chatGPTTestCreds(t, store))
 
-	rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	rows, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows")
 	byID := rowsByID(rows)
 
@@ -460,7 +460,7 @@ func TestOwnerModelsListingHidesHiddenAndOtherOwners(t *testing.T) {
 
 	// The other owner sees their own directory and not this one's, which is the
 	// property the whole per-owner store exists for.
-	rowsB, err := c.ListModelRows(ownerCtx(ownerB), "", protocol.KindFundi)
+	rowsB, err := c.ListModelRows(ownerCtx(ownerB), ownerB, "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows(owner B)")
 	byIDB := rowsByID(rowsB)
 	ck.HasKey(byIDB, chatGPTTestProvider+"/gpt-b-only", "owner B's own model is missing from their listing")
@@ -468,7 +468,7 @@ func TestOwnerModelsListingHidesHiddenAndOtherOwners(t *testing.T) {
 
 	// A caller with no owner (the unix socket) gets no login rows at all, and no
 	// error: a model listing is a picker, not an authorization decision.
-	anon, err := c.ListModelRows(context.Background(), "", protocol.KindFundi)
+	anon, err := c.ListModelRows(context.Background(), "", "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows(no owner)")
 	for id := range rowsByID(anon) {
 		ck.False(strings.HasPrefix(id, chatGPTTestProvider+"/"), "an ownerless caller was offered %q", id)
@@ -493,7 +493,7 @@ func TestOwnerModelsListingPricesViaOpenAIID(t *testing.T) {
 		             "input_cache_read":"0.0000001","input_cache_write":"0.0000002"}}
 		]}`)})
 
-	rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	rows, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows")
 	byID := rowsByID(rows)
 
@@ -543,10 +543,10 @@ func TestOwnerModelsListingFetchesWhenNoCache(t *testing.T) {
 	// The fetch runs on the daemon's context, so wait for it rather than sleep:
 	// the listing that triggers it answers from whatever is cached at that moment,
 	// which is the point (it never waits for the upstream).
-	_, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	_, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows before the fetch")
 	assert.Eventually(t, 10*time.Second, "the model directory fetch to land", func() error {
-		rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+		rows, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 		if err != nil {
 			return err
 		}
@@ -581,7 +581,7 @@ func TestOwnerModelsListingKeepsCacheWhenFetchFails(t *testing.T) {
 	c := spawnTestChatGPTController(t, chatGPTTestCredsWithModels(t, store, fx))
 
 	for i := 0; i < 3; i++ {
-		rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+		rows, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 		ck.Require().NoError(err, "ListModelRows with a failing model endpoint")
 		ck.HasKey(rowsByID(rows), chatGPTTestProvider+"/gpt-6.1-sol", "the cached directory stopped being listed")
 	}
@@ -610,7 +610,7 @@ func TestOwnerModelsFetchSendsIfNoneMatchAndKeepsCacheOn304(t *testing.T) {
 	fx := newModelsFixture(t, http.StatusNotModified, "")
 	c := spawnTestChatGPTController(t, chatGPTTestCredsWithModels(t, store, fx))
 
-	rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	rows, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows")
 	ck.HasKey(rowsByID(rows), chatGPTTestProvider+"/gpt-6.1-sol", "the cached directory is not listed")
 
@@ -639,7 +639,7 @@ func TestOwnerModelsFetchDoesNotStoreUnparsableBody(t *testing.T) {
 	fx := newModelsFixture(t, http.StatusOK, "<html>not a model directory</html>")
 	c := spawnTestChatGPTController(t, chatGPTTestCredsWithModels(t, store, fx))
 
-	rows, err := c.ListModelRows(ownerCtx(ownerA), "", protocol.KindFundi)
+	rows, err := c.ListModelRows(ownerCtx(ownerA), ownerA, "", protocol.KindFundi)
 	ck.Require().NoError(err, "ListModelRows")
 	ck.HasKey(rowsByID(rows), chatGPTTestProvider+"/gpt-6.1-sol", "the cached directory is not listed")
 

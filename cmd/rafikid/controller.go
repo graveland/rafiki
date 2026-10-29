@@ -1716,6 +1716,17 @@ func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scop
 	// Config resolution, design §3. The request tier wins; the env tier
 	// fills gaps; the profile tier is the worker's business.
 	model := req.Model
+	if model != "" {
+		// The request's model goes through the SAME strict alias resolution a
+		// spawn does: a slash-free name that is not an alias is a mistake, not
+		// a model id. The env fallback below is an operator declaration, not a
+		// caller's alias, and is deliberately left unresolved.
+		resolved, _, aerr := c.resolveModelAlias(ctx, spawnOwner(ctx).UserID, model)
+		if aerr != nil {
+			return nil, aerr
+		}
+		model = resolved
+	}
 	if model == "" {
 		model = os.Getenv("RAFIKI_REVIEW_MODEL")
 	}
@@ -2079,12 +2090,42 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		return protocol.SpawnResponseData{}, err
 	}
 
+	// Model aliases resolve ONCE, here, before routing: resolveRouting parses
+	// the spawn's and the preset's model strings, so both are rewritten to their
+	// targets first (the caller's spec merged over the alias's). Only THIS
+	// spawn's copy of the preset is resolved — presetRec below is still the
+	// stored row, and the stored row keeps the alias name — which is what makes
+	// repointing an alias reach the preset's future spawns. A miss is refused
+	// (a slash-free model that is not an alias is a mistake, not a model id) and
+	// a store outage is Unavailable; neither falls through.
+	spawnModel, spawnAlias, err := c.resolveModelAlias(ctx, owner.UserID, spawnModel)
+	if err != nil {
+		return protocol.SpawnResponseData{}, err
+	}
+	routingPreset := presetRec
+	var presetAlias string
+	if presetRec != nil && presetRec.Model != "" {
+		cp := *presetRec
+		if cp.Model, presetAlias, err = c.resolveModelAlias(ctx, owner.UserID, cp.Model); err != nil {
+			return protocol.SpawnResponseData{}, presetModelAliasError(presetRec.Name, err)
+		}
+		routingPreset = &cp
+	}
+	// The alias the APPLIED model came through — the request's when it named a
+	// model, else the preset's — matching the rule resolveRouting applies below.
+	// The test is on the RESOLVED spawnModel, which is correct because the
+	// helper maps "" to "" and nothing else to it.
+	modelAlias := spawnAlias
+	if spawnModel == "" {
+		modelAlias = presetAlias
+	}
+
 	// Routing resolves ONCE, immediately after the preset it merges under:
 	// the spawn/preset specs are parsed out of Model (brackets stripped into
 	// the base id), the policy row fills the gaps, and the merged spec rides
 	// req.Routing from here on — stored on the session, plumbed to the child,
 	// labelled, and kept verbatim across resume. Never re-resolved.
-	req, err = c.resolveRouting(spawnModel, presetRec, req)
+	req, err = c.resolveRouting(spawnModel, routingPreset, req)
 	if err != nil {
 		return protocol.SpawnResponseData{}, err
 	}
@@ -2427,6 +2468,11 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// at spawn only; resume keeps the label the original spawn set.
 	if req.Routing != "" {
 		initLabels["rafiki/routing"] = req.Routing
+	}
+	// The alias the model was resolved through, if any — daemon-written at
+	// spawn only, like rafiki/routing; resume keeps the original spawn's label.
+	if modelAlias != "" {
+		initLabels["rafiki/model-alias"] = modelAlias
 	}
 	stampPresetLabels(initLabels, presetRec)
 	if req.ConfigDir != "" {

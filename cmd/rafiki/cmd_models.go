@@ -31,6 +31,7 @@ Sources reported per row:
   alias         your model aliases (rafiki models alias)
   openrouter    the daemon's OpenRouter catalog snapshot
   local         the daemon's live probe of a configured local provider
+  alias         one of YOUR own model aliases, listed under the name you gave it
 
 An empty CTX or price cell means the daemon has no catalog entry for that
 id — every locally-served model — which is not the same as a zero. The V

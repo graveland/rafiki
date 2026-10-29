@@ -31,6 +31,11 @@ const (
 	SourceDeclared   Source = "declared"    // providers.toml [providers.<name>.models.<id>] declarations
 	SourceOpenRouter Source = "openrouter"  // live OpenRouter catalog (non-anthropic ids)
 	SourceLocal      Source = "local"       // live probe of a configured local provider
+	// SourceAlias is the caller's own model aliases (rafiki models alias). It
+	// is produced by the DAEMON's listing, not by ListSources: an alias lives
+	// in an owner-scoped store pkg/models knows nothing about, so this constant
+	// only names the rows the daemon appends.
+	SourceAlias Source = "alias"
 )
 
 // openRouterCatalogTTL bounds how long the on-disk /models snapshot is trusted

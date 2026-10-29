@@ -506,7 +506,9 @@ func (l connectLifecycle) SetRouting(ctx context.Context, childID, delta string)
 type connectModels struct{ c *Controller }
 
 func (m connectModels) ListModels(ctx context.Context, provider, kind string) ([]connectapi.ModelRow, error) {
-	return m.c.ListModelRows(ctx, provider, kind)
+	// The caller's OWN aliases, resolved from the connection's identity — the
+	// same owner rule every other owner-scoped read on this plane follows.
+	return m.c.ListModelRows(ctx, spawnOwner(ctx).UserID, provider, kind)
 }
 
 // connectExecutors adapts *Controller to connectapi.ExecutorLister.

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -172,10 +173,18 @@ func (a connectChildOps) ShutdownDaemon(_ context.Context) error {
 	return errors.New("ShutdownDaemon: not served until the daemon shutdown path lands")
 }
 
-// ModelInfo delegates to Controller.ModelInfo and converts it. Never an
-// error: an unknown model is known=false, not a failure.
-func (a connectChildOps) ModelInfo(_ context.Context, model string) (*rafikiv1.ModelInfoResponse, error) {
-	return modelInfoResponseFrom(a.c.ModelInfo(model)), nil
+// ModelInfo delegates to Controller.ModelInfo and converts it. An unknown
+// model is known=false, not a failure: this is a LENIENT alias site, so a
+// slash-free model that names no alias is passed through unchanged (the answer
+// is then simply unknown, which is what the caller already handles). It IS an
+// error when the alias store fails — an outage must not be reported as "no such
+// model".
+func (a connectChildOps) ModelInfo(ctx context.Context, model string) (*rafikiv1.ModelInfoResponse, error) {
+	resolved, _, err := a.c.lookupModelAlias(ctx, spawnOwner(ctx).UserID, model)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	return modelInfoResponseFrom(a.c.ModelInfo(resolved)), nil
 }
 
 // modelInfoResponseFrom converts the framed ModelInfoResponseData onto the

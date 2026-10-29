@@ -93,7 +93,7 @@ func TestListModelRowsPreservesCachePriceAbsence(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := &Controller{catalog: seedCatalogWithPricing(t, "openai/gpt-x",
 		&models2Pricing{prompt: 5e-6, completion: 1.5e-5})}
-	rows, err := c.ListModelRows(context.Background(), "", "")
+	rows, err := c.ListModelRows(context.Background(), "", "", "")
 	ck.NoError(err)
 	var row *connectapi.ModelRow
 	for i := range rows {
@@ -177,7 +177,7 @@ func TestFilterRowsForKindClaudeKeepsOnlyAnthropic(t *testing.T) {
 func TestListModelRowsClaudeKindAdmitsOnlyAnthropic(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := &Controller{} // catalog nil, providers default: builtin-only spine for claude
-	rows, err := c.ListModelRows(context.Background(), "", protocol.KindClaude)
+	rows, err := c.ListModelRows(context.Background(), "", "", protocol.KindClaude)
 	ck.Require().NoError(err)
 	ck.Require().NotEmpty(rows, "no rows for the claude kind; the builtin spine came back empty")
 	for _, r := range rows {
@@ -213,7 +213,7 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 		WithCache(&byteSnapshotStore{data: []byte(snapshot)})
 	c := &Controller{catalog: cat}
 
-	rows, err := c.ListModelRows(context.Background(), "", "")
+	rows, err := c.ListModelRows(context.Background(), "", "", "")
 	ck.Require().NoError(err)
 	byID := map[string]connectapi.ModelRow{}
 	for _, r := range rows {
@@ -296,7 +296,7 @@ func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
 		{ID: "openai/gpt-4o", Created: 1, Pricing: price(2.5e-6)},
 	})
 	c := &Controller{catalog: cat}
-	rows, err := c.ListModelRows(context.Background(), "", protocol.KindClaude)
+	rows, err := c.ListModelRows(context.Background(), "", "", protocol.KindClaude)
 	ck.Require().NoError(err)
 	byID := make(map[string]connectapi.ModelRow, len(rows))
 	for _, r := range rows {
