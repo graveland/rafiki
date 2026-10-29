@@ -8,10 +8,10 @@ import (
 	"errors"
 	"time"
 
-	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -177,12 +177,23 @@ func (a connectChildOps) ShutdownDaemon(_ context.Context) error {
 // model is known=false, not a failure: this is a LENIENT alias site, so a
 // slash-free model that names no alias is passed through unchanged (the answer
 // is then simply unknown, which is what the caller already handles). It IS an
-// error when the alias store fails — an outage must not be reported as "no such
-// model".
+// error in two cases: the model string itself may fail to parse (a malformed
+// bracket on an alias candidate, which lookupModelAlias already classified as
+// InvalidArgument and which keeps its code here), and the alias store may fail
+// — an outage must not be reported as "no such model", so a plain error becomes
+// Unavailable.
 func (a connectChildOps) ModelInfo(ctx context.Context, model string) (*rafikiv1.ModelInfoResponse, error) {
 	resolved, _, err := a.c.lookupModelAlias(ctx, spawnOwner(ctx).UserID, model)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, err)
+		// An already-classified refusal (a malformed bracket on an alias
+		// candidate) keeps its code; the store's own error becomes
+		// Unavailable. Mirrors ExplainModelRoutes in
+		// connect_routeexplainer.go.
+		var ce *connectapi.ControllerError
+		if errors.As(err, &ce) {
+			return nil, err
+		}
+		return nil, &connectapi.ControllerError{Code: protocol.ErrUnavailable, Message: err.Error()}
 	}
 	return modelInfoResponseFrom(a.c.ModelInfo(resolved)), nil
 }

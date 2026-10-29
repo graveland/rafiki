@@ -330,6 +330,32 @@ func TestModelInfoResolvesAlias(t *testing.T) {
 	ck.False(miss.Known, "the miss must not invent facts")
 }
 
+// ModelInfo's failures stay classified: the model string's own parse failure
+// (a malformed bracket on an alias candidate) is InvalidArgument — the caller
+// mistyped — while an alias-store outage is Unavailable. Wrapping both as
+// Unavailable would blame the server for the caller's input.
+func TestModelInfoModelAliasErrorCodes(t *testing.T) {
+	t.Run("malformed bracket keeps InvalidArgument", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		c := &Controller{modelAliasStore: modelalias.NewMemStore()}
+
+		_, err := (connectChildOps{c: c}).ModelInfo(ownerCtx("u1"), "ds[sort=")
+		ck.Require().Error(err, "ModelInfo(ds[sort=) must refuse a malformed bracket")
+		ck.Eq(protocol.ErrInvalidArgs, aliasErrCode(t, err), "code")
+		ck.True(strings.Contains(aliasErrMessage(t, err), "ds[sort="),
+			"the message must name the model as typed; got %q", aliasErrMessage(t, err))
+	})
+
+	t.Run("store outage is Unavailable", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		c := &Controller{modelAliasStore: failingAliasStore{err: errors.New("connection reset")}}
+
+		_, err := (connectChildOps{c: c}).ModelInfo(ownerCtx("u1"), "ds")
+		ck.Require().Error(err, "an alias-store outage must not read as \"unknown model\"")
+		ck.Eq(protocol.ErrUnavailable, aliasErrCode(t, err), "code")
+	})
+}
+
 // ─── listings ───────────────────────────────────────────────────────────────
 
 // An alias is listable under its own name, carrying its TARGET's facts, and it
