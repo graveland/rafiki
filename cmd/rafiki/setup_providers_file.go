@@ -22,8 +22,8 @@ import (
 const providersHeader = `# providers.toml — written by ` + "`rafiki setup`" + `.
 # Setup rewrites this file on a re-run only while it is unchanged since setup
 # wrote it; once you edit it, setup leaves it alone (and offers to back it up).
-# Aliases, ` + "`only`" + ` pins, via_executor, fallback chains and session headers are
-# hand-edited: see docs/guide/proxy.md.
+# Model declarations, ` + "`only`" + ` pins, via_executor, fallback chains and session
+# headers are hand-edited: see docs/guide/proxy.md.
 
 `
 
