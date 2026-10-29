@@ -1775,9 +1775,9 @@ func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scop
 // the worker's LLM client routes through the same registry, so an unknown
 // provider fails here with an actionable message rather than mid-run as a
 // per-conversation error. Beyond it, two sources, mirroring ModelInfo's own
-// resolution: the provider's declared model alias (a custom or locally-served
-// provider's model is never in the OpenRouter catalog — the alias table is
-// how the operator declares it) and the OpenRouter catalog. The catalog
+// resolution: the provider's declared model (a custom or locally-served
+// provider's model is never in the OpenRouter catalog — the declaration table
+// is how the operator registers it) and the OpenRouter catalog. The catalog
 // resolves the id Split already SUBSTITUTED — the provider-local spelling,
 // which is what real catalog keys are ("z-ai/glm-5.3-flash",
 // "anthropic/claude-sonnet-5"), never the qualified request string: Split
@@ -1793,9 +1793,9 @@ func (c *Controller) reviewModelResolves(model string) bool {
 	if err != nil {
 		return false
 	}
-	// The request-side local id is the alias KEY on the provider Split
+	// The request-side local id is the declaration KEY on the provider Split
 	// returned; a bare id resolved against DefaultProvider inside Split, so
-	// no provider-name handling is needed here. A declared alias means the
+	// no provider-name handling is needed here. A declared model means the
 	// operator registered the model with the daemon.
 	if _, localID := providers.SplitRaw(model); localID != "" {
 		if _, declared := p.Models[localID]; declared {
@@ -2208,7 +2208,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// daemon's key while the caller believed their own was billing would be
 	// worse than refusing. Refused here, in the same request-validation block
 	// as the other refusals, before anything is minted. The resolved model id
-	// (alias substitution included) is what carries the suffix.
+	// (declaration substitution included) is what carries the suffix.
 	if req.APIKey != "" && req.Model != "" {
 		if _, modelID, err := providersOrDefault(c.providers).Split(req.Model); err == nil && llm.IsBatchModel(modelID) {
 			return protocol.SpawnResponseData{}, &connectapi.ControllerError{

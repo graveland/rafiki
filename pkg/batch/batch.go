@@ -313,7 +313,7 @@ func (b *Batcher) deliver(customID string, out parkOutcome) {
 // POST and MarkSubmitted lands in the recovery sweep instead of a blind
 // resubmission. The provider object is part of the GROUP KEY, not something
 // one row stands for: the only-list is a function of the parking CLIENT's
-// spec (and alias/pin), and two children parking the same model with
+// spec (and its declaration pin), and two children parking the same model with
 // different only-lists inside one window must submit as distinct batches —
 // coalescing them would impose one caller's pin on another's calls (or 404
 // the whole batch at submit). A nil provider groups with nil and submits no

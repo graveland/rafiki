@@ -27,7 +27,7 @@ and ordered by the same engine the cockpit picker uses.
 Sources reported per row:
   user-config   your configured providers (providers.toml)
   builtin       curated static list of common provider/model IDs
-  alias         providers.toml [providers.<name>.models.<alias>] entries
+  declared      providers.toml [providers.<name>.models.<id>] declarations
   openrouter    the daemon's OpenRouter catalog snapshot
   local         the daemon's live probe of a configured local provider
 
@@ -59,7 +59,7 @@ a provider or starting a new local model, instead of waiting out the cache.`,
 		RunE: runModels,
 	}
 	cmd.Flags().String("provider", "", "Filter by provider name (e.g. anthropic, openai, ollama)")
-	cmd.Flags().String("source", "", "Filter by source: user-config|builtin|alias|openrouter|local")
+	cmd.Flags().String("source", "", "Filter by source: user-config|builtin|declared|openrouter|local")
 	cmd.Flags().StringArray("sort", nil, "Order rows: field[:asc|:desc], repeatable, first key wins")
 	cmd.Flags().String("min-ctx", "", "Minimum context window in tokens (k/m suffixes: 200k, 1m)")
 	cmd.Flags().String("max-ctx", "", "Maximum context window in tokens (k/m suffixes)")
@@ -84,7 +84,7 @@ a provider or starting a new local model, instead of waiting out the cache.`,
 		cobra.ShellCompDirectiveNoFileComp,
 	))
 	_ = cmd.RegisterFlagCompletionFunc("source", cobra.FixedCompletions(
-		[]string{"user-config", "builtin", "alias", "openrouter", "local"},
+		[]string{"user-config", "builtin", "declared", "openrouter", "local"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
 	_ = cmd.RegisterFlagCompletionFunc("sort", cobra.FixedCompletions(
@@ -425,8 +425,8 @@ func modelsDisplayWidth() int {
 
 // modelDisplayCell shows the bare model part — openrouter/anthropic/claude-x
 // renders as anthropic/claude-x, killing the triple-openrouter row labels;
-// SOURCE carries the provider identity and --verbose the full id. An alias
-// can leave Model empty, so the full id is the fallback.
+// SOURCE carries the provider identity and --verbose the full id. A row can
+// leave Model empty, so the full id is the fallback.
 func modelDisplayCell(r *rafikiv1.ModelRow) string {
 	if m := r.GetModel(); m != "" {
 		return m

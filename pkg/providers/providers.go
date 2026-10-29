@@ -132,14 +132,14 @@ type ViaExecutor struct {
 // Provider is one named endpoint.
 type Provider struct {
 	// Name is the map key, stamped in by Parse. It is not read from the file.
-	Name        string                `toml:"-"`
-	Kind        Kind                  `toml:"kind"`
-	BaseURL     string                `toml:"base_url"`
-	APIKeyEnv   string                `toml:"api_key_env"`
-	Fallback    []string              `toml:"fallback"`
-	Extras      map[string]any        `toml:"extras"`
-	ViaExecutor *ViaExecutor          `toml:"via_executor"`
-	Models      map[string]ModelAlias `toml:"models"`
+	Name        string               `toml:"-"`
+	Kind        Kind                 `toml:"kind"`
+	BaseURL     string               `toml:"base_url"`
+	APIKeyEnv   string               `toml:"api_key_env"`
+	Fallback    []string             `toml:"fallback"`
+	Extras      map[string]any       `toml:"extras"`
+	ViaExecutor *ViaExecutor         `toml:"via_executor"`
+	Models      map[string]ModelDecl `toml:"models"`
 	// SessionHeader, when non-empty, is the HTTP header name a stable
 	// per-conversation identifier is sent on for backend-sticky routing (see
 	// llm.WithSessionID) — the header name is provider-specific (OpenRouter's
@@ -154,21 +154,22 @@ type Provider struct {
 	SessionHeader string `toml:"session_header"`
 }
 
-// ModelAlias names a short local id for a provider's real model id, and
-// optionally declares what the catalog can't know about a model this
-// provider isn't in — its context window, how much of the prompt budget
-// context files may occupy, and which skills/MCP servers are even relevant
-// for it. Split substitutes ID for the alias key before a request is sent,
-// so "vmlx/qwen" and "vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit" address
-// the same model; only the alias key carries the declared metadata, since
-// that's what makes the alias worth using rather than typing the real id.
+// ModelDecl is one providers.toml [providers.<p>.models.<key>] declaration: a
+// short local key for a provider's real model id, optionally declaring what
+// the catalog can't know about a model this provider isn't in — its context
+// window, how much of the prompt budget context files may occupy, and which
+// skills/MCP servers are even relevant for it. Split substitutes ID for the
+// declaration key before a request is sent, so "vmlx/qwen" and
+// "vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit" address the same model; only
+// the declaration key carries the declared metadata, since that's what makes
+// the short name worth using rather than typing the real id.
 //
 // Skills and MCPServers are *string, not string, because "key absent" (nil:
 // no override, today's unrestricted default applies) must be distinguishable
 // from "key present but empty" ("": none) — a plain string can't represent
 // that. Both share the same tri-state convention: nil=no override, ""=none,
 // "*"=explicitly all, "a,b,c"=allowlist.
-type ModelAlias struct {
+type ModelDecl struct {
 	ID                  string  `toml:"id"`
 	ContextWindow       int     `toml:"context_window"`
 	MaxCompletionTokens int     `toml:"max_completion_tokens"`
@@ -176,16 +177,15 @@ type ModelAlias struct {
 	Skills              *string `toml:"skills"`
 	MCPServers          *string `toml:"mcp_servers"`
 	// Only lists the OpenRouter provider slugs allowed to serve requests made
-	// through this alias, sent as the request body's "provider".only. It is
-	// what lets two aliases name the SAME real id while routing it to
+	// through this declaration, sent as the request body's "provider".only. It
+	// is what lets two declarations name the SAME real id while routing it to
 	// DIFFERENT providers (an A/B eval: "glm-flash@together" vs
-	// "glm-flash@fireworks"), so the pin is per-alias and travels with the
-	// alias through Set.Resolve — never looked up by id. A non-empty value
-	// REPLACES the static pin's only for that request (the alias is the
-	// explicit, more specific declaration); the ProviderGuard's ignore list
-	// still merges in. nil/empty = no alias pin: static pins and the guard
-	// still apply as before. Only meaningful for kind "anthropic-openrouter";
-	// Validate refuses it on any other kind.
+	// "glm-flash@fireworks"), so the pin is per-declaration and travels with
+	// the declaration through Set.Resolve — never looked up by id. A non-empty
+	// value IS the pin for that request; the ProviderGuard's ignore list still
+	// merges in. nil/empty = no declaration pin: only the guard applies. Only
+	// meaningful for kind "anthropic-openrouter"; Validate refuses it on any
+	// other kind.
 	Only []string `toml:"only"`
 }
 
@@ -414,26 +414,26 @@ func (s *Set) Validate() error {
 				return fmt.Errorf("providers: provider %q: via_executor requires base_url (it is the request's target URL either way)", name)
 			}
 		}
-		aliases := make([]string, 0, len(p.Models))
-		for alias := range p.Models {
-			aliases = append(aliases, alias)
+		decls := make([]string, 0, len(p.Models))
+		for decl := range p.Models {
+			decls = append(decls, decl)
 		}
-		sort.Strings(aliases)
-		for _, alias := range aliases {
-			m := p.Models[alias]
+		sort.Strings(decls)
+		for _, decl := range decls {
+			m := p.Models[decl]
 			if m.ID == "" {
-				return fmt.Errorf("providers: provider %q: models.%s: id is required", name, alias)
+				return fmt.Errorf("providers: provider %q: models.%s: id is required", name, decl)
 			}
 			// A provider pin is an OpenRouter routing instruction (the request
 			// body's "provider".only); on any other kind it would be silently
 			// meaningless, so refuse it rather than let a config look like it
 			// constrains routing when nothing reads it.
 			if len(m.Only) > 0 && p.Kind != KindAnthropicOpenRouter {
-				return fmt.Errorf("providers: provider %q: models.%s: only requires kind %q, not %q", name, alias, KindAnthropicOpenRouter, p.Kind)
+				return fmt.Errorf("providers: provider %q: models.%s: only requires kind %q, not %q", name, decl, KindAnthropicOpenRouter, p.Kind)
 			}
 			for _, slug := range m.Only {
 				if strings.TrimSpace(slug) == "" {
-					return fmt.Errorf("providers: provider %q: models.%s: only must not contain an empty provider slug", name, alias)
+					return fmt.Errorf("providers: provider %q: models.%s: only must not contain an empty provider slug", name, decl)
 				}
 			}
 		}

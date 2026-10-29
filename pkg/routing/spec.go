@@ -349,9 +349,9 @@ func (s Spec) Quantizations() []string {
 
 // Prefs builds the OpenRouter provider-routing object for a request whose
 // resolved spec is s. pinOnly is the provider pin below every spec level (a
-// providers.toml alias's only, or the static providerPins); ignore is the
-// guard's merged bans and ejections. The bool reports whether anything needs
-// sending at all — false means the caller sends no provider object.
+// providers.toml model declaration's only); ignore is the guard's merged bans
+// and ejections. The bool reports whether anything needs sending at all —
+// false means the caller sends no provider object.
 //
 // Rules:
 //   - Only: the spec's own only when set, else the pin. A spec only is an

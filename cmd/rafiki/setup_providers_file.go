@@ -62,8 +62,8 @@ func classifyProvidersFile(path, recordedSHA string) (state providersFileState, 
 // renderProvider, renderSet, renderEmbeddings and renderSummaries are
 // render-only mirrors of the providers types: every field carries omitempty so
 // an unset value is omitted rather than written as `= ""`. Setting up does not
-// write aliases, extras, via_executor, session headers or any fallback beyond
-// what Default() carries.
+// write model declarations, extras, via_executor, session headers or any
+// fallback beyond what Default() carries.
 type renderProvider struct {
 	Kind      providers.Kind `toml:"kind"`
 	BaseURL   string         `toml:"base_url,omitempty"`
@@ -109,7 +109,7 @@ func renderProviders(set *providers.Set) ([]byte, error) {
 	for _, name := range set.Names() {
 		p := set.Providers[name]
 		if len(p.Models) > 0 {
-			return nil, fmt.Errorf("providers: %s: setup does not write model aliases (hand-edit providers.toml)", name)
+			return nil, fmt.Errorf("providers: %s: setup does not write model declarations (hand-edit providers.toml)", name)
 		}
 		if len(p.Extras) > 0 {
 			return nil, fmt.Errorf("providers: %s: setup does not write extras (hand-edit providers.toml)", name)

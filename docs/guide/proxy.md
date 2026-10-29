@@ -17,17 +17,12 @@ Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
   primary, with breaker-gated OpenRouter failover when configured;
 - a `<family>-latest` alias (`opus-latest`) — resolved live from the
   OpenRouter catalog to the family's newest Anthropic model;
-- a **short model alias** (`kimi-k3`, `deepseek-v4-pro`, `glm-5.2`) —
-  resolved live from the catalog to the newest release of that model line,
-  yielding an OpenRouter slash id;
 - any OpenRouter slash id (`moonshotai/kimi-k3`) — routed directly to
   OpenRouter with no failover.
 
-Some model lines carry a **provider pin** (`routing.ProviderPrefsFor`):
-open-weight models are served by many OpenRouter providers of varying
-quantization and data-retention policy, so pinned lines get an OpenRouter
-`provider` routing object restricting them to vetted hosts (`glm-5.2` →
-Fireworks). A caller-supplied `provider` field always wins over the pin.
+Nothing else is resolved: a slash-free name that is not a `<family>-latest`
+alias is passed through as written. The daemon ships no built-in per-line
+provider pin.
 
 ### Routing specs
 
@@ -86,10 +81,10 @@ tool (agent id + spec), bounded to the caller's own subtree; `only=` in a
 delta is operator-only, so a child may set `prefer`, `sort` and `quant` but
 never pin.
 
-Below every spec level sits a **pin** (a providers.toml alias's `only`, or
-the built-in per-line pins): used only when no spec level set `only`. A pin
-and an operator **ban** are defaults, not authority — any caller that can
-spawn can route around them with `only=[...]`. **Data policy cannot be
+Below every spec level sits a **pin** (a providers.toml model declaration's
+`only`): used only when no spec level set `only`. A pin and an operator
+**ban** are defaults, not authority — any caller that can spawn can route
+around them with `only=[...]`. **Data policy cannot be
 bypassed**: `nodata`/`zdr` ride along even under a spec `only`, and the
 cache guard's ejections are dropped only by an explicit `only`. Authority
 splits the other way: a spec is caller-settable by anyone who can spawn (it
@@ -130,10 +125,9 @@ question (who is locked out vs what defaults apply). A line names at most
 `<model>/<id>` — the provider segment is not part of a policy line, and the
 store refuses longer shapes. Among matching line rows the LONGEST line wins.
 
-No concrete model ids are hardcoded: aliases name families/lines and the
-catalog is the source of truth, so an unresolvable alias errors instead of
-falling back to a stale id. Slash ids and model aliases require
-`OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
+No concrete model ids are hardcoded: `<family>-latest` names name families
+and the catalog is the source of truth, so an unresolvable name errors instead
+of falling back to a stale id. Slash ids require `OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
 it takes raw ids and routes by configured prefix.
 
 ### The provider cache guard
@@ -256,13 +250,13 @@ clamps the effort, and retries once. Subsequent requests to that model clamp
 proactively. See `pkg/routing/effortmap.go` (`EffortCache`) and
 `pkg/server/proxy.go` (`effortRetry`).
 
-## Model aliases and declared context windows
+## Model declarations
 
 A local model's real id is often long, and its context window is never in
 the OpenRouter catalog, so Claude Code falls back to assuming 200K — which
 overflows a small local model with an opaque `prompt_too_long` from the
-inference server itself, outside rafiki's view. A provider can declare short
-aliases, each optionally carrying its real context window:
+inference server itself, outside rafiki's view. A provider can declare a short
+key for a real id, each declaration optionally carrying its context window:
 
 ```toml
 [providers.vmlx.models.qwen]
@@ -274,24 +268,24 @@ mcp_servers          = "codescan" # same tri-state convention
 
 [providers.openrouter.models."glm-flash@together"]
 id   = "z-ai/glm-5.3-flash"
-only = ["together"]              # openrouter only: provider slugs allowed to serve this alias
+only = ["together"]              # openrouter only: provider slugs allowed to serve this declaration
 ```
 
 `rafiki claude --model vmlx/qwen` sends the real id upstream and pins
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW` accordingly; the alias shows up in `rafiki
-models` and `--model` completion (`source: alias`) once a reachable daemon
-knows about it. `context_files_tokens`/`skills`/`mcp_servers` bound what gets
-built into a **fundi** child's system prompt and tool inventory for that
-model — a `rafiki claude` child assembles those itself and only
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` accordingly; the declaration shows up in
+`rafiki models` and `--model` completion (`source: declared`) once a reachable
+daemon knows about it. `context_files_tokens`/`skills`/`mcp_servers` bound
+what gets built into a **fundi** child's system prompt and tool inventory for
+that model — a `rafiki claude` child assembles those itself and only
 `context_window` reaches it. An explicit `--skills`/`--mcp-servers` flag on
 the spawn always overrides the model's declared default.
 
 `only` is an OpenRouter-only pin on an `anthropic-openrouter` provider's
-alias: requests made through the alias are sent with
+model declaration: requests made through the declared key are sent with
 `"provider": {"only": [...]}` so only those OpenRouter provider slugs may
-serve them, and it replaces any built-in routing pin for that model line for
-that request (the cache guard's ignore list still merges in). Because the
-pin lives on the alias, two aliases can route the SAME model id to different
-providers — an eval compares `openrouter/glm-flash@together` against
+serve them, unless a routing spec sets its own `only` (the cache guard's
+ignore list still merges in). Because the pin lives on the declaration, two
+declarations can route the SAME model id to different providers — an eval
+compares `openrouter/glm-flash@together` against
 `openrouter/glm-flash@fireworks`, both sending `z-ai/glm-5.3-flash` with
 different `only` lists. On any other provider kind, `only` is a config error.

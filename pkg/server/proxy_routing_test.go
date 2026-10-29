@@ -216,9 +216,9 @@ func TestProxyRoutingCallerDataPolicyForced(t *testing.T) {
 }
 
 // TestProxyRoutingNoResolverUnchanged proves a proxy without a resolver keeps
-// the pre-spec behaviour exactly: the static pin is still injected (and only
-// the pin — no sort/quant/data fields appear), a caller object still wins for
-// the pin, and the guard's ignore is still merged into a caller object even
+// the pre-spec behaviour exactly: no provider object is invented for any model
+// (there is no built-in per-line pin to inject), a caller object passes through
+// as written, and the guard's ignore is still merged into a caller object even
 // when it names an only.
 func TestProxyRoutingNoResolverUnchanged(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -242,22 +242,20 @@ func TestProxyRoutingNoResolverUnchanged(t *testing.T) {
 		return providerOf(t, (*bodies)[len(*bodies)-1])
 	}
 
-	// Pinned model line: pin prefs injected, nothing spec-shaped added.
+	// A model that used to carry a built-in pin, with no caller provider: no
+	// provider object is invented, and nothing spec-shaped appears.
 	prov := send(`{"model":"z-ai/glm-5.2","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	c.EqDiff([]any{"fireworks"}, listOf(t, prov, "only"), "pin still injected without a resolver")
-	for _, key := range []string{"sort", "quantizations", "data_collection", "zdr", "ignore"} {
-		c.Nil(prov[key], "pin-only object must not carry %q", key)
-	}
+	c.Nil(prov, "no built-in pin: a caller-less request must carry no provider object")
 
-	// Caller object with an only: wins for the pin, and — no resolver, so no
+	// Caller object with an only: passed through, and — no resolver, so no
 	// only-bypass rule — still takes the guard's ignore merge.
 	prov = send(`{"model":"deepseek/deepseek-v4-pro","provider":{"only":["novita"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	c.EqDiff([]any{"novita"}, listOf(t, prov, "only"), "caller provider wins for the pin")
+	c.EqDiff([]any{"novita"}, listOf(t, prov, "only"), "caller provider passes through")
 	c.EqDiff([]any{"coreweave"}, listOf(t, prov, "ignore"), "without a resolver the guard merges into a caller only as before")
 
-	// Unpinned model, no caller object: no provider object at all.
+	// Undeclared model, no caller object: no provider object at all.
 	prov = send(`{"model":"openai/gpt-4o","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	c.Nil(prov, "unpinned model must carry no provider object")
+	c.Nil(prov, "undeclared model must carry no provider object")
 }
 
 // TestProxyRoutingCallerDataPolicyForcedOnMalformed extends the data-policy

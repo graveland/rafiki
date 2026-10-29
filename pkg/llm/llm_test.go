@@ -255,10 +255,11 @@ func TestSendParamsSlashModelRoutesToOpenRouter(t *testing.T) {
 	ck.Eq("moonshotai/kimi-k3", string(openrouter.lastReq[0].Model), "openrouter model")
 }
 
-// TestSendParamsPinnedModelCarriesProviderPrefs proves a provider-pinned
-// slash model (routing provider pins) reaches the OpenRouter sender with the
-// "provider" extra field set, and an unpinned one does not.
-func TestSendParamsPinnedModelCarriesProviderPrefs(t *testing.T) {
+// TestSendParamsUnpinnedModelCarriesNoProviderPrefs proves an undeclared slash
+// model reaches the OpenRouter sender with no "provider" extra field — the
+// daemon ships no built-in per-line pin any more, so even a line that used to
+// carry one sends none.
+func TestSendParamsUnpinnedModelCarriesNoProviderPrefs(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"), respondText("ok"),
@@ -287,7 +288,7 @@ func TestSendParamsPinnedModelCarriesProviderPrefs(t *testing.T) {
 		ck.Require().NoError(err, "marshal wire params")
 		return string(b)
 	}
-	ck.StrContains(wire(0), `"provider":{"only":["fireworks"]}`, "pinned model wire body missing provider pin")
+	ck.NotStrContains(wire(0), `"provider"`, "no built-in pin: the body must carry no provider field")
 	ck.NotStrContains(wire(1), `"provider"`, "unpinned model must not carry a provider field")
 }
 

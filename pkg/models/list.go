@@ -28,7 +28,7 @@ type Source string
 const (
 	SourceUserConfig Source = "user-config" // ~/.pi/agent/models.json
 	SourceBuiltin    Source = "builtin"     // curated list + <family>-latest aliases
-	SourceAlias      Source = "alias"       // providers.toml [providers.<name>.models.<alias>]
+	SourceDeclared   Source = "declared"    // providers.toml [providers.<name>.models.<id>] declarations
 	SourceOpenRouter Source = "openrouter"  // live OpenRouter catalog (non-anthropic ids)
 	SourceLocal      Source = "local"       // live probe of a configured local provider
 )
@@ -89,10 +89,10 @@ var knownModels = []string{
 }
 
 // List returns the union of all sources, deduped on ID.  First occurrence wins
-// (user-config > builtin > alias > openrouter > ollama > lmstudio), so
+// (user-config > builtin > declared > openrouter > ollama > lmstudio), so
 // user-configured models shadow builtin entries with the same ID and carry
 // the user's display name, and the curated builtin entries keep their
-// ordering ahead of the ~300 the live catalog contributes. Alias IDs
+// ordering ahead of the ~300 the live catalog contributes. Declared model IDs
 // ("vmlx/qwen") don't collide with anything else by construction — the point
 // of declaring one is a short name nothing else already uses.
 //
@@ -121,8 +121,8 @@ func ListSources(ctx context.Context, set *providers.Set, want map[Source]bool) 
 	if enabled(SourceBuiltin) {
 		all = append(all, loadBuiltins()...)
 	}
-	if enabled(SourceAlias) {
-		all = append(all, loadAliases(set)...)
+	if enabled(SourceDeclared) {
+		all = append(all, loadDeclared(set)...)
 	}
 	if enabled(SourceOpenRouter) {
 		all = append(all, loadOpenRouter(ctx)...)
@@ -288,22 +288,22 @@ func openRouterModels(ids []string) []Model {
 	return out
 }
 
-// loadAliases lists every provider's declared models.<alias> entries. Unlike
+// loadDeclared lists every provider's declared models.<id> entries. Unlike
 // loadLocal this is not a network probe — it's config, so it's always
 // available, including for a provider whose server happens to be down.
-func loadAliases(set *providers.Set) []Model {
+func loadDeclared(set *providers.Set) []Model {
 	if set == nil {
 		return nil
 	}
 	var out []Model
 	for _, name := range set.Names() {
 		p := set.Providers[name]
-		for alias, meta := range p.Models {
+		for decl, meta := range p.Models {
 			out = append(out, Model{
-				ID:       name + "/" + alias,
+				ID:       name + "/" + decl,
 				Provider: name,
 				Model:    meta.ID,
-				Source:   SourceAlias,
+				Source:   SourceDeclared,
 			})
 		}
 	}

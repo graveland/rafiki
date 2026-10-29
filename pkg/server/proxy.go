@@ -301,7 +301,7 @@ func cachePct(u routing.CapturedUsage) float64 {
 }
 
 // mergeIgnore unions ignore into whatever provider object is already on the
-// payload — a routing.ProviderPrefs from a pin, a caller-supplied map, or
+// payload — a routing.ProviderPrefs the spec built, a caller-supplied map, or
 // nothing at all — and returns the value to store back. Existing entries are
 // preserved and duplicates dropped.
 func mergeIgnore(existing any, ignore []string) any {
@@ -497,22 +497,20 @@ func routingSessionID(r *http.Request) string {
 // applyProviderRouting decides the OpenRouter provider-routing object for one
 // request, mutating payload in place. Three layers, weakest first:
 //
-//   - The static pin (routing.ProviderPrefsFor): injected when the caller sent
-//     no provider object at all; a caller-supplied object wins for the pin.
+//   - A caller-supplied provider object: used as the caller wrote it.
 //   - The guard's ignore list: merged in even over a caller-supplied object —
 //     a budget guard any caller can switch off by sending a provider block is
 //     not a guard — except when that object names a non-empty `only`: an
 //     explicit routing decision bypasses bans.
 //   - The session's routing spec (routingResolver, the daemon's Controller):
 //     the resolved spec builds the whole object for a request with no caller
-//     provider — spec.Prefs folds the pin and the guard's ignore in under its
-//     own rules, including dropping the ignore when the spec names an only —
-//     and on a caller-supplied object it forces the one boundary a spec exists
-//     to hold, data_collection "deny" and zdr, over whatever the caller asked
-//     for. No resolver means none of this runs: the pre-spec behaviour,
-//     exactly.
+//     provider — spec.Prefs folds the guard's ignore in under its own rules,
+//     including dropping the ignore when the spec names an only — and on a
+//     caller-supplied object it forces the one boundary a spec exists to hold,
+//     data_collection "deny" and zdr, over whatever the caller asked for. No
+//     resolver means none of this runs: the pre-spec behaviour, exactly, which
+//     now sends no provider object unless the guard has something to ignore.
 func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model string, r *http.Request) {
-	pinPrefs, pinned := routing.ProviderPrefsFor(model)
 	ignore := p.guard.IgnoredFor(time.Now(), model)
 	_, hasCaller := payload["provider"]
 
@@ -537,10 +535,10 @@ func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model strin
 		}
 		spec := p.routingResolver.RoutingFor(routingSessionID(r), model)
 		if !hasCaller {
-			// spec.Prefs owns the whole object — its only overrides the pin and
-			// drops the bans, the pin fills in otherwise, and the data flags are
-			// built in — so the separate guard merge must not run on top of it.
-			if prefs, send := spec.Prefs(pinPrefs.Only, ignore); send {
+			// spec.Prefs owns the whole object — its only drops the bans, the
+			// ignore fills in otherwise, and the data flags are built in — so
+			// the separate guard merge must not run on top of it.
+			if prefs, send := spec.Prefs(nil, ignore); send {
 				payload["provider"] = prefs
 			}
 			return
@@ -561,11 +559,6 @@ func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model strin
 		return
 	}
 
-	if !hasCaller {
-		if pinned {
-			payload["provider"] = pinPrefs
-		}
-	}
 	if len(ignore) > 0 {
 		payload["provider"] = mergeIgnore(payload["provider"], ignore)
 	}

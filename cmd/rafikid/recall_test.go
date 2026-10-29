@@ -350,7 +350,7 @@ func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
 // would silently degrade the segment budget to the unknown-context fallback.
 // Rides the TestRecallWiring shim (the pinned name lacks the -run pattern).
 func TestLLMCompleterResolvesCatalogModel(t *testing.T) {
-	prov := func(models map[string]providers.ModelAlias) *providers.Set {
+	prov := func(models map[string]providers.ModelDecl) *providers.Set {
 		return &providers.Set{
 			DefaultProvider: "anthropic",
 			Providers: map[string]providers.Provider{
@@ -366,8 +366,8 @@ func TestLLMCompleterResolvesCatalogModel(t *testing.T) {
 		ck.Eq("openrouter/z-ai/glm-5.3-flash", c.model, "model")
 		ck.Eq("z-ai/glm-5.3-flash", c.catalogModel, "catalogModel")
 	})
-	t.Run("alias resolves to the real id", func(t *testing.T) {
-		p := prov(map[string]providers.ModelAlias{"glm": {ID: "z-ai/glm-5.3-flash", ContextWindow: 1310720}})
+	t.Run("declared model resolves to the real id", func(t *testing.T) {
+		p := prov(map[string]providers.ModelDecl{"glm": {ID: "z-ai/glm-5.3-flash", ContextWindow: 1310720}})
 		c := newLLMCompleter(nil, p, "openrouter/glm", nil)
 		assert.NewAborting(t).Eq("z-ai/glm-5.3-flash", c.catalogModel, "catalogModel")
 	})

@@ -821,9 +821,10 @@ func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	c.Eq("openrouter", fs.lastUpstream, "captured upstream")
 }
 
-// A pinned model line (routing provider pins) gets its provider preferences
-// injected into the OpenRouter body; a caller-supplied provider object wins.
-func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
+// No model line is pinned by the daemon any more: a caller-supplied provider
+// object reaches OpenRouter exactly as written, and a request that carries
+// none gets no provider object invented for it.
+func TestMessagesProxyCallerProviderReachesOpenRouter(t *testing.T) {
 	c := assert.NewCollecting(t)
 	var orBodies [][]byte
 	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -858,22 +859,19 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 		prov, _ := payload["provider"].(map[string]any)
 		return prov
 	}
-	if prov := providerOf(orBodies[0]); fmt.Sprintf("%v", prov["only"]) != "[fireworks]" {
-		t.Errorf("pinned model provider = %v, want only=[fireworks]", prov)
-	}
+	c.Nil(providerOf(orBodies[0]), "no caller provider and no built-in pin: only=%v", providerOf(orBodies[0]))
 	if prov := providerOf(orBodies[1]); fmt.Sprintf("%v", prov["only"]) != "[baseten]" {
-		t.Errorf("caller-supplied provider must win, got %v", prov)
+		t.Errorf("caller-supplied provider must pass through, got %v", prov)
 	}
-	c.Nil(providerOf(orBodies[2]), "unpinned model must carry no provider, got")
+	c.Nil(providerOf(orBodies[2]), "undeclared model must carry no provider, got")
 }
 
 // TestDoOpenRouterMergesIgnoreList proves an ejected provider reaches the wire
 // as provider.ignore, AND that it survives a caller-supplied provider object.
 // The union is deliberate: a budget guard any caller can switch off by sending
-// its own provider block is not a guard. Contrast with
-// TestMessagesProxyPinsProviderForPinnedModel, where a caller-supplied
-// provider legitimately overrides a pin — the guard's ignore list is not a
-// pin and must not be overridable the same way.
+// its own provider block is not a guard. Contrast with the caller/spec layers,
+// where an explicit `only` legitimately skips the merge — the guard's ignore
+// list is not a preference and must not be switchable off the same way.
 func TestDoOpenRouterMergesIgnoreList(t *testing.T) {
 	g := routing.NewProviderGuard(routing.DefaultEjectTTL, slog.New(slog.DiscardHandler))
 	now := time.Now()
@@ -972,16 +970,12 @@ func TestProxyResolveModel(t *testing.T) {
 	c.Require().NoError(err, "concrete errored")
 	c.Eq("claude-opus-4-8", modelOf(t, body), "concrete")
 	c.Eq("claude-opus-4-8", resolved, "concrete resolved")
-	// short model alias -> the line's newest OR slash id (selectUpstream then
-	// routes the slash id to OpenRouter, per the slash-routing tests above)
+	// a short name is not a built-in alias: it passes through untouched even
+	// though the catalog contains the model line it spells
 	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"kimi-k3","max_tokens":1}`))
 	c.Require().NoError(err, "kimi-k3 errored")
-	c.Eq("moonshotai/kimi-k3", modelOf(t, body), "kimi-k3")
-	c.Eq("moonshotai/kimi-k3", resolved, "kimi-k3 resolved")
-	// a model alias the catalog can't resolve -> error (no hardcoded fallback)
-	if _, _, err = p.resolveAndAdapt([]byte(`{"model":"deepseek-v4-pro"}`)); err == nil {
-		t.Error("deepseek-v4-pro absent from catalog must error")
-	}
+	c.Eq("kimi-k3", modelOf(t, body), "kimi-k3")
+	c.Eq("kimi-k3", resolved, "kimi-k3 resolved")
 	// a "<family>-latest" the catalog can't resolve -> error (no hardcoded fallback)
 	if _, _, err = p.resolveAndAdapt([]byte(`{"model":"opus-latest"}`)); err == nil {
 		t.Error("opus-latest absent from catalog must error")

@@ -20,17 +20,17 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// aliasProviders returns a registry whose prov entry carries one alias with
-// declared window metadata, so Controller.ModelInfo's alias path (not the
+// declProviders returns a registry whose prov entry carries one declared model
+// with window metadata, so Controller.ModelInfo's declaration path (not the
 // OpenRouter catalog, not providers.toml on disk) answers deterministically.
-func aliasProviders() *providers.Set {
+func declProviders() *providers.Set {
 	return &providers.Set{
 		DefaultProvider: "prov",
 		Providers: map[string]providers.Provider{
 			"prov": {
 				Name: "prov",
-				Models: map[string]providers.ModelAlias{
-					"alias": {ID: "real-id", ContextWindow: 200000, MaxCompletionTokens: 32000},
+				Models: map[string]providers.ModelDecl{
+					"decl": {ID: "real-id", ContextWindow: 200000, MaxCompletionTokens: 32000},
 				},
 			},
 		},
@@ -45,11 +45,11 @@ func aliasProviders() *providers.Set {
 // or misnames a field fails loudly rather than agreeing with itself by
 // accident.
 func TestChildOpsModelInfoMatchesFramed(t *testing.T) {
-	ctrl := &Controller{providers: aliasProviders()}
+	ctrl := &Controller{providers: declProviders()}
 	s := connectapi.NewServer(nil)
 	s.SetChildOps(connectChildOps{c: ctrl})
 
-	for _, model := range []string{"prov/alias", "prov/unknown", "unconfigured/model", "bare-id"} {
+	for _, model := range []string{"prov/decl", "prov/unknown", "unconfigured/model", "bare-id"} {
 		t.Run(model, func(t *testing.T) {
 			c := assert.NewCollecting(t)
 			want := ctrl.ModelInfo(model) // the framed payload, verbatim
@@ -66,21 +66,21 @@ func TestChildOpsModelInfoMatchesFramed(t *testing.T) {
 		})
 	}
 
-	// The alias case above must actually be known — a mapping that zeroed
+	// The declared case above must actually be known — a mapping that zeroed
 	// everything would otherwise pass every field comparison against a
 	// zero-value want.
-	if known := ctrl.ModelInfo("prov/alias"); !known.Known || known.ResolvedID != "prov/real-id" {
-		t.Fatalf("fixture broke: ModelInfo(prov/alias) = %+v, want known with resolved id", known)
+	if known := ctrl.ModelInfo("prov/decl"); !known.Known || known.ResolvedID != "prov/real-id" {
+		t.Fatalf("fixture broke: ModelInfo(prov/decl) = %+v, want known with resolved id", known)
 	}
 }
 
 func TestChildOpsModelInfoRoutingAutoCompactMatchesCatalog(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	// The formula lives in one binary by design (the alias path computes it
-	// daemon-side); pin that the adapter's answer is exactly
+	// The formula lives in one binary by design (the declaration path computes
+	// it daemon-side); pin that the adapter's answer is exactly
 	// routing.AutoCompactWindow of the declared windows.
-	ctrl := &Controller{providers: aliasProviders()}
-	got, err := (connectChildOps{c: ctrl}).ModelInfo(context.Background(), "prov/alias")
+	ctrl := &Controller{providers: declProviders()}
+	got, err := (connectChildOps{c: ctrl}).ModelInfo(context.Background(), "prov/decl")
 	ck.Require().NoError(err, "ModelInfo")
 	want := routing.AutoCompactWindow(200000, 32000)
 	ck.Eq(int32(want), got.AutoCompactWindow, "auto_compact_window = %d, want routing.AutoCompactWindow = %d", got.AutoCompactWindow, want)

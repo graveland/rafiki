@@ -35,27 +35,27 @@ func contextFilesBudget(contextWindow int) int {
 }
 
 // modelDefaults holds per-model spawn defaults resolved from a provider's
-// declared model alias — the fields the OpenRouter catalog can never answer,
-// since it only ever observes OpenRouter's own model catalog: how much of
-// the prompt budget context files may occupy, and which skills/MCP servers
-// are even relevant for this model.
+// declared model — the fields the OpenRouter catalog can never answer, since
+// it only ever observes OpenRouter's own model catalog: how much of the prompt
+// budget context files may occupy, and which skills/MCP servers are even
+// relevant for this model.
 type modelDefaults struct {
-	// ContextFilesTokens is the resolved token budget: the alias's explicit
-	// ContextFilesTokens override if set, otherwise contextFilesBudget of its
-	// declared ContextWindow. 0 means no cap.
+	// ContextFilesTokens is the resolved token budget: the declaration's
+	// explicit ContextFilesTokens override if set, otherwise contextFilesBudget
+	// of its declared ContextWindow. 0 means no cap.
 	ContextFilesTokens int
 	Skills             *string
 	MCPServers         *string
 }
 
 // resolveModelDefaults looks up model's provider and, if its local id names a
-// declared alias (providers.ModelAlias), returns that alias's resolved
+// declared model (providers.ModelDecl), returns that declaration's resolved
 // defaults. ok is false when set is nil, the provider is unknown, or the
-// model's local id names no declared alias — the caller leaves every
-// affected field at its existing zero-value behavior in that case (no
-// context-files cap, no model-declared skills/MCP default).
+// model's local id names no declared model — the caller leaves every affected
+// field at its existing zero-value behavior in that case (no context-files
+// cap, no model-declared skills/MCP default).
 //
-// This mirrors Controller.aliasContextWindow (cmd/rafikid/models_presets.go)
+// This mirrors Controller.declContextWindow (cmd/rafikid/models_presets.go)
 // but is a plain function, not a Controller method: it needs only the
 // provider registry, never the OpenRouter catalog, so it costs nothing to
 // call from agentFlags.toRuntimeOptions, which has no Controller in scope.
@@ -71,18 +71,18 @@ func resolveModelDefaults(set *providers.Set, model string) (modelDefaults, bool
 	if !ok {
 		return modelDefaults{}, false
 	}
-	alias, ok := p.Models[localID]
+	decl, ok := p.Models[localID]
 	if !ok {
 		return modelDefaults{}, false
 	}
-	budget := alias.ContextFilesTokens
+	budget := decl.ContextFilesTokens
 	if budget == 0 {
-		budget = contextFilesBudget(alias.ContextWindow)
+		budget = contextFilesBudget(decl.ContextWindow)
 	}
 	return modelDefaults{
 		ContextFilesTokens: budget,
-		Skills:             alias.Skills,
-		MCPServers:         alias.MCPServers,
+		Skills:             decl.Skills,
+		MCPServers:         decl.MCPServers,
 	}, true
 }
 

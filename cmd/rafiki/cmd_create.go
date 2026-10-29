@@ -895,8 +895,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	dropChildCompletionCache(cmd)
 
 	// Remember what actually got spawned, not what was asked for: a preset or
-	// an alias may have supplied it, and replaying the resolved choice is what
-	// makes the next bare create land on the same model.
+	// a declared model may have supplied it, and replaying the resolved choice
+	// is what makes the next bare create land on the same model.
 	clientstate.RememberModel(p.Name, req.Kind, req.Model)
 	if ref := req.ExecutorRef; ref != "" {
 		clientstate.RememberExecutor(p.Name, req.Kind, ref)

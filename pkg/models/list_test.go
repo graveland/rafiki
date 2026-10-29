@@ -196,9 +196,9 @@ func TestLoadUserConfig_SkipsEmptyID(t *testing.T) {
 	c.Len(got, 1, "expected 1 entry (empty id skipped), got %d", len(got))
 }
 
-// ─── loadAliases ───────────────────────────────────────────────────────────────
+// ─── loadDeclared ──────────────────────────────────────────────────────────────
 
-func TestLoadAliases_Fields(t *testing.T) {
+func TestLoadDeclared_Fields(t *testing.T) {
 	c := assert.NewCollecting(t)
 	set, err := providers.Parse([]byte(`
 default_provider = "anthropic"
@@ -216,30 +216,30 @@ context_window = 16384
 `))
 	c.Require().NoError(err, "Parse")
 
-	got := loadAliases(set)
-	c.Require().Len(got, 1, "expected 1 alias, got %d", len(got))
+	got := loadDeclared(set)
+	c.Require().Len(got, 1, "expected 1 declared model, got %d", len(got))
 	m := got[0]
 	c.Eq("vmlx/qwen", m.ID, "ID")
 	c.Eq("vmlx", m.Provider, "Provider =")
 	c.Eq("models/Qwen3.8-27B-Abliterated-MLX-4bit", m.Model, "Model")
-	c.Eq(SourceAlias, m.Source, "Source")
+	c.Eq(SourceDeclared, m.Source, "Source")
 }
 
-func TestLoadAliases_NoAliasesDeclared(t *testing.T) {
-	got := loadAliases(providers.Default())
-	assert.NewCollecting(t).Nil(got, "expected nil with no aliases declared, got")
+func TestLoadDeclared_NoneDeclared(t *testing.T) {
+	got := loadDeclared(providers.Default())
+	assert.NewCollecting(t).Nil(got, "expected nil with no models declared, got")
 }
 
-func TestLoadAliases_NilSet(t *testing.T) {
-	assert.NewCollecting(t).Nil(loadAliases(nil), "expected nil for a nil set, got")
+func TestLoadDeclared_NilSet(t *testing.T) {
+	assert.NewCollecting(t).Nil(loadDeclared(nil), "expected nil for a nil set, got")
 }
 
-// A declared alias must reach both ListModels and --model completion —
+// A declared model must reach both ListModels and --model completion —
 // List/ListSources is the single function that serves both. base_url is
 // deliberately omitted so loadLocal skips this provider entirely (it only
-// probes providers with an explicit base_url); the alias must still surface
-// without a reachable server, since it's config, not a live probe.
-func TestList_IncludesAliases(t *testing.T) {
+// probes providers with an explicit base_url); the declaration must still
+// surface without a reachable server, since it's config, not a live probe.
+func TestList_IncludesDeclaredModels(t *testing.T) {
 	set, err := providers.Parse([]byte(`
 default_provider = "anthropic"
 
@@ -257,11 +257,11 @@ context_window = 16384
 
 	got := List(context.Background(), set)
 	for _, m := range got {
-		if m.ID == "vmlx/qwen" && m.Source == SourceAlias {
+		if m.ID == "vmlx/qwen" && m.Source == SourceDeclared {
 			return
 		}
 	}
-	t.Errorf("vmlx/qwen (source=alias) not found in List() output: %+v", got)
+	t.Errorf("vmlx/qwen (source=declared) not found in List() output: %+v", got)
 }
 
 // ─── loadLocal ─────────────────────────────────────────────────────────────────

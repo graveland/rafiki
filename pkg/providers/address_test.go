@@ -45,7 +45,7 @@ func TestSplit(t *testing.T) {
 		{"vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit", "vmlx", "models/Qwen3.8-27B-Abliterated-MLX-4bit"},
 		// A bare id resolves against default_provider.
 		{"claude-sonnet-5", "anthropic", "claude-sonnet-5"},
-		// An alias substitutes its declared real id.
+		// A declaration substitutes its declared real id.
 		{"vmlx/qwen", "vmlx", "models/Qwen3.8-27B-Abliterated-MLX-4bit"},
 	}
 	for _, tc := range cases {
@@ -128,46 +128,46 @@ base_url = "http://localhost:8005"
 id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
 `
 
-// Resolve must return everything Split does PLUS the matched alias, so the
-// alias's declared metadata (its only-pin) can travel with the request. The
-// pin must come from the alias, never be looked up by real id: two aliases
-// share one id and must keep their own pins apart.
-func TestResolveReturnsAlias(t *testing.T) {
+// Resolve must return everything Split does PLUS the matched declaration, so
+// its metadata (its only-pin) can travel with the request. The pin must come
+// from the declaration, never be looked up by real id: two declarations share
+// one id and must keep their own pins apart.
+func TestResolveReturnsDecl(t *testing.T) {
 	set, err := providers.Parse([]byte(resolveTOML))
 	assert.NewAborting(t).NoError(err, "Parse")
 	cases := []struct {
 		in           string
 		wantProvider string
 		wantModel    string
-		wantAlias    bool
+		wantDecl     bool
 		wantOnly     []string
 	}{
 		{"openrouter/glm-flash@together", "openrouter", "z-ai/glm-5.3-flash", true, []string{"together"}},
 		{"openrouter/glm-flash@fireworks", "openrouter", "z-ai/glm-5.3-flash", true, []string{"fireworks"}},
-		// A real (non-alias) id: no alias, no pin.
+		// A real (undeclared) id: no declaration, no pin.
 		{"openrouter/z-ai/glm-5.3-flash", "openrouter", "z-ai/glm-5.3-flash", false, nil},
-		// An alias without only still resolves as an alias, with a nil pin.
+		// A declaration without only still resolves, with a nil pin.
 		{"vmlx/qwen", "vmlx", "models/Qwen3.8-27B-Abliterated-MLX-4bit", true, nil},
-		// A non-alias bare id against default_provider.
+		// A bare, undeclared id against default_provider.
 		{"claude-sonnet-5", "anthropic", "claude-sonnet-5", false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
 			c := assert.NewCollecting(t)
-			p, model, alias, err := set.Resolve(tc.in)
+			p, model, decl, err := set.Resolve(tc.in)
 			c.Require().NoError(err, "Resolve(%q)", tc.in)
 			c.Eq(tc.wantProvider, p.Name, "provider")
 			c.Eq(tc.wantModel, model, "model")
-			c.Require().False(tc.wantAlias && alias == nil, "alias = nil, want the matched alias")
-			if !tc.wantAlias {
-				c.Require().Nil(alias, "alias")
+			c.Require().False(tc.wantDecl && decl == nil, "declaration = nil, want the matched declaration")
+			if !tc.wantDecl {
+				c.Require().Nil(decl, "declaration")
 				return
 			}
-			got, want := alias.ID, tc.wantModel
-			c.Eq(want, got, "alias.ID")
-			c.Require().Len(alias.Only, len(tc.wantOnly), "alias.Only = %v, want %v", alias.Only, tc.wantOnly)
+			got, want := decl.ID, tc.wantModel
+			c.Eq(want, got, "decl.ID")
+			c.Require().Len(decl.Only, len(tc.wantOnly), "decl.Only = %v, want %v", decl.Only, tc.wantOnly)
 			for i := range tc.wantOnly {
-				c.Eq(tc.wantOnly[i], alias.Only[i], "alias.Only[%d] = %q, want", i, alias.Only[i])
+				c.Eq(tc.wantOnly[i], decl.Only[i], "decl.Only[%d] = %q, want", i, decl.Only[i])
 			}
 		})
 	}
@@ -182,8 +182,8 @@ func TestResolveUnknownProviderErrors(t *testing.T) {
 }
 
 // Split must behave EXACTLY as before now that it wraps Resolve: its callers
-// (pkg/fundi, pkg/server, cmd/rafikid) were not taught about aliases and must
-// not change behaviour.
+// (pkg/fundi, pkg/server, cmd/rafikid) were not taught about declarations and
+// must not change behaviour.
 func TestSplitMatchesResolve(t *testing.T) {
 	set, err := providers.Parse([]byte(resolveTOML))
 	assert.NewAborting(t).NoError(err, "Parse")

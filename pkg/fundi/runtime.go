@@ -77,7 +77,7 @@ type RuntimeOptions struct {
 	NoBuiltinTools bool
 	NoContextFiles bool
 	// ContextFilesBudget is the approximate token budget context files may
-	// occupy; 0 means no cap. Set from a model's declared alias — see
+	// occupy; 0 means no cap. Set from a model's declaration — see
 	// cmd/rafikid's resolveModelDefaults — never computed here.
 	ContextFilesBudget int
 	// ProjectContext, when non-nil, is the project tier of instruction files
@@ -111,8 +111,8 @@ type RuntimeOptions struct {
 	MCPConfig       string // absolute path, or empty to skip MCP entirely
 	// MCPServers is a comma-separated allowlist of MCPConfig's mcpServers
 	// keys to actually connect; empty or "*" means all (today's behavior).
-	// Set from a model's declared alias by default — see
-	// cmd/rafikid's resolveModelDefaults — or an explicit caller override.
+	// Set from a model's declaration by default — see cmd/rafikid's
+	// resolveModelDefaults — or an explicit caller override.
 	MCPServers string
 	// NoMCP disables MCP entirely, overriding MCPConfig even when it is set.
 	NoMCP bool

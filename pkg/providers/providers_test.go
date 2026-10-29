@@ -50,13 +50,13 @@ func TestParseGood(t *testing.T) {
 	if got := set.Providers["anthropic"].Fallback; len(got) != 1 || got[0] != "openrouter" {
 		t.Errorf("anthropic.Fallback = %v, want [openrouter]", got)
 	}
-	alias, ok := p.Models["qwen"]
+	decl, ok := p.Models["qwen"]
 	c.Require().True(ok, "vmlx.models.qwen not found")
-	c.Eq("models/Qwen3.8-27B-Abliterated-MLX-4bit", alias.ID, "alias.ID =")
-	c.Eq(16384, alias.ContextWindow, "alias.ContextWindow")
-	c.Eq(3277, alias.ContextFilesTokens, "alias.ContextFilesTokens")
-	c.False(alias.Skills == nil || *alias.Skills != "", "alias.Skills = %v, want a pointer to \"\"", alias.Skills)
-	c.False(alias.MCPServers == nil || *alias.MCPServers != "codescan", "alias.MCPServers = %v, want a pointer to \"codescan\"", alias.MCPServers)
+	c.Eq("models/Qwen3.8-27B-Abliterated-MLX-4bit", decl.ID, "decl.ID =")
+	c.Eq(16384, decl.ContextWindow, "decl.ContextWindow")
+	c.Eq(3277, decl.ContextFilesTokens, "decl.ContextFilesTokens")
+	c.False(decl.Skills == nil || *decl.Skills != "", "decl.Skills = %v, want a pointer to \"\"", decl.Skills)
+	c.False(decl.MCPServers == nil || *decl.MCPServers != "codescan", "decl.MCPServers = %v, want a pointer to \"codescan\"", decl.MCPServers)
 }
 
 func TestParseRejects(t *testing.T) {
@@ -111,7 +111,7 @@ func TestParseRejects(t *testing.T) {
 			want: "unknown key",
 		},
 		{
-			name: "model alias with no id",
+			name: "declared model with no id",
 			toml: "default_provider = \"x\"\n[providers.x]\nkind = \"anthropic\"\n[providers.x.models.qwen]\ncontext_window = 16384\n",
 			want: "models.qwen: id is required",
 		},
@@ -164,7 +164,7 @@ func TestLoadMissingFileReturnsDefault(t *testing.T) {
 	c.True(ok, "Load of a missing file must return Default()")
 }
 
-func TestParseModelAliasSkillsUnsetVsEmpty(t *testing.T) {
+func TestParseModelDeclSkillsUnsetVsEmpty(t *testing.T) {
 	c := assert.NewCollecting(t)
 	const toml = `
 default_provider = "x"
@@ -191,10 +191,10 @@ skills = "*"
 	}
 }
 
-// only is the alias-level OpenRouter provider pin: two aliases may name the
-// SAME real id while pinning DIFFERENT provider slugs, which is what makes an
-// A/B eval on one model possible. Absent = nil (no pin).
-func TestParseModelAliasOnly(t *testing.T) {
+// only is the declaration-level OpenRouter provider pin: two declarations may
+// name the SAME real id while pinning DIFFERENT provider slugs, which is what
+// makes an A/B eval on one model possible. Absent = nil (no pin).
+func TestParseModelDeclOnly(t *testing.T) {
 	c := assert.NewCollecting(t)
 	const toml = `
 default_provider = "openrouter"
@@ -225,8 +225,8 @@ id = "z-ai/glm-5.2"
 		t.Errorf("glm-flash@fireworks.Only = %v, want [fireworks]", got)
 	}
 	c.Nil(p.Models["unpinned"].Only, "unpinned.Only")
-	// The two aliases above must still resolve to the same real id.
-	c.Eq(p.Models["glm-flash@fireworks"].ID, p.Models["glm-flash@together"].ID, "two-aliases-one-id setup lost")
+	// The two declarations above must still resolve to the same real id.
+	c.Eq(p.Models["glm-flash@fireworks"].ID, p.Models["glm-flash@together"].ID, "two-declarations-one-id setup lost")
 }
 
 func TestProvidersLoadsEmbeddingsAndSummaries(t *testing.T) {

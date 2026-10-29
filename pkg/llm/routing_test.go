@@ -20,8 +20,8 @@ import (
 )
 
 // routingTOML is a minimal openrouter-only registry with NO provider pins and
-// no aliases: every provider-routing decision in the body must then come from
-// the client's routing spec (or the guard), never from a pin.
+// no declared-model pins: every provider-routing decision in the body must then
+// come from the client's routing spec (or the guard), never from a pin.
 const routingTOML = `
 default_provider = "openrouter"
 
@@ -95,36 +95,38 @@ func noEligibleErr(status int, msg string) *anthropic.Error {
 }
 
 // TestApplyProviderPrefsZeroSpecUnchanged pins the pre-spec behaviour: with a
-// zero spec, applyProviderPrefs produces byte-identical bodies to the
-// pre-routing-spec client for every shape that used to reach it — no pin, a
-// static pin, an alias pin, a guard ejection, extras alone, extras with a
-// pin. The goldens below were harvested from the pre-spec code.
+// zero spec, applyProviderPrefs produces byte-identical bodies for every shape
+// that reaches it — no pin, a declaration pin, a guard ejection, extras alone,
+// extras with a declaration pin. The goldens below were harvested from the
+// pre-spec code; the only one that changed is the removed built-in pin (that
+// line now carries no provider object at all, exactly like any other
+// undeclared id).
 func TestApplyProviderPrefsZeroSpecUnchanged(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	g := ejectTogether(t)
-	aliasOnly := &providers.ModelAlias{ID: "z-ai/glm-5.3-flash", Only: []string{"together"}}
-	noAlias := (*providers.ModelAlias)(nil)
+	declOnly := &providers.ModelDecl{ID: "z-ai/glm-5.3-flash", Only: []string{"together"}}
+	noDecl := (*providers.ModelDecl)(nil)
 
 	cases := []struct {
 		name   string
 		model  string
-		alias  *providers.ModelAlias
+		decl   *providers.ModelDecl
 		guard  *routing.ProviderGuard
 		extras map[string]any
 		golden string
 	}{
-		{"plain", "z-ai/glm-5.3-flash", noAlias, nil, nil,
+		{"plain", "z-ai/glm-5.3-flash", noDecl, nil, nil,
 			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.3-flash"}`},
-		{"static pin", "z-ai/glm-5.2", noAlias, nil, nil,
-			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.2","provider":{"only":["fireworks"]}}`},
-		{"alias pin", "z-ai/glm-5.3-flash", aliasOnly, nil, nil,
+		{"undeclared pinned line", "z-ai/glm-5.2", noDecl, nil, nil,
+			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.2"}`},
+		{"declaration pin", "z-ai/glm-5.3-flash", declOnly, nil, nil,
 			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.3-flash","provider":{"only":["together"]}}`},
-		{"guard ignore", "z-ai/glm-5.3-flash", noAlias, g, nil,
+		{"guard ignore", "z-ai/glm-5.3-flash", noDecl, g, nil,
 			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.3-flash","provider":{"ignore":["together"]}}`},
-		{"extras only", "z-ai/glm-5.3-flash", noAlias, nil, map[string]any{"top_k": float64(7)},
+		{"extras only", "z-ai/glm-5.3-flash", noDecl, nil, map[string]any{"top_k": float64(7)},
 			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.3-flash","top_k":7}`},
-		{"extras + pin", "z-ai/glm-5.2", noAlias, nil, map[string]any{"top_k": float64(7)},
-			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.2","top_k":7,"provider":{"only":["fireworks"]}}`},
+		{"extras + declaration pin", "z-ai/glm-5.3-flash", declOnly, nil, map[string]any{"top_k": float64(7)},
+			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.3-flash","top_k":7,"provider":{"only":["together"]}}`},
 	}
 	// canonicalBody normalises a body through decode-to-map/encode, because
 	// the SDK marshals ExtraFields in MAP ORDER — nondeterministic whenever a
@@ -147,7 +149,7 @@ func TestApplyProviderPrefsZeroSpecUnchanged(t *testing.T) {
 	for _, tc := range cases {
 		params := anthropic.MessageNewParams{Model: anthropic.Model(tc.model), MaxTokens: 16,
 			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-		applyProviderPrefs(&params, tc.alias, tc.guard, tc.extras, routing.Spec{})
+		applyProviderPrefs(&params, tc.decl, tc.guard, tc.extras, routing.Spec{})
 		b, err := json.Marshal(params)
 		ck.Require().NoError(err, "marshal %s", tc.name)
 		ck.Eq(canonicalBody(t, []byte(tc.golden)), canonicalBody(t, b),
@@ -166,7 +168,7 @@ func TestRoutingSpecOnBody(t *testing.T) {
 	}}
 	spec := routing.Spec{Sort: routing.SortPrice, Quant: []string{"fp8+"}, NoData: true}
 	c := newSpecClient(t, routingSet(t), spec, nil, openrouter)
-	sendAliasParams(t, c, "openrouter/kimi")
+	sendDeclParams(t, c, "openrouter/kimi")
 
 	body := wireBody(t, openrouter.lastReq, 0)
 	ck.StrContains(body,
@@ -188,7 +190,7 @@ func TestRoutingOnlyDropsGuardIgnores(t *testing.T) {
 	}}
 	spec := routing.Spec{Only: []string{"fireworks"}, Sort: routing.SortPrice}
 	c := newSpecClient(t, routingSet(t), spec, ejectTogether(t), openrouter)
-	sendAliasParams(t, c, "openrouter/glmflash")
+	sendDeclParams(t, c, "openrouter/glmflash")
 
 	body := wireBody(t, openrouter.lastReq, 0)
 	ck.StrContains(body, `"provider":{"only":["fireworks"],"sort":"price"}`,
@@ -207,29 +209,29 @@ func TestRoutingOnlyKeepsZDR(t *testing.T) {
 	}}
 	spec := routing.Spec{Only: []string{"fireworks"}, ZDR: true}
 	c := newSpecClient(t, routingSet(t), spec, nil, openrouter)
-	sendAliasParams(t, c, "openrouter/glmflash")
+	sendDeclParams(t, c, "openrouter/glmflash")
 
 	body := wireBody(t, openrouter.lastReq, 0)
 	ck.StrContains(body, `"provider":{"only":["fireworks"],"zdr":true}`,
 		"zdr must ride along beside the spec only, wire body =")
 }
 
-// TestRoutingAliasOnlyLosesToSpecOnly proves precedence: the alias's only pin
+// TestRoutingDeclOnlyLosesToSpecOnly proves precedence: the declaration's only pin
 // (glm-flash@together -> together) loses to the spec's own only — the spec is
 // the more explicit, more recent declaration of where the request may go.
-func TestRoutingAliasOnlyLosesToSpecOnly(t *testing.T) {
+func TestRoutingDeclOnlyLosesToSpecOnly(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
 	spec := routing.Spec{Only: []string{"fireworks"}}
-	c := newSpecClient(t, aliasPinSet(t), spec, nil, openrouter)
-	sendAliasParams(t, c, "openrouter/glm-flash@together")
+	c := newSpecClient(t, declPinSet(t), spec, nil, openrouter)
+	sendDeclParams(t, c, "openrouter/glm-flash@together")
 
 	body := wireBody(t, openrouter.lastReq, 0)
 	ck.StrContains(body, `"provider":{"only":["fireworks"]}`,
 		"the spec only must win the only slot, wire body =")
-	ck.NotStrContains(body, `"together"`, "the alias pin leaked past the spec only")
+	ck.NotStrContains(body, `"together"`, "the declaration pin leaked past the spec only")
 }
 
 // TestRoutingNoEligibleErrorNamesSpec proves the no-eligible rejection is

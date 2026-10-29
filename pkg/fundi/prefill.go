@@ -604,7 +604,7 @@ func renderPrefillText(calls []prefillCall) string {
 // prefillFallbackContext.
 //
 // modelID must be the provider-local id (EngineConfig.ModelID, already split
-// and alias-resolved by Providers.Split). The catalog indexes OpenRouter-native
+// and declaration-resolved by Providers.Split). The catalog indexes OpenRouter-native
 // ids, so a provider-qualified "openrouter/z-ai/…" never matches and would
 // silently cap every pre-fill at the fallback's 60%; the id goes through
 // catalogModelID for the same reason, which is how a Responses-kind provider's

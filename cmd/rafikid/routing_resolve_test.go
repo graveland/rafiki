@@ -251,12 +251,12 @@ func TestRoutingLabel(t *testing.T) {
 	ck.False(has, "a spec-less spawn must not carry a rafiki/routing label")
 }
 
-// TestRoutingAliasOnlyNotInSpec pins what resolveRouting deliberately does
-// NOT fold in: a providers.toml alias's `only` pin. The alias pin is applied
-// at request time as the pin (used only when the spec has no only) and does
-// not bypass bans; folding it into the stored spec would silently make every
-// alias pin a ban-bypassing decision.
-func TestRoutingAliasOnlyNotInSpec(t *testing.T) {
+// TestRoutingDeclOnlyNotInSpec pins what resolveRouting deliberately does NOT
+// fold in: a providers.toml model declaration's `only` pin. The declaration
+// pin is applied at request time as the pin (used only when the spec has no
+// only) and does not bypass bans; folding it into the stored spec would
+// silently make every declaration pin a ban-bypassing decision.
+func TestRoutingDeclOnlyNotInSpec(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.providers = &providers.Set{
@@ -264,7 +264,7 @@ func TestRoutingAliasOnlyNotInSpec(t *testing.T) {
 		Providers: map[string]providers.Provider{
 			"openrouter": {
 				Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
-				Models: map[string]providers.ModelAlias{
+				Models: map[string]providers.ModelDecl{
 					"z-ai/glm-5.3-flash": {ID: "z-ai/glm-5.3-flash", Only: []string{"together"}},
 				},
 			},
@@ -278,7 +278,7 @@ func TestRoutingAliasOnlyNotInSpec(t *testing.T) {
 		Model: "openrouter/z-ai/glm-5.3-flash",
 	})
 	ck.Require().NoError(err, "resolveRouting")
-	ck.Eq("quant=fp8+", req.Routing, "the alias's only must not leak into the stored spec")
+	ck.Eq("quant=fp8+", req.Routing, "the declaration's only must not leak into the stored spec")
 	ck.False(strings.Contains(req.Routing, "only="), "stored spec must not contain only=")
 }
 
@@ -453,13 +453,13 @@ func TestRoutingBatchSpecRefused(t *testing.T) {
 	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash:batch", "the refusal names the model: %s", ce.Message)
 }
 
-// TestRoutingPolicyResolvesThroughAlias pins the translated-id policy lookup:
+// TestRoutingPolicyResolvesThroughDecl pins the translated-id policy lookup:
 // a policy line is keyed by the REAL OpenRouter id, but the applied model may
-// name a providers.toml ALIAS — the row must reach alias-spawned children
-// (a nodata row that silently missed them was a data-policy gap). The alias's
-// own `only` pin still never folds into the stored spec, and req.Model stays
-// the applied base id.
-func TestRoutingPolicyResolvesThroughAlias(t *testing.T) {
+// name a providers.toml declared model — the row must reach such a child (a
+// nodata row that silently missed them was a data-policy gap). The
+// declaration's own `only` pin still never folds into the stored spec, and
+// req.Model stays the applied base id.
+func TestRoutingPolicyResolvesThroughDecl(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.providers = &providers.Set{
@@ -467,7 +467,7 @@ func TestRoutingPolicyResolvesThroughAlias(t *testing.T) {
 		Providers: map[string]providers.Provider{
 			"openrouter": {
 				Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
-				Models: map[string]providers.ModelAlias{
+				Models: map[string]providers.ModelDecl{
 					"glm-flash@together": {ID: "z-ai/glm-5.3-flash", Only: []string{"together"}},
 				},
 			},
@@ -481,7 +481,7 @@ func TestRoutingPolicyResolvesThroughAlias(t *testing.T) {
 		Model: "openrouter/glm-flash@together",
 	})
 	ck.Require().NoError(err, "resolveRouting")
-	ck.Eq("nodata", req.Routing, "the line row must apply to the alias-spawned child")
+	ck.Eq("nodata", req.Routing, "the line row must apply to the declaration-spawned child")
 	ck.Eq("openrouter/glm-flash@together", req.Model, "req.Model stays the applied base id")
 }
 
@@ -508,11 +508,11 @@ func TestRoutingBatchPolicyRowAppliesThroughSuffix(t *testing.T) {
 	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash", "the refusal names the model: %s", ce.Message)
 }
 
-// TestRoutingBatchRefusalThroughAlias pins the refusal's translated id: an
-// alias whose id ends in :batch is a supported shape, and spawning it with a
-// non-only spec is refused exactly like the literal :batch request — never
-// accepted to then park without its data policy.
-func TestRoutingBatchRefusalThroughAlias(t *testing.T) {
+// TestRoutingBatchRefusalThroughDecl pins the refusal's translated id: a
+// declared model whose id ends in :batch is a supported shape, and spawning it
+// with a non-only spec is refused exactly like the literal :batch request —
+// never accepted to then park without its data policy.
+func TestRoutingBatchRefusalThroughDecl(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.providers = &providers.Set{
@@ -520,7 +520,7 @@ func TestRoutingBatchRefusalThroughAlias(t *testing.T) {
 		Providers: map[string]providers.Provider{
 			"openrouter": {
 				Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
-				Models: map[string]providers.ModelAlias{
+				Models: map[string]providers.ModelDecl{
 					"glmb": {ID: "z-ai/glm-5.3-flash:batch"},
 				},
 			},
@@ -532,19 +532,19 @@ func TestRoutingBatchRefusalThroughAlias(t *testing.T) {
 		Cwd:   "/tmp/w",
 		Model: "openrouter/glmb[nodata]",
 	})
-	ck.Require().Error(err, "a non-only spec on an alias-to-:batch must be refused")
+	ck.Require().Error(err, "a non-only spec on a declaration-to-:batch must be refused")
 	var ce *connectapi.ControllerError
 	ck.True(errors.As(err, &ce), "want a ControllerError, got %v", err)
 	ck.Eq(protocol.ErrInvalidArgs, ce.Code)
 	ck.StrContains(ce.Message, "glmb", "the refusal names the model: %s", ce.Message)
 
-	// An only-only spec passes through the same alias.
+	// An only-only spec passes through the same declaration.
 	req, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
 		Cwd:   "/tmp/w",
 		Model: "openrouter/glmb[only=deepinfra]",
 	})
-	ck.Require().NoError(err, "an only-only spec on an alias-to-:batch passes")
+	ck.Require().NoError(err, "an only-only spec on a declaration-to-:batch passes")
 	ck.Eq("only=deepinfra", req.Routing, "the parked call pins its only")
 }
 

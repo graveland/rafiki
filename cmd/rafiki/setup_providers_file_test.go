@@ -110,7 +110,7 @@ func TestRenderProvidersRefusesUnwrittenFields(t *testing.T) {
 	}{
 		{"models", func(s *providers.Set) {
 			p := s.Providers["anthropic"]
-			p.Models = map[string]providers.ModelAlias{"qwen": {ID: "m"}}
+			p.Models = map[string]providers.ModelDecl{"qwen": {ID: "m"}}
 			s.Providers["anthropic"] = p
 		}},
 		{"extras", func(s *providers.Set) {

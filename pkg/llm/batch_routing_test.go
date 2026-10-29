@@ -34,14 +34,15 @@ func (b *routingFakeBatcher) Park(_ context.Context, _ string, model string, _ a
 	return batchReply(), nil
 }
 
-// routingOnlySet registers the alias "glm-flash" -> z-ai/glm-5.3-flash, with
-// only as the alias's Only pin (nil = none). A batch request must name the
-// ALIAS (openrouter/glm-flash:batch): Set.Resolve matches Models by the
-// requested id, and the substituted base id carries no Only of its own.
+// routingOnlySet registers the declared model "glm-flash" -> z-ai/glm-5.3-flash,
+// with only as the declaration's Only pin (nil = none). A batch request must
+// name the DECLARED KEY (openrouter/glm-flash:batch): Set.Resolve matches
+// Models by the requested id, and the substituted base id carries no Only of
+// its own.
 func routingOnlySet(only []string) *providers.Set {
-	alias := providers.ModelAlias{ID: "z-ai/glm-5.3-flash"}
+	decl := providers.ModelDecl{ID: "z-ai/glm-5.3-flash"}
 	if only != nil {
-		alias.Only = only
+		decl.Only = only
 	}
 	return &providers.Set{
 		DefaultProvider: "openrouter",
@@ -49,7 +50,7 @@ func routingOnlySet(only []string) *providers.Set {
 			"openrouter": {
 				Name:   "openrouter",
 				Kind:   providers.KindAnthropicOpenRouter,
-				Models: map[string]providers.ModelAlias{"glm-flash": alias},
+				Models: map[string]providers.ModelDecl{"glm-flash": decl},
 			},
 		},
 	}
@@ -87,8 +88,8 @@ func parkedProviders(t *testing.T, c *Client) json.RawMessage {
 
 // TestBatchRoutingOnParkedRequest pins the parked call's wire: the batch
 // envelope's provider object carries ONLY {"only": [...]} — the spec's Only
-// when set (beating the alias pin and the static pin), else the SAME pinOnly
-// rule applyProviderPrefs computes (alias Only > static pin) — and is absent
+// when set (beating the declaration's pin), else the SAME pinOnly rule
+// applyProviderPrefs computes (the declaration's Only) — and is absent
 // entirely when nothing pins the model. Never the full prefs object: sort,
 // quantizations, data_collection, zdr and ignore are submit-time 400s on the
 // Batch API (Task 0.1's probe).
@@ -108,41 +109,41 @@ func TestBatchRoutingOnParkedRequest(t *testing.T) {
 		return obj.Only
 	}
 
-	t.Run("spec only wins over alias and pin", func(t *testing.T) {
+	t.Run("spec only wins over the declaration pin", func(t *testing.T) {
 		ck := assert.NewAborting(t)
-		c := newRoutingBatchClient(t, routingOnlySet([]string{"alias-host"}),
+		c := newRoutingBatchClient(t, routingOnlySet([]string{"decl-host"}),
 			routing.Spec{Only: []string{"spec-host"}})
 		ck.Eq("[spec-host]", fmt.Sprint(decodeOnly(t, parkedProviders(t, c))), "spec Only")
 	})
 
-	t.Run("alias only when the spec carries none", func(t *testing.T) {
+	t.Run("declaration only when the spec carries none", func(t *testing.T) {
 		ck := assert.NewAborting(t)
-		c := newRoutingBatchClient(t, routingOnlySet([]string{"alias-host"}),
+		c := newRoutingBatchClient(t, routingOnlySet([]string{"decl-host"}),
 			routing.Spec{Sort: routing.SortPrice})
-		// Name the ALIAS with the suffix: Set.Resolve's alias lookup sees the
-		// stripped id (prepareSend resolves :batch ids through the base), so
-		// the alias's Only pin reaches the parked envelope.
+		// Name the DECLARED KEYS with the suffix: Set.Resolve's declaration
+		// lookup sees the stripped id (prepareSend resolves :batch ids through
+		// the base), so the declaration's Only pin reaches the parked envelope.
 		b := c.batcher.(*routingFakeBatcher)
-		aliasParams := batchParams()
-		aliasParams.Model = "openrouter/glm-flash:batch"
-		_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, aliasParams)
-		ck.Require().NoError(err, "SendParams (park, alias-named)")
+		declParams := batchParams()
+		declParams.Model = "openrouter/glm-flash:batch"
+		_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, declParams)
+		ck.Require().NoError(err, "SendParams (park, declaration-named)")
 		ck.Require().Eq(1, len(b.providers), "batcher calls")
-		ck.Eq("[alias-host]", fmt.Sprint(decodeOnly(t, b.providers[0])), "alias Only")
+		ck.Eq("[decl-host]", fmt.Sprint(decodeOnly(t, b.providers[0])), "declaration Only")
 	})
 
-	t.Run("static pin when no spec and no alias only", func(t *testing.T) {
+	t.Run("declaration without only sends no provider key", func(t *testing.T) {
 		ck := assert.NewAborting(t)
 		set := routingOnlySet(nil)
-		set.Providers["openrouter"].Models["glm52"] = providers.ModelAlias{ID: "z-ai/glm-5.2"}
+		set.Providers["openrouter"].Models["glm52"] = providers.ModelDecl{ID: "z-ai/glm-5.2"}
 		c := newRoutingBatchClient(t, set, routing.Spec{})
 		params := batchParams()
-		params.Model = "openrouter/glm52:batch" // providerPins: fireworks
+		params.Model = "openrouter/glm52:batch"
 		b := c.batcher.(*routingFakeBatcher)
 		_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, params)
 		ck.Require().NoError(err, "SendParams (park)")
 		ck.Require().Eq(1, len(b.providers), "batcher calls")
-		ck.Eq("[fireworks]", fmt.Sprint(decodeOnly(t, b.providers[0])), "static pin Only")
+		ck.Nil(b.providers[0], "a declaration with no only must pin nothing")
 	})
 
 	t.Run("no pin at all sends no provider key", func(t *testing.T) {
@@ -152,16 +153,16 @@ func TestBatchRoutingOnParkedRequest(t *testing.T) {
 	})
 }
 
-// TestBatchAliasToBatchIDParksFirstCallOnly pins fix-6's regression: an alias
-// whose ID ends in :batch is a supported shape, and it must behave exactly
-// like the literal :batch request — the FIRST call parks (params.Model keeps
-// the suffix), a LATER call goes live with the suffix stripped. The old code
-// tested only the pre-alias string, so batched stayed false, the strip never
-// ran, and every turn parked.
-func TestBatchAliasToBatchIDParksFirstCallOnly(t *testing.T) {
+// TestBatchDeclToBatchIDParksFirstCallOnly pins fix-6's regression: a declared
+// model whose ID ends in :batch is a supported shape, and it must behave
+// exactly like the literal :batch request — the FIRST call parks (params.Model
+// keeps the suffix), a LATER call goes live with the suffix stripped. The old
+// code tested only the pre-declaration string, so batched stayed false, the
+// strip never ran, and every turn parked.
+func TestBatchDeclToBatchIDParksFirstCallOnly(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	set := routingOnlySet(nil)
-	set.Providers["openrouter"].Models["glmb"] = providers.ModelAlias{ID: "z-ai/glm-5.3-flash:batch"}
+	set.Providers["openrouter"].Models["glmb"] = providers.ModelDecl{ID: "z-ai/glm-5.3-flash:batch"}
 	b := &routingFakeBatcher{}
 	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("live"),
@@ -183,7 +184,7 @@ func TestBatchAliasToBatchIDParksFirstCallOnly(t *testing.T) {
 	first := batchParams()
 	first.Model = "openrouter/glmb"
 	resp, err := c.SendParams(context.Background(), meta, first)
-	ck.Require().NoError(err, "first SendParams (alias to :batch) must park")
+	ck.Require().NoError(err, "first SendParams (declared id to :batch) must park")
 	ck.Eq("batched", resp.Content[0].Text, "first call response from the batcher")
 	ck.Require().Eq(1, len(b.providers), "batcher calls after the first send")
 	ck.Eq("z-ai/glm-5.3-flash:batch", b.models[0], "the parked call's model carries exactly one :batch")
@@ -192,7 +193,7 @@ func TestBatchAliasToBatchIDParksFirstCallOnly(t *testing.T) {
 	later := laterCallParams()
 	later.Model = "openrouter/glmb"
 	resp, err = c.SendParams(context.Background(), meta, later)
-	ck.Require().NoError(err, "later SendParams (alias to :batch) must go live")
+	ck.Require().NoError(err, "later SendParams (declared id to :batch) must go live")
 	ck.Eq("live", resp.Content[0].Text, "later call response from the live sender")
 	ck.Require().Eq(1, sender.calls, "live sender calls")
 	ck.Eq("z-ai/glm-5.3-flash", string(sender.lastReq[0].Model), "the :batch suffix must be stripped on the live call")

@@ -437,24 +437,24 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	if requested == "" {
 		requested = c.defaultModel
 	}
-	// A :batch suffix is not part of an alias name or a pin's model line: the
-	// parked call's alias and static-pin lookups must see the BASE id (aliases
-	// are exact-match, providerPins match by line — "glm-flash:batch" matches
-	// neither). Resolve against the stripped id and re-apply the suffix below
-	// exactly when this send parks; the park invariant is unchanged.
+	// A :batch suffix is not part of a declared model's name: the parked
+	// call's declaration lookup must see the BASE id (declaration keys are
+	// exact-match, so "glm-flash:batch" matches nothing). Resolve against the
+	// stripped id and re-apply the suffix below exactly when this send parks;
+	// the park invariant is unchanged.
 	//
 	// batched is true when the suffix arrives on the REQUESTED string (a
-	// literal …:batch) OR on the alias-RESOLVED id: an alias whose id ends in
-	// :batch is a supported shape, and without the second arm batched would be
-	// false, the strip below would never run, and EVERY turn would park
-	// instead of only the first.
+	// literal …:batch) OR on the declaration-RESOLVED id: a declaration whose
+	// id ends in :batch is a supported shape, and without the second arm
+	// batched would be false, the strip below would never run, and EVERY turn
+	// would park instead of only the first.
 	batched := IsBatchModel(requested)
-	p, modelID, alias, err := c.set.Resolve(strings.TrimSuffix(requested, BatchSuffix))
+	p, modelID, decl, err := c.set.Resolve(strings.TrimSuffix(requested, BatchSuffix))
 	if err != nil {
 		return ctx, nil, "", nil, nil, params, routing.Spec{}, err
 	}
 	batched = batched || IsBatchModel(modelID)
-	// baseID is the suffix-free id every arm builds from: an alias's raw ID
+	// baseID is the suffix-free id every arm builds from: a declaration's raw ID
 	// may itself end in :batch, so the first-call arm must STRIP before
 	// re-appending (adding a suffix to a suffixed id would park
 	// "…:batch:batch", a model no endpoint serves).
@@ -472,8 +472,8 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 			modelID = baseID + BatchSuffix
 		} else {
 			// Later calls go live on the base id, for every batched shape (the
-			// literal case is stripped by construction; the alias case may have
-			// carried the suffix in its own id).
+			// literal case is stripped by construction; the declaration case
+			// may have carried the suffix in its own id).
 			modelID = baseID
 		}
 		params.Model = anthropic.Model(modelID)
@@ -493,15 +493,15 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	// all read THIS value, so a steer landing mid-request applies to the NEXT
 	// request and never makes one request's body and error disagree.
 	spec := c.spec()
-	c.mutateParams(p, alias, &params, spec)
+	c.mutateParams(p, decl, &params, spec)
 
-	// The parked call's only-list, computed HERE while the alias is in hand —
-	// the same pinOnly rule applyProviderPrefs applies (spec Only > alias
-	// Only > static pin), against the model line WITHOUT the :batch suffix.
-	// nil = no pin: the batch envelope carries no provider key at all.
+	// The parked call's only-list, computed HERE while the declaration is in
+	// hand — the same pinOnly rule applyProviderPrefs applies (spec Only >
+	// declaration Only). nil = no pin: the batch envelope carries no provider
+	// key at all.
 	var batchOnly []string
 	if batched {
-		batchOnly = batchOnlyList(spec, alias, strings.TrimSuffix(modelID, BatchSuffix))
+		batchOnly = batchOnlyList(spec, decl, strings.TrimSuffix(modelID, BatchSuffix))
 	}
 
 	attrs := []attribute.KeyValue{
@@ -527,21 +527,21 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 
 // mutateParams applies a kind's request-body mutation. Only
 // anthropic-openrouter has one: OpenRouter's non-standard top-level "provider"
-// field, carrying the pinned routing preferences (an alias's own only pin
-// replacing the static pin when the request was made through an alias), plus
-// whatever the cache guard has ejected — and, when a routing spec is set on
-// the client (WithRouting), the spec's own provider-routing decisions.
+// field, carrying the declared routing preferences (a model declaration's own
+// only pin, when the request was made through one), plus whatever the cache
+// guard has ejected — and, when a routing spec is set on the client
+// (WithRouting), the spec's own provider-routing decisions.
 // providers.Validate refuses extras.provider, so the user cannot clobber it.
 //
-// alias is the ModelAlias the requested model id matched, from
+// decl is the ModelDecl the requested model id matched, from
 // providers.Set.Resolve; nil for the fallback path (callModel re-resolves the
 // model against the FALLBACK provider via the catalog, which knows nothing
-// about the primary's aliases) and for non-alias requests.
-func (c *Client) mutateParams(p providers.Provider, alias *providers.ModelAlias, params *anthropic.MessageNewParams, spec routing.Spec) {
+// about the primary's declarations) and for undeclared ids.
+func (c *Client) mutateParams(p providers.Provider, decl *providers.ModelDecl, params *anthropic.MessageNewParams, spec routing.Spec) {
 	if p.Kind != providers.KindAnthropicOpenRouter {
 		return
 	}
-	applyProviderPrefs(params, alias, c.guard, p.Extras, spec)
+	applyProviderPrefs(params, decl, c.guard, p.Extras, spec)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -1099,10 +1099,10 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		if fbProvider.Kind == providers.KindAnthropicOpenRouter {
 			fbParams.Model = anthropic.Model(c.catalog.OpenRouterModel(string(params.Model)))
 		}
-		// The fallback path has no alias: the model was re-resolved against
-		// the FALLBACK provider via the catalog, which knows nothing about the
-		// primary's aliases, so nil means the fallback's own static pins and
-		// guard ejections apply, never a stale alias pin.
+		// The fallback path has no declaration: the model was re-resolved
+		// against the FALLBACK provider via the catalog, which knows nothing
+		// about the primary's declared models, so nil means only the
+		// fallback's own guard ejections apply, never a stale declaration pin.
 		c.mutateParams(fbProvider, nil, &fbParams, spec)
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
@@ -1121,43 +1121,37 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 // alongside. Which preferences depends on spec, the resolved routing spec
 // (routing.Spec, zero = none):
 //
-//   - Zero spec — the pre-spec path (applyProviderPrefsPreSpec) runs verbatim:
-//     the static pin's prefs (routing.ProviderPrefsFor), overridden by an
-//     alias's own Only when non-empty, plus any providers the guard has
-//     ejected. Keeping today's code untouched — including the
-//     pinned-with-empty-Only corner, where a pin whose Only is empty still
-//     emits "provider": {} — is what guarantees a request with no spec
-//     produces a byte-identical body to the pre-spec client.
+//   - Zero spec — the pre-spec path (applyProviderPrefsPreSpec) runs: the
+//     declaration's own Only when non-empty, plus any providers the guard has
+//     ejected. Keeping that path separate is what guarantees a request with no
+//     spec produces a byte-identical body to the pre-spec client.
 //
 //   - Non-zero spec — the spec's own decisions take over the provider object
-//     through spec.Prefs: pinOnly is the alias's Only when non-empty, else the
-//     static pin's, and the spec's own Only (an explicit operator decision
-//     about where the request may be served) REPLACES it and bypasses the
-//     guard's bans and ejections; sort/quantizations/data-policy ride along,
-//     the data flags even under an only. prefs is sent only when spec.Prefs
-//     reports anything to send.
+//     through spec.Prefs: pinOnly is the declaration's Only when non-empty, and
+//     the spec's own Only (an explicit operator decision about where the
+//     request may be served) REPLACES it and bypasses the guard's bans and
+//     ejections; sort/quantizations/data-policy ride along, the data flags even
+//     under an only. prefs is sent only when spec.Prefs reports anything to
+//     send.
 //
-// An alias's Only pin, when non-empty, REPLACES the static pin's Only for this
-// request: the alias is the explicit, more specific declaration (two aliases
-// may share one id and route it to different providers, which a static
-// per-line pin could never express). The guard's Ignore list still merges in
-// either way — an alias pin declares who MAY serve; the guard vetoes who
-// must not. With an alias pin the body carries "provider" even when there is
-// no static pin and nothing to ignore.
+// A declaration's Only pin, when non-empty, IS the pin for this request (two
+// declarations may share one id and route it to different providers). The
+// guard's Ignore list still merges in — a declaration pin declares who MAY
+// serve; the guard vetoes who must not. With a declaration pin the body
+// carries "provider" even when nothing has to be ignored.
 //
 // SetExtraFields REPLACES the whole map, so everything that belongs in it must
 // be assembled here in one call. "provider" is a reserved extras key
 // (providers.Validate refuses it) precisely because a user-supplied one would
 // otherwise delete the guard's ejections with no error and no log line.
-func applyProviderPrefs(params *anthropic.MessageNewParams, alias *providers.ModelAlias, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec) {
+func applyProviderPrefs(params *anthropic.MessageNewParams, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec) {
 	if spec.IsZero() {
-		applyProviderPrefsPreSpec(params, alias, g, extras)
+		applyProviderPrefsPreSpec(params, decl, g, extras)
 		return
 	}
-	pin, _ := routing.ProviderPrefsFor(string(params.Model))
-	pinOnly := pin.Only
-	if alias != nil && len(alias.Only) > 0 {
-		pinOnly = alias.Only
+	var pinOnly []string
+	if decl != nil && len(decl.Only) > 0 {
+		pinOnly = decl.Only
 	}
 	prefs, send := spec.Prefs(pinOnly, g.IgnoredFor(time.Now(), string(params.Model)))
 	fields := make(map[string]any, len(extras)+1)
@@ -1173,16 +1167,17 @@ func applyProviderPrefs(params *anthropic.MessageNewParams, alias *providers.Mod
 	params.SetExtraFields(fields)
 }
 
-// applyProviderPrefsPreSpec is the pre-routing-spec code path, run verbatim
-// for a zero spec so no body byte can change. Do not evolve it — new
-// behaviour belongs in the spec branch of applyProviderPrefs; the one
-// deliberate divergence is the pinned-with-empty-Only corner (a pin whose
-// Only is empty still emits "provider": {}), which spec.Prefs' send-flag
-// semantics would silently drop.
-func applyProviderPrefsPreSpec(params *anthropic.MessageNewParams, alias *providers.ModelAlias, g *routing.ProviderGuard, extras map[string]any) {
-	prefs, pinned := routing.ProviderPrefsFor(string(params.Model))
-	if alias != nil && len(alias.Only) > 0 {
-		prefs.Only = alias.Only
+// applyProviderPrefsPreSpec is the pre-routing-spec code path, run for a zero
+// spec so no body byte can change for a request that carries no routing spec.
+// Do not evolve it — new behaviour belongs in the spec branch of
+// applyProviderPrefs. It sends a "provider" object only when a declaration
+// pins providers or the guard has something to ignore; extras alone stay
+// top-level.
+func applyProviderPrefsPreSpec(params *anthropic.MessageNewParams, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any) {
+	var prefs routing.ProviderPrefs
+	pinned := false
+	if decl != nil && len(decl.Only) > 0 {
+		prefs.Only = decl.Only
 		pinned = true
 	}
 	ignore := g.IgnoredFor(time.Now(), string(params.Model))

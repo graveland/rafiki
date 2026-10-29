@@ -53,14 +53,6 @@ func LatestFamilies() []string {
 	return out
 }
 
-// This maps a shorthand model name easily intuited by engineers to its OpenRouter "slash" id
-var modelAliases = map[string]string{
-	"kimi-k3":           "moonshotai/kimi-k3",
-	"deepseek-v4-pro":   "deepseek/deepseek-v4-pro",
-	"deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-	"glm-5.2":           "z-ai/glm-5.2",
-}
-
 // ProviderPrefs is OpenRouter's provider-routing request object, sent as the
 // body's "provider" field. This includes settings for which providers we want
 // to host the model, giving us control over things like data governance policies
@@ -70,9 +62,9 @@ type ProviderPrefs struct {
 	Only []string `json:"only,omitempty"`
 	// Ignore excludes these OpenRouter provider slugs. OpenRouter merges this
 	// with the account-wide ignore list from the dashboard's privacy settings.
-	// Populated at request time by ProviderGuard from observed behaviour, never
-	// by the static pins below — a provider is ignored because it misbehaved,
-	// not because of a policy judgement about its quantization or retention.
+	// Populated at request time by ProviderGuard from observed behaviour — a
+	// provider is ignored because it misbehaved, not because of a policy
+	// judgement about its quantization or retention.
 	Ignore []string `json:"ignore,omitempty"`
 	// Order tries these provider slugs first; OpenRouter falls back to the rest
 	// (allow_fallbacks stays at its default of true).
@@ -92,50 +84,15 @@ type ProviderPrefs struct {
 	ZDR bool `json:"zdr,omitempty"`
 }
 
-// providerPins maps an OpenRouter model-line prefix (same line semantics as
-// modelAliases/inModelLine) to the provider preferences required when routing
-// that line. Some open-weight models are served by dozens of providers of
-// wildly varying quantization/retention policy; a pin here restricts routing
-// to vetted ones. Applied wherever a request is sent to OpenRouter — alias or
-// explicit slash id — unless the caller supplied its own provider object.
-var providerPins = map[string]ProviderPrefs{
-	// GLM 5.2's cheap default endpoints are fp4 and/or prompt-retaining;
-	// Fireworks is the vetted no-retention host.
-	"z-ai/glm-5.2": {Only: []string{"fireworks"}},
-}
-
-// ProviderPrefsFor returns the provider-routing preferences pinned for an
-// OpenRouter model id, matching by model line ("z-ai/glm-5.2" and a stamped
-// point release like "z-ai/glm-5.2-0905" both match the "z-ai/glm-5.2" pin).
-// ok=false when the model has no pin.
-func ProviderPrefsFor(orID string) (ProviderPrefs, bool) {
-	for prefix, prefs := range providerPins {
-		if inModelLine(orID, prefix) {
-			return prefs, true
-		}
-	}
-	return ProviderPrefs{}, false
-}
-
-// ModelAliases returns the short model aliases, sorted, for completion.
-func ModelAliases() []string {
-	out := make([]string, 0, len(modelAliases))
-	for a := range modelAliases {
-		out = append(out, a)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // ResolveModel maps a requested model to the concrete id to send upstream:
 // empty -> defaultModel (and empty with no default is an error — there is no
 // hardcoded silent default); an "anthropic/<x>" prefix -> the native-Anthropic
 // marker, stripped and <x> resolved as a bare id; a "<family>-latest" alias ->
-// the catalog's newest for that family; a short model alias (kimi-k3) -> the
-// catalog's newest release of that model line; anything else (a concrete
-// Anthropic id or a slash OpenRouter id) unchanged. An alias errors when the
-// catalog can't resolve it (nil catalog, or offline with a cold cache) rather
-// than sending an unusable alias upstream — there is no hardcoded fallback list.
+// the catalog's newest for that family; anything else (a concrete Anthropic id,
+// a slash OpenRouter id, or any other short name) unchanged. No short-name
+// table is hardcoded here. A "<family>-latest" name errors when the catalog
+// can't resolve it (nil catalog, or offline with a cold cache) rather than
+// sending an unusable alias upstream — there is no hardcoded fallback list.
 func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, error) {
 	if requested == "" {
 		requested = defaultModel
@@ -155,14 +112,6 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 		if cat != nil {
 			if antID, _, resolved := cat.ResolveLatest(fam); resolved {
 				return antID, nil
-			}
-		}
-		return "", fmt.Errorf("cannot resolve %q: OpenRouter model catalog unavailable", requested)
-	}
-	if prefix, ok := modelAliases[requested]; ok {
-		if cat != nil {
-			if orID, resolved := cat.ResolveNewest(prefix); resolved {
-				return orID, nil
 			}
 		}
 		return "", fmt.Errorf("cannot resolve %q: OpenRouter model catalog unavailable", requested)
@@ -508,8 +457,8 @@ func (c *ModelCatalog) ResolveLatest(family string) (string, string, bool) {
 }
 
 // ResolveNewest returns the newest catalog model in the line named by an OR
-// id prefix (see modelAliases): the prefix itself or a stamped point release
-// of it, excluding ~aliases. ok=false if unresolved.
+// id prefix: the prefix itself or a stamped point release of it, excluding
+// ~aliases. ok=false if unresolved.
 func (c *ModelCatalog) ResolveNewest(prefix string) (string, bool) {
 	c.refresh()
 	c.mu.Lock()

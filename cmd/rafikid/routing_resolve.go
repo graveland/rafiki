@@ -20,11 +20,11 @@ package main
 // cannot accept (sort/quant/nodata/zdr — the envelope carries only
 // provider.only). See the guard at the end of resolveRouting.
 //
-// What is deliberately NOT folded into the spec: a providers.toml alias's
-// `only` pin and the static providerPins. pkg/llm applies them at request
-// time as the pin — used only when the spec carries no `only` — and a pin
-// does not bypass bans, while a spec `only` does. Folding them in here would
-// silently make every alias pin a ban-bypassing decision.
+// What is deliberately NOT folded into the spec: a providers.toml model
+// declaration's `only` pin. pkg/llm applies it at request time as the pin —
+// used only when the spec carries no `only` — and a pin does not bypass bans,
+// while a spec `only` does. Folding it in here would silently make every
+// declaration pin a ban-bypassing decision.
 
 import (
 	"fmt"
@@ -106,12 +106,14 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// RoutingFor falls back to per-request policy resolution in that case).
 	//
 	// translatedBase is the applied base id resolved through the provider set:
-	// appliedBase may name a providers.toml ALIAS ("openrouter/glm-flash@together"),
-	// and the policy's lines are keyed by the real OpenRouter id. One
-	// translation serves both consumers below (the policy lookup and the :batch
-	// refusal) — two copies would be exactly the drift finding-10 fixed.
-	// Only the lookup translates; the alias's `only` pin still never folds into
-	// the stored spec, and req.Model stays the applied base id as spawned.
+	// appliedBase may name a providers.toml declared model
+	// ("openrouter/glm-flash@together"), and the policy's lines are keyed by
+	// the real OpenRouter id. One translation serves both consumers below (the
+	// policy lookup and the :batch refusal) — two copies would be exactly the
+	// drift finding-10 fixed.
+	// Only the lookup translates; the declaration's `only` pin still never
+	// folds into the stored spec, and req.Model stays the applied base id as
+	// spawned.
 	translatedBase := appliedBase
 	if _, modelID, err := providersOrDefault(c.providers).Split(appliedBase); err == nil {
 		translatedBase = modelID
@@ -130,8 +132,8 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// carries any key the batch wire cannot serve is refused at spawn — never
 	// a silent fallback to unrouted. A spec with ONLY only= (or a zero spec)
 	// passes: only rides the wire as {"only": [...]} (parkSend's batchOnly).
-	// The refusal tests the TRANSLATED id: an alias whose id ends in :batch is
-	// a supported shape (see the :batch/API-key guard in controller.go), and
+	// The refusal tests the TRANSLATED id: a declared id ending in :batch is a
+	// supported shape (see the :batch/API-key guard in controller.go), and
 	// the refusal must fire on it as on a literal :batch request.
 	if llm.IsBatchModel(translatedBase) {
 		if merged.Sort != "" || merged.Quant != nil || merged.NoData || merged.ZDR {

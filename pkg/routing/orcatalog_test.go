@@ -91,10 +91,10 @@ func TestOpenRouterModel(t *testing.T) {
 	ck.Eq("openai/gpt-4o", nilCat.OpenRouterModel("openai/gpt-4o"), "nil-catalog slash passthrough =")
 }
 
-// TestResolveNewest covers the model-alias resolver: newest release of a
-// model line by catalog prefix, where "release" means the prefix itself or a
-// stamped point release ("-0905") — never a variant fork (-thinking, -code),
-// a new line (kimi-k3.5), or a ~alias.
+// TestResolveNewest covers the model-line resolver: newest release of a model
+// line by catalog prefix, where "release" means the prefix itself or a stamped
+// point release ("-0905") — never a variant fork (-thinking, -code), a new line
+// (kimi-k3.5), or a ~alias.
 func TestResolveNewest(t *testing.T) {
 	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
@@ -115,16 +115,6 @@ func TestResolveNewest(t *testing.T) {
 	}
 	got, ok := c.ResolveNewest("deepseek/deepseek-v5")
 	assert.NewCollecting(t).False(ok, "absent line must not resolve, got %q", got)
-}
-
-func TestModelAliases(t *testing.T) {
-	c := assert.NewAborting(t)
-	got := ModelAliases()
-	want := []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2", "kimi-k3"}
-	c.Len(got, len(want), "ModelAliases = %v, want %v", got, want)
-	for i := range want {
-		c.Eq(want[i], got[i], "ModelAliases = %v, want %v", got, want)
-	}
 }
 
 func TestResolveModel(t *testing.T) {
@@ -171,25 +161,21 @@ func TestResolveModel(t *testing.T) {
 	// A non-anthropic provider prefix stays an OpenRouter-native slash id, unchanged.
 	mustResolve("haiku-latest", "deepseek/deepseek-chat", "deepseek/deepseek-chat")
 
-	// Short model aliases resolve to the line's newest OR id (slash form, so
-	// downstream slash routing sends them to OpenRouter). An empty request
-	// resolves through a model-alias default too.
-	mustResolve("haiku-latest", "kimi-k3", "moonshotai/kimi-k3")
-	mustResolve("haiku-latest", "deepseek-v4-pro", "deepseek/deepseek-v4-pro")
-	mustResolve("haiku-latest", "deepseek-v4-flash", "deepseek/deepseek-v4-flash")
-	mustResolve("haiku-latest", "glm-5.2", "z-ai/glm-5.2")
-	mustResolve("kimi-k3", "", "moonshotai/kimi-k3")
+	// A short name is not a built-in alias: there is no hardcoded short-name
+	// table any more, so a slash-free id that is not a <family>-latest name is
+	// passed through as written — even when the catalog happens to contain a
+	// model whose line that name spells.
+	mustResolve("haiku-latest", "kimi-k3", "kimi-k3")
+	mustResolve("haiku-latest", "glm-5.2", "glm-5.2")
+	mustResolve("kimi-k3", "", "kimi-k3")
 
-	// An alias the catalog can't resolve errors — there is no hardcoded
-	// fallback list to silently paper over it with a stale id.
+	// A <family>-latest name the catalog can't resolve errors — there is no
+	// hardcoded fallback list to silently paper over it with a stale id.
 	if _, err := ResolveModel(c, "", "opus-latest"); err == nil {
 		t.Error("opus-latest absent from catalog must error, not fall back to a hardcoded id")
 	}
 	if _, err := ResolveModel(nil, "", "haiku-latest"); err == nil {
 		t.Error("nil catalog + -latest must error")
-	}
-	if _, err := ResolveModel(nil, "", "kimi-k3"); err == nil {
-		t.Error("nil catalog + model alias must error")
 	}
 	// No requested model AND no default must error loudly — there is no hardcoded
 	// silent default (haiku or otherwise) to paper over an unset model.
@@ -197,23 +183,19 @@ func TestResolveModel(t *testing.T) {
 	assert.NewCollecting(t).Error(err, "empty model + empty default must error, not silently pick a model")
 }
 
-// TestProviderPrefsFor covers provider pinning: a pinned line matches its
-// base id and stamped point releases (same inModelLine semantics as aliases),
-// never a different line, and unpinned models carry no preferences.
-func TestProviderPrefsFor(t *testing.T) {
-	c := assert.NewCollecting(t)
-	for _, id := range []string{"z-ai/glm-5.2", "z-ai/glm-5.2-0905"} {
-		prefs, ok := ProviderPrefsFor(id)
-		if !ok {
-			t.Errorf("%s: want a pin", id)
-			continue
-		}
-		c.False(len(prefs.Only) != 1 || prefs.Only[0] != "fireworks", "%s: Only = %v, want [fireworks]", id, prefs.Only)
-	}
-	for _, id := range []string{"z-ai/glm-5.20", "z-ai/glm-5", "z-ai/glm-5.2.1", "moonshotai/kimi-k3", "claude-haiku-4-5"} {
-		_, ok := ProviderPrefsFor(id)
-		c.False(ok, "%s: must not be pinned", id)
-	}
+// TestResolveModelLeavesShortNamesAlone pins the absence of a hardcoded
+// short-name table: a warm catalog that contains the very model line a short
+// name might have aliased does not make ResolveModel rewrite it.
+func TestResolveModelLeavesShortNamesAlone(t *testing.T) {
+	c := assert.NewAborting(t)
+	cat := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]CatalogEntry{
+		{ID: "moonshotai/kimi-k3", Created: 1},
+		{ID: "moonshotai/kimi-k3-0905", Created: 2},
+	})
+	got, err := ResolveModel(cat, "", "kimi-k3")
+	c.Require().NoError(err, "ResolveModel(kimi-k3)")
+	c.Eq("kimi-k3", got, "a short name must pass through unchanged")
 }
 
 // TestCatalogRefreshCoalesces proves concurrent refreshes are coalesced into one
@@ -465,7 +447,8 @@ func TestResolveIDUsesCatalogResolution(t *testing.T) {
 	}{
 		{"claude-opus-5", "anthropic/claude-opus-5", true},           // bare Anthropic id
 		{"anthropic/claude-opus-5", "anthropic/claude-opus-5", true}, // slash id passes through
-		{"kimi-k3", "moonshotai/kimi-k3", true},                      // modelAliases
+		{"moonshotai/kimi-k3", "moonshotai/kimi-k3", true},           // slash id
+		{"kimi-k3", "", false},                                       // no short-alias table
 		{"gpt-5.6", "", false},                                       // not in catalog
 	}
 	for _, tc := range cases {
@@ -498,8 +481,8 @@ func TestModelCatalogPriceSatisfiesStorePriceSource(t *testing.T) {
 	ck.False(got.CacheReadUSD == nil || *got.CacheReadUSD != 0.0000005, "Price(claude-opus-5) cache read = %v, want 0.0000005", got.CacheReadUSD)
 	ck.False(got.CacheWriteUSD == nil || *got.CacheWriteUSD != 0.00000625, "Price(claude-opus-5) cache write = %v, want 0.00000625", got.CacheWriteUSD)
 
-	if _, ok := c.Price("kimi-k3"); ok {
-		t.Error("Price(kimi-k3) ok = true, want false: entry has no Pricing")
+	if _, ok := c.Price("moonshotai/kimi-k3"); ok {
+		t.Error("Price(moonshotai/kimi-k3) ok = true, want false: entry has no Pricing")
 	}
 	if _, ok := c.Price("gpt-5.6"); ok {
 		t.Error("Price(gpt-5.6) ok = true, want false: not in catalog")
@@ -550,10 +533,10 @@ func TestLookupReportsIDAndPriceInOneCall(t *testing.T) {
 
 	// An entry with no prices is still found — the syncer records the row with
 	// its or_id and NULL prices rather than dropping the model.
-	info, ok = c.Lookup("kimi-k3")
-	ck.Require().True(ok, "Lookup(kimi-k3) ok = false, want true: the entry exists")
+	info, ok = c.Lookup("moonshotai/kimi-k3")
+	ck.Require().True(ok, "Lookup(moonshotai/kimi-k3) ok = false, want true: the entry exists")
 	ck.Eq("moonshotai/kimi-k3", info.ORID, "ORID")
-	ck.False(info.Priced, "Lookup(kimi-k3) Priced = true, want false: entry has no prices")
+	ck.False(info.Priced, "Lookup(moonshotai/kimi-k3) Priced = true, want false: entry has no prices")
 
 	if _, ok := c.Lookup("gpt-5.6"); ok {
 		t.Error("Lookup(gpt-5.6) ok = true, want false: not in catalog")

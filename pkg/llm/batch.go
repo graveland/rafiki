@@ -68,19 +68,17 @@ func WithBatcher(b Batcher) ClientOption {
 
 // batchOnlyList computes the only-list a parked call's batch envelope pins
 // serving with: the routing spec's Only when set, else the SAME pinOnly rule
-// applyProviderPrefs implements — the alias's Only when non-empty, else the
-// static pin's (routing.ProviderPrefsFor). model must be the id with the
-// :batch suffix STRIPPED (a pin matches the model line, and ":batch" is not
-// a line extension). nil means no opinion: the envelope carries no provider.
-func batchOnlyList(spec routing.Spec, alias *providers.ModelAlias, model string) []string {
+// applyProviderPrefs implements — the declaration's Only when non-empty. model
+// is the id with the :batch suffix STRIPPED. nil means no opinion: the
+// envelope carries no provider.
+func batchOnlyList(spec routing.Spec, decl *providers.ModelDecl, model string) []string {
 	if len(spec.Only) > 0 {
 		return spec.Only
 	}
-	if alias != nil && len(alias.Only) > 0 {
-		return alias.Only
+	if decl != nil && len(decl.Only) > 0 {
+		return decl.Only
 	}
-	pin, _ := routing.ProviderPrefsFor(model)
-	return pin.Only
+	return nil
 }
 
 // batchProviderJSON renders the narrowed provider object the batch envelope
@@ -123,7 +121,8 @@ func firstCall(params anthropic.MessageNewParams) bool {
 // live through — so conversation_turn.upstream stays a provider name on the
 // batch path too (insights joins it, never a model id).
 // batchOnly is the only-list batchOnlyList computed for this park (prepareSend
-// resolves it while it still holds the alias); nil = no pin, no provider key.
+// resolves it while it still holds the declaration); nil = no pin, no provider
+// key.
 func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, params anthropic.MessageNewParams, primary string, batchOnly []string) (*anthropic.Message, error) {
 	if c.batcher == nil {
 		return nil, errors.New("llm: " + string(params.Model) + ": no batcher configured")

@@ -13,13 +13,13 @@ import (
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
-// ContextWindow resolves model against the provider registry's declared model
-// aliases first, then the daemon's shared OpenRouter catalog. The registry
-// takes priority because the catalog can never know a local/custom provider's
-// model — it only ever hears about OpenRouter ids. ok is false when neither
-// source knows model.
+// ContextWindow resolves model against the provider registry's declared models
+// first, then the daemon's shared OpenRouter catalog. The registry takes
+// priority because the catalog can never know a local/custom provider's model
+// — it only ever hears about OpenRouter ids. ok is false when neither source
+// knows model.
 func (c *Controller) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
-	if ctxLen, maxComp, _, aliasOK := c.aliasContextWindow(model); aliasOK {
+	if ctxLen, maxComp, _, declOK := c.declContextWindow(model); declOK {
 		return ctxLen, maxComp, true
 	}
 	if c.catalog == nil {
@@ -28,12 +28,13 @@ func (c *Controller) ContextWindow(model string) (contextLen, maxCompletion int,
 	return c.catalog.ContextWindow(model)
 }
 
-// aliasContextWindow looks up model against the provider registry's declared
-// models.<alias> table. ok is true only when the provider declares an alias
-// matching model's local id AND that alias declares a context window — an
-// alias declared purely for its shorthand (no context_window) is not "known"
-// context-wise, same as no alias at all, and falls through to the catalog.
-func (c *Controller) aliasContextWindow(model string) (contextLen, maxCompletion int, resolvedID string, ok bool) {
+// declContextWindow looks up model against the provider registry's declared
+// models.<id> table. ok is true only when the provider declares a model
+// matching model's local id AND that declaration carries a context window — a
+// declaration made purely for its shorthand (no context_window) is not "known"
+// context-wise, same as no declaration at all, and falls through to the
+// catalog.
+func (c *Controller) declContextWindow(model string) (contextLen, maxCompletion int, resolvedID string, ok bool) {
 	set := providersOrDefault(c.providers)
 	if set == nil {
 		return 0, 0, "", false
@@ -46,11 +47,11 @@ func (c *Controller) aliasContextWindow(model string) (contextLen, maxCompletion
 	if !found {
 		return 0, 0, "", false
 	}
-	alias, found := p.Models[localID]
-	if !found || alias.ContextWindow <= 0 {
+	decl, found := p.Models[localID]
+	if !found || decl.ContextWindow <= 0 {
 		return 0, 0, "", false
 	}
-	return alias.ContextWindow, alias.MaxCompletionTokens, name + "/" + alias.ID, true
+	return decl.ContextWindow, decl.MaxCompletionTokens, name + "/" + decl.ID, true
 }
 
 // ModelInfo answers the ModelInfo RPC from the provider registry plus the
@@ -59,7 +60,7 @@ func (c *Controller) aliasContextWindow(model string) (contextLen, maxCompletion
 // degrades on.
 func (c *Controller) ModelInfo(model string) protocol.ModelInfoResponseData {
 	out := protocol.ModelInfoResponseData{Model: model}
-	if ctxLen, maxComp, resolvedID, ok := c.aliasContextWindow(model); ok {
+	if ctxLen, maxComp, resolvedID, ok := c.declContextWindow(model); ok {
 		out.Known = true
 		out.ContextWindow = ctxLen
 		out.MaxCompletionTokens = maxComp
@@ -146,7 +147,8 @@ type catalogFacts struct {
 //     again at the row layer by filterRowsForKind.
 //   - "fundi" (the DEFAULT, and the empty/not-yet-typed case) is rafiki's
 //     native runtime, so it takes what rafiki resolves: the curated ids and
-//     family aliases, plus any OpenRouter slash id.
+//     family aliases, the operator's declared models, plus any OpenRouter
+//     slash id.
 func sourcesForKind(kind string) map[models.Source]bool {
 	switch kind {
 	case protocol.KindClaude:
@@ -155,7 +157,7 @@ func sourcesForKind(kind string) map[models.Source]bool {
 		return map[models.Source]bool{
 			models.SourceUserConfig: true,
 			models.SourceBuiltin:    true,
-			models.SourceAlias:      true,
+			models.SourceDeclared:   true,
 			models.SourceOpenRouter: true,
 			models.SourceLocal:      true,
 		}

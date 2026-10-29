@@ -103,12 +103,12 @@ const mcpPath = "/mcp"
 // being wrong in the "not Anthropic" direction only costs a fatter tools[]
 // while being wrong the other way costs the whole session.
 //
-// Note it is deliberately no substitute for the proxy's own check. A bare
-// alias resolves through routing.ResolveModel's table (glm-5.2 → an OpenRouter
-// id), and "~anthropic/..." keeps its tilde and routes to OpenRouter — this
-// predicate calls the first not-Anthropic and the second Anthropic. It is a
-// launch-time courtesy that errs toward letting work through; the proxy's 400
-// remains the authority.
+// Note it is deliberately no substitute for the proxy's own check: a name this
+// predicate accepts may still be resolved downstream to an OpenRouter slash id
+// (routing.ResolveModel, or a provider declaration's real id), and
+// "~anthropic/..." keeps its tilde and routes to OpenRouter even though the
+// predicate calls it Anthropic. It is a launch-time courtesy that errs toward
+// letting work through; the proxy's 400 remains the authority.
 func AnthropicModel(model string) bool {
 	if model == "" {
 		return true // no override: Claude Code picks one of its own Anthropic ids

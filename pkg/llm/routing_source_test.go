@@ -51,8 +51,8 @@ func TestWithRoutingSourceIsReadPerRequest(t *testing.T) {
 		return specB
 	}, routing.Spec{}, openrouter)
 
-	sendAliasParams(t, c, "openrouter/glmflash")
-	sendAliasParams(t, c, "openrouter/glmflash")
+	sendDeclParams(t, c, "openrouter/glmflash")
+	sendDeclParams(t, c, "openrouter/glmflash")
 
 	ck.Require().Len(openrouter.lastReq, 2, "two sends")
 	ck.StrContains(wireBody(t, openrouter.lastReq, 0), `"only":["fireworks"]`,
@@ -73,7 +73,7 @@ func TestWithRoutingSourceNilIsIgnored(t *testing.T) {
 	}}
 	c := newSourceClient(t, nil, routing.Spec{Only: []string{"fireworks"}}, openrouter)
 
-	sendAliasParams(t, c, "openrouter/glmflash")
+	sendDeclParams(t, c, "openrouter/glmflash")
 
 	ck.StrContains(wireBody(t, openrouter.lastReq, 0), `"only":["fireworks"]`,
 		"a nil source must leave the static WithRouting spec in place")
@@ -91,7 +91,7 @@ func TestWithRoutingSourceBeatsStaticRouting(t *testing.T) {
 		return routing.Spec{Only: []string{"together"}}
 	}, routing.Spec{Only: []string{"fireworks"}}, openrouter)
 
-	sendAliasParams(t, c, "openrouter/glmflash")
+	sendDeclParams(t, c, "openrouter/glmflash")
 
 	body := wireBody(t, openrouter.lastReq, 0)
 	ck.StrContains(body, `"only":["together"]`, "the live source must win over the static spec")
