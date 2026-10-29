@@ -308,8 +308,8 @@ func TestBackfillProviderMessageID(t *testing.T) {
 	backfillInsertRow(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"b"}]`, nil)
 	backfillInsertRow(t, ctx, pool, convID, 2, "user", `[{"type":"text","text":"c"}]`, nil)
 	_, err := pool.Exec(ctx, `
-		INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, request, response_ordinal, response_message_id)
-		VALUES ($1::uuid, 0, 'complete', '{}'::jsonb, 1, 'msg_reply_1')`, convID)
+		INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, response_ordinal, response_message_id)
+		VALUES ($1::uuid, 0, 'complete', 1, 'msg_reply_1')`, convID)
 	c.NoError(err, "insert turn")
 
 	backfillRun(t, ctx, pool, convID)
