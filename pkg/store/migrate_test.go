@@ -664,9 +664,9 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 	chain, err := loadMigrations()
 	c.Require().NoError(err, "load chain")
 	head := chain[len(chain)-1]
-	// 0062 is the migration whose rollback is observed below; a new head means
+	// 0063 is the migration whose rollback is observed below; a new head means
 	// this test must be repointed, not silently left asserting an older one.
-	c.Eq(62, head.version, "this test observes 0062's rollback")
+	c.Eq(63, head.version, "this test observes 0063's rollback")
 
 	prev, hadPrev := goSteps[head.version]
 	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
@@ -690,14 +690,12 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 		"probe the migrations table")
 	c.False(recorded, "version %d was recorded despite its go step failing", head.version)
 
-	// 0061 commits on its own; it is 0062's DROP COLUMN that must roll back
-	// with its step, so resume_from_ordinal is still there.
-	var horizonCol bool
-	c.Require().NoError(pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		                WHERE table_schema='conversations' AND table_name='conversation'
-		                  AND column_name='resume_from_ordinal')`).Scan(&horizonCol), "probe resume_from_ordinal")
-	c.True(horizonCol, "0062's drop survived a failed go step; the SQL did not roll back with it")
+	// 0062 commits on its own; it is 0063's CREATE TABLE that must roll back
+	// with its step, so model_alias is absent.
+	var aliasTable bool
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT to_regclass('conversations.model_alias') IS NOT NULL`).Scan(&aliasTable), "probe model_alias")
+	c.False(aliasTable, "0063's CREATE TABLE survived a failed go step; the SQL did not roll back with it")
 }
 
 // TestMigrateGoStepUnknownVersion pins loadMigrations' refusal of a step for a
@@ -835,4 +833,43 @@ func TestMigrate0062DropsResumeFromOrdinal(t *testing.T) {
 		 WHERE table_schema='conversations' AND table_name='conversation'
 		   AND column_name='resume_from_ordinal'`).Scan(&nullable), "probe resume_from_ordinal nullability")
 	c.Eq("YES", nullable, "the restored resume_from_ordinal must be nullable; its data is not restored")
+}
+
+// TestMigrate0063CreatesModelAlias pins 0063: aliases live in
+// conversations.model_alias, one value per (owner, name) -- the unique index
+// is NULLS NOT DISTINCT so every unattributed row shares one bucket -- and the
+// down migration drops the table.
+func TestMigrate0063CreatesModelAlias(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	var tableExists bool
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT to_regclass('conversations.model_alias') IS NOT NULL`).Scan(&tableExists), "probe model_alias")
+	c.True(tableExists, "conversations.model_alias does not exist after migration 0063")
+
+	// Both rows are unattributed (owner_user_id NULL, the local-socket bucket):
+	// the second insert must be refused by the unique index, which is what
+	// proves its NULLS NOT DISTINCT clause.
+	_, err := pool.Exec(ctx,
+		`INSERT INTO conversations.model_alias (owner_user_id, name, target) VALUES (NULL, 'ds', 'openrouter/a')`)
+	c.Require().NoError(err, "insert the first unattributed alias")
+	_, err = pool.Exec(ctx,
+		`INSERT INTO conversations.model_alias (owner_user_id, name, target) VALUES (NULL, 'ds', 'openrouter/b')`)
+	c.Require().Error(err, "a second unattributed alias with the same name must be refused")
+	pgErr := c.Require().ErrorAs[*pgconn.PgError](err, "insert error must be a *pgconn.PgError")
+	c.Eq("23505", pgErr.Code, "the duplicate must be a unique violation")
+
+	// There is no MigrateTo API, so exercise the down migration directly: a
+	// no-op body must fail this test, not leave the table in place.
+	down, err := os.ReadFile("migrations/0063_model_alias.down.sql")
+	c.Require().NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT to_regclass('conversations.model_alias') IS NOT NULL`).Scan(&tableExists), "re-probe model_alias")
+	c.False(tableExists, "the down migration did not drop conversations.model_alias")
 }
