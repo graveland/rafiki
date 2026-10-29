@@ -267,8 +267,8 @@ func backfillConversationTree(ctx context.Context, tx pgx.Tx, conversationID str
 // It is the one identity the backfill, the tree check and live capture share:
 // capture compares a request's replayed message with the node a
 // previous_message_id names, the backfill compares a re-stored copy with the
-// node it duplicates, and the check compares a legacy working set with the path
-// that replaced it. One rule, one implementation — two would drift.
+// node it duplicates, and the check recognises a compaction summary that
+// restates a root. One rule, one implementation — two would drift.
 //
 // Canonical equality alone is not enough on real data. Capture stored an
 // assistant reply as the SDK's marshalled message, so one side of a real pair

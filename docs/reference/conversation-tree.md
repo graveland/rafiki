@@ -146,7 +146,7 @@ Three callers, one implementation — two would drift:
   message the request replays at that node's depth (`pkg/capture/capture.go`);
 - **the backfill** recognises a re-stored copy of a node already placed
   (`pkg/store/tree_backfill.go`);
-- **the check** compares a legacy working set with the path that replaced it
+- **the check** recognises a compaction summary that restates a root
   (`pkg/store/tree_check.go`).
 
 Identity and hashing stay `Canon`: `SameMessage` decides "these two rows are the
