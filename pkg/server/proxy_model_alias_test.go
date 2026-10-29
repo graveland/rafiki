@@ -274,3 +274,27 @@ func TestProxyModelAliasCountTokensAgreesWithMessages(t *testing.T) {
 	c.StrContains(rec.Body.String(), "model alias lookup failed", "count_tokens error body")
 	c.Len(*anthropic2, 0, "upstream requests after a lookup failure")
 }
+
+// TestProxyModelAliasCountTokensCarriesAliasDataPolicy proves the token-count
+// endpoint carries an alias target's spec to the provider-routing layer exactly
+// as /v1/messages does: a count_tokens body carries the prompt, so a target
+// asking for nodata/zdr must get them on that route too. Previously
+// ServeCountTokens discarded the resolved spec, so an OpenRouter-routed count
+// went out with data collection left at OpenRouter's default.
+func TestProxyModelAliasCountTokensCarriesAliasDataPolicy(t *testing.T) {
+	c := assert.NewCollecting(t)
+	alias := &fakeAliasResolver{targets: map[string]string{"ds": "openrouter/~deepseek/deepseek-flash-latest[nodata,zdr]"}}
+	p, anthropic, or := newAliasTestProxy(t, alias, &recordingResolver{}, nil)
+
+	rec := httptest.NewRecorder()
+	p.ServeCountTokens(rec, httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(
+		`{"model":"ds","messages":[{"role":"user","content":"hi"}]}`)))
+
+	c.Eq(http.StatusOK, rec.Code, "count_tokens status")
+	c.Len(*anthropic, 0, "Anthropic count_tokens requests (a slashed target is an OpenRouter id)")
+	c.Require().Len(*or, 1, "OpenRouter count_tokens requests")
+	c.Eq("~deepseek/deepseek-flash-latest", modelOfAliasBody(t, (*or)[0]), "model reaching OpenRouter (the spec is not part of the id)")
+	prov := providerOf(t, (*or)[0])
+	c.Eq("deny", prov["data_collection"], "provider.data_collection (the alias's nodata reaches a token count)")
+	c.Eq(true, prov["zdr"], "provider.zdr (the alias's zdr reaches a token count)")
+}

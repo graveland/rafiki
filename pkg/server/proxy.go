@@ -681,9 +681,13 @@ func callerCarriesOnly(v any) bool {
 // (empty -> default, "<family>-latest" -> concrete newest), and proactively
 // adapts output_config.effort to what the resolved model is known to allow
 // (clamp/strip per the runtime effort cache; a cold cache is a no-op and any
-// rejection is caught by effortRetry). Best-effort: a decode/marshal failure
-// forwards the input unchanged. An unresolvable "<family>-latest" returns an
-// error so the caller fails cleanly. Returns the (possibly-rewritten) body, the
+// rejection is caught by effortRetry). A decode failure forwards the input
+// unchanged (nothing was resolved, so nothing can be misrouted); a MARSHAL
+// failure forwards it unchanged only when no alias was resolved — after an
+// alias hit the input still names the alias, so it becomes an error the callers
+// answer 502 rather than forwarding traffic to a model the caller never asked
+// for. An unresolvable "<family>-latest" returns an error too, so the caller
+// fails cleanly. Returns the (possibly-rewritten) body, the
 // resolved model, and the routing spec the alias target carried (zero when no
 // alias was resolved).
 //
@@ -744,6 +748,15 @@ func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte
 	}
 	out, err := json.Marshal(body)
 	if err != nil {
+		if aliasHit {
+			// The body in hand still names the ALIAS, so forwarding it would send
+			// traffic to a model the caller never asked for — the exact
+			// fall-through alias resolution exists to prevent. Fail the request
+			// (the callers answer a plain error 502) rather than rewrite nothing.
+			p.logger.Warn("proxy: request rewrite marshal failed after an alias hit; refusing to forward the alias",
+				"alias", requested, "model", resolved, "error", err)
+			return reqBody, "", routing.Spec{}, fmt.Errorf("model alias %q could not be applied: %w", requested, err)
+		}
 		p.logger.Warn("proxy: request rewrite marshal failed; forwarding original", "model", requested, "error", err)
 		return reqBody, requested, aliasSpec, nil
 	}
@@ -2036,13 +2049,19 @@ func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	reqBody, model, _, err := p.resolveAndAdapt(r, reqBody)
+	reqBody, model, aliasSpec, err := p.resolveAndAdapt(r, reqBody)
 	if err != nil {
 		if writeModelAliasError(w, err) {
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	// An alias target's spec rides the request context to the provider-routing
+	// layer exactly as it does on /v1/messages: a count_tokens body carries the
+	// prompt, so a target asking for nodata/zdr must get them here too.
+	if !aliasSpec.IsZero() {
+		r = r.WithContext(withAliasSpec(r.Context(), aliasSpec))
 	}
 	const path = "/v1/messages/count_tokens"
 	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, path, captureRef{})
