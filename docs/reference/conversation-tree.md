@@ -312,12 +312,12 @@ where in the tree that body's content already lives:
   merged run of consecutive user rows makes the first wire message cover several
   path rows, so the dropped run starts at the anchor message's end.
 
-The rows a request covered are the working path up to `request_head_id`, minus
-`[request_trim_from, request_trim_to)`. The exact wire body is not reproducible
-from them — the descriptor is best-effort, not a rebuild: consecutive user rows
-merge into one message, empty tool names are rewritten, and cache markers are
-added. `prefix_content` holds the envelope (the request minus `messages`), stored
-on change.
+The rows a request covered are the working path from its root through
+`request_head_id`, minus `[request_trim_from, request_trim_to)`. The exact wire
+body is not reproducible from them — the descriptor is best-effort, not a
+rebuild: consecutive user rows merge into one message, empty tool names are
+rewritten, and cache markers are added. `prefix_content` holds the envelope (the
+request minus `messages`), stored on change.
 
 ## Reading
 
