@@ -14,9 +14,8 @@ import (
 )
 
 // TreeCheckReport is the conversation tree's invariant check. Every count must
-// be zero and no mismatch listed for the tree to be a faithful copy of the
-// history it was built from; DuplicateRows and WorkingSetLooseMatch are
-// informational and deliberately do not make a report fail.
+// be zero for the tree to be a faithful copy of the history it was built from;
+// DuplicateRows is informational and deliberately does not make a report fail.
 type TreeCheckReport struct {
 	Conversations int
 	// MissingHash counts rows with no tree position that are neither an
@@ -62,57 +61,22 @@ type TreeCheckReport struct {
 	// deliberately NOT reproduced here: that needs the walk, and the backfill's
 	// own unmatched_copies log line remains the only record of it.
 	ProviderIDMissing int
-	// WorkingSetMismatch lists conversations whose working path carries
-	// different messages from the legacy working set it replaced.
-	WorkingSetMismatch []string
-	// WorkingSetLooseMatch lists conversations that match only under the looser
-	// message identity the backfill used — the same message as the SDK models
-	// it, not byte-for-byte. Informational: it does not fail the check, and it
-	// is what a cutover rehearsal reads to see how much of the data relies on
-	// the looser rule. Empty unless TreeCheckOptions.Cutover is set.
-	WorkingSetLooseMatch []string
 }
 
-// OK reports whether every invariant holds. Both working-set fields are empty
-// unless the run asked for the cutover comparison, so a structural run's OK says
-// nothing about them.
+// OK reports whether every invariant holds.
 func (r TreeCheckReport) OK() bool {
 	return r.MissingHash == 0 && r.BadHash == 0 && r.BadDepth == 0 && r.MissingHead == 0 &&
-		r.OrdinalCounterBehind == 0 && r.ProviderIDMissing == 0 && len(r.WorkingSetMismatch) == 0
+		r.OrdinalCounterBehind == 0 && r.ProviderIDMissing == 0
 }
 
-// TreeCheckOptions selects the checks a run performs.
-type TreeCheckOptions struct {
-	// Cutover adds the working-set comparison: the working path against the
-	// legacy working set a resume_from_ordinal horizon described.
-	//
-	// It is a CUTOVER-TIME gate and nothing else. The comparison is only
-	// meaningful on the database as the backfill left it, before the new daemon
-	// writes: after go-live a conversation that compacts, forks or retracts
-	// legitimately leaves the siblings it left behind off its head path, so the
-	// first such write on a conversation that still carries the legacy horizon
-	// would make the comparison fail on correct data. Leave it false to run the
-	// structural health check, which is valid at any time.
-	Cutover bool
-}
-
-// CheckTree checks every conversation's tree invariants, structurally.
-//
-// It does NOT run the working-set comparison: that is the cutover gate, and it
-// is only valid before the new daemon writes. Use CheckTreeWithOptions with
-// TreeCheckOptions{Cutover: true} for it.
+// CheckTree checks every conversation's tree invariants.
 func CheckTree(ctx context.Context, pool *pgxpool.Pool) (TreeCheckReport, error) {
-	return CheckTreeWithOptions(ctx, pool, TreeCheckOptions{})
+	return checkTree(ctx, pool, nil)
 }
 
-// CheckTreeWithOptions is CheckTree with the checks opts selects.
-func CheckTreeWithOptions(ctx context.Context, pool *pgxpool.Pool, opts TreeCheckOptions) (TreeCheckReport, error) {
-	return checkTree(ctx, pool, nil, opts)
-}
-
-// checkTree is CheckTreeWithOptions scoped to ids, or to every conversation when
-// ids is nil. Tests scope it because the database they run against is shared.
-func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string, opts TreeCheckOptions) (TreeCheckReport, error) {
+// checkTree is CheckTree scoped to ids, or to every conversation when ids is
+// nil. Tests scope it because the database they run against is shared.
+func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheckReport, error) {
 	var report TreeCheckReport
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation c
@@ -174,15 +138,6 @@ func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string, opts TreeC
 	}
 	report.ProviderIDMissing = providerMissing
 
-	if !opts.Cutover {
-		return report, nil
-	}
-	mismatches, loose, err := checkWorkingSets(ctx, pool, ids)
-	if err != nil {
-		return report, err
-	}
-	report.WorkingSetMismatch = mismatches
-	report.WorkingSetLooseMatch = loose
 	return report, nil
 }
 
@@ -337,10 +292,8 @@ type checkTreeRow struct {
 // describe a different history.
 //
 // It walks EVERY conversation with messages, via
-// checkConversationsWithMessages. A structural check must never use the
-// horizon-scoped list: hashes are a property of the tree, not of the legacy
-// storage a conversation happened to use, so scoping this one would leave every
-// post-cutover conversation unchecked.
+// checkConversationsWithMessages: hashes are a property of the tree, not of the
+// storage a conversation happened to use.
 func checkBadHashes(ctx context.Context, pool *pgxpool.Pool, ids []string) (int, error) {
 	conversations, err := checkConversationsWithMessages(ctx, pool, ids)
 	if err != nil {
@@ -446,7 +399,7 @@ func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 // gives either a provider id, so counting them would keep this field non-zero on
 // a correct tree — a warning nothing can act on. Excluded, a non-zero count names
 // a placed row that lost the id its turn recorded: a backfill or writer defect,
-// which is worth gating a cutover on.
+// which is worth failing the check over.
 //
 // This is a coverage check, not a comparison: it asks only whether the backfill's
 // turn map and the rows it placed agree, so it is valid at any time — a row that
@@ -469,69 +422,10 @@ func checkProviderIDs(ctx context.Context, pool *pgxpool.Pool, ids []string) (in
 	return missing, nil
 }
 
-// checkWorkingSets compares the working path of every conversation that still
-// carries a LEGACY RESUME HORIZON against the working set that horizon
-// described: the rows at and after it, in ordinal order.
-//
-// It runs only under TreeCheckOptions.Cutover, and that is a property of the
-// check, not a convenience. It is the PRE-START gate: once the new daemon writes,
-// the comparison no longer describes correct data even for a conversation whose
-// storage used the horizon.
-//
-// The horizon filter is what makes this check mean anything after the cutover.
-// Nothing writes resume_from_ordinal any more, so "the working path equals every
-// row in ordinal order" is no longer a property of correct data: a conversation
-// that compacts or forks now legitimately leaves sibling rows off its head path.
-// Only conversations whose storage actually used the horizon — the ones the
-// backfill had to reproduce — are still expected to match, so this comparison is
-// the cutover's net over pre-tree conversations and nothing else.
-//
-// This is the ONLY check allowed to narrow the conversation list, and it does so
-// with checkConversationsWithHorizon. Every structural check uses
-// checkConversationsWithMessages instead, because a tree's shape and its hashes
-// are properties of every conversation regardless of how it was stored.
-//
-// The comparison is on messages, not on rows: an interim fork's copies are the
-// same messages as the nodes they duplicate, so a forked conversation still
-// compares equal — and that equality is exactly the property the tree relies on.
-// A strict comparison runs first; a conversation that only matches under the
-// looser identity the backfill used is reported separately, because "these rows
-// are the same message in a different representation" is a fact a rehearsal
-// wants to see rather than a failure.
-func checkWorkingSets(ctx context.Context, pool *pgxpool.Pool, ids []string) (mismatches, loose []string, err error) {
-	conversations, err := checkConversationsWithHorizon(ctx, pool, ids)
-	if err != nil {
-		return nil, nil, err
-	}
-	for _, id := range conversations {
-		working, err := checkLegacyWorkingSet(ctx, pool, id)
-		if err != nil {
-			return nil, nil, err
-		}
-		path, err := checkWorkingPath(ctx, pool, id)
-		if err != nil {
-			return nil, nil, err
-		}
-		switch {
-		case checkSameMessages(working, path):
-		case checkSameMessagesLoose(working, path):
-			loose = append(loose, id)
-		default:
-			mismatches = append(mismatches, id)
-		}
-	}
-	return mismatches, loose, nil
-}
-
-// checkConversationsWithMessages lists EVERY conversation that has messages,
-// whatever storage it was written with. This is the list for STRUCTURAL checks —
-// the tree's shape and its hashes are properties of every conversation, and the
-// absence of a legacy resume horizon says nothing about them.
-//
-// Its callers are checkBadHashes and anything else that inspects a tree. Only a
-// comparison against a LEGACY representation may narrow the list, and that is
-// checkConversationsWithHorizon: a check that silently stopped walking
-// post-cutover conversations would report a clean tree it never looked at.
+// checkConversationsWithMessages lists every conversation that has messages,
+// which is the list every structural check walks: the tree's shape and its
+// hashes are properties of every conversation, whatever storage it was written
+// with.
 func checkConversationsWithMessages(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]string, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT c.id::text FROM conversations.conversation c
@@ -542,70 +436,6 @@ func checkConversationsWithMessages(ctx context.Context, pool *pgxpool.Pool, ids
 		return nil, fmt.Errorf("tree check: list conversations: %w", err)
 	}
 	return checkScanStrings(rows)
-}
-
-// checkConversationsWithHorizon lists the conversations that still carry a
-// legacy resume horizon, which is the subset the working-set comparison is
-// defined over — see checkWorkingSets for why. NOTHING else may use it: a
-// conversation without the horizon has no legacy working set to reproduce, but it
-// is still a tree, and a structural check that read this list instead of
-// checkConversationsWithMessages would skip every conversation written since the
-// cutover and the majority of the backfilled ones.
-func checkConversationsWithHorizon(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]string, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT c.id::text FROM conversations.conversation c
-		  WHERE ($1::uuid[] IS NULL OR c.id = ANY($1::uuid[]))
-		    AND c.resume_from_ordinal IS NOT NULL
-		    AND EXISTS (SELECT 1 FROM conversations.conversation_message m WHERE m.conversation_id = c.id)
-		  ORDER BY c.id`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("tree check: list conversations with a legacy horizon: %w", err)
-	}
-	return checkScanStrings(rows)
-}
-
-// checkLegacyWorkingSet reads what the pre-tree LoadWorking returned: the rows
-// at and after the resume horizon, in ordinal order, interim copies included.
-func checkLegacyWorkingSet(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]convtree.Msg, error) {
-	rows, err := pool.Query(ctx, `
-		SELECT role, content::text FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid
-		   AND ordinal >= coalesce((SELECT resume_from_ordinal FROM conversations.conversation WHERE id = $1::uuid), 0)
-		 ORDER BY ordinal`, conversationID)
-	if err != nil {
-		return nil, fmt.Errorf("tree check: read working set of %s: %w", conversationID, err)
-	}
-	return checkScanMessages(rows)
-}
-
-// checkWorkingPath reads the working path: the chain of nodes from the head back
-// to its root, in root-to-head order.
-func checkWorkingPath(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]convtree.Msg, error) {
-	rows, err := pool.Query(ctx, `
-		WITH RECURSIVE path AS (
-		  SELECT m.id, m.parent_id, m.depth, m.role, m.content FROM conversations.conversation_message m
-		    JOIN conversations.conversation c ON c.head_id = m.id WHERE c.id = $1::uuid
-		  UNION ALL
-		  SELECT p.id, p.parent_id, p.depth, p.role, p.content FROM conversations.conversation_message p JOIN path ON p.id = path.parent_id
-		)
-		SELECT role, content::text FROM path ORDER BY depth`, conversationID)
-	if err != nil {
-		return nil, fmt.Errorf("tree check: read working path of %s: %w", conversationID, err)
-	}
-	return checkScanMessages(rows)
-}
-
-func checkScanMessages(rows pgx.Rows) ([]convtree.Msg, error) {
-	defer rows.Close()
-	var out []convtree.Msg
-	for rows.Next() {
-		var msg convtree.Msg
-		if err := rows.Scan(&msg.Role, &msg.Content); err != nil {
-			return nil, fmt.Errorf("tree check: scan message: %w", err)
-		}
-		out = append(out, msg)
-	}
-	return out, rows.Err()
 }
 
 func checkScanStrings(rows pgx.Rows) ([]string, error) {
@@ -619,28 +449,4 @@ func checkScanStrings(rows pgx.Rows) ([]string, error) {
 		out = append(out, v)
 	}
 	return out, rows.Err()
-}
-
-// checkSameMessages reports whether two histories are the same history: same
-// length, and every message canonicalising equal to its counterpart.
-func checkSameMessages(a, b []convtree.Msg) bool {
-	return checkCompareMessages(a, b, convtree.Equal)
-}
-
-// checkSameMessagesLoose is the same comparison under the identity the backfill
-// uses to decide two rows are one message.
-func checkSameMessagesLoose(a, b []convtree.Msg) bool {
-	return checkCompareMessages(a, b, SameMessage)
-}
-
-func checkCompareMessages(a, b []convtree.Msg, same func(x, y convtree.Msg) bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !same(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
 }

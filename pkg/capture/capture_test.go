@@ -813,11 +813,6 @@ func TestTheFirstRequestIsAPlainRoot(t *testing.T) {
 	c.NoError(pool.QueryRow(ctx,
 		`SELECT coalesce(depth,-1) FROM conversations.conversation_message WHERE id=$1::uuid`, head).Scan(&headDepth), "read head depth")
 	c.Eq(2, headDepth, "the head is the request's last node")
-
-	var resume *int
-	c.NoError(pool.QueryRow(ctx,
-		`SELECT resume_from_ordinal FROM conversations.conversation WHERE id=$1`, convID).Scan(&resume), "read resume_from_ordinal")
-	c.Nil(resume, "capture must not write resume_from_ordinal any more")
 }
 
 // TestDecomposeRequest_CacheBreakpoints verifies breakpoint detection is

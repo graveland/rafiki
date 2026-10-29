@@ -225,15 +225,17 @@ order that matters:
    stopped. **The dump is the rollback** — a migration that rewrites data has no
    down path worth trusting.
 2. Rehearse the restore (`timescaledb_pre_restore()` / `…_post_restore()` for a
-   hypertable), migrate, `rafikid tree check --cutover`, repeat until clean.
+   hypertable), migrate, `rafikid tree check`, repeat until clean.
 3. On the real database: stop every daemon writing to it, `rafikid migrate`
    (capture the log — the backfill's own validity signal is a line only it
-   prints), `rafikid tree check --cutover` (must exit 0), `VACUUM FULL` the
-   rewritten table if the migration changed its `fillfactor`, then start the new
-   daemon.
-4. After go-live, `rafikid tree check` **without** `--cutover` is the health
-   probe and must exit 0; `--cutover` compares legacy working sets and is only
-   valid before the new daemon starts writing.
+   prints), `rafikid tree check` (must exit 0), `VACUUM FULL` the rewritten table
+   if the migration changed its `fillfactor`, then start the new daemon.
+4. After go-live the same `rafikid tree check` is the health probe and must exit
+   0; it reports structure only, so a fork or compaction does not move it.
+
+An installation upgrading from a release before the conversation tree must first
+upgrade to the last release carrying migrations 0057-0061 and run the gate there:
+see [Conversation tree → Cutover procedure](../reference/conversation-tree.md).
 
 Measured on a 3,583-conversation / 321,165-message database: 1 m 07 s to migrate
 and 49 s for the check, about 2 minutes of downtime, 63 MB peak RSS.

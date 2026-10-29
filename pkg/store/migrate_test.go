@@ -664,9 +664,9 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 	chain, err := loadMigrations()
 	c.Require().NoError(err, "load chain")
 	head := chain[len(chain)-1]
-	// 0061 is the migration whose rollback is observed below; a new head means
+	// 0062 is the migration whose rollback is observed below; a new head means
 	// this test must be repointed, not silently left asserting an older one.
-	c.Eq(61, head.version, "this test observes 0061's rollback")
+	c.Eq(62, head.version, "this test observes 0062's rollback")
 
 	prev, hadPrev := goSteps[head.version]
 	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
@@ -690,14 +690,14 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 		"probe the migrations table")
 	c.False(recorded, "version %d was recorded despite its go step failing", head.version)
 
-	// 0060 commits on its own; it is 0061's DROP COLUMN that must roll back
-	// with its step, so the request column is still there.
-	var requestCol bool
+	// 0061 commits on its own; it is 0062's DROP COLUMN that must roll back
+	// with its step, so resume_from_ordinal is still there.
+	var horizonCol bool
 	c.Require().NoError(pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		                WHERE table_schema='conversations' AND table_name='conversation_turn'
-		                  AND column_name='request')`).Scan(&requestCol), "probe request")
-	c.True(requestCol, "0061's drop survived a failed go step; the SQL did not roll back with it")
+		                WHERE table_schema='conversations' AND table_name='conversation'
+		                  AND column_name='resume_from_ordinal')`).Scan(&horizonCol), "probe resume_from_ordinal")
+	c.True(horizonCol, "0062's drop survived a failed go step; the SQL did not roll back with it")
 }
 
 // TestMigrateGoStepUnknownVersion pins loadMigrations' refusal of a step for a
@@ -793,4 +793,46 @@ func TestMigrate0061DropsRequestColumn(t *testing.T) {
 		 WHERE table_schema='conversations' AND table_name='conversation_turn'
 		   AND column_name='request'`).Scan(&nullable), "probe request nullability")
 	c.Eq("YES", nullable, "the restored request column must be nullable; its data is not restored")
+}
+
+// TestMigrate0062DropsResumeFromOrdinal pins 0062: the legacy resume horizon is
+// gone — nothing has written it since the conversation tree became the working
+// set — and the columns that carry the tree survive. The down migration re-adds
+// the column empty: the horizons are not restored.
+func TestMigrate0062DropsResumeFromOrdinal(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	column := func(name string) bool {
+		t.Helper()
+		var exists bool
+		c.Require().NoError(pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			                WHERE table_schema='conversations' AND table_name='conversation'
+			                  AND column_name=$1)`, name).Scan(&exists), "probe %s", name)
+		return exists
+	}
+
+	c.False(column("resume_from_ordinal"), "conversation.resume_from_ordinal survived migration 0062")
+	for _, kept := range []string{"head_id", "next_ordinal", "node_count"} {
+		c.True(column(kept), "the tree column %s was dropped with resume_from_ordinal", kept)
+	}
+
+	// There is no MigrateTo API, so exercise the down migration directly: a
+	// no-op body must fail this test, not leave the column absent.
+	down, err := os.ReadFile("migrations/0062_drop_resume_from_ordinal.down.sql")
+	c.Require().NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	c.True(column("resume_from_ordinal"), "the down migration did not re-add resume_from_ordinal")
+
+	var nullable string
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT is_nullable FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name='conversation'
+		   AND column_name='resume_from_ordinal'`).Scan(&nullable), "probe resume_from_ordinal nullability")
+	c.Eq("YES", nullable, "the restored resume_from_ordinal must be nullable; its data is not restored")
 }

@@ -354,19 +354,6 @@ func loadInterimSnapshot(t *testing.T) interimSnapshot {
 	return snapshot
 }
 
-// message returns the snapshot's row at ordinal, which the tests name by the
-// fixture's own ordinals so a shape can be traced back to the recording.
-func (s interimSnapshot) message(t *testing.T, ordinal int) interimSnapshotRow {
-	t.Helper()
-	for _, m := range s.Messages {
-		if m.Ordinal == ordinal {
-			return m
-		}
-	}
-	t.Fatalf("the interim snapshot has no message at ordinal %d", ordinal)
-	return interimSnapshotRow{}
-}
-
 // TestBackfillSnapshotFixture is the backfill against real shapes: the rows
 // capture actually wrote for a claude session with tool calls, a killed and
 // resumed turn, a /compact and a /clear. It runs through Migrate, so step 56 —
@@ -426,7 +413,7 @@ func TestBackfillSnapshotFixture(t *testing.T) {
 	c.Require().NotNil(head, "head")
 	c.Eq(len(snapshot.Messages)-1, *head, "head is the last row")
 
-	check, err := checkTreeCutover(ctx, pool, []string{convID})
+	check, err := checkTree(ctx, pool, []string{convID})
 	c.Require().NoError(err, "checkTree")
 	c.True(check.OK(), "tree check over the fixture: %+v", check)
 }
