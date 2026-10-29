@@ -48,6 +48,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/modelalias"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -481,6 +482,10 @@ type Controller struct {
 	// presetStore is the owner-scoped preset backend; nil on a DB-less
 	// daemon, which refuses any spawn naming a preset.
 	presetStore presets.Store
+
+	// modelAliasStore is the owner-scoped model-alias backend; nil on a
+	// DB-less daemon, where every alias lookup misses.
+	modelAliasStore modelalias.Store
 
 	// recall is the wired recall subsystem (store, optional embedder, the
 	// background indexer and summarizer). Nil on a DB-less daemon: the

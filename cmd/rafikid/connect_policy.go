@@ -221,6 +221,14 @@ var controlPolicyTable = map[string]controlPolicy{
 	"SetRoute":    policyUserOnly,
 	"DeleteRoute": policyUserOnly,
 
+	// Model aliases are per-owner names, so listing is a read of the caller's
+	// OWN rows — any caller, child included (a child reads its owner's). A
+	// write needs a user credential: no child and no MCP tool may author one,
+	// which the adapter refuses a second time (connectModelAliases).
+	"ListModelAliases": policyAnyCaller,
+	"PutModelAlias":    policyUserOnly,
+	"DeleteModelAlias": policyUserOnly,
+
 	// Sandboxes. CreateSandbox/RemoveSandbox are childScoped: a per-child
 	// credential may provision and tear down its OWN containers, bounded
 	// inside the Controller (a child's resources are clamped, its host paths

@@ -182,6 +182,10 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"PutPreset":    ownerExempt,
 	"DeletePreset": ownerExempt,
 
+	"ListModelAliases": ownerExempt,
+	"PutModelAlias":    ownerExempt,
+	"DeleteModelAlias": ownerExempt,
+
 	"Report":    ownerExempt,
 	"Receive":   ownerExempt,
 	"SetResult": ownerExempt,
@@ -270,6 +274,10 @@ var ownerExemptReasons = map[string]string{
 	"RemoveSandbox": "sandboxCaller resolves the owner from the credential; the Controller enforces",
 	"SyncPath":      "sandboxCaller resolves the owner from the credential; the Controller enforces",
 	"SyncRepo":      "sandboxCaller resolves the owner from the credential; the Controller enforces",
+
+	"ListModelAliases": "model aliases resolve against the connection's owner",
+	"PutModelAlias":    "model aliases resolve against the connection's owner",
+	"DeleteModelAlias": "model aliases resolve against the connection's owner",
 
 	"ListPymodules":  "the caller's owner's pymodule corpus",
 	"GetPymodule":    "the caller's owner's pymodule corpus",

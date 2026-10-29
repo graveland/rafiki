@@ -698,7 +698,7 @@ message ModelRow {
   string provider = 2;
   string model    = 3;
   string name     = 4;
-  string source   = 5;  // user-config|builtin|alias|openrouter|local
+  string source   = 5;  // user-config|builtin|declared|alias|openrouter|local
 
   optional int32  context_window        = 6;
   optional int32  max_completion_tokens = 7;
@@ -1360,6 +1360,11 @@ service Control {
   rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc SetRoute(SetRouteRequest) returns (SetRouteResponse);
   rpc DeleteRoute(DeleteRouteRequest) returns (DeleteRouteResponse);
+  // Model aliases: per-owner slash-free names for full model strings. Read by
+  // any caller (a child reads its owner's), written only by a user credential.
+  rpc ListModelAliases(ListModelAliasesRequest) returns (ListModelAliasesResponse);
+  rpc PutModelAlias(PutModelAliasRequest) returns (PutModelAliasResponse);
+  rpc DeleteModelAlias(DeleteModelAliasRequest) returns (DeleteModelAliasResponse);
   // The script-child verbs. All three are childScoped; Report is the one that
   // acts OUTWARD (on the caller's own parent), Receive and SetResult act only
   // on the caller itself. See the "Script children" block above for the
@@ -1845,6 +1850,20 @@ message DeleteRouteRequest {
   string model_line = 1;
 }
 message DeleteRouteResponse {}
+
+// ModelAliasRow is one alias of the connection's owner.
+message ModelAliasRow {
+  string name = 1;                            // slash-free, ^[a-z0-9][a-z0-9._-]*$
+  string target = 2;                          // provider/id, optionally [spec]
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+message ListModelAliasesRequest {}
+message ListModelAliasesResponse { repeated ModelAliasRow rows = 1; }
+message PutModelAliasRequest { string name = 1; string target = 2; }
+message PutModelAliasResponse { ModelAliasRow row = 1; }
+message DeleteModelAliasRequest { string name = 1; }
+message DeleteModelAliasResponse {}
 
 // ─── Control-plane messages ────────────────────────────────────────────────
 // The request/response shapes behind the RPCs above. Unless a comment says

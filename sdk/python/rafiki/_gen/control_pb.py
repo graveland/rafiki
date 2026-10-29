@@ -5465,6 +5465,139 @@ class DeleteRouteResponse:
         return obj
 
 @dataclasses.dataclass
+class ModelAliasRow:
+    name: str = ""
+    target: str = ""
+    created_at: Optional[datetime.datetime] = None
+    updated_at: Optional[datetime.datetime] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.target != "":
+            out["target"] = self.target
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.updated_at is not None:
+            out["updatedAt"] = _ts_out(self.updated_at)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ModelAliasRow":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("target")
+        if _v is not None:
+            obj.target = _v
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _ts_in(_v, "createdAt")
+        _v = _d.get("updatedAt")
+        if _v is not None:
+            obj.updated_at = _ts_in(_v, "updatedAt")
+        return obj
+
+@dataclasses.dataclass
+class ListModelAliasesRequest:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListModelAliasesRequest":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ListModelAliasesResponse:
+    rows: list[ModelAliasRow] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.rows:
+            out["rows"] = [x.to_dict() for x in self.rows]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListModelAliasesResponse":
+        obj = cls()
+        _v = _d.get("rows")
+        if _v is not None:
+            obj.rows = [ModelAliasRow.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class PutModelAliasRequest:
+    name: str = ""
+    target: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.target != "":
+            out["target"] = self.target
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "PutModelAliasRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("target")
+        if _v is not None:
+            obj.target = _v
+        return obj
+
+@dataclasses.dataclass
+class PutModelAliasResponse:
+    row: Optional[ModelAliasRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.row is not None:
+            out["row"] = self.row.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "PutModelAliasResponse":
+        obj = cls()
+        _v = _d.get("row")
+        if _v is not None:
+            obj.row = ModelAliasRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class DeleteModelAliasRequest:
+    name: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteModelAliasRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        return obj
+
+@dataclasses.dataclass
+class DeleteModelAliasResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteModelAliasResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
 class ResumeRequest:
     child_id: str = ""
     api_key: str = ""

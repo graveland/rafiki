@@ -67,6 +67,7 @@ type Server struct {
 	sendSteps      atomic.Pointer[SendStepRunner]
 	pymodules      atomic.Pointer[PymoduleManager]
 	presets        atomic.Pointer[PresetManager]
+	modelAliases   atomic.Pointer[ModelAliasManager]
 	recall         atomic.Pointer[RecallManager]
 	repos          atomic.Pointer[RepoManager]
 	quota          atomic.Pointer[QuotaReader]

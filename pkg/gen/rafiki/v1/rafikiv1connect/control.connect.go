@@ -157,6 +157,14 @@ const (
 	ControlSetRouteProcedure = "/rafiki.v1.Control/SetRoute"
 	// ControlDeleteRouteProcedure is the fully-qualified name of the Control's DeleteRoute RPC.
 	ControlDeleteRouteProcedure = "/rafiki.v1.Control/DeleteRoute"
+	// ControlListModelAliasesProcedure is the fully-qualified name of the Control's ListModelAliases
+	// RPC.
+	ControlListModelAliasesProcedure = "/rafiki.v1.Control/ListModelAliases"
+	// ControlPutModelAliasProcedure is the fully-qualified name of the Control's PutModelAlias RPC.
+	ControlPutModelAliasProcedure = "/rafiki.v1.Control/PutModelAlias"
+	// ControlDeleteModelAliasProcedure is the fully-qualified name of the Control's DeleteModelAlias
+	// RPC.
+	ControlDeleteModelAliasProcedure = "/rafiki.v1.Control/DeleteModelAlias"
 	// ControlReportProcedure is the fully-qualified name of the Control's Report RPC.
 	ControlReportProcedure = "/rafiki.v1.Control/Report"
 	// ControlReceiveProcedure is the fully-qualified name of the Control's Receive RPC.
@@ -306,6 +314,11 @@ type ControlClient interface {
 	ListRoutes(context.Context, *connect.Request[v1.ListRoutesRequest]) (*connect.Response[v1.ListRoutesResponse], error)
 	SetRoute(context.Context, *connect.Request[v1.SetRouteRequest]) (*connect.Response[v1.SetRouteResponse], error)
 	DeleteRoute(context.Context, *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error)
+	// Model aliases: per-owner slash-free names for full model strings. Read by
+	// any caller (a child reads its owner's), written only by a user credential.
+	ListModelAliases(context.Context, *connect.Request[v1.ListModelAliasesRequest]) (*connect.Response[v1.ListModelAliasesResponse], error)
+	PutModelAlias(context.Context, *connect.Request[v1.PutModelAliasRequest]) (*connect.Response[v1.PutModelAliasResponse], error)
+	DeleteModelAlias(context.Context, *connect.Request[v1.DeleteModelAliasRequest]) (*connect.Response[v1.DeleteModelAliasResponse], error)
 	// The script-child verbs. All three are childScoped; Report is the one that
 	// acts OUTWARD (on the caller's own parent), Receive and SetResult act only
 	// on the caller itself. See the "Script children" block above for the
@@ -700,6 +713,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("DeleteRoute")),
 			connect.WithClientOptions(opts...),
 		),
+		listModelAliases: connect.NewClient[v1.ListModelAliasesRequest, v1.ListModelAliasesResponse](
+			httpClient,
+			baseURL+ControlListModelAliasesProcedure,
+			connect.WithSchema(controlMethods.ByName("ListModelAliases")),
+			connect.WithClientOptions(opts...),
+		),
+		putModelAlias: connect.NewClient[v1.PutModelAliasRequest, v1.PutModelAliasResponse](
+			httpClient,
+			baseURL+ControlPutModelAliasProcedure,
+			connect.WithSchema(controlMethods.ByName("PutModelAlias")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteModelAlias: connect.NewClient[v1.DeleteModelAliasRequest, v1.DeleteModelAliasResponse](
+			httpClient,
+			baseURL+ControlDeleteModelAliasProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteModelAlias")),
+			connect.WithClientOptions(opts...),
+		),
 		report: connect.NewClient[v1.ReportRequest, v1.ReportResponse](
 			httpClient,
 			baseURL+ControlReportProcedure,
@@ -976,6 +1007,9 @@ type controlClient struct {
 	listRoutes               *connect.Client[v1.ListRoutesRequest, v1.ListRoutesResponse]
 	setRoute                 *connect.Client[v1.SetRouteRequest, v1.SetRouteResponse]
 	deleteRoute              *connect.Client[v1.DeleteRouteRequest, v1.DeleteRouteResponse]
+	listModelAliases         *connect.Client[v1.ListModelAliasesRequest, v1.ListModelAliasesResponse]
+	putModelAlias            *connect.Client[v1.PutModelAliasRequest, v1.PutModelAliasResponse]
+	deleteModelAlias         *connect.Client[v1.DeleteModelAliasRequest, v1.DeleteModelAliasResponse]
 	report                   *connect.Client[v1.ReportRequest, v1.ReportResponse]
 	receive                  *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
 	setResult                *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
@@ -1289,6 +1323,21 @@ func (c *controlClient) DeleteRoute(ctx context.Context, req *connect.Request[v1
 	return c.deleteRoute.CallUnary(ctx, req)
 }
 
+// ListModelAliases calls rafiki.v1.Control.ListModelAliases.
+func (c *controlClient) ListModelAliases(ctx context.Context, req *connect.Request[v1.ListModelAliasesRequest]) (*connect.Response[v1.ListModelAliasesResponse], error) {
+	return c.listModelAliases.CallUnary(ctx, req)
+}
+
+// PutModelAlias calls rafiki.v1.Control.PutModelAlias.
+func (c *controlClient) PutModelAlias(ctx context.Context, req *connect.Request[v1.PutModelAliasRequest]) (*connect.Response[v1.PutModelAliasResponse], error) {
+	return c.putModelAlias.CallUnary(ctx, req)
+}
+
+// DeleteModelAlias calls rafiki.v1.Control.DeleteModelAlias.
+func (c *controlClient) DeleteModelAlias(ctx context.Context, req *connect.Request[v1.DeleteModelAliasRequest]) (*connect.Response[v1.DeleteModelAliasResponse], error) {
+	return c.deleteModelAlias.CallUnary(ctx, req)
+}
+
 // Report calls rafiki.v1.Control.Report.
 func (c *controlClient) Report(ctx context.Context, req *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {
 	return c.report.CallUnary(ctx, req)
@@ -1536,6 +1585,11 @@ type ControlHandler interface {
 	ListRoutes(context.Context, *connect.Request[v1.ListRoutesRequest]) (*connect.Response[v1.ListRoutesResponse], error)
 	SetRoute(context.Context, *connect.Request[v1.SetRouteRequest]) (*connect.Response[v1.SetRouteResponse], error)
 	DeleteRoute(context.Context, *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error)
+	// Model aliases: per-owner slash-free names for full model strings. Read by
+	// any caller (a child reads its owner's), written only by a user credential.
+	ListModelAliases(context.Context, *connect.Request[v1.ListModelAliasesRequest]) (*connect.Response[v1.ListModelAliasesResponse], error)
+	PutModelAlias(context.Context, *connect.Request[v1.PutModelAliasRequest]) (*connect.Response[v1.PutModelAliasResponse], error)
+	DeleteModelAlias(context.Context, *connect.Request[v1.DeleteModelAliasRequest]) (*connect.Response[v1.DeleteModelAliasResponse], error)
 	// The script-child verbs. All three are childScoped; Report is the one that
 	// acts OUTWARD (on the caller's own parent), Receive and SetResult act only
 	// on the caller itself. See the "Script children" block above for the
@@ -1926,6 +1980,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("DeleteRoute")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListModelAliasesHandler := connect.NewUnaryHandler(
+		ControlListModelAliasesProcedure,
+		svc.ListModelAliases,
+		connect.WithSchema(controlMethods.ByName("ListModelAliases")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlPutModelAliasHandler := connect.NewUnaryHandler(
+		ControlPutModelAliasProcedure,
+		svc.PutModelAlias,
+		connect.WithSchema(controlMethods.ByName("PutModelAlias")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteModelAliasHandler := connect.NewUnaryHandler(
+		ControlDeleteModelAliasProcedure,
+		svc.DeleteModelAlias,
+		connect.WithSchema(controlMethods.ByName("DeleteModelAlias")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlReportHandler := connect.NewUnaryHandler(
 		ControlReportProcedure,
 		svc.Report,
@@ -2254,6 +2326,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlSetRouteHandler.ServeHTTP(w, r)
 		case ControlDeleteRouteProcedure:
 			controlDeleteRouteHandler.ServeHTTP(w, r)
+		case ControlListModelAliasesProcedure:
+			controlListModelAliasesHandler.ServeHTTP(w, r)
+		case ControlPutModelAliasProcedure:
+			controlPutModelAliasHandler.ServeHTTP(w, r)
+		case ControlDeleteModelAliasProcedure:
+			controlDeleteModelAliasHandler.ServeHTTP(w, r)
 		case ControlReportProcedure:
 			controlReportHandler.ServeHTTP(w, r)
 		case ControlReceiveProcedure:
@@ -2553,6 +2631,18 @@ func (UnimplementedControlHandler) SetRoute(context.Context, *connect.Request[v1
 
 func (UnimplementedControlHandler) DeleteRoute(context.Context, *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteRoute is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListModelAliases(context.Context, *connect.Request[v1.ListModelAliasesRequest]) (*connect.Response[v1.ListModelAliasesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListModelAliases is not implemented"))
+}
+
+func (UnimplementedControlHandler) PutModelAlias(context.Context, *connect.Request[v1.PutModelAliasRequest]) (*connect.Response[v1.PutModelAliasResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.PutModelAlias is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteModelAlias(context.Context, *connect.Request[v1.DeleteModelAliasRequest]) (*connect.Response[v1.DeleteModelAliasResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteModelAlias is not implemented"))
 }
 
 func (UnimplementedControlHandler) Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {

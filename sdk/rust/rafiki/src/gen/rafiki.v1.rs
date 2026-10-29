@@ -1365,7 +1365,7 @@ pub struct ModelRow {
     pub model: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub name: ::prost::alloc::string::String,
-    /// user-config|builtin|alias|openrouter|local
+    /// user-config|builtin|declared|alias|openrouter|local
     #[prost(string, tag = "5")]
     pub source: ::prost::alloc::string::String,
     #[prost(int32, optional, tag = "6")]
@@ -2850,6 +2850,46 @@ pub struct DeleteRouteRequest {
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct DeleteRouteResponse {}
+/// ModelAliasRow is one alias of the connection's owner.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ModelAliasRow {
+    /// slash-free, ^[a-z0-9][a-z0-9._-]*$
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// provider/id, optionally \[spec\]
+    #[prost(string, tag = "2")]
+    pub target: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "4")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ListModelAliasesRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListModelAliasesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub rows: ::prost::alloc::vec::Vec<ModelAliasRow>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PutModelAliasRequest {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub target: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PutModelAliasResponse {
+    #[prost(message, optional, tag = "1")]
+    pub row: ::core::option::Option<ModelAliasRow>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeleteModelAliasRequest {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteModelAliasResponse {}
 /// ResumeRequest mirrors protocol.ResumeRequest: re-spawn an exited child
 /// against its persisted state record. api_key is used at spawn time only and
 /// is never persisted.

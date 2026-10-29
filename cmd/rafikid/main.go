@@ -32,6 +32,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/modelaliasdb"
 	"go.graveland.dev/rafiki/pkg/oidclogin"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -796,6 +797,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// Connect manager is never registered.
 	if pool != nil {
 		ctrl.presetStore = presetsdb.NewPostgresStore(pool)
+		ctrl.modelAliasStore = modelaliasdb.NewPostgresStore(pool)
 	}
 	// Recall: the store behind the recall/recall_context/memory_* tools, plus
 	// the background indexer (windows, embeddings, rolling summaries) started
@@ -983,6 +985,9 @@ func runDaemon(opts runDaemonOpts) error {
 			}
 			if ctrl.presetStore != nil {
 				face.Control.SetPresetManager(connectPresets{c: ctrl})
+			}
+			if ctrl.modelAliasStore != nil {
+				face.Control.SetModelAliasManager(connectModelAliases{c: ctrl})
 			}
 			if ctrl.recall != nil {
 				face.Control.SetRecallManager(connectRecall{c: ctrl})
