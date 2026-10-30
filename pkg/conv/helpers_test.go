@@ -137,6 +137,40 @@ func (b *conflictOnce) Commit(ctx context.Context, commit conv.Commit) (time.Tim
 	return b.Backend.Commit(ctx, commit)
 }
 
+// stalledState holds the first State call it is armed for until the test
+// releases it, and returns the answer it read BEFORE waiting: that is how a
+// reader's observation is made to land after a writer's move.
+type stalledState struct {
+	conv.Backend
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *stalledState) arm() {
+	b.mu.Lock()
+	b.armed = true
+	b.mu.Unlock()
+}
+
+func (b *stalledState) State(ctx context.Context, convID string) (conv.State, error) {
+	st, err := b.Backend.State(ctx, convID)
+	if err != nil {
+		return conv.State{}, err
+	}
+	b.mu.Lock()
+	stall := b.armed
+	b.armed = false
+	b.mu.Unlock()
+	if !stall {
+		return st, nil
+	}
+	close(b.entered)
+	<-b.release
+	return st, nil
+}
+
 // failingCommit is a backend whose Commit always answers err.
 type failingCommit struct {
 	conv.Backend

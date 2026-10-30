@@ -204,3 +204,70 @@ func TestMemBackendConformance(t *testing.T) {
 		return m, m.Ensure
 	})
 }
+
+// A reader's observation that lands after a retract carries the SAME next
+// ordinal as the state the retract published, so only a generation can order
+// them: the retracted row must not come back as the head.
+func TestReaderStateCannotResurrectARetractedHead(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	stalled := &stalledState{Backend: b, entered: make(chan struct{}), release: make(chan struct{})}
+	s := conv.NewStore(stalled, conv.Options{})
+	owner := s.Open(convID, conv.AsOwner())
+
+	first, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "one")}}})
+	c.NoError(err, "one")
+	second, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "two")}}})
+	c.NoError(err, "two")
+
+	// The reader reads the pre-retract head, then stalls until the retract has
+	// committed and published.
+	stalled.arm()
+	reader := s.Open(convID)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := reader.Working(ctx); err != nil {
+			c.Errorf("reader Working: %v", err)
+		}
+	}()
+	<-stalled.entered
+	c.NoError(owner.RetractHead(ctx, second.Nodes[0].ID), "retract")
+	close(stalled.release)
+	<-done
+
+	path, err := owner.Working(ctx)
+	c.NoError(err, "Working")
+	c.EqDeep([]string{first.Nodes[0].ID}, nodeIDs(path), "the retracted row did not come back")
+}
+
+// A head a reader loaded must not be inherited by the owner that takes over.
+func TestOwnerAttachInvalidatesCachedHead(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	_, err := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner()).Append(ctx, conv.Append{
+		FromHead: true,
+		Nodes:    []conv.NewNode{{Msg: textMsg(msg.User, "a")}},
+	})
+	c.NoError(err, "append")
+
+	// Only a reader has touched this store's entry: the head it loaded must not
+	// be inherited by the owner that attaches next.
+	counting := convtest.NewCounting(b)
+	s := conv.NewStore(counting, conv.Options{})
+	_, err = s.Open(convID).Working(ctx)
+	c.NoError(err, "reader read")
+
+	counting.Reset()
+	owner := s.Open(convID, conv.AsOwner())
+	_, err = owner.Working(ctx)
+	c.NoError(err, "owner read")
+	c.Eq(1, counting.Counts()["State"], "the owner transition re-reads the head")
+
+	counting.Reset()
+	_, err = owner.Working(ctx)
+	c.NoError(err, "second owner read")
+	c.Eq(0, counting.Counts()["State"], "and then trusts it")
+}

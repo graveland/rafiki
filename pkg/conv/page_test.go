@@ -126,8 +126,10 @@ func TestPageRefusesNonPositiveLimit(t *testing.T) {
 // 0 bytes is 256 MiB and an idle TTL of 0 is five minutes.
 func TestOptionsZeroValuesAreDefaults(t *testing.T) {
 	c := assert.NewAborting(t)
-	s := NewStore(NewMemBackend(), Options{})
-	c.Eq(int64(defaultCacheBytes), s.cacheBytes, "CacheBytes 0 means 256 MiB")
-	c.Eq(defaultIdleTTL, s.ttl, "IdleTTL 0 means five minutes")
-	c.NotNil(s.now, "a nil Now is time.Now")
+	for _, bytes := range []int64{0, -1, -1 << 40} {
+		s := NewStore(NewMemBackend(), Options{CacheBytes: bytes})
+		c.Eq(int64(defaultCacheBytes), s.cacheBytes, "CacheBytes %d means 256 MiB, never no cache", bytes)
+		c.Eq(defaultIdleTTL, s.ttl, "IdleTTL 0 means five minutes")
+		c.NotNil(s.now, "a nil Now is time.Now")
+	}
 }

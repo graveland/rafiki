@@ -26,6 +26,13 @@ type headState struct {
 	nextOrdinal int
 }
 
+// providerRef is a provider message id's index entry. It carries the node's
+// ordinal so a re-fetched older node cannot displace a newer one.
+type providerRef struct {
+	id      string
+	ordinal int
+}
+
 // entry is the per-conversation cache state.
 type entry struct {
 	// head is the conversation's position as this process last saw it. A write
@@ -34,14 +41,22 @@ type entry struct {
 	head atomic.Pointer[headState]
 	// writeMu serialises Append and RetractHead on this conversation.
 	writeMu sync.Mutex
-	// owner, loaded and lastAccess are guarded by Store.mu, as is byProvider.
+	// owner, loaded, lastAccess, gen, lease and byProvider are guarded by
+	// Store.mu.
 	owner      bool
 	loaded     bool
 	lastAccess time.Time
-	// byProvider maps a provider message id to a node id, so a lookup that is
-	// already cached costs no query. It holds ids rather than nodes on purpose:
-	// an evicted node's mapping stays correct, it just needs a Fetch.
-	byProvider map[string]string
+	// gen counts the writes this entry has published. A read that asked the
+	// backend at generation g may store its answer only while the generation is
+	// still g, which is what orders a read against a write that moved the head
+	// WITHOUT advancing the ordinal (a retract, or a head-only move).
+	gen uint64
+	// lease is the fence key of the last handle that resolved the entry, so a
+	// takeover invalidates a head the previous holder left behind.
+	lease string
+	// byProvider maps a provider message id to the node that carries it, so a
+	// lookup that is already cached costs no query.
+	byProvider map[string]providerRef
 }
 
 // Store is a conversation node cache in front of a Backend. It is safe for
@@ -60,9 +75,10 @@ type Store struct {
 }
 
 // NewStore returns a Store over b. Every zero option is the documented
-// default: a nil Now is time.Now.
+// default, including a negative CacheBytes, which cannot mean "cache nothing":
+// a nil Now is time.Now.
 func NewStore(b Backend, o Options) *Store {
-	if o.CacheBytes == 0 {
+	if o.CacheBytes <= 0 {
 		o.CacheBytes = defaultCacheBytes
 	}
 	if o.IdleTTL == 0 {
@@ -112,6 +128,14 @@ type Handle struct {
 	lease  Lease
 }
 
+// leaseKey identifies the fence a handle writes under, "" when unfenced.
+func (h *Handle) leaseKey() string {
+	if !h.lease.Held() {
+		return ""
+	}
+	return h.lease.ConversationID + "|" + h.lease.Holder + "|" + h.lease.Token
+}
+
 // Open returns a handle on convID. It performs no I/O: the only work it does is
 // the lazy sweep of entries that have been idle past the TTL.
 func (s *Store) Open(convID string, opts ...OpenOption) *Handle {
@@ -148,22 +172,54 @@ func (s *Store) Transcript(ctx context.Context, convID string) ([]*Node, error) 
 }
 
 // touch resolves convID's entry, creating it when absent, marks it live and
-// records owner. Entries idle past the TTL are swept here and on every Open,
-// which is the whole of the expiry mechanism: no goroutines, no timers.
-func (s *Store) touch(convID string, owner bool) *entry {
+// records the handle's authority. Entries idle past the TTL are swept here and
+// on every Open, which is the whole of the expiry mechanism: no goroutines, no
+// timers.
+//
+// Becoming the owner, or arriving under a different fence, invalidates the
+// cached head: a head a reader loaded before the takeover must not be trusted
+// by the writer that took over.
+func (s *Store) touch(convID string, owner bool, lease string) *entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
 	e := s.entries[convID]
 	if e == nil {
-		e = &entry{byProvider: make(map[string]string)}
+		e = &entry{byProvider: make(map[string]providerRef)}
 		s.entries[convID] = e
 	}
-	if owner {
+	if owner && !e.owner {
 		e.owner = true
+		e.loaded = false
+	}
+	if lease != "" && lease != e.lease {
+		e.lease = lease
+		e.loaded = false
 	}
 	e.lastAccess = s.now()
 	return e
+}
+
+// lockEntry resolves convID's entry and takes its write lock, re-resolving
+// after the lock so a writer never holds the lock of an entry that was swept
+// and replaced. Entry creation happens only under Store.mu, so there is one
+// entry — and therefore one writeMu — per conversation.
+func (h *Handle) lockEntry() *entry {
+	for {
+		e := h.store.touch(h.convID, h.owner, h.leaseKey())
+		e.writeMu.Lock()
+		if h.store.isLive(h.convID, e) {
+			return e
+		}
+		e.writeMu.Unlock()
+	}
+}
+
+// isLive reports whether e is still the conversation's entry.
+func (s *Store) isLive(convID string, e *entry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.entries[convID] == e
 }
 
 // sweepLocked drops entries that have been idle past the TTL.
@@ -174,6 +230,16 @@ func (s *Store) sweepLocked() {
 			delete(s.entries, id)
 		}
 	}
+}
+
+// liveLocked returns convID's entry, installing e when the conversation has
+// none.
+func (s *Store) liveLocked(convID string, e *entry) *entry {
+	if live := s.entries[convID]; live != nil {
+		return live
+	}
+	s.entries[convID] = e
+	return e
 }
 
 // cachedHead returns the entry's position when it may be trusted: only an
@@ -192,22 +258,23 @@ func (s *Store) cachedHead(e *entry, owner bool) (headState, bool) {
 	return *hp, true
 }
 
-// storeHead records st on convID's live entry, which is e unless the entry was
-// swept and recreated while the caller was working.
-//
-// A slower reader must never move the entry's position backwards: next ordinal
-// only grows, so a state that is behind the one already stored is dropped. That
-// is what stops a reader that asked the backend before a commit from clobbering
-// the head the commit published.
-func (s *Store) storeHead(convID string, e *entry, st headState) {
+// generation reads the entry's write generation, which a read captures before
+// asking the backend and hands back to storeHeadRead.
+func (s *Store) generation(convID string, e *entry) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live := s.entries[convID]
-	if live == nil {
-		live = e
-		s.entries[convID] = live
-	}
-	if cur := live.head.Load(); cur != nil && cur.nextOrdinal > st.nextOrdinal {
+	return s.liveLocked(convID, e).gen
+}
+
+// storeHeadRead stores a state a READ observed, but only while no write has
+// published since the read captured its generation. A read that raced a retract
+// or a head-only move carries the same next ordinal as the state the writer
+// published, so the generation — not the ordinal — is what orders them.
+func (s *Store) storeHeadRead(convID string, e *entry, gen uint64, st headState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.liveLocked(convID, e)
+	if live.gen != gen {
 		return
 	}
 	live.loaded = true
@@ -215,14 +282,38 @@ func (s *Store) storeHead(convID string, e *entry, st headState) {
 	live.head.Store(&st)
 }
 
-// getLocked returns a cached node and marks it hot.
-func (s *Store) getLocked(id string) (*Node, bool) {
+// storeHeadWrite publishes a state a WRITER resolved or committed, advancing
+// the generation so every read in flight against the old position is dropped.
+func (s *Store) storeHeadWrite(convID string, e *entry, st headState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.liveLocked(convID, e)
+	live.gen++
+	live.loaded = true
+	live.lastAccess = s.now()
+	live.head.Store(&st)
+}
+
+// lookupLocked returns a cached node of THIS conversation. A node id from
+// another conversation is a miss, never a hit: the id space is global but a
+// conversation's tree is not.
+func (s *Store) lookupLocked(convID, id string) (*Node, bool) {
 	el, ok := s.nodes[id]
 	if !ok {
 		return nil, false
 	}
-	s.lru.MoveToFront(el)
-	return el.Value.(*Node), true
+	n := el.Value.(*Node)
+	if n.ConversationID != convID {
+		return nil, false
+	}
+	return n, true
+}
+
+// touchLocked marks a cached node hot.
+func (s *Store) touchLocked(id string) {
+	if el, ok := s.nodes[id]; ok {
+		s.lru.MoveToFront(el)
+	}
 }
 
 // putLocked inserts a node, charging its stored content, and evicts from the
@@ -235,7 +326,11 @@ func (s *Store) putLocked(n *Node) {
 	s.nodes[n.ID] = s.lru.PushFront(n)
 	s.charged += int64(len(n.Content))
 	if e := s.entries[n.ConversationID]; e != nil && n.ProviderMessageID != "" {
-		e.byProvider[n.ProviderMessageID] = n.ID
+		// The newest ordinal wins: a re-fetched older node must not displace
+		// the reply a resume is looking for.
+		if cur, ok := e.byProvider[n.ProviderMessageID]; !ok || n.Ordinal >= cur.ordinal {
+			e.byProvider[n.ProviderMessageID] = providerRef{id: n.ID, ordinal: n.Ordinal}
+		}
 	}
 	for s.charged > s.cacheBytes && s.lru.Len() > 0 {
 		s.evictLocked()
@@ -254,10 +349,16 @@ func (s *Store) evictLocked() {
 	s.lru.Remove(el)
 	delete(s.nodes, n.ID)
 	s.charged -= int64(len(n.Content))
+	if e := s.entries[n.ConversationID]; e != nil && n.ProviderMessageID != "" {
+		if cur, ok := e.byProvider[n.ProviderMessageID]; ok && cur.id == n.ID {
+			delete(e.byProvider, n.ProviderMessageID)
+		}
+	}
 }
 
-// putNodes caches nodes and keeps the live entries warm.
-func (s *Store) putNodes(nodes ...*Node) {
+// putNodes caches nodes of convID and keeps the entry warm. A node belonging to
+// another conversation is never adopted.
+func (s *Store) putNodes(convID string, nodes ...*Node) {
 	if len(nodes) == 0 {
 		return
 	}
@@ -265,28 +366,39 @@ func (s *Store) putNodes(nodes ...*Node) {
 	defer s.mu.Unlock()
 	now := s.now()
 	for _, n := range nodes {
+		if n == nil || n.ConversationID != convID {
+			continue
+		}
 		s.putLocked(n)
-		if e := s.entries[n.ConversationID]; e != nil {
+		if e := s.entries[convID]; e != nil {
 			e.lastAccess = now
 		}
 	}
 }
 
-// cachedNode returns one cached node.
-func (s *Store) cachedNode(id string) (*Node, bool) {
+// cachedNode returns one cached node of convID.
+func (s *Store) cachedNode(convID, id string) (*Node, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.getLocked(id)
+	n, ok := s.lookupLocked(convID, id)
+	if ok {
+		s.touchLocked(id)
+	}
+	return n, ok
 }
 
 // cachedPath walks from toward the root entirely out of the cache. ok is false
 // on the first miss, which is what sends the caller to the backend.
-func (s *Store) cachedPath(from string, crossRoots bool) ([]*Node, bool) {
+//
+// Recency is applied afterwards, root first and head last, so the head — the
+// node every read starts at — ends hottest and eviction drops the oldest part
+// of the history rather than the part a reader needs next.
+func (s *Store) cachedPath(convID, from string, crossRoots bool) ([]*Node, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var rev []*Node
 	for id := from; id != ""; {
-		n, ok := s.getLocked(id)
+		n, ok := s.lookupLocked(convID, id)
 		if !ok {
 			return nil, false
 		}
@@ -299,6 +411,9 @@ func (s *Store) cachedPath(from string, crossRoots bool) ([]*Node, bool) {
 		default:
 			id = ""
 		}
+	}
+	for i := len(rev) - 1; i >= 0; i-- {
+		s.touchLocked(rev[i].ID)
 	}
 	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
 		rev[i], rev[j] = rev[j], rev[i]
@@ -313,7 +428,7 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 	if from == "" {
 		return nil, nil
 	}
-	if path, ok := h.store.cachedPath(from, crossRoots); ok {
+	if path, ok := h.store.cachedPath(h.convID, from, crossRoots); ok {
 		return path, nil
 	}
 	refs, err := h.store.backend.Walk(ctx, h.convID, from, crossRoots)
@@ -321,7 +436,9 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 		return nil, err
 	}
 	if len(refs) == 0 {
-		return nil, nil
+		// from is not "" here, so a walk that reached nothing names a node this
+		// conversation does not hold — another conversation's, or none.
+		return nil, fmt.Errorf("conv: walk: node %s not in conversation %s", from, h.convID)
 	}
 	nodes, err := h.store.nodesFor(ctx, h.convID, refs)
 	if err != nil {
@@ -340,11 +457,16 @@ func (s *Store) nodesFor(ctx context.Context, convID string, refs []Ref) ([]*Nod
 	var missing []string
 	s.mu.Lock()
 	for i, r := range refs {
-		if n, ok := s.getLocked(r.ID); ok {
+		if n, ok := s.lookupLocked(convID, r.ID); ok {
 			out[i] = n
 			continue
 		}
 		missing = append(missing, r.ID)
+	}
+	for i := len(refs) - 1; i >= 0; i-- {
+		if out[i] != nil {
+			s.touchLocked(refs[i].ID)
+		}
 	}
 	s.mu.Unlock()
 	if len(missing) == 0 {
@@ -356,9 +478,11 @@ func (s *Store) nodesFor(ctx context.Context, convID string, refs []Ref) ([]*Nod
 	}
 	byID := make(map[string]*Node, len(fetched))
 	for _, n := range fetched {
-		byID[n.ID] = n
+		if n.ConversationID == convID {
+			byID[n.ID] = n
+		}
 	}
-	s.putNodes(fetched...)
+	s.putNodes(convID, fetched...)
 	for i, r := range refs {
 		if out[i] != nil {
 			continue
@@ -374,7 +498,7 @@ func (s *Store) nodesFor(ctx context.Context, convID string, refs []Ref) ([]*Nod
 
 // nodeRef returns one node's ref, from the cache or the backend.
 func (s *Store) nodeRef(ctx context.Context, convID, id string) (Ref, error) {
-	if n, ok := s.cachedNode(id); ok {
+	if n, ok := s.cachedNode(convID, id); ok {
 		return n.Ref, nil
 	}
 	fetched, err := s.backend.Fetch(ctx, convID, []string{id})
@@ -382,18 +506,18 @@ func (s *Store) nodeRef(ctx context.Context, convID, id string) (Ref, error) {
 		return Ref{}, fmt.Errorf("read node %s: %w", id, err)
 	}
 	for _, n := range fetched {
-		if n.ID == id {
-			s.putNodes(n)
+		if n.ID == id && n.ConversationID == convID {
+			s.putNodes(convID, n)
 			return n.Ref, nil
 		}
 	}
 	return Ref{}, fmt.Errorf("node %s not in conversation %s", id, convID)
 }
 
-// node returns one node, from the cache or the backend, and nil when the
-// conversation does not hold it.
+// node returns one node of convID, from the cache or the backend, and nil when
+// the conversation does not hold it.
 func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
-	if n, ok := s.cachedNode(id); ok {
+	if n, ok := s.cachedNode(convID, id); ok {
 		return n, nil
 	}
 	fetched, err := s.backend.Fetch(ctx, convID, []string{id})
@@ -401,8 +525,8 @@ func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
 		return nil, fmt.Errorf("read node %s: %w", id, err)
 	}
 	for _, n := range fetched {
-		if n.ID == id {
-			s.putNodes(n)
+		if n.ID == id && n.ConversationID == convID {
+			s.putNodes(convID, n)
 			return n, nil
 		}
 	}
@@ -411,35 +535,38 @@ func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
 
 // readState resolves the conversation's position for a read. An owner entry
 // whose head is loaded answers from memory; anything else asks the backend
-// once and stores what it said.
+// once and stores what it said — unless a write published in between, which is
+// also what corrects an entry that is ahead of the backend.
 func (h *Handle) readState(ctx context.Context, e *entry) (State, error) {
 	if st, ok := h.store.cachedHead(e, h.owner); ok {
 		return State{HeadID: st.id, NextOrdinal: st.nextOrdinal}, nil
 	}
+	gen := h.store.generation(h.convID, e)
 	st, err := h.store.backend.State(ctx, h.convID)
 	if err != nil {
 		return State{}, err
 	}
-	h.store.storeHead(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
 	return st, nil
 }
 
 // State returns the conversation's position, always from the backend: it is
 // the answer a caller asks for precisely when it does not trust its cache.
 func (h *Handle) State(ctx context.Context) (State, error) {
-	e := h.store.touch(h.convID, h.owner)
+	e := h.store.touch(h.convID, h.owner, h.leaseKey())
+	gen := h.store.generation(h.convID, e)
 	st, err := h.store.backend.State(ctx, h.convID)
 	if err != nil {
 		return State{}, err
 	}
-	h.store.storeHead(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
 	return st, nil
 }
 
 // Working returns the working path: the chain from the head to the nearest
 // root, chronological.
 func (h *Handle) Working(ctx context.Context) ([]*Node, error) {
-	e := h.store.touch(h.convID, h.owner)
+	e := h.store.touch(h.convID, h.owner, h.leaseKey())
 	st, err := h.readState(ctx, e)
 	if err != nil {
 		return nil, err
@@ -449,7 +576,7 @@ func (h *Handle) Working(ctx context.Context) ([]*Node, error) {
 
 // Snapshot returns the conversation's whole tree, crossing every root.
 func (h *Handle) Snapshot(ctx context.Context) (*Snapshot, error) {
-	e := h.store.touch(h.convID, h.owner)
+	e := h.store.touch(h.convID, h.owner, h.leaseKey())
 	st, err := h.readState(ctx, e)
 	if err != nil {
 		return nil, err
@@ -463,9 +590,10 @@ func (h *Handle) Snapshot(ctx context.Context) (*Snapshot, error) {
 
 // RequestAt returns the working path ending at headID, minus working positions
 // [trimFrom, trimTo) when both are set. It reads no conversation state: the
-// caller names the head it is replaying.
+// caller names the head it is replaying, which must belong to this
+// conversation.
 func (h *Handle) RequestAt(ctx context.Context, headID string, trimFrom, trimTo *int) ([]*Node, error) {
-	h.store.touch(h.convID, h.owner)
+	h.store.touch(h.convID, h.owner, h.leaseKey())
 	nodes, err := h.pathFrom(ctx, headID, false)
 	if err != nil {
 		return nil, err
@@ -493,13 +621,13 @@ func (h *Handle) RequestAt(ctx context.Context, headID string, trimFrom, trimTo 
 // conversation's own index answers it when the node is cached, so a resume
 // costs no query; otherwise the backend is asked once.
 func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID string) (*Node, bool, error) {
-	e := h.store.touch(h.convID, h.owner)
+	e := h.store.touch(h.convID, h.owner, h.leaseKey())
 	if providerMessageID != "" {
 		h.store.mu.Lock()
-		id, ok := e.byProvider[providerMessageID]
+		ref, ok := e.byProvider[providerMessageID]
 		h.store.mu.Unlock()
 		if ok {
-			n, err := h.store.node(ctx, h.convID, id)
+			n, err := h.store.node(ctx, h.convID, ref.id)
 			if err != nil {
 				return nil, false, err
 			}
@@ -512,24 +640,24 @@ func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID 
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	h.store.putNodes(n)
+	h.store.putNodes(h.convID, n)
 	return n, true, nil
 }
 
 // Roots returns the conversation's parent-less nodes, newest ordinal first.
 func (h *Handle) Roots(ctx context.Context) ([]*Node, error) {
-	h.store.touch(h.convID, h.owner)
+	h.store.touch(h.convID, h.owner, h.leaseKey())
 	roots, err := h.store.backend.Roots(ctx, h.convID)
 	if err != nil {
 		return nil, err
 	}
-	h.store.putNodes(roots...)
+	h.store.putNodes(h.convID, roots...)
 	return roots, nil
 }
 
 // NodesByHash returns the refs of the nodes the conversation holds under
 // hashes.
 func (h *Handle) NodesByHash(ctx context.Context, hashes []convtree.Hash) (map[convtree.Hash]Ref, error) {
-	h.store.touch(h.convID, h.owner)
+	h.store.touch(h.convID, h.owner, h.leaseKey())
 	return h.store.backend.Lookup(ctx, h.convID, hashes)
 }

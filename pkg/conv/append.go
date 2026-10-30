@@ -42,8 +42,7 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 	if err := a.validate(); err != nil {
 		return Result{}, err
 	}
-	e := h.store.touch(h.convID, h.owner)
-	e.writeMu.Lock()
+	e := h.lockEntry()
 	defer e.writeMu.Unlock()
 
 	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
@@ -75,7 +74,7 @@ func (h *Handle) writeState(ctx context.Context, e *entry, fresh bool) (State, e
 	if err != nil {
 		return State{}, err
 	}
-	h.store.storeHead(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	h.store.storeHeadWrite(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
 	return st, nil
 }
 
@@ -186,6 +185,8 @@ func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State
 				kind = rootKind
 			}
 		}
+		// A published node owns its slices and pointed-to values: the caller's
+		// NewNode must not be able to mutate a node through aliasing.
 		toolUseIDs := a.Nodes[i].ToolUseIDs
 		if toolUseIDs == nil {
 			toolUseIDs = msg.ToolUseIDs(decoded[i])
@@ -202,11 +203,11 @@ func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State
 				PathHash:       hashes[i],
 			},
 			Msg:               decoded[i],
-			Content:           contents[i],
-			ToolUseIDs:        toolUseIDs,
+			Content:           append([]byte(nil), contents[i]...),
+			ToolUseIDs:        append([]string(nil), toolUseIDs...),
 			StopReason:        a.Nodes[i].StopReason,
-			InputTokens:       a.Nodes[i].InputTokens,
-			OutputTokens:      a.Nodes[i].OutputTokens,
+			InputTokens:       copyInt64(a.Nodes[i].InputTokens),
+			OutputTokens:      copyInt64(a.Nodes[i].OutputTokens),
 			ProviderMessageID: a.Nodes[i].ProviderMessageID,
 		})
 	}
@@ -216,11 +217,18 @@ func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State
 		headID = ids[len(ids)-1]
 	}
 
+	// The backend sees copies: the value it committed and the value the cache
+	// publishes must not be the same memory, or stamping CreatedAt on the
+	// published node would reach into a row the backend already holds.
+	committed := make([]*Node, len(rows))
+	for i, n := range rows {
+		committed[i] = copyNode(n)
+	}
 	created, err := h.store.backend.Commit(ctx, Commit{
 		ConversationID:      h.convID,
 		ExpectHead:          st.HeadID,
 		ExpectNextOrdinal:   st.NextOrdinal,
-		Rows:                rows,
+		Rows:                committed,
 		NewHead:             headID,
 		Forks:               forks,
 		Fallback:            a.Fallback,
@@ -235,8 +243,8 @@ func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State
 	}
 	// Rows first, head second: a reader that observes the new head must find
 	// its nodes.
-	h.store.putNodes(rows...)
-	h.store.storeHead(h.convID, e, headState{id: headID, nextOrdinal: st.NextOrdinal + len(rows)})
+	h.store.putNodes(h.convID, rows...)
+	h.store.storeHeadWrite(h.convID, e, headState{id: headID, nextOrdinal: st.NextOrdinal + len(rows)})
 
 	nodes := make([]*Node, 0, len(hashes))
 	nodes = append(nodes, held...)
@@ -328,36 +336,56 @@ func (a Append) validate() error {
 // must be the head and a user row. It is a head move, never a delete: the
 // retracted row survives, unreachable from the working path, so a retry can
 // append a different node at the same position.
+//
+// The head and role checks are pre-checks: a refusal still fences the lease
+// first, because a writer that has lost the conversation must learn that rather
+// than that its head is wrong. The fence is a commit that moves the head onto
+// itself and writes no row, which is the only fence this interface offers.
 func (h *Handle) RetractHead(ctx context.Context, id string) error {
-	e := h.store.touch(h.convID, h.owner)
-	e.writeMu.Lock()
+	e := h.lockEntry()
 	defer e.writeMu.Unlock()
 
+	refusal := fmt.Errorf("conv: retract head: %s is not the head user row", id)
 	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
 		st, err := h.store.backend.State(ctx, h.convID)
 		if err != nil {
 			return err
 		}
-		h.store.storeHead(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
-		if st.HeadID != id {
-			return fmt.Errorf("conv: retract head: %s is not the head user row", id)
-		}
-		node, err := h.store.node(ctx, h.convID, id)
+		h.store.storeHeadWrite(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+
+		newHead, refused, err := h.retractTarget(ctx, id, st)
 		if err != nil {
-			return fmt.Errorf("conv: retract head: %w", err)
+			return err
 		}
-		if node == nil || node.Msg.Role != msg.User {
-			return fmt.Errorf("conv: retract head: %s is not the head user row", id)
+		if refused {
+			_, err := h.store.backend.Commit(ctx, Commit{
+				ConversationID:    h.convID,
+				ExpectHead:        st.HeadID,
+				ExpectNextOrdinal: st.NextOrdinal,
+				NewHead:           st.HeadID,
+				Lease:             h.lease,
+			})
+			switch {
+			case err == nil:
+				return refusal
+			case errors.Is(err, ErrLeaseLost):
+				return err
+			case errors.Is(err, ErrConflict):
+				continue
+			default:
+				return err
+			}
 		}
+
 		_, err = h.store.backend.Commit(ctx, Commit{
 			ConversationID:    h.convID,
 			ExpectHead:        st.HeadID,
 			ExpectNextOrdinal: st.NextOrdinal,
-			NewHead:           node.ParentID,
+			NewHead:           newHead,
 			Lease:             h.lease,
 		})
 		if err == nil {
-			h.store.storeHead(h.convID, e, headState{id: node.ParentID, nextOrdinal: st.NextOrdinal})
+			h.store.storeHeadWrite(h.convID, e, headState{id: newHead, nextOrdinal: st.NextOrdinal})
 			return nil
 		}
 		if errors.Is(err, ErrLeaseLost) || !errors.Is(err, ErrConflict) {
@@ -365,4 +393,41 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 		}
 	}
 	return fmt.Errorf("conv: retract head: %w after 5 attempts", ErrConflict)
+}
+
+// retractTarget reports the head a retract of id would leave, or that id is not
+// retractable at all.
+func (h *Handle) retractTarget(ctx context.Context, id string, st State) (newHead string, refused bool, err error) {
+	if st.HeadID != id {
+		return "", true, nil
+	}
+	node, err := h.store.node(ctx, h.convID, id)
+	if err != nil {
+		return "", false, fmt.Errorf("conv: retract head: %w", err)
+	}
+	if node == nil || node.Msg.Role != msg.User {
+		return "", true, nil
+	}
+	return node.ParentID, false, nil
+}
+
+// copyNode returns a node whose stored content, tool-use ids and token values
+// are its own. Msg is shared: a decoded message is never written to after it is
+// published.
+func copyNode(n *Node) *Node {
+	cp := *n
+	cp.Content = append([]byte(nil), n.Content...)
+	cp.ToolUseIDs = append([]string(nil), n.ToolUseIDs...)
+	cp.InputTokens = copyInt64(n.InputTokens)
+	cp.OutputTokens = copyInt64(n.OutputTokens)
+	return &cp
+}
+
+// copyInt64 returns a fresh pointer to v's value.
+func copyInt64(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
 }

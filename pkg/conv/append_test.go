@@ -4,11 +4,13 @@ package conv_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/conv"
@@ -478,4 +480,98 @@ func (r *commitRecorder) last() conv.Commit {
 		return conv.Commit{}
 	}
 	return r.commits[len(r.commits)-1]
+}
+
+// A node id names a node in ONE conversation. A parent, a derived-from or a
+// replayed head belonging to another conversation is refused, never adopted
+// from the cache: the id space is global, a tree is not.
+func TestAppendRejectsForeignNode(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	b := conv.NewMemBackend()
+	otherID := uuid.Must(uuid.NewV7()).String()
+	b.Ensure(otherID)
+	convID := uuid.Must(uuid.NewV7()).String()
+	b.Ensure(convID)
+
+	// One store, so the foreign node is in this cache: the danger is a cache
+	// hit, not a backend miss.
+	s := conv.NewStore(b, conv.Options{})
+	foreign, err := s.Open(otherID, conv.AsOwner()).Append(ctx, conv.Append{
+		FromHead: true,
+		Nodes:    []conv.NewNode{{Msg: textMsg(msg.User, "elsewhere")}},
+	})
+	c.NoError(err, "foreign append")
+	foreignID := foreign.Nodes[0].ID
+
+	h := s.Open(convID, conv.AsOwner())
+	_, err = h.Append(ctx, conv.Append{
+		ParentID: foreignID,
+		Nodes:    []conv.NewNode{{Msg: textMsg(msg.Assistant, "here")}},
+	})
+	c.ErrorContains(err, "conv: append: node "+foreignID+" not in conversation "+convID, "a foreign parent")
+
+	_, err = h.Append(ctx, conv.Append{
+		Root:          convtree.RootKindClear,
+		DerivedFromID: foreignID,
+		Nodes:         []conv.NewNode{{Msg: textMsg(msg.User, "cleared")}},
+	})
+	c.ErrorContains(err, "conv: append: derived-from: node "+foreignID+" not in conversation "+convID, "a foreign derived-from")
+
+	_, err = h.RequestAt(ctx, foreignID, nil, nil)
+	c.ErrorContains(err, "not in conversation "+convID, "a foreign head")
+
+	st, err := h.State(ctx)
+	c.NoError(err, "State")
+	c.Eq("", st.HeadID, "nothing was inserted")
+	path, err := h.Working(ctx)
+	c.NoError(err, "Working")
+	c.Empty(path, "the conversation is still empty")
+}
+
+// A published node owns its slices and pointed-to values.
+func TestPublishedNodeDoesNotAliasCallerMemory(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	h := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
+
+	in, out := int64(11), int64(22)
+	ids := []string{"tool_1"}
+	res, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{
+		Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{
+			msg.ToolUse{ID: "tool_1", Name: "bash", Input: json.RawMessage(`{}`)},
+		}},
+		ToolUseIDs:   ids,
+		InputTokens:  &in,
+		OutputTokens: &out,
+	}}})
+	c.NoError(err, "append")
+	node := res.Nodes[0]
+
+	ids[0] = "mutated"
+	in, out = 99, 98
+	c.EqDeep([]string{"tool_1"}, node.ToolUseIDs, "the node's tool-use ids are its own")
+	c.Eq(int64(11), *node.InputTokens, "the node's input tokens are its own")
+	c.Eq(int64(22), *node.OutputTokens, "the node's output tokens are its own")
+}
+
+// The head and role checks are pre-checks: a writer that has lost the
+// conversation learns that, not that its head is wrong.
+func TestRetractHeadFencesBeforeRefusing(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	h := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
+	first, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "one")}}})
+	c.NoError(err, "one")
+	_, err = h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "two")}}})
+	c.NoError(err, "two")
+
+	fenced := conv.NewStore(&failingCommit{Backend: b, failure: conv.ErrLeaseLost}, conv.Options{}).
+		Open(convID, conv.WithLease(conv.Lease{ConversationID: convID, Holder: "gone", Token: "stale"}))
+
+	err = fenced.RetractHead(ctx, first.Nodes[0].ID)
+	c.ErrorIs(err, conv.ErrLeaseLost, "a lost lease wins over the head check")
+	c.NotStrContains(err.Error(), "not the head user row", "the refusal is not reported instead")
 }
