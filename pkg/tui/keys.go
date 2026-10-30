@@ -49,7 +49,12 @@ type keyMap struct {
 	Redraw        key.Binding
 	// ^Y is free: not in textareaKeys, and bound nowhere else in the cockpit.
 	ToggleImages key.Binding
-	Abort        key.Binding
+	// ToggleInjected shows the harness-injected system-role blocks the
+	// transcript hides by default. ^T is a textarea key (transpose), so like
+	// ^B/^G/^D it is grandfathered: you cannot transpose a character while
+	// typing in the prompt.
+	ToggleInjected key.Binding
+	Abort          key.Binding
 
 	// Input pane.
 	Send           key.Binding
@@ -118,6 +123,10 @@ func defaultKeyMap() keyMap {
 		// Kitty graphics support. ^Y is free: not in textareaKeys, and bound
 		// nowhere else in the cockpit.
 		ToggleImages: key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("^Y", "images")),
+		// ^T shows the harness-injected system-role messages -- heartbeat
+		// nudges, environment updates -- that the transcript hides by default.
+		// They are real history but not conversation, so the default is off.
+		ToggleInjected: key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("^T", "injected")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
@@ -226,14 +235,21 @@ var textareaKeys = map[string]bool{
 	"shift+up": true, "shift+down": true, "ctrl+g": true, "ctrl+shift+c": true,
 }
 
-// grandfathered are textarea keys the cockpit already took before this chunk.
-// ctrl+b (rail) and ctrl+g (help) must stay reachable from every pane, and
-// ctrl+d quits. The design accepts that you cannot use them while typing.
+// grandfathered are textarea keys the cockpit takes anyway. ctrl+b (rail) and
+// ctrl+g (help) must stay reachable from every pane, ctrl+d quits, and ctrl+t
+// shows the injected messages. The design accepts that you cannot use them
+// while typing.
 // ctrl+a is deliberately NOT here: it used to be ToggleRail's primary
 // binding, and now that ToggleRail moved to ctrl+r, ctrl+a reaches the
 // textarea's line-start like every other unclaimed emacs key should.
 var grandfathered = map[string]bool{
 	"ctrl+b": true, "ctrl+g": true, "ctrl+d": true,
+	// ^T shows the injected system-role messages. It IS a textarea key
+	// (transpose-character-backward), and the cockpit takes it anyway: reading
+	// what the harness said to the agent is the point of the toggle, and
+	// transposing a character mid-prompt is the rarer need. Same trade as
+	// ^B/^G/^D.
+	"ctrl+t": true,
 	// Scroll keys the input pane claims outright. pgup/pgdown page a
 	// three-line box, which is meaningless; home/end are line-start/line-end,
 	// which ^A gave up anyway and alt+</ctrl+home still provide.
@@ -241,7 +257,7 @@ var grandfathered = map[string]bool{
 }
 
 // globalConflicts returns the names of global bindings that steal a textarea
-// key, ignoring the grandfathered three. It must return empty.
+// key, ignoring the grandfathered ones. It must return empty.
 func (k keyMap) globalConflicts() []string {
 	globals := map[string]key.Binding{
 		"Quit": k.Quit, "NextPane": k.NextPane, "PrevPane": k.PrevPane,
@@ -249,7 +265,8 @@ func (k keyMap) globalConflicts() []string {
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
-		"Redraw": k.Redraw, "Abort": k.Abort,
+		"ToggleInjected": k.ToggleInjected,
+		"Redraw":         k.Redraw, "Abort": k.Abort,
 	}
 	var out []string
 	for name, b := range globals {

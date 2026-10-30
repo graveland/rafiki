@@ -367,6 +367,10 @@ type Cockpit struct {
 	showHelp   bool
 	railHidden bool
 	expandArgs bool
+	// showInjected draws the harness-injected system-role blocks the transcript
+	// hides by default. A VIEW flag only: the blocks stay in the session, so
+	// ^T re-shows history already fetched, with no refetch.
+	showInjected bool
 	// railPeek records that an explicit request revealed a rail the default look
 	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
@@ -1521,6 +1525,18 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Lines reuses r.cached for every block below Finalized -- which is the
 		// whole visible transcript -- so the toggle reached only the live tail.
 		c.invalidatePanes()
+		return c, nil
+	case key.Matches(msg, k.ToggleInjected):
+		// Same trap as ^O above, and worse: a hidden injected block leaves no
+		// line behind, so without the invalidation the cached prefix would keep
+		// showing (or keep omitting) blocks the flag no longer agrees with.
+		c.showInjected = !c.showInjected
+		c.invalidatePanes()
+		if c.showInjected {
+			c.setNotice("injected messages: shown")
+		} else {
+			c.setNotice("injected messages: hidden")
+		}
 		return c, nil
 	case key.Matches(msg, k.ToggleImages):
 		if c.caps.mode() != imageModeKitty {
@@ -2768,7 +2784,7 @@ func (c *Cockpit) helpLines(width int) []string {
 	left := group("anywhere",
 		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
 		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs,
-		k.ToggleImages, k.Redraw, k.Quit)
+		k.ToggleInjected, k.ToggleImages, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
 		k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape)...)
@@ -2859,7 +2875,12 @@ func (c *Cockpit) View() tea.View {
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)
-		lines := p.linesFor(s, convWidth, bodyHeight, c.expandArgs, c.drawImages(), c.caps.smallIDs(), c.ghostRows(f, convWidth))
+		lines := p.linesFor(s, convWidth, bodyHeight, renderOpts{
+			expandArgs:   c.expandArgs,
+			drawImages:   c.drawImages(),
+			smallIDs:     c.caps.smallIDs(),
+			showInjected: c.showInjected,
+		}, c.ghostRows(f, convWidth))
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to

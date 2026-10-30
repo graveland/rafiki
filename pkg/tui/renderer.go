@@ -370,6 +370,13 @@ type renderer struct {
 	// nothing visible.
 	expandArgs bool
 
+	// showInjected draws the harness-injected blocks the cockpit hides by
+	// default. Filtering happens HERE, at layout time, never in the session:
+	// the block stays in the model, so the toggle re-shows history already
+	// fetched without a refetch. Part of the cache key via paneSig for the same
+	// reason as expandArgs.
+	showInjected bool
+
 	// images is the shared Kitty thumbnail store, or nil when this renderer
 	// must never draw pixels. drawImages and smallIDs are set per render by
 	// linesFor, exactly like expandArgs — and like expandArgs they are part of
@@ -480,6 +487,17 @@ func (r *renderer) renderBlock(b session.Block) string {
 		return "\n" + strings.Join(rows, "\n")
 	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(sanitizeControlChars(b.Text))
+	case session.KindInjected:
+		// Real history, not a turn: a harness nudge reads as a footnote under
+		// its own gutter, in the same grey the system lines use — ⚙ already
+		// means an error or a compaction boundary, and this must not be
+		// mistaken for one. Wrapped so a long environment update stays inside
+		// the pane; hidden outright unless the reader asked for it.
+		var sb strings.Builder
+		for _, line := range strings.Split(strings.TrimRight(sanitizeControlChars(b.Text), "\n"), "\n") {
+			r.writeWrapped(&sb, styleMeta.Render("↳ "), styleThink.Render(line))
+		}
+		return sb.String()
 	case session.KindScriptOutput:
 		// A script's output IS the transcript's content, not commentary: raw,
 		// never markdown (the glamour-joins-paragraphs trap), gutter weight
@@ -685,6 +703,15 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	return sb.String()
 }
 
+// hides reports whether b is left out of the transcript in the current mode.
+//
+// Only injected blocks can be hidden, and the toggle is the only input. The
+// block is never removed from the session: a hidden block is one the layout
+// skipped, so re-showing it costs no refetch.
+func (r *renderer) hides(b session.Block) bool {
+	return b.Kind == session.KindInjected && !r.showInjected
+}
+
 // Lines renders the transcript as display lines: cached output for the
 // finalized prefix, freshly rendered output for the live tail.
 //
@@ -718,6 +745,9 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.liveOut = nil
 	}
 	for i := r.cachedUpTo; i < finalized; i++ {
+		if r.hides(blocks[i]) {
+			continue
+		}
 		r.cached = append(r.cached, blockLines(r.renderBlock(blocks[i]))...)
 	}
 	r.cachedUpTo = finalized
@@ -730,6 +760,9 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.lastFP = fp
 		var tail []string
 		for i := finalized; i < len(blocks); i++ {
+			if r.hides(blocks[i]) {
+				continue
+			}
 			tail = append(tail, blockLines(r.renderBlock(blocks[i]))...)
 		}
 		r.liveOut = tail

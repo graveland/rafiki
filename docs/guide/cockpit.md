@@ -76,6 +76,9 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `esc` / `^X` | Abort the running turn |
 | `^R` / `^B` | Collapse/restore the agent rail; with one agent, peek it |
 | `^G` | Toggle the help overlay |
+| `^O` | Expand tool arguments in full rather than folded |
+| `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
+| `^T` | Show the messages the agent's harness injected (hidden by default — see below) |
 | `^C`/`^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time |
 
 **Input pane**
@@ -119,6 +122,14 @@ own prose, dotted `┊` for thinking, none for tool calls — which show their
 argument (`⚒ bash go test ./...`) and truncate output from the *end* (where
 the error usually is). No mouse support, deliberately — capturing it would
 take away your terminal's own select-and-copy.
+
+A `↳` gutter marks the messages the agent's own harness injected — a
+heartbeat nudge, an environment update, a file-changed notice. They are
+stored history, so they are replayed with everything else, but they are not
+conversation and the transcript hides them until you press `^T`. Hiding is a
+view decision: the messages stay in the transcript already fetched, so the
+toggle costs no refetch, and scrolling and the position readout are
+unaffected either way.
 
 ## Activity and attention
 

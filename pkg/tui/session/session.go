@@ -33,6 +33,13 @@ const (
 	// KindScriptOutput is one chunk of a script child's stdout or stderr. Its
 	// Stream field says which; Text is the verbatim output.
 	KindScriptOutput
+	// KindInjected is a system-role message the child's own harness put into
+	// the conversation -- a heartbeat nudge, an environment update, a
+	// file-changed notice. It is real history, so it stays in the model, but it
+	// is not conversation: the cockpit hides these unless asked, and it is a
+	// kind of its own rather than KindSystem because KindSystem (errors,
+	// compaction boundaries) is always worth seeing.
+	KindInjected
 )
 
 // ToolCall is one tool invocation inside an assistant turn.
@@ -324,6 +331,8 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 			Final: true,
 		})
 		s.recomputeFinalized()
+	case *rafikiv1.Event_SystemMessage:
+		s.applySystemMessage(p.SystemMessage)
 	case *rafikiv1.Event_ChildExited:
 		// A dead child answers no more tool calls.
 		s.settleAll()
@@ -358,6 +367,25 @@ func (s *Session) applyScriptOutput(so *rafikiv1.ScriptOutput) {
 		Text:   so.GetText(),
 		Stream: so.GetStream(),
 		Final:  true,
+	})
+	s.recomputeFinalized()
+}
+
+// applySystemMessage appends one harness-injected system-role message.
+//
+// It is KindInjected, never KindUser: a user-role block is what clears the
+// cockpit's ⏳ pending echo, and nothing the harness says on its own behalf
+// acknowledges a prompt. It is never KindSystem either -- see KindInjected.
+// Like CompactionBoundary and Retry it is mid-conversation, so it does NOT
+// settleAll: an injected nudge arriving between a tool_use and its
+// tool_result must leave the call in flight. recomputeFinalized is safe here
+// because it stops at the first block that can still change.
+func (s *Session) applySystemMessage(sm *rafikiv1.SystemMessage) {
+	s.Blocks = append(s.Blocks, Block{
+		Kind:  KindInjected,
+		At:    time.Now(),
+		Text:  TextFromContent(sm.GetContent()),
+		Final: true,
 	})
 	s.recomputeFinalized()
 }

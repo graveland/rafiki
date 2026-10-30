@@ -147,7 +147,8 @@ func TestLifecycleKeysStayRailLocal(t *testing.T) {
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
-		"Redraw": k.Redraw, "Abort": k.Abort,
+		"ToggleInjected": k.ToggleInjected,
+		"Redraw":         k.Redraw, "Abort": k.Abort,
 	}
 	rail := map[string]bool{}
 	for _, s := range k.NewAgent.Keys() {

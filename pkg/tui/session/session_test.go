@@ -762,3 +762,58 @@ func TestApplyScriptOutputJoinsSplitPieces(t *testing.T) {
 	c.Require().Len(s3.Blocks, 1, "history blocks = %d, want 1", len(s3.Blocks))
 	c.Eq("piece joined\n", s3.Blocks[0].Text, "history join")
 }
+
+// systemMessage builds one SystemMessage event: a stored system-role row the
+// child's harness injected (a heartbeat nudge, an environment update, a
+// file-changed notice).
+func systemMessage(childID, text string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_SystemMessage{SystemMessage: &rafikiv1.SystemMessage{
+			Content: []*rafikiv1.ContentBlock{{
+				Index: 0,
+				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+			}},
+		}},
+	}
+}
+
+// An injected system-role message is real history but not conversation, so it
+// lands in its OWN kind: KindSystem already means an error or a compaction
+// boundary, and those must stay always-visible. It is also mid-conversation --
+// it must not resolve an in-flight tool call, and it must not clear the
+// cockpit's ⏳ pending echo (that clears on KindUser only).
+func TestSessionAppliesSystemMessage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_test")
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c_test",
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+						Id: "tu_1", Name: "bash", InputJson: `{"command":"sleep 60"}`,
+					}},
+				}},
+			},
+		},
+	})
+	s.Apply(&rafikiv1.Event{ChildId: "c_test", Payload: &rafikiv1.Event_ToolExecutionStart{
+		ToolExecutionStart: &rafikiv1.ToolExecutionStart{ToolUseId: "tu_1", Name: "bash"},
+	}})
+
+	s.Apply(systemMessage("c_test", "heartbeat: keep going"))
+
+	c.Require().Len(s.Blocks, 2, "blocks")
+	got := s.Blocks[1]
+	c.Eq(session.KindInjected, got.Kind, "an injected message must not land in KindSystem (errors and compaction boundaries) or KindUser (which clears the pending echo); kind")
+	c.Eq("heartbeat: keep going", got.Text, "text")
+	c.True(got.Final, "an injected block is settled the moment it is appended")
+
+	last := s.LastAssistant()
+	c.Require().NotNil(last, "the assistant block is gone")
+	c.Require().Len(last.ToolCalls, 1, "tool calls")
+	c.True(last.ToolCalls[0].Running, "an injected message resolved an in-flight tool call")
+	c.NotEq(len(s.Blocks), s.Finalized, "Finalized: an injected message settled the live region")
+}

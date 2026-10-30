@@ -2705,10 +2705,10 @@ func TestRedrawInvalidatesThePaneCache(t *testing.T) {
 	s.Blocks = []session.Block{{Kind: session.KindUser, Text: "hello", Final: true}}
 	s.Finalized = 1
 
-	c.Require().NotNil(p.linesFor(s, 80, 24, false, false, false, nil), "first render returned nil")
-	c.Require().Nil(p.linesFor(s, 80, 24, false, false, false, nil), "second render should have been a cache hit")
+	c.Require().NotNil(p.linesFor(s, 80, 24, renderOpts{}, nil), "first render returned nil")
+	c.Require().Nil(p.linesFor(s, 80, 24, renderOpts{}, nil), "second render should have been a cache hit")
 	p.invalidate()
-	c.NotNil(p.linesFor(s, 80, 24, false, false, false, nil), "invalidate did not force a rebuild")
+	c.NotNil(p.linesFor(s, 80, 24, renderOpts{}, nil), "invalidate did not force a rebuild")
 }
 
 // TestClosingARowKeepsTheCursorWhereTheRowWas pins that the cursor lands on the
@@ -2919,4 +2919,83 @@ func TestPendingGhostStaysWithItsAgent(t *testing.T) {
 	c.pending = []pendingSend{{"c_1", "hello"}}
 	ck.Len(c.ghostRows("c_1", 80), 2, "blank separator plus one row")
 	ck.Len(c.ghostRows("c_2", 80), 0, "ghost followed the user to another agent")
+}
+
+// ── injected (system-role) messages ─────────────────────────────────────────
+
+// systemMessageEventFor is a stored system-role row as the focus stream
+// delivers it: content, and no turn around it.
+func systemMessageEventFor(id, text string) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: id,
+		Payload: &rafikiv1.Event_SystemMessage{SystemMessage: &rafikiv1.SystemMessage{
+			Content: []*rafikiv1.ContentBlock{{
+				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+			}},
+		}}}
+}
+
+// injectedCockpit shows one child whose transcript holds a user turn and one
+// harness-injected message, the way the focus stream would have delivered
+// them.
+func injectedCockpit(t *testing.T) *Cockpit {
+	t.Helper()
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.focusChild = "c_1"
+	c.applyEvent(userMessageEventFor("c_1", "hello there", 0))
+	c.applyEvent(systemMessageEventFor("c_1", "heartbeat: keep going"))
+	return c
+}
+
+// Injected messages are real history but not conversation, so the transcript
+// hides them by default -- and hiding is a RENDER decision: the block stays in
+// the session, which is what lets ^T re-show it with no refetch.
+func TestCockpitHidesInjectedByDefault(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := injectedCockpit(t)
+
+	view := ansi.Strip(c.View().Content)
+	ck.StrContains(view, "hello there", "the transcript lost the user turn:\n")
+	ck.NotStrContains(view, "heartbeat", "an injected system-role message is shown by default:\n")
+
+	s := c.sessions["c_1"]
+	ck.Require().Len(s.Blocks, 2, "the hidden block must stay in the session model")
+	ck.Eq(session.KindInjected, s.Blocks[1].Kind, "block[1] kind")
+}
+
+// ^T brings the injected messages back and puts them away again, and neither
+// press may touch the session: the toggle is a view flag, so history already
+// fetched is re-shown without a refetch.
+func TestCockpitCtrlTTogglesInjected(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := injectedCockpit(t)
+	s := c.sessions["c_1"]
+	ck.Require().Len(s.Blocks, 2, "setup")
+
+	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	ck.True(c.showInjected, "^T did not toggle showInjected")
+	ck.StrContains(ansi.Strip(c.View().Content), "heartbeat: keep going",
+		"^T did not reveal the injected message:\n")
+
+	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	ck.False(c.showInjected, "^T did not toggle back")
+	ck.NotStrContains(ansi.Strip(c.View().Content), "heartbeat",
+		"^T did not hide the injected message again:\n")
+
+	ck.Len(s.Blocks, 2, "the toggle changed the session model; filtering is a render decision only")
+	ck.Eq(session.KindInjected, s.Blocks[1].Kind, "block[1] kind")
+}
+
+// ^T must be discoverable: a key that changes the transcript and appears
+// nowhere in the help overlay may as well not exist.
+func TestHelpShowsInjectedToggle(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	help := ansi.Strip(c.View().Content)
+	h := c.keys.ToggleInjected.Help()
+	ck.StrContains(help, h.Key, "the help overlay does not name the injected toggle's key:\n")
+	ck.StrContains(help, h.Desc, "the help overlay does not describe the injected toggle:\n")
 }
