@@ -65,6 +65,7 @@ states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
 transcript = c.export(child)              # the child's decomposed transcript (fundi or claude; last assistant turn = the answer)
 page = c.get_history(child, limit=50)     # the newest 50 transcript events, oldest first, each with ts;
+                                          #   (system rows come back as SystemMessage, not UserMessage)
 older = c.get_history(child, limit=50, before=page[0].ts)
                                           #   page backwards with the oldest ts held (an empty page is
                                           #   the start; a page never splits events sharing a ts)
@@ -211,10 +212,14 @@ Streaming calls retry too, with their delivery contracts spelled out:
   between pull and wire loses what it had not yet yielded. That is the
   daemon's contract, not a choice the SDK makes.
 
-Message identity: a durable `AssistantMessage` or `UserMessage` event carries
-in `Event.ts` the `created_at` of the `conversation_message` row that message
-was persisted as, the same value `get_history` reports for it, so a message is
-identified across a live stream and a history read by its `ts`. Fundi children
+Message identity: a durable `AssistantMessage`, `UserMessage` or
+`SystemMessage` event carries in `Event.ts` the `created_at` of the
+`conversation_message` row that message was persisted as, the same value
+`get_history` reports for it, so a message is identified across a live stream
+and a history read by its `ts`. A `system`-role row — a notice the child's
+harness injected (a heartbeat nudge, an environment update), not something the
+user typed — arrives as `SystemMessage`, from the stream and from
+`get_history` alike: it is history, and hiding it is a display choice. Fundi children
 meet this today; a claude child's live `ts` is still the claude stream's time,
 not the row's. Rows written in one transaction share a `ts`, so match on `ts`
 plus position and role. A fundi tool result is its own `UserMessage` (a

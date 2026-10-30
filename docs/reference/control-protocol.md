@@ -323,7 +323,14 @@ Note that the durable event ordinal is **not** `conversation_message.ordinal`: i
 
 ### Message events: `ts` is the row's `created_at`
 
-A durable `AssistantMessage` or `UserMessage` event on `StreamEvents` carries in `Event.ts` the `created_at` of the `conversation_message` row that message was persisted as, the same value `GetHistory` reports for that message. A client can therefore identify one message across a live stream and a history read by its `ts`.
+A durable `AssistantMessage`, `UserMessage` or `SystemMessage` event on `StreamEvents` carries in `Event.ts` the `created_at` of the `conversation_message` row that message was persisted as, the same value `GetHistory` reports for that message. A client can therefore identify one message across a live stream and a history read by its `ts`.
+
+A stored `system`-role row — a message the child's harness injected (a heartbeat
+nudge, an environment update, a file-changed notice), not something the user
+typed — renders as `SystemMessage`, never as a `UserMessage`. It is real
+history: `GetHistory` returns it and `StreamEvents` streams it. A client that
+renders it distinctly, or hides it by default, is making a display choice; it
+must not omit the row.
 
 Because several rows can share a `ts` (a transaction's rows share one), `ts`
 identifies a message together with its position and role, not alone.
@@ -385,8 +392,10 @@ the multi-row transaction today is a compaction or `/clear` boundary written
 together with the tail copied after it (`appendBoundary`, `pkg/store`), and
 those copies render no event. Clients must still treat `ts` as non-unique; the
 widening below is what makes that safe. For a fundi or claude child this `ts` is the same
-value the live `AssistantMessage`/`UserMessage` event carried — see "Message
-events: `ts` is the row's `created_at`" above.
+value the live `AssistantMessage`/`UserMessage`/`SystemMessage` event carried —
+see "Message events: `ts` is the row's `created_at`" above. A `system`-role row
+is history like any other: it comes back from `GetHistory` as a
+`SystemMessage`, and hiding it is the client's display choice, not the read's.
 
 The request's two optional fields page that history BACKWARDS:
 
@@ -1886,6 +1895,7 @@ Every event payload is classified into a tier:
 | Event | Tier | Purpose |
 |---|---|---|
 | `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way |
+| `SystemMessage` | durable | A persisted `system`-role row: a message the child's harness injected (a heartbeat nudge, an environment update, a file-changed notice), not something the user typed. Same `ts` rule as the other message events. Clients may render it distinctly and hide it by default; it is real history and is never omitted from `GetHistory` |
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn, emitted once per turn by both model-backed kinds: a fundi turn opens at `Emitter.AgentStart` (`pkg/fundi/emit.go`) before its first request, so `model` is unset there; a claude turn opens at prompt delivery — its prompt echo (`OutboundEchoNative`, `pkg/child/provider_claude_state.go`), before the first model request reaches the proxy — so `model` is unset there too, and the first assistant frame (which names one) does not reopen it. A second prompt/steer inside the same turn publishes no second `TurnStart`. `turn_id` is unset on both, since no producer mints one and `TurnEnd` carries none either |
 | `TurnEnd` | durable | End of an agent turn. A fundi turn publishes it from `Emitter.AgentEnd`, a claude turn from its `result` frame. Both carry the turn's token usage; cost rides `cost_usd` when the producer can price the turn (fundi always reports one, a claude child omits it when the result frame reports none) |
@@ -1904,7 +1914,7 @@ Every event payload is classified into a tier:
 | `TasksChanged` | durable | The task ledger OWNED by this event's `child_id` changed. `kind` is one of `added`, `updated`, `dropped`, `assigned`, `orphaned` (a string, like `AgentStatus.state`, so a new kind needs no wire change); `tasks` are the rows the change touched as they read AFTER it — `handle`, `content`, `active_form`, `status`, `assignee`, `drop_reason`; a `dropped` notice carries only subtree rows reading `dropped`, so a completed or failed descendant the drop left alone is not reported. Published only after the store mutation commits (`tasks.Notifying` wraps the ledger, `pkg/tasks/notify.go`; the one publisher is `Controller.publishTasksChanged`, `cmd/rafikid/task_ledger.go`), and silent on an error or a no-op mutation, so a consumer can never replay a change the ledger does not have. `assigned` (a spawned child's `task` handle) publishes on the SPAWNER's ledger (`Controller.Spawn`'s post-admission `Assign`) and `orphaned` (a dead child's unfinished rows) on the dead child's PARENT's (`Controller.handleChildExit`'s sweep); in both the event names whichever child owns that ledger |
 | `ContentBlockDelta` | ephemeral | Live token/text streaming delta |
 
-Nineteen payload types today: eighteen durable (the seventeen durable rows above
+Twenty payload types today: nineteen durable (the eighteen durable rows above
 plus `ScriptReport`, the `Report` verb's stored payload — it reaches a child's
 own event log only when the top-level script has no parent to push to) and one
 ephemeral (`ContentBlockDelta`). The count is prose, not enforcement; the

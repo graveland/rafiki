@@ -253,6 +253,23 @@ class UserMessage:
         return obj
 
 @dataclasses.dataclass
+class SystemMessage:
+    content: list[ContentBlock] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.content:
+            out["content"] = [x.to_dict() for x in self.content]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SystemMessage":
+        obj = cls()
+        _v = _d.get("content")
+        if _v is not None:
+            obj.content = [ContentBlock.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
 class AssistantMessage:
     content: list[ContentBlock] = dataclasses.field(default_factory=list)
     stop_reason: str = "STOP_REASON_UNSPECIFIED"
@@ -830,6 +847,7 @@ class Event:
     child_renamed: Optional[ChildRenamed] = None
     tasks_changed: Optional[TasksChanged] = None
     child_closed: Optional[ChildClosed] = None
+    system_message: Optional[SystemMessage] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -839,7 +857,7 @@ class Event:
             out["ordinal"] = self.ordinal
         if self.ts is not None:
             out["ts"] = _ts_out(self.ts)
-        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed, self.child_closed) if x is not None]
+        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed, self.child_closed, self.system_message) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
         if self.user_message is not None:
@@ -880,6 +898,8 @@ class Event:
             out["tasksChanged"] = self.tasks_changed.to_dict()
         if self.child_closed is not None:
             out["childClosed"] = self.child_closed.to_dict()
+        if self.system_message is not None:
+            out["systemMessage"] = self.system_message.to_dict()
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Event":
@@ -950,6 +970,9 @@ class Event:
         _v = _d.get("childClosed")
         if _v is not None:
             obj.child_closed = ChildClosed.from_dict(_v)
+        _v = _d.get("systemMessage")
+        if _v is not None:
+            obj.system_message = SystemMessage.from_dict(_v)
         return obj
 
 

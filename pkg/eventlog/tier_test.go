@@ -23,6 +23,7 @@ func TestTierOf(t *testing.T) {
 		{Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{}}},
 		{Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{}}},
 		{Payload: &rafikiv1.Event_AssistantMessage{AssistantMessage: &rafikiv1.AssistantMessage{}}},
+		{Payload: &rafikiv1.Event_SystemMessage{SystemMessage: &rafikiv1.SystemMessage{}}},
 		{Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{}}},
 		{Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{}}},
 		// TypeName's switch arm is load-bearing: TierOf classifies via

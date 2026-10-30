@@ -238,6 +238,8 @@ func TypeName(ev *rafikiv1.Event) string {
 		return "user_message"
 	case *rafikiv1.Event_AssistantMessage:
 		return "assistant_message"
+	case *rafikiv1.Event_SystemMessage:
+		return "system_message"
 	case *rafikiv1.Event_TurnStart:
 		return "turn_start"
 	case *rafikiv1.Event_TurnEnd:

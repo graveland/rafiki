@@ -214,6 +214,8 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		}
 	case *rafikiv1.Event_UserMessage:
 		detail = " " + oneLine(contentSummary(p.UserMessage.GetContent()))
+	case *rafikiv1.Event_SystemMessage:
+		detail = " " + oneLine(contentSummary(p.SystemMessage.GetContent()))
 	case *rafikiv1.Event_AssistantMessage:
 		detail = " " + oneLine(contentSummary(p.AssistantMessage.GetContent()))
 	case *rafikiv1.Event_TurnStart:

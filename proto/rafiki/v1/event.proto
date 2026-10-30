@@ -88,6 +88,15 @@ message UserMessage {
   repeated ContentBlock content = 1;
 }
 
+// SystemMessage is a durable-tier event: a persisted system-role message — a
+// message the child's harness injected (a heartbeat nudge, an environment
+// update, a file-changed notice), not something the user typed. Clients may
+// render it distinctly and hide it by default; it is real history and is never
+// omitted from GetHistory.
+message SystemMessage {
+  repeated ContentBlock content = 1;
+}
+
 // AssistantMessage is a durable-tier event: a persisted assistant-role message.
 message AssistantMessage {
   repeated ContentBlock content = 1;
@@ -335,9 +344,9 @@ message OperatorState {
 
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — fifteen durable types as of the
-// operator-status work, not the fourteen this comment named before it and not
-// the two this comment originally named. pkg/eventlog/tier.go is the authority.
+// ordinal is set on DURABLE-tier events. pkg/eventlog/tier.go is the authority
+// on which payloads those are; the count lives there so this comment cannot
+// drift from it.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
 // 0023): zero-based and gap-free per child. It is NOT conversation_message.
@@ -383,5 +392,6 @@ message Event {
     ChildRenamed child_renamed = 27;
     TasksChanged tasks_changed = 28;
     ChildClosed child_closed = 29;
+    SystemMessage system_message = 30;
   }
 }

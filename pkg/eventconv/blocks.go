@@ -77,8 +77,10 @@ func BlocksFromMsg(m msg.Message) []*rafikiv1.ContentBlock {
 }
 
 // protoBlock converts one native block into its proto form, reporting false for
-// a kind the proto vocabulary cannot name. An opaque block is one: it is kept
-// for the dialect that minted it, and its proto form would be a guess.
+// a kind the proto vocabulary cannot name. An opaque block is converted by its
+// declared type when the proto has a field for that type — being kept verbatim
+// for a field this model does not carry is not a reason to vanish from a
+// transcript — and is skipped only for a type the proto cannot name.
 func protoBlock(b msg.Block) (*rafikiv1.ContentBlock, bool) {
 	switch t := b.(type) {
 	case msg.Text:
@@ -110,10 +112,137 @@ func protoBlock(b msg.Block) (*rafikiv1.ContentBlock, bool) {
 			Image: &rafikiv1.ImageBlock{MediaType: t.MediaType, Data: t.Data},
 		}}, true
 	case msg.Opaque:
-		return nil, false
+		return opaqueBlock(t.Raw)
 	default:
 		panic(fmt.Sprintf("eventconv: unmapped block %T", b))
 	}
+}
+
+// opaqueBlock converts a block kept verbatim into its proto form when the proto
+// vocabulary can name its declared type, reporting false otherwise. The decoded
+// shape is the provider's block JSON, and each type is mapped exactly as the
+// typed block of the same kind is.
+func opaqueBlock(raw json.RawMessage) (*rafikiv1.ContentBlock, bool) {
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, false
+	}
+	switch head.Type {
+	case "text":
+		var b struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, false
+		}
+		return &rafikiv1.ContentBlock{Block: &rafikiv1.ContentBlock_Text{
+			Text: &rafikiv1.TextBlock{Text: b.Text},
+		}}, true
+	case "thinking":
+		var b struct {
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		}
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, false
+		}
+		return &rafikiv1.ContentBlock{Block: &rafikiv1.ContentBlock_Thinking{
+			Thinking: &rafikiv1.ThinkingBlock{Thinking: b.Thinking, Signature: b.Signature},
+		}}, true
+	case "tool_use":
+		var b struct {
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, false
+		}
+		return &rafikiv1.ContentBlock{Block: &rafikiv1.ContentBlock_ToolUse{
+			ToolUse: &rafikiv1.ToolUseBlock{
+				Id:        b.ID,
+				Name:      b.Name,
+				InputJson: inputJSON(b.Input),
+			},
+		}}, true
+	case "tool_result":
+		var b struct {
+			ToolUseID string          `json:"tool_use_id"`
+			IsError   bool            `json:"is_error"`
+			Content   json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, false
+		}
+		return &rafikiv1.ContentBlock{Block: &rafikiv1.ContentBlock_ToolResult{
+			ToolResult: &rafikiv1.ToolResultBlock{
+				ToolUseId: b.ToolUseID,
+				IsError:   b.IsError,
+				Content:   opaqueToolResultContent(b.Content),
+			},
+		}}, true
+	case "image":
+		var b struct {
+			Source struct {
+				Type      string `json:"type"`
+				MediaType string `json:"media_type"`
+				Data      string `json:"data"`
+			} `json:"source"`
+		}
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, false
+		}
+		img := &rafikiv1.ImageBlock{}
+		if b.Source.Type == "base64" {
+			img.MediaType = b.Source.MediaType
+			if data, err := base64.StdEncoding.DecodeString(b.Source.Data); err == nil {
+				img.Data = data
+			}
+		}
+		return &rafikiv1.ContentBlock{Block: &rafikiv1.ContentBlock_Image{Image: img}}, true
+	}
+	return nil, false
+}
+
+// opaqueToolResultContent maps a verbatim tool result's nested blocks. Only
+// text and image have a proto form inside a tool result, matching
+// toolResultContent: any other kind is skipped and leaves the gap its source
+// position leaves there too. A string content is the API's one-block shorthand
+// for a single text block, not an array.
+func opaqueToolResultContent(raw json.RawMessage) []*rafikiv1.ContentBlock {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return nil
+		}
+		return []*rafikiv1.ContentBlock{{
+			Index: 0,
+			Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+		}}
+	}
+	var raws []json.RawMessage
+	if err := json.Unmarshal(trimmed, &raws); err != nil {
+		return nil
+	}
+	out := make([]*rafikiv1.ContentBlock, 0, len(raws))
+	for i, raw := range raws {
+		cb, ok := opaqueBlock(raw)
+		if !ok {
+			continue
+		}
+		switch cb.Block.(type) {
+		case *rafikiv1.ContentBlock_Text, *rafikiv1.ContentBlock_Image:
+			cb.Index = int32(i)
+			out = append(out, cb)
+		}
+	}
+	return out
 }
 
 // imageBlock converts a stored image into its proto form. Only a base64

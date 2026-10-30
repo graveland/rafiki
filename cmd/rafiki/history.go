@@ -28,6 +28,7 @@ import (
 // marker row). The single-child default shows these.
 var conversationTypes = []string{
 	"user_message",
+	"system_message",
 	"assistant_message",
 	"compaction_boundary",
 }

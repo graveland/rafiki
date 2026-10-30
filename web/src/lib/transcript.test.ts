@@ -9,6 +9,7 @@ import {
   ContentBlockDeltaSchema,
   ContentBlockSchema,
   EventSchema,
+  SystemMessageSchema,
   TextBlockSchema,
   ToolResultBlockSchema,
   UserMessageSchema,
@@ -40,6 +41,17 @@ function assistantEvent(childId: string, text: string, ordinal?: number): Event 
     payload: {
       case: 'assistantMessage',
       value: create(AssistantMessageSchema, { content: [textBlock(text)] }),
+    },
+  })
+}
+
+function systemEvent(childId: string, text: string, ordinal?: number): Event {
+  return create(EventSchema, {
+    childId,
+    ordinal,
+    payload: {
+      case: 'systemMessage',
+      value: create(SystemMessageSchema, { content: [textBlock(text)] }),
     },
   })
 }
@@ -183,6 +195,17 @@ it('history error falls back to -1 with no history', async () => {
   expect(cursorOf(streamRequests[0])).toBe(-1)
   expect(conversation.blocks).toHaveLength(0)
   expect(conversation.error).toBeUndefined()
+  conversation.dispose()
+})
+
+it('a system_message renders under its own kind, not as a user turn', async () => {
+  const events = [systemEvent('c', 'Environment update', 0), userEvent('c', 'hi', 1)]
+  const { control } = fakeControl({ stream: (_i, o) => replay(events, o?.signal) })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  await flush()
+  expect(conversation.blocks.map((block) => block.kind)).toEqual(['system', 'user'])
+  expect(conversation.blocks[0].text).toBe('Environment update')
   conversation.dispose()
 })
 

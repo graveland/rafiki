@@ -388,6 +388,28 @@ export class Conversation {
         ]
         break
       }
+      case 'systemMessage': {
+        // A stored system row is a harness injection (a heartbeat nudge, an
+        // environment update), not a user turn: it renders under its own kind.
+        const content = event.payload.value.content
+        if (!fromHistory && this.trimDuplicate('system', content)) {
+          return
+        }
+        this.recordHistory('system', content, fromHistory)
+        const projected = project(content)
+        this.blocks = [
+          ...this.blocks,
+          {
+            kind: 'system',
+            content,
+            text: projected.text,
+            thinking: projected.thinking,
+            toolCalls: projected.toolCalls,
+            inFlight: false,
+          },
+        ]
+        break
+      }
       case 'contentBlockDelta': {
         const delta = event.payload.value.delta
         // An input_json delta belongs to a tool_use fragment, not the assistant

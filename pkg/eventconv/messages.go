@@ -49,7 +49,8 @@ func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event 
 			continue
 		}
 		blocks := BlocksFromParam(m.Param)
-		if m.Param.Role == "assistant" {
+		switch m.Param.Role {
+		case "assistant":
 			ev.Payload = &rafikiv1.Event_AssistantMessage{
 				AssistantMessage: &rafikiv1.AssistantMessage{
 					Content:       blocks,
@@ -57,7 +58,11 @@ func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event 
 					RawStopReason: m.StopReason,
 				},
 			}
-		} else {
+		case "system":
+			ev.Payload = &rafikiv1.Event_SystemMessage{
+				SystemMessage: &rafikiv1.SystemMessage{Content: blocks},
+			}
+		default:
 			ev.Payload = &rafikiv1.Event_UserMessage{
 				UserMessage: &rafikiv1.UserMessage{Content: blocks},
 			}

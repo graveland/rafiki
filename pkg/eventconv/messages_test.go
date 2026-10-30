@@ -32,6 +32,34 @@ func TestEventsFromMessagesCarriesOrdinal(t *testing.T) {
 	c.Eq("end_turn", evs[1].GetAssistantMessage().RawStopReason, "raw stop reason")
 }
 
+// A stored system row is a message the harness injected, not something the user
+// typed, so it gets its own event rather than a user turn's. A user row still
+// lands on UserMessage.
+func TestEventsFromMessagesRendersSystemRole(t *testing.T) {
+	c := assert.NewAborting(t)
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.MessageParam{
+			Role:    "system",
+			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("Environment update: /tmp is now writable")},
+		}},
+		{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("carry on"))},
+	}
+
+	evs := eventconv.EventsFromMessages("c_test", msgs)
+
+	c.Len(evs, 2, "got %d events, want 2", len(evs))
+	sys := evs[0].GetSystemMessage()
+	c.NotNil(sys, "event 0 is %T, want Event_SystemMessage", evs[0].Payload)
+	c.Nil(evs[0].GetUserMessage(), "event 0 must not be a user message")
+	c.Eq(0, evs[0].GetOrdinal(), "event 0 ordinal")
+	c.Len(sys.GetContent(), 1, "system content blocks")
+	c.Eq("Environment update: /tmp is now writable", sys.GetContent()[0].GetText().GetText(), "system text")
+	user := evs[1].GetUserMessage()
+	c.NotNil(user, "event 1 is %T, want Event_UserMessage", evs[1].Payload)
+	c.Nil(evs[1].GetSystemMessage(), "event 1 must not be a system message")
+	c.Eq(1, evs[1].GetOrdinal(), "event 1 ordinal")
+}
+
 // Each event carries its row's created_at as ts. A row with no recorded
 // created_at leaves ts unset rather than stamping the zero time, which would
 // read as "year 1" and sort before every real event.

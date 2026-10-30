@@ -35,6 +35,7 @@ func (t Tier) admits(of Tier) bool {
 var durableTypes = map[string]bool{
 	"user_message":         true,
 	"assistant_message":    true,
+	"system_message":       true,
 	"agent_status":         true,
 	"child_spawned":        true,
 	"child_exited":         true,

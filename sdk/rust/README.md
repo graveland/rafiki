@@ -103,7 +103,8 @@ child that spawned it and is empty for a top-level child.
 `get_history` pages backwards: ask with `limit` for the newest N, then again
 with `before` set to the oldest `ts` you hold. A page never splits events that
 share a `ts`, so it can hold more than `limit`; an empty page is the start of
-the conversation.
+the conversation. A stored `system`-role row comes back as `SystemMessage`, not
+`UserMessage`.
 
 `begin_provider_login` / `complete_provider_login` / `delete_provider_credential`
 manage the CALLING USER's own provider credentials. `provider` is the NAME of a
@@ -199,10 +200,14 @@ A dropped connection, and any end without the Connect end-of-stream envelope
 truncation, never a clean close. Only `None` from the stream, after a
 flags-`0x02` end-of-stream envelope, is a clean end.
 
-A durable `AssistantMessage` or `UserMessage` event carries in `Event.ts` the
-`created_at` of the `conversation_message` row that message was persisted as,
-the same value `get_history` reports for it, so a message is identified across
-a live stream and a history read by its `ts`. Fundi children meet this today;
+A durable `AssistantMessage`, `UserMessage` or `SystemMessage` event carries
+in `Event.ts` the `created_at` of the `conversation_message` row that message
+was persisted as, the same value `get_history` reports for it, so a message is
+identified across a live stream and a history read by its `ts`. A `system`-role
+row — a notice the child's harness injected (a heartbeat nudge, an environment
+update), not something the user typed — arrives as `SystemMessage`, from the
+stream and from `get_history` alike: it is history, and hiding it is a display
+choice. Fundi children meet this today;
 a claude child's live `ts` is still the claude stream's time, not the row's.
 Rows written in one transaction share a `ts`, so match on `ts` plus position
 and role. A fundi tool result is its own `UserMessage` (a `tool_result` block),

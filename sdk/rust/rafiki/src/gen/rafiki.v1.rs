@@ -96,6 +96,16 @@ pub struct UserMessage {
     #[prost(message, repeated, tag = "1")]
     pub content: ::prost::alloc::vec::Vec<ContentBlock>,
 }
+/// SystemMessage is a durable-tier event: a persisted system-role message — a
+/// message the child's harness injected (a heartbeat nudge, an environment
+/// update, a file-changed notice), not something the user typed. Clients may
+/// render it distinctly and hide it by default; it is real history and is never
+/// omitted from GetHistory.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SystemMessage {
+    #[prost(message, repeated, tag = "1")]
+    pub content: ::prost::alloc::vec::Vec<ContentBlock>,
+}
 /// AssistantMessage is a durable-tier event: a persisted assistant-role message.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AssistantMessage {
@@ -401,9 +411,9 @@ pub struct OperatorState {
 }
 /// Event is the stream envelope.
 ///
-/// ordinal is set on DURABLE-tier events — fifteen durable types as of the
-/// operator-status work, not the fourteen this comment named before it and not
-/// the two this comment originally named. pkg/eventlog/tier.go is the authority.
+/// ordinal is set on DURABLE-tier events. pkg/eventlog/tier.go is the authority
+/// on which payloads those are; the count lives there so this comment cannot
+/// drift from it.
 ///
 /// It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
 /// 0023): zero-based and gap-free per child. It is NOT conversation_message.
@@ -432,7 +442,7 @@ pub struct Event {
     pub ts: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(
         oneof = "event::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29, 30"
     )]
     pub payload: ::core::option::Option<event::Payload>,
 }
@@ -478,6 +488,8 @@ pub mod event {
         TasksChanged(super::TasksChanged),
         #[prost(message, tag = "29")]
         ChildClosed(super::ChildClosed),
+        #[prost(message, tag = "30")]
+        SystemMessage(super::SystemMessage),
     }
 }
 /// StopReason normalizes how a turn ended across providers. The provider's own
