@@ -132,13 +132,23 @@ func estimateHistoryTokens(nodes []*convpkg.Node) int {
 // isLegalCut reports whether a tail may start at n: a tool_result block must
 // never be separated from the assistant tool_use that produced it, so any user
 // row carrying one is off limits.
+//
+// A block that degraded to msg.Opaque is classified by the type it declares:
+// storage keeps a tool_result verbatim whenever it carries a field this model
+// does not (a caller, an SDK-union junk key), and a boundary that could not see
+// one would split the pair and have the next request rejected.
 func isLegalCut(n *convpkg.Node) bool {
 	if n.Msg.Role == msg.Assistant {
 		return true
 	}
 	for _, b := range n.Msg.Content {
-		if _, ok := b.(msg.ToolResult); ok {
+		switch t := b.(type) {
+		case msg.ToolResult:
 			return false
+		case msg.Opaque:
+			if msg.OpaqueType(t) == "tool_result" {
+				return false
+			}
 		}
 	}
 	return true

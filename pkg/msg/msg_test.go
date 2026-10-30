@@ -147,3 +147,21 @@ func TestOpaqueToolBlocksYieldIDs(t *testing.T) {
 		opaque(`5`),
 	}}), "only a non-empty id on a tool block counts")
 }
+
+// TestOpaqueType pins the classifier a boundary reader needs: an Opaque block
+// reports the wire type it declares, and anything that is not a typed JSON
+// object reports none.
+func TestOpaqueType(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	opaque := func(raw string) msg.Opaque {
+		return msg.Opaque{Provider: msg.DialectAnthropic, Raw: json.RawMessage(raw)}
+	}
+
+	c.Eq("tool_result", msg.OpaqueType(opaque(`{"type":"tool_result","tool_use_id":"t1","caller":{"type":"direct"}}`)))
+	c.Eq("tool_use", msg.OpaqueType(opaque(`{"type":"tool_use","id":"t1","name":"read"}`)))
+	c.Eq("redacted_thinking", msg.OpaqueType(opaque(`{"type":"redacted_thinking","data":"x"}`)))
+	c.Eq("", msg.OpaqueType(opaque(`{"tool_use_id":"t1"}`)), "a block declaring no type")
+	c.Eq("", msg.OpaqueType(opaque(`5`)), "raw JSON that is not an object")
+	c.Eq("", msg.OpaqueType(opaque(``)), "empty raw")
+}

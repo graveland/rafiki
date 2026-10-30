@@ -9,6 +9,7 @@ import (
 
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -197,4 +198,45 @@ func TestEstimateTokensNative(t *testing.T) {
 		Content: []byte(strings.Repeat("x", 400)),
 	}
 	c.Eq(109, estimateTokens(long), "assistant, 400 stored bytes")
+}
+
+// TestCompactionCutTailTreatsOpaqueToolResultAsToolResult pins the boundary rule
+// against the shape production actually stores: a tool_result that carries a
+// field this model does not (a caller) is kept verbatim as msg.Opaque, and a
+// tail that started on it would separate it from the tool_use that produced it.
+// The typed and Opaque forms must be classified identically.
+func TestCompactionCutTailTreatsOpaqueToolResultAsToolResult(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// The block really degrades: a caller key is real extra data, so the codec
+	// cannot reproduce it and keeps the bytes verbatim.
+	stored, err := msganthropic.Decode("user", []byte(
+		`[{"type":"tool_result","tool_use_id":"tu_1","content":[{"type":"text","text":"out"}],"caller":{"type":"direct"}}]`))
+	c.Require().NoError(err, "decode stored tool_result")
+	c.Require().Len(stored.Content, 1)
+	opaque, ok := stored.Content[0].(msg.Opaque)
+	c.Require().True(ok, "the block must degrade to Opaque, got %T", stored.Content[0])
+	c.Eq("tool_result", msg.OpaqueType(opaque), "the Opaque block must still declare its type")
+
+	typedRow := &convpkg.Node{Msg: msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "tu_1", Content: []msg.Block{msg.Text{Text: "out"}}},
+	}}}
+	opaqueRow := &convpkg.Node{Msg: stored}
+
+	c.False(isLegalCut(typedRow), "a typed tool_result row is not a legal cut")
+	c.False(isLegalCut(opaqueRow), "an Opaque tool_result row must not be a legal cut")
+
+	// The same history with each shape: the cut skips the result row and starts
+	// at the assistant row above it.
+	for name, resultRow := range map[string]*convpkg.Node{"typed": typedRow, "opaque": opaqueRow} {
+		history := []*convpkg.Node{
+			cpUserText("start"),
+			cpAssistantToolUse("tu_1"),
+			resultRow,
+			cpAssistantText("done"),
+		}
+		budget := estimateHistoryTokens(history[2:])
+		c.Greater(budget, estimateHistoryTokens(history[1:]))
+		c.Eq(3, cutTail(history, budget), "%s tool_result row must be skipped by the cut", name)
+	}
 }

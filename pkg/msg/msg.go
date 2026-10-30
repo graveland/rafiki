@@ -175,6 +175,21 @@ func ToolUseIDs(m Message) []string {
 	return ids
 }
 
+// OpaqueType returns the wire type an Opaque block declares ("tool_use",
+// "tool_result", ...), or "" when its raw JSON is not an object or carries no
+// type. A reader that must classify a block it could not decode faithfully — a
+// compaction boundary, say — can still see what the provider called it, the
+// same way ToolUseIDs reads an Opaque block's id.
+func OpaqueType(o Opaque) string {
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(o.Raw, &head); err != nil {
+		return ""
+	}
+	return head.Type
+}
+
 // opaqueIDs returns the id an Opaque block declares, or nothing. Raw that is not
 // a JSON object, that is not a tool block, or whose id is empty declares none.
 func opaqueIDs(raw json.RawMessage) []string {
