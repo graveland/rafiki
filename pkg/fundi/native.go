@@ -160,9 +160,12 @@ func (e *Emitter) publishError(err error) {
 
 // publishUserRow publishes a persisted user row — a prompt, a drained steer,
 // or one tool's result — as a durable UserMessage whose ts is the row's
-// created_at and whose content is the stored content converted exactly as
-// GetHistory converts it (eventconv.BlocksFromMsg), so a live viewer and a
-// replayed one see one message, identifiable by its ts.
+// created_at. The content is converted with msganthropic.FromParam and rendered
+// through eventconv.BlocksFromMsg, the same bridge the history read uses, so the
+// live copy and a replayed one agree on every block the proto vocabulary can
+// name. The two inputs are not identical — an SDK param here, the stored JSON
+// there — so an opaque-by-type block can still render differently; the row's ts
+// is what identifies the message across the two.
 //
 // A tool_result rides a UserMessage because that is the shape history has:
 // Anthropic puts tool_result in the user turn. ToolExecutionEnd carries a
