@@ -28,8 +28,8 @@ import (
 // retracted prompt, a superseded reply — never reaches this function, and the
 // compaction_tail copies of rows that appear earlier are already gone. A
 // compaction_summary node renders as a boundary divider rather than a plain
-// user prompt, mirroring eventconv.EventsFromMessages — the full-history
-// reader contract (docs/reference/fundi-compaction.md).
+// user prompt, mirroring eventconv.EventsFromNodes — the full-history reader
+// contract (docs/reference/fundi-compaction.md).
 func DBToPiFramesMessages(nodes []*conv.Node) []json.RawMessage {
 	frames, _ := DBToPiFramesWithOrigins(nodes)
 	return frames

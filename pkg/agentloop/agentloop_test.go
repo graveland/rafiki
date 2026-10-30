@@ -22,6 +22,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 
@@ -125,6 +126,24 @@ func (f *fakeTools) executedNames() []string {
 
 // newConvByRef opens a handle on the conversation correlated by ref — used
 // to hand each concurrent racer its own handle on one stored conversation.
+// appendNode persists one message under the conversation's head, the fixture
+// shape these resume tests need: a row with no client-side history above it.
+func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic.MessageParam, meta *store.AssistantMeta, providerID string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	message, err := msganthropic.FromParam(param)
+	c.NoError(err, "convert message")
+	node := conv.NewNode{Msg: message, ProviderMessageID: providerID}
+	if meta != nil {
+		node.StopReason = meta.StopReason
+		node.InputTokens = &meta.Input
+		node.OutputTokens = &meta.Output
+	}
+	handle := conv.NewStore(store.NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
+	_, err = handle.Append(context.Background(), conv.Append{FromHead: true, Nodes: []conv.NewNode{node}})
+	c.NoError(err, "append node")
+}
+
 func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
@@ -316,13 +335,10 @@ func TestResumeAlreadyComplete(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	msgs := store.NewMessages(pool)
 	ctx := context.Background()
-	_, aerr := msgs.AppendNode(ctx, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
-	c.Require().NoError(aerr)
-	_, aerr = msgs.AppendNode(ctx, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
+	appendNode(t, pool, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
+	appendNode(t, pool, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
 		&store.AssistantMeta{StopReason: "end_turn"}, "")
-	c.Require().NoError(aerr)
 
 	result, err := Resume(ctx, conv, tools, nil)
 	c.Require().NoError(err, "Resume")
@@ -385,22 +401,16 @@ func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 // blocks + optional partial results — the state a crash mid-batch leaves.
 func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversation, partial []anthropic.ContentBlockParamUnion) {
 	t.Helper()
-	c := assert.NewAborting(t)
-	ctx := context.Background()
-	msgs := store.NewMessages(pool)
-	_, aerr := msgs.AppendNode(ctx, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil, "")
-	c.NoError(aerr)
+	appendNode(t, pool, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil, "")
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_a", map[string]any{"k": "a"}, "alpha"),
 		anthropic.NewToolUseBlock("toolu_b", map[string]any{"k": "b"}, "beta"),
 	)
-	_, aerr = msgs.AppendNode(ctx, conv.ID, assistant, nil, "")
-	c.NoError(aerr)
+	appendNode(t, pool, conv.ID, assistant, nil, "")
 	for _, block := range partial {
-		_, aerr := msgs.AppendNode(ctx, conv.ID,
+		appendNode(t, pool, conv.ID,
 			anthropic.MessageParam{Role: anthropic.MessageParamRoleUser,
 				Content: []anthropic.ContentBlockParamUnion{block}}, nil, "")
-		c.NoError(aerr)
 	}
 }
 
@@ -464,12 +474,9 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
-	msgs := store.NewMessages(pool)
-	_, aerr := msgs.AppendNode(ctx, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
-	c.Require().NoError(aerr)
-	_, aerr = msgs.AppendNode(ctx, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
+	appendNode(t, pool, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
+	appendNode(t, pool, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
 		&store.AssistantMeta{StopReason: "max_tokens"}, "")
-	c.Require().NoError(aerr)
 
 	result, err := Resume(ctx, conv, tools, nil)
 	c.Require().NoError(err, "Resume")

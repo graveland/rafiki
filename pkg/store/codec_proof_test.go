@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
@@ -192,14 +193,18 @@ func opaqueType(raw json.RawMessage) string {
 	return head.Type
 }
 
-// codecProofChainNode builds a chain node carrying raw content, which the tests
-// seed through AppendChain exactly as capture would.
-func codecProofChainNode(t *testing.T, role, content string) ChainNode {
+// codecProofNode builds an append node carrying raw content, which the tests
+// seed through conv.Append exactly as capture would.
+func codecProofNode(t *testing.T, role, content string) convpkg.NewNode {
 	t.Helper()
 	if !json.Valid([]byte(content)) {
 		t.Fatalf("seed content is not valid JSON: %s", content)
 	}
-	return ChainNode{Role: role, Content: jsonbSafe([]byte(content))}
+	message, err := msganthropic.Decode(role, []byte(content))
+	if err != nil {
+		t.Fatalf("decode seed content: %v", err)
+	}
+	return convpkg.NewNode{Msg: message, Content: []byte(content)}
 }
 
 // TestCodecProofOnSeededRows seeds the shapes the codec is most likely to
@@ -225,17 +230,14 @@ func TestCodecProofOnSeededRows(t *testing.T) {
 		}
 	})
 
-	nodes := []ChainNode{
-		codecProofChainNode(t, "user", `[{"type":"tool_result","tool_use_id":"toolu_01","content":"file written"}]`),
-		codecProofChainNode(t, "user", `"hello"`),
-		codecProofChainNode(t, "assistant", `[{"type":"redacted_thinking","data":"b3BhcXVl"}]`),
+	nodes := []convpkg.NewNode{
+		codecProofNode(t, "user", `[{"type":"tool_result","tool_use_id":"toolu_01","content":"file written"}]`),
+		codecProofNode(t, "user", `"hello"`),
+		codecProofNode(t, "assistant", `[{"type":"redacted_thinking","data":"b3BhcXVl"}]`),
 	}
-	res, err := NewMessages(pool).AppendChain(ctx, ChainAppend{
-		ConversationID: conv,
-		Root:           convtree.RootKindRoot,
-		Nodes:          nodes,
-	})
-	c.NoError(err, "AppendChain seed")
+	res, err := convpkg.NewStore(NewConvBackend(pool), convpkg.Options{}).Open(conv, convpkg.AsOwner()).
+		Append(ctx, convpkg.Append{Root: convtree.RootKindRoot, Nodes: nodes})
+	c.NoError(err, "append seed")
 	c.Eq(3, res.Inserted, "seed inserted three rows")
 
 	report, err := proveCodec(ctx, pool, []string{conv})

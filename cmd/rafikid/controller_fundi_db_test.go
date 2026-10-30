@@ -9,7 +9,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/conv"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -31,27 +32,32 @@ func TestDBRecentSkipsCompactionTailAndRendersSummaryBoundary(t *testing.T) {
 		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		 VALUES ('test', 'server') RETURNING id::text`).Scan(&convID), "insert conversation")
 
-	msgs := store.NewMessages(pool)
 	rows := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-1")),
 		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-1")),
 		anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-2")),
 		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-2")),
 	}
-	for i, p := range rows {
-		_, aerr := msgs.AppendNode(ctx, convID, p, nil, "")
-		ck.Require().NoError(aerr, "append %d", i)
+	for _, p := range rows {
+		appendNode(t, pool, convID, p, nil)
 	}
-	tail := []store.Message{
-		{Ordinal: 2, Param: rows[2]},
-		{Ordinal: 3, Param: rows[3]},
-	}
+	tail := []anthropic.MessageParam{rows[2], rows[3]}
 	summary := anthropic.MessageParam{
 		Role:    anthropic.MessageParamRoleUser,
 		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("SUMMARY-TEXT")},
 	}
-	_, err := msgs.AppendCompaction(ctx, convID, summary, 100, tail)
-	ck.Require().NoError(err, "AppendCompaction")
+	summaryMsg, serr := msganthropic.FromParam(summary)
+	ck.Require().NoError(serr, "convert summary")
+	nodes := []conv.NewNode{{Msg: summaryMsg, InputTokens: ptr(int64(100))}}
+	for i, p := range tail {
+		m, merr := msganthropic.FromParam(p)
+		ck.Require().NoError(merr, "convert tail %d", i)
+		nodes = append(nodes, conv.NewNode{Msg: m, Kind: conv.KindCompactionTail})
+	}
+	_, err := convStoreFor(t, pool).Open(convID, conv.AsOwner()).Append(ctx, conv.Append{
+		Root: conv.KindCompactionSummary, DerivedFromHead: true, Nodes: nodes,
+	})
+	ck.Require().NoError(err, "append compaction")
 
 	ctrl := newTestController(t)
 	ctrl.pool = pool

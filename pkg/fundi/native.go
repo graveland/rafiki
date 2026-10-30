@@ -3,6 +3,7 @@
 package fundi
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -11,6 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -159,7 +161,7 @@ func (e *Emitter) publishError(err error) {
 // publishUserRow publishes a persisted user row — a prompt, a drained steer,
 // or one tool's result — as a durable UserMessage whose ts is the row's
 // created_at and whose content is the stored content converted exactly as
-// GetHistory converts it (eventconv.BlocksFromParam), so a live viewer and a
+// GetHistory converts it (eventconv.BlocksFromMsg), so a live viewer and a
 // replayed one see one message, identifiable by its ts.
 //
 // A tool_result rides a UserMessage because that is the shape history has:
@@ -167,8 +169,22 @@ func (e *Emitter) publishError(err error) {
 // duration and an error flag and no text, so this event is the only live
 // source of a tool's output.
 func (e *Emitter) publishUserRow(content []anthropic.ContentBlockParamUnion, row store.Appended) {
+	if e.native == nil {
+		return
+	}
+	message, err := msganthropic.FromParam(anthropic.MessageParam{
+		Role:    anthropic.MessageParamRoleUser,
+		Content: content,
+	})
+	if err != nil {
+		// The row is already committed, so history still renders it; only the
+		// live copy is lost, and saying so is better than publishing a blank
+		// message or swallowing the failure.
+		slog.Warn("fundi: publish user row: convert content", "error", err)
+		return
+	}
 	e.publishNativeAt(&rafikiv1.UserMessage{
-		Content: eventconv.BlocksFromParam(anthropic.MessageParam{Role: anthropic.MessageParamRoleUser, Content: content}),
+		Content: eventconv.BlocksFromMsg(message),
 	}, row.CreatedAt)
 }
 

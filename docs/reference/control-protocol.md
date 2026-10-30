@@ -337,12 +337,12 @@ identifies a message together with its position and role, not alone.
 
 **Fundi children.** A fundi child publishes a message event
 only after the row it describes has been inserted, and takes `ts` from that
-insert's `RETURNING created_at` (`store.AppendNode` → `store.AppendChain`; a node
+insert's `RETURNING created_at` (`conv.Handle.Append`; a node
 the conversation already holds keeps its stored row, and with it its original
 `ts`). Event content for a user row is the
-stored content converted as `GetHistory` converts it (`eventconv.BlocksFromParam`
-live, `eventconv.BlocksFromMsg` on the read; both index blocks by source
-position, and the read also renders a block only the decoded node can name).
+stored content converted as `GetHistory` converts it (`eventconv.BlocksFromMsg`,
+the same conversion live and on the read: both index blocks by source position,
+and a block only the decoded node can name still renders).
 Every other event (`TurnStart`, `TurnEnd`,
 deltas, tool events, errors) keeps its emit-time `ts`. Behaviour this implies:
 
@@ -1801,7 +1801,7 @@ regardless.
 
 | command | claude | fundi | script |
 |---|---|---|---|
-| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | queue the text; the engine appends a `clear` root through `AppendClear` → `AppendChain`, which starts a fresh working set and writes no horizon | `InvalidArgument` |
+| `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | queue the text; the engine appends a `clear` root through `conv.Handle.Append`, which starts a fresh working set and writes no horizon | `InvalidArgument` |
 | `/compact [text]` | forward the text as a user message | queue the text; the engine runs a manual compaction (`text` = extra summary instructions) | `InvalidArgument` |
 | `/exit` | `Kill` | `Kill` | `Kill` |
 

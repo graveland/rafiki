@@ -4,8 +4,10 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/conv/convtest"
 	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 )
 
@@ -86,15 +89,21 @@ func countNodes(t *testing.T, pool *pgxpool.Pool, convID string) int {
 	return n
 }
 
-// convPair builds the same message for both write paths from one stored
-// content, so AppendChain and the core hash identical bytes.
-func convPair(t *testing.T, role, text string) (ChainNode, conv.NewNode) {
+// textContent is the stored JSON of a one-text-block message.
+func textContent(t *testing.T, text string) []byte {
 	t.Helper()
-	c := assert.NewAborting(t)
-	chain := chainText(role, text)
-	decoded, err := msganthropic.Decode(role, chain.Content)
-	c.NoError(err, "decode %q", text)
-	return chain, conv.NewNode{Msg: decoded, Content: chain.Content}
+	content, err := json.Marshal([]map[string]any{{"type": "text", "text": text}})
+	assert.NewAborting(t).NoError(err, "marshal %q", text)
+	return content
+}
+
+// convNode builds an append node carrying one text block.
+func convNode(t *testing.T, role, text string) conv.NewNode {
+	t.Helper()
+	content := textContent(t, text)
+	decoded, err := msganthropic.Decode(role, content)
+	assert.NewAborting(t).NoError(err, "decode %q", text)
+	return conv.NewNode{Msg: decoded, Content: content}
 }
 
 // commitRow builds a root node carrying text, the shape a Commit from the core
@@ -102,11 +111,11 @@ func convPair(t *testing.T, role, text string) (ChainNode, conv.NewNode) {
 func commitRow(t *testing.T, convID, role, text string, ordinal, depth int) *conv.Node {
 	t.Helper()
 	c := assert.NewAborting(t)
-	chain := chainText(role, text)
+	content := textContent(t, text)
 	hashes, err := convtree.Chain(convtree.RootSeed(convtree.RootKindRoot, nil),
-		[]convtree.Msg{{Role: role, Content: chain.Content}})
+		[]convtree.Msg{{Role: role, Content: content}})
 	c.NoError(err, "hash %q", text)
-	decoded, err := msganthropic.Decode(role, chain.Content)
+	decoded, err := msganthropic.Decode(role, content)
 	c.NoError(err, "decode %q", text)
 	return &conv.Node{
 		Ref: conv.Ref{
@@ -117,7 +126,7 @@ func commitRow(t *testing.T, convID, role, text string, ordinal, depth int) *con
 			PathHash:       hashes[0],
 		},
 		Msg:     decoded,
-		Content: chain.Content,
+		Content: content,
 	}
 }
 
@@ -145,7 +154,7 @@ func TestConvBackendConflictOnHeadMove(t *testing.T) {
 	b := NewConvBackend(pool)
 
 	handle := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
-	_, first := convPair(t, "user", "hello")
+	first := convNode(t, "user", "hello")
 	res, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{first}})
 	c.NoError(err, "append")
 
@@ -191,7 +200,7 @@ func TestConvBackendInsertConflictIsErrConflict(t *testing.T) {
 	b := NewConvBackend(pool)
 
 	handle := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
-	_, first := convPair(t, "user", "hello")
+	first := convNode(t, "user", "hello")
 	res, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{first}})
 	c.NoError(err, "append")
 
@@ -241,7 +250,7 @@ func TestConvBackendCommitFencesLease(t *testing.T) {
 	// first, so it hears "you lost the lease" — the answer that ends it — rather
 	// than a conflict the caller's CAS loop would retry and then misreport.
 	handle := conv.NewStore(b, conv.Options{}).Open(convID)
-	_, first := convPair(t, "user", "appended while unfenced")
+	first := convNode(t, "user", "appended while unfenced")
 	_, err = handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{first}})
 	c.NoError(err, "append")
 
@@ -259,74 +268,160 @@ func TestConvBackendCommitFencesLease(t *testing.T) {
 	c.Eq(1, countNodes(t, pool, convID), "the fenced commit inserted nothing")
 }
 
-func TestConvBackendCountersMatchAppendChain(t *testing.T) {
+// convState is the conversation row's tree statistics.
+type convState struct {
+	nextOrdinal  int
+	nodeCount    int
+	forkCount    int
+	fallback     int
+	payloadBytes int64
+	clearPending bool
+}
+
+func readConvState(t *testing.T, pool *pgxpool.Pool, convID string) convState {
+	t.Helper()
+	var s convState
+	err := pool.QueryRow(context.Background(), `
+		SELECT next_ordinal, node_count, fork_count, fallback_count, payload_bytes, clear_pending
+		  FROM conversations.conversation WHERE id = $1::uuid`, convID).
+		Scan(&s.nextOrdinal, &s.nodeCount, &s.forkCount, &s.fallback, &s.payloadBytes, &s.clearPending)
+	assert.NewAborting(t).NoError(err, "read conversation state")
+	return s
+}
+
+// storedPayloadBytes is the payload_bytes basis: the stored jsonb text, not
+// the Go bytes that produced it.
+func storedPayloadBytes(t *testing.T, pool *pgxpool.Pool, convID string) int64 {
+	t.Helper()
+	var n int64
+	err := pool.QueryRow(context.Background(), `
+		SELECT coalesce(sum(octet_length(content::text)), 0)
+		  FROM conversations.conversation_message WHERE conversation_id = $1::uuid`, convID).Scan(&n)
+	assert.NewAborting(t).NoError(err, "sum stored payload bytes")
+	return n
+}
+
+// expiredLease takes a lease on conv that is already expired. Acquire's
+// negative TTL writes exactly that row, so the fence's `expires_at > now()`
+// predicate — not a missing row — is what has to refuse it.
+func expiredLease(t *testing.T, pool *pgxpool.Pool, conv, holder string) Lease {
+	t.Helper()
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	lease, ok, err := NewLeases(pool).Acquire(ctx, conv, holder, -1*time.Second)
+	c.NoError(err, "acquire an expired lease")
+	c.True(ok, "acquire an expired lease")
+	var live bool
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT expires_at > now() FROM conversations.conversation_lease
+		 WHERE conversation_id = $1::uuid`, conv).Scan(&live), "read lease expiry")
+	c.False(live, "the lease row must be expired for this test to mean anything")
+	return lease
+}
+
+// TestConvBackendCounters pins the counters one Commit maintains: node, fork
+// and fallback counts, next_ordinal and payload_bytes.
+func TestConvBackendCounters(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
 	ctx := context.Background()
-	chainConv := cleanConversation(t, pool)
-	coreConv := cleanConversation(t, pool)
+	convID := cleanConversation(t, pool)
+	handle := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
 
-	aChain, aCore := convPair(t, "user", "a")
-	bChain, bCore := convPair(t, "assistant", "b")
-	cChain, cCore := convPair(t, "user", "c")
-	forkChain, forkCore := convPair(t, "assistant", "d")
-	fallChain, fallCore := convPair(t, "user", "e")
+	a := convNode(t, "user", "a")
+	b := convNode(t, "assistant", "b")
+	cc := convNode(t, "user", "c")
+	fork := convNode(t, "assistant", "d")
+	fall := convNode(t, "user", "e")
 
-	m := NewMessages(pool)
-	chainRoot, err := m.AppendChain(ctx, ChainAppend{
-		ConversationID: chainConv,
-		Root:           convtree.RootKindRoot,
-		Nodes:          []ChainNode{aChain, bChain, cChain},
-	})
-	c.NoError(err, "AppendChain root")
-	_, err = m.AppendChain(ctx, ChainAppend{
-		ConversationID: chainConv,
-		ParentID:       chainRoot.Nodes[1].ID,
-		Nodes:          []ChainNode{forkChain},
-	})
-	c.NoError(err, "AppendChain fork")
-	_, err = m.AppendChain(ctx, ChainAppend{
-		ConversationID: chainConv,
-		ParentFromHead: true,
-		Nodes:          []ChainNode{fallChain},
-		Fallback:       true,
-	})
-	c.NoError(err, "AppendChain fallback")
+	root, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{a, b, cc}})
+	c.NoError(err, "root")
+	_, err = handle.Append(ctx, conv.Append{ParentID: root.Nodes[1].ID, Nodes: []conv.NewNode{fork}})
+	c.NoError(err, "fork")
+	_, err = handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{fall}, Fallback: true})
+	c.NoError(err, "fallback")
 
-	handle := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(coreConv, conv.AsOwner())
-	coreRoot, err := handle.Append(ctx, conv.Append{
-		FromHead: true,
-		Nodes:    []conv.NewNode{aCore, bCore, cCore},
-	})
-	c.NoError(err, "conv root")
-	_, err = handle.Append(ctx, conv.Append{
-		ParentID: coreRoot.Nodes[1].ID,
-		Nodes:    []conv.NewNode{forkCore},
-	})
-	c.NoError(err, "conv fork")
-	_, err = handle.Append(ctx, conv.Append{
-		FromHead: true,
-		Nodes:    []conv.NewNode{fallCore},
-		Fallback: true,
-	})
-	c.NoError(err, "conv fallback")
+	state := readConvState(t, pool, convID)
+	c.Eq(5, state.nodeCount, "the fixture appends five nodes")
+	c.Eq(1, state.forkCount, "the fixture forks once")
+	c.Eq(1, state.fallback, "the fixture falls back once")
+	c.Eq(5, state.nextOrdinal, "next_ordinal")
+	c.Eq(storedPayloadBytes(t, pool, convID), state.payloadBytes, "payload_bytes")
+}
 
-	viaChain := readConvState(t, pool, chainConv)
-	viaCore := readConvState(t, pool, coreConv)
-	c.Eq(viaChain.nodeCount, viaCore.nodeCount, "node_count")
-	c.Eq(viaChain.forkCount, viaCore.forkCount, "fork_count")
-	c.Eq(viaChain.fallback, viaCore.fallback, "fallback_count")
-	c.Eq(viaChain.payloadBytes, viaCore.payloadBytes, "payload_bytes")
-	c.Eq(viaChain.nextOrdinal, viaCore.nextOrdinal, "next_ordinal")
-	c.Eq(5, viaCore.nodeCount, "the fixture appends five nodes")
-	c.Eq(1, viaCore.forkCount, "the fixture forks once")
-	c.Eq(1, viaCore.fallback, "the fixture falls back once")
+// TestConvBackendConsumesClearPending pins ConsumeClearPending: the flag is
+// cleared in the same transaction as the append, and left alone otherwise.
+func TestConvBackendConsumesClearPending(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	convID := cleanConversation(t, pool)
+	handle := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
 
-	for ordinal := 0; ordinal < viaCore.nodeCount; ordinal++ {
-		c.EqDeep(readTreeRow(t, pool, chainConv, ordinal).hash,
-			readTreeRow(t, pool, coreConv, ordinal).hash,
-			"node %d has the same path hash on both write paths", ordinal)
+	setClearPending := func(v bool) {
+		t.Helper()
+		_, err := pool.Exec(ctx, `UPDATE conversations.conversation SET clear_pending = $2 WHERE id = $1::uuid`, convID, v)
+		c.NoError(err, "set clear_pending")
 	}
+
+	setClearPending(true)
+	_, err := handle.Append(ctx, conv.Append{
+		FromHead: true, Nodes: []conv.NewNode{convNode(t, "user", "a")}, ConsumeClearPending: true,
+	})
+	c.NoError(err, "append consuming clear_pending")
+	c.False(readConvState(t, pool, convID).clearPending, "clear_pending consumed")
+
+	setClearPending(true)
+	_, err = handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{convNode(t, "user", "b")}})
+	c.NoError(err, "append leaving clear_pending")
+	c.True(readConvState(t, pool, convID).clearPending, "clear_pending untouched when not consumed")
+}
+
+// TestStoredResponsesSignatureSurvivesTheTreeRoundTrip pins the design's "the
+// encrypted reasoning round-trips into the next request, including across a
+// resume" claim where it is decided: the stored JSONB. A resumed or recovered
+// child reloads these nodes and resends the thinking blocks, so a signature that
+// comes back mangled (or dropped) silently loses the provider's continuation
+// state.
+func TestStoredResponsesSignatureSurvivesTheTreeRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	convID := cleanConversation(t, pool)
+	convs := conv.NewStore(NewConvBackend(pool), conv.Options{})
+	handle := convs.Open(convID, conv.AsOwner())
+
+	signature := "openai-responses:rs_0f1e2d3c:" + strings.Repeat("A-_9", 4096)
+	message := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.Thinking{Text: "reasoning text", Sig: msg.Signature{Value: signature}},
+		msg.Text{Text: "the answer"},
+	}}
+	// The message is its own root, so a replay attaches at the same place (the
+	// root seed) that the first append did.
+	appendAtRoot := func() (conv.Result, error) {
+		return handle.Append(ctx, conv.Append{Root: convtree.RootKindRoot, Nodes: []conv.NewNode{{Msg: message}}})
+	}
+	first, err := appendAtRoot()
+	c.NoError(err, "append")
+	replay, err := appendAtRoot()
+	c.NoError(err, "replay append")
+	c.Eq(0, replay.Inserted, "a replay is the same node")
+	c.Eq(first.Nodes[0].ID, replay.Nodes[0].ID, "the same node")
+
+	stored, err := convs.Transcript(ctx, convID)
+	c.Require().NoError(err, "Transcript")
+	c.Require().Len(stored, 1, "rows")
+	thinking, ok := stored[0].Msg.Content[0].(msg.Thinking)
+	c.Require().True(ok, "the first block is thinking")
+	c.Eq(signature, thinking.Sig.Value, "the reasoning signature must come back byte-identical")
+	c.Eq("reasoning text", thinking.Text, "the reasoning text")
+	text, ok := stored[0].Msg.Content[1].(msg.Text)
+	c.Require().True(ok, "the second block is text")
+	c.Eq("the answer", text.Text, "the text block")
+
+	reencoded, err := msganthropic.EncodeContent(stored[0].Msg)
+	c.NoError(err, "re-encode the loaded content")
+	c.StrContains(string(reencoded), signature, "the signature survives re-encoding")
 }
 
 // TestConvBackendFetchReturnsTheStoredRendering pins Content to the column's
@@ -342,7 +437,7 @@ func TestConvBackendFetchReturnsTheStoredRendering(t *testing.T) {
 	b := NewConvBackend(pool)
 	handle := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
 
-	_, hello := convPair(t, "user", "hello")
+	hello := convNode(t, "user", "hello")
 	res, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{hello}})
 	c.NoError(err, "append")
 	node := res.Nodes[0]
@@ -367,13 +462,13 @@ func TestConvBackendWalkCrossesDerivedFrom(t *testing.T) {
 	b := NewConvBackend(pool)
 	handle := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
 
-	_, hello := convPair(t, "user", "hello")
+	hello := convNode(t, "user", "hello")
 	root, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{hello}})
 	c.NoError(err, "root append")
-	_, hi := convPair(t, "assistant", "hi")
+	hi := convNode(t, "assistant", "hi")
 	tail, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{hi}})
 	c.NoError(err, "tail append")
-	_, summary := convPair(t, "user", "summary")
+	summary := convNode(t, "user", "summary")
 	boundary, err := handle.Append(ctx, conv.Append{
 		Root:          conv.KindCompactionSummary,
 		DerivedFromID: tail.Nodes[0].ID,
@@ -448,7 +543,7 @@ func TestReaderUnderLeaseTakeover(t *testing.T) {
 
 	nodes := make([]conv.NewNode, 0, 3)
 	for _, text := range []string{"a", "b", "c"} {
-		_, n := convPair(t, "user", text)
+		n := convNode(t, "user", text)
 		nodes = append(nodes, n)
 	}
 	first, err := handleA.Append(ctx, conv.Append{FromHead: true, Nodes: nodes})
@@ -535,8 +630,8 @@ func TestReaderUnderLeaseTakeover(t *testing.T) {
 
 	writerC := conv.NewStore(NewConvBackend(pool), conv.Options{})
 	handleC := writerC.Open(convID, conv.AsOwner(), conv.WithLease(leaseC))
-	_, afterOne := convPair(t, "assistant", "after the takeover")
-	_, afterTwo := convPair(t, "user", "and again")
+	afterOne := convNode(t, "assistant", "after the takeover")
+	afterTwo := convNode(t, "user", "and again")
 	second, err := handleC.Append(ctx, conv.Append{
 		FromHead: true,
 		Nodes:    []conv.NewNode{afterOne, afterTwo},
@@ -546,7 +641,7 @@ func TestReaderUnderLeaseTakeover(t *testing.T) {
 		committed[n.ID] = true
 	}
 
-	_, stale := convPair(t, "assistant", "a stale writer")
+	stale := convNode(t, "assistant", "a stale writer")
 	_, err = handleA.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{stale}})
 	c.ErrorIs(err, ErrLeaseLost, "the writer that lost its lease is fenced")
 

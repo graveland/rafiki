@@ -13,6 +13,7 @@ import (
 
 	"github.com/multigres/testkit/assert"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
@@ -66,9 +67,9 @@ func newRowEngine(t *testing.T, ts fakeToolSet, bodies ...string) (*Engine, *loc
 	eng.Start()
 	fe.handler = eng
 	history := func() []*rafikiv1.Event {
-		msgs, err := store.NewMessages(pool).Load(context.Background(), eng.conv.ID)
+		nodes, err := conv.NewStore(store.NewConvBackend(pool), conv.Options{}).Transcript(context.Background(), eng.conv.ID)
 		c.NoError(err, "load history")
-		return eventconv.EventsFromMessages("c", msgs)
+		return eventconv.EventsFromNodes("c", nodes)
 	}
 	return eng, sink, history
 }

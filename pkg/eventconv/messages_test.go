@@ -4,8 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -88,36 +86,6 @@ func TestEventsFromNodesCarriesTimestamp(t *testing.T) {
 	c.Eq(t0, evs[0].GetTs().AsTime().UTC(), "event 0 ts")
 	c.Eq(t1, evs[1].GetTs().AsTime().UTC(), "event 1 ts")
 	c.Nil(evs[2].GetTs(), "event 2 has a zero CreatedAt, want ts nil")
-}
-
-func TestBlocksFromParamPreservesToolUseInputAsRawJSON(t *testing.T) {
-	c := assert.NewAborting(t)
-	p := anthropic.NewAssistantMessage(
-		anthropic.NewToolUseBlock("tu_1", map[string]any{"path": "/tmp/x"}, "read"),
-	)
-
-	blocks := eventconv.BlocksFromParam(p)
-
-	c.Len(blocks, 1, "got %d blocks, want 1", len(blocks))
-	tu := blocks[0].GetToolUse()
-	c.NotNil(tu, "block is not a tool_use")
-	c.Eq("tu_1", tu.Id, "id")
-	c.Eq("read", tu.Name, "name")
-	c.NotEq("", tu.InputJson, "input_json is empty; it must carry the raw arguments JSON")
-}
-
-func TestBlocksAreIndexedMonotonically(t *testing.T) {
-	p := anthropic.NewAssistantMessage(
-		anthropic.NewTextBlock("one"),
-		anthropic.NewTextBlock("two"),
-		anthropic.NewTextBlock("three"),
-	)
-
-	blocks := eventconv.BlocksFromParam(p)
-
-	for i, b := range blocks {
-		assert.NewAborting(t).Eq(int32(i), b.Index, "block %d has index %d, want %d", i, b.Index, i)
-	}
 }
 
 func TestStopReasonNormalizes(t *testing.T) {

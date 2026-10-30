@@ -15,7 +15,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
-	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -169,11 +168,8 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 		ExternalRef:      childID,
 	})
 	ck.NoError(err, "EnsureConversationByExternalRef")
-	ms := store.NewMessages(pool)
-	_, aerr := ms.AppendNode(ctx, convID, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil, "")
-	ck.NoError(aerr, "append user message")
-	_, aerr = ms.AppendNode(ctx, convID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil, "")
-	ck.NoError(aerr, "append assistant message")
+	appendNode(t, pool, convID, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil)
+	appendNode(t, pool, convID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil)
 
 	c.st.Insert(&childstore.Session{
 		ChildID:   childID,

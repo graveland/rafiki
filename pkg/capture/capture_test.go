@@ -18,7 +18,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -378,14 +380,15 @@ func TestMessageHasCacheControl(t *testing.T) {
 
 // TestJSONBSafe checks the U+0000 sanitizer directly (no DB): clean content is
 // returned verbatim, NUL-bearing content is stripped and stays valid JSON with
-// integers preserved, and invalid JSON is passed through unchanged.
+// integers preserved, and invalid JSON is passed through unchanged. It pins
+// conv.StorableJSON, the one sanitizer capture and the tree both use.
 func TestJSONBSafe(t *testing.T) {
 	c := assert.NewCollecting(t)
 	clean := `{"type":"text","text":"hello"}`
-	c.Eq(clean, string(jsonbSafe([]byte(clean))), "clean content changed")
+	c.Eq(clean, string(conv.StorableJSON([]byte(clean))), "clean content changed")
 
 	withNUL := `[{"type":"text","text":"a\u0000b","n":123456789012345678}]`
-	out := string(jsonbSafe([]byte(withNUL)))
+	out := string(conv.StorableJSON([]byte(withNUL)))
 	c.False(strings.Contains(out, `\u0000`) || strings.IndexByte(out, 0) >= 0, "output still carries NUL: %s", out)
 	c.StrContains(out, "123456789012345678", "large integer not preserved (UseNumber)")
 	var arr []map[string]any
@@ -395,7 +398,7 @@ func TestJSONBSafe(t *testing.T) {
 	}
 
 	bad := `not json \u0000`
-	c.Eq(bad, string(jsonbSafe([]byte(bad))), "invalid json changed")
+	c.Eq(bad, string(conv.StorableJSON([]byte(bad))), "invalid json changed")
 }
 
 // TestDecomposeRequest_NullEscapeInContent verifies a message whose content
@@ -1608,13 +1611,13 @@ func TestInsertTurnIntentRecordsRequestDescriptor(t *testing.T) {
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	c.Require().NoError(err, "EnsureConversation")
 
-	res, err := store.AppendChain(ctx, pool, store.Lease{}, store.ChainAppend{
-		ConversationID: convID,
-		Root:           convtree.RootKindRoot,
-		Nodes:          []store.ChainNode{{Role: "user", Content: []byte(`"hi"`)}},
-	})
-	c.Require().NoError(err, "AppendChain")
-	c.Require().Eq(1, len(res.Nodes), "AppendChain node count")
+	res, err := conv.NewStore(store.NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner()).
+		Append(ctx, conv.Append{
+			Root:  convtree.RootKindRoot,
+			Nodes: []conv.NewNode{{Msg: msg.Message{Role: msg.User}, Content: []byte(`"hi"`)}},
+		})
+	c.Require().NoError(err, "append seed")
+	c.Require().Eq(1, len(res.Nodes), "append node count")
 	headID := res.Nodes[0].ID
 
 	from, to := 1, 4

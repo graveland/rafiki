@@ -3,16 +3,15 @@
 package store
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/conv"
 )
 
 // AnalysisRow is one conversations.conversation_analysis row: the result of
@@ -109,7 +108,7 @@ func UpsertAnalysis(ctx context.Context, pool *pgxpool.Pool, row AnalysisRow) (i
 		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id::text`,
 		row.ConversationID, row.DetectorVersion, row.Model, nullify(row.Profile), status, nullify(row.Error),
-		row.PromptHash, nullifyBytes(jsonbSafe(row.Analysis)), row.InputTokens, row.OutputTokens, row.CostUSD,
+		row.PromptHash, nullifyBytes(conv.StorableJSON(row.Analysis)), row.InputTokens, row.OutputTokens, row.CostUSD,
 	).Scan(&id)
 	if err != nil {
 		return "", nil, fmt.Errorf("upsert analysis: insert: %w", err)
@@ -291,53 +290,4 @@ func nullifyBytes(b []byte) any {
 		return nil
 	}
 	return b
-}
-
-// jsonbSafe makes a JSON value storable in a Postgres jsonb column, which
-// cannot represent U+0000: a `\u0000` escape triggers SQLSTATE 22P05 on
-// insert. Analysis payloads are LLM output over arbitrary captured
-// conversation text, so strip U+0000 from every string. Values without the
-// escape are returned verbatim — only NUL-bearing content pays the
-// decode/re-encode. Invalid JSON is returned unchanged so the insert surfaces
-// the real error.
-func jsonbSafe(b []byte) []byte {
-	if !bytes.Contains(b, []byte(`\u0000`)) {
-		return b
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber() // preserve integer precision through the round-trip
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return b
-	}
-	out, err := json.Marshal(stripNUL(v))
-	if err != nil {
-		return b
-	}
-	return out
-}
-
-// stripNUL recursively removes U+0000 from every string (and map key) in a
-// decoded JSON value. json.Number and other scalars pass through unchanged.
-func stripNUL(v any) any {
-	switch t := v.(type) {
-	case string:
-		if strings.IndexByte(t, 0) < 0 {
-			return t
-		}
-		return strings.ReplaceAll(t, "\x00", "")
-	case []any:
-		for i, e := range t {
-			t[i] = stripNUL(e)
-		}
-		return t
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, e := range t {
-			out[strings.ReplaceAll(k, "\x00", "")] = stripNUL(e)
-		}
-		return out
-	default:
-		return v
-	}
 }

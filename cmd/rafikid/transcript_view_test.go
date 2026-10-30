@@ -16,10 +16,21 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
+// rowFixture is one stored message as these tests build it: the shape a
+// conversations.conversation_message row carries, kept local so a fixture stays
+// a one-liner.
+type rowFixture struct {
+	Ordinal     int
+	Param       anthropic.MessageParam
+	StopReason  string
+	Kind        *string
+	InputTokens *int
+}
+
 // transcriptNodes builds the transcript a db-sourced read hands the frame
 // converter from stored rows: the node's identity, its decoded message, and the
 // kind, stop reason and replaced-context size the row carries.
-func transcriptNodes(t *testing.T, msgs []store.Message) []*conv.Node {
+func transcriptNodes(t *testing.T, msgs []rowFixture) []*conv.Node {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	out := make([]*conv.Node, 0, len(msgs))
@@ -41,7 +52,7 @@ func transcriptNodes(t *testing.T, msgs []store.Message) []*conv.Node {
 
 // viewEntries renders the frames for msgs and pairs them with their origins —
 // the exact route a db-sourced agent_view takes.
-func viewEntries(t *testing.T, msgs []store.Message) []entry {
+func viewEntries(t *testing.T, msgs []rowFixture) []entry {
 	t.Helper()
 	frames, origins := fundi.DBToPiFramesWithOrigins(transcriptNodes(t, msgs))
 	return renderEntries(frames, origins)
@@ -131,7 +142,7 @@ func viewDataLines(t *testing.T, out string) []string {
 // and the index resets when the row changes.
 func TestTranscriptViewNumbersEntriesWithinARow(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 2, Param: anthropic.NewUserMessage(
 			anthropic.NewToolResultBlock("tu_1", "first result", false),
 			anthropic.NewToolResultBlock("tu_2", "second result", false),
@@ -148,7 +159,7 @@ func TestTranscriptViewNumbersEntriesWithinARow(t *testing.T) {
 // nothing gets no cursor — there is nothing to address.
 func TestTranscriptViewThinkingOnlyRowYieldsNoEntry(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("prompt"))},
 		{Ordinal: 1, StopReason: string(anthropic.StopReasonEndTurn), Param: anthropic.NewAssistantMessage(
 			anthropic.NewThinkingBlock("sig", "long private reasoning"))},
@@ -164,7 +175,7 @@ func TestTranscriptViewThinkingOnlyRowYieldsNoEntry(t *testing.T) {
 // text to show.
 func TestTranscriptViewEndedEarly(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 0, StopReason: string(anthropic.StopReasonMaxTokens), Param: anthropic.NewAssistantMessage(
 			anthropic.NewThinkingBlock("sig", "ran out"))},
 		{Ordinal: 1, StopReason: string(anthropic.StopReasonMaxTokens), Param: anthropic.NewAssistantMessage(
@@ -189,7 +200,7 @@ func TestTranscriptViewEndedEarly(t *testing.T) {
 func TestTranscriptViewFullTextIsUncut(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	text := strings.Repeat("line one\n", 600)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock(text))},
 	})
 	e := all[0]
@@ -206,9 +217,9 @@ func TestTranscriptViewFullTextIsUncut(t *testing.T) {
 // range, and one marker per direction that has more.
 func TestTranscriptViewNewestPageMarkers(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	var msgs []store.Message
+	var msgs []rowFixture
 	for i := 0; i < 50; i++ {
-		msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+		msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 			anthropic.NewTextBlock(fmt.Sprintf("prompt %d", i)))})
 	}
 	all := viewEntries(t, msgs)
@@ -223,9 +234,9 @@ func TestTranscriptViewNewestPageMarkers(t *testing.T) {
 // drop the OLDEST entries of their window when the byte budget binds.
 func TestTranscriptViewByteBudgetFromEnd(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	var msgs []store.Message
+	var msgs []rowFixture
 	for i := 0; i < 6; i++ {
-		msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+		msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 			anthropic.NewTextBlock(strings.Repeat("x", 100)))})
 	}
 	all := viewEntries(t, msgs)
@@ -250,9 +261,9 @@ func TestTranscriptViewByteBudgetFromEnd(t *testing.T) {
 // if after reuses the from-end walk.
 func TestTranscriptViewByteBudgetFromStartOnAfter(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	var msgs []store.Message
+	var msgs []rowFixture
 	for i := 0; i < 6; i++ {
-		msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+		msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 			anthropic.NewTextBlock(strings.Repeat("x", 100)))})
 	}
 	all := viewEntries(t, msgs)
@@ -268,7 +279,7 @@ func TestTranscriptViewByteBudgetFromStartOnAfter(t *testing.T) {
 // empty while entries remain, even when one entry alone exceeds the budget.
 func TestTranscriptViewOversizeEntryStillShown(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock(strings.Repeat("y", 5000)))},
 	})
 	out := renderPage(all, pageSpec{mode: pageNewest, limit: 0, maxBytes: 10})
@@ -294,32 +305,32 @@ func TestTranscriptViewOversizeEntryStillShown(t *testing.T) {
 //     can place — a page of one inside the middle of the transcript.
 func TestTranscriptViewPagingIsLossless(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	var msgs []store.Message
+	var msgs []rowFixture
 	for i := 0; i < 48; i++ {
 		switch i % 6 {
 		case 0:
-			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+			msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 				anthropic.NewTextBlock(fmt.Sprintf("prompt %d", i)))})
 		case 1:
-			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewAssistantMessage(
+			msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewAssistantMessage(
 				anthropic.NewTextBlock(strings.Repeat(fmt.Sprintf("answer %d ", i), 3)))})
 		case 2:
 			// One row, three entries — the sub-index half of the cursor.
-			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+			msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d_a", i), fmt.Sprintf("first result %d", i), false),
 				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d_b", i), strings.Repeat("z", 600), false),
 				anthropic.NewToolResultBlock(fmt.Sprintf("tu_%d_c", i), fmt.Sprintf("third result %d", i), true),
 			)})
 		case 3:
-			msgs = append(msgs, store.Message{Ordinal: i, Kind: ptr(store.KindCompactionSummary),
+			msgs = append(msgs, rowFixture{Ordinal: i, Kind: ptr(store.KindCompactionSummary),
 				InputTokens: ptr(1000 * i), Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))})
 		case 4:
 			// Longer than the 2000-char page cap, and longer than the byte
 			// budget below: cut, and too big for any page.
-			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewAssistantMessage(
+			msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewAssistantMessage(
 				anthropic.NewTextBlock(strings.Repeat(fmt.Sprintf("long answer %d ", i), 200)))})
 		case 5:
-			msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+			msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 				anthropic.NewTextBlock(fmt.Sprintf("follow-up %d", i)))})
 		}
 	}
@@ -441,7 +452,7 @@ func TestTranscriptViewPagingIsLossless(t *testing.T) {
 // is shown alone — never an empty page, and never "(nothing after …)".
 func TestTranscriptViewNeverEmptyOnBeforeAndAfter(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("small prompt"))},
 		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock(strings.Repeat("y", 5000)))},
 		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("small follow-up"))},
@@ -475,7 +486,7 @@ func TestTranscriptViewNeverEmptyOnBeforeAndAfter(t *testing.T) {
 	// A window with several entries under the same tight budget still shows at
 	// least one of them rather than nothing: every entry exceeds the budget,
 	// so the floor is what keeps the page non-empty.
-	crowded := viewEntries(t, []store.Message{
+	crowded := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("start"))},
 		{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(strings.Repeat("x", 400)))},
 		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(strings.Repeat("x", 400)))},
@@ -491,9 +502,9 @@ func TestTranscriptViewNeverEmptyOnBeforeAndAfter(t *testing.T) {
 // grammar, an absent entry with the real bounds, and the two empty windows.
 func TestTranscriptViewCursorErrors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	var msgs []store.Message
+	var msgs []rowFixture
 	for i := 0; i < 3; i++ {
-		msgs = append(msgs, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+		msgs = append(msgs, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 			anthropic.NewTextBlock(fmt.Sprintf("prompt %d", i)))})
 	}
 	all := viewEntries(t, msgs)
@@ -522,7 +533,7 @@ func TestTranscriptViewCursorErrors(t *testing.T) {
 func TestTranscriptViewFind(t *testing.T) {
 	ck := assert.NewCollecting(t)
 
-	pastMessageCap := viewEntries(t, []store.Message{
+	pastMessageCap := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewAssistantMessage(
 			anthropic.NewTextBlock(strings.Repeat("a", 2500) + " needle"))},
 	})
@@ -530,7 +541,7 @@ func TestTranscriptViewFind(t *testing.T) {
 	ck.StrContains(out, "[1 matches for \"needle\"", "a hit past the 2000-char page cap is still found")
 	ck.StrContains(out, "needle", "and the snippet shows the match")
 
-	pastToolCap := viewEntries(t, []store.Message{
+	pastToolCap := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(
 			anthropic.NewToolResultBlock("tu_1", strings.Repeat("b", 500)+" needle", false))},
 	})
@@ -538,21 +549,21 @@ func TestTranscriptViewFind(t *testing.T) {
 	ck.StrContains(out, "[1 matches for \"needle\"", "a hit past the 400-char tool-result cap is still found")
 	ck.StrContains(out, "m:0.0  ", "the hit is addressed by its cursor")
 
-	caseInsensitive := viewEntries(t, []store.Message{
+	caseInsensitive := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("the Needle is here"))},
 	})
 	ck.StrContains(renderFind(caseInsensitive, "NEEDLE", 0, 0, viewMaxBytes), "Needle",
 		"matching is case-insensitive and the snippet keeps the original case")
 
-	nonASCII := viewEntries(t, []store.Message{
+	nonASCII := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("Ärger über den needle hier"))},
 	})
 	ck.StrContains(renderFind(nonASCII, "needle", 0, 0, viewMaxBytes), "needle",
 		"lowering per rune keeps snippet offsets valid for non-ASCII text")
 
-	var many []store.Message
+	var many []rowFixture
 	for i := 0; i < 15; i++ {
-		many = append(many, store.Message{Ordinal: i, Param: anthropic.NewUserMessage(
+		many = append(many, rowFixture{Ordinal: i, Param: anthropic.NewUserMessage(
 			anthropic.NewTextBlock("a needle in entry " + strconv.Itoa(i)))})
 	}
 	all := viewEntries(t, many)
@@ -581,7 +592,7 @@ func TestTranscriptViewEntryChunks(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	// 70 000 bytes of 2-byte runes: the 32 768-byte boundary lands mid-rune.
 	big := strings.Repeat("é", 35000)
-	all := viewEntries(t, []store.Message{
+	all := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("go"))},
 		{Ordinal: 1, StopReason: string(anthropic.StopReasonMaxTokens),
 			Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock(big))},
@@ -634,7 +645,7 @@ func TestTranscriptViewEntryChunks(t *testing.T) {
 	_, err = renderEntry(all, fmt.Sprintf("%s@nope", e.cursor), viewMaxBytes)
 	ck.ErrorContains(err, "malformed offset", "a non-numeric offset is refused")
 
-	short := viewEntries(t, []store.Message{
+	short := viewEntries(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("short answer"))},
 	})
 	out, err := renderEntry(short, short[0].cursor, viewMaxBytes)
@@ -649,7 +660,7 @@ func TestTranscriptViewEntryChunks(t *testing.T) {
 // to that rather than panicking.
 func TestTranscriptViewOneShotHasNoCursors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	frames, origins := fundi.DBToPiFramesWithOrigins(transcriptNodes(t, []store.Message{
+	frames, origins := fundi.DBToPiFramesWithOrigins(transcriptNodes(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
 		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi there"))},
 	}))

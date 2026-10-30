@@ -12,7 +12,7 @@ import (
 )
 
 // ClearBoundaryText is the content of the synthetic user row a fundi /clear
-// writes (store.AppendClear). Readers that cannot import pkg/store without
+// writes (`conv.Handle.Append` with a clear root). Readers that cannot import pkg/store without
 // linking postgres match it from here.
 const ClearBoundaryText = "The conversation was cleared. Nothing from before this point is available."
 

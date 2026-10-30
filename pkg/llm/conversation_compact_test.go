@@ -887,15 +887,13 @@ func TestCompactionStoreLoadStaysFull(t *testing.T) {
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }, NoTail: true}))
 	ck.Require().NoError(err)
 
-	msgs := store.NewMessages(pool)
 	for i, txt := range []string{"seed0", "seed1", "seed2", "seed3"} {
 		role := anthropic.MessageParamRoleUser
 		if i%2 == 1 {
 			role = anthropic.MessageParamRoleAssistant
 		}
-		_, aerr := msgs.AppendNode(ctx, conv.ID,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}}, nil, "")
-		ck.Require().NoError(aerr)
+		appendNode(t, pool, conv.ID,
+			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}})
 	}
 	conv.usedTokens = 999_000
 
@@ -903,17 +901,20 @@ func TestCompactionStoreLoadStaysFull(t *testing.T) {
 		t.Fatalf("continue: %v", err)
 	}
 
-	full, err := msgs.Load(ctx, conv.ID)
+	convs := convpkg.NewStore(store.NewConvBackend(pool), convpkg.Options{})
+	handle := convs.Open(conv.ID)
+	full, err := convs.Transcript(ctx, conv.ID)
 	ck.Require().NoError(err)
-	ck.Require().Len(full, 6, "Load must return every row: 4 seeds + summary + assistant")
+	ck.Require().Len(full, 6, "Transcript must return every row: 4 seeds + summary + assistant")
 	for i, want := range []string{"seed0", "seed1", "seed2", "seed3"} {
-		ck.Eq(want, full[i].Param.Content[0].OfText.Text, "pre-compaction row %d", i)
+		text, ok := full[i].Msg.Content[0].(msg.Text)
+		ck.Require().True(ok, "pre-compaction row %d is not text", i)
+		ck.Eq(want, text.Text, "pre-compaction row %d", i)
 	}
-	working, err := msgs.LoadWorking(ctx, conv.ID)
+	working, err := handle.Working(ctx)
 	ck.Require().NoError(err)
 	ck.Require().Len(working, 2, "working set = summary + assistant")
-	ck.Require().NotNil(working[0].Kind, "working set does not start at the summary")
-	ck.Eq(store.KindCompactionSummary, *working[0].Kind, "working set row 0 kind")
+	ck.Eq(convpkg.KindCompactionSummary, working[0].Kind, "working set row 0 kind")
 }
 
 func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
@@ -929,15 +930,13 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }, NoTail: true}))
 	ck.Require().NoError(err)
 
-	msgs := store.NewMessages(pool)
 	for i := 0; i < 4; i++ {
 		role := anthropic.MessageParamRoleUser
 		if i%2 == 1 {
 			role = anthropic.MessageParamRoleAssistant
 		}
-		_, aerr := msgs.AppendNode(ctx, conv.ID,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}}, nil, "")
-		ck.Require().NoError(aerr)
+		appendNode(t, pool, conv.ID,
+			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}})
 	}
 	conv.usedTokens = 999_000
 

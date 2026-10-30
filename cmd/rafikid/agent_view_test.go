@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -24,6 +25,26 @@ import (
 func convStoreFor(t *testing.T, pool *pgxpool.Pool) *conv.Store {
 	t.Helper()
 	return conv.NewStore(store.NewConvBackend(pool), conv.Options{})
+}
+
+// appendNode persists one message under convID's head and returns the committed
+// row identity — the fixture primitive the agent_view tests build on.
+func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic.MessageParam, meta *store.AssistantMeta) store.Appended {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	message, err := msganthropic.FromParam(param)
+	ck.NoError(err, "convert message")
+	node := conv.NewNode{Msg: message}
+	if meta != nil {
+		node.StopReason = meta.StopReason
+		node.InputTokens = &meta.Input
+		node.OutputTokens = &meta.Output
+	}
+	res, err := convStoreFor(t, pool).Open(convID, conv.AsOwner()).
+		Append(context.Background(), conv.Append{FromHead: true, Nodes: []conv.NewNode{node}})
+	ck.NoError(err, "append node")
+	n := res.Nodes[len(res.Nodes)-1]
+	return store.Appended{ID: n.ID, CreatedAt: n.CreatedAt, Ordinal: n.Ordinal, Depth: n.Depth}
 }
 
 // agentViewDBFixture is a seeded STORED conversation behind c_grandchild (the
@@ -56,10 +77,8 @@ func agentViewDBFixtureFor(t *testing.T) agentViewDBFixture {
 		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		 VALUES ('test', 'server') RETURNING id::text`).Scan(&convID), "insert conversation")
 
-	msgs := store.NewMessages(pool)
 	appendRow := func(param anthropic.MessageParam, meta *store.AssistantMeta) {
-		_, aerr := msgs.AppendNode(ctx, convID, param, meta, "")
-		ck.NoError(aerr, "append row")
+		appendNode(t, pool, convID, param, meta)
 	}
 	user := func(text string) anthropic.MessageParam {
 		return anthropic.NewUserMessage(anthropic.NewTextBlock(text))
@@ -277,17 +296,14 @@ func deadBranchFixtureFor(t *testing.T) deadBranchFixture {
 		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		 VALUES ('test', 'server') RETURNING id::text`).Scan(&convID), "insert conversation")
 
-	msgs := store.NewMessages(pool)
 	appendRow := func(param anthropic.MessageParam) store.Appended {
 		t.Helper()
-		row, err := msgs.AppendNode(ctx, convID, param, nil, "")
-		ck.NoError(err, "append row")
-		return row
+		return appendNode(t, pool, convID, param, nil)
 	}
 	appendRow(anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-live-1")))
 	appendRow(anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-live-1")))
 	retracted := appendRow(anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-retracted")))
-	ck.NoError(msgs.RetractHead(ctx, convID, retracted.ID), "retract the retried user row")
+	ck.NoError(convStoreFor(t, pool).Open(convID, conv.AsOwner()).RetractHead(ctx, retracted.ID), "retract the retried user row")
 	appendRow(anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-live-2")))
 	appendRow(anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-live-2")))
 

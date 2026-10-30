@@ -3,18 +3,20 @@
 A conversation's messages are a **tree of content-addressed nodes**, not a linear
 ordinal sequence. Every write path — claude capture through the proxy, fundi's
 own appends, a compaction, a `/clear` — goes through one primitive,
-`store.AppendChain`, and identity is a hash of the node's position and content.
+`conv.Handle.Append`, and identity is a hash of the node's position and content.
 
 The code, in the order this doc reads it:
 
 | File | What it owns |
 |---|---|
 | `pkg/convtree/convtree.go` | `Canon`, `RootSeed`, `NodeHash`, `Chain`, `HashVersion` — the identity |
-| `pkg/store/tree.go` | `AppendChain`, `LoadPath`, `RetractHead` — the write path |
+| `pkg/conv/append.go` | `Append`, `RetractHead`, the chain and parent rules — the write path |
+| `pkg/conv/store.go`, `pkg/conv/snapshot.go` | the node cache, the one walk, and the views |
+| `pkg/store/convbackend.go` | `Commit` — the Postgres CAS write |
 | `pkg/store/tree_backfill.go` | migration 0057's Go step, and `SameMessage` |
 | `pkg/store/tree_check.go` | `CheckTree` — the invariant check |
 | `pkg/capture/capture.go` | claude's attach decision |
-| `pkg/store/compaction.go`, `pkg/llm/` | fundi's mapping onto the tree |
+| `pkg/llm/` | fundi's mapping onto the tree |
 | `cmd/rafikid/tree_check.go` | the `rafikid tree check` verb |
 
 ## The model
@@ -53,8 +55,8 @@ in the order they happened. Because identity carries no timestamp, the same
 message sent twice under the same parent (a prompt re-sent after an interrupt)
 is ONE node, and the chronological view shows it once.
 
-The active path is a different read (`LoadPath`), and the two must not be
-confused: full history is every row in ordinal order, the working set is the
+The active path is a different read (`conv.Handle.Working`), and the two must not
+be confused: full history is every row in ordinal order, the working set is the
 head's path.
 
 ## Identity: `Canon` and the path hash
@@ -109,7 +111,7 @@ history IS the same history; and seeding a compaction root by derived-from would
 make the backfill disagree with live capture, where the summary names the reply
 it summarised while the last stored row before it can be the summarization side
 branch. Pinned by `TestRootSeedDistinguishesKindAndDerivedFrom`,
-`TestTwoClearsAreDistinctRoots` (`pkg/store`).
+`TestTwoClearsAreDistinctRoots` (`pkg/conv`).
 
 Hashes are taken over **the bytes that are stored** (after `jsonbSafe`), which is
 why `Canon`'s input is the jsonb text and not the request body.
@@ -153,30 +155,35 @@ Identity and hashing stay `Canon`: `SameMessage` decides "these two rows are the
 same message", never "these two rows are the same node". Pinned by
 `TestBackfillSameMessage` (`pkg/store`).
 
-## Writing: `AppendChain`
+## Writing: `conv.Handle.Append`
 
-`AppendChain(ctx, pool, lease, ChainAppend)` (`pkg/store/tree.go`) appends a chain
-of one or more nodes under one parent. `AppendNode`/`AppendCompaction`/
-`AppendClear`/`SeedChain` are all this call.
+`conv.Handle.Append(ctx, conv.Append)` (`pkg/conv/append.go`) appends a chain of
+one or more nodes under one parent. Every write path — capture, fundi, a
+compaction, a `/clear`, a seed — is this call. `conv.Append` names exactly one
+parent mode — `ParentID`, `FromHead` (the head read under the lock), or `Root`
+(with an optional `DerivedFromID`/`DerivedFromHead`) — plus `Fallback` and
+`ConsumeClearPending`.
 
-`ChainAppend` names exactly one parent mode — `ParentID`, `ParentFromHead` (the
-head read under the lock), or `Root` (with an optional `DerivedFromID`/
-`DerivedFromHead`) — plus `Fallback` and `ConsumeClearPending`. One transaction:
+The core owns the chain logic: it resolves the parent slot (the parent's
+`path_hash`, or `RootSeed(kind, derived-from)`), hashes the whole chain in Go
+(`pkg/convtree`), reads which of those hashes the conversation already holds, and
+inserts only the missing suffix. `store.ConvBackend.Commit` is the CAS write that
+decision is handed to. One transaction:
 
 ```
 SELECT head_id, next_ordinal FROM conversation WHERE id = $c FOR UPDATE
 fence the lease (FOR SHARE on conversation_lease; ErrLeaseLost if it is gone)
-resolve the parent slot: the parent's path_hash, or RootSeed(kind, derived-from)
-hash the whole chain in Go, from that slot
-SELECT id, path_hash, ordinal, depth, created_at FROM conversation_message
- WHERE conversation_id = $c AND path_hash = ANY($hashes)
-the existing nodes must form a PREFIX of the chain; m = the first missing index
-INSERT nodes m..n (ON CONFLICT (conversation_id, path_hash) DO NOTHING)
+compare head_id and next_ordinal to the values Append read (ErrConflict if they moved)
+check every row's parent/derived-from is a node of this conversation
+INSERT the missing suffix (ON CONFLICT (conversation_id, path_hash) DO NOTHING)
 UPDATE conversation SET next_ordinal += inserted, head_id = <last node>,
        node_count += inserted, fork_count += forks, fallback_count += fallback,
        payload_bytes += sum(octet_length(content::text)) of the inserted rows,
        clear_pending = false (only when ConsumeClearPending)
 ```
+
+`Append` retries a `conv.ErrConflict` up to five times, re-reading the head each
+time; `conv.ErrLeaseLost` is returned as-is and never retried.
 
 - The row lock is what allocates a gap-free ordinal range and what makes the head
   move atomic with the insert. Ordinals are assigned `next_ordinal + (i - m)`, so
@@ -184,9 +191,9 @@ UPDATE conversation SET next_ordinal += inserted, head_id = <last node>,
 - **The head moves to the last node of the chain whether that node was inserted
   or already existed**, which is what makes a client that rewinds onto a branch
   and gets back a stored reply still end up on the right path. An empty `Nodes`
-  with a `ParentID` just moves the head there, inserting nothing. `RetractHead`
-  (`pkg/store/tree.go`) makes the same move in its own transaction, with its own
-  checks (the node must be the head and a user row).
+  with a `ParentID` just moves the head there, inserting nothing.
+  `conv.Handle.RetractHead` makes the same move in its own transaction, with its
+  own checks (the node must be the head and a user row).
 - **Existing nodes must form a prefix of the chain.** A gap means the tree
   disagrees with what is being appended, and it is reported rather than repaired
   — silently rewriting history is the failure this scheme exists to prevent. The
@@ -194,23 +201,16 @@ UPDATE conversation SET next_ordinal += inserted, head_id = <last node>,
   the prefix invariant was broken and the call errors.
 - A held lease is re-checked inside the same transaction with `FOR SHARE` on the
   lease row, so a takeover's `UPDATE` blocks until this transaction ends and a
-  stalled writer that wakes after takeover writes nothing.
+  stalled writer that wakes after takeover writes nothing. The fence is checked
+  before the head comparison, so a taken-over writer hears `ErrLeaseLost`, not a
+  retryable conflict.
 - `fork_count` + 1 means "this append created a branch point" (the parent of the
   first inserted node already had a child); `fallback_count` + 1 means "this
   append attached without a usable `previous_message_id`".
 
-`LoadPath` walks `head_id → parent_id` to a root and returns the path in depth
-order; a conversation with no head returns an empty slice. `RetractHead` moves the
-head to the parent of the current head, which must be a user row: it is a head
-move, never a delete, so the retracted row survives as an abandoned leaf and the
-smaller retry is its sibling.
-
-Pinned by `TestAppendChainInsertsChainWithConsecutiveOrdinals`,
-`TestAppendChainPartialPrefixInsertsOnlyTheRest`, `TestAppendChainAllExistingMovesHead`,
-`TestAppendChainSiblingCountsFork`, `TestAppendChainPrefixInvariant`,
-`TestAppendChainConcurrentWritersGetDisjointGapFreeOrdinals`,
-`TestAppendChainLeaseFenceBlocksTakeover`, `TestLoadPathFollowsHeadNotOrdinal`,
-`TestRetractHeadMovesHeadAndKeepsRow` (`pkg/store`).
+Pinned by `convtest.RunBackendSuite` (`pkg/conv/convtest`) and
+`TestAppend*`/`TestRetractHead*` (`pkg/conv`), plus `TestConvBackend*`
+(`pkg/store`).
 
 ## claude: the request names its parent
 
@@ -276,20 +276,21 @@ request is a root derived from the head it cut.
 ## fundi: the parent is given
 
 fundi holds its working history in memory and appends to its end, so it needs no
-hash lookup to find the attach point. The mapping (`pkg/store/compaction.go`,
-`pkg/llm/conversation.go`, `pkg/llm/conversation_compact.go`):
+hash lookup to find the attach point. The mapping (`pkg/llm/conversation.go`,
+`pkg/llm/conversation_compact.go`):
 
 | Operation | Tree |
 |---|---|
-| `Messages.AppendNode` | one `AppendChain` with `ParentFromHead` — the ordinal comes from the counter, never `len(history)`; a message re-sent on resume is the same hash, so it is idempotent |
-| `Messages.AppendCompaction` | ONE `AppendChain`: the summary as a `compaction_summary` root (`derived_from` = the head) followed by the tail copies under it, `kind='compaction_tail'` so every reader that skips tails keeps working |
-| `Messages.AppendClear` | one node as a `clear` root, `derived_from` = the head; the head moves onto it, so the working path restarts there |
-| `Messages.LoadWorking` | a thin alias for `LoadPath` — walk `parent_id` from `head_id` to a root |
-| `Conversation.RetractTailUser` | `RetractHead`: move the head back to the parent, never a `DELETE`; the retracted prompt stays as an abandoned leaf and the smaller retry is its sibling |
-| `Messages.SeedChain` | a chain from a plain root; an existing prefix is matched by hash so only the missing suffix is inserted |
+| `Conversation.appendMessage` | one `conv.Handle.Append` with `FromHead` — the ordinal comes from the counter, never `len(history)`; a message re-sent on resume is the same hash, so it is idempotent |
+| `Conversation.compact` | ONE `Append`: the summary as a `compaction_summary` root (`DerivedFromHead`) followed by the tail copies under it, `Kind: conv.KindCompactionTail` so every reader that skips tails keeps working |
+| a `/clear` | one node as a `clear` root, `DerivedFromHead`; the head moves onto it, so the working path restarts there |
+| `Conversation.loadHistory` | `conv.Handle.Working` — walk `parent_id` from `head_id` to a root |
+| `Conversation.RetractTailUser` | `conv.Handle.RetractHead`: move the head back to the parent, never a `DELETE`; the retracted prompt stays as an abandoned leaf and the smaller retry is its sibling |
+| `Conversation.SeedHistory` | a chain from a plain root; an existing prefix is matched by hash so only the missing suffix is inserted |
 
-The in-memory mode used by tests and tools without a database (`messages == nil`)
-keeps its slice and its `memHorizon`; it has no tree.
+The store-less mode used by tests and tools without a database (`llm.WithStore`
+unset) runs the same core over `conv.NewMemBackend()`: it has the same tree and
+the same views, just no Postgres.
 
 See `docs/reference/fundi-compaction.md` for the policy, the tail rule and the
 events.
@@ -321,24 +322,62 @@ request minus `messages`), stored on change.
 
 ## Reading
 
-- **Chronological** — `store.Messages.Load`, `ORDER BY ordinal`: every row ever
-  written, including the branches the working path no longer reaches. This is
-  what `GetHistory` (and so `rafiki logs`), `rafiki tail`'s backfill, recall and
-  the insights export read.
-- **Transcript** — `conv.Store.Transcript` (or `Page` over it): the head's walk
-  across compaction and clear boundaries, chronological and without the
-  `compaction_tail` copies, so a row the head no longer reaches is absent. This
-  is what `Controller.dbRecent`/`agent_view` reads.
-- **Working path** — `LoadPath` (or `ORDER BY depth` over it): the history the
-  model last saw. fundi's working set, and what anything that renders only the
-  live history needs.
-- **Siblings** at a node (`WHERE parent_id = $1`) are the branch points.
+One walk is the source of every view. `conv.Store` (`pkg/conv/store.go`) opens a
+handle on a conversation and `Snapshot` walks `head_id → parent_id`, crossing a
+root's `derived_from_id`, through the cache or one `Walk`+`Fetch` on the backend.
+The four views over that walk:
+
+- **Transcript** — `conv.Store.Transcript` (or `Snapshot().Transcript()`): the
+  head's walk across compaction and clear boundaries, chronological and without
+  the `compaction_tail` copies, so a row the head no longer reaches is absent.
+  `Controller.dbRecent`/`agent_view`, `rafiki logs` and `rafiki tail` read this.
+- **History** — `Snapshot().History()`: the same walk, compaction tails included.
+  It is the full tree the head reaches, in chronological order.
+- **Working path** — `conv.Handle.Working`: the chain from the head to the
+  nearest root, stopping at a compaction or clear boundary. fundi's working set,
+  and what anything that renders only the live history needs.
+- **Page** — `conv.Store.Page` (or `Snapshot().Page`): one bounded, backward page
+  of the transcript, widened so it never splits nodes that share a `created_at`.
+  `GetHistory` pages with it.
+
+Two readers stay SQL because they read ROWS, not the tree:
+
+- **Chronological row read** — `store.Messages.LoadSince`, `ORDER BY ordinal`:
+  the rows created at or after a timestamp, including branches the working path
+  no longer reaches. A capture report reads its turn back with it.
+- **Tree check and backfill** — `pkg/store/tree_check.go` and
+  `pkg/store/tree_backfill.go` walk the raw rows directly; they are the invariant
+  checker and the migration, not a read path.
 
 A full-history reader must skip `kind='compaction_tail'` rows or it shows a
-compaction's tail twice: `eventconv.EventsFromMessages`, `pkg/fundi.DBToPiFramesMessages`,
+compaction's tail twice: `eventconv.EventsFromNodes`, `pkg/fundi.DBToPiFramesMessages`,
 the `pkg/insights` readers, `pkg/recall` (which also skips `compaction_summary`).
-`store.Messages.Load` is deliberately NOT filtered by anything else — a reader
-that wants the working set asks for it by name.
+`store.Messages.LoadSince` is deliberately NOT filtered by anything else — a
+reader that wants the working set asks for it by name.
+
+## Cache
+
+`conv.Store` (`pkg/conv/store.go`) is the node cache in front of a
+`conv.Backend`. One store serves the whole daemon: the proxy face, the review
+worker and every in-process child share it, so a node one face appended is
+cached for the next.
+
+- **Authority.** An owner handle (`conv.AsOwner`, what a writer opens) trusts the
+  head it cached and publishes the new head only after its rows are cached; a
+  reader handle asks the backend once and stores the answer only while no write
+  has published since. Becoming the owner, or arriving under a different fence,
+  invalidates the cached head — a takeover must not inherit the previous
+  holder's position.
+- **Idle TTL.** An entry idle for `IdleTTL` (default five minutes) is swept on the
+  next `Open` or `touch`; there are no timers and no goroutines. A swept entry
+  costs a `State` call, never a stale answer.
+- **Budget.** `RAFIKI_CONV_CACHE_BYTES` sets the cache budget in bytes (default
+  `268435456` = 256 MiB), charged by stored content bytes; the coldest nodes are
+  evicted, and an evicted node is re-fetched through `Walk` + `Fetch`. A value
+  that is not a positive integer refuses daemon startup.
+- **`clear_pending` is never cached.** It is read from the conversation row when
+  a request needs it, so a `/clear` a client just sent is visible to the next
+  request on any face.
 
 ## Stats
 
@@ -466,7 +505,8 @@ NULL `path_hash` is invisible to every count — expected for a recognised
 interim-fork copy, but a backfill misclassification leaves no trace. A non-root
 row with a NULL `depth` escapes both `bad_depth` (`NULL <> x` is not TRUE) and
 `bad_hash` (depth is checked only for roots). No defect here is
-one the writers can produce: `AppendChain` always writes a position and a depth,
+one the writers can produce: `conv.Handle.Append` always writes a position and a
+depth,
 and the only positionless rows the backfill leaves are the copies it recognised.
 Each therefore means data edited by hand — which is also why none is repaired.
 
@@ -553,8 +593,10 @@ runs — never a retry.
 - `pkg/convtree` — the canon rules (including `TestCanonEscapesHTMLAndLineSeparators`,
   the escaped-bytes pin), the root seed, and `TestGoldenFixtureChains`
   / `TestParityStoredVersusReplayed` over `testdata/claude-capture`.
-- `pkg/store` — `TestAppendChain*`, `TestLoadPath*`, `TestRetractHead*`,
-  `TestBackfill*`, `TestCheckTree*`, `TestCompaction*`, `TestTwoClearsAreDistinctRoots`.
+- `pkg/store` — `TestBackfill*`, `TestCheckTree*`, `TestConvBackend*`,
+  `TestStoredResponsesSignatureSurvivesTheTreeRoundTrip`.
+- `pkg/conv` — `convtest.RunBackendSuite`, `TestAppend*`, `TestRetractHead*`,
+  `TestPage*`, `TestTranscript*`, `TestWorking*`, `TestTwoClearsAreDistinctRoots`.
 - `pkg/capture` — `TestCapturedClaudeSessionReplays`, `TestReplayTwiceAddsNoRows`,
   `TestBackfillMatchesTreeCapture`, `TestARewindAttachesAtTheNamedNode`,
   `TestACompactionSummaryAfterAKnownReplyIsARoot`, `clear_boundary_test.go`.

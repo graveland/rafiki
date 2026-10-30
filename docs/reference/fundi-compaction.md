@@ -17,8 +17,8 @@ deleted or renumbered.
 The mechanism lives in `pkg/llm`: `CompactionPolicy`
 (`pkg/llm/compact_policy.go`) decides when and how much, `Conversation.compact`
 (`pkg/llm/conversation_compact.go`) runs the summary call and writes the
-boundary, and `store.Messages.AppendCompaction` (`pkg/store/compaction.go`)
-persists it — one `store.AppendChain` call, so the boundary is one transaction.
+boundary, and the boundary is written through `conv.Handle.Append`
+(`pkg/conv/append.go`) — one call, so the boundary is one transaction.
 The tree model itself is `docs/reference/conversation-tree.md`.
 
 ## Triggers
@@ -69,9 +69,9 @@ catalog does not know returns 0 and so never triggers proactively.
 
 ## Rows
 
-`AppendCompaction` is one `store.AppendChain` call, which locks the conversation
-row `FOR UPDATE` first (serialising concurrent compactors) and fences the write
-on the held conversation lease:
+A compaction is one `conv.Handle.Append` call; `store.ConvBackend.Commit` locks
+the conversation row `FOR UPDATE` first (serialising concurrent compactors) and
+fences the write on the held conversation lease:
 
 - **Summary** as the first node of the chain, a ROOT of kind
   `compaction_summary` with `derived_from_id` = the head it replaced, and
@@ -98,7 +98,7 @@ summary plus tail (`TestCompactionSecondCompactionIsANewRoot`,
 ## Clear
 
 `/clear` is the same shape with no summary: `Conversation.Clear` →
-`store.Messages.AppendClear` appends ONE synthetic user row
+`conv.Handle.Append` appends ONE synthetic user row
 (`store.ClearBoundaryText`, `kind='clear'`) as a ROOT derived from the current
 head, and the head moves onto it, in one lease-fenced transaction. The working
 path is then that row alone, so the next prompt merges into it at request
@@ -111,9 +111,9 @@ next prompt has nothing to merge into. `Engine.runSlash` then publishes a native
 `CompactionBoundary{trigger:"clear"}`.
 
 A claude `/clear` shares `kind='clear'` but its row is the real first message of
-the new head; readers tell them apart with `store.IsClearBoundary` (kind AND the
+the new head; readers tell them apart with `conv.IsClearBoundary` (kind AND the
 exact boundary text). Full-history readers render the synthetic row as a
-divider: `eventconv.EventsFromMessages`, `pkg/fundi.DBToPiFramesMessages`;
+divider: `eventconv.EventsFromNodes`, `pkg/fundi.DBToPiFramesMessages`;
 `pkg/recall` extracts nothing from it and cuts summariser windows at it.
 
 Only a PROMPT frame is ever a command (`queued.command`): a steer that falls
@@ -128,24 +128,22 @@ frame's `trigger`).
 
 ## Working set vs full history
 
-Two reads of `conversations.conversation_message` exist, and which one a caller
-uses is the whole point:
+Two kinds of read of `conversations.conversation_message` exist, and which one a
+caller uses is the whole point:
 
-- **Working set** — `store.Messages.LoadWorking` (an alias for `LoadPath`)
-  returns the chain from `conversation.head_id` up `parent_id` to a root, in
-  depth order. `llm.Conversation.loadHistory` (and so `History`,
+- **Working set** — `conv.Handle.Working` returns the chain from
+  `conversation.head_id` up `parent_id` to a root, stopping at a compaction or
+  clear boundary. `llm.Conversation.loadHistory` (and so `History`,
   `agentloop.Resume`, orphan repair and `classifyPrefill`) reads only this.
-- **Full history** — `store.Messages.Load`/`LoadPage` returns every row in
-  ordinal order and is deliberately NOT path-filtered. `GetHistory` (which
-  serves `rafiki logs`), `StreamEvents`' tail backfill (which serves `rafiki
-  tail`) and recall read every row.
-- **Transcript** — `conv.Store.Transcript` returns the head's walk across
-  compaction and clear boundaries, so a row the head no longer reaches (a
-  retracted prompt, a superseded reply) does not appear. `Controller.dbRecent`
-  (which serves GetRecent and the `agent_view` tool) reads it.
+- **Full history** — `conv.Store.Transcript` (or `Page` over it) is the head's
+  walk across compaction and clear boundaries, so a row the head no longer
+  reaches does not appear; `Snapshot().History()` is that walk with the tails.
+  `GetHistory` pages with `Page`, and `agent_view`/`rafiki logs`/`rafiki tail`
+  render `Transcript`. `store.Messages.LoadSince` is the one row reader that
+  stays SQL: the rows a capture turn wrote, read back by timestamp.
 
 A full-history reader must skip `kind='compaction_tail'` rows or it shows the
-tail twice: `eventconv.EventsFromMessages` skips them and synthesises a
+tail twice: `eventconv.EventsFromNodes` skips them and synthesises a
 `CompactionBoundary` from the summary row instead; the transcript
 `pkg/fundi.DBToPiFramesMessages` renders (the agent_view path) never carries them
 at all, and the function drops any it is handed before rendering the same
@@ -234,7 +232,7 @@ A compaction is observable two ways:
   duration (`pkg/child/state.go`). On a successful end the emitter also
   publishes a native `CompactionBoundary` event carrying the trigger and the
   pre/post token counts.
-- **Reattach.** `eventconv.EventsFromMessages` synthesises the same
+- **Reattach.** `eventconv.EventsFromNodes` synthesises the same
   `CompactionBoundary` from the stored `compaction_summary` row, so a client
   backfilling history renders the boundary as the same divider it saw live.
 

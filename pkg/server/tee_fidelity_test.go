@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -561,6 +562,6 @@ func (s *recordingChatStore) ConversationTokens(context.Context, string) ([]capt
 }
 
 // MessagesSince satisfies proxyStore; this fake reports no stored rows.
-func (s *recordingChatStore) MessagesSince(context.Context, string, time.Time) ([]store.Message, error) {
+func (s *recordingChatStore) MessagesSince(context.Context, string, time.Time) ([]*conv.Node, error) {
 	return nil, nil
 }

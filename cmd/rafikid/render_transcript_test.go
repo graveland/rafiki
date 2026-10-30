@@ -19,7 +19,7 @@ func ptr[T any](v T) *T { return &v }
 // "(no transcript yet)" for a child with a full transcript.
 func TestRenderTranscriptLimitCountsEntries(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	frames := fundi.DBToPiFramesMessages(transcriptNodes(t, []store.Message{
+	frames := fundi.DBToPiFramesMessages(transcriptNodes(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first prompt"))},
 		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("first answer"))},
 		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("second prompt"))},
@@ -41,7 +41,7 @@ func TestRenderTranscriptLimitCountsEntries(t *testing.T) {
 // a readable divider line, not silently dropped.
 func TestRenderTranscriptRendersCompactionBoundary(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	frames := fundi.DBToPiFramesMessages(transcriptNodes(t, []store.Message{
+	frames := fundi.DBToPiFramesMessages(transcriptNodes(t, []rowFixture{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first prompt"))},
 		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("first answer"))},
 		{Ordinal: 2, Kind: ptr(store.KindCompactionSummary), InputTokens: ptr(150_000),

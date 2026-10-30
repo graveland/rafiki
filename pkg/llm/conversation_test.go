@@ -17,12 +17,26 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
+
+// appendNode persists one message under the conversation's head, the fixture
+// shape the trim and compaction tests seed before a send.
+func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic.MessageParam) {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	message, err := msganthropic.FromParam(param)
+	ck.NoError(err, "convert message")
+	handle := convpkg.NewStore(store.NewConvBackend(pool), convpkg.Options{}).Open(convID, convpkg.AsOwner())
+	_, err = handle.Append(context.Background(), convpkg.Append{FromHead: true, Nodes: []convpkg.NewNode{{Msg: message}}})
+	ck.NoError(err, "append node")
+}
 
 // Integration tests need TimescaleDB (RAFIKI_TEST_DSN, see store/migrate_test.go).
 func convTestPool(t *testing.T) *pgxpool.Pool {
@@ -244,8 +258,7 @@ func TestConversationTrimRetryKeepsPrefixAndRows(t *testing.T) {
 		}
 		msg := anthropic.MessageParam{Role: role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		_, aerr := store.NewMessages(pool).AppendNode(ctx, conv.ID, msg, nil, "")
-		ck.Require().NoError(aerr)
+		appendNode(t, pool, conv.ID, msg)
 	}
 
 	if _, err := conv.Send(ctx, UserText("question")); err != nil {
@@ -299,12 +312,9 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	// Conversation B: an assistant tool_use with no matching tool_result.
 	convB, err := c.Conversation(ctx, NewConversation("", "test"))
 	ck.Require().NoError(err)
-	msgs := store.NewMessages(pool)
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_orphan", map[string]any{"a": 1}, "service_status"))
-	_, aerr := msgs.AppendNode(ctx, convB.ID, assistant, nil, "")
-	ck.Require().NoError(aerr)
-
+	appendNode(t, pool, convB.ID, assistant)
 	// Conversation C: clean (a full Send).
 	convC, err := c.Conversation(ctx, NewConversation("", "test"))
 	ck.Require().NoError(err)
@@ -868,11 +878,10 @@ func TestRequestDescriptorTrimRetryRecordsDroppedRange(t *testing.T) {
 		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
 	}
 	for i, role := range roles {
-		_, aerr := store.NewMessages(pool).AppendNode(ctx, conv.ID, anthropic.MessageParam{
+		appendNode(t, pool, conv.ID, anthropic.MessageParam{
 			Role:    role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("seeded %d", i))},
-		}, nil, "")
-		ck.Require().NoError(aerr, "seed row %d", i)
+		})
 	}
 	if _, err := conv.Send(ctx, UserText("question")); err != nil {
 		t.Fatalf("Send with trim-retry: %v", err)
@@ -939,11 +948,10 @@ func TestCompactionOverflowRecordsNewHead(t *testing.T) {
 		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
 	}
 	for i, role := range roles {
-		_, aerr := store.NewMessages(pool).AppendNode(ctx, conv.ID, anthropic.MessageParam{
+		appendNode(t, pool, conv.ID, anthropic.MessageParam{
 			Role:    role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("seeded %d", i))},
-		}, nil, "")
-		ck.Require().NoError(aerr, "seed row %d", i)
+		})
 	}
 
 	resp, err := conv.Continue(ctx)

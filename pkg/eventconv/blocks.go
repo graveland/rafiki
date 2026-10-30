@@ -11,56 +11,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
 
-// BlocksFromParam converts one stored message's content blocks into proto
-// blocks, assigning each a rafiki-local index. The index is positional within
-// this message and is not the provider's own numbering.
-func BlocksFromParam(p anthropic.MessageParam) []*rafikiv1.ContentBlock {
-	out := make([]*rafikiv1.ContentBlock, 0, len(p.Content))
-	for i, blk := range p.Content {
-		cb := &rafikiv1.ContentBlock{Index: int32(i)}
-		switch {
-		case blk.OfText != nil:
-			cb.Block = &rafikiv1.ContentBlock_Text{
-				Text: &rafikiv1.TextBlock{Text: blk.OfText.Text},
-			}
-		case blk.OfThinking != nil:
-			cb.Block = &rafikiv1.ContentBlock_Thinking{
-				Thinking: &rafikiv1.ThinkingBlock{
-					Thinking:  blk.OfThinking.Thinking,
-					Signature: blk.OfThinking.Signature,
-				},
-			}
-		case blk.OfToolUse != nil:
-			cb.Block = &rafikiv1.ContentBlock_ToolUse{
-				ToolUse: &rafikiv1.ToolUseBlock{
-					Id:        blk.OfToolUse.ID,
-					Name:      blk.OfToolUse.Name,
-					InputJson: rawJSON(blk.OfToolUse.Input),
-				},
-			}
-		case blk.OfToolResult != nil:
-			cb.Block = &rafikiv1.ContentBlock_ToolResult{
-				ToolResult: toolResult(blk.OfToolResult),
-			}
-		case blk.OfImage != nil:
-			cb.Block = &rafikiv1.ContentBlock_Image{Image: imageBlock(blk.OfImage)}
-		default:
-			continue
-		}
-		out = append(out, cb)
-	}
-	return out
-}
-
 // BlocksFromMsg converts a native message's content blocks into proto blocks,
 // assigning each a rafiki-local index. The index is the block's source position
-// within this message, matching BlocksFromParam: a block that cannot be named
+// within this message: a block that cannot be named
 // is skipped and leaves a gap, so two messages with the same named blocks in the
 // same order always carry the same indices.
 func BlocksFromMsg(m msg.Message) []*rafikiv1.ContentBlock {
@@ -243,56 +200,6 @@ func opaqueToolResultContent(raw json.RawMessage) []*rafikiv1.ContentBlock {
 		}
 	}
 	return out
-}
-
-// imageBlock converts a stored image into its proto form. Only a base64
-// source carries bytes; a URL source, or base64 that does not decode, still
-// yields a block, so the image is named downstream rather than dropped.
-func imageBlock(img *anthropic.ImageBlockParam) *rafikiv1.ImageBlock {
-	out := &rafikiv1.ImageBlock{}
-	if src := img.Source.OfBase64; src != nil {
-		out.MediaType = string(src.MediaType)
-		if data, err := base64.StdEncoding.DecodeString(src.Data); err == nil {
-			out.Data = data
-		}
-	}
-	return out
-}
-
-func toolResult(tr *anthropic.ToolResultBlockParam) *rafikiv1.ToolResultBlock {
-	out := &rafikiv1.ToolResultBlock{
-		ToolUseId: tr.ToolUseID,
-		IsError:   tr.IsError.Or(false),
-	}
-	for i, c := range tr.Content {
-		cb := &rafikiv1.ContentBlock{Index: int32(i)}
-		switch {
-		case c.OfText != nil:
-			cb.Block = &rafikiv1.ContentBlock_Text{
-				Text: &rafikiv1.TextBlock{Text: c.OfText.Text},
-			}
-		case c.OfImage != nil:
-			cb.Block = &rafikiv1.ContentBlock_Image{Image: imageBlock(c.OfImage)}
-		default:
-			continue
-		}
-		out.Content = append(out.Content, cb)
-	}
-	return out
-}
-
-// rawJSON renders a tool's arguments back to their JSON text. Tool inputs stay
-// opaque strings on the wire by design (spec §3.3): the shape is whatever the
-// model produced for whatever tool.
-func rawJSON(v any) string {
-	if v == nil {
-		return ""
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 // toolResultContent maps a tool result's nested blocks. Only text and image have

@@ -10,8 +10,10 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
@@ -91,14 +93,19 @@ func newCaptureHarness(t *testing.T) *captureHarness {
 	return h
 }
 
-func capRow(ordinal int, role string, at time.Time, stop string) store.Message {
-	m := store.Message{
-		Ordinal:    ordinal,
-		Param:      anthropic.MessageParam{Role: anthropic.MessageParamRole(role), Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("m%d", ordinal))}},
-		StopReason: stop,
-		CreatedAt:  at,
+func capRow(ordinal int, role string, at time.Time, stop string) *conv.Node {
+	message, err := msganthropic.FromParam(anthropic.MessageParam{
+		Role:    anthropic.MessageParamRole(role),
+		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("m%d", ordinal))},
+	})
+	if err != nil {
+		panic(err)
 	}
-	return m
+	return &conv.Node{
+		Ref:        conv.Ref{Ordinal: ordinal, CreatedAt: at},
+		Msg:        message,
+		StopReason: stop,
+	}
 }
 
 func TestCaptureReportPublishesRowsWithRowTs(t *testing.T) {
@@ -109,7 +116,7 @@ func TestCaptureReportPublishesRowsWithRowTs(t *testing.T) {
 
 	h.c.CaptureReported(server.CaptureReport{
 		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1",
-		Rows: []store.Message{capRow(0, "user", t1, ""), capRow(1, "assistant", t2, "end_turn")},
+		Rows: []*conv.Node{capRow(0, "user", t1, ""), capRow(1, "assistant", t2, "end_turn")},
 	})
 	h.drain()
 
@@ -127,9 +134,9 @@ func TestCaptureReportDedupesByOrdinal(t *testing.T) {
 	now := time.Now()
 
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv",
-		Rows: []store.Message{capRow(3, "user", now, ""), capRow(4, "assistant", now, "end_turn")}})
+		Rows: []*conv.Node{capRow(3, "user", now, ""), capRow(4, "assistant", now, "end_turn")}})
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv",
-		Rows: []store.Message{capRow(4, "assistant", now, "end_turn"), capRow(5, "user", now, "")}})
+		Rows: []*conv.Node{capRow(4, "assistant", now, "end_turn"), capRow(5, "user", now, "")}})
 	h.drain()
 
 	var labels []string
@@ -144,11 +151,10 @@ func TestCaptureReportPublishesNoBoundaryForCompactionSummary(t *testing.T) {
 	h := newCaptureHarness(t)
 	now := time.Now()
 	summary := capRow(1, "user", now, "")
-	kind := store.KindCompactionSummary
-	summary.Kind = &kind
+	summary.Kind = conv.KindCompactionSummary
 
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv",
-		Rows: []store.Message{capRow(0, "user", now, ""), summary, capRow(2, "assistant", now, "end_turn")}})
+		Rows: []*conv.Node{capRow(0, "user", now, ""), summary, capRow(2, "assistant", now, "end_turn")}})
 	h.drain()
 
 	var labels []string
@@ -165,7 +171,7 @@ func TestCaptureReportErrPublishesErrorAfterRows(t *testing.T) {
 
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1",
 		Err:  "insert failed",
-		Rows: []store.Message{capRow(0, "user", now, "")}})
+		Rows: []*conv.Node{capRow(0, "user", now, "")}})
 	h.drain()
 
 	ck.EqDeep([]string{"user:0", "error:capture_not_persisted", "released"}, h.log, "order")
@@ -188,7 +194,7 @@ func TestCaptureReportMarksResponsePersisted(t *testing.T) {
 	now := time.Now()
 
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1",
-		Rows: []store.Message{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")}})
+		Rows: []*conv.Node{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")}})
 	h.drain()
 
 	ck.EqDeep([]string{"user:0", "assistant:1", "persisted:msg_1"}, h.log, "row events precede the gate call")
@@ -203,7 +209,7 @@ func TestCaptureReportThreadRoutesToThreadChild(t *testing.T) {
 	h.log, h.got = nil, nil
 
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ThreadID: "th", ConversationID: "conv-th", ResponseMessageID: "msg_9",
-		Rows: []store.Message{capRow(0, "user", time.Now(), "")}})
+		Rows: []*conv.Node{capRow(0, "user", time.Now(), "")}})
 	h.drain()
 
 	ck.Require().Eq(1, len(h.got), "events")
@@ -216,7 +222,7 @@ func TestCaptureReportUnknownChildDropped(t *testing.T) {
 	h := newCaptureHarness(t)
 
 	h.c.CaptureReported(server.CaptureReport{Session: "launcher", ConversationID: "conv", ResponseMessageID: "msg_1",
-		Rows: []store.Message{capRow(0, "user", time.Now(), "")}})
+		Rows: []*conv.Node{capRow(0, "user", time.Now(), "")}})
 	h.drain()
 
 	ck.Eq(0, len(h.got), "events")
@@ -268,9 +274,9 @@ func assertPublishedTsMatchesHistory(t *testing.T, role string) {
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: convID, ResponseMessageID: "msg_1", Rows: rows})
 	h.drain()
 
-	page, err := store.NewMessages(pool).LoadPage(ctx, convID, store.HistoryPage{})
-	ck.Require().NoError(err, "LoadPage")
-	history := eventconv.EventsFromMessages("c_1", page)
+	page, err := conv.NewStore(store.NewConvBackend(pool), conv.Options{}).Transcript(ctx, convID)
+	ck.Require().NoError(err, "Transcript")
+	history := eventconv.EventsFromNodes("c_1", page)
 
 	want := func(evs []*rafikiv1.Event) *timestamppb.Timestamp {
 		for _, ev := range evs {
@@ -298,7 +304,7 @@ func TestCaptureReportReleaseOnlyReleasesTheGateAndPublishesNothing(t *testing.T
 
 	h.c.CaptureReported(server.CaptureReport{
 		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1", ReleaseOnly: true,
-		Rows: []store.Message{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")},
+		Rows: []*conv.Node{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")},
 	})
 	h.drain()
 
@@ -309,7 +315,7 @@ func TestCaptureReportReleaseOnlyReleasesTheGateAndPublishesNothing(t *testing.T
 	// says nothing about what this conversation has published.
 	h.log, h.got = nil, nil
 	h.c.CaptureReported(server.CaptureReport{Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1",
-		Rows: []store.Message{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")}})
+		Rows: []*conv.Node{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")}})
 	h.drain()
 
 	ck.EqDeep([]string{"user:0", "assistant:1", "persisted:msg_1"}, h.log, "the mark was not advanced")

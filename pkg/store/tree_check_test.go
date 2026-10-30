@@ -10,7 +10,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -427,27 +429,23 @@ func TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites(t *testing.T) {
 	// Go-live write 1: a fork — a second child under the request, as AppendChain
 	// with ParentID writes it — and the head moves onto the fork, so the reply it
 	// left behind is no longer on the working path.
-	forked, err := AppendChain(ctx, pool, Lease{}, ChainAppend{
-		ConversationID: convID,
-		ParentID:       checkRowID(t, ctx, pool, convID, 0),
-		Nodes: []ChainNode{{
-			Role:    "user",
-			Content: []byte(`[{"type":"text","text":"forked"}]`),
-		}},
+	handle := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
+	forked, err := handle.Append(ctx, conv.Append{
+		ParentID: checkRowID(t, ctx, pool, convID, 0),
+		Nodes:    []conv.NewNode{{Msg: msg.Message{Role: msg.User}, Content: []byte(`[{"type":"text","text":"forked"}]`)}},
 	})
 	c.Require().NoError(err, "append the fork")
 	c.Eq(1, forked.Inserted, "the fork is a new node")
 
-	// Go-live write 2: a compaction, exactly as AppendCompaction writes it — a
+	// Go-live write 2: a compaction, exactly as a compaction writes it — a
 	// compaction_summary root derived from the current head, with the tail copied
 	// verbatim under it. The head restarts at the summary.
-	compacted, err := AppendChain(ctx, pool, Lease{}, ChainAppend{
-		ConversationID:  convID,
-		Root:            convtree.RootKindCompaction,
+	compacted, err := handle.Append(ctx, conv.Append{
+		Root:            conv.KindCompactionSummary,
 		DerivedFromHead: true,
-		Nodes: []ChainNode{
-			{Role: "user", Content: []byte(`[{"type":"text","text":"the summary"}]`)},
-			{Role: "assistant", Content: []byte(`[{"type":"text","text":"reply"}]`), Kind: ptrTo(KindCompactionTail)},
+		Nodes: []conv.NewNode{
+			{Msg: msg.Message{Role: msg.User}, Content: []byte(`[{"type":"text","text":"the summary"}]`)},
+			{Msg: msg.Message{Role: msg.Assistant}, Content: []byte(`[{"type":"text","text":"reply"}]`), Kind: conv.KindCompactionTail},
 		},
 	})
 	c.Require().NoError(err, "append the compaction")

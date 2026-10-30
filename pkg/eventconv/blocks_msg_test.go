@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
@@ -101,27 +99,55 @@ const bridgeOpaqueFixture = `[
 	{"type":"tool_use","id":"tu_2","name":"grep","input":{"pattern":"x"}}
 ]`
 
-// TestBlocksFromMsgMatchesBlocksFromParam pins the native bridge against the
-// SDK bridge it will replace: both decode the same stored content and must
-// produce the same proto blocks, indices included.
-func TestBlocksFromMsgMatchesBlocksFromParam(t *testing.T) {
-	t.Run("every kind", func(t *testing.T) {
-		c := assert.NewAborting(t)
-		got := bridgesAgree(t, bridgeFixture)
+// TestBlocksFromMsgRendersEveryKind pins the native bridge over a fixture
+// carrying every typed kind, with a tool result that nests text and an image.
+func TestBlocksFromMsgRendersEveryKind(t *testing.T) {
+	c := assert.NewAborting(t)
+	m, err := msganthropic.Decode("assistant", []byte(bridgeFixture))
+	c.NoError(err, "decode content into msg.Message")
 
-		c.Len(got, 5, "blocks from the full fixture")
-		c.Len(got[3].GetToolResult().GetContent(), 2, "nested tool result content")
-		c.NotNil(got[3].GetToolResult().GetContent()[1].GetImage(), "nested image survives")
-	})
+	blocks := eventconv.BlocksFromMsg(m)
 
-	t.Run("past an opaque block", func(t *testing.T) {
-		c := assert.NewAborting(t)
-		got := bridgesAgree(t, bridgeOpaqueFixture)
+	c.Require().Len(blocks, 5, "blocks from the full fixture")
+	for i, b := range blocks {
+		c.Eq(int32(i), b.Index, "block %d keeps its source index", i)
+	}
+	c.Eq("hello", blocks[0].GetText().GetText(), "text block")
+	c.Eq("weighing the options", blocks[1].GetThinking().GetThinking(), "thinking text")
+	c.Eq("sig_abc", blocks[1].GetThinking().GetSignature(), "thinking signature")
+	tu := blocks[2].GetToolUse()
+	c.Require().NotNil(tu, "block 2 is %T, want a tool_use", blocks[2].Block)
+	c.Eq("tu_1", tu.GetId(), "tool_use id")
+	c.Eq("bash", tu.GetName(), "tool_use name")
+	var input map[string]any
+	c.NoError(json.Unmarshal([]byte(tu.GetInputJson()), &input), "input_json is JSON")
+	c.EqDeep(map[string]any{"command": "ls -la", "paths": []any{"/tmp"}}, input, "tool_use input")
+	tr := blocks[3].GetToolResult()
+	c.Require().NotNil(tr, "block 3 is %T, want a tool_result", blocks[3].Block)
+	c.Eq("tu_1", tr.GetToolUseId(), "tool_result id")
+	c.True(tr.GetIsError(), "tool_result is_error")
+	c.Len(tr.GetContent(), 2, "nested tool result content")
+	c.Eq("boom", tr.GetContent()[0].GetText().GetText(), "nested text")
+	c.EqDeep(png1x1Bytes(t), tr.GetContent()[1].GetImage().GetData(), "nested image bytes")
+	img := blocks[4].GetImage()
+	c.Require().NotNil(img, "block 4 is %T, want an image", blocks[4].Block)
+	c.Eq("image/jpeg", img.GetMediaType(), "image media type")
+	c.EqDeep(png1x1Bytes(t), img.GetData(), "image bytes")
+}
 
-		c.Len(got, 2, "blocks emitted past the opaque one")
-		c.Eq(int32(1), got[0].Index, "first emitted block keeps its source index")
-		c.Eq(int32(2), got[1].Index, "second emitted block keeps its source index")
-	})
+// TestBlocksFromMsgSkipsPastAnOpaqueBlock pins that a block the proto cannot
+// name is skipped and leaves a gap, so the emitted blocks keep their source
+// indices.
+func TestBlocksFromMsgSkipsPastAnOpaqueBlock(t *testing.T) {
+	c := assert.NewAborting(t)
+	m, err := msganthropic.Decode("assistant", []byte(bridgeOpaqueFixture))
+	c.NoError(err, "decode content into msg.Message")
+
+	got := eventconv.BlocksFromMsg(m)
+
+	c.Require().Len(got, 2, "blocks emitted past the opaque one")
+	c.Eq(int32(1), got[0].Index, "first emitted block keeps its source index")
+	c.Eq(int32(2), got[1].Index, "second emitted block keeps its source index")
 }
 
 // A block kept verbatim is still real content: when the proto vocabulary can
@@ -179,37 +205,4 @@ func TestBlocksFromMsgRendersOpaqueByType(t *testing.T) {
 	c.NotNil(shorthand, "block 4 is %T, want a tool_result", blocks[4].Block)
 	c.Len(shorthand.GetContent(), 1, "string content is one text block")
 	c.Eq("shorthand", shorthand.GetContent()[0].GetText().GetText(), "string tool result text")
-}
-
-// bridgesAgree decodes content through both routes, asserts the two bridges
-// produced identical blocks, and returns the native bridge's result.
-func bridgesAgree(t *testing.T, content string) []*rafikiv1.ContentBlock {
-	t.Helper()
-	c := assert.NewAborting(t)
-
-	m, err := msganthropic.Decode("assistant", []byte(content))
-	c.NoError(err, "decode content into msg.Message")
-
-	var sdkContent []anthropic.ContentBlockParamUnion
-	c.NoError(json.Unmarshal([]byte(content), &sdkContent), "decode content into SDK content blocks")
-	want := eventconv.BlocksFromParam(anthropic.NewAssistantMessage(sdkContent...))
-	got := eventconv.BlocksFromMsg(m)
-	c.Len(got, len(want), "got %d blocks from msg, want %d from the SDK param", len(got), len(want))
-
-	wantAll := proto.Clone(&rafikiv1.AssistantMessage{Content: want}).(*rafikiv1.AssistantMessage)
-	gotAll := proto.Clone(&rafikiv1.AssistantMessage{Content: got}).(*rafikiv1.AssistantMessage)
-	for i := range want {
-		if want[i].GetToolUse() == nil || got[i].GetToolUse() == nil {
-			continue
-		}
-		var wv, gv any
-		c.NoError(json.Unmarshal([]byte(want[i].GetToolUse().InputJson), &wv), "block %d: unmarshal BlocksFromParam InputJson", i)
-		c.NoError(json.Unmarshal([]byte(got[i].GetToolUse().InputJson), &gv), "block %d: unmarshal BlocksFromMsg InputJson", i)
-		c.EqDeep(wv, gv, "block %d: tool input", i)
-		wantAll.Content[i].GetToolUse().InputJson = ""
-		gotAll.Content[i].GetToolUse().InputJson = ""
-	}
-	c.True(proto.Equal(wantAll, gotAll), "bridges disagree: BlocksFromParam=%v BlocksFromMsg=%v", want, got)
-
-	return got
 }

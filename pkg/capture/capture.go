@@ -329,7 +329,7 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 			        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
 			        model=COALESCE(NULLIF($11,''), model), served_provider=$12
 			  WHERE id=$1::uuid AND created_at=$2`,
-			r.TurnID, r.CreatedAt, nullifyBytes(jsonbSafe(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
+			r.TurnID, r.CreatedAt, nullifyBytes(conv.StorableJSON(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
 			r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model,
 			nullify(r.ServedProvider))
 		if err != nil {
@@ -413,7 +413,7 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 // RootSeed(RootKindRoot, nil). A request whose history starts at a compaction or
 // clear root and names no usable id therefore attaches as a new root.
 //
-// Content is stored verbatim (jsonbSafe'd; empty content becomes JSON null).
+// Content is stored verbatim (conv.StorableJSON'd; empty content becomes JSON null).
 // Also stores prefix_content on this turn iff prefixHash differs from the
 // previous turn's, and records cache-breakpoints on the turn. Returns the error
 // for the caller to escalate (the proxy fails the turn), never panics, never
@@ -434,7 +434,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 		if len(content) == 0 {
 			content = json.RawMessage(`null`)
 		}
-		msgs[i] = convtree.Msg{Role: m.Role, Content: jsonbSafe(content)}
+		msgs[i] = convtree.Msg{Role: m.Role, Content: conv.StorableJSON(content)}
 	}
 	var head string
 	err := retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
@@ -657,7 +657,7 @@ func (s *CaptureStore) priorTurnInputTokens(ctx context.Context, convID string, 
 }
 
 // chainNodes renders parsed messages as append nodes. Content stays verbatim:
-// the core applies StorableJSON to it exactly as jsonbSafe did.
+// the core applies StorableJSON to it exactly as conv.StorableJSON does.
 func chainNodes(msgs []convtree.Msg) ([]conv.NewNode, error) {
 	nodes := make([]conv.NewNode, len(msgs))
 	for i, m := range msgs {
@@ -760,7 +760,7 @@ func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID strin
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET prefix_content=$3, cache_breakpoints=$4
 			  WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, jsonbSafe(envelope), breakpoints); err != nil {
+			turnID, createdAt, conv.StorableJSON(envelope), breakpoints); err != nil {
 			return fmt.Errorf("store turn prefix: prefix_content: %w", err)
 		}
 		return nil
@@ -855,54 +855,6 @@ func messageHasCacheControl(content json.RawMessage) bool {
 	return bytes.Contains(content, []byte(`"cache_control"`))
 }
 
-// jsonbSafe makes a JSON value storable in a Postgres jsonb column, which
-// cannot represent U+0000: a `\u0000` escape triggers SQLSTATE 22P05 on insert.
-// Captured content is arbitrary client/model text (a pasted NUL, a tool result),
-// so strip U+0000 from every string. Values without the escape are returned
-// verbatim — only NUL-bearing content pays the decode/re-encode. Invalid JSON is
-// returned unchanged so the insert surfaces the real error.
-func jsonbSafe(b []byte) []byte {
-	if !bytes.Contains(b, []byte(`\u0000`)) {
-		return b
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber() // preserve integer precision through the round-trip
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return b
-	}
-	out, err := json.Marshal(stripNUL(v))
-	if err != nil {
-		return b
-	}
-	return out
-}
-
-// stripNUL recursively removes U+0000 from every string (and map key) in a
-// decoded JSON value. json.Number and other scalars pass through unchanged.
-func stripNUL(v any) any {
-	switch t := v.(type) {
-	case string:
-		if strings.IndexByte(t, 0) < 0 {
-			return t
-		}
-		return strings.ReplaceAll(t, "\x00", "")
-	case []any:
-		for i, e := range t {
-			t[i] = stripNUL(e)
-		}
-		return t
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, e := range t {
-			out[strings.ReplaceAll(k, "\x00", "")] = stripNUL(e)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
 // AppendResponseMessage appends the canonical assistant Message (canonical, an
 // anthropic.Message JSON) as a child of `parentID` — the request head
 // DecomposeRequest returned — with content stored verbatim from
@@ -935,7 +887,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 			ParentID: parentID,
 			Nodes: []conv.NewNode{{
 				Msg:               msg.Message{Role: msg.Assistant},
-				Content:           jsonbSafe(content),
+				Content:           conv.StorableJSON(content),
 				InputTokens:       &in,
 				OutputTokens:      &out,
 				StopReason:        stopReason,

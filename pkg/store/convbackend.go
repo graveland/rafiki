@@ -20,11 +20,11 @@ import (
 // conversations.conversation_message, its position on
 // conversations.conversation.
 //
-// It writes exactly what AppendChain writes, in the same transaction shape —
-// the conversation row locked FOR UPDATE, the lease re-checked under FOR SHARE,
-// the nodes inserted with ON CONFLICT (conversation_id, path_hash) DO NOTHING,
-// and the conversation's counters moved in one UPDATE — so the two write paths
-// cannot disagree about a conversation's tree.
+// It writes one atomic tree write in the transaction shape conv's Append
+// expects — the conversation row locked FOR UPDATE, the lease re-checked under
+// FOR SHARE, the nodes inserted with ON CONFLICT (conversation_id, path_hash)
+// DO NOTHING, and the conversation's counters moved in one UPDATE — so the
+// commit cannot disagree with the tree the core hashed.
 type ConvBackend struct{ pool *pgxpool.Pool }
 
 // NewConvBackend returns a conv.Backend backed by pool.
@@ -214,7 +214,7 @@ func (b *ConvBackend) ByProviderMessageID(ctx context.Context, convID, providerM
 }
 
 // HasChild reports whether parentID has a child in the conversation. It reads
-// parent_id only, which is the edge AppendChain's fork check counts.
+// parent_id only, which is the edge Append's fork check counts.
 func (b *ConvBackend) HasChild(ctx context.Context, convID, parentID string) (bool, error) {
 	var exists bool
 	err := b.pool.QueryRow(ctx, `
@@ -227,13 +227,13 @@ func (b *ConvBackend) HasChild(ctx context.Context, convID, parentID string) (bo
 	return exists, nil
 }
 
-// Commit applies one atomic tree write, mirroring AppendChain statement for
-// statement: the conversation row is locked FOR UPDATE (which is what makes the
-// head comparison meaningful and the head move atomic with the insert), a held
-// lease is re-checked under FOR SHARE (a takeover's UPDATE blocks until this
-// transaction ends, so a writer that wakes after a takeover writes nothing), the
-// nodes are inserted with the same ON CONFLICT (conversation_id, path_hash) DO
-// NOTHING, and the conversation's counters move in one UPDATE.
+// Commit applies one atomic tree write: the conversation row is locked FOR
+// UPDATE (which is what makes the head comparison meaningful and the head move
+// atomic with the insert), a held lease is re-checked under FOR SHARE (a
+// takeover's UPDATE blocks until this transaction ends, so a writer that wakes
+// after a takeover writes nothing), the nodes are inserted with ON CONFLICT
+// (conversation_id, path_hash) DO NOTHING, and the conversation's counters move
+// in one UPDATE.
 //
 // The fence is checked before the head comparison, so a taken-over writer always
 // hears conv.ErrLeaseLost rather than a conflict its caller would retry. A stale

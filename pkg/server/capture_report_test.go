@@ -16,7 +16,7 @@ import (
 
 	"github.com/multigres/testkit/assert"
 
-	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/conv"
 )
 
 type recordingSink struct {
@@ -84,7 +84,7 @@ func serveReport(p *MessagesProxy, body, session string) *httptest.ResponseRecor
 
 func TestCaptureReportOnSuccess(t *testing.T) {
 	c := assert.NewAborting(t)
-	rows := []store.Message{{Ordinal: 0}, {Ordinal: 1}}
+	rows := []*conv.Node{{Ref: conv.Ref{Ordinal: 0}}, {Ref: conv.Ref{Ordinal: 1}}}
 	fs := &fakeProxyStore{sinceRows: rows}
 	p, sink, _ := reportProxy(t, fs, http.StatusOK)
 
@@ -105,7 +105,7 @@ func TestCaptureReportOnSuccess(t *testing.T) {
 
 func TestCaptureReportOnUpstreamErrorCarriesPromptAndTurnErr(t *testing.T) {
 	c := assert.NewAborting(t)
-	rows := []store.Message{{Ordinal: 0}}
+	rows := []*conv.Node{{Ref: conv.Ref{Ordinal: 0}}}
 	fs := &fakeProxyStore{sinceRows: rows}
 	p, sink, _ := reportProxy(t, fs, http.StatusTooManyRequests)
 
@@ -135,7 +135,7 @@ func TestCaptureReportOnAppendFailure(t *testing.T) {
 
 func TestCaptureReportReadBackFailure(t *testing.T) {
 	c := assert.NewAborting(t)
-	fs := &fakeProxyStore{sinceErr: errors.New("db gone"), sinceRows: []store.Message{{Ordinal: 0}}}
+	fs := &fakeProxyStore{sinceErr: errors.New("db gone"), sinceRows: []*conv.Node{{Ref: conv.Ref{Ordinal: 0}}}}
 	p, sink, _ := reportProxy(t, fs, http.StatusOK)
 
 	serveReport(p, reportToolsBody, "sess-1")
@@ -155,7 +155,7 @@ func TestCaptureReportReadBackFailure(t *testing.T) {
 // the child's event stream (TurnEnd included) silent until the child exited.
 func TestCaptureReportReleasesGateForRequestWithoutClientTools(t *testing.T) {
 	c := assert.NewAborting(t)
-	fs := &fakeProxyStore{sinceRows: []store.Message{{Ordinal: 0}, {Ordinal: 1}}}
+	fs := &fakeProxyStore{sinceRows: []*conv.Node{{Ref: conv.Ref{Ordinal: 0}}, {Ref: conv.Ref{Ordinal: 1}}}}
 	p, sink, _ := reportProxy(t, fs, http.StatusOK)
 
 	serveReport(p, reportPlainBody, "sess-1")

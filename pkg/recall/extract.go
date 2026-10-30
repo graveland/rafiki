@@ -163,7 +163,7 @@ func humanSize(n int) string {
 }
 
 // isClearBoundary reports whether m is the synthetic row a fundi /clear writes
-// (store.AppendClear). A claude clear row shares the kind but is a real message,
+// (`conv.Handle.Append` with a clear root). A claude clear row shares the kind but is a real message,
 // so the kind alone is not enough.
 func isClearBoundary(m Message) bool {
 	return m.Kind == "clear" && bytes.Contains(m.Content, []byte(slashcmd.ClearBoundaryText))

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multigres/testkit/assert"
@@ -139,70 +138,6 @@ func TestRelease(t *testing.T) {
 	c.NoError(ls.Release(ctx, lease), "Release")
 	if _, ok, err := ls.Acquire(ctx, conv, "daemon-b", 5*time.Minute); err != nil || !ok {
 		t.Errorf("after Release, daemon-b could not acquire: ok=%v err=%v", ok, err)
-	}
-}
-
-// TestFencedAppendSucceedsWithLiveLease is the baseline for the next test:
-// with a valid lease the guard is invisible.
-func TestFencedAppendSucceedsWithLiveLease(t *testing.T) {
-	c := assert.NewAborting(t)
-	pool := leasePool(t)
-	ls := NewLeases(pool)
-	ctx := context.Background()
-	conv := newConversation(t, pool)
-
-	lease, ok, err := ls.Acquire(ctx, conv, "daemon-a", 5*time.Minute)
-	c.False(err != nil || !ok, "Acquire: ok=%v err=%v", ok, err)
-
-	msgs := NewMessages(pool).WithLease(lease)
-	_, aerr := msgs.AppendNode(ctx, conv, userMessage("hello"), nil, "")
-	c.NoError(aerr, "AppendNode with a live lease")
-
-	loaded, err := NewMessages(pool).Load(ctx, conv)
-	c.NoError(err, "Load")
-	c.Len(loaded, 1, "loaded %d messages, want 1", len(loaded))
-}
-
-// TestFencedAppendFailsAfterTakeover is the fencing test. A holder that stalled
-// past expiry and woke up after another daemon took over must write NOTHING —
-// this is what makes a TTL lease safe without a monotonic fencing token.
-func TestFencedAppendFailsAfterTakeover(t *testing.T) {
-	c := assert.NewCollecting(t)
-	pool := leasePool(t)
-	ls := NewLeases(pool)
-	ctx := context.Background()
-	conv := newConversation(t, pool)
-
-	stale, ok, err := ls.Acquire(ctx, conv, "daemon-a", -time.Minute)
-	c.Require().False(err != nil || !ok, "first Acquire: ok=%v err=%v", ok, err)
-	if _, ok, err := ls.Acquire(ctx, conv, "daemon-b", 5*time.Minute); err != nil || !ok {
-		t.Fatalf("takeover: ok=%v err=%v", ok, err)
-	}
-
-	msgs := NewMessages(pool).WithLease(stale)
-	_, err = msgs.AppendNode(ctx, conv, userMessage("should not land"), nil, "")
-	c.Require().ErrorIs(err, ErrLeaseLost, "AppendNode error")
-
-	loaded, lerr := NewMessages(pool).Load(ctx, conv)
-	c.Require().NoError(lerr, "Load")
-	c.Empty(loaded, "a superseded holder wrote %d messages; want 0", len(loaded))
-}
-
-// TestUnfencedAppendStillWorks pins the escape hatch: a caller with no lease
-// (a client-driven conversation, a migration) writes exactly as before.
-func TestUnfencedAppendStillWorks(t *testing.T) {
-	pool := leasePool(t)
-	ctx := context.Background()
-	conv := newConversation(t, pool)
-
-	_, aerr := NewMessages(pool).AppendNode(ctx, conv, userMessage("unfenced"), nil, "")
-	assert.NewAborting(t).NoError(aerr, "unfenced AppendNode")
-}
-
-func userMessage(text string) anthropic.MessageParam {
-	return anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(text)},
 	}
 }
 

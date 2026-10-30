@@ -7,7 +7,9 @@ package convtest
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -339,6 +341,119 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		st, err := h.State(ctx)
 		c.NoError(err, "State")
 		c.Eq(2, st.NextOrdinal, "a retract allocates no ordinal")
+	})
+
+	t.Run("ConcurrentAppendsGetDisjointOrdinals", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, convID := setup(t)
+		ctx := context.Background()
+		convs := conv.NewStore(b, conv.Options{})
+
+		const writers = 2
+		var wg sync.WaitGroup
+		results := make([][]int, writers)
+		errs := make([]error, writers)
+		for i := range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				chain := []conv.NewNode{
+					{Msg: text(msg.User, strconv.Itoa(i)+" a")},
+					{Msg: text(msg.Assistant, strconv.Itoa(i)+" b")},
+				}
+				res, err := convs.Open(convID, conv.AsOwner()).Append(ctx, conv.Append{Root: convtree.RootKindRoot, Nodes: chain})
+				errs[i] = err
+				for _, n := range res.Nodes {
+					results[i] = append(results[i], n.Ordinal)
+				}
+			}()
+		}
+		wg.Wait()
+
+		var all []int
+		for i := range writers {
+			c.NoError(errs[i], "writer %d", i)
+			all = append(all, results[i]...)
+		}
+		sort.Ints(all)
+		c.EqDeep([]int{0, 1, 2, 3}, all, "two chains allocate four gap-free ordinals")
+	})
+
+	t.Run("ConcurrentSameChainLeavesOneCopy", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, convID := setup(t)
+		ctx := context.Background()
+		convs := conv.NewStore(b, conv.Options{})
+
+		chain := []conv.NewNode{{Msg: text(msg.User, "same")}, {Msg: text(msg.Assistant, "chain")}}
+		const writers = 2
+		var wg sync.WaitGroup
+		ids := make([][]string, writers)
+		errs := make([]error, writers)
+		for i := range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				res, err := convs.Open(convID, conv.AsOwner()).Append(ctx, conv.Append{Root: convtree.RootKindRoot, Nodes: chain})
+				errs[i] = err
+				for _, n := range res.Nodes {
+					ids[i] = append(ids[i], n.ID)
+				}
+			}()
+		}
+		wg.Wait()
+
+		for i := range writers {
+			c.NoError(errs[i], "writer %d", i)
+			c.EqDeep(ids[0], ids[i], "writer %d returned the same ids", i)
+		}
+		nodes, err := convs.Transcript(ctx, convID)
+		c.NoError(err, "Transcript")
+		c.Len(nodes, 2, "one copy of the chain")
+	})
+
+	t.Run("CompactionRootWithTail", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, convID := setup(t)
+		ctx := context.Background()
+		h := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
+
+		root, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{
+			{Msg: text(msg.User, "a")}, {Msg: text(msg.Assistant, "b")},
+		}})
+		c.NoError(err, "root")
+		replaced := int64(150)
+		boundary, err := h.Append(ctx, conv.Append{
+			Root:          conv.KindCompactionSummary,
+			DerivedFromID: root.Nodes[1].ID,
+			Nodes: []conv.NewNode{
+				{Msg: text(msg.User, "summary"), InputTokens: &replaced},
+				{Msg: text(msg.User, "a"), Kind: conv.KindCompactionTail},
+				{Msg: text(msg.Assistant, "b"), Kind: conv.KindCompactionTail},
+			},
+		})
+		c.NoError(err, "compaction")
+		c.Len(boundary.Nodes, 3, "summary + two tail copies")
+		c.Eq(conv.KindCompactionSummary, boundary.Nodes[0].Kind, "the summary is a root")
+		c.Eq("", boundary.Nodes[0].ParentID, "the summary has no parent")
+		c.Eq(root.Nodes[1].ID, boundary.Nodes[0].DerivedFromID, "the summary derives from the old head")
+		c.Eq(conv.KindCompactionTail, boundary.Nodes[1].Kind, "tail copy kind")
+		c.Eq(boundary.Nodes[0].ID, boundary.Nodes[1].ParentID, "the tail hangs under the summary")
+		c.Require().NotNil(boundary.Nodes[0].InputTokens, "the summary carries the replaced size")
+		c.Eq(replaced, *boundary.Nodes[0].InputTokens, "the replaced size")
+
+		working, err := h.Working(ctx)
+		c.NoError(err, "Working")
+		c.Len(working, 3, "working set = summary + tail")
+		c.Eq(conv.KindCompactionSummary, working[0].Kind, "the working path restarts at the summary")
+
+		sn, err := h.Snapshot(ctx)
+		c.NoError(err, "Snapshot")
+		var kinds []string
+		for n := range sn.Transcript() {
+			kinds = append(kinds, n.Kind)
+		}
+		c.EqDeep([]string{"", "", conv.KindCompactionSummary}, kinds, "transcript: pre-compaction rows, then the summary; tails dropped")
 	})
 
 	t.Run("UnknownConversation", func(t *testing.T) {

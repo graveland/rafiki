@@ -6,10 +6,10 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // capturePublisher turns capture reports into durable message events. mark
@@ -85,13 +85,13 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 		}
 	}
 	// The translator already published this compaction's boundary live.
-	live := make([]store.Message, 0, len(kept))
+	live := make([]*conv.Node, 0, len(kept))
 	for _, m := range kept {
-		if m.Kind == nil || *m.Kind != store.KindCompactionSummary {
+		if m.Kind != conv.KindCompactionSummary {
 			live = append(live, m)
 		}
 	}
-	for _, ev := range eventconv.EventsFromMessages(childID, live) {
+	for _, ev := range eventconv.EventsFromNodes(childID, live) {
 		c.publishEvent(childID, ev)
 	}
 	if len(kept) > 0 {

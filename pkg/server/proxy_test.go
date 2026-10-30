@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -71,12 +72,12 @@ type fakeProxyStore struct {
 	lastIntentConv  string // conversation the last InsertTurnIntent landed on
 	lastIntentID    string // TurnIntent.ID the last InsertTurnIntent received (a pre-minted founding turn)
 
-	resolveErr error           // when set, ResolveThreadConversation returns it
-	intentErr  error           // when set, InsertTurnIntent returns it
-	sinceErr   error           // when set, MessagesSince returns it
-	sinceRows  []store.Message // what MessagesSince answers
-	sinceCalls int             // MessagesSince call count
-	lastSince  time.Time       // since passed to the last MessagesSince
+	resolveErr error        // when set, ResolveThreadConversation returns it
+	intentErr  error        // when set, InsertTurnIntent returns it
+	sinceErr   error        // when set, MessagesSince returns it
+	sinceRows  []*conv.Node // what MessagesSince answers
+	sinceCalls int          // MessagesSince call count
+	lastSince  time.Time    // since passed to the last MessagesSince
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
@@ -1179,7 +1180,7 @@ func (s *fakeProxyStore) ConversationTokens(context.Context, string) ([]capture.
 	return s.convTokens, nil
 }
 
-func (s *fakeProxyStore) MessagesSince(_ context.Context, _ string, since time.Time) ([]store.Message, error) {
+func (s *fakeProxyStore) MessagesSince(_ context.Context, _ string, since time.Time) ([]*conv.Node, error) {
 	s.sinceCalls++
 	s.lastSince = since
 	return s.sinceRows, s.sinceErr

@@ -24,11 +24,11 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/claudethread"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 type proxyStore interface {
@@ -42,7 +42,7 @@ type proxyStore interface {
 	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, parentID string, canonical []byte, in, out int64, stopReason string) error
 	RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
-	MessagesSince(ctx context.Context, convID string, since time.Time) ([]store.Message, error)
+	MessagesSince(ctx context.Context, convID string, since time.Time) ([]*conv.Node, error)
 }
 
 // rawTraceRecorder is the one method the proxy needs from

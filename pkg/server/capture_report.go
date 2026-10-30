@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/claudethread"
-	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/conv"
 )
 
 // CaptureReport is what one begun capture stored, reported once after the
@@ -18,7 +18,7 @@ type CaptureReport struct {
 	ThreadID          string // routed thread; "" is the main thread
 	ConversationID    string
 	ResponseMessageID string // the response's message id; "" when it was not stored
-	Rows              []store.Message
+	Rows              []*conv.Node
 	Err               string // non-empty: the capture failed
 	TurnErr           string // non-empty: the turn failed upstream or mid-stream; the capture itself is intact
 	// ReleaseOnly marks a report from a request that is NOT the child's own
@@ -67,7 +67,7 @@ func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []
 		errText = cr.outcome.failure
 	}
 	releaseOnly := !claudethread.DeclaresClientTools(reqBody)
-	var rows []store.Message
+	var rows []*conv.Node
 	// No read-back for a release-only report: none of its rows can publish, and
 	// the read would be a DB round trip on every titler and helper request.
 	if cr.on && !releaseOnly {
