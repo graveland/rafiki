@@ -17,16 +17,21 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
 type CaptureStore struct {
 	pool  *pgxpool.Pool
 	lease store.Lease
+	convs *conv.Store
 }
 
-func NewCaptureStore(pool *pgxpool.Pool) *CaptureStore { return &CaptureStore{pool: pool} }
+func NewCaptureStore(pool *pgxpool.Pool) *CaptureStore {
+	return &CaptureStore{pool: pool, convs: conv.NewStore(store.NewConvBackend(pool), conv.Options{})}
+}
 
 // WithLease returns a copy of s whose message writes are guarded by l. A zero
 // Lease means unfenced — the client-driven proxy path, which no daemon resumes.
@@ -34,6 +39,25 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 	cp := *s
 	cp.lease = l
 	return &cp
+}
+
+// WithConv returns a copy of s that attaches and appends through cs. It refuses
+// nil: storing the address of a nil store would nil-panic the first attach
+// instead of naming the mistake.
+func (s *CaptureStore) WithConv(cs *conv.Store) *CaptureStore {
+	if cs == nil {
+		panic("capture: WithConv(nil)")
+	}
+	cp := *s
+	cp.convs = cs
+	return &cp
+}
+
+// handle opens convID on the conversation store as a READER: capture writes are
+// fenced by the lease but it never declares ownership of the conversation, which
+// is claude's to claim.
+func (s *CaptureStore) handle(convID string) *conv.Handle {
+	return s.convs.Open(convID, conv.WithLease(s.lease))
 }
 
 type ConversationRef struct {
@@ -426,26 +450,25 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 // request's head node on the turn. Both writes are idempotent (a chain is
 // addressed by its hashes), which is what makes the caller's retry safe.
 func (s *CaptureStore) attachRequest(ctx context.Context, convID, turnID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (string, error) {
+	h := s.handle(convID)
 	if len(msgs) == 0 {
 		// A request carrying no history appends nothing: the response hangs off
 		// whatever the conversation's head already is.
-		var head string
-		if err := s.pool.QueryRow(ctx,
-			`SELECT coalesce(head_id::text, '') FROM conversations.conversation WHERE id = $1::uuid`,
-			convID).Scan(&head); err != nil {
+		st, err := h.State(ctx)
+		if err != nil {
 			return "", fmt.Errorf("attach: read head: %w", err)
 		}
-		if head == "" {
+		if st.HeadID == "" {
 			return "", fmt.Errorf("attach: conversation %s has no messages and no head", convID)
 		}
-		return head, s.setRequestHead(ctx, turnID, createdAt, head)
+		return st.HeadID, s.setRequestHead(ctx, turnID, createdAt, st.HeadID)
 	}
 
-	req, err := s.planAttach(ctx, convID, createdAt, msgs, prevMessageID)
+	req, err := s.planAttach(ctx, h, convID, createdAt, msgs, prevMessageID)
 	if err != nil {
 		return "", err
 	}
-	res, err := store.AppendChain(ctx, s.pool, s.lease, req)
+	res, err := h.Append(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("attach: append chain: %w", err)
 	}
@@ -460,45 +483,47 @@ func (s *CaptureStore) attachRequest(ctx context.Context, convID, turnID string,
 }
 
 // planAttach decides where the request hangs and what to append there.
-func (s *CaptureStore) planAttach(ctx context.Context, convID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (store.ChainAppend, error) {
-	nodes := chainNodes(msgs)
+func (s *CaptureStore) planAttach(ctx context.Context, h *conv.Handle, convID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (conv.Append, error) {
+	nodes, err := chainNodes(msgs)
+	if err != nil {
+		return conv.Append{}, err
+	}
 	if prevMessageID == "" {
-		return s.planWithoutPredecessor(ctx, convID, nodes, msgs)
+		return s.planWithoutPredecessor(ctx, h, nodes, msgs)
 	}
 
-	node, found, err := s.nodeByProviderMessageID(ctx, convID, prevMessageID)
+	node, found, err := s.nodeByProviderMessageID(ctx, h, prevMessageID)
 	if err != nil {
-		return store.ChainAppend{}, err
+		return conv.Append{}, err
 	}
 	reason := "no previous_message_id match"
 	if found {
 		if d := node.depth; d < len(msgs) && msgs[d].Role == "assistant" && store.SameMessage(node.msg, msgs[d]) {
-			return store.ChainAppend{ConversationID: convID, ParentID: node.id, Nodes: nodes[d+1:]}, nil
+			return conv.Append{ParentID: node.id, Nodes: nodes[d+1:]}, nil
 		}
 		if looksLikeCompactionSummary(msgs[0].Content) {
 			inTok, ierr := s.priorTurnInputTokens(ctx, convID, createdAt)
 			if ierr != nil {
-				return store.ChainAppend{}, ierr
+				return conv.Append{}, ierr
 			}
 			nodes[0].InputTokens = inTok
-			return store.ChainAppend{
-				ConversationID: convID,
-				Root:           convtree.RootKindCompaction,
-				DerivedFromID:  node.id,
-				Nodes:          nodes,
+			return conv.Append{
+				Root:          convtree.RootKindCompaction,
+				DerivedFromID: node.id,
+				Nodes:         nodes,
 			}, nil
 		}
 		reason = "attach message differs"
 	}
 
-	parent, depth, ok, err := s.deepestChainMatch(ctx, convID, msgs)
+	parent, depth, ok, err := s.deepestChainMatch(ctx, h, msgs)
 	if err != nil {
-		return store.ChainAppend{}, err
+		return conv.Append{}, err
 	}
 	if ok {
 		slog.Warn("capture: attached by hash-chain fallback",
 			"conversation", convID, "reason", reason, "depth", depth)
-		return store.ChainAppend{ConversationID: convID, ParentID: parent, Nodes: nodes[depth+1:], Fallback: true}, nil
+		return conv.Append{ParentID: parent, Nodes: nodes[depth+1:], Fallback: true}, nil
 	}
 
 	slog.Warn("capture: attached as a new root", "conversation", convID, "reason", reason)
@@ -506,69 +531,50 @@ func (s *CaptureStore) planAttach(ctx context.Context, convID string, createdAt 
 	if found {
 		derivedFrom = node.id
 	}
-	return store.ChainAppend{
-		ConversationID: convID,
-		Root:           convtree.RootKindRoot,
-		DerivedFromID:  derivedFrom,
-		Nodes:          nodes,
-		Fallback:       true,
+	return conv.Append{
+		Root:          convtree.RootKindRoot,
+		DerivedFromID: derivedFrom,
+		Nodes:         nodes,
+		Fallback:      true,
 	}, nil
 }
 
 // planWithoutPredecessor handles a request that names no predecessor: the
 // request itself decides where it starts.
-func (s *CaptureStore) planWithoutPredecessor(ctx context.Context, convID string, nodes []store.ChainNode, msgs []convtree.Msg) (store.ChainAppend, error) {
-	var clearPending bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT clear_pending FROM conversations.conversation WHERE id = $1::uuid`,
-		convID).Scan(&clearPending); err != nil {
-		return store.ChainAppend{}, fmt.Errorf("attach: read clear_pending: %w", err)
+func (s *CaptureStore) planWithoutPredecessor(ctx context.Context, h *conv.Handle, nodes []conv.NewNode, msgs []convtree.Msg) (conv.Append, error) {
+	st, err := h.State(ctx)
+	if err != nil {
+		return conv.Append{}, fmt.Errorf("attach: read clear_pending: %w", err)
 	}
-	if clearPending {
-		return store.ChainAppend{
-			ConversationID:      convID,
+	if st.ClearPending {
+		return conv.Append{
 			Root:                convtree.RootKindClear,
 			DerivedFromHead:     true,
 			ConsumeClearPending: true,
 			Nodes:               nodes,
 		}, nil
 	}
-	root, ok, err := s.rootMatching(ctx, convID, msgs[0])
+	root, ok, err := s.rootMatching(ctx, h, msgs[0])
 	if err != nil {
-		return store.ChainAppend{}, err
+		return conv.Append{}, err
 	}
 	if ok {
-		return store.ChainAppend{ConversationID: convID, ParentID: root, Nodes: nodes[1:]}, nil
+		return conv.Append{ParentID: root, Nodes: nodes[1:]}, nil
 	}
-	return store.ChainAppend{ConversationID: convID, Root: convtree.RootKindRoot, Nodes: nodes}, nil
+	return conv.Append{Root: convtree.RootKindRoot, Nodes: nodes}, nil
 }
 
 // rootMatching returns the id of a root of this conversation that holds the same
 // message as m.
-func (s *CaptureStore) rootMatching(ctx context.Context, convID string, m convtree.Msg) (string, bool, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, role, content FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND parent_id IS NULL AND path_hash IS NOT NULL
-		 ORDER BY ordinal DESC`, convID)
+func (s *CaptureStore) rootMatching(ctx context.Context, h *conv.Handle, m convtree.Msg) (string, bool, error) {
+	roots, err := h.Roots(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("attach: read roots: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			id      string
-			role    string
-			content []byte
-		)
-		if err := rows.Scan(&id, &role, &content); err != nil {
-			return "", false, fmt.Errorf("attach: scan root: %w", err)
+	for _, n := range roots {
+		if convtree.Equal(convtree.Msg{Role: n.Msg.Role.String(), Content: n.Content}, m) {
+			return n.ID, true, nil
 		}
-		if convtree.Equal(convtree.Msg{Role: role, Content: content}, m) {
-			return id, true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", false, fmt.Errorf("attach: read roots: %w", err)
 	}
 	return "", false, nil
 }
@@ -585,64 +591,37 @@ type providerNode struct {
 //
 // A node without a tree position — a legacy row the backfill has not placed — is
 // not an attach point: reporting it unknown lets the hash chain degrade the
-// attach instead of failing the turn on a parent AppendChain cannot chain from.
-func (s *CaptureStore) nodeByProviderMessageID(ctx context.Context, convID, providerMessageID string) (providerNode, bool, error) {
-	var (
-		node    providerNode
-		content []byte
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT id::text, coalesce(depth, 0), role, content
-		  FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND provider_message_id = $2 AND path_hash IS NOT NULL
-		 ORDER BY ordinal DESC LIMIT 1`,
-		convID, providerMessageID).Scan(&node.id, &node.depth, &node.msg.Role, &content)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return providerNode{}, false, nil
-	}
+// attach instead of failing the turn on a parent Append cannot chain from.
+func (s *CaptureStore) nodeByProviderMessageID(ctx context.Context, h *conv.Handle, providerMessageID string) (providerNode, bool, error) {
+	n, ok, err := h.NodeByProviderMessageID(ctx, providerMessageID)
 	if err != nil {
 		return providerNode{}, false, fmt.Errorf("attach: resolve previous_message_id: %w", err)
 	}
-	node.msg.Content = content
-	return node, true, nil
+	if !ok {
+		return providerNode{}, false, nil
+	}
+	return providerNode{
+		id:    n.ID,
+		depth: n.Depth,
+		msg:   convtree.Msg{Role: n.Msg.Role.String(), Content: n.Content},
+	}, true, nil
 }
 
 // deepestChainMatch hashes the request's whole chain from a plain root and finds
 // the deepest node of this conversation whose stored path hash it matches,
 // returning that node's id and its index in msgs.
-func (s *CaptureStore) deepestChainMatch(ctx context.Context, convID string, msgs []convtree.Msg) (string, int, bool, error) {
+func (s *CaptureStore) deepestChainMatch(ctx context.Context, h *conv.Handle, msgs []convtree.Msg) (string, int, bool, error) {
 	hashes, err := convtree.Chain(convtree.RootSeed(convtree.RootKindRoot, nil), msgs)
 	if err != nil {
 		return "", 0, false, fmt.Errorf("attach: hash chain: %w", err)
 	}
-	raw := make([][]byte, len(hashes))
-	for i, h := range hashes {
-		raw[i] = h[:]
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, path_hash FROM conversations.conversation_message
-		 WHERE conversation_id = $1::uuid AND path_hash = ANY($2::bytea[])`, convID, raw)
+	byHash, err := h.NodesByHash(ctx, hashes)
 	if err != nil {
 		return "", 0, false, fmt.Errorf("attach: match chain: %w", err)
 	}
-	defer rows.Close()
-	byHash := make(map[string]string, len(hashes))
-	for rows.Next() {
-		var (
-			nodeID string
-			key    []byte
-		)
-		if err := rows.Scan(&nodeID, &key); err != nil {
-			return "", 0, false, fmt.Errorf("attach: scan chain match: %w", err)
-		}
-		byHash[string(key)] = nodeID
-	}
-	if err := rows.Err(); err != nil {
-		return "", 0, false, fmt.Errorf("attach: match chain: %w", err)
-	}
 	for i := len(hashes) - 1; i >= 0; i-- {
-		if nodeID, hit := byHash[string(hashes[i][:])]; hit {
-			return nodeID, i, true, nil
+		if ref, hit := byHash[hashes[i]]; hit {
+			return ref.ID, i, true, nil
 		}
 	}
 	return "", 0, false, nil
@@ -672,13 +651,18 @@ func (s *CaptureStore) priorTurnInputTokens(ctx context.Context, convID string, 
 	return &prevIn, nil
 }
 
-// chainNodes renders parsed messages as chain nodes.
-func chainNodes(msgs []convtree.Msg) []store.ChainNode {
-	nodes := make([]store.ChainNode, len(msgs))
+// chainNodes renders parsed messages as append nodes. Content stays verbatim:
+// the core applies StorableJSON to it exactly as jsonbSafe did.
+func chainNodes(msgs []convtree.Msg) ([]conv.NewNode, error) {
+	nodes := make([]conv.NewNode, len(msgs))
 	for i, m := range msgs {
-		nodes[i] = store.ChainNode{Role: m.Role, Content: m.Content}
+		role, err := msg.ParseRole(m.Role)
+		if err != nil {
+			return nil, fmt.Errorf("attach: message %d: %w", i, err)
+		}
+		nodes[i] = conv.NewNode{Msg: msg.Message{Role: role}, Content: m.Content}
 	}
-	return nodes
+	return nodes, nil
 }
 
 // setRequestHead records the request's head node on the turn.
@@ -931,22 +915,21 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 	if parentID == "" {
 		return fmt.Errorf("append response: no request head to append under (conversation %s)", convID)
 	}
-	var msg struct {
+	var reply struct {
 		Content json.RawMessage `json:"content"`
 	}
-	if err := json.Unmarshal(canonical, &msg); err != nil {
+	if err := json.Unmarshal(canonical, &reply); err != nil {
 		return fmt.Errorf("append response: unmarshal canonical: %w", err)
 	}
-	content := msg.Content
+	content := reply.Content
 	if len(content) == 0 {
 		content = json.RawMessage(`null`)
 	}
 	return retryDB(ctx, "appendResponse", func(ctx context.Context) error {
-		res, err := store.AppendChain(ctx, s.pool, s.lease, store.ChainAppend{
-			ConversationID: convID,
-			ParentID:       parentID,
-			Nodes: []store.ChainNode{{
-				Role:              "assistant",
+		res, err := s.handle(convID).Append(ctx, conv.Append{
+			ParentID: parentID,
+			Nodes: []conv.NewNode{{
+				Msg:               msg.Message{Role: msg.Assistant},
 				Content:           jsonbSafe(content),
 				InputTokens:       &in,
 				OutputTokens:      &out,
