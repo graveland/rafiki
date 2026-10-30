@@ -207,7 +207,7 @@ func TestAgentSpawnModelDescribesTheRoutingBrackets(t *testing.T) {
 	}
 	c.Require().NotEq("", desc, "agent_spawn has no model property")
 	for _, want := range []string{
-		"[", "sort=", "price|throughput|latency|balanced", "quant=", "prefer=", "only=", "nodata", "zdr",
+		"[", "sort=", "price|throughput|latency|balanced", "quant=", "prefer=", "only=", "exclude=", "nodata", "zdr",
 		":batch", "agent_route",
 	} {
 		c.StrContains(desc, want, "model description missing %q", want)

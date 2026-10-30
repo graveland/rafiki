@@ -53,13 +53,20 @@ silently ignored (a misread spec silently changes where requests are served):
   and it RESPECTS operator bans and the cache guard's ejections (`only`
   bypasses them);
 - `only=slug|slug` — OpenRouter provider slugs the request may be served by;
+- `exclude=slug|slug` — provider slugs NEVER served for this spec. It lands in
+  the same `provider.ignore` list as an operator ban, so it is the per-line
+  ban (`rafiki providers route set 'z-ai/glm-5.3' 'exclude=openinference'`),
+  it unions with the daemon's bans, and it is **monotone**: set at any level
+  it holds, and no spawn, preset or child steer can clear it. There is no
+  cleared form — `exclude=` with no value is a parse error;
 - `nodata` — sets `data_collection: "deny"`;
 - `zdr` — sets `zdr: true` (zero data retention).
 
 **Resolution** merges one spec per level, most specific first: the spawn's
 spec > the preset's spec > the routing-policy row for the model line > the
-global `*` row. Per key the more specific level wins when set; `nodata` and
-`zdr` are **monotone** — set at any level they hold, nothing clears them.
+global `*` row. Per key the more specific level wins when set; `nodata`, `zdr`
+and `exclude` are **monotone** — set at any level they hold, nothing clears
+them.
 Resolution happens ONCE, in `Controller.Spawn`, and the merged spec is stored
 on the child's session: `rafiki get <child>` reports it (`routing`), resume
 never re-resolves it, and a policy edit after the spawn never rewrites a
@@ -88,9 +95,12 @@ never pin.
 Below every spec level sits a **pin** (a providers.toml model declaration's
 `only`): used only when no spec level set `only`. A pin and an operator
 **ban** are defaults, not authority — any caller that can spawn can route
-around them with `only=[...]`. **Data policy cannot be
-bypassed**: `nodata`/`zdr` ride along even under a spec `only`, and the
-cache guard's ejections are dropped only by an explicit `only`. Authority
+around them with `only=[...]`. A spec's `exclude=` is the per-line form of a
+ban: it unions with the daemon's ban list into `provider.ignore`, it is
+monotone (no spawn, preset or child steer can clear it), and like every ban
+it is dropped by an explicit `only=`. **Data policy cannot be bypassed**:
+`nodata`/`zdr` ride along even under a spec `only`, and the cache guard's
+ejections are dropped only by an explicit `only`. Authority
 splits the other way: a spec is caller-settable by anyone who can spawn (it
 rides the model string's brackets), while policy rows are operator-only
 (set/delete need a user credential or the local socket).
@@ -98,14 +108,15 @@ rides the model string's brackets), while policy rows are operator-only
 **Batch transport interplay:** a parked `:batch` call's envelope carries
 `provider.only` ONLY (the spec's `only`, else the pin) — the Batch API
 rejects every other provider key at submit. A `:batch` model whose merged
-spec carries any other key (sort, quant, nodata, zdr) is therefore refused
-at spawn.
+spec carries any other key (sort, quant, prefer, exclude, nodata, zdr) is
+therefore refused at spawn rather than silently parked unrouted.
 
 ### Routing policy (`rafiki providers route`)
 
 ```
 rafiki providers route set 'z-ai/glm-5.3' 'sort=price,quant=fp8+'
 rafiki providers route set '*' 'nodata'
+rafiki providers route set 'z-ai/glm-5.3' 'exclude=openinference'
 rafiki providers route list
 rafiki providers route delete 'z-ai/glm-5.3'
 ```
@@ -120,14 +131,29 @@ any caller; writing (set, delete) requires a user credential or the local
 socket. A `set` appends and takes effect immediately — no restart; a
 `delete` appends a tombstone.
 
-A policy **line is a `-` prefix FAMILY**: a row's line matches a model id
-equal to it or extending it with `-` (after stripping the provider segment
-of a three-segment id) — the line `z-ai/glm-5.3` governs `z-ai/glm-5.3`,
-`z-ai/glm-5.3-0905` AND `z-ai/glm-5.3-flash`. This is a different vocabulary
-from the cache guard's stamp-exact model lines, which answer a different
-question (who is locked out vs what defaults apply). A line names at most
-`<model>/<id>` — the provider segment is not part of a policy line, and the
-store refuses longer shapes. Among matching line rows the LONGEST line wins.
+A policy line is a **glob over the model line**: the id is first reduced to
+its line (a leading `<provider>/` is stripped from a three-segment id, and a
+`:batch` suffix with it), then a line matches when it equals that line or — if
+it carries `*`, `?` or `[` — when `filepath.Match` accepts it. So `z-ai/*`
+governs every model under `z-ai/` (including `openrouter/z-ai/glm-5.3-flash`,
+which reduces to `z-ai/glm-5.3-flash`), `z-ai/glm-5.3*` governs the whole
+`glm-5.3` family, and a line with no metacharacters matches only exactly. A
+`*` in a line never crosses `/`, so `z-ai/*` matches one model segment, not a
+deeper id. This is a different vocabulary from the cache guard's stamp-exact
+model lines, which answer a different question (who is locked out vs what
+defaults apply). A line names at most `<model>/<id>` — the provider segment is
+not part of a policy line, and the store refuses longer shapes. Among matching
+line rows the LONGEST line wins, and only that row participates: shorter rows
+do not fill its gaps.
+
+A row's spec is a **default, not authority**: any caller who can spawn can
+route around it with a bracket spec, and a `prefer=` row still respects the
+operator's bans (a banned provider is skipped and the fallback continues) —
+while a spec `only=` that names providers is an explicit pin that drops the
+ban list. A CLEARED `only=` (`only=` with no value) is neither: it suppresses
+an inherited pin but never the bans, because clearing a pin is not authority to
+serve a banned host. Data policy is the exception in the other direction:
+`nodata`/`zdr` ride along even under a spec `only=`.
 
 No concrete model ids are hardcoded: `<family>-latest` names name families
 and the catalog is the source of truth, so an unresolvable name errors instead

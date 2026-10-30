@@ -92,6 +92,27 @@ func TestRouteExplainIgnoreExcludesWhenNoOnly(t *testing.T) {
 	c.Eq(ExcludeNone, byKey[explainKey("beta", "fp8")].Reason, "unignored slug is eligible")
 }
 
+// TestRouteExplainSpecExcludeExcludes pins that a spec's own exclude= (the
+// per-line ban) shows up as an exclusion with its own reason, and that a named
+// only= still wins the reason for a provider outside it.
+func TestRouteExplainSpecExcludeExcludes(t *testing.T) {
+	c := assert.NewAborting(t)
+	eps := []Endpoint{
+		{Provider: "Alpha", Slug: "alpha", Quantization: "fp8", PromptPrice: 0.1},
+		{Provider: "Beta", Slug: "beta", Quantization: "fp8", PromptPrice: 0.2},
+	}
+	rows := ExplainRoutes(eps, nil, Spec{Exclude: []string{"alpha"}}, nil)
+	byKey := explainRowMap(rows)
+	c.Eq(ExcludeSpec, byKey[explainKey("alpha", "fp8")].Reason, "a spec exclude is its own reason")
+	c.Eq(false, byKey[explainKey("alpha", "fp8")].Eligible, "excluded provider is not eligible")
+	c.Eq(ExcludeNone, byKey[explainKey("beta", "fp8")].Reason, "the other provider is eligible")
+
+	// With a named only=, a provider outside it is not-in-only rather than
+	// exclude: the pin is the decision that matters.
+	rows = ExplainRoutes(eps, nil, Spec{Only: []string{"beta"}, Exclude: []string{"alpha"}}, nil)
+	c.Eq(ExcludeNotInOnly, explainRowMap(rows)[explainKey("alpha", "fp8")].Reason, "not-in-only wins over exclude")
+}
+
 // TestRouteExplainReasonPrecedence pins the reason precedence: not-in-only,
 // then banned, then quant. When several apply, only the highest is reported.
 func TestRouteExplainReasonPrecedence(t *testing.T) {

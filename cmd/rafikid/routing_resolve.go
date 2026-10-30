@@ -130,13 +130,16 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// (Task 0.1's probe: sort, data_collection, zdr and ignore are each a
 	// submit-time 400 "Unrecognized key"), so a :batch model whose merged spec
 	// carries any key the batch wire cannot serve is refused at spawn — never
-	// a silent fallback to unrouted. A spec with ONLY only= (or a zero spec)
-	// passes: only rides the wire as {"only": [...]} (parkSend's batchOnly).
+	// a silent fallback to unrouted. That includes prefer= (provider.order) and
+	// exclude= (provider.ignore), which the envelope would silently drop. A spec
+	// with ONLY only= (or a zero spec) passes: only rides the wire as
+	// {"only": [...]} (parkSend's batchOnly).
 	// The refusal tests the TRANSLATED id: a declared id ending in :batch is a
 	// supported shape (see the :batch/API-key guard in controller.go), and
 	// the refusal must fire on it as on a literal :batch request.
 	if llm.IsBatchModel(translatedBase) {
-		if merged.Sort != "" || merged.Quant != nil || merged.NoData || merged.ZDR {
+		if merged.Sort != "" || merged.Quant != nil || merged.Prefer != nil ||
+			len(merged.Exclude) > 0 || merged.NoData || merged.ZDR {
 			return req, &connectapi.ControllerError{
 				Code: protocol.ErrInvalidArgs,
 				Message: fmt.Sprintf("a routing spec cannot apply to %s: OpenRouter's Batch API accepts only provider.only; drop the spec or the :batch suffix",

@@ -642,8 +642,16 @@ func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model strin
 			}
 			return
 		}
-		if !callerCarriesOnly(payload["provider"]) && len(ignore) > 0 {
-			payload["provider"] = mergeIgnore(payload["provider"], ignore)
+		if !callerCarriesOnly(payload["provider"]) {
+			// The caller's own provider object does not know about this line's
+			// exclusions, so they ride with the guard's bans — a line's exclude=
+			// is a ban, and a caller object is no more authority over it than
+			// over an operator ban. A caller-supplied only= is the explicit
+			// decision that skips this merge, exactly as a spec only= does.
+			bans := append(append([]string{}, spec.Exclude...), ignore...)
+			if len(bans) > 0 {
+				payload["provider"] = mergeIgnore(payload["provider"], bans)
+			}
 		}
 		// Data policy is the one boundary: a caller object must not clear it,
 		// so the spec's flags are SET over the caller's own values.

@@ -420,8 +420,10 @@ func TestRoutingBatchSpecRefused(t *testing.T) {
 	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash:batch", "the refusal must name the model: %s", ce.Message)
 	ck.StrContains(ce.Message, "provider.only", "the refusal must name the wire's limit: %s", ce.Message)
 
-	// Each remaining non-only key refuses too (quant, nodata, zdr).
-	for _, spec := range []string{"quant=fp8+", "nodata", "zdr"} {
+	// Each remaining non-only key refuses too (quant, prefer, exclude, nodata,
+	// zdr) — prefer becomes provider.order and exclude provider.ignore, and the
+	// batch envelope would silently drop both.
+	for _, spec := range []string{"quant=fp8+", "prefer=fireworks", "exclude=openinference", "nodata", "zdr"} {
 		_, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
 			Kind:  protocol.KindFundi,
 			Cwd:   "/tmp/w",

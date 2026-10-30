@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // completeModel returns tab-completion candidates for the --model flag.
@@ -35,22 +36,46 @@ func completeModel(cmd *cobra.Command, kind, toComplete string) []string {
 	return filterByPrefix(modelIDs(cmd, kind), toComplete)
 }
 
-// specKeys are the items a routing spec can carry, in ParseSpec's accepted
-// spelling and Spec.String's key order; offered each once, since ParseSpec
-// refuses a repeated key. specValues are the two value sets that are grammar
-// too: sort= takes one of ParseSpec's four spellings (the parse error's
-// price|throughput|latency|balanced order), quant= names OpenRouter's
-// quantizations (pkg/routing/spec.go's quantTiers plus "unknown"; a caller
-// appends "+" for a floor). prefer= and only= take provider slugs, which only
-// the daemon's catalog knows, so nothing is offered for them — these tables
-// mirror pkg/routing's grammar, and the daemon is the validator either way.
+// specKeys are the items a routing spec can carry, in the grammar's own order
+// and spelling (a valued key keeps its "="), derived from routing.SpecKeys so
+// completion cannot offer a key the daemon refuses nor miss one it accepts.
+// specValues are the two value sets that are grammar too: sort= takes one of
+// ParseSpec's four spellings (the parse error's price|throughput|latency|balanced
+// order), quant= names OpenRouter's quantizations (pkg/routing/spec.go's
+// quantTiers plus "unknown"; a caller appends "+" for a floor). prefer= and
+// only= take provider slugs, which only the daemon's catalog knows, so nothing
+// is offered for them — the daemon is the validator either way.
 var (
-	specKeys   = []string{"sort=", "quant=", "prefer=", "only=", "nodata", "zdr"}
+	specKeys   = routingSpecKeys()
 	specValues = map[string][]string{
-		"sort":  {"price", "throughput", "latency", "balanced"},
+		"sort":  routingSortValues(),
 		"quant": {"int4", "fp4", "mxfp4", "nvfp4", "fp6", "int8", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"},
 	}
 )
+
+// routingSpecKeys spells pkg/routing's grammar as completion candidates.
+func routingSpecKeys() []string {
+	keys := routing.SpecKeys()
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k.TakesValue {
+			out = append(out, k.Name+"=")
+			continue
+		}
+		out = append(out, k.Name)
+	}
+	return out
+}
+
+// routingSortValues spells pkg/routing's sort values as completion candidates.
+func routingSortValues() []string {
+	sorts := routing.SortValues()
+	out := make([]string, 0, len(sorts))
+	for _, s := range sorts {
+		out = append(out, string(s))
+	}
+	return out
+}
 
 // completeRoutingSpecTail returns completion candidates for the inside of a
 // model string's routing brackets. tail begins at the "[" (everything before

@@ -175,6 +175,13 @@ func (c *Controller) canonicalizeRoutingSlugs(ctx context.Context, spec routing.
 		}
 		spec.Only = only
 	}
+	if len(spec.Exclude) > 0 {
+		exclude, err := c.resolveSlugs(ctx, spec.Exclude)
+		if err != nil {
+			return routing.Spec{}, err
+		}
+		spec.Exclude = exclude
+	}
 	return spec, nil
 }
 

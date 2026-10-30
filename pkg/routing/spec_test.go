@@ -107,6 +107,55 @@ func TestParseSpecRejects(t *testing.T) {
 	}
 }
 
+// TestSpecKeysAreTheParsersGrammar pins SpecKeys against ParseSpec: every key
+// it lists parses, and parses to a non-zero Spec (so a key the table knows but
+// the value switch drops is caught), while a key it does not list is refused by
+// name. Model-string completion, the CLI's help text and their tests all derive
+// from SpecKeys, so a key the parser learns cannot ship undocumented, and help
+// cannot advertise a key the parser refuses.
+func TestSpecKeysAreTheParsersGrammar(t *testing.T) {
+	// One valid value per valued key, and every valued key must have one: a
+	// key arriving without a sample would parse as "name=", which for an
+	// optional-value key is a non-nil empty slice — non-zero, so the IsZero
+	// check below would wave it through while nothing reads it.
+	sample := map[string]string{
+		"sort":    "price",
+		"quant":   "fp8",
+		"prefer":  "fireworks",
+		"only":    "fireworks",
+		"exclude": "openinference",
+	}
+	keys := SpecKeys()
+	if len(keys) == 0 {
+		t.Fatal("SpecKeys() is empty")
+	}
+	for _, k := range keys {
+		item := k.Name
+		if k.TakesValue {
+			val, ok := sample[k.Name]
+			if !ok {
+				t.Fatalf("SpecKeys lists the valued key %q with no sample value: add one here, and make the parser read it", k.Name)
+			}
+			item += "=" + val
+		}
+		spec, err := ParseSpec(item)
+		if err != nil {
+			t.Errorf("ParseSpec(%q) = error %v, want it accepted: SpecKeys lists %q", item, err, k.Name)
+			continue
+		}
+		if spec.IsZero() {
+			t.Errorf("ParseSpec(%q) = the zero Spec: the grammar accepts %q but nothing reads it", item, k.Name)
+		}
+	}
+	// The other direction: a key outside SpecKeys must not parse, or the list
+	// would be a subset of the grammar and the help could omit a real key.
+	for _, unknown := range []string{"foo", "sortx", "preferx", "nodatax"} {
+		if _, err := ParseSpec(unknown + "=1"); err == nil || !strings.Contains(err.Error(), "unknown key") {
+			t.Errorf("ParseSpec(%q) = %v, want an unknown-key refusal: %q is not in SpecKeys", unknown+"=1", err, unknown)
+		}
+	}
+}
+
 // TestSpecParseRejects carries the pinned TestParseSpecRejects table under the
 // -run patterns used by verify commands, which match only TestSpec*/TestParse
 // Model*/TestQuant* prefixes — the pinned name itself contains neither
@@ -309,10 +358,11 @@ func TestSpecStringRoundTrip(t *testing.T) {
 		{"prefer cleared", Spec{Prefer: []string{}}, "prefer="},
 		{"only list", Spec{Only: []string{"gmicloud", "novita"}}, "only=gmicloud|novita"},
 		{"only cleared", Spec{Only: []string{}}, "only="},
+		{"exclude list", Spec{Exclude: []string{"openinference", "gmicloud"}}, "exclude=openinference|gmicloud"},
 		{"nodata", Spec{NoData: true}, "nodata"},
 		{"zdr", Spec{ZDR: true}, "zdr"},
-		{"everything", Spec{Sort: SortLatency, Quant: []string{"fp8+"}, Only: []string{"gmicloud"}, NoData: true, ZDR: true},
-			"sort=latency,quant=fp8+,only=gmicloud,nodata,zdr"},
+		{"everything", Spec{Sort: SortLatency, Quant: []string{"fp8+"}, Only: []string{"gmicloud"}, Exclude: []string{"openinference"}, NoData: true, ZDR: true},
+			"sort=latency,quant=fp8+,only=gmicloud,exclude=openinference,nodata,zdr"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -328,6 +378,95 @@ func TestSpecStringRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSpecMergeExcludeIsMonotone pins that exclude is a BAN, not a preference:
+// the union survives a receiver without it, a receiver cannot narrow or clear
+// what a lower level excluded, and duplicates collapse. This is what makes
+// `providers route set '*' exclude=x` hold for every child and every later
+// spawn regardless of the spec it carries.
+func TestSpecMergeExcludeIsMonotone(t *testing.T) {
+	lower := Spec{Exclude: []string{"openinference", "gmicloud"}}
+	merged := Spec{Sort: SortPrice, Exclude: []string{"novita"}}.Merge(lower)
+	if want := []string{"novita", "openinference", "gmicloud"}; !reflect.DeepEqual(merged.Exclude, want) {
+		t.Errorf("merged.Exclude = %v, want the union %v", merged.Exclude, want)
+	}
+	if merged.String() != "sort=price,exclude=novita|openinference|gmicloud" {
+		t.Errorf("String() = %q", merged.String())
+	}
+
+	// The receiver cannot clear it: an empty (even non-nil) Exclude adds nothing.
+	cleared := Spec{Exclude: []string{}}.Merge(lower)
+	if !reflect.DeepEqual(cleared.Exclude, []string{"openinference", "gmicloud"}) {
+		t.Errorf("cleared receiver Exclude = %v, want the lower level's list to survive", cleared.Exclude)
+	}
+
+	// No duplicates, and nil when neither level excludes anyone.
+	dupe := Spec{Exclude: []string{"a"}}.Merge(Spec{Exclude: []string{"a", "b"}})
+	if want := []string{"a", "b"}; !reflect.DeepEqual(dupe.Exclude, want) {
+		t.Errorf("duplicate union = %v, want %v", dupe.Exclude, want)
+	}
+	if none := (Spec{}).Merge(Spec{}); none.Exclude != nil {
+		t.Errorf("Exclude = %v, want nil when neither level excludes", none.Exclude)
+	}
+}
+
+// TestSpecParseExclude pins exclude's own rules: it takes "|" slugs, and it is
+// the one list key with no cleared form (Merge unions, so there is nothing to
+// clear) — `exclude=` is refused rather than silently ignored.
+func TestSpecParseExclude(t *testing.T) {
+	spec, err := ParseSpec("exclude=openinference|gmicloud")
+	if err != nil {
+		t.Fatalf("ParseSpec = %v", err)
+	}
+	if want := []string{"openinference", "gmicloud"}; !reflect.DeepEqual(spec.Exclude, want) {
+		t.Errorf("Exclude = %v, want %v", spec.Exclude, want)
+	}
+	if spec.IsZero() {
+		t.Error("a spec carrying only an exclude is not zero: it must reach the wire")
+	}
+	for _, bad := range []string{"exclude=", "exclude=fireworks|"} {
+		if _, err := ParseSpec(bad); err == nil {
+			t.Errorf("ParseSpec(%q) = nil error, want a refusal", bad)
+		}
+	}
+}
+
+// TestSpecPrefsExcludeRidesWithBans pins the wire half: a line's exclude= is a
+// ban, so it is unioned into provider.ignore alongside the guard's bans and
+// ejections — and a named only= still drops both, exactly as it drops every
+// ban, because the pin decides who serves.
+func TestSpecPrefsExcludeRidesWithBans(t *testing.T) {
+	t.Run("no pin: exclude unions with the guard's bans", func(t *testing.T) {
+		prefs, ok := Spec{Exclude: []string{"openinference"}}.Prefs([]string{"pinned"}, []string{"banned"})
+		if !ok {
+			t.Fatal("prefs not sent")
+		}
+		if want := []string{"openinference", "banned"}; !reflect.DeepEqual(prefs.Ignore, want) {
+			t.Errorf("Ignore = %v, want %v", prefs.Ignore, want)
+		}
+		if !reflect.DeepEqual(prefs.Only, []string{"pinned"}) {
+			t.Errorf("Only = %v, want the declaration pin", prefs.Only)
+		}
+	})
+	t.Run("cleared only: exclude still rides", func(t *testing.T) {
+		prefs, ok := Spec{Only: []string{}, Exclude: []string{"openinference"}}.Prefs(nil, []string{"banned"})
+		if !ok {
+			t.Fatal("prefs not sent")
+		}
+		if want := []string{"openinference", "banned"}; !reflect.DeepEqual(prefs.Ignore, want) {
+			t.Errorf("Ignore = %v, want %v", prefs.Ignore, want)
+		}
+	})
+	t.Run("named only drops the exclude with the bans", func(t *testing.T) {
+		prefs, ok := Spec{Only: []string{"gmicloud"}, Exclude: []string{"openinference"}}.Prefs(nil, []string{"banned"})
+		if !ok {
+			t.Fatal("prefs not sent")
+		}
+		if prefs.Ignore != nil {
+			t.Errorf("Ignore = %v, want nil: a named only= is the pin and drops every ban", prefs.Ignore)
+		}
+	})
 }
 
 // TestSpecPrefsOnlyBypassesIgnore pins decision 5: a spec only is an explicit
@@ -366,6 +505,51 @@ func TestSpecPrefsOnlyBypassesIgnore(t *testing.T) {
 		}
 		if !reflect.DeepEqual(prefs.Only, []string{"pinned"}) {
 			t.Errorf("Only = %v, want the pin", prefs.Only)
+		}
+	})
+}
+
+// TestSpecPrefsClearedOnlyKeepsBans pins the third arm: `only=` parsed to the
+// non-nil EMPTY slice is the "explicitly cleared" signal, and clearing an
+// inherited pin is not authority to serve a banned host. It must suppress the
+// declaration's pin (that is what the signal is for) while the guard's bans and
+// ejections still ride — otherwise a stored `only=` silently lifts them, since
+// nothing else in the spec may need sending at all.
+func TestSpecPrefsClearedOnlyKeepsBans(t *testing.T) {
+	t.Run("cleared only keeps ignore and drops the pin", func(t *testing.T) {
+		prefs, ok := Spec{Only: []string{}}.Prefs([]string{"pinned"}, []string{"banned"})
+		if !ok {
+			t.Fatal("prefs not sent: a cleared only= must still carry the bans")
+		}
+		if prefs.Only != nil {
+			t.Errorf("Only = %v, want nil: a cleared only= suppresses the declaration pin", prefs.Only)
+		}
+		if !reflect.DeepEqual(prefs.Ignore, []string{"banned"}) {
+			t.Errorf("Ignore = %v, want the guard's bans: clearing a pin must not lift them", prefs.Ignore)
+		}
+	})
+	t.Run("cleared only alone still sends the bans", func(t *testing.T) {
+		prefs, ok := Spec{Only: []string{}}.Prefs(nil, []string{"banned"})
+		if !ok {
+			t.Fatal("prefs not sent: the request would reach a banned provider")
+		}
+		if !reflect.DeepEqual(prefs.Ignore, []string{"banned"}) {
+			t.Errorf("Ignore = %v, want the guard's bans", prefs.Ignore)
+		}
+	})
+	t.Run("a parsed only= behaves like the cleared signal", func(t *testing.T) {
+		// The whole path, not the struct literal: this is the shape a stored row
+		// or a spawn bracket produces.
+		spec, err := ParseSpec("only=")
+		if err != nil {
+			t.Fatalf("ParseSpec(only=) = %v", err)
+		}
+		prefs, ok := spec.Prefs([]string{"pinned"}, []string{"banned"})
+		if !ok || !reflect.DeepEqual(prefs.Ignore, []string{"banned"}) {
+			t.Errorf("prefs = %+v (sent %v), want the bans and no pin", prefs, ok)
+		}
+		if prefs.Only != nil {
+			t.Errorf("Only = %v, want nil", prefs.Only)
 		}
 	})
 }

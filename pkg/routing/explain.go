@@ -11,6 +11,7 @@ const (
 	ExcludeNone      ExcludeReason = ""
 	ExcludeQuant     ExcludeReason = "quant"       // quantization not in the spec's set
 	ExcludeNotInOnly ExcludeReason = "not-in-only" // spec.Only is set and excludes this provider
+	ExcludeSpec      ExcludeReason = "exclude"     // slug is in the spec's own exclude list (this line's ban)
 	ExcludeBanned    ExcludeReason = "banned"      // slug is in the guard's ignore list (bans/ejections)
 )
 
@@ -56,6 +57,10 @@ func ExplainRoutes(eps []Endpoint, stats []EndpointStats, spec Spec, ignore []st
 	for _, slug := range ignore {
 		ign[slug] = true
 	}
+	specExcluded := make(map[string]bool, len(spec.Exclude))
+	for _, slug := range spec.Exclude {
+		specExcluded[slug] = true
+	}
 
 	// A (slug, quantization) key that names more than one endpoint, or that more
 	// than one stats row claims, is ambiguous: attaching a speed to either would
@@ -83,6 +88,8 @@ func ExplainRoutes(eps []Endpoint, stats []EndpointStats, spec Spec, ignore []st
 		switch {
 		case len(spec.Only) > 0 && !only[ep.Slug]:
 			row.Reason = ExcludeNotInOnly
+		case len(spec.Only) == 0 && specExcluded[ep.Slug]:
+			row.Reason = ExcludeSpec
 		case len(spec.Only) == 0 && ign[ep.Slug]:
 			row.Reason = ExcludeBanned
 		case len(quants) > 0 && !qset[ep.Quantization]:

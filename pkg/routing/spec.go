@@ -28,23 +28,34 @@ const (
 // It carries only what OpenRouter's provider-routing object can express; the
 // base model id lives outside it.
 type Spec struct {
-	Sort   Sort
-	Quant  []string // as written: either a floor like "fp8+" (one element) or a list of OpenRouter quantizations
-	Prefer []string // provider slugs, tried first; fallbacks stay on
-	Only   []string // provider slugs
-	NoData bool
-	ZDR    bool
+	Sort    Sort
+	Quant   []string // as written: either a floor like "fp8+" (one element) or a list of OpenRouter quantizations
+	Prefer  []string // provider slugs, tried first; fallbacks stay on
+	Only    []string // provider slugs
+	Exclude []string // provider slugs never served for this spec's line
+	NoData  bool
+	ZDR     bool
 }
 
-// sortValues is every sort spelling ParseSpec accepts. SortInherit ("") is
-// deliberately absent: `sort=` is a valued key without a value, a parse error —
-// inherit is expressed by leaving sort out.
-var sortValues = map[Sort]bool{
-	SortPrice:      true,
-	SortThroughput: true,
-	SortLatency:    true,
-	SortBalanced:   true,
-}
+// sortValues is every sort spelling ParseSpec accepts, in the order the parse
+// error and the completion present them. SortInherit ("") is deliberately
+// absent: `sort=` is a valued key without a value, a parse error — inherit is
+// expressed by leaving sort out. SortValues exposes the list, like SpecKeys, so
+// help text, completion and their tests cannot drift from it.
+var sortValues = []Sort{SortPrice, SortThroughput, SortLatency, SortBalanced}
+
+// sortValueSet is sortValues as a membership test, for ParseSpec.
+var sortValueSet = func() map[Sort]bool {
+	m := make(map[Sort]bool, len(sortValues))
+	for _, s := range sortValues {
+		m[s] = true
+	}
+	return m
+}()
+
+// SortValues lists every sort spelling ParseSpec accepts, in the parse error's
+// order (price|throughput|latency|balanced).
+func SortValues() []Sort { return append([]Sort(nil), sortValues...) }
 
 // quantTiers is the quantization ladder in bit-width tiers, lowest first: a
 // floor on a name admits its whole tier and every tier above it. "unknown" is
@@ -121,12 +132,73 @@ func ParseModel(s string) (base string, spec Spec, err error) {
 	return base, spec, nil
 }
 
+// specKeyRule is how ParseSpec treats one item key's value. Its zero value is
+// keyUnknown, so a key that is not in the grammar cannot be mistaken for one
+// that takes no value.
+type specKeyRule int
+
+const (
+	keyUnknown       specKeyRule = iota // not a grammar key
+	keyRequiresValue                    // sort: "=" and a non-empty value
+	keyOptionalValue                    // quant, prefer, only: "=" required, an empty value clears the key
+	keyBare                             // nodata, zdr: no value at all
+)
+
+// specKeyRules is THE list of item keys the grammar accepts, in the order
+// Spec.String writes them. ParseSpec classifies every item through it, so this
+// table and what the parser accepts cannot drift apart; SpecKeys exposes it to
+// the callers that have to describe the grammar (model-string completion, the
+// CLI's help text, and the tests that pin both).
+var specKeyRules = []struct {
+	name string
+	rule specKeyRule
+}{
+	{"sort", keyRequiresValue},
+	{"quant", keyOptionalValue},
+	{"prefer", keyOptionalValue},
+	{"only", keyOptionalValue},
+	// exclude takes a value and no level can CLEAR it (Merge unions it), so
+	// `exclude=` is refused rather than silently doing nothing.
+	{"exclude", keyRequiresValue},
+	{"nodata", keyBare},
+	{"zdr", keyBare},
+}
+
+// SpecKey is one key of the routing-spec grammar.
+type SpecKey struct {
+	Name       string // as spelled in a spec, without the "="
+	TakesValue bool   // valued keys are written name=value; a bare key stands alone
+}
+
+// SpecKeys lists every key ParseSpec accepts, in the grammar's own order. It is
+// the one place that list exists: model-string completion, the CLI's help text
+// and their tests all derive from it, so a key the parser learns cannot ship
+// undocumented and help can never advertise a key the parser refuses.
+func SpecKeys() []SpecKey {
+	out := make([]SpecKey, 0, len(specKeyRules))
+	for _, k := range specKeyRules {
+		out = append(out, SpecKey{Name: k.name, TakesValue: k.rule != keyBare})
+	}
+	return out
+}
+
+// specKeyRuleFor reports how ParseSpec treats key; keyUnknown when it is not a
+// grammar key.
+func specKeyRuleFor(key string) specKeyRule {
+	for _, k := range specKeyRules {
+		if k.name == key {
+			return k.rule
+		}
+	}
+	return keyUnknown
+}
+
 // ParseSpec parses the inside of the brackets — the same string a routing
-// policy row stores ("sort=price,quant=fp8+"). Items are comma-separated; the
-// valued keys are sort, quant, prefer and only (list values joined with "|"),
-// the flags nodata and zdr are bare. Any malformed or unknown item is an error
-// naming it: never ignored. The empty string is the zero Spec — a policy row
-// stores ” to mean "no spec".
+// policy row stores ("sort=price,quant=fp8+"). Items are comma-separated, and
+// every key comes from specKeyRules — the grammar's one description, exposed as
+// SpecKeys — which also says whether that key takes a value. Any malformed or
+// unknown item is an error naming it: never ignored. The empty string is the
+// zero Spec — a policy row stores ” to mean "no spec".
 //
 // quant=, prefer= and only= with an EMPTY value are valid: they parse to a
 // non-nil empty slice, the "explicitly cleared" signal that Merge keeps when a
@@ -144,21 +216,21 @@ func ParseSpec(s string) (Spec, error) {
 			return Spec{}, fmt.Errorf("routing spec %q: empty item", s)
 		}
 		key, val, hasVal := strings.Cut(item, "=")
-		switch key {
-		case "sort":
+		switch rule := specKeyRuleFor(key); rule {
+		case keyUnknown:
+			return Spec{}, fmt.Errorf("routing spec %q: item %q: unknown key %q", s, item, key)
+		case keyRequiresValue:
 			if !hasVal || val == "" {
-				return Spec{}, fmt.Errorf("routing spec %q: item %q: sort needs a value", s, item)
+				return Spec{}, fmt.Errorf("routing spec %q: item %q: %s needs a value", s, item, key)
 			}
-		case "quant", "prefer", "only":
+		case keyOptionalValue:
 			if !hasVal {
 				return Spec{}, fmt.Errorf("routing spec %q: item %q: %q needs a value", s, item, key)
 			}
-		case "nodata", "zdr":
+		case keyBare:
 			if hasVal {
 				return Spec{}, fmt.Errorf("routing spec %q: item %q: %q takes no value", s, item, key)
 			}
-		default:
-			return Spec{}, fmt.Errorf("routing spec %q: item %q: unknown key %q", s, item, key)
 		}
 		if seen[key] {
 			return Spec{}, fmt.Errorf("routing spec %q: item %q: %q repeated", s, item, key)
@@ -167,7 +239,7 @@ func ParseSpec(s string) (Spec, error) {
 		switch key {
 		case "sort":
 			sort := Sort(val)
-			if !sortValues[sort] {
+			if !sortValueSet[sort] {
 				return Spec{}, fmt.Errorf("routing spec %q: item %q: unknown sort %q (want price|throughput|latency|balanced)", s, item, val)
 			}
 			spec.Sort = sort
@@ -178,29 +250,23 @@ func ParseSpec(s string) (Spec, error) {
 			}
 			spec.Quant = quant
 		case "prefer":
-			if val == "" {
-				spec.Prefer = []string{}
-			} else {
-				slugs := strings.Split(val, "|")
-				for _, slug := range slugs {
-					if slug == "" {
-						return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
-					}
-				}
-				spec.Prefer = slugs
+			slugs, err := parseSlugList(s, item, val)
+			if err != nil {
+				return Spec{}, err
 			}
+			spec.Prefer = slugs
 		case "only":
-			if val == "" {
-				spec.Only = []string{}
-			} else {
-				slugs := strings.Split(val, "|")
-				for _, slug := range slugs {
-					if slug == "" {
-						return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
-					}
-				}
-				spec.Only = slugs
+			slugs, err := parseSlugList(s, item, val)
+			if err != nil {
+				return Spec{}, err
 			}
+			spec.Only = slugs
+		case "exclude":
+			slugs, err := parseSlugList(s, item, val)
+			if err != nil {
+				return Spec{}, err
+			}
+			spec.Exclude = slugs
 		case "nodata":
 			spec.NoData = true
 		case "zdr":
@@ -208,6 +274,22 @@ func ParseSpec(s string) (Spec, error) {
 		}
 	}
 	return spec, nil
+}
+
+// parseSlugList parses a "|"-joined provider-slug value. An empty value is the
+// "explicitly cleared" signal for the keys that accept one (prefer=, only=);
+// exclude= cannot be cleared and never reaches that branch.
+func parseSlugList(spec, item, val string) ([]string, error) {
+	if val == "" {
+		return []string{}, nil
+	}
+	slugs := strings.Split(val, "|")
+	for _, slug := range slugs {
+		if slug == "" {
+			return nil, fmt.Errorf("routing spec %q: item %q: empty provider slug", spec, item)
+		}
+	}
+	return slugs, nil
 }
 
 // parseQuantList parses a quant value: either a single floor ("fp8+", one
@@ -261,9 +343,10 @@ func copyList(s []string) []string {
 // Merge combines two specs from the resolution chain, the receiver being the
 // more specific level (spawn over preset over policy row). Per key, the
 // receiver's value wins when set — Sort when non-empty, Quant, Prefer and Only
-// when non-nil — else the lower level's fills in. NoData and ZDR are monotone
-// instead: set at ANY level they hold (confidentiality, not preference), so
-// they OR.
+// when non-nil — else the lower level's fills in. NoData, ZDR and Exclude are
+// monotone instead: set at ANY level they hold, so NoData/ZDR OR and Exclude
+// UNIONS. Monotone is what makes exclusion a ban rather than a preference: no
+// spawn, preset or child steer can lift a provider the operator excluded.
 func (s Spec) Merge(lower Spec) Spec {
 	merged := Spec{NoData: s.NoData, ZDR: s.ZDR}
 	if s.Sort != "" {
@@ -286,16 +369,38 @@ func (s Spec) Merge(lower Spec) Spec {
 	} else if lower.Only != nil {
 		merged.Only = copyList(lower.Only)
 	}
+	merged.Exclude = unionSlugs(s.Exclude, lower.Exclude)
 	merged.NoData = merged.NoData || lower.NoData
 	merged.ZDR = merged.ZDR || lower.ZDR
 	return merged
 }
 
+// unionSlugs returns a ∪ b, a's order first then b's unseen items, deduplicated
+// and nil when both are empty. An empty slice is "nothing": Exclude is monotone,
+// so there is no cleared state for it to distinguish.
+func unionSlugs(a, b []string) []string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(a)+len(b))
+	seen := make(map[string]bool, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, slug := range list {
+			if seen[slug] {
+				continue
+			}
+			seen[slug] = true
+			out = append(out, slug)
+		}
+	}
+	return out
+}
+
 // String renders the canonical form — keys in fixed order (sort, quant, prefer,
-// only, nodata, zdr), list values joined with "|", a floor kept as written
-// ("fp8+"), unset keys omitted. sort=balanced IS emitted: it is a decision,
-// unlike the zero Sort. ParseSpec(String()) returns an equal Spec, so a stored
-// policy row round-trips.
+// only, exclude, nodata, zdr), list values joined with "|", a floor kept as
+// written ("fp8+"), unset keys omitted. sort=balanced IS emitted: it is a
+// decision, unlike the zero Sort. ParseSpec(String()) returns an equal Spec, so
+// a stored policy row round-trips.
 func (s Spec) String() string {
 	var parts []string
 	if s.Sort != "" {
@@ -310,6 +415,9 @@ func (s Spec) String() string {
 	if s.Only != nil {
 		parts = append(parts, "only="+strings.Join(s.Only, "|"))
 	}
+	if len(s.Exclude) > 0 {
+		parts = append(parts, "exclude="+strings.Join(s.Exclude, "|"))
+	}
 	if s.NoData {
 		parts = append(parts, "nodata")
 	}
@@ -321,7 +429,8 @@ func (s Spec) String() string {
 
 // IsZero reports whether the spec carries nothing at all.
 func (s Spec) IsZero() bool {
-	return s.Sort == "" && s.Quant == nil && s.Prefer == nil && s.Only == nil && !s.NoData && !s.ZDR
+	return s.Sort == "" && s.Quant == nil && s.Prefer == nil && s.Only == nil &&
+		len(s.Exclude) == 0 && !s.NoData && !s.ZDR
 }
 
 // Quantizations expands Quant for the wire: a floor ("fp8+") becomes every
@@ -354,9 +463,17 @@ func (s Spec) Quantizations() []string {
 // false means the caller sends no provider object.
 //
 // Rules:
-//   - Only: the spec's own only when set, else the pin. A spec only is an
-//     explicit routing decision and BYPASSES bans and ejections (decision 5 of
-//     the design), so ignore is dropped in that case.
+//   - Only: the spec's own only when it NAMES a provider, else the pin. A spec
+//     only is an explicit routing decision and BYPASSES bans and ejections
+//     (decision 5 of the design), so ignore is dropped in that case. An `only=`
+//     that was explicitly CLEARED (non-nil, empty — the "suppress the inherited
+//     pin" signal Merge carries) is neither: it sends no pin at all, and the
+//     bans still ride, because clearing a pin is not authority to serve a
+//     banned host.
+//   - Exclude: the spec's own never-serve list, UNIONED with ignore wherever
+//     ignore is sent — a line's exclusion is a ban, so the guard's bans and the
+//     line's exclusions are one ignore list on the wire. A named only drops
+//     both, as it drops every ban: the pin decides who serves.
 //   - Sort: sent for price/throughput/latency; omitted for SortInherit and for
 //     SortBalanced (balanced = deliberately send no sort).
 //   - Prefer: the spec's preferred slugs ride as Order, ALWAYS, independent of
@@ -367,11 +484,16 @@ func (s Spec) Quantizations() []string {
 //     jointly.
 func (s Spec) Prefs(pinOnly, ignore []string) (ProviderPrefs, bool) {
 	var prefs ProviderPrefs
-	if s.Only != nil {
+	switch {
+	case len(s.Only) > 0:
+		// An explicit pin: no fallback, so nothing to route around.
 		prefs.Only = copyList(s.Only)
-	} else {
+	case s.Only == nil:
 		prefs.Only = copyList(pinOnly)
-		prefs.Ignore = copyList(ignore)
+		prefs.Ignore = unionSlugs(s.Exclude, ignore)
+	default:
+		// only= explicitly cleared: no pin, but every ban and ejection holds.
+		prefs.Ignore = unionSlugs(s.Exclude, ignore)
 	}
 	prefs.Order = copyList(s.Prefer)
 	if s.Sort != SortInherit && s.Sort != SortBalanced {

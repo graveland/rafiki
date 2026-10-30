@@ -43,9 +43,8 @@ and that is what this verb prints.
 
 CHILD is a child id or name, resolved like every other child-target verb (the
 completion offers both). SPEC is a bracket-free routing spec — the same grammar
-a spawn, a preset or a model
-string's "[...]" bracket uses, without the brackets — comma-separated and
-order-free:
+a spawn, a preset or a model string's "[...]" bracket uses, without the
+brackets — comma-separated and order-free:
 
   sort=price|throughput|latency|balanced
   quant=<floor>+            e.g. fp8+ — that tier and every tier above it
@@ -54,18 +53,23 @@ order-free:
                             FROM: an unhealthy or banned one is skipped
   only=slug|slug            serve ONLY these providers — a HARD PIN, no
                             fallback: prefer= orders, only= restricts
+  exclude=slug|slug         never serve these — a ban for this child, and it
+                            HOLDS: a later delta cannot remove one
   nodata, zdr               bare flags: no prompt-retaining hosts / ZDR only
 
 prefer= is the soft form and only= the hard one: prefer= sets the order
 OpenRouter tries providers in and still falls back to the rest, while only=
 removes every provider not named, so an outage or a ban on the only= set has
-nowhere to fall back to. A child credential may set prefer=, sort= and quant=
-but may never set or change only= (that would sidestep the operator's bans),
-nor clear an operator-set only=, nodata or zdr.
+nowhere to fall back to. exclude= is the opposite of prefer=: it subtracts a
+provider and unions with the operator's bans, at any level. A child credential
+may set prefer=, sort=, quant= and exclude= (excluding only ever tightens) but
+may never set or change only= (that would sidestep the operator's bans), nor
+clear an operator-set only=, exclude=, nodata or zdr.
 
 The merge never clears a key you do not name: a delta of "sort=price" leaves
-the child's prefer=, only= and quant= exactly as they were. Steering a key an
-operator owns from a child credential is refused with permission_denied.
+the child's prefer=, only= and quant= exactly as they were, and exclude= only
+ever grows. Steering a key an operator owns from a child credential is refused
+with permission_denied.
 
 Example:
   rafiki route set c_01HXABC 'prefer=fireworks|deepinfra'

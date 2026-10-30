@@ -116,6 +116,25 @@ func TestSetChildRoutingChildPreservesStoredNoDataAndZDR(t *testing.T) {
 	ck.Eq("prefer=fireworks,nodata,zdr", got, "nodata/zdr are monotone and the grammar cannot un-set them")
 }
 
+// TestSetChildRoutingChildMayExcludeButNeverRemove pins exclude's authority:
+// excluding only ever tightens, so a child credential may add one, while the
+// stored exclusion is monotone — a later child steer cannot remove what the
+// operator or an ancestor excluded.
+func TestSetChildRoutingChildMayExcludeButNeverRemove(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := routingTree(t)
+	setStoredRouting(t, c, "c_leaf", "exclude=openinference")
+
+	got, err := c.SetChildRouting(context.Background(), "c_mid", "c_leaf", "exclude=gmicloud")
+	ck.NoError(err, "a child may exclude a provider")
+	ck.Eq("exclude=gmicloud|openinference", got, "exclusions union, delta's slugs first")
+
+	// An empty exclude= is a parse error, so there is no way to express removal.
+	_, err = c.SetChildRouting(context.Background(), "c_mid", "c_leaf", "exclude=")
+	ck.Eq(connect.CodeInvalidArgument, connect.CodeOf(connectapi.ConnectErr(err)), "exclude= cannot clear")
+	ck.Eq("exclude=gmicloud|openinference", storedRouting(t, c, "c_leaf"), "stored spec unchanged")
+}
+
 func TestSetChildRoutingChildMayPreferSortQuant(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := routingTree(t)

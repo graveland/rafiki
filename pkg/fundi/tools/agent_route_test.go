@@ -15,8 +15,9 @@ const wantAgentRouteDescription = "Change where a child's model requests are ser
 	"effective on its next request. spec is a bracket-free routing spec such as " +
 	"\"prefer=fireworks\" (try that provider first, fall back to the rest) or " +
 	"\"sort=throughput,quant=fp8+\". It merges over the child's current routing. You " +
-	"may steer your own subtree only, and you may set prefer, sort and quant — only= " +
-	"(a hard provider pin) is reserved for the operator."
+	"may steer your own subtree only, and you may set prefer, sort, quant and exclude " +
+	"(excluding only tightens) — only= (a hard provider pin) is reserved for the " +
+	"operator."
 
 func TestAgentRouteBlueprintSchemaAndMaterialize(t *testing.T) {
 	ck := assert.NewAborting(t)

@@ -233,7 +233,7 @@ func TestProvidersRouteCompletionOffersTheSpecTail(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 
 	got := completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[")
-	c.EqDiff([]string{"sort=", "quant=", "prefer=", "only=", "nodata", "zdr"}, got, "keys after [")
+	c.EqDiff([]string{"sort=", "quant=", "prefer=", "only=", "exclude=", "nodata", "zdr"}, got, "keys after [")
 
 	got = completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[sort=")
 	c.EqDiff([]string{
@@ -245,7 +245,7 @@ func TestProvidersRouteCompletionOffersTheSpecTail(t *testing.T) {
 	c.EqDiff([]string{"price"}, got, "values after sort=p")
 
 	got = completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[sort=price,")
-	c.EqDiff([]string{"quant=", "prefer=", "only=", "nodata", "zdr"}, got, "keys after a used sort= must drop it")
+	c.EqDiff([]string{"quant=", "prefer=", "only=", "exclude=", "nodata", "zdr"}, got, "keys after a used sort= must drop it")
 
 	got = completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[nodata,zdr,q")
 	c.EqDiff([]string{"quant="}, got, "keys after two used flags, filtered")
@@ -263,4 +263,43 @@ func TestProvidersRouteCompletionOffersTheSpecTail(t *testing.T) {
 	// knowledge, and completion must not dial for them).
 	c.Empty(completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[sort=price]"), "a closed spec offered candidates")
 	c.Empty(completeModel(nil, "fundi", "openrouter/z-ai/glm-5.3[only="), "only= offered values")
+}
+
+// TestProvidersRouteHelpPinsEverySpecSetting bans help drift: every key the
+// routing-spec grammar accepts must be listed in `providers route`'s SPEC
+// table and named by `providers route set`, spelled the way it is
+// written in a spec (a valued key keeps its "=") — a mention in prose does not
+// count, which is why the group's assertion reads the block and not the whole
+// help. The list is routing.SpecKeys() — the parser's own table, not a copy — so
+// a key ParseSpec learns fails here until the help documents it, and the help
+// cannot advertise a key the parser refuses. The sort= values are pinned the
+// same way, off routing.SortValues().
+func TestProvidersRouteHelpPinsEverySpecSetting(t *testing.T) {
+	c := assert.NewAborting(t)
+	group, set := newProvidersRouteCmd(), newProvidersRouteSetCmd()
+	c.Require().NotEmpty(routing.SpecKeys(), "routing.SpecKeys() is empty")
+
+	// The block runs from the SPEC heading to the next section heading, so it
+	// covers the key table and nothing else.
+	grammar := ""
+	if i := strings.Index(group.Long, "THE SPEC"); i >= 0 {
+		grammar = group.Long[i:]
+		if j := strings.Index(grammar, "\nRESOLUTION"); j >= 0 {
+			grammar = grammar[:j]
+		}
+	}
+	c.Require().NotEq("", grammar, "providers route help has no SPEC table:\n%s", group.Long)
+
+	for _, k := range routing.SpecKeys() {
+		spelling := k.Name
+		if k.TakesValue {
+			spelling += "="
+		}
+		c.StrContains(grammar, spelling, "the SPEC table does not describe %q:\n%s", spelling, grammar)
+		c.StrContains(set.Long, spelling, "providers route set help does not describe %q:\n%s", spelling, set.Long)
+	}
+
+	for _, s := range routing.SortValues() {
+		c.StrContains(grammar, string(s), "the SPEC table does not offer sort=%s:\n%s", s, grammar)
+	}
 }

@@ -29,8 +29,8 @@ now governs the daemon's next OpenRouter request, whoever sends it.
 Subcommands:
   bans          what is excluded right now, and why
   ban/unban     exclude a provider for every model, until lifted or --for
-  route         per-model-line specs: sort, quantization floor, provider
-                allowlist, data policy
+  route         per-model-line specs: sort, quantization, preferred, pinned
+                and excluded providers, data policy
   login         log in to a provider that authenticates with your subscription
   logout        forget the subscription credential stored against your user`,
 	}
@@ -45,45 +45,62 @@ func newProvidersRouteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "route",
 		Short: "Routing-policy rows: the OpenRouter provider spec each model line resolves to",
-		Long: `Per-model-line routing defaults. Resolution is per key: a row fills the
-keys a spawn/preset spec leaves unset (a spawn's "[...]" beats a preset's,
-which beats these rows), and nodata/zdr ALWAYS hold — they reach running
-children too, so a row set after a spawn governs that child's later requests.
+		Long: `Per-model-line routing defaults: the provider spec each model line resolves to.
 
-A policy line is a two-segment MODEL line, and may use filepath.Match glob
-metacharacters: "z-ai/*" governs every model under z-ai/, "z-ai/glm-5.3*"
-governs the glm-5.3 family, and "*" alone is the global line that fills every
-gap (a line's spec merges over the global row's, per key). "*" in a line never
-crosses "/", so "z-ai/*" does not match a three-segment id. A line names at
-most <model>/<id>: the provider segment is not part of a policy line, and the
-store refuses longer shapes. Reading the rows is open to any caller; writing
-one (set, delete) requires a user credential or the local socket.
+  rafiki providers route set 'z-ai/glm-5.3-flash' 'quant=fp8+'
+  rafiki providers route set '*' 'nodata'
+  rafiki providers route set 'z-ai/glm-5.3' 'exclude=openinference'
+  rafiki providers route list
+  rafiki providers route delete 'z-ai/glm-5.3'
 
-The SPEC grammar (comma-separated, order-free):
-  sort=price|throughput|latency|balanced
-  quant=<floor>+           e.g. fp8+ — admit that tier and every tier above
-  quant=a|b|c              an explicit list instead; floors cannot join a list
-  only=slug|slug           serve only these providers
-  nodata, zdr              bare flags: no prompt-retaining hosts / ZDR only
-Resolution is per key: a spawn/preset spec beats a row key by key, and
-nodata/zdr are also merged monotonically — a row can tighten them but no
-spawn can loosen them.
+A LINE is a model line — "<model>/<id>", no provider segment — with glob
+metacharacters: "z-ai/*" is every model under z-ai/, "z-ai/glm-5.3*" is that
+family, and "*" alone is the global line. A model id is matched with its
+provider segment stripped (openrouter/z-ai/glm-5.3-flash -> z-ai/glm-5.3-flash),
+a "*" never crosses "/", the LONGEST matching line wins, and only that row
+participates. set appends (the history is kept; the newest row per line wins),
+delete appends a tombstone.
 
-Example:
-  rafiki providers route set z-ai/glm-5.3-flash 'quant=fp8+'
-      Serve the model only at 8-bit weights or better: every 4-bit
-      quantization (int4, fp4, mxfp4, nvfp4) and fp6 is excluded, as are
-      hosts OpenRouter has not labelled. To keep 6-bit hosts too, spell the
-      list instead: 'quant=fp6|int8|fp8|mxfp8|fp16|bf16|fp32'.
+THE SPEC is the same comma-separated grammar a spawn's "[...]" and a preset
+take; every key is optional and order-free:
+
+  sort=price|throughput|latency|balanced   rank providers (default: OpenRouter's)
+  quant=fp8+                               that tier or better
+  quant=fp6|int8|fp8                       exactly these instead
+  prefer=fireworks|deepinfra               try these first, then fall back
+  only=fireworks|deepinfra                 serve ONLY these: no fallback
+  exclude=openinference|gmicloud           never serve these for this line
+  nodata                                   no provider that may store the prompt
+  zdr                                      zero-data-retention endpoints only
+
+prefer= orders, only= restricts, exclude= subtracts. exclude= is a BAN scoped
+to this line: it unions with the daemon's own ban list, it holds at every
+level (a spawn's spec cannot clear it), and it reaches running children. only=
+is the one exception to every ban — an explicit pin that serves the provider it
+names even when banned, and drops the ban list.
+
+RESOLUTION is per key: a spawn's spec beats a preset's, which beats these rows,
+and a line's spec merges over the global "*" row. nodata, zdr and exclude are
+monotone — set at any level they hold — while sort, quant, prefer and only are
+filled in per key. Reading the rows is open to any caller; writing one (set,
+delete) needs a user credential or the local socket.
+
+Examples:
+  rafiki providers route set 'z-ai/glm-5.3-flash' 'quant=fp8+'
+      Serve only at 8-bit weights or better: every 4-bit tier (int4, fp4,
+      mxfp4, nvfp4) and fp6 is excluded, as is any unlabelled host. To keep
+      6-bit hosts too, name the list: 'quant=fp6|int8|fp8|mxfp8|fp16|bf16|fp32'.
 
   rafiki providers route set '*' 'sort=price,nodata'
-      Global default: cheapest eligible provider first, and no provider
-      that may store or train on prompts. Quote "*" — the shell would
-      glob it.
+      Global default: cheapest eligible provider first, none that may store or
+      train on prompts. Quote '*': the shell would glob it.
 
-  rafiki providers route set deepseek/deepseek-v4 'only=fireworks|deepinfra'
-      Restrict a model line to named providers. Quote the spec: "|" is a
-      shell pipe.`,
+  rafiki providers route set 'z-ai/glm-5.3' 'exclude=openinference'
+      Keep one provider away from one model line, without banning it
+      everywhere. 'rafiki providers ban openinference' is the global form.
+
+  rafiki providers route set 'deepseek/deepseek-v4' 'only=fireworks|deepinfra'
+      Restrict a line to named providers. Quote the spec: "|" is a shell pipe.`,
 	}
 	cmd.AddCommand(newProvidersRouteSetCmd(), newProvidersRouteListCmd(), newProvidersRouteDeleteCmd())
 	return cmd
@@ -93,16 +110,22 @@ func newProvidersRouteSetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <line|*> <spec>",
 		Short: "Set the routing spec a model line resolves to",
-		Long: `Set the routing spec a model line resolves to, replacing any previous row
-for the line (a set is an append — the store keeps the history). SPEC is a
-routing spec in the model string's bracket grammar, e.g.
-"sort=price,quant=fp8+"; the empty string stores the zero spec (no opinion).
-The daemon validates SPEC and refuses what it cannot parse.
+		Long: `Set (append) the routing spec a model line resolves to: the newest row per
+line wins, the history is kept. SPEC is a routing spec in the same grammar a
+spawn's "[...]" takes — sort=, quant=, prefer=, only=, exclude=, nodata, zdr,
+each described with its values by 'rafiki providers route --help' — e.g.
+'sort=price,quant=fp8+'. The empty string stores the zero spec: no opinion from
+this line. The daemon validates SPEC and refuses what it cannot parse.
+
+A banned provider is skipped unless the spec pins one with only=, which drops
+the ban list. To keep a provider away from just this line, use
+exclude=openinference; 'rafiki providers ban openinference' is the global form.
 
 Example:
-  rafiki providers route set z-ai/glm-5.3-flash 'quant=fp8+'
+  rafiki providers route set 'z-ai/glm-5.3-flash' 'quant=fp8+'
   rafiki providers route set '*' 'sort=throughput'
-  rafiki providers route set z-ai/glm-5.3-flash ''   # clear back to no opinion`,
+  rafiki providers route set 'z-ai/glm-5.3' 'exclude=openinference'
+  rafiki providers route set 'z-ai/glm-5.3-flash' ''   # back to no opinion`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ep, err := newConnectEndpoint(cmd)

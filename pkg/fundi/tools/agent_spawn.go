@@ -79,6 +79,7 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"e.g. \"openrouter/z-ai/glm-5.3[sort=throughput,nodata]\": comma-separated items " +
 					"sort=price|throughput|latency|balanced, quant=<floor like fp8+ or a list a|b>, " +
 					"prefer=<provider slugs a|b> (soft preference), only=<provider slugs a|b> (hard pin), " +
+					"exclude=<provider slugs a|b> (never serve these for this child; it holds at every level), " +
 					"nodata, zdr. Your spec wins per key over the preset's, and the operator's routing " +
 					"policy fills the rest. A \":batch\" model accepts only only=. A malformed spec " +
 					"refuses the spawn. agent_route changes a running agent's spec afterwards."},

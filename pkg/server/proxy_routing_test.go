@@ -179,6 +179,36 @@ func TestProxyRoutingCallerOnlySkipsIgnore(t *testing.T) {
 	c.EqDiff([]any{"coreweave"}, listOf(t, prov, "ignore"), "no only on the caller object: the guard's ban is merged in")
 }
 
+// TestProxyRoutingCallerObjectKeepsLineExclude pins that a line's exclude= is
+// a BAN, so a caller-supplied provider object cannot dodge it: the spec's
+// exclusions merge into the caller's ignore alongside the guard's bans. A
+// caller object that names its own only= is still the explicit decision that
+// skips the merge, exactly as it skips operator bans.
+func TestProxyRoutingCallerObjectKeepsLineExclude(t *testing.T) {
+	c := assert.NewCollecting(t)
+	spec, err := routing.ParseSpec("exclude=openinference")
+	c.Require().NoError(err, "parse spec")
+	res := &recordingResolver{spec: spec}
+	p, bodies := newRoutingTestProxy(t, res)
+
+	send := func(body string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer client-token")
+		req.Header.Set("X-Rafiki-Session", "c_child7")
+		p.ServeHTTP(rec, req)
+		return providerOf(t, (*bodies)[len(*bodies)-1])
+	}
+
+	prov := send(`{"model":"openai/gpt-4o","provider":{"sort":"latency"},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.Eq("latency", prov["sort"], "caller's sort survives")
+	c.EqDiff([]any{"openinference"}, listOf(t, prov, "ignore"), "the line's exclusion rides with the caller's object")
+
+	prov = send(`{"model":"openai/gpt-4o","provider":{"only":["fireworks"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.Nil(prov["ignore"], "a caller only= is the explicit pin and skips the ban merge, got %v", prov["ignore"])
+}
+
 // TestProxyRoutingCallerDataPolicyForced pins the OVERWRITE direction of the
 // data-policy force and its composition with a caller only: a caller object
 // that carries its own data_collection/zdr CANNOT clear them (a caller's

@@ -93,7 +93,7 @@
   a colder, more expensive provider mid-conversation. `routing.ProviderGuard`
   watches for the miss pattern and ejects the bad provider automatically.
 - **Declared routing, end to end.** An OpenRouter model id can carry a
-  bracketed spec (`[sort=price,quant=fp8+,prefer=…,only=…,nodata,zdr]`) that
+  bracketed spec (`[sort=price,quant=fp8+,prefer=…,only=…,exclude=…,nodata,zdr]`) that
   any caller who can spawn may set; `rafiki models route` shows where a spec
   would serve a model, `rafiki route set` steers a running child's spec, and
   `rafiki providers route set` stores operator defaults per model line;
