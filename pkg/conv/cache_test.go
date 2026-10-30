@@ -487,15 +487,16 @@ func TestOwnerAttachInvalidatesCachedHead(t *testing.T) {
 }
 
 // A read in flight against an entry that holds no position yet must not store
-// its answer once a commit has published into that entry: the commit's publish
-// bumps the generation even though there was no position to replace.
-func TestCommitPublishesIntoAnEmptyEntry(t *testing.T) {
+// its answer once a commit has reached that entry: the commit bumps the
+// generation, publishes nothing, and the next owner read asks the backend.
+func TestCommitInvalidatesAnEntryWithNoPosition(t *testing.T) {
 	c := assert.NewAborting(t)
 	b, convID := newConv(t)
 	ctx := context.Background()
 	clk := newClock()
 	gate := newCommitGate()
-	stalled := &stalledState{Backend: &blockedCommit{Backend: b, gate: gate}, entered: make(chan struct{}), release: make(chan struct{})}
+	counting := convtest.NewCounting(b)
+	stalled := &stalledState{Backend: &blockedCommit{Backend: counting, gate: gate}, entered: make(chan struct{}), release: make(chan struct{})}
 	s := conv.NewStore(stalled, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
 
 	owner := s.Open(convID, conv.AsOwner())
@@ -526,9 +527,65 @@ func TestCommitPublishesIntoAnEmptyEntry(t *testing.T) {
 	close(stalled.release)
 	<-done
 
+	counting.Reset()
 	after, err := other.Working(ctx)
 	c.NoError(err, "owner Working")
 	c.EqDeep([]string{root.Nodes[0].ID, committed.Nodes[0].ID}, nodeIDs(after), "the owner read answers the committed head, not H0")
+	c.Eq(1, counting.Counts()["State"], "from the backend: nothing was published into the empty entry")
+}
+
+// An entry created after a commit landed cannot tell whether that commit is the
+// newest, so a delayed commit must not claim to be.
+func TestDelayedCommitCannotOutrankANewerOne(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	clk := newClock()
+	gate := newCommitGate()
+	gatedBackend := &gatedCommit{Backend: b, gate: gate}
+	stalled := &stalledState{Backend: gatedBackend, entered: make(chan struct{}), release: make(chan struct{})}
+	s := conv.NewStore(stalled, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
+
+	a := s.Open(convID, conv.AsOwner())
+	_, err := a.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "a")}}})
+	c.NoError(err, "a")
+
+	// 1. A commits H1 and stalls after the backend commit, before publishing.
+	releaseA := pausedAppend(gate, a, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "h1")}}})
+
+	// 2. E1 expires; B creates E2, reads H1, commits and publishes H2.
+	clk.Advance(2 * time.Minute)
+	bh := s.Open(convID, conv.AsOwner())
+	h2, err := bh.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "h2")}}})
+	c.NoError(err, "B appends H2")
+
+	// 3. E2 expires; C creates E3 and its Working reads H2 and stalls.
+	clk.Advance(2 * time.Minute)
+	stalled.arm()
+	ch := s.Open(convID, conv.AsOwner())
+	var path []*conv.Node
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		path, err = ch.Working(ctx)
+		done <- err
+	}()
+	<-stalled.entered
+
+	// 4. A resumes; its commit reaches E3, which has no position.
+	h1, err := releaseA()
+	c.NoError(err, "A")
+	c.Eq(1, h1.Inserted, "A inserted H1")
+
+	// 5. C's observation is released.
+	close(stalled.release)
+	c.NoError(<-done, "C Working")
+	c.Eq(3, len(path), "C read the head it observed")
+
+	// 6. Every later owner read answers the durable head.
+	after, err := ch.Working(ctx)
+	c.NoError(err, "owner Working")
+	c.Eq(h2.Nodes[0].ID, after[len(after)-1].ID, "the owner read answers H2, not the delayed H1")
 }
 
 // A writer's own State observation, made while resolving, must not overwrite a

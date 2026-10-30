@@ -78,12 +78,12 @@ func TestReaderStateFromASweptEntryIsDropped(t *testing.T) {
 	fresh := headState{id: root.Nodes[0].ID, nextOrdinal: 1}
 	for {
 		s.mu.Lock()
-		reached := replacement.gen >= gen
+		cur := replacement.gen
 		s.mu.Unlock()
-		if reached {
+		if cur >= gen {
 			break
 		}
-		s.storeCommitted(convID, replacement, fresh)
+		s.storeObserved(convID, replacement, cur, fresh)
 	}
 	s.mu.Lock()
 	caughtUp := replacement.gen == gen

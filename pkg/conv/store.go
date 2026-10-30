@@ -305,15 +305,15 @@ func (s *Store) storeObserved(convID string, e *entry, gen uint64, st headState)
 	s.publishLocked(live, st)
 }
 
-// storeCommitted publishes the position a successful Commit left behind, and
+// storeCommitted reports the position a successful Commit left behind, and
 // ALWAYS advances the generation, into an entry that holds no position as well:
 // an observation in flight against that entry captured an earlier generation and
-// is dropped. The rows are durable whether or not the writer's entry survived,
+// is dropped. An entry with no position is only bumped, never published into. The rows are durable whether or not the writer's entry survived,
 // so a swept entry must not swallow the news: when the writer's entry is gone,
 // the conversation's CURRENT entry is brought up to date instead, and an entry is
 // never installed (a swept one is dead for good).
 //
-// Only a cached position strictly BEHIND the commit (or absent) is replaced. One
+// Only a cached position strictly BEHIND the commit is replaced. One
 // strictly ahead is a later write and is left alone, but still bumps. At the SAME
 // next ordinal neither the ordinal nor the generation can order the two: a
 // retract is a head move that leaves the ordinal alone, and a commit whose
@@ -332,7 +332,14 @@ func (s *Store) storeCommitted(convID string, e *entry, st headState) {
 	}
 	cur := live.head.Load()
 	switch {
-	case cur == nil, cur.nextOrdinal < st.nextOrdinal:
+	case cur == nil:
+		// An entry with no position knows nothing, so it cannot tell whether this
+		// commit is the newest: it may have been created after later commits
+		// landed. The bump drops any observation in flight; publishing nothing
+		// makes the next read ask the backend.
+		live.gen++
+		live.lastAccess = s.now()
+	case cur.nextOrdinal < st.nextOrdinal:
 		s.publishLocked(live, st)
 	case cur.nextOrdinal > st.nextOrdinal:
 		live.gen++
