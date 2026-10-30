@@ -21,7 +21,6 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
@@ -263,7 +262,7 @@ func TestStreamInterceptorAfterPolicy(t *testing.T) {
 		return "", false
 	})
 
-	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv := connectapi.NewServer(nil)
 	h := &server.Handler{}
 	h.ControlPath, h.Control = connectControlRoute(srv, reg, nil)
 	mux := http.NewServeMux()
@@ -388,7 +387,7 @@ func TestExpiredTokenStreamContinues(t *testing.T) {
 		id:    users.Identity{UserID: "u1", Username: "brent", TokenID: "tok-1"},
 	}
 	src := &fakeEventSource{}
-	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv := connectapi.NewServer(nil)
 	srv.SetEventSource(src)
 	srv.SetLineage(stubLineage{})
 	h := &server.Handler{}

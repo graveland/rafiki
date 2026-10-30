@@ -6,36 +6,44 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/conv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
 
-type fakeLoader struct{ msgs []store.Message }
+// historyChild is the child id these tests ask about; the fixture's resolver
+// maps it to a conversation id, so the two identifiers stay distinct.
+const historyChild = "c_1"
 
-func (f fakeLoader) LoadPage(context.Context, string, store.HistoryPage) ([]store.Message, error) {
-	return f.msgs, nil
+type fakeLoader struct{ nodes []*conv.Node }
+
+func (f fakeLoader) Page(context.Context, string, conv.PageQuery) ([]*conv.Node, error) {
+	return f.nodes, nil
 }
 
 // recordingLoader remembers the id and page it was queried with, so a test
 // can prove the handler looked up the RESOLVED conversation id rather than the
-// child id, and handed the request's bounds to the store.
+// child id, and handed the request's bounds to the store. A nil inner serves no
+// nodes, which is all a guard test needs from the seam.
 type recordingLoader struct {
-	msgs    []store.Message
-	gotID   string
-	gotPage store.HistoryPage
+	inner    *conv.Store
+	gotID    string
+	gotQuery conv.PageQuery
 }
 
-func (r *recordingLoader) LoadPage(_ context.Context, conversationID string, page store.HistoryPage) ([]store.Message, error) {
+func (r *recordingLoader) Page(ctx context.Context, conversationID string, q conv.PageQuery) ([]*conv.Node, error) {
 	r.gotID = conversationID
-	r.gotPage = page
-	return r.msgs, nil
+	r.gotQuery = q
+	if r.inner == nil {
+		return nil, nil
+	}
+	return r.inner.Page(ctx, conversationID, q)
 }
 
 // fakeResolver maps every input to itself unless told otherwise — these tests
@@ -52,58 +60,216 @@ func (f fakeResolver) ConversationID(childID string) (string, bool) {
 	return cid, ok
 }
 
-// historyT0 is the fixture's base timestamp.
-var historyT0 = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+// transcript is the production history seam without a database: a real
+// conv.Store over an in-memory tree. Tests append through it, so the pages the
+// handler serves are the ones a daemon would serve.
+type transcript struct {
+	t      *testing.T
+	store  *conv.Store
+	convID string
+	handle *conv.Handle
+}
 
-func threeMessages() []store.Message {
-	return []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("a")), CreatedAt: historyT0},
-		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("b")), CreatedAt: historyT0},
-		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("c")), CreatedAt: historyT0.Add(time.Second)},
+func newTranscript(t *testing.T) *transcript {
+	t.Helper()
+	backend := conv.NewMemBackend()
+	convID := "conv-history"
+	backend.Ensure(convID)
+	st := conv.NewStore(backend, conv.Options{})
+	return &transcript{
+		t:      t,
+		store:  st,
+		convID: convID,
+		handle: st.Open(convID, conv.AsOwner()),
 	}
+}
+
+func text(role msg.Role, body string) conv.NewNode {
+	return conv.NewNode{Msg: msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: body}}}}
+}
+
+// append appends a chain from the conversation's head.
+func (f *transcript) append(nodes ...conv.NewNode) conv.Result {
+	f.t.Helper()
+	res, err := f.handle.Append(context.Background(), conv.Append{FromHead: true, Nodes: nodes})
+	assert.NewAborting(f.t).NoError(err, "append")
+	return res
+}
+
+func (f *transcript) user(body string) conv.Result {
+	f.t.Helper()
+	return f.append(text(msg.User, body))
+}
+
+func (f *transcript) assistant(body string) conv.Result {
+	f.t.Helper()
+	return f.append(text(msg.Assistant, body))
+}
+
+// server wires the store into the Control service the way the daemon does,
+// resolving historyChild to the fixture's conversation.
+func (f *transcript) server(loader connectapi.HistoryLoader) *connectapi.Server {
+	s := connectapi.NewServer(loader)
+	s.SetChildResolver(fakeResolver{known: map[string]string{historyChild: f.convID}})
+	return s
+}
+
+// history serves one GetHistory request against the fixture's tree.
+func (f *transcript) history(req *rafikiv1.GetHistoryRequest) []*rafikiv1.Event {
+	f.t.Helper()
+	c := assert.NewAborting(f.t)
+	if req.ChildId == "" {
+		req.ChildId = historyChild
+	}
+	resp, err := f.server(f.store).GetHistory(context.Background(), connect.NewRequest(req))
+	c.NoError(err, "GetHistory")
+	return resp.Msg.Events
+}
+
+// firstText is the text of a message event's first content block.
+func firstText(t *testing.T, ev *rafikiv1.Event) string {
+	t.Helper()
+	blocks := ev.GetUserMessage().GetContent()
+	if blocks == nil {
+		blocks = ev.GetAssistantMessage().GetContent()
+	}
+	if len(blocks) == 0 || blocks[0].GetText() == nil {
+		t.Fatalf("event %d carries no text block: %T", ev.GetOrdinal(), ev.Payload)
+	}
+	return blocks[0].GetText().GetText()
 }
 
 func TestGetHistoryReturnsAllByDefault(t *testing.T) {
 	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
-	s.SetChildResolver(fakeResolver{})
+	f := newTranscript(t)
+	f.user("a")
+	f.assistant("b")
+	f.user("c")
 
-	resp, err := s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
-	c.NoError(err, "GetHistory")
-	c.Eq(3, len(resp.Msg.Events), "got")
+	events := f.history(&rafikiv1.GetHistoryRequest{})
+
+	c.Eq(3, len(events), "got")
+	c.Eq(0, events[0].GetOrdinal(), "event 0 ordinal")
+	c.Eq(2, events[2].GetOrdinal(), "event 2 ordinal")
 }
 
-// The page semantics are store.Messages.LoadPage's (TestLoadPage* in
-// pkg/store); the handler's job is to hand every bound over intact, and to
-// leave an unset one unset rather than collapsing it to a zero value.
+// The page semantics are conv.Store.Page's (TestPageBounds in pkg/conv); the
+// handler's job is to hand every bound over intact, and to leave an unset one
+// unset rather than collapsing it to a zero value.
 func TestGetHistoryPassesBoundsToTheStore(t *testing.T) {
 	c := assert.NewAborting(t)
-	loader := &recordingLoader{msgs: threeMessages()}
-	s := connectapi.NewServer(loader)
-	s.SetChildResolver(fakeResolver{})
+	f := newTranscript(t)
+	f.user("a")
+	f.assistant("b")
+	f.user("c")
+	before := time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)
+	loader := &recordingLoader{inner: f.store}
+	s := f.server(loader)
 
 	_, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{
-			ChildId:      "c_1",
+			ChildId:      historyChild,
 			AfterOrdinal: proto.Int32(0),
-			Before:       timestamppb.New(historyT0.Add(time.Second)),
+			Before:       timestamppb.New(before),
 			Limit:        proto.Int32(2),
 		}))
 	c.NoError(err, "GetHistory")
-	c.NotNil(loader.gotPage.AfterOrdinal, "after_ordinal")
-	c.Eq(0, *loader.gotPage.AfterOrdinal, "after_ordinal")
-	c.NotNil(loader.gotPage.Before, "before")
-	c.True(historyT0.Add(time.Second).Equal(*loader.gotPage.Before), "before = %v", *loader.gotPage.Before)
-	c.NotNil(loader.gotPage.Limit, "limit")
-	c.Eq(2, *loader.gotPage.Limit, "limit")
+	c.NotNil(loader.gotQuery.AfterOrdinal, "after_ordinal")
+	c.Eq(0, *loader.gotQuery.AfterOrdinal, "after_ordinal")
+	c.NotNil(loader.gotQuery.Before, "before")
+	c.True(before.Equal(*loader.gotQuery.Before), "before = %v", *loader.gotQuery.Before)
+	c.NotNil(loader.gotQuery.Limit, "limit")
+	c.Eq(2, *loader.gotQuery.Limit, "limit")
 
 	_, err = s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
+		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: historyChild}))
 	c.NoError(err, "GetHistory")
-	c.Nil(loader.gotPage.AfterOrdinal, "unset after_ordinal")
-	c.Nil(loader.gotPage.Before, "unset before")
-	c.Nil(loader.gotPage.Limit, "unset limit")
+	c.Nil(loader.gotQuery.AfterOrdinal, "unset after_ordinal")
+	c.Nil(loader.gotQuery.Before, "unset before")
+	c.Nil(loader.gotQuery.Limit, "unset limit")
+}
+
+// History is the transcript along the head's history, so a user row retracted
+// before it was answered — RetractHead moves the head back and deletes nothing —
+// is not part of it. Only the retry comes back.
+func TestGetHistoryOmitsDeadBranch(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newTranscript(t)
+	f.user("first")
+	retracted := f.user("retracted")
+	c.NoError(f.handle.RetractHead(context.Background(), retracted.Nodes[0].ID), "retract")
+	f.user("retry")
+
+	events := f.history(&rafikiv1.GetHistoryRequest{})
+
+	c.Len(events, 2, "events")
+	c.Eq("first", firstText(t, events[0]), "event 0 text")
+	c.Eq("retry", firstText(t, events[1]), "event 1 text")
+	c.Eq(2, events[1].GetOrdinal(), "the retry keeps the ordinal it was appended at")
+}
+
+// A compaction boundary is a derived root, so the history walks across it and
+// keeps the rows before it. The tail copies written after the boundary render
+// no event and never count toward a page.
+func TestGetHistoryCrossesCompaction(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newTranscript(t)
+	f.user("a")
+	last := f.assistant("b")
+	preTokens := int64(182000)
+	summary := text(msg.User, "summary")
+	summary.InputTokens = &preTokens
+	_, err := f.handle.Append(context.Background(), conv.Append{
+		Root:          conv.KindCompactionSummary,
+		DerivedFromID: last.Nodes[0].ID,
+		Nodes:         []conv.NewNode{summary},
+	})
+	c.NoError(err, "compaction boundary")
+	tailA := text(msg.User, "a")
+	tailA.Kind = conv.KindCompactionTail
+	tailB := text(msg.Assistant, "b")
+	tailB.Kind = conv.KindCompactionTail
+	f.append(tailA, tailB)
+	f.assistant("d")
+
+	events := f.history(&rafikiv1.GetHistoryRequest{})
+
+	c.Len(events, 4, "events")
+	c.EqDeep([]int32{0, 1, 2, 5}, eventOrdinals(events), "pre-boundary rows, the boundary, and the row after the tails")
+	c.Eq("a", firstText(t, events[0]), "event 0 text")
+	c.Eq("b", firstText(t, events[1]), "event 1 text")
+	cb := events[2].GetCompactionBoundary()
+	c.NotNil(cb, "event 2 is %T, want Event_CompactionBoundary", events[2].Payload)
+	c.Eq(int32(preTokens), cb.GetPreTokens(), "pre_tokens")
+	c.Eq("d", firstText(t, events[3]), "event 3 text")
+}
+
+// A page never splits rows that share a ts, so a limit that would cut between
+// them widens backwards to the start of the group: both rows of the later
+// transaction come back.
+func TestGetHistoryPageWidensSharedCreatedAt(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newTranscript(t)
+	f.user("old")
+	// One commit stamps every row it writes with the same created_at; the sleep
+	// keeps the two transactions' stamps apart on the wall clock.
+	time.Sleep(2 * time.Millisecond)
+	f.append(text(msg.Assistant, "new 1"), text(msg.User, "new 2"))
+
+	events := f.history(&rafikiv1.GetHistoryRequest{Limit: proto.Int32(1)})
+
+	c.Len(events, 2, "the same-ts group widened past the limit")
+	c.EqDeep([]int32{1, 2}, eventOrdinals(events), "ordinals")
+	c.Eq("new 1", firstText(t, events[0]), "event 0 text")
+	c.Eq("new 2", firstText(t, events[1]), "event 1 text")
+}
+
+func eventOrdinals(events []*rafikiv1.Event) []int32 {
+	out := make([]int32, len(events))
+	for i, ev := range events {
+		out[i] = ev.GetOrdinal()
+	}
+	return out
 }
 
 // A limit <= 0 is refused before the conversation resolves, so no resolver is
@@ -111,10 +277,10 @@ func TestGetHistoryPassesBoundsToTheStore(t *testing.T) {
 func TestGetHistoryRejectsNonPositiveLimit(t *testing.T) {
 	for _, n := range []int32{0, -1} {
 		c := assert.NewAborting(t)
-		s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
+		s := connectapi.NewServer(fakeLoader{})
 
 		_, err := s.GetHistory(context.Background(),
-			connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1", Limit: proto.Int32(n)}))
+			connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: historyChild, Limit: proto.Int32(n)}))
 		c.Error(err, "want an error for limit=%d, got nil", n)
 		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "limit=%d code", n)
 	}
@@ -134,7 +300,7 @@ func TestRoutesReturnsControlHandler(t *testing.T) {
 // than becoming the Unavailable a missing resolver produces.
 func TestGetHistoryRejectsEmptyChildID(t *testing.T) {
 	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: nil})
+	s := connectapi.NewServer(fakeLoader{})
 
 	_, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: ""}))
@@ -143,23 +309,27 @@ func TestGetHistoryRejectsEmptyChildID(t *testing.T) {
 }
 
 // The child id and the conversation id are different identifiers: child ids
-// are ULIDs the daemon mints per spawn, while store.Messages.Load queries
-// WHERE conversation_id = $1::uuid. Without a resolver the handler must fail
-// rather than pass the child id through as if it were a conversation id.
+// are ULIDs the daemon mints per spawn, while the transcript is keyed by the
+// conversation's UUID. Without a resolver the handler must fail rather than
+// pass the child id through as if it were a conversation id.
 func TestGetHistoryFailsClosedWithoutResolver(t *testing.T) {
 	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
+	f := newTranscript(t)
+	f.user("a")
+	s := connectapi.NewServer(f.store)
 	// No SetChildResolver call.
 
 	_, err := s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
+		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: historyChild}))
 	c.Error(err, "want an error when no resolver is wired, got nil")
 	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestGetHistoryRejectsUnknownChild(t *testing.T) {
 	c := assert.NewAborting(t)
-	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
+	f := newTranscript(t)
+	f.user("a")
+	s := connectapi.NewServer(f.store)
 	s.SetChildResolver(fakeResolver{known: map[string]string{}}) // resolves nothing
 
 	_, err := s.GetHistory(context.Background(),
@@ -172,15 +342,14 @@ func TestGetHistoryRejectsUnknownChild(t *testing.T) {
 // carry the child id the caller asked about, not the conversation UUID.
 func TestGetHistoryLoadsByConversationIDButLabelsByChildID(t *testing.T) {
 	c := assert.NewAborting(t)
-	loader := &recordingLoader{msgs: threeMessages()}
-	s := connectapi.NewServer(loader)
-	s.SetChildResolver(fakeResolver{known: map[string]string{
-		"c_1": "1e3f4a9c-0000-4000-8000-000000000001",
-	}})
+	f := newTranscript(t)
+	f.user("a")
+	loader := &recordingLoader{inner: f.store}
+	s := f.server(loader)
 
 	resp, err := s.GetHistory(context.Background(),
-		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
+		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: historyChild}))
 	c.NoError(err, "GetHistory")
-	c.Eq("1e3f4a9c-0000-4000-8000-000000000001", loader.gotID, "loaded with")
-	c.Eq("c_1", resp.Msg.Events[0].GetChildId(), "event child id")
+	c.Eq(f.convID, loader.gotID, "loaded with")
+	c.Eq(historyChild, resp.Msg.Events[0].GetChildId(), "event child id")
 }

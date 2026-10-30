@@ -24,7 +24,7 @@ import (
 // emitProto.
 
 // conversationTypes are the durable types GetHistory serves (see
-// eventconv.EventsFromMessages: message rows plus the compaction-boundary
+// eventconv.EventsFromNodes: message rows plus the compaction-boundary
 // marker row). The single-child default shows these.
 var conversationTypes = []string{
 	"user_message",

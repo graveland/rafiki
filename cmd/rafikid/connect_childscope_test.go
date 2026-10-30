@@ -14,12 +14,12 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/conv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
 
@@ -114,7 +114,7 @@ func (i *recordingInbox) Accept(_ context.Context, in inbox.Inbound) (string, er
 
 type recordingHistory struct{ loads []string }
 
-func (h *recordingHistory) LoadPage(_ context.Context, conversationID string, _ store.HistoryPage) ([]store.Message, error) {
+func (h *recordingHistory) Page(_ context.Context, conversationID string, _ conv.PageQuery) ([]*conv.Node, error) {
 	h.loads = append(h.loads, conversationID)
 	return nil, nil
 }

@@ -17,7 +17,6 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
@@ -765,7 +764,7 @@ func TestRevokeTokenCancelsOpenStream(t *testing.T) {
 		},
 	}
 	ctrl := &Controller{users: ustore, streamRevoke: reg}
-	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv := connectapi.NewServer(nil)
 	srv.SetExecutorSessions(stubSessions{})
 	srv.SetUserAdmin(connectUserAdmin{c: ctrl})
 	h := &server.Handler{}
@@ -818,7 +817,7 @@ func TestRevokeTokenCancelsOpenStream(t *testing.T) {
 func cutMount(t *testing.T, ustore *cutUserStore, reg *streamRegistry, auth *server.UserTokenAuth) rafikiv1connect.ControlClient {
 	t.Helper()
 	ctrl := &Controller{users: ustore, streamRevoke: reg}
-	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv := connectapi.NewServer(nil)
 	srv.SetExecutorSessions(stubSessions{})
 	srv.SetUserAdmin(connectUserAdmin{c: ctrl})
 	h := &server.Handler{}

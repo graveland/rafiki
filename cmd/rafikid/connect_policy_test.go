@@ -20,7 +20,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
@@ -70,14 +69,14 @@ func proxyFaceConnectRoute(t *testing.T) rafikiv1connect.ControlClient {
 	// handlers consult. Kill is childScoped: its per-child refusal must come
 	// from the REAL source (c_victim is not a descendant of c_child), or the
 	// assertion would be proving that an unwired handler answers Unavailable.
-	// HistoryLoader tolerates a nil pool because no admitted request below
-	// reaches GetHistory.
+	// The history seam is nil because no admitted request below reaches
+	// GetHistory.
 	ctrl := &Controller{st: childstore.New(), cm: newChildManager()}
 	ctrl.st.Insert(&childstore.Session{
 		ChildID: "c_child", Status: protocol.StatusIdle, Kind: protocol.KindFundi,
 		StartedAt: time.Now(),
 	})
-	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv := connectapi.NewServer(nil)
 	srv.SetChildScopeSource(ctrl.childScopeFor)
 	h := &server.Handler{}
 	h.ControlPath, h.Control = connectControlRoute(srv, newStreamRegistry(), nil)

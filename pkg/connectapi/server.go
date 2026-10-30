@@ -15,24 +15,24 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/inbox"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// HistoryLoader is the narrow slice of store.Messages this package needs.
+// HistoryLoader is the narrow slice of conv.Store this package needs.
 // Depending on the interface rather than the concrete type keeps the handler
 // testable without a database.
 type HistoryLoader interface {
-	LoadPage(ctx context.Context, conversationID string, page store.HistoryPage) ([]store.Message, error)
+	Page(ctx context.Context, conversationID string, q conv.PageQuery) ([]*conv.Node, error)
 }
 
 // ConversationResolver maps a daemon-assigned child id (a ULID, "c_...") to
-// the persisted conversation's UUID — the id store.Messages.Load actually
-// expects. These are different identifiers: the child id is runtime-only,
+// the persisted conversation's UUID — the id the conversation tree is keyed
+// by. These are different identifiers: the child id is runtime-only,
 // minted per spawn, while the conversation id is what conversation_message
 // rows are keyed by. false means the child is unknown, has exited and been
 // forgotten, or is not a fundi child (only fundi children have a conversation
@@ -167,8 +167,8 @@ func (s *Server) SetChildResolver(r ConversationResolver) { s.resolver.Store(&r)
 // thing stopping a Connect handler from reaching a child directly.
 func (s *Server) SetInbox(in inbox.Accepter) { s.inbox.Store(&in) }
 
-// resolveConversation turns a request's child_id into the conversation id
-// store.Messages.Load needs. Centralized here because GetHistory and
+// resolveConversation turns a request's child_id into the conversation id the
+// conversation tree is keyed by. Centralized here because GetHistory and
 // StreamEvents both need it with identical semantics.
 func (s *Server) resolveConversation(childID string) (string, error) {
 	p := s.resolver.Load()
@@ -191,14 +191,16 @@ func (s *Server) Routes(interceptors ...connect.Interceptor) (string, http.Handl
 	return rafikiv1connect.NewControlHandler(s, connect.WithInterceptors(interceptors...))
 }
 
-// GetHistory serves the durable tier: persisted messages converted to native
-// events, each carrying its row's created_at as ts, bounded by the request's
-// three optional fields — after_ordinal (strictly greater; the exact
+// GetHistory serves the durable tier: the conversation's transcript converted
+// to native events, each carrying its node's created_at as ts, bounded by the
+// request's three optional fields — after_ordinal (strictly greater; the exact
 // resumption cursor a follower replays from), before (ts strictly earlier;
 // how a caller pages backwards) and limit (the newest N left, never splitting
 // events that share a ts, so a page may hold more than N). The bounds are
-// applied in the database by store.Messages.LoadPage, which owns their
-// semantics, so a page costs the rows it returns.
+// applied by conv.Store.Page, which owns their semantics, so a page costs the
+// nodes it returns. History is the transcript along the conversation head's
+// history: a row the head no longer reaches — a retracted prompt, a superseded
+// sibling reply — is not part of it.
 func (s *Server) GetHistory(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.GetHistoryRequest],
@@ -238,7 +240,7 @@ func (s *Server) GetHistory(
 		return nil, err
 	}
 
-	var page store.HistoryPage
+	var page conv.PageQuery
 	if req.Msg.AfterOrdinal != nil {
 		after := int(req.Msg.GetAfterOrdinal())
 		page.AfterOrdinal = &after
@@ -251,14 +253,14 @@ func (s *Server) GetHistory(
 		limit := int(req.Msg.GetLimit())
 		page.Limit = &limit
 	}
-	msgs, err := s.history.LoadPage(ctx, conversationID, page)
+	nodes, err := s.history.Page(ctx, conversationID, page)
 	if err != nil {
 		return nil, unmappedErr(err, "rpc", "GetHistory", "conversationId", conversationID)
 	}
 	return connect.NewResponse(&rafikiv1.GetHistoryResponse{
-		Events: eventconv.EventsFromMessages(childID, msgs),
+		Events: eventconv.EventsFromNodes(childID, nodes),
 	}), nil
 }
 
 // Compile-time proof that the production type satisfies the test seam.
-var _ HistoryLoader = (*store.Messages)(nil)
+var _ HistoryLoader = (*conv.Store)(nil)

@@ -6,21 +6,31 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
 
-func TestEventsFromMessagesCarriesOrdinal(t *testing.T) {
+// node is one transcript node carrying a single text block.
+func node(ordinal int, role msg.Role, text string) *conv.Node {
+	return &conv.Node{
+		Ref: conv.Ref{Ordinal: ordinal},
+		Msg: msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: text}}},
+	}
+}
+
+func TestEventsFromNodesCarriesOrdinal(t *testing.T) {
 	c := assert.NewAborting(t)
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
-		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi")), StopReason: "end_turn"},
+	nodes := []*conv.Node{
+		node(0, msg.User, "hello"),
+		{Ref: conv.Ref{Ordinal: 1}, Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "hi"}}}, StopReason: "end_turn"},
 	}
 
-	evs := eventconv.EventsFromMessages("c_test", msgs)
+	evs := eventconv.EventsFromNodes("c_test", nodes)
 
 	c.Len(evs, 2, "got %d events, want 2", len(evs))
 	c.Eq(0, evs[0].GetOrdinal(), "event 0 ordinal")
@@ -35,17 +45,14 @@ func TestEventsFromMessagesCarriesOrdinal(t *testing.T) {
 // A stored system row is a message the harness injected, not something the user
 // typed, so it gets its own event rather than a user turn's. A user row still
 // lands on UserMessage.
-func TestEventsFromMessagesRendersSystemRole(t *testing.T) {
+func TestEventsFromNodesRendersSystemRole(t *testing.T) {
 	c := assert.NewAborting(t)
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.MessageParam{
-			Role:    "system",
-			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("Environment update: /tmp is now writable")},
-		}},
-		{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("carry on"))},
+	nodes := []*conv.Node{
+		node(0, msg.System, "Environment update: /tmp is now writable"),
+		node(1, msg.User, "carry on"),
 	}
 
-	evs := eventconv.EventsFromMessages("c_test", msgs)
+	evs := eventconv.EventsFromNodes("c_test", nodes)
 
 	c.Len(evs, 2, "got %d events, want 2", len(evs))
 	sys := evs[0].GetSystemMessage()
@@ -60,20 +67,20 @@ func TestEventsFromMessagesRendersSystemRole(t *testing.T) {
 	c.Eq(1, evs[1].GetOrdinal(), "event 1 ordinal")
 }
 
-// Each event carries its row's created_at as ts. A row with no recorded
+// Each event carries its node's created_at as ts. A node with no recorded
 // created_at leaves ts unset rather than stamping the zero time, which would
 // read as "year 1" and sort before every real event.
-func TestEventsFromMessagesCarriesTimestamp(t *testing.T) {
+func TestEventsFromNodesCarriesTimestamp(t *testing.T) {
 	c := assert.NewAborting(t)
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	t1 := t0.Add(90 * time.Second)
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first")), CreatedAt: t0},
-		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("second")), CreatedAt: t1},
-		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("undated"))},
-	}
+	first := node(0, msg.User, "first")
+	first.CreatedAt = t0
+	second := node(1, msg.Assistant, "second")
+	second.CreatedAt = t1
+	nodes := []*conv.Node{first, second, node(2, msg.User, "undated")}
 
-	evs := eventconv.EventsFromMessages("c_test", msgs)
+	evs := eventconv.EventsFromNodes("c_test", nodes)
 
 	c.Len(evs, 3, "got %d events, want 3", len(evs))
 	c.NotNil(evs[0].GetTs(), "event 0 ts is nil")
@@ -132,19 +139,18 @@ func TestStopReasonNormalizes(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-// A kind='compaction_summary' row maps to a CompactionBoundary event, not to
+// A kind='compaction_summary' node maps to a CompactionBoundary event, not to
 // the ordinary UserMessage branch its role would otherwise land in. Only
 // pre_tokens is ever set here — a reattach-synthesized boundary cannot know
 // the post size — which is what makes the renderer pick the one-sided format.
-func TestEventsFromMessagesMapsCompactionSummaryRow(t *testing.T) {
+func TestEventsFromNodesMapsCompactionSummaryNode(t *testing.T) {
 	c := assert.NewAborting(t)
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("old context"))},
-		{Ordinal: 1, Kind: ptr("compaction_summary"), InputTokens: ptr(182000),
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))},
-	}
+	boundary := node(1, msg.User, "summary")
+	boundary.Kind = conv.KindCompactionSummary
+	boundary.InputTokens = ptr(int64(182000))
+	nodes := []*conv.Node{node(0, msg.User, "old context"), boundary}
 
-	evs := eventconv.EventsFromMessages("c_test", msgs)
+	evs := eventconv.EventsFromNodes("c_test", nodes)
 
 	c.Len(evs, 2, "got %d events, want 2", len(evs))
 	c.NotNil(evs[0].GetUserMessage(), "event 0 is %T, want an ordinary user message", evs[0].Payload)
@@ -159,16 +165,14 @@ func TestEventsFromMessagesMapsCompactionSummaryRow(t *testing.T) {
 	c.Eq("", cb.Trigger, "trigger")
 }
 
-// A summary row with no recorded input_tokens still becomes a boundary, with
+// A summary node with no recorded input_tokens still becomes a boundary, with
 // pre_tokens unset rather than a zero that would read as "compaction dropped
 // everything".
-func TestEventsFromMessagesCompactionSummaryWithoutTokens(t *testing.T) {
-	msgs := []store.Message{
-		{Ordinal: 4, Kind: ptr("compaction_summary"),
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))},
-	}
+func TestEventsFromNodesCompactionSummaryWithoutTokens(t *testing.T) {
+	boundary := node(4, msg.User, "summary")
+	boundary.Kind = conv.KindCompactionSummary
 
-	ev := eventconv.EventsFromMessages("c_test", msgs)[0]
+	ev := eventconv.EventsFromNodes("c_test", []*conv.Node{boundary})[0]
 
 	cb := ev.GetCompactionBoundary()
 	assert.NewAborting(t).NotNil(cb, "event is %T, want Event_CompactionBoundary", ev.Payload)
@@ -177,24 +181,29 @@ func TestEventsFromMessagesCompactionSummaryWithoutTokens(t *testing.T) {
 	}
 }
 
-// kind='compaction_tail' rows are stored duplicates of rows that already sit
-// before the compaction horizon, so the full-history reader must drop them
-// entirely — no event, no ordinal — leaving the summary's boundary and the
-// pre-horizon messages behind.
-func TestCompactionEventsFromMessagesSkipsTail(t *testing.T) {
+// kind='compaction_tail' nodes are copies of nodes that already sit before the
+// compaction horizon, so the full-history reader must drop them entirely — no
+// event, no ordinal — leaving the summary's boundary and the pre-horizon
+// messages behind. conv.Store.Page already drops them; this pins the renderer's
+// own rule so a caller handing it a raw walk cannot leak the copies.
+func TestCompactionEventsFromNodesSkipsTail(t *testing.T) {
 	c := assert.NewAborting(t)
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
-		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi")), StopReason: "end_turn"},
-		{Ordinal: 2, Kind: ptr("compaction_summary"), InputTokens: ptr(900),
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))},
-		{Ordinal: 3, Kind: ptr("compaction_tail"),
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
-		{Ordinal: 4, Kind: ptr("compaction_tail"),
-			Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi")), StopReason: "end_turn"},
+	summary := node(2, msg.User, "summary")
+	summary.Kind = conv.KindCompactionSummary
+	summary.InputTokens = ptr(int64(900))
+	tailOne := node(3, msg.User, "hello")
+	tailOne.Kind = conv.KindCompactionTail
+	tailTwo := node(4, msg.Assistant, "hi")
+	tailTwo.Kind = conv.KindCompactionTail
+	nodes := []*conv.Node{
+		node(0, msg.User, "hello"),
+		{Ref: conv.Ref{Ordinal: 1}, Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "hi"}}}, StopReason: "end_turn"},
+		summary,
+		tailOne,
+		tailTwo,
 	}
 
-	evs := eventconv.EventsFromMessages("c_test", msgs)
+	evs := eventconv.EventsFromNodes("c_test", nodes)
 
 	c.Len(evs, 3, "got %d events, want 3", len(evs))
 	c.Eq(0, evs[0].GetOrdinal(), "event 0 ordinal")
@@ -209,17 +218,16 @@ func TestCompactionEventsFromMessagesSkipsTail(t *testing.T) {
 	}
 }
 
-func TestEventsFromMessagesRendersFundiClearAsBoundary(t *testing.T) {
+func TestEventsFromNodesRendersFundiClearAsBoundary(t *testing.T) {
 	c := assert.NewAborting(t)
-	clear := store.KindClear
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("before"))},
-		{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText)), Kind: &clear},
-		// A claude clear row is the real first message of the new head.
-		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("real head")), Kind: &clear},
-	}
+	clearBoundary := node(1, msg.User, store.ClearBoundaryText)
+	clearBoundary.Kind = conv.KindClear
+	// A claude clear row is the real first message of the new head.
+	claudeClear := node(2, msg.User, "real head")
+	claudeClear.Kind = conv.KindClear
+	nodes := []*conv.Node{node(0, msg.User, "before"), clearBoundary, claudeClear}
 
-	evs := eventconv.EventsFromMessages("c_test", msgs)
+	evs := eventconv.EventsFromNodes("c_test", nodes)
 
 	c.Require().Len(evs, 3, "events")
 	c.NotNil(evs[0].GetUserMessage(), "ordinary row")

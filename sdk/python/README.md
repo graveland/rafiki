@@ -226,6 +226,12 @@ plus position and role. A fundi tool result is its own `UserMessage` (a
 `tool_result` block), published in tool_use order; steers drained together are
 one merged event.
 
+`get_history` returns the transcript along the conversation head's history, not
+every stored row: a prompt retracted before it was answered, and the superseded
+sibling reply a retry left behind, are omitted. A live `stream_events` feed
+still shows such a branch as it happens, and a refetch drops it. Ordinals stay
+strictly increasing along the returned page.
+
 ## Tests
 
 The Go test `TestPythonSDK*` in `test/integration` drives this SDK against a

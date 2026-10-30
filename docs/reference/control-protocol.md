@@ -340,8 +340,10 @@ only after the row it describes has been inserted, and takes `ts` from that
 insert's `RETURNING created_at` (`store.AppendNode` → `store.AppendChain`; a node
 the conversation already holds keeps its stored row, and with it its original
 `ts`). Event content for a user row is the
-stored content converted exactly as `GetHistory` converts it
-(`eventconv.BlocksFromParam`). Every other event (`TurnStart`, `TurnEnd`,
+stored content converted as `GetHistory` converts it (`eventconv.BlocksFromParam`
+live, `eventconv.BlocksFromMsg` on the read; both index blocks by source
+position, and the read also renders a block only the decoded node can name).
+Every other event (`TurnStart`, `TurnEnd`,
 deltas, tool events, errors) keeps its emit-time `ts`. Behaviour this implies:
 
 - **One `UserMessage` per persisted user row**: the prompt, each drained steer
@@ -383,19 +385,19 @@ request carrying `X-Rafiki-Session`, the Anthropic proxy answers `503` with body
 
 ### `GetHistory`: ts, `limit` and `before`
 
-`GetHistory` reads the `conversation_message` side of that split — the
-ordinal it returns is `conversation_message.ordinal`, never the event-log
-ordinal — and every event it returns carries `ts`: its row's `created_at`.
-That is **transaction-start time**, so every row one transaction wrote shares
-one `ts`. Ordinary messages are appended one statement each and get their own;
-the multi-row transaction today is a compaction or `/clear` boundary written
-together with the tail copied after it (`appendBoundary`, `pkg/store`), and
-those copies render no event. Clients must still treat `ts` as non-unique; the
-widening below is what makes that safe. For a fundi or claude child this `ts` is the same
-value the live `AssistantMessage`/`UserMessage`/`SystemMessage` event carried —
-see "Message events: `ts` is the row's `created_at`" above. A `system`-role row
-is history like any other: it comes back from `GetHistory` as a
-`SystemMessage`, and hiding it is the client's display choice, not the read's.
+`GetHistory` reads the conversation's transcript — the message tree along the
+head's history — and the ordinal it returns is `conversation_message.ordinal`,
+never the event-log ordinal. Every event it returns carries `ts`: its node's
+`created_at`. That is **transaction-start time**, so every row one transaction
+wrote shares one `ts`. Ordinary messages are appended one statement each and get
+their own; the multi-row transaction today is a compaction or `/clear` boundary
+written together with the tail copied after it (`appendBoundary`, `pkg/store`),
+and those copies render no event. Clients must still treat `ts` as non-unique;
+the widening below is what makes that safe. For a fundi or claude child this
+`ts` is the same value the live `AssistantMessage`/`UserMessage`/`SystemMessage`
+event carried — see "Message events: `ts` is the row's `created_at`" above. A
+`system`-role row is history like any other: it comes back from `GetHistory` as
+a `SystemMessage`, and hiding it is the client's display choice, not the read's.
 
 The request's two optional fields page that history BACKWARDS:
 
@@ -410,22 +412,26 @@ more than `limit` events. This is what keeps a page from breaking a
 transaction apart: a client pages with the oldest `ts` it received, and if the
 cut had split a same-`ts` group, the rows on the near side of the split would
 share that `ts` and be skipped for good by the next `before`. The bounds are
-applied in the database (`store.Messages.LoadPage`), so a page costs the rows
-it returns rather than the whole conversation; `compaction_tail` rows render no
-event and never count toward `limit`.
+applied by the conversation store (`conv.Store.Page`), so a page costs the
+nodes it returns rather than the whole conversation; `compaction_tail` nodes
+render no event and never count toward `limit`.
 
 Both fields are additive optional proto fields, so `protocol.Epoch` is
 unchanged.
 
-**A history read shows the whole stored history, not the working path.** The rows
-come back in `ordinal` order (`store.Messages.Load`/`LoadPage`), so two kinds of
-row that the tree legitimately leaves off its working path appear here: a prompt
-retracted before it was answered — `RetractHead` moves `head_id` back and deletes
-nothing, so the retracted row survives as an unreachable leaf — and the sibling
-branches a fork or a compaction left behind. `agent_view` and `rafiki
-logs`/`tail` read the same rows and show them too. This is the tree keeping
-history, not a leak; a path-aware reader (one that renders the head→root chain)
-is a later plan, and nothing in this contract promises one.
+**History is the transcript along the conversation head's history, not every
+stored row.** A page is the head→root walk across compaction and `/clear`
+boundaries, minus the `compaction_tail` copies, so a row the head no longer
+reaches is omitted: a prompt retracted before it was answered — `RetractHead`
+moves `head_id` back and deletes nothing, so the retracted row survives as an
+unreachable leaf — and the superseded sibling reply a retry or a fork left
+behind. A live `StreamEvents` feed is not filtered this way: a row is published
+when it is written, so a branch that is later abandoned still shows up as it
+happens, and a refetch through `GetHistory` drops it. Ordinals stay strictly
+increasing along the returned page, so a client can still page and resume by
+ordinal. `agent_view` still reads the stored rows (`store.Messages.Load`) and
+shows the dead branches; `rafiki logs`/`tail` backfill through `GetHistory`, so
+they follow the transcript.
 
 #### `EventSubject`
 
@@ -521,7 +527,7 @@ call at all — and is described under "Owner isolation between users" below.
 
 | RPC | Kind | Owner isolation | Purpose |
 |---|---|---|---|
-| `GetHistory` | unary · childScoped | ownerGuarded | Durable events for one child: the persisted messages converted to events, each carrying `ts` (its row's `created_at` — transaction time; unset only when the row's `created_at` is unknown, which the loader never produces), filterable by `after_ordinal`, and pageable BACKWARDS by `before` (a `Timestamp`, strictly earlier) with an optional `limit` of the newest N events. The cut never splits events that share a timestamp — see "`GetHistory`: ts, `limit` and `before`" below. These are additive OPTIONAL fields, so no protocol epoch bump |
+| `GetHistory` | unary · childScoped | ownerGuarded | Durable events for one child: the conversation transcript (the head's history, so a row the head no longer reaches is omitted) converted to events, each carrying `ts` (its row's `created_at` — transaction time; unset only when the row's `created_at` is unknown, which the loader never produces), filterable by `after_ordinal`, and pageable BACKWARDS by `before` (a `Timestamp`, strictly earlier) with an optional `limit` of the newest N events. The cut never splits events that share a timestamp — see "`GetHistory`: ts, `limit` and `before`" below. These are additive OPTIONAL fields, so no protocol epoch bump |
 | `StreamEvents` | server-streaming · childScoped | ownerGuarded | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary · childScoped | ownerGuarded | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child or a `/exit` slash command (see "`Send` and the durable inbox" and "Slash commands in a prompt" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
 | `ListChildren` | unary · childScoped | ownerFiltered | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child, plus the server-derived display fields `display_state`/`waiting_on`/`display_msg` — see "Operator display state"); answers only the caller's own subtree |

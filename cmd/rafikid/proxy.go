@@ -31,7 +31,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/turntrace"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/version"
@@ -419,7 +418,15 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// made "this daemon has no database" and "this daemon predates the Connect
 	// control plane" produce the same bodiless 404, which net/http answers and
 	// Connect reports as CodeUnimplemented.
-	connectServer := connectapi.NewServer(store.NewMessages(pool))
+	// History pages the conversation tree, so the Connect plane reads through
+	// the daemon's shared conv store. Assigned through the interface so a
+	// store-less face leaves the seam nil rather than a typed nil that
+	// GetHistory would dereference.
+	var history connectapi.HistoryLoader
+	if convs != nil {
+		history = convs
+	}
+	connectServer := connectapi.NewServer(history)
 	connectServer.SetProviderBanManager(connectProviderBans{g: guard})
 	// connectControlRoute adds the policy interceptor and, innermost behind
 	// it, the stream-revocation interceptor: the proxy face's Connect route
