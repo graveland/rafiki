@@ -42,6 +42,12 @@ type TreeCheckReport struct {
 	// OrdinalCounterBehind counts conversations whose next_ordinal is not
 	// ahead of their highest ordinal.
 	OrdinalCounterBehind int
+	// OrdinalNotIncreasing counts edges along which ordinal does not strictly
+	// increase: a child whose ordinal is not greater than its parent's, and a root
+	// whose ordinal is not greater than the node it is derived from. Cursors
+	// (after_ordinal, the web join, agent_view's m:<ordinal>) need ordinals to be
+	// monotonic along every linear history.
+	OrdinalNotIncreasing int
 	// ProviderIDMissing counts PLACED assistant nodes whose conversation turn
 	// recorded a response_message_id for their ordinal, but whose row carries no
 	// provider_message_id. That column is the attach key capture rule 2 resolves
@@ -66,7 +72,7 @@ type TreeCheckReport struct {
 // OK reports whether every invariant holds.
 func (r TreeCheckReport) OK() bool {
 	return r.MissingHash == 0 && r.BadHash == 0 && r.BadDepth == 0 && r.MissingHead == 0 &&
-		r.OrdinalCounterBehind == 0 && r.ProviderIDMissing == 0
+		r.OrdinalCounterBehind == 0 && r.OrdinalNotIncreasing == 0 && r.ProviderIDMissing == 0
 }
 
 // CheckTree checks every conversation's tree invariants.
@@ -78,6 +84,7 @@ func CheckTree(ctx context.Context, pool *pgxpool.Pool) (TreeCheckReport, error)
 // nil. Tests scope it because the database they run against is shared.
 func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheckReport, error) {
 	var report TreeCheckReport
+	var derivedOrdinalNotIncreasing int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation c
 		  WHERE ($1::uuid[] IS NULL OR c.id = ANY($1::uuid[]))`, ids).Scan(&report.Conversations); err != nil {
@@ -112,12 +119,30 @@ func checkTree(ctx context.Context, pool *pgxpool.Pool, ids []string) (TreeCheck
 			           AND ($1::uuid[] IS NULL OR c.id = ANY($1::uuid[]))`,
 			into: &report.OrdinalCounterBehind,
 		},
+		{
+			name: "ordinal not increasing (parent)",
+			query: `SELECT count(*) FROM conversations.conversation_message m
+			          JOIN conversations.conversation_message p ON p.id = m.parent_id
+			         WHERE m.ordinal <= p.ordinal
+			           AND ($1::uuid[] IS NULL OR m.conversation_id = ANY($1::uuid[]))`,
+			into: &report.OrdinalNotIncreasing,
+		},
+		{
+			name: "ordinal not increasing (derived)",
+			query: `SELECT count(*) FROM conversations.conversation_message m
+			          JOIN conversations.conversation_message p ON p.id = m.derived_from_id
+			         WHERE m.ordinal <= p.ordinal
+			           AND m.parent_id IS NULL
+			           AND ($1::uuid[] IS NULL OR m.conversation_id = ANY($1::uuid[]))`,
+			into: &derivedOrdinalNotIncreasing,
+		},
 	}
 	for _, q := range counts {
 		if err := pool.QueryRow(ctx, q.query, ids).Scan(q.into); err != nil {
 			return report, fmt.Errorf("tree check: %s: %w", q.name, err)
 		}
 	}
+	report.OrdinalNotIncreasing += derivedOrdinalNotIncreasing
 
 	missing, duplicates, err := checkLegacyRows(ctx, pool, ids)
 	if err != nil {

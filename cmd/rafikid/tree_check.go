@@ -37,9 +37,10 @@ func newTreeCheckCmd() *cobra.Command {
 row that is neither a replay's copy nor a duplicate of a summary root has a path
 hash, every node's hash is the hash its position implies, every child sits one
 below its parent, every conversation with messages has a head, the ordinal
-allocator is ahead of the rows, and every assistant row whose turn recorded a
-response message id carries that id. Those fields cover EVERY conversation, and
-they are the structural health check you can run at any time.
+allocator is ahead of the rows, ordinals strictly increase along every edge, and
+every assistant row whose turn recorded a response message id carries that id.
+Those fields cover EVERY conversation, and they are the structural health check
+you can run at any time.
 
 duplicate_rows is informational: it counts rows that are the same message in a
 different representation, and it does not fail the check.
@@ -70,6 +71,7 @@ Exits non-zero when any check fails.`,
 			fmt.Fprintf(out, "bad_depth: %d\n", report.BadDepth)
 			fmt.Fprintf(out, "missing_head: %d\n", report.MissingHead)
 			fmt.Fprintf(out, "ordinal_counter_behind: %d\n", report.OrdinalCounterBehind)
+			fmt.Fprintf(out, "ordinal_not_increasing: %d\n", report.OrdinalNotIncreasing)
 			fmt.Fprintf(out, "provider_id_missing: %d\n", report.ProviderIDMissing)
 			if !report.OK() {
 				return errors.New("conversation tree check failed")

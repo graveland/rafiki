@@ -431,22 +431,24 @@ any time. Output, one field per line:
 | `bad_depth` | children whose depth is not their parent's + 1 |
 | `missing_head` | conversations with messages but no `head_id` |
 | `ordinal_counter_behind` | conversations whose `next_ordinal` is not ahead of their highest ordinal |
+| `ordinal_not_increasing` | edges along which `ordinal` does not strictly increase: a child whose ordinal is not greater than its parent's, and a root whose ordinal is not greater than the node it is `derived_from`. Cursors (`after_ordinal`, the web join, `agent_view`'s `m:<ordinal>`) need ordinals to be monotonic along every linear history |
 | `provider_id_missing` | **placed** assistant rows (`path_hash` set) whose turn recorded a `response_message_id` for their ordinal but that carry no `provider_message_id`. A row with no tree position is expected and NOT counted: the backfill deliberately leaves an interim-fork copy and a duplicate summary root positionless, and neither ever gets the id. Among placed rows a non-zero value is a real defect — a backfill or writer that lost the id its turn named — so it gates the cutover |
 
-`missing_hash`, `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`
-and `provider_id_missing` fail the check; `duplicate_rows` does not. It exits
-non-zero when the check fails, so it can gate a cutover.
+`missing_hash`, `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`,
+`ordinal_not_increasing` and `provider_id_missing` fail the check;
+`duplicate_rows` does not. It exits non-zero when the check fails, so it can gate
+a cutover.
 
 **Scope.** Two different conversation lists, and the difference matters.
 `bad_hash`, `bad_depth`, `missing_head`, `ordinal_counter_behind`,
-`provider_id_missing`, `missing_hash` and `duplicate_rows` cover **every
-conversation with messages**: `bad_hash` walks every conversation with messages
-(`checkConversationsWithMessages`), `bad_depth`, `missing_head`,
-`ordinal_counter_behind` and `provider_id_missing` are single queries over every
-conversation, and the two legacy-row counters classify the unplaced rows of every
-conversation that holds one (`checkConversationsWithLegacyRows`,
-`pkg/store/tree_check.go`), so a conversation with no unplaced row contributes
-nothing. A tree's shape and its hashes are properties of the tree, however its
+`ordinal_not_increasing`, `provider_id_missing`, `missing_hash` and
+`duplicate_rows` cover **every conversation with messages**: `bad_hash` walks
+every conversation with messages (`checkConversationsWithMessages`), `bad_depth`,
+`missing_head`, `ordinal_counter_behind`, `ordinal_not_increasing` and
+`provider_id_missing` are single queries over every conversation, and the two
+legacy-row counters classify the unplaced rows of every conversation that holds
+one (`checkConversationsWithLegacyRows`, `pkg/store/tree_check.go`), so a
+conversation with no unplaced row contributes nothing. A tree's shape and its hashes are properties of the tree, however its
 storage was written. Pinned by `TestCheckTreeDetectsEachClass`,
 `TestCheckTreeDetectsABadHash`, `TestCheckTreeDetectsBadDepthWithoutALegacyHorizon`,
 `TestCheckTreeHealthProbeStaysCleanAfterGoLiveWrites` and

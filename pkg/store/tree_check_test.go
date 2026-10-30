@@ -575,3 +575,145 @@ func checkInsertTurn(t *testing.T, ctx context.Context, pool *pgxpool.Pool, conv
 		VALUES ($1::uuid, 0, 'complete', $2, $3)`, convID, responseOrdinal, responseMessageID)
 	assert.NewAborting(t).NoError(err, "insert turn")
 }
+
+// checkDropConversation removes a test's conversation and its messages once the
+// test ends. The scratch database is created per test, but the rows are still
+// dropped so nothing a test planted outlives the test that can explain it. The
+// head is released first: conversation.head_id RESTRICTs the delete of the row
+// it names, and conversation_message RESTRICTs the delete of its conversation.
+func checkDropConversation(t *testing.T, pool *pgxpool.Pool, convID string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, q := range []string{
+			`UPDATE conversations.conversation SET head_id = NULL WHERE id = $1::uuid`,
+			`DELETE FROM conversations.conversation_message WHERE conversation_id = $1::uuid`,
+			`DELETE FROM conversations.conversation WHERE id = $1::uuid`,
+		} {
+			if _, err := pool.Exec(ctx, q, convID); err != nil {
+				t.Errorf("drop conversation %s (%s): %v", convID, q, err)
+			}
+		}
+	})
+}
+
+// TestTreeCheckCountsOrdinalNotIncreasingOnParentEdge pins the parent edge: a
+// child's ordinal must be greater than its parent's, because the chronological
+// view and every cursor over it (after_ordinal, the web join, agent_view's
+// m:<ordinal>) read ordinals as insertion order along a linear history.
+func TestTreeCheckCountsOrdinalNotIncreasingOnParentEdge(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	checkDropConversation(t, pool, convID)
+
+	rootHash := checkInsertNode(t, ctx, pool, convID, 5, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, convID, 6, "assistant", `[{"type":"text","text":"child"}]`, nil, checkInt(5), rootHash, 1)
+	checkSetConversation(t, ctx, pool, convID, checkInt(6), checkInt(7))
+
+	clean, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree before the corruption")
+	c.Eq(0, clean.OrdinalNotIncreasing, "a chain written in ordinal order has no inverted edge")
+	c.True(clean.OK(), "the control passes: %+v", clean)
+
+	// Move the child's ordinal below its parent's, leaving the parent edge, the
+	// depth and the hash untouched so only the new count can see it.
+	_, err = pool.Exec(ctx, `UPDATE conversations.conversation_message SET ordinal = 4
+		WHERE conversation_id = $1::uuid AND ordinal = 6`, convID)
+	c.Require().NoError(err, "move the child below its parent")
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.OrdinalNotIncreasing, "the child's ordinal is not greater than its parent's")
+	c.Eq(0, report.MissingHash, "every row holds a position")
+	c.Eq(0, report.BadHash, "the hash is the hash of its position")
+	c.Eq(0, report.BadDepth, "the depth is untouched")
+	c.Eq(0, report.OrdinalCounterBehind, "the allocator is still ahead of the rows")
+	c.False(report.OK(), "an inverted edge fails the check")
+}
+
+// TestTreeCheckCountsOrdinalNotIncreasingOnDerivedEdge pins the lineage edge: a
+// root's ordinal must be greater than the ordinal of the node it was derived
+// from. Capture writes that root AFTER the node it replaced, so an ordinal that
+// is not greater is a real inversion — a history view following derived_from
+// would otherwise read the replaced node as the later one.
+func TestTreeCheckCountsOrdinalNotIncreasingOnDerivedEdge(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	checkDropConversation(t, pool, convID)
+
+	replacedHash := checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"before the cut"}]`, nil, nil, nil, 0)
+	// A plain root derived from the node it replaced, seeded exactly as capture
+	// writes it, so the hash check has nothing to report.
+	slot := convtree.Hash(replacedHash)
+	derivedContent := `[{"type":"text","text":"after the cut"}]`
+	hash, err := convtree.NodeHash(convtree.RootSeed(convtree.RootKindRoot, &slot),
+		convtree.Msg{Role: "user", Content: []byte(derivedContent)})
+	c.Require().NoError(err, "hash the derived root")
+	checkInsertRow(t, ctx, pool, convID, 1, "user", derivedContent, nil, nil, hash[:], checkDepth(0))
+	_, err = pool.Exec(ctx, `UPDATE conversations.conversation_message SET derived_from_id = (
+			SELECT id FROM conversations.conversation_message
+			 WHERE conversation_id = $1::uuid AND ordinal = 0)
+		WHERE conversation_id = $1::uuid AND ordinal = 1`, convID)
+	c.Require().NoError(err, "derive the root from the node it replaced")
+	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(6))
+
+	clean, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree before the corruption")
+	c.Eq(0, clean.OrdinalNotIncreasing, "a root written after the node it replaced has a greater ordinal")
+	c.True(clean.OK(), "the control passes: %+v", clean)
+
+	// Move the replaced node above the root derived from it.
+	_, err = pool.Exec(ctx, `UPDATE conversations.conversation_message SET ordinal = 5
+		WHERE conversation_id = $1::uuid AND ordinal = 0`, convID)
+	c.Require().NoError(err, "move the replaced node above the derived root")
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.OrdinalNotIncreasing, "the root's ordinal is not greater than the node it is derived from")
+	c.Eq(0, report.MissingHash, "every row holds a position")
+	c.Eq(0, report.BadHash, "the hash is the hash of its position")
+	c.Eq(0, report.BadDepth, "both are roots at depth 0")
+	c.Eq(0, report.OrdinalCounterBehind, "the allocator is still ahead of the rows")
+	c.False(report.OK(), "an inverted lineage edge fails the check")
+}
+
+// TestTreeCheckOKRequiresIncreasingOrdinals pins OrdinalNotIncreasing into OK():
+// a conversation whose ONLY defect is an inverted edge must fail the check, and
+// every other count must be zero so nothing else can explain the failure.
+func TestTreeCheckOKRequiresIncreasingOrdinals(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	convID := checkTestConv(t, ctx, pool)
+	checkDropConversation(t, pool, convID)
+
+	rootHash := checkInsertNode(t, ctx, pool, convID, 0, "user", `[{"type":"text","text":"root"}]`, nil, nil, nil, 0)
+	checkInsertNode(t, ctx, pool, convID, 1, "assistant", `[{"type":"text","text":"child"}]`, nil, checkInt(0), rootHash, 1)
+	checkSetConversation(t, ctx, pool, convID, checkInt(1), checkInt(6))
+
+	_, err := pool.Exec(ctx, `UPDATE conversations.conversation_message SET ordinal = 4
+		WHERE conversation_id = $1::uuid AND ordinal = 0`, convID)
+	c.Require().NoError(err, "move the root above the child it precedes")
+
+	report, err := checkTree(ctx, pool, []string{convID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.OrdinalNotIncreasing, "the inverted edge is the only defect")
+	c.Eq(0, report.MissingHash, "every row holds a position")
+	c.Eq(0, report.DuplicateRows, "nothing repeats a root")
+	c.Eq(0, report.BadHash, "the hashes verify")
+	c.Eq(0, report.BadDepth, "the depths are right")
+	c.Eq(0, report.MissingHead, "the head moved with the append")
+	c.Eq(0, report.OrdinalCounterBehind, "the allocator is ahead of the rows")
+	c.Eq(0, report.ProviderIDMissing, "no turn recorded a reply id")
+	c.False(report.OK(), "a report whose only defect is an inverted edge is not OK")
+}
