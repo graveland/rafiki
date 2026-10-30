@@ -10,10 +10,11 @@
 // a chain the conversation already holds inserts only the missing suffix and
 // two histories that agree on every message converge on the same tree.
 //
-// Nodes are never mutated after they are published. An append inserts the new
-// nodes into the cache and only then publishes the new head, so a reader that
-// observes the new head always finds its nodes. One writer, many snapshot
-// readers.
+// Nodes are never mutated after they are published. A write commits through the
+// Backend and then inserts the committed nodes into the cache; the
+// conversation's head is never cached, so every operation reads it from the
+// Backend and a reader can only ever walk a head the Backend actually holds.
+// One writer per conversation, many snapshot readers.
 //
 // The package is storage-agnostic and pgx-free: it may import the standard
 // library, github.com/google/uuid, pkg/convtree, pkg/msg, pkg/msg/anthropic and
