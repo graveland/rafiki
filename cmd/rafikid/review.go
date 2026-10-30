@@ -13,6 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -23,12 +24,13 @@ import (
 // independent calls). capacity 8, drop-with-QUEUE_FULL beyond that.
 //
 // Everything on it is constructed once at startup and read-only after: pool,
-// prov and catalog are set by newReviewQueue and never mutated. Only jobs,
-// inFlight and the lazy LLM client below carry mutable state.
+// prov, catalog and convs are set by newReviewQueue and never mutated. Only
+// jobs, inFlight and the lazy LLM client below carry mutable state.
 type reviewQueue struct {
 	pool    *pgxpool.Pool
 	prov    *providers.Set
 	catalog *routing.ModelCatalog
+	convs   *conv.Store
 
 	jobs     chan reviewJob
 	mu       sync.Mutex
@@ -70,11 +72,12 @@ type reviewJob struct {
 	force          bool
 }
 
-func newReviewQueue(pool *pgxpool.Pool, prov *providers.Set, catalog *routing.ModelCatalog) *reviewQueue {
+func newReviewQueue(pool *pgxpool.Pool, prov *providers.Set, catalog *routing.ModelCatalog, convs *conv.Store) *reviewQueue {
 	return &reviewQueue{
 		pool:     pool,
 		prov:     prov,
 		catalog:  catalog,
+		convs:    convs,
 		jobs:     make(chan reviewJob, reviewQueueCapacity),
 		inFlight: make(map[string]bool),
 	}
@@ -246,6 +249,12 @@ func (q *reviewQueue) client() (*llm.Client, error) {
 		opts := []llm.ClientOption{llm.WithProviders(q.prov)}
 		if q.catalog != nil {
 			opts = append(opts, llm.WithCatalog(q.catalog))
+		}
+		// The daemon's one conversation store: an analyze run reads the very
+		// conversation the proxy face just captured, so it must read it through
+		// the same node cache rather than a private one of its own.
+		if q.convs != nil {
+			opts = append(opts, llm.WithConvStore(q.convs))
 		}
 		q.llmClient, q.llmErr = llm.NewClient(opts...)
 	})

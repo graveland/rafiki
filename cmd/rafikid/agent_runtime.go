@@ -460,6 +460,13 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	// (catalog-less daemon) keeps the client building its own.
 	ro.Catalog = c.catalog
 
+	// The daemon's ONE conversation store, so this child's llm.Client opens
+	// conversations through the same node cache the proxy face captures into
+	// instead of a private one. This is the same instance the face passes via
+	// llm.WithConvStore; nil (a Controller built without a pool) keeps the
+	// client's own.
+	ro.ConvStore = c.convs
+
 	// The daemon's one provider guard, so an operator ban or a cache ejection
 	// reaches this child's OpenRouter requests exactly as it reaches the proxy
 	// face's — and the child's turns feed the guard's ejection evidence.

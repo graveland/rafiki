@@ -438,6 +438,19 @@ func runDaemon(opts runDaemonOpts) error {
 		slog.Info("dev mode: store migrated")
 	}
 
+	// The daemon's ONE conversation node cache, built here because it is the
+	// pool's cache: every in-daemon reader and writer of conversation history
+	// (the proxy face and its capture store, the review worker, every fundi
+	// child) opens conversations through this instance. A second store would be
+	// a second cache over the same rows — one face's append a miss for the
+	// next. A bad RAFIKI_CONV_CACHE_BYTES is fatal: an operator who set a budget
+	// must learn it was rejected, not get the default silently.
+	convs, err := newConvStore(pool)
+	if err != nil {
+		slog.Error("cannot start", "error", err)
+		return err
+	}
+
 	reg := prometheus.NewRegistry()
 	// The daemon's Prometheus instrumentation, built exactly ONCE: NewMetrics
 	// registers its metric families, so a second construction panics. The proxy
@@ -664,6 +677,9 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.sandboxBootTime = time.Now()
 	ctrl.streamRevoke = streamRevoke
 	ctrl.providerCreds = creds
+	// The daemon's one conversation store, so a fundi child's llm.Client opens
+	// conversations through the same cache the proxy face captures into.
+	ctrl.convs = convs
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	ctrl.SetProviderGuard(guard)
@@ -684,7 +700,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// daemon gets no reviewer at all — ConversationReview then answers
 	// FailedPrecondition instead of accepting jobs nothing will ever run.
 	if pool != nil {
-		ctrl.reviewQ = newReviewQueue(pool, prov, catalog)
+		ctrl.reviewQ = newReviewQueue(pool, prov, catalog, convs)
 		ctrl.reviewQ.start(baseCtx)
 	}
 
@@ -714,6 +730,7 @@ func runDaemon(opts runDaemonOpts) error {
 		Config:       opts.Config,
 		Listen:       opts.Listen,
 		Catalog:      catalog,
+		ConvStore:    convs,
 		RawTrace:     rawTrace,
 		RawTraceAll:  rawTraceAll,
 		Users:        userStore,

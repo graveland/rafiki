@@ -37,6 +37,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
@@ -106,6 +107,13 @@ type Controller struct {
 	// observation belongs to (HandleSubagentObservation). Nil on a DB-less
 	// daemon, which captures no turns and so never attributes a subagent.
 	captureStore *capture.CaptureStore
+
+	// convs is the daemon's one conversation store (newConvStore, built beside
+	// the pool in main.go): the node cache every in-process fundi child opens
+	// its conversations through, so a turn this daemon captured is already
+	// cached for the child that resumes it. Nil in a fixture, where each client
+	// keeps llm's private default.
+	convs *conv.Store
 
 	// children is the durable child-state store. Nil when pool is nil, which
 	// means children live in memory only and do not survive a restart.

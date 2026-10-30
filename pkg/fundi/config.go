@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -169,6 +170,13 @@ type Config struct {
 	// what the standalone `rafikid fundi` process (no daemon catalog) keeps
 	// doing.
 	Catalog *routing.ModelCatalog
+
+	// ConvStore is the daemon's one conversation store, handed to the engine's
+	// llm.Client via llm.WithConvStore — see RuntimeOptions.ConvStore, whose doc
+	// comment carries the reasoning. nil means the client keeps its own private
+	// store, which is what the standalone `rafikid fundi` process (no daemon
+	// cache to share) does.
+	ConvStore *conv.Store
 
 	// Batcher is the daemon's parked-call batcher, handed to the engine's
 	// llm.Client via llm.WithBatcher. nil (the standalone `rafikid fundi`
@@ -469,6 +477,14 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	}
 	if c.ProviderGuard != nil {
 		opts = append(opts, llm.WithProviderGuard(c.ProviderGuard))
+	}
+
+	// The daemon's one conversation store, before the FakeTurns early-return
+	// below: a --fake-turns child must end up with the caller's cache just as it
+	// ends up with the caller's catalog and batcher. nil (standalone `rafikid
+	// fundi`) keeps the client's private default.
+	if c.ConvStore != nil {
+		opts = append(opts, llm.WithConvStore(c.ConvStore))
 	}
 
 	// Tracing, before the FakeTurns early-return below — the same placement rule

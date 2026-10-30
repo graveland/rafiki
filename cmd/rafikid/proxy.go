@@ -22,6 +22,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/ejection"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -211,6 +212,10 @@ type faceOptions struct {
 	// ConnectTrace traces unary RPCs on the Control mount (newConnectTracing).
 	// Nil = tracing off; the route is still served, just untraced.
 	ConnectTrace connect.Interceptor
+	// ConvStore is the daemon's one conversation store (newConvStore), shared
+	// with every in-daemon llm.Client and the capture store so a node one of
+	// them appends is cached for all. Nil = each builds its own (tests).
+	ConvStore *conv.Store
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -262,9 +267,17 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 			"env_file", paths.ServiceEnvFile())
 	}
 
+	// The daemon's one conversation store, in scope here because this function
+	// also mounts the Connect plane below. Nil (tests) leaves every store and
+	// client this face builds with a private cache of its own.
+	convs := opts.ConvStore
+
 	var captureStore *capture.CaptureStore
 	if pool != nil {
 		captureStore = capture.NewCaptureStore(pool)
+		if convs != nil {
+			captureStore = captureStore.WithConv(convs)
+		}
 	} else {
 		logger.Warn("no agent database; proxied turns will be routed but NOT captured", "env", paths.DB)
 	}
@@ -294,6 +307,9 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 	if pool != nil {
 		llmOpts = append(llmOpts, llm.WithStore(pool))
+	}
+	if convs != nil {
+		llmOpts = append(llmOpts, llm.WithConvStore(convs))
 	}
 	if openrouterKey != "" {
 		openrouterSender, err := llm.SenderForKey(providers.Provider{Name: "openrouter", Kind: providers.KindAnthropicOpenRouter}, openrouterKey, nil)

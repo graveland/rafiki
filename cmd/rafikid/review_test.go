@@ -60,14 +60,14 @@ func reviewTestController(t *testing.T, reads reviewReads) *Controller {
 	t.Setenv("RAFIKI_REVIEW_PROFILE", "")
 	t.Setenv("RAFIKI_REVIEW_MAX_BUDGET_USD", "")
 	c := &Controller{}
-	c.reviewQ = newReviewQueue(nil, providers.Default(), nil)
+	c.reviewQ = newReviewQueue(nil, providers.Default(), nil, nil)
 	c.reviewInsights = reads
 	return c
 }
 
 func TestReviewQueueTryAcceptEnqueuesOncePerConversation(t *testing.T) {
 	c := assert.NewCollecting(t)
-	q := newReviewQueue(nil, nil, nil)
+	q := newReviewQueue(nil, nil, nil, nil)
 	for i := 0; i < 8; i++ {
 		id := string(rune('a' + i))
 		st := q.tryAccept(reviewJob{conversationID: id, stage: "detect"})
@@ -90,7 +90,7 @@ func TestReviewQueueTryAcceptEnqueuesOncePerConversation(t *testing.T) {
 // be the only one in the channel — the guard rejects without enqueueing.
 func TestReviewQueueSecondRequestForSameConversationGetsAlreadyRunning(t *testing.T) {
 	c := assert.NewAborting(t)
-	q := newReviewQueue(nil, nil, nil)
+	q := newReviewQueue(nil, nil, nil, nil)
 	c.Eq("enqueued", q.tryAccept(reviewJob{conversationID: "conv-1", stage: "detect"}), "first tryAccept")
 	st := q.tryAccept(reviewJob{conversationID: "conv-1", stage: "detect"})
 	c.Eq("already_running", st, "second tryAccept")
@@ -103,7 +103,7 @@ func TestReviewQueueSecondRequestForSameConversationGetsAlreadyRunning(t *testin
 // "probably returned in time" check.
 func TestReviewQueueFullReturnsQueueFullWithoutBlocking(t *testing.T) {
 	c := assert.NewAborting(t)
-	q := newReviewQueue(nil, nil, nil)
+	q := newReviewQueue(nil, nil, nil, nil)
 	for i := 0; i < reviewQueueCapacity; i++ {
 		id := string(rune('a' + i))
 		st := q.tryAccept(reviewJob{conversationID: id, stage: "detect"})
@@ -125,7 +125,7 @@ func TestReviewQueueFullReturnsQueueFullWithoutBlocking(t *testing.T) {
 // slot to make room and prove the id is still admissible.
 func TestReviewQueueFullDoesNotLeaveTheIDMarkedInFlight(t *testing.T) {
 	c := assert.NewAborting(t)
-	q := newReviewQueue(nil, nil, nil)
+	q := newReviewQueue(nil, nil, nil, nil)
 	for i := 0; i < reviewQueueCapacity; i++ {
 		id := string(rune('a' + i))
 		q.tryAccept(reviewJob{conversationID: id, stage: "detect"})
@@ -147,7 +147,7 @@ func TestReviewQueueInFlightClearsOnJobCompletion(t *testing.T) {
 	// developer's real profile directory.
 	t.Setenv("RAFIKI_ANALYZER_DIR", filepath.Join(t.TempDir(), "absent"))
 	c := assert.NewAborting(t)
-	q := newReviewQueue(nil, nil, nil)
+	q := newReviewQueue(nil, nil, nil, nil)
 	job := reviewJob{conversationID: "conv-9", stage: "detect"}
 	c.Eq("enqueued", q.tryAccept(job), "tryAccept")
 	q.runJob(context.Background(), job)
@@ -169,7 +169,7 @@ func TestReviewQueueInFlightClearsOnJobCompletion(t *testing.T) {
 func TestReviewQueuePricerPricesResponsesModelByCatalogID(t *testing.T) {
 	c := assert.NewCollecting(t)
 	cat := seedResponsesCatalog()
-	q := newReviewQueue(nil, mustParseProviders(t, responsesProvidersTOML), cat)
+	q := newReviewQueue(nil, mustParseProviders(t, responsesProvidersTOML), cat, nil)
 	client, err := q.client()
 	c.Require().NoError(err, "the review queue built no client")
 	c.Require().True(client.Catalog() == cat, "the queue's client does not share the queue's catalog")
@@ -191,7 +191,7 @@ func TestReviewQueuePricerPricesResponsesModelByCatalogID(t *testing.T) {
 	c.Eq(3.0, price.CostOf(1_000_000, 0, 0, 0).Total, "qualified Responses id is priced")
 
 	// No catalog: unpriced, exactly as before this pricer was wired in.
-	c.Nil(newReviewQueue(nil, nil, nil).localOptions(nil).Pricer,
+	c.Nil(newReviewQueue(nil, nil, nil, nil).localOptions(nil).Pricer,
 		"a queue with no catalog must hand local.New a nil pricer")
 }
 

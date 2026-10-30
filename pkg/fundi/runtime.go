@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -152,6 +153,17 @@ type RuntimeOptions struct {
 	// (Controller.catalog); handing the same pointer to every child makes the
 	// fetch and the memory daemon-wide, not per-child.
 	Catalog *routing.ModelCatalog
+
+	// ConvStore is the daemon's ONE conversation store, passed to the child's
+	// llm.Client via llm.WithConvStore. nil = the client builds a private one
+	// (standalone `rafikid fundi`, which has no daemon cache to share).
+	//
+	// Without it every in-process child holds its own node cache over the same
+	// rows, so a turn the daemon's proxy face just captured is a cache miss for
+	// the child resuming that conversation. The daemon owns ONE instance
+	// (Controller.convs); handing the same pointer to every child makes the
+	// cache daemon-wide, not per-child.
+	ConvStore *conv.Store
 
 	// Batcher is the daemon's ONE parked-call batcher, passed to the child's
 	// llm.Client via llm.WithBatcher. nil = no batcher: a :batch first call
@@ -846,6 +858,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		RoutingSource:          opts.RoutingSource,
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,
+		ConvStore:              opts.ConvStore,
 		Batcher:                opts.Batcher,
 		ProviderGuard:          opts.ProviderGuard,
 		TracerProvider:         opts.TracerProvider,
