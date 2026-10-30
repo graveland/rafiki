@@ -6,12 +6,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
@@ -71,11 +75,50 @@ func countSummaryReqs(sender *scriptedSender) int {
 	return n
 }
 
-func textRow(ordinal int, role anthropic.MessageParamRole, text string) store.Message {
-	return store.Message{Ordinal: ordinal, Param: anthropic.MessageParam{
-		Role:    role,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(text)},
-	}}
+// textRow builds one fixture node. Its ordinal is a hint: an append assigns
+// the real one, and every fixture here is seeded in order.
+func textRow(ordinal int, role msg.Role, text string) *convpkg.Node {
+	return &convpkg.Node{
+		Ref: convpkg.Ref{Ordinal: ordinal},
+		Msg: msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: text}}},
+	}
+}
+
+// seedRows appends fixture rows as the conversation's initial history. It goes
+// to the node core directly because a fixture carries kinds and blocks that
+// SeedHistory (whose input is provider message params) cannot express.
+func seedRows(t *testing.T, conv *Conversation, rows ...*convpkg.Node) {
+	t.Helper()
+	nodes := make([]convpkg.NewNode, len(rows))
+	for i, r := range rows {
+		nodes[i] = convpkg.NewNode{
+			Msg: r.Msg, Content: r.Content, Kind: r.Kind, StopReason: r.StopReason,
+			InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
+		}
+	}
+	_, err := conv.handle().Append(context.Background(), convpkg.Append{Root: convtree.RootKindRoot, Nodes: nodes})
+	assert.NewAborting(t).NoError(err, "seed fixture rows")
+}
+
+// workingRows returns the conversation's working set.
+func workingRows(t *testing.T, conv *Conversation) []*convpkg.Node {
+	t.Helper()
+	rows, err := conv.History(context.Background())
+	assert.NewAborting(t).NoError(err, "read the working set")
+	return rows
+}
+
+// allRows returns every node of the conversation's tree, compaction tails and
+// pre-compaction rows included.
+func allRows(t *testing.T, conv *Conversation) []*convpkg.Node {
+	t.Helper()
+	sn, err := conv.client.convs.Open(conv.ID).Snapshot(context.Background())
+	assert.NewAborting(t).NoError(err, "read the tree")
+	var rows []*convpkg.Node
+	for n := range sn.History() {
+		rows = append(rows, n)
+	}
+	return rows
 }
 
 // stripCC returns a copy of msgs with every cache_control marker cleared, so
@@ -101,10 +144,10 @@ func (c countingTrim) Trim(msgs []Message, _ int) ([]Message, bool) {
 	return msgs, false
 }
 
-func hasKind(msgs []store.Message, kind string) int {
+func hasKind(rows []*convpkg.Node, kind string) int {
 	n := 0
-	for _, m := range msgs {
-		if m.Kind != nil && *m.Kind == kind {
+	for _, r := range rows {
+		if r.Kind == kind {
 			n++
 		}
 	}
@@ -123,11 +166,11 @@ func TestCompactionProactiveFiresWhenHeadroomLow(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 100_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	if _, err := conv.Send(ctx, UserText("first")); err != nil {
 		t.Fatalf("first send: %v", err)
@@ -153,11 +196,11 @@ func TestCompactionProactiveSilentWithPlentyOfHeadroom(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 100_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	if _, err := conv.Send(ctx, UserText("one")); err != nil {
 		t.Fatalf("send 1: %v", err)
@@ -179,11 +222,11 @@ func TestCompactionProactiveSilentWhenWindowUnknown(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{})) // nil ContextWindowFn
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	if _, err := conv.Continue(ctx); err != nil {
@@ -202,10 +245,10 @@ func TestCompactionProactiveSilentBelowMinRows(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"))
 	conv.usedTokens = 990_000
 
 	if _, err := conv.Continue(ctx); err != nil {
@@ -242,11 +285,11 @@ func TestCompactionProactiveCountsPendingRows(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	if _, err := conv.Send(ctx, UserText("first")); err != nil {
 		t.Fatalf("send 1: %v", err)
@@ -288,11 +331,11 @@ func TestCompactionSummaryMaxTokensClampedToConversationCap(t *testing.T) {
 		}
 		conv, err := c.Conversation(ctx, append(base, opts...)...)
 		ck.Require().NoError(err)
-		conv.mem = append(conv.mem,
-			textRow(0, anthropic.MessageParamRoleUser, "a"),
-			textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-			textRow(2, anthropic.MessageParamRoleUser, "c"),
-			textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+		seedRows(t, conv,
+			textRow(0, msg.User, "a"),
+			textRow(1, msg.Assistant, "b"),
+			textRow(2, msg.User, "c"),
+			textRow(3, msg.Assistant, "d"))
 		conv.usedTokens = 999_000
 		if _, err := conv.Continue(ctx); err != nil {
 			t.Fatalf("continue: %v", err)
@@ -320,11 +363,11 @@ func TestCompactionUsedTokensEstimatedWhenUnset(t *testing.T) {
 	// A large history with no reported usage: the byte estimate alone must
 	// exceed the window's headroom.
 	pad := strings.Repeat("q", 12_000)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, pad),
-		textRow(1, anthropic.MessageParamRoleAssistant, pad),
-		textRow(2, anthropic.MessageParamRoleUser, pad),
-		textRow(3, anthropic.MessageParamRoleAssistant, pad))
+	seedRows(t, conv,
+		textRow(0, msg.User, pad),
+		textRow(1, msg.Assistant, pad),
+		textRow(2, msg.User, pad),
+		textRow(3, msg.Assistant, pad))
 
 	if _, err := conv.Continue(ctx); err != nil {
 		t.Fatalf("continue: %v", err)
@@ -349,12 +392,12 @@ func TestCompactionSummaryRequestPrefixIsByteIdentical(t *testing.T) {
 		SystemText("you are a test"),
 		WithCompaction(CompactionPolicy{})) // nil window: overflow only
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"),
-		textRow(4, anthropic.MessageParamRoleUser, "e"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"),
+		textRow(4, msg.User, "e"))
 
 	tools := []anthropic.ToolUnionParam{
 		anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{Type: "object"}, "report_findings"),
@@ -389,11 +432,11 @@ func TestCompactionSummaryRequestHasNoToolChoice(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	tools := []anthropic.ToolUnionParam{
 		anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{Type: "object"}, "report_findings"),
@@ -421,22 +464,24 @@ func TestCompactionDiscardsToolUseBlocksInSummaryResponse(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	if _, err := conv.Continue(ctx); err != nil {
 		t.Fatalf("continue: %v", err)
 	}
-	ck.Require().NotZero(conv.memHorizon, "no summary row was written")
-	row := conv.mem[conv.memHorizon]
-	ck.Require().Len(row.Param.Content, 1, "summary row content blocks")
-	ck.Require().NotNil(row.Param.Content[0].OfText, "summary row is not a text block")
-	ck.StrContains(row.Param.Content[0].OfText.Text, "X", "summary text")
-	ck.Nil(row.Param.Content[0].OfToolUse, "a tool_use block was stored in the summary")
+	rows := workingRows(t, conv)
+	ck.Require().NotEmpty(rows, "no summary row was written")
+	row := rows[0]
+	ck.Eq(convpkg.KindCompactionSummary, row.Kind, "working set row 0 kind")
+	ck.Require().Len(row.Msg.Content, 1, "summary row content blocks")
+	text, ok := row.Msg.Content[0].(msg.Text)
+	ck.Require().True(ok, "summary row is not a text block")
+	ck.StrContains(text.Text, "X", "summary text")
 }
 
 func TestCompactionTruncatedSummaryWritesNothing(t *testing.T) {
@@ -450,18 +495,17 @@ func TestCompactionTruncatedSummaryWritesNothing(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the turn must still proceed")
 	ck.Eq("real", resp.Content[0].Text, "response")
-	ck.Eq(0, conv.memHorizon, "horizon moved on a truncated summary")
-	ck.Eq(0, hasKind(conv.mem, store.KindCompactionSummary), "a truncated summary was stored")
+	ck.Eq(0, hasKind(allRows(t, conv), convpkg.KindCompactionSummary), "a truncated summary was stored")
 }
 
 func TestCompactionEmptySummaryWritesNothing(t *testing.T) {
@@ -475,18 +519,17 @@ func TestCompactionEmptySummaryWritesNothing(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	if _, err := conv.Continue(ctx); err != nil {
 		t.Fatalf("continue: %v", err)
 	}
-	ck.Eq(0, conv.memHorizon, "horizon moved on an empty summary")
-	ck.Eq(0, hasKind(conv.mem, store.KindCompactionSummary), "an empty summary was stored")
+	ck.Eq(0, hasKind(allRows(t, conv), convpkg.KindCompactionSummary), "an empty summary was stored")
 }
 
 func TestCompactionSummaryCallErrorLetsTurnProceed(t *testing.T) {
@@ -500,17 +543,17 @@ func TestCompactionSummaryCallErrorLetsTurnProceed(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the turn must proceed on the unchanged history")
 	ck.Eq("real", resp.Content[0].Text, "response")
-	ck.Eq(0, hasKind(conv.mem, store.KindCompactionSummary), "a summary was written after a failed call")
+	ck.Eq(0, hasKind(allRows(t, conv), convpkg.KindCompactionSummary), "a summary was written after a failed call")
 }
 
 func TestCompactionContextCancelledPropagates(t *testing.T) {
@@ -525,11 +568,11 @@ func TestCompactionContextCancelledPropagates(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	_, err = conv.Continue(ctx)
@@ -547,12 +590,12 @@ func TestCompactionWorkingSetAfterCompaction(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }, TailCap: 50}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, strings.Repeat("x", 400)),
-		textRow(3, anthropic.MessageParamRoleAssistant, "c"),
-		textRow(4, anthropic.MessageParamRoleUser, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, strings.Repeat("x", 400)),
+		textRow(3, msg.Assistant, "c"),
+		textRow(4, msg.User, "d"))
 	conv.usedTokens = 999_000
 
 	if _, err := conv.Continue(ctx); err != nil {
@@ -567,17 +610,12 @@ func TestCompactionWorkingSetAfterCompaction(t *testing.T) {
 	ck.StrContains(real.Messages[0].Content[0].OfText.Text, "handover", "working set does not start at the summary")
 	ck.Eq("d", real.Messages[2].Content[0].OfText.Text, "the tail's last row is missing from the request")
 
-	ck.Eq(5, conv.memHorizon, "memHorizon")
-	ck.Require().Len(conv.mem, 9, "mem rows")
-	ck.Require().NotNil(conv.mem[8].Param.Content[0].OfText, "assistant reply is not text")
-	ck.Eq("reply", conv.mem[8].Param.Content[0].OfText.Text, "assistant reply ordinal")
-	ck.Eq(anthropic.MessageParamRoleAssistant, conv.mem[8].Param.Role, "assistant reply role")
+	ck.Len(allRows(t, conv), 9, "the summary, its two tail copies, the five pre-compaction rows and the reply")
 
 	hist, err := conv.History(ctx)
 	ck.Require().NoError(err)
 	ck.Require().Len(hist, 4, "History() must return the working set")
-	ck.Require().NotNil(hist[0].Kind, "working set does not start at the summary")
-	ck.Eq(store.KindCompactionSummary, *hist[0].Kind, "working set row 0 kind")
+	ck.Eq(convpkg.KindCompactionSummary, hist[0].Kind, "working set row 0 kind")
 	ck.Eq(5, hist[0].Ordinal, "summary ordinal")
 	ck.Eq(8, hist[3].Ordinal, "assistant ordinal")
 }
@@ -595,11 +633,11 @@ func TestCompactionSecondCompactionComposes(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	conv.usedTokens = 999_000
 	if _, err := conv.Continue(ctx); err != nil {
@@ -614,10 +652,11 @@ func TestCompactionSecondCompactionComposes(t *testing.T) {
 	ck.Require().True(isSummaryReq(sender.lastReq[2]), "request 2 is not the second summary call")
 	ck.StrContains(mustJSON(sender.lastReq[2].Messages), "first", "the second summary request must contain the first summary")
 
-	row := conv.mem[conv.memHorizon]
-	ck.Require().NotNil(row.Kind, "working set does not start at the second summary")
-	ck.Eq(store.KindCompactionSummary, *row.Kind, "working set row kind")
-	ck.StrContains(row.Param.Content[0].OfText.Text, "second", "working set does not hold the second summary")
+	row := workingRows(t, conv)[0]
+	ck.Eq(convpkg.KindCompactionSummary, row.Kind, "working set row kind")
+	text, ok := row.Msg.Content[0].(msg.Text)
+	ck.Require().True(ok, "the second summary is not text")
+	ck.StrContains(text.Text, "second", "working set does not hold the second summary")
 }
 
 func TestCompactionNoTailIsSummaryOnly(t *testing.T) {
@@ -631,11 +670,11 @@ func TestCompactionNoTailIsSummaryOnly(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }, NoTail: true}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	conv.usedTokens = 999_000
 
 	var workingAtEnd int
@@ -665,11 +704,11 @@ func TestCompactionOverflowNetCompactsOnceBeforeTrim(t *testing.T) {
 		WithTrimPolicy(countingTrim{calls: &trimCalls}),
 		WithCompaction(CompactionPolicy{})) // nil window: overflow only
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the retried call must succeed")
@@ -693,11 +732,11 @@ func TestCompactionOverflowCompactsAtMostOnce(t *testing.T) {
 		WithTrimPolicy(countingTrim{calls: &trimCalls}),
 		WithCompaction(CompactionPolicy{}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	_, err = conv.Continue(ctx)
 	ck.Error(err, "the still-too-large retry must surface an error")
@@ -715,9 +754,9 @@ func TestCompactionOverflowSkippedWhenTooFewRows(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"))
 
 	_, err = conv.Continue(ctx)
 	ck.Require().Error(err, "the original error must reach the caller")
@@ -738,15 +777,15 @@ func TestCompactionOverflowSummaryTooLargeFallsToTrim(t *testing.T) {
 		WithTrimPolicy(countingTrim{calls: &trimCalls}),
 		WithCompaction(CompactionPolicy{}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	_, err = conv.Continue(ctx)
 	ck.Error(err, "the too-large error must surface")
-	ck.Eq(0, hasKind(conv.mem, store.KindCompactionSummary), "nothing must be written when the summary itself overflows")
+	ck.Eq(0, hasKind(allRows(t, conv), convpkg.KindCompactionSummary), "nothing must be written when the summary itself overflows")
 	ck.Eq(1, trimCalls, "trim must run after the failed summary")
 }
 
@@ -763,11 +802,11 @@ func TestCompactionStartEndEventsBalanced(t *testing.T) {
 		conv, err := c.Conversation(ctx, NewConversation("", "test"),
 			WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 		ck.Require().NoError(err)
-		conv.mem = append(conv.mem,
-			textRow(0, anthropic.MessageParamRoleUser, "a"),
-			textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-			textRow(2, anthropic.MessageParamRoleUser, "c"),
-			textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+		seedRows(t, conv,
+			textRow(0, msg.User, "a"),
+			textRow(1, msg.Assistant, "b"),
+			textRow(2, msg.User, "c"),
+			textRow(3, msg.Assistant, "d"))
 		conv.usedTokens = 999_000
 		var events []CompactionEvent
 		conv.OnCompaction(func(ev CompactionEvent) { events = append(events, ev) })
@@ -815,11 +854,11 @@ func TestCompactionFailedSummaryNotRetriedEveryIteration(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 100_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	// The proactive trigger sits on the window's edge: 100k window, 40k buffer,
 	// 90k reported usage leaves 10k headroom. The buffer's half is 20k, so the
@@ -926,11 +965,11 @@ func TestCompactManualSummarisesBelowThreshold(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 	var trigger string
 	conv.OnCompaction(func(ev CompactionEvent) { trigger = ev.Trigger })
 
@@ -942,7 +981,7 @@ func TestCompactManualSummarisesBelowThreshold(t *testing.T) {
 	last := sender.lastReq[0].Messages
 	got := last[len(last)-1].Content[len(last[len(last)-1].Content)-1].OfText.Text
 	ck.StrContains(got, "keep the schema", "instructions must ride the summary prompt")
-	ck.Eq(4, conv.memHorizon, "memHorizon moved onto the summary")
+	ck.Eq(4, len(workingRows(t, conv)), "the working set is the summary plus the three-row tail")
 }
 
 func TestCompactManualNeedsPolicyAndRows(t *testing.T) {
@@ -958,7 +997,7 @@ func TestCompactManualNeedsPolicyAndRows(t *testing.T) {
 	short, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	short.mem = append(short.mem, textRow(0, anthropic.MessageParamRoleUser, "a"))
+	seedRows(t, short, textRow(0, msg.User, "a"))
 	ok, err := short.Compact(ctx, "")
 	ck.NoError(err, "too few rows is not an error")
 	ck.False(ok, "too few rows must write nothing")
@@ -974,18 +1013,18 @@ func TestClearRestartsWorkingSet(t *testing.T) {
 	ctx := context.Background()
 	conv, err := c.Conversation(ctx, NewConversation("", "test"))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"))
 	conv.usedTokens = 999
 
 	ck.Require().NoError(conv.Clear(ctx))
 	ck.Eq(0, conv.usedTokens, "usedTokens must reset")
-	ck.Len(conv.mem, 3, "no row is deleted")
+	ck.Len(allRows(t, conv), 3, "no row is deleted")
 	hist, err := conv.History(ctx)
 	ck.Require().NoError(err)
 	ck.Require().Len(hist, 1, "working set is the boundary alone")
-	ck.True(store.IsClearBoundary(hist[0]), "working set row 0 is the clear boundary")
+	ck.True(convpkg.IsClearBoundary(hist[0]), "working set row 0 is the clear boundary")
 	ck.Eq(2, hist[0].Ordinal, "boundary ordinal")
 
 	_, err = conv.Send(ctx, UserText("fresh"))
@@ -998,16 +1037,16 @@ func TestClearRestartsWorkingSet(t *testing.T) {
 	empty, err := c.Conversation(ctx, NewConversation("", "test"))
 	ck.Require().NoError(err)
 	ck.NoError(empty.Clear(ctx), "Clear on an empty conversation is a no-op")
-	ck.Empty(empty.mem, "nothing written")
+	ck.Empty(allRows(t, empty), "nothing written")
 }
 
-// TestStorelessCompactionKeepsTailRowsRetractable: the in-memory compaction
-// copies the verbatim tail under the summary, and those copies must stay
-// addressable. A mid-send compaction sits between the write-ahead user row and
-// the retraction of it, so the copied user row has to answer to the id
-// AppendUser returned; a copy with no identity makes RetractTailUser refuse and
-// leaves the oversized prompt in the working set.
-func TestStorelessCompactionKeepsTailRowsRetractable(t *testing.T) {
+// TestCompactionTailCopyIsRetractable: a compaction copies the verbatim tail
+// under the summary as nodes of their own, and the copy of the write-ahead user
+// row is what the working set now ends on. Retracting it by its own id must
+// work: a mid-send compaction sits between that append and the retraction of it,
+// so a copy that could not be retracted would leave an oversized prompt in the
+// working set.
+func TestCompactionTailCopyIsRetractable(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
@@ -1017,11 +1056,11 @@ func TestStorelessCompactionKeepsTailRowsRetractable(t *testing.T) {
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
 	ck.Require().NoError(err)
-	conv.mem = append(conv.mem,
-		textRow(0, anthropic.MessageParamRoleUser, "a"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "b"),
-		textRow(2, anthropic.MessageParamRoleUser, "c"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "d"))
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
 
 	row, err := conv.AppendUser(ctx, UserText("the oversized prompt"))
 	ck.Require().NoError(err)
@@ -1036,12 +1075,60 @@ func TestStorelessCompactionKeepsTailRowsRetractable(t *testing.T) {
 	hist, err := conv.History(ctx)
 	ck.Require().NoError(err)
 	ck.Require().Len(hist, 5, "the summary plus the four-row tail")
-	ck.Eq(row.ID, hist[len(hist)-1].ID, "the copied tail user row keeps the append's identity")
+	last := hist[len(hist)-1]
+	ck.Eq(msg.User, last.Msg.Role, "the working set ends on the copied user row")
+	ck.NotEq(row.ID, last.ID, "the copy is a node of its own")
 
-	ck.Require().NoError(conv.RetractTailUser(ctx, row.ID),
-		"the copied tail user row must be retractable by the id AppendUser returned")
+	ck.Require().NoError(conv.RetractTailUser(ctx, last.ID),
+		"the copied tail user row must be retractable by its own id")
 	after, err := conv.History(ctx)
 	ck.Require().NoError(err)
 	ck.Require().Len(after, 4, "the retract drops the copied user row")
-	ck.Eq(anthropic.MessageParamRoleAssistant, after[len(after)-1].Param.Role, "the retract leaves the reply above it")
+	ck.Eq(msg.Assistant, after[len(after)-1].Msg.Role, "the retract leaves the reply above it")
+}
+
+// TestCompactionTailCopiesStoredBytes pins that a tail copy carries the stored
+// content verbatim. Re-encoding the message would be a second, lossy rendering
+// of bytes the conversation already holds — the exact drift the content-
+// addressed tree exists to prevent.
+func TestCompactionTailCopiesStoredBytes(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
+		respondUsage(10, 5, 0, 0, "reply"),
+	}}
+	cl := memClient(t, sender)
+	conv, err := cl.Conversation(ctx, NewConversation("", "test"),
+		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
+	c.Require().NoError(err)
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
+	before := workingRows(t, conv)
+	conv.usedTokens = 999_000
+
+	if _, err := conv.Continue(ctx); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+
+	tails := 0
+	for _, n := range allRows(t, conv) {
+		if n.Kind != convpkg.KindCompactionTail {
+			continue
+		}
+		tails++
+		var source *convpkg.Node
+		for _, b := range before {
+			if reflect.DeepEqual(b.Msg, n.Msg) {
+				source = b
+				break
+			}
+		}
+		c.Require().NotNil(source, "a tail copy has no source row")
+		c.EqDeep(source.Content, n.Content, "a tail copy must carry the stored bytes verbatim")
+	}
+	c.Greater(0, tails, "no tail copies were written")
 }

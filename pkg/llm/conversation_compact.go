@@ -12,6 +12,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -25,7 +28,7 @@ import (
 // appended under a fresh root and only the head moves. A failed attempt leaves
 // no partial state; an End event is still emitted so observers stay balanced
 // with the Start event (with zero tokens on failure).
-func (conv *Conversation) compact(ctx context.Context, span trace.Span, history []store.Message, scfg sendConfig, trigger, instructions string) (bool, error) {
+func (conv *Conversation) compact(ctx context.Context, span trace.Span, history []*convpkg.Node, scfg sendConfig, trigger, instructions string) (bool, error) {
 	p := *conv.cfg.compaction
 	if conv.onCompact != nil {
 		conv.onCompact(CompactionEvent{Phase: CompactionStart, Trigger: trigger})
@@ -45,7 +48,15 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	if instructions != "" {
 		prompt += "\n\nAdditional instructions for the summary:\n" + instructions
 	}
-	reqMsgs := mergeForRequest(history)
+	reqMsgs, err := mergeForRequest(history)
+	if err != nil {
+		return false, err
+	}
+	if len(reqMsgs) == 0 {
+		// Every row was harness-injected history, which no request can carry.
+		// There is nothing to summarise.
+		return false, nil
+	}
 	last := &reqMsgs[len(reqMsgs)-1]
 	if last.Role == anthropic.MessageParamRoleUser {
 		last.Content = append(slices.Clone(last.Content), anthropic.NewTextBlock(prompt))
@@ -101,39 +112,31 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	replaced := int(resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens)
 	start := cutTail(history, p.tailBudget())
 	tail := history[start:]
-	summaryRow := store.Message{
-		Param:       summaryMessage(summary),
-		Kind:        ptr(store.KindCompactionSummary),
-		InputTokens: &replaced,
+	// The summary and the boundary rows are built natively: they are content
+	// this package writes, not a provider message it received.
+	replacedTokens := int64(replaced)
+	nodes := make([]convpkg.NewNode, 0, len(tail)+1)
+	nodes = append(nodes, convpkg.NewNode{
+		Msg:         summaryMessage(summary),
+		InputTokens: &replacedTokens,
+	})
+	for _, t := range tail {
+		// The stored bytes are carried verbatim: a tail copy is the same row,
+		// re-hung under the summary, and re-encoding it could drift from what
+		// the conversation already holds.
+		nodes = append(nodes, convpkg.NewNode{
+			Msg:        t.Msg,
+			Content:    t.Content,
+			StopReason: t.StopReason,
+			Kind:       convpkg.KindCompactionTail,
+		})
 	}
-
-	if conv.client.messages == nil {
-		n := nextOrdinal(conv.mem)
-		summaryRow.ID = randomID()
-		summaryRow.Ordinal = n
-		conv.memHorizon = len(conv.mem)
-		conv.mem = append(conv.mem, summaryRow)
-		for i, t := range tail {
-			// Every copied row carries an identity of its own: RetractTailUser
-			// finds the tail user row by id, and a mid-send compaction sits
-			// between the write-ahead append and the retraction of it. The copy
-			// keeps the source row's id — in memory the row IS the same message,
-			// there is no new node to name — and a seeded row that arrived
-			// without one gets a fresh id.
-			id := t.ID
-			if id == "" {
-				id = randomID()
-			}
-			conv.mem = append(conv.mem, store.Message{
-				ID:         id,
-				Ordinal:    n + 1 + i,
-				Param:      t.Param,
-				ToolUseIDs: t.ToolUseIDs,
-				StopReason: t.StopReason,
-				Kind:       ptr(store.KindCompactionTail),
-			})
-		}
-	} else if _, err := conv.client.messages.AppendCompaction(ctx, conv.ID, summaryRow.Param, replaced, tail); err != nil {
+	res, err := conv.handle().Append(ctx, convpkg.Append{
+		Root:            convtree.RootKindCompaction,
+		DerivedFromHead: true,
+		Nodes:           nodes,
+	})
+	if err != nil {
 		return false, err
 	}
 
@@ -148,13 +151,10 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	// earlier failure must not block the next legitimate compaction.
 	conv.compactSuppressBelow = 0
 	pre = replaced
-	post = estimateTokens(summaryRow) + estimateHistoryTokens(tail)
+	post = estimateTokens(res.Nodes[0]) + estimateHistoryTokens(tail)
 	succeeded = true
 	return true, nil
 }
-
-// ptr returns a pointer to a copy of v, for the optional store.Message fields.
-func ptr[T any](v T) *T { return &v }
 
 // ErrCompactionDisabled is returned by Compact on a Conversation built without
 // WithCompaction.
@@ -205,16 +205,12 @@ func (conv *Conversation) Clear(ctx context.Context) error {
 	if len(history) == 0 {
 		return nil
 	}
-	boundary := anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText))
-	if conv.client.messages == nil {
-		conv.memHorizon = len(conv.mem)
-		conv.mem = append(conv.mem, store.Message{
-			ID:      randomID(),
-			Ordinal: nextOrdinal(conv.mem),
-			Param:   boundary,
-			Kind:    ptr(store.KindClear),
-		})
-	} else if _, err := conv.client.messages.AppendClear(ctx, conv.ID, boundary); err != nil {
+	boundary := convpkg.NewNode{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: store.ClearBoundaryText}}}}
+	if _, err := conv.handle().Append(ctx, convpkg.Append{
+		Root:            convtree.RootKindClear,
+		DerivedFromHead: true,
+		Nodes:           []convpkg.NewNode{boundary},
+	}); err != nil {
 		return fmt.Errorf("llm: clear: %w", err)
 	}
 	conv.usedTokens = 0

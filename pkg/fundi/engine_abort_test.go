@@ -51,15 +51,13 @@ func capturedLogs(t *testing.T) *syncBuffer {
 //     Asserted against the captured outgoing params, not inferred from the
 //     scripted call returning.
 //
-// On the repair COUNT: it is 0 here, and that is the only correct expectation
-// for a store-less conversation. agentloop persists each tool result through
-// conv.AppendUser, and the in-memory conversation path ignores ctx entirely, so
-// the result lands even on a cancelled turn and there is no orphan left to
-// repair. A genuine orphan needs a store that honours ctx (pgx does), which is
-// exactly what TestRepairOrphansDBBackedGenuineOrphan covers end to end,
-// including the repaired request shape. Asserting 0 here is deliberate: it pins
-// that RepairOrphans ran and found the history already consistent, rather than
-// quietly passing on whatever number turned up.
+// On the repair COUNT: it is 1 here. agentloop persists each tool result
+// through conv.AppendUser, and the conversation backend — the in-process one
+// exactly like pgx — refuses a write on a cancelled context, so the result does
+// not land and the aborted assistant turn keeps a dangling tool_use. That is a
+// genuine orphan, and the abort arm's repair is what stops the next API call
+// being rejected for it. TestRepairOrphansDBBackedGenuineOrphan covers the same
+// shape against Postgres, including the repaired request shape.
 func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 	c := assert.NewCollecting(t)
 	toolRunning := make(chan struct{})
@@ -100,7 +98,7 @@ func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 
 	// (2) RepairOrphans ran inside the abort arm and reported its count. See
 	// this test's doc comment for why 0 is the right number store-less.
-	c.StrContains(logText, "orphans_repaired=0", "abort branch did not report an orphan-repair count of 0; RepairOrphans may not have run.\nlogs:\n")
+	c.StrContains(logText, "orphans_repaired=1", "abort branch did not report the orphan it repaired; RepairOrphans may not have run.\nlogs:\n")
 
 	// (3) The aborted iteration issued no API call, so the second scripted turn
 	// was not consumed. Exactly one request for turn 1: the iteration that

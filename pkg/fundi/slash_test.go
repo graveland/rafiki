@@ -10,7 +10,9 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
@@ -69,7 +71,7 @@ func TestSlashCompactAndClearPromptsRunWithoutATurn(t *testing.T) {
 	hist, err := eng.conv.History(context.Background())
 	c.Require().NoError(err)
 	c.Require().Len(hist, 1, "working set after /clear")
-	c.True(store.IsClearBoundary(hist[0]), "working set is the clear boundary")
+	c.True(conv.IsClearBoundary(hist[0]), "working set is the clear boundary")
 }
 
 // The daemon never classifies steer text, so the engine must not either: a steer
@@ -172,21 +174,25 @@ func TestSlashCompactIsAbortable(t *testing.T) {
 }
 
 func TestEndsAtBoundary(t *testing.T) {
-	kind := func(k string) *string { return &k }
-	user := func(s string) anthropic.MessageParam { return anthropic.NewUserMessage(anthropic.NewTextBlock(s)) }
+	user := func(s string) msg.Message {
+		return msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: s}}}
+	}
+	assistant := func(s string) msg.Message {
+		return msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: s}}}
+	}
 	cases := []struct {
 		name string
-		h    []store.Message
+		h    []*conv.Node
 		want bool
 	}{
 		{"empty", nil, false},
-		{"ordinary tail", []store.Message{{Param: user("hi")}}, false},
-		{"clear boundary", []store.Message{{Kind: kind(store.KindClear), Param: user(store.ClearBoundaryText)}}, true},
-		{"claude clear row is a real message", []store.Message{{Kind: kind(store.KindClear), Param: user("real head")}}, false},
-		{"compaction summary alone", []store.Message{{Kind: kind(store.KindCompactionSummary), Param: user("s")}}, true},
-		{"summary then tail", []store.Message{
-			{Kind: kind(store.KindCompactionSummary), Param: user("s")},
-			{Kind: kind(store.KindCompactionTail), Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("t"))},
+		{"ordinary tail", []*conv.Node{{Msg: user("hi")}}, false},
+		{"clear boundary", []*conv.Node{{Ref: conv.Ref{Kind: conv.KindClear}, Msg: user(store.ClearBoundaryText)}}, true},
+		{"claude clear row is a real message", []*conv.Node{{Ref: conv.Ref{Kind: conv.KindClear}, Msg: user("real head")}}, false},
+		{"compaction summary alone", []*conv.Node{{Ref: conv.Ref{Kind: conv.KindCompactionSummary}, Msg: user("s")}}, true},
+		{"summary then tail", []*conv.Node{
+			{Ref: conv.Ref{Kind: conv.KindCompactionSummary}, Msg: user("s")},
+			{Ref: conv.Ref{Kind: conv.KindCompactionTail}, Msg: assistant("t")},
 		}, false},
 	}
 	for _, tc := range cases {

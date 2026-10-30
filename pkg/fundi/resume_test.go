@@ -8,10 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
@@ -74,7 +73,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	c.NoError(err, "History (pre-repair)")
 	c.Len(before, 2, "pre-repair history has %d rows, want 2 (user + assistant tool_use); rows", len(before))
 	assistant := before[1]
-	c.Eq(anthropic.MessageParamRoleAssistant, assistant.Param.Role, "row 1 role")
+	c.Eq(msg.Assistant, assistant.Msg.Role, "row 1 role")
 	c.False(len(assistant.ToolUseIDs) != 1 || assistant.ToolUseIDs[0] != "tu_1", "assistant.ToolUseIDs = %v, want [tu_1] (the orphan never formed)", assistant.ToolUseIDs)
 	t.Log("confirmed: process 1 left a genuine dangling tool_use (tu_1), unrepaired")
 
@@ -102,13 +101,13 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	c.NoError(err, "History (post-repair)")
 	c.Len(after, 3, "post-repair history has %d rows, want 3 (user, assistant, synthetic result); rows", len(after))
 	repairRow := after[2]
-	c.Eq(anthropic.MessageParamRoleUser, repairRow.Param.Role, "repair row role")
-	c.Len(repairRow.Param.Content, 1, "repair row has %d blocks, want 1", len(repairRow.Param.Content))
-	tr := repairRow.Param.Content[0].OfToolResult
-	if tr == nil || tr.ToolUseID != "tu_1" {
-		t.Fatalf("repair row block = %+v, want a tool_result for tu_1", repairRow.Param.Content[0])
+	c.Eq(msg.User, repairRow.Msg.Role, "repair row role")
+	c.Len(repairRow.Msg.Content, 1, "repair row has %d blocks, want 1", len(repairRow.Msg.Content))
+	tr, ok := nodeToolResult(repairRow)
+	if !ok || tr.ToolUseID != "tu_1" {
+		t.Fatalf("repair row block = %+v, want a tool_result for tu_1", repairRow.Msg.Content[0])
 	}
-	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
+	c.True(tr.IsError, "synthesized tool_result is not marked IsError")
 
 	// Per correction (B): a scripted Continue succeeding proves nothing - the
 	// fake sender ignores request contents and llm.Continue does no

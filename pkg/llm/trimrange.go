@@ -3,12 +3,15 @@
 package llm
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"go.graveland.dev/rafiki/pkg/store"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 )
 
 // mergeForRequestRows is mergeForRequest plus rowStart[i], the index in
@@ -24,23 +27,35 @@ import (
 // causes a 400 rejection ("tool_calls[0].function.name must be a non-empty
 // string"). The matching tool_result blocks (is_error feedback from the agent
 // loop) are kept so the model sees the error and can self-correct.
-func mergeForRequestRows(history []store.Message) (msgs []Message, rowStart []int) {
+//
+// A System node is dropped: it is harness-injected history (a Claude Code
+// notice, an environment update) that no provider request can carry as a turn,
+// and dropping it keeps the turn alive instead of failing on a row the model
+// never wrote.
+func mergeForRequestRows(history []*convpkg.Node) (msgs []Message, rowStart []int, err error) {
 	out := make([]Message, 0, len(history))
 	start := make([]int, 0, len(history))
-	for i, m := range history {
-		m.Param.Content = replaceEmptyToolUses(m.Param)
-		if m.Param.Role == anthropic.MessageParamRoleUser && len(out) > 0 &&
+	for i, n := range history {
+		if n.Msg.Role == msg.System {
+			continue
+		}
+		param, err := msganthropic.ToParam(n.Msg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("llm: message %d: %w", i, err)
+		}
+		param.Content = replaceEmptyToolUses(param)
+		if param.Role == anthropic.MessageParamRoleUser && len(out) > 0 &&
 			out[len(out)-1].Role == anthropic.MessageParamRoleUser {
 			last := &out[len(out)-1]
 			// Clone before appending: appending into a stored param's backing
 			// array would mutate history the caller may still hold.
-			last.Content = append(slices.Clone(last.Content), m.Param.Content...)
+			last.Content = append(slices.Clone(last.Content), param.Content...)
 			continue
 		}
 		start = append(start, i)
-		out = append(out, m.Param)
+		out = append(out, param)
 	}
-	return out, start
+	return out, start, nil
 }
 
 // trimDropped reports where a trim cut. It recognises only the anchor-plus-
@@ -68,10 +83,10 @@ func trimDropped(orig, trimmed []Message, rowStart []int) (to int, keptRowStart 
 }
 
 // requestHeadID names the stored row a request's history ends at — the turn's
-// head. An in-memory conversation's row ids are synthetic (random hex, never
-// conversation_message nodes), so they must not reach the uuid column.
-func (conv *Conversation) requestHeadID(history []store.Message) string {
-	if conv.client.messages == nil || len(history) == 0 {
+// head. A store-less conversation's node ids are local-only (its backend is
+// in-process), so they must not reach the uuid column.
+func (conv *Conversation) requestHeadID(history []*convpkg.Node) string {
+	if conv.client.capture == nil || len(history) == 0 {
 		return ""
 	}
 	return history[len(history)-1].ID

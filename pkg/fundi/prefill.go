@@ -15,12 +15,13 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // PrefillPreamble is the first row (r0) of a TOOL-shape persisted pre-fill:
@@ -92,7 +93,7 @@ const (
 // only separates the empty-history cases: a pre-fill-SHAPED history (either
 // shape) is recognised even when the engine was rebuilt without the field, so
 // the shaped tail is never misread as resumable work.
-func classifyPrefill(history []store.Message, configured bool) prefillState {
+func classifyPrefill(history []*conv.Node, configured bool) prefillState {
 	if len(history) == 0 {
 		if configured {
 			return prefillEmpty
@@ -128,26 +129,28 @@ func classifyPrefill(history []store.Message, configured bool) prefillState {
 }
 
 // prefillRowIsR0: user with exactly one text block equal to PrefillPreamble.
-func prefillRowIsR0(m store.Message) bool {
-	if m.Param.Role != anthropic.MessageParamRoleUser {
+func prefillRowIsR0(n *conv.Node) bool {
+	if n.Msg.Role != msg.User {
 		return false
 	}
-	if len(m.Param.Content) != 1 || m.Param.Content[0].OfText == nil {
+	if len(n.Msg.Content) != 1 {
 		return false
 	}
-	return m.Param.Content[0].OfText.Text == PrefillPreamble
+	text, ok := n.Msg.Content[0].(msg.Text)
+	return ok && text.Text == PrefillPreamble
 }
 
 // prefillRowIsR1: assistant whose blocks are all tool_use with prefill_ ids.
-func prefillRowIsR1(m store.Message) bool {
-	if m.Param.Role != anthropic.MessageParamRoleAssistant {
+func prefillRowIsR1(n *conv.Node) bool {
+	if n.Msg.Role != msg.Assistant {
 		return false
 	}
-	if len(m.Param.Content) == 0 {
+	if len(n.Msg.Content) == 0 {
 		return false
 	}
-	for _, b := range m.Param.Content {
-		if b.OfToolUse == nil || !strings.HasPrefix(b.OfToolUse.ID, prefillIDPrefix) {
+	for _, b := range n.Msg.Content {
+		tu, ok := b.(msg.ToolUse)
+		if !ok || !strings.HasPrefix(tu.ID, prefillIDPrefix) {
 			return false
 		}
 	}
@@ -155,15 +158,16 @@ func prefillRowIsR1(m store.Message) bool {
 }
 
 // prefillRowIsR2: user whose blocks are all tool_result with prefill_ ids.
-func prefillRowIsR2(m store.Message) bool {
-	if m.Param.Role != anthropic.MessageParamRoleUser {
+func prefillRowIsR2(n *conv.Node) bool {
+	if n.Msg.Role != msg.User {
 		return false
 	}
-	if len(m.Param.Content) == 0 {
+	if len(n.Msg.Content) == 0 {
 		return false
 	}
-	for _, b := range m.Param.Content {
-		if b.OfToolResult == nil || !strings.HasPrefix(b.OfToolResult.ToolUseID, prefillIDPrefix) {
+	for _, b := range n.Msg.Content {
+		tr, ok := b.(msg.ToolResult)
+		if !ok || !strings.HasPrefix(tr.ToolUseID, prefillIDPrefix) {
 			return false
 		}
 	}
@@ -174,21 +178,22 @@ func prefillRowIsR2(m store.Message) bool {
 // PrefillTextPreamble — the complete TEXT-shape pre-fill a tool-less child
 // persists. Exactly one row, written in one atomic write: the text shape has
 // no partial prefixes to recognise.
-func prefillRowIsTextPrefill(m store.Message) bool {
-	if m.Param.Role != anthropic.MessageParamRoleUser {
+func prefillRowIsTextPrefill(n *conv.Node) bool {
+	if n.Msg.Role != msg.User {
 		return false
 	}
-	if len(m.Param.Content) == 0 || m.Param.Content[0].OfText == nil {
+	if len(n.Msg.Content) == 0 {
 		return false
 	}
-	return strings.HasPrefix(m.Param.Content[0].OfText.Text, PrefillTextPreamble)
+	text, ok := n.Msg.Content[0].(msg.Text)
+	return ok && strings.HasPrefix(text.Text, PrefillTextPreamble)
 }
 
 // prefillReadInput marshals a read call's input. Field order is the byte
 // stability contract: two runs over the same entries must produce identical
-// r1 content, which is what makes `SeedChain` match the rows a previous run
+// r1 content, which is what makes `SeedHistory` match the rows a previous run
 // already wrote by hash (and what `TestPrefillInputsAreByteStable` pins).
-// `SeedChain` compares by hash only; a divergent seed would become a sibling
+// `SeedHistory` compares by hash only; a divergent seed would become a sibling
 // root rather than an error, which is unreachable because `classifyPrefill`
 // gates the persisted content before anything is seeded.
 type prefillReadInput struct {
@@ -236,7 +241,7 @@ type prefillCall struct {
 // It emits NO frontend frames: an AgentStart/AgentEnd pair outside a turn
 // would drive the settle path, and a child quietly reading its files before
 // the first turn is exactly the intent.
-func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st prefillState) error {
+func (e *Engine) runPrefill(ctx context.Context, history []*conv.Node, st prefillState) error {
 	if err := e.prefillToolsAvailable(); err != nil {
 		return err
 	}
@@ -246,17 +251,13 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 	// inputs come from history, so r2 matches what those ids promise.
 	var calls []prefillCall
 	if st == prefillHasR1 {
-		for _, b := range history[1].Param.Content {
-			tu := b.OfToolUse
-			if tu == nil {
+		for _, b := range history[1].Msg.Content {
+			tu, ok := b.(msg.ToolUse)
+			if !ok {
 				continue // classifyPrefill guarantees all tool_use
 			}
-			input, err := json.Marshal(tu.Input)
-			if err != nil {
-				return fmt.Errorf("prefill: re-marshal tool_use %s input: %w", tu.ID, err)
-			}
-			result, execErr := e.prefillReader().Execute(ctx, "read", input)
-			call := prefillCall{id: tu.ID, input: input, path: prefillInputPath(input), result: result.Text}
+			result, execErr := e.prefillReader().Execute(ctx, "read", tu.Input)
+			call := prefillCall{id: tu.ID, input: tu.Input, path: prefillInputPath(tu.Input), result: result.Text}
 			if execErr != nil {
 				call.isError = true
 				call.result = execErr.Error()
@@ -329,29 +330,28 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 	}
 
 	// Persist r0/r1/r2. In the resumed-partial cases the existing rows are
-	// passed through VERBATIM so SeedHistory's idempotence check sees
-	// identical content; only the missing rows are new.
+	// rebuilt from history block for block: SeedHistory matches by node hash,
+	// and a rebuilt row with the same blocks hashes to the row already there,
+	// so only the missing rows are new.
 	r0 := anthropic.MessageParam{
 		Role:    anthropic.MessageParamRoleUser,
 		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(PrefillPreamble)},
 	}
 	r1 := anthropic.MessageParam{Role: anthropic.MessageParamRoleAssistant}
-	switch st {
-	case prefillHasR0:
-		r0 = history[0].Param
-	case prefillHasR1:
-		r0 = history[0].Param
-		r1 = history[1].Param
-	}
-	r2 := anthropic.MessageParam{Role: anthropic.MessageParamRoleUser}
-	// In the HasR1 replay r1 already carries its tool_use blocks — the calls
-	// were built FROM them, so appending again would duplicate every block
-	// and diverge the persisted row.
-	if st != prefillHasR1 {
+	if st == prefillHasR1 {
+		// r1 already carries its tool_use blocks — the calls were built FROM
+		// them, so rebuilding from calls would duplicate every block.
+		for _, b := range history[1].Msg.Content {
+			if tu, ok := b.(msg.ToolUse); ok {
+				r1.Content = append(r1.Content, anthropic.NewToolUseBlock(tu.ID, tu.Input, tu.Name))
+			}
+		}
+	} else {
 		for _, c := range calls {
-			r1.Content = append(r1.Content, anthropic.NewToolUseBlock(c.id, json.RawMessage(c.input), "read"))
+			r1.Content = append(r1.Content, anthropic.NewToolUseBlock(c.id, c.input, "read"))
 		}
 	}
+	r2 := anthropic.MessageParam{Role: anthropic.MessageParamRoleUser}
 	for _, c := range calls {
 		r2.Content = append(r2.Content, anthropic.NewToolResultBlock(c.id, c.result, c.isError))
 	}

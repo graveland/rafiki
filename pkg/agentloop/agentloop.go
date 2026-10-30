@@ -27,7 +27,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"golang.org/x/sync/errgroup"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
@@ -335,10 +337,10 @@ type orphan struct {
 // assistant message is a clean end-of-conversation text (no tool_use, final
 // row, stop reason end_turn), its text is returned instead — a truncated or
 // unknown stop reason is never treated as completion.
-func analyzeOrphans(history []store.Message) ([]orphan, *string) {
+func analyzeOrphans(history []*conv.Node) ([]orphan, *string) {
 	lastAssistant := -1
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Param.Role == anthropic.MessageParamRoleAssistant {
+		if history[i].Msg.Role == msg.Assistant {
 			lastAssistant = i
 			break
 		}
@@ -349,7 +351,7 @@ func analyzeOrphans(history []store.Message) ([]orphan, *string) {
 
 	resolved := map[string]bool{}
 	for _, m := range history[lastAssistant+1:] {
-		if m.Param.Role != anthropic.MessageParamRoleUser {
+		if m.Msg.Role != msg.User {
 			continue
 		}
 		for _, id := range m.ToolUseIDs {
@@ -360,16 +362,17 @@ func analyzeOrphans(history []store.Message) ([]orphan, *string) {
 	var orphans []orphan
 	hasToolUse := false
 	var text string
-	for _, block := range history[lastAssistant].Param.Content {
-		if tu := block.OfToolUse; tu != nil {
+	for _, block := range history[lastAssistant].Msg.Content {
+		switch b := block.(type) {
+		case msg.ToolUse:
 			hasToolUse = true
-			if !resolved[tu.ID] {
-				input, _ := json.Marshal(tu.Input)
-				orphans = append(orphans, orphan{id: tu.ID, name: tu.Name, input: input})
+			if !resolved[b.ID] {
+				orphans = append(orphans, orphan{id: b.ID, name: b.Name, input: b.Input})
 			}
-		}
-		if tb := block.OfText; tb != nil && text == "" {
-			text = tb.Text
+		case msg.Text:
+			if text == "" {
+				text = b.Text
+			}
 		}
 	}
 	if !hasToolUse && lastAssistant == len(history)-1 &&

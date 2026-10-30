@@ -458,12 +458,20 @@ func TestInMemoryConversation(t *testing.T) {
 	if err != nil || len(history) != 4 {
 		t.Errorf("history = %d err=%v, want 4", len(history), err)
 	}
-	// SeedHistory idempotence: re-seeding identical prefix no-ops.
-	params := make([]Message, 0, 4)
-	for _, m := range history {
-		params = append(params, m.Param)
+	// SeedHistory idempotence: re-seeding identical prefix no-ops, and a
+	// re-continue puts the head back on the reply it was on.
+	params := []Message{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("one")),
+		anthropic.NewAssistantMessage(anthropic.NewTextBlock("mem reply")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("two")),
 	}
 	ck.NoError(conv.SeedHistory(context.Background(), params), "idempotent re-seed failed")
+	if _, err := conv.Continue(context.Background()); err != nil {
+		t.Fatalf("Continue after the re-seed: %v", err)
+	}
+	resumed, err := conv.History(context.Background())
+	ck.Require().NoError(err)
+	ck.EqDeep(history, resumed, "a re-seed and a re-continue must not change the working path")
 	// Resume plumbing must refuse without a store.
 	if _, err := conv.IncrementResumeAttempts(context.Background()); err == nil {
 		t.Error("IncrementResumeAttempts must error without WithStore")

@@ -40,7 +40,7 @@ func (s *fakeSender) New(ctx context.Context, params anthropic.MessageNewParams)
 	if s.reply != nil {
 		return s.reply, nil
 	}
-	return &anthropic.Message{}, nil
+	return &anthropic.Message{Role: "assistant"}, nil
 }
 
 // fakeRecallStore answers only the calls a test wires; anything else panics
@@ -307,6 +307,7 @@ func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
 	pool := scratchPool(t)
 	ctx := t.Context()
 	sender := &fakeSender{reply: &anthropic.Message{
+		Role:    "assistant",
 		Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "the summary text"}},
 		Model:   "claude-haiku-4-5",
 		Usage:   anthropic.Usage{InputTokens: 100, OutputTokens: 40},
@@ -441,6 +442,7 @@ func TestLLMCompleterPricesResponsesModelByCatalogID(t *testing.T) {
 	cat := seedResponsesCatalog()
 	prov := mustParseProviders(t, responsesProvidersTOML)
 	sender := &fakeSender{reply: &anthropic.Message{
+		Role:    "assistant",
 		Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "the summary text"}},
 		Model:   "gpt-6.1-sol", // the provider-local spelling the upstream echoes
 		Usage:   anthropic.Usage{InputTokens: 1_000_000, OutputTokens: 500_000},

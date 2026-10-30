@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -738,8 +739,10 @@ func TestResumeContinueIsIdempotent(t *testing.T) {
 
 		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0}), "seed the first message")
 		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0, r1, r2}), "complete the prefix")
-		ck.Len(conv.mem, 3, "completing a seeded prefix must not duplicate it")
-		for i, m := range conv.mem {
+		seeded, err := conv.History(ctx)
+		ck.Require().NoError(err, "History")
+		ck.Len(seeded, 3, "completing a seeded prefix must not duplicate it")
+		for i, m := range seeded {
 			ck.Eq(i, m.Ordinal, "message %d sits at its own ordinal", i)
 		}
 
@@ -751,10 +754,12 @@ func TestResumeContinueIsIdempotent(t *testing.T) {
 		ck.Require().Len(before, 4, "the seed plus the reply")
 
 		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0, r1, r2}), "re-seed the same prefix")
+		if _, err := conv.Continue(ctx); err != nil {
+			t.Fatalf("Continue after the re-seed: %v", err)
+		}
 		after, err := conv.History(ctx)
 		ck.Require().NoError(err, "History after the re-seed")
-		ck.EqDeep(before, after, "re-seeding a prefix must leave the history unchanged")
-		ck.Len(conv.mem, 4, "re-seeding a prefix must not append")
+		ck.EqDeep(before, after, "a re-seed and a re-continue must not change the working path")
 	})
 }
 
@@ -998,18 +1003,18 @@ func TestRequestDescriptorInMemoryConversationHasNoHead(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	conv, err := cl.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"))
 	ck.Require().NoError(err)
-	ck.Require().Nil(cl.messages, "a store-less client must have no message store")
+	ck.Require().Nil(cl.capture, "a store-less client must have no capture store")
 
-	conv.mem = append(conv.mem, store.Message{
-		ID:      "mem-row-id",
-		Ordinal: 0,
-		Param:   anthropic.NewUserMessage(anthropic.NewTextBlock("hi")),
-	})
-	ck.Eq("", conv.requestHeadID(conv.mem), "an in-memory history must resolve no head")
+	seedRows(t, conv, textRow(0, msg.User, "hi"))
+	hist, err := conv.History(ctx)
+	ck.Require().NoError(err, "History")
+	ck.Eq("", conv.requestHeadID(hist), "an in-memory history must resolve no head")
 
 	if _, err := conv.Continue(ctx); err != nil {
 		t.Fatalf("Continue: %v", err)
 	}
-	ck.Eq("", conv.requestHeadID(conv.mem), "the head stays empty after a send")
-	c.True(conv.mem[len(conv.mem)-1].ID != "", "the appended reply has no id of its own")
+	hist, err = conv.History(ctx)
+	ck.Require().NoError(err, "History after the send")
+	ck.Eq("", conv.requestHeadID(hist), "the head stays empty after a send")
+	c.True(hist[len(hist)-1].ID != "", "the appended reply has no id of its own")
 }

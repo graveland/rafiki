@@ -5,7 +5,7 @@ package llm
 import (
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // compactionPrompt asks the model for a plain-text handover summary. It is
@@ -41,13 +41,8 @@ Use exactly this structure: <analysis>...</analysis> then <summary>...</summary>
 const summaryFraming = "This session is being continued from an earlier conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n"
 
 // summaryMessage builds the single user message carrying the summary text.
-func summaryMessage(summary string) anthropic.MessageParam {
-	return anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			{OfText: &anthropic.TextBlockParam{Text: summaryFraming + summary}},
-		},
-	}
+func summaryMessage(summary string) msg.Message {
+	return msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: summaryFraming + summary}}}
 }
 
 // extractSummary pulls the <summary> block out of a model response. An

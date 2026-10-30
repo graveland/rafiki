@@ -12,11 +12,12 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
-	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -64,26 +65,29 @@ func prefillSimpleEngine(t *testing.T, ts fakeToolSet, entries []protocol.Prefil
 }
 
 // assertPrefillRow checks one persisted pre-fill row's role and block types.
-func assertPrefillRow(t *testing.T, m store.Message, ordinal int, role anthropic.MessageParamRole, blockKind string) {
+func assertPrefillRow(t *testing.T, n *conv.Node, ordinal int, role msg.Role, blockKind string) {
 	t.Helper()
 	c := assert.NewAborting(t)
-	c.Eq(ordinal, m.Ordinal, "row")
-	c.Eq(role, m.Param.Role, "row %d role = %v, want", ordinal, m.Param.Role)
-	c.NotEmpty(m.Param.Content, "row %d has no content blocks", ordinal)
-	for i, b := range m.Param.Content {
+	c.Eq(ordinal, n.Ordinal, "row")
+	c.Eq(role, n.Msg.Role, "row %d role = %v, want", ordinal, n.Msg.Role)
+	c.NotEmpty(n.Msg.Content, "row %d has no content blocks", ordinal)
+	for i, b := range n.Msg.Content {
 		switch blockKind {
 		case "text":
-			c.NotNil(b.OfText, "row %d block %d is not a text block", ordinal, i)
+			_, ok := b.(msg.Text)
+			c.True(ok, "row %d block %d is not a text block", ordinal, i)
 		case "tool_use":
-			c.NotNil(b.OfToolUse, "row %d block %d is not a tool_use block", ordinal, i)
-			c.Eq("read", b.OfToolUse.Name, "row %d block %d tool name = %q, want read", ordinal, i, b.OfToolUse.Name)
-			if !strings.HasPrefix(b.OfToolUse.ID, "prefill_") {
-				t.Fatalf("row %d block %d tool_use id %q lacks the prefill_ prefix", ordinal, i, b.OfToolUse.ID)
+			tu, ok := b.(msg.ToolUse)
+			c.Require().True(ok, "row %d block %d is not a tool_use block", ordinal, i)
+			c.Eq("read", tu.Name, "row %d block %d tool name = %q, want read", ordinal, i, tu.Name)
+			if !strings.HasPrefix(tu.ID, "prefill_") {
+				t.Fatalf("row %d block %d tool_use id %q lacks the prefill_ prefix", ordinal, i, tu.ID)
 			}
 		case "tool_result":
-			c.NotNil(b.OfToolResult, "row %d block %d is not a tool_result block", ordinal, i)
-			if !strings.HasPrefix(b.OfToolResult.ToolUseID, "prefill_") {
-				t.Fatalf("row %d block %d tool_result id %q lacks the prefill_ prefix", ordinal, i, b.OfToolResult.ToolUseID)
+			tr, ok := b.(msg.ToolResult)
+			c.Require().True(ok, "row %d block %d is not a tool_result block", ordinal, i)
+			if !strings.HasPrefix(tr.ToolUseID, "prefill_") {
+				t.Fatalf("row %d block %d tool_result id %q lacks the prefill_ prefix", ordinal, i, tr.ToolUseID)
 			}
 		default:
 			t.Fatalf("unknown block kind %q", blockKind)
@@ -108,18 +112,18 @@ func TestPrefillRowsShape(t *testing.T) {
 	c.Len(hist, 5, "history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
 
 	// r0: user, one text block, exactly the preamble.
-	assertPrefillRow(t, hist[0], 0, anthropic.MessageParamRoleUser, "text")
-	c.Eq(PrefillPreamble, hist[0].Param.Content[0].OfText.Text, "r0 text")
+	assertPrefillRow(t, hist[0], 0, msg.User, "text")
+	c.Eq(PrefillPreamble, nodeText(hist[0]), "r0 text")
 
 	// r1: assistant, only tool_use blocks named read with prefill_ ids.
-	assertPrefillRow(t, hist[1], 1, anthropic.MessageParamRoleAssistant, "tool_use")
+	assertPrefillRow(t, hist[1], 1, msg.Assistant, "tool_use")
 	wantIDs := []string{"prefill_0001", "prefill_0002"}
-	for i, b := range hist[1].Param.Content {
-		c.Eq(wantIDs[i], b.OfToolUse.ID, "r1 block %d id = %q, want", i, b.OfToolUse.ID)
+	for i, b := range hist[1].Msg.Content {
+		tu, ok := b.(msg.ToolUse)
+		c.Require().True(ok, "r1 block %d is not a tool_use", i)
+		c.Eq(wantIDs[i], tu.ID, "r1 block %d id = %q, want", i, tu.ID)
 		var cmd prefillReadCmd
-		in, mErr := json.Marshal(b.OfToolUse.Input)
-		c.NoError(mErr, "marshal r1 block %d input", i)
-		c.NoError(json.Unmarshal(in, &cmd), "unmarshal r1 block %d input", i)
+		c.NoError(json.Unmarshal(tu.Input, &cmd), "unmarshal r1 block %d input", i)
 		wantPath := "/tmp/a.txt"
 		if i == 1 {
 			wantPath = "/tmp/b.txt"
@@ -129,17 +133,19 @@ func TestPrefillRowsShape(t *testing.T) {
 	}
 
 	// r2: user, one tool_result per r1 id, same order, none an error.
-	assertPrefillRow(t, hist[2], 2, anthropic.MessageParamRoleUser, "tool_result")
-	for i, b := range hist[2].Param.Content {
-		c.Eq(wantIDs[i], b.OfToolResult.ToolUseID, "r2 block %d tool_use id = %q, want", i, b.OfToolResult.ToolUseID)
-		c.False(b.OfToolResult.IsError.Value, "r2 block %d is an error result", i)
+	assertPrefillRow(t, hist[2], 2, msg.User, "tool_result")
+	for i, b := range hist[2].Msg.Content {
+		tr, ok := b.(msg.ToolResult)
+		c.Require().True(ok, "r2 block %d is not a tool_result", i)
+		c.Eq(wantIDs[i], tr.ToolUseID, "r2 block %d tool_use id = %q, want", i, tr.ToolUseID)
+		c.False(tr.IsError, "r2 block %d is an error result", i)
 	}
 
 	// r3: the task prompt, appended by the normal loop — the pre-fill rows
 	// sit at ordinals 0-2, strictly before it.
-	assertPrefillRow(t, hist[3], 3, anthropic.MessageParamRoleUser, "text")
-	c.Eq("do the task", hist[3].Param.Content[0].OfText.Text, "r3 text")
-	c.Eq(anthropic.MessageParamRoleAssistant, hist[4].Param.Role, "row 4 role")
+	assertPrefillRow(t, hist[3], 3, msg.User, "text")
+	c.Eq("do the task", nodeText(hist[3]), "r3 text")
+	c.Eq(msg.Assistant, hist[4].Msg.Role, "row 4 role")
 
 	// No prefill activity is framed to the frontend, and no read leaked
 	// before the prefill rows were in place.
@@ -175,29 +181,17 @@ func TestPrefillMissingFileIsErrorResult(t *testing.T) {
 	c.NoError(err, "history")
 	c.Len(hist, 5, "history has %d rows, want 5 — the engine must keep running past a failed read", len(hist))
 	errResults := 0
-	for i, b := range hist[2].Param.Content {
-		tr := b.OfToolResult
-		c.NotNil(tr, "r2 block %d is not a tool_result", i)
-		if tr.IsError.Value {
+	for i, b := range hist[2].Msg.Content {
+		tr, ok := b.(msg.ToolResult)
+		c.Require().True(ok, "r2 block %d is not a tool_result", i)
+		if tr.IsError {
 			errResults++
-			c.StrContains(blockText(t, tr), "no such file", "error result")
+			c.StrContains(firstText(tr.Content), "no such file", "error result")
 		}
 	}
 	c.Eq(1, errResults, "r2 has")
 	c.Eq(1, sender.callCount(), "sender was called")
 	c.NotStrContains(out.String(), "agent_error", "a failed read must not be fatal")
-}
-
-// blockText flattens a tool_result block's text content for assertions.
-func blockText(t *testing.T, tr *anthropic.ToolResultBlockParam) string {
-	t.Helper()
-	var sb strings.Builder
-	for _, c := range tr.Content {
-		if c.OfText != nil {
-			sb.WriteString(c.OfText.Text)
-		}
-	}
-	return sb.String()
 }
 
 // TestPrefillAllReadsFailIsFatal: when every read failed the child gained
@@ -261,7 +255,7 @@ func TestPrefillPagesLargeFile(t *testing.T) {
 	hist, err := eng.conv.History(context.Background())
 	c.NoError(err, "history")
 	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	c.Len(hist[1].Param.Content, 2, "r1 has %d blocks, want 2 pages for one entry", len(hist[1].Param.Content))
+	c.Len(hist[1].Msg.Content, 2, "r1 has %d blocks, want 2 pages for one entry", len(hist[1].Msg.Content))
 	c.Len(cmds, 2, "fake read was called %d times, want 2", len(cmds))
 	c.False(cmds[0].Offset != 1 || cmds[1].Offset != 3, "read calls at offsets %v, want [1 3]", cmds)
 	if cmds[0].Limit != 1_000_000 || cmds[1].Limit != 1_000_000 {
@@ -339,7 +333,7 @@ func TestPrefillQuotedTrailerStopsPaging(t *testing.T) {
 	hist, err := eng.conv.History(context.Background())
 	c.NoError(err, "history")
 	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	c.Len(hist[1].Param.Content, 2, "r1 has %d blocks, want 2 (one per entry)", len(hist[1].Param.Content))
+	c.Len(hist[1].Msg.Content, 2, "r1 has %d blocks, want 2 (one per entry)", len(hist[1].Msg.Content))
 	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
@@ -382,11 +376,12 @@ func TestPrefillGlobSortedAndExpanded(t *testing.T) {
 	c.NoError(err, "history")
 	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
 	// Glob calls are NOT recorded; r1 carries one tool_use per matched path.
-	c.Len(hist[1].Param.Content, 3, "r1 has %d blocks, want 3 reads (no glob block)", len(hist[1].Param.Content))
-	for i, b := range hist[1].Param.Content {
-		in, _ := json.Marshal(b.OfToolUse.Input)
+	c.Len(hist[1].Msg.Content, 3, "r1 has %d blocks, want 3 reads (no glob block)", len(hist[1].Msg.Content))
+	for i, b := range hist[1].Msg.Content {
+		tu, ok := b.(msg.ToolUse)
+		c.Require().True(ok, "r1 block %d is not a tool_use", i)
 		var cmd prefillReadCmd
-		c.NoError(json.Unmarshal(in, &cmd), "unmarshal r1 block %d", i)
+		c.NoError(json.Unmarshal(tu.Input, &cmd), "unmarshal r1 block %d", i)
 		c.Eq(want[i], cmd.Path, "r1 block %d path = %q, want", i, cmd.Path)
 	}
 	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
@@ -506,18 +501,14 @@ func TestPrefillInputsAreByteStable(t *testing.T) {
 	hist1 := runPrefillInMemory(t, entries)
 	hist2 := runPrefillInMemory(t, entries)
 
-	got1, err := json.Marshal(hist1[1].Param)
-	c.NoError(err)
-	got2, err := json.Marshal(hist2[1].Param)
-	c.NoError(err)
-	c.Eq(string(got2), string(got1), "r1 JSON differs between runs:\n%s\nvs\n%s", got1, got2)
-	c.False(!strings.Contains(string(got1), `"path":"/tmp/a.txt","offset":1,"limit":1000000`) &&
-		!strings.Contains(string(got1), `{"path":"/tmp/a.txt","offset":1,"limit":1000000}`), "r1 JSON does not carry the byte-stable field order: %s", got1)
+	got1, got2 := hist1[1].Content, hist2[1].Content
+	c.Eq(string(got2), string(got1), "r1 stored content differs between runs:\n%s\nvs\n%s", got1, got2)
+	c.StrContains(string(got1), `{"path":"/tmp/a.txt","offset":1,"limit":1000000}`, "r1 content does not carry the byte-stable field order")
 }
 
 // runPrefillInMemory runs one engine's pre-fill (via a prompt turn, which
 // serialises behind it) and returns the resulting history.
-func runPrefillInMemory(t *testing.T, entries []protocol.PrefillRead) []store.Message {
+func runPrefillInMemory(t *testing.T, entries []protocol.PrefillRead) []*conv.Node {
 	t.Helper()
 	c := assert.NewAborting(t)
 	eng, out, _ := prefillSimpleEngine(t, prefillFakeRead(nil), entries)
@@ -594,13 +585,13 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 	c.Len(hist, 3, "history has %d rows, want 3 (text prefill, task, reply)", len(hist))
 
 	// r0: user, exactly ONE text block starting with the text marker.
-	if hist[0].Ordinal != 0 || hist[0].Param.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("row 0 = ordinal %d role %v, want user at 0", hist[0].Ordinal, hist[0].Param.Role)
+	if hist[0].Ordinal != 0 || hist[0].Msg.Role != msg.User {
+		t.Fatalf("row 0 = ordinal %d role %v, want user at 0", hist[0].Ordinal, hist[0].Msg.Role)
 	}
-	if len(hist[0].Param.Content) != 1 || hist[0].Param.Content[0].OfText == nil {
-		t.Fatalf("row 0 must be a single text block, got %d blocks", len(hist[0].Param.Content))
+	if len(hist[0].Msg.Content) != 1 {
+		t.Fatalf("row 0 must be a single text block, got %d blocks", len(hist[0].Msg.Content))
 	}
-	text := hist[0].Param.Content[0].OfText.Text
+	text := nodeText(hist[0])
 	if !strings.HasPrefix(text, PrefillTextPreamble) {
 		t.Fatalf("row 0 text does not start with the text pre-fill marker: %q", text)
 	}
@@ -615,16 +606,19 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 
 	// No tool_use or tool_result block anywhere in the history.
 	for i, m := range hist {
-		for j, b := range m.Param.Content {
-			c.False(b.OfToolUse != nil || b.OfToolResult != nil, "row %d block %d is a tool block; a tool-less pre-fill must be text only", i, j)
+		for j, b := range m.Msg.Content {
+			switch b.(type) {
+			case msg.ToolUse, msg.ToolResult:
+				t.Fatalf("row %d block %d is a tool block; a tool-less pre-fill must be text only", i, j)
+			}
 		}
 	}
 
 	// r1: the task prompt; r2: the turn's reply.
-	if hist[1].Param.Content[0].OfText == nil || hist[1].Param.Content[0].OfText.Text != "do the task" {
-		t.Fatalf("row 1 = %+v, want the task prompt", hist[1].Param.Content)
+	if got := nodeText(hist[1]); got != "do the task" {
+		t.Fatalf("row 1 = %+v, want the task prompt", hist[1].Msg.Content)
 	}
-	c.Eq(anthropic.MessageParamRoleAssistant, hist[2].Param.Role, "row 2 role")
+	c.Eq(msg.Assistant, hist[2].Msg.Role, "row 2 role")
 
 	// The request: the text row and the task merged into ONE user message,
 	// task text last.
@@ -692,7 +686,7 @@ func TestPrefillTextShapeGlobRangeAndError(t *testing.T) {
 	hist, err := eng.conv.History(context.Background())
 	c.NoError(err, "history")
 	c.Len(hist, 3, "history has %d rows, want 3 (text prefill, task, reply) — a failed read must not be fatal", len(hist))
-	text := hist[0].Param.Content[0].OfText.Text
+	text := nodeText(hist[0])
 	for _, want := range []string{
 		"=== /b/aaa.txt ===\n     1\taaa body\n",
 		"=== /b/zzz.txt ===\n     1\tzzz body\n",
@@ -738,83 +732,56 @@ func TestPrefillTextOverCapPersistsNothing(t *testing.T) {
 	c.Empty(hist, "history has %d rows, want NOTHING persisted before the cap check", len(hist))
 }
 
-// prefillTestRow builds one store.Message for classifyPrefill's table.
-func prefillTestRow(param llm.Message) store.Message {
-	return store.Message{Param: param, ToolUseIDs: store.ToolUseIDsOf(param)}
-}
+// prefillTestRow wraps one native message as a fixture row for classifyPrefill.
+func prefillTestRow(m msg.Message) *conv.Node { return &conv.Node{Msg: m} }
 
 // TestPrefillClassify is the table over histories classifyPrefill must
 // recognise — and, critically, must leave alone.
 func TestPrefillClassify(t *testing.T) {
-	r0 := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(PrefillPreamble)},
+	user := func(s string) msg.Message {
+		return msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: s}}}
 	}
-	r1 := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleAssistant,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolUseBlock("prefill_0001", json.RawMessage(`{"path":"a.txt","offset":1,"limit":1000000}`), "read"),
-		},
-	}
-	r2 := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolResultBlock("prefill_0001", "body", false),
-		},
-	}
-	task := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("do it")},
-	}
-	wrongPreamble := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("please read these files first.")},
-	}
-	textPrefill := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewTextBlock(PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"),
-		},
-	}
-	nearMarkerText := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewTextBlock("[rafiki prefill] some other preamble a user could have typed."),
-		},
-	}
-	realID := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleAssistant,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolUseBlock("toolu_01ABC", json.RawMessage(`{"path":"a.txt","offset":1,"limit":1000000}`), "read"),
-		},
-	}
+	r0 := user(PrefillPreamble)
+	r1 := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "prefill_0001", Name: "read", Input: json.RawMessage(`{"path":"a.txt","offset":1,"limit":1000000}`)},
+	}}
+	r2 := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "prefill_0001", Content: []msg.Block{msg.Text{Text: "body"}}},
+	}}
+	task := user("do it")
+	wrongPreamble := user("please read these files first.")
+	textPrefill := user(PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n")
+	nearMarkerText := user("[rafiki prefill] some other preamble a user could have typed.")
+	realID := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "toolu_01ABC", Name: "read", Input: json.RawMessage(`{"path":"a.txt","offset":1,"limit":1000000}`)},
+	}}
 
 	tests := []struct {
 		name       string
-		history    []store.Message
+		history    []*conv.Node
 		configured bool
 		want       prefillState
 	}{
 		{"empty configured", nil, true, prefillEmpty},
 		{"empty unconfigured", nil, false, prefillNone},
-		{"r0 only", []store.Message{prefillTestRow(r0)}, true, prefillHasR0},
-		{"r0+r1", []store.Message{prefillTestRow(r0), prefillTestRow(r1)}, true, prefillHasR1},
-		{"complete", []store.Message{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2)}, true, prefillComplete},
+		{"r0 only", []*conv.Node{prefillTestRow(r0)}, true, prefillHasR0},
+		{"r0+r1", []*conv.Node{prefillTestRow(r0), prefillTestRow(r1)}, true, prefillHasR1},
+		{"complete", []*conv.Node{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2)}, true, prefillComplete},
 		// A pre-fill-SHAPED history is recognised even without the field, so
 		// the shaped tail can never reach Resume.
-		{"complete unconfigured", []store.Message{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2)}, false, prefillComplete},
+		{"complete unconfigured", []*conv.Node{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2)}, false, prefillComplete},
 		// The text shape a tool-less child persists: exactly ONE user row
 		// starting with PrefillTextPreamble. Complete — with or without the
 		// field — and it must never be confused with an r0 prefix of the
 		// tool-call shape.
-		{"text complete", []store.Message{prefillTestRow(textPrefill)}, true, prefillTextComplete},
-		{"text complete unconfigured", []store.Message{prefillTestRow(textPrefill)}, false, prefillTextComplete},
-		{"text complete plus task row", []store.Message{prefillTestRow(textPrefill), prefillTestRow(task)}, true, prefillNone},
-		{"near-marker text row", []store.Message{prefillTestRow(nearMarkerText)}, true, prefillNone},
-		{"complete plus task row", []store.Message{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2), prefillTestRow(task)}, true, prefillNone},
-		{"wrong preamble", []store.Message{prefillTestRow(wrongPreamble)}, true, prefillNone},
-		{"non-prefill id", []store.Message{prefillTestRow(r0), prefillTestRow(realID)}, true, prefillNone},
-		{"four rows not shaped", []store.Message{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2), prefillTestRow(task)}, false, prefillNone},
+		{"text complete", []*conv.Node{prefillTestRow(textPrefill)}, true, prefillTextComplete},
+		{"text complete unconfigured", []*conv.Node{prefillTestRow(textPrefill)}, false, prefillTextComplete},
+		{"text complete plus task row", []*conv.Node{prefillTestRow(textPrefill), prefillTestRow(task)}, true, prefillNone},
+		{"near-marker text row", []*conv.Node{prefillTestRow(nearMarkerText)}, true, prefillNone},
+		{"complete plus task row", []*conv.Node{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2), prefillTestRow(task)}, true, prefillNone},
+		{"wrong preamble", []*conv.Node{prefillTestRow(wrongPreamble)}, true, prefillNone},
+		{"non-prefill id", []*conv.Node{prefillTestRow(r0), prefillTestRow(realID)}, true, prefillNone},
+		{"four rows not shaped", []*conv.Node{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2), prefillTestRow(task)}, false, prefillNone},
 	}
 
 	for _, tc := range tests {
@@ -831,7 +798,7 @@ func TestPrefillAssistantRowHasNoUsage(t *testing.T) {
 	c := assert.NewAborting(t)
 	hist := runPrefillInMemory(t, []protocol.PrefillRead{{Path: "/tmp/a.txt"}})
 	c.Eq("", hist[1].StopReason, "r1 stop reason")
-	c.Eq(anthropic.MessageParamRoleAssistant, hist[1].Param.Role, "r1 role =")
+	c.Eq(msg.Assistant, hist[1].Msg.Role, "r1 role =")
 }
 
 // TestPrefillContextWindowUsesProviderLocalID pins the id the cap asks the

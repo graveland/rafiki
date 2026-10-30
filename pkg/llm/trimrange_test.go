@@ -3,13 +3,15 @@
 package llm
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"go.graveland.dev/rafiki/pkg/store"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -22,17 +24,18 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 	c := assert.NewAborting(t)
 
 	// Rows 4 and 5 are both user, so they merge into one wire message.
-	history := []store.Message{
-		textRow(0, anthropic.MessageParamRoleUser, "u0"),
-		textRow(1, anthropic.MessageParamRoleAssistant, "a1"),
-		textRow(2, anthropic.MessageParamRoleUser, "u2"),
-		textRow(3, anthropic.MessageParamRoleAssistant, "a3"),
-		textRow(4, anthropic.MessageParamRoleUser, "u4a"),
-		textRow(5, anthropic.MessageParamRoleUser, "u4b"),
-		textRow(6, anthropic.MessageParamRoleAssistant, "a6"),
-		textRow(7, anthropic.MessageParamRoleUser, "u7"),
+	history := []*convpkg.Node{
+		textRow(0, msg.User, "u0"),
+		textRow(1, msg.Assistant, "a1"),
+		textRow(2, msg.User, "u2"),
+		textRow(3, msg.Assistant, "a3"),
+		textRow(4, msg.User, "u4a"),
+		textRow(5, msg.User, "u4b"),
+		textRow(6, msg.Assistant, "a6"),
+		textRow(7, msg.User, "u7"),
 	}
-	msgs, rowStart := mergeForRequestRows(history)
+	msgs, rowStart, err := mergeForRequestRows(history)
+	c.Require().NoError(err, "merge")
 	c.Eq(7, len(msgs), "wire messages")
 	c.EqDeep([]int{0, 1, 2, 3, 4, 6, 7}, rowStart, "rowStart")
 	c.Eq(2, len(msgs[4].Content), "rows 4 and 5 merged into one message")
@@ -49,14 +52,15 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 
 	// A merged ANCHOR: rows 0 and 1 both user, so the anchor message spans two
 	// path positions and the dropped range starts at 2.
-	mergedAnchor := []store.Message{
-		textRow(0, anthropic.MessageParamRoleUser, "u0"),
-		textRow(1, anthropic.MessageParamRoleUser, "u1"),
-		textRow(2, anthropic.MessageParamRoleAssistant, "a2"),
-		textRow(3, anthropic.MessageParamRoleUser, "u3"),
-		textRow(4, anthropic.MessageParamRoleAssistant, "a4"),
+	mergedAnchor := []*convpkg.Node{
+		textRow(0, msg.User, "u0"),
+		textRow(1, msg.User, "u1"),
+		textRow(2, msg.Assistant, "a2"),
+		textRow(3, msg.User, "u3"),
+		textRow(4, msg.Assistant, "a4"),
 	}
-	msgs2, rowStart2 := mergeForRequestRows(mergedAnchor)
+	msgs2, rowStart2, err := mergeForRequestRows(mergedAnchor)
+	c.Require().NoError(err, "merge")
 	c.Eq(4, len(msgs2), "wire messages with a merged anchor")
 	c.EqDeep([]int{0, 2, 3, 4}, rowStart2, "rowStart with a merged anchor")
 	c.Eq(2, rowStart2[1], "anchorEnd with a merged anchor")
@@ -106,53 +110,37 @@ func TestTrimDroppedRejectsNonAnchorSuffixShape(t *testing.T) {
 // is the same merge: its message list must stay byte-identical to
 // mergeForRequest's for every fixture the merge tests use.
 func TestMergeForRequestRowsMatchesMergeForRequest(t *testing.T) {
-	brokenToolUse := anthropic.ContentBlockParamUnion{
-		OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_broken", Name: "", Input: map[string]any{"command": "whoami"}},
+	brokenToolUse := msg.ToolUse{ID: "id_broken", Name: "", Input: json.RawMessage(`{"command":"whoami"}`)}
+	goodToolUse := msg.ToolUse{ID: "id_good", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}
+	toolResult := func(id string) msg.ToolResult {
+		return msg.ToolResult{ToolUseID: id, Content: []msg.Block{msg.Text{Text: "out"}}}
 	}
-	goodToolUse := anthropic.ContentBlockParamUnion{
-		OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_good", Name: "bash", Input: map[string]any{"command": "ls"}},
-	}
-	toolResult := func(id string) anthropic.ContentBlockParamUnion {
-		return anthropic.ContentBlockParamUnion{OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: id,
-			Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "out"}}},
-		}}
-	}
-	cases := map[string][]store.Message{
+	cases := map[string][]*convpkg.Node{
 		"empty-name tool_use replaced": {
-			{Ordinal: 0, Param: anthropic.MessageParam{
-				Role:    anthropic.MessageParamRoleAssistant,
-				Content: []anthropic.ContentBlockParamUnion{goodToolUse, brokenToolUse, anthropic.NewTextBlock("note")},
-			}},
-			{Ordinal: 1, Param: anthropic.MessageParam{
-				Role:    anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{toolResult("id_good"), toolResult("id_broken")},
-			}},
+			{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{goodToolUse, brokenToolUse, msg.Text{Text: "note"}}}},
+			{Msg: msg.Message{Role: msg.User, Content: []msg.Block{toolResult("id_good"), toolResult("id_broken")}}},
 		},
 		"good tool_uses untouched": {
-			{Ordinal: 0, Param: anthropic.MessageParam{
-				Role:    anthropic.MessageParamRoleAssistant,
-				Content: []anthropic.ContentBlockParamUnion{goodToolUse, goodToolUse},
-			}},
+			{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{goodToolUse, goodToolUse}}},
 		},
 		"consecutive user rows merge": {
-			{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first"))},
-			{Ordinal: 1, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("second"))},
-			{Ordinal: 2, Param: anthropic.MessageParam{
-				Role:    anthropic.MessageParamRoleAssistant,
-				Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("reply")},
-			}},
-			{Ordinal: 3, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("third"))},
+			{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "first"}}}},
+			{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "second"}}}},
+			{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "reply"}}}},
+			{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "third"}}}},
 		},
 	}
 
 	for name, history := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := assert.NewAborting(t)
-			msgs, rowStart := mergeForRequestRows(history)
-			if !reflect.DeepEqual(mergeForRequest(history), msgs) {
+			msgs, rowStart, err := mergeForRequestRows(history)
+			c.Require().NoError(err, "merge")
+			merged, err := mergeForRequest(history)
+			c.Require().NoError(err, "mergeForRequest")
+			if !reflect.DeepEqual(merged, msgs) {
 				t.Fatalf("mergeForRequestRows output differs from mergeForRequest:\n%#v\n%#v",
-					mergeForRequest(history), msgs)
+					merged, msgs)
 			}
 			c.Eq(len(msgs), len(rowStart), "rowStart entries vs messages")
 			// A merged row appends no start, so each start is the first row of

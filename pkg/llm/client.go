@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -38,12 +39,16 @@ type Client struct {
 	set      *providers.Set
 	pool     *pgxpool.Pool
 	capture  *capture.CaptureStore
-	messages *store.Messages
-	lease    store.Lease
-	catalog  *routing.ModelCatalog
-	logger   *slog.Logger
-	tracer   trace.Tracer
-	batcher  Batcher
+	convs    *convpkg.Store
+	// mem is the backend a store-less client's conversations live in. When no
+	// conv store is supplied it IS convs' backend; when one is supplied it only
+	// gives the "mem-" conversations a place to be created.
+	mem     *convpkg.MemBackend
+	lease   store.Lease
+	catalog *routing.ModelCatalog
+	logger  *slog.Logger
+	tracer  trace.Tracer
+	batcher Batcher
 
 	breakerWindow time.Duration
 	defaultModel  string
@@ -90,6 +95,14 @@ func WithProviderSender(name string, s Sender) ClientOption {
 // Required for Conversation; SendParams degrades to capture-less without it.
 func WithStore(pool *pgxpool.Pool) ClientOption {
 	return func(c *Client) { c.pool = pool }
+}
+
+// WithConvStore shares an existing conversation store (its cache and its
+// backend) instead of building a private one. A daemon hands its one store to
+// every client it builds, so a reader and a writer of the same conversation
+// see one cache rather than one apiece.
+func WithConvStore(cs *convpkg.Store) ClientOption {
+	return func(c *Client) { c.convs = cs }
 }
 
 // WithBreaker enables per-upstream circuit breakers with the given probe
@@ -251,28 +264,37 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	}
 	if c.pool != nil {
 		c.capture = capture.NewCaptureStore(c.pool)
-		c.messages = store.NewMessages(c.pool)
+	}
+	if c.convs == nil {
+		if c.pool != nil {
+			c.convs = convpkg.NewStore(store.NewConvBackend(c.pool), convpkg.Options{})
+		} else {
+			c.mem = convpkg.NewMemBackend()
+			c.convs = convpkg.NewStore(c.mem, convpkg.Options{})
+		}
 	}
 	c.modelGate = NewModelGate(10*time.Second, 300*time.Second)
 	return c, nil
 }
 
 // SetLease installs the conversation write lease on this client's stores, so
-// every message append carries the guard clause.
+// every message append is fenced by it.
 //
 // Called exactly once, at engine build, after the conversation is resolved and
 // before any turn can run. One Client is built per child (see BuildEngine), so
-// there is no concurrency here and nothing has written yet.
+// there is no concurrency here and nothing has written yet. The lease reaches a
+// conversation through Conversation.handle, which resolves it on every call
+// rather than capturing it at Open time — that is what lets this land after
+// Conversation() returned.
 //
 // A zero lease, or a client with no stores, is a no-op — that is the unfenced
 // behaviour the proxy face and every client-driven conversation rely on.
 func (c *Client) SetLease(l store.Lease) {
-	if !l.Held() || c.capture == nil || c.messages == nil {
+	if !l.Held() || c.capture == nil || c.convs == nil {
 		return
 	}
 	c.lease = l
 	c.capture = c.capture.WithLease(l)
-	c.messages = c.messages.WithLease(l)
 }
 
 // Breaker exposes the breaker for a provider so the embedded proxy face can

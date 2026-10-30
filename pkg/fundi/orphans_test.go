@@ -10,6 +10,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -206,13 +207,13 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 	c.NoError(err)
 	c.Len(history, 4, "history has %d rows, want 4 (one synthetic row appended)", len(history))
 	last := history[len(history)-1]
-	c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "synthesized row role")
-	c.Len(last.Param.Content, 1, "synthesized row has %d blocks, want 1 (tu_1 must not be re-synthesized)", len(last.Param.Content))
-	tr := last.Param.Content[0].OfToolResult
-	if tr == nil || tr.ToolUseID != "tu_2" {
-		t.Fatalf("synthesized block = %+v, want a tool_result for tu_2", last.Param.Content[0])
+	c.Eq(msg.User, last.Msg.Role, "synthesized row role")
+	c.Len(last.Msg.Content, 1, "synthesized row has %d blocks, want 1 (tu_1 must not be re-synthesized)", len(last.Msg.Content))
+	tr, ok := nodeToolResult(last)
+	if !ok || tr.ToolUseID != "tu_2" {
+		t.Fatalf("synthesized block = %+v, want a tool_result for tu_2", last.Msg.Content[0])
 	}
-	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
+	c.True(tr.IsError, "synthesized tool_result is not marked IsError")
 }
 
 // TestRepairOrphansRoundTrip is the brief's Step 1(a): seed a store-less
@@ -250,10 +251,10 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 	history, err := conv.History(ctx)
 	c.NoError(err)
 	last := history[len(history)-1]
-	c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "history's trailing row role")
-	tr := last.Param.Content[0].OfToolResult
-	if tr == nil || tr.ToolUseID != "tu_1" {
-		t.Fatalf("trailing row's block = %+v, want a tool_result for tu_1", last.Param.Content[0])
+	c.Eq(msg.User, last.Msg.Role, "history's trailing row role")
+	tr, ok := nodeToolResult(last)
+	if !ok || tr.ToolUseID != "tu_1" {
+		t.Fatalf("trailing row's block = %+v, want a tool_result for tu_1", last.Msg.Content[0])
 	}
 
 	if _, err := conv.Continue(ctx); err != nil {

@@ -3,9 +3,8 @@
 package llm
 
 import (
-	"github.com/anthropics/anthropic-sdk-go"
-
-	"go.graveland.dev/rafiki/pkg/store"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // CompactionPolicy governs proactive context compaction: when to summarise
@@ -108,28 +107,37 @@ func (p CompactionPolicy) tailBudget() int {
 	return budget
 }
 
-// estimateTokens approximates a message's token count from its marshaled
-// request footprint (roughly four bytes per token).
-func estimateTokens(m store.Message) int { return (messageSize(m.Param) + 3) / 4 }
+// envelopeBytes is the byte length of the request envelope a message rides in:
+// {"role":"","content":}. It is the fixed overhead estimateTokens adds to the
+// stored content.
+const envelopeBytes = 24
+
+// estimateTokens approximates a node's token count from its stored content
+// plus the request envelope around it (roughly four bytes per token). It reads
+// the stored bytes rather than re-marshalling the message, so it costs nothing
+// on a node the cache already holds.
+func estimateTokens(n *convpkg.Node) int {
+	return (len(n.Content) + len(n.Msg.Role.String()) + envelopeBytes + 3) / 4
+}
 
 // estimateHistoryTokens sums estimateTokens across a history.
-func estimateHistoryTokens(msgs []store.Message) int {
+func estimateHistoryTokens(nodes []*convpkg.Node) int {
 	total := 0
-	for _, m := range msgs {
-		total += estimateTokens(m)
+	for _, n := range nodes {
+		total += estimateTokens(n)
 	}
 	return total
 }
 
-// isLegalCut reports whether a tail may start at m: a tool_result block must
-// never be separated from the assistant tool_use that produced it, so any
-// user row carrying one is off limits.
-func isLegalCut(m store.Message) bool {
-	if m.Param.Role == anthropic.MessageParamRoleAssistant {
+// isLegalCut reports whether a tail may start at n: a tool_result block must
+// never be separated from the assistant tool_use that produced it, so any user
+// row carrying one is off limits.
+func isLegalCut(n *convpkg.Node) bool {
+	if n.Msg.Role == msg.Assistant {
 		return true
 	}
-	for _, b := range m.Param.Content {
-		if b.OfToolResult != nil {
+	for _, b := range n.Msg.Content {
+		if _, ok := b.(msg.ToolResult); ok {
 			return false
 		}
 	}
@@ -146,7 +154,7 @@ func isLegalCut(m store.Message) bool {
 // start index decreases, so once the accumulated suffix exceeds the budget no
 // smaller index can fit and the walk stops; the last legal index seen within
 // budget is therefore the earliest such start.
-func cutTail(history []store.Message, budgetTokens int) int {
+func cutTail(history []*convpkg.Node, budgetTokens int) int {
 	if budgetTokens <= 0 {
 		return len(history)
 	}

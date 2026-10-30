@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
@@ -148,10 +149,10 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	c.NoError(err, "History (pre-repair)")
 	c.Len(before, 2, "pre-repair history has %d rows, want 2 (user + assistant tool_use); rows", len(before))
 	assistant := before[1]
-	c.Eq(anthropic.MessageParamRoleAssistant, assistant.Param.Role, "row 1 role")
+	c.Eq(msg.Assistant, assistant.Msg.Role, "row 1 role")
 	var sawToolUse bool
-	for _, block := range assistant.Param.Content {
-		if tu := block.OfToolUse; tu != nil {
+	for _, block := range assistant.Msg.Content {
+		if tu, ok := block.(msg.ToolUse); ok {
 			sawToolUse = true
 			c.Eq("tu_1", tu.ID, "assistant tool_use id")
 		}
@@ -170,13 +171,13 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	c.NoError(err, "History (post-repair)")
 	c.Len(after, 3, "post-repair history has %d rows, want 3 (user, assistant, synthetic result); rows", len(after))
 	repairRow := after[2]
-	c.Eq(anthropic.MessageParamRoleUser, repairRow.Param.Role, "repair row role")
-	c.Len(repairRow.Param.Content, 1, "repair row has %d blocks, want 1", len(repairRow.Param.Content))
-	tr := repairRow.Param.Content[0].OfToolResult
-	if tr == nil || tr.ToolUseID != "tu_1" {
-		t.Fatalf("repair row block = %+v, want a tool_result for tu_1", repairRow.Param.Content[0])
+	c.Eq(msg.User, repairRow.Msg.Role, "repair row role")
+	c.Len(repairRow.Msg.Content, 1, "repair row has %d blocks, want 1", len(repairRow.Msg.Content))
+	tr, ok := nodeToolResult(repairRow)
+	if !ok || tr.ToolUseID != "tu_1" {
+		t.Fatalf("repair row block = %+v, want a tool_result for tu_1", repairRow.Msg.Content[0])
 	}
-	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
+	c.True(tr.IsError, "synthesized tool_result is not marked IsError")
 
 	resp, err := conv.Continue(background)
 	c.NoError(err, "Continue after RepairOrphans failed")
@@ -244,12 +245,12 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 		c.NoError(err)
 		c.Len(hist, 3, "history has %d rows, want 3 (one synthetic row appended)", len(hist))
 		last := hist[2]
-		c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "trailing row role")
-		tr := last.Param.Content[0].OfToolResult
-		if tr == nil || tr.ToolUseID != "toolu_01ABC" {
-			t.Fatalf("trailing block = %+v, want a tool_result for toolu_01ABC", last.Param.Content[0])
+		c.Eq(msg.User, last.Msg.Role, "trailing row role")
+		tr, ok := nodeToolResult(last)
+		if !ok || tr.ToolUseID != "toolu_01ABC" {
+			t.Fatalf("trailing block = %+v, want a tool_result for toolu_01ABC", last.Msg.Content[0])
 		}
-		c.False(!tr.IsError.Value || len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
-			tr.Content[0].OfText.Text != "Tool execution aborted by user.", "synthesized result = %+v, want the standard abort text marked IsError", tr)
+		c.False(!tr.IsError || len(tr.Content) != 1 || firstText(tr.Content) != "Tool execution aborted by user.",
+			"synthesized result = %+v, want the standard abort text marked IsError", tr)
 	})
 }

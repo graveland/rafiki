@@ -19,7 +19,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 
@@ -746,14 +748,14 @@ func TestPendingUserInjectedAtEndTurnContinuesTheLoop(t *testing.T) {
 
 // assertHistoryContainsUserText fails unless some user row's text content
 // contains want.
-func assertHistoryContainsUserText(t *testing.T, hist []store.Message, want string) {
+func assertHistoryContainsUserText(t *testing.T, hist []*conv.Node, want string) {
 	t.Helper()
 	for _, m := range hist {
-		if m.Param.Role != anthropic.MessageParamRoleUser {
+		if m.Msg.Role != msg.User {
 			continue
 		}
-		for _, b := range m.Param.Content {
-			if b.OfText != nil && strings.Contains(b.OfText.Text, want) {
+		for _, b := range m.Msg.Content {
+			if text, ok := b.(msg.Text); ok && strings.Contains(text.Text, want) {
 				return
 			}
 		}

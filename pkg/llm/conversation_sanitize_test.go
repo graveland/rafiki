@@ -3,11 +3,11 @@
 package llm
 
 import (
+	"encoding/json"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
-	"go.graveland.dev/rafiki/pkg/store"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -15,50 +15,21 @@ import (
 func TestMergeForRequestReplacesEmptyNameToolUses(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	// Assistant with a good tool_use and a broken one (empty name)
-	assistantContent := []anthropic.ContentBlockParamUnion{
-		{
-			OfToolUse: &anthropic.ToolUseBlockParam{
-				ID:    "id_good",
-				Name:  "bash",
-				Input: map[string]any{"command": "ls"},
-			},
-		},
-		{
-			OfToolUse: &anthropic.ToolUseBlockParam{
-				ID:    "id_broken",
-				Name:  "",
-				Input: map[string]any{"command": "whoami"},
-			},
-		},
-		{OfText: &anthropic.TextBlockParam{Text: "I will run these tools."}},
-	}
-	assistant := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleAssistant,
-		Content: assistantContent,
-	}
+	// Assistant with a good tool_use and a broken one (empty name), plus text.
+	assistant := &convpkg.Node{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "id_good", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)},
+		msg.ToolUse{ID: "id_broken", Name: "", Input: json.RawMessage(`{"command":"whoami"}`)},
+		msg.Text{Text: "I will run these tools."},
+	}}}
 
-	// User message with tool_results for both (is_error for the broken one)
-	user := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			{OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: "id_good",
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "output"}}},
-			}},
-			{OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: "id_broken",
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "error: empty name"}}},
-			}},
-		},
-	}
+	// User message with tool_results for both (is_error for the broken one).
+	user := &convpkg.Node{Msg: msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "id_good", Content: []msg.Block{msg.Text{Text: "output"}}},
+		msg.ToolResult{ToolUseID: "id_broken", Content: []msg.Block{msg.Text{Text: "error: empty name"}}, IsError: true},
+	}}}
 
-	history := []store.Message{
-		{Ordinal: 0, Param: assistant},
-		{Ordinal: 1, Param: user},
-	}
-
-	result := mergeForRequest(history)
+	result, err := mergeForRequest([]*convpkg.Node{assistant, user})
+	c.Require().NoError(err)
 
 	c.Eq(2, len(result), "two messages")
 
@@ -79,18 +50,13 @@ func TestMergeForRequestReplacesEmptyNameToolUses(t *testing.T) {
 func TestMergeForRequestReplacesOnlyEmptyNames(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	assistantContent := []anthropic.ContentBlockParamUnion{
-		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_1", Name: "bash", Input: map[string]any{"command": "ls"}}},
-		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_2", Name: "read", Input: map[string]any{"path": "/tmp"}}},
-	}
-	assistant := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleAssistant,
-		Content: assistantContent,
-	}
+	assistant := &convpkg.Node{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "id_1", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)},
+		msg.ToolUse{ID: "id_2", Name: "read", Input: json.RawMessage(`{"path":"/tmp"}`)},
+	}}}
 
-	history := []store.Message{{Ordinal: 0, Param: assistant}}
-
-	result := mergeForRequest(history)
+	result, err := mergeForRequest([]*convpkg.Node{assistant})
+	c.Require().NoError(err)
 
 	c.Eq(1, len(result))
 	c.Eq(2, len(result[0].Content))
@@ -101,24 +67,16 @@ func TestMergeForRequestReplacesOnlyEmptyNames(t *testing.T) {
 func TestMergeForRequestLeavesUserMessagesUntouched(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	assistant := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleAssistant,
-		Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: "hello"}}},
-	}
-	user := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_good", Name: "bash", Input: map[string]any{"command": "ls"}}},
-			{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_broken", Name: "", Input: map[string]any{}}},
-		},
-	}
+	assistant := &convpkg.Node{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.Text{Text: "hello"},
+	}}}
+	user := &convpkg.Node{Msg: msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolUse{ID: "id_good", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)},
+		msg.ToolUse{ID: "id_broken", Name: "", Input: json.RawMessage(`{}`)},
+	}}}
 
-	history := []store.Message{
-		{Ordinal: 0, Param: assistant},
-		{Ordinal: 1, Param: user},
-	}
-
-	result := mergeForRequest(history)
+	result, err := mergeForRequest([]*convpkg.Node{assistant, user})
+	c.Require().NoError(err)
 
 	c.Eq(2, len(result))
 	c.Eq(2, len(result[1].Content), "user message untouched — replace is assistant-only")
@@ -127,55 +85,28 @@ func TestMergeForRequestLeavesUserMessagesUntouched(t *testing.T) {
 func TestMergeForRequestMultipleReplacedToolUses(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	assistantContent := []anthropic.ContentBlockParamUnion{
-		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_a", Name: "", Input: map[string]any{}}},
-		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_b", Name: "read", Input: map[string]any{"path": "/tmp"}}},
-		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_c", Name: "", Input: map[string]any{}}},
-		{OfToolUse: &anthropic.ToolUseBlockParam{ID: "id_d", Name: "bash", Input: map[string]any{"command": "date"}}},
-	}
-	assistant := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleAssistant,
-		Content: assistantContent,
-	}
+	assistant := &convpkg.Node{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "id_a", Name: "", Input: json.RawMessage(`{}`)},
+		msg.ToolUse{ID: "id_b", Name: "read", Input: json.RawMessage(`{"path":"/tmp"}`)},
+		msg.ToolUse{ID: "id_c", Name: "", Input: json.RawMessage(`{}`)},
+		msg.ToolUse{ID: "id_d", Name: "bash", Input: json.RawMessage(`{"command":"date"}`)},
+	}}}
 
-	user := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			{OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: "id_a",
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "err a"}}},
-			}},
-			{OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: "id_b",
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "ok b"}}},
-			}},
-			{OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: "id_c",
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "err c"}}},
-			}},
-			{OfToolResult: &anthropic.ToolResultBlockParam{
-				ToolUseID: "id_d",
-				Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "ok d"}}},
-			}},
-		},
-	}
+	user := &convpkg.Node{Msg: msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "id_a", Content: []msg.Block{msg.Text{Text: "err a"}}},
+		msg.ToolResult{ToolUseID: "id_b", Content: []msg.Block{msg.Text{Text: "ok b"}}},
+		msg.ToolResult{ToolUseID: "id_c", Content: []msg.Block{msg.Text{Text: "err c"}}},
+		msg.ToolResult{ToolUseID: "id_d", Content: []msg.Block{msg.Text{Text: "ok d"}}},
+	}}}
 
-	history := []store.Message{
-		{Ordinal: 0, Param: assistant},
-		{Ordinal: 1, Param: user},
-	}
-
-	result := mergeForRequest(history)
+	result, err := mergeForRequest([]*convpkg.Node{assistant, user})
+	c.Require().NoError(err)
 
 	// Assistant: 4 blocks — two kept (read, bash), two replaced with text
 	c.Eq(4, len(result[0].Content))
-	// Block 0: replaced (was id_a, now text)
 	c.True(result[0].Content[0].OfText != nil, "id_a replaced with text")
-	// Block 1: id_b kept
 	c.Eq("read", result[0].Content[1].OfToolUse.Name)
-	// Block 2: replaced (was id_c, now text)
 	c.True(result[0].Content[2].OfText != nil, "id_c replaced with text")
-	// Block 3: id_d kept
 	c.Eq("bash", result[0].Content[3].OfToolUse.Name)
 
 	// User: all four tool_results kept — error feedback preserved

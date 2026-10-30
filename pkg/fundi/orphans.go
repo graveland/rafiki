@@ -8,6 +8,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // RepairOrphans fixes the API-shape invariant an aborted mid-tool-execution
@@ -41,7 +42,7 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 
 	lastAssistant := -1
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Param.Role == anthropic.MessageParamRoleAssistant {
+		if history[i].Msg.Role == msg.Assistant {
 			lastAssistant = i
 			break
 		}
@@ -52,7 +53,7 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 
 	resolved := make(map[string]bool)
 	for _, m := range history[lastAssistant+1:] {
-		if m.Param.Role != anthropic.MessageParamRoleUser {
+		if m.Msg.Role != msg.User {
 			continue
 		}
 		for _, id := range m.ToolUseIDs {
@@ -61,9 +62,9 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 	}
 
 	var blocks []anthropic.ContentBlockParamUnion
-	for _, block := range history[lastAssistant].Param.Content {
-		tu := block.OfToolUse
-		if tu == nil || resolved[tu.ID] {
+	for _, block := range history[lastAssistant].Msg.Content {
+		tu, ok := block.(msg.ToolUse)
+		if !ok || resolved[tu.ID] {
 			continue
 		}
 		// A pre-fill's synthetic tool_use ids are never orphans to repair —

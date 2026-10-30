@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -123,7 +124,7 @@ func prefillSeedRows(path string) []llm.Message {
 
 // waitForPrefillDBRows polls the DB-backed history until it reaches wantRows
 // rows (concurrent-safe through pgx), bailing early on an agent_error frame.
-func waitForPrefillDBRows(t *testing.T, eng *Engine, out *syncBuffer, wantRows int) []store.Message {
+func waitForPrefillDBRows(t *testing.T, eng *Engine, out *syncBuffer, wantRows int) []*conv.Node {
 	t.Helper()
 	c := assert.NewAborting(t)
 	deadline := time.Now().Add(15 * time.Second)
@@ -335,13 +336,15 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 	c.Len(hist, 3, "history has %d rows, want exactly 3", len(hist))
 
 	// r2 was written by executing r1's inputs verbatim.
-	r1 := hist[1].Param.Content[0].OfToolUse
-	r2 := hist[2].Param.Content[0].OfToolResult
+	r1, ok := nodeToolUse(hist[1])
+	c.Require().True(ok, "r1 is not a tool_use row")
+	r2, ok := nodeToolResult(hist[2])
+	c.Require().True(ok, "r2 is not a tool_result row")
 	c.Eq(r1.ID, r2.ToolUseID, "r2 tool_use_id")
 	if !strings.HasPrefix(r1.ID, "prefill_") {
 		t.Fatalf("r1 id %q lacks the prefill_ prefix", r1.ID)
 	}
-	c.Eq("/tmp/a.txt body", r2.Content[0].OfText.Text, "r2 result")
+	c.Eq("/tmp/a.txt body", firstText(r2.Content), "r2 result")
 
 	mu.Lock()
 	c.False(len(readPaths) != 1 || readPaths[0] != "/tmp/a.txt", "read calls = %v, want exactly r1's input path", readPaths)
@@ -513,18 +516,18 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	hist := waitForPrefillDBRows(t, eng, out, 3)
 	c.Len(hist, 3, "history has %d rows, want exactly 3 — a 4th row would be boot repair's "+
 		"synthetic results landing beside the real r2", len(hist))
-	if hist[0].Param.Content[0].OfText == nil || hist[0].Param.Content[0].OfText.Text != PrefillPreamble {
-		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Param.Content)
+	if got := nodeText(hist[0]); got != PrefillPreamble {
+		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Msg.Content)
 	}
-	r1 := hist[1].Param.Content[0].OfToolUse
-	if r1 == nil || r1.ID != "prefill_0001" {
-		t.Fatalf("r1 block = %+v, want the seeded tool_use prefill_0001", hist[1].Param.Content[0])
+	r1, ok := nodeToolUse(hist[1])
+	if !ok || r1.ID != "prefill_0001" {
+		t.Fatalf("r1 block = %+v, want the seeded tool_use prefill_0001", hist[1].Msg.Content[0])
 	}
-	tr := hist[2].Param.Content[0].OfToolResult
-	if tr == nil || tr.ToolUseID != "prefill_0001" {
-		t.Fatalf("r2 block = %+v, want the pre-fill's tool_result for prefill_0001", hist[2].Param.Content[0])
+	tr, ok := nodeToolResult(hist[2])
+	if !ok || tr.ToolUseID != "prefill_0001" {
+		t.Fatalf("r2 block = %+v, want the pre-fill's tool_result for prefill_0001", hist[2].Msg.Content[0])
 	}
-	got := tr.Content[0].OfText.Text
+	got := firstText(tr.Content)
 	c.Eq("/tmp/a.txt body", got, "r2 result = %q, want the re-executed read output — a %q row here means "+
 		"boot repair fabricated results for a prefill_ id", got, "Tool execution aborted by user.")
 	mu.Lock()

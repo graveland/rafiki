@@ -16,6 +16,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -34,24 +38,16 @@ type Conversation struct {
 	ID     string
 	cfg    convConfig
 
-	// mem holds history when the client has no store: same loop semantics,
-	// no capture and no Resume (both need the DB). CLI-mode hosts use this.
-	mem []store.Message
-
 	// usedTokens is the total token count the last successful response
 	// reported (input + cache read + cache creation + output); 0 means "not
 	// known yet", which the compaction trigger reads as "estimate from bytes
 	// instead".
 	usedTokens int
-	// memHorizon is the index into mem of the current compaction summary row
-	// (0 = no compaction). loadHistory returns mem[memHorizon:], the working
-	// set; the DB path reads the tree's working path instead.
-	memHorizon int
 	// onCompact observes compaction boundaries; nil means no observer.
 	//
-	// usedTokens, memHorizon and onCompact are UNSYNCHRONISED: a Conversation
-	// is owned by one goroutine at a time (mem has the same property), so a
-	// caller must never run two sends concurrently.
+	// usedTokens and onCompact are UNSYNCHRONISED: a Conversation is owned by
+	// one goroutine at a time, so a caller must never run two sends
+	// concurrently.
 	onCompact func(CompactionEvent)
 
 	// compactSuppressBelow is the usedForCheck value below which proactive
@@ -253,7 +249,11 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	if c.capture == nil {
 		// Store-less (in-memory) conversation: full loop semantics, no
 		// capture and no Resume. ID is local-only.
-		return &Conversation{client: c, ID: "mem-" + randomID(), cfg: cfg}, nil
+		id := "mem-" + randomID()
+		if c.mem != nil {
+			c.mem.Ensure(id)
+		}
+		return &Conversation{client: c, ID: id, cfg: cfg}, nil
 	}
 	ref := capture.ConversationRef{
 		OriginEntrypoint: cfg.entrypoint, DrivenBy: string(store.DrivenByServer),
@@ -486,12 +486,18 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 			if err != nil {
 				return 0, nil, nil, "", false
 			}
-			msgs, rowStart := mergeForRequestRows(h)
+			msgs, rowStart, err := mergeForRequestRows(h)
+			if err != nil {
+				return 0, nil, nil, "", false
+			}
 			return nextOrdinal(h), msgs, rowStart, conv.requestHeadID(h), true
 		}
 	}
 
-	msgs, rowStart := mergeForRequestRows(history)
+	msgs, rowStart, err := mergeForRequestRows(history)
+	if err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
 	resp, _, err := conv.sendWithTrim(ctx, span, nextOrdinal(history), msgs, rowStart, conv.requestHeadID(history), scfg, onOverflow)
 	if err != nil {
 		return nil, err
@@ -521,7 +527,7 @@ func (conv *Conversation) OutputCap() int64 { return conv.cfg.maxTokens }
 
 // History returns the stored WORKING set: the path from the conversation's head
 // to its root — the agent loop's orphan-analysis input.
-func (conv *Conversation) History(ctx context.Context) ([]store.Message, error) {
+func (conv *Conversation) History(ctx context.Context) ([]*convpkg.Node, error) {
 	return conv.loadHistory(ctx)
 }
 
@@ -556,69 +562,69 @@ func (conv *Conversation) ResetResumeAttempts(ctx context.Context) error {
 // itself survives as a leaf of the tree, unreachable from the working path.
 // Refuses anything that is not the tail user row.
 func (conv *Conversation) RetractTailUser(ctx context.Context, id string) error {
-	if conv.client.messages == nil {
-		i := len(conv.mem) - 1
-		if i < 0 || conv.mem[i].ID != id || conv.mem[i].Param.Role != anthropic.MessageParamRoleUser {
-			return fmt.Errorf("llm: %s is not the tail user row", id)
-		}
-		conv.mem = conv.mem[:i]
-		return nil
-	}
-	return conv.client.messages.RetractHead(ctx, conv.ID, id)
+	return conv.handle().RetractHead(ctx, id)
 }
 
-// loadHistory reads the WORKING set through the storage seam: the path from the
-// conversation's head to its root (or, in memory, the slice from the compaction
-// horizon). store.Messages.Load is deliberately not called here: it returns the
-// full history, including the pre-compaction rows the working path no longer
-// reaches, and only GetHistory/rafiki logs want that.
-func (conv *Conversation) loadHistory(ctx context.Context) ([]store.Message, error) {
-	if conv.client.messages == nil {
-		return conv.mem[conv.memHorizon:], nil
-	}
-	return conv.client.messages.LoadWorking(ctx, conv.ID)
+// handle opens the conversation's handle. It is resolved on every call rather
+// than captured once: the lease is installed after Conversation() returns (the
+// engine build calls SetLease), and a handle freezes its fence at Open.
+func (conv *Conversation) handle() *convpkg.Handle {
+	return conv.client.convs.Open(conv.ID, convpkg.AsOwner(), convpkg.WithLease(conv.client.lease))
 }
 
-// appendMessage writes one message through the storage seam. The tree decides
-// identity, so a replayed node is matched by hash and returns the existing
-// row's identity instead of writing a second copy.
+// loadHistory reads the WORKING set: the path from the conversation's head to
+// its nearest root. The full tree is deliberately not read here — it includes
+// the pre-compaction rows the working path no longer reaches, and only
+// GetHistory/rafiki logs want that.
+func (conv *Conversation) loadHistory(ctx context.Context) ([]*convpkg.Node, error) {
+	return conv.handle().Working(ctx)
+}
+
+// appendMessage writes one message as the next node under the conversation's
+// head. The tree decides identity, so a replayed node is matched by hash and
+// returns the existing row's identity instead of writing a second copy.
 func (conv *Conversation) appendMessage(ctx context.Context, param anthropic.MessageParam, meta *store.AssistantMeta, providerID string) (store.Appended, error) {
-	if conv.client.messages == nil {
-		msg := store.Message{ID: randomID(), Ordinal: nextOrdinal(conv.mem), Param: param, ToolUseIDs: store.ToolUseIDsOf(param)}
-		if meta != nil {
-			msg.StopReason = meta.StopReason
-		}
-		conv.mem = append(conv.mem, msg)
-		return store.Appended{ID: msg.ID, CreatedAt: time.Now(), Ordinal: msg.Ordinal}, nil
+	message, err := msganthropic.FromParam(param)
+	if err != nil {
+		return store.Appended{}, fmt.Errorf("convert message: %w", err)
 	}
-	return conv.client.messages.AppendNode(ctx, conv.ID, param, meta, providerID)
+	node := convpkg.NewNode{Msg: message, ProviderMessageID: providerID}
+	if meta != nil {
+		node.StopReason = meta.StopReason
+		node.InputTokens = &meta.Input
+		node.OutputTokens = &meta.Output
+	}
+	res, err := conv.handle().Append(ctx, convpkg.Append{FromHead: true, Nodes: []convpkg.NewNode{node}})
+	if err != nil {
+		return store.Appended{}, err
+	}
+	n := res.Nodes[len(res.Nodes)-1]
+	return store.Appended{ID: n.ID, CreatedAt: n.CreatedAt, Ordinal: n.Ordinal, Depth: n.Depth}, nil
 }
 
 // SeedHistory idempotently persists msgs as the conversation's history from a
 // fresh root — the bridge for hosts carrying client-side history (e.g. a fundi
 // prefill, a Slack thread continuation). An existing prefix is matched by node
 // hash, so only the missing suffix is inserted and a partial earlier seed is
-// completed rather than duplicated. A store-less conversation has no hashes to
-// match on, so there ORDINAL PLACEMENT is the invariant: message i lands at
-// ordinal i, replacing whatever held that ordinal, so re-seeding a prefix is
-// equally a no-op.
+// completed rather than duplicated. Re-seeding a prefix therefore inserts
+// nothing and leaves the working set unchanged.
 func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
-	if conv.client.messages == nil {
-		for i, m := range msgs {
-			row := store.Message{ID: randomID(), Ordinal: i, Param: m, ToolUseIDs: store.ToolUseIDsOf(m)}
-			if i < len(conv.mem) {
-				// The row already at this ordinal keeps its identity: a re-seed
-				// of the same prefix must leave the history byte-identical, not
-				// merely the same length.
-				row.ID = conv.mem[i].ID
-				conv.mem[i] = row
-				continue
-			}
-			conv.mem = append(conv.mem, row)
-		}
+	if len(msgs) == 0 {
 		return nil
 	}
-	return conv.client.messages.SeedChain(ctx, conv.ID, msgs)
+	nodes := make([]convpkg.NewNode, len(msgs))
+	for i, m := range msgs {
+		message, err := msganthropic.FromParam(m)
+		if err != nil {
+			return fmt.Errorf("llm: seed history: convert message %d: %w", i, err)
+		}
+		nodes[i] = convpkg.NewNode{Msg: message}
+	}
+	_, err := conv.handle().Append(ctx, convpkg.Append{Root: convtree.RootKindRoot, Nodes: nodes})
+	if err != nil {
+		return fmt.Errorf("llm: seed history: %w", err)
+	}
+	return nil
 }
 
 func randomID() string {
@@ -629,16 +635,16 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// mergeForRequest converts stored rows to wire messages, merging CONSECUTIVE
+// mergeForRequest converts stored nodes to wire messages, merging CONSECUTIVE
 // user rows into one user message (per-tool tool_result rows → the single
 // user message the API requires after an assistant tool_use turn). Block
 // order within the merge follows row ordinal order.
 //
 // The merge rules live in mergeForRequestRows, which also reports where each
 // wire message began; a request that does not need the row mapping calls this.
-func mergeForRequest(history []store.Message) []Message {
-	msgs, _ := mergeForRequestRows(history)
-	return msgs
+func mergeForRequest(history []*convpkg.Node) ([]Message, error) {
+	msgs, _, err := mergeForRequestRows(history)
+	return msgs, err
 }
 
 // replaceEmptyToolUses replaces assistant tool_use blocks with empty names
@@ -800,11 +806,11 @@ func (conv *Conversation) sendMeta(ordinal int, scfg sendConfig) SendMeta {
 // estimate of the rows appended since it (tool results and steers not yet
 // sent); before any response (fresh or resumed) it is a byte estimate of the
 // working set plus the system prompt, since no usage figure exists yet.
-func (conv *Conversation) usedForCheck(history []store.Message) int {
+func (conv *Conversation) usedForCheck(history []*convpkg.Node) int {
 	if conv.usedTokens > 0 {
 		last := -1
-		for i, m := range history {
-			if m.Param.Role == anthropic.MessageParamRoleAssistant {
+		for i, n := range history {
+			if n.Msg.Role == msg.Assistant {
 				last = i
 			}
 		}
@@ -1023,7 +1029,7 @@ func blockWithCacheControl(b anthropic.ContentBlockParamUnion, cc anthropic.Cach
 	return b
 }
 
-func nextOrdinal(history []store.Message) int {
+func nextOrdinal(history []*convpkg.Node) int {
 	if len(history) == 0 {
 		return 0
 	}

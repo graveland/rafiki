@@ -15,6 +15,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -905,12 +906,12 @@ func (e *Engine) runSlash(text string, images []llm.UserImage) bool {
 
 // endsAtBoundary reports whether the working set's last row is a clear or
 // compaction-summary boundary: nothing after it for the model to answer.
-func endsAtBoundary(history []store.Message) bool {
+func endsAtBoundary(history []*conv.Node) bool {
 	if len(history) == 0 {
 		return false
 	}
 	last := history[len(history)-1]
-	return store.IsClearBoundary(last) || (last.Kind != nil && *last.Kind == store.KindCompactionSummary)
+	return conv.IsClearBoundary(last) || last.Kind == conv.KindCompactionSummary
 }
 
 // turnEnded reports how the turn just finished. Nil-safe: most callers

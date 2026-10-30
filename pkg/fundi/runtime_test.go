@@ -10,10 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/recall"
@@ -260,15 +259,18 @@ func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
 	hist, err := eng.conv.History(context.Background())
 	c.NoError(err, "history")
 	c.Len(hist, 3, "history has %d rows, want 3 (text prefill, task, reply)", len(hist))
-	row := hist[0].Param
-	c.False(row.Role != anthropic.MessageParamRoleUser || len(row.Content) != 1 || row.Content[0].OfText == nil, "prefill row = %+v, want one user text block", row.Content)
-	text := row.Content[0].OfText.Text
+	row := hist[0].Msg
+	c.False(row.Role != msg.User || len(row.Content) != 1, "prefill row = %+v, want one user text block", row.Content)
+	text := nodeText(hist[0])
 	if !strings.HasPrefix(text, PrefillTextPreamble) {
 		t.Fatalf("prefill row does not start with the text marker: %q", text)
 	}
 	c.StrContains(text, "=== a.txt ===\n     1\talpha line\n     2\tbeta line\n", "prefill row missing a.txt's header + numbered contents; got:\n")
 	for _, b := range row.Content {
-		c.False(b.OfToolUse != nil || b.OfToolResult != nil, "tool-less pre-fill row carries a tool block")
+		switch b.(type) {
+		case msg.ToolUse, msg.ToolResult:
+			t.Fatalf("tool-less pre-fill row carries a tool block: %T", b)
+		}
 	}
 }
 

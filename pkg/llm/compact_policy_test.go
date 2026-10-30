@@ -3,49 +3,34 @@
 package llm
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
-	"go.graveland.dev/rafiki/pkg/store"
+	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
 
-func cpUserText(text string) anthropic.MessageParam {
-	return anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: text}}},
-	}
+func cpUserText(text string) *convpkg.Node {
+	return &convpkg.Node{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: text}}}}
 }
 
-func cpAssistantText(text string) anthropic.MessageParam {
-	return anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleAssistant,
-		Content: []anthropic.ContentBlockParamUnion{{OfText: &anthropic.TextBlockParam{Text: text}}},
-	}
+func cpAssistantText(text string) *convpkg.Node {
+	return &convpkg.Node{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: text}}}}
 }
 
-func cpAssistantToolUse(id string) anthropic.MessageParam {
-	return anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleAssistant,
-		Content: []anthropic.ContentBlockParamUnion{{OfToolUse: &anthropic.ToolUseBlockParam{
-			ID:    id,
-			Name:  "bash",
-			Input: map[string]any{"command": "ls"},
-		}}},
-	}
+func cpAssistantToolUse(id string) *convpkg.Node {
+	return &convpkg.Node{Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: id, Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)},
+	}}}
 }
 
-func cpUserToolResult(id string) anthropic.MessageParam {
-	return anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{{OfToolResult: &anthropic.ToolResultBlockParam{
-			ToolUseID: id,
-			Content:   []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "output"}}},
-		}}},
-	}
+func cpUserToolResult(id string) *convpkg.Node {
+	return &convpkg.Node{Msg: msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: id, Content: []msg.Block{msg.Text{Text: "output"}}},
+	}}}
 }
 
 func TestCompactionPolicyZeroValueMeansDefaults(t *testing.T) {
@@ -89,11 +74,11 @@ func TestCompactionTailBudget(t *testing.T) {
 
 func TestCompactionCutTailNeverSplitsToolPair(t *testing.T) {
 	c := assert.NewAborting(t)
-	history := []store.Message{
-		{Ordinal: 0, Param: cpUserText("start")},
-		{Ordinal: 1, Param: cpAssistantToolUse("A")},
-		{Ordinal: 2, Param: cpUserToolResult("A")},
-		{Ordinal: 3, Param: cpAssistantText("done")},
+	history := []*convpkg.Node{
+		cpUserText("start"),
+		cpAssistantToolUse("A"),
+		cpUserToolResult("A"),
+		cpAssistantText("done"),
 	}
 	c.False(isLegalCut(history[2]), "a tool_result row is never a legal cut")
 
@@ -106,10 +91,10 @@ func TestCompactionCutTailNeverSplitsToolPair(t *testing.T) {
 
 func TestCompactionCutTailLegalStarts(t *testing.T) {
 	c := assert.NewAborting(t)
-	history := []store.Message{
-		{Ordinal: 0, Param: cpUserText("first")},
-		{Ordinal: 1, Param: cpAssistantText("second")},
-		{Ordinal: 2, Param: cpUserText("third")},
+	history := []*convpkg.Node{
+		cpUserText("first"),
+		cpAssistantText("second"),
+		cpUserText("third"),
 	}
 	// Index 0 is never a tail start, even when everything fits.
 	c.Eq(1, cutTail(history, estimateHistoryTokens(history)+1_000_000))
@@ -121,11 +106,11 @@ func TestCompactionCutTailLegalStarts(t *testing.T) {
 
 func TestCompactionCutTailEarliestFit(t *testing.T) {
 	c := assert.NewAborting(t)
-	history := []store.Message{
-		{Ordinal: 0, Param: cpUserText("zero")},
-		{Ordinal: 1, Param: cpAssistantText("one")},
-		{Ordinal: 2, Param: cpUserText("two")},
-		{Ordinal: 3, Param: cpAssistantText("three")},
+	history := []*convpkg.Node{
+		cpUserText("zero"),
+		cpAssistantText("one"),
+		cpUserText("two"),
+		cpAssistantText("three"),
 	}
 	c.True(isLegalCut(history[1]) && isLegalCut(history[2]) && isLegalCut(history[3]))
 
@@ -137,10 +122,10 @@ func TestCompactionCutTailEarliestFit(t *testing.T) {
 
 func TestCompactionCutTailEmptyWhenNothingFits(t *testing.T) {
 	c := assert.NewAborting(t)
-	history := []store.Message{
-		{Ordinal: 0, Param: cpUserText("zero")},
-		{Ordinal: 1, Param: cpAssistantText("one")},
-		{Ordinal: 2, Param: cpUserText("two")},
+	history := []*convpkg.Node{
+		cpUserText("zero"),
+		cpAssistantText("one"),
+		cpUserText("two"),
 	}
 	lastSuffix := estimateHistoryTokens(history[len(history)-1:])
 	c.Eq(len(history), cutTail(history, 0))
@@ -182,9 +167,34 @@ func TestCompactionExtractSummary(t *testing.T) {
 func TestCompactionSummaryMessageIsUserText(t *testing.T) {
 	c := assert.NewAborting(t)
 	m := summaryMessage("the summary")
-	c.Eq(anthropic.MessageParamRoleUser, m.Role)
+	c.Eq(msg.User, m.Role)
 	c.Len(m.Content, 1)
-	c.NotNil(m.Content[0].OfText)
-	c.Eq(summaryFraming+"the summary", m.Content[0].OfText.Text)
-	c.True(strings.HasPrefix(m.Content[0].OfText.Text, summaryFraming))
+	text, ok := m.Content[0].(msg.Text)
+	c.Require().True(ok, "the summary is not a text block")
+	c.Eq(summaryFraming+"the summary", text.Text)
+	c.True(strings.HasPrefix(text.Text, summaryFraming))
+}
+
+// TestEstimateTokensNative pins the byte estimate: stored content plus the
+// role plus the request envelope {"role":"","content":}, four bytes per token.
+// It is computed from the stored bytes rather than by re-marshalling the
+// message, so it costs nothing on a node the cache already holds.
+func TestEstimateTokensNative(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.Eq(24, envelopeBytes, "the request envelope is {\"role\":\"\",\"content\":}")
+
+	short := &convpkg.Node{
+		Msg:     msg.Message{Role: msg.User},
+		Content: []byte(`[{"type":"text","text":"hi"}]`),
+	}
+	c.Eq(15, estimateTokens(short), "user, 29 stored bytes")
+
+	empty := &convpkg.Node{Msg: msg.Message{Role: msg.User}}
+	c.Eq(7, estimateTokens(empty), "user, no stored bytes")
+
+	long := &convpkg.Node{
+		Msg:     msg.Message{Role: msg.Assistant},
+		Content: []byte(strings.Repeat("x", 400)),
+	}
+	c.Eq(109, estimateTokens(long), "assistant, 400 stored bytes")
 }

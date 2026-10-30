@@ -18,6 +18,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
@@ -718,15 +719,14 @@ func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
 	history, err := eng.conv.History(ctx)
 	c.NoError(err)
 	last := history[len(history)-1]
-	c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "trailing history row role")
-	c.Len(last.Param.Content, 1, "trailing row has %d blocks, want 1 synthesized tool_result", len(last.Param.Content))
-	tr := last.Param.Content[0].OfToolResult
-	if tr == nil || tr.ToolUseID != "tu_1" {
-		t.Fatalf("trailing block = %+v, want a tool_result for tu_1", last.Param.Content[0])
+	c.Eq(msg.User, last.Msg.Role, "trailing history row role")
+	c.Len(last.Msg.Content, 1, "trailing row has %d blocks, want 1 synthesized tool_result", len(last.Msg.Content))
+	tr, ok := nodeToolResult(last)
+	if !ok || tr.ToolUseID != "tu_1" {
+		t.Fatalf("trailing block = %+v, want a tool_result for tu_1", last.Msg.Content[0])
 	}
-	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
-	if len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
-		tr.Content[0].OfText.Text != "Tool execution aborted by user." {
+	c.True(tr.IsError, "synthesized tool_result is not marked IsError")
+	if len(tr.Content) != 1 || firstText(tr.Content) != "Tool execution aborted by user." {
 		t.Fatalf("synthesized tool_result content = %+v, want the standard abort text", tr.Content)
 	}
 }
@@ -938,15 +938,15 @@ func TestWorkerWaitsForStart(t *testing.T) {
 	hist, err := eng.conv.History(context.Background())
 	c.NoError(err, "history after Start()")
 	c.Len(hist, 5, "history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
-	if hist[0].Param.Content[0].OfText == nil || hist[0].Param.Content[0].OfText.Text != PrefillPreamble {
-		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Param.Content)
+	if got := nodeText(hist[0]); got != PrefillPreamble {
+		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Msg.Content)
 	}
-	if tu := hist[1].Param.Content[0].OfToolUse; tu == nil || tu.ID != "prefill_0001" {
-		t.Fatalf("r1 block = %+v, want the pre-fill's tool_use prefill_0001", hist[1].Param.Content[0])
+	if tu, ok := nodeToolUse(hist[1]); !ok || tu.ID != "prefill_0001" {
+		t.Fatalf("r1 block = %+v, want the pre-fill's tool_use prefill_0001", hist[1].Msg.Content)
 	}
-	if tr := hist[2].Param.Content[0].OfToolResult; tr == nil || tr.ToolUseID != "prefill_0001" ||
-		tr.Content[0].OfText == nil || tr.Content[0].OfText.Text != "/tmp/a.txt body" {
-		t.Fatalf("r2 block = %+v, want the pre-fill's real tool_result", hist[2].Param.Content[0])
+	if tr, ok := nodeToolResult(hist[2]); !ok || tr.ToolUseID != "prefill_0001" ||
+		firstText(tr.Content) != "/tmp/a.txt body" {
+		t.Fatalf("r2 block = %+v, want the pre-fill's real tool_result", hist[2].Msg.Content)
 	}
 	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
