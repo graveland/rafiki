@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package conv_test
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/convtree"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
+)
+
+// textMsg is a one-block message.
+func textMsg(role msg.Role, text string) msg.Message {
+	return msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: text}}}
+}
+
+// newConv returns a memory backend and a freshly created conversation id.
+func newConv(t *testing.T) (*conv.MemBackend, string) {
+	t.Helper()
+	b := conv.NewMemBackend()
+	id := uuid.Must(uuid.NewV7()).String()
+	b.Ensure(id)
+	return b, id
+}
+
+// nodeIDs returns nodes' ids in the order given.
+func nodeIDs(nodes []*conv.Node) []string {
+	out := make([]string, len(nodes))
+	for i, n := range nodes {
+		out[i] = n.ID
+	}
+	return out
+}
+
+// ordinals returns nodes' ordinals in the order given.
+func ordinals(nodes []*conv.Node) []int {
+	out := make([]int, len(nodes))
+	for i, n := range nodes {
+		out[i] = n.Ordinal
+	}
+	return out
+}
+
+// intPtr returns a pointer to v, for a PageQuery or trim bound.
+func intPtr(v int) *int { return &v }
+
+// historyIDs returns a snapshot's node ids, chronological.
+func historyIDs(sn *conv.Snapshot) []string {
+	out := []string{}
+	for n := range sn.History() {
+		out = append(out, n.ID)
+	}
+	return out
+}
+
+// transcriptIDs returns a snapshot's transcript ids, chronological.
+func transcriptIDs(sn *conv.Snapshot) []string {
+	out := []string{}
+	for n := range sn.Transcript() {
+		out = append(out, n.ID)
+	}
+	return out
+}
+
+// recorder wraps a Backend and records the ids a Fetch was asked for.
+type recorder struct {
+	conv.Backend
+	mu    sync.Mutex
+	fetch [][]string
+	state int
+	walk  int
+}
+
+func (r *recorder) State(ctx context.Context, convID string) (conv.State, error) {
+	r.mu.Lock()
+	r.state++
+	r.mu.Unlock()
+	return r.Backend.State(ctx, convID)
+}
+
+func (r *recorder) Walk(ctx context.Context, convID, fromID string, crossRoots bool) ([]conv.Ref, error) {
+	r.mu.Lock()
+	r.walk++
+	r.mu.Unlock()
+	return r.Backend.Walk(ctx, convID, fromID, crossRoots)
+}
+
+func (r *recorder) Fetch(ctx context.Context, convID string, ids []string) ([]*conv.Node, error) {
+	r.mu.Lock()
+	r.fetch = append(r.fetch, append([]string(nil), ids...))
+	r.mu.Unlock()
+	return r.Backend.Fetch(ctx, convID, ids)
+}
+
+func (r *recorder) fetched() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.fetch...)
+}
+
+func (r *recorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fetch = nil
+	r.state = 0
+	r.walk = 0
+}
+
+// conflictOnce moves the head underneath the first Commit it receives and
+// reports a conflict, then behaves normally.
+type conflictOnce struct {
+	conv.Backend
+	mu    sync.Mutex
+	hooks []func() error
+	fired int
+}
+
+func (b *conflictOnce) Commit(ctx context.Context, commit conv.Commit) (time.Time, error) {
+	b.mu.Lock()
+	if b.fired < len(b.hooks) {
+		hook := b.hooks[b.fired]
+		b.fired++
+		b.mu.Unlock()
+		if err := hook(); err != nil {
+			return time.Time{}, err
+		}
+		return time.Time{}, conv.ErrConflict
+	}
+	b.mu.Unlock()
+	return b.Backend.Commit(ctx, commit)
+}
+
+// failingCommit is a backend whose Commit always answers err.
+type failingCommit struct {
+	conv.Backend
+	mu      sync.Mutex
+	calls   int
+	failure error
+}
+
+func (b *failingCommit) Commit(context.Context, conv.Commit) (time.Time, error) {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	return time.Time{}, b.failure
+}
+
+func (b *failingCommit) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// storedNode builds a node the way a backend holds one, for tests that write
+// through Commit directly.
+func storedNode(t *testing.T, convID, parentID string, slot convtree.Hash, role msg.Role, text string, ordinal, depth int) *conv.Node {
+	t.Helper()
+	message := textMsg(role, text)
+	content, err := msganthropic.EncodeContent(message)
+	if err != nil {
+		t.Fatalf("encode content: %v", err)
+	}
+	hashes, err := convtree.Chain(slot, []convtree.Msg{{Role: role.String(), Content: content}})
+	if err != nil {
+		t.Fatalf("hash chain: %v", err)
+	}
+	return &conv.Node{
+		Ref: conv.Ref{
+			ID:             uuid.Must(uuid.NewV7()).String(),
+			ConversationID: convID,
+			ParentID:       parentID,
+			Ordinal:        ordinal,
+			Depth:          depth,
+			PathHash:       hashes[0],
+		},
+		Msg:     message,
+		Content: content,
+	}
+}
