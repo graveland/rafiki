@@ -677,9 +677,10 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.sandboxBootTime = time.Now()
 	ctrl.streamRevoke = streamRevoke
 	ctrl.providerCreds = creds
-	// The daemon's one conversation store, so a fundi child's llm.Client opens
-	// conversations through the same cache the proxy face captures into.
-	ctrl.convs = convs
+	// The daemon's one conversation store: this Controller's capture store and
+	// every fundi child's llm.Client go through the same cache the proxy face
+	// captures into.
+	ctrl.setConvStore(convs)
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	ctrl.SetProviderGuard(guard)

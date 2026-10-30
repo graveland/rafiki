@@ -53,6 +53,11 @@ func (s *CaptureStore) WithConv(cs *conv.Store) *CaptureStore {
 	return &cp
 }
 
+// ConvStore returns the conversation store this capture store attaches and
+// appends through. It exists so a caller that shares ONE store across a process
+// can prove every capture path got that instance; nothing branches on it.
+func (s *CaptureStore) ConvStore() *conv.Store { return s.convs }
+
 // handle opens convID on the conversation store as a READER: capture writes are
 // fenced by the lease but it never declares ownership of the conversation, which
 // is claude's to claim.

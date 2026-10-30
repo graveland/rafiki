@@ -109,10 +109,11 @@ type Controller struct {
 	captureStore *capture.CaptureStore
 
 	// convs is the daemon's one conversation store (newConvStore, built beside
-	// the pool in main.go): the node cache every in-process fundi child opens
-	// its conversations through, so a turn this daemon captured is already
-	// cached for the child that resumes it. Nil in a fixture, where each client
-	// keeps llm's private default.
+	// the pool in main.go), attached by setConvStore: the node cache this
+	// Controller's capture store writes through and every in-process fundi
+	// child's llm.Client opens its conversations through, so a turn captured
+	// here is already cached for the child that resumes it. Nil in a fixture,
+	// where each client keeps llm's private default.
 	convs *conv.Store
 
 	// children is the durable child-state store. Nil when pool is nil, which
@@ -933,6 +934,23 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		c.reviewInsights = insights.New(pool)
 	}
 	return c
+}
+
+// setConvStore attaches the daemon's one conversation store: the cache this
+// Controller's capture store writes through, and the store every in-process
+// child's llm.Client opens conversations through (agentRuntimeOptionsFor).
+//
+// It must move clearMarker with captureStore — both point at the same capture
+// store, and a /clear marker written through a stale one would land in a cache
+// no reader consults. A nil cs (a fixture with no daemon store) leaves both
+// alone: there is nothing to share.
+func (c *Controller) setConvStore(cs *conv.Store) {
+	c.convs = cs
+	if cs == nil || c.captureStore == nil {
+		return
+	}
+	c.captureStore = c.captureStore.WithConv(cs)
+	c.clearMarker = c.captureStore
 }
 
 // taskStore returns a task ledger or nil when there is no database.

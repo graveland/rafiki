@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/conv/convtest"
@@ -62,6 +63,31 @@ func TestConversationHistoryHitsCacheBetweenIterations(t *testing.T) {
 	counts := counting.Counts()
 	c.Eq(0, counts["Walk"], "the second iteration walked the backend")
 	c.Eq(0, counts["Fetch"], "the second iteration fetched nodes")
+}
+
+// TestNewClientWithConvStoreBuildsNoSecondStore pins the daemon's one-store
+// rule at the client: WithConvStore must leave exactly the caller's store
+// behind. The capture store used to build one of its own even when the caller
+// shared theirs, which cached the same nodes twice and left the shared cache
+// blind to everything capture wrote.
+func TestNewClientWithConvStoreBuildsNoSecondStore(t *testing.T) {
+	c := assert.NewAborting(t)
+	// Parsed, never connected: NewClient only stores the pool, and capture's
+	// construction queries nothing.
+	pool, err := pgxpool.New(context.Background(), "postgres://nobody:secret@127.0.0.1:1/conv_store_test")
+	c.NoError(err, "pgxpool.New parses the DSN without dialling")
+	t.Cleanup(pool.Close)
+
+	shared := convpkg.NewStore(convpkg.NewMemBackend(), convpkg.Options{})
+	cl, err := NewClient(
+		WithStore(pool),
+		WithConvStore(shared),
+		WithLogger(testLogger(t)),
+	)
+	c.NoError(err, "NewClient")
+	c.Eq(shared, cl.convs, "the client keeps the caller's store")
+	c.NotNil(cl.capture, "a pool builds the capture store")
+	c.Eq(shared, cl.capture.ConvStore(), "capture shares it — a private one would be a second cache")
 }
 
 // leaseLostBackend is a conversation backend whose writes always report the

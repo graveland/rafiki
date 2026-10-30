@@ -139,6 +139,12 @@ type proxyFace struct {
 	// there is no pool.
 	QuotaStore *quota.Store
 
+	// captureStore is the store this face captures turns into, retained so the
+	// daemon's one-conversation-store invariant is assertable from a test (see
+	// TestConvStoreSharedByControllerAndProxyFace) rather than only readable in
+	// this file. Nil when there is no pool.
+	captureStore *capture.CaptureStore
+
 	// TokenAuth is the same identity resolver the TCP/TLS face requires a
 	// credential through, exposed so the UDS Connect listener can OPTIONALLY
 	// resolve identity too (see UserTokenAuth.IdentifyStrict, used by the
@@ -492,16 +498,17 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		return nil, fmt.Errorf("resolve proxy port from %s: %w", ln.Addr(), err)
 	}
 	f := &proxyFace{
-		URL:        "http://127.0.0.1:" + port,
-		Token:      token,
-		srv:        srv,
-		Handler:    mux,
-		Control:    connectServer,
-		MCP:        mcpFace,
-		QuotaStore: quotaStore,
-		TokenAuth:  tokenAuth,
-		messages:   messages,
-		LLM:        client,
+		URL:          "http://127.0.0.1:" + port,
+		Token:        token,
+		srv:          srv,
+		Handler:      mux,
+		Control:      connectServer,
+		MCP:          mcpFace,
+		QuotaStore:   quotaStore,
+		TokenAuth:    tokenAuth,
+		messages:     messages,
+		LLM:          client,
+		captureStore: captureStore,
 	}
 	logger.Info("proxy face listening",
 		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)

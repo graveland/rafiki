@@ -273,6 +273,14 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 			c.convs = convpkg.NewStore(c.mem, convpkg.Options{})
 		}
 	}
+	// The capture store shares this client's conversation store — the caller's
+	// when WithConvStore set one, this client's private default otherwise — so a
+	// node written through capture is cached once, for the same reader that
+	// replays it. Attached AFTER the default above, which is what keeps the
+	// no-option path at one store too.
+	if c.capture != nil {
+		c.capture = c.capture.WithConv(c.convs)
+	}
 	c.modelGate = NewModelGate(10*time.Second, 300*time.Second)
 	return c, nil
 }
