@@ -129,7 +129,8 @@ stored history, so they are replayed with everything else, but they are not
 conversation and the transcript hides them until you press `^T`. Hiding is a
 view decision: the messages stay in the transcript already fetched, so the
 toggle costs no refetch, and scrolling and the position readout are
-unaffected either way.
+unaffected either way. A transcript whose ONLY blocks are injected says
+`N injected hidden — ^T` instead of claiming the conversation is empty.
 
 ## Activity and attention
 

@@ -2886,15 +2886,31 @@ func (c *Cockpit) View() tea.View {
 		// created agent until it is asked something. The renderer used to
 		// answer it with "Connecting…", so the pane claimed to be connecting
 		// forever two rows above a status line reading "connected".
-		if lines != nil && len(lines) == 0 {
-			conv = styleMeta.Render("No messages yet — type below and press " +
-				c.keys.Send.Help().Key + " to start.")
-			break
-		}
+		//
+		// Emptiness is read from the VIEWPORT, not from `lines`: a cache hit
+		// returns nil, meaning the pane already shows whatever it was last
+		// given, so only the drawn result answers "is there anything on
+		// screen".
 		if lines != nil {
 			c.syncViewport(p, lines)
 		}
 		conv = p.vp.View()
+		if strings.TrimSpace(ansi.Strip(conv)) == "" {
+			// "No messages yet" would be a lie when the transcript holds only
+			// injected blocks: there IS content, the filter is hiding it. Say
+			// how much, and name the key that shows it.
+			switch n := hiddenInjectedCount(s.Blocks, c.showInjected); {
+			case n > 0:
+				conv = styleMeta.Render(itoa(int64(n)) + " injected hidden — " +
+					c.keys.ToggleInjected.Help().Key)
+			case !c.historyInFlight[f]:
+				// Blank while a fetch is in flight: the blocks are on their
+				// way, and the pane should not describe a conversation it has
+				// not read yet.
+				conv = styleMeta.Render("No messages yet — type below and press " +
+					c.keys.Send.Help().Key + " to start.")
+			}
+		}
 	default:
 		conv = styleMeta.Render("loading…")
 	}

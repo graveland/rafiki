@@ -110,6 +110,14 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 	p.renderer.smallIDs = opts.smallIDs
 	p.renderer.showInjected = opts.showInjected
 	lines := p.renderer.Lines(s.Blocks, s.Finalized, width)
+	// The renderer answers "nothing to draw" with nil, which is also this
+	// function's "nothing to do". Past the signature check this is a FRESH
+	// render, so an empty result means the transcript has no lines -- say so
+	// with an empty slice, or a pane whose every block is filtered out keeps
+	// the rows it drew last frame.
+	if lines == nil {
+		lines = []string{}
+	}
 	if len(ghost) == 0 {
 		return lines
 	}

@@ -703,13 +703,34 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	return sb.String()
 }
 
+// hidesBlock reports whether b is left out of the transcript in the given
+// mode. It is the ONE filter predicate: Lines skips blocks with it, and the
+// cockpit counts what it is hiding with it, so the pane and its copy cannot
+// disagree about what the toggle would reveal.
+func hidesBlock(b session.Block, showInjected bool) bool {
+	return b.Kind == session.KindInjected && !showInjected
+}
+
+// hiddenInjectedCount is how many of blocks the mode hides. Derived at render
+// time from the blocks themselves: a stored count would be a second thing to
+// keep true.
+func hiddenInjectedCount(blocks []session.Block, showInjected bool) int {
+	var n int
+	for _, b := range blocks {
+		if hidesBlock(b, showInjected) {
+			n++
+		}
+	}
+	return n
+}
+
 // hides reports whether b is left out of the transcript in the current mode.
 //
 // Only injected blocks can be hidden, and the toggle is the only input. The
 // block is never removed from the session: a hidden block is one the layout
 // skipped, so re-showing it costs no refetch.
 func (r *renderer) hides(b session.Block) bool {
-	return b.Kind == session.KindInjected && !r.showInjected
+	return hidesBlock(b, r.showInjected)
 }
 
 // Lines renders the transcript as display lines: cached output for the

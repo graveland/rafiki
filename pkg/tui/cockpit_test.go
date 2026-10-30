@@ -1940,15 +1940,28 @@ func TestShortTranscriptIsBottomAnchored(t *testing.T) {
 
 // paneWithContent gives the focused pane more lines than fit, so scroll
 // position is observable.
+//
+// The lines come from the SESSION and are rendered, never hand-filled into the
+// viewport: the pane is derived from the session on every render, so a
+// directly seeded viewport is wiped by the next View. KindSystem blocks render
+// one line each, which keeps the pane's content length equal to the block
+// count and the readout's total readable below.
 func paneWithContent(t *testing.T, c *Cockpit) *paneState {
 	t.Helper()
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	lines := make([]string, 200)
-	for i := range lines {
-		lines[i] = "line " + strconv.Itoa(i)
+	s := c.sessions["c_1"]
+	if s == nil {
+		s = session.New("c_1")
+		c.sessions["c_1"] = s
 	}
+	for i := 0; i < 200; i++ {
+		s.Blocks = append(s.Blocks, session.Block{
+			Kind: session.KindSystem, Text: "line " + strconv.Itoa(i), Final: true,
+		})
+	}
+	s.Finalized = len(s.Blocks)
 	p := c.pane("c_1")
-	c.syncViewport(p, lines)
+	c.View()
 	p.vp.GotoBottom()
 	return p
 }
@@ -2998,4 +3011,43 @@ func TestHelpShowsInjectedToggle(t *testing.T) {
 	h := c.keys.ToggleInjected.Help()
 	ck.StrContains(help, h.Key, "the help overlay does not name the injected toggle's key:\n")
 	ck.StrContains(help, h.Desc, "the help overlay does not describe the injected toggle:\n")
+}
+
+// An empty pane has two very different causes, and the copy must not confuse
+// them. A transcript holding ONLY injected blocks has content -- the filter is
+// hiding it -- so "No messages yet" would be a lie; the pane names the count
+// and the key instead, and ^T then draws the blocks. A conversation with no
+// blocks at all keeps the "No messages yet" line.
+func TestCockpitNamesWhatItHidesWhenNothingElseIsLeft(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.focusChild = "c_1"
+	c.applyEvent(systemMessageEventFor("c_1", "heartbeat: keep going"))
+	c.applyEvent(systemMessageEventFor("c_1", "env: cwd=/work"))
+
+	view := ansi.Strip(c.View().Content)
+	ck.StrContains(view, "2 injected hidden", "an all-injected transcript must say how much it hides:\n")
+	ck.StrContains(view, c.keys.ToggleInjected.Help().Key, "the hidden-count line must name the key that shows them:\n")
+	ck.NotStrContains(view, "No messages yet", "the pane claimed an all-injected transcript is empty:\n")
+
+	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	view = ansi.Strip(c.View().Content)
+	ck.StrContains(view, "heartbeat: keep going", "^T did not draw the injected blocks:\n")
+	ck.StrContains(view, "env: cwd=/work", "^T did not draw every injected block:\n")
+	ck.NotStrContains(view, "injected hidden", "the hidden-count line survived ^T:\n")
+
+	// Hiding them again must CLEAR the pane. A renderer with nothing to draw
+	// returns no lines, and a pane that keeps the rows it drew last frame shows
+	// blocks the filter says are hidden.
+	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	view = ansi.Strip(c.View().Content)
+	ck.NotStrContains(view, "heartbeat", "^T hid the blocks in the model but left them on screen:\n")
+	ck.StrContains(view, "2 injected hidden", "the pane did not go back to naming what it hides:\n")
+
+	empty := newTestCockpit("c_2")
+	empty.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	ck.StrContains(ansi.Strip(empty.View().Content), "No messages yet",
+		"a conversation with no blocks at all must keep the empty copy:\n")
 }
