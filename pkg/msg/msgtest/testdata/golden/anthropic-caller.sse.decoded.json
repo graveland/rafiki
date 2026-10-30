@@ -1,0 +1,25 @@
+{
+  "id": "msg_caller",
+  "model": "claude-sonnet-4-5",
+  "stop_reason": "tool_use",
+  "provider": "Together",
+  "usage": {
+    "input": 80,
+    "output": 9,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "content": [
+    {
+      "caller": {
+        "type": "direct"
+      },
+      "id": "toolu_02",
+      "input": {
+        "prompt": "run"
+      },
+      "name": "mcp__rafiki__agent_spawn",
+      "type": "tool_use"
+    }
+  ]
+}

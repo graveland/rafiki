@@ -1,0 +1,58 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "source": {
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "media_type": "image/png",
+            "type": "base64"
+          },
+          "type": "image"
+        },
+        {
+          "text": "what is this",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "toolu_img",
+          "input": {
+            "path": "a"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "tool_use_id": "toolu_img",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "content": [
+            {
+              "source": {
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+                "media_type": "image/png",
+                "type": "base64"
+              },
+              "type": "image"
+            }
+          ],
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model"
+}

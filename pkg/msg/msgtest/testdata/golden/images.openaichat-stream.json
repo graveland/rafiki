@@ -1,0 +1,29 @@
+{
+  "model": "test-model",
+  "max_tokens": 1024,
+  "stream": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "what is this"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "toolu_img",
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "arguments": "{\"path\":\"a\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "",
+      "tool_call_id": "toolu_img"
+    }
+  ]
+}

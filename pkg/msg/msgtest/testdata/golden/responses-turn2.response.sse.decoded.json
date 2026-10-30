@@ -1,0 +1,13 @@
+{
+  "id": "resp_05b3eac196d9a636016ae17d79f154819b9400d48d5be648db",
+  "model": "gpt-6.1-sol",
+  "stop_reason": "end_turn",
+  "provider": "",
+  "usage": {
+    "input": 4172,
+    "output": 31,
+    "cache_read": 9856,
+    "cache_write": 0
+  },
+  "content": []
+}

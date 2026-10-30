@@ -1,0 +1,76 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "read a",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "looking",
+          "type": "text"
+        },
+        {
+          "id": "toolu_1",
+          "input": {
+            "path": "a"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "tool_use_id": "toolu_1",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "content": [
+            {
+              "text": "contents",
+              "type": "text"
+            }
+          ],
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "temperature": 0.2,
+  "tools": [
+    {
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file",
+      "description": "Read a file from disk."
+    },
+    {
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_dir",
+      "description": "List a directory."
+    }
+  ]
+}

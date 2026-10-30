@@ -1,0 +1,32 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "signature": "sig-a",
+          "thinking": "a",
+          "type": "thinking"
+        },
+        {
+          "text": "done",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "continue",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model"
+}

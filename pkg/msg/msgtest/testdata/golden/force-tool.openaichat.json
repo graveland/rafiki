@@ -1,0 +1,48 @@
+{
+  "model": "test-model",
+  "max_tokens": 1024,
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "read a"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file from disk.",
+        "parameters": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_dir",
+        "description": "List a directory.",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "function",
+    "function": {
+      "name": "read_file"
+    }
+  }
+}

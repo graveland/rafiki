@@ -1,0 +1,47 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "read a",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "tool_choice": {
+    "name": "read_file",
+    "type": "tool"
+  },
+  "tools": [
+    {
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file",
+      "description": "Read a file from disk."
+    },
+    {
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_dir",
+      "description": "List a directory."
+    }
+  ]
+}

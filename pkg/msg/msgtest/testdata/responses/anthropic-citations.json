@@ -1,0 +1,31 @@
+{
+  "id": "msg_citations",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "the cited claim",
+      "citations": [
+        {
+          "type": "char_location",
+          "cited_text": "the source",
+          "document_index": 0,
+          "document_title": "a doc",
+          "start_char_index": 0,
+          "end_char_index": 10
+        }
+      ]
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 50,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 12
+  },
+  "provider": "Together"
+}

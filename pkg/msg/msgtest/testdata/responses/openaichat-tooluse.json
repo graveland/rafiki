@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-tooluse",
+  "object": "chat.completion",
+  "created": 1793166832,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Let me look.",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "arguments": "{\"path\":\"a\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 100,
+    "completion_tokens": 25,
+    "total_tokens": 125,
+    "prompt_tokens_details": {
+      "cached_tokens": 40
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 3
+    }
+  }
+}

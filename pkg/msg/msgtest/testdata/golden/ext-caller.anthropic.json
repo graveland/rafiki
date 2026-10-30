@@ -1,0 +1,76 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "start",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "cited",
+          "citations": [
+            {
+              "cited_text": "c",
+              "document_index": 0,
+              "end_char_index": 1,
+              "start_char_index": 0,
+              "type": "char_location"
+            }
+          ],
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "go on",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "toolu_9",
+          "input": {
+            "path": "b"
+          },
+          "name": "read_file",
+          "caller": {
+            "type": "direct"
+          },
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "tool_use_id": "toolu_9",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "content": [
+            {
+              "text": "x",
+              "type": "text"
+            }
+          ],
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model"
+}

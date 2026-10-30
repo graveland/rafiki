@@ -1,0 +1,27 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "hello",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "system": [
+    {
+      "text": "You are terse.",
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "type": "text"
+    }
+  ]
+}

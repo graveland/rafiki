@@ -1,0 +1,52 @@
+{
+  "model": "test-model",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "read a"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "read_file",
+      "description": "Read a file from disk.",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": false
+    },
+    {
+      "type": "function",
+      "name": "list_dir",
+      "description": "List a directory.",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "strict": false
+    }
+  ],
+  "tool_choice": {
+    "type": "function",
+    "name": "read_file"
+  },
+  "parallel_tool_calls": true,
+  "max_output_tokens": 1024,
+  "stream": false,
+  "prompt_cache_key": "sess-1"
+}

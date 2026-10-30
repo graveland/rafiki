@@ -1,0 +1,27 @@
+{
+  "id": "resp_0cf3ceb209f8671c016ae18df08954819ba356b3c5b74b1d53",
+  "model": "gpt-6.1-sol",
+  "stop_reason": "tool_use",
+  "provider": "",
+  "usage": {
+    "input": 100,
+    "output": 35,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "",
+      "signature": "openai-responses:api:rs_0cf3ceb209f8671c016ae18df1d0b8819baece265f64916983:gAAAAABq4Y3y80w9JPKq59ZESKOW6NEtXPfv2fbx5Oh6-BtjZe0P5WyagYTezvKw-bMnJ-86AIXK1xPlZpvTaRs-TP0AIaevZBkqdj-coWZNj6LxSqLCdEmX7YQ_cE9oZyKqW7FpvRXCUnoxTGbi5Dh7TPh4wivf9pB9oFlBLZo3pHXJ8_OJ3M4WK2qTkk4lO7uP-kLgYAm7dxfnduPt5tWOFkXCWLmG1PgtkgUKosEDXz23lNqbF6vcH8l8cDia0xzZA6657zMg44YL6x2ISPF_qIK8u1OHy3A6mhXw8D4AOq0vX_6qRQq5qakMOzUyB9B-FBqmq1hRLh8HMLRpxG-ONSWYxDEsTwKQmwnbkMJUqXYysTRRTPl_0-dGizs5Ls2_B8G-OVTpiNTmQquJd_FryphE5MbNhs_5iWwj3YYzviGiL9FIuEo2Y_JY2VQ2x9bw-UNO1gB4WuuMp0iU6X0l_y8K82A2N-ZOoyQMkhTESVM_LSvD3QXe9mVOVCS-PMiAcw-kpoj5OA2v_krSx7xEOeTE0fTksPJI7kWFhPYg1XIX2v7eIoLLHLa8igFaE_Bkqj7XFEuviQMG3NemTpR7gXU8XrqUzUETLjeyIk3ZGKV4FtNAW2J6A4Mfl7PRpac6gm1OkClEN28Z-wCDBa8AXvfbB_13BUr65ADtefC45EUYIEUcMLaLev0Z01gs3hPQUoyowNwID-yYGBeKi6srO47XxPNSJdGWDLgtcJWlwOM94q2gkvKlVpvhk7jfR1Uz9hCizBKFVZQLhQ4O0s5hpcpBflF5aL4JuL-kpPACoiva7tUnmSlnqcFKuHm2XeUvpC3ctcDhAPK8UL3_tux8BXuZ4KuGLdjGcZ_XRhNYdzj0lZiMk7wuqiaaAXFNM2RbWUSzlk3snAreXJqSLkY0f2nVeuq2LWtpaO1hVLOiTW_z3drBQegLxdZOfnOnFcg200S6bwsDmueGG4ZfbaPaxINYNSQwrChP6Vnr_AmquRNiX0XFEYlEt0g17jiiREgzupObx_uBLd0HpFIfQsN1bSHdyqVOyHN1X2n-PuC4EUlLNxhoxs-uuvCOvmJrQ4RtalwFBBmmAJ2949U7msEA5qEleLxosnaI4CsKGhdgGakyVYFYiUjZVp6Iew9MxgjZsAg9mV_QEah8t_tHfr9MNSEn-QApH7g95WxPm8rAAhFy7BO98Q_1Vw1HhH4ziCl2r2Seb6zWyijvAX3HqUo0ep4_8YUmwurGdfFM3Z3ovgQiJqmUjJsDNniv9R86FAdU8s_obGcAbmRsf1d20k7Hehjx1Ts2IaN-Ds2C241y486YYNz0xDQatiIzgia-IPA6by8iGRbPdYpR81cOlgHDQg20NTYOJLosuMKywAtBY5UqVshs8Jf2cyhZvHhhY5kdNK4j3Ve3QxWawO5LpoON-FHuCGWVgbVNt0an3HYznmNsMfBsSY_FpM3RJ1FJioD2WQRuk5OhKE5ANTRuCgDJmszf9dyHwQFg10xEo7SoWA4zj_sF7iTqsIr_VMh0xfJcQbeMhz4PkYxJRxFDNqGe2FlWedFnjr0U20zvfeIJDJNnj1BOjoU2ZwE7SE1tRJErdSQTii0Tv0JbW5te6IkPArYPm2KYVgx4I2cQj4VEUeIy8sPuCOCPyrP1U7IjVwV6XCUY7TbkSpKOpcMuBWYauyVu-uhiuI6iinpRgezsEQZ8riFZbEy8mtg-JsmmxzCwTCEjrZf-Gttv95ihZXeVK2gGNf_kHw=="
+    },
+    {
+      "type": "tool_use",
+      "id": "call_70b6c42145b04a3eac6712e9e23c36df",
+      "name": "get_weather",
+      "input": {
+        "city": "Oslo"
+      }
+    }
+  ]
+}

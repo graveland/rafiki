@@ -1,0 +1,45 @@
+{
+  "model": "test-model",
+  "instructions": "",
+  "input": [
+    {
+      "type": "reasoning",
+      "id": "rs_2",
+      "encrypted_content": "blob-cg",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "c"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "done"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "continue"
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "max_output_tokens": 1024,
+  "stream": true,
+  "store": false,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "sess-1"
+}

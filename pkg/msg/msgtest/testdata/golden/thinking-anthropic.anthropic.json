@@ -1,0 +1,36 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "signature": "sig-anthropic",
+          "thinking": "hmm",
+          "type": "thinking"
+        },
+        {
+          "text": "ok",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "continue",
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "thinking": {
+    "budget_tokens": 2048,
+    "type": "enabled"
+  }
+}

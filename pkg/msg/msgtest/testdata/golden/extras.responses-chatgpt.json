@@ -1,0 +1,24 @@
+{
+  "model": "test-model",
+  "instructions": "You are terse.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "hello"
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "max_output_tokens": 1024,
+  "stream": true,
+  "store": false,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "sess-1"
+}

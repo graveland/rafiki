@@ -1,0 +1,37 @@
+{
+  "id": "msg_servertool",
+  "model": "claude-sonnet-4-5",
+  "stop_reason": "end_turn",
+  "provider": "Together",
+  "usage": {
+    "input": 60,
+    "output": 20,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "content": [
+    {
+      "id": "srvtoolu_01",
+      "input": {
+        "query": "rafiki"
+      },
+      "name": "web_search",
+      "provider_metadata": {
+        "source": "web"
+      },
+      "type": "server_tool_use"
+    },
+    {
+      "content": [
+        {
+          "type": "web_search_result",
+          "title": "Rafiki",
+          "url": "https://example.com",
+          "encrypted_content": "enc-1"
+        }
+      ],
+      "tool_use_id": "srvtoolu_01",
+      "type": "web_search_tool_result"
+    }
+  ]
+}

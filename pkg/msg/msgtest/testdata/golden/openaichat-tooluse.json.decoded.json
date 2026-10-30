@@ -1,0 +1,26 @@
+{
+  "id": "chatcmpl-tooluse",
+  "model": "gpt-4o-mini",
+  "stop_reason": "tool_use",
+  "provider": "",
+  "usage": {
+    "input": 100,
+    "output": 25,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "content": [
+    {
+      "type": "text",
+      "text": "Let me look."
+    },
+    {
+      "type": "tool_use",
+      "id": "call_1",
+      "name": "read_file",
+      "input": {
+        "path": "a"
+      }
+    }
+  ]
+}

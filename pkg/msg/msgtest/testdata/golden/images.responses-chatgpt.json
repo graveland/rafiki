@@ -1,0 +1,44 @@
+{
+  "model": "test-model",
+  "instructions": "",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        },
+        {
+          "type": "input_text",
+          "text": "what is this"
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "call_id": "toolu_img",
+      "name": "read_file",
+      "arguments": "{\"path\":\"a\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "toolu_img",
+      "output": [
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "max_output_tokens": 1024,
+  "stream": true,
+  "store": false,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "sess-1"
+}

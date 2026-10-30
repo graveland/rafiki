@@ -1,0 +1,28 @@
+{
+  "id": "msg_citations",
+  "model": "claude-sonnet-4-5",
+  "stop_reason": "end_turn",
+  "provider": "Together",
+  "usage": {
+    "input": 50,
+    "output": 12,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "content": [
+    {
+      "citations": [
+        {
+          "cited_text": "the source",
+          "document_index": 0,
+          "document_title": "a doc",
+          "end_char_index": 10,
+          "start_char_index": 0,
+          "type": "char_location"
+        }
+      ],
+      "text": "the cited claim",
+      "type": "text"
+    }
+  ]
+}

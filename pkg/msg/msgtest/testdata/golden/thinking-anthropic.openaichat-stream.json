@@ -1,0 +1,15 @@
+{
+  "model": "test-model",
+  "max_tokens": 4096,
+  "stream": true,
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "ok"
+    },
+    {
+      "role": "user",
+      "content": "continue"
+    }
+  ]
+}

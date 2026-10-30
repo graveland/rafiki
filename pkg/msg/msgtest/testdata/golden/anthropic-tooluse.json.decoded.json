@@ -1,0 +1,26 @@
+{
+  "id": "msg_tooluse",
+  "model": "claude-sonnet-4-5",
+  "stop_reason": "tool_use",
+  "provider": "Together",
+  "usage": {
+    "input": 100,
+    "output": 25,
+    "cache_read": 40,
+    "cache_write": 10
+  },
+  "content": [
+    {
+      "type": "text",
+      "text": "Let me look."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01",
+      "name": "read_file",
+      "input": {
+        "path": "a"
+      }
+    }
+  ]
+}
