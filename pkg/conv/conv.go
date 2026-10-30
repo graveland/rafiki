@@ -114,7 +114,10 @@ type Commit struct {
 type Backend interface {
 	State(ctx context.Context, convID string) (State, error)
 	// Walk returns refs from fromID toward the root, head-first. crossRoots follows a
-	// root's DerivedFromID; false stops at the first root.
+	// root's DerivedFromID; false stops at the first root. An id the conversation
+	// does not hold — including a node of another conversation — is ErrNotFound,
+	// never an empty chain: an empty walk would hide a head pointing out of its
+	// conversation.
 	Walk(ctx context.Context, convID, fromID string, crossRoots bool) ([]Ref, error)
 	Fetch(ctx context.Context, convID string, ids []string) ([]*Node, error)
 	Lookup(ctx context.Context, convID string, hashes []convtree.Hash) (map[convtree.Hash]Ref, error)
@@ -122,7 +125,12 @@ type Backend interface {
 	ByProviderMessageID(ctx context.Context, convID, providerMessageID string) (*Node, bool, error) // placed rows only, newest ordinal
 	HasChild(ctx context.Context, convID, parentID string) (bool, error)
 	// Commit is atomic. A head/next_ordinal mismatch or a path_hash insert conflict is
-	// ErrConflict; a fence failure is ErrLeaseLost. Returns the rows' created_at.
+	// ErrConflict; a fence failure is ErrLeaseLost. The fence is checked first, so a
+	// taken-over writer always sees ErrLeaseLost, even when the head moved too — a
+	// conflict is retried and a lost lease is not. A row whose ParentID or
+	// DerivedFromID names a node the conversation does not hold is ErrNotFound,
+	// never ErrConflict, so a caller does not retry a write that cannot land.
+	// Returns the rows' created_at.
 	Commit(ctx context.Context, c Commit) (time.Time, error)
 }
 
