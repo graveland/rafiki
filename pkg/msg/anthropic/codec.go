@@ -3,13 +3,15 @@
 //
 // Stored content is JSON: an array of blocks as the API accepts them, a bare
 // JSON string for the shorthand prompt form, or null. Decoding is total and
-// lossless: a block is turned into a native typed block only when re-encoding it
-// reproduces the same canonical content, and otherwise it is kept verbatim as
-// msg.Opaque. That is what keeps a field this package does not model —
-// citations, an unusual image source, a caller added by the API — from being
-// silently dropped on the way to storage, and what lets a single odd block (a
-// wrongly-typed field, say) be read back without making its whole conversation
-// unreadable.
+// lossless: a block whose core fields this package models is turned into the
+// matching typed block, and every key the core does not model — citations, a
+// caller the API added — rides along in that block's msg.Ext, tagged with the
+// dialect that produced it. Nothing is silently dropped on the way to storage,
+// and a block that carries its residue in Ext re-encodes to the same canonical
+// content. A block with no native core at all (redacted_thinking, a server-tool
+// block, an unknown type), or one whose core fields cannot be read, is kept
+// verbatim as msg.Opaque, which is what lets a single odd block (a wrongly-typed
+// field, say) be read back without making its whole conversation unreadable.
 package anthropic
 
 import (
@@ -155,6 +157,49 @@ func decodeBlock(raw json.RawMessage) (msg.Block, error) {
 	return verify(raw, block)
 }
 
+// coreKeys names the keys each typed block's native core models. Everything
+// else a normalized block of that type carries is residue, which Ext keeps.
+var (
+	coreText       = []string{"type", "text"}
+	coreThinking   = []string{"type", "thinking", "signature"}
+	coreToolUse    = []string{"type", "id", "name", "input"}
+	coreToolResult = []string{"type", "tool_use_id", "content", "is_error"}
+	coreImage      = []string{"type", "source"}
+)
+
+// residue returns the keys of raw's normalized block that core does not model,
+// as the Ext the typed block carries. Normalizing first is what keeps
+// cache_control and the empty-valued marshalling artefacts out of Ext.
+func residue(raw json.RawMessage, core []string) (msg.Ext, error) {
+	wrapped := make([]byte, 0, len(raw)+2)
+	wrapped = append(wrapped, '[')
+	wrapped = append(wrapped, raw...)
+	wrapped = append(wrapped, ']')
+	normalized, err := Normalize(wrapped)
+	if err != nil {
+		return msg.Ext{}, fmt.Errorf("anthropic: normalize block for ext: %w", err)
+	}
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(normalized, &blocks); err != nil {
+		return msg.Ext{}, fmt.Errorf("anthropic: read normalized block for ext: %w", err)
+	}
+	if len(blocks) == 0 {
+		return msg.Ext{}, nil
+	}
+	keys := blocks[0]
+	for _, k := range core {
+		delete(keys, k)
+	}
+	if len(keys) == 0 {
+		return msg.Ext{}, nil
+	}
+	out, err := json.Marshal(keys)
+	if err != nil {
+		return msg.Ext{}, fmt.Errorf("anthropic: marshal block ext: %w", err)
+	}
+	return msg.Ext{Dialect: msg.DialectAnthropic, Raw: string(out)}, nil
+}
+
 func decodeTextBlock(raw json.RawMessage) (msg.Block, error) {
 	var p struct {
 		Text string `json:"text"`
@@ -162,7 +207,11 @@ func decodeTextBlock(raw json.RawMessage) (msg.Block, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("anthropic: decode text block: %w", err)
 	}
-	return msg.Text{Text: p.Text}, nil
+	ext, err := residue(raw, coreText)
+	if err != nil {
+		return nil, err
+	}
+	return msg.Text{Text: p.Text, Ext: ext}, nil
 }
 
 func decodeThinkingBlock(raw json.RawMessage) (msg.Block, error) {
@@ -173,9 +222,14 @@ func decodeThinkingBlock(raw json.RawMessage) (msg.Block, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("anthropic: decode thinking block: %w", err)
 	}
+	ext, err := residue(raw, coreThinking)
+	if err != nil {
+		return nil, err
+	}
 	return msg.Thinking{
 		Text: p.Thinking,
 		Sig:  msg.Signature{Dialect: signatureDialect(p.Signature), Value: p.Signature},
+		Ext:  ext,
 	}, nil
 }
 
@@ -188,7 +242,11 @@ func decodeToolUseBlock(raw json.RawMessage) (msg.Block, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("anthropic: decode tool_use block: %w", err)
 	}
-	return msg.ToolUse{ID: p.ID, Name: p.Name, Input: copyRaw(p.Input)}, nil
+	ext, err := residue(raw, coreToolUse)
+	if err != nil {
+		return nil, err
+	}
+	return msg.ToolUse{ID: p.ID, Name: p.Name, Input: copyRaw(p.Input), Ext: ext}, nil
 }
 
 func decodeToolResultBlock(raw json.RawMessage) (msg.Block, error) {
@@ -204,7 +262,11 @@ func decodeToolResultBlock(raw json.RawMessage) (msg.Block, error) {
 	if err != nil {
 		return nil, err
 	}
-	return msg.ToolResult{ToolUseID: p.ToolUseID, Content: content, IsError: p.IsError}, nil
+	ext, err := residue(raw, coreToolResult)
+	if err != nil {
+		return nil, err
+	}
+	return msg.ToolResult{ToolUseID: p.ToolUseID, Content: content, IsError: p.IsError, Ext: ext}, nil
 }
 
 func decodeImageBlock(raw json.RawMessage) (msg.Block, error) {
@@ -225,7 +287,11 @@ func decodeImageBlock(raw json.RawMessage) (msg.Block, error) {
 	if err != nil {
 		return opaque(raw), nil
 	}
-	return verify(raw, msg.Image{MediaType: p.Source.MediaType, Data: data})
+	ext, err := residue(raw, coreImage)
+	if err != nil {
+		return nil, err
+	}
+	return verify(raw, msg.Image{MediaType: p.Source.MediaType, Data: data, Ext: ext})
 }
 
 // verify re-encodes block and returns it only if that reproduces raw's
@@ -309,8 +375,63 @@ func isPrefixed(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
-// encodeBlock encodes one block the way it is stored.
+// encodeBlock encodes one block the way it is stored: its core fields, plus the
+// residue it carries in Ext.
 func encodeBlock(block msg.Block) (json.RawMessage, error) {
+	core, err := encodeCore(block)
+	if err != nil {
+		return nil, err
+	}
+	return withExt(core, blockExt(block))
+}
+
+// withExt merges a block's Ext residue into its core encoding. A block carrying
+// no residue encodes exactly as its core struct does, and the core wins on a key
+// collision, since Ext only ever holds what the core does not model.
+func withExt(core json.RawMessage, ext msg.Ext) (json.RawMessage, error) {
+	if ext.Raw == "" {
+		return core, nil
+	}
+	var merged, extra map[string]json.RawMessage
+	if err := json.Unmarshal(core, &merged); err != nil {
+		return nil, fmt.Errorf("anthropic: read core block for ext: %w", err)
+	}
+	if err := json.Unmarshal([]byte(ext.Raw), &extra); err != nil {
+		return nil, fmt.Errorf("anthropic: block ext is not a JSON object: %w", err)
+	}
+	for k, v := range extra {
+		if _, ok := merged[k]; !ok {
+			merged[k] = v
+		}
+	}
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: encode block with ext: %w", err)
+	}
+	return out, nil
+}
+
+// blockExt returns the residue a block carries; an Opaque block has none,
+// because its whole form is verbatim.
+func blockExt(block msg.Block) msg.Ext {
+	switch t := block.(type) {
+	case msg.Text:
+		return t.Ext
+	case msg.Thinking:
+		return t.Ext
+	case msg.ToolUse:
+		return t.Ext
+	case msg.ToolResult:
+		return t.Ext
+	case msg.Image:
+		return t.Ext
+	}
+	return msg.Ext{}
+}
+
+// encodeCore encodes the fields this package models, without the residue the
+// block carries in Ext.
+func encodeCore(block msg.Block) (json.RawMessage, error) {
 	switch t := block.(type) {
 	case msg.Text:
 		return marshalBlock(struct {
@@ -400,10 +521,14 @@ func toParamRole(r msg.Role) (sdk.MessageParamRole, error) {
 	return "", fmt.Errorf("anthropic: unknown role %d", r)
 }
 
-// toParamBlock builds the SDK's typed block. Only an Opaque block is handed to
-// the SDK's own JSON decoder, since it is the only one whose shape this package
-// does not know.
+// toParamBlock builds the SDK's typed block. A block carrying residue, and an
+// Opaque block, is handed to the SDK's own JSON decoder: it is the only route
+// that carries fields the typed constructors do not set — a tool_use's caller, a
+// text block's citations.
 func toParamBlock(block msg.Block) (sdk.ContentBlockParamUnion, error) {
+	if blockExt(block).Raw != "" {
+		return paramFromEncoded(block)
+	}
 	switch t := block.(type) {
 	case msg.Text:
 		return sdk.NewTextBlock(t.Text), nil
@@ -428,37 +553,49 @@ func toParamBlock(block msg.Block) (sdk.ContentBlockParamUnion, error) {
 	case msg.Image:
 		return sdk.NewImageBlockBase64(t.MediaType, base64.StdEncoding.EncodeToString(t.Data)), nil
 	case msg.Opaque:
-		var param sdk.ContentBlockParamUnion
-		if err := json.Unmarshal(t.Raw, &param); err != nil {
-			return sdk.ContentBlockParamUnion{}, fmt.Errorf("anthropic: unmarshal opaque block: %w", err)
-		}
-		return param, nil
+		return paramFromEncoded(t)
 	}
 	return sdk.ContentBlockParamUnion{}, fmt.Errorf("anthropic: unknown block type %T", block)
 }
 
+// paramFromEncoded builds the SDK's union from a block's stored encoding.
+func paramFromEncoded(block msg.Block) (sdk.ContentBlockParamUnion, error) {
+	enc, err := encodeBlock(block)
+	if err != nil {
+		return sdk.ContentBlockParamUnion{}, err
+	}
+	var param sdk.ContentBlockParamUnion
+	if err := json.Unmarshal(enc, &param); err != nil {
+		return sdk.ContentBlockParamUnion{}, fmt.Errorf("anthropic: unmarshal encoded block: %w", err)
+	}
+	return param, nil
+}
+
 // toParamToolResultContent builds the narrower block union a tool_result
-// carries. Anything outside it goes through a block's own param form and the
-// SDK's JSON decoder, the same route an Opaque block takes.
+// carries. A nested block that carries residue, like an Opaque one, goes through
+// its own stored encoding and the SDK's JSON decoder, so what the core does not
+// model still reaches the request.
 func toParamToolResultContent(blocks []msg.Block) ([]sdk.ToolResultBlockParamContentUnion, error) {
 	out := make([]sdk.ToolResultBlockParamContentUnion, 0, len(blocks))
 	for _, b := range blocks {
-		switch t := b.(type) {
-		case msg.Text:
-			out = append(out, sdk.ToolResultBlockParamContentUnion{
-				OfText: &sdk.TextBlockParam{Text: t.Text},
-			})
-			continue
-		case msg.Image:
-			out = append(out, sdk.ToolResultBlockParamContentUnion{
-				OfImage: &sdk.ImageBlockParam{Source: sdk.ImageBlockParamSourceUnion{
-					OfBase64: &sdk.Base64ImageSourceParam{
-						Data:      base64.StdEncoding.EncodeToString(t.Data),
-						MediaType: sdk.Base64ImageSourceMediaType(t.MediaType),
-					},
-				}},
-			})
-			continue
+		if blockExt(b).Raw == "" {
+			switch t := b.(type) {
+			case msg.Text:
+				out = append(out, sdk.ToolResultBlockParamContentUnion{
+					OfText: &sdk.TextBlockParam{Text: t.Text},
+				})
+				continue
+			case msg.Image:
+				out = append(out, sdk.ToolResultBlockParamContentUnion{
+					OfImage: &sdk.ImageBlockParam{Source: sdk.ImageBlockParamSourceUnion{
+						OfBase64: &sdk.Base64ImageSourceParam{
+							Data:      base64.StdEncoding.EncodeToString(t.Data),
+							MediaType: sdk.Base64ImageSourceMediaType(t.MediaType),
+						},
+					}},
+				})
+				continue
+			}
 		}
 		param, err := toParamBlock(b)
 		if err != nil {

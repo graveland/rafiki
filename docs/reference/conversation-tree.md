@@ -116,6 +116,14 @@ branch. Pinned by `TestRootSeedDistinguishesKindAndDerivedFrom`,
 Hashes are taken over **the bytes that are stored** (after `jsonbSafe`), which is
 why `Canon`'s input is the jsonb text and not the request body.
 
+The native codec (`pkg/msg/anthropic`) sits downstream of that and cannot move a
+hash. It decodes stored content into typed blocks, keeping every key the native
+core does not model in that block's `msg.Ext` (tagged with the dialect that
+produced it) rather than demoting the whole block; `msg.Opaque` is only for a
+block type with no native core, or one whose core fields cannot be read. Node
+identity is the canonical form of the stored bytes, so a block that gains or
+loses `Ext` on its way through the codec hashes exactly as it did before.
+
 ## `SameMessage`: one notion of identity across writer, backfill and checker
 
 `store.SameMessage` (`pkg/store/tree_backfill.go`) is the *comparison* identity,

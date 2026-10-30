@@ -146,6 +146,20 @@ func TestOpaqueToolBlocksYieldIDs(t *testing.T) {
 		opaque(`{"type":"tool_result","tool_use_id":""}`),
 		opaque(`5`),
 	}}), "only a non-empty id on a tool block counts")
+
+	// A typed block carrying residue is an ordinary typed block: its id is the
+	// one the core holds, not one read out of Ext.
+	withExt := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "toolu_1", Name: "read_file", Ext: msg.Ext{
+			Dialect: msg.DialectAnthropic,
+			Raw:     `{"caller":{"type":"direct"}}`,
+		}},
+		msg.ToolResult{ToolUseID: "toolu_1", Ext: msg.Ext{
+			Dialect: msg.DialectAnthropic,
+			Raw:     `{"caller":{"type":"direct"}}`,
+		}},
+	}}
+	c.EqDeep([]string{"toolu_1", "toolu_1"}, msg.ToolUseIDs(withExt), "a typed block with Ext yields its id")
 }
 
 // TestOpaqueType pins the classifier a boundary reader needs: an Opaque block

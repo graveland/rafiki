@@ -30,13 +30,13 @@ type fixture struct {
 // fixtures names the expectation of every file in testdata. A file missing here
 // fails TestRoundTripFaithful, so a new fixture has to state what it proves.
 //
-// The opaque entries are the deliberate half of the split: a block the typed
-// form cannot reproduce must be kept verbatim, and those are the fixtures that a
-// canon-only round trip would go on passing even if every block had quietly
-// collapsed to Opaque. Two of them pair with a typed sibling on purpose — an
-// empty citations array versus a real one, and a plain tool_use versus one
-// carrying a caller — so the guard that keeps the first typed cannot be widened
-// into swallowing the second.
+// The opaque entry is the deliberate half of the split: a block type with no
+// native core must be kept verbatim, and it is the fixture that a canon-only
+// round trip would go on passing even if every block had quietly collapsed to
+// Opaque. The paired fixtures prove the opposite rule for a type the codec does
+// model — an empty citations array versus a real one, and a plain tool_use
+// versus one carrying a caller — both stay typed, with the extra key riding
+// along in Ext rather than demoting the block.
 var fixtures = map[string]fixture{
 	"text.json":                       {kinds: []string{"text"}},
 	"text-cache-control.json":         {kinds: []string{"text"}},
@@ -65,11 +65,14 @@ var fixtures = map[string]fixture{
 	"sdk-union-empty-siblings.json": {kinds: []string{"text", "tool_use"}},
 	"citations-empty.json":          {kinds: []string{"text"}},
 
-	// Deliberately opaque fixtures.
-	"opaque-redacted-thinking.json":   {opaque: true},
-	"opaque-text-with-citations.json": {opaque: true},
-	"citations-real.json":             {opaque: true},
-	"tool-use-caller.json":            {opaque: true},
+	// Deliberately opaque: a block type with no native core.
+	"opaque-redacted-thinking.json": {opaque: true},
+
+	// The residue fixtures: a real citations array and a caller are keys the core
+	// does not model, so they land in Ext and the block stays typed.
+	"opaque-text-with-citations.json": {kinds: []string{"text"}},
+	"citations-real.json":             {kinds: []string{"text"}},
+	"tool-use-caller.json":            {kinds: []string{"tool_use"}},
 }
 
 // TestDecodeTypedBlocks pins the happy path for each typed kind: a block the
@@ -119,6 +122,16 @@ func TestDecodeTypedBlocks(t *testing.T) {
 			content: `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + pngBase64 + `"}}]`,
 			want:    msg.Image{MediaType: "image/png", Data: png},
 		},
+		{
+			name:    "tool_use with a caller",
+			content: `[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a"},"caller":{"type":"direct"}}]`,
+			want: msg.ToolUse{
+				ID:    "toolu_1",
+				Name:  "read_file",
+				Input: json.RawMessage(`{"path":"a"}`),
+				Ext:   msg.Ext{Dialect: msg.DialectAnthropic, Raw: `{"caller":{"type":"direct"}}`},
+			},
+		},
 	} {
 		m, err := anthropic.Decode("user", []byte(tc.content))
 		c.NoError(err, "%s: Decode", tc.name)
@@ -127,8 +140,10 @@ func TestDecodeTypedBlocks(t *testing.T) {
 	}
 }
 
-// TestDecodeFallsBackToOpaque pins losslessness: a block carrying anything the
-// codec cannot reproduce is kept byte-identically rather than trimmed.
+// TestDecodeFallsBackToOpaque pins losslessness for a block with no native
+// core: a block type the codec does not model is kept byte-identically rather
+// than trimmed. A block of a modelled type that carries an extra key is not one
+// of these — that key lands in Ext, pinned by TestExtRoundTripCanonical.
 func TestDecodeFallsBackToOpaque(t *testing.T) {
 	c := assert.NewAborting(t)
 
@@ -136,10 +151,6 @@ func TestDecodeFallsBackToOpaque(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{
-			name: "text with citations",
-			raw:  `{"type":"text","text":"cited","citations":[{"type":"char_location","cited_text":"x","document_index":0,"document_title":"t","start_char_index":0,"end_char_index":1}]}`,
-		},
 		{
 			name: "image with a url source",
 			raw:  `{"type":"image","source":{"type":"url","url":"https://example.test/cat.png"}}`,
@@ -156,10 +167,6 @@ func TestDecodeFallsBackToOpaque(t *testing.T) {
 			name: "unknown type",
 			raw:  `{"type":"future_block_type","payload":{"a":1}}`,
 		},
-		{
-			name: "tool_use with a caller",
-			raw:  `{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a"},"caller":{"type":"direct"}}`,
-		},
 	} {
 		m, err := anthropic.Decode("user", []byte("["+tc.raw+"]"))
 		c.NoError(err, "%s: Decode", tc.name)
@@ -169,26 +176,6 @@ func TestDecodeFallsBackToOpaque(t *testing.T) {
 		c.True(ok, "%s must fall back to Opaque, got %T", tc.name, m.Content[0])
 		c.Eq(msg.DialectAnthropic, opaque.Provider, "%s: Provider", tc.name)
 		c.Eq(tc.raw, string(opaque.Raw), "%s: Raw must be byte-identical", tc.name)
-	}
-
-	// The other half of the empty-value rule: real extra data still degrades the
-	// block, byte for byte, so ignoring empty values cannot become ignoring
-	// everything the typed form does not model.
-	for _, name := range []string{"citations-real.json", "tool-use-caller.json"} {
-		content, err := os.ReadFile(filepath.Join("testdata", name))
-		c.NoError(err, "%s: read", name)
-
-		var raws []json.RawMessage
-		c.NoError(json.Unmarshal(content, &raws), "%s: read its blocks", name)
-
-		m, err := anthropic.Decode("user", content)
-		c.NoError(err, "%s: Decode", name)
-		c.Eq(len(raws), len(m.Content), "%s: block count", name)
-		for i, raw := range raws {
-			opaque, ok := m.Content[i].(msg.Opaque)
-			c.True(ok, "%s block %d must fall back to Opaque, got %T", name, i, m.Content[i])
-			c.Eq(string(raw), string(opaque.Raw), "%s block %d: Raw must be byte-identical", name, i)
-		}
 	}
 }
 
@@ -611,6 +598,125 @@ func TestFromParamRoundTrip(t *testing.T) {
 	fromParam, err := anthropic.FromParam(sdkDecode(c, "assistant", content))
 	c.NoError(err, "FromParam")
 	c.EqDeep(want, fromParam, "FromParam must agree with Decode")
+}
+
+// TestExtResidueExcludesCacheControl pins what Ext must not collect: a
+// cache_control hint is transport-only and an empty citations array is a
+// marshalling artefact, so a block carrying only those has no residue at all.
+func TestExtResidueExcludesCacheControl(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	m, err := anthropic.Decode("user", []byte(
+		`[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"},"citations":[]}]`))
+	c.NoError(err, "Decode")
+	c.Eq(1, len(m.Content), "one block")
+	c.EqDeep[msg.Block](msg.Text{Text: "cached"}, m.Content[0], "cache_control and an empty citations array are not residue")
+}
+
+// TestExtRoundTripCanonical pins that the residue fixtures stay typed and that
+// re-encoding them reproduces their canonical content: Ext is lossless, not a
+// trimming.
+func TestExtRoundTripCanonical(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, name := range []string{"tool-use-caller.json", "citations-real.json", "opaque-text-with-citations.json"} {
+		content, err := os.ReadFile(filepath.Join("testdata", name))
+		c.NoError(err, "%s: read", name)
+
+		m, err := anthropic.Decode("user", content)
+		c.NoError(err, "%s: Decode", name)
+		c.True(len(m.Content) > 0, "%s: content", name)
+		for i, block := range m.Content {
+			_, isOpaque := block.(msg.Opaque)
+			c.False(isOpaque, "%s block %d carries residue and must stay typed, got %T", name, i, block)
+			c.Eq(msg.DialectAnthropic, extOf(block).Dialect, "%s block %d: Ext dialect", name, i)
+			c.True(extOf(block).Raw != "", "%s block %d: Ext must carry the unmodelled keys", name, i)
+		}
+
+		encoded, err := anthropic.EncodeContent(m)
+		c.NoError(err, "%s: EncodeContent", name)
+		assertCanonEqual(c, content, encoded, name)
+	}
+}
+
+// TestToParamCarriesExt pins that residue reaches the SDK params: the typed
+// constructors do not set a caller, so a block carrying one must go through its
+// stored encoding instead.
+func TestToParamCarriesExt(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	const raw = `{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a"},"caller":{"type":"direct"}}`
+	m, err := anthropic.Decode("assistant", []byte("["+raw+"]"))
+	c.NoError(err, "Decode")
+	c.Require().Len(m.Content, 1, "one block")
+
+	param, err := anthropic.ToParam(m)
+	c.NoError(err, "ToParam")
+	got, err := json.Marshal(param.Content)
+	c.NoError(err, "marshal ToParam")
+	c.StrContains(string(got), `"caller"`, "the caller must reach the SDK params")
+	assertCanonEqual(c, []byte("["+raw+"]"), got, "ToParam must carry the residue")
+}
+
+// TestEncodeBlockWithoutExtIsByteIdentical pins that the residue path did not
+// disturb the ordinary one: a block with no Ext encodes to exactly the bytes it
+// encoded to before Ext existed.
+func TestEncodeBlockWithoutExtIsByteIdentical(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, tc := range []struct {
+		name    string
+		content []msg.Block
+		want    string
+	}{
+		{
+			name:    "text",
+			content: []msg.Block{msg.Text{Text: "hi"}},
+			want:    `[{"type":"text","text":"hi"}]`,
+		},
+		{
+			name: "tool_use",
+			content: []msg.Block{msg.ToolUse{
+				ID:    "toolu_1",
+				Name:  "read_file",
+				Input: json.RawMessage(`{"path":"a"}`),
+			}},
+			want: `[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a"}}]`,
+		},
+	} {
+		encoded, err := anthropic.EncodeContent(msg.Message{Role: msg.User, Content: tc.content})
+		c.NoError(err, "%s: EncodeContent", tc.name)
+		c.Eq(tc.want, string(encoded), "%s: a block with no Ext must encode exactly as before", tc.name)
+	}
+}
+
+// TestEncodeExtNotObjectErrors pins that a malformed Ext is refused rather than
+// silently dropped: it is hand-built state, not something a decode produced.
+func TestEncodeExtNotObjectErrors(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	_, err := anthropic.EncodeContent(msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.Text{Text: "hi", Ext: msg.Ext{Dialect: msg.DialectAnthropic, Raw: `"not an object"`}},
+	}})
+	c.Error(err, "an Ext that is not a JSON object must be refused")
+	c.ErrorContains(err, "block ext is not a JSON object", "the error must name what is wrong")
+}
+
+// extOf returns the residue a block carries, for the fixture expectations.
+func extOf(block msg.Block) msg.Ext {
+	switch t := block.(type) {
+	case msg.Text:
+		return t.Ext
+	case msg.Thinking:
+		return t.Ext
+	case msg.ToolUse:
+		return t.Ext
+	case msg.ToolResult:
+		return t.Ext
+	case msg.Image:
+		return t.Ext
+	}
+	return msg.Ext{}
 }
 
 // kindOf names a block's kind, for the fixture expectations.

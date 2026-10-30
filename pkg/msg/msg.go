@@ -3,8 +3,9 @@
 //
 // It is the model everything downstream of storage speaks. A provider codec
 // (pkg/msg/anthropic) translates between it and that provider's own message
-// types, in both directions, and keeps anything it cannot represent faithfully
-// as an Opaque block rather than dropping it.
+// types, in both directions. The keys of a block that this model does not carry
+// ride along in that block's Ext rather than demoting the whole block; a block
+// with no native form at all is kept verbatim as Opaque rather than dropped.
 package msg
 
 import (
@@ -66,8 +67,19 @@ type Message struct {
 // known kinds is exactly BlockKinds().
 type Block interface{ block() }
 
+// Ext holds the keys of a provider block that the native core does not model,
+// tagged with the dialect that produced them. The same dialect re-emits them;
+// any other dialect ignores them. Raw is a JSON object, or "" for none.
+type Ext struct {
+	Dialect Dialect
+	Raw     string
+}
+
 // Text is a run of plain text.
-type Text struct{ Text string }
+type Text struct {
+	Text string
+	Ext  Ext
+}
 
 // Thinking is a model reasoning block. Sig carries where its signature came
 // from, because a signature minted by one provider's dialect is only
@@ -75,6 +87,7 @@ type Text struct{ Text string }
 type Thinking struct {
 	Text string
 	Sig  Signature
+	Ext  Ext
 }
 
 // ToolUse is a model's request to run a tool. Input is the argument object as
@@ -83,6 +96,7 @@ type ToolUse struct {
 	ID    string
 	Name  string
 	Input json.RawMessage
+	Ext   Ext
 }
 
 // ToolResult is the outcome of a tool use, delivered back to the model. Content
@@ -92,6 +106,7 @@ type ToolResult struct {
 	ToolUseID string
 	Content   []Block
 	IsError   bool
+	Ext       Ext
 }
 
 // Image is an inline image. Data is the decoded bytes; MediaType is the MIME
@@ -99,11 +114,15 @@ type ToolResult struct {
 type Image struct {
 	MediaType string
 	Data      []byte
+	Ext       Ext
 }
 
-// Opaque is a block kept verbatim because it has no faithful native form: a
-// provider block this codec does not model, or one whose fields would be lost
-// on a round trip. Provider names the dialect Raw belongs to.
+// Opaque is a block kept verbatim because it has no native core to translate: a
+// block type this model does not carry (redacted_thinking, a server-tool block,
+// an unknown type), or a block whose core fields cannot be read into their typed
+// form. Extra keys on a block type this model does carry are not a reason to
+// keep it verbatim — they ride along in Ext. Provider names the dialect Raw
+// belongs to.
 type Opaque struct {
 	Provider Dialect
 	Raw      json.RawMessage
