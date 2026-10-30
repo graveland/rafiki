@@ -52,6 +52,7 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 		}
 		res, err := h.appendAttempt(ctx, a, st)
 		if err == nil {
+			h.store.refreshAfterCommit(ctx, h.convID)
 			return res, nil
 		}
 		if errors.Is(err, ErrLeaseLost) || !errors.Is(err, ErrConflict) {
@@ -63,7 +64,8 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 
 // appendAttempt resolves, hashes and commits one append against st. It has no
 // side effect until Commit succeeds; a Commit error leaves the cache untouched
-// and is retried by the caller.
+// and is retried by the caller. It never touches the cached head: the caller
+// refreshes it after a successful attempt.
 func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result, error) {
 	parent, isRoot, rootKind, derivedFromID, err := h.resolveParent(ctx, a, st.HeadID)
 	if err != nil {
@@ -364,6 +366,7 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 			Lease:             h.lease,
 		})
 		if err == nil {
+			h.store.refreshAfterCommit(ctx, h.convID)
 			return nil
 		}
 		if errors.Is(err, ErrLeaseLost) || !errors.Is(err, ErrConflict) {

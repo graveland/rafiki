@@ -191,23 +191,24 @@ func TestMemBackendConformance(t *testing.T) {
 }
 
 // A reader's observation that lands after a retract carries the SAME next
-// ordinal as the state the retract published, so only a generation can order
+// ordinal as the state the retract installed, so only the version can order
 // them: the retracted row must not come back as the head.
 func TestReaderStateCannotResurrectARetractedHead(t *testing.T) {
 	c := assert.NewAborting(t)
 	b, convID := newConv(t)
 	ctx := context.Background()
+	seed := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
 	stalled := &stalledState{Backend: b, entered: make(chan struct{}), release: make(chan struct{})}
 	s := conv.NewStore(stalled, conv.Options{})
 	owner := s.Open(convID, conv.AsOwner())
 
-	first, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "one")}}})
+	first, err := seed.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "one")}}})
 	c.NoError(err, "one")
-	second, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "two")}}})
+	second, err := seed.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "two")}}})
 	c.NoError(err, "two")
 
 	// The reader reads the pre-retract head, then stalls until the retract has
-	// committed and published.
+	// committed and refreshed.
 	stalled.arm()
 	reader := s.Open(convID)
 	done := make(chan struct{})
@@ -225,33 +226,6 @@ func TestReaderStateCannotResurrectARetractedHead(t *testing.T) {
 	path, err := owner.Working(ctx)
 	c.NoError(err, "Working")
 	c.EqDeep([]string{first.Nodes[0].ID}, nodeIDs(path), "the retracted row did not come back")
-}
-
-func TestEveryReadAsksTheBackendForTheHead(t *testing.T) {
-	c := assert.NewAborting(t)
-	b, convID := newConv(t)
-	ctx := context.Background()
-	counting := convtest.NewCounting(b)
-	s := conv.NewStore(counting, conv.Options{})
-	owner := s.Open(convID, conv.AsOwner())
-	_, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "a")}}})
-	c.NoError(err, "a")
-	_, err = owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "b")}}})
-	c.NoError(err, "b")
-
-	reads := map[string]func(*conv.Handle) error{
-		"Working":  func(h *conv.Handle) error { _, err := h.Working(ctx); return err },
-		"Snapshot": func(h *conv.Handle) error { _, err := h.Snapshot(ctx); return err },
-	}
-	for name, read := range reads {
-		for _, h := range []*conv.Handle{owner, s.Open(convID)} {
-			counting.Reset()
-			c.NoError(read(h), name)
-			counts := counting.Counts()
-			c.Eq(1, counts["State"], name+" asks for the head exactly once")
-			c.Eq(0, counts["Fetch"], name+" fetches nothing when the nodes are cached")
-		}
-	}
 }
 
 func TestNodeCacheStillAvoidsFetches(t *testing.T) {

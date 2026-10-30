@@ -11,10 +11,13 @@
 // two histories that agree on every message converge on the same tree.
 //
 // Nodes are never mutated after they are published. A write commits through the
-// Backend and then inserts the committed nodes into the cache; the
-// conversation's head is never cached, so every operation reads it from the
-// Backend and a reader can only ever walk a head the Backend actually holds.
-// One writer per conversation, many snapshot readers.
+// Backend, inserts the committed nodes into the cache, and then refreshes the
+// cached head from the Backend: a write never publishes its own commit result,
+// so the cache only ever holds a position some update read from the Backend. A
+// reader that sees a head before its nodes are cached falls back to Walk and
+// Fetch. The cached head is ordered by an in-process version, so it is bounded
+// by the idle TTL against another process's commits. One writer per
+// conversation, many snapshot readers.
 //
 // The package is storage-agnostic and pgx-free: it may import the standard
 // library, github.com/google/uuid, pkg/convtree, pkg/msg, pkg/msg/anthropic and

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/convtree"
@@ -17,13 +18,36 @@ const (
 	defaultIdleTTL    = 5 * time.Minute
 )
 
-// entry is the per-conversation cache state. It holds no position: the
-// conversation's head is read from the backend on every operation, so there is
-// nothing here to go stale.
+// headState is one observation of a conversation's position, stamped with the
+// version of the entry it was installed into. A state with cached unset is an
+// invalidation: it carries a version so an in-flight install loses to it, but no
+// position.
+type headState struct {
+	version     int64
+	cached      bool
+	id          string
+	nextOrdinal int
+	at          time.Time
+}
+
+// ver is the entry's version: 0 until the first install or invalidation.
+func (h *headState) ver() int64 {
+	if h == nil {
+		return 0
+	}
+	return h.version
+}
+
+// entry is the per-conversation cache state.
 type entry struct {
 	// writeMu serialises Append and RetractHead while this entry is the
 	// conversation's.
 	writeMu sync.Mutex
+	// head is the entry's cached position and its version in one pointer, so an
+	// install is a single compare-and-swap against the exact state an update
+	// started from: there is no window between winning the version and storing
+	// the position. nil means nothing was ever installed.
+	head atomic.Pointer[headState]
 	// lastAccess and dead are guarded by Store.mu.
 	lastAccess time.Time
 	// dead is set when the sweep drops this entry, and nothing clears it: a
@@ -74,17 +98,19 @@ func NewStore(b Backend, o Options) *Store {
 // openConfig is what OpenOption mutates.
 type openConfig struct {
 	lease Lease
+	owner bool
 }
 
 // OpenOption customises a Handle.
 type OpenOption func(*openConfig)
 
-// AsOwner marks the handle as this process's writer for the conversation. It
-// changes nothing about a handle's behaviour: every read asks the backend for
-// the head whoever the handle is, so the option exists only to keep call sites
-// stating who writes.
+// AsOwner marks the handle as this process's writer for the conversation, which
+// is what lets its reads serve the cached head: the writer's own commits refresh
+// it, so a warm owner read makes no backend call. A handle without it asks the
+// backend for the head on every read, because the conversation's writer may be
+// another process.
 func AsOwner() OpenOption {
-	return func(*openConfig) {}
+	return func(c *openConfig) { c.owner = true }
 }
 
 // WithLease fences the handle's writes on l.
@@ -99,6 +125,7 @@ type Handle struct {
 	store  *Store
 	convID string
 	lease  Lease
+	owner  bool
 }
 
 // Open returns a handle on convID. It performs no I/O: the only work it does is
@@ -111,7 +138,7 @@ func (s *Store) Open(convID string, opts ...OpenOption) *Handle {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return &Handle{store: s, convID: convID, lease: cfg.lease}
+	return &Handle{store: s, convID: convID, lease: cfg.lease, owner: cfg.owner}
 }
 
 // Page reads one page of the conversation's transcript.
@@ -415,31 +442,140 @@ func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
 	return nil, nil
 }
 
-// State returns the conversation's position, always from the backend. Every
-// read begins here, exactly once, and walks from the head it returns: no
-// operation reuses a head an earlier one fetched.
+// State returns the conversation's position, always from the backend and never
+// through the cached head: it carries ClearPending, which is not cached.
 func (h *Handle) State(ctx context.Context) (State, error) {
 	h.store.touch(h.convID)
 	return h.store.backend.State(ctx, h.convID)
 }
 
+// headID returns the conversation's head: for an owner, the entry's cached head
+// while it is fresh; otherwise the answer of one update, which also leaves the
+// entry holding what it read.
+func (h *Handle) headID(ctx context.Context) (string, error) {
+	e := h.store.touch(h.convID)
+	if hs := e.head.Load(); h.owner && hs != nil && hs.cached && h.store.now().Sub(hs.at) <= h.store.ttl {
+		return hs.id, nil
+	}
+	st, err := h.store.refresh(ctx, h.convID)
+	if err != nil {
+		return "", err
+	}
+	return st.HeadID, nil
+}
+
+// refresh installs what the backend says the conversation's position is now.
+func (s *Store) refresh(ctx context.Context, convID string) (State, error) {
+	return s.update(ctx, convID, func(_ *entry, cur State) (State, error) { return cur, nil })
+}
+
+// refreshAfterCommit is what a write does once its commit is durable. The write
+// has happened whether or not the backend can answer now, so a failed refresh is
+// absorbed by invalidating the cached head: the next read asks the backend.
+func (s *Store) refreshAfterCommit(ctx context.Context, convID string) {
+	if _, err := s.refresh(ctx, convID); err != nil {
+		s.invalidate(convID)
+	}
+}
+
+// update is the only place a cached head is installed. It reads the backend's
+// State once per iteration, applies fn to it and installs the result with one
+// compare-and-swap against the entry state the iteration began from; a lost swap
+// or a dead entry restarts the loop with a fresh read, so fn never sees a value
+// from an earlier iteration and nothing but a backend read in the same iteration
+// is ever installed.
+//
+// A write never installs its own commit result. It calls update with an identity
+// fn (a refresh), so "is my commit newer than yours" is never asked: the cache
+// only ever holds a state some update read from the backend and won the swap for.
+//
+// How each stale-read finding is impossible:
+//
+//	F1/R1  a delayed publication installs an older head: a write refreshes
+//	       (reads the backend) instead of publishing its commit result.
+//	R3     an empty entry never learns, an in-flight read installs the
+//	       pre-commit head: the install is a swap against the state the read
+//	       began from, every install and invalidation replaces that state, so a
+//	       read that began before the commit's refresh loses.
+//	R4     a writer's stale State observation overwrites a newer commit: writers
+//	       install nothing but through update's swap.
+//	R5/R6  a delayed commit outranks a newer one; active reads keep the stale
+//	       entry warm: no commit result is ever installed, and an installed head
+//	       older than the idle TTL is refreshed whatever touched the entry since.
+//
+// The version orders this process's observations only. Another daemon's commits
+// are not seen until the cached head is older than the TTL.
+func (s *Store) update(ctx context.Context, convID string, fn func(e *entry, cur State) (State, error)) (State, error) {
+	for {
+		e := s.touch(convID)
+		old := e.head.Load()
+		cur, err := s.backend.State(ctx, convID)
+		if err != nil {
+			return State{}, err
+		}
+		next, err := fn(e, cur)
+		if err != nil {
+			return State{}, err
+		}
+		if s.install(convID, e, old, next) {
+			return next, nil
+		}
+	}
+}
+
+// install swaps e's head from old to next, and fails when e is no longer the
+// conversation's entry or its head is no longer old. The identity check and the
+// swap share Store.mu with the sweep, so a dead entry can never win.
+func (s *Store) install(convID string, e *entry, old *headState, next State) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.dead || s.entries[convID] != e {
+		return false
+	}
+	return e.head.CompareAndSwap(old, &headState{
+		version:     old.ver() + 1,
+		cached:      true,
+		id:          next.HeadID,
+		nextOrdinal: next.NextOrdinal,
+		at:          s.now(),
+	})
+}
+
+// invalidate drops the conversation's cached position without installing one:
+// the replacement state carries a newer version, so an update that began before
+// it loses its swap.
+func (s *Store) invalidate(convID string) {
+	s.mu.Lock()
+	e := s.entries[convID]
+	s.mu.Unlock()
+	if e == nil {
+		return
+	}
+	for {
+		old := e.head.Load()
+		if e.head.CompareAndSwap(old, &headState{version: old.ver() + 1}) {
+			return
+		}
+	}
+}
+
 // Working returns the working path: the chain from the head to the nearest
 // root, chronological.
 func (h *Handle) Working(ctx context.Context) ([]*Node, error) {
-	st, err := h.State(ctx)
+	head, err := h.headID(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return h.pathFrom(ctx, st.HeadID, false)
+	return h.pathFrom(ctx, head, false)
 }
 
 // Snapshot returns the conversation's whole tree, crossing every root.
 func (h *Handle) Snapshot(ctx context.Context) (*Snapshot, error) {
-	st, err := h.State(ctx)
+	head, err := h.headID(ctx)
 	if err != nil {
 		return nil, err
 	}
-	nodes, err := h.pathFrom(ctx, st.HeadID, true)
+	nodes, err := h.pathFrom(ctx, head, true)
 	if err != nil {
 		return nil, err
 	}

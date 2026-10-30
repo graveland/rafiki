@@ -362,21 +362,38 @@ reader that wants the working set asks for it by name.
 worker and every in-process child share it, so a node one face appended is
 cached for the next.
 
-- **The head is never cached.** Every read (`Working`, `Snapshot`, and through
-  them `Page`/`Transcript`) calls the backend's `State` exactly once at the start
-  and walks from the head it returns; writes resolve their starting position from
-  `State` too and no longer publish a position afterwards. A committed append or
-  retract is therefore visible to the next read by construction. The cost is one
-  indexed primary-key lookup per read; the cache no longer offers a zero-query
-  owner read. `conv.AsOwner` changes nothing about a handle's reads.
+- **The head is cached, ordered by an in-process version, and only `Store.update`
+  installs it.** `update` reads the backend's `State` once per iteration, applies a pure
+  function to it and installs the result with one compare-and-swap against the
+  entry state the iteration began from (the version lives in the same pointer as
+  the position, so there is no window between winning the version and storing
+  the head); a lost swap or a dead entry restarts the loop with a fresh read. The
+  identity check and the swap share `Store.mu` with the sweep, so a swept entry can
+  never win. A write NEVER publishes its own commit result: after its commit is
+  durable `Append`/`RetractHead` refresh (read the backend and install that), so
+  "is my commit newer than yours" is never asked; if the refresh itself fails the
+  write still succeeded and the cached head is invalidated instead. A read
+  (`Working`, `Snapshot`, and through them `Page`/`Transcript`) on a `conv.AsOwner`
+  handle uses the cached head when it is fresh and otherwise refreshes, so a warm
+  owner read makes zero backend calls; a read on any other handle always refreshes
+  (one `State` call, installed through `update`), because the conversation's
+  writer may be another process. `Handle.State` stays a backend read because it
+  carries `clear_pending`.
+- **The version is in-process only.** It orders this process's observations; it
+  is not persisted and not shared, so a restart starts with an empty cache and a
+  second daemon's commits are invisible until the cached head is older than
+  `IdleTTL` (age, not idleness: reads keep an entry alive but a head installed
+  longer ago than the TTL is refreshed on the next read). The deployment is one
+  replica; this is not cross-process invalidation.
 - **The cache holds nodes.** Decoded messages in a byte-charged LRU shared by the
   whole store; the walk is answered from memory when every node is cached (no
   `Walk`, no `Fetch`).
-- **A swept entry is dead for good.** An entry carries only the per-conversation
-  write mutex, its last access and a `dead` flag. The sweep sets `dead` and
-  nothing clears it, so a writer that still holds a swept entry re-resolves the
-  conversation's current one before writing; the commit's compare-and-swap is what
-  refuses a second writer.
+- **A swept entry is dead for good.** An entry carries the per-conversation
+  write mutex, its cached head, its last access and a `dead` flag. The sweep sets
+  `dead` and nothing clears it. A writer re-resolves the conversation's entry only
+  when it takes the lock, so one holding a swept entry may coexist with a writer
+  on its replacement; the commit's compare-and-swap is what refuses the second
+  writer, and `update` never installs into the dead entry.
 - **Provider lookups always ask the backend.** `provider_message_id` is not
   unique — `ConvBackend.ByProviderMessageID` answers the newest ordinal — and the
   cache cannot know which duplicates exist, so `NodeByProviderMessageID` never
