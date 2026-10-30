@@ -19,6 +19,44 @@ import (
 // pngBase64 is a one-pixel PNG, the payload of every image fixture.
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
+// fixture is what one testdata file must decode to: the block kinds it exists to
+// pin, in order, or — for the deliberately untyped fixtures — the fact that
+// every one of its blocks must come back Opaque.
+type fixture struct {
+	kinds  []string
+	opaque bool
+}
+
+// fixtures names the expectation of every file in testdata. A file missing here
+// fails TestRoundTripFaithful, so a new fixture has to state what it proves.
+//
+// The two opaque entries are the deliberate half of the split: a block the typed
+// form cannot reproduce must be kept verbatim, and those are the fixtures that a
+// canon-only round trip would go on passing even if every block had quietly
+// collapsed to Opaque.
+var fixtures = map[string]fixture{
+	"text.json":                       {kinds: []string{"text"}},
+	"text-cache-control.json":         {kinds: []string{"text"}},
+	"multi-text.json":                 {kinds: []string{"text", "text"}},
+	"string-content.json":             {kinds: []string{"text"}},
+	"thinking-anthropic.json":         {kinds: []string{"thinking"}},
+	"thinking-responses-api.json":     {kinds: []string{"thinking"}},
+	"thinking-responses-chatgpt.json": {kinds: []string{"thinking"}},
+	"thinking-responses-legacy.json":  {kinds: []string{"thinking"}},
+	"tool-use.json":                   {kinds: []string{"text", "tool_use"}},
+	"tool-result-string.json":         {kinds: []string{"tool_result"}},
+	"tool-result-error.json":          {kinds: []string{"tool_result"}},
+	"tool-result-not-error.json":      {kinds: []string{"tool_result"}},
+	"tool-result-nested-image.json":   {kinds: []string{"tool_result"}},
+	"image.json":                      {kinds: []string{"image"}},
+	"claude-captured-mixed.json":      {kinds: []string{"text", "thinking", "tool_use"}},
+	"fundi-row.json":                  {kinds: []string{"text", "tool_use", "tool_result"}},
+
+	// Deliberately opaque fixtures.
+	"opaque-redacted-thinking.json":   {opaque: true},
+	"opaque-text-with-citations.json": {opaque: true},
+}
+
 // TestDecodeTypedBlocks pins the happy path for each typed kind: a block the
 // codec can reproduce comes back typed, not Opaque.
 func TestDecodeTypedBlocks(t *testing.T) {
@@ -119,6 +157,50 @@ func TestDecodeFallsBackToOpaque(t *testing.T) {
 	}
 }
 
+// TestDecodeMalformedBlockFallsBackToOpaque pins totality: a block whose fields
+// are the wrong JSON type cannot be typed losslessly, but it must still decode —
+// as its own original bytes — because one odd block must not fail a whole
+// conversation's walk.
+func TestDecodeMalformedBlockFallsBackToOpaque(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "type is a number", raw: `{"type":5,"text":"hi"}`},
+		{name: "text is a number", raw: `{"type":"text","text":5}`},
+		{name: "thinking is an object", raw: `{"type":"thinking","thinking":{"nope":true},"signature":"sig"}`},
+		{name: "signature is a number", raw: `{"type":"thinking","thinking":"hmm","signature":5}`},
+		{name: "tool_use id is a number", raw: `{"type":"tool_use","id":5,"name":"read_file","input":{}}`},
+		{name: "tool_result is_error is a string", raw: `{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"ok"}],"is_error":"yes"}`},
+		{name: "tool_result content is a number", raw: `{"type":"tool_result","tool_use_id":"toolu_1","content":5}`},
+		{name: "image data is a number", raw: `{"type":"image","source":{"type":"base64","media_type":"image/png","data":5}}`},
+		{name: "block is a number", raw: `5`},
+		{name: "block is a string", raw: `"just a string"`},
+		{name: "block is an array", raw: `[1,2,3]`},
+		{name: "block is null", raw: `null`},
+	} {
+		m, err := anthropic.Decode("user", []byte("["+tc.raw+"]"))
+		c.NoError(err, "%s: a malformed block must decode, not error", tc.name)
+		c.Eq(1, len(m.Content), "%s: one block", tc.name)
+
+		opaque, ok := m.Content[0].(msg.Opaque)
+		c.True(ok, "%s must fall back to Opaque, got %T", tc.name, m.Content[0])
+		c.Eq(msg.DialectAnthropic, opaque.Provider, "%s: Provider", tc.name)
+		c.Eq(tc.raw, string(opaque.Raw), "%s: Raw must be byte-identical", tc.name)
+	}
+
+	// What stays an error: content that is not a JSON array or string at all,
+	// and content that is not JSON.
+	_, err := anthropic.Decode("user", []byte(`{"type":"text","text":"hi"}`))
+	c.Error(err, "a top-level object is not message content")
+	_, err = anthropic.Decode("user", []byte(`[{"type":"text",`))
+	c.Error(err, "truncated JSON is an error")
+	_, err = anthropic.Decode("user", []byte(`7`))
+	c.Error(err, "a top-level number is not message content")
+}
+
 // TestDecodeSignatureDialect pins the reasoning-signature classification: a
 // signature is only replayable to the backend that minted it, so the dialect has
 // to be read off the signature itself.
@@ -199,28 +281,125 @@ func TestDecodeEquivalences(t *testing.T) {
 	c.EqualError(err, `msg: unknown role "system"`, "an unknown role is an error, not a guess")
 }
 
-// TestRoundTripFaithful pins losslessness over realistic stored rows: decoding
-// and re-encoding a fixture must not change its canonical identity.
+// TestRoundTripFaithful pins losslessness over realistic stored rows, and pins
+// what each fixture is supposed to be: decoding and re-encoding a fixture must
+// not change its canonical identity, AND it must yield the block kinds that
+// fixture exists to prove. The second half is what stops a canon-only round trip
+// from passing while every block has quietly collapsed to Opaque.
 func TestRoundTripFaithful(t *testing.T) {
 	c := assert.NewAborting(t)
 
 	paths, err := filepath.Glob(filepath.Join("testdata", "*.json"))
 	c.NoError(err, "glob testdata")
 	c.True(len(paths) >= 12, "want at least 12 fixtures, found %d", len(paths))
+	c.Eq(len(fixtures), len(paths), "every fixture must declare its expectation in fixtures")
 
 	for _, path := range paths {
 		name := filepath.Base(path)
 		original, err := os.ReadFile(path)
 		c.NoError(err, "read %s", name)
 
+		want, declared := fixtures[name]
+		c.True(declared, "%s has no declared expectation", name)
+
 		m, err := anthropic.Decode("user", original)
 		c.NoError(err, "%s: Decode", name)
+
+		var kinds []string
+		for i, block := range m.Content {
+			_, isOpaque := block.(msg.Opaque)
+			if want.opaque {
+				c.True(isOpaque, "%s block %d belongs to a deliberately untyped fixture and must be Opaque, got %T", name, i, block)
+				continue
+			}
+			c.False(isOpaque, "%s block %d must decode to a typed block, not Opaque", name, i)
+			kinds = append(kinds, kindOf(block))
+		}
+		if !want.opaque {
+			c.EqDeep(want.kinds, kinds, "%s: decoded block kinds", name)
+		}
 
 		encoded, err := anthropic.EncodeContent(m)
 		c.NoError(err, "%s: EncodeContent", name)
 
 		assertCanonEqual(c, original, encoded, name)
 	}
+}
+
+// TestEncodeContentHandBuilt pins the outbound direction on messages built from
+// msg values rather than decoded from stored bytes, which is how later work
+// constructs nodes.
+func TestEncodeContentHandBuilt(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	t.Run("empty tool_use input encodes as an object", func(t *testing.T) {
+		cc := c.Sub(t)
+		m := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+			msg.ToolUse{ID: "toolu_1", Name: "noargs"},
+		}}
+
+		encoded, err := anthropic.EncodeContent(m)
+		cc.NoError(err, "EncodeContent")
+		cc.Eq(`[{"type":"tool_use","id":"toolu_1","name":"noargs","input":{}}]`, string(encoded),
+			"an empty input must still be a JSON object, not null and not absent")
+
+		back, err := anthropic.Decode("assistant", encoded)
+		cc.NoError(err, "Decode")
+		cc.EqDeep(
+			[]msg.Block{msg.ToolUse{ID: "toolu_1", Name: "noargs", Input: json.RawMessage(`{}`)}},
+			back.Content, "the block must come back typed with its empty input",
+		)
+	})
+
+	for _, tc := range []struct {
+		name     string
+		content  []msg.Block
+		wantJSON string
+		wantBack []msg.Block
+	}{
+		{
+			name:     "nil tool_result content",
+			content:  nil,
+			wantJSON: `[{"type":"tool_result","tool_use_id":"toolu_1"}]`,
+			wantBack: []msg.Block{msg.ToolResult{ToolUseID: "toolu_1"}},
+		},
+		{
+			name:     "empty tool_result content",
+			content:  []msg.Block{},
+			wantJSON: `[{"type":"tool_result","tool_use_id":"toolu_1","content":[]}]`,
+			wantBack: []msg.Block{msg.ToolResult{ToolUseID: "toolu_1", Content: []msg.Block{}}},
+		},
+	} {
+		m := msg.Message{Role: msg.User, Content: []msg.Block{
+			msg.ToolResult{ToolUseID: "toolu_1", Content: tc.content},
+		}}
+
+		encoded, err := anthropic.EncodeContent(m)
+		c.NoError(err, "%s: EncodeContent", tc.name)
+		c.Eq(tc.wantJSON, string(encoded), "%s: encoded JSON", tc.name)
+
+		back, err := anthropic.Decode("user", encoded)
+		c.NoError(err, "%s: Decode", tc.name)
+		c.EqDeep(tc.wantBack, back.Content, "%s must decode back to its typed block", tc.name)
+	}
+
+	t.Run("a hand-built image round-trips byte for byte", func(t *testing.T) {
+		cc := c.Sub(t)
+		image := msg.Image{MediaType: "image/png", Data: []byte{0x89, 'P', 'N', 'G', 0, 1, 2, 0xff}}
+		m := msg.Message{Role: msg.User, Content: []msg.Block{image}}
+
+		encoded, err := anthropic.EncodeContent(m)
+		cc.NoError(err, "EncodeContent")
+		cc.Eq(
+			`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`+
+				base64.StdEncoding.EncodeToString(image.Data)+`"}}]`,
+			string(encoded), "the image must be base64 of its bytes",
+		)
+
+		back, err := anthropic.Decode("user", encoded)
+		cc.NoError(err, "Decode")
+		cc.EqDeep([]msg.Block{image}, back.Content, "image bytes must survive the round trip")
+	})
 }
 
 // TestToParamMatchesSDKDecode pins the outbound conversion against the SDK's own
@@ -302,6 +481,25 @@ func TestFromParamRoundTrip(t *testing.T) {
 	fromParam, err := anthropic.FromParam(sdkDecode(c, "assistant", content))
 	c.NoError(err, "FromParam")
 	c.EqDeep(want, fromParam, "FromParam must agree with Decode")
+}
+
+// kindOf names a block's kind, for the fixture expectations.
+func kindOf(block msg.Block) string {
+	switch block.(type) {
+	case msg.Text:
+		return "text"
+	case msg.Thinking:
+		return "thinking"
+	case msg.ToolUse:
+		return "tool_use"
+	case msg.ToolResult:
+		return "tool_result"
+	case msg.Image:
+		return "image"
+	case msg.Opaque:
+		return "opaque"
+	}
+	return "unknown"
 }
 
 // sdkDecode is the SDK's own decoding of stored content: the harness the

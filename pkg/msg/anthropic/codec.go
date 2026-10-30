@@ -2,12 +2,14 @@
 // (pkg/msg) and the Anthropic message content stored for a conversation.
 //
 // Stored content is JSON: an array of blocks as the API accepts them, a bare
-// JSON string for the shorthand prompt form, or null. Decoding is lossless by
-// construction: a block is only turned into a native typed block when
-// re-encoding it reproduces the same canonical content, and otherwise it is
-// kept verbatim as msg.Opaque. That is what keeps a field this package does not
-// model — citations, an unusual image source, a caller added by the API —
-// from being silently dropped on the way to storage.
+// JSON string for the shorthand prompt form, or null. Decoding is total and
+// lossless: a block is turned into a native typed block only when re-encoding it
+// reproduces the same canonical content, and otherwise it is kept verbatim as
+// msg.Opaque. That is what keeps a field this package does not model —
+// citations, an unusual image source, a caller added by the API — from being
+// silently dropped on the way to storage, and what lets a single odd block (a
+// wrongly-typed field, say) be read back without making its whole conversation
+// unreadable.
 package anthropic
 
 import (
@@ -32,6 +34,12 @@ const (
 // Decode turns stored message content into a native message. content is a JSON
 // array of blocks, a bare JSON string (one text block), or null or empty (no
 // content).
+//
+// Two things are errors: an unknown role, and content that is not valid JSON or
+// is JSON of an unexpected top-level kind. Nothing inside a block is: a block
+// whose fields cannot be read into the typed form degrades to Opaque carrying
+// its original bytes, because one unreadable block must not fail a whole
+// conversation's walk.
 func Decode(role string, content []byte) (msg.Message, error) {
 	r, err := msg.ParseRole(role)
 	if err != nil {
@@ -121,7 +129,7 @@ func decodeBlock(raw json.RawMessage) (msg.Block, error) {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(raw, &head); err != nil {
-		return nil, fmt.Errorf("anthropic: decode block type: %w", err)
+		return opaque(raw), nil
 	}
 	var (
 		block msg.Block
@@ -137,12 +145,12 @@ func decodeBlock(raw json.RawMessage) (msg.Block, error) {
 	case "tool_result":
 		block, err = decodeToolResultBlock(raw)
 	case "image":
-		return decodeImageBlock(raw)
+		block, err = decodeImageBlock(raw)
 	default:
 		return opaque(raw), nil
 	}
 	if err != nil {
-		return nil, err
+		return opaque(raw), nil
 	}
 	return verify(raw, block)
 }
