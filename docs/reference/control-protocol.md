@@ -431,7 +431,8 @@ happens, and a refetch through `GetHistory` drops it. Ordinals stay strictly
 increasing along the returned page, so a client can still page and resume by
 ordinal. `agent_view` still reads the stored rows (`store.Messages.Load`) and
 shows the dead branches; `rafiki logs`/`tail` backfill through `GetHistory`, so
-they follow the transcript.
+they follow the transcript. A conversation the daemon does not hold answers
+`not_found`, never an empty page and never `internal`.
 
 #### `EventSubject`
 

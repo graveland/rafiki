@@ -308,6 +308,25 @@ func TestGetHistoryRejectsEmptyChildID(t *testing.T) {
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
+// A conversation the store does not hold is NotFound, the answer every other
+// verb gives for a missing object. An empty page would hide a wrong id and
+// Internal would claim the daemon is broken, so neither is acceptable here.
+func TestGetHistoryUnknownConversationIsNotFound(t *testing.T) {
+	c := assert.NewAborting(t)
+	// No conversation is ever created on this backend.
+	s := connectapi.NewServer(conv.NewStore(conv.NewMemBackend(), conv.Options{}))
+	s.SetChildResolver(fakeResolver{known: map[string]string{
+		historyChild: "0b8f7c1e-0000-4000-8000-000000000000",
+	}})
+
+	resp, err := s.GetHistory(context.Background(),
+		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: historyChild}))
+
+	c.Error(err, "want an error for a conversation the store does not hold, got nil")
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
+	c.Nil(resp, "response")
+}
+
 // The child id and the conversation id are different identifiers: child ids
 // are ULIDs the daemon mints per spawn, while the transcript is keyed by the
 // conversation's UUID. Without a resolver the handler must fail rather than

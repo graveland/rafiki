@@ -191,6 +191,18 @@ func (s *Server) Routes(interceptors ...connect.Interceptor) (string, http.Handl
 	return rafikiv1connect.NewControlHandler(s, connect.WithInterceptors(interceptors...))
 }
 
+// historyError maps a transcript read failure onto a Connect code: a
+// conversation the store does not hold is CodeNotFound — the answer every other
+// verb gives for a missing object, and one a caller can act on, where an empty
+// page would hide a wrong id and Internal would claim the daemon is broken —
+// and everything else stays Internal rather than reading as the caller's fault.
+func historyError(err error, conversationID string) error {
+	if errors.Is(err, conv.ErrNotFound) {
+		return connect.NewError(connect.CodeNotFound, err)
+	}
+	return unmappedErr(err, "rpc", "GetHistory", "conversationId", conversationID)
+}
+
 // GetHistory serves the durable tier: the conversation's transcript converted
 // to native events, each carrying its node's created_at as ts, bounded by the
 // request's three optional fields — after_ordinal (strictly greater; the exact
@@ -255,7 +267,7 @@ func (s *Server) GetHistory(
 	}
 	nodes, err := s.history.Page(ctx, conversationID, page)
 	if err != nil {
-		return nil, unmappedErr(err, "rpc", "GetHistory", "conversationId", conversationID)
+		return nil, historyError(err, conversationID)
 	}
 	return connect.NewResponse(&rafikiv1.GetHistoryResponse{
 		Events: eventconv.EventsFromNodes(childID, nodes),
