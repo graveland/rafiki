@@ -242,9 +242,11 @@ func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State
 		n.CreatedAt = created
 	}
 	// Rows first, head second: a reader that observes the new head must find
-	// its nodes.
+	// its nodes. The commit's position is published to whatever entry the
+	// conversation has now, even when this writer's own entry was swept while it
+	// was committing.
 	h.store.putNodes(h.convID, rows...)
-	h.store.storeHeadWrite(h.convID, e, headState{id: headID, nextOrdinal: st.NextOrdinal + len(rows)})
+	h.store.storeCommitted(h.convID, e, headState{id: headID, nextOrdinal: st.NextOrdinal + len(rows)})
 
 	nodes := make([]*Node, 0, len(hashes))
 	nodes = append(nodes, held...)
@@ -385,7 +387,7 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 			Lease:             h.lease,
 		})
 		if err == nil {
-			h.store.storeHeadWrite(h.convID, e, headState{id: newHead, nextOrdinal: st.NextOrdinal})
+			h.store.storeCommitted(h.convID, e, headState{id: newHead, nextOrdinal: st.NextOrdinal})
 			return nil
 		}
 		if errors.Is(err, ErrLeaseLost) || !errors.Is(err, ErrConflict) {

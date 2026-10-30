@@ -139,48 +139,82 @@ func (c *clock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// gatedCommit holds one armed Commit after the backend has applied it and before
-// it returns: that is the window a writer spends between committing a head and
-// publishing it.
-type gatedCommit struct {
-	conv.Backend
+// commitGate is the synchronisation a test uses to hold one Commit in flight.
+// entered is closed when the commit is held, release unblocks it.
+type commitGate struct {
 	mu      sync.Mutex
 	armed   bool
 	entered chan struct{}
 	release chan struct{}
 }
 
-// arm makes the next Commit stall after it lands.
-func (g *gatedCommit) arm() {
+// newCommitGate returns a gate that is not yet armed.
+func newCommitGate() *commitGate {
+	return &commitGate{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+// arm makes the next Commit hold.
+func (g *commitGate) arm() {
 	g.mu.Lock()
 	g.armed = true
 	g.mu.Unlock()
 }
 
-// Commit applies the commit, then stalls when armed, so a test can sweep the
-// entry out from under a writer that has already written.
+// take reports whether this Commit should hold, and spends the arm.
+func (g *commitGate) take() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	hold := g.armed
+	g.armed = false
+	return hold
+}
+
+// hold signals that the commit is being held and waits for the test to release
+// it.
+func (g *commitGate) hold() {
+	close(g.entered)
+	<-g.release
+}
+
+// gatedCommit applies a commit and only then holds it: the window a writer spends
+// between its rows landing and its position being published.
+type gatedCommit struct {
+	conv.Backend
+	gate *commitGate
+}
+
+// Commit applies the commit, then holds it when armed.
 func (g *gatedCommit) Commit(ctx context.Context, commit conv.Commit) (time.Time, error) {
 	created, err := g.Backend.Commit(ctx, commit)
 	if err != nil {
 		return created, err
 	}
-	g.mu.Lock()
-	stall := g.armed
-	g.armed = false
-	g.mu.Unlock()
-	if !stall {
-		return created, nil
+	if g.gate.take() {
+		g.gate.hold()
 	}
-	close(g.entered)
-	<-g.release
 	return created, nil
 }
 
+// blockedCommit holds a commit BEFORE it reaches the backend: the window a
+// writer spends between resolving its position and its rows landing.
+type blockedCommit struct {
+	conv.Backend
+	gate *commitGate
+}
+
+// Commit holds when armed, then applies the commit.
+func (b *blockedCommit) Commit(ctx context.Context, commit conv.Commit) (time.Time, error) {
+	if b.gate.take() {
+		b.gate.hold()
+	}
+	return b.Backend.Commit(ctx, commit)
+}
+
 // pausedAppend starts a.Append in the background with the gate armed, so the
-// append has committed by the time this returns and has not published. The
-// returned function releases it, waits for it to finish and reports its result.
-func pausedAppend(g *gatedCommit, h *conv.Handle, a conv.Append) func() (conv.Result, error) {
-	g.arm()
+// append has reached the gate by the time this returns. The returned function
+// releases it, waits for it to finish and reports its result.
+func pausedAppend(gate *commitGate, h *conv.Handle, a conv.Append) func() (conv.Result, error) {
+	gate.arm()
 	stalled := make(chan struct{})
 	var res conv.Result
 	var err error
@@ -189,7 +223,7 @@ func pausedAppend(g *gatedCommit, h *conv.Handle, a conv.Append) func() (conv.Re
 		res, err = h.Append(context.Background(), a)
 	}()
 	select {
-	case <-g.entered:
+	case <-gate.entered:
 	case <-stalled:
 		// The append finished without reaching the gate, so there is nothing to
 		// wait for; the result says why.
@@ -197,7 +231,7 @@ func pausedAppend(g *gatedCommit, h *conv.Handle, a conv.Append) func() (conv.Re
 	var once sync.Once
 	return func() (conv.Result, error) {
 		once.Do(func() {
-			close(g.release)
+			close(gate.release)
 			<-stalled
 		})
 		return res, err

@@ -26,26 +26,16 @@ type headState struct {
 	nextOrdinal int
 }
 
-// providerRef is a provider message id's index entry: the newest node this entry
-// has seen carrying the id, and that node's ordinal. id is empty once that node
-// has been evicted, which keeps the ordinal — the high-water mark that stops a
-// re-fetched older duplicate from being answered — without pointing at a node
-// the cache no longer holds.
-type providerRef struct {
-	id      string
-	ordinal int
-}
-
 // entry is the per-conversation cache state.
 type entry struct {
 	// head is the conversation's position as this process last saw it. A write
 	// stores the new state only after its rows are in the LRU, so a reader that
 	// observes the new head always finds its nodes.
 	head atomic.Pointer[headState]
-	// writeMu serialises Append and RetractHead on this conversation.
+	// writeMu serialises Append and RetractHead while this entry is the
+	// conversation's.
 	writeMu sync.Mutex
-	// owner, loaded, lastAccess, gen, lease, dead and byProvider are guarded by
-	// Store.mu.
+	// owner, loaded, lastAccess, gen, lease and dead are guarded by Store.mu.
 	owner      bool
 	loaded     bool
 	lastAccess time.Time
@@ -61,10 +51,6 @@ type entry struct {
 	// lease is the fence key of the last handle that resolved the entry, so a
 	// takeover invalidates a head the previous holder left behind.
 	lease string
-	// byProvider maps a provider message id to the newest node this entry has
-	// seen carrying it, so an owner lookup that is already cached costs no
-	// query. It is an optimisation for the owner, never a source of truth.
-	byProvider map[string]providerRef
 }
 
 // Store is a conversation node cache in front of a Backend. It is safe for
@@ -193,7 +179,7 @@ func (s *Store) touch(convID string, owner bool, lease string) *entry {
 	s.sweepLocked()
 	e := s.entries[convID]
 	if e == nil {
-		e = &entry{byProvider: make(map[string]providerRef)}
+		e = &entry{}
 		s.entries[convID] = e
 	}
 	if owner && !e.owner {
@@ -210,8 +196,11 @@ func (s *Store) touch(convID string, owner bool, lease string) *entry {
 
 // lockEntry resolves convID's entry and takes its write lock, re-resolving
 // after the lock so a writer never holds the lock of an entry that was swept
-// and replaced. Entry creation happens only under Store.mu, so there is one
-// entry — and therefore one writeMu — per conversation.
+// and replaced. Creation happens only under Store.mu, but that does not make the
+// lock unique: a held writeMu can still be swept, so two writers may briefly
+// hold the locks of two entries of the same conversation. What keeps that safe
+// is the commit's compare-and-swap, which refuses the second writer, and the
+// monotonic publish, which never moves a cached position backwards.
 func (h *Handle) lockEntry() *entry {
 	for {
 		e := h.store.touch(h.convID, h.owner, h.leaseKey())
@@ -302,16 +291,15 @@ func (s *Store) storeHeadRead(convID string, e *entry, gen uint64, st headState)
 	if live == nil || live.gen != gen {
 		return
 	}
-	live.loaded = true
-	live.lastAccess = s.now()
-	live.head.Store(&st)
+	s.publishLocked(live, st)
 }
 
-// storeHeadWrite publishes a state a WRITER resolved or committed, advancing
-// the generation so every read in flight against the old position is dropped. A
-// writer whose entry was swept while it was committing publishes nothing: the
-// next reader resolves a fresh entry and reads the backend, which is the head
-// the commit left.
+// storeHeadWrite publishes a position a WRITER resolved, advancing the
+// generation so every read in flight against the old position is dropped. A
+// writer whose entry was swept publishes nothing here: a position it only
+// RESOLVED says no more than the next reader's own read will, so dropping it
+// costs a query and never an answer. A commit is published by storeCommitted
+// instead.
 func (s *Store) storeHeadWrite(convID string, e *entry, st headState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,6 +307,49 @@ func (s *Store) storeHeadWrite(convID string, e *entry, st headState) {
 	if live == nil {
 		return
 	}
+	s.publishLocked(live, st)
+}
+
+// storeCommitted publishes the position a successful Commit left behind. The
+// rows are durable whether or not the writer's entry survived, so a swept entry
+// must not swallow the news: when the writer's entry is gone, the conversation's
+// CURRENT entry is refreshed instead, and an entry is never installed (a swept
+// one is dead for good).
+//
+// Nothing is published backwards. A replacement entry keeps any position it
+// holds at or beyond the commit, because a later head move at the same ordinal
+// cannot be ordered against this one; the writer's own entry takes the commit
+// even when the ordinal did not move, because it is the only writer through that
+// entry (its writeMu) and a retract is exactly a head move at the same ordinal.
+// With no entry at all, the next reader creates one and asks the backend.
+func (s *Store) storeCommitted(convID string, e *entry, st headState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.liveEntryLocked(convID, e)
+	if live == nil {
+		// A different entry now: only a position strictly behind the commit can
+		// be brought forward. At or beyond the committed ordinal its value may be
+		// a later head move, which this commit cannot be ordered against.
+		live = s.entries[convID]
+		if live == nil {
+			return
+		}
+		if cur := live.head.Load(); cur != nil && cur.nextOrdinal >= st.nextOrdinal {
+			return
+		}
+	} else if cur := live.head.Load(); cur != nil && cur.nextOrdinal > st.nextOrdinal {
+		// Our own entry, but a later commit has already published a position into
+		// it — a writer whose entry was swept can do exactly that.
+		return
+	}
+	s.publishLocked(live, st)
+}
+
+// publishLocked stores st into a live entry, advancing its generation and
+// keeping it warm. Every publish path ends here, so a published position always
+// has the same effect on the entry; whether it may move the entry is each
+// caller's rule.
+func (s *Store) publishLocked(live *entry, st headState) {
 	live.gen++
 	live.loaded = true
 	live.lastAccess = s.now()
@@ -348,22 +379,13 @@ func (s *Store) touchLocked(id string) {
 }
 
 // putLocked inserts a node, charging its stored content, and evicts from the
-// cold end past the budget. A node's provider message id is indexed here,
-// because this is where a node of that conversation enters the cache.
+// cold end past the budget.
 func (s *Store) putLocked(n *Node) {
 	if _, ok := s.nodes[n.ID]; ok {
 		return
 	}
 	s.nodes[n.ID] = s.lru.PushFront(n)
 	s.charged += int64(len(n.Content))
-	if e := s.entries[n.ConversationID]; e != nil && n.ProviderMessageID != "" {
-		// The newest ordinal wins: a re-fetched older node must not displace
-		// the reply a resume is looking for, and it must not even lower the mark
-		// of a newer node that has since been evicted.
-		if cur, ok := e.byProvider[n.ProviderMessageID]; !ok || n.Ordinal >= cur.ordinal {
-			e.byProvider[n.ProviderMessageID] = providerRef{id: n.ID, ordinal: n.Ordinal}
-		}
-	}
 	for s.charged > s.cacheBytes && s.lru.Len() > 0 {
 		s.evictLocked()
 	}
@@ -371,8 +393,7 @@ func (s *Store) putLocked(n *Node) {
 
 // evictLocked drops the coldest node. Eviction costs no reader anything:
 // snapshots hold node references, so a reader mid-iteration is unaffected, and
-// an evicted node is re-fetched through Walk + Fetch. Only the provider index
-// notices, and only by forgetting which node held the id.
+// an evicted node is re-fetched through Walk + Fetch.
 func (s *Store) evictLocked() {
 	el := s.lru.Back()
 	if el == nil {
@@ -382,14 +403,6 @@ func (s *Store) evictLocked() {
 	s.lru.Remove(el)
 	delete(s.nodes, n.ID)
 	s.charged -= int64(len(n.Content))
-	if e := s.entries[n.ConversationID]; e != nil && n.ProviderMessageID != "" {
-		if cur, ok := e.byProvider[n.ProviderMessageID]; ok && cur.id == n.ID {
-			// The ordinal mark stays: an older duplicate re-fetched after this
-			// node was evicted must still be known to be older than the newest
-			// this entry has seen.
-			e.byProvider[n.ProviderMessageID] = providerRef{ordinal: cur.ordinal}
-		}
-	}
 }
 
 // putNodes caches nodes of convID and keeps the entry warm. A node belonging to
@@ -657,53 +670,22 @@ func (h *Handle) RequestAt(ctx context.Context, headID string, trimFrom, trimTo 
 	return kept, nil
 }
 
-// NodeByProviderMessageID returns the node an upstream message id names.
+// NodeByProviderMessageID returns the newest node an upstream message id names,
+// always from the backend.
 //
-// The conversation's own index is an OWNER-only optimisation, exactly like the
-// cached head: only an owner handle on an owner entry answers from it, and only
-// while the index still holds the newest node it has seen for that id. Every
-// other reader — capture is a reader by design — asks the backend, whose answer
-// is the newest ordinal. That matters because a provider id is not unique: an
-// index that answered whatever it happened to hold could name an older duplicate
-// than the backend would, and capture uses this node as previous_message_id.
+// A provider message id is not unique — `ConvBackend.ByProviderMessageID` orders
+// `ordinal DESC LIMIT 1` — and the cache cannot know which duplicates exist, so
+// it answers nothing from memory: a cached node is only the newest among the
+// nodes this process happens to hold. Capture uses this node as
+// `previous_message_id`, so a cheaper answer is not worth a wrong attachment.
 func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID string) (*Node, bool, error) {
-	e := h.store.touch(h.convID, h.owner, h.leaseKey())
-	if providerMessageID != "" {
-		if ref, ok := h.store.indexedProvider(h.convID, e, h.owner, providerMessageID); ok {
-			n, err := h.store.node(ctx, h.convID, ref.id)
-			if err != nil {
-				return nil, false, err
-			}
-			if n != nil {
-				return n, true, nil
-			}
-		}
-	}
+	h.store.touch(h.convID, h.owner, h.leaseKey())
 	n, ok, err := h.store.backend.ByProviderMessageID(ctx, h.convID, providerMessageID)
 	if err != nil || !ok {
 		return nil, ok, err
 	}
 	h.store.putNodes(h.convID, n)
 	return n, true, nil
-}
-
-// indexedProvider returns the index entry for providerMessageID when it may be
-// trusted: an owner handle on a live owner entry, and a node the index still
-// holds as the newest it has seen for that id. An entry whose newest node was
-// evicted keeps the ordinal but no id, so this reports a miss and the caller
-// asks the backend rather than answering with an older duplicate.
-func (s *Store) indexedProvider(convID string, e *entry, owner bool, providerMessageID string) (providerRef, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.liveEntryLocked(convID, e)
-	if live == nil || !owner || !live.owner {
-		return providerRef{}, false
-	}
-	ref, ok := live.byProvider[providerMessageID]
-	if !ok || ref.id == "" {
-		return providerRef{}, false
-	}
-	return ref, true
 }
 
 // Roots returns the conversation's parent-less nodes, newest ordinal first.

@@ -96,34 +96,3 @@ func TestReaderStateFromASweptEntryIsDropped(t *testing.T) {
 	c.Eq(root.Nodes[0].ID, head.id, "the replacement's head was not overwritten")
 	c.Eq(1, head.nextOrdinal, "nor its next ordinal")
 }
-
-// A re-fetched older node must not displace the newest one in the provider
-// index, and an evicted node's id must go with it while its ordinal stays: the
-// mark is what keeps a re-fetched older duplicate from becoming the answer.
-func TestProviderIndexPrefersTheNewestAndForgetsAnEvictedNode(t *testing.T) {
-	c := assert.NewAborting(t)
-	s := NewStore(NewMemBackend(), Options{})
-	const convID = "conv"
-	s.touch(convID, false, "")
-
-	newer := &Node{Ref: Ref{ID: "newer", ConversationID: convID, Ordinal: 5}, Content: []byte("x"), ProviderMessageID: "msg_1"}
-	older := &Node{Ref: Ref{ID: "older", ConversationID: convID, Ordinal: 2}, Content: []byte("x"), ProviderMessageID: "msg_1"}
-	s.putNodes(convID, newer)
-	s.putNodes(convID, older)
-
-	s.mu.Lock()
-	ref, ok := s.entries[convID].byProvider["msg_1"]
-	s.mu.Unlock()
-	c.True(ok, "indexed")
-	c.Eq("newer", ref.id, "the newest ordinal wins")
-
-	s.mu.Lock()
-	for s.lru.Len() > 0 {
-		s.evictLocked()
-	}
-	ref, ok = s.entries[convID].byProvider["msg_1"]
-	s.mu.Unlock()
-	c.True(ok, "the id stays indexed")
-	c.Eq("", ref.id, "but no longer names an evicted node")
-	c.Eq(5, ref.ordinal, "the ordinal it remembers is the newest it has seen")
-}

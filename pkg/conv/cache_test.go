@@ -154,30 +154,41 @@ func TestEntryExpiresAfterIdleTTL(t *testing.T) {
 	c.Eq(1, counting.Counts()["State"], "an expired entry re-checks the head")
 }
 
-func TestProviderIndexResolvesWithoutQuery(t *testing.T) {
+// A provider message id is not unique, so the cache never answers a lookup from
+// memory: every handle, owner or reader, asks the backend, which orders by
+// ordinal.
+func TestProviderLookupAlwaysAsksTheBackend(t *testing.T) {
 	c := assert.NewAborting(t)
 	b, convID := newConv(t)
 	ctx := context.Background()
 	counting := convtest.NewCounting(b)
-	h := conv.NewStore(counting, conv.Options{}).Open(convID, conv.AsOwner())
-	res, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{
+	s := conv.NewStore(counting, conv.Options{})
+	owner := s.Open(convID, conv.AsOwner())
+	res, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{
 		Msg:               textMsg(msg.Assistant, "b"),
 		ProviderMessageID: "msg_indexed",
 	}}})
 	c.NoError(err, "append")
 
 	counting.Reset()
-	node, ok, err := h.NodeByProviderMessageID(ctx, "msg_indexed")
-	c.NoError(err, "NodeByProviderMessageID")
+	node, ok, err := owner.NodeByProviderMessageID(ctx, "msg_indexed")
+	c.NoError(err, "owner lookup")
 	c.True(ok, "found")
-	c.Eq(res.Nodes[0].ID, node.ID, "the indexed node")
-	c.Empty(counting.Counts(), "the conversation's own index answered it")
+	c.Eq(res.Nodes[0].ID, node.ID, "the node the provider id names")
+	c.Eq(1, counting.Counts()["ByProviderMessageID"], "an owner asks the backend too")
 
 	counting.Reset()
-	_, ok, err = h.NodeByProviderMessageID(ctx, "msg_absent")
+	node, ok, err = s.Open(convID).NodeByProviderMessageID(ctx, "msg_indexed")
+	c.NoError(err, "reader lookup")
+	c.True(ok, "found")
+	c.Eq(res.Nodes[0].ID, node.ID, "the node the provider id names")
+	c.Eq(1, counting.Counts()["ByProviderMessageID"], "and so does a reader")
+
+	counting.Reset()
+	_, ok, err = owner.NodeByProviderMessageID(ctx, "msg_absent")
 	c.NoError(err, "absent")
 	c.False(ok, "not found")
-	c.Eq(1, counting.Counts()["ByProviderMessageID"], "an unknown id falls through to the backend")
+	c.Eq(1, counting.Counts()["ByProviderMessageID"], "an unknown id is a backend miss")
 }
 
 // A writer that pauses between committing its head and publishing it must not
@@ -189,7 +200,8 @@ func TestSweptEntryIsNeverResurrected(t *testing.T) {
 	ctx := context.Background()
 	clk := newClock()
 	counting := convtest.NewCounting(b)
-	gated := &gatedCommit{Backend: counting, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := newCommitGate()
+	gated := &gatedCommit{Backend: counting, gate: gate}
 	s := conv.NewStore(gated, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
 
 	owner := s.Open(convID, conv.AsOwner())
@@ -197,7 +209,7 @@ func TestSweptEntryIsNeverResurrected(t *testing.T) {
 	c.NoError(err, "a")
 
 	// Writer A commits its head and pauses before publishing it.
-	release := pausedAppend(gated, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "b")}}})
+	release := pausedAppend(gate, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "b")}}})
 
 	// The entry idles past the TTL, so the next handle sweeps it.
 	clk.Advance(2 * time.Minute)
@@ -233,7 +245,8 @@ func TestPublishAfterSweepIsDropped(t *testing.T) {
 	ctx := context.Background()
 	clk := newClock()
 	counting := convtest.NewCounting(b)
-	gated := &gatedCommit{Backend: counting, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := newCommitGate()
+	gated := &gatedCommit{Backend: counting, gate: gate}
 	s := conv.NewStore(gated, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
 
 	owner := s.Open(convID, conv.AsOwner())
@@ -241,7 +254,7 @@ func TestPublishAfterSweepIsDropped(t *testing.T) {
 	c.NoError(err, "a")
 
 	// Writer A commits a user row and pauses before publishing it.
-	release := pausedAppend(gated, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "b")}}})
+	release := pausedAppend(gate, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "b")}}})
 
 	// The entry idles past the TTL and is swept; B resolves the replacement and
 	// moves the head back to the root, which it publishes there.
@@ -264,57 +277,56 @@ func TestPublishAfterSweepIsDropped(t *testing.T) {
 	c.Empty(counting.Counts(), "and the live entry answered it")
 }
 
-// The provider index is an owner-only optimisation: a reader handle asks the
-// backend even with a warm index, because a provider id is not unique and only
-// the backend orders by ordinal.
-func TestProviderIndexIsOwnerOnly(t *testing.T) {
+// A commit that lands after its writer's entry was swept must still reach the
+// conversation's live entry. Dropping it would leave that entry loaded and
+// permanently stale, answering a head older than the one committed.
+func TestCommitAfterSweepRefreshesTheLiveEntry(t *testing.T) {
 	c := assert.NewAborting(t)
 	b, convID := newConv(t)
 	ctx := context.Background()
+	clk := newClock()
 	counting := convtest.NewCounting(b)
-	s := conv.NewStore(counting, conv.Options{})
+	gate := newCommitGate()
+	blocked := &blockedCommit{Backend: counting, gate: gate}
+	s := conv.NewStore(blocked, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
+
 	owner := s.Open(convID, conv.AsOwner())
-	res, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{
-		Msg:               textMsg(msg.Assistant, "b"),
-		ProviderMessageID: "msg_shared",
-	}}})
-	c.NoError(err, "append")
+	root, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "a")}}})
+	c.NoError(err, "a")
+
+	// Writer A resolves H0 and pauses before its commit reaches the backend.
+	release := pausedAppend(gate, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "b")}}})
+
+	// The entry idles past the TTL and is swept; an owner read creates the
+	// replacement and loads H0 into it.
+	clk.Advance(2 * time.Minute)
+	other := s.Open(convID, conv.AsOwner())
+	before, err := other.Working(ctx)
+	c.NoError(err, "Working")
+	c.EqDeep([]string{root.Nodes[0].ID}, nodeIDs(before), "the live entry starts at H0")
+
+	// A's commit lands, with the entry it resolved already gone.
+	committed, err := release()
+	c.NoError(err, "the paused writer")
+	c.Eq(1, committed.Inserted, "the paused writer inserted its row")
 
 	counting.Reset()
-	node, ok, err := s.Open(convID).NodeByProviderMessageID(ctx, "msg_shared")
-	c.NoError(err, "reader lookup")
-	c.True(ok, "found")
-	c.Eq(res.Nodes[0].ID, node.ID, "the node the provider id names")
-	c.Eq(1, counting.Counts()["ByProviderMessageID"], "a reader asks the backend with the index warm")
-
-	counting.Reset()
-	node, ok, err = owner.NodeByProviderMessageID(ctx, "msg_shared")
-	c.NoError(err, "owner lookup")
-	c.True(ok, "found")
-	c.Eq(res.Nodes[0].ID, node.ID, "the node the provider id names")
-	c.Empty(counting.Counts(), "an owner answers from its own index")
+	after, err := other.Working(ctx)
+	c.NoError(err, "Working after the commit")
+	c.EqDeep([]string{root.Nodes[0].ID, committed.Nodes[0].ID}, nodeIDs(after), "the committed head reached the live entry")
+	c.Empty(counting.Counts(), "and was published to it, not left for a backend read")
 }
 
-// The index must never answer with an older duplicate. Once the newest node
-// carrying a provider id has been evicted, the id it remembered is forgotten but
-// its ordinal is not, so re-fetching the older node cannot become the answer.
-func TestProviderIndexNeverAnswersOlderThanNewest(t *testing.T) {
+// The answer is always the newest ordinal, even when the cache holds an older
+// duplicate of the same provider id: the cache cannot know which duplicates
+// exist, so it never answers a lookup itself.
+func TestProviderLookupAnswersTheNewestOrdinal(t *testing.T) {
 	c := assert.NewAborting(t)
 	b, convID := newConv(t)
 	ctx := context.Background()
-
-	// One node's worth of cache, measured on a scratch conversation.
-	scratch := convID + "-size"
-	b.Ensure(scratch)
-	sized, err := conv.NewStore(b, conv.Options{}).Open(scratch, conv.AsOwner()).Append(ctx, conv.Append{
-		FromHead: true,
-		Nodes:    []conv.NewNode{{Msg: textMsg(msg.Assistant, "older")}},
-	})
-	c.NoError(err, "size probe")
-	budget := int64(len(sized.Nodes[0].Content))
-
 	counting := convtest.NewCounting(b)
-	owner := conv.NewStore(counting, conv.Options{CacheBytes: budget}).Open(convID, conv.AsOwner())
+	owner := conv.NewStore(counting, conv.Options{}).Open(convID, conv.AsOwner())
+
 	older, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{
 		Msg:               textMsg(msg.Assistant, "older"),
 		ProviderMessageID: "msg_dup",
@@ -325,24 +337,20 @@ func TestProviderIndexNeverAnswersOlderThanNewest(t *testing.T) {
 		ProviderMessageID: "msg_dup",
 	}}})
 	c.NoError(err, "newer")
-	c.Eq(budget, int64(len(older.Nodes[0].Content)), "the older node fills the cache on its own")
-	c.Eq(budget, int64(len(newer.Nodes[0].Content)), "so does the newer one")
+	c.Eq(older.Nodes[0].Ordinal+1, newer.Nodes[0].Ordinal, "the duplicate is the newer row")
 
-	// Evict the newer node by caching a third, then re-fetch the older root: the
-	// older duplicate is now the only node in the cache carrying the id.
-	third, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "third")}}})
-	c.NoError(err, "third")
-	c.Eq(budget, int64(len(third.Nodes[0].Content)), "and so does the third, which is what evicts the newer node")
+	// Roots caches the older duplicate — it is the root — which is the only one
+	// a cache could see.
 	roots, err := owner.Roots(ctx)
 	c.NoError(err, "Roots")
 	c.Require().Len(roots, 1, "one root")
-	c.Eq(older.Nodes[0].ID, roots[0].ID, "the older node is the root, and is cached again")
+	c.Eq(older.Nodes[0].ID, roots[0].ID, "the older duplicate is cached")
 
 	counting.Reset()
 	node, ok, err := owner.NodeByProviderMessageID(ctx, "msg_dup")
 	c.NoError(err, "NodeByProviderMessageID")
 	c.True(ok, "found")
-	c.Eq(newer.Nodes[0].ID, node.ID, "the newest ordinal, not the older duplicate")
+	c.Eq(newer.Nodes[0].ID, node.ID, "the newest ordinal, not the cached older duplicate")
 	c.Eq(1, counting.Counts()["ByProviderMessageID"], "the backend answered it")
 }
 
