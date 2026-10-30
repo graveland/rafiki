@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,6 +164,23 @@ func TestConvBackendConflictOnHeadMove(t *testing.T) {
 	c.NoError(err, "State")
 	c.Eq(res.Nodes[0].ID, st.HeadID, "the head did not move")
 	c.Eq(1, st.NextOrdinal, "no ordinal was allocated")
+
+	// The fence runs before the comparison, so a LIVE lease must leave the
+	// conflict a conflict: this writer still holds the conversation.
+	live, ok, err := NewLeases(pool).Acquire(ctx, convID, "daemon-holder", 5*time.Minute)
+	c.NoError(err, "acquire a live lease")
+	c.True(ok, "the conversation is free")
+	row = commitRow(t, convID, "user", "a stale head under a live lease", 1, 1)
+	_, err = b.Commit(ctx, conv.Commit{
+		ConversationID:    convID,
+		ExpectHead:        "",
+		ExpectNextOrdinal: 0,
+		Rows:              []*conv.Node{row},
+		NewHead:           row.ID,
+		Lease:             live,
+	})
+	c.ErrorIs(err, conv.ErrConflict, "a stale head under a live lease is a conflict, not a lease loss")
+	c.Eq(1, countNodes(t, pool, convID), "the refused commit inserted nothing either")
 }
 
 func TestConvBackendInsertConflictIsErrConflict(t *testing.T) {
@@ -219,6 +236,27 @@ func TestConvBackendCommitFencesLease(t *testing.T) {
 	c.ErrorIs(err, ErrLeaseLost, "an expired lease is a lost lease")
 	c.True(errors.Is(err, conv.ErrLeaseLost), "the fence fails with conv's error")
 	c.Eq(0, countNodes(t, pool, convID), "the fenced commit inserted nothing")
+
+	// A taken-over writer usually has a stale head as well. The fence is checked
+	// first, so it hears "you lost the lease" — the answer that ends it — rather
+	// than a conflict the caller's CAS loop would retry and then misreport.
+	handle := conv.NewStore(b, conv.Options{}).Open(convID)
+	_, first := convPair(t, "user", "appended while unfenced")
+	_, err = handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{first}})
+	c.NoError(err, "append")
+
+	stale := commitRow(t, convID, "user", "a stale head behind a dead lease", 1, 1)
+	_, err = b.Commit(ctx, conv.Commit{
+		ConversationID:    convID,
+		ExpectHead:        "",
+		ExpectNextOrdinal: 0,
+		Rows:              []*conv.Node{stale},
+		NewHead:           stale.ID,
+		Lease:             expired,
+	})
+	c.ErrorIs(err, ErrLeaseLost, "a lost lease outranks a stale head")
+	c.False(errors.Is(err, conv.ErrConflict), "so the caller cannot retry it as a conflict")
+	c.Eq(1, countNodes(t, pool, convID), "the fenced commit inserted nothing")
 }
 
 func TestConvBackendCountersMatchAppendChain(t *testing.T) {
@@ -291,6 +329,36 @@ func TestConvBackendCountersMatchAppendChain(t *testing.T) {
 	}
 }
 
+// TestConvBackendFetchReturnsTheStoredRendering pins Content to the column's
+// own text. jsonb re-renders what it was given, so a backend that answered with
+// a re-encode of the decoded message would look identical through convtree.Canon
+// while quietly normalising away whatever the codec had written — and the
+// compaction tail re-stores Content verbatim, so a codec bug must stay visible.
+func TestConvBackendFetchReturnsTheStoredRendering(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	convID := cleanConversation(t, pool)
+	b := NewConvBackend(pool)
+	handle := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
+
+	_, hello := convPair(t, "user", "hello")
+	res, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{hello}})
+	c.NoError(err, "append")
+	node := res.Nodes[0]
+
+	var stored string
+	err = pool.QueryRow(ctx, `
+		SELECT content::text FROM conversations.conversation_message WHERE id = $1::uuid`,
+		node.ID).Scan(&stored)
+	c.NoError(err, "read the stored content")
+
+	fetched, err := b.Fetch(ctx, convID, []string{node.ID})
+	c.NoError(err, "Fetch")
+	c.Len(fetched, 1, "one node")
+	c.Eq(stored, string(fetched[0].Content), "Content is the column's rendering")
+}
+
 func TestConvBackendWalkCrossesDerivedFrom(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
@@ -358,10 +426,14 @@ func TestLeaseAliases(t *testing.T) {
 }
 
 // TestReaderUnderLeaseTakeover is the fence and the read path together: a
-// writer that lost its lease cannot write, and a reader never serves a head it
-// did not re-check. The reader's snapshots are validated while the takeover
-// happens, so a torn read — a head whose nodes are not there, or a chain that
-// does not link up — fails the test rather than passing on the final state.
+// writer that lost its lease cannot write, a takeover waits for a writer
+// transaction already in flight, and a reader never serves a head it did not
+// re-check.
+//
+// The ordering is forced rather than hoped for: the reader must complete a
+// snapshot before the lease is expired, and the decisive snapshot must have
+// BEGUN after C's append returned. A reader that answered from a cached head
+// would hand back A's head for that snapshot and fail, however the timing fell.
 func TestReaderUnderLeaseTakeover(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
@@ -382,20 +454,19 @@ func TestReaderUnderLeaseTakeover(t *testing.T) {
 	first, err := handleA.Append(ctx, conv.Append{FromHead: true, Nodes: nodes})
 	c.NoError(err, "A appends three nodes")
 
-	var (
-		mu        sync.Mutex
-		committed = make(map[string]bool, 5)
-		failures  []string
-		snapshots int
-	)
+	// committed is read only by the test goroutine, which is what lets the
+	// reader's snapshots be validated in the order they were taken.
+	committed := make(map[string]bool, 5)
 	for _, n := range first.Nodes {
 		committed[n.ID] = true
 	}
 
 	reader := conv.NewStore(NewConvBackend(pool), conv.Options{})
 	readerHandle := reader.Open(convID)
+	reports := make(chan snapshotReport, 256)
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	var begun atomic.Int64
 	go func() {
 		defer close(done)
 		for {
@@ -404,30 +475,63 @@ func TestReaderUnderLeaseTakeover(t *testing.T) {
 				return
 			default:
 			}
+			started := begun.Add(1)
 			sn, err := readerHandle.Snapshot(ctx)
-			mu.Lock()
-			snapshots++
-			if err != nil {
-				failures = append(failures, fmt.Sprintf("snapshot: %v", err))
-				mu.Unlock()
+			select {
+			case reports <- snapshotReport{started: started, snapshot: sn, err: err}:
+			case <-stop:
 				return
 			}
-			if problem := snapshotProblem(sn, committed); problem != "" {
-				failures = append(failures, problem)
-			}
-			mu.Unlock()
 			time.Sleep(time.Millisecond)
 		}
 	}()
 
-	_, err = pool.Exec(ctx, `
-		UPDATE conversations.conversation_lease SET expires_at = now() - interval '1 second'
-		 WHERE conversation_id = $1::uuid`, convID)
-	c.NoError(err, "expire A's lease")
+	// The reader must have taken a real snapshot BEFORE the takeover, or a
+	// reader that simply started late would satisfy the assertion at the end.
+	select {
+	case rep := <-reports:
+		checkSnapshot(t, rep, committed)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reader took no snapshot before the takeover")
+	}
 
-	leaseC, ok, err := NewLeases(pool).Acquire(ctx, convID, "daemon-c", 5*time.Minute)
-	c.NoError(err, "acquire C's lease")
-	c.True(ok, "C takes the expired lease over")
+	// A Commit already in flight holds the takeover out: the fence's FOR SHARE
+	// on the lease row is what the takeover's UPDATE waits for. Held here as a
+	// direct transaction, with the two statements Commit opens with.
+	tx, err := pool.Begin(ctx)
+	c.NoError(err, "begin the in-flight writer transaction")
+	var (
+		heldHead  string
+		heldNext  int
+		fencedOne int
+	)
+	c.NoError(tx.QueryRow(ctx, `
+		SELECT coalesce(head_id::text, ''), next_ordinal
+		  FROM conversations.conversation WHERE id = $1::uuid FOR UPDATE`, convID).
+		Scan(&heldHead, &heldNext), "lock the conversation")
+	c.NoError(tx.QueryRow(ctx, `
+		SELECT 1 FROM conversations.conversation_lease
+		 WHERE conversation_id = $1::uuid AND holder = $2 AND token = $3::uuid
+		   AND expires_at > now() FOR SHARE`, convID, leaseA.Holder, leaseA.Token).
+		Scan(&fencedOne), "fence under FOR SHARE")
+
+	takeover := make(chan takeoverResult, 1)
+	go func() { takeover <- takeLease(ctx, pool, convID, "daemon-c") }()
+	select {
+	case res := <-takeover:
+		t.Fatalf("the takeover did not wait for the writer transaction: %v", res.err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	c.NoError(tx.Commit(ctx), "the in-flight writer transaction ends")
+
+	var leaseC Lease
+	select {
+	case res := <-takeover:
+		c.NoError(res.err, "the takeover completes once the writer transaction ends")
+		leaseC = res.lease
+	case <-time.After(10 * time.Second):
+		t.Fatal("the takeover never completed after the writer transaction ended")
+	}
 
 	writerC := conv.NewStore(NewConvBackend(pool), conv.Options{})
 	handleC := writerC.Open(convID, conv.AsOwner(), conv.WithLease(leaseC))
@@ -438,58 +542,87 @@ func TestReaderUnderLeaseTakeover(t *testing.T) {
 		Nodes:    []conv.NewNode{afterOne, afterTwo},
 	})
 	c.NoError(err, "C appends after the takeover")
-	mu.Lock()
 	for _, n := range second.Nodes {
 		committed[n.ID] = true
 	}
-	mu.Unlock()
 
 	_, stale := convPair(t, "assistant", "a stale writer")
 	_, err = handleA.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{stale}})
 	c.ErrorIs(err, ErrLeaseLost, "the writer that lost its lease is fenced")
 
+	// The decisive snapshot has to have BEGUN after C's append returned, so it
+	// cannot be one that was already in flight, and its head is C's.
+	mark := begun.Load()
+	var decisive *conv.Snapshot
+	deadline := time.After(10 * time.Second)
+	for decisive == nil {
+		select {
+		case rep := <-reports:
+			sn := checkSnapshot(t, rep, committed)
+			if rep.started > mark {
+				decisive = sn
+			}
+		case <-deadline:
+			t.Fatal("the reader took no snapshot after the takeover")
+		}
+	}
+	c.Eq(second.Nodes[len(second.Nodes)-1].ID, decisive.Head().ID,
+		"a reader re-checks the head and sees C's")
+
 	close(stop)
 	<-done
-
-	mu.Lock()
-	ran, problems := snapshots, append([]string(nil), failures...)
-	mu.Unlock()
-	for _, problem := range problems {
-		t.Errorf("reader snapshot: %s", problem)
-	}
-	c.Greater(0, ran, "the reader took snapshots while the takeover ran")
-
-	sn, err := readerHandle.Snapshot(ctx)
-	c.NoError(err, "the reader's next snapshot")
-	head := sn.Head()
-	c.Require().NotNil(head, "the snapshot has a head")
-	c.Eq(second.Nodes[len(second.Nodes)-1].ID, head.ID, "a reader re-checks the head and sees C's")
 }
 
-// snapshotProblem reports what is inconsistent about one reader snapshot, or ""
-// when it is a view some writer actually committed: strictly increasing
-// ordinals, every node hanging off its predecessor, and a head that was
-// committed.
-func snapshotProblem(sn *conv.Snapshot, committed map[string]bool) string {
+// snapshotReport is one reader snapshot, stamped with the sequence number of
+// the iteration that took it.
+type snapshotReport struct {
+	started  int64
+	snapshot *conv.Snapshot
+	err      error
+}
+
+// takeoverResult is what the takeover goroutine hands back.
+type takeoverResult struct {
+	lease Lease
+	err   error
+}
+
+// takeLease expires the conversation's lease and acquires it for holder: what a
+// second daemon does once it decides the first is gone.
+func takeLease(ctx context.Context, pool *pgxpool.Pool, convID, holder string) takeoverResult {
+	if _, err := pool.Exec(ctx, `
+		UPDATE conversations.conversation_lease SET expires_at = now() - interval '1 second'
+		 WHERE conversation_id = $1::uuid`, convID); err != nil {
+		return takeoverResult{err: fmt.Errorf("expire the lease: %w", err)}
+	}
+	lease, ok, err := NewLeases(pool).Acquire(ctx, convID, holder, 5*time.Minute)
+	if err != nil {
+		return takeoverResult{err: fmt.Errorf("acquire %s: %w", holder, err)}
+	}
+	if !ok {
+		return takeoverResult{err: fmt.Errorf("%s did not get the lease", holder)}
+	}
+	return takeoverResult{lease: lease}
+}
+
+// checkSnapshot fails the test when one reader snapshot is inconsistent: the
+// chain must link up, ordinals must strictly increase, and the head must be a
+// node some writer actually committed.
+func checkSnapshot(t *testing.T, rep snapshotReport, committed map[string]bool) *conv.Snapshot {
+	t.Helper()
+	c := assert.NewAborting(t)
+	c.NoError(rep.err, "the reader's snapshot")
 	var prev *conv.Node
 	head := ""
-	for n := range sn.History() {
+	for n := range rep.snapshot.History() {
 		if prev != nil {
-			if n.Ordinal <= prev.Ordinal {
-				return fmt.Sprintf("ordinal %d follows %d", n.Ordinal, prev.Ordinal)
-			}
-			if n.ParentID != prev.ID {
-				return fmt.Sprintf("node %s hangs off %q, not %s", n.ID, n.ParentID, prev.ID)
-			}
+			c.Eq(prev.ID, n.ParentID, "node %s hangs off its predecessor", n.ID)
+			c.Greater(prev.Ordinal, n.Ordinal, "ordinals strictly increase")
 		}
 		prev = n
 		head = n.ID
 	}
-	if head == "" {
-		return "empty snapshot"
-	}
-	if !committed[head] {
-		return fmt.Sprintf("head %s was never committed", head)
-	}
-	return ""
+	c.NotEq("", head, "the snapshot is not empty")
+	c.True(committed[head], "head %s was committed by a writer", head)
+	return rep.snapshot
 }

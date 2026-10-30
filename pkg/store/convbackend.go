@@ -39,9 +39,11 @@ const refColumns = `
 	ordinal, coalesce(depth, 0), coalesce(kind, ''), created_at, path_hash`
 
 // nodeColumns is refColumns plus the stored message: what Fetch, Roots and
-// ByProviderMessageID hand back.
+// ByProviderMessageID hand back. content is read through its own rendering —
+// jsonb's text output — because that is the stored JSON a node is re-stored
+// from, not whatever bytes the writer happened to hand the append.
 const nodeColumns = refColumns + `,
-	role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''),
+	role, content::text, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''),
 	input_tokens, output_tokens, coalesce(provider_message_id, '')`
 
 // rowScanner is the half of pgx.Row and pgx.Rows a scan helper needs.
@@ -69,10 +71,12 @@ func (b *ConvBackend) State(ctx context.Context, convID string) (conv.State, err
 // recursive CTE. Every step is scoped to the conversation, so a parent id from
 // another conversation cannot walk into it; a root's DerivedFromID is followed
 // only when crossRoots is set, which is what stops the working path at a
-// compaction or clear boundary.
+// compaction or clear boundary. An id the conversation does not hold is
+// conv.ErrNotFound, never an empty chain: an empty answer would hide a head
+// pointing out of its conversation.
 func (b *ConvBackend) Walk(ctx context.Context, convID, fromID string, crossRoots bool) ([]conv.Ref, error) {
 	if fromID == "" {
-		return nil, nil
+		return nil, fmt.Errorf("%w: no node to walk from in conversation %s", conv.ErrNotFound, convID)
 	}
 	rows, err := b.pool.Query(ctx, `
 		WITH RECURSIVE walk AS (
@@ -108,6 +112,9 @@ func (b *ConvBackend) Walk(ctx context.Context, convID, fromID string, crossRoot
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("conv backend: walk %s: %w", convID, err)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: node %s is not in conversation %s", conv.ErrNotFound, fromID, convID)
 	}
 	return out, nil
 }
@@ -228,11 +235,13 @@ func (b *ConvBackend) HasChild(ctx context.Context, convID, parentID string) (bo
 // nodes are inserted with the same ON CONFLICT (conversation_id, path_hash) DO
 // NOTHING, and the conversation's counters move in one UPDATE.
 //
-// A head or next_ordinal mismatch is conv.ErrConflict, an insert that returns
-// no row is conv.ErrConflict (the path hash is already stored), and a fence
-// failure is conv.ErrLeaseLost. The created_at it returns is the transaction's,
-// shared by every row inserted here; a commit with no rows returns the zero
-// time, since nothing was stamped.
+// The fence is checked before the head comparison, so a taken-over writer always
+// hears conv.ErrLeaseLost rather than a conflict its caller would retry. A stale
+// head or next_ordinal under a live lease is conv.ErrConflict, an insert that
+// returns no row is conv.ErrConflict (the path hash is already stored), and a
+// row hanging off a node the conversation does not hold is conv.ErrNotFound.
+// The created_at it returns is the transaction's, shared by every row inserted
+// here; a commit with no rows returns the zero time, since nothing was stamped.
 func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, error) {
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
@@ -254,12 +263,21 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 	if err != nil {
 		return time.Time{}, fmt.Errorf("conv commit: lock conversation: %w", err)
 	}
+
+	// The fence comes before the comparison on purpose. A writer that has been
+	// taken over usually has a stale head too, and a conflict would be retried
+	// by the caller's CAS loop until it gave up reporting "the head moved" for
+	// "you lost the lease". The lease is the answer that ends the writer.
+	if err := fenceLease(ctx, tx, c.ConversationID, c.Lease); err != nil {
+		return time.Time{}, fmt.Errorf("conv commit: %w", err)
+	}
+
 	if head != c.ExpectHead || nextOrdinal != c.ExpectNextOrdinal {
 		return time.Time{}, fmt.Errorf("%w: conversation %s is at head %q ordinal %d, not head %q ordinal %d",
 			conv.ErrConflict, c.ConversationID, head, nextOrdinal, c.ExpectHead, c.ExpectNextOrdinal)
 	}
 
-	if err := fenceLease(ctx, tx, c.ConversationID, c.Lease); err != nil {
+	if err := checkCommitParents(ctx, tx, c); err != nil {
 		return time.Time{}, fmt.Errorf("conv commit: %w", err)
 	}
 
@@ -320,6 +338,56 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 	return created, nil
 }
 
+// checkCommitParents refuses a commit whose rows hang off nodes the
+// conversation does not hold, before anything is inserted. A row id is globally
+// unique, so parent_id's foreign key accepts a node of ANOTHER conversation;
+// this check is what keeps one conversation's tree out of another's. Ids minted
+// by this same commit are known, so a chain inserted in one transaction passes.
+func checkCommitParents(ctx context.Context, tx pgx.Tx, c conv.Commit) error {
+	known := make(map[string]bool, len(c.Rows))
+	for _, row := range c.Rows {
+		known[row.ID] = true
+	}
+	var refs []string
+	for _, row := range c.Rows {
+		for _, id := range [2]string{row.ParentID, row.DerivedFromID} {
+			if id == "" || known[id] {
+				continue
+			}
+			known[id] = true
+			refs = append(refs, id)
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id::text FROM conversations.conversation_message
+		 WHERE conversation_id = $1::uuid AND id = ANY($2::uuid[])`, c.ConversationID, refs)
+	if err != nil {
+		return fmt.Errorf("check row parents: %w", err)
+	}
+	defer rows.Close()
+
+	found := make(map[string]bool, len(refs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("check row parents: %w", err)
+		}
+		found[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("check row parents: %w", err)
+	}
+	for _, id := range refs {
+		if !found[id] {
+			return fmt.Errorf("%w: node %s is not in conversation %s", conv.ErrNotFound, id, c.ConversationID)
+		}
+	}
+	return nil
+}
+
 // queryNodes runs a node-columns query and scans every row.
 func (b *ConvBackend) queryNodes(ctx context.Context, convID, sql string, args ...any) ([]*conv.Node, error) {
 	rows, err := b.pool.Query(ctx, sql, args...)
@@ -364,11 +432,13 @@ func scanRef(convID string, r rowScanner) (conv.Ref, error) {
 }
 
 // scanNode reads a node row: a ref plus the stored message. Content is the
-// message re-encoded, not the column's bytes, because jsonb does not preserve
-// the text it was given — it reorders keys and normalises whitespace. The
-// re-encode is what a fresh append of the same message stores, so a node read
-// back compares equal to the node that was appended; its identity is its path
-// hash either way.
+// column's own rendering — jsonb's text output — and not a re-encode of the
+// decoded message, because Content is authoritative for re-storage: a
+// compaction tail copies it verbatim, so a codec bug must surface as content
+// that no longer matches rather than be silently normalised away here. The
+// consequence is that Content is not byte-identical to what the append handed
+// in (jsonb sorts object keys and normalises whitespace); its identity is its
+// path hash, which is computed from the canonical form and is unaffected.
 func scanNode(convID string, r rowScanner) (*conv.Node, error) {
 	var (
 		n       conv.Node
@@ -392,11 +462,7 @@ func scanNode(convID string, r rowScanner) (*conv.Node, error) {
 		return nil, fmt.Errorf("decode node %s: %w", n.ID, err)
 	}
 	n.Msg = message
-	stored, err := msganthropic.EncodeContent(message)
-	if err != nil {
-		return nil, fmt.Errorf("re-encode node %s: %w", n.ID, err)
-	}
-	n.Content = stored
+	n.Content = content
 	return &n, nil
 }
 

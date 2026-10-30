@@ -92,7 +92,9 @@ func (m *MemBackend) State(_ context.Context, convID string) (State, error) {
 }
 
 // Walk returns the chain from fromID toward the root, head-first, following a
-// root's DerivedFromID only when crossRoots is set.
+// root's DerivedFromID only when crossRoots is set. An id the conversation does
+// not hold is ErrNotFound: a walk that answered with an empty chain instead
+// would hide a head pointing out of its conversation.
 func (m *MemBackend) Walk(_ context.Context, convID, fromID string, crossRoots bool) ([]Ref, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -100,11 +102,14 @@ func (m *MemBackend) Walk(_ context.Context, convID, fromID string, crossRoots b
 	if err != nil {
 		return nil, err
 	}
+	if fromID == "" {
+		return nil, fmt.Errorf("%w: no node to walk from in conversation %s", ErrNotFound, convID)
+	}
 	var out []Ref
 	for id := fromID; id != ""; {
 		n, ok := c.byID[id]
 		if !ok {
-			return nil, fmt.Errorf("conv: walk: node %s not in conversation %s", id, convID)
+			return nil, fmt.Errorf("%w: node %s is not in conversation %s", ErrNotFound, id, convID)
 		}
 		out = append(out, n.Ref)
 		switch {
@@ -196,7 +201,9 @@ func (m *MemBackend) HasChild(_ context.Context, convID, parentID string) (bool,
 }
 
 // Commit applies one atomic tree write. The rows are copied, stamped with one
-// created_at, and the head moves only when the expectation held.
+// created_at, and the head moves only when the expectation held. A row whose
+// parent or derived-from names a node of ANOTHER conversation is refused: this
+// check is what keeps one conversation's tree out of another's.
 func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, err
@@ -219,6 +226,9 @@ func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, erro
 			return time.Time{}, fmt.Errorf("%w: %s", ErrConflict, commit.ConversationID)
 		}
 		seen[row.PathHash] = true
+	}
+	if err := checkCommitParents(c.byID, commit); err != nil {
+		return time.Time{}, err
 	}
 
 	created := m.stamp()
@@ -244,4 +254,26 @@ func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, erro
 		c.clearPending = false
 	}
 	return created, nil
+}
+
+// checkCommitParents refuses a commit whose rows hang off nodes the
+// conversation does not hold. A node of another conversation is exactly that
+// case: its id is globally unique, so nothing but this check distinguishes it
+// from a parent of the conversation being written.
+func checkCommitParents(byID map[string]*Node, commit Commit) error {
+	known := make(map[string]bool, len(commit.Rows))
+	for _, row := range commit.Rows {
+		known[row.ID] = true
+	}
+	for _, row := range commit.Rows {
+		for _, id := range [2]string{row.ParentID, row.DerivedFromID} {
+			if id == "" || known[id] {
+				continue
+			}
+			if _, ok := byID[id]; !ok {
+				return fmt.Errorf("%w: node %s is not in conversation %s", ErrNotFound, id, commit.ConversationID)
+			}
+		}
+	}
+	return nil
 }

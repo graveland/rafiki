@@ -7,6 +7,7 @@ package convtest
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -33,6 +34,18 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		convID := uuid.Must(uuid.NewV7()).String()
 		create(convID)
 		return b, convID
+	}
+
+	// setupTwo returns a backend and two conversations, for the cases where a
+	// backend must refuse something that belongs to the other one.
+	setupTwo := func(t *testing.T) (conv.Backend, string, string) {
+		t.Helper()
+		b, create := newBackend(t)
+		mine := uuid.Must(uuid.NewV7()).String()
+		other := uuid.Must(uuid.NewV7()).String()
+		create(mine)
+		create(other)
+		return b, mine, other
 	}
 
 	text := func(role msg.Role, s string) msg.Message {
@@ -122,6 +135,21 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		c.Eq(boundary.Nodes[0].ID, working[0].ID, "working path is the new root")
 	})
 
+	t.Run("WalkRejectsAForeignNode", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, mine, other := setupTwo(t)
+		ctx := context.Background()
+		h := conv.NewStore(b, conv.Options{}).Open(mine, conv.AsOwner())
+		res, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: text(msg.User, "hello")}}})
+		c.NoError(err, "append")
+
+		// A node id from another conversation is not found: every read is
+		// conversation-scoped, and a backend that answered with an empty walk
+		// instead would hide a head pointing out of its conversation.
+		_, err = b.Walk(ctx, other, res.Nodes[0].ID, true)
+		c.ErrorIs(err, conv.ErrNotFound, "a node of another conversation is not found")
+	})
+
 	t.Run("FetchAndLookup", func(t *testing.T) {
 		c := assert.NewAborting(t)
 		b, convID := setup(t)
@@ -135,7 +163,16 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		path, err := fresh.Working(ctx)
 		c.NoError(err, "Working through a cold cache")
 		c.Len(path, 1, "one node")
-		c.EqDeep(node.Content, path[0].Content, "the fetched node is the appended one")
+
+		// Content is each backend's own rendering of the stored JSON, so the
+		// bytes cannot be compared: Postgres hands back what jsonb renders,
+		// which sorts object keys and normalises whitespace. What must agree is
+		// the canonical form — the thing a node is hashed and re-stored as.
+		want, err := convtree.Canon(node.Msg.Role.String(), node.Content)
+		c.NoError(err, "canonicalise the appended node's content")
+		got, err := convtree.Canon(path[0].Msg.Role.String(), path[0].Content)
+		c.NoError(err, "canonicalise the fetched node's content")
+		c.EqDeep(want, got, "the fetched node is the appended one, up to the backend's rendering")
 
 		refs, err := fresh.NodesByHash(ctx, []convtree.Hash{node.PathHash})
 		c.NoError(err, "NodesByHash")
@@ -250,6 +287,38 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		c.ErrorIs(err, conv.ErrConflict, "a duplicate path hash is a conflict")
 	})
 
+	t.Run("CommitRejectsAForeignParent", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, mine, other := setupTwo(t)
+		ctx := context.Background()
+		h := conv.NewStore(b, conv.Options{}).Open(mine, conv.AsOwner())
+		root, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: text(msg.User, "hello")}}})
+		c.NoError(err, "append in the first conversation")
+
+		// Both rows hang off a node that lives in the OTHER conversation. A
+		// row id is globally unique, so a foreign key would accept it; the
+		// backend itself has to refuse it, or a write can splice one
+		// conversation's tree into another.
+		child := foreignRow(t, other, "hello", root.Nodes[0].ID, "")
+		_, err = b.Commit(ctx, conv.Commit{
+			ConversationID: other, Rows: []*conv.Node{child}, NewHead: child.ID,
+		})
+		c.ErrorIs(err, conv.ErrNotFound, "a parent from another conversation is not found")
+		c.NotErrorIs(err, conv.ErrConflict, "and it is not retried as a conflict")
+
+		derived := foreignRow(t, other, "summary", "", root.Nodes[0].ID)
+		derived.Kind = conv.KindCompactionSummary
+		_, err = b.Commit(ctx, conv.Commit{
+			ConversationID: other, Rows: []*conv.Node{derived}, NewHead: derived.ID,
+		})
+		c.ErrorIs(err, conv.ErrNotFound, "a derived-from from another conversation is not found")
+
+		st, err := b.State(ctx, other)
+		c.NoError(err, "State of the refused conversation")
+		c.Eq("", st.HeadID, "the refused commits left no head")
+		c.Eq(0, st.NextOrdinal, "the refused commits allocated no ordinal")
+	})
+
 	t.Run("RetractMovesHead", func(t *testing.T) {
 		c := assert.NewAborting(t)
 		b, convID := setup(t)
@@ -280,6 +349,29 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		c.ErrorIs(err, conv.ErrNotFound, "an unknown conversation is ErrNotFound")
 		c.False(errors.Is(err, conv.ErrConflict), "not a conflict")
 	})
+}
+
+// foreignRow builds a node whose parent, or derived-from, names a node of
+// ANOTHER conversation. Its path hash is a real one, so a backend that skipped
+// the check would store the row rather than trip over the hash.
+func foreignRow(t *testing.T, convID, content, parentID, derivedFromID string) *conv.Node {
+	t.Helper()
+	c := assert.NewAborting(t)
+	body := []byte(strconv.Quote(content))
+	hashes, err := convtree.Chain(convtree.RootSeed(convtree.RootKindRoot, nil),
+		[]convtree.Msg{{Role: "user", Content: body}})
+	c.NoError(err, "hash the foreign row")
+	return &conv.Node{
+		Ref: conv.Ref{
+			ID:             uuid.Must(uuid.NewV7()).String(),
+			ConversationID: convID,
+			ParentID:       parentID,
+			DerivedFromID:  derivedFromID,
+			PathHash:       hashes[0],
+		},
+		Msg:     msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: content}}},
+		Content: body,
+	}
 }
 
 // historyIDs returns a snapshot's node ids in chronological order.
