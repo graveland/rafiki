@@ -1,0 +1,1 @@
+[{"type":"tool_use","id":"toolu_01F","name":"mcp__rafiki__agent_spawn","input":{"prompt":"run the suite"},"caller":{"type":"direct"}}]

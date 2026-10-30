@@ -1,6 +1,7 @@
 package msg_test
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -22,9 +23,9 @@ func TestRoleZeroIsInvalid(t *testing.T) {
 
 	c.Eq("invalid", msg.Role(0).String(), "the zero Role must not name a role")
 
-	_, err := msg.ParseRole("system")
-	c.Error(err, "system is not a role rafiki stores")
-	c.EqualError(err, `msg: unknown role "system"`)
+	_, err := msg.ParseRole("tool")
+	c.Error(err, "an unmodelled role is not a role rafiki stores")
+	c.EqualError(err, `msg: unknown role "tool"`)
 
 	for _, tc := range []struct {
 		text string
@@ -32,6 +33,7 @@ func TestRoleZeroIsInvalid(t *testing.T) {
 	}{
 		{text: "user", want: msg.User},
 		{text: "assistant", want: msg.Assistant},
+		{text: "system", want: msg.System},
 	} {
 		got, err := msg.ParseRole(tc.text)
 		c.NoError(err, "ParseRole(%q)", tc.text)
@@ -108,4 +110,40 @@ func TestToolUseIDsMatchesStore(t *testing.T) {
 	c.EqDeep([]string{"toolu_1", "toolu_1", "toolu_2", "toolu_2"}, msg.ToolUseIDs(m))
 
 	c.EqDeep([]string(nil), msg.ToolUseIDs(msg.Message{Role: msg.Assistant}), "a message with no tools has no ids")
+}
+
+// TestOpaqueToolBlocksYieldIDs pins that an id survives a block the codec kept
+// verbatim: a tool_use carrying a caller, or a tool_result carrying anything the
+// typed form cannot reproduce, is still a tool call, so it must yield exactly
+// what the typed path yields for the same ids.
+func TestOpaqueToolBlocksYieldIDs(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	opaque := func(raw string) msg.Block {
+		return msg.Opaque{Provider: msg.DialectAnthropic, Raw: json.RawMessage(raw)}
+	}
+
+	want := []string{"toolu_1", "toolu_1", "toolu_2", "toolu_2"}
+	typed := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "toolu_1", Name: "read_file"},
+		msg.ToolResult{ToolUseID: "toolu_1"},
+		msg.ToolUse{ID: "toolu_2", Name: "bash"},
+		msg.ToolResult{ToolUseID: "toolu_2"},
+	}}
+	verbatim := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		opaque(`{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a"},"caller":{"type":"direct"}}`),
+		opaque(`{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"ok","citations":[]}]}`),
+		opaque(`{"type":"tool_use","id":"toolu_2","name":"bash","input":{},"caller":{"type":"direct"}}`),
+		opaque(`{"type":"tool_result","tool_use_id":"toolu_2","content":"done"}`),
+	}}
+
+	c.EqDeep(want, msg.ToolUseIDs(typed), "the typed path")
+	c.EqDeep(want, msg.ToolUseIDs(verbatim), "an Opaque tool block must still yield its id, in block order")
+
+	c.EqDeep([]string(nil), msg.ToolUseIDs(msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		opaque(`{"type":"redacted_thinking","data":"opaque"}`),
+		opaque(`{"type":"tool_use","id":"","name":"nameless","input":{}}`),
+		opaque(`{"type":"tool_result","tool_use_id":""}`),
+		opaque(`5`),
+	}}), "only a non-empty id on a tool block counts")
 }

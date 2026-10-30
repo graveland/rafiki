@@ -30,10 +30,13 @@ type fixture struct {
 // fixtures names the expectation of every file in testdata. A file missing here
 // fails TestRoundTripFaithful, so a new fixture has to state what it proves.
 //
-// The two opaque entries are the deliberate half of the split: a block the typed
+// The opaque entries are the deliberate half of the split: a block the typed
 // form cannot reproduce must be kept verbatim, and those are the fixtures that a
 // canon-only round trip would go on passing even if every block had quietly
-// collapsed to Opaque.
+// collapsed to Opaque. Two of them pair with a typed sibling on purpose — an
+// empty citations array versus a real one, and a plain tool_use versus one
+// carrying a caller — so the guard that keeps the first typed cannot be widened
+// into swallowing the second.
 var fixtures = map[string]fixture{
 	"text.json":                       {kinds: []string{"text"}},
 	"text-cache-control.json":         {kinds: []string{"text"}},
@@ -52,9 +55,21 @@ var fixtures = map[string]fixture{
 	"claude-captured-mixed.json":      {kinds: []string{"text", "thinking", "tool_use"}},
 	"fundi-row.json":                  {kinds: []string{"text", "tool_use", "tool_result"}},
 
+	// A Claude-injected notice, stored under role "system": its content is an
+	// ordinary text block once the role itself decodes.
+	"system-row.json": {kinds: []string{"text"}},
+
+	// The two shapes that only stay typed because Normalize ignores empty-valued
+	// keys: the SDK's union marshalled without omitzero, and an empty citations
+	// array.
+	"sdk-union-empty-siblings.json": {kinds: []string{"text", "tool_use"}},
+	"citations-empty.json":          {kinds: []string{"text"}},
+
 	// Deliberately opaque fixtures.
 	"opaque-redacted-thinking.json":   {opaque: true},
 	"opaque-text-with-citations.json": {opaque: true},
+	"citations-real.json":             {opaque: true},
+	"tool-use-caller.json":            {opaque: true},
 }
 
 // TestDecodeTypedBlocks pins the happy path for each typed kind: a block the
@@ -155,6 +170,51 @@ func TestDecodeFallsBackToOpaque(t *testing.T) {
 		c.Eq(msg.DialectAnthropic, opaque.Provider, "%s: Provider", tc.name)
 		c.Eq(tc.raw, string(opaque.Raw), "%s: Raw must be byte-identical", tc.name)
 	}
+
+	// The other half of the empty-value rule: real extra data still degrades the
+	// block, byte for byte, so ignoring empty values cannot become ignoring
+	// everything the typed form does not model.
+	for _, name := range []string{"citations-real.json", "tool-use-caller.json"} {
+		content, err := os.ReadFile(filepath.Join("testdata", name))
+		c.NoError(err, "%s: read", name)
+
+		var raws []json.RawMessage
+		c.NoError(json.Unmarshal(content, &raws), "%s: read its blocks", name)
+
+		m, err := anthropic.Decode("user", content)
+		c.NoError(err, "%s: Decode", name)
+		c.Eq(len(raws), len(m.Content), "%s: block count", name)
+		for i, raw := range raws {
+			opaque, ok := m.Content[i].(msg.Opaque)
+			c.True(ok, "%s block %d must fall back to Opaque, got %T", name, i, m.Content[i])
+			c.Eq(string(raw), string(opaque.Raw), "%s block %d: Raw must be byte-identical", name, i)
+		}
+	}
+}
+
+// TestDecodeSystemRole pins that a harness-injected notice is readable at all:
+// production stores thousands of rows with role "system", so a model that cannot
+// name that role cannot walk a single claude conversation.
+func TestDecodeSystemRole(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	content, err := os.ReadFile(filepath.Join("testdata", "system-row.json"))
+	c.NoError(err, "read the fixture")
+
+	m, err := anthropic.Decode("system", content)
+	c.NoError(err, "a system row must decode")
+	c.Eq(msg.System, m.Role, "role must decode to msg.System")
+	c.Eq(1, len(m.Content), "the notice is one block")
+
+	text, ok := m.Content[0].(msg.Text)
+	c.True(ok, "the notice must decode to a text block, got %T", m.Content[0])
+	c.True(text.Text != "", "the notice's text must survive")
+
+	role, err := msg.ParseRole("system")
+	c.NoError(err, "ParseRole(\"system\")")
+	c.Eq(msg.System, role, "ParseRole must return System")
+	c.Eq("system", role.String(), "System must render back to its wire spelling")
+	c.Eq("invalid", msg.Role(0).String(), "the zero Role must still name no role")
 }
 
 // TestDecodeMalformedBlockFallsBackToOpaque pins totality: a block whose fields
@@ -277,8 +337,78 @@ func TestDecodeEquivalences(t *testing.T) {
 		c.EqDeep(tc.want, m, "%s must decode without falling back to Opaque", tc.name)
 	}
 
-	_, err := anthropic.Decode("system", []byte(`"x"`))
-	c.EqualError(err, `msg: unknown role "system"`, "an unknown role is an error, not a guess")
+	// The two fixtures that are only typed because Normalize ignores
+	// empty-valued keys: our own storage path writes the SDK's union without
+	// omitzero, and the API emits "citations": [].
+	for _, name := range []string{"sdk-union-empty-siblings.json", "citations-empty.json"} {
+		content, err := os.ReadFile(filepath.Join("testdata", name))
+		c.NoError(err, "%s: read", name)
+
+		m, err := anthropic.Decode("user", content)
+		c.NoError(err, "%s: Decode", name)
+		c.True(len(m.Content) > 0, "%s: content", name)
+		for i, block := range m.Content {
+			_, isOpaque := block.(msg.Opaque)
+			c.False(isOpaque, "%s block %d carries only empty-valued extras and must stay typed, got %T", name, i, block)
+		}
+	}
+
+	_, err := anthropic.Decode("developer", []byte(`"x"`))
+	c.EqualError(err, `msg: unknown role "developer"`, "an unknown role is an error, not a guess")
+}
+
+// TestNormalizeDropsEmptyValues pins the rule that keeps a real row typed: a key
+// whose value is empty carries no information, so it is dropped on both sides of
+// the codec's self-verification, while a key carrying real data is kept and so
+// still degrades its block to Opaque.
+func TestNormalizeDropsEmptyValues(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "empty string siblings vanish",
+			in:   `[{"type":"text","text":"hi","id":"","data":"","name":""}]`,
+			want: `[{"text":"hi","type":"text"}]`,
+		},
+		{
+			name: "null and empty array vanish",
+			in:   `[{"type":"text","text":"hi","citations":[],"meta":null}]`,
+			want: `[{"text":"hi","type":"text"}]`,
+		},
+		{
+			name: "empty keys vanish inside tool_result content",
+			in:   `[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"ok","id":""}]}]`,
+			want: `[{"content":[{"text":"ok","type":"text"}],"tool_use_id":"toolu_1","type":"tool_result"}]`,
+		},
+		{
+			name: "a non-empty array is kept",
+			in:   `[{"type":"text","text":"hi","citations":[{"type":"char_location","cited_text":"x"}]}]`,
+			want: `[{"citations":[{"cited_text":"x","type":"char_location"}],"text":"hi","type":"text"}]`,
+		},
+		{
+			name: "a non-empty object is kept, and so are the keys inside it",
+			in:   `[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":""},"caller":{"type":"direct"}}]`,
+			want: `[{"caller":{"type":"direct"},"id":"toolu_1","input":{"path":""},"name":"read_file","type":"tool_use"}]`,
+		},
+		{
+			name: "false and zero are values, not absences",
+			in:   `[{"type":"tool_result","tool_use_id":"toolu_1","content":"boom","is_error":true,"n":0}]`,
+			want: `[{"content":[{"text":"boom","type":"text"}],"is_error":true,"n":0,"tool_use_id":"toolu_1","type":"tool_result"}]`,
+		},
+		{
+			name: "cache_control and is_error false still vanish",
+			in:   `[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"ok","cache_control":{"type":"ephemeral"}}],"is_error":false}]`,
+			want: `[{"content":[{"text":"ok","type":"text"}],"tool_use_id":"toolu_1","type":"tool_result"}]`,
+		},
+	} {
+		got, err := anthropic.Normalize([]byte(tc.in))
+		c.NoError(err, "%s: Normalize", tc.name)
+		c.Eq(tc.want, string(got), "%s: normalized content", tc.name)
+	}
 }
 
 // TestRoundTripFaithful pins losslessness over realistic stored rows, and pins

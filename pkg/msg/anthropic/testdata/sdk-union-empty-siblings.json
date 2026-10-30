@@ -1,0 +1,1 @@
+[{"type":"text","text":"Checking the tree before editing.","id":"","data":"","name":""},{"type":"tool_use","id":"toolu_01E","name":"Bash","input":{"command":"git status --short"},"text":"","data":""}]

@@ -17,9 +17,14 @@ import (
 // in the caller rather than a default worth guessing at.
 type Role uint8
 
+// System is a message the harness injected into the conversation rather than one
+// either party wrote — a Claude Code notice, a heartbeat nudge, an environment
+// update. Stored history contains them, so a model that cannot read one makes a
+// whole conversation unreadable.
 const (
 	User      Role = 1
 	Assistant Role = 2
+	System    Role = 3
 )
 
 // String returns the wire spelling of r, or "invalid" for any unset value.
@@ -29,6 +34,8 @@ func (r Role) String() string {
 		return "user"
 	case Assistant:
 		return "assistant"
+	case System:
+		return "system"
 	}
 	return "invalid"
 }
@@ -40,6 +47,8 @@ func ParseRole(s string) (Role, error) {
 		return User, nil
 	case "assistant":
 		return Assistant, nil
+	case "system":
+		return System, nil
 	}
 	return 0, fmt.Errorf("msg: unknown role %q", s)
 }
@@ -143,6 +152,10 @@ func BlockKinds() []Block {
 // ToolUseIDs returns the tool_use and tool_result ids of m, in block order,
 // skipping empty ids. It is the linkage orphaned-tool_use recovery keys on, and
 // it must agree with what storage records for the same content.
+//
+// An Opaque block yields its id too, when its raw JSON declares one: a block kept
+// verbatim for a field this model does not carry (a caller, say) is still a tool
+// call, and dropping its id would orphan the result that answers it.
 func ToolUseIDs(m Message) []string {
 	var ids []string
 	for _, b := range m.Content {
@@ -155,7 +168,33 @@ func ToolUseIDs(m Message) []string {
 			if t.ToolUseID != "" {
 				ids = append(ids, t.ToolUseID)
 			}
+		case Opaque:
+			ids = append(ids, opaqueIDs(t.Raw)...)
 		}
 	}
 	return ids
+}
+
+// opaqueIDs returns the id an Opaque block declares, or nothing. Raw that is not
+// a JSON object, that is not a tool block, or whose id is empty declares none.
+func opaqueIDs(raw json.RawMessage) []string {
+	var head struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		ToolUseID string `json:"tool_use_id"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil
+	}
+	switch head.Type {
+	case "tool_use":
+		if head.ID != "" {
+			return []string{head.ID}
+		}
+	case "tool_result":
+		if head.ToolUseID != "" {
+			return []string{head.ToolUseID}
+		}
+	}
+	return nil
 }
