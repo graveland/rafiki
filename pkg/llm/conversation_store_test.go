@@ -5,6 +5,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -88,6 +89,29 @@ func TestNewClientWithConvStoreBuildsNoSecondStore(t *testing.T) {
 	c.Eq(shared, cl.convs, "the client keeps the caller's store")
 	c.NotNil(cl.capture, "a pool builds the capture store")
 	c.Eq(shared, cl.capture.ConvStore(), "capture shares it — a private one would be a second cache")
+}
+
+// TestWithConvStoreRefusesNil pins the other half of the one-store rule: nil
+// through the option is a programming error, not "use the default". Accepting
+// it would install nothing, and the client's private fallback would quietly
+// become a SECOND cache over the same rows — the split the shared store exists
+// to prevent. A client built WITHOUT the option still gets its own store, which
+// is the standalone `rafikid agent` path and must keep working.
+func TestWithConvStoreRefusesNil(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	recovered := c.Panics(func() { _, _ = NewClient(WithConvStore(nil)) },
+		"NewClient(WithConvStore(nil)) is refused")
+	c.Eq("llm: WithConvStore(nil)", fmt.Sprint(recovered), "the panic names the option")
+
+	cl, err := NewClient(WithLogger(testLogger(t)), WithDefaultModel("claude-haiku-4-5"))
+	c.NoError(err, "NewClient with no conv store option")
+	c.NotNil(cl.convs, "a client built without the option still has its own store")
+
+	conv, err := cl.Conversation(context.Background(), NewConversation("", "agent"))
+	c.NoError(err, "Conversation")
+	_, err = conv.AppendUser(context.Background(), UserText("hi"))
+	c.NoError(err, "the private default store accepts a write")
 }
 
 // leaseLostBackend is a conversation backend whose writes always report the

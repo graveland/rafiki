@@ -175,7 +175,8 @@ type Config struct {
 	// llm.Client via llm.WithConvStore — see RuntimeOptions.ConvStore, whose doc
 	// comment carries the reasoning. nil means the client keeps its own private
 	// store, which is what the standalone `rafikid fundi` process (no daemon
-	// cache to share) does.
+	// cache to share) does. That nil is honoured by OMITTING the option below,
+	// never by passing it to llm.WithConvStore, which refuses nil outright.
 	ConvStore *conv.Store
 
 	// Batcher is the daemon's parked-call batcher, handed to the engine's
@@ -482,7 +483,8 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// The daemon's one conversation store, before the FakeTurns early-return
 	// below: a --fake-turns child must end up with the caller's cache just as it
 	// ends up with the caller's catalog and batcher. nil (standalone `rafikid
-	// fundi`) keeps the client's private default.
+	// fundi`) keeps the client's private default — by omitting the option, since
+	// llm.WithConvStore(nil) is a programming error, not "use the default".
 	if c.ConvStore != nil {
 		opts = append(opts, llm.WithConvStore(c.ConvStore))
 	}

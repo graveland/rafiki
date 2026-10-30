@@ -101,7 +101,18 @@ func WithStore(pool *pgxpool.Pool) ClientOption {
 // backend) instead of building a private one. A daemon hands its one store to
 // every client it builds, so a reader and a writer of the same conversation
 // see one cache rather than one apiece.
+//
+// nil is a programming error, not "use the default": a caller with no store to
+// share omits the option and the client builds its own (the standalone
+// `rafikid agent` path). Passing nil would install nothing, and the client's
+// private fallback would then be a SECOND cache over the same rows — exactly
+// the split the shared store exists to prevent. It panics rather than being
+// ignored because a ClientOption cannot return an error (capture.WithConv
+// refuses a nil store the same way).
 func WithConvStore(cs *convpkg.Store) ClientOption {
+	if cs == nil {
+		panic("llm: WithConvStore(nil)")
+	}
 	return func(c *Client) { c.convs = cs }
 }
 
@@ -265,6 +276,9 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	if c.pool != nil {
 		c.capture = capture.NewCaptureStore(c.pool)
 	}
+	// No option is the ONLY way to reach this private store: WithConvStore
+	// refuses nil, so a caller either shares its store or builds one here —
+	// never a nil "meaning default" that would slip a second cache in later.
 	if c.convs == nil {
 		if c.pool != nil {
 			c.convs = convpkg.NewStore(store.NewConvBackend(c.pool), convpkg.Options{})

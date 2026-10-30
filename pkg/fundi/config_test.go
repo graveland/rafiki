@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
@@ -242,6 +243,31 @@ func TestBuildEngineWithoutSharedCatalogBuildsOwn(t *testing.T) {
 	catA, catB := catalogOf(a.client), catalogOf(b.client)
 	c.False(catA == nil || catB == nil, "standalone engines' catalogs = %p, %p; llm.NewClient was expected to default one in for each", catA, catB)
 	c.NotEq(catB, catA, "two standalone engines share one catalog instance (")
+}
+
+// TestFundiNilConvStoreUsesThePrivateDefault pins the half of the one-store
+// rule that stays legal: a Config with no ConvStore (standalone `rafikid fundi`,
+// which has no daemon cache to share) still builds an engine whose client made
+// its own store, and that store works. The daemon's wiring always passes a real
+// one; nil here must mean "build your own" by omitting the option, never reach
+// llm.WithConvStore, which now refuses nil outright.
+func TestFundiNilConvStoreUsesThePrivateDefault(t *testing.T) {
+	c := assert.NewAborting(t)
+	silenceSlog(t)
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	c.True(opts.ConvStore == nil, "the fixture must leave ConvStore nil")
+
+	eng, shutdown, err := BuildRuntime(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil), opts)
+	c.NoError(err, "BuildRuntime with a nil ConvStore")
+	t.Cleanup(shutdown)
+	t.Cleanup(eng.Close)
+
+	ctx := context.Background()
+	_, err = eng.conv.AppendUser(ctx, llm.UserText("hello"))
+	c.NoError(err, "AppendUser through the client's private default store")
+	hist, err := eng.conv.History(ctx)
+	c.NoError(err, "History through the client's private default store")
+	c.Eq(1, len(hist), "the message written through the default store reads back")
 }
 
 // TestContextWindowOverrideReachesEngine is the end-to-end guard for the
