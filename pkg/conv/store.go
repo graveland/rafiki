@@ -23,11 +23,10 @@ const (
 // invalidation: it carries a version so an in-flight install loses to it, but no
 // position.
 type headState struct {
-	version     int64
-	cached      bool
-	id          string
-	nextOrdinal int
-	at          time.Time
+	version int64
+	cached  bool
+	id      string
+	at      time.Time
 }
 
 // ver is the entry's version: 0 until the first install or invalidation.
@@ -44,7 +43,7 @@ type entry struct {
 	// conversation's.
 	writeMu sync.Mutex
 	// head is the entry's cached position and its version in one pointer, so an
-	// install is a single compare-and-swap against the exact state an update
+	// install is a single compare-and-swap against the exact state a refresh
 	// started from: there is no window between winning the version and storing
 	// the position. nil means nothing was ever installed.
 	head atomic.Pointer[headState]
@@ -450,44 +449,50 @@ func (h *Handle) State(ctx context.Context) (State, error) {
 }
 
 // headID returns the conversation's head: for an owner, the entry's cached head
-// while it is fresh; otherwise the answer of one update, which also leaves the
+// while it is fresh; otherwise the answer of one refresh, which also leaves the
 // entry holding what it read.
 func (h *Handle) headID(ctx context.Context) (string, error) {
 	e := h.store.touch(h.convID)
 	if hs := e.head.Load(); h.owner && hs != nil && hs.cached && h.store.now().Sub(hs.at) <= h.store.ttl {
 		return hs.id, nil
 	}
-	st, err := h.store.refresh(ctx, h.convID)
+	st, _, err := h.store.refresh(ctx, h.convID)
 	if err != nil {
 		return "", err
 	}
 	return st.HeadID, nil
 }
 
-// refresh installs what the backend says the conversation's position is now.
-func (s *Store) refresh(ctx context.Context, convID string) (State, error) {
-	return s.update(ctx, convID, func(_ *entry, cur State) (State, error) { return cur, nil })
-}
+// maxRefreshAttempts bounds how many times refresh retries a lost install
+// before it answers without installing.
+const maxRefreshAttempts = 4
 
 // refreshAfterCommit is what a write does once its commit is durable. The write
-// has happened whether or not the backend can answer now, so a failed refresh is
-// absorbed by invalidating the cached head: the next read asks the backend.
+// has happened whether or not the backend can answer now or the cache accepted
+// what was read, so a refresh that failed or did not install is absorbed by
+// invalidating the cached head: the next read asks the backend.
 func (s *Store) refreshAfterCommit(ctx context.Context, convID string) {
-	if _, err := s.refresh(ctx, convID); err != nil {
+	if _, installed, err := s.refresh(ctx, convID); err != nil || !installed {
 		s.invalidate(convID)
 	}
 }
 
-// update is the only place a cached head is installed. It reads the backend's
-// State once per iteration, applies fn to it and installs the result with one
-// compare-and-swap against the entry state the iteration began from; a lost swap
-// or a dead entry restarts the loop with a fresh read, so fn never sees a value
-// from an earlier iteration and nothing but a backend read in the same iteration
-// is ever installed.
+// refresh is the only place a cached head is installed. It reads the backend's
+// State once per iteration and installs it with one compare-and-swap against the
+// entry state the iteration began from; a lost swap or a dead entry restarts the
+// loop with a fresh read, so nothing but a backend read in the same iteration is
+// ever installed. A future caller that needs a computed state rather than the
+// backend's can add a parameter then.
 //
-// A write never installs its own commit result. It calls update with an identity
-// fn (a refresh), so "is my commit newer than yours" is never asked: the cache
-// only ever holds a state some update read from the backend and won the swap for.
+// Installing is an optimisation, not a requirement, for a non-owner read: after
+// maxRefreshAttempts lost installs the state last read is returned with
+// installed false, a correct answer that was just not cached. That bounds the
+// loop under concurrent installers, which would otherwise be able to starve a
+// reader. A write whose refresh did not install invalidates instead.
+//
+// A write never installs its own commit result. It calls refresh after its
+// commit, so "is my commit newer than yours" is never asked: the cache only ever
+// holds a state some refresh read from the backend and won the swap for.
 //
 // How each stale-read finding is impossible:
 //
@@ -498,27 +503,28 @@ func (s *Store) refreshAfterCommit(ctx context.Context, convID string) {
 //	       began from, every install and invalidation replaces that state, so a
 //	       read that began before the commit's refresh loses.
 //	R4     a writer's stale State observation overwrites a newer commit: writers
-//	       install nothing but through update's swap.
+//	       install nothing but through refresh's swap.
 //	R5/R6  a delayed commit outranks a newer one; active reads keep the stale
-//	       entry warm: no commit result is ever installed, and an installed head
-//	       older than the idle TTL is refreshed whatever touched the entry since.
+//	       entry warm: no commit result is ever installed, and a head installed
+//	       more than the idle TTL ago is refreshed whatever touched the entry
+//	       since. The TTL runs from the install, which follows the State read, so
+//	       a cached head lags a commit by at most one TTL.
 //
 // The version orders this process's observations only. Another daemon's commits
 // are not seen until the cached head is older than the TTL.
-func (s *Store) update(ctx context.Context, convID string, fn func(e *entry, cur State) (State, error)) (State, error) {
-	for {
+func (s *Store) refresh(ctx context.Context, convID string) (st State, installed bool, err error) {
+	for attempt := 0; ; attempt++ {
 		e := s.touch(convID)
 		old := e.head.Load()
-		cur, err := s.backend.State(ctx, convID)
+		st, err = s.backend.State(ctx, convID)
 		if err != nil {
-			return State{}, err
+			return State{}, false, err
 		}
-		next, err := fn(e, cur)
-		if err != nil {
-			return State{}, err
+		if s.install(convID, e, old, st) {
+			return st, true, nil
 		}
-		if s.install(convID, e, old, next) {
-			return next, nil
+		if attempt+1 >= maxRefreshAttempts {
+			return st, false, nil
 		}
 	}
 }
@@ -533,16 +539,15 @@ func (s *Store) install(convID string, e *entry, old *headState, next State) boo
 		return false
 	}
 	return e.head.CompareAndSwap(old, &headState{
-		version:     old.ver() + 1,
-		cached:      true,
-		id:          next.HeadID,
-		nextOrdinal: next.NextOrdinal,
-		at:          s.now(),
+		version: old.ver() + 1,
+		cached:  true,
+		id:      next.HeadID,
+		at:      s.now(),
 	})
 }
 
 // invalidate drops the conversation's cached position without installing one:
-// the replacement state carries a newer version, so an update that began before
+// the replacement state carries a newer version, so a refresh that began before
 // it loses its swap.
 func (s *Store) invalidate(convID string) {
 	s.mu.Lock()

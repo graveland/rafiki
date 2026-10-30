@@ -362,29 +362,39 @@ reader that wants the working set asks for it by name.
 worker and every in-process child share it, so a node one face appended is
 cached for the next.
 
-- **The head is cached, ordered by an in-process version, and only `Store.update`
-  installs it.** `update` reads the backend's `State` once per iteration, applies a pure
-  function to it and installs the result with one compare-and-swap against the
-  entry state the iteration began from (the version lives in the same pointer as
-  the position, so there is no window between winning the version and storing
-  the head); a lost swap or a dead entry restarts the loop with a fresh read. The
-  identity check and the swap share `Store.mu` with the sweep, so a swept entry can
-  never win. A write NEVER publishes its own commit result: after its commit is
-  durable `Append`/`RetractHead` refresh (read the backend and install that), so
-  "is my commit newer than yours" is never asked; if the refresh itself fails the
-  write still succeeded and the cached head is invalidated instead. A read
-  (`Working`, `Snapshot`, and through them `Page`/`Transcript`) on a `conv.AsOwner`
-  handle uses the cached head when it is fresh and otherwise refreshes, so a warm
-  owner read makes zero backend calls; a read on any other handle always refreshes
-  (one `State` call, installed through `update`), because the conversation's
-  writer may be another process. `Handle.State` stays a backend read because it
+- **The head is cached, ordered by an in-process version, and only `Store.refresh`
+  installs it.** `refresh` reads the backend's `State` once per iteration and
+  installs it with one compare-and-swap against the entry state the iteration
+  began from (the version lives in the same pointer as the position, so two
+  installers that loaded the same state cannot both win, and there is no window
+  between winning the version and storing the head); a lost swap or a dead entry
+  restarts the loop with a fresh read. The identity check and the swap share
+  `Store.mu` with the sweep, so a swept entry can never win. The loop is bounded
+  (`maxRefreshAttempts`): installing is an optimisation for a non-owner read, so
+  after that many lost swaps it answers with the state it last read, uncached.
+  A write NEVER publishes its own commit result: after its commit is durable
+  `Append`/`RetractHead` refresh (read the backend and install that), so "is my
+  commit newer than yours" is never asked; if that refresh fails or loses its
+  bound the write still succeeded and the cached head is invalidated instead. A
+  read (`Working`, `Snapshot`, and through them `Page`/`Transcript`) on a
+  `conv.AsOwner` handle uses the cached head when it is fresh and otherwise
+  refreshes, so a warm owner read makes zero backend calls; a read on any other
+  handle always refreshes (one `State` call), because the conversation's writer
+  may be another process. `Handle.State` stays a backend read because it
   carries `clear_pending`.
+- **A cached head lags a commit by at most one `IdleTTL`, measured from the
+  install.** A head installed more than `IdleTTL` ago is refreshed on the next
+  owner read however busy the entry is (age, not idleness). The stamp is taken
+  when the head was installed — after the `State` read that produced it — not
+  when the commit became durable, so the bound is one TTL from install. Between
+  a commit becoming durable and its writer's refresh, an owner read can still
+  serve the previous head; the writer's call has not returned, so that read is
+  concurrent with it.
 - **The version is in-process only.** It orders this process's observations; it
   is not persisted and not shared, so a restart starts with an empty cache and a
-  second daemon's commits are invisible until the cached head is older than
-  `IdleTTL` (age, not idleness: reads keep an entry alive but a head installed
-  longer ago than the TTL is refreshed on the next read). The deployment is one
-  replica; this is not cross-process invalidation.
+  second daemon's commits are invisible to an owner handle until the cached head
+  ages out by the bound above. The deployment is one replica; this is not
+  cross-process invalidation.
 - **The cache holds nodes.** Decoded messages in a byte-charged LRU shared by the
   whole store; the walk is answered from memory when every node is cached (no
   `Walk`, no `Fetch`).
@@ -393,7 +403,7 @@ cached for the next.
   `dead` and nothing clears it. A writer re-resolves the conversation's entry only
   when it takes the lock, so one holding a swept entry may coexist with a writer
   on its replacement; the commit's compare-and-swap is what refuses the second
-  writer, and `update` never installs into the dead entry.
+  writer, and `refresh` never installs into the dead entry.
 - **Provider lookups always ask the backend.** `provider_message_id` is not
   unique — `ConvBackend.ByProviderMessageID` answers the newest ordinal — and the
   cache cannot know which duplicates exist, so `NodeByProviderMessageID` never
