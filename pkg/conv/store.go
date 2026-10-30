@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/convtree"
@@ -18,42 +17,19 @@ const (
 	defaultIdleTTL    = 5 * time.Minute
 )
 
-// headState is an entry's cached position. It is what an owner read uses
-// instead of asking the backend, and what a write publishes after its rows are
-// cached.
-type headState struct {
-	id          string
-	nextOrdinal int
-}
-
-// entry is the per-conversation cache state.
+// entry is the per-conversation cache state. It holds no position: the
+// conversation's head is read from the backend on every operation, so there is
+// nothing here to go stale.
 type entry struct {
-	// head is the conversation's position as this process last saw it. A write
-	// stores the new state only after its rows are in the LRU, so a reader that
-	// observes the new head always finds its nodes.
-	head atomic.Pointer[headState]
 	// writeMu serialises Append and RetractHead while this entry is the
 	// conversation's.
 	writeMu sync.Mutex
-	// owner, loaded, lastAccess, gen, lease and dead are guarded by Store.mu.
-	owner      bool
-	loaded     bool
+	// lastAccess and dead are guarded by Store.mu.
 	lastAccess time.Time
 	// dead is set when the sweep drops this entry, and nothing clears it: a
-	// swept entry is dead for good, so no path may publish into it or install it
-	// as the conversation's entry again.
+	// swept entry is dead for good, so no path may install it as the
+	// conversation's entry again.
 	dead bool
-	// gen counts every change to what this entry answers with: a publish, an
-	// observation stored, an invalidation, a takeover. Position is mutated by
-	// exactly two paths and both bump it. An authoritative publish
-	// (storeCommitted) always bumps, into an empty entry too. An observation
-	// (storeObserved) presents the generation captured BEFORE its backend State
-	// call and stores only while it is still that value, so an observation that
-	// raced any other change is dropped and the next read asks the backend.
-	gen uint64
-	// lease is the fence key of the last handle that resolved the entry, so a
-	// takeover invalidates a head the previous holder left behind.
-	lease string
 }
 
 // Store is a conversation node cache in front of a Backend. It is safe for
@@ -97,17 +73,18 @@ func NewStore(b Backend, o Options) *Store {
 
 // openConfig is what OpenOption mutates.
 type openConfig struct {
-	owner bool
 	lease Lease
 }
 
 // OpenOption customises a Handle.
 type OpenOption func(*openConfig)
 
-// AsOwner marks the handle as this process's writer for the conversation: its
-// reads trust the cached head and it keeps the entry alive as the owner.
+// AsOwner marks the handle as this process's writer for the conversation. It
+// changes nothing about a handle's behaviour: every read asks the backend for
+// the head whoever the handle is, so the option exists only to keep call sites
+// stating who writes.
 func AsOwner() OpenOption {
-	return func(c *openConfig) { c.owner = true }
+	return func(*openConfig) {}
 }
 
 // WithLease fences the handle's writes on l.
@@ -117,20 +94,11 @@ func WithLease(l Lease) OpenOption {
 
 // Handle is a conversation descriptor. It holds no cache state of its own:
 // every call resolves (or recreates) the conversation's entry, so a swept entry
-// costs a State call rather than a stale answer.
+// costs a lock, never a stale answer.
 type Handle struct {
 	store  *Store
 	convID string
-	owner  bool
 	lease  Lease
-}
-
-// leaseKey identifies the fence a handle writes under, "" when unfenced.
-func (h *Handle) leaseKey() string {
-	if !h.lease.Held() {
-		return ""
-	}
-	return h.lease.ConversationID + "|" + h.lease.Holder + "|" + h.lease.Token
 }
 
 // Open returns a handle on convID. It performs no I/O: the only work it does is
@@ -143,7 +111,7 @@ func (s *Store) Open(convID string, opts ...OpenOption) *Handle {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return &Handle{store: s, convID: convID, owner: cfg.owner, lease: cfg.lease}
+	return &Handle{store: s, convID: convID, lease: cfg.lease}
 }
 
 // Page reads one page of the conversation's transcript.
@@ -168,15 +136,10 @@ func (s *Store) Transcript(ctx context.Context, convID string) ([]*Node, error) 
 	return out, nil
 }
 
-// touch resolves convID's entry, creating it when absent, marks it live and
-// records the handle's authority. Entries idle past the TTL are swept here and
-// on every Open, which is the whole of the expiry mechanism: no goroutines, no
-// timers.
-//
-// Becoming the owner, or arriving under a different fence, invalidates the
-// cached head: a head a reader loaded before the takeover must not be trusted
-// by the writer that took over.
-func (s *Store) touch(convID string, owner bool, lease string) *entry {
+// touch resolves convID's entry, creating it when absent, and marks it live.
+// Entries idle past the TTL are swept here and on every Open, which is the whole
+// of the expiry mechanism: no goroutines, no timers.
+func (s *Store) touch(convID string) *entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
@@ -184,16 +147,6 @@ func (s *Store) touch(convID string, owner bool, lease string) *entry {
 	if e == nil {
 		e = &entry{}
 		s.entries[convID] = e
-	}
-	if owner && !e.owner {
-		e.owner = true
-		e.loaded = false
-		e.gen++
-	}
-	if lease != "" && lease != e.lease {
-		e.lease = lease
-		e.loaded = false
-		e.gen++
 	}
 	e.lastAccess = s.now()
 	return e
@@ -204,11 +157,10 @@ func (s *Store) touch(convID string, owner bool, lease string) *entry {
 // and replaced. Creation happens only under Store.mu, but that does not make the
 // lock unique: a held writeMu can still be swept, so two writers may briefly
 // hold the locks of two entries of the same conversation. What keeps that safe
-// is the commit's compare-and-swap, which refuses the second writer, and the
-// monotonic publish, which never moves a cached position backwards.
+// is the commit's compare-and-swap, which refuses the second writer.
 func (h *Handle) lockEntry() *entry {
 	for {
-		e := h.store.touch(h.convID, h.owner, h.leaseKey())
+		e := h.store.touch(h.convID)
 		e.writeMu.Lock()
 		if h.store.isLive(h.convID, e) {
 			return e
@@ -221,7 +173,7 @@ func (h *Handle) lockEntry() *entry {
 func (s *Store) isLive(convID string, e *entry) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.liveEntryLocked(convID, e) != nil
+	return !e.dead && s.entries[convID] == e
 }
 
 // sweepLocked drops entries that have been idle past the TTL. Dropping one kills
@@ -235,141 +187,6 @@ func (s *Store) sweepLocked() {
 			delete(s.entries, id)
 		}
 	}
-}
-
-// liveEntryLocked returns e while it is still convID's current entry, and nil
-// once it is not. This is the one liveness test every publish path makes: an
-// entry the sweep dropped is dead for good, so its value is DROPPED rather than
-// installed into whatever entry the conversation has now. Installing it would
-// publish a head older than the one already committed, and a read built from
-// that head is wrong before any compare-and-swap runs.
-func (s *Store) liveEntryLocked(convID string, e *entry) *entry {
-	if e == nil || e.dead || s.entries[convID] != e {
-		return nil
-	}
-	return e
-}
-
-// cachedHead returns the entry's position when it may be trusted: only an owner
-// handle reading a live owner entry whose head has been loaded answers without
-// the backend. A swept entry answers nothing, so its last known head cannot
-// outlive it.
-func (s *Store) cachedHead(convID string, e *entry, owner bool) (headState, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.liveEntryLocked(convID, e)
-	if live == nil || !owner || !live.owner || !live.loaded {
-		return headState{}, false
-	}
-	hp := live.head.Load()
-	if hp == nil {
-		return headState{}, false
-	}
-	return *hp, true
-}
-
-// generation reads the entry's write generation, which an observation captures
-// BEFORE asking the backend and hands back to storeObserved. ok is false once the
-// entry has been swept: the observation belongs to an entry that is no longer the
-// conversation's, so it has nowhere to go.
-func (s *Store) generation(convID string, e *entry) (uint64, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.liveEntryLocked(convID, e)
-	if live == nil {
-		return 0, false
-	}
-	return live.gen, true
-}
-
-// storeObserved stores a state some backend State call returned, whether a read
-// made it or a writer resolving its starting position did. It writes only into
-// the entry the call observed, and only while the generation is still the one
-// captured before the call: any publish, invalidation or takeover since then
-// means the observation may be older than what the entry now holds, so it is
-// DROPPED and the next read asks the backend. Entry identity is what stops a
-// stalled observation landing in the entry that replaced its own, where a
-// generation that has caught up would compare equal.
-//
-// This is the only way an observation reaches the entry, so a writer's own
-// State call cannot overwrite a newer commit (a commit publishes with a bump,
-// which fails this check), and a read that was in flight when a commit published
-// into a still-empty entry is dropped for the same reason.
-func (s *Store) storeObserved(convID string, e *entry, gen uint64, st headState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.liveEntryLocked(convID, e)
-	if live == nil || live.gen != gen {
-		return
-	}
-	s.publishLocked(live, st)
-}
-
-// storeCommitted reports the position a successful Commit left behind, and
-// ALWAYS advances the generation, into an entry that holds no position as well:
-// an observation in flight against that entry captured an earlier generation and
-// is dropped. An entry with no position is only bumped, never published into. The rows are durable whether or not the writer's entry survived,
-// so a swept entry must not swallow the news: when the writer's entry is gone,
-// the conversation's CURRENT entry is brought up to date instead, and an entry is
-// never installed (a swept one is dead for good).
-//
-// Only a cached position strictly BEHIND the commit is replaced. One
-// strictly ahead is a later write and is left alone, but still bumps. At the SAME
-// next ordinal neither the ordinal nor the generation can order the two: a
-// retract is a head move that leaves the ordinal alone, and a commit whose
-// starting head another commit has since moved back to is indistinguishable from
-// a stale read — so the entry stops answering with its position and the next read
-// asks the backend. Guessing there publishes a head older than a committed one.
-func (s *Store) storeCommitted(convID string, e *entry, st headState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.liveEntryLocked(convID, e)
-	if live == nil {
-		live = s.entries[convID]
-		if live == nil {
-			return
-		}
-	}
-	cur := live.head.Load()
-	switch {
-	case cur == nil:
-		// An entry with no position knows nothing, so it cannot tell whether this
-		// commit is the newest: it may have been created after later commits
-		// landed. The bump drops any observation in flight; publishing nothing
-		// makes the next read ask the backend.
-		live.gen++
-		live.lastAccess = s.now()
-	case cur.nextOrdinal < st.nextOrdinal:
-		s.publishLocked(live, st)
-	case cur.nextOrdinal > st.nextOrdinal:
-		live.gen++
-		live.lastAccess = s.now()
-	default:
-		s.invalidateLocked(live)
-	}
-}
-
-// invalidateLocked stops an entry answering with its cached position, so the next
-// read asks the backend. The position itself is kept: it still orders a later
-// commit (a commit behind it is dropped, one ahead replaces it), and a
-// re-invalidation keeps it in place. The generation advances with it, so an
-// observation already in flight cannot publish the position this invalidation
-// retired.
-func (s *Store) invalidateLocked(live *entry) {
-	live.gen++
-	live.loaded = false
-	live.lastAccess = s.now()
-}
-
-// publishLocked stores st into a live entry, advancing its generation and
-// keeping it warm. Every publish path ends here, so a published position always
-// has the same effect on the entry; whether it may move the entry is each
-// caller's rule.
-func (s *Store) publishLocked(live *entry, st headState) {
-	live.gen++
-	live.loaded = true
-	live.lastAccess = s.now()
-	live.head.Store(&st)
 }
 
 // lookupLocked returns a cached node of THIS conversation. A node id from
@@ -598,45 +415,18 @@ func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
 	return nil, nil
 }
 
-// readState resolves the conversation's position for a read. An owner entry
-// whose head is loaded answers from memory; anything else asks the backend
-// once and stores what it said — unless a write published in between, which is
-// also what corrects an entry that is ahead of the backend.
-func (h *Handle) readState(ctx context.Context, e *entry) (State, error) {
-	if st, ok := h.store.cachedHead(h.convID, e, h.owner); ok {
-		return State{HeadID: st.id, NextOrdinal: st.nextOrdinal}, nil
-	}
-	gen, live := h.store.generation(h.convID, e)
-	st, err := h.store.backend.State(ctx, h.convID)
-	if err != nil {
-		return State{}, err
-	}
-	if live {
-		h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
-	}
-	return st, nil
-}
-
-// State returns the conversation's position, always from the backend: it is
-// the answer a caller asks for precisely when it does not trust its cache.
+// State returns the conversation's position, always from the backend. Every
+// read begins here, exactly once, and walks from the head it returns: no
+// operation reuses a head an earlier one fetched.
 func (h *Handle) State(ctx context.Context) (State, error) {
-	e := h.store.touch(h.convID, h.owner, h.leaseKey())
-	gen, live := h.store.generation(h.convID, e)
-	st, err := h.store.backend.State(ctx, h.convID)
-	if err != nil {
-		return State{}, err
-	}
-	if live {
-		h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
-	}
-	return st, nil
+	h.store.touch(h.convID)
+	return h.store.backend.State(ctx, h.convID)
 }
 
 // Working returns the working path: the chain from the head to the nearest
 // root, chronological.
 func (h *Handle) Working(ctx context.Context) ([]*Node, error) {
-	e := h.store.touch(h.convID, h.owner, h.leaseKey())
-	st, err := h.readState(ctx, e)
+	st, err := h.State(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -645,8 +435,7 @@ func (h *Handle) Working(ctx context.Context) ([]*Node, error) {
 
 // Snapshot returns the conversation's whole tree, crossing every root.
 func (h *Handle) Snapshot(ctx context.Context) (*Snapshot, error) {
-	e := h.store.touch(h.convID, h.owner, h.leaseKey())
-	st, err := h.readState(ctx, e)
+	st, err := h.State(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +451,7 @@ func (h *Handle) Snapshot(ctx context.Context) (*Snapshot, error) {
 // caller names the head it is replaying, which must belong to this
 // conversation.
 func (h *Handle) RequestAt(ctx context.Context, headID string, trimFrom, trimTo *int) ([]*Node, error) {
-	h.store.touch(h.convID, h.owner, h.leaseKey())
+	h.store.touch(h.convID)
 	nodes, err := h.pathFrom(ctx, headID, false)
 	if err != nil {
 		return nil, err
@@ -695,7 +484,7 @@ func (h *Handle) RequestAt(ctx context.Context, headID string, trimFrom, trimTo 
 // nodes this process happens to hold. Capture uses this node as
 // `previous_message_id`, so a cheaper answer is not worth a wrong attachment.
 func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID string) (*Node, bool, error) {
-	h.store.touch(h.convID, h.owner, h.leaseKey())
+	h.store.touch(h.convID)
 	n, ok, err := h.store.backend.ByProviderMessageID(ctx, h.convID, providerMessageID)
 	if err != nil || !ok {
 		return nil, ok, err
@@ -706,7 +495,7 @@ func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID 
 
 // Roots returns the conversation's parent-less nodes, newest ordinal first.
 func (h *Handle) Roots(ctx context.Context) ([]*Node, error) {
-	h.store.touch(h.convID, h.owner, h.leaseKey())
+	h.store.touch(h.convID)
 	roots, err := h.store.backend.Roots(ctx, h.convID)
 	if err != nil {
 		return nil, err
@@ -718,6 +507,6 @@ func (h *Handle) Roots(ctx context.Context) ([]*Node, error) {
 // NodesByHash returns the refs of the nodes the conversation holds under
 // hashes.
 func (h *Handle) NodesByHash(ctx context.Context, hashes []convtree.Hash) (map[convtree.Hash]Ref, error) {
-	h.store.touch(h.convID, h.owner, h.leaseKey())
+	h.store.touch(h.convID)
 	return h.store.backend.Lookup(ctx, h.convID, hashes)
 }

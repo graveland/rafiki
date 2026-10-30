@@ -362,29 +362,21 @@ reader that wants the working set asks for it by name.
 worker and every in-process child share it, so a node one face appended is
 cached for the next.
 
-- **Authority.** An owner handle (`conv.AsOwner`, what a writer opens) trusts the
-  head it cached and publishes the new head only after its rows are cached; a
-  reader handle asks the backend once and stores the answer only while no write
-  has published since. Becoming the owner, or arriving under a different fence,
-  invalidates the cached head — a takeover must not inherit the previous
-  holder's position.
-- **A swept entry is dead for good, and a commit is never lost.** Every publish
-  path (`storeHeadWrite` for a position a writer only resolved, `storeHeadRead`
-  for one a reader observed) checks under the store's lock that the entry is
-  still the conversation's current one and DROPS its value if it is not; nothing
-  installs a swept entry again, and entry identity — not just the write
-  generation — is what a publish is checked against. A **commit** is the
-  exception: `storeCommitted` brings the conversation's CURRENT entry up to date
-  with the position a successful `Commit` left behind, because the rows are
-  durable whether or not the writer's entry survived, and a replacement left
-  holding the pre-commit head would answer it forever. It never moves an entry
-  backwards. A cached position strictly behind the commit is replaced; one
-  strictly ahead is a later write and stays. At the *same* next ordinal the two
-  cannot be ordered — a retract moves the head and leaves the ordinal alone, and
-  a commit whose starting head another commit has since moved back to looks
-  exactly like a stale read — so the entry stops answering with its position and
-  the next read asks the backend. An entry with no position is left alone for the
-  same reason, and with no entry at all nothing is published.
+- **The head is never cached.** Every read (`Working`, `Snapshot`, and through
+  them `Page`/`Transcript`) calls the backend's `State` exactly once at the start
+  and walks from the head it returns; writes resolve their starting position from
+  `State` too and no longer publish a position afterwards. A committed append or
+  retract is therefore visible to the next read by construction. The cost is one
+  indexed primary-key lookup per read; the cache no longer offers a zero-query
+  owner read. `conv.AsOwner` changes nothing about a handle's reads.
+- **The cache holds nodes.** Decoded messages in a byte-charged LRU shared by the
+  whole store; the walk is answered from memory when every node is cached (no
+  `Walk`, no `Fetch`).
+- **A swept entry is dead for good.** An entry carries only the per-conversation
+  write mutex, its last access and a `dead` flag. The sweep sets `dead` and
+  nothing clears it, so a writer that still holds a swept entry re-resolves the
+  conversation's current one before writing; the commit's compare-and-swap is what
+  refuses a second writer.
 - **Provider lookups always ask the backend.** `provider_message_id` is not
   unique — `ConvBackend.ByProviderMessageID` answers the newest ordinal — and the
   cache cannot know which duplicates exist, so `NodeByProviderMessageID` never
@@ -392,8 +384,7 @@ cached for the next.
   `previous_message_id`, so a cached duplicate that happened to be the newest the
   process had seen would be a wrong attachment.
 - **Idle TTL.** An entry idle for `IdleTTL` (default five minutes) is swept on the
-  next `Open` or `touch`; there are no timers and no goroutines. A swept entry
-  costs a `State` call, never a stale answer.
+  next `Open` or `touch`; there are no timers and no goroutines.
 - **Budget.** `RAFIKI_CONV_CACHE_BYTES` sets the cache budget in bytes (default
   `268435456` = 256 MiB), charged by stored content bytes; the coldest nodes are
   evicted, and an evicted node is re-fetched through `Walk` + `Fetch`. A value

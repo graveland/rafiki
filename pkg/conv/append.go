@@ -46,11 +46,11 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 	defer e.writeMu.Unlock()
 
 	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
-		st, err := h.writeState(ctx, e, attempt > 0)
+		st, err := h.store.backend.State(ctx, h.convID)
 		if err != nil {
 			return Result{}, err
 		}
-		res, err := h.appendAttempt(ctx, e, a, st)
+		res, err := h.appendAttempt(ctx, a, st)
 		if err == nil {
 			return res, nil
 		}
@@ -61,30 +61,10 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 	return Result{}, fmt.Errorf("conv: append: %w after 5 attempts", ErrConflict)
 }
 
-// writeState resolves the position an append writes from. The cached head is
-// trusted only for an owner entry; fresh forces the backend, which is what a
-// conflict demands.
-func (h *Handle) writeState(ctx context.Context, e *entry, fresh bool) (State, error) {
-	if !fresh {
-		if st, ok := h.store.cachedHead(h.convID, e, h.owner); ok {
-			return State{HeadID: st.id, NextOrdinal: st.nextOrdinal}, nil
-		}
-	}
-	gen, live := h.store.generation(h.convID, e)
-	st, err := h.store.backend.State(ctx, h.convID)
-	if err != nil {
-		return State{}, err
-	}
-	if live {
-		h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
-	}
-	return st, nil
-}
-
 // appendAttempt resolves, hashes and commits one append against st. It has no
 // side effect until Commit succeeds; a Commit error leaves the cache untouched
 // and is retried by the caller.
-func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State) (Result, error) {
+func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result, error) {
 	parent, isRoot, rootKind, derivedFromID, err := h.resolveParent(ctx, a, st.HeadID)
 	if err != nil {
 		return Result{}, err
@@ -244,12 +224,7 @@ func (h *Handle) appendAttempt(ctx context.Context, e *entry, a Append, st State
 	for _, n := range rows {
 		n.CreatedAt = created
 	}
-	// Rows first, head second: a reader that observes the new head must find
-	// its nodes. The commit's position is published to whatever entry the
-	// conversation has now, even when this writer's own entry was swept while it
-	// was committing.
 	h.store.putNodes(h.convID, rows...)
-	h.store.storeCommitted(h.convID, e, headState{id: headID, nextOrdinal: st.NextOrdinal + len(rows)})
 
 	nodes := make([]*Node, 0, len(hashes))
 	nodes = append(nodes, held...)
@@ -352,13 +327,9 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 
 	refusal := fmt.Errorf("conv: retract head: %s is not the head user row", id)
 	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
-		gen, live := h.store.generation(h.convID, e)
 		st, err := h.store.backend.State(ctx, h.convID)
 		if err != nil {
 			return err
-		}
-		if live {
-			h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
 		}
 
 		newHead, refused, err := h.retractTarget(ctx, id, st)
@@ -393,7 +364,6 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 			Lease:             h.lease,
 		})
 		if err == nil {
-			h.store.storeCommitted(h.convID, e, headState{id: newHead, nextOrdinal: st.NextOrdinal})
 			return nil
 		}
 		if errors.Is(err, ErrLeaseLost) || !errors.Is(err, ErrConflict) {
