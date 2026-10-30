@@ -1,0 +1,1 @@
+[{"type":"text","text":"<system reminder>","cache_control":{"type":"ephemeral"}},{"type":"thinking","thinking":"The user wants the test to pass.","signature":"openai-responses:chatgpt:rs_01HCXD:gAAAAABq-claude"},{"type":"tool_use","id":"toolu_01C","name":"Bash","input":{"command":"go test ./pkg/msg/...","description":"run the new tests"},"cache_control":{"type":"ephemeral"}}]

@@ -1,0 +1,1 @@
+[{"type":"text","text":"Running the suite now."},{"type":"tool_use","id":"toolu_01D","name":"bash","input":{"cmd":"go vet ./pkg/msg/..."}},{"type":"tool_result","tool_use_id":"toolu_01D","content":[{"type":"text","text":"ok  go.graveland.dev/rafiki/pkg/msg"}],"is_error":false}]

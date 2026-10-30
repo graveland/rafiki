@@ -1,0 +1,1 @@
+[{"type":"text","text":"Reading the file."},{"type":"tool_use","id":"toolu_01A","name":"read_file","input":{"path":"pkg/msg/msg.go","limit":200}}]
