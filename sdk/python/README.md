@@ -230,7 +230,8 @@ one merged event.
 every stored row: a prompt retracted before it was answered, and the superseded
 sibling reply a retry left behind, are omitted. A live `stream_events` feed
 still shows such a branch as it happens, and a refetch drops it. Ordinals stay
-strictly increasing along the returned page.
+strictly increasing along the returned page. A conversation id the daemon does
+not hold is an error (`not_found`), never an empty page.
 
 ## Tests
 

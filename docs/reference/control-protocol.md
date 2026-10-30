@@ -412,9 +412,13 @@ more than `limit` events. This is what keeps a page from breaking a
 transaction apart: a client pages with the oldest `ts` it received, and if the
 cut had split a same-`ts` group, the rows on the near side of the split would
 share that `ts` and be skipped for good by the next `before`. The bounds are
-applied by the conversation store (`conv.Store.Page`), so a page costs the
-nodes it returns rather than the whole conversation; `compaction_tail` nodes
-render no event and never count toward `limit`.
+applied by the conversation store (`conv.Store.Page`); `compaction_tail` nodes
+render no event and never count toward `limit`. A warm page costs only the
+nodes it returns: the daemon's one `conv.Store` keeps decoded nodes cached
+(`RAFIKI_CONV_CACHE_BYTES`), so paging a conversation it has recently read does
+not walk it again. A cold page — the first read of a conversation since the
+cache last dropped it — walks the whole head→root chain once, and the page is
+then bounded in memory rather than in SQL.
 
 Both fields are additive optional proto fields, so `protocol.Epoch` is
 unchanged.
@@ -2563,7 +2567,7 @@ transport error, and never a successful result carrying the text.
 |---|---|
 | `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used) |
 | `agent_list` | Every agent the daemon knows: id, name, model, current status, working directory, assigned task handle |
-| `agent_view` | Transcript of one agent — prompts, replies, tool calls with their results; newest entries by default, paged/searched/expanded by cursor (`before`, `after`, `entry`, `find`; only `find`+`after` combine) on a stored conversation, newest page only for a live/exited child without one; a deliberate check, not a polling loop |
+| `agent_view` | Transcript of one agent — prompts, replies, tool calls with their results; newest entries by default, paged/searched/expanded by cursor (`before`, `after`, `entry`, `find`; only `find`+`after` combine) on a stored conversation, newest page only for a live/exited child without one; a deliberate check, not a polling loop. A cursor names a row of the transcript, so one minted before a retract (`m:<ordinal>` of a row the head no longer reaches) refuses rather than silently returning its neighbours |
 | `agent_send` | Deliver a prompt to a running agent |
 | `agent_kill` | Shut an agent down and wait for the exit to be recorded |
 | `agent_set_budget` | Change a TOP-LEVEL agent's USD budget (the exception above) |
