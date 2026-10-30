@@ -1,124 +1,89 @@
 package fundi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/child"
-	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 )
 
-// DBToPiFrames converts persisted conversation messages (from
-// store.Messages.Load) into the pi AgentSessionEvent frames the attach TUI
-// and GetRecent consumers expect. This is the read path for fundi
-// children once the DB is the canonical store — the ring buffer is bypassed
-// entirely.
+// DBToPiFramesMessages converts a conversation transcript (conv.Store.Transcript)
+// into the pi AgentSessionEvent frames the attach TUI and GetRecent consumers
+// expect. This is the read path for fundi and claude children once the DB is
+// the canonical store — the ring buffer is bypassed entirely.
 //
-// Every message produces frames that mirror what the live fundi Emitter would
-// have produced: user prompts get message_start/message_end, assistant turns
-// get message_start/message_update/message_end plus tool_execution_start for
-// each tool_use, and tool results get tool_execution_end. An agent_start frame
-// is prepended and an agent_end frame carrying the Pi-format accumulated
-// messages is appended so the TUI's AgentSession can seed its message cache.
-func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
-	// Phase 1: collect tool_use blocks and resolved tool_use ids (those with
-	// a matching tool_result) so tool_execution_start is only emitted when a
-	// result follows and tool_execution_end can recover the tool name.
-	uses, resolved := toolUseMap(msgs)
-
-	// Phase 2: build frames and accumulate Pi-format messages for agent_end.
-	out := make([]json.RawMessage, 0, len(msgs)*3+2)
-	piMsgs := make([]json.RawMessage, 0, len(msgs))
-
-	out = appendFrame(out, child.PiAgentStart())
-
-	for _, m := range msgs {
-		switch m.Role {
-		case "user":
-			frames, piMsgsFor := dbUserFramesWithTools(m, uses)
-			out = append(out, frames...)
-			piMsgs = append(piMsgs, piMsgsFor...)
-		case "assistant":
-			frames, piMsg := dbAssistantFramesWithTools(m, uses, resolved)
-			out = append(out, frames...)
-			piMsgs = appendPiMsg(piMsgs, piMsg)
-		}
-	}
-
-	out = appendFrame(out, child.PiAgentEnd(piMsgs, nil))
-
-	return out
+// Every node produces frames that mirror what the live fundi Emitter would have
+// produced: user prompts get message_start/message_end, assistant turns get
+// message_start/message_update/message_end plus tool_execution_start for each
+// tool_use, and tool results get tool_execution_end. An agent_start frame is
+// prepended and an agent_end frame carrying the Pi-format accumulated messages
+// is appended so the TUI's AgentSession can seed its message cache.
+//
+// The transcript is the head's walk, so a row the head no longer reaches — a
+// retracted prompt, a superseded reply — never reaches this function, and the
+// compaction_tail copies of rows that appear earlier are already gone. A
+// compaction_summary node renders as a boundary divider rather than a plain
+// user prompt, mirroring eventconv.EventsFromMessages — the full-history
+// reader contract (docs/reference/fundi-compaction.md).
+func DBToPiFramesMessages(nodes []*conv.Node) []json.RawMessage {
+	frames, _ := DBToPiFramesWithOrigins(nodes)
+	return frames
 }
 
-// FrameOrigin names the stored row a frame was rendered from. FromRow is
-// false for the synthetic agent_start/agent_end frames, which come from no
-// row; it is the explicit flag because Ordinal 0 is a real ordinal.
+// FrameOrigin names the node a frame was rendered from. FromRow is false for
+// the synthetic agent_start/agent_end frames, which come from no row; it is the
+// explicit flag because Ordinal 0 is a real ordinal.
 type FrameOrigin struct {
 	FromRow    bool
 	Ordinal    int
 	StopReason string
 }
 
-// DBToPiFramesMessages is DBToPiFrames for stored rows: it drops
-// compaction_tail copies (their originals still exist earlier in the table, so
-// the tail is shown exactly once) and renders the compaction_summary row as a
-// boundary divider rather than a plain user prompt. It mirrors
-// eventconv.EventsFromMessages, which skips the same copies and synthesises a
-// CompactionBoundary from the same summary row — the full-history reader
-// contract (docs/reference/fundi-compaction.md).
-func DBToPiFramesMessages(msgs []store.Message) []json.RawMessage {
-	frames, _ := DBToPiFramesWithOrigins(msgs)
-	return frames
-}
-
 // DBToPiFramesWithOrigins is DBToPiFramesMessages plus a parallel slice naming
-// the stored row each frame came from. The frames are exactly
-// DBToPiFramesMessages'; origins[i] names the row frames[i] came from.
-func DBToPiFramesWithOrigins(msgs []store.Message) ([]json.RawMessage, []FrameOrigin) {
-	params := make([]anthropic.MessageParam, 0, len(msgs))
-	for _, m := range msgs {
-		if hasKind(m, store.KindCompactionTail) {
-			continue
-		}
-		params = append(params, m.Param)
-	}
-	uses, resolved := toolUseMap(params)
+// the node each frame came from. The frames are exactly DBToPiFramesMessages';
+// origins[i] names the node frames[i] came from.
+func DBToPiFramesWithOrigins(nodes []*conv.Node) ([]json.RawMessage, []FrameOrigin) {
+	names, resolved := toolUseMap(nodes)
 
-	out := make([]json.RawMessage, 0, len(params)*3+2)
-	origins := make([]FrameOrigin, 0, len(params)*3+2)
-	piMsgs := make([]json.RawMessage, 0, len(params))
+	out := make([]json.RawMessage, 0, len(nodes)*3+2)
+	origins := make([]FrameOrigin, 0, len(nodes)*3+2)
+	piMsgs := make([]json.RawMessage, 0, len(nodes))
 
 	out, origins = appendFrameWithOrigin(out, origins, child.PiAgentStart(), FrameOrigin{})
 
-	for _, m := range msgs {
-		if hasKind(m, store.KindCompactionTail) {
+	for _, n := range nodes {
+		// A transcript never carries a tail copy, but this function is exported
+		// and a working path does: rendering one would show a row twice.
+		if n.Kind == conv.KindCompactionTail {
 			continue
 		}
-		if hasKind(m, store.KindCompactionSummary) {
+		if n.Kind == conv.KindCompactionSummary {
 			out, origins = appendFrameWithOrigin(out, origins,
-				compactionBoundaryFrame(m.InputTokens, ""),
-				FrameOrigin{FromRow: true, Ordinal: m.Ordinal})
+				compactionBoundaryFrame(n.InputTokens, ""),
+				FrameOrigin{FromRow: true, Ordinal: n.Ordinal})
 			continue
 		}
-		if store.IsClearBoundary(m) {
+		if conv.IsClearBoundary(n) {
 			out, origins = appendFrameWithOrigin(out, origins,
 				compactionBoundaryFrame(nil, "clear"),
-				FrameOrigin{FromRow: true, Ordinal: m.Ordinal})
+				FrameOrigin{FromRow: true, Ordinal: n.Ordinal})
 			continue
 		}
-		switch m.Param.Role {
-		case "user":
-			frames, piMsgsFor := dbUserFramesWithTools(m.Param, uses)
+		switch n.Msg.Role {
+		case msg.User:
+			frames, piMsgsFor := dbUserFramesWithTools(n.Msg, names)
 			out = append(out, frames...)
-			origins = appendOrigins(origins, len(frames), m)
+			origins = appendOrigins(origins, len(frames), n)
 			piMsgs = append(piMsgs, piMsgsFor...)
-		case "assistant":
-			frames, piMsg := dbAssistantFramesWithTools(m.Param, uses, resolved)
+		case msg.Assistant:
+			frames, piMsg := dbAssistantFramesWithTools(n.Msg, resolved)
 			out = append(out, frames...)
-			origins = appendOrigins(origins, len(frames), m)
+			origins = appendOrigins(origins, len(frames), n)
 			piMsgs = appendPiMsg(piMsgs, piMsg)
 		}
 	}
@@ -139,25 +104,20 @@ func appendFrameWithOrigin(out []json.RawMessage, origins []FrameOrigin, v any, 
 	return out, append(origins, origin)
 }
 
-// appendOrigins appends n copies of m's origin, one per frame m produced.
-func appendOrigins(origins []FrameOrigin, n int, m store.Message) []FrameOrigin {
-	origin := FrameOrigin{FromRow: true, Ordinal: m.Ordinal, StopReason: m.StopReason}
-	for i := 0; i < n; i++ {
+// appendOrigins appends count copies of n's origin, one per frame n produced.
+func appendOrigins(origins []FrameOrigin, count int, n *conv.Node) []FrameOrigin {
+	origin := FrameOrigin{FromRow: true, Ordinal: n.Ordinal, StopReason: n.StopReason}
+	for i := 0; i < count; i++ {
 		origins = append(origins, origin)
 	}
 	return origins
 }
 
-// hasKind reports whether m carries the given compaction kind.
-func hasKind(m store.Message, kind string) bool {
-	return m.Kind != nil && *m.Kind == kind
-}
-
 // compactionBoundaryFrame is the pi-vocabulary divider DBToPiFramesMessages
-// emits in place of a compaction_summary row. preTokens is the replaced-context
-// size (InputTokens on the row); it is omitted when the row carries none.
+// emits in place of a compaction_summary node. preTokens is the replaced-context
+// size (InputTokens on the node); it is omitted when the node carries none.
 // trigger is "clear" for a /clear boundary and empty for a compaction.
-func compactionBoundaryFrame(preTokens *int, trigger string) json.RawMessage {
+func compactionBoundaryFrame(preTokens *int64, trigger string) json.RawMessage {
 	f := map[string]any{"type": "compaction_boundary"}
 	if preTokens != nil {
 		f["preTokens"] = *preTokens
@@ -168,32 +128,132 @@ func compactionBoundaryFrame(preTokens *int, trigger string) json.RawMessage {
 	return mustFrame(f)
 }
 
-// toolUseInfo carries the fields a tool_execution_end frame needs to pair a
-// tool_result block with its originating tool_use.
-type toolUseInfo struct {
-	name  string
-	input json.RawMessage
+// frameBlockKind is what a stored block contributes to the frame vocabulary.
+// The zero value is "nothing renders here": an image, and any block type this
+// vocabulary cannot name, contributes no frame block of its own.
+type frameBlockKind uint8
+
+const (
+	frameBlockNone frameBlockKind = iota
+	frameBlockText
+	frameBlockThinking
+	frameBlockToolUse
+	frameBlockToolResult
+)
+
+// frameBlock is one block as the frame vocabulary reads it: its kind plus the
+// fields that kind renders.
+type frameBlock struct {
+	kind       frameBlockKind
+	text       string
+	toolUse    msg.ToolUse
+	toolResult msg.ToolResult
 }
 
-// toolUseMap scans messages for tool_use blocks and tool_result blocks,
-// returning (1) a map from tool_use id → {name, input} for name recovery in
-// tool_execution_end, and (2) the set of tool_use ids that have a matching
-// tool_result — only those ids get tool_execution_start frames.
-func toolUseMap(msgs []anthropic.MessageParam) (map[string]toolUseInfo, map[string]bool) {
-	m := make(map[string]toolUseInfo)
+// frameBlocks reads a message's content blocks, dropping the ones that render
+// nothing.
+func frameBlocks(m msg.Message) []frameBlock {
+	out := make([]frameBlock, 0, len(m.Content))
+	for _, b := range m.Content {
+		if fb := frameBlockOf(b); fb.kind != frameBlockNone {
+			out = append(out, fb)
+		}
+	}
+	return out
+}
+
+// frameBlockOf classifies one block. An Opaque block is read by the wire type
+// it declares (msg.OpaqueType) and decoded into that type's fields: the codec
+// keeps a block verbatim when its typed form cannot reproduce it, not because
+// the block is unreadable, and the SDK decode this replaced rendered it as its
+// typed form.
+func frameBlockOf(b msg.Block) frameBlock {
+	switch t := b.(type) {
+	case msg.Text:
+		return frameBlock{kind: frameBlockText, text: t.Text}
+	case msg.Thinking:
+		return frameBlock{kind: frameBlockThinking, text: t.Text}
+	case msg.ToolUse:
+		return frameBlock{kind: frameBlockToolUse, toolUse: t}
+	case msg.ToolResult:
+		return frameBlock{kind: frameBlockToolResult, toolResult: t}
+	case msg.Opaque:
+		return opaqueFrameBlock(t)
+	}
+	return frameBlock{}
+}
+
+// opaqueFrameBlock decodes a block kept verbatim into the frame vocabulary by
+// its declared type, reporting none for a type the vocabulary cannot name.
+func opaqueFrameBlock(o msg.Opaque) frameBlock {
+	switch msg.OpaqueType(o) {
+	case "text":
+		var v struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(o.Raw, &v); err != nil {
+			return frameBlock{}
+		}
+		return frameBlock{kind: frameBlockText, text: v.Text}
+	case "thinking":
+		var v struct {
+			Thinking string `json:"thinking"`
+		}
+		if err := json.Unmarshal(o.Raw, &v); err != nil {
+			return frameBlock{}
+		}
+		return frameBlock{kind: frameBlockThinking, text: v.Thinking}
+	case "tool_use":
+		var v struct {
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.Unmarshal(o.Raw, &v); err != nil {
+			return frameBlock{}
+		}
+		return frameBlock{kind: frameBlockToolUse, toolUse: msg.ToolUse{ID: v.ID, Name: v.Name, Input: v.Input}}
+	case "tool_result":
+		var v struct {
+			ToolUseID string          `json:"tool_use_id"`
+			IsError   bool            `json:"is_error"`
+			Content   json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(o.Raw, &v); err != nil {
+			return frameBlock{}
+		}
+		tr := msg.ToolResult{ToolUseID: v.ToolUseID, IsError: v.IsError}
+		decoded, err := msganthropic.Decode(msg.User.String(), v.Content)
+		if err != nil {
+			return frameBlock{kind: frameBlockToolResult, toolResult: tr}
+		}
+		tr.Content = decoded.Content
+		return frameBlock{kind: frameBlockToolResult, toolResult: tr}
+	}
+	return frameBlock{}
+}
+
+// toolUseMap scans the transcript's blocks, returning the name of every
+// tool_use id (for tool_execution_end to name the tool) and the set of ids a
+// tool_result answers — only those get tool_execution_start frames.
+func toolUseMap(nodes []*conv.Node) (map[string]string, map[string]bool) {
+	names := make(map[string]string)
 	resolved := make(map[string]bool)
-	for _, msg := range msgs {
-		for _, block := range msg.Content {
-			if tu := block.OfToolUse; tu != nil && tu.ID != "" {
-				input, _ := json.Marshal(tu.Input)
-				m[tu.ID] = toolUseInfo{name: tu.Name, input: input}
-			}
-			if tr := block.OfToolResult; tr != nil && tr.ToolUseID != "" {
-				resolved[tr.ToolUseID] = true
+	for _, n := range nodes {
+		for _, fb := range frameBlocks(n.Msg) {
+			switch fb.kind {
+			case frameBlockToolUse:
+				if fb.toolUse.ID != "" {
+					names[fb.toolUse.ID] = fb.toolUse.Name
+				}
+			case frameBlockToolResult:
+				if fb.toolResult.ToolUseID != "" {
+					resolved[fb.toolResult.ToolUseID] = true
+				}
 			}
 		}
 	}
-	return m, resolved
+	return names, resolved
 }
 
 // dbUserFramesWithTools produces frames and Pi-format messages for a user
@@ -202,7 +262,7 @@ func toolUseMap(msgs []anthropic.MessageParam) (map[string]toolUseInfo, map[stri
 // Pure tool_result messages do NOT get a user message_start/message_end —
 // the live Emitter accumulates PiToolResultMessage but does not echo user
 // message frames for tool results.
-func dbUserFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo) ([]json.RawMessage, []json.RawMessage) {
+func dbUserFramesWithTools(m msg.Message, names map[string]string) ([]json.RawMessage, []json.RawMessage) {
 	ts := time.Now().UnixMilli()
 	id := fmt.Sprintf("user-%d", ts)
 
@@ -212,25 +272,23 @@ func dbUserFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo
 		texts  []string
 	)
 
-	for _, block := range m.Content {
-		switch {
-		case block.OfText != nil && block.OfText.Text != "":
-			texts = append(texts, block.OfText.Text)
-		case block.OfToolResult != nil:
-			tr := block.OfToolResult
-			resultText := toolResultText(tr.Content)
-			isErr := tr.IsError.Value
-			name := ""
-			if u, ok := uses[tr.ToolUseID]; ok {
-				name = u.name
+	for _, fb := range frameBlocks(m) {
+		switch fb.kind {
+		case frameBlockText:
+			if fb.text != "" {
+				texts = append(texts, fb.text)
 			}
-			frames = appendFrame(frames, child.PiToolExecutionEnd(tr.ToolUseID, name, resultText, isErr, ""))
+		case frameBlockToolResult:
+			tr := fb.toolResult
+			resultText := toolResultText(tr.Content)
+			name := names[tr.ToolUseID]
+			frames = appendFrame(frames, child.PiToolExecutionEnd(tr.ToolUseID, name, resultText, tr.IsError, ""))
 			piMsgs = appendPiMsg(piMsgs, child.PiToolResultMessage{
 				Role:       "toolResult",
 				ToolCallID: tr.ToolUseID,
 				ToolName:   name,
 				Content:    []child.PiContentBlock{child.PiTextBlock(resultText)},
-				IsError:    isErr,
+				IsError:    tr.IsError,
 				Timestamp:  ts,
 			})
 		}
@@ -239,10 +297,10 @@ func dbUserFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo
 	if len(texts) > 0 {
 		// This is a user prompt or steer — emit message_start/message_end.
 		text := texts[0]
-		msg := child.PiUserMessage{Role: "user", ID: id, Content: text, Timestamp: ts}
-		frames = appendFrame(frames, child.PiUserMessageStart(msg))
-		frames = appendFrame(frames, child.PiUserMessageEnd(msg))
-		piMsgs = appendPiMsg(piMsgs, msg)
+		piUser := child.PiUserMessage{Role: "user", ID: id, Content: text, Timestamp: ts}
+		frames = appendFrame(frames, child.PiUserMessageStart(piUser))
+		frames = appendFrame(frames, child.PiUserMessageEnd(piUser))
+		piMsgs = appendPiMsg(piMsgs, piUser)
 	}
 
 	return frames, piMsgs
@@ -252,19 +310,23 @@ func dbUserFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo
 // assistant message. In addition to message_start/message_update/message_end,
 // it emits tool_execution_start for each tool_use block that has a matching
 // tool_result later in the conversation.
-func dbAssistantFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo, resolved map[string]bool) ([]json.RawMessage, json.RawMessage) {
-	blocks := make([]child.PiContentBlock, 0, len(m.Content))
+func dbAssistantFramesWithTools(m msg.Message, resolved map[string]bool) ([]json.RawMessage, json.RawMessage) {
+	fbs := frameBlocks(m)
+	blocks := make([]child.PiContentBlock, 0, len(fbs))
 	hasToolUse := false
-	for _, block := range m.Content {
-		switch {
-		case block.OfText != nil && block.OfText.Text != "":
-			blocks = append(blocks, child.PiTextBlock(block.OfText.Text))
-		case block.OfThinking != nil && block.OfThinking.Thinking != "":
-			blocks = append(blocks, child.PiThinkingBlock(block.OfThinking.Thinking))
-		case block.OfToolUse != nil:
+	for _, fb := range fbs {
+		switch fb.kind {
+		case frameBlockText:
+			if fb.text != "" {
+				blocks = append(blocks, child.PiTextBlock(fb.text))
+			}
+		case frameBlockThinking:
+			if fb.text != "" {
+				blocks = append(blocks, child.PiThinkingBlock(fb.text))
+			}
+		case frameBlockToolUse:
 			hasToolUse = true
-			args := toolUseArgs(block.OfToolUse.Input)
-			blocks = append(blocks, child.PiToolCallBlock(block.OfToolUse.ID, block.OfToolUse.Name, args))
+			blocks = append(blocks, child.PiToolCallBlock(fb.toolUse.ID, fb.toolUse.Name, toolUseArgs(fb.toolUse.Input)))
 		}
 	}
 
@@ -272,50 +334,52 @@ func dbAssistantFramesWithTools(m anthropic.MessageParam, uses map[string]toolUs
 	if hasToolUse {
 		stopReason = "toolUse"
 	}
-	msg := child.PiAssistantMessage{
+	piMessage := child.PiAssistantMessage{
 		Role:       "assistant",
 		Content:    blocks,
 		API:        "anthropic-messages",
-		Provider:   "", // unknown from DB messages alone; zero is acceptable
-		Model:      "", // unknown from DB messages alone; zero is acceptable
+		Provider:   "", // unknown from stored messages alone; zero is acceptable
+		Model:      "", // unknown from stored messages alone; zero is acceptable
 		Usage:      child.PiUsage{},
 		StopReason: stopReason,
 		Timestamp:  time.Now().UnixMilli(),
 	}
 
 	var frames []json.RawMessage
-	frames = appendFrame(frames, child.PiMessageStart(msg, ""))
-	frames = appendFrame(frames, child.PiMessageUpdate(msg, ""))
+	frames = appendFrame(frames, child.PiMessageStart(piMessage, ""))
+	frames = appendFrame(frames, child.PiMessageUpdate(piMessage, ""))
 	// Emit tool_execution_start for each tool_use that has a matching
 	// tool_result, mirroring what the live Emitter does (ToolStart before
 	// message_end). Without these, the TUI shows the tool_use block but not
 	// the tool-execution lifecycle that renders the output.
-	for _, block := range m.Content {
-		if tu := block.OfToolUse; tu != nil && resolved[tu.ID] {
-			args := toolUseArgs(tu.Input)
-			frames = appendFrame(frames, child.PiToolExecutionStart(tu.ID, tu.Name, args, ""))
+	for _, fb := range fbs {
+		if fb.kind == frameBlockToolUse && resolved[fb.toolUse.ID] {
+			frames = appendFrame(frames, child.PiToolExecutionStart(fb.toolUse.ID, fb.toolUse.Name, toolUseArgs(fb.toolUse.Input), ""))
 		}
 	}
-	frames = appendFrame(frames, child.PiMessageEnd(msg, ""))
+	frames = appendFrame(frames, child.PiMessageEnd(piMessage, ""))
 
-	piMsg := mustFrame(msg)
-	return frames, piMsg
+	return frames, mustFrame(piMessage)
 }
 
-// toolResultText extracts a plain-text representation from the SDK's
-// ToolResultBlockParamContentUnion array. Each element is typically OfText.
-func toolResultText(content []anthropic.ToolResultBlockParamContentUnion) string {
-	for _, c := range content {
-		if c.OfText != nil {
-			return c.OfText.Text
+// toolResultText extracts a plain-text representation from a tool result's
+// content blocks. The first text block wins, an Opaque one included. Content
+// with no text at all (an image, say) falls back to its provider-shaped JSON
+// rather than rendering as nothing.
+func toolResultText(content []msg.Block) string {
+	for _, b := range content {
+		if fb := frameBlockOf(b); fb.kind == frameBlockText {
+			return fb.text
 		}
 	}
-	// Fallback: marshal the whole thing. This shouldn't be reached for
-	// normal tool_result content (which always has OfText blocks).
-	if b, err := json.Marshal(content); err == nil && len(b) > 0 {
-		return string(b)
+	if len(content) == 0 {
+		return ""
 	}
-	return ""
+	encoded, err := msganthropic.EncodeContent(msg.Message{Role: msg.User, Content: content})
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 // appendFrame marshals v and appends the result to out. Marshal failures are
@@ -358,19 +422,20 @@ func appendPiMsg(out []json.RawMessage, v any) []json.RawMessage {
 	return append(out, b)
 }
 
-// toolUseArgs converts a tool_use block's input (json.RawMessage or map) into
-// the map[string]any that PiToolCallBlock expects.
-func toolUseArgs(input any) map[string]any {
-	switch v := input.(type) {
-	case map[string]any:
-		return v
-	case json.RawMessage:
-		var m map[string]any
-		if err := json.Unmarshal(v, &m); err != nil {
-			return map[string]any{"_raw": string(v)}
-		}
-		return m
-	default:
+// toolUseArgs converts a tool_use block's input into the map[string]any that
+// PiToolCallBlock expects. Input that carries no object renders no arguments,
+// which is the empty map; input that is not valid JSON stays visible under
+// "_raw" rather than being dropped.
+func toolUseArgs(input json.RawMessage) map[string]any {
+	if len(bytes.TrimSpace(input)) == 0 {
 		return map[string]any{}
 	}
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return map[string]any{"_raw": string(input)}
+	}
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }

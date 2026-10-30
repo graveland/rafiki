@@ -81,10 +81,11 @@ type Message struct {
 
 // Load returns the conversation's FULL message history in ordinal order — every
 // node ever written, including the ones the working path no longer reaches.
-// GetHistory, `rafiki logs` and `Controller.dbRecent` (agent_view) all render
-// the pre-compaction history with the boundary inline. The working set every
-// send, orphan repair and prefill classifier uses is LoadWorking, the path from
-// the head to its root.
+// GetHistory and `rafiki logs` render the pre-compaction history with the
+// boundary inline; the working set every send, orphan repair and prefill
+// classifier uses is LoadWorking, the path from the head to its root.
+// `agent_view`/GetRecent do not read this: they render conv.Store.Transcript,
+// the head's walk.
 func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, error) {
 	rows, err := m.pool.Query(ctx, `
 		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens, created_at, id::text

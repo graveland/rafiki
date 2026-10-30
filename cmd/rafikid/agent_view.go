@@ -5,10 +5,10 @@ import (
 	"fmt"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // viewTranscript renders one agent_view read for spec.ChildID. A db-sourced
@@ -21,7 +21,7 @@ import (
 //
 // The source decision is dbSourced, the same helper GetRecent uses, so a child
 // is never paged out of one source and rendered from another. A db-sourced read
-// loads the rows ITSELF and RETURNS a load error, where dbRecent logs and
+// reads the transcript ITSELF and RETURNS a read error, where dbRecent logs and
 // answers empty: an empty page would read as "the agent said nothing".
 func (c *Controller) viewTranscript(spec tools.ViewSpec, rendered bool) (string, error) {
 	snap, ok := c.st.Get(spec.ChildID)
@@ -63,15 +63,15 @@ func (c *Controller) viewTranscript(spec tools.ViewSpec, rendered bool) (string,
 			renderTranscript(res.Events, limit, viewMaxBytes), nil
 	}
 
-	var rows []store.Message
-	if c.pool != nil && convID != "" {
-		loaded, err := store.NewMessages(c.pool).Load(context.Background(), convID)
+	var nodes []*conv.Node
+	if c.convs != nil && convID != "" {
+		loaded, err := c.convs.Transcript(context.Background(), convID)
 		if err != nil {
 			return "", fmt.Errorf("loading %s's conversation: %w", spec.ChildID, err)
 		}
-		rows = loaded
+		nodes = loaded
 	}
-	frames, origins := fundi.DBToPiFramesWithOrigins(rows)
+	frames, origins := fundi.DBToPiFramesWithOrigins(nodes)
 	// renderEntries treats a mismatched origins slice as absent, which is right
 	// for its nil-origins callers and wrong here: the entries would silently
 	// carry no cursors, and every marker would print an empty before=/after=/

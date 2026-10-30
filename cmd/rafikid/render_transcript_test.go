@@ -14,17 +14,17 @@ import (
 func ptr[T any](v T) *T { return &v }
 
 // TestRenderTranscriptLimitCountsEntries pins that agent_view's limit counts
-// rendered entries, not frames: DBToPiFrames ends every transcript with an
-// agent_end frame that renders nothing, so a frame limit of 1 rendered
+// rendered entries, not frames: the frame converter ends every transcript with
+// an agent_end frame that renders nothing, so a frame limit of 1 rendered
 // "(no transcript yet)" for a child with a full transcript.
 func TestRenderTranscriptLimitCountsEntries(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	frames := fundi.DBToPiFrames([]anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock("first prompt")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("first answer")),
-		anthropic.NewUserMessage(anthropic.NewTextBlock("second prompt")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("second answer")),
-	})
+	frames := fundi.DBToPiFramesMessages(transcriptNodes(t, []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first prompt"))},
+		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("first answer"))},
+		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("second prompt"))},
+		{Ordinal: 3, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("second answer"))},
+	}))
 
 	ck.Eq("[3 earlier entries omitted]\nassistant: second answer\n",
 		renderTranscript(frames, 1, viewMaxBytes), "limit 1 must show the newest entry")
@@ -37,17 +37,17 @@ func TestRenderTranscriptLimitCountsEntries(t *testing.T) {
 }
 
 // TestRenderTranscriptRendersCompactionBoundary pins that the boundary divider
-// pkg/fundi.DBToPiFramesMessages emits for a stored compaction_summary row
-// renders as a readable divider line, not silently dropped.
+// pkg/fundi.DBToPiFramesMessages emits for a compaction_summary node renders as
+// a readable divider line, not silently dropped.
 func TestRenderTranscriptRendersCompactionBoundary(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	frames := fundi.DBToPiFramesMessages([]store.Message{
+	frames := fundi.DBToPiFramesMessages(transcriptNodes(t, []store.Message{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("first prompt"))},
 		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("first answer"))},
 		{Ordinal: 2, Kind: ptr(store.KindCompactionSummary), InputTokens: ptr(150_000),
 			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary text"))},
 		{Ordinal: 3, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("second prompt"))},
-	})
+	}))
 	out := renderTranscript(frames, 0, viewMaxBytes)
 	ck.StrContains(out, "context compacted", "the compaction boundary must render as a divider")
 	ck.StrContains(out, "150k tokens", "the divider must carry the replaced-token figure")

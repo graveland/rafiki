@@ -11,7 +11,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // conversationIDForChild resolves the conversation holding a child's persisted
@@ -53,33 +52,34 @@ func (c *Controller) dbSourced(snap childstore.Snapshot) (string, bool) {
 	return convID, convID != "" || snap.Kind == protocol.KindFundi
 }
 
-// dbRecent loads a conversation's persisted messages and converts them to pi
-// vocabulary. Serves BOTH fundi and claude children: DBToPiFramesMessages emits
-// exactly the message_start/message_end/tool_execution_* events that
-// renderTranscript and the CLI's renderPiEvent consume, so one path serves
-// agent_view, rafiki logs and rafiki tail.
+// dbRecent reads a conversation's transcript and converts it to pi vocabulary.
+// Serves BOTH fundi and claude children: DBToPiFramesMessages emits exactly the
+// message_start/message_end/tool_execution_* events that renderTranscript and
+// the CLI's renderPiEvent consume, so one path serves agent_view, rafiki logs
+// and rafiki tail.
 //
-// Not filtered by the compaction horizon, deliberately: callers render the
-// full history with the boundary inline. It IS filtered by row kind, though:
-// DBToPiFramesMessages drops compaction_tail copies (the tail shows once, via
-// its original row) and renders the compaction_summary row as a boundary
-// divider rather than a plain user prompt.
+// The read is the transcript along the conversation's head, so a row the head no
+// longer reaches (a retracted prompt, a superseded reply) does not appear. It is
+// not filtered by the compaction horizon, deliberately: callers render the full
+// history with the boundary inline. The transcript drops compaction_tail copies
+// (the tail shows once, via its original row), and DBToPiFramesMessages renders
+// the compaction_summary node as a boundary divider rather than a plain user
+// prompt.
 //
 // Honours q.Limit only. q.Since cannot be honoured here (DBToPiFrames stamps
 // render-time timestamps, not capture time), q.Rendered has no raw alternative
 // on this branch, and --raw on a resolvable child receives pi vocabulary rather
 // than the child's backend frames.
 func (c *Controller) dbRecent(conversationID string, q recentQuery) []ring.Event {
-	if c.pool == nil || conversationID == "" {
+	if c.convs == nil || conversationID == "" {
 		return nil
 	}
-	ms := store.NewMessages(c.pool)
-	msgs, err := ms.Load(context.Background(), conversationID)
+	nodes, err := c.convs.Transcript(context.Background(), conversationID)
 	if err != nil {
-		slog.Warn("dbRecent: load failed", "conversationID", conversationID, "error", err)
+		slog.Warn("dbRecent: transcript read failed", "conversationID", conversationID, "error", err)
 		return nil
 	}
-	frames := fundi.DBToPiFramesMessages(msgs)
+	frames := fundi.DBToPiFramesMessages(nodes)
 
 	if q.Limit > 0 && len(frames) > q.Limit {
 		frames = frames[len(frames)-q.Limit:]

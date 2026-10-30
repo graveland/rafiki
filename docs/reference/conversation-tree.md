@@ -323,8 +323,12 @@ request minus `messages`), stored on change.
 
 - **Chronological** — `store.Messages.Load`, `ORDER BY ordinal`: every row ever
   written, including the branches the working path no longer reaches. This is
-  what `GetHistory` (and so `rafiki logs`), `Controller.dbRecent`/`agent_view`,
-  recall and the insights export read.
+  what `GetHistory` (and so `rafiki logs`), `rafiki tail`'s backfill, recall and
+  the insights export read.
+- **Transcript** — `conv.Store.Transcript` (or `Page` over it): the head's walk
+  across compaction and clear boundaries, chronological and without the
+  `compaction_tail` copies, so a row the head no longer reaches is absent. This
+  is what `Controller.dbRecent`/`agent_view` reads.
 - **Working path** — `LoadPath` (or `ORDER BY depth` over it): the history the
   model last saw. fundi's working set, and what anything that renders only the
   live history needs.

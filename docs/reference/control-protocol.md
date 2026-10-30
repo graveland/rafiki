@@ -429,10 +429,10 @@ behind. A live `StreamEvents` feed is not filtered this way: a row is published
 when it is written, so a branch that is later abandoned still shows up as it
 happens, and a refetch through `GetHistory` drops it. Ordinals stay strictly
 increasing along the returned page, so a client can still page and resume by
-ordinal. `agent_view` still reads the stored rows (`store.Messages.Load`) and
-shows the dead branches; `rafiki logs`/`tail` backfill through `GetHistory`, so
-they follow the transcript. A conversation the daemon does not hold answers
-`not_found`, never an empty page and never `internal`.
+ordinal. `agent_view` renders the same transcript (`conv.Store.Transcript`), so
+a dead branch is absent from it too, and `rafiki logs`/`tail` backfill through
+`GetHistory`. A conversation the daemon does not hold answers `not_found`,
+never an empty page and never `internal`.
 
 #### `EventSubject`
 

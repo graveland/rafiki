@@ -135,18 +135,23 @@ uses is the whole point:
   returns the chain from `conversation.head_id` up `parent_id` to a root, in
   depth order. `llm.Conversation.loadHistory` (and so `History`,
   `agentloop.Resume`, orphan repair and `classifyPrefill`) reads only this.
-- **Full history** — `store.Messages.Load` returns every row in ordinal order and
-  is deliberately NOT path-filtered. `GetHistory` (which serves `rafiki logs`),
-  `Controller.dbRecent` (which serves GetRecent / the `agent_view` tool) and
-  recall read every row.
+- **Full history** — `store.Messages.Load`/`LoadPage` returns every row in
+  ordinal order and is deliberately NOT path-filtered. `GetHistory` (which
+  serves `rafiki logs`), `StreamEvents`' tail backfill (which serves `rafiki
+  tail`) and recall read every row.
+- **Transcript** — `conv.Store.Transcript` returns the head's walk across
+  compaction and clear boundaries, so a row the head no longer reaches (a
+  retracted prompt, a superseded reply) does not appear. `Controller.dbRecent`
+  (which serves GetRecent and the `agent_view` tool) reads it.
 
 A full-history reader must skip `kind='compaction_tail'` rows or it shows the
 tail twice: `eventconv.EventsFromMessages` skips them and synthesises a
-`CompactionBoundary` from the summary row instead; `pkg/fundi.DBToPiFramesMessages`
-(the agent_view path) skips them and renders the same boundary divider; the
-`pkg/insights` readers (the export query and the tools/skills/sizes/classes
-catalogue CTEs) skip them; and `pkg/recall` skips them in both its extraction
-and summariser paths. `pkg/recall` also skips the `compaction_summary` row in
+`CompactionBoundary` from the summary row instead; the transcript
+`pkg/fundi.DBToPiFramesMessages` renders (the agent_view path) never carries them
+at all, and the function drops any it is handed before rendering the same
+boundary divider; the `pkg/insights` readers (the export query and the
+tools/skills/sizes/classes catalogue CTEs) skip them; and `pkg/recall` skips them
+in both its extraction and summariser paths. `pkg/recall` also skips the `compaction_summary` row in
 its extraction (`extract.go`) and cuts windows at summaries (`summarize.go`), so
 a summary is never re-summarised as ordinary conversation.
 

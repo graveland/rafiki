@@ -10,15 +10,40 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/multigres/testkit/assert"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/store"
 )
+
+// transcriptNodes builds the transcript a db-sourced read hands the frame
+// converter from stored rows: the node's identity, its decoded message, and the
+// kind, stop reason and replaced-context size the row carries.
+func transcriptNodes(t *testing.T, msgs []store.Message) []*conv.Node {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	out := make([]*conv.Node, 0, len(msgs))
+	for _, m := range msgs {
+		decoded, err := msganthropic.FromParam(m.Param)
+		ck.NoError(err, "decode row %d", m.Ordinal)
+		n := &conv.Node{Ref: conv.Ref{Ordinal: m.Ordinal}, Msg: decoded, StopReason: m.StopReason}
+		if m.Kind != nil {
+			n.Kind = *m.Kind
+		}
+		if m.InputTokens != nil {
+			pre := int64(*m.InputTokens)
+			n.InputTokens = &pre
+		}
+		out = append(out, n)
+	}
+	return out
+}
 
 // viewEntries renders the frames for msgs and pairs them with their origins —
 // the exact route a db-sourced agent_view takes.
 func viewEntries(t *testing.T, msgs []store.Message) []entry {
 	t.Helper()
-	frames, origins := fundi.DBToPiFramesWithOrigins(msgs)
+	frames, origins := fundi.DBToPiFramesWithOrigins(transcriptNodes(t, msgs))
 	return renderEntries(frames, origins)
 }
 
@@ -624,10 +649,10 @@ func TestTranscriptViewEntryChunks(t *testing.T) {
 // to that rather than panicking.
 func TestTranscriptViewOneShotHasNoCursors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	frames, origins := fundi.DBToPiFramesWithOrigins([]store.Message{
+	frames, origins := fundi.DBToPiFramesWithOrigins(transcriptNodes(t, []store.Message{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
 		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi there"))},
-	})
+	}))
 
 	for _, e := range renderEntries(frames, nil) {
 		ck.Eq("", e.cursor, "no origins means no cursors")

@@ -5,15 +5,29 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
 
+// transcriptNode is one node of a transcript: its ordinal and its message. The
+// frame converter reads nothing else off an ordinary row.
+func transcriptNode(ordinal int, m msg.Message) *conv.Node {
+	return &conv.Node{Ref: conv.Ref{Ordinal: ordinal}, Msg: m}
+}
+
+func userMessage(blocks ...msg.Block) msg.Message {
+	return msg.Message{Role: msg.User, Content: blocks}
+}
+
+func assistantMessage(blocks ...msg.Block) msg.Message {
+	return msg.Message{Role: msg.Assistant, Content: blocks}
+}
+
 func TestDBToPiFrames_Empty(t *testing.T) {
-	frames := DBToPiFrames(nil)
+	frames := DBToPiFramesMessages(nil)
 	// agent_start + agent_end (empty messages) = 2
 	assert.NewAborting(t).Len(frames, 2, "got %d frames for empty input, want 2 (agent_start + agent_end)", len(frames))
 	var hdr struct{ Type string }
@@ -27,12 +41,10 @@ func TestDBToPiFrames_Empty(t *testing.T) {
 
 func TestDBToPiFrames_UserText(t *testing.T) {
 	c := assert.NewCollecting(t)
-	msgs := []anthropic.MessageParam{
-		anthropic.NewUserMessage(
-			anthropic.NewTextBlock("hello world"),
-		),
+	nodes := []*conv.Node{
+		transcriptNode(0, userMessage(msg.Text{Text: "hello world"})),
 	}
-	frames := DBToPiFrames(msgs)
+	frames := DBToPiFramesMessages(nodes)
 	// agent_start + message_start(user) + message_end(user) + agent_end = 4
 	c.Require().Len(frames, 4, "got %d frames, want 4", len(frames))
 	// Verify the user message frames.
@@ -52,12 +64,10 @@ func TestDBToPiFrames_UserText(t *testing.T) {
 
 func TestDBToPiFrames_AssistantText(t *testing.T) {
 	c := assert.NewCollecting(t)
-	msgs := []anthropic.MessageParam{
-		anthropic.NewAssistantMessage(
-			anthropic.NewTextBlock("pong"),
-		),
+	nodes := []*conv.Node{
+		transcriptNode(0, assistantMessage(msg.Text{Text: "pong"})),
 	}
-	frames := DBToPiFrames(msgs)
+	frames := DBToPiFramesMessages(nodes)
 	// agent_start + message_start + message_update + message_end + agent_end = 5
 	c.Require().Len(frames, 5, "got %d frames, want 5", len(frames))
 	var env struct {
@@ -88,12 +98,12 @@ func TestDBToPiFrames_AssistantText(t *testing.T) {
 
 func TestDBToPiFrames_ToolUse(t *testing.T) {
 	c := assert.NewCollecting(t)
-	msgs := []anthropic.MessageParam{
-		anthropic.NewAssistantMessage(
-			anthropic.NewToolUseBlock("toolu_01", map[string]any{"file": "/tmp/x"}, "read"),
-		),
+	nodes := []*conv.Node{
+		transcriptNode(0, assistantMessage(
+			msg.ToolUse{ID: "toolu_01", Name: "read", Input: json.RawMessage(`{"file":"/tmp/x"}`)},
+		)),
 	}
-	frames := DBToPiFrames(msgs)
+	frames := DBToPiFramesMessages(nodes)
 	// agent_start + message_start + message_update + message_end + agent_end = 5
 	// (No tool_execution_start — there is no matching tool_result.)
 	c.Require().Len(frames, 5, "got %d frames, want 5", len(frames))
@@ -119,16 +129,15 @@ func TestDBToPiFrames_ToolUse(t *testing.T) {
 
 func TestDBToPiFrames_UserWithToolResult(t *testing.T) {
 	c := assert.NewCollecting(t)
-	isError := true
-	msgs := []anthropic.MessageParam{
-		anthropic.NewAssistantMessage(
-			anthropic.NewToolUseBlock("toolu_01", map[string]any{"cmd": "ls"}, "bash"),
-		),
-		anthropic.NewUserMessage(
-			anthropic.NewToolResultBlock("toolu_01", "file1.txt\nfile2.txt", isError),
-		),
+	nodes := []*conv.Node{
+		transcriptNode(0, assistantMessage(
+			msg.ToolUse{ID: "toolu_01", Name: "bash", Input: json.RawMessage(`{"cmd":"ls"}`)},
+		)),
+		transcriptNode(1, userMessage(
+			msg.ToolResult{ToolUseID: "toolu_01", Content: []msg.Block{msg.Text{Text: "file1.txt\nfile2.txt"}}, IsError: true},
+		)),
 	}
-	frames := DBToPiFrames(msgs)
+	frames := DBToPiFramesMessages(nodes)
 	// agent_start
 	//   + message_start(assistant) + message_update + tool_execution_start + message_end
 	//   + tool_execution_end
@@ -169,26 +178,25 @@ func TestDBToPiFrames_UserWithToolResult(t *testing.T) {
 
 func TestDBToPiFrames_Limit(t *testing.T) {
 	// This test verifies that limit filtering is applied by the caller
-	// (dbRecent), not by DBToPiFrames itself. DBToPiFrames returns
-	// all frames; the caller slices.
-	msgs := []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock("msg1")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply1")),
-		anthropic.NewUserMessage(anthropic.NewTextBlock("msg2")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply2")),
+	// (dbRecent), not by the frame converter itself, which returns all frames.
+	nodes := []*conv.Node{
+		transcriptNode(0, userMessage(msg.Text{Text: "msg1"})),
+		transcriptNode(1, assistantMessage(msg.Text{Text: "reply1"})),
+		transcriptNode(2, userMessage(msg.Text{Text: "msg2"})),
+		transcriptNode(3, assistantMessage(msg.Text{Text: "reply2"})),
 	}
-	frames := DBToPiFrames(msgs)
+	frames := DBToPiFramesMessages(nodes)
 	// agent_start + (2 user messages × 2 frames) + (2 assistant messages × 3 frames) + agent_end = 12
 	assert.NewAborting(t).Len(frames, 12, "got %d frames, want 12 (agent_start + 2 user pairs + 2 assistant trios + agent_end)", len(frames))
 }
 
 func TestDBToPiFrames_AgentEndCarriesMessages(t *testing.T) {
 	c := assert.NewCollecting(t)
-	msgs := []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi there")),
+	nodes := []*conv.Node{
+		transcriptNode(0, userMessage(msg.Text{Text: "hello"})),
+		transcriptNode(1, assistantMessage(msg.Text{Text: "hi there"})),
 	}
-	frames := DBToPiFrames(msgs)
+	frames := DBToPiFramesMessages(nodes)
 	// Last frame must be agent_end.
 	var end struct {
 		Type     string            `json:"type"`
@@ -211,28 +219,24 @@ func TestDBToPiFrames_AgentEndCarriesMessages(t *testing.T) {
 
 // TestDBToPiFramesMessages_SkipsTailAndRendersBoundary pins the full-history
 // reader contract for the agent_view path: a compaction_tail copy must be
-// dropped (the tail shows once, through its original row), and the
-// compaction_summary row must render as a compaction_boundary divider rather
+// dropped (the tail shows once, through its original node), and the
+// compaction_summary node must render as a compaction_boundary divider rather
 // than as a plain user prompt.
 func TestDBToPiFramesMessages_SkipsTailAndRendersBoundary(t *testing.T) {
 	c := assert.NewCollecting(t)
-	kind := func(k string) *string { return &k }
-	pre := 123
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
-		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a1"))},
-		{Ordinal: 2, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p2"))},
-		{Ordinal: 3, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a2"))},
-		{Ordinal: 4, Kind: kind(store.KindCompactionSummary), InputTokens: &pre,
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("SUMMARY-TEXT"))},
-		{Ordinal: 5, Kind: kind(store.KindCompactionTail),
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p2"))},
-		{Ordinal: 6, Kind: kind(store.KindCompactionTail),
-			Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a2"))},
+	pre := int64(123)
+	nodes := []*conv.Node{
+		transcriptNode(0, userMessage(msg.Text{Text: "p1"})),
+		transcriptNode(1, assistantMessage(msg.Text{Text: "a1"})),
+		transcriptNode(2, userMessage(msg.Text{Text: "p2"})),
+		transcriptNode(3, assistantMessage(msg.Text{Text: "a2"})),
+		{Ref: conv.Ref{Ordinal: 4, Kind: conv.KindCompactionSummary}, Msg: userMessage(msg.Text{Text: "SUMMARY-TEXT"}), InputTokens: &pre},
+		{Ref: conv.Ref{Ordinal: 5, Kind: conv.KindCompactionTail}, Msg: userMessage(msg.Text{Text: "p2"})},
+		{Ref: conv.Ref{Ordinal: 6, Kind: conv.KindCompactionTail}, Msg: assistantMessage(msg.Text{Text: "a2"})},
 	}
 
 	var boundary, p2, summary int
-	for _, f := range DBToPiFramesMessages(msgs) {
+	for _, f := range DBToPiFramesMessages(nodes) {
 		var env struct {
 			Type      string `json:"type"`
 			PreTokens *int   `json:"preTokens"`
@@ -261,37 +265,34 @@ func TestDBToPiFramesMessages_SkipsTailAndRendersBoundary(t *testing.T) {
 	}
 	c.Eq(1, boundary, "compaction_boundary frames")
 	c.Eq(1, p2, "the tail marker must appear once (tail copy skipped, original kept)")
-	c.Eq(0, summary, "the summary row must not render as a plain user message")
+	c.Eq(0, summary, "the summary node must not render as a plain user message")
 }
 
-// TestDBToPiFramesWithOrigins pins that every frame names the stored row it was
+// TestDBToPiFramesWithOrigins pins that every frame names the node it was
 // rendered from, one origin per frame. It fails if any branch forgets to append
 // its origin (the length check), if the compaction_tail skip is lost (ordinal 4
-// reappears), or if a row's StopReason is not carried.
+// reappears), or if a node's StopReason is not carried.
 func TestDBToPiFramesWithOrigins(t *testing.T) {
 	c := assert.NewCollecting(t)
-	originsPtr := func(s string) *string { return &s }
-	pre := 123
-	rows := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
-		{Ordinal: 1, StopReason: "tool_use", Param: anthropic.NewAssistantMessage(
-			anthropic.NewTextBlock("a1"),
-			anthropic.NewToolUseBlock("tu1", map[string]any{"file": "/tmp/x"}, "read"),
+	pre := int64(123)
+	nodes := []*conv.Node{
+		transcriptNode(0, userMessage(msg.Text{Text: "p1"})),
+		{Ref: conv.Ref{Ordinal: 1}, StopReason: "tool_use", Msg: assistantMessage(
+			msg.Text{Text: "a1"},
+			msg.ToolUse{ID: "tu1", Name: "read", Input: json.RawMessage(`{"file":"/tmp/x"}`)},
 		)},
-		{Ordinal: 2, Param: anthropic.NewUserMessage(
-			anthropic.NewToolResultBlock("tu1", "r1", false),
-			anthropic.NewToolResultBlock("tu2", "r2", false),
+		transcriptNode(2, userMessage(
+			msg.ToolResult{ToolUseID: "tu1", Content: []msg.Block{msg.Text{Text: "r1"}}},
+			msg.ToolResult{ToolUseID: "tu2", Content: []msg.Block{msg.Text{Text: "r2"}}},
+		)),
+		{Ref: conv.Ref{Ordinal: 3}, StopReason: "max_tokens", Msg: assistantMessage(
+			msg.Thinking{Text: "weighing it up", Sig: msg.Signature{Dialect: msg.DialectAnthropic, Value: "sig"}},
 		)},
-		{Ordinal: 3, StopReason: "max_tokens", Param: anthropic.NewAssistantMessage(
-			anthropic.NewThinkingBlock("sig", "weighing it up"),
-		)},
-		{Ordinal: 4, Kind: originsPtr(store.KindCompactionTail),
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
-		{Ordinal: 5, Kind: originsPtr(store.KindCompactionSummary), InputTokens: &pre,
-			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("SUMMARY-TEXT"))},
+		{Ref: conv.Ref{Ordinal: 4, Kind: conv.KindCompactionTail}, Msg: userMessage(msg.Text{Text: "p1"})},
+		{Ref: conv.Ref{Ordinal: 5, Kind: conv.KindCompactionSummary}, Msg: userMessage(msg.Text{Text: "SUMMARY-TEXT"}), InputTokens: &pre},
 	}
 
-	frames, origins := DBToPiFramesWithOrigins(rows)
+	frames, origins := DBToPiFramesWithOrigins(nodes)
 
 	c.Require().Len(origins, len(frames), "origins = %d, frames = %d — every frame needs exactly one origin", len(origins), len(frames))
 	c.Require().NotEmpty(frames, "no frames")
@@ -319,7 +320,7 @@ func TestDBToPiFramesWithOrigins(t *testing.T) {
 		switch types[i] {
 		case "tool_execution_end":
 			toolEnds++
-			c.Eq(2, origin.Ordinal, "tool_execution_end %d origin ordinal = %d, want 2 (the tool_result row)", toolEnds, origin.Ordinal)
+			c.Eq(2, origin.Ordinal, "tool_execution_end %d origin ordinal = %d, want 2 (the tool_result node)", toolEnds, origin.Ordinal)
 		case "message_end":
 			switch origin.Ordinal {
 			case 1:
@@ -333,25 +334,58 @@ func TestDBToPiFramesWithOrigins(t *testing.T) {
 		case "compaction_boundary":
 			boundary++
 			c.True(origin.FromRow, "compaction_boundary FromRow = false, want true")
-			c.Eq(5, origin.Ordinal, "compaction_boundary origin ordinal = %d, want 5 (the summary row)", origin.Ordinal)
+			c.Eq(5, origin.Ordinal, "compaction_boundary origin ordinal = %d, want 5 (the summary node)", origin.Ordinal)
 		}
 	}
 	c.Eq(2, toolEnds, "tool_execution_end frames = %d, want exactly 2 (one per tool_result block)", toolEnds)
 	c.Eq(1, toolUseEnd, "message_end frames for ord 1 = %d, want 1", toolUseEnd)
 	c.Eq(1, maxTokensEnd, "message_end frames for ord 3 = %d, want 1", maxTokensEnd)
 	c.Eq(1, boundary, "compaction_boundary frames = %d, want 1", boundary)
+}
 
-	// The plain reader must return the same frames — same count, same type at
-	// every index (the bytes carry time.Now() timestamps, so they differ).
-	plain := DBToPiFramesMessages(rows)
-	c.Require().Len(plain, len(frames), "DBToPiFramesMessages frames = %d, DBToPiFramesWithOrigins frames = %d", len(plain), len(frames))
-	for i, f := range plain {
+// TestDBToPiFramesMessages_RendersClearAsBoundary: a fundi /clear's synthetic
+// boundary node renders as a divider, not as a user prompt carrying the
+// boundary text.
+func TestDBToPiFramesMessages_RendersClearAsBoundary(t *testing.T) {
+	c := assert.NewCollecting(t)
+	nodes := []*conv.Node{
+		transcriptNode(0, userMessage(msg.Text{Text: "p1"})),
+		transcriptNode(1, assistantMessage(msg.Text{Text: "a1"})),
+		{Ref: conv.Ref{Ordinal: 2, Kind: conv.KindClear}, Msg: userMessage(msg.Text{Text: store.ClearBoundaryText})},
+	}
+	var boundary, leaked int
+	for _, f := range DBToPiFramesMessages(nodes) {
+		if strings.Contains(string(f), store.ClearBoundaryText) {
+			leaked++
+		}
 		var env struct {
 			Type string `json:"type"`
 		}
-		c.Require().NoError(json.Unmarshal(f, &env), "plain frame %d: %s", i, f)
-		c.Eq(types[i], env.Type, "frame %d type: DBToPiFramesMessages = %q, DBToPiFramesWithOrigins = %q", i, env.Type, types[i])
+		c.Require().NoError(json.Unmarshal(f, &env), "frame %s", f)
+		if env.Type == "compaction_boundary" {
+			boundary++
+		}
 	}
+	c.Eq(1, boundary, "compaction_boundary frames")
+	c.Eq(0, leaked, "the boundary text must not render as a prompt")
+}
+
+func TestDBToPiFramesMessages_ClearBoundaryFrameCarriesTrigger(t *testing.T) {
+	nodes := []*conv.Node{
+		{Ref: conv.Ref{Ordinal: 0, Kind: conv.KindClear}, Msg: userMessage(msg.Text{Text: store.ClearBoundaryText})},
+	}
+	var trigger string
+	for _, f := range DBToPiFramesMessages(nodes) {
+		var env struct {
+			Type    string `json:"type"`
+			Trigger string `json:"trigger"`
+		}
+		assert.NewAborting(t).NoError(json.Unmarshal(f, &env), "frame %s", f)
+		if env.Type == "compaction_boundary" {
+			trigger = env.Trigger
+		}
+	}
+	assert.NewCollecting(t).Eq("clear", trigger, "the divider frame's trigger")
 }
 
 // TestAppendPiMsg_SkipsNilRawMessage guards the fix for appendPiMsg's dead
@@ -385,48 +419,97 @@ func TestAppendPiMsg_AppendsNonNilValues(t *testing.T) {
 	c.Eq(`{"role":"assistant"}`, string(out[0]), "entry = %s, want marshaled struct", out[0])
 }
 
-// A fundi /clear's synthetic boundary row renders as a divider, not as a user
-// prompt carrying the boundary text.
-func TestDBToPiFramesMessages_RendersClearAsBoundary(t *testing.T) {
+// TestDBToPiFrames_OpaqueBlocksRenderByDeclaredType pins the rule that a block
+// kept verbatim is not dropped: the codec keeps one when its typed form cannot
+// reproduce it, and the SDK decode this replaced rendered it as its typed form.
+// A tool_use kept verbatim is still a tool call, and a tool_result kept
+// verbatim still answers one.
+func TestDBToPiFrames_OpaqueBlocksRenderByDeclaredType(t *testing.T) {
 	c := assert.NewCollecting(t)
-	clear := store.KindClear
-	msgs := []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("p1"))},
-		{Ordinal: 1, Param: anthropic.NewAssistantMessage(anthropic.NewTextBlock("a1"))},
-		{Ordinal: 2, Kind: &clear, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText))},
+	opaque := func(raw string) msg.Block {
+		return msg.Opaque{Provider: msg.DialectAnthropic, Raw: json.RawMessage(raw)}
 	}
-	var boundary, leaked int
-	for _, f := range DBToPiFramesMessages(msgs) {
-		if strings.Contains(string(f), store.ClearBoundaryText) {
-			leaked++
-		}
-		var env struct {
-			Type string `json:"type"`
-		}
-		c.Require().NoError(json.Unmarshal(f, &env), "frame %s", f)
-		if env.Type == "compaction_boundary" {
-			boundary++
-		}
+	nodes := []*conv.Node{
+		transcriptNode(0, assistantMessage(
+			opaque(`{"type":"text","text":"with a citation","citations":[]}`),
+			opaque(`{"type":"tool_use","id":"tu1","name":"read","input":{"file":"/tmp/x"},"caller":{"type":"direct"}}`),
+		)),
+		transcriptNode(1, userMessage(
+			opaque(`{"type":"tool_result","tool_use_id":"tu1","content":[{"type":"text","text":"the result","citations":[]}]}`),
+		)),
 	}
-	c.Eq(1, boundary, "compaction_boundary frames")
-	c.Eq(0, leaked, "the boundary text must not render as a prompt")
-}
+	frames := DBToPiFramesMessages(nodes)
 
-func TestDBToPiFramesMessages_ClearBoundaryFrameCarriesTrigger(t *testing.T) {
-	clear := store.KindClear
-	frames := DBToPiFramesMessages([]store.Message{
-		{Ordinal: 0, Kind: &clear, Param: anthropic.NewUserMessage(anthropic.NewTextBlock(store.ClearBoundaryText))},
-	})
-	var trigger string
+	var text string
+	var toolCall struct {
+		ID        string         `json:"id"`
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	var startToolName, endToolCallID, endText string
+	var sawStart, sawEnd bool
 	for _, f := range frames {
 		var env struct {
 			Type    string `json:"type"`
-			Trigger string `json:"trigger"`
+			Message struct {
+				Content []struct {
+					Type      string         `json:"type"`
+					Text      string         `json:"text"`
+					ID        string         `json:"id"`
+					Name      string         `json:"name"`
+					Arguments map[string]any `json:"arguments"`
+				} `json:"content"`
+			} `json:"message"`
+			ToolCallID string `json:"toolCallId"`
+			ToolName   string `json:"toolName"`
+			Result     struct {
+				Content []struct{ Text string } `json:"content"`
+			} `json:"result"`
 		}
-		assert.NewAborting(t).NoError(json.Unmarshal(f, &env), "frame %s", f)
-		if env.Type == "compaction_boundary" {
-			trigger = env.Trigger
+		c.Require().NoError(json.Unmarshal(f, &env), "frame %s", f)
+		switch env.Type {
+		case "message_end":
+			for _, blk := range env.Message.Content {
+				if blk.Type == "toolCall" {
+					toolCall.ID = blk.ID
+					toolCall.Name = blk.Name
+					toolCall.Arguments = blk.Arguments
+				}
+			}
+		case "message_start":
+			if len(env.Message.Content) > 0 && env.Message.Content[0].Type == "text" {
+				text = env.Message.Content[0].Text
+			}
+		case "tool_execution_start":
+			sawStart = true
+			startToolName = env.ToolName
+		case "tool_execution_end":
+			sawEnd = true
+			endToolCallID = env.ToolCallID
+			if len(env.Result.Content) > 0 {
+				endText = env.Result.Content[0].Text
+			}
 		}
 	}
-	assert.NewCollecting(t).Eq("clear", trigger, "the divider frame's trigger")
+
+	c.Eq("with a citation", text, "an Opaque text block must render its text")
+	c.Eq("tu1", toolCall.ID, "an Opaque tool_use must render as a tool call")
+	c.Eq("read", toolCall.Name, "an Opaque tool_use must keep its name")
+	c.False(toolCall.Arguments["file"] != "/tmp/x", "an Opaque tool_use must keep its arguments; got %v", toolCall.Arguments)
+	c.True(sawStart, "an Opaque tool_result must resolve its tool_use, so tool_execution_start is emitted")
+	c.Eq("read", startToolName, "the tool name is recovered from the Opaque tool_use")
+	c.True(sawEnd, "an Opaque tool_result must emit tool_execution_end")
+	c.Eq("tu1", endToolCallID, "tool_execution_end toolCallId")
+	c.Eq("the result", endText, "the result text must survive the verbatim block")
+}
+
+// TestDBToPiFramesMessages_EmptyTranscript covers the empty read: the daemon
+// renders nothing but the two synthetic frames, never an error.
+func TestDBToPiFramesMessages_EmptyTranscript(t *testing.T) {
+	frames, origins := DBToPiFramesWithOrigins(nil)
+	c := assert.NewAborting(t)
+	c.Len(frames, 2, "an empty transcript renders agent_start and agent_end only")
+	c.Len(origins, len(frames), "every frame needs exactly one origin")
+	c.False(origins[0].FromRow, "agent_start comes from no row")
+	c.False(origins[1].FromRow, "agent_end comes from no row")
 }

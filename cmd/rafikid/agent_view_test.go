@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,11 +12,19 @@ import (
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 )
+
+// convStoreFor builds the daemon's conversation store over pool — the one
+// reader every transcript path goes through.
+func convStoreFor(t *testing.T, pool *pgxpool.Pool) *conv.Store {
+	t.Helper()
+	return conv.NewStore(store.NewConvBackend(pool), conv.Options{})
+}
 
 // agentViewDBFixture is a seeded STORED conversation behind c_grandchild (the
 // one descendant of the caller c_mine), shaped to exercise every mode:
@@ -80,6 +89,7 @@ func agentViewDBFixtureFor(t *testing.T) agentViewDBFixture {
 
 	ctrl := spawnerFixture(t)
 	ctrl.pool = pool
+	ctrl.convs = convStoreFor(t, pool)
 	ck.NoError(ctrl.st.Update("c_grandchild", func(s *childstore.Session) {
 		s.SessionID = convID
 	}), "point c_grandchild at the seeded conversation")
@@ -245,4 +255,149 @@ func TestAgentViewUserFaceIsPageable(t *testing.T) {
 	ck.Require().NoError(err, "before= on the user face must page, not refuse")
 	ck.StrContains(older, "entries · showing", "got:\n%s", older)
 	ck.False(strings.Contains(older, "paging is not available yet"), "the user face still refuses paging: %s", older)
+}
+
+// deadBranchFixture is a conversation whose third row was retracted: the head
+// walks past it to the row appended after it, so the transcript the daemon reads
+// must not render it. It is the shape a retried prompt leaves behind.
+type deadBranchFixture struct {
+	ctrl      *Controller
+	convID    string
+	retracted string
+}
+
+func deadBranchFixtureFor(t *testing.T) deadBranchFixture {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	pool := scratchPool(t)
+	ctx := context.Background()
+
+	var convID string
+	ck.NoError(pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		 VALUES ('test', 'server') RETURNING id::text`).Scan(&convID), "insert conversation")
+
+	msgs := store.NewMessages(pool)
+	appendRow := func(param anthropic.MessageParam) store.Appended {
+		t.Helper()
+		row, err := msgs.AppendNode(ctx, convID, param, nil, "")
+		ck.NoError(err, "append row")
+		return row
+	}
+	appendRow(anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-live-1")))
+	appendRow(anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-live-1")))
+	retracted := appendRow(anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-retracted")))
+	ck.NoError(msgs.RetractHead(ctx, convID, retracted.ID), "retract the retried user row")
+	appendRow(anthropic.NewUserMessage(anthropic.NewTextBlock("prompt-live-2")))
+	appendRow(anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply-live-2")))
+
+	ctrl := spawnerFixture(t)
+	ctrl.pool = pool
+	ctrl.convs = convStoreFor(t, pool)
+	ck.NoError(ctrl.st.Update("c_grandchild", func(s *childstore.Session) {
+		s.SessionID = convID
+	}), "point c_grandchild at the seeded conversation")
+
+	return deadBranchFixture{ctrl: ctrl, convID: convID, retracted: "prompt-retracted"}
+}
+
+// TestAgentViewOmitsDeadBranch pins that agent_view renders the transcript along
+// the conversation head: a user row that was retracted and replaced is not in
+// the head's walk, so it must not appear anywhere — and the m:<ordinal> cursors
+// still page forward and back across the gap it left in the ordinals.
+func TestAgentViewOmitsDeadBranch(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := deadBranchFixtureFor(t)
+	sp := newControllerSpawner(f.ctrl, "c_mine")
+	ctx := context.Background()
+	target := "c_grandchild"
+
+	newest, err := sp.View(ctx, tools.ViewSpec{ChildID: target})
+	ck.Require().NoError(err, "plain view")
+	ck.StrContains(newest, "reply-live-2", "the newest page must show the live tail; got:\n%s", newest)
+	ck.NotStrContains(newest, f.retracted, "the retracted row must not render; got:\n%s", newest)
+
+	// Follow before= back to the beginning: every live entry must be reachable
+	// and the retracted one must never appear.
+	pages := []string{newest}
+	page := newest
+	for i := 0; ; i++ {
+		if i > 10 {
+			t.Fatalf("before= did not reach the start of the conversation:\n%s", page)
+		}
+		if !strings.Contains(page, "earlier — before=") {
+			break
+		}
+		page, err = sp.View(ctx, tools.ViewSpec{ChildID: target, Before: markerCursor(t, page, "before")})
+		ck.Require().NoError(err, "before=")
+		pages = append(pages, page)
+	}
+	ck.StrContains(page, "prompt-live-1", "following before= must reach the first live prompt; got:\n%s", page)
+	for _, p := range pages {
+		ck.NotStrContains(p, f.retracted, "no page may render the retracted row; got:\n%s", p)
+	}
+
+	// The retracted row's ordinal sits in the middle of the sequence, so the
+	// cursor space skips it: the oldest entry is still m:0.0, paging after it
+	// reaches the live tail, and the dead ordinal names no entry at all.
+	ck.Eq("m:0.0", hitCursor(t, page), "the first live prompt is the first entry")
+	ck.StrContains(page, "m:1.0", "the reply after it keeps ordinal 1; got:\n%s", page)
+
+	forward, err := sp.View(ctx, tools.ViewSpec{ChildID: target, After: "m:1.0"})
+	ck.Require().NoError(err, "after= must page forward past the reply")
+	ck.StrContains(forward, "prompt-live-2", "after= must reach the live tail; got:\n%s", forward)
+	ck.StrContains(forward, "reply-live-2", "after= must reach the live tail; got:\n%s", forward)
+	ck.NotStrContains(forward, f.retracted, "no forward page may render the retracted row; got:\n%s", forward)
+
+	_, err = sp.View(ctx, tools.ViewSpec{ChildID: target, After: "m:2.0"})
+	ck.Require().Error(err, "the retracted row's ordinal must name no entry")
+	ck.StrContains(err.Error(), "no entry m:2.0", "the refusal must name the missing cursor; got %v", err)
+}
+
+// TestDBRecentReadsTranscript pins the source of GetRecent's stored branch: it
+// reads the transcript along the head, so a retracted row that is still in the
+// table never reaches the frames — and a controller with no conversation store
+// answers empty, exactly as it did with no pool.
+func TestDBRecentReadsTranscript(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := deadBranchFixtureFor(t)
+
+	rendered := map[string]int{}
+	for _, ev := range f.ctrl.dbRecent(f.convID, recentQuery{}) {
+		var env struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		ck.Require().NoError(json.Unmarshal(ev.Bytes, &env), "frame %s", ev.Bytes)
+		if env.Type != "message_end" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(env.Message.Content, &text) == nil {
+			rendered[text]++
+			continue
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(env.Message.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "text" {
+				rendered[b.Text]++
+			}
+		}
+	}
+
+	for _, want := range []string{"prompt-live-1", "reply-live-1", "prompt-live-2", "reply-live-2"} {
+		ck.Eq(1, rendered[want], "%q must render exactly once; got %v", want, rendered)
+	}
+	ck.Eq(0, rendered[f.retracted], "the retracted row is not in the transcript; got %v", rendered)
+
+	bare := spawnerFixture(t)
+	ck.Empty(bare.dbRecent(f.convID, recentQuery{}), "no conversation store means no frames, not a panic")
 }

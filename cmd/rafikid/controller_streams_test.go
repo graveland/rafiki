@@ -182,6 +182,10 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 		SessionID: "/tmp/session-file.json",
 	})
 
+	// Built after the appends: a store warmed before them would answer the read
+	// from the head it cached then.
+	c.convs = convStoreFor(t, pool)
+
 	res, err := c.GetRecent(childID, recentQuery{Limit: 10, Rendered: true})
 	ck.NoError(err, "GetRecent")
 	ck.Eq("db", c.recentSource(), "source")

@@ -17,7 +17,7 @@ import (
 // TestDBRecentSkipsCompactionTailAndRendersSummaryBoundary pins the agent_view
 // (GetRecent → dbRecent) contract for a compacted conversation: the
 // compaction_tail copy is dropped (the tail shows once, through its original
-// row) and the compaction_summary row renders as a compaction_boundary divider
+// row) and the compaction_summary node renders as a compaction_boundary divider
 // rather than a plain user prompt. Before the fix dbRecent passed the bare
 // Params, so every tail row was shown twice and the summary looked like a user
 // message.
@@ -55,6 +55,7 @@ func TestDBRecentSkipsCompactionTailAndRendersSummaryBoundary(t *testing.T) {
 
 	ctrl := newTestController(t)
 	ctrl.pool = pool
+	ctrl.convs = convStoreFor(t, pool)
 
 	var boundary, prompt2, summaryCount int
 	for _, ev := range ctrl.dbRecent(convID, recentQuery{}) {
