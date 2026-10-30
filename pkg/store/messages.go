@@ -12,16 +12,20 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/conv"
 )
 
 // Messages persists and loads message-granularity conversation state
 // (conversations.conversation_message). Turn-granularity capture stays in
 // pkg/capture CaptureStore; library-driven sends write both.
+
 // ErrLeaseLost is returned by a guarded write whose conversation lease is no
 // longer held. It means another daemon has taken over the conversation; the
 // caller must stop writing AND stop acting — see the lease-lost path in
-// cmd/rafikid.
-var ErrLeaseLost = errors.New("store: conversation lease lost")
+// cmd/rafikid. It is conv.ErrLeaseLost, so a conv.Backend's fence and this
+// store's guards fail with one error value.
+var ErrLeaseLost = conv.ErrLeaseLost
 
 type Messages struct {
 	pool  *pgxpool.Pool

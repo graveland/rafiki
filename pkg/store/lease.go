@@ -10,23 +10,21 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/conv"
 )
 
 // Lease is one daemon's exclusive right to WRITE to a conversation.
 //
 // Reads are never gated — every daemon may read every conversation, which is
 // what makes search across several machines work. Only appends are exclusive.
-type Lease struct {
-	ConversationID string
-	Holder         string
-	Token          string
-	ExpiresAt      time.Time
-}
-
-// Held reports whether l names an actual lease rather than the zero value.
-// An unfenced caller (the proxy path, a client-driven conversation) carries the
-// zero Lease, and every guard treats that as "not fenced".
-func (l Lease) Held() bool { return l.ConversationID != "" && l.Token != "" }
+//
+// The type itself lives in pkg/conv, so a conv.Backend can carry the fence it
+// must honour without the store; this name is what every store caller uses.
+// Held reports whether it names an actual lease rather than the zero value, and
+// an unfenced caller (the proxy path, a client-driven conversation) carries the
+// zero Lease, which every guard treats as "not fenced".
+type Lease = conv.Lease
 
 // LeaseStore owns conversations.conversation_lease.
 type LeaseStore struct {
