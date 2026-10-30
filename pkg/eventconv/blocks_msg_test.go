@@ -65,36 +65,67 @@ const bridgeFixture = `[
 	{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"` + png1x1 + `"}}
 ]`
 
+// bridgeOpaqueFixture is stored content whose first block the proto vocabulary
+// cannot name. Both bridges skip it and keep numbering by source position, so
+// the emitted blocks carry indices 1 and 2 rather than 0 and 1.
+const bridgeOpaqueFixture = `[
+	{"type":"redacted_thinking","data":"opaque_blob"},
+	{"type":"text","text":"after the opaque block"},
+	{"type":"tool_use","id":"tu_2","name":"grep","input":{"pattern":"x"}}
+]`
+
 // TestBlocksFromMsgMatchesBlocksFromParam pins the native bridge against the
 // SDK bridge it will replace: both decode the same stored content and must
-// produce the same proto blocks.
+// produce the same proto blocks, indices included.
 func TestBlocksFromMsgMatchesBlocksFromParam(t *testing.T) {
+	t.Run("every kind", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		got := bridgesAgree(t, bridgeFixture)
+
+		c.Len(got, 5, "blocks from the full fixture")
+		c.Len(got[3].GetToolResult().GetContent(), 2, "nested tool result content")
+		c.NotNil(got[3].GetToolResult().GetContent()[1].GetImage(), "nested image survives")
+	})
+
+	t.Run("past an opaque block", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		got := bridgesAgree(t, bridgeOpaqueFixture)
+
+		c.Len(got, 2, "blocks emitted past the opaque one")
+		c.Eq(int32(1), got[0].Index, "first emitted block keeps its source index")
+		c.Eq(int32(2), got[1].Index, "second emitted block keeps its source index")
+	})
+}
+
+// bridgesAgree decodes content through both routes, asserts the two bridges
+// produced identical blocks, and returns the native bridge's result.
+func bridgesAgree(t *testing.T, content string) []*rafikiv1.ContentBlock {
+	t.Helper()
 	c := assert.NewAborting(t)
 
-	m, err := msganthropic.Decode("assistant", []byte(bridgeFixture))
-	c.NoError(err, "decode fixture into msg.Message")
+	m, err := msganthropic.Decode("assistant", []byte(content))
+	c.NoError(err, "decode content into msg.Message")
 
 	var sdkContent []anthropic.ContentBlockParamUnion
-	c.NoError(json.Unmarshal([]byte(bridgeFixture), &sdkContent), "decode fixture into SDK content blocks")
-	param := anthropic.NewAssistantMessage(sdkContent...)
-
-	want := eventconv.BlocksFromParam(param)
+	c.NoError(json.Unmarshal([]byte(content), &sdkContent), "decode content into SDK content blocks")
+	want := eventconv.BlocksFromParam(anthropic.NewAssistantMessage(sdkContent...))
 	got := eventconv.BlocksFromMsg(m)
-
 	c.Len(got, len(want), "got %d blocks from msg, want %d from the SDK param", len(got), len(want))
-	for i := range want {
-		w := proto.Clone(want[i]).(*rafikiv1.ContentBlock)
-		g := proto.Clone(got[i]).(*rafikiv1.ContentBlock)
-		if wu, gu := w.GetToolUse(), g.GetToolUse(); wu != nil && gu != nil {
-			var wv, gv any
-			c.NoError(json.Unmarshal([]byte(wu.InputJson), &wv), "block %d: unmarshal BlocksFromParam InputJson", i)
-			c.NoError(json.Unmarshal([]byte(gu.InputJson), &gv), "block %d: unmarshal BlocksFromMsg InputJson", i)
-			c.EqDeep(wv, gv, "block %d: tool input", i)
-			wu.InputJson, gu.InputJson = "", ""
-		}
-		c.True(proto.Equal(w, g), "block %d differs: BlocksFromParam=%v BlocksFromMsg=%v", i, want[i], got[i])
-	}
 
-	c.Len(got[3].GetToolResult().GetContent(), 2, "nested tool result content")
-	c.NotNil(got[3].GetToolResult().GetContent()[1].GetImage(), "nested image survives")
+	wantAll := proto.Clone(&rafikiv1.AssistantMessage{Content: want}).(*rafikiv1.AssistantMessage)
+	gotAll := proto.Clone(&rafikiv1.AssistantMessage{Content: got}).(*rafikiv1.AssistantMessage)
+	for i := range want {
+		if want[i].GetToolUse() == nil || got[i].GetToolUse() == nil {
+			continue
+		}
+		var wv, gv any
+		c.NoError(json.Unmarshal([]byte(want[i].GetToolUse().InputJson), &wv), "block %d: unmarshal BlocksFromParam InputJson", i)
+		c.NoError(json.Unmarshal([]byte(got[i].GetToolUse().InputJson), &gv), "block %d: unmarshal BlocksFromMsg InputJson", i)
+		c.EqDeep(wv, gv, "block %d: tool input", i)
+		wantAll.Content[i].GetToolUse().InputJson = ""
+		gotAll.Content[i].GetToolUse().InputJson = ""
+	}
+	c.True(proto.Equal(wantAll, gotAll), "bridges disagree: BlocksFromParam=%v BlocksFromMsg=%v", want, got)
+
+	return got
 }

@@ -59,16 +59,18 @@ func BlocksFromParam(p anthropic.MessageParam) []*rafikiv1.ContentBlock {
 }
 
 // BlocksFromMsg converts a native message's content blocks into proto blocks,
-// assigning each a rafiki-local index. The index is positional over the blocks
-// actually emitted and is not the provider's own numbering.
+// assigning each a rafiki-local index. The index is the block's source position
+// within this message, matching BlocksFromParam: a block that cannot be named
+// is skipped and leaves a gap, so two messages with the same named blocks in the
+// same order always carry the same indices.
 func BlocksFromMsg(m msg.Message) []*rafikiv1.ContentBlock {
 	out := make([]*rafikiv1.ContentBlock, 0, len(m.Content))
-	for _, b := range m.Content {
+	for i, b := range m.Content {
 		cb, ok := protoBlock(b)
 		if !ok {
 			continue
 		}
-		cb.Index = int32(len(out))
+		cb.Index = int32(i)
 		out = append(out, cb)
 	}
 	return out
@@ -166,19 +168,19 @@ func rawJSON(v any) string {
 
 // toolResultContent maps a tool result's nested blocks. Only text and image have
 // a proto form inside a tool result, matching the SDK route: any other kind is
-// skipped rather than failing the whole result.
+// skipped and leaves the gap its source position leaves there too.
 func toolResultContent(blocks []msg.Block) []*rafikiv1.ContentBlock {
 	out := make([]*rafikiv1.ContentBlock, 0, len(blocks))
-	for _, b := range blocks {
+	for i, b := range blocks {
 		switch t := b.(type) {
 		case msg.Text:
 			out = append(out, &rafikiv1.ContentBlock{
-				Index: int32(len(out)),
+				Index: int32(i),
 				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: t.Text}},
 			})
 		case msg.Image:
 			out = append(out, &rafikiv1.ContentBlock{
-				Index: int32(len(out)),
+				Index: int32(i),
 				Block: &rafikiv1.ContentBlock_Image{
 					Image: &rafikiv1.ImageBlock{MediaType: t.MediaType, Data: t.Data},
 				},
