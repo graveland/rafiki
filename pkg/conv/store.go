@@ -26,8 +26,11 @@ type headState struct {
 	nextOrdinal int
 }
 
-// providerRef is a provider message id's index entry. It carries the node's
-// ordinal so a re-fetched older node cannot displace a newer one.
+// providerRef is a provider message id's index entry: the newest node this entry
+// has seen carrying the id, and that node's ordinal. id is empty once that node
+// has been evicted, which keeps the ordinal — the high-water mark that stops a
+// re-fetched older duplicate from being answered — without pointing at a node
+// the cache no longer holds.
 type providerRef struct {
 	id      string
 	ordinal int
@@ -41,11 +44,15 @@ type entry struct {
 	head atomic.Pointer[headState]
 	// writeMu serialises Append and RetractHead on this conversation.
 	writeMu sync.Mutex
-	// owner, loaded, lastAccess, gen, lease and byProvider are guarded by
+	// owner, loaded, lastAccess, gen, lease, dead and byProvider are guarded by
 	// Store.mu.
 	owner      bool
 	loaded     bool
 	lastAccess time.Time
+	// dead is set when the sweep drops this entry, and nothing clears it: a
+	// swept entry is dead for good, so no path may publish into it or install it
+	// as the conversation's entry again.
+	dead bool
 	// gen counts the writes this entry has published. A read that asked the
 	// backend at generation g may store its answer only while the generation is
 	// still g, which is what orders a read against a write that moved the head
@@ -54,8 +61,9 @@ type entry struct {
 	// lease is the fence key of the last handle that resolved the entry, so a
 	// takeover invalidates a head the previous holder left behind.
 	lease string
-	// byProvider maps a provider message id to the node that carries it, so a
-	// lookup that is already cached costs no query.
+	// byProvider maps a provider message id to the newest node this entry has
+	// seen carrying it, so an owner lookup that is already cached costs no
+	// query. It is an optimisation for the owner, never a source of truth.
 	byProvider map[string]providerRef
 }
 
@@ -219,39 +227,47 @@ func (h *Handle) lockEntry() *entry {
 func (s *Store) isLive(convID string, e *entry) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.entries[convID] == e
+	return s.liveEntryLocked(convID, e) != nil
 }
 
-// sweepLocked drops entries that have been idle past the TTL.
+// sweepLocked drops entries that have been idle past the TTL. Dropping one kills
+// it: dead is what tells a handle still holding it that its state is no longer
+// the conversation's.
 func (s *Store) sweepLocked() {
 	now := s.now()
 	for id, e := range s.entries {
 		if now.Sub(e.lastAccess) > s.ttl {
+			e.dead = true
 			delete(s.entries, id)
 		}
 	}
 }
 
-// liveLocked returns convID's entry, installing e when the conversation has
-// none.
-func (s *Store) liveLocked(convID string, e *entry) *entry {
-	if live := s.entries[convID]; live != nil {
-		return live
+// liveEntryLocked returns e while it is still convID's current entry, and nil
+// once it is not. This is the one liveness test every publish path makes: an
+// entry the sweep dropped is dead for good, so its value is DROPPED rather than
+// installed into whatever entry the conversation has now. Installing it would
+// publish a head older than the one already committed, and a read built from
+// that head is wrong before any compare-and-swap runs.
+func (s *Store) liveEntryLocked(convID string, e *entry) *entry {
+	if e == nil || e.dead || s.entries[convID] != e {
+		return nil
 	}
-	s.entries[convID] = e
 	return e
 }
 
-// cachedHead returns the entry's position when it may be trusted: only an
-// owner handle reading an owner entry whose head has been loaded answers
-// without the backend.
-func (s *Store) cachedHead(e *entry, owner bool) (headState, bool) {
+// cachedHead returns the entry's position when it may be trusted: only an owner
+// handle reading a live owner entry whose head has been loaded answers without
+// the backend. A swept entry answers nothing, so its last known head cannot
+// outlive it.
+func (s *Store) cachedHead(convID string, e *entry, owner bool) (headState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !owner || !e.owner || !e.loaded {
+	live := s.liveEntryLocked(convID, e)
+	if live == nil || !owner || !live.owner || !live.loaded {
 		return headState{}, false
 	}
-	hp := e.head.Load()
+	hp := live.head.Load()
 	if hp == nil {
 		return headState{}, false
 	}
@@ -259,22 +275,31 @@ func (s *Store) cachedHead(e *entry, owner bool) (headState, bool) {
 }
 
 // generation reads the entry's write generation, which a read captures before
-// asking the backend and hands back to storeHeadRead.
-func (s *Store) generation(convID string, e *entry) uint64 {
+// asking the backend and hands back to storeHeadRead. ok is false once the entry
+// has been swept: the read's answer belongs to an entry that is no longer the
+// conversation's, so it has nowhere to go.
+func (s *Store) generation(convID string, e *entry) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.liveLocked(convID, e).gen
+	live := s.liveEntryLocked(convID, e)
+	if live == nil {
+		return 0, false
+	}
+	return live.gen, true
 }
 
-// storeHeadRead stores a state a READ observed, but only while no write has
-// published since the read captured its generation. A read that raced a retract
-// or a head-only move carries the same next ordinal as the state the writer
-// published, so the generation — not the ordinal — is what orders them.
+// storeHeadRead stores a state a READ observed, but only into the entry it
+// observed it from, and only while no write has published since the read
+// captured its generation. A read that raced a retract or a head-only move
+// carries the same next ordinal as the state the writer published, so the
+// generation — not the ordinal — is what orders them; entry identity is what
+// stops a stalled read landing in the entry that replaced its own, where a
+// generation that has since caught up would compare equal.
 func (s *Store) storeHeadRead(convID string, e *entry, gen uint64, st headState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live := s.liveLocked(convID, e)
-	if live.gen != gen {
+	live := s.liveEntryLocked(convID, e)
+	if live == nil || live.gen != gen {
 		return
 	}
 	live.loaded = true
@@ -283,11 +308,17 @@ func (s *Store) storeHeadRead(convID string, e *entry, gen uint64, st headState)
 }
 
 // storeHeadWrite publishes a state a WRITER resolved or committed, advancing
-// the generation so every read in flight against the old position is dropped.
+// the generation so every read in flight against the old position is dropped. A
+// writer whose entry was swept while it was committing publishes nothing: the
+// next reader resolves a fresh entry and reads the backend, which is the head
+// the commit left.
 func (s *Store) storeHeadWrite(convID string, e *entry, st headState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live := s.liveLocked(convID, e)
+	live := s.liveEntryLocked(convID, e)
+	if live == nil {
+		return
+	}
 	live.gen++
 	live.loaded = true
 	live.lastAccess = s.now()
@@ -327,7 +358,8 @@ func (s *Store) putLocked(n *Node) {
 	s.charged += int64(len(n.Content))
 	if e := s.entries[n.ConversationID]; e != nil && n.ProviderMessageID != "" {
 		// The newest ordinal wins: a re-fetched older node must not displace
-		// the reply a resume is looking for.
+		// the reply a resume is looking for, and it must not even lower the mark
+		// of a newer node that has since been evicted.
 		if cur, ok := e.byProvider[n.ProviderMessageID]; !ok || n.Ordinal >= cur.ordinal {
 			e.byProvider[n.ProviderMessageID] = providerRef{id: n.ID, ordinal: n.Ordinal}
 		}
@@ -337,9 +369,10 @@ func (s *Store) putLocked(n *Node) {
 	}
 }
 
-// evictLocked drops the coldest node. Eviction drops index entries only:
+// evictLocked drops the coldest node. Eviction costs no reader anything:
 // snapshots hold node references, so a reader mid-iteration is unaffected, and
-// an evicted node is re-fetched through Walk + Fetch.
+// an evicted node is re-fetched through Walk + Fetch. Only the provider index
+// notices, and only by forgetting which node held the id.
 func (s *Store) evictLocked() {
 	el := s.lru.Back()
 	if el == nil {
@@ -351,7 +384,10 @@ func (s *Store) evictLocked() {
 	s.charged -= int64(len(n.Content))
 	if e := s.entries[n.ConversationID]; e != nil && n.ProviderMessageID != "" {
 		if cur, ok := e.byProvider[n.ProviderMessageID]; ok && cur.id == n.ID {
-			delete(e.byProvider, n.ProviderMessageID)
+			// The ordinal mark stays: an older duplicate re-fetched after this
+			// node was evicted must still be known to be older than the newest
+			// this entry has seen.
+			e.byProvider[n.ProviderMessageID] = providerRef{ordinal: cur.ordinal}
 		}
 	}
 }
@@ -538,15 +574,17 @@ func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
 // once and stores what it said — unless a write published in between, which is
 // also what corrects an entry that is ahead of the backend.
 func (h *Handle) readState(ctx context.Context, e *entry) (State, error) {
-	if st, ok := h.store.cachedHead(e, h.owner); ok {
+	if st, ok := h.store.cachedHead(h.convID, e, h.owner); ok {
 		return State{HeadID: st.id, NextOrdinal: st.nextOrdinal}, nil
 	}
-	gen := h.store.generation(h.convID, e)
+	gen, live := h.store.generation(h.convID, e)
 	st, err := h.store.backend.State(ctx, h.convID)
 	if err != nil {
 		return State{}, err
 	}
-	h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	if live {
+		h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	}
 	return st, nil
 }
 
@@ -554,12 +592,14 @@ func (h *Handle) readState(ctx context.Context, e *entry) (State, error) {
 // the answer a caller asks for precisely when it does not trust its cache.
 func (h *Handle) State(ctx context.Context) (State, error) {
 	e := h.store.touch(h.convID, h.owner, h.leaseKey())
-	gen := h.store.generation(h.convID, e)
+	gen, live := h.store.generation(h.convID, e)
 	st, err := h.store.backend.State(ctx, h.convID)
 	if err != nil {
 		return State{}, err
 	}
-	h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	if live {
+		h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	}
 	return st, nil
 }
 
@@ -617,16 +657,19 @@ func (h *Handle) RequestAt(ctx context.Context, headID string, trimFrom, trimTo 
 	return kept, nil
 }
 
-// NodeByProviderMessageID returns the node an upstream message id names. The
-// conversation's own index answers it when the node is cached, so a resume
-// costs no query; otherwise the backend is asked once.
+// NodeByProviderMessageID returns the node an upstream message id names.
+//
+// The conversation's own index is an OWNER-only optimisation, exactly like the
+// cached head: only an owner handle on an owner entry answers from it, and only
+// while the index still holds the newest node it has seen for that id. Every
+// other reader — capture is a reader by design — asks the backend, whose answer
+// is the newest ordinal. That matters because a provider id is not unique: an
+// index that answered whatever it happened to hold could name an older duplicate
+// than the backend would, and capture uses this node as previous_message_id.
 func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID string) (*Node, bool, error) {
 	e := h.store.touch(h.convID, h.owner, h.leaseKey())
 	if providerMessageID != "" {
-		h.store.mu.Lock()
-		ref, ok := e.byProvider[providerMessageID]
-		h.store.mu.Unlock()
-		if ok {
+		if ref, ok := h.store.indexedProvider(h.convID, e, h.owner, providerMessageID); ok {
 			n, err := h.store.node(ctx, h.convID, ref.id)
 			if err != nil {
 				return nil, false, err
@@ -642,6 +685,25 @@ func (h *Handle) NodeByProviderMessageID(ctx context.Context, providerMessageID 
 	}
 	h.store.putNodes(h.convID, n)
 	return n, true, nil
+}
+
+// indexedProvider returns the index entry for providerMessageID when it may be
+// trusted: an owner handle on a live owner entry, and a node the index still
+// holds as the newest it has seen for that id. An entry whose newest node was
+// evicted keeps the ordinal but no id, so this reports a miss and the caller
+// asks the backend rather than answering with an older duplicate.
+func (s *Store) indexedProvider(convID string, e *entry, owner bool, providerMessageID string) (providerRef, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.liveEntryLocked(convID, e)
+	if live == nil || !owner || !live.owner {
+		return providerRef{}, false
+	}
+	ref, ok := live.byProvider[providerMessageID]
+	if !ok || ref.id == "" {
+		return providerRef{}, false
+	}
+	return ref, true
 }
 
 // Roots returns the conversation's parent-less nodes, newest ordinal first.

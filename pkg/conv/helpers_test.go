@@ -113,6 +113,97 @@ func (r *recorder) reset() {
 	r.walk = 0
 }
 
+// clock is a time source a test drives by hand: the cache's only notion of
+// time, so an entry expires when the test says so and a sweep needs no sleep.
+type clock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+// newClock returns a clock stopped at a fixed instant.
+func newClock() *clock {
+	return &clock{t: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
+}
+
+// Now returns the clock's current instant.
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+// Advance moves the clock forward by d.
+func (c *clock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// gatedCommit holds one armed Commit after the backend has applied it and before
+// it returns: that is the window a writer spends between committing a head and
+// publishing it.
+type gatedCommit struct {
+	conv.Backend
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+// arm makes the next Commit stall after it lands.
+func (g *gatedCommit) arm() {
+	g.mu.Lock()
+	g.armed = true
+	g.mu.Unlock()
+}
+
+// Commit applies the commit, then stalls when armed, so a test can sweep the
+// entry out from under a writer that has already written.
+func (g *gatedCommit) Commit(ctx context.Context, commit conv.Commit) (time.Time, error) {
+	created, err := g.Backend.Commit(ctx, commit)
+	if err != nil {
+		return created, err
+	}
+	g.mu.Lock()
+	stall := g.armed
+	g.armed = false
+	g.mu.Unlock()
+	if !stall {
+		return created, nil
+	}
+	close(g.entered)
+	<-g.release
+	return created, nil
+}
+
+// pausedAppend starts a.Append in the background with the gate armed, so the
+// append has committed by the time this returns and has not published. The
+// returned function releases it, waits for it to finish and reports its result.
+func pausedAppend(g *gatedCommit, h *conv.Handle, a conv.Append) func() (conv.Result, error) {
+	g.arm()
+	stalled := make(chan struct{})
+	var res conv.Result
+	var err error
+	go func() {
+		defer close(stalled)
+		res, err = h.Append(context.Background(), a)
+	}()
+	select {
+	case <-g.entered:
+	case <-stalled:
+		// The append finished without reaching the gate, so there is nothing to
+		// wait for; the result says why.
+	}
+	var once sync.Once
+	return func() (conv.Result, error) {
+		once.Do(func() {
+			close(g.release)
+			<-stalled
+		})
+		return res, err
+	}
+}
+
 // conflictOnce moves the head underneath the first Commit it receives and
 // reports a conflict, then behaves normally.
 type conflictOnce struct {

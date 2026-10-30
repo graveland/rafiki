@@ -66,7 +66,7 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 // conflict demands.
 func (h *Handle) writeState(ctx context.Context, e *entry, fresh bool) (State, error) {
 	if !fresh {
-		if st, ok := h.store.cachedHead(e, h.owner); ok {
+		if st, ok := h.store.cachedHead(h.convID, e, h.owner); ok {
 			return State{HeadID: st.id, NextOrdinal: st.nextOrdinal}, nil
 		}
 	}

@@ -15,40 +15,69 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// TestBlocksBridgeCoversEveryKind fails when either block vocabulary grows a
-// kind the bridge does not map: a message-side kind with no table entry, or a
-// proto oneof field with no native kind feeding it.
+// TestBlocksBridgeCoversEveryKind drives the real conversion switch with one
+// block per msg.BlockKinds() entry and asserts the ContentBlock it produces sets
+// the oneof field the table names. A kind added to msg without a mapping fails
+// here — through protoBlock, not by comparing one table with another — and so
+// does a proto field no native kind feeds.
 func TestBlocksBridgeCoversEveryKind(t *testing.T) {
 	c := assert.NewAborting(t)
-	kinds := map[string]string{
-		"Text":       "text",
-		"Thinking":   "thinking",
-		"ToolUse":    "tool_use",
-		"ToolResult": "tool_result",
-		"Image":      "image",
-		"Opaque":     "",
-	}
 
-	mapped := make(map[string]bool, len(kinds))
-	for _, field := range kinds {
-		if field != "" {
-			mapped[field] = true
-		}
+	// One filled block per native kind, with the proto oneof field the bridge must
+	// render it as. "" means the proto vocabulary cannot name that block, so the
+	// bridge skips it and leaves the gap its source index leaves.
+	samples := map[string]struct {
+		block msg.Block
+		field string
+	}{
+		"Text":       {msg.Text{Text: "hello"}, "text"},
+		"Thinking":   {msg.Thinking{Text: "weighing", Sig: msg.Signature{Dialect: msg.DialectAnthropic, Value: "sig"}}, "thinking"},
+		"ToolUse":    {msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}, "tool_use"},
+		"ToolResult": {msg.ToolResult{ToolUseID: "tu_1", Content: []msg.Block{msg.Text{Text: "ok"}}}, "tool_result"},
+		"Image":      {msg.Image{MediaType: "image/png", Data: png1x1Bytes(t)}, "image"},
+		"Opaque":     {msg.Opaque{Provider: msg.DialectAnthropic, Raw: json.RawMessage(`{"type":"redacted_thinking","data":"opaque_blob"}`)}, ""},
 	}
 
 	oneof := (&rafikiv1.ContentBlock{}).ProtoReflect().Descriptor().Oneofs().ByName("block")
 	c.NotNil(oneof, "ContentBlock has no block oneof")
-	fields := oneof.Fields()
-	c.Len(mapped, fields.Len(), "table maps %d fields, the proto oneof has %d", len(mapped), fields.Len())
-	for i := range fields.Len() {
-		name := string(fields.Get(i).Name())
-		c.True(mapped[name], "proto oneof field %q has no msg block in the table", name)
+
+	rendered := make(map[string]bool, len(samples))
+	for _, kind := range msg.BlockKinds() {
+		name := reflect.TypeOf(kind).Name()
+		sample, ok := samples[name]
+		c.Require().True(ok, "msg block kind %q has no sample: a new kind must be mapped by the bridge and listed here", name)
+		if !ok {
+			continue
+		}
+		blocks := eventconv.BlocksFromMsg(msg.Message{Role: msg.Assistant, Content: []msg.Block{sample.block}})
+		if sample.field == "" {
+			c.Len(blocks, 0, "%s has no proto field, so the bridge skips it", name)
+			continue
+		}
+		c.Require().Len(blocks, 1, "%s renders one block", name)
+		field := blocks[0].ProtoReflect().WhichOneof(oneof)
+		c.Require().NotNil(field, "%s rendered no proto block", name)
+		c.Eq(sample.field, string(field.Name()), "%s renders as the field the table names", name)
+		rendered[sample.field] = true
 	}
 
-	for _, k := range msg.BlockKinds() {
-		name := reflect.TypeOf(k).Name()
-		c.HasKey(kinds, name, "msg block kind %q has no proto oneof field in the table", name)
+	fields := oneof.Fields()
+	for i := range fields.Len() {
+		name := string(fields.Get(i).Name())
+		c.True(rendered[name], "proto oneof field %q is fed by no msg block kind", name)
 	}
+
+	// An Opaque block is converted by its declared type when the proto can name
+	// it, so a block kept verbatim for a field this model does not carry does not
+	// vanish from a transcript.
+	named := eventconv.BlocksFromMsg(msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.Opaque{Provider: msg.DialectAnthropic, Raw: json.RawMessage(
+			`{"type":"tool_use","id":"tu_2","name":"grep","input":{"pattern":"x"}}`)},
+	}})
+	c.Require().Len(named, 1, "an opaque block of a nameable type renders")
+	field := named[0].ProtoReflect().WhichOneof(oneof)
+	c.Require().NotNil(field, "the opaque block rendered no proto block")
+	c.Eq("tool_use", string(field.Name()), "an opaque tool_use renders as tool_use")
 
 	// A message payload renders only through the block list the bridge emits, so
 	// every payload carrying message content must be in this table — a new one

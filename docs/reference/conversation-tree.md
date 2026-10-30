@@ -368,6 +368,19 @@ cached for the next.
   has published since. Becoming the owner, or arriving under a different fence,
   invalidates the cached head — a takeover must not inherit the previous
   holder's position.
+- **A swept entry is dead for good.** Every publish path (a writer's
+  `storeHeadWrite`, a read's `storeHeadRead`) checks under the store's lock that
+  the entry is still the conversation's current one and DROPS its value if it is
+  not; nothing installs a swept entry again. A writer that stalls past the TTL
+  therefore publishes nothing, and the next reader resolves a fresh entry and
+  reads the backend — the head the commit actually left. Entry identity, not just
+  the write generation, is what a publish is checked against.
+- **The provider index is owner-only.** `provider_message_id` is not unique —
+  `ConvBackend.ByProviderMessageID` answers the newest ordinal — so the cache's
+  index of them is an optimisation for the owner, exactly like the cached head. A
+  reader handle (capture is one by design) always asks the backend. Eviction
+  forgets which node held an id but keeps the ordinal it recorded, so a
+  re-fetched older duplicate can never become the answer.
 - **Idle TTL.** An entry idle for `IdleTTL` (default five minutes) is swept on the
   next `Open` or `touch`; there are no timers and no goroutines. A swept entry
   costs a `State` call, never a stale answer.
