@@ -313,36 +313,51 @@ func (s *Store) storeHeadWrite(convID string, e *entry, st headState) {
 // storeCommitted publishes the position a successful Commit left behind. The
 // rows are durable whether or not the writer's entry survived, so a swept entry
 // must not swallow the news: when the writer's entry is gone, the conversation's
-// CURRENT entry is refreshed instead, and an entry is never installed (a swept
-// one is dead for good).
+// CURRENT entry is brought up to date instead, and an entry is never installed (a
+// swept one is dead for good).
 //
-// Nothing is published backwards. A replacement entry keeps any position it
-// holds at or beyond the commit, because a later head move at the same ordinal
-// cannot be ordered against this one; the writer's own entry takes the commit
-// even when the ordinal did not move, because it is the only writer through that
-// entry (its writeMu) and a retract is exactly a head move at the same ordinal.
-// With no entry at all, the next reader creates one and asks the backend.
+// Only a cached position strictly BEHIND the commit is replaced. One strictly
+// ahead is a later write and is left alone. At the SAME next ordinal neither the
+// ordinal nor the generation can order the two: a retract is a head move that
+// leaves the ordinal alone, and a commit whose starting head another commit has
+// since moved back to is indistinguishable from a stale read — so the entry stops
+// answering with its position and the next read asks the backend. Guessing there
+// publishes a head older than a committed one, which is the defect this whole
+// mechanism exists to prevent. An entry with no position at all is left as it is,
+// for the same reason: it is not loaded, so the next read asks the backend.
 func (s *Store) storeCommitted(convID string, e *entry, st headState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live := s.liveEntryLocked(convID, e)
 	if live == nil {
-		// A different entry now: only a position strictly behind the commit can
-		// be brought forward. At or beyond the committed ordinal its value may be
-		// a later head move, which this commit cannot be ordered against.
 		live = s.entries[convID]
 		if live == nil {
 			return
 		}
-		if cur := live.head.Load(); cur != nil && cur.nextOrdinal >= st.nextOrdinal {
-			return
-		}
-	} else if cur := live.head.Load(); cur != nil && cur.nextOrdinal > st.nextOrdinal {
-		// Our own entry, but a later commit has already published a position into
-		// it — a writer whose entry was swept can do exactly that.
-		return
 	}
-	s.publishLocked(live, st)
+	cur := live.head.Load()
+	switch {
+	case cur == nil:
+		// Nothing cached to correct, and an entry with no position is not loaded:
+		// the next read asks the backend and sees this commit there.
+	case cur.nextOrdinal < st.nextOrdinal:
+		s.publishLocked(live, st)
+	case cur.nextOrdinal > st.nextOrdinal:
+		// A later write has already published a position ahead of this commit.
+	default:
+		s.invalidateLocked(live)
+	}
+}
+
+// invalidateLocked stops an entry answering with its cached position, so the next
+// read asks the backend. The position itself is kept: it still orders a later
+// commit (a commit behind it is dropped, one ahead replaces it), and a
+// re-invalidation keeps it in place. The generation advances with it, so a read
+// already in flight cannot publish the position this invalidation retired.
+func (s *Store) invalidateLocked(live *entry) {
+	live.gen++
+	live.loaded = false
+	live.lastAccess = s.now()
 }
 
 // publishLocked stores st into a live entry, advancing its generation and

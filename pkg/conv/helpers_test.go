@@ -210,30 +210,43 @@ func (b *blockedCommit) Commit(ctx context.Context, commit conv.Commit) (time.Ti
 	return b.Backend.Commit(ctx, commit)
 }
 
-// pausedAppend starts a.Append in the background with the gate armed, so the
-// append has reached the gate by the time this returns. The returned function
-// releases it, waits for it to finish and reports its result.
-func pausedAppend(gate *commitGate, h *conv.Handle, a conv.Append) func() (conv.Result, error) {
+// pausedWrite runs write in the background with the gate armed, so the write has
+// reached the gate by the time this returns. The returned function releases it,
+// waits for it to finish and reports its error.
+func pausedWrite(gate *commitGate, write func() error) func() error {
 	gate.arm()
 	stalled := make(chan struct{})
-	var res conv.Result
 	var err error
 	go func() {
 		defer close(stalled)
-		res, err = h.Append(context.Background(), a)
+		err = write()
 	}()
 	select {
 	case <-gate.entered:
 	case <-stalled:
-		// The append finished without reaching the gate, so there is nothing to
-		// wait for; the result says why.
+		// The write finished without reaching the gate, so there is nothing to
+		// wait for; its error says why.
 	}
 	var once sync.Once
-	return func() (conv.Result, error) {
+	return func() error {
 		once.Do(func() {
 			close(gate.release)
 			<-stalled
 		})
+		return err
+	}
+}
+
+// pausedAppend is pausedWrite for an append, reporting what it inserted.
+func pausedAppend(gate *commitGate, h *conv.Handle, a conv.Append) func() (conv.Result, error) {
+	var res conv.Result
+	release := pausedWrite(gate, func() error {
+		var err error
+		res, err = h.Append(context.Background(), a)
+		return err
+	})
+	return func() (conv.Result, error) {
+		err := release()
 		return res, err
 	}
 }

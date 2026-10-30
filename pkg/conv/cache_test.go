@@ -274,7 +274,7 @@ func TestPublishAfterSweepIsDropped(t *testing.T) {
 	path, err := s.Open(convID, conv.AsOwner()).Working(ctx)
 	c.NoError(err, "Working")
 	c.EqDeep([]string{root.Nodes[0].ID}, nodeIDs(path), "the retracted row did not come back as the head")
-	c.Empty(counting.Counts(), "and the live entry answered it")
+	c.Eq(1, counting.Counts()["State"], "and the same-ordinal position was re-read rather than guessed")
 }
 
 // A commit that lands after its writer's entry was swept must still reach the
@@ -315,6 +315,46 @@ func TestCommitAfterSweepRefreshesTheLiveEntry(t *testing.T) {
 	c.NoError(err, "Working after the commit")
 	c.EqDeep([]string{root.Nodes[0].ID, committed.Nodes[0].ID}, nodeIDs(after), "the committed head reached the live entry")
 	c.Empty(counting.Counts(), "and was published to it, not left for a backend read")
+}
+
+// A retract that lands after its writer's entry was swept must reach the
+// conversation's live entry too. A head move leaves the ordinal alone, so a
+// replacement created before it holds the row being retracted and would serve it
+// as the head until the entry expired.
+func TestRetractAfterSweepRefreshesTheLiveEntry(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	clk := newClock()
+	counting := convtest.NewCounting(b)
+	gate := newCommitGate()
+	blocked := &blockedCommit{Backend: counting, gate: gate}
+	s := conv.NewStore(blocked, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
+
+	owner := s.Open(convID, conv.AsOwner())
+	root, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "a")}}})
+	c.NoError(err, "a")
+	retracted, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "b")}}})
+	c.NoError(err, "b")
+
+	// Writer A resolves the retract and pauses before its commit lands.
+	release := pausedWrite(gate, func() error { return owner.RetractHead(ctx, retracted.Nodes[0].ID) })
+
+	// The entry idles past the TTL and is swept; an owner read creates the
+	// replacement, which loads the position as it stands — the row to retract is
+	// still the head.
+	clk.Advance(2 * time.Minute)
+	other := s.Open(convID, conv.AsOwner())
+	before, err := other.Working(ctx)
+	c.NoError(err, "Working")
+	c.EqDeep([]string{root.Nodes[0].ID, retracted.Nodes[0].ID}, nodeIDs(before), "the replacement starts at the row to retract")
+
+	// The retract commits, with the entry it resolved already gone.
+	c.NoError(release(), "the paused retract")
+
+	after, err := other.Working(ctx)
+	c.NoError(err, "Working after the retract")
+	c.EqDeep([]string{root.Nodes[0].ID}, nodeIDs(after), "the replacement serves the retracted row's parent")
 }
 
 // The answer is always the newest ordinal, even when the cache holds an older

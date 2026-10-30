@@ -374,14 +374,17 @@ cached for the next.
   still the conversation's current one and DROPS its value if it is not; nothing
   installs a swept entry again, and entry identity — not just the write
   generation — is what a publish is checked against. A **commit** is the
-  exception: `storeCommitted` publishes the position a successful `Commit` left
-  behind into the conversation's CURRENT entry, because the rows are durable
-  whether or not the writer's entry survived, and a replacement left holding the
-  pre-commit head would answer it forever. It never moves an entry backwards: a
-  replacement whose cached position is at or beyond the committed ordinal keeps
-  its own, since a later head move at the same ordinal cannot be ordered against
-  the commit. With no entry at all nothing is published, and the next reader asks
-  the backend.
+  exception: `storeCommitted` brings the conversation's CURRENT entry up to date
+  with the position a successful `Commit` left behind, because the rows are
+  durable whether or not the writer's entry survived, and a replacement left
+  holding the pre-commit head would answer it forever. It never moves an entry
+  backwards. A cached position strictly behind the commit is replaced; one
+  strictly ahead is a later write and stays. At the *same* next ordinal the two
+  cannot be ordered — a retract moves the head and leaves the ordinal alone, and
+  a commit whose starting head another commit has since moved back to looks
+  exactly like a stale read — so the entry stops answering with its position and
+  the next read asks the backend. An entry with no position is left alone for the
+  same reason, and with no entry at all nothing is published.
 - **Provider lookups always ask the backend.** `provider_message_id` is not
   unique — `ConvBackend.ByProviderMessageID` answers the newest ordinal — and the
   cache cannot know which duplicates exist, so `NodeByProviderMessageID` never
