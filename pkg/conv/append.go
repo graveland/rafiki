@@ -70,11 +70,14 @@ func (h *Handle) writeState(ctx context.Context, e *entry, fresh bool) (State, e
 			return State{HeadID: st.id, NextOrdinal: st.nextOrdinal}, nil
 		}
 	}
+	gen, live := h.store.generation(h.convID, e)
 	st, err := h.store.backend.State(ctx, h.convID)
 	if err != nil {
 		return State{}, err
 	}
-	h.store.storeHeadWrite(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	if live {
+		h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+	}
 	return st, nil
 }
 
@@ -349,11 +352,14 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 
 	refusal := fmt.Errorf("conv: retract head: %s is not the head user row", id)
 	for attempt := 0; attempt < maxAppendAttempts; attempt++ {
+		gen, live := h.store.generation(h.convID, e)
 		st, err := h.store.backend.State(ctx, h.convID)
 		if err != nil {
 			return err
 		}
-		h.store.storeHeadWrite(h.convID, e, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+		if live {
+			h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+		}
 
 		newHead, refused, err := h.retractTarget(ctx, id, st)
 		if err != nil {

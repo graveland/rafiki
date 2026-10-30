@@ -485,3 +485,146 @@ func TestOwnerAttachInvalidatesCachedHead(t *testing.T) {
 	c.NoError(err, "second owner read")
 	c.Eq(0, counting.Counts()["State"], "and then trusts it")
 }
+
+// A read in flight against an entry that holds no position yet must not store
+// its answer once a commit has published into that entry: the commit's publish
+// bumps the generation even though there was no position to replace.
+func TestCommitPublishesIntoAnEmptyEntry(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	clk := newClock()
+	gate := newCommitGate()
+	stalled := &stalledState{Backend: &blockedCommit{Backend: b, gate: gate}, entered: make(chan struct{}), release: make(chan struct{})}
+	s := conv.NewStore(stalled, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
+
+	owner := s.Open(convID, conv.AsOwner())
+	root, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "a")}}})
+	c.NoError(err, "a")
+
+	// A resolves E and pauses before its commit.
+	releaseA := pausedAppend(gate, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "b")}}})
+
+	// E expires; owner B creates E2, captures its generation, reads H0 and
+	// pauses before returning.
+	clk.Advance(2 * time.Minute)
+	stalled.arm()
+	other := s.Open(convID, conv.AsOwner())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := other.Working(ctx); err != nil {
+			c.Errorf("B Working: %v", err)
+		}
+	}()
+	<-stalled.entered
+
+	// A commits H1 while E2 has no position.
+	committed, err := releaseA()
+	c.NoError(err, "A")
+
+	close(stalled.release)
+	<-done
+
+	after, err := other.Working(ctx)
+	c.NoError(err, "owner Working")
+	c.EqDeep([]string{root.Nodes[0].ID, committed.Nodes[0].ID}, nodeIDs(after), "the owner read answers the committed head, not H0")
+}
+
+// A writer's own State observation, made while resolving, must not overwrite a
+// newer committed head that was published into the entry in the meantime.
+func TestWriterObservationCannotOverwriteANewerCommit(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	clk := newClock()
+	counting := convtest.NewCounting(b)
+	gateB := newCommitGate()
+	inner := &blockedCommit{Backend: counting, gate: gateB}
+	gateA := newCommitGate()
+	outer := &blockedCommit{Backend: inner, gate: gateA}
+	stalled := &stalledState{Backend: outer, entered: make(chan struct{}), release: make(chan struct{})}
+	s := conv.NewStore(stalled, conv.Options{Now: clk.Now, IdleTTL: time.Minute})
+
+	owner := s.Open(convID, conv.AsOwner())
+	root, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "a")}}})
+	c.NoError(err, "a")
+
+	// A resolves E and pauses before committing H1.
+	releaseA := pausedAppend(gateA, owner, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.Assistant, "b")}}})
+
+	// E expires; B loads H0 into E2, then starts a RetractHead whose State reads
+	// H0 and pauses.
+	clk.Advance(2 * time.Minute)
+	other := s.Open(convID, conv.AsOwner())
+	_, err = other.Working(ctx)
+	c.NoError(err, "B loads H0")
+	stalled.arm()
+	retractDone := make(chan error, 1)
+	go func() { retractDone <- other.RetractHead(ctx, root.Nodes[0].ID) }()
+	<-stalled.entered
+
+	// A commits H1; its publish reaches E2.
+	committed, err := releaseA()
+	c.NoError(err, "A")
+	gateB.arm()
+
+	// B resumes and runs on to its own commit, which is held so the cache can be
+	// inspected right after the observation was stored or dropped.
+	close(stalled.release)
+	<-gateB.entered
+
+	counting.Reset()
+	during, err := other.Working(ctx)
+	c.NoError(err, "owner Working")
+	c.EqDeep([]string{root.Nodes[0].ID, committed.Nodes[0].ID}, nodeIDs(during), "the stalled observation did not overwrite the committed head")
+	c.Eq(0, counting.Counts()["State"], "and the entry still answers from the published head")
+
+	close(gateB.release)
+	c.Require().NotNil(<-retractDone, "the retract of a row that is no longer the head is refused")
+}
+
+// A retract leaves the ordinal alone, so the ordinal cannot order it against an
+// earlier position: the next read must see it, and an observation that was in
+// flight before it must not undo it.
+func TestEqualOrdinalPublishOrdersByGeneration(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	counting := convtest.NewCounting(b)
+	stalled := &stalledState{Backend: counting, entered: make(chan struct{}), release: make(chan struct{})}
+	s := conv.NewStore(stalled, conv.Options{})
+	owner := s.Open(convID, conv.AsOwner())
+
+	first, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "one")}}})
+	c.NoError(err, "one")
+	second, err := owner.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "two")}}})
+	c.NoError(err, "two")
+
+	stalled.arm()
+	reader := s.Open(convID)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := reader.Working(ctx); err != nil {
+			c.Errorf("reader Working: %v", err)
+		}
+	}()
+	<-stalled.entered
+	c.NoError(owner.RetractHead(ctx, second.Nodes[0].ID), "retract")
+
+	counting.Reset()
+	seen, err := owner.Working(ctx)
+	c.NoError(err, "Working after the retract")
+	c.EqDeep([]string{first.Nodes[0].ID}, nodeIDs(seen), "the next read sees the retract")
+	c.Eq(1, counting.Counts()["State"], "by asking the backend")
+
+	close(stalled.release)
+	<-done
+
+	counting.Reset()
+	later, err := owner.Working(ctx)
+	c.NoError(err, "Working after the stalled observation")
+	c.EqDeep([]string{first.Nodes[0].ID}, nodeIDs(later), "the stalled observation did not undo the retract")
+	c.Eq(0, counting.Counts()["State"], "and the entry still answers from the position the read stored")
+}

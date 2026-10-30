@@ -76,8 +76,14 @@ func TestReaderStateFromASweptEntryIsDropped(t *testing.T) {
 	replacement := s.touch(convID, true, "")
 	c.True(replacement != swept, "the sweep left a replacement entry")
 	fresh := headState{id: root.Nodes[0].ID, nextOrdinal: 1}
-	for i := uint64(0); i < gen; i++ {
-		s.storeHeadWrite(convID, replacement, fresh)
+	for {
+		s.mu.Lock()
+		reached := replacement.gen >= gen
+		s.mu.Unlock()
+		if reached {
+			break
+		}
+		s.storeCommitted(convID, replacement, fresh)
 	}
 	s.mu.Lock()
 	caughtUp := replacement.gen == gen
@@ -85,7 +91,7 @@ func TestReaderStateFromASweptEntryIsDropped(t *testing.T) {
 	c.True(caughtUp, "the replacement's generation caught up to the read's")
 
 	// The read's observation lands now: it belongs to an entry that is gone.
-	s.storeHeadRead(convID, swept, gen, headState{id: "stale", nextOrdinal: 7})
+	s.storeObserved(convID, swept, gen, headState{id: "stale", nextOrdinal: 7})
 
 	s.mu.Lock()
 	head := replacement.head.Load()

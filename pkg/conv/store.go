@@ -43,10 +43,13 @@ type entry struct {
 	// swept entry is dead for good, so no path may publish into it or install it
 	// as the conversation's entry again.
 	dead bool
-	// gen counts the writes this entry has published. A read that asked the
-	// backend at generation g may store its answer only while the generation is
-	// still g, which is what orders a read against a write that moved the head
-	// WITHOUT advancing the ordinal (a retract, or a head-only move).
+	// gen counts every change to what this entry answers with: a publish, an
+	// observation stored, an invalidation, a takeover. Position is mutated by
+	// exactly two paths and both bump it. An authoritative publish
+	// (storeCommitted) always bumps, into an empty entry too. An observation
+	// (storeObserved) presents the generation captured BEFORE its backend State
+	// call and stores only while it is still that value, so an observation that
+	// raced any other change is dropped and the next read asks the backend.
 	gen uint64
 	// lease is the fence key of the last handle that resolved the entry, so a
 	// takeover invalidates a head the previous holder left behind.
@@ -185,10 +188,12 @@ func (s *Store) touch(convID string, owner bool, lease string) *entry {
 	if owner && !e.owner {
 		e.owner = true
 		e.loaded = false
+		e.gen++
 	}
 	if lease != "" && lease != e.lease {
 		e.lease = lease
 		e.loaded = false
+		e.gen++
 	}
 	e.lastAccess = s.now()
 	return e
@@ -263,9 +268,9 @@ func (s *Store) cachedHead(convID string, e *entry, owner bool) (headState, bool
 	return *hp, true
 }
 
-// generation reads the entry's write generation, which a read captures before
-// asking the backend and hands back to storeHeadRead. ok is false once the entry
-// has been swept: the read's answer belongs to an entry that is no longer the
+// generation reads the entry's write generation, which an observation captures
+// BEFORE asking the backend and hands back to storeObserved. ok is false once the
+// entry has been swept: the observation belongs to an entry that is no longer the
 // conversation's, so it has nowhere to go.
 func (s *Store) generation(convID string, e *entry) (uint64, bool) {
 	s.mu.Lock()
@@ -277,14 +282,20 @@ func (s *Store) generation(convID string, e *entry) (uint64, bool) {
 	return live.gen, true
 }
 
-// storeHeadRead stores a state a READ observed, but only into the entry it
-// observed it from, and only while no write has published since the read
-// captured its generation. A read that raced a retract or a head-only move
-// carries the same next ordinal as the state the writer published, so the
-// generation — not the ordinal — is what orders them; entry identity is what
-// stops a stalled read landing in the entry that replaced its own, where a
-// generation that has since caught up would compare equal.
-func (s *Store) storeHeadRead(convID string, e *entry, gen uint64, st headState) {
+// storeObserved stores a state some backend State call returned, whether a read
+// made it or a writer resolving its starting position did. It writes only into
+// the entry the call observed, and only while the generation is still the one
+// captured before the call: any publish, invalidation or takeover since then
+// means the observation may be older than what the entry now holds, so it is
+// DROPPED and the next read asks the backend. Entry identity is what stops a
+// stalled observation landing in the entry that replaced its own, where a
+// generation that has caught up would compare equal.
+//
+// This is the only way an observation reaches the entry, so a writer's own
+// State call cannot overwrite a newer commit (a commit publishes with a bump,
+// which fails this check), and a read that was in flight when a commit published
+// into a still-empty entry is dropped for the same reason.
+func (s *Store) storeObserved(convID string, e *entry, gen uint64, st headState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live := s.liveEntryLocked(convID, e)
@@ -294,37 +305,21 @@ func (s *Store) storeHeadRead(convID string, e *entry, gen uint64, st headState)
 	s.publishLocked(live, st)
 }
 
-// storeHeadWrite publishes a position a WRITER resolved, advancing the
-// generation so every read in flight against the old position is dropped. A
-// writer whose entry was swept publishes nothing here: a position it only
-// RESOLVED says no more than the next reader's own read will, so dropping it
-// costs a query and never an answer. A commit is published by storeCommitted
-// instead.
-func (s *Store) storeHeadWrite(convID string, e *entry, st headState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.liveEntryLocked(convID, e)
-	if live == nil {
-		return
-	}
-	s.publishLocked(live, st)
-}
-
-// storeCommitted publishes the position a successful Commit left behind. The
-// rows are durable whether or not the writer's entry survived, so a swept entry
-// must not swallow the news: when the writer's entry is gone, the conversation's
-// CURRENT entry is brought up to date instead, and an entry is never installed (a
-// swept one is dead for good).
+// storeCommitted publishes the position a successful Commit left behind, and
+// ALWAYS advances the generation, into an entry that holds no position as well:
+// an observation in flight against that entry captured an earlier generation and
+// is dropped. The rows are durable whether or not the writer's entry survived,
+// so a swept entry must not swallow the news: when the writer's entry is gone,
+// the conversation's CURRENT entry is brought up to date instead, and an entry is
+// never installed (a swept one is dead for good).
 //
-// Only a cached position strictly BEHIND the commit is replaced. One strictly
-// ahead is a later write and is left alone. At the SAME next ordinal neither the
-// ordinal nor the generation can order the two: a retract is a head move that
-// leaves the ordinal alone, and a commit whose starting head another commit has
-// since moved back to is indistinguishable from a stale read — so the entry stops
-// answering with its position and the next read asks the backend. Guessing there
-// publishes a head older than a committed one, which is the defect this whole
-// mechanism exists to prevent. An entry with no position at all is left as it is,
-// for the same reason: it is not loaded, so the next read asks the backend.
+// Only a cached position strictly BEHIND the commit (or absent) is replaced. One
+// strictly ahead is a later write and is left alone, but still bumps. At the SAME
+// next ordinal neither the ordinal nor the generation can order the two: a
+// retract is a head move that leaves the ordinal alone, and a commit whose
+// starting head another commit has since moved back to is indistinguishable from
+// a stale read — so the entry stops answering with its position and the next read
+// asks the backend. Guessing there publishes a head older than a committed one.
 func (s *Store) storeCommitted(convID string, e *entry, st headState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -337,13 +332,11 @@ func (s *Store) storeCommitted(convID string, e *entry, st headState) {
 	}
 	cur := live.head.Load()
 	switch {
-	case cur == nil:
-		// Nothing cached to correct, and an entry with no position is not loaded:
-		// the next read asks the backend and sees this commit there.
-	case cur.nextOrdinal < st.nextOrdinal:
+	case cur == nil, cur.nextOrdinal < st.nextOrdinal:
 		s.publishLocked(live, st)
 	case cur.nextOrdinal > st.nextOrdinal:
-		// A later write has already published a position ahead of this commit.
+		live.gen++
+		live.lastAccess = s.now()
 	default:
 		s.invalidateLocked(live)
 	}
@@ -352,8 +345,9 @@ func (s *Store) storeCommitted(convID string, e *entry, st headState) {
 // invalidateLocked stops an entry answering with its cached position, so the next
 // read asks the backend. The position itself is kept: it still orders a later
 // commit (a commit behind it is dropped, one ahead replaces it), and a
-// re-invalidation keeps it in place. The generation advances with it, so a read
-// already in flight cannot publish the position this invalidation retired.
+// re-invalidation keeps it in place. The generation advances with it, so an
+// observation already in flight cannot publish the position this invalidation
+// retired.
 func (s *Store) invalidateLocked(live *entry) {
 	live.gen++
 	live.loaded = false
@@ -611,7 +605,7 @@ func (h *Handle) readState(ctx context.Context, e *entry) (State, error) {
 		return State{}, err
 	}
 	if live {
-		h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+		h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
 	}
 	return st, nil
 }
@@ -626,7 +620,7 @@ func (h *Handle) State(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	if live {
-		h.store.storeHeadRead(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
+		h.store.storeObserved(h.convID, e, gen, headState{id: st.HeadID, nextOrdinal: st.NextOrdinal})
 	}
 	return st, nil
 }
