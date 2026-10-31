@@ -95,18 +95,25 @@ You run **in the main repo**. You never `cd` into a worktree.
    into the ledger; "the scan was clean" without the rows is not a scan.
 6. **Integration branch, in its own worktree.** One integration branch off
    `main` per plan, and it is checked out in a DEDICATED worktree created at
-   setup — never in the main checkout:
+   setup — never in the main checkout — at the STABLE path
+   `.worktrees/integration`, the same path every plan uses:
 
    ```
-   git worktree add -b <plan>-integration .worktrees/integration-<plan> main
+   git worktree add -b <plan>-integration .worktrees/integration main
    ```
+
+   The path is fixed on purpose. Go keys compiled packages and test results
+   by absolute path, so a per-plan path makes the first gate rebuild and
+   re-test the whole module; a reused path leaves untouched packages cached.
+   If another live plan holds `.worktrees/integration`, use
+   `.worktrees/integration-2` and keep that one stable instead.
 
    The main checkout stays on whatever the operator left it on. Other sessions
    work there: their commits, stashes and uncommitted files must never be
    paved over, and a merge run against the main checkout's HEAD both blocks on
    their dirty tree and exposes the branch to their commits. Every
    integration command names the worktree explicitly (`git -C
-   <main-repo>/.worktrees/integration-<plan> …`), so no step depends on where
+   <main-repo>/.worktrees/integration …`), so no step depends on where
    HEAD happens to sit. Coordinator-local commits (graduations, doc syncs)
    also land in that worktree — `git -C <integration-wt> branch
    --show-current` must name the integration branch before any commit.
@@ -120,8 +127,8 @@ You run **in the main repo**. You never `cd` into a worktree.
 Per task, concurrently, in chunks of at most four:
 
 ```
-git worktree add -b <plan>-<task> .worktrees/<plan>-<task> \
-  $(git -C <main-repo>/.worktrees/integration-<plan> rev-parse HEAD)
+git worktree add -b <plan>-<task> <the task's worktree: path, a .worktrees/slot-<n>> \
+  $(git -C <main-repo>/.worktrees/integration rev-parse HEAD)
 <extract the task body> > <main-repo>/tasks/sdd/<plan-basename>/task-<n>-brief.md
 agent_spawn(cwd: "<abs worktree>", preset: "<group>:<role>", max_cost: <plan value>,
             task: "1.1", name: "1.1", prompt: <dispatch>)
@@ -277,7 +284,11 @@ Per task, before its branch lands:
    branch without a commit of its own. Resolve a conflict during the rebase or
    rule on it; never dissolve one into a merge.
 
-Then run the wave's `gate:` on the **landed** result, with `-count=1`.
+Then run the wave's `gate:` on the **landed** result, **without** `-count=1`:
+the test cache re-runs exactly the packages whose inputs the wave changed.
+Only the last wave's gate, the one the final review sits behind, runs with
+`-count=1` (`GOFLAGS=-count=1 make check`), because the database is the one
+input the cache cannot see.
 
 **Linear is the rule, not a preference.** Each task's work should be
 reviewable and bisectable as its own commits; a merge commit wraps a

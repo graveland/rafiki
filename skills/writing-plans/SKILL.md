@@ -46,7 +46,7 @@ gate: make check
 
 ### Task 1.1 — Add cost_usd to AgentInfo
 touches: pkg/fundi/tools/agent.go, pkg/fundi/tools/agent_steer.go
-worktree: .worktrees/<plan>-1.1
+worktree: .worktrees/slot-1
 max_cost: 0.15
 verify: go test ./pkg/fundi/tools/ -run TestAgentList -count=1
 
@@ -71,8 +71,11 @@ template.
 - **`touches`** — the files this task may modify. Checked for disjointness
   within a wave when the plan is written, and against the real diff before the
   branch merges.
-- **`worktree`** — `.worktrees/<plan>-<task>`. Stated, not derived, so a
-  coordinator that lost its context finds the same path. Omit for an inline
+- **`worktree`** — `.worktrees/slot-<n>`, one slot per concurrent task in a
+  wave (`slot-1`..`slot-4`), reused wave after wave and plan after plan.
+  Stated, not derived, so a coordinator that lost its context finds the same
+  path. The path is a slot rather than the task's name because Go's build and
+  test caches are keyed by absolute path (see *Gate cost*). Omit for an inline
   task.
 - **`max_cost`** — USD, passed straight to `agent_spawn`. **Size it to what the
   work should cost**, not generously: a tight cap on cheap work is how a
@@ -124,6 +127,47 @@ its `gate:`.
   and is impossible to get wrong.
 - Prefer a review checkpoint on a wave boundary: it sees the wave's whole diff
   after the gate, where per-task context is fresh in the reviewer's brief.
+
+## Gate cost
+
+A full gate is the most expensive line in a plan. Cold, `make check` takes
+many minutes, and every wave boundary pays for one, plus a bisection whenever
+it goes red. Count the gates when you lay out the waves, the same way you
+count dispatches.
+
+- **A wave has to buy something.** Every boundary is a full gate. Two waves
+  separated only by a type or a signature should usually be one task that
+  produces and consumes it. If the dependency is a pure declaration (a
+  migration, a proto message, an interface type nothing calls yet), it can be
+  an inline **wave 0** that the coordinator commits before wave 1 dispatches.
+- **A purely additive inline wave gets a scoped gate.** A new migration, a new
+  proto message, a new package nobody imports: that cannot break a package
+  that does not import it, so its gate is the package it touches
+  (`gate: go test ./pkg/store/ -run TestMigrate`, say), not the whole suite.
+  The next full gate covers it at no extra cost, because only the changed
+  packages re-run there.
+- **A gate is only as cheap as its cache is warm.** Go keys both compiled
+  packages and test results by **absolute path**: the same tree checked out
+  at a new path rebuilds and re-tests everything, even packages nobody
+  touched. (You can check this: copy a module to a second directory and
+  `go test` re-runs instead of saying `(cached)`.) A fresh
+  `.worktrees/integration-<plan>` per plan is the reason a first gate is
+  cold. So:
+  - gate in one integration worktree at a **stable path**
+    (`.worktrees/integration`), reused across plans;
+  - give task worktrees slot paths (`worktree:` above) for the same reason;
+  - **never put `-count=1` on a wave gate.** The cache already re-runs exactly
+    the packages whose inputs changed. In this repo that is sound because
+    `test/integration` declares its build inputs; the database is the one
+    input the cache cannot see. The last wave's gate is the only `-count=1`
+    run, and it is the gate the final review sits behind.
+- **Touch the expensive package late.** `test/integration` rebuilds the
+  binaries and re-runs whenever any daemon or CLI source changes. A wave that
+  only touches leaf packages leaves it cached, so put leaf-only work in early
+  waves and daemon wiring in the last ones.
+- **Per-task `verify` is scoped:** that task's packages and `-run` patterns,
+  never `make check`. A task that cannot be proven without the full suite is
+  usually two tasks.
 
 ## Writing a body a seat can execute
 
