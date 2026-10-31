@@ -295,11 +295,17 @@ func decodeImageBlock(raw json.RawMessage) (msg.Block, error) {
 }
 
 // verify re-encodes block and returns it only if that reproduces raw's
-// canonical content; otherwise the block is kept verbatim as Opaque.
+// canonical content; otherwise the block is kept verbatim as Opaque. Identical
+// bytes are identical canonical content, so a re-encoding that reproduces raw
+// byte for byte (what content written by EncodeContent does) skips the
+// canonicalisation, which parses and copies both sides in full.
 func verify(raw json.RawMessage, block msg.Block) (msg.Block, error) {
 	enc, err := encodeBlock(block)
 	if err != nil {
 		return nil, err
+	}
+	if bytes.Equal(raw, enc) {
+		return block, nil
 	}
 	same, err := canonEqual(raw, enc)
 	if err != nil {
