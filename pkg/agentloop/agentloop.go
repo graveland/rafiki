@@ -210,13 +210,13 @@ type Result struct {
 // Run drives a fresh tool-use loop: append userContent, then iterate
 // Continue → execute tools → persist results until end_turn or the
 // iteration cap. opts are additional llm.SendOptions (e.g.
-// llm.WithStreamHandler) forwarded to every conv.Continue call in the loop,
-// after llm.WithTools(defs) — so a caller-supplied option can override tools
+// llm.WithStreamHandlerMsg) forwarded to every conv.ContinueMsg call in the loop,
+// after llm.WithToolsMsg(defs) — so a caller-supplied option can override tools
 // if it ever needs to, but never displaces them by omission.
 //
-// opts are forwarded to EVERY Continue call in the loop, not just the first.
+// opts are forwarded to EVERY ContinueMsg call in the loop, not just the first.
 // A tool-calling run therefore delivers several assistant turns through one
-// llm.WithStreamHandler with no boundary event between them; a consumer
+// llm.WithStreamHandlerMsg with no boundary event between them; a consumer
 // that concatenates handler output will glue one turn's prose onto the
 // next. Use Events.OnTurn, which fires once per LLM call (see drive), as
 // the turn boundary.
@@ -386,8 +386,8 @@ func analyzeOrphans(history []*conv.Node) ([]orphan, *string) {
 
 // drive is the shared loop body: Continue with tools, execute any requested
 // batch, persist results per tool in tool_use order, repeat until end_turn.
-// opts are extra llm.SendOptions forwarded to every Continue call, after
-// llm.WithTools(defs) (built once, loop-invariant, matching defs above it) so
+// opts are extra llm.SendOptions forwarded to every ContinueMsg call, after
+// llm.WithToolsMsg(defs) (built once, loop-invariant, matching defs above it) so
 // a caller-supplied option can override tools if it ever needs to.
 //
 // A turn that would otherwise run past its guardrail (the iteration cap, or

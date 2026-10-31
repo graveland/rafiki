@@ -1142,7 +1142,7 @@ func (e *Engine) priorConversationCost() float64 {
 }
 
 // events wires the agent loop's observation callbacks to the pi emitter, and
-// returns the llm.SendOptions that must ride along on every conv.Continue call
+// returns the llm.SendOptions that must ride along on every conv.ContinueMsg call
 // of THIS turn so the loop actually streams and parks honestly.
 //
 // The stream handler and OnTurn are built together, sharing one coalescing
