@@ -205,6 +205,32 @@ func TestHTTPSenderAnthropicStaticHeaders(t *testing.T) {
 	c.Eq("sk-test", got.Get("X-Api-Key"))
 }
 
+// TestAnthropicBearerSenderSendsBearerNoAPIKey pins the one credential shape
+// rafiki's own /v1/messages proxy accepts: a bearer token and no x-api-key,
+// whatever ANTHROPIC_API_KEY the environment holds.
+func TestAnthropicBearerSenderSendsBearerNoAPIKey(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-environment-leak")
+	var got http.Header
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, anthropicOK)
+	}))
+	defer srv.Close()
+
+	sender := NewAnthropicBearerSender(srv.URL, "rafiki-token", nil)
+	_, err := sender.Send(context.Background(), nativeRequest(t), msg.EncodeOptions{})
+	c.Require().NoError(err, "Send")
+
+	c.Eq("Bearer rafiki-token", got.Get("Authorization"), "Authorization")
+	c.Eq("", got.Get("X-Api-Key"), "x-api-key must never be sent to the proxy")
+	c.Eq("2023-06-01", got.Get("Anthropic-Version"), "anthropic-version")
+	c.Eq("/v1/messages", gotPath, "proxy path")
+}
+
 // TestHTTPSenderOpenAIRequiresBaseURL pins the constructor contract: a generic
 // OpenAI-compatible endpoint has no canonical default.
 func TestHTTPSenderOpenAIRequiresBaseURL(t *testing.T) {

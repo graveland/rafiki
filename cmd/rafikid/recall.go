@@ -9,13 +9,13 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/embed"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/recalldb"
@@ -109,21 +109,23 @@ func (c *llmCompleter) Complete(ctx context.Context, ownerUserID, system, user s
 	if err != nil {
 		return recall.Completion{}, fmt.Errorf("recall summaries: %w", err)
 	}
-	resp, err := conv.Send(ctx, llm.UserText(user),
+	resp, err := conv.SendMsg(ctx, llm.UserTextMsg(user),
 		llm.WithMaxTokens(int64(maxTokens)), llm.WithSource(recall.SummaryEntrypoint))
 	if err != nil {
 		return recall.Completion{}, fmt.Errorf("recall summaries: %w", err)
 	}
 	var text strings.Builder
 	for _, blk := range resp.Content {
-		text.WriteString(blk.Text)
+		if t, ok := blk.(msg.Text); ok {
+			text.WriteString(t.Text)
+		}
 	}
-	model := string(resp.Model)
+	model := resp.Model
 	return recall.Completion{
 		Text:         text.String(),
 		Model:        model,
-		InputTokens:  resp.Usage.InputTokens,
-		OutputTokens: resp.Usage.OutputTokens,
+		InputTokens:  msg.Val(resp.Usage.Input),
+		OutputTokens: msg.Val(resp.Usage.Output),
 		CostUSD:      completionCost(c.pricer, model, c.catalogModel, resp.Usage),
 	}, nil
 }
@@ -131,12 +133,12 @@ func (c *llmCompleter) Complete(ctx context.Context, ownerUserID, system, user s
 // completionCost prices one response's usage via pricer, returning 0 when the
 // pricer is nil or has no entry for the model — the same arithmetic as
 // pkg/analyze/detect.go's detectCost, which routes through
-// routing.ModelPricing.Cost so every cost consumer shares one formula. The
+// routing.ModelPricing.UsageCost so every cost consumer shares one formula. The
 // response echoes the serving provider's id, but an echo that misses the
 // catalog falls back to the configured model's provider-local id before
 // giving up, so a summary's cost is never silently zero just because the
 // responder spelled the id differently than the catalog does.
-func completionCost(pricer insights.Pricer, model, catalogModel string, usage anthropic.Usage) float64 {
+func completionCost(pricer insights.Pricer, model, catalogModel string, usage msg.Usage) float64 {
 	if pricer == nil {
 		return 0
 	}
@@ -147,7 +149,7 @@ func completionCost(pricer insights.Pricer, model, catalogModel string, usage an
 	if !ok {
 		return 0
 	}
-	return price.Cost(usage).Total
+	return price.UsageCost(usage).Total
 }
 
 // recallBinding is recall + memories for one caller, bound at construction —

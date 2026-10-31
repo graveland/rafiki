@@ -13,8 +13,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -797,22 +795,13 @@ const cliDefaultModel = "haiku-latest"
 // slash/tilde preflight.
 func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 	if proxyURL != "" {
-		// anthropic.NewClient prepends option.DefaultClientOptions(), which — if
-		// ANTHROPIC_API_KEY is set in the environment, which it commonly is for
-		// direct-to-Anthropic use — turns that into an implicit
-		// option.WithAPIKey(...) request option setting the X-Api-Key header.
-		// That is a DIFFERENT header from the Authorization: Bearer one
-		// WithAuthToken sets below, so without the WithAPIKey("") override here,
-		// every --proxy-url request would carry the developer's real Anthropic
-		// key to whatever host --proxy-url points at (including a third party)
-		// alongside the intended proxy bearer token — a credential leak. Do NOT
-		// remove this as dead-looking "clear an empty value" cleanup: it is the
-		// fix. Request options apply in the order given and
-		// http.Header.Set is last-writer-wins, so appending this after
-		// WithAuthToken guarantees it wins regardless of DefaultClientOptions'
-		// position in anthropic.NewClient's own option list.
-		sdk := anthropic.NewClient(option.WithBaseURL(proxyURL), option.WithAuthToken(proxyToken), option.WithAPIKey(""))
-		sender := llm.FromSDK(sdk)
+		// The proxy target is rafiki's own /v1/messages, which authenticates
+		// with a BEARER token and no x-api-key — the one credential shape the
+		// plain Anthropic sender cannot express, since it always keys on
+		// X-Api-Key. This sender reads no environment, so an ANTHROPIC_API_KEY
+		// set for direct-to-Anthropic use can never ride a --proxy-url request
+		// to whatever host --proxy-url names.
+		sender := llm.NewAnthropicBearerSender(proxyURL, proxyToken, nil)
 		prov, err := providers.Load(paths.ProvidersFile())
 		if err != nil {
 			return nil, false, fmt.Errorf("load providers: %w", err)
@@ -829,13 +818,17 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 	if key == "" {
 		return nil, false, errors.New("agent analyze: no --proxy-url/RAFIKI_URL configured and ANTHROPIC_API_KEY unset")
 	}
+	sender, err := llm.SenderForKey(providers.Provider{Name: "anthropic", Kind: providers.KindAnthropic}, key, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("anthropic sender: %w", err)
+	}
 	prov, err := providers.Load(paths.ProvidersFile())
 	if err != nil {
 		return nil, false, fmt.Errorf("load providers: %w", err)
 	}
 	client, err := llm.NewClient(
 		llm.WithProviders(prov),
-		llm.WithProviderSender("anthropic", llm.FromSDK(anthropic.NewClient(option.WithAPIKey(key)))),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel(cliDefaultModel),
 	)
 	return client, false, err

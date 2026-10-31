@@ -8,9 +8,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/fundi"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // --- transcript rendering ---
@@ -79,7 +78,7 @@ func renderEntries(events []json.RawMessage, origins []fundi.FrameOrigin) []entr
 				// model ran out of tokens mid-message: without one, the marker
 				// would have nowhere to attach and the cut would read as "the
 				// tool stopped".
-				if origins == nil || origins[i].StopReason != string(anthropic.StopReasonMaxTokens) {
+				if origins == nil || origins[i].StopReason != msg.StopMaxTokens.String() {
 					continue
 				}
 				page = env.Message.Role + ": (no text)"
@@ -128,7 +127,7 @@ func renderEntries(events []json.RawMessage, origins []fundi.FrameOrigin) []entr
 				}
 				e.cursor = fmt.Sprintf("m:%d.%d", o.Ordinal, sub)
 			}
-			e.endsEarly = o.FromRow && o.StopReason == string(anthropic.StopReasonMaxTokens)
+			e.endsEarly = o.FromRow && o.StopReason == msg.StopMaxTokens.String()
 		}
 		out = append(out, e)
 	}

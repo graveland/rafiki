@@ -125,6 +125,29 @@ func newOpenRouterSender(p providers.Provider, base, key string, rt http.RoundTr
 	}, nil
 }
 
+// NewAnthropicBearerSender builds an Anthropic Messages sender that
+// authenticates with a bearer token and never sends x-api-key. It targets
+// rafiki's own /v1/messages proxy, whose credential is a rafiki bearer token —
+// a contract the plain Anthropic sender cannot express, because SenderForKey
+// always keys on X-Api-Key. It reads no environment: the token is the only
+// credential it has. An empty token sends no credential header at all.
+func NewAnthropicBearerSender(baseURL, token string, rt http.RoundTripper) Sender {
+	headers := http.Header{}
+	headers.Set("Anthropic-Version", "2023-06-01")
+	headers.Set("Content-Type", "application/json")
+	var auth func(*http.Request)
+	if token != "" {
+		auth = func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+token) }
+	}
+	return &httpSender{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		headers: headers,
+		auth:    auth,
+		client:  &http.Client{Transport: headerCaptureTransport{base: rt}},
+		codec:   anthropicCodec(),
+	}
+}
+
 // newOpenAISender builds the KindOpenAI sender: a generic OpenAI-compatible
 // Chat Completions endpoint (Ollama, vLLM, Fireworks, …). There is no canonical
 // default base URL for such an endpoint, so an empty one is a config error

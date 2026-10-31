@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -393,7 +394,7 @@ func TestLLMCompleterResolvesCatalogModel(t *testing.T) {
 // differently than the catalog does. Rides the TestRecallWiring shim.
 func TestLLMCompleterCompletionCostFallback(t *testing.T) {
 	c := assert.NewAborting(t)
-	usage := anthropic.Usage{InputTokens: 1000, OutputTokens: 100}
+	usage := msg.Usage{Input: msg.Ptr(1000), Output: msg.Ptr(100)}
 	known := func(ids ...string) insights.Pricer {
 		set := map[string]struct{}{}
 		for _, id := range ids {
