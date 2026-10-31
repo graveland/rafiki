@@ -3564,8 +3564,10 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, 
 	// drop the watch here, where the intent is known, not in handleChildExit
 	// (a passive stdin close makes the same death read as the child's own —
 	// fake-pi and claude alike exit 0 on EOF). Also covers the native-child
-	// early return below, which never reaches the shutdown sequence.
-	c.rateWatch.drop(childID)
+	// early return below, which never reaches the shutdown sequence. This drops
+	// the ROW's pending-resume label too, so a later boot cannot re-arm what the
+	// operator deliberately stopped.
+	c.dropRateLimitWatch(childID)
 	// A pending recovery resume must not fire for a child the operator killed
 	// while it waited for its executor.
 	c.dropPendingResume(childID)
@@ -3786,7 +3788,7 @@ func (c *Controller) abortSpawn(childID string, ch *child.Child) {
 	// caller may already have queued a spawn/operator link for it.
 	c.trace.ChildGone(childID)
 	c.cm.Remove(childID)
-	c.rateWatch.drop(childID)
+	c.dropRateLimitWatch(childID)
 	c.dropPendingResume(childID)
 	c.forgetBoundExecutor(childID)
 	if c.darajaReg != nil {
@@ -3913,7 +3915,7 @@ func (c *Controller) Close(childID string) error {
 	// A forgotten child is never coming back: nothing must resurrect it, so
 	// its rate-limit watch goes with the row. CloseAllExited, the other
 	// forget site, drops the same way.
-	c.rateWatch.drop(childID)
+	c.dropRateLimitWatch(childID)
 	// A pending recovery resume must not fire for a child that was closed
 	// while it waited for its executor.
 	c.dropPendingResume(childID)
@@ -4136,7 +4138,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID s
 		// and never terminal, so the retention sweep can never reach it.
 		if ownedRow {
 			c.dropInboxForForgotten(s.ChildID, "child forgotten")
-			c.rateWatch.drop(s.ChildID)
+			c.dropRateLimitWatch(s.ChildID)
 			c.dropPendingResume(s.ChildID)
 		}
 		if c.children != nil && ownedRow {

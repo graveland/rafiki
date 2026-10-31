@@ -350,6 +350,11 @@ func (c *Controller) loadChildren(ctx context.Context) {
 	}
 
 	c.armRecoveredGrace()
+	// And the pending rate-limit auto-resumes: their timers died with the
+	// previous daemon, but the fire instant rides each child's row, so a child
+	// parked on a 429 when the daemon restarted is re-armed — and its retry
+	// notice re-published — instead of the promise silently evaporating.
+	c.armRecoveredRateLimitResumes()
 }
 
 // armRecoveredGrace re-derives every recovered exited child's grace deadline

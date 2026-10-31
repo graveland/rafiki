@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -45,6 +46,17 @@ const (
 	rateLimitResumeTimeout = 30 * time.Second
 )
 
+// rateLimitResumeLabel carries a PENDING auto-resume on the child's row, as the
+// fire instant in RFC3339 (UTC). It is what makes the promise survive the
+// daemon: the watch itself is in memory, so without this a restart inside the
+// wait window dropped a resume the operator had already been told about. The
+// label means "a resume is still owed" and nothing else — it is cleared the
+// moment the resume is delivered, canceled by a clean completion, abandoned, or
+// the child is killed or forgotten — so a restart never re-arms a watch that had
+// already resolved. The daemon's own shutdown deliberately LEAVES it in place
+// (rateWatch.dropAll), because that is exactly the resume the next boot owes.
+const rateLimitResumeLabel = "rafiki/rate-limit-resume-at"
+
 // rateLimitResumeText is the prompt an auto-resume delivers to the child. The
 // child keeps its full in-process context, so the instruction is a nudge, not
 // a re-briefing; naming the cause keeps the model from narrating the gap as a
@@ -69,18 +81,29 @@ type rateLimitState struct {
 	// post-dated by the retried request's success, because the retry is a new
 	// proxied request issued only after the 429 was handled.
 	lastOKAt time.Time
-	// attempts counts scheduled resumes since the last successful turn.
+	// attempts counts resumes DELIVERED since the last successful turn — not
+	// schedules. Only a resume that actually went out spends the budget: a 429
+	// that re-targets a pending resume (Claude Code retrying inside one turn,
+	// or a second failed turn before the reset) is the same attempt, and
+	// burning a slot for it used to exhaust the cap without a single retry
+	// ever firing.
 	attempts int
+	// abandoned marks a cap already announced, so the two triggers that can
+	// reach scheduleRateLimitResumeLocked (the 429 notification and the idle
+	// transition) publish the abandonment once rather than twice per 429.
+	// Cleared by a successful turn, which re-opens the budget.
+	abandoned bool
 	// timer is the pending resume, if any. At most one per child: a newer 429
 	// supersedes it.
 	timer *time.Timer
 }
 
-// rateLimitWatch is the per-child in-memory watch. State is deliberately NOT
-// persisted: a daemon restart inside the wait window loses the pending resume
-// and the child is stalled exactly as it was before this feature existed.
-// Persisting would need a clear-on-success write per turn to keep stale marks
-// from re-arming a recovered child after a restart; not worth it yet.
+// rateLimitWatch is the per-child in-memory watch.
+//
+// The WATCH is in-memory; the pending RESUME is not — scheduling stamps the
+// fire instant on the child's row (rateLimitResumeLabel) and the boot walk
+// re-arms from it, so a restart inside the wait window no longer breaks a
+// promise the operator was already told about.
 type rateLimitWatch struct {
 	mu sync.Mutex
 	m  map[string]*rateLimitState
@@ -165,7 +188,9 @@ func (w *rateLimitWatch) drop(childID string) {
 }
 
 // dropAll cancels every pending timer and forgets every watch state: the
-// daemon's own shutdown, where nothing will be around to act on a fire.
+// daemon's own shutdown, where nothing will be around to act on a fire. The
+// pending-resume labels are deliberately LEFT on the rows — that is the resume
+// the next boot owes, and armRecoveredRateLimitResumes re-arms it from there.
 func (w *rateLimitWatch) dropAll() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -193,24 +218,32 @@ func (c *Controller) RateLimited(session string, resetAt time.Time) {
 	if !ok || snap.Kind != protocol.KindClaude || snap.Native {
 		return
 	}
-	c.rateWatch.mu.Lock()
-	defer c.rateWatch.mu.Unlock()
-	st := c.rateWatch.stateLocked(session, true)
-	st.limitedAt = time.Now()
-	st.resetAt = resetAt
-	if st.timer != nil {
-		// A pending resume built on an older reset time is superseded: this
-		// rejection restarts the decision, and the idle hook (or the idle
-		// check below) schedules against the newer reset.
-		st.timer.Stop()
-		st.timer = nil
-	}
-	// The failed turn may already have settled — the proxy's notification
-	// races the result frame it caused. A stale header can also name a reset
-	// already in the past; the watch's delay clamps that to the buffer floor.
-	if snap.Status == protocol.StatusIdle && st.limitedAt.After(st.lastOKAt) {
-		c.scheduleRateLimitResumeLocked(session, st)
-	}
+	// The row write (stamp/clear) happens after the lock is released: the watch
+	// mutex is process-wide, and a database round trip under it would hold up
+	// every other child's 429 notification and idle transition.
+	var fireAt time.Time
+	var abandoned bool
+	func() {
+		c.rateWatch.mu.Lock()
+		defer c.rateWatch.mu.Unlock()
+		st := c.rateWatch.stateLocked(session, true)
+		st.limitedAt = time.Now()
+		st.resetAt = resetAt
+		if st.timer != nil {
+			// A pending resume built on an older reset time is superseded: this
+			// rejection restarts the decision, and the idle hook (or the idle
+			// check below) schedules against the newer reset.
+			st.timer.Stop()
+			st.timer = nil
+		}
+		// The failed turn may already have settled — the proxy's notification
+		// races the result frame it caused. A stale header can also name a reset
+		// already in the past; the watch's delay clamps that to the buffer floor.
+		if snap.Status == protocol.StatusIdle && st.limitedAt.After(st.lastOKAt) {
+			fireAt, abandoned = c.scheduleRateLimitResumeLocked(session, st)
+		}
+	}()
+	c.syncRateLimitResumeLabel(session, fireAt, abandoned)
 }
 
 // TurnSucceeded implements server.RateLimitObserver: a clean main-thread
@@ -218,20 +251,28 @@ func (c *Controller) RateLimited(session string, resetAt time.Time) {
 // the consecutive-attempt count. Runs once per proxied request; everything
 // under the lock is in-memory only.
 func (c *Controller) TurnSucceeded(session string) {
-	c.rateWatch.mu.Lock()
-	defer c.rateWatch.mu.Unlock()
-	st := c.rateWatch.stateLocked(session, false)
-	if st == nil {
-		return
-	}
-	st.lastOKAt = time.Now()
-	if st.timer != nil {
-		st.timer.Stop()
-		st.timer = nil
-		c.publishRateLimitNotice(session, false, st.attempts,
-			"rate limit cleared; scheduled auto-resume canceled", time.Time{})
-	}
-	st.attempts = 0
+	func() {
+		c.rateWatch.mu.Lock()
+		defer c.rateWatch.mu.Unlock()
+		st := c.rateWatch.stateLocked(session, false)
+		if st == nil {
+			return
+		}
+		st.lastOKAt = time.Now()
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+			c.publishRateLimitNotice(session, false, st.attempts,
+				"rate limit cleared; scheduled auto-resume canceled", time.Time{})
+		}
+		st.attempts = 0
+		// The model answered: the budget re-opens and a future breach is worth
+		// announcing again.
+		st.abandoned = false
+	}()
+	// The model answered, so nothing is owed: drop the row's pending-resume
+	// label. A no-op (and no row write) for a child that never carried one.
+	c.clearRateLimitResumeAt(session)
 }
 
 // maybeRateLimitResume schedules a resume when the just-settled turn of a
@@ -239,32 +280,62 @@ func (c *Controller) TurnSucceeded(session string) {
 // result frame) and from RateLimited (the 429 notification landing after it) —
 // one predicate, two triggers, whichever arrives second wins.
 func (c *Controller) maybeRateLimitResume(childID string) {
-	c.rateWatch.mu.Lock()
-	defer c.rateWatch.mu.Unlock()
-	st := c.rateWatch.stateLocked(childID, false)
-	if st == nil || st.limitedAt.IsZero() || !st.limitedAt.After(st.lastOKAt) {
-		return // never limited here, or a success already post-dated the 429
-	}
-	if st.timer != nil {
-		return // already scheduled; a newer 429 supersedes via RateLimited
-	}
-	c.scheduleRateLimitResumeLocked(childID, st)
+	var fireAt time.Time
+	var abandoned bool
+	func() {
+		c.rateWatch.mu.Lock()
+		defer c.rateWatch.mu.Unlock()
+		st := c.rateWatch.stateLocked(childID, false)
+		if st == nil || st.limitedAt.IsZero() || !st.limitedAt.After(st.lastOKAt) {
+			return // never limited here, or a success already post-dated the 429
+		}
+		if st.timer != nil {
+			return // already scheduled; a newer 429 supersedes via RateLimited
+		}
+		fireAt, abandoned = c.scheduleRateLimitResumeLocked(childID, st)
+	}()
+	c.syncRateLimitResumeLabel(childID, fireAt, abandoned)
 }
 
 // scheduleRateLimitResumeLocked arms the timer and publishes the TUI notice.
 // rateLimitWatch.mu must be held.
-func (c *Controller) scheduleRateLimitResumeLocked(childID string, st *rateLimitState) {
+// It returns the instant it armed, and whether it instead abandoned the watch
+// (the attempt cap), so the caller can persist the decision on the child's row.
+//
+// Arming does not spend an attempt: `attempts` counts deliveries, so the timer
+// carries the ordinal of the resume it is about to make (attempts+1), and a 429
+// that re-targets a pending timer re-announces that same ordinal against the
+// newer reset instead of counting up.
+func (c *Controller) scheduleRateLimitResumeLocked(childID string, st *rateLimitState) (fireAt time.Time, abandoned bool) {
 	if st.attempts >= maxRateLimitResumes {
-		c.publishRateLimitNotice(childID, false, st.attempts, fmt.Sprintf(
-			"auto-resume abandoned after %d attempts; resume manually with `rafiki resume`", maxRateLimitResumes), time.Time{})
-		slog.Warn("claude child rate limited; auto-resume attempts exhausted",
-			"childId", childID, "attempts", st.attempts, "resetAt", st.resetAt)
-		return
+		// Announce the cap ONCE per breach: with no timer armed, both triggers
+		// (the 429 notification and the idle transition) reach this branch for
+		// the same rejection.
+		if !st.abandoned {
+			st.abandoned = true
+			c.publishRateLimitNotice(childID, false, st.attempts, fmt.Sprintf(
+				"auto-resume abandoned after %d attempts; resume manually with `rafiki resume`", maxRateLimitResumes), time.Time{})
+			// The Retry resolution above only clears the rail's glyph; the
+			// transcript needs a block of its own, which is what an Error is:
+			// the turn is over and nothing more is coming on its own.
+			c.publishEvent(childID, &rafikiv1.Event{
+				ChildId: childID,
+				Ts:      timestamppb.Now(),
+				Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+					Code: "rate_limit_auto_resume_abandoned",
+					Message: fmt.Sprintf("auto-resume abandoned after %d rate-limited turns; "+
+						"nothing more will be retried — prompt it or run `rafiki resume` when the window reopens",
+						maxRateLimitResumes),
+				}},
+			})
+			slog.Warn("claude child rate limited; auto-resume attempts exhausted",
+				"childId", childID, "attempts", st.attempts, "resetAt", st.resetAt)
+		}
+		return time.Time{}, true
 	}
-	st.attempts++
-	delay := c.rateWatch.delay(st.attempts-1, st.resetAt)
-	fireAt := time.Now().Add(delay)
-	attempt := st.attempts
+	attempt := st.attempts + 1
+	delay := c.rateWatch.delay(st.attempts, st.resetAt)
+	fireAt = time.Now().Add(delay)
 	st.timer = time.AfterFunc(delay, func() { c.fireRateLimitResume(childID, attempt) })
 	// The fire instant travels as resume_at, not formatted into the
 	// reason: this daemon's clock zone is arbitrary (a container runs UTC),
@@ -272,7 +343,9 @@ func (c *Controller) scheduleRateLimitResumeLocked(childID string, st *rateLimit
 	c.publishRateLimitNotice(childID, true, attempt, "rate limited (HTTP 429)", fireAt)
 	slog.Warn("claude child rate limited; auto-resume scheduled",
 		"childId", childID, "resume_at", fireAt.Format(time.RFC3339),
-		"reset_at", st.resetAt.Format(time.RFC3339), "attempt", attempt, "max", maxRateLimitResumes)
+		"reset_at", st.resetAt.Format(time.RFC3339), "attempt", attempt,
+		"delivered", st.attempts, "max", maxRateLimitResumes)
+	return fireAt, false
 }
 
 // fireRateLimitResume re-validates the watch at fire time on the timer's own
@@ -292,24 +365,37 @@ func (c *Controller) fireRateLimitResume(childID string, attempt int) {
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		c.rateWatch.drop(childID)
+		c.dropRateLimitWatch(childID)
 		return
 	}
 	if st.lastOKAt.After(st.limitedAt) {
 		return // a success post-dated the 429; nothing to resume
 	}
 	switch snap.Status {
-	case protocol.StatusIdle:
-		// The failed turn settled and the child has been sitting on it.
-		c.deliverRateLimitResume(childID, attempt)
-	case protocol.StatusExited:
-		// The process died while the resume was pending. deliverRateLimitResume
-		// relaunches it via Resume — the same path a manual `rafiki resume`
-		// takes — and then prompts it.
+	case protocol.StatusIdle, protocol.StatusExited:
+		// Idle: the failed turn settled and the child has been sitting on it.
+		// Exited: the process died while the resume was pending, and
+		// deliverRateLimitResume relaunches it via Resume — the same path a
+		// manual `rafiki resume` takes. Either way a resume is going out, so
+		// THIS is where an attempt is spent (not when it was scheduled).
+		c.noteRateLimitAttempt(childID, attempt)
 		c.deliverRateLimitResume(childID, attempt)
 	default:
 		// Mid-turn: the child recovered on its own (or a coordinator prompted
-		// it). Its turn's own verdict drives the watch from here.
+		// it). Its turn's own verdict drives the watch from here — no resume is
+		// delivered, so nothing is spent.
+	}
+}
+
+// noteRateLimitAttempt records the delivery of resume `attempt` against the
+// child's budget. Called at fire time, on the fire path only; the max() guards a
+// timer that raced its own supersession (RateLimited stops a pending timer, but
+// Stop can lose to a callback already running).
+func (c *Controller) noteRateLimitAttempt(childID string, attempt int) {
+	c.rateWatch.mu.Lock()
+	defer c.rateWatch.mu.Unlock()
+	if st := c.rateWatch.stateLocked(childID, false); st != nil && attempt > st.attempts {
+		st.attempts = attempt
 	}
 }
 
@@ -344,7 +430,152 @@ func (c *Controller) deliverRateLimitResume(childID string, attempt int) {
 		return
 	}
 	c.publishRateLimitNotice(childID, false, attempt, fmt.Sprintf("auto-resume %d firing", attempt), time.Time{})
+	// The resume is delivered, so the row no longer owes one: clear the label
+	// before the next 429 re-stamps it. A restart between here and the child's
+	// next verdict must not deliver the same nudge twice.
+	c.clearRateLimitResumeAt(childID)
 	slog.Info("rate-limited claude child auto-resumed", "childId", childID, "attempt", attempt)
+}
+
+// syncRateLimitResumeLabel makes the child's row agree with the watch: the
+// fire instant when a timer is armed, nothing when the watch was abandoned.
+// Called with rateLimitWatch.mu RELEASED (see RateLimited), and a no-op when
+// the watch reached no decision at all — a 429 arriving mid-turn must not clear
+// a label an earlier one stamped.
+func (c *Controller) syncRateLimitResumeLabel(childID string, fireAt time.Time, abandoned bool) {
+	switch {
+	case abandoned:
+		c.clearRateLimitResumeAt(childID)
+	case !fireAt.IsZero():
+		c.stampRateLimitResumeAt(childID, fireAt)
+	}
+}
+
+// stampRateLimitResumeAt records the pending fire instant on the child's row,
+// so a daemon restart inside the wait window re-arms it (armRecoveredRateLimitResumes)
+// instead of silently breaking a promise the operator already saw. The row write
+// is asynchronous: this runs on a proxy request's goroutine and must not add a
+// database round trip to it.
+func (c *Controller) stampRateLimitResumeAt(childID string, at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	value := at.UTC().Format(time.RFC3339)
+	changed := false
+	if err := c.st.Update(childID, func(s *childstore.Session) {
+		if s.Labels == nil {
+			s.Labels = map[string]string{}
+		}
+		if s.Labels[rateLimitResumeLabel] == value {
+			return
+		}
+		s.Labels[rateLimitResumeLabel] = value
+		changed = true
+	}); err != nil {
+		slog.Warn("stamp rate-limit resume label", "childId", childID, "error", err)
+		return
+	}
+	if changed {
+		c.writeRateLimitResumeRow(childID)
+	}
+}
+
+// clearRateLimitResumeAt drops the pending-resume label. It writes nothing when
+// the child carries no label, so the per-turn call in TurnSucceeded costs no
+// row write on a healthy child.
+func (c *Controller) clearRateLimitResumeAt(childID string) {
+	changed := false
+	if err := c.st.Update(childID, func(s *childstore.Session) {
+		if _, ok := s.Labels[rateLimitResumeLabel]; !ok {
+			return
+		}
+		delete(s.Labels, rateLimitResumeLabel)
+		changed = true
+	}); err != nil {
+		return // child gone: there is no row left to clear
+	}
+	if changed {
+		c.writeRateLimitResumeRow(childID)
+	}
+}
+
+// writeRateLimitResumeRow persists the child's row off the caller's goroutine.
+// writeRecord snapshots the store when it RUNS, so a stamp or clear that lands
+// in between still wins: whichever write runs last writes the store's current
+// truth rather than a captured one.
+func (c *Controller) writeRateLimitResumeRow(childID string) {
+	go func() {
+		if err := c.writeRecord(childID); err != nil {
+			slog.Warn("write child row after rate-limit resume change", "childId", childID, "error", err)
+		}
+	}()
+}
+
+// dropRateLimitWatch forgets a child's watch AND its persisted resume. An
+// operator's Kill (or a forget) must not be undone by the next boot re-arming
+// the label; the daemon's own shutdown calls rateWatch.dropAll instead, which
+// deliberately leaves every label in place.
+func (c *Controller) dropRateLimitWatch(childID string) {
+	c.rateWatch.drop(childID)
+	c.clearRateLimitResumeAt(childID)
+}
+
+// armRecoveredRateLimitResumes re-arms the auto-resume a daemon restart
+// interrupted. The watch itself lived only in the previous daemon's memory, but
+// the fire instant rides the child's row, so a child that was parked on a rate
+// limit when its daemon died is re-armed here — and the schedule notice is
+// re-published, which is also what puts "will retry at HH:MM" back into a
+// viewer that attached after the original notice.
+//
+// Only an IDLE claude child is re-armed. An exited one is recovery's business
+// (recoverOne decides whether it resumes at all, and arming here could
+// relaunch a child recovery deliberately left alone); a working one gets the
+// restart continuation nudge instead. An instant already in the past — the
+// daemon was down through the reset — fires on the buffer floor, so the child
+// resumes promptly instead of waiting for another full window.
+func (c *Controller) armRecoveredRateLimitResumes() {
+	for _, s := range c.st.List() {
+		if s.Kind != protocol.KindClaude || s.Native || s.Status != protocol.StatusIdle {
+			continue
+		}
+		raw := s.Labels[rateLimitResumeLabel]
+		if raw == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			slog.Warn("rate-limit resume label is not an RFC3339 instant; dropping it",
+				"childId", s.ChildID, "value", raw)
+			c.clearRateLimitResumeAt(s.ChildID)
+			continue
+		}
+		var fireAt time.Time
+		var abandoned bool
+		func() {
+			c.rateWatch.mu.Lock()
+			defer c.rateWatch.mu.Unlock()
+			st := c.rateWatch.stateLocked(s.ChildID, true)
+			// The row is the whole record: the 429 that stamped it is the latest
+			// upstream verdict for this child, and a restart is not a success.
+			st.limitedAt = time.Now()
+			st.resetAt = at
+			// The row carries no attempt count, so a restart re-opens the
+			// budget (and re-arms a breach announcement): the alternative is a
+			// crash loop that never retries at all.
+			st.attempts = 0
+			st.abandoned = false
+			fireAt, abandoned = c.scheduleRateLimitResumeLocked(s.ChildID, st)
+		}()
+		c.syncRateLimitResumeLabel(s.ChildID, fireAt, abandoned)
+		if abandoned {
+			slog.Info("rate-limit auto-resume abandoned on re-arm: attempt cap reached",
+				"childId", s.ChildID, "reset_at", at.Format(time.RFC3339))
+			continue
+		}
+		slog.Info("re-armed a rate-limit auto-resume from the child's row",
+			"childId", s.ChildID, "reset_at", at.Format(time.RFC3339),
+			"resume_at", fireAt.Format(time.RFC3339))
+	}
 }
 
 // publishRateLimitNotice publishes the retry-family event the TUI renders:
