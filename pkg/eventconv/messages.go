@@ -8,6 +8,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/conv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/harness"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
 
@@ -67,8 +68,24 @@ func EventsFromNodes(childID string, nodes []*conv.Node) []*rafikiv1.Event {
 				SystemMessage: &rafikiv1.SystemMessage{Content: blocks},
 			}
 		default:
+			// The harness that wrote this message is the only code that knows
+			// which of its blocks the user did not type. Marking returns a copy
+			// (a node's Msg is shared by the cache), and BlocksFromMsg keeps
+			// each block's index in the stored message, so the split is
+			// recoverable without renumbering or compacting anything.
+			h := harness.For(n.Origin)
+			marked := h.Mark(n.Msg)
+			var content, injected []*rafikiv1.ContentBlock
+			for _, cb := range BlocksFromMsg(marked) {
+				if t, ok := marked.Content[int(cb.Index)].(msg.Text); ok && t.Injected {
+					cb.GetText().Text = h.Unwrap(t)
+					injected = append(injected, cb)
+					continue
+				}
+				content = append(content, cb)
+			}
 			ev.Payload = &rafikiv1.Event_UserMessage{
-				UserMessage: &rafikiv1.UserMessage{Content: blocks},
+				UserMessage: &rafikiv1.UserMessage{Content: content, Injected: injected},
 			}
 		}
 		out = append(out, ev)

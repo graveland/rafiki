@@ -1,6 +1,10 @@
 package eventconv_test
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +22,19 @@ func node(ordinal int, role msg.Role, text string) *conv.Node {
 	return &conv.Node{
 		Ref: conv.Ref{Ordinal: ordinal},
 		Msg: msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: text}}},
+	}
+}
+
+// textNode is one user node carrying several text blocks, written by origin.
+func textNode(ordinal int, origin conv.Origin, texts ...string) *conv.Node {
+	blocks := make([]msg.Block, 0, len(texts))
+	for _, text := range texts {
+		blocks = append(blocks, msg.Text{Text: text})
+	}
+	return &conv.Node{
+		Ref:    conv.Ref{Ordinal: ordinal},
+		Msg:    msg.Message{Role: msg.User, Content: blocks},
+		Origin: origin,
 	}
 }
 
@@ -201,4 +218,116 @@ func TestEventsFromNodesRendersFundiClearAsBoundary(t *testing.T) {
 	c.NotNil(evs[0].GetUserMessage(), "ordinary row")
 	c.Eq("clear", evs[1].GetCompactionBoundary().GetTrigger(), "synthetic clear row renders as a divider")
 	c.NotNil(evs[2].GetUserMessage(), "a claude clear row stays a message")
+}
+
+// A claude-code user row carries the harness's reminders in the same block
+// list as the user's own text. The split keeps every block's index in the
+// stored message, so the original interleaving stays recoverable, and the
+// injected half has its wrapper removed.
+func TestInjectedSplitForClaudeCodeNode(t *testing.T) {
+	c := assert.NewAborting(t)
+	const (
+		r1       = "<system-reminder>\nreminder one\n</system-reminder>"
+		userText = "the user's own words"
+		r2       = "<system-reminder>\nreminder two\n</system-reminder>"
+	)
+
+	n := textNode(0, conv.OriginClaudeCode, r1, userText, r2)
+
+	evs := eventconv.EventsFromNodes("c_test", []*conv.Node{n})
+
+	c.Len(evs, 1, "got %d events, want 1", len(evs))
+	um := evs[0].GetUserMessage()
+	c.NotNil(um, "event 0 is %T, want Event_UserMessage", evs[0].Payload)
+
+	content := um.GetContent()
+	c.Len(content, 1, "content blocks")
+	c.Eq(int32(1), content[0].GetIndex(), "the user's text keeps index 1")
+	c.Eq(userText, content[0].GetText().GetText(), "content text")
+
+	injected := um.GetInjected()
+	c.Len(injected, 2, "injected blocks")
+	c.Eq(int32(0), injected[0].GetIndex(), "first reminder keeps index 0")
+	c.Eq("reminder one", injected[0].GetText().GetText(), "first reminder body, wrapper removed")
+	c.Eq(int32(2), injected[1].GetIndex(), "second reminder keeps index 2")
+	c.Eq("reminder two", injected[1].GetText().GetText(), "second reminder body, wrapper removed")
+}
+
+// A fundi node has no harness that marks anything, so its content is not split
+// even when it contains reminder-shaped text.
+func TestInjectedNotSplitForFundiNode(t *testing.T) {
+	c := assert.NewAborting(t)
+	const (
+		r1       = "<system-reminder>\nreminder one\n</system-reminder>"
+		userText = "the user's own words"
+		r2       = "<system-reminder>\nreminder two\n</system-reminder>"
+	)
+
+	n := textNode(0, conv.OriginFundi, r1, userText, r2)
+
+	evs := eventconv.EventsFromNodes("c_test", []*conv.Node{n})
+
+	c.Len(evs, 1, "got %d events, want 1", len(evs))
+	um := evs[0].GetUserMessage()
+	c.NotNil(um, "event 0 is %T, want Event_UserMessage", evs[0].Payload)
+
+	content := um.GetContent()
+	c.Len(content, 3, "content blocks")
+	for i, want := range []string{r1, userText, r2} {
+		c.Eq(int32(i), content[i].GetIndex(), "block %d index", i)
+		c.Eq(want, content[i].GetText().GetText(), "block %d text is unchanged", i)
+	}
+	c.Len(um.GetInjected(), 0, "a fundi node splits nothing out")
+}
+
+// The recorded capture is the real reminder shape: four reminders around the
+// user's one line of text, each shown without its wrapper.
+func TestInjectedSplitUsesFixture(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	raw, err := os.ReadFile(filepath.Join("..", "capture", "testdata", "interim-capture-rows.json"))
+	c.NoError(err, "read the capture fixture")
+
+	var doc struct {
+		Messages []struct {
+			Ordinal int             `json:"ordinal"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	c.NoError(json.Unmarshal(raw, &doc), "decode the capture fixture")
+
+	var in *conv.Node
+	for _, m := range doc.Messages {
+		if m.Ordinal != 0 {
+			continue
+		}
+		c.Eq("user", m.Role, "message ordinal 0 is a user message")
+		var blocks []struct {
+			Text string `json:"text"`
+			Type string `json:"type"`
+		}
+		c.NoError(json.Unmarshal(m.Content, &blocks), "decode ordinal 0's content")
+		texts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			c.Eq("text", b.Type, "ordinal 0 is all text blocks")
+			texts = append(texts, b.Text)
+		}
+		in = textNode(0, conv.OriginClaudeCode, texts...)
+	}
+	c.NotNil(in, "the capture fixture has message ordinal 0")
+
+	evs := eventconv.EventsFromNodes("c_test", []*conv.Node{in})
+
+	c.Len(evs, 1, "got %d events, want 1", len(evs))
+	um := evs[0].GetUserMessage()
+	c.NotNil(um, "event 0 is %T, want Event_UserMessage", evs[0].Payload)
+	c.Len(um.GetInjected(), 4, "the fixture's four reminders are injected")
+	c.Len(um.GetContent(), 1, "the user's one line is the content")
+
+	for _, cb := range um.GetInjected() {
+		text := cb.GetText().GetText()
+		c.False(strings.HasPrefix(text, "<system-reminder>"), "injected text %q still carries its wrapper", text)
+	}
+	c.Eq("Reply with exactly one word: ready", um.GetContent()[0].GetText().GetText(), "the user's own text")
 }
