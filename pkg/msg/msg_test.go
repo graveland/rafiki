@@ -179,3 +179,13 @@ func TestOpaqueType(t *testing.T) {
 	c.Eq("", msg.OpaqueType(opaque(`5`)), "raw JSON that is not an object")
 	c.Eq("", msg.OpaqueType(opaque(``)), "empty raw")
 }
+
+// TestInjectedZeroValueIsUserText pins the safe meaning of the zero value: an
+// unmarked text block is the user's own words, so a fixture or a constructor
+// that forgets the field cannot accidentally claim harness provenance.
+func TestInjectedZeroValueIsUserText(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	c.False(msg.Text{}.Injected, "the zero Text is user text, not harness-inserted context")
+	c.True(msg.Text{Text: "x", Injected: true}.Injected, "the annotation is settable")
+}

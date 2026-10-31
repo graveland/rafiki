@@ -221,6 +221,12 @@ func translateUser(m msg.Message) ([]chatMessage, error) {
 	for _, b := range m.Content {
 		switch t := b.(type) {
 		case msg.Text:
+			if t.Injected {
+				if text.Len() > 0 {
+					text.WriteString("\n")
+				}
+				text.WriteString(msg.InjectedTextNote)
+			}
 			text.WriteString(t.Text)
 		case msg.ToolResult:
 			var sb strings.Builder

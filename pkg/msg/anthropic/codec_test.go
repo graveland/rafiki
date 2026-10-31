@@ -775,3 +775,37 @@ func canonOf(c *assert.C, content []byte) []byte {
 	c.NoError(err, "Canon(%s)", content)
 	return canon
 }
+
+// TestInjectedTextEncodesByteIdentical pins that Injected is an annotation and
+// nothing more in this dialect: Claude Code has its own convention for the
+// context a harness inserts, so a marked block is not wrapped, moved or dropped
+// — it encodes exactly as the same bytes unmarked.
+func TestInjectedTextEncodesByteIdentical(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	const reminder = "<system-reminder>\nx\n</system-reminder>"
+	marked := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.Text{Text: reminder, Injected: true},
+		msg.Text{Text: "hi"},
+	}}
+	plain := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.Text{Text: reminder},
+		msg.Text{Text: "hi"},
+	}}
+
+	markedContent, err := anthropic.EncodeContent(marked)
+	c.NoError(err, "EncodeContent with a marked block")
+	plainContent, err := anthropic.EncodeContent(plain)
+	c.NoError(err, "EncodeContent with an unmarked block")
+	c.EqDeep(plainContent, markedContent, "Injected must not change the encoded content")
+
+	markedParam, err := anthropic.ToParam(marked)
+	c.NoError(err, "ToParam with a marked block")
+	plainParam, err := anthropic.ToParam(plain)
+	c.NoError(err, "ToParam with an unmarked block")
+	markedBody, err := json.Marshal(markedParam)
+	c.NoError(err, "marshal the marked param")
+	plainBody, err := json.Marshal(plainParam)
+	c.NoError(err, "marshal the unmarked param")
+	c.EqDeep(plainBody, markedBody, "Injected must not change the SDK param")
+}

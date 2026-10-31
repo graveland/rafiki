@@ -402,7 +402,11 @@ func (c Codec) messageItems(m msg.Message) ([]any, error) {
 			if t.Text == "" {
 				continue
 			}
-			parts = append(parts, textPart{Type: partType, Text: t.Text})
+			text := t.Text
+			if t.Injected {
+				text = msg.InjectedTextNote + text
+			}
+			parts = append(parts, textPart{Type: partType, Text: text})
 		case msg.Image:
 			img, err := imagePart(t)
 			if err != nil {

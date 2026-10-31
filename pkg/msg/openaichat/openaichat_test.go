@@ -501,3 +501,46 @@ func mustJSON(c *assert.C, v any) string {
 	c.NoError(err, "marshal for inspection")
 	return string(b)
 }
+
+// TestInjectedTextIsNotedInChatCompletions pins the note this dialect has no
+// harness convention for: a marked block is prefixed with InjectedTextNote, and
+// text already in the message is separated from it by a newline so the note
+// cannot run on from the user's own words. Unmarked text is unchanged.
+func TestInjectedTextIsNotedInChatCompletions(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, tc := range []struct {
+		name    string
+		content []msg.Block
+		want    string
+	}{
+		{
+			name:    "marked first",
+			content: []msg.Block{msg.Text{Text: "R", Injected: true}, msg.Text{Text: "hi"}},
+			want:    msg.InjectedTextNote + "R" + "hi",
+		},
+		{
+			name:    "marked after user text",
+			content: []msg.Block{msg.Text{Text: "hi"}, msg.Text{Text: "R", Injected: true}},
+			want:    "hi\n" + msg.InjectedTextNote + "R",
+		},
+		{
+			name:    "unmarked",
+			content: []msg.Block{msg.Text{Text: "R"}, msg.Text{Text: "hi"}},
+			want:    "Rhi",
+		},
+	} {
+		req := &msg.Request{
+			Model:     "test-model",
+			MaxTokens: 64,
+			Messages:  []msg.Message{{Role: msg.User, Content: tc.content}},
+		}
+		body, err := openaichat.Encode(req, msg.EncodeOptions{})
+		c.NoError(err, "%s: encode", tc.name)
+		messages := arrayAt(c, canonicalObject(c, body, "encoded body")["messages"], "messages")
+		c.Eq(1, len(messages), "%s: one user message", tc.name)
+		content, ok := objectAt(c, messages[0], "messages[0]")["content"].(string)
+		c.True(ok, "%s: content is a string", tc.name)
+		c.Eq(tc.want, content, "%s: content", tc.name)
+	}
+}

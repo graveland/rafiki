@@ -78,8 +78,19 @@ type Ext struct {
 // Text is a run of plain text.
 type Text struct {
 	Text string
-	Ext  Ext
+	// Injected marks harness-inserted context in a user message — text the
+	// user never wrote. It is an annotation: Text keeps the raw string, the
+	// harness's wrapper included, so a marked block encodes exactly as an
+	// unmarked one in its own dialect. It is never stored; a harness package
+	// (pkg/harness) sets it when a message is read for display or replay.
+	Injected bool
+	Ext      Ext
 }
+
+// InjectedTextNote prefixes an Injected block in dialects with no harness
+// convention of their own, so the model does not read it as user speech. It
+// is a constant: replayed history must encode to the same bytes every turn.
+const InjectedTextNote = "[The following text was added by the agent harness as context. It is not a message from the user.]\n"
 
 // Thinking is a model reasoning block. Sig carries where its signature came
 // from, because a signature minted by one provider's dialect is only

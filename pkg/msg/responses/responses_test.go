@@ -277,3 +277,40 @@ func reasoningIDs(t *testing.T, body map[string]any) []string {
 	}
 	return ids
 }
+
+// TestInjectedTextIsNotedInResponses pins that a marked block carries the note
+// as the prefix of its own part, in place: the part stays where the block was,
+// and an unmarked block's part is its text unchanged.
+func TestInjectedTextIsNotedInResponses(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	userItem := func(content []msg.Block) map[string]any {
+		body, err := (responses.Codec{Mode: responses.ModeAPI}).Encode(&msg.Request{
+			Model:     "test-model",
+			MaxTokens: 64,
+			Messages:  []msg.Message{{Role: msg.User, Content: content}},
+		}, msg.EncodeOptions{})
+		c.NoError(err, "encode")
+		var doc map[string]any
+		c.NoError(json.Unmarshal(body, &doc), "decode the built body")
+		items, ok := doc["input"].([]any)
+		c.True(ok, "input is an array")
+		c.Len(items, 1, "one input item")
+		item, ok := items[0].(map[string]any)
+		c.True(ok, "input[0] is an object")
+		c.Eq("user", item["role"], "input[0] role")
+		return item
+	}
+
+	marked := userItem([]msg.Block{msg.Text{Text: "R", Injected: true}, msg.Text{Text: "hi"}})
+	c.EqDeep[any]([]any{
+		map[string]any{"type": "input_text", "text": msg.InjectedTextNote + "R"},
+		map[string]any{"type": "input_text", "text": "hi"},
+	}, marked["content"], "a marked block is noted in place, the block after it untouched")
+
+	plain := userItem([]msg.Block{msg.Text{Text: "R"}, msg.Text{Text: "hi"}})
+	c.EqDeep[any]([]any{
+		map[string]any{"type": "input_text", "text": "R"},
+		map[string]any{"type": "input_text", "text": "hi"},
+	}, plain["content"], "an unmarked block's part is its text unchanged")
+}
