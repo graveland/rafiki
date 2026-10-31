@@ -121,28 +121,34 @@ func runTurns(t *testing.T, conv *Conversation, n int, stream bool) {
 	}
 }
 
-// TestGuardSkipsObservationWithoutCacheRead pins the guard's evidence rule: a
-// turn whose response reports NO cache-read count is not an observation. Read
-// as a zero it would look like a miss, and five such turns would eject a
-// healthy provider on no evidence at all.
-func TestGuardSkipsObservationWithoutCacheRead(t *testing.T) {
+// TestGuardObservesAbsentCacheReadAsZero pins the guard's evidence rule: an
+// OpenRouter turn that reports its input tokens but no cache-read figure is a
+// cache miss and reaches the guard as CacheReadTokens 0 — five such turns eject
+// the provider exactly as a reported zero does. A turn reporting no input count
+// at all is no evidence and observes nothing.
+func TestGuardObservesAbsentCacheReadAsZero(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := convTestPool(t)
 
 	g := routing.NewProviderGuard(routing.DefaultEjectTTL, testLogger(t))
 	conv := guardTestConversation(t, pool, g, nativeFakeSender{resp: cacheMissResponse("Together", nil)})
-	// Well past the miss streak that would eject, if these were observed.
 	runTurns(t, conv, 8, false)
-	c.Nil(g.IgnoredFor(time.Now(), guardModel), "a response with no cache_read count was treated as evidence")
+	c.EqDeep([]string{"together"}, g.IgnoredFor(time.Now(), guardModel),
+		"an absent cache_read count must be observed as a miss")
 
-	// The positive control: the SAME turns with a REPORTED zero are evidence,
-	// and eject the provider. Without this the assertion above could pass for
-	// the wrong reason (the guard never observing anything at all).
 	g2 := routing.NewProviderGuard(routing.DefaultEjectTTL, testLogger(t))
 	conv2 := guardTestConversation(t, pool, g2, nativeFakeSender{resp: cacheMissResponse("Together", msg.Ptr(0))})
 	runTurns(t, conv2, 8, false)
 	c.EqDeep([]string{"together"}, g2.IgnoredFor(time.Now(), guardModel),
 		"a reported zero cache read must reach the guard as a miss")
+
+	// Neither figure reported: no evidence, however many turns.
+	noUsage := cacheMissResponse("Together", nil)
+	noUsage.Usage.Input = nil
+	g3 := routing.NewProviderGuard(routing.DefaultEjectTTL, testLogger(t))
+	conv3 := guardTestConversation(t, pool, g3, nativeFakeSender{resp: noUsage})
+	runTurns(t, conv3, 8, false)
+	c.Nil(g3.IgnoredFor(time.Now(), guardModel), "a turn with no input count was treated as evidence")
 }
 
 // TestStreamingProviderAttributionReachesGuard pins that the backend a response

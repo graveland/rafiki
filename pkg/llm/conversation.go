@@ -324,7 +324,7 @@ type sendConfig struct {
 }
 
 // streamSink is the per-send stream observer: the handler sees the response
-// accumulated so far after each content-bearing event.
+// accumulated so far, coalesced as StreamHandler describes.
 type streamSink struct {
 	native StreamHandler
 }
@@ -334,12 +334,18 @@ func (s streamSink) active() bool { return s.native != nil }
 
 type SendOption func(*sendConfig)
 
-// StreamHandler receives the response accumulated so far after each
-// content-bearing stream event.
+// StreamHandler receives the response accumulated so far. It is called after
+// every block start and block stop, and after a delta event (text, thinking,
+// signature or input-json fragment) at most once per streamHandlerMinInterval
+// (50 ms), measured from the last delta-triggered call, the first delta of a
+// send always calling; deltas arriving sooner are
+// folded into the next call's view, and the block's stop delivers the final
+// one. The view only grows, and a call never happens after the send returns.
 type StreamHandler func(partial *msg.Response)
 
-// WithStreamHandler streams the response, invoking h after each event that
-// carries content, with the response accumulated so far, and returns the
+// WithStreamHandler streams the response, invoking h with the response
+// accumulated so far — after every block start and stop, and after delta
+// events at most once per 50 ms (see StreamHandler) — and returns the
 // accumulated message exactly as an unstreamed call would.
 //
 // h is never ignored: every sender streams. h is called synchronously on the

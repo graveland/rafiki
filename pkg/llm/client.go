@@ -526,17 +526,19 @@ func setUsageAttrs(span trace.Span, resp *msg.Response) {
 	)
 }
 
-// observeProvider feeds the provider cache guard — but only with evidence. An
-// OpenRouter turn that reports neither a cache-read nor an input count says
-// nothing about the backend's cache behaviour, and a fabricated observation
-// would eject a healthy provider. The gate is the guard's own input contract,
-// not a heuristic: both counts must be present.
+// observeProvider feeds the provider cache guard, for OpenRouter turns only. A
+// turn that reports no input count says nothing about the backend's cache
+// behaviour, and a fabricated observation would eject a healthy provider, so
+// Input must be present. An ABSENT cache-read figure is a cache miss, not
+// missing evidence — OpenRouter may omit the field when nothing was read — so
+// it is observed as 0; skipping it would blind the guard in exactly the case
+// it exists to catch.
 func (c *Client) observeProvider(ref turnRef, model, servedBy string, resp *msg.Response) {
 	p, ok := c.set.Get(servedBy)
 	if !ok || p.Kind != providers.KindAnthropicOpenRouter {
 		return
 	}
-	if resp.Usage.CacheRead == nil || resp.Usage.Input == nil {
+	if resp.Usage.Input == nil {
 		return
 	}
 	c.guard.Observe(time.Now(), routing.Observation{
@@ -922,6 +924,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 	}
 
 	acc := msg.NewAccumulator()
+	var lastDeltaCall time.Time
 	for serr == nil {
 		ev, derr := dec.Next()
 		if errors.Is(derr, io.EOF) {
@@ -949,7 +952,18 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 			return nil, true, delivered, wrapped
 		}
 		if content && handler.native != nil {
-			handler.native(acc.Response())
+			// acc.Response() deep-copies every block, the open tool-input
+			// buffer included, so calling it per delta costs O(N^2) bytes in
+			// a streamed argument. Starts and stops always call; deltas are
+			// coalesced to one call per streamHandlerMinInterval, the first
+			// delta of a send always calling, and the BlockStop that closes
+			// every block delivers the final view.
+			if !isDeltaEvent(ev) {
+				handler.native(acc.Response())
+			} else if time.Since(lastDeltaCall) >= streamHandlerMinInterval {
+				handler.native(acc.Response())
+				lastDeltaCall = time.Now()
+			}
 		}
 	}
 	if serr != nil {
@@ -993,6 +1007,22 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 	}
 	c.recordRawTrace(ctx, meta, ref.turnID, p.req, resp, 200, p.primary, latency, nil, hdrs)
 	return resp, true, delivered, nil
+}
+
+// streamHandlerMinInterval is the least time between two stream-handler calls
+// triggered by delta events, measured from the last delta-triggered call (the
+// first delta of a send is never held back). Block starts and stops are never
+// held back by it.
+const streamHandlerMinInterval = 50 * time.Millisecond
+
+// isDeltaEvent reports whether ev is a BlockDelta (a text, thinking, signature
+// or input-json fragment) — the only event kind the stream handler coalesces.
+func isDeltaEvent(ev msg.StreamEvent) bool {
+	switch ev.(type) {
+	case msg.BlockDelta, *msg.BlockDelta:
+		return true
+	}
+	return false
 }
 
 // primaryGate is the ONE place that decides whether a send should issue to
