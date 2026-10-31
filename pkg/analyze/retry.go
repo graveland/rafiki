@@ -3,9 +3,8 @@
 package analyze
 
 import (
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // retryContent builds the follow-up user turn for a failed schema-forced
@@ -21,27 +20,26 @@ import (
 // not just the first one. Only when resp has no tool_use at all (the model
 // replied with text and never called the tool) is a plain user-text turn
 // legal.
-func retryContent(resp *anthropic.Message, errText string) []anthropic.ContentBlockParamUnion {
+func retryContent(resp *msg.Response, errText string) []msg.Block {
 	ids := toolUseIDs(resp)
 	if len(ids) == 0 {
-		return llm.UserText(errText)
+		return llm.UserTextMsg(errText)
 	}
-	blocks := make([]anthropic.ContentBlockParamUnion, len(ids))
+	blocks := make([]msg.Block, len(ids))
 	for i, id := range ids {
-		blocks[i] = anthropic.NewToolResultBlock(id, errText, true)
+		blocks[i] = msg.ToolResult{ToolUseID: id, Content: []msg.Block{msg.Text{Text: errText}}, IsError: true}
 	}
 	return blocks
 }
 
 // toolUseIDs returns the IDs of every tool_use block in resp's content, in
 // order.
-func toolUseIDs(resp *anthropic.Message) []string {
+func toolUseIDs(resp *msg.Response) []string {
 	var ids []string
 	for _, block := range resp.Content {
-		if block.Type != "tool_use" {
-			continue
+		if tu, ok := block.(msg.ToolUse); ok {
+			ids = append(ids, tu.ID)
 		}
-		ids = append(ids, block.AsToolUse().ID)
 	}
 	return ids
 }

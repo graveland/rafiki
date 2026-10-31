@@ -8,10 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // builtinDetectorPrompt is the default system prompt for Detect, judging a
@@ -92,11 +91,15 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 		return nil, fmt.Errorf("analyze: detect: %w", err)
 	}
 
-	tools := []anthropic.ToolUnionParam{reportFindingsTool()}
+	tool, err := reportFindingsTool()
+	if err != nil {
+		return nil, fmt.Errorf("analyze: detect: %w", err)
+	}
+	tools := []msg.ToolDef{tool}
 	md := renderTranscriptMarkdown(t)
 
-	resp, err := conv.Send(ctx, llm.UserText(md),
-		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+	resp, err := conv.SendMsg(ctx, llm.UserTextMsg(md),
+		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: detect: %w", err)
 	}
@@ -105,8 +108,8 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 	if perr != nil {
 		retry := fmt.Sprintf("Your report_findings call could not be used: %v\n\n"+
 			"Call report_findings again with input that satisfies the schema.", perr)
-		resp, err = conv.Send(ctx, retryContent(resp, retry),
-			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+		resp, err = conv.SendMsg(ctx, retryContent(resp, retry),
+			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 		if err != nil {
 			return nil, fmt.Errorf("analyze: detect retry: %w", err)
 		}
@@ -116,7 +119,7 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 		}
 	}
 
-	model = string(resp.Model)
+	model = resp.Model
 	analysis := &Analysis{
 		ConversationID:  t.ConversationID,
 		DetectorVersion: DetectorVersion,
@@ -125,8 +128,8 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 		Outcome:         out.Outcome,
 		Verdicts:        out.Verdicts,
 		Findings:        out.Findings,
-		InputTokens:     resp.Usage.InputTokens,
-		OutputTokens:    resp.Usage.OutputTokens,
+		InputTokens:     msg.Val(resp.Usage.Input),
+		OutputTokens:    msg.Val(resp.Usage.Output),
 		CostUSD:         detectCost(pricer, model, resp.Usage),
 	}
 	return analysis, nil
@@ -136,7 +139,7 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 // or has no entry for model. The arithmetic lives on routing.ModelPricing so
 // every cost consumer (here, and the agent runtimes that price per turn) shares
 // one formula.
-func detectCost(pricer insights.Pricer, model string, usage anthropic.Usage) float64 {
+func detectCost(pricer insights.Pricer, model string, usage msg.Usage) float64 {
 	if pricer == nil {
 		return 0
 	}
@@ -144,20 +147,20 @@ func detectCost(pricer insights.Pricer, model string, usage anthropic.Usage) flo
 	if !ok {
 		return 0
 	}
-	return price.Cost(usage).Total
+	return price.UsageCost(usage).Total
 }
 
 // parseReportFindings finds the report_findings tool_use block in resp,
 // unmarshals its input, and validates the axis/recommendation-kind enums.
-func parseReportFindings(resp *anthropic.Message) (*detectorOutput, error) {
+func parseReportFindings(resp *msg.Response) (*detectorOutput, error) {
 	var raw json.RawMessage
 	for _, block := range resp.Content {
-		if block.Type != "tool_use" {
+		tu, ok := block.(msg.ToolUse)
+		if !ok {
 			continue
 		}
-		tu := block.AsToolUse()
 		if tu.Name == "report_findings" {
-			raw = json.RawMessage(tu.Input)
+			raw = tu.Input
 			break
 		}
 	}
@@ -200,8 +203,9 @@ func validateDetectorOutput(out *detectorOutput) error {
 	return nil
 }
 
-// reportFindingsTool mirrors Analysis's outcome/verdicts/findings fields.
-func reportFindingsTool() anthropic.ToolUnionParam {
+// reportFindingsTool declares the report_findings tool, whose schema mirrors
+// Analysis's outcome/verdicts/findings fields.
+func reportFindingsTool() (msg.ToolDef, error) {
 	evidenceItem := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -232,25 +236,28 @@ func reportFindingsTool() anthropic.ToolUnionParam {
 		},
 		"required": []string{"axis", "title", "topic_key", "evidence", "recommendation", "confidence"},
 	}
-	return anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
-		Name: "report_findings",
-		Description: anthropic.String(
-			"Report the detector's verdict for this conversation: one-line outcome, " +
-				"per-axis verdicts (skill-gap, knowledge-to-persist, grind), and any findings."),
-		InputSchema: anthropic.ToolInputSchemaParam{
-			Type: "object",
-			Properties: map[string]any{
-				"outcome": map[string]any{"type": "string", "description": "one-line what-happened summary"},
-				"verdicts": map[string]any{
-					"type":                 "object",
-					"description":          "axis -> ok|finding|n/a",
-					"additionalProperties": map[string]any{"type": "string", "enum": []string{"ok", "finding", "n/a"}},
-				},
-				"findings": map[string]any{"type": "array", "items": findingItem},
+	schema, err := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"outcome": map[string]any{"type": "string", "description": "one-line what-happened summary"},
+			"verdicts": map[string]any{
+				"type":                 "object",
+				"description":          "axis -> ok|finding|n/a",
+				"additionalProperties": map[string]any{"type": "string", "enum": []string{"ok", "finding", "n/a"}},
 			},
-			Required: []string{"outcome", "verdicts", "findings"},
+			"findings": map[string]any{"type": "array", "items": findingItem},
 		},
-	}}
+		"required": []string{"outcome", "verdicts", "findings"},
+	})
+	if err != nil {
+		return msg.ToolDef{}, fmt.Errorf("report_findings input schema: %w", err)
+	}
+	return msg.ToolDef{
+		Name: "report_findings",
+		Description: "Report the detector's verdict for this conversation: one-line outcome, " +
+			"per-axis verdicts (skill-gap, knowledge-to-persist, grind), and any findings.",
+		InputSchema: schema,
+	}, nil
 }
 
 // renderTranscriptMarkdown renders t as compact markdown for the detector

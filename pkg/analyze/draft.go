@@ -9,10 +9,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // builtinDraftPrompt is the default system prompt for Draft, proposing a
@@ -74,11 +73,15 @@ func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillF
 		return nil, fmt.Errorf("analyze: draft: %w", err)
 	}
 
-	tools := []anthropic.ToolUnionParam{proposeSkillEditTool()}
-	msg := renderDraftRequest(f, current)
+	tool, err := proposeSkillEditTool()
+	if err != nil {
+		return nil, fmt.Errorf("analyze: draft: %w", err)
+	}
+	tools := []msg.ToolDef{tool}
+	userText := renderDraftRequest(f, current)
 
-	resp, err := conv.Send(ctx, llm.UserText(msg),
-		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
+	resp, err := conv.SendMsg(ctx, llm.UserTextMsg(userText),
+		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: draft: %w", err)
 	}
@@ -87,8 +90,8 @@ func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillF
 	if perr != nil {
 		retry := fmt.Sprintf("Your propose_skill_edit call could not be used: %v\n\n"+
 			"Call propose_skill_edit again with input that satisfies the schema.", perr)
-		resp, err = conv.Send(ctx, retryContent(resp, retry),
-			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
+		resp, err = conv.SendMsg(ctx, retryContent(resp, retry),
+			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
 		if err != nil {
 			return nil, fmt.Errorf("analyze: draft retry: %w", err)
 		}
@@ -98,13 +101,13 @@ func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillF
 		}
 	}
 
-	servedModel := string(resp.Model)
+	servedModel := resp.Model
 	return &SkillEdit{
 		FindingTitle: f.Title,
 		Files:        out.Files,
 		Rationale:    out.Rationale,
-		InputTokens:  resp.Usage.InputTokens,
-		OutputTokens: resp.Usage.OutputTokens,
+		InputTokens:  msg.Val(resp.Usage.Input),
+		OutputTokens: msg.Val(resp.Usage.Output),
 		CostUSD:      detectCost(pricer, servedModel, resp.Usage),
 	}, nil
 }
@@ -153,15 +156,15 @@ func renderDraftRequest(f RankedFinding, current []SkillFile) string {
 
 // parseProposeSkillEdit finds the propose_skill_edit tool_use block in resp,
 // unmarshals its input, and validates the file paths/rationale.
-func parseProposeSkillEdit(resp *anthropic.Message) (*draftOutput, error) {
+func parseProposeSkillEdit(resp *msg.Response) (*draftOutput, error) {
 	var raw json.RawMessage
 	for _, block := range resp.Content {
-		if block.Type != "tool_use" {
+		tu, ok := block.(msg.ToolUse)
+		if !ok {
 			continue
 		}
-		tu := block.AsToolUse()
 		if tu.Name == "propose_skill_edit" {
-			raw = json.RawMessage(tu.Input)
+			raw = tu.Input
 			break
 		}
 	}
@@ -224,9 +227,9 @@ func validateRelativePath(p string) error {
 	return nil
 }
 
-// proposeSkillEditTool describes the propose_skill_edit tool: the full
+// proposeSkillEditTool declares the propose_skill_edit tool: the full
 // proposed file contents plus a short rationale.
-func proposeSkillEditTool() anthropic.ToolUnionParam {
+func proposeSkillEditTool() (msg.ToolDef, error) {
 	fileItem := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -235,18 +238,21 @@ func proposeSkillEditTool() anthropic.ToolUnionParam {
 		},
 		"required": []string{"path", "content"},
 	}
-	return anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
-		Name: "propose_skill_edit",
-		Description: anthropic.String(
-			"Propose a skill-file edit (or new skill) addressing the given finding: full " +
-				"file contents for each file to write, plus a short rationale."),
-		InputSchema: anthropic.ToolInputSchemaParam{
-			Type: "object",
-			Properties: map[string]any{
-				"files":     map[string]any{"type": "array", "items": fileItem},
-				"rationale": map[string]any{"type": "string"},
-			},
-			Required: []string{"files", "rationale"},
+	schema, err := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"files":     map[string]any{"type": "array", "items": fileItem},
+			"rationale": map[string]any{"type": "string"},
 		},
-	}}
+		"required": []string{"files", "rationale"},
+	})
+	if err != nil {
+		return msg.ToolDef{}, fmt.Errorf("propose_skill_edit input schema: %w", err)
+	}
+	return msg.ToolDef{
+		Name: "propose_skill_edit",
+		Description: "Propose a skill-file edit (or new skill) addressing the given finding: full " +
+			"file contents for each file to write, plus a short rationale.",
+		InputSchema: schema,
+	}, nil
 }
