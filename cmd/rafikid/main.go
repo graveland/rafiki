@@ -57,6 +57,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/tagsdb"
 	"go.graveland.dev/rafiki/pkg/telemetry"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -1013,6 +1014,13 @@ func runDaemon(opts runDaemonOpts) error {
 			}
 			if ctrl.modelAliasStore != nil {
 				face.Control.SetModelAliasManager(connectModelAliases{c: ctrl})
+			}
+			// Tags are DB-backed and shared: ONE store serves both the Tag RPCs
+			// and a from_tag spawn's resolution, so a tag a caller just created
+			// is one a spawn can fork from. A daemon with no database leaves
+			// both unwired, and both answer their own refusal.
+			if pool != nil {
+				wireTagManager(face.Control, ctrl, tagsdb.New(pool))
 			}
 			if ctrl.recall != nil {
 				face.Control.SetRecallManager(connectRecall{c: ctrl})

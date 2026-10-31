@@ -18,6 +18,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/tagsdb"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -289,4 +290,57 @@ func TestControllerSetPathSyncerRefusesNil(t *testing.T) {
 // verify pattern's TestControllerSyncer prefix.
 func TestControllerSyncerGuards(t *testing.T) {
 	t.Run("SetPathSyncerRefusesNil", TestControllerSetPathSyncerRefusesNil)
+}
+
+// stubForkStore is stubChildStore plus ForkSource, so a test can hand
+// wireForkSource one store of each kind and see the type assertion decide.
+type stubForkStore struct{ stubChildStore }
+
+func (stubForkStore) ForkSource(context.Context, string) (childstore.ForkSource, bool, error) {
+	return childstore.ForkSource{}, false, nil
+}
+
+// TestControllerWiresForkSourceFromChildStore pins the production wiring path
+// for forks, the same way TestControllerWiresLineageSourceFromChildStore pins
+// it for lineage: the Controller's children field is the narrower ChildStore,
+// which does NOT include ForkSource, so a store that lost it would leave every
+// fork refusing as "not visible" with nothing failing to compile.
+func TestControllerWiresForkSourceFromChildStore(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	wired := &Controller{}
+	wireForkSource(wired, stubForkStore{})
+	c.True(wired.forks != nil, "a store implementing ForkSource must be wired as the fork source")
+
+	barren := &Controller{}
+	wireForkSource(barren, stubChildStore{})
+	c.True(barren.forks == nil, "a store without ForkSource must leave the source nil")
+
+	refused := &Controller{}
+	refused.SetForkSource(nil)
+	c.True(refused.forks == nil, "SetForkSource must refuse a nil interface")
+}
+
+// TestTagManagerIsWired boots the tag wiring the daemon uses: the Tag RPCs
+// must reach the manager rather than answer "tags not yet wired", and a daemon
+// with no database must leave them Unavailable instead of nil-panicking.
+func TestTagManagerIsWired(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := scratchPool(t)
+	ctrl := newTestController(t)
+	srv := connectapi.NewServer(nil)
+
+	wireTagManager(srv, ctrl, tagsdb.New(pool))
+	c.True(ctrl.tagStore != nil, "wireTagManager must give the Controller the same store")
+
+	rows, err := srv.ListTags(context.Background(), connect.NewRequest(&rafikiv1.ListTagsRequest{
+		NamePrefix: uniqueForkName("wired"), Limit: 5,
+	}))
+	c.NoError(err, "ListTags after wireTagManager")
+	c.Eq(0, len(rows.Msg.GetRows()), "a fresh prefix lists nothing")
+
+	bare := connectapi.NewServer(nil)
+	wireTagManager(bare, ctrl, nil)
+	_, err = bare.ListTags(context.Background(), connect.NewRequest(&rafikiv1.ListTagsRequest{}))
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "an unwired daemon answers Unavailable, got %v", err)
 }

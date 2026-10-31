@@ -130,6 +130,18 @@ type Controller struct {
 	// subtreeSelector falls back to the live set alone.
 	lineage childstore.LineageSource
 
+	// forks is the child store's fork view: the durable row (closed children
+	// included) a fork or a tag reads a source's owner, kind and conversation
+	// from, and the parent chain ancestorsOf walks. Wired once at startup from
+	// the Postgres child store — see wireForkSource. Nil on a DB-less daemon or
+	// in a test, where a fork fails closed rather than guessing an authority.
+	forks forkSourceStore
+
+	// tagStore is the tag persistence a from_tag spawn resolves through, wired
+	// once at startup beside the Connect tag manager (wireTagManager), which
+	// shares the same instance. Nil on a DB-less daemon, where from_tag refuses.
+	tagStore tagStore
+
 	// stopping is set once the daemon's own shutdown sequence begins
 	// (ShutdownAllChildren). Child exits handled after that point skip the row
 	// persist on purpose: the process is dying and its children die with it,
@@ -926,6 +938,9 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		// descendants included); wire it so subtree spend and child conversation
 		// scope keep covering closed children.
 		wireLineageSource(c, childStore)
+		// The same store answers a fork's source row and parent chain; without
+		// it every fork would refuse as "not visible".
+		wireForkSource(c, childStore)
 		c.leases = store.NewLeases(pool)
 		// The review verbs' read surface. Pricer-less like coster's initial
 		// value: RecentAnalyses reads cost off the stored analysis row, it
@@ -2170,6 +2185,16 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		req.Kind = protocol.KindFundi
 	}
 
+	// A fork resolves ONCE, here: the node the new child's conversation starts
+	// after is settled before anything is minted, named or written, so a
+	// refusal starts no process. The node rides the child's session from this
+	// point on, which is what makes moving a tag unreachable from an existing
+	// fork and a resume a plain reopen of the conversation the fork created.
+	forkFromNodeID, err := c.resolveFork(ctx, req, owner)
+	if err != nil {
+		return protocol.SpawnResponseData{}, err
+	}
+
 	// A name a live SIBLING already holds is refused here (suffixed, for the
 	// daemon's tool spawners) — after the preset and routing resolution that
 	// decide the effective kind, and before anything is minted, forked or
@@ -2407,7 +2432,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 	}
 
-	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID, nil)
+	runner, err := c.agentRunnerFor(req, childID, false, ownerName, owner.UserID, nil, forkFromNodeID)
 	if err != nil {
 		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
@@ -2565,6 +2590,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		NoTools:            req.NoTools,
 		NoBuiltinTools:     req.NoBuiltinTools,
 		Routing:            req.Routing,
+		ForkFromNodeID:     forkFromNodeID,
 		Extensions:         req.Extensions,
 		NoExtensions:       req.NoExtensions,
 		Skills:             req.Skills,

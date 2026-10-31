@@ -136,6 +136,11 @@ type RuntimeOptions struct {
 	// provider-routing behaviour.
 	Routing string
 
+	// ForkFromNodeID is carried verbatim into Config.ForkFromNodeID: the node
+	// this child's conversation forks from. Resolved once at spawn by the
+	// daemon, never re-resolved on resume. Empty = no fork.
+	ForkFromNodeID string
+
 	// RoutingSource, when non-nil, is carried into Config.RoutingSource and
 	// overrides Routing: the engine's llm.Client resolves the spec LIVE on
 	// every request (llm.WithRoutingSource), so an operator's steering write
@@ -855,6 +860,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Providers:              opts.Providers,
 		APIKeyOverride:         opts.APIKeyOverride,
 		Routing:                opts.Routing,
+		ForkFromNodeID:         opts.ForkFromNodeID,
 		RoutingSource:          opts.RoutingSource,
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,

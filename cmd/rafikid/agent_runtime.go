@@ -124,9 +124,21 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 // snap is non-nil for Resume/RespawnChild, nil for a fresh Spawn — see
 // darajaLaunchExecutor's doc comment for why that distinction matters.
 func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
+	forkFromNodeID := ""
+	if snap != nil {
+		forkFromNodeID = snap.ForkFromNodeID
+	}
+	return c.agentRunnerFor(req, childID, autoResume, ownerName, ownerUserID, snap, forkFromNodeID)
+}
+
+// agentRunnerFor is agentRunner with the fork node passed in explicitly, for
+// the spawn path — where there is no stored snapshot yet to carry it. A resume
+// reads it back off the snapshot (agentRunner above), which is what makes the
+// node resolve ONCE: the record is the only source after spawn.
+func (c *Controller) agentRunnerFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot, forkFromNodeID string) (child.Runner, error) {
 	switch req.Kind {
 	case protocol.KindFundi:
-		ro, err := c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, credentialOwnerUserID(ownerUserID, snap))
+		ro, err := c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, credentialOwnerUserID(ownerUserID, snap), forkFromNodeID)
 		if err != nil {
 			return nil, err
 		}
@@ -346,7 +358,7 @@ func credentialOwnerUserID(ownerUserID string, snap *childstore.Snapshot) string
 // label. Start there, not here, or the child's ATTRIBUTION owner (which can come
 // from that label) silently becomes the BILLING owner.
 func (c *Controller) spawnAgentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (fundi.RuntimeOptions, error) {
-	return c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, ownerUserID)
+	return c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, ownerUserID, "")
 }
 
 // agentRuntimeOptionsFor builds the RuntimeOptions for an agent-kind req, and is
@@ -366,7 +378,7 @@ func (c *Controller) spawnAgentRuntimeOptions(req protocol.SpawnRequest, childID
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID, credentialOwner string) (fundi.RuntimeOptions, error) {
+func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID, credentialOwner, forkFromNodeID string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
@@ -417,6 +429,11 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	// resume AND startup recovery (see loadChildren), so all three get the live
 	// reader.
 	ro.RoutingSource = c.liveRoutingSource(childID, f.routing)
+
+	// The fork node was resolved ONCE, before this call: at spawn from the
+	// request, on a resume from the stored record. It is never re-resolved
+	// here, and llm.ForkFrom is ignored when the conversation already exists.
+	ro.ForkFromNodeID = forkFromNodeID
 
 	// The owner's ChatGPT model directory feeds TWO things from ONE parse: the
 	// per-model facts the sender gates its request on (ModelFactsFor reads the

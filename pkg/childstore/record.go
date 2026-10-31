@@ -113,6 +113,10 @@ type ChildConfig struct {
 	NoContextFiles     bool     `json:"noContextFiles,omitempty"`
 	SystemPrompt       string   `json:"systemPrompt,omitempty"`
 	AppendSystemPrompt string   `json:"appendSystemPrompt,omitempty"`
+	// ForkFromNodeID is the node this child's conversation forked from,
+	// resolved once at spawn. It rides the config JSONB like Routing, so a
+	// resume replays the same edge and never re-resolves a tag.
+	ForkFromNodeID string `json:"forkFromNodeID,omitempty"`
 	// Prefill is the spawn's pre-fill (see protocol.PrefillRead). It rides the
 	// config JSONB, so adding it costs no migration.
 	Prefill        []protocol.PrefillRead `json:"prefill,omitempty"`
@@ -213,6 +217,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 			NoContextFiles:     snap.NoContextFiles,
 			SystemPrompt:       snap.SystemPrompt,
 			AppendSystemPrompt: snap.AppendSystemPrompt,
+			ForkFromNodeID:     snap.ForkFromNodeID,
 			Prefill:            snap.Prefill,
 			Verbose:            snap.Verbose,
 			PiBinary:           snap.PiBinary,
@@ -287,6 +292,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		NoContextFiles:     rec.Config.NoContextFiles,
 		SystemPrompt:       rec.Config.SystemPrompt,
 		AppendSystemPrompt: rec.Config.AppendSystemPrompt,
+		ForkFromNodeID:     rec.Config.ForkFromNodeID,
 		Prefill:            rec.Config.Prefill,
 		Verbose:            rec.Config.Verbose,
 		PiBinary:           rec.Config.PiBinary,

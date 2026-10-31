@@ -104,6 +104,12 @@ type Session struct {
 	NoContextFiles     bool
 	SystemPrompt       string
 	AppendSystemPrompt string
+	// ForkFromNodeID is the conversation node this child's conversation was
+	// forked from. It resolves ONCE at spawn — from a fork_from reference or
+	// from a tag — and is carried across resume verbatim: moving a tag never
+	// reaches an existing fork, and a resume reopens the conversation the fork
+	// already created, where llm.ForkFrom is ignored. Empty means no fork.
+	ForkFromNodeID string
 	// Prefill is the spawn's pre-fill (see protocol.PrefillRead): the files
 	// (or globs) the child reads through its own Read tool before turn 1,
 	// recorded as real tool_use/tool_result history. Persisted and carried
@@ -248,10 +254,12 @@ type Snapshot struct {
 	NoContextFiles     bool
 	SystemPrompt       string
 	AppendSystemPrompt string
-	Prefill            []protocol.PrefillRead
-	Verbose            bool
-	PiBinary           string
-	ExtraArgs          []string
+	// ForkFromNodeID mirrors Session.ForkFromNodeID — see its doc comment.
+	ForkFromNodeID string
+	Prefill        []protocol.PrefillRead
+	Verbose        bool
+	PiBinary       string
+	ExtraArgs      []string
 
 	RecordRequests bool
 
@@ -342,8 +350,9 @@ func (s *Session) Snapshot() Snapshot {
 		NoThemes:          s.NoThemes,
 		NoContextFiles:    s.NoContextFiles,
 		SystemPrompt:      s.SystemPrompt, AppendSystemPrompt: s.AppendSystemPrompt,
-		Prefill: copyPrefill(s.Prefill),
-		Verbose: s.Verbose, PiBinary: s.PiBinary,
+		ForkFromNodeID: s.ForkFromNodeID,
+		Prefill:        copyPrefill(s.Prefill),
+		Verbose:        s.Verbose, PiBinary: s.PiBinary,
 		ExtraArgs: copyStrings(s.ExtraArgs),
 
 		RecordRequests: s.RecordRequests,

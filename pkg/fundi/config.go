@@ -115,6 +115,13 @@ type Config struct {
 	// populated — see CLAUDE.md's owner-attribution entry.
 	OwnerUserID string
 
+	// ForkFromNodeID, when set, creates this child's conversation as a fork of
+	// that node (llm.ForkFrom): its history is the source's up to that node, by
+	// reference. The daemon resolves it ONCE at spawn and carries it verbatim
+	// across resume; a resume reopens the conversation the fork already created,
+	// where llm.ForkFrom is ignored. Empty means no fork.
+	ForkFromNodeID string
+
 	// Pool is the database pool backing conversation persistence, supplied by
 	// the owning process. A nil Pool means an in-memory (capture-less)
 	// conversation, exactly as an empty DBURL used to behave. BuildEngine
@@ -353,6 +360,9 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	}
 	if c.Ref != "" {
 		convOpts = append(convOpts, llm.ByExternalRef(c.Ref))
+	}
+	if c.ForkFromNodeID != "" {
+		convOpts = append(convOpts, llm.ForkFrom(c.ForkFromNodeID))
 	}
 	if c.MaxOutputTokens > 0 {
 		convOpts = append(convOpts, llm.MaxTokens(int64(c.MaxOutputTokens)))
