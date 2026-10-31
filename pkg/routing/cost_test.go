@@ -5,8 +5,6 @@ package routing
 import (
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
@@ -24,11 +22,11 @@ var testPricing = ModelPricing{
 
 func TestModelPricingCostComponents(t *testing.T) {
 	c := assert.NewCollecting(t)
-	usage := anthropic.Usage{
-		InputTokens:              1000,
-		OutputTokens:             200,
-		CacheReadInputTokens:     5000,
-		CacheCreationInputTokens: 400,
+	usage := msg.Usage{
+		Input:      msg.Ptr(1000),
+		Output:     msg.Ptr(200),
+		CacheRead:  msg.Ptr(5000),
+		CacheWrite: msg.Ptr(400),
 	}
 
 	got := testPricing.Cost(usage)
@@ -49,26 +47,26 @@ func TestModelPricingCostComponents(t *testing.T) {
 // A zero-value ModelPricing (an unpriced model) must cost nothing rather than
 // producing NaN or panicking — callers treat 0 as "unpriced".
 func TestModelPricingCostZeroPricingIsFree(t *testing.T) {
-	usage := anthropic.Usage{InputTokens: 1000, OutputTokens: 200}
+	usage := msg.Usage{Input: msg.Ptr(1000), Output: msg.Ptr(200)}
 	assert.NewAborting(t).Eq((CostBreakdown{}), (ModelPricing{}).Cost(usage), "Cost()")
 }
 
 // Negative control: zero usage against real pricing is also free. Guards
 // against a formula that adds a per-turn constant.
 func TestModelPricingCostZeroUsageIsFree(t *testing.T) {
-	assert.NewAborting(t).Eq((CostBreakdown{}), testPricing.Cost(anthropic.Usage{}), "Cost()")
+	assert.NewAborting(t).Eq((CostBreakdown{}), testPricing.Cost(msg.Usage{}), "Cost()")
 }
 
-// Cost(usage) must be exactly CostOf over the same counts — the SDK-shaped
-// entry point is an adapter, not a second formula. A SQL rollup (which has
-// int64 counts and no anthropic.Usage) prices through CostOf and must agree.
+// Cost(usage) must be exactly CostOf over the same counts — the usage-shaped
+// entry point is an adapter, not a second formula. A SQL rollup (which has int64
+// counts and no msg.Usage) prices through CostOf and must agree.
 func TestModelPricingCostOfMatchesCost(t *testing.T) {
 	c := assert.NewAborting(t)
-	usage := anthropic.Usage{
-		InputTokens:              1000,
-		OutputTokens:             200,
-		CacheReadInputTokens:     5000,
-		CacheCreationInputTokens: 400,
+	usage := msg.Usage{
+		Input:      msg.Ptr(1000),
+		Output:     msg.Ptr(200),
+		CacheRead:  msg.Ptr(5000),
+		CacheWrite: msg.Ptr(400),
 	}
 
 	fromUsage := testPricing.Cost(usage)
@@ -88,16 +86,16 @@ func TestModelPricingCostOfArgumentOrder(t *testing.T) {
 	c.False(got.CacheWrite != testPricing.CacheWriteUSD || got.Input != 0, "CostOf(0,0,0,1) = %+v, want only CacheWrite charged", got)
 }
 
-// TestUsageCostNilIsZero pins the presence rule at the pricing boundary: a
+// TestCostNilIsZero pins the presence rule at the pricing boundary: a
 // count the provider did not report prices as zero, and a nil count must never
 // read as anything else (a panic, or a fabricated number).
-func TestUsageCostNilIsZero(t *testing.T) {
+func TestCostNilIsZero(t *testing.T) {
 	c := assert.NewCollecting(t)
 
-	c.Eq(CostBreakdown{}, testPricing.UsageCost(msg.Usage{}), "an all-nil usage is free")
+	c.Eq(CostBreakdown{}, testPricing.Cost(msg.Usage{}), "an all-nil usage is free")
 
 	// A nil field beside a reported one: only the reported one is charged.
-	got := testPricing.UsageCost(msg.Usage{
+	got := testPricing.Cost(msg.Usage{
 		Input:  msg.Ptr(1000),
 		Output: msg.Ptr(200),
 	})
@@ -106,16 +104,13 @@ func TestUsageCostNilIsZero(t *testing.T) {
 		Output: 200 * testPricing.CompletionUSD,
 	}
 	want.Total = want.Input + want.Output
-	c.Eq(want, got, "UsageCost with cache counts unreported")
+	c.Eq(want, got, "Cost with cache counts unreported")
 
-	// The same numbers through the native and the SDK-shaped adapter agree.
-	sdk := testPricing.Cost(anthropic.Usage{
-		InputTokens: 1000, OutputTokens: 200,
-		CacheReadInputTokens: 5000, CacheCreationInputTokens: 400,
-	})
-	native := testPricing.UsageCost(msg.Usage{
+	// The same numbers through the counts API and the usage API agree.
+	fromCounts := testPricing.CostOf(1000, 200, 5000, 400)
+	fromUsage := testPricing.Cost(msg.Usage{
 		Input: msg.Ptr(1000), Output: msg.Ptr(200),
 		CacheRead: msg.Ptr(5000), CacheWrite: msg.Ptr(400),
 	})
-	c.Eq(sdk, native, "UsageCost and Cost disagree for the same counts")
+	c.Eq(fromCounts, fromUsage, "CostOf and Cost disagree for the same counts")
 }

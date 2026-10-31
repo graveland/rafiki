@@ -141,7 +141,7 @@ func (e *Events) assistantRow(resp *msg.Response, row store.Appended) {
 
 // appendUser persists content as a user row and reports it through OnUserRow.
 func appendUser(ctx context.Context, conv *llm.Conversation, ev *Events, content []msg.Block) (store.Appended, error) {
-	row, err := conv.AppendUserMsg(ctx, content)
+	row, err := conv.AppendUser(ctx, content)
 	if err != nil {
 		return store.Appended{}, err
 	}
@@ -210,13 +210,13 @@ type Result struct {
 // Run drives a fresh tool-use loop: append userContent, then iterate
 // Continue → execute tools → persist results until end_turn or the
 // iteration cap. opts are additional llm.SendOptions (e.g.
-// llm.WithStreamHandlerMsg) forwarded to every conv.ContinueMsg call in the loop,
-// after llm.WithToolsMsg(defs) — so a caller-supplied option can override tools
+// llm.WithStreamHandler) forwarded to every conv.Continue call in the loop,
+// after llm.WithTools(defs) — so a caller-supplied option can override tools
 // if it ever needs to, but never displaces them by omission.
 //
-// opts are forwarded to EVERY ContinueMsg call in the loop, not just the first.
+// opts are forwarded to EVERY Continue call in the loop, not just the first.
 // A tool-calling run therefore delivers several assistant turns through one
-// llm.WithStreamHandlerMsg with no boundary event between them; a consumer
+// llm.WithStreamHandler with no boundary event between them; a consumer
 // that concatenates handler output will glue one turn's prose onto the
 // next. Use Events.OnTurn, which fires once per LLM call (see drive), as
 // the turn boundary.
@@ -305,7 +305,7 @@ func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Even
 				IsError:   true,
 			},
 		}
-		if _, err := conv.AppendUserMsg(ctx, synthetic); err != nil {
+		if _, err := conv.AppendUser(ctx, synthetic); err != nil {
 			return nil, fmt.Errorf("agentloop: persist synthetic result: %w", err)
 		}
 	}
@@ -386,15 +386,15 @@ func analyzeOrphans(history []*conv.Node) ([]orphan, *string) {
 
 // drive is the shared loop body: Continue with tools, execute any requested
 // batch, persist results per tool in tool_use order, repeat until end_turn.
-// opts are extra llm.SendOptions forwarded to every ContinueMsg call, after
-// llm.WithToolsMsg(defs) (built once, loop-invariant, matching defs above it) so
+// opts are extra llm.SendOptions forwarded to every Continue call, after
+// llm.WithTools(defs) (built once, loop-invariant, matching defs above it) so
 // a caller-supplied option can override tools if it ever needs to.
 //
 // A turn that would otherwise run past its guardrail (the iteration cap, or
 // ev.ShouldStop) never gets hard-killed: see wrapUp.
 func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, opts ...llm.SendOption) (*Result, error) {
 	defs := tools.Definitions()
-	baseOpts := append([]llm.SendOption{llm.WithToolsMsg(defs)}, opts...)
+	baseOpts := append([]llm.SendOption{llm.WithTools(defs)}, opts...)
 	limit := ev.maxIterations()
 	var stats Stats
 	baseCap := conv.OutputCap()
@@ -489,7 +489,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 							"Response hit output token limit — tool call %q may have truncated arguments. Re-issue if needed.", tu.name)}},
 						IsError: true,
 					}
-					if _, err := conv.AppendUserMsg(ctx, []msg.Block{result}); err != nil {
+					if _, err := conv.AppendUser(ctx, []msg.Block{result}); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: persist truncated tool result: %w", err)
 					}
 				}
@@ -540,20 +540,20 @@ func wrapUp(ctx context.Context, conv *llm.Conversation, ev *Events, sendOpts []
 			IsError:   true,
 		}
 	}
-	if _, err := conv.AppendUserMsg(ctx, results); err != nil {
+	if _, err := conv.AppendUser(ctx, results); err != nil {
 		return &Result{Stats: *stats}, fmt.Errorf("agentloop: persist wrap-up tool results: %w", err)
 	}
 
-	// llm.WithToolsMsg(nil) last always wins over sendOpts' own
-	// llm.WithToolsMsg(defs) (options apply in order; a later option on the same
+	// llm.WithTools(nil) last always wins over sendOpts' own
+	// llm.WithTools(defs) (options apply in order; a later option on the same
 	// field overrides an earlier one) — no tools reach the request, so the model
 	// cannot respond with another tool_use regardless of what it was asked to
 	// do.
-	finalOpts := append(append([]llm.SendOption{}, sendOpts...), llm.WithToolsMsg(nil))
+	finalOpts := append(append([]llm.SendOption{}, sendOpts...), llm.WithTools(nil))
 	finalIteration := iteration + 1
 	start := time.Now()
 	var assistantRow store.Appended
-	resp, err := conv.ContinueMsg(ctx, persistedInto(finalOpts, &assistantRow)...)
+	resp, err := conv.Continue(ctx, persistedInto(finalOpts, &assistantRow)...)
 	ev.turn(finalIteration, resp, time.Since(start), err)
 	if err != nil {
 		return &Result{Stats: *stats}, fmt.Errorf("agentloop: wrap-up call: %w", err)
@@ -665,7 +665,7 @@ func executeBatch(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev
 	for i := range uses {
 		<-done[i]
 		content := []msg.Block{results[i]}
-		row, err := conv.AppendUserMsg(ctx, content)
+		row, err := conv.AppendUser(ctx, content)
 		if err != nil {
 			persistErr = err
 			cancel()
@@ -681,7 +681,7 @@ func executeBatch(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev
 }
 
 // toolResultBlock builds the tool_result content block sent back to the model.
-// Images come first, mirroring llm.UserContentMsg's block order; the text block
+// Images come first, mirroring llm.UserContent's block order; the text block
 // is always present (even when empty) so a text-free image-only result still
 // has the shape every consumer expects. This is the only place a tool's images
 // are turned into message content, so a change here is what the live request,

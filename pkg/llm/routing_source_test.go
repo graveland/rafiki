@@ -6,8 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -15,12 +14,12 @@ import (
 
 // newSourceClient builds a client on the openrouter-only registry with a
 // routing source and an optional static spec, plus an openrouter sender.
-func newSourceClient(t *testing.T, src func() routing.Spec, static routing.Spec, openrouter SDKSender) *Client {
+func newSourceClient(t *testing.T, src func() routing.Spec, static routing.Spec, openrouter Sender) *Client {
 	t.Helper()
 	c, err := NewClient(
 		WithProviders(routingSet(t)),
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 		WithRoutingSource(src),
@@ -37,7 +36,7 @@ func newSourceClient(t *testing.T, src func() routing.Spec, static routing.Spec,
 // and its error decoration disagree).
 func TestWithRoutingSourceIsReadPerRequest(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("one"),
 		respondText("two"),
 	}}
@@ -51,13 +50,13 @@ func TestWithRoutingSourceIsReadPerRequest(t *testing.T) {
 		return specB
 	}, routing.Spec{}, openrouter)
 
-	sendDeclParams(t, c, "openrouter/glmflash")
-	sendDeclParams(t, c, "openrouter/glmflash")
+	sendDecl(t, c, "openrouter/glmflash")
+	sendDecl(t, c, "openrouter/glmflash")
 
 	ck.Require().Len(openrouter.lastReq, 2, "two sends")
-	ck.StrContains(wireBody(t, openrouter.lastReq, 0), `"only":["fireworks"]`,
+	ck.StrContains(wireBody(t, openrouter, 0), `"only":["fireworks"]`,
 		"first request must carry the first source spec")
-	ck.StrContains(wireBody(t, openrouter.lastReq, 1), `"only":["together"]`,
+	ck.StrContains(wireBody(t, openrouter, 1), `"only":["together"]`,
 		"second request must carry the second source spec")
 	ck.Eq(int32(2), calls.Load(), "source must be evaluated exactly once per send")
 	ck.Require()
@@ -68,14 +67,14 @@ func TestWithRoutingSourceIsReadPerRequest(t *testing.T) {
 // WithRouting.
 func TestWithRoutingSourceNilIsIgnored(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	c := newSourceClient(t, nil, routing.Spec{Only: []string{"fireworks"}}, openrouter)
 
-	sendDeclParams(t, c, "openrouter/glmflash")
+	sendDecl(t, c, "openrouter/glmflash")
 
-	ck.StrContains(wireBody(t, openrouter.lastReq, 0), `"only":["fireworks"]`,
+	ck.StrContains(wireBody(t, openrouter, 0), `"only":["fireworks"]`,
 		"a nil source must leave the static WithRouting spec in place")
 	ck.Require()
 }
@@ -84,16 +83,16 @@ func TestWithRoutingSourceNilIsIgnored(t *testing.T) {
 // overrides the static spec installed with WithRouting.
 func TestWithRoutingSourceBeatsStaticRouting(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	c := newSourceClient(t, func() routing.Spec {
 		return routing.Spec{Only: []string{"together"}}
 	}, routing.Spec{Only: []string{"fireworks"}}, openrouter)
 
-	sendDeclParams(t, c, "openrouter/glmflash")
+	sendDecl(t, c, "openrouter/glmflash")
 
-	body := wireBody(t, openrouter.lastReq, 0)
+	body := wireBody(t, openrouter, 0)
 	ck.StrContains(body, `"only":["together"]`, "the live source must win over the static spec")
 	ck.NotStrContains(body, `"fireworks"`, "the static spec must not leak in")
 	ck.Require()

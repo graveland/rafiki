@@ -87,6 +87,42 @@ func TestAccumulateToolInputEmptyStringStart(t *testing.T) {
 		"an empty-string start with no deltas finalizes to an empty object")
 }
 
+// TestAccumulateToolInputEmptyStringStartThenDeltas is the shape a non-Anthropic
+// provider sends: content_block_start carries "input":"" and the arguments
+// arrive as input_json_delta fragments. The placeholder must be REPLACED by the
+// first fragment, not prefixed onto it — appending would produce `""{"a":1}`,
+// which is not JSON.
+func TestAccumulateToolInputEmptyStringStartThenDeltas(t *testing.T) {
+	c := assert.NewAborting(t)
+	a := msg.NewAccumulator()
+	addAll(c, a,
+		msg.BlockStart{Index: 0, Block: msg.ToolUse{ID: "toolu_1", Name: "read", Input: json.RawMessage(`""`)}},
+		msg.BlockDelta{Index: 0, Kind: msg.DeltaInputJSON, Text: `{"path":`},
+		msg.BlockDelta{Index: 0, Kind: msg.DeltaInputJSON, Text: `"/foo"}`},
+		msg.BlockStop{Index: 0},
+	)
+	c.Eq(`{"path":"/foo"}`, string(toolUseAt(c, a.Response(), 0).Input),
+		"the first fragment replaces the empty-string placeholder")
+}
+
+// TestAccumulateToolInputAbsentStartThenDeltas covers the null/absent input
+// seed: the same replacement rule applies when the start carries no input at
+// all.
+func TestAccumulateToolInputAbsentStartThenDeltas(t *testing.T) {
+	c := assert.NewAborting(t)
+	a := msg.NewAccumulator()
+	addAll(c, a,
+		msg.BlockStart{Index: 0, Block: msg.ToolUse{ID: "toolu_1", Name: "read"}},
+		msg.BlockDelta{Index: 0, Kind: msg.DeltaInputJSON, Text: `{"path":"/baz"}`},
+		msg.BlockStop{Index: 0},
+	)
+	c.Eq(`{"path":"/baz"}`, string(toolUseAt(c, a.Response(), 0).Input),
+		"an absent input seed is replaced by the first fragment")
+}
+
+// TestAccumulateToolInputInvalidDroppedAtStop: an input left as an incomplete
+// JSON prefix (an interrupted delta sequence) is dropped to "{}" at block stop
+// rather than handed to a tool, and the accumulator still finalizes.
 func TestAccumulateToolInputInvalidDroppedAtStop(t *testing.T) {
 	c := assert.NewAborting(t)
 	a := msg.NewAccumulator()

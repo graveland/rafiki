@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -39,7 +39,7 @@ type prefillGateSender struct {
 	open bool
 }
 
-func (s *prefillGateSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *prefillGateSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
 	s.mu.Lock()
 	if !s.open {
 		s.mu.Unlock()
@@ -47,7 +47,15 @@ func (s *prefillGateSender) New(ctx context.Context, params anthropic.MessageNew
 		return nil, errors.New("prefill gate closed")
 	}
 	s.mu.Unlock()
-	return s.inner.New(ctx, params)
+	return s.inner.Send(ctx, req, opts)
+}
+
+func (s *prefillGateSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // openGate lets calls through; opened only once a prompt has been queued.
@@ -59,12 +67,6 @@ func (s *prefillGateSender) openGate() {
 
 // callCount reports how many requests the inner sender actually served.
 func (s *prefillGateSender) callCount() int { return s.inner.callCount() }
-
-// prefillDBEngineSDK is prefillDBEngine for an SDK-typed fake (the gate sender).
-func prefillDBEngineSDK(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender, ref string, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
-	t.Helper()
-	return prefillDBEngine(t, pool, llm.FromSDKSender(sender), ref, extra)
-}
 
 // prefillDBEngine builds an engine over a DB-backed conversation reattached
 // by external ref, with the shared wiring every test in this file needs.
@@ -99,7 +101,7 @@ func prefillDBEngine(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref st
 func prefillDBSeedClient(t *testing.T, pool *pgxpool.Pool) *llm.Client {
 	t.Helper()
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(newCapturingSender(t, sampleEndTurn))),
+		llm.WithProviderSender("anthropic", newCapturingSender(t, sampleEndTurn)),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"))
 	assert.NewAborting(t).NoError(err)
@@ -170,7 +172,7 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err, "seed conversation")
-	c.NoError(conv.SeedHistoryMsg(ctx, prefillSeedRows("/tmp/a.txt")), "seed history")
+	c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")), "seed history")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 3 {
 		t.Fatalf("seeded history = %d rows (%v), want 3", len(hist), err)
 	}
@@ -178,7 +180,7 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
 	var eng *Engine
 	var out *syncBuffer
-	eng, out = prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out = prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		cfg.Prefill = prefill
 		if len(prefill) > 0 {
@@ -209,11 +211,11 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	msgs := params.Messages
 	c.Len(msgs, 3, "request has %d messages, want 3", len(msgs))
 	last := msgs[len(msgs)-1]
-	c.Eq(anthropic.MessageParamRoleUser, last.Role, "last request message role")
+	c.Eq(msg.User, last.Role, "last request message role")
 	text := ""
 	for _, b := range last.Content {
-		if b.OfText != nil {
-			text = b.OfText.Text
+		if tx, ok := b.(msg.Text); ok {
+			text = tx.Text
 		}
 	}
 	c.Eq("do the task", text, "task text")
@@ -250,7 +252,7 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 			msg.Text{Text: PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"},
 		},
 	}
-	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{textRow}), "seed history")
+	c.NoError(conv.SeedHistory(ctx, []msg.Message{textRow}), "seed history")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 1 {
 		t.Fatalf("seeded history = %d rows (%v), want 1", len(hist), err)
 	}
@@ -258,7 +260,7 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
 	var eng *Engine
 	var out *syncBuffer
-	eng, out = prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out = prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		if configured {
 			// runPrefill must NOT run either: the shape is already complete.
@@ -287,12 +289,12 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	msgs := params.Messages
 	c.Len(msgs, 1, "request has %d messages, want 1 (the merged user message)", len(msgs))
 	merged := msgs[0]
-	c.Eq(anthropic.MessageParamRoleUser, merged.Role, "request message 0 role")
+	c.Eq(msg.User, merged.Role, "request message 0 role")
 	c.Len(merged.Content, 2, "merged user message has %d blocks, want prefill text + task", len(merged.Content))
-	first := merged.Content[0]
-	c.False(first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble), "merged block 0 = %+v, want the pre-fill text", first)
-	last := merged.Content[1]
-	c.False(last.OfText == nil || last.OfText.Text != "do the task", "merged block 1 = %+v, want the task text last", last)
+	first, ok := merged.Content[0].(msg.Text)
+	c.False(!ok || !strings.HasPrefix(first.Text, PrefillTextPreamble), "merged block 0 = %+v, want the pre-fill text", merged.Content[0])
+	last, ok := merged.Content[1].(msg.Text)
+	c.False(!ok || last.Text != "do the task", "merged block 1 = %+v, want the task text last", merged.Content[1])
 	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
@@ -311,7 +313,7 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 	c.NoError(err, "seed conversation")
 	// Seed only r0+r1: r2 is what the pre-fill must write.
 	rows := prefillSeedRows("/tmp/a.txt")
-	c.NoError(conv.SeedHistoryMsg(ctx, rows[:2]), "seed history")
+	c.NoError(conv.SeedHistory(ctx, rows[:2]), "seed history")
 
 	var mu sync.Mutex
 	var readPaths []string
@@ -329,7 +331,7 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 	}
 
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
-	eng, out := prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		cfg.Prefill = []protocol.PrefillRead{{Path: "/tmp/a.txt"}}
 		cfg.Tools = ts
@@ -369,7 +371,7 @@ func TestPrefillSyntheticRowUsageIsNull(t *testing.T) {
 	ref := "prefill-usage-null"
 
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
-	eng, out := prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.Prefill = []protocol.PrefillRead{{Path: "/tmp/a.txt"}}
 	})
 	defer eng.Close()
@@ -414,7 +416,7 @@ func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
 
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
 	fatalCalled := make(chan error, 1)
-	eng, out := prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		cfg.OnFatal = func(err error) { fatalCalled <- err }
 	})
@@ -480,7 +482,7 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err, "seed conversation")
-	c.NoError(conv.SeedHistoryMsg(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
+	c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
 
 	var mu sync.Mutex
 	var reads int

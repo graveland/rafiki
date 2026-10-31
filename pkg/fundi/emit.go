@@ -329,7 +329,7 @@ func (e *Emitter) addUsage(u child.PiUsage) {
 }
 
 // costOf prices usage for the model that actually served the response, using
-// rafiki's shared per-component formula (routing.ModelPricing.UsageCost) so this
+// rafiki's shared per-component formula (routing.ModelPricing.Cost) so this
 // runtime and rafiki's analyze pipeline can never drift on the arithmetic.
 //
 // Zero is returned when there is no pricer or the model is unpriced — both are
@@ -344,7 +344,7 @@ func costOf(pricer Pricer, model string, usage msg.Usage) child.PiCost {
 	if !ok {
 		return child.PiCost{}
 	}
-	c := price.UsageCost(usage)
+	c := price.Cost(usage)
 	return child.PiCost{
 		Input:      c.Input,
 		Output:     c.Output,

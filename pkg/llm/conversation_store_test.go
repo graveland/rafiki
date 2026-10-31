@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/conv/convtest"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
@@ -37,7 +37,7 @@ func newStoredConversation(cl *Client, convID string) *Conversation {
 func TestConversationHistoryHitsCacheBetweenIterations(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "first"),
 		respondUsage(10, 5, 0, 0, "second"),
 	}}
@@ -45,7 +45,7 @@ func TestConversationHistoryHitsCacheBetweenIterations(t *testing.T) {
 	mem.Ensure("conv-cache")
 	counting := convtest.NewCounting(mem)
 	cl, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
@@ -131,7 +131,7 @@ func TestConversationLeaseLostStopsWriting(t *testing.T) {
 	mem := convpkg.NewMemBackend()
 	mem.Ensure("conv-lease")
 	cl, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("anthropic", &scriptedSender{}),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),

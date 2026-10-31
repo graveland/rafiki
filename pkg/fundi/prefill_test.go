@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -53,7 +51,7 @@ func prefillFakeRead(failPaths map[string]bool) fakeToolSet {
 func prefillSimpleEngine(t *testing.T, ts fakeToolSet, entries []protocol.PrefillRead, extra ...func(*EngineConfig)) (*Engine, *syncBuffer, *capturingSender) {
 	t.Helper()
 	sender := newCapturingSender(t, sampleEndTurn)
-	eng, out := newTestEngineWithSDKConfig(t, ts, sender, func(cfg *EngineConfig) {
+	eng, out := newTestEngineWithConfig(t, ts, sender, func(cfg *EngineConfig) {
 		cfg.Prefill = entries
 		for _, fn := range extra {
 			if fn != nil {
@@ -156,14 +154,14 @@ func TestPrefillRowsShape(t *testing.T) {
 	params := sender.lastParams(t)
 	c.Len(params.Messages, 3, "request has %d messages, want 3 (preamble, tool_use, merged tool_results+task)", len(params.Messages))
 	merged := params.Messages[2]
-	c.Eq(anthropic.MessageParamRoleUser, merged.Role, "request message 2 role")
+	c.Eq(msg.User, merged.Role, "request message 2 role")
 	c.Len(merged.Content, 3, "merged user message has %d blocks, want 2 tool_results + 1 text", len(merged.Content))
 	for i, id := range wantIDs {
-		tr := merged.Content[i].OfToolResult
-		c.False(tr == nil || tr.ToolUseID != id, "merged block %d is not a tool_result for %q", i, id)
+		tr, ok := merged.Content[i].(msg.ToolResult)
+		c.False(!ok || tr.ToolUseID != id, "merged block %d is not a tool_result for %q", i, id)
 	}
-	last := merged.Content[2]
-	c.False(last.OfText == nil || last.OfText.Text != "do the task", "merged block 2 = %+v, want the task text last", last)
+	last, ok := merged.Content[2].(msg.Text)
+	c.False(!ok || last.Text != "do the task", "merged block 2 = %+v, want the task text last", merged.Content[2])
 }
 
 // TestPrefillMissingFileIsErrorResult: one existing and one missing file —
@@ -625,12 +623,12 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 	params := sender.lastParams(t)
 	c.Len(params.Messages, 1, "request has %d messages, want 1 (the merged user message)", len(params.Messages))
 	merged := params.Messages[0]
-	c.Eq(anthropic.MessageParamRoleUser, merged.Role, "request message 0 role")
+	c.Eq(msg.User, merged.Role, "request message 0 role")
 	c.Len(merged.Content, 2, "merged user message has %d blocks, want prefill text + task", len(merged.Content))
-	first := merged.Content[0]
-	c.False(first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble), "merged block 0 = %+v, want the pre-fill text", first)
-	last := merged.Content[1]
-	c.False(last.OfText == nil || last.OfText.Text != "do the task", "merged block 1 = %+v, want the task text last", last)
+	first, ok := merged.Content[0].(msg.Text)
+	c.False(!ok || !strings.HasPrefix(first.Text, PrefillTextPreamble), "merged block 0 = %+v, want the pre-fill text", merged.Content[0])
+	last, ok := merged.Content[1].(msg.Text)
+	c.False(!ok || last.Text != "do the task", "merged block 1 = %+v, want the task text last", merged.Content[1])
 	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 

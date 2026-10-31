@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -30,7 +28,7 @@ func compactionPolicyOpt(cfg *EngineConfig) {
 
 func seedFourRows(t *testing.T, eng *Engine) {
 	t.Helper()
-	assert.NewAborting(t).NoError(eng.conv.SeedHistoryMsg(context.Background(), []msg.Message{
+	assert.NewAborting(t).NoError(eng.conv.SeedHistory(context.Background(), []msg.Message{
 		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "a"}}},
 		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "b"}}},
 		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "c"}}},
@@ -131,7 +129,14 @@ type ctxBlockingSender struct {
 	calls   atomic.Int32
 }
 
-func (s *ctxBlockingSender) New(ctx context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *ctxBlockingSender) Send(ctx context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	s.calls.Add(1)
+	s.once.Do(func() { close(s.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (s *ctxBlockingSender) Stream(ctx context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
 	s.calls.Add(1)
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
@@ -143,7 +148,7 @@ func (s *ctxBlockingSender) New(ctx context.Context, _ anthropic.MessageNewParam
 func TestSlashCompactIsAbortable(t *testing.T) {
 	c := assert.NewCollecting(t)
 	bs := &ctxBlockingSender{started: make(chan struct{})}
-	eng, out := newTestEngineWithSDKConfig(t, fakeToolSet{}, bs, compactionPolicyOpt)
+	eng, out := newTestEngineWithConfig(t, fakeToolSet{}, bs, compactionPolicyOpt)
 	seedFourRows(t, eng)
 
 	eng.HandlePrompt("/compact")
@@ -208,7 +213,7 @@ func TestSlashStartupResumeSkipsAfterClear(t *testing.T) {
 	c := assert.NewCollecting(t)
 	silenceSlog(t)
 	bs := &ctxBlockingSender{started: make(chan struct{})}
-	client, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(bs)), llm.WithDefaultModel("claude-x"))
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", bs), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)

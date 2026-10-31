@@ -870,7 +870,7 @@ func (e *Engine) runSlash(text string, images []llm.UserImage) bool {
 
 		// Only the tool definitions matter for the cached prefix: Compact drops
 		// the stream and batch hooks a turn's options would add.
-		done, err := e.conv.Compact(ctx, args, llm.WithToolsMsg(e.tools.Definitions()))
+		done, err := e.conv.Compact(ctx, args, llm.WithTools(e.tools.Definitions()))
 		aborted := errors.Is(ctx.Err(), context.Canceled)
 
 		e.mu.Lock()
@@ -1029,15 +1029,15 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	var result *agentloop.Result
 	var err error
 	if stop, why := e.haltedNow(); stop {
-		content := llm.UserContentMsg(text, images)
+		content := llm.UserContent(text, images)
 		var row store.Appended
-		if row, err = e.conv.AppendUserMsg(ctx, content); err == nil {
+		if row, err = e.conv.AppendUser(ctx, content); err == nil {
 			e.em.publishUserRow(content, row)
 			result = &agentloop.Result{LimitReached: true, LimitReason: why}
 		}
 	} else {
 		events, sendOpts := e.events()
-		result, err = agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContentMsg(text, images), sendOpts...)
+		result, err = agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), sendOpts...)
 	}
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
@@ -1142,18 +1142,18 @@ func (e *Engine) priorConversationCost() float64 {
 }
 
 // events wires the agent loop's observation callbacks to the pi emitter, and
-// returns the llm.SendOptions that must ride along on every conv.ContinueMsg call
+// returns the llm.SendOptions that must ride along on every conv.Continue call
 // of THIS turn so the loop actually streams and parks honestly.
 //
 // The stream handler and OnTurn are built together, sharing one coalescing
 // window, because of how agentloop.drive is structured: it builds its
-// sendOpts ONCE (llm.WithToolsMsg(defs) plus whatever this method returns)
+// sendOpts ONCE (llm.WithTools(defs) plus whatever this method returns)
 // and reuses that same slice — and therefore this same handler closure — for
-// every iteration of the turn's tool-use loop (drive calls conv.ContinueMsg
+// every iteration of the turn's tool-use loop (drive calls conv.Continue
 // once per iteration, stopping only at end_turn). Both stream events and
 // OnTurn fire on the loop's own goroutine, and the handler for iteration N is
-// always fully done (conv.ContinueMsg has returned) before OnTurn(N) runs and
-// before conv.ContinueMsg(N+1) can start — so it's safe for OnTurn to reset
+// always fully done (conv.Continue has returned) before OnTurn(N) runs and
+// before conv.Continue(N+1) can start — so it's safe for OnTurn to reset
 // the closure's streamed/lastFlush state with no locking, but the reset is
 // mandatory: without it, iteration N+1 would inherit iteration N's
 // coalescing window and suppress its own first flush.
@@ -1261,7 +1261,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
-					"upstream_provider", e.client.ProviderSlug(llm.ProviderOfMsg(resp)),
+					"upstream_provider", e.client.ProviderSlug(llm.ProviderOf(resp)),
 					"input_tokens", msg.Val(resp.Usage.Input), "output_tokens", msg.Val(resp.Usage.Output),
 					"cache_read_tokens", msg.Val(resp.Usage.CacheRead), "cache_creation_tokens", msg.Val(resp.Usage.CacheWrite),
 					"cache_pct", cachePct,
@@ -1270,9 +1270,9 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
-			// leaks state into the next conv.ContinueMsg call. lastFlush resets
+			// leaks state into the next conv.Continue call. lastFlush resets
 			// alongside streamed for the same reason: agentloop runs
-			// ContinueMsg once per tool-calling iteration, reusing this same
+			// Continue once per tool-calling iteration, reusing this same
 			// closure (see this method's doc), so each iteration must start
 			// its own coalescing window rather than inheriting the previous
 			// iteration's lastFlush and suppressing its own first flush.
@@ -1340,7 +1340,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			e.em.BatchWaitEnd()
 		}
 	}
-	return ev, []llm.SendOption{llm.WithStreamHandlerMsg(handler), llm.WithBatchWait(batchWait)}
+	return ev, []llm.SendOption{llm.WithStreamHandler(handler), llm.WithBatchWait(batchWait)}
 }
 
 // effectiveMaxCost returns the live cap when an accessor was configured,
@@ -1510,7 +1510,7 @@ func (e *Engine) drainSteers() []msg.Block {
 		e.em.UserMessage(q.text)
 	}
 	if len(images) > 0 {
-		return llm.UserContentMsg(strings.Join(texts, "\n"), images)
+		return llm.UserContent(strings.Join(texts, "\n"), images)
 	}
-	return llm.UserTextMsg(strings.Join(texts, "\n"))
+	return llm.UserText(strings.Join(texts, "\n"))
 }

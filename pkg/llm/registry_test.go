@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package llm_test
+package llm
 
 import (
 	"context"
@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
-	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
@@ -23,22 +22,28 @@ type recordingSender struct {
 	// routing.FailoverWorthy explicitly excludes context.Canceled and
 	// context.DeadlineExceeded (pkg/routing/classify.go), so a deadline error
 	// here would make callModel return immediately and the test would assert
-	// the wrong thing. A 5xx *anthropic.Error is the reliable choice.
+	// the wrong thing. A 5xx *msg.APIError is the reliable choice.
 	err error
 }
 
 func failoverWorthyErr() error {
-	resp := &http.Response{StatusCode: 503, Status: "503 Service Unavailable"}
-	req, _ := http.NewRequest("POST", "http://x", nil)
-	return &anthropic.Error{StatusCode: 503, Request: req, Response: resp}
+	return &msg.APIError{Status: http.StatusServiceUnavailable, Kind: msg.ErrOther, Dialect: msg.DialectAnthropic}
 }
 
-func (r recordingSender) New(_ context.Context, p anthropic.MessageNewParams) (*anthropic.Message, error) {
-	*r.calls = append(*r.calls, r.name+":"+string(p.Model))
+func (r recordingSender) Send(_ context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	*r.calls = append(*r.calls, r.name+":"+req.Model)
 	if r.err != nil {
 		return nil, r.err
 	}
-	return &anthropic.Message{}, nil
+	return &msg.Response{}, nil
+}
+
+func (r recordingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := r.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 func localSet(t *testing.T) *providers.Set {
@@ -60,33 +65,29 @@ base_url = "http://localhost:8005"
 func TestNewClientNeedsNoAnthropicSender(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	var calls []string
-	c, err := llm.NewClient(
-		llm.WithProviders(localSet(t)),
-		llm.WithProviderSender("vmlx", llm.FromSDKSender(recordingSender{name: "vmlx", calls: &calls})),
-		llm.WithDefaultModel("vmlx/qwen3"),
+	c, err := NewClient(
+		WithProviders(localSet(t)),
+		WithProviderSender("vmlx", recordingSender{name: "vmlx", calls: &calls}),
+		WithDefaultModel("vmlx/qwen3"),
 	)
 	ck.Require().NoError(err, "NewClient with no anthropic sender")
-	if _, err := c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
-		Model: anthropic.Model("vmlx/qwen3"), MaxTokens: 8,
-	}); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := c.send(context.Background(), SendMeta{}, &msg.Request{Model: "vmlx/qwen3", MaxTokens: 8}, nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 	// The sender receives the PROVIDER-LOCAL id, with the provider prefix
 	// stripped: "vmlx/qwen3" addresses provider vmlx and model qwen3.
 	ck.False(len(calls) != 1 || calls[0] != "vmlx:qwen3", "calls = %v, want [vmlx:qwen3]", calls)
 }
 
-func TestSendParamsUnknownProviderErrors(t *testing.T) {
+func TestSendUnknownProviderErrors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c, err := llm.NewClient(
-		llm.WithProviders(localSet(t)),
-		llm.WithProviderSender("vmlx", llm.FromSDKSender(recordingSender{name: "vmlx", calls: &[]string{}})),
+	c, err := NewClient(
+		WithProviders(localSet(t)),
+		WithProviderSender("vmlx", recordingSender{name: "vmlx", calls: &[]string{}}),
 	)
 	ck.Require().NoError(err, "NewClient")
-	_, err = c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
-		Model: anthropic.Model("deepseek/deepseek-chat"), MaxTokens: 8,
-	})
-	ck.Require().Error(err, "SendParams with an unconfigured provider succeeded")
+	_, err = c.send(context.Background(), SendMeta{}, &msg.Request{Model: "deepseek/deepseek-chat", MaxTokens: 8}, nil)
+	ck.Require().Error(err, "send with an unconfigured provider succeeded")
 	ck.StrContains(err.Error(), "unknown provider", "error = %q, want \"unknown provider\"", err.Error())
 }
 
@@ -107,17 +108,15 @@ base_url = "http://localhost:2"
 `))
 	ck.Require().NoError(err, "Parse")
 	var calls []string
-	c, err := llm.NewClient(
-		llm.WithProviders(set),
-		llm.WithProviderSender("primary", llm.FromSDKSender(recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()})),
-		llm.WithProviderSender("backup", llm.FromSDKSender(recordingSender{name: "backup", calls: &calls})),
-		llm.WithBreaker(time.Minute),
+	c, err := NewClient(
+		WithProviders(set),
+		WithProviderSender("primary", recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()}),
+		WithProviderSender("backup", recordingSender{name: "backup", calls: &calls}),
+		WithBreaker(time.Minute),
 	)
 	ck.Require().NoError(err, "NewClient")
-	if _, err := c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
-		Model: anthropic.Model("primary/m"), MaxTokens: 8,
-	}); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := c.send(context.Background(), SendMeta{}, &msg.Request{Model: "primary/m", MaxTokens: 8}, nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 	ck.False(len(calls) != 2 || calls[0] != "primary:m" || calls[1] != "backup:m", "calls = %v, want [primary:m backup:m]", calls)
 }
@@ -144,18 +143,16 @@ base_url = "http://localhost:3"
 `))
 	ck.Require().NoError(err, "Parse")
 	var calls []string
-	c, err := llm.NewClient(
-		llm.WithProviders(set),
-		llm.WithProviderSender("primary", llm.FromSDKSender(recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()})),
-		llm.WithProviderSender("backup", llm.FromSDKSender(recordingSender{name: "backup", calls: &calls})),
-		llm.WithProviderSender("other", llm.FromSDKSender(recordingSender{name: "other", calls: &calls})),
-		llm.WithBreaker(time.Minute),
+	c, err := NewClient(
+		WithProviders(set),
+		WithProviderSender("primary", recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()}),
+		WithProviderSender("backup", recordingSender{name: "backup", calls: &calls}),
+		WithProviderSender("other", recordingSender{name: "other", calls: &calls}),
+		WithBreaker(time.Minute),
 	)
 	ck.Require().NoError(err, "NewClient")
-	if _, err := c.SendParams(context.Background(), llm.SendMeta{Fallback: []string{"other"}}, anthropic.MessageNewParams{
-		Model: anthropic.Model("primary/m"), MaxTokens: 8,
-	}); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := c.send(context.Background(), SendMeta{Fallback: []string{"other"}}, &msg.Request{Model: "primary/m", MaxTokens: 8}, nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 	ck.False(len(calls) != 2 || calls[1] != "other:m", "calls = %v, want the caller's [other] to win over the configured [backup]", calls)
 }

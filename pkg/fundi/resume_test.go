@@ -52,7 +52,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	// --- process 1: create a genuine dangling tool_use, bypassing Engine ---
 	sender1 := newCapturingSender(t, sampleResp)
 	client1, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender1)),
+		llm.WithProviderSender("anthropic", sender1),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)
@@ -63,7 +63,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel() // no-op once the tool has already cancelled; guards early-return paths
 	tools := cancelOnExecuteTools{cancel: cancel}
-	_, runErr := agentloop.Run(turnCtx, conv1, tools, nil, llm.UserTextMsg("go"))
+	_, runErr := agentloop.Run(turnCtx, conv1, tools, nil, llm.UserText("go"))
 	c.Error(runErr, "agentloop.Run (process 1) succeeded, want an error from the cancelled-context persist "+
 		"(the tool cancels turnCtx before the tool_result gets persisted)")
 
@@ -118,7 +118,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	// what any real client would send next.
 	sender3 := newCapturingSender(t, sampleEndTurn)
 	client3, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender3)),
+		llm.WithProviderSender("anthropic", sender3),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)

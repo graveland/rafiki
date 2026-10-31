@@ -12,14 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -29,13 +26,11 @@ import (
 
 // appendNode persists one message under the conversation's head, the fixture
 // shape the trim and compaction tests seed before a send.
-func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic.MessageParam) {
+func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, message msg.Message) {
 	t.Helper()
 	ck := assert.NewAborting(t)
-	message, err := msganthropic.FromParam(param)
-	ck.NoError(err, "convert message")
 	handle := convpkg.NewStore(store.NewConvBackend(pool), convpkg.Options{}).Open(convID, convpkg.AsOwner())
-	_, err = handle.Append(context.Background(), convpkg.Append{FromHead: true, Nodes: []convpkg.NewNode{{Msg: message}}})
+	_, err := handle.Append(context.Background(), convpkg.Append{FromHead: true, Nodes: []convpkg.NewNode{{Msg: message}}})
 	ck.NoError(err, "append node")
 }
 
@@ -67,10 +62,10 @@ func convTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func testClient(t *testing.T, pool *pgxpool.Pool, sender SDKSender) *Client {
+func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("haiku-latest"), // conversations created without Model() intend this default
@@ -80,24 +75,24 @@ func testClient(t *testing.T, pool *pgxpool.Pool, sender SDKSender) *Client {
 	return c
 }
 
-// TestSendParamsSetsSessionIDFromConversationID proves the fundi-native path
-// (Conversation.Send -> Client.SendParams), not just the reverse-proxy face,
+// TestSendSetsSessionIDFromConversationID proves the fundi-native path
+// (Conversation.Send -> Client.send), not just the reverse-proxy face,
 // threads OpenRouter's sticky-routing session id through — and that the value
 // is rafiki's own conversation id, matching what pkg/server/proxy.go sends for
 // passthrough clients. pkg/llm/sender_provider_test.go covers the other half:
 // that a session id on the context really reaches OpenRouter as the
 // x-session-id header.
-func TestSendParamsSetsSessionIDFromConversationID(t *testing.T) {
+func TestSendSetsSessionIDFromConversationID(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -130,9 +125,9 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 	const served = `{"id":"msg_x","type":"message","role":"assistant","model":"claude-sonnet-5",
 		"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
 		"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		func(anthropic.MessageNewParams) (*anthropic.Message, error) { return cannedMessage(served), nil },
-		func(anthropic.MessageNewParams) (*anthropic.Message, error) { return cannedMessage(served), nil },
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(*msg.Request) (*msg.Response, error) { return cannedMessage(served), nil },
+		func(*msg.Request) (*msg.Response, error) { return cannedMessage(served), nil },
 	}}
 
 	cat := routing.NewModelCatalog(nil, time.Hour, testLogger(t))
@@ -142,7 +137,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 		}},
 	})
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(cat),
 		WithDefaultModel("haiku-latest"),
@@ -164,7 +159,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 	ck.LessOrEqual(1e-9, math.Abs(got-want), "ConversationCost = %v, want %v", got, want)
 
 	// A store-less client reports 0 rather than a bogus figure.
-	bare, err := NewClient(WithProviderSender("anthropic", sdkFake(sender)), WithDefaultModel("haiku-latest"))
+	bare, err := NewClient(WithProviderSender("anthropic", sender), WithDefaultModel("haiku-latest"))
 	ck.Require().NoError(err)
 	ck.Eq(0, bare.ConversationCost(ctx, "some-id"), "ConversationCost without a store")
 }
@@ -173,7 +168,7 @@ func TestConversationSendPersistsBothGranularities(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("first reply"),
 		respondText("second reply"),
 	}}
@@ -188,14 +183,15 @@ func TestConversationSendPersistsBothGranularities(t *testing.T) {
 
 	resp, err := conv.Send(ctx, UserText("hello"))
 	ck.Require().NoError(err, "Send")
-	ck.Require().Eq("first reply", resp.Content[0].Text, "resp =")
+	ck.Require().Eq("first reply", firstText(t, resp), "resp =")
 
 	// Model resolved once at creation.
-	ck.Eq("claude-sonnet-5", string(sender.lastReq[0].Model), "model")
-	// Default cache policy: one 5m breakpoint (empty TTL) on the last system
-	// block. Callers wanting 1h opt in via WithCache (see DefaultCachePolicy).
-	sys := sender.lastReq[0].System
-	ck.False(len(sys) != 1 || sys[0].CacheControl.Type == "" || sys[0].CacheControl.TTL != "", "system breakpoint wrong (want ephemeral/5m-default): %+v", sys)
+	ck.Eq("claude-sonnet-5", sender.lastReq[0].Model, "model")
+	// Default cache policy: one 5m breakpoint on the last system block, which
+	// the codec places at encode time. Callers wanting 1h opt in via WithCache
+	// (see DefaultCachePolicy).
+	ck.Eq(Cache5m, sender.lastReq[0].Cache.SystemTTL, "system cache TTL")
+	ck.Require().NotEmpty(sender.lastOpts, "the sender saw no encode options")
 
 	// Second send loads history: request must carry 3 messages.
 	if _, err := conv.Send(ctx, UserText("and again")); err != nil {
@@ -242,7 +238,7 @@ func TestConversationTrimRetryKeepsPrefixAndRows(t *testing.T) {
 	ctx := context.Background()
 
 	// Fail the first attempt as prompt-too-large, succeed the second.
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondText("after trim"),
 	}}
@@ -254,13 +250,12 @@ func TestConversationTrimRetryKeepsPrefixAndRows(t *testing.T) {
 	// Seed enough history that the default policy can drop the middle.
 	big := strings.Repeat("y", 80*1024)
 	for i := range 5 {
-		role := anthropic.MessageParamRoleUser
+		role := msg.User
 		if i%2 == 1 {
-			role = anthropic.MessageParamRoleAssistant
+			role = msg.Assistant
 		}
-		msg := anthropic.MessageParam{Role: role,
-			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		appendNode(t, pool, conv.ID, msg)
+		appendNode(t, pool, conv.ID, msg.Message{Role: role,
+			Content: []msg.Block{msg.Text{Text: big}}})
 	}
 
 	if _, err := conv.Send(ctx, UserText("question")); err != nil {
@@ -297,7 +292,7 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	c := testClient(t, pool, sender)
@@ -314,8 +309,9 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	// Conversation B: an assistant tool_use with no matching tool_result.
 	convB, err := c.Conversation(ctx, NewConversation("", "test"))
 	ck.Require().NoError(err)
-	assistant := anthropic.NewAssistantMessage(
-		anthropic.NewToolUseBlock("toolu_orphan", map[string]any{"a": 1}, "service_status"))
+	assistant := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "toolu_orphan", Name: "service_status", Input: json.RawMessage(`{"a":1}`)},
+	}}
 	appendNode(t, pool, convB.ID, assistant)
 	// Conversation C: clean (a full Send).
 	convC, err := c.Conversation(ctx, NewConversation("", "test"))
@@ -356,7 +352,7 @@ func TestConversationStoresPrefixOnChange(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("one"), respondText("two"),
 	}}
 	c := testClient(t, pool, sender)
@@ -411,7 +407,7 @@ func TestConversationWithToolChoice(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("tool choice test"),
 		respondText("tool choice test 2"),
 	}}
@@ -423,26 +419,20 @@ func TestConversationWithToolChoice(t *testing.T) {
 		SystemText("you are a test"))
 	ck.Require().NoError(err, "Conversation")
 
-	tools := []anthropic.ToolUnionParam{
-		anthropic.ToolUnionParamOfTool(
-			anthropic.ToolInputSchemaParam{Type: "object"},
-			"report_findings",
-		),
-	}
+	tools := []msg.ToolDef{{Name: "report_findings", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 
 	resp, err := conv.Send(ctx, UserText("test"), WithTools(tools), WithToolChoice("report_findings"))
 	ck.Require().NoError(err, "Send")
-	ck.Require().Eq("tool choice test", resp.Content[0].Text, "unexpected response")
+	ck.Require().Eq("tool choice test", firstText(t, resp), "unexpected response")
 
-	ck.Require().NotNil(sender.lastReq[0].ToolChoice.OfTool, "ToolChoice.OfTool is nil, expected tool choice to be set")
-	ck.Eq("report_findings", sender.lastReq[0].ToolChoice.OfTool.Name, "ToolChoice.OfTool.Name")
+	ck.Eq("report_findings", sender.lastReq[0].ForceTool, "the forced tool")
 
 	// Send without WithToolChoice should have zero ToolChoice
 	resp2, err := conv.Send(ctx, UserText("test 2"))
 	ck.Require().NoError(err, "Send 2")
-	ck.Require().Eq("tool choice test 2", resp2.Content[0].Text, "unexpected response 2")
+	ck.Require().Eq("tool choice test 2", firstText(t, resp2), "unexpected response 2")
 
-	ck.Nil(sender.lastReq[1].ToolChoice.OfTool, "ToolChoice.OfTool should be nil when WithToolChoice not used, got")
+	ck.Eq("", sender.lastReq[1].ForceTool, "no tool may be forced when WithToolChoice is not used, got %q", sender.lastReq[1].ForceTool)
 }
 
 // Attribution is persisted as a conversations.users id, never a name: the
@@ -460,7 +450,7 @@ func TestConversationPersistsUserIDsNotNames(t *testing.T) {
 		`INSERT INTO conversations.users (username, token_sha256)
 		 VALUES ('brent', 'digest-llm') RETURNING id::text`).Scan(&userID), "insert user")
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("reply"),
 	}}
 	c := testClient(t, pool, sender)
@@ -494,7 +484,7 @@ func TestConversationEmptyUserIDPersistsAsNull(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("reply"),
 	}}
 	c := testClient(t, pool, sender)
@@ -523,13 +513,17 @@ func TestUserContentOrdersImagesFirst(t *testing.T) {
 		{MediaType: "image/png", Data: []byte("bytes")},
 	})
 	c.Require().Len(blocks, 2, "got %d blocks, want image then text", len(blocks))
-	c.NotNil(blocks[0].OfImage, "first block is not the image")
-	c.NotNil(blocks[1].OfText, "second block is not the text")
+	_, isImage := blocks[0].(msg.Image)
+	c.Require().True(isImage, "first block is not the image")
+	_, isText := blocks[1].(msg.Text)
+	c.Require().True(isText, "second block is not the text")
 
 	only := UserContent("", []UserImage{{MediaType: "image/png", Data: []byte("b")}})
-	if len(only) != 1 || only[0].OfImage == nil {
-		t.Errorf("an image with no text must send just the image, got %d blocks", len(only))
+	if len(only) != 1 {
+		t.Fatalf("an image with no text must send just the image, got %d blocks", len(only))
 	}
+	_, loneIsImage := only[0].(msg.Image)
+	c.Require().True(loneIsImage, "the lone block must be the image")
 
 	c.Eq(1, len(UserContent("hi", nil)), "text with no images")
 	// An image carrying no bytes is skipped rather than sent as an empty block.
@@ -539,8 +533,8 @@ func TestUserContentOrdersImagesFirst(t *testing.T) {
 // respondWithProvider returns a canned response carrying OpenRouter's
 // non-standard top-level "provider" field — the shape a real OpenRouter body
 // has, and the only place the serving provider's name arrives.
-func respondWithProvider(provider string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondWithProvider(provider string) func(*msg.Request) (*msg.Response, error) {
+	return func(*msg.Request) (*msg.Response, error) {
 		return cannedMessage(`{"id":"msg_or","type":"message","role":"assistant","model":"deepseek/deepseek-v4-pro",` +
 			`"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",` +
 			`"usage":{"input_tokens":10,"output_tokens":5},"provider":"` + provider + `"}`), nil
@@ -570,7 +564,7 @@ func TestCaptureRecordsServedProvider(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondWithProvider("Together"),
 	}}
 	c := testClient(t, pool, sender)
@@ -590,16 +584,15 @@ func TestCaptureRecordsServedProviderStreaming(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	start := sseEvent("message_start", `{"type":"message_start","message":{"id":"msg_or","type":"message",`+
-		`"role":"assistant","model":"deepseek/deepseek-v4-pro","content":[],`+
-		`"usage":{"input_tokens":10,"output_tokens":0},"provider":"Together"}}`)
-	events := append([]ssestream.Event{start, contentBlockStartEvent()},
-		textDeltaEvent("hi"), contentBlockStopEvent(), messageDeltaEvent(), messageStopEvent())
+	start := msg.MessageStart{ID: "msg_or", Model: "deepseek/deepseek-v4-pro", Provider: "Together",
+		Usage: msg.Usage{Input: msg.Ptr(10), Output: msg.Ptr(0)}}
+	events := []msg.StreamEvent{start, contentBlockStartEvent(), textDeltaEvent("hi"),
+		contentBlockStopEvent(), messageDeltaEvent()}
 	sender := &fakeStreamingSender{scripts: []streamScript{{events: events}}}
 	c := testClient(t, pool, sender)
 	conv, err := c.Conversation(ctx, NewConversation("", "test"))
 	ck.Require().NoError(err)
-	if _, err := conv.Send(ctx, UserText("hi"), WithStreamHandler(func(anthropic.MessageStreamEventUnion) {})); err != nil {
+	if _, err := conv.Send(ctx, UserText("hi"), WithStreamHandler(func(*msg.Response) {})); err != nil {
 		t.Fatal(err)
 	}
 	ck.Eq("Together", servedProviderOfLastTurn(t, pool, conv.ID), "captured served_provider")
@@ -612,7 +605,7 @@ func TestRetractTailUserLeavesLeaf(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	c := testClient(t, pool, &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	c := testClient(t, pool, &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}})
 	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"))
@@ -663,7 +656,7 @@ func TestResumeContinueIsIdempotent(t *testing.T) {
 		ck := assert.NewCollecting(t)
 		pool := convTestPool(t)
 		ctx := context.Background()
-		c := testClient(t, pool, &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		c := testClient(t, pool, &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			respondText("the reply"),
 			respondText("the reply"),
 		}})
@@ -688,8 +681,8 @@ func TestResumeContinueIsIdempotent(t *testing.T) {
 		// Re-seed the prefix the conversation was given, then continue again: the
 		// seed leaves the head on the row the reply was written under, so the
 		// re-sent reply is the node that is already there.
-		ck.Require().NoError(reloaded.SeedHistory(ctx, []Message{
-			anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
+		ck.Require().NoError(reloaded.SeedHistory(ctx, []msg.Message{
+			{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hello"}}},
 		}), "re-seeding the same prefix")
 		if _, err := reloaded.Continue(ctx); err != nil {
 			t.Fatalf("Continue: %v", err)
@@ -707,16 +700,16 @@ func TestResumeContinueIsIdempotent(t *testing.T) {
 	t.Run("memory", func(t *testing.T) {
 		ck := assert.NewCollecting(t)
 		ctx := context.Background()
-		sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			respondText("the reply"),
 		}}
 		conv := newTestConversation(t, sender)
-		r0 := anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))
-		r1 := anthropic.NewAssistantMessage(anthropic.NewTextBlock("the reply"))
-		r2 := anthropic.NewUserMessage(anthropic.NewTextBlock("again"))
+		r0 := msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hello"}}}
+		r1 := msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "the reply"}}}
+		r2 := msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "again"}}}
 
-		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0}), "seed the first message")
-		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0, r1, r2}), "complete the prefix")
+		ck.Require().NoError(conv.SeedHistory(ctx, []msg.Message{r0}), "seed the first message")
+		ck.Require().NoError(conv.SeedHistory(ctx, []msg.Message{r0, r1, r2}), "complete the prefix")
 		seeded, err := conv.History(ctx)
 		ck.Require().NoError(err, "History")
 		ck.Len(seeded, 3, "completing a seeded prefix must not duplicate it")
@@ -731,7 +724,7 @@ func TestResumeContinueIsIdempotent(t *testing.T) {
 		ck.Require().NoError(err, "History")
 		ck.Require().Len(before, 4, "the seed plus the reply")
 
-		ck.Require().NoError(conv.SeedHistory(ctx, []Message{r0, r1, r2}), "re-seed the same prefix")
+		ck.Require().NoError(conv.SeedHistory(ctx, []msg.Message{r0, r1, r2}), "re-seed the same prefix")
 		if _, err := conv.Continue(ctx); err != nil {
 			t.Fatalf("Continue after the re-seed: %v", err)
 		}
@@ -748,8 +741,8 @@ func TestFundiAssistantNodeCarriesProviderMessageID(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(*msg.Request) (*msg.Response, error) {
 			return cannedMessage(`{"id":"msg_upstream_1","type":"message","role":"assistant","model":"claude-haiku-4-5",
 				"content":[{"type":"text","text":"reply"}],
 				"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`), nil
@@ -793,7 +786,7 @@ func TestTurnRecordsRequestHeadAndNoTrimRange(t *testing.T) {
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	c := testClient(t, pool, sender)
@@ -829,7 +822,7 @@ func TestRequestDescriptorTrimRetryRecordsDroppedRange(t *testing.T) {
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondText("after trim"),
 	}}
@@ -840,15 +833,15 @@ func TestRequestDescriptorTrimRetryRecordsDroppedRange(t *testing.T) {
 
 	// Six seeded rows alternating user/assistant, then Send appends ordinal 6:
 	// no consecutive user rows, so every wire message is exactly one row.
-	roles := []anthropic.MessageParamRole{
-		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
-		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
-		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
+	roles := []msg.Role{
+		msg.User, msg.Assistant,
+		msg.User, msg.Assistant,
+		msg.User, msg.Assistant,
 	}
 	for i, role := range roles {
-		appendNode(t, pool, conv.ID, anthropic.MessageParam{
+		appendNode(t, pool, conv.ID, msg.Message{
 			Role:    role,
-			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("seeded %d", i))},
+			Content: []msg.Block{msg.Text{Text: fmt.Sprintf("seeded %d", i)}},
 		})
 	}
 	if _, err := conv.Send(ctx, UserText("question")); err != nil {
@@ -901,7 +894,7 @@ func TestCompactionOverflowRecordsNewHead(t *testing.T) {
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondUsage(10, 5, 0, 0, "real"),
@@ -911,20 +904,17 @@ func TestCompactionOverflowRecordsNewHead(t *testing.T) {
 		WithCompaction(CompactionPolicy{})) // unknown window: overflow only
 	ck.Require().NoError(err)
 
-	roles := []anthropic.MessageParamRole{
-		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
-		anthropic.MessageParamRoleUser, anthropic.MessageParamRoleAssistant,
-	}
+	roles := []msg.Role{msg.User, msg.Assistant, msg.User, msg.Assistant}
 	for i, role := range roles {
-		appendNode(t, pool, conv.ID, anthropic.MessageParam{
+		appendNode(t, pool, conv.ID, msg.Message{
 			Role:    role,
-			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(fmt.Sprintf("seeded %d", i))},
+			Content: []msg.Block{msg.Text{Text: fmt.Sprintf("seeded %d", i)}},
 		})
 	}
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the retried call after compaction must succeed")
-	ck.Eq("real", resp.Content[0].Text, "response")
+	ck.Eq("real", firstText(t, resp), "response")
 
 	type turnRow struct {
 		head   *string
@@ -972,7 +962,7 @@ func TestRequestDescriptorInMemoryConversationHasNoHead(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	cl := memClient(t, sender)

@@ -75,7 +75,7 @@ func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 	// left for the SECOND prompt, and the assertion that it is still available
 	// is assertion 3.
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 	logs := capturedLogs(t)
 
 	eng.HandlePrompt("go")

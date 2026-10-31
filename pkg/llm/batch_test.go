@@ -11,7 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -54,11 +53,11 @@ func batchReply() json.RawMessage {
 // newBatchClient builds a store-less client whose "openrouter" provider is
 // backed by sender (never expected to be called on the park path) and whose
 // batcher is b.
-func newBatchClient(t *testing.T, b Batcher, sender SDKSender) *Client {
+func newBatchClient(t *testing.T, b Batcher, sender Sender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(sender)),
-		WithProviderSender("openrouter", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
+		WithProviderSender("openrouter", sender),
 		WithBatcher(b),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -67,30 +66,30 @@ func newBatchClient(t *testing.T, b Batcher, sender SDKSender) *Client {
 	return c
 }
 
-func batchParams() anthropic.MessageNewParams {
-	return anthropic.MessageNewParams{Model: "openrouter/z-ai/glm-5.3-flash:batch", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+func batchParams() *msg.Request {
+	return userTextRequest("openrouter/z-ai/glm-5.3-flash:batch")
 }
 
 // laterCallParams is a request containing an assistant message — a later call.
-func laterCallParams() anthropic.MessageNewParams {
+func laterCallParams() *msg.Request {
 	p := batchParams()
-	p.Messages = append(p.Messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock("earlier reply")),
-		anthropic.NewUserMessage(anthropic.NewTextBlock("next")))
+	p.Messages = append(p.Messages,
+		msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "earlier reply"}}},
+		msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "next"}}})
 	return p
 }
 
 func TestBatchFirstCallParks(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
 	c := newBatchClient(t, b, sender)
 
-	resp, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 12}, batchParams())
-	ck.Require().NoError(err, "SendParams")
-	ck.Eq("batched", resp.Content[0].Text, "response")
+	resp, err := c.send(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 12}, batchParams(), nil)
+	ck.Require().NoError(err, "send")
+	ck.Eq("batched", firstText(t, resp), "response")
 	ck.Require().Eq(1, b.calls, "batcher called")
 	ck.Eq("z-ai/glm-5.3-flash:batch", b.lastMods[0], "batcher model")
 	ck.Eq("01a0d5e6-2636-7afa-b356-cf9441b16e31-12", b.lastIDs[0], "batcher customID")
@@ -103,29 +102,29 @@ func TestBatchLaterCallStripsSuffix(t *testing.T) {
 		t.Error("batcher must not be called on a later call")
 		return batchReply(), nil
 	}}}
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("live"),
 	}}
 	c := newBatchClient(t, b, sender)
 
-	resp, err := c.SendParams(context.Background(), SendMeta{ConversationID: "conv"}, laterCallParams())
-	ck.Require().NoError(err, "SendParams")
-	ck.Eq("live", resp.Content[0].Text, "response")
+	resp, err := c.send(context.Background(), SendMeta{ConversationID: "conv"}, laterCallParams(), nil)
+	ck.Require().NoError(err, "send")
+	ck.Eq("live", firstText(t, resp), "response")
 	ck.Require().Eq(1, sender.calls, "live sender called")
-	ck.Eq("z-ai/glm-5.3-flash", string(sender.lastReq[0].Model), "live model")
+	ck.Eq("z-ai/glm-5.3-flash", sender.lastReq[0].Model, "live model")
 	ck.Eq(0, b.calls, "batcher called")
 }
 
 func TestBatchNonOpenRouterProviderRefused(t *testing.T) {
 	b := &fakeBatcher{}
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
 	c := newBatchClient(t, b, sender)
 
 	params := batchParams()
 	params.Model = "anthropic/claude-haiku-4-5:batch"
-	_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "conv"}, params)
+	_, err := c.send(context.Background(), SendMeta{ConversationID: "conv"}, params, nil)
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "served only by an anthropic-openrouter provider"), "error = %v, want the anthropic-openrouter-only refusal", err)
 	if sender.calls != 0 || b.calls != 0 {
 		t.Errorf("nothing may be sent: sender=%d batcher=%d, want 0/0", sender.calls, b.calls)
@@ -134,16 +133,16 @@ func TestBatchNonOpenRouterProviderRefused(t *testing.T) {
 
 func TestBatchNoBatcherErrors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("openrouter", sdkFake(sender)),
+		WithProviderSender("openrouter", sender),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	_, err = c.SendParams(context.Background(), SendMeta{ConversationID: "conv"}, batchParams())
+	_, err = c.send(context.Background(), SendMeta{ConversationID: "conv"}, batchParams(), nil)
 	ck.Require().False(err == nil || !strings.Contains(err.Error(), "no batcher configured"), "error = %v, want 'no batcher configured'", err)
 	ck.Eq(0, sender.calls, "live sender called")
 }
@@ -154,7 +153,7 @@ func TestBatchNeedsConversationID(t *testing.T) {
 	sender := &scriptedSender{}
 	c := newBatchClient(t, b, sender)
 
-	_, err := c.SendParams(context.Background(), SendMeta{}, batchParams())
+	_, err := c.send(context.Background(), SendMeta{}, batchParams(), nil)
 	ck.Require().False(err == nil || !strings.Contains(err.Error(), "needs a conversation id"), "error = %v, want 'needs a conversation id'", err)
 	ck.Eq(0, b.calls, "batcher called")
 }
@@ -170,14 +169,14 @@ func TestBatchStreamingBypassed(t *testing.T) {
 		NewConversation("", "test"), Model("openrouter/z-ai/glm-5.3-flash:batch"))
 	ck.Require().NoError(err)
 	resp, err := conv.Send(context.Background(), UserText("hi"),
-		WithStreamHandler(func(anthropic.MessageStreamEventUnion) { handlerFired = true }))
+		WithStreamHandler(func(*msg.Response) { handlerFired = true }))
 	ck.Require().NoError(err, "Send")
 	ck.False(handlerFired, "stream handler must never fire on the batch path")
 	if streamer.streamCalls != 0 || streamer.newCalls != 0 {
 		t.Errorf("streaming sender reached (stream=%d new=%d), want never", streamer.streamCalls, streamer.newCalls)
 	}
 	ck.Eq(1, b.calls, "batcher called")
-	ck.Eq("batched", resp.Content[0].Text, "response")
+	ck.Eq("batched", firstText(t, resp), "response")
 }
 
 func TestBatchWaitHookBrackets(t *testing.T) {
@@ -232,7 +231,7 @@ func TestBatchTurnCaptured(t *testing.T) {
 		t.Helper()
 		ck := assert.NewAborting(t)
 		c, err := NewClient(
-			WithProviderSender("openrouter", sdkFake(&scriptedSender{})),
+			WithProviderSender("openrouter", &scriptedSender{}),
 			WithBatcher(b),
 			WithStore(pool),
 			WithCatalog(seededCatalog(t)),
@@ -310,7 +309,7 @@ func TestBatchTurnCaptured(t *testing.T) {
 func TestBatchParkStripsForeignThinking(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
 	c := newBatchClient(t, b, sender)

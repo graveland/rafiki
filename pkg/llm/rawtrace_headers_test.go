@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 
@@ -77,11 +75,8 @@ func TestRecordRawTraceCapturesRealHeaders(t *testing.T) {
 	rec := newFakeRawTraceRecorder()
 	c.rawTrace = rec
 
-	_, err = c.SendParams(context.Background(), SendMeta{}, anthropic.MessageNewParams{
-		Model: "test-model", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
-	ck.Require().NoError(err, "SendParams")
+	_, err = c.send(context.Background(), SendMeta{}, userTextRequest("test-model"), nil)
+	ck.Require().NoError(err, "send")
 
 	got := rec.awaitOne(t)
 

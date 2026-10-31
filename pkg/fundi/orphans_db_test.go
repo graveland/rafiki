@@ -121,7 +121,7 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	// the actual shape sent, not just that the call returned successfully.
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)
@@ -133,7 +133,7 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	defer cancel() // no-op once the tool has already cancelled; guards early-return paths
 	tools := cancelOnExecuteTools{cancel: cancel}
 
-	_, runErr := agentloop.Run(turnCtx, conv, tools, nil, llm.UserTextMsg("go"))
+	_, runErr := agentloop.Run(turnCtx, conv, tools, nil, llm.UserText("go"))
 	c.Error(runErr, "agentloop.Run succeeded, want an error from the cancelled-context persist "+
 		"(the tool cancels turnCtx before the tool_result gets persisted)")
 	t.Logf("agentloop.Run failed as expected: %v", runErr)
@@ -175,7 +175,7 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	}
 	c.True(tr.IsError, "synthesized tool_result is not marked IsError")
 
-	resp, err := conv.ContinueMsg(background)
+	resp, err := conv.Continue(background)
 	c.NoError(err, "Continue after RepairOrphans failed")
 	c.Eq(msg.StopEndTurn, resp.StopReason, "post-repair Continue stop_reason")
 
@@ -205,7 +205,7 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 		c.NoError(err, "seed conversation")
 		// r0+r1 with no r2: the state a dead process leaves mid-prefill,
 		// and what boot-time RepairOrphans sees in BuildEngine.
-		c.NoError(conv.SeedHistoryMsg(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
+		c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
 
 		n, err := RepairOrphans(ctx, conv)
 		c.NoError(err, "RepairOrphans")
@@ -232,7 +232,7 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 					Input: json.RawMessage(`{"path":"/tmp/a.txt","offset":1,"limit":1000000}`)},
 			},
 		}
-		c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{r0, r1}), "seed history")
+		c.NoError(conv.SeedHistory(ctx, []msg.Message{r0, r1}), "seed history")
 
 		n, err := RepairOrphans(ctx, conv)
 		c.NoError(err, "RepairOrphans")

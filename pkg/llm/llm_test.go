@@ -12,8 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -26,103 +25,128 @@ func testLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// sdkFake wraps an SDK-typed test sender so it satisfies the native Sender.
-// The fakes stay SDK-shaped on purpose: they are the ones the client's own
-// conversion is exercised against.
-func sdkFake(s SDKSender) Sender { return FromSDKSender(s) }
-
 // scriptedSender returns queued results in order; the last repeats.
 type scriptedSender struct {
-	calls   int
-	scripts []func(params anthropic.MessageNewParams) (*anthropic.Message, error)
-	lastReq []anthropic.MessageNewParams
-	lastCtx []context.Context
+	calls    int
+	scripts  []func(*msg.Request) (*msg.Response, error)
+	lastReq  []*msg.Request
+	lastOpts []msg.EncodeOptions
+	lastCtx  []context.Context
 }
 
-func (s *scriptedSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	s.lastReq = append(s.lastReq, params)
+func (s *scriptedSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	s.lastReq = append(s.lastReq, req)
+	s.lastOpts = append(s.lastOpts, opts)
 	s.lastCtx = append(s.lastCtx, ctx)
 	i := s.calls
 	if i >= len(s.scripts) {
 		i = len(s.scripts) - 1
 	}
 	s.calls++
-	return s.scripts[i](params)
+	return s.scripts[i](req)
 }
 
-func respondText(text string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *scriptedSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
+}
+
+func respondText(text string) func(*msg.Request) (*msg.Response, error) {
+	return func(*msg.Request) (*msg.Response, error) {
 		return cannedMessage(`{"id":"msg_t","type":"message","role":"assistant","model":"claude-haiku-4-5",
 			"content":[{"type":"text","text":"` + text + `"}],
 			"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`), nil
 	}
 }
 
-func respondErr(err error) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) { return nil, err }
+func respondErr(err error) func(*msg.Request) (*msg.Response, error) {
+	return func(*msg.Request) (*msg.Response, error) { return nil, err }
 }
 
-func cannedMessage(raw string) *anthropic.Message {
-	var m anthropic.Message
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		panic(err)
+// cannedMessage decodes an Anthropic response body into a native response.
+func cannedMessage(raw string) *msg.Response {
+	return llmtest.FromAnthropicJSON(raw)
+}
+
+// firstText returns the text of r's first text block.
+func firstText(t *testing.T, r *msg.Response) string {
+	t.Helper()
+	for _, b := range r.Content {
+		if tx, ok := b.(msg.Text); ok {
+			return tx.Text
+		}
 	}
-	return &m
+	t.Fatalf("response carries no text block: %+v", r.Content)
+	return ""
 }
 
-// overloadedErr fabricates a retryable SDK error (529).
-func overloadedErr() *anthropic.Error {
-	e := &anthropic.Error{StatusCode: 529}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: 529}
-	_ = e.UnmarshalJSON([]byte(`{"error":{"type":"overloaded_error","message":"Overloaded"}}`))
-	return e
+// userTextRequest is the minimal native request the routing tests send.
+func userTextRequest(model string) *msg.Request {
+	return &msg.Request{Model: model, MaxTokens: 16,
+		Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}}
 }
 
-// authErr fabricates a non-retryable SDK error (401).
-func authErr() *anthropic.Error {
-	e := &anthropic.Error{StatusCode: http.StatusUnauthorized}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: http.StatusUnauthorized}
-	_ = e.UnmarshalJSON([]byte(`{"error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
-	return e
+// overloadedErr fabricates a retryable overloaded refusal (529).
+func overloadedErr() *msg.APIError {
+	return &msg.APIError{
+		Status:  http.StatusTooManyRequests + 100,
+		Body:    []byte(`{"error":{"type":"overloaded_error","message":"Overloaded"}}`),
+		Kind:    msg.ErrOverloaded,
+		Dialect: msg.DialectAnthropic,
+		Message: "Overloaded",
+	}
+}
+
+// authErr fabricates a non-retryable refusal (401).
+func authErr() *msg.APIError {
+	return &msg.APIError{
+		Status:  http.StatusUnauthorized,
+		Body:    []byte(`{"error":{"type":"authentication_error","message":"invalid x-api-key"}}`),
+		Kind:    msg.ErrOther,
+		Dialect: msg.DialectAnthropic,
+		Message: "invalid x-api-key",
+	}
 }
 
 // creditExhaustedErr fabricates the 400 Anthropic returns when the account has
 // run out of credit: not retryable (the same request fails identically) but
 // failover-worthy.
-func creditExhaustedErr() *anthropic.Error {
-	e := &anthropic.Error{StatusCode: http.StatusBadRequest}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: http.StatusBadRequest}
-	_ = e.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`))
-	return e
+func creditExhaustedErr() *msg.APIError {
+	const detail = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."
+	return &msg.APIError{
+		Status:  http.StatusBadRequest,
+		Body:    []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"` + detail + `"}}`),
+		Kind:    msg.ErrOther,
+		Dialect: msg.DialectAnthropic,
+		Message: detail,
+	}
 }
 
-func promptTooLargeErr() *anthropic.Error {
-	e := &anthropic.Error{StatusCode: http.StatusBadRequest}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: http.StatusBadRequest}
-	_ = e.UnmarshalJSON([]byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`))
-	return e
+func promptTooLargeErr() *msg.APIError {
+	return &msg.APIError{
+		Status:  http.StatusBadRequest,
+		Body:    []byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`),
+		Kind:    msg.ErrPromptTooLarge,
+		Dialect: msg.DialectAnthropic,
+		Message: "prompt is too long: too many tokens",
+	}
 }
 
-func rateLimitErr() *anthropic.Error {
-	e := &anthropic.Error{StatusCode: http.StatusTooManyRequests}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: http.StatusTooManyRequests}
-	_ = e.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error"}}`))
-	return e
+func rateLimitErr() *msg.APIError {
+	return &msg.APIError{
+		Status:  http.StatusTooManyRequests,
+		Body:    []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error"}}`),
+		Kind:    msg.ErrRateLimit,
+		Dialect: msg.DialectAnthropic,
+		Message: "Provider returned error",
+	}
 }
 
 // promptTooLargeAPIErr fabricates the native prompt-too-large refusal the
-// classifiers read: the SDK-typed helper above goes through the compat adapter
-// to produce exactly this.
+// classifiers read.
 func promptTooLargeAPIErr() *msg.APIError {
 	return &msg.APIError{
 		Status:  http.StatusBadRequest,
@@ -159,57 +183,55 @@ func TestNewClientDefaultsToBuiltInProviders(t *testing.T) {
 	_ = c // healthy
 }
 
-func TestSendParamsFailsOverAndMapsModel(t *testing.T) {
+func TestSendFailsOverAndMapsModel(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(overloadedErr()),
 	}}
-	fallback := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(primary)),
-		WithProviderSender("openrouter", sdkFake(fallback)),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
 
-	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params)
-	ck.Require().NoError(err, "SendParams")
-	ck.Eq("from fallback", resp.Content[0].Text, "response")
-	ck.Eq("anthropic/claude-haiku-4.5", string(fallback.lastReq[0].Model), "fallback model")
+	req := userTextRequest("claude-haiku-4-5")
+	resp, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, req, nil)
+	ck.Require().NoError(err, "send")
+	ck.Eq("from fallback", firstText(t, resp), "response")
+	ck.Eq("anthropic/claude-haiku-4.5", fallback.lastReq[0].Model, "fallback model")
 	ck.True(c.Breaker("anthropic").Open(), "breaker must be open after a retryable primary failure")
 
 	// Breaker open → next call goes straight to the fallback (no probe yet).
-	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params); err != nil {
-		t.Fatalf("SendParams (pinned): %v", err)
+	if _, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, req, nil); err != nil {
+		t.Fatalf("send (pinned): %v", err)
 	}
 	ck.Eq(1, primary.calls, "primary called")
 }
 
-func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
+func TestSendNonRetryableDoesNotFailOver(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(authErr()),
 	}}
-	fallback := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(primary)),
-		WithProviderSender("openrouter", sdkFake(fallback)),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params); err == nil {
+	req := userTextRequest("claude-haiku-4-5")
+	if _, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, req, nil); err == nil {
 		t.Fatal("401 must surface, not fail over")
 	}
 	ck.Eq(0, fallback.calls, "fallback called")
@@ -219,81 +241,78 @@ func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
 // An out-of-credit primary is not retryable, but it IS a reason to fail over:
 // the account cannot answer any request until it is funded, so pinning callers
 // to it would strand every send behind a billing problem.
-func TestSendParamsFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
+func TestSendFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(creditExhaustedErr()),
 	}}
-	fallback := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(primary)),
-		WithProviderSender("openrouter", sdkFake(fallback)),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params)
-	ck.Require().NoError(err, "SendParams")
-	ck.Eq("from fallback", resp.Content[0].Text, "response")
+	req := userTextRequest("claude-haiku-4-5")
+	resp, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, req, nil)
+	ck.Require().NoError(err, "send")
+	ck.Eq("from fallback", firstText(t, resp), "response")
 	ck.True(c.Breaker("anthropic").Open(), "breaker must be open after an out-of-credit primary rejection")
 }
 
-// TestSendParamsSlashModelRoutesToOpenRouter proves an OpenRouter-native
+// TestSendSlashModelRoutesToOpenRouter proves an OpenRouter-native
 // (slash) model — e.g. a resolved model alias like kimi-k3 — goes straight
 // to the OpenRouter sender untranslated, never touching the Anthropic primary
 // and never failing over (the caller asked for this specific model).
-func TestSendParamsSlashModelRoutesToOpenRouter(t *testing.T) {
+func TestSendSlashModelRoutesToOpenRouter(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from openrouter"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(primary)),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", openrouter),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	params := anthropic.MessageNewParams{Model: "openrouter/moonshotai/kimi-k3", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params)
-	ck.Require().NoError(err, "SendParams")
-	ck.Eq("from openrouter", resp.Content[0].Text, "response")
+	req := userTextRequest("openrouter/moonshotai/kimi-k3")
+	resp, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, req, nil)
+	ck.Require().NoError(err, "send")
+	ck.Eq("from openrouter", firstText(t, resp), "response")
 	ck.Eq(0, primary.calls, "anthropic primary called")
-	ck.Eq("moonshotai/kimi-k3", string(openrouter.lastReq[0].Model), "openrouter model")
+	ck.Eq("moonshotai/kimi-k3", openrouter.lastReq[0].Model, "openrouter model")
 }
 
-// TestSendParamsUnpinnedModelCarriesNoProviderPrefs proves an undeclared slash
+// TestSendUnpinnedModelCarriesNoProviderPrefs proves an undeclared slash
 // model reaches the OpenRouter sender with no "provider" extra field — the
 // daemon ships no built-in per-line pin any more, so even a line that used to
 // carry one sends none.
-func TestSendParamsUnpinnedModelCarriesNoProviderPrefs(t *testing.T) {
+func TestSendUnpinnedModelCarriesNoProviderPrefs(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"), respondText("ok"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
 	send := func(model string) {
 		t.Helper()
-		params := anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 16,
-			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-		if _, err := c.SendParams(context.Background(), SendMeta{}, params); err != nil {
-			t.Fatalf("SendParams(%s): %v", model, err)
+		req := userTextRequest(model)
+		if _, err := c.send(context.Background(), SendMeta{}, req, nil); err != nil {
+			t.Fatalf("send(%s): %v", model, err)
 		}
 	}
 	send("openrouter/z-ai/glm-5.2")
@@ -301,8 +320,8 @@ func TestSendParamsUnpinnedModelCarriesNoProviderPrefs(t *testing.T) {
 
 	wire := func(i int) string {
 		t.Helper()
-		b, err := json.Marshal(openrouter.lastReq[i])
-		ck.Require().NoError(err, "marshal wire params")
+		b, err := msganthropic.Encode(openrouter.lastReq[i], openrouter.lastOpts[i])
+		ck.Require().NoError(err, "encode wire body")
 		return string(b)
 	}
 	ck.NotStrContains(wire(0), `"provider"`, "no built-in pin: the body must carry no provider field")
@@ -311,62 +330,59 @@ func TestSendParamsUnpinnedModelCarriesNoProviderPrefs(t *testing.T) {
 
 // A slash model with no OpenRouter sender configured must fail cleanly, not
 // leak the request to the Anthropic API (which would 404 the model anyway).
-func TestSendParamsSlashModelWithoutOpenRouterErrors(t *testing.T) {
+func TestSendSlashModelWithoutOpenRouterErrors(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("anthropic", primary),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	params := anthropic.MessageNewParams{Model: "deepseek/deepseek-v4-pro", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	if _, err := c.SendParams(context.Background(), SendMeta{}, params); err == nil {
+	req := userTextRequest("deepseek/deepseek-v4-pro")
+	if _, err := c.send(context.Background(), SendMeta{}, req, nil); err == nil {
 		t.Fatal("slash model without an OpenRouter sender must error")
 	}
 	ck.Eq(0, primary.calls, "anthropic primary called")
 }
 
-// TestSendParamsAnthropicPrefixRoutesNative proves the "anthropic/<x>" native
+// TestSendAnthropicPrefixRoutesNative proves the "anthropic/<x>" native
 // marker reaches the direct Anthropic sender (prefix stripped on the wire),
 // while a non-anthropic provider slash id still routes to OpenRouter — covering
 // the second entry point where callers build params directly (bypassing
 // ResolveModel).
-func TestSendParamsAnthropicPrefixRoutesNative(t *testing.T) {
+func TestSendAnthropicPrefixRoutesNative(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	anthropicSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	anthropicSender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from anthropic"),
 	}}
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from openrouter"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(anthropicSender)),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", anthropicSender),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
 
 	// "anthropic/" prefix -> native Anthropic sender, prefix stripped on the wire.
-	params := anthropic.MessageNewParams{Model: "anthropic/sonnet-latest", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{}, params)
-	ck.Require().NoError(err, "SendParams(anthropic/...)")
-	ck.Eq("from anthropic", resp.Content[0].Text, "response")
+	req := userTextRequest("anthropic/sonnet-latest")
+	resp, err := c.send(context.Background(), SendMeta{}, req, nil)
+	ck.Require().NoError(err, "send(anthropic/...)")
+	ck.Eq("from anthropic", firstText(t, resp), "response")
 	ck.Eq(0, openrouter.calls, "openrouter called")
-	ck.Eq("sonnet-latest", string(anthropicSender.lastReq[0].Model), "anthropic wire model")
+	ck.Eq("sonnet-latest", anthropicSender.lastReq[0].Model, "anthropic wire model")
 
 	// A non-anthropic provider slash id still routes to OpenRouter, unchanged.
-	params2 := anthropic.MessageNewParams{Model: "openrouter/deepseek/deepseek-chat", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp2, err := c.SendParams(context.Background(), SendMeta{}, params2)
-	ck.Require().NoError(err, "SendParams(deepseek/...)")
-	ck.Eq("from openrouter", resp2.Content[0].Text, "response")
-	ck.Eq("deepseek/deepseek-chat", string(openrouter.lastReq[0].Model), "openrouter wire model")
+	req2 := userTextRequest("openrouter/deepseek/deepseek-chat")
+	resp2, err := c.send(context.Background(), SendMeta{}, req2, nil)
+	ck.Require().NoError(err, "send(deepseek/...)")
+	ck.Eq("from openrouter", firstText(t, resp2), "response")
+	ck.Eq("deepseek/deepseek-chat", openrouter.lastReq[0].Model, "openrouter wire model")
 	ck.Eq(1, anthropicSender.calls, "anthropic called")
 }
 
@@ -376,15 +392,15 @@ func TestSendParamsAnthropicPrefixRoutesNative(t *testing.T) {
 // and the turn reaches the native Anthropic sender — never OpenRouter.
 func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	anthropicSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	anthropicSender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("native"),
 	}}
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("openrouter"),
 	}}
 	c := newMemClient(t,
-		WithProviderSender("anthropic", sdkFake(anthropicSender)),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", anthropicSender),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 	)
 	conv, err := c.Conversation(context.Background(),
@@ -395,7 +411,7 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 	}
 	ck.Eq(1, anthropicSender.calls, "anthropic called")
 	ck.Eq(0, openrouter.calls, "openrouter called")
-	ck.Eq("claude-sonnet-5", string(anthropicSender.lastReq[0].Model), "resolved wire model")
+	ck.Eq("claude-sonnet-5", anthropicSender.lastReq[0].Model, "resolved wire model")
 }
 
 // TestConversationNoModelNoDefaultErrors proves the hardcoded haiku default is
@@ -403,7 +419,7 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 // loudly rather than silently selecting a model.
 func TestConversationNoModelNoDefaultErrors(t *testing.T) {
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("anthropic", &scriptedSender{}),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -413,49 +429,48 @@ func TestConversationNoModelNoDefaultErrors(t *testing.T) {
 	}
 }
 
-func TestSendParamsNoFallbackBypassesBreaker(t *testing.T) {
+func TestSendNoFallbackBypassesBreaker(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(overloadedErr()), // trips via the WITH-fallback send
 		respondText("direct despite pin"),
 	}}
-	fallback := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(primary)),
-		WithProviderSender("openrouter", sdkFake(fallback)),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+	req := userTextRequest("claude-haiku-4-5")
 
 	// Trip the breaker via a fallback-configured send.
-	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params); err != nil {
+	if _, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, req, nil); err != nil {
 		t.Fatalf("tripping send: %v", err)
 	}
 	ck.Require().True(c.Breaker("anthropic").Open(), "breaker should be open")
 
 	// A send with NO fallback opts out of pinning: direct primary despite the
 	// open breaker (the per-conversation escape hatch from the design).
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{}}, params)
+	resp, err := c.send(context.Background(), SendMeta{Fallback: []string{}}, req, nil)
 	ck.Require().NoError(err, "no-fallback send")
-	ck.Eq("direct despite pin", resp.Content[0].Text, "response")
+	ck.Eq("direct despite pin", firstText(t, resp), "response")
 	ck.Eq(2, primary.calls, "primary calls")
 }
 
 func TestInMemoryConversation(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("mem reply"),
 		respondText("mem reply 2"),
 	}}
 	// No WithStore: conversation degrades to in-memory history.
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -477,10 +492,10 @@ func TestInMemoryConversation(t *testing.T) {
 	}
 	// SeedHistory idempotence: re-seeding identical prefix no-ops, and a
 	// re-continue puts the head back on the reply it was on.
-	params := []Message{
-		anthropic.NewUserMessage(anthropic.NewTextBlock("one")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("mem reply")),
-		anthropic.NewUserMessage(anthropic.NewTextBlock("two")),
+	params := []msg.Message{
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "one"}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "mem reply"}}},
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "two"}}},
 	}
 	ck.NoError(conv.SeedHistory(context.Background(), params), "idempotent re-seed failed")
 	if _, err := conv.Continue(context.Background()); err != nil {
@@ -607,7 +622,7 @@ func TestAssembleCachePolicyVariants(t *testing.T) {
 
 // UserTextMessages is a test helper: one native user message wrapping UserText.
 func UserTextMessages(s string) []msg.Message {
-	return []msg.Message{{Role: msg.User, Content: UserTextMsg(s)}}
+	return []msg.Message{{Role: msg.User, Content: UserText(s)}}
 }
 
 // ---- Task 2 primitives: Primary + ThinkingBudget conv options -------------
@@ -624,15 +639,15 @@ func newMemClient(t *testing.T, opts ...ClientOption) *Client {
 
 func TestPrimaryOptionRoutesUpstream(t *testing.T) {
 	ck := assert.NewAborting(t)
-	anthropicSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	anthropicSender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from anthropic"),
 	}}
-	openrouterSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouterSender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("from openrouter"),
 	}}
 	c := newMemClient(t,
-		WithProviderSender("anthropic", sdkFake(anthropicSender)),
-		WithProviderSender("openrouter", sdkFake(openrouterSender)),
+		WithProviderSender("anthropic", anthropicSender),
+		WithProviderSender("openrouter", openrouterSender),
 	)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-test"), Primary("openrouter"))
@@ -646,10 +661,10 @@ func TestPrimaryOptionRoutesUpstream(t *testing.T) {
 
 func TestThinkingBudgetSetsParam(t *testing.T) {
 	ck := assert.NewAborting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
-	c := newMemClient(t, WithProviderSender("anthropic", sdkFake(sender)))
+	c := newMemClient(t, WithProviderSender("anthropic", sender))
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-test"), ThinkingBudget(8192))
 	ck.NoError(err)
@@ -658,29 +673,29 @@ func TestThinkingBudgetSetsParam(t *testing.T) {
 	}
 	ck.NotEmpty(sender.lastReq, "sender captured no request")
 	last := sender.lastReq[len(sender.lastReq)-1]
-	ck.False(last.Thinking.OfEnabled == nil || last.Thinking.OfEnabled.BudgetTokens != 8192, "thinking budget not set: %+v", last.Thinking)
+	ck.Eq(int64(8192), last.ThinkingBudget, "thinking budget not set")
 }
 
-// TestProviderSurvivesSDKDecode proves the non-standard "provider" field
-// reaches Go through the SDK's ExtraFields. This is the one genuine unknown in
-// the design: the Anthropic SDK has no Provider field, so if it dropped unknown
-// members the agent path could never attribute a cache miss to a provider.
-func TestProviderSurvivesSDKDecode(t *testing.T) {
+// TestProviderSurvivesDecode proves the non-standard "provider" field reaches
+// the native response: the Anthropic SDK has no Provider field, so if the codec
+// dropped unknown members the agent path could never attribute a cache miss to
+// a provider.
+func TestProviderSurvivesDecode(t *testing.T) {
 	c := assert.NewCollecting(t)
-	var msg anthropic.Message
-	body := []byte(`{"id":"m1","type":"message","role":"assistant","model":"deepseek/deepseek-v4-pro",` +
-		`"content":[],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1},"provider":"CoreWeave"}`)
-	c.Require().NoError(json.Unmarshal(body, &msg), "unmarshal")
-	c.Eq("CoreWeave", ProviderOf(&msg), "ProviderOf")
+	body := `{"id":"m1","type":"message","role":"assistant","model":"deepseek/deepseek-v4-pro",` +
+		`"content":[],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1},"provider":"CoreWeave"}`
+	resp, err := msganthropic.DecodeResponse([]byte(body))
+	c.Require().NoError(err, "DecodeResponse")
+	c.Eq("CoreWeave", ProviderOf(resp), "ProviderOf")
 }
 
 // TestProviderOfMissing proves a native Anthropic response yields no provider
 // rather than a bogus one.
 func TestProviderOfMissing(t *testing.T) {
 	c := assert.NewCollecting(t)
-	var msg anthropic.Message
-	body := []byte(`{"id":"m1","type":"message","role":"assistant","model":"claude-opus-4-8",` +
-		`"content":[],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}`)
-	c.Require().NoError(json.Unmarshal(body, &msg), "unmarshal")
-	c.Eq("", ProviderOf(&msg), "ProviderOf")
+	body := `{"id":"m1","type":"message","role":"assistant","model":"claude-opus-4-8",` +
+		`"content":[],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}`
+	resp, err := msganthropic.DecodeResponse([]byte(body))
+	c.Require().NoError(err, "DecodeResponse")
+	c.Eq("", ProviderOf(resp), "ProviderOf")
 }

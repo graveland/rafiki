@@ -15,35 +15,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/msg"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
 )
 
-// minimalParams is the smallest MessageNewParams the SDK requires.
-func minimalParams() anthropic.MessageNewParams {
-	return anthropic.MessageNewParams{
-		MaxTokens: 16,
-		Model:     "gpt-4o",
-		Messages: []anthropic.MessageParam{
-			{Role: "user", Content: []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: "hi"}},
-			}},
-		},
-	}
-}
+// minimalRequest is the smallest native request the senders accept.
+func minimalRequest() *msg.Request { return userTextRequest("gpt-4o") }
 
-// nativeRequest is minimalParams as the native request a Sender takes.
+// nativeRequest is minimalRequest for callers that want a *testing.T helper.
 func nativeRequest(t *testing.T) *msg.Request {
 	t.Helper()
-	req, _, err := msganthropic.RequestFromSDK(minimalParams())
-	assert.NewAborting(t).NoError(err, "convert minimal params")
-	return req
+	return minimalRequest()
 }
 
 // mustJSON marshals v for assertions and error messages; on failure it says
@@ -301,7 +286,7 @@ func TestTrimRetryOnOpenAIChatPromptTooLarge(t *testing.T) {
 
 	got, err := conv.Send(context.Background(), UserText("question"))
 	c.Require().NoError(err, "Send must trim and retry, not fail")
-	c.Eq("after trim", textOfMessage(got), "message")
+	c.Eq("after trim", responseText(got), "message")
 	c.Eq(int32(2), hits.Load(), "attempts")
 	c.Require().Len(bodies, 2, "captured bodies")
 	first := strings.Count(bodies[0], `"role"`)
@@ -355,7 +340,7 @@ func TestStreamInBandRateLimitUsesModelGate(t *testing.T) {
 	conv.cfg.rateLimit = RateLimitPolicy{MaxRetries: 1}
 
 	_, err := conv.Send(context.Background(), UserText("hi"),
-		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+		WithStreamHandler(func(*msg.Response) {}))
 	c.Require().Error(err, "Send must fail once the retries are exhausted")
 
 	isRL, _ := isRateLimit(err)
@@ -374,7 +359,7 @@ func TestStreamInBandTransientIsRetryable(t *testing.T) {
 
 	conv, _ := openAIConversation(t, srv)
 	_, err := conv.Send(context.Background(), UserText("hi"),
-		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+		WithStreamHandler(func(*msg.Response) {}))
 	c.Require().Error(err, "Send must fail")
 
 	var apiErr *msg.APIError

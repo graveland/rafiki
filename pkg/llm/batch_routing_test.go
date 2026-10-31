@@ -9,8 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
@@ -62,10 +61,10 @@ func newRoutingBatchClient(t *testing.T, set *providers.Set, spec routing.Spec) 
 	t.Helper()
 	c, err := NewClient(
 		WithProviders(set),
-		WithProviderSender("openrouter", sdkFake(&scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		WithProviderSender("openrouter", &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			respondText("must not be reached"),
-		}})),
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		}}),
+		WithProviderSender("anthropic", &scriptedSender{}),
 		WithBatcher(&routingFakeBatcher{}),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -80,8 +79,8 @@ func newRoutingBatchClient(t *testing.T, set *providers.Set, spec routing.Spec) 
 func parkedProviders(t *testing.T, c *Client) json.RawMessage {
 	t.Helper()
 	b := c.batcher.(*routingFakeBatcher)
-	_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, batchParams())
-	assert.NewAborting(t).NoError(err, "SendParams (park)")
+	_, err := c.send(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, batchParams(), nil)
+	assert.NewAborting(t).NoError(err, "send (park)")
 	assert.NewAborting(t).Eq(1, len(b.providers), "batcher calls")
 	return b.providers[0]
 }
@@ -126,8 +125,8 @@ func TestBatchRoutingOnParkedRequest(t *testing.T) {
 		b := c.batcher.(*routingFakeBatcher)
 		declParams := batchParams()
 		declParams.Model = "openrouter/glm-flash:batch"
-		_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, declParams)
-		ck.Require().NoError(err, "SendParams (park, declaration-named)")
+		_, err := c.send(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, declParams, nil)
+		ck.Require().NoError(err, "send (park, declaration-named)")
 		ck.Require().Eq(1, len(b.providers), "batcher calls")
 		ck.Eq("[decl-host]", fmt.Sprint(decodeOnly(t, b.providers[0])), "declaration Only")
 	})
@@ -140,8 +139,8 @@ func TestBatchRoutingOnParkedRequest(t *testing.T) {
 		params := batchParams()
 		params.Model = "openrouter/glm52:batch"
 		b := c.batcher.(*routingFakeBatcher)
-		_, err := c.SendParams(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, params)
-		ck.Require().NoError(err, "SendParams (park)")
+		_, err := c.send(context.Background(), SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}, params, nil)
+		ck.Require().NoError(err, "send (park)")
 		ck.Require().Eq(1, len(b.providers), "batcher calls")
 		ck.Nil(b.providers[0], "a declaration with no only must pin nothing")
 	})
@@ -164,13 +163,13 @@ func TestBatchDeclToBatchIDParksFirstCallOnly(t *testing.T) {
 	set := routingOnlySet(nil)
 	set.Providers["openrouter"].Models["glmb"] = providers.ModelDecl{ID: "z-ai/glm-5.3-flash:batch"}
 	b := &routingFakeBatcher{}
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("live"),
 	}}
 	c, err := NewClient(
 		WithProviders(set),
-		WithProviderSender("openrouter", sdkFake(sender)),
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("openrouter", sender),
+		WithProviderSender("anthropic", sender),
 		WithBatcher(b),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -183,18 +182,18 @@ func TestBatchDeclToBatchIDParksFirstCallOnly(t *testing.T) {
 	// name a model no endpoint serves (review-fix R1).
 	first := batchParams()
 	first.Model = "openrouter/glmb"
-	resp, err := c.SendParams(context.Background(), meta, first)
-	ck.Require().NoError(err, "first SendParams (declared id to :batch) must park")
-	ck.Eq("batched", resp.Content[0].Text, "first call response from the batcher")
+	resp, err := c.send(context.Background(), meta, first, nil)
+	ck.Require().NoError(err, "first send (declared id to :batch) must park")
+	ck.Eq("batched", firstText(t, resp), "first call response from the batcher")
 	ck.Require().Eq(1, len(b.providers), "batcher calls after the first send")
 	ck.Eq("z-ai/glm-5.3-flash:batch", b.models[0], "the parked call's model carries exactly one :batch")
 
 	// Later call: goes live, suffix stripped.
 	later := laterCallParams()
 	later.Model = "openrouter/glmb"
-	resp, err = c.SendParams(context.Background(), meta, later)
-	ck.Require().NoError(err, "later SendParams (declared id to :batch) must go live")
-	ck.Eq("live", resp.Content[0].Text, "later call response from the live sender")
+	resp, err = c.send(context.Background(), meta, later, nil)
+	ck.Require().NoError(err, "later send (declared id to :batch) must go live")
+	ck.Eq("live", firstText(t, resp), "later call response from the live sender")
 	ck.Require().Eq(1, sender.calls, "live sender calls")
 	ck.Eq("z-ai/glm-5.3-flash", string(sender.lastReq[0].Model), "the :batch suffix must be stripped on the live call")
 	ck.Eq(1, len(b.providers), "the later call must not park again")

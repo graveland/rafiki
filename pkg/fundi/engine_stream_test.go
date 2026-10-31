@@ -4,15 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"go.graveland.dev/rafiki/pkg/msg"
 
@@ -24,106 +20,77 @@ import (
 // These mirror rafiki's own (package-private) llm/conversation_stream_test.go
 // fixtures, rebuilt here against the exported llm.StreamingSender interface
 // so the engine's streaming wiring (Task B4) can be driven end to end with no
-// network. Event bodies for the tool_use case are lifted from a real
-// recorded API response (anthropic-sdk-go's
-// toolrunner/testdata/cassettes/tool_runner_next_streaming.yaml) rather than
-// invented, so the input_json_delta fragmentation (including the
-// "{}"-replaced-not-appended first chunk — see anthropic.Message.Accumulate)
-// matches what the real API actually sends.
+// network. The tool_use case's input_json_delta fragmentation (including the
+// "{}"-replaced-not-appended first chunk) matches what the real API sends.
 
-func sseEvt(typ, raw string) ssestream.Event {
-	return ssestream.Event{Type: typ, Data: []byte(raw)}
+func streamMessageStart(model string) msg.StreamEvent {
+	return msg.MessageStart{ID: "msg_stream", Model: model,
+		Usage: msg.Usage{Input: msg.Ptr(10), Output: msg.Ptr(0), CacheRead: msg.Ptr(0), CacheWrite: msg.Ptr(0)}}
 }
 
-func streamMessageStart(model string) ssestream.Event {
-	return sseEvt("message_start", fmt.Sprintf(
-		`{"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":%q,`+
-			`"content":[],"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
-		model))
+func streamTextBlockStart(index int) msg.StreamEvent {
+	return msg.BlockStart{Index: index, Block: msg.Text{}}
 }
 
-func streamTextBlockStart(index int) ssestream.Event {
-	return sseEvt("content_block_start", fmt.Sprintf(
-		`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, index))
+func streamTextDelta(index int, text string) msg.StreamEvent {
+	return msg.BlockDelta{Index: index, Kind: msg.DeltaText, Text: text}
 }
 
-func streamTextDelta(index int, text string) ssestream.Event {
-	b, _ := json.Marshal(text)
-	return sseEvt("content_block_delta", fmt.Sprintf(
-		`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`, index, b))
+func streamToolUseStart(index int, id, name string) msg.StreamEvent {
+	return msg.BlockStart{Index: index, Block: msg.ToolUse{ID: id, Name: name, Input: json.RawMessage(`{}`)}}
 }
 
-func streamToolUseStart(index int, id, name string) ssestream.Event {
-	return sseEvt("content_block_start", fmt.Sprintf(
-		`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%q,"name":%q,"input":{}}}`,
-		index, id, name))
+func streamInputJSONDelta(index int, partial string) msg.StreamEvent {
+	return msg.BlockDelta{Index: index, Kind: msg.DeltaInputJSON, Text: partial}
 }
 
-func streamInputJSONDelta(index int, partial string) ssestream.Event {
-	b, _ := json.Marshal(partial)
-	return sseEvt("content_block_delta", fmt.Sprintf(
-		`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`, index, b))
+func streamBlockStop(index int) msg.StreamEvent {
+	return msg.BlockStop{Index: index}
 }
 
-func streamBlockStop(index int) ssestream.Event {
-	return sseEvt("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, index))
+func streamThinkingBlockStart(index int) msg.StreamEvent {
+	return msg.BlockStart{Index: index, Block: msg.Thinking{Sig: msg.Signature{Dialect: msg.DialectAnthropic}}}
 }
 
-func streamThinkingBlockStart(index int) ssestream.Event {
-	return sseEvt("content_block_start", fmt.Sprintf(
-		`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, index))
+func streamThinkingDelta(index int, thinking string) msg.StreamEvent {
+	return msg.BlockDelta{Index: index, Kind: msg.DeltaThinking, Text: thinking}
 }
 
-func streamThinkingDelta(index int, thinking string) ssestream.Event {
-	b, _ := json.Marshal(thinking)
-	return sseEvt("content_block_delta", fmt.Sprintf(
-		`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`, index, b))
-}
-
-func streamMessageDelta(stopReason string, outputTokens int) ssestream.Event {
-	return sseEvt("message_delta", fmt.Sprintf(
-		`{"type":"message_delta","delta":{"stop_reason":%q},"usage":{"output_tokens":%d}}`, stopReason, outputTokens))
-}
-
-func streamMessageStop() ssestream.Event {
-	return sseEvt("message_stop", `{"type":"message_stop"}`)
+func streamMessageDelta(stopReason string, outputTokens int) msg.StreamEvent {
+	return msg.MessageDelta{StopReason: msg.ParseStopReason(stopReason), Usage: msg.Usage{Output: msg.Ptr(int64(outputTokens))}}
 }
 
 // textTurnEvents scripts a complete single-text-block streamed turn ending in
 // end_turn, split across the given deltas.
-func textTurnEvents(model string, parts ...string) []ssestream.Event {
-	ev := []ssestream.Event{streamMessageStart(model), streamTextBlockStart(0)}
+func textTurnEvents(model string, parts ...string) []msg.StreamEvent {
+	ev := []msg.StreamEvent{streamMessageStart(model), streamTextBlockStart(0)}
 	for _, p := range parts {
 		ev = append(ev, streamTextDelta(0, p))
 	}
-	ev = append(ev, streamBlockStop(0), streamMessageDelta("end_turn", len(parts)), streamMessageStop())
-	return ev
+	return append(ev, streamBlockStop(0), streamMessageDelta("end_turn", len(parts)))
 }
 
 // toolUseTurnEvents scripts a streamed turn whose only content is a single
-// tool_use block, its input arriving as jsonParts input_json_delta fragments
-// (see the cassette-derived fragmentation note above) — the shape needed to
-// prove tool dispatch waits for the fully reassembled JSON.
-func toolUseTurnEvents(model, toolID, toolName string, jsonParts []string) []ssestream.Event {
-	ev := []ssestream.Event{streamMessageStart(model), streamToolUseStart(0, toolID, toolName)}
+// tool_use block, its input arriving as jsonParts input_json_delta fragments —
+// the shape needed to prove tool dispatch waits for the fully reassembled JSON.
+func toolUseTurnEvents(model, toolID, toolName string, jsonParts []string) []msg.StreamEvent {
+	ev := []msg.StreamEvent{streamMessageStart(model), streamToolUseStart(0, toolID, toolName)}
 	for _, p := range jsonParts {
 		ev = append(ev, streamInputJSONDelta(0, p))
 	}
-	ev = append(ev, streamBlockStop(0), streamMessageDelta("tool_use", 10), streamMessageStop())
-	return ev
+	return append(ev, streamBlockStop(0), streamMessageDelta("tool_use", 10))
 }
 
 // thinkingTurnEvents scripts a complete thinking-only streamed turn ending in
-// end_turn, split across the given deltas — the shape needed to prove
-// thinking blocks trigger live message_update emission via hasContent.
-func thinkingTurnEvents(model, thinking string, outputTokens int) []ssestream.Event {
+// end_turn, split across the given deltas — the shape needed to prove thinking
+// blocks trigger live message_update emission via hasContent.
+func thinkingTurnEvents(model, thinking string, outputTokens int) []msg.StreamEvent {
 	parts := splitThinking(thinking)
-	ev := []ssestream.Event{streamMessageStart(model), streamThinkingBlockStart(0)}
+	ev := []msg.StreamEvent{streamMessageStart(model), streamThinkingBlockStart(0)}
 	for _, p := range parts {
 		ev = append(ev, streamThinkingDelta(0, p))
 	}
-	ev = append(ev, streamBlockStop(0), streamMessageDelta("end_turn", outputTokens), streamMessageStop())
-	return ev
+	return append(ev, streamBlockStop(0), streamMessageDelta("end_turn", outputTokens))
 }
 
 // splitThinking splits a thinking string into chunks to simulate deltas.
@@ -143,48 +110,47 @@ func splitThinking(s string) []string {
 	return parts
 }
 
-// preContentFailureEvents scripts the SDK's own structural events
-// (message_start, an empty content_block_start) with NO content ever
-// delivered, followed by a decoder-surfaced error — modeling a mid-stream
-// failure that happens before any real content arrives. hasContent must gate
-// the handler so this never fires StreamStart.
-func preContentFailureEvents() []ssestream.Event {
-	return []ssestream.Event{streamMessageStart("claude-x"), streamTextBlockStart(0)}
+// preContentFailureEvents scripts the stream's own structural events
+// (message_start, an empty content_block_start) with NO content ever delivered
+// — modeling a mid-stream failure that happens before any real content
+// arrives. hasContent must gate the handler so this never fires StreamStart.
+func preContentFailureEvents() []msg.StreamEvent {
+	return []msg.StreamEvent{streamMessageStart("claude-x"), streamTextBlockStart(0)}
 }
 
 // fakeStreamDecoder replays a fixed event slice, then (once exhausted)
-// surfaces trailErr from Err() — mirroring rafiki's own fakeDecoder in
-// llm/conversation_stream_test.go (unexported there, so rebuilt here).
+// surfaces trailErr.
 type fakeStreamDecoder struct {
-	events   []ssestream.Event
+	events   []msg.StreamEvent
 	idx      int
 	trailErr error
 }
 
-func (d *fakeStreamDecoder) Next() bool {
+func (d *fakeStreamDecoder) Next() (msg.StreamEvent, error) {
 	if d.idx >= len(d.events) {
-		return false
+		if d.trailErr != nil {
+			return nil, d.trailErr
+		}
+		return nil, io.EOF
 	}
+	ev := d.events[d.idx]
 	d.idx++
-	return true
+	return ev, nil
 }
-func (d *fakeStreamDecoder) Event() ssestream.Event { return d.events[d.idx-1] }
-func (d *fakeStreamDecoder) Close() error           { return nil }
-func (d *fakeStreamDecoder) Err() error             { return d.trailErr }
 
-// streamScript is one scripted NewStreaming call, mirroring rafiki's own
-// streamScript (unexported there).
+func (d *fakeStreamDecoder) Close() error { return nil }
+
+// streamScript is one scripted Stream call.
 type streamScript struct {
-	events   []ssestream.Event
+	events   []msg.StreamEvent
 	trailErr error
 }
 
-// scriptedStreamingSender implements llm.StreamingSender, replaying queued
-// streamScripts in order — one per agentloop.drive iteration. New must never
-// be called: every conv.Continue in the engine always carries
-// llm.WithStreamHandler, so sendAttempt always tries sendStreaming first, and
-// this sender always reports canStream=true; a call to New is therefore a
-// test bug (streaming silently fell back), not a legitimate path.
+// scriptedStreamingSender replays queued streamScripts in order — one per
+// agentloop.drive iteration. Send must never be called: every conv.Continue in
+// the engine always carries llm.WithStreamHandler, so sendAttempt always tries
+// the streaming path first; a call to Send is therefore a test bug (streaming
+// silently fell back), not a legitimate path.
 type scriptedStreamingSender struct {
 	mu      sync.Mutex
 	scripts []streamScript
@@ -195,11 +161,11 @@ func newScriptedStreamingSender(scripts ...streamScript) *scriptedStreamingSende
 	return &scriptedStreamingSender{scripts: scripts}
 }
 
-func (s *scriptedStreamingSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return nil, errors.New("scriptedStreamingSender: New called; want NewStreaming (a stream handler is always set)")
+func (s *scriptedStreamingSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	return nil, errors.New("scriptedStreamingSender: Send called; want Stream (a stream handler is always set)")
 }
 
-func (s *scriptedStreamingSender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+func (s *scriptedStreamingSender) Stream(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.calls >= len(s.scripts) {
@@ -207,8 +173,7 @@ func (s *scriptedStreamingSender) NewStreaming(_ context.Context, _ anthropic.Me
 	}
 	sc := s.scripts[s.calls]
 	s.calls++
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](
-		&fakeStreamDecoder{events: sc.events, trailErr: sc.trailErr}, nil), nil
+	return &fakeStreamDecoder{events: sc.events, trailErr: sc.trailErr}, nil
 }
 
 // ---- tests ----
@@ -224,7 +189,7 @@ func TestEngine_StreamsDeltasAndPricesFinalMessageOnce(t *testing.T) {
 	c := assert.NewAborting(t)
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{events: textTurnEvents("claude-x", "Hel", "lo")})
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -299,7 +264,7 @@ func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
 			[]string{"", `{"command":"ls `, `-la"}`})},
 		streamScript{events: textTurnEvents("claude-x", "done")},
 	)
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("go")
 	eng.Wait()
@@ -358,7 +323,7 @@ func TestEngine_HasContentGatePreventsOrphanedMessageStartOnPreContentFailure(t 
 		events:   preContentFailureEvents(),
 		trailErr: errors.New("stream dropped before any content"),
 	})
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -415,18 +380,18 @@ func TestEngine_NonStreamingFallbackProducesWellFormedFrameSequence(t *testing.T
 // blocking behavior differs), so it satisfies the same ssestream.Decoder
 // shape.
 type blockingStreamDecoder struct {
-	prefix  []ssestream.Event
-	suffix  []ssestream.Event
+	prefix  []msg.StreamEvent
+	suffix  []msg.StreamEvent
 	release <-chan struct{}
 
 	idx     int
 	blocked bool
 }
 
-func (d *blockingStreamDecoder) Next() bool {
+func (d *blockingStreamDecoder) Next() (msg.StreamEvent, error) {
 	if d.idx < len(d.prefix) {
 		d.idx++
-		return true
+		return d.prefix[d.idx-1], nil
 	}
 	if !d.blocked {
 		d.blocked = true
@@ -434,48 +399,39 @@ func (d *blockingStreamDecoder) Next() bool {
 	}
 	si := d.idx - len(d.prefix)
 	if si >= len(d.suffix) {
-		return false
+		return nil, io.EOF
 	}
 	d.idx++
-	return true
+	return d.suffix[si], nil
 }
 
-func (d *blockingStreamDecoder) Event() ssestream.Event {
-	i := d.idx - 1
-	if i < len(d.prefix) {
-		return d.prefix[i]
-	}
-	return d.suffix[i-len(d.prefix)]
-}
 func (d *blockingStreamDecoder) Close() error { return nil }
-func (d *blockingStreamDecoder) Err() error   { return nil }
 
-// blockingStreamingSender implements llm.StreamingSender with exactly one
-// NewStreaming call, backed by a blockingStreamDecoder. New must never be
-// called — see scriptedStreamingSender's doc for why that's a hard test bug,
-// not a fallback path, given a stream handler is always set.
+// blockingStreamingSender issues exactly one Stream call, backed by a
+// blockingStreamDecoder. Send must never be called — see
+// scriptedStreamingSender's doc for why that's a hard test bug, not a fallback
+// path, given a stream handler is always set.
 type blockingStreamingSender struct {
-	prefix  []ssestream.Event
-	suffix  []ssestream.Event
+	prefix  []msg.StreamEvent
+	suffix  []msg.StreamEvent
 	release <-chan struct{}
 }
 
-func (s *blockingStreamingSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return nil, errors.New("blockingStreamingSender: New called; want NewStreaming (a stream handler is always set)")
+func (s *blockingStreamingSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	return nil, errors.New("blockingStreamingSender: Send called; want Stream (a stream handler is always set)")
 }
 
-func (s *blockingStreamingSender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](
-		&blockingStreamDecoder{prefix: s.prefix, suffix: s.suffix, release: s.release}, nil), nil
+func (s *blockingStreamingSender) Stream(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
+	return &blockingStreamDecoder{prefix: s.prefix, suffix: s.suffix, release: s.release}, nil
 }
 
 // streamStage is one phase of a stagedStreamDecoder's replay: play events,
-// then (if release is non-nil) block until it closes before starting the
-// next stage. Generalizes blockingStreamDecoder's single prefix/release/suffix
-// shape to N stages, needed by a test that must control TWO separate flush
-// windows rather than one.
+// then (if release is non-nil) block until it closes before starting the next
+// stage. Generalizes blockingStreamDecoder's single prefix/release/suffix shape
+// to N stages, needed by a test that must control TWO separate flush windows
+// rather than one.
 type streamStage struct {
-	events  []ssestream.Event
+	events  []msg.StreamEvent
 	release <-chan struct{}
 }
 
@@ -488,24 +444,18 @@ type stagedStreamDecoder struct {
 	sIdx   int // stage currently being drained
 	eIdx   int // next event index within that stage
 	waited bool
-
-	// curS/curE record which (stage, event) index the last successful Next()
-	// returned, since by the time Event() is called sIdx/eIdx may already have
-	// advanced past it (Next() eagerly advances to the next stage once the
-	// current one is exhausted, to decide whether to block).
-	curS, curE int
 }
 
-func (d *stagedStreamDecoder) Next() bool {
+func (d *stagedStreamDecoder) Next() (msg.StreamEvent, error) {
 	for {
 		if d.sIdx >= len(d.stages) {
-			return false
+			return nil, io.EOF
 		}
 		cur := d.stages[d.sIdx]
 		if d.eIdx < len(cur.events) {
-			d.curS, d.curE = d.sIdx, d.eIdx
+			ev := cur.events[d.eIdx]
 			d.eIdx++
-			return true
+			return ev, nil
 		}
 		if cur.release != nil && !d.waited {
 			d.waited = true
@@ -517,23 +467,21 @@ func (d *stagedStreamDecoder) Next() bool {
 	}
 }
 
-func (d *stagedStreamDecoder) Event() ssestream.Event { return d.stages[d.curS].events[d.curE] }
-func (d *stagedStreamDecoder) Close() error           { return nil }
-func (d *stagedStreamDecoder) Err() error             { return nil }
+func (d *stagedStreamDecoder) Close() error { return nil }
 
 // stagedStreamingSender is blockingStreamingSender's N-gate sibling: exactly
-// one NewStreaming call, backed by a stagedStreamDecoder. New must never be
-// called, for the same reason blockingStreamingSender's New never is.
+// one Stream call, backed by a stagedStreamDecoder. Send must never be called,
+// for the same reason blockingStreamingSender's is never called.
 type stagedStreamingSender struct {
 	stages []streamStage
 }
 
-func (s *stagedStreamingSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return nil, errors.New("stagedStreamingSender: New called; want NewStreaming (a stream handler is always set)")
+func (s *stagedStreamingSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	return nil, errors.New("stagedStreamingSender: Send called; want Stream (a stream handler is always set)")
 }
 
-func (s *stagedStreamingSender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](&stagedStreamDecoder{stages: s.stages}, nil), nil
+func (s *stagedStreamingSender) Stream(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
+	return &stagedStreamDecoder{stages: s.stages}, nil
 }
 
 // waitFor polls cond every millisecond until it reports true, failing the
@@ -574,21 +522,20 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 	c := assert.NewAborting(t)
 	release := make(chan struct{})
 	sender := &blockingStreamingSender{
-		prefix: []ssestream.Event{
+		prefix: []msg.StreamEvent{
 			streamMessageStart("claude-x"),
 			streamTextBlockStart(0),
 			streamTextDelta(0, "Hel"), // must surface to the frontend before we ever unblock
 		},
-		suffix: []ssestream.Event{
+		suffix: []msg.StreamEvent{
 			streamTextDelta(0, "lo"),
 			streamBlockStop(0),
 			streamMessageDelta("end_turn", 2),
-			streamMessageStop(),
 		},
 		release: release,
 	}
 	ts := fakeToolSet{}
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi") // queues and returns immediately; the turn runs on Engine's own worker goroutine
 
@@ -672,7 +619,7 @@ func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
 	release2 := make(chan struct{})
 	sender := &stagedStreamingSender{stages: []streamStage{
 		{
-			events: []ssestream.Event{
+			events: []msg.StreamEvent{
 				streamMessageStart("claude-x"),
 				streamTextBlockStart(0),
 				streamTextDelta(0, "Hel"), // triggers the turn's first (immediate) flush
@@ -680,20 +627,19 @@ func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
 			release: release1,
 		},
 		{
-			events:  []ssestream.Event{streamTextDelta(0, "lo")},
+			events:  []msg.StreamEvent{streamTextDelta(0, "lo")},
 			release: release2,
 		},
 		{
-			events: []ssestream.Event{
+			events: []msg.StreamEvent{
 				streamTextDelta(0, " world"),
 				streamBlockStop(0),
 				streamMessageDelta("end_turn", 3),
-				streamMessageStop(),
 			},
 		},
 	}}
 	ts := fakeToolSet{}
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 
@@ -783,7 +729,7 @@ func TestEngine_CoalescingStillDeliversFinalContent(t *testing.T) {
 	sender := newScriptedStreamingSender(streamScript{
 		events: textTurnEvents("claude-x", "H", "e", "l", "l", "o"),
 	})
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -798,15 +744,15 @@ func TestEngine_CoalescingStillDeliversFinalContent(t *testing.T) {
 // coalescing gate produces exactly 1 in this scenario — but avoids the test
 // itself becoming a timing assertion.
 func TestEngine_CoalescesManyDeltasIntoFewFrames(t *testing.T) {
-	ev := []ssestream.Event{streamMessageStart("claude-x"), streamTextBlockStart(0)}
+	ev := []msg.StreamEvent{streamMessageStart("claude-x"), streamTextBlockStart(0)}
 	for i := 0; i < 200; i++ {
 		ev = append(ev, streamTextDelta(0, "x"))
 	}
-	ev = append(ev, streamBlockStop(0), streamMessageDelta("end_turn", 200), streamMessageStop())
+	ev = append(ev, streamBlockStop(0), streamMessageDelta("end_turn", 200))
 
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{events: ev})
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -873,7 +819,7 @@ func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
 	sender := newScriptedStreamingSender(streamScript{
 		events: textTurnEvents("claude-x", "Hel", "lo", " world"),
 	})
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -974,21 +920,20 @@ func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
 	c := assert.NewAborting(t)
 	release := make(chan struct{})
 	sender := &blockingStreamingSender{
-		prefix: []ssestream.Event{
+		prefix: []msg.StreamEvent{
 			streamMessageStart("deepseek/deepseek-v4-pro"),
 			streamThinkingBlockStart(0),
 			streamThinkingDelta(0, "I should check options."),
 		},
-		suffix: []ssestream.Event{
+		suffix: []msg.StreamEvent{
 			streamThinkingDelta(0, " 1) merge, 2) push, 3) keep."),
 			streamBlockStop(0),
 			streamMessageDelta("end_turn", 5),
-			streamMessageStop(),
 		},
 		release: release,
 	}
 	ts := fakeToolSet{}
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 
@@ -1035,7 +980,7 @@ func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
 	sender := newScriptedStreamingSender(streamScript{
 		events: thinkingTurnEvents("deepseek/deepseek-v4-pro", "Let me think about this...", 3),
 	})
-	eng, out := newTestEngineWithSDKSender(t, ts, sender)
+	eng, out := newTestEngineWithSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()

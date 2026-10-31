@@ -98,8 +98,8 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 	tools := []msg.ToolDef{tool}
 	md := renderTranscriptMarkdown(t)
 
-	resp, err := conv.SendMsg(ctx, llm.UserTextMsg(md),
-		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+	resp, err := conv.Send(ctx, llm.UserText(md),
+		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: detect: %w", err)
 	}
@@ -108,8 +108,8 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 	if perr != nil {
 		retry := fmt.Sprintf("Your report_findings call could not be used: %v\n\n"+
 			"Call report_findings again with input that satisfies the schema.", perr)
-		resp, err = conv.SendMsg(ctx, retryContent(resp, retry),
-			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+		resp, err = conv.Send(ctx, retryContent(resp, retry),
+			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 		if err != nil {
 			return nil, fmt.Errorf("analyze: detect retry: %w", err)
 		}
@@ -147,7 +147,7 @@ func detectCost(pricer insights.Pricer, model string, usage msg.Usage) float64 {
 	if !ok {
 		return 0
 	}
-	return price.UsageCost(usage).Total
+	return price.Cost(usage).Total
 }
 
 // parseReportFindings finds the report_findings tool_use block in resp,

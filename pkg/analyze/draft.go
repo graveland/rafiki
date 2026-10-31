@@ -80,8 +80,8 @@ func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillF
 	tools := []msg.ToolDef{tool}
 	userText := renderDraftRequest(f, current)
 
-	resp, err := conv.SendMsg(ctx, llm.UserTextMsg(userText),
-		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
+	resp, err := conv.Send(ctx, llm.UserText(userText),
+		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: draft: %w", err)
 	}
@@ -90,8 +90,8 @@ func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillF
 	if perr != nil {
 		retry := fmt.Sprintf("Your propose_skill_edit call could not be used: %v\n\n"+
 			"Call propose_skill_edit again with input that satisfies the schema.", perr)
-		resp, err = conv.SendMsg(ctx, retryContent(resp, retry),
-			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithToolsMsg(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
+		resp, err = conv.Send(ctx, retryContent(resp, retry),
+			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("propose_skill_edit"), llm.WithSource("analyze"))
 		if err != nil {
 			return nil, fmt.Errorf("analyze: draft retry: %w", err)
 		}

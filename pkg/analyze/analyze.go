@@ -90,7 +90,7 @@ type Profile struct {
 	// preamble before completing the tool call, failing with
 	// stop_reason=max_tokens, and need headroom above 16384 (kimi observed
 	// 8,871 alone). Models with a low output cap or slow throughput need it
-	// lowered instead (opus-4 line must stay <=8192 per the anthropic-sdk-go
+	// lowered instead (the opus-4 line must stay <=8192 for the API's
 	// non-streaming 10-minute guard).
 	MaxOutputTokens int `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
 

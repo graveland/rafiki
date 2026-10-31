@@ -109,7 +109,7 @@ func (c *llmCompleter) Complete(ctx context.Context, ownerUserID, system, user s
 	if err != nil {
 		return recall.Completion{}, fmt.Errorf("recall summaries: %w", err)
 	}
-	resp, err := conv.SendMsg(ctx, llm.UserTextMsg(user),
+	resp, err := conv.Send(ctx, llm.UserText(user),
 		llm.WithMaxTokens(int64(maxTokens)), llm.WithSource(recall.SummaryEntrypoint))
 	if err != nil {
 		return recall.Completion{}, fmt.Errorf("recall summaries: %w", err)
@@ -133,7 +133,7 @@ func (c *llmCompleter) Complete(ctx context.Context, ownerUserID, system, user s
 // completionCost prices one response's usage via pricer, returning 0 when the
 // pricer is nil or has no entry for the model — the same arithmetic as
 // pkg/analyze/detect.go's detectCost, which routes through
-// routing.ModelPricing.UsageCost so every cost consumer shares one formula. The
+// routing.ModelPricing.Cost so every cost consumer shares one formula. The
 // response echoes the serving provider's id, but an echo that misses the
 // catalog falls back to the configured model's provider-local id before
 // giving up, so a summary's cost is never silently zero just because the
@@ -149,7 +149,7 @@ func completionCost(pricer insights.Pricer, model, catalogModel string, usage ms
 	if !ok {
 		return 0
 	}
-	return price.UsageCost(usage).Total
+	return price.Cost(usage).Total
 }
 
 // recallBinding is recall + memories for one caller, bound at construction —

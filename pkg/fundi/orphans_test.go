@@ -7,64 +7,71 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 )
 
 // capturingSender is a scripted llm.Sender (same replay-in-order contract as
-// fakeSender/scriptedSender) that additionally records the
-// anthropic.MessageNewParams of every New call it serves. It is the seam
-// that lets a test assert on the OUTGOING REQUEST SHAPE rather than merely
-// observing that a scripted call "succeeded" — fakeSender.New ignores params
-// entirely (see faketurns.go), so a successful Continue proves nothing about
-// whether the request it sent was well-formed. The shape the real Anthropic
-// API actually enforces — a tool_use block always followed by a matching
-// tool_result — is exactly what assertToolResultFollowsToolUse checks against
-// a captured request's Messages.
+// fakeSender/scriptedSender) that additionally records the msg.Request of every
+// call it serves. It is the seam that lets a test assert on the OUTGOING
+// REQUEST SHAPE rather than merely observing that a scripted call "succeeded" —
+// fakeSender ignores the request entirely (see faketurns.go), so a successful
+// Continue proves nothing about whether the request it sent was well-formed.
+// The shape the real Anthropic API actually enforces — a tool_use block always
+// followed by a matching tool_result — is exactly what
+// assertToolResultFollowsToolUse checks against a captured request's Messages.
 type capturingSender struct {
 	mu       sync.Mutex
 	next     int
-	turns    []*anthropic.Message
-	captured []anthropic.MessageNewParams
+	turns    []*msg.Response
+	captured []*msg.Request
 }
 
-// newCapturingSender scripts bodies (raw JSON anthropic.Message values) to be
+// newCapturingSender scripts bodies (raw Anthropic response JSON) to be
 // replayed in call order, mirroring scriptedSender/LoadFakeSender.
 func newCapturingSender(t *testing.T, bodies ...string) *capturingSender {
 	t.Helper()
 	s := &capturingSender{}
 	for i, b := range bodies {
-		var msg anthropic.Message
-		assert.NewAborting(t).NoError(json.Unmarshal([]byte(b), &msg), "capturingSender: unmarshal scripted body %d", i)
-		s.turns = append(s.turns, &msg)
+		resp, err := msganthropic.DecodeResponse([]byte(b))
+		assert.NewAborting(t).NoError(err, "capturingSender: decode scripted body %d", i)
+		s.turns = append(s.turns, resp)
 	}
 	return s
 }
 
-// New records params, then returns the next scripted message.
+// Send records req, then returns the next scripted response.
 //
-// It honours ctx BEFORE recording, for the same reason fakeSender.New does
+// It honours ctx BEFORE recording, for the same reason fakeSender.Send does
 // (see faketurns.go) and one more besides: a real HTTP sender never issues the
 // request at all on a cancelled context, so an aborted iteration must leave no
 // trace in captured. That is what lets a test assert "the aborted turn made no
 // further API call" by counting captured requests.
-func (s *capturingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *capturingSender) Send(ctx context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.captured = append(s.captured, params)
+	s.captured = append(s.captured, req)
 	if s.next >= len(s.turns) {
 		return nil, errors.New("agent: capturingSender: scripted turns exhausted")
 	}
-	msg := s.turns[s.next]
+	resp := s.turns[s.next]
 	s.next++
-	return msg, nil
+	return resp, nil
+}
+
+func (s *capturingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // callCount reports how many requests this sender actually served. A request
@@ -75,13 +82,13 @@ func (s *capturingSender) callCount() int {
 	return len(s.captured)
 }
 
-// lastParams returns the params of the most recent New call, failing the
-// test if New was never called.
-func (s *capturingSender) lastParams(t *testing.T) anthropic.MessageNewParams {
+// lastParams returns the request of the most recent call, failing the test if
+// the sender was never called.
+func (s *capturingSender) lastParams(t *testing.T) *msg.Request {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	assert.NewAborting(t).NotEmpty(s.captured, "capturingSender: New was never called")
+	assert.NewAborting(t).NotEmpty(s.captured, "capturingSender: never called")
 	return s.captured[len(s.captured)-1]
 }
 
@@ -91,16 +98,16 @@ func (s *capturingSender) lastParams(t *testing.T) anthropic.MessageNewParams {
 // block for that same id. This is the exact shape the real Anthropic API
 // validates and rejects a request for lacking — the invariant RepairOrphans
 // exists to restore.
-func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam, toolUseID string) {
+func assertToolResultFollowsToolUse(t *testing.T, msgs []msg.Message, toolUseID string) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	for i, m := range msgs {
-		if m.Role != anthropic.MessageParamRoleAssistant {
+		if m.Role != msg.Assistant {
 			continue
 		}
 		var hasToolUse bool
 		for _, block := range m.Content {
-			if tu := block.OfToolUse; tu != nil && tu.ID == toolUseID {
+			if tu, ok := block.(msg.ToolUse); ok && tu.ID == toolUseID {
 				hasToolUse = true
 				break
 			}
@@ -110,9 +117,9 @@ func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam,
 		}
 		c.Less(len(msgs), i+1, "request has %d messages; the assistant message with tool_use %q is the last one — no follow-up tool_result", len(msgs), toolUseID)
 		next := msgs[i+1]
-		c.Eq(anthropic.MessageParamRoleUser, next.Role, "message after tool_use %q has role %v, want user", toolUseID, next.Role)
+		c.Eq(msg.User, next.Role, "message after tool_use %q has role %v, want user", toolUseID, next.Role)
 		for _, block := range next.Content {
-			if tr := block.OfToolResult; tr != nil && tr.ToolUseID == toolUseID {
+			if tr, ok := block.(msg.ToolResult); ok && tr.ToolUseID == toolUseID {
 				return
 			}
 		}
@@ -149,8 +156,8 @@ func TestRepairOrphansNoOpWhenTrailingMessageIsUser(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{
-		{Role: msg.User, Content: llm.UserTextMsg("go")},
+	c.NoError(conv.SeedHistory(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserText("go")},
 	}))
 	n, err := RepairOrphans(ctx, conv)
 	c.NoError(err)
@@ -161,8 +168,8 @@ func TestRepairOrphansNoOpWhenAllToolUseResolved(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{
-		{Role: msg.User, Content: llm.UserTextMsg("go")},
+	c.NoError(conv.SeedHistory(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserText("go")},
 		{Role: msg.Assistant, Content: []msg.Block{
 			msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)},
 		}},
@@ -188,8 +195,8 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{
-		{Role: msg.User, Content: llm.UserTextMsg("go")},
+	c.NoError(conv.SeedHistory(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserText("go")},
 		{Role: msg.Assistant, Content: []msg.Block{
 			msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)},
 			msg.ToolUse{ID: "tu_2", Name: "bash", Input: json.RawMessage(`{}`)},
@@ -231,7 +238,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 	c := assert.NewAborting(t)
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
 	c.NoError(err)
 	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "agent"))
@@ -240,7 +247,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 
 	// sampleResp is a tool_use response (id tu_1); the tool it names never
 	// runs, so its result is never appended — the orphan.
-	if _, err := conv.SendMsg(ctx, llm.UserTextMsg("go")); err != nil {
+	if _, err := conv.Send(ctx, llm.UserText("go")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -257,7 +264,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 		t.Fatalf("trailing row's block = %+v, want a tool_result for tu_1", last.Msg.Content[0])
 	}
 
-	if _, err := conv.ContinueMsg(ctx); err != nil {
+	if _, err := conv.Continue(ctx); err != nil {
 		t.Fatalf("Continue after RepairOrphans failed: %v", err)
 	}
 

@@ -15,12 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -63,7 +62,7 @@ type scriptedSender struct {
 	scripts []string // canned response JSON, last repeats
 }
 
-func (s *scriptedSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *scriptedSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.calls
@@ -71,11 +70,15 @@ func (s *scriptedSender) New(_ context.Context, _ anthropic.MessageNewParams) (*
 		i = len(s.scripts) - 1
 	}
 	s.calls++
-	var m anthropic.Message
-	if err := json.Unmarshal([]byte(s.scripts[i]), &m); err != nil {
-		panic(err)
+	return llmtest.FromAnthropicJSON(s.scripts[i]), nil
+}
+
+func (s *scriptedSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
 	}
-	return &m, nil
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // erroringSender always fails — used where a test needs a genuine upstream
@@ -85,7 +88,11 @@ type erroringSender struct {
 	err error
 }
 
-func (s *erroringSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *erroringSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	return nil, s.err
+}
+
+func (s *erroringSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
 	return nil, s.err
 }
 
@@ -141,12 +148,12 @@ func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, message msg.Mes
 	c.NoError(err, "append node")
 }
 
-func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender, ref string) *llm.Conversation {
+func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
@@ -158,12 +165,12 @@ func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender, ref st
 	return conv
 }
 
-func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender) *llm.Conversation {
+func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
@@ -217,7 +224,7 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 		},
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("diagnose it"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("diagnose it"))
 	c.Require().NoError(err, "Run")
 	c.Eq("final analysis", result.Text, "Text =")
 	if result.Stats.ToolCalls != 2 || result.Stats.Iterations != 2 {
@@ -255,7 +262,7 @@ func TestResumeReissuesPendingCall(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	_, aerr := conv.AppendUserMsg(context.Background(), llm.UserTextMsg("diagnose it"))
+	_, aerr := conv.AppendUser(context.Background(), llm.UserText("diagnose it"))
 	c.Require().NoError(aerr)
 	// (crash here: no assistant, no results)
 
@@ -333,7 +340,7 @@ func TestResumeAlreadyComplete(t *testing.T) {
 	conv := newConv(t, pool, sender)
 
 	ctx := context.Background()
-	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserTextMsg("q")}, nil, "")
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserText("q")}, nil, "")
 	appendNode(t, pool, conv.ID, msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "done earlier"}}},
 		&store.AssistantMeta{StopReason: "end_turn"}, "")
 
@@ -398,7 +405,7 @@ func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 // blocks + optional partial results — the state a crash mid-batch leaves.
 func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversation, partial []msg.Block) {
 	t.Helper()
-	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserTextMsg("diagnose it")}, nil, "")
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserText("diagnose it")}, nil, "")
 	assistant := msg.Message{Role: msg.Assistant, Content: []msg.Block{
 		msg.ToolUse{ID: "toolu_a", Name: "alpha", Input: json.RawMessage(`{"k":"a"}`)},
 		msg.ToolUse{ID: "toolu_b", Name: "beta", Input: json.RawMessage(`{"k":"b"}`)},
@@ -469,7 +476,7 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
-	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserTextMsg("q")}, nil, "")
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserText("q")}, nil, "")
 	appendNode(t, pool, conv.ID, msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "truncated mid-"}}},
 		&store.AssistantMeta{StopReason: "max_tokens"}, "")
 
@@ -497,7 +504,7 @@ func TestDriveHandlesMaxTokensTextOnly(t *testing.T) {
 		respEndTurn,
 	}}
 	conv := newConv(t, pool, sender)
-	result, err := Run(context.Background(), conv, &fakeTools{}, nil, llm.UserTextMsg("go"))
+	result, err := Run(context.Background(), conv, &fakeTools{}, nil, llm.UserText("go"))
 	c.Require().NoError(err, "Run")
 	c.Eq("final analysis", result.Text, "Text")
 	params := sender.allParams()
@@ -523,7 +530,7 @@ func TestDriveHandlesMaxTokensWithToolCalls(t *testing.T) {
 	}}
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
-	result, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("go"))
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
 	c.Require().NoError(err, "Run")
 	// No tools should have been executed — both were truncated.
 	c.Empty(tools.executedNames(), "executed")
@@ -549,7 +556,7 @@ func TestToolErrorBecomesIsErrorResultAndLoopContinues(t *testing.T) {
 	tools := &failingTools{failName: "beta"}
 	conv := newConv(t, pool, sender)
 
-	result, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("go"))
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
 	c.Require().NoError(err, "Run")
 	c.Eq("final analysis", result.Text, "Text =")
 	rows := messageRows(t, pool, conv.ID)
@@ -649,12 +656,12 @@ func TestConcurrentResume(t *testing.T) {
 
 // newMemConv builds a store-less (in-memory) conversation: full loop
 // semantics, no DB — the fast path for exercising drive() without a store.
-func newMemConv(t *testing.T, sender llm.SDKSender) *llm.Conversation {
+func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
 	)
@@ -694,7 +701,7 @@ func TestOnToolStartEndCarryID(t *testing.T) {
 		OnToolStart: func(id, _ string, _ json.RawMessage) { startID = id },
 		OnToolEnd:   func(id, _ string, _ toolmeta.Result, _ error) { endID = id },
 	}
-	_, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("hi"))
+	_, err := Run(context.Background(), conv, tools, ev, llm.UserText("hi"))
 	assert.NewAborting(t).NoError(err)
 	if startID != "tu_1" || endID != "tu_1" || tools.ctxID != "tu_1" {
 		t.Fatalf("ids: start=%q end=%q ctx=%q, want tu_1", startID, endID, tools.ctxID)
@@ -709,7 +716,7 @@ func TestPendingUserInjectedBetweenIterations(t *testing.T) {
 		injected = nil // fire once
 		return out
 	}}
-	if _, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserTextMsg("hi")); err != nil {
+	if _, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi")); err != nil {
 		t.Fatal(err)
 	}
 	hist, err := conv.History(context.Background())
@@ -739,7 +746,7 @@ func TestPendingUserInjectedAtEndTurnContinuesTheLoop(t *testing.T) {
 		injected = nil // fire once
 		return out
 	}}
-	result, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserTextMsg("hi"))
+	result, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi"))
 	c.NoError(err)
 	c.Eq(2, result.Stats.Iterations, "Iterations = %d, want 2 -- the steer must force a second Continue "+
 		"call rather than ending on the first end_turn", result.Stats.Iterations)
@@ -774,30 +781,34 @@ type trackingSender struct {
 	mu      sync.Mutex
 	calls   int
 	scripts []string
-	params  []anthropic.MessageNewParams
+	params  []*msg.Request
 }
 
-func (s *trackingSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *trackingSender) Send(_ context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.params = append(s.params, params)
+	s.params = append(s.params, req)
 	i := s.calls
 	if i >= len(s.scripts) {
 		i = len(s.scripts) - 1
 	}
 	s.calls++
-	var m anthropic.Message
-	if err := json.Unmarshal([]byte(s.scripts[i]), &m); err != nil {
-		panic(err)
-	}
-	return &m, nil
+	return llmtest.FromAnthropicJSON(s.scripts[i]), nil
 }
 
-// allParams returns every MessageNewParams recorded so far, in call order.
-func (s *trackingSender) allParams() []anthropic.MessageNewParams {
+func (s *trackingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
+}
+
+// allParams returns every request recorded so far, in call order.
+func (s *trackingSender) allParams() []*msg.Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]anthropic.MessageNewParams{}, s.params...)
+	return append([]*msg.Request{}, s.params...)
 }
 
 // TestDriveKeepsToolsWhenExtraSendOptionsPassed guards against a regression
@@ -834,71 +845,48 @@ func TestDriveKeepsToolsWhenExtraSendOptionsPassed(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
 
-	_, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("hi"),
-		llm.WithToolsMsg(differentDefs))
+	_, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
+		llm.WithTools(differentDefs))
 	c.NoError(err, "Run")
 
 	all := sender.allParams()
 	c.Len(all, 2, "Continue calls = %d, want 2 (two-iteration script didn't drive both turns)", len(all))
-	for i, params := range all {
-		got := params.Tools
-		if len(got) != 1 || got[0].OfTool == nil || got[0].OfTool.Name != "override" {
+	for i, req := range all {
+		got := req.Tools
+		if len(got) != 1 || got[0].Name != "override" {
 			t.Fatalf("iteration %d Tools = %+v, want exactly the caller's override def (caller's llm.WithTools must win over drive's llm.WithTools(defs))", i+1, got)
 		}
 	}
 }
 
-// streamFakeDecoder replays a fixed event slice — the minimal ssestream.Decoder
-// a StreamingSender fake needs (mirrors llm package's own fakeDecoder, which
-// is unexported and so not reusable across packages).
-type streamFakeDecoder struct {
-	events []ssestream.Event
-	idx    int
-}
-
-func (d *streamFakeDecoder) Next() bool {
-	if d.idx >= len(d.events) {
-		return false
-	}
-	d.idx++
-	return true
-}
-func (d *streamFakeDecoder) Event() ssestream.Event { return d.events[d.idx-1] }
-func (d *streamFakeDecoder) Close() error           { return nil }
-func (d *streamFakeDecoder) Err() error             { return nil }
-
-func sseEv(typ, raw string) ssestream.Event { return ssestream.Event{Type: typ, Data: []byte(raw)} }
-
-// endTurnStreamEvents is a minimal, valid single-text-block streaming
-// response (message_start..message_stop) for the given text.
-func endTurnStreamEvents(text string) []ssestream.Event {
-	return []ssestream.Event{
-		sseEv("message_start", `{"type":"message_start","message":{"id":"msg_stream","type":"message",
-			"role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`),
-		sseEv("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
-		sseEv("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`+text+`"}}`),
-		sseEv("content_block_stop", `{"type":"content_block_stop","index":0}`),
-		sseEv("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`),
-		sseEv("message_stop", `{"type":"message_stop"}`),
+// endTurnStreamEvents is a minimal, valid single-text-block streaming response
+// (message_start..message_delta) for the given text.
+func endTurnStreamEvents(text string) []msg.StreamEvent {
+	return []msg.StreamEvent{
+		msg.MessageStart{ID: "msg_stream", Model: "claude-test", Usage: msg.Usage{Input: msg.Ptr(10), Output: msg.Ptr(0)}},
+		msg.BlockStart{Index: 0, Block: msg.Text{}},
+		msg.BlockDelta{Index: 0, Kind: msg.DeltaText, Text: text},
+		msg.BlockStop{Index: 0},
+		msg.MessageDelta{StopReason: msg.StopEndTurn, Usage: msg.Usage{Output: msg.Ptr(5)}},
 	}
 }
 
-// streamingOnlySender implements llm.StreamingSender, replaying a canned
-// text stream. New panics: this proves the test's llm.WithStreamHandler
-// engaged the STREAMING path rather than silently falling through to New,
-// which would make the test pass even if opts never reached conv.Continue.
+// streamingOnlySender replays a canned text stream. Send panics: this proves
+// the test's llm.WithStreamHandler engaged the STREAMING path rather than
+// silently falling through to the non-streamed one, which would make the test
+// pass even if opts never reached conv.Continue.
 type streamingOnlySender struct {
-	events      []ssestream.Event
+	events      []msg.StreamEvent
 	streamCalls int
 }
 
-func (s *streamingOnlySender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
-	panic("streamingOnlySender.New called; caller-supplied llm.WithStreamHandler must engage NewStreaming")
+func (s *streamingOnlySender) Send(context.Context, *msg.Request, msg.EncodeOptions) (*msg.Response, error) {
+	panic("streamingOnlySender.Send called; caller-supplied llm.WithStreamHandler must engage Stream")
 }
 
-func (s *streamingOnlySender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+func (s *streamingOnlySender) Stream(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
 	s.streamCalls++
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](&streamFakeDecoder{events: s.events}, nil), nil
+	return llmtest.NewDecoder(s.events), nil
 }
 
 // TestRunThreadsCallerSendOptionToContinue proves a caller-supplied
@@ -912,13 +900,16 @@ func TestRunThreadsCallerSendOptionToContinue(t *testing.T) {
 	conv := newMemConv(t, sender)
 
 	var seen strings.Builder
-	handler := func(ev anthropic.MessageStreamEventUnion) {
-		if ev.Type == "content_block_delta" && ev.Delta.Type == "text_delta" {
-			seen.WriteString(ev.Delta.Text)
+	handler := func(resp *msg.Response) {
+		seen.Reset()
+		for _, b := range resp.Content {
+			if tx, ok := b.(msg.Text); ok {
+				seen.WriteString(tx.Text)
+			}
 		}
 	}
 
-	result, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("hi"),
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
 		llm.WithStreamHandler(handler))
 	c.Require().NoError(err, "Run")
 	c.Require().Eq("streamed hello", seen.String(), "stream handler saw")
@@ -936,16 +927,20 @@ const respWrappedUp = `{"id":"msg_w","type":"message","role":"assistant","model"
 	"content":[{"type":"text","text":"wrapping up now"}],
 	"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`
 
-func (s *toolAwareSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *toolAwareSender) Send(_ context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
 	script := respTwoTools
-	if len(params.Tools) == 0 {
+	if len(req.Tools) == 0 {
 		script = respWrappedUp
 	}
-	var m anthropic.Message
-	if err := json.Unmarshal([]byte(script), &m); err != nil {
-		panic(err)
+	return llmtest.FromAnthropicJSON(script), nil
+}
+
+func (s *toolAwareSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
 	}
-	return &m, nil
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // Hitting the iteration cap must no longer hard-error the turn: the model
@@ -966,7 +961,7 @@ func TestIterationCapEndsGracefullyInsteadOfErroring(t *testing.T) {
 		},
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("go"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
 	c.Require().NoError(err, "Run")
 	c.True(result.LimitReached, "LimitReached = false, want true")
 	c.StrContains(result.LimitReason, "maximum tool iterations (2)", "LimitReason =")
@@ -992,7 +987,7 @@ func TestShouldStopEndsTurnGracefully(t *testing.T) {
 		ShouldStop: func() (bool, string) { return true, "cost budget exceeded" },
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("go"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
 	c.Require().NoError(err, "Run")
 	if !result.LimitReached || result.LimitReason != "cost budget exceeded" {
 		t.Errorf("LimitReached=%v LimitReason=%q, want true/%q", result.LimitReached, result.LimitReason, "cost budget exceeded")
@@ -1020,7 +1015,7 @@ func TestNoDefaultIterationCap(t *testing.T) {
 		},
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("go"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
 	c.Require().NoError(err, "Run")
 	c.Greater(250, result.Stats.Iterations, "Stats.Iterations")
 	if !result.LimitReached || result.LimitReason != "test cutoff past the old 250 default" {

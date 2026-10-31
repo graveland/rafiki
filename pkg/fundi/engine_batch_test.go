@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -52,7 +51,7 @@ func batchEngineReply() json.RawMessage {
 func batchEngineClient(t *testing.T, b llm.Batcher) *llm.Client {
 	t.Helper()
 	client, err := llm.NewClient(
-		llm.WithProviderSender("openrouter", llm.FromSDKSender(neverSender{})),
+		llm.WithProviderSender("openrouter", neverSender{}),
 		llm.WithDefaultModel("openrouter/z-ai/glm-5.3-flash:batch"),
 		llm.WithBatcher(b),
 	)
@@ -64,7 +63,11 @@ func batchEngineClient(t *testing.T, b llm.Batcher) *llm.Client {
 // FIRST call the request must park, never go live.
 type neverSender struct{}
 
-func (neverSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (neverSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	return nil, errNeverSent{}
+}
+
+func (neverSender) Stream(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
 	return nil, errNeverSent{}
 }
 
@@ -156,7 +159,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		return nil, context.Canceled // released by the cancel below
 	}}
 	client1, err := llm.NewClient(
-		llm.WithProviderSender("openrouter", llm.FromSDKSender(neverSender{})),
+		llm.WithProviderSender("openrouter", neverSender{}),
 		llm.WithDefaultModel("openrouter/z-ai/glm-5.3-flash:batch"),
 		llm.WithBatcher(b1),
 		llm.WithStore(pool),
@@ -199,7 +202,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 	// The conversation must carry the user row (engine 1's write-ahead) —
 	// that row is what makes the resumed Continue re-issue ordinal N.
 	clientResume, err := llm.NewClient(
-		llm.WithProviderSender("openrouter", llm.FromSDKSender(neverSender{})),
+		llm.WithProviderSender("openrouter", neverSender{}),
 		llm.WithDefaultModel("openrouter/z-ai/glm-5.3-flash:batch"),
 		llm.WithBatcher(&recordPark{}), // placeholder; engine 2 gets its own below
 		llm.WithStore(pool),
@@ -216,7 +219,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 	// the pending turn and must land on Park with the SAME customID.
 	b2 := &recordPark{}
 	client2, err := llm.NewClient(
-		llm.WithProviderSender("openrouter", llm.FromSDKSender(neverSender{})),
+		llm.WithProviderSender("openrouter", neverSender{}),
 		llm.WithDefaultModel("openrouter/z-ai/glm-5.3-flash:batch"),
 		llm.WithBatcher(b2),
 		llm.WithStore(pool),

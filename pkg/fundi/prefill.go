@@ -317,7 +317,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []*conv.Node, st prefil
 		// leave behind — a restart either re-runs the whole pre-fill (empty
 		// history) or finds it complete (prefillTextComplete).
 		r0 := msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: rendered}}}
-		if err := e.conv.SeedHistoryMsg(ctx, []msg.Message{r0}); err != nil {
+		if err := e.conv.SeedHistory(ctx, []msg.Message{r0}); err != nil {
 			return fmt.Errorf("prefill: seed history: %w", err)
 		}
 		slog.Info("agent: prefill complete", "conversation", e.conv.ID, "reads", len(calls), "est_tokens", est, "shape", "text")
@@ -349,7 +349,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []*conv.Node, st prefil
 			ToolUseID: c.id, Content: []msg.Block{msg.Text{Text: c.result}}, IsError: c.isError,
 		})
 	}
-	if err := e.conv.SeedHistoryMsg(ctx, []msg.Message{r0, r1, r2}); err != nil {
+	if err := e.conv.SeedHistory(ctx, []msg.Message{r0, r1, r2}); err != nil {
 		return fmt.Errorf("prefill: seed history: %w", err)
 	}
 

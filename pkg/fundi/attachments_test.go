@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -32,24 +32,26 @@ type contentBlock struct {
 	} `json:"source"`
 }
 
-// lastUserBlocks decodes the content blocks of the final user-role message in
-// the captured request.
-func lastUserBlocks(t *testing.T, params anthropic.MessageNewParams) []contentBlock {
+// lastUserBlocks encodes the captured request the way the wire sees it and
+// decodes the content blocks of its final user-role message.
+func lastUserBlocks(t *testing.T, req *msg.Request) []contentBlock {
 	t.Helper()
 	c := assert.NewAborting(t)
-	body, err := json.Marshal(params.Messages)
-	c.NoError(err, "marshal request messages")
-	var msgs []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+	body, err := msganthropic.Encode(req, msg.EncodeOptions{})
+	c.NoError(err, "encode request")
+	var wire struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
 	}
-	c.NoError(json.Unmarshal(body, &msgs), "decode request messages")
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role != "user" {
+	c.NoError(json.Unmarshal(body, &wire), "decode request body")
+	for i := len(wire.Messages) - 1; i >= 0; i-- {
+		if wire.Messages[i].Role != "user" {
 			continue
 		}
 		var blocks []contentBlock
-		c.NoError(json.Unmarshal(msgs[i].Content, &blocks), "decode content blocks")
+		c.NoError(json.Unmarshal(wire.Messages[i].Content, &blocks), "decode content blocks")
 		return blocks
 	}
 	t.Fatal("no user message in the captured request")
@@ -74,7 +76,7 @@ func assertImageThenText(t *testing.T, blocks []contentBlock) {
 func TestPromptWithAttachmentsReachesTheWire(t *testing.T) {
 	c := assert.NewAborting(t)
 	cs := newCapturingSender(t, sampleEndTurn)
-	eng, _ := newTestEngineWithSDKSender(t, fakeToolSet{}, cs)
+	eng, _ := newTestEngineWithSender(t, fakeToolSet{}, cs)
 	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
 	c.NoError(err, "decode fixture")
 	eng.HandlePromptWithAttachments("F1", "look", []llm.UserImage{{MediaType: "image/png", Data: png}})
@@ -90,7 +92,7 @@ func TestPromptWithAttachmentsReachesTheWire(t *testing.T) {
 func TestAttachmentFrameThroughTheRealFrontendReachesTheWire(t *testing.T) {
 	c := assert.NewAborting(t)
 	cs := newCapturingSender(t, sampleEndTurn)
-	eng, _ := newTestEngineWithSDKSender(t, fakeToolSet{}, cs)
+	eng, _ := newTestEngineWithSender(t, fakeToolSet{}, cs)
 	frame := `{"type":"prompt","id":"F1","message":"look",` +
 		`"attachments":[{"media_type":"image/png","data":"` + png1x1Base64 + `"}]}` + "\n"
 	fe := NewFrontend(strings.NewReader(frame), io.Discard, eng)
@@ -147,7 +149,7 @@ func TestAttachmentFrameDispatchesToTheAttachmentHandler(t *testing.T) {
 func TestPromptWithAttachmentsEchoesTheImage(t *testing.T) {
 	c := assert.NewAborting(t)
 	sink := &recordingSink{}
-	eng, _ := newTestEngineWithSDKConfig(t, fakeToolSet{}, newCapturingSender(t, sampleEndTurn), func(cfg *EngineConfig) {
+	eng, _ := newTestEngineWithConfig(t, fakeToolSet{}, newCapturingSender(t, sampleEndTurn), func(cfg *EngineConfig) {
 		cfg.NativeSink = sink
 	})
 	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
@@ -200,7 +202,7 @@ func TestSteerWithAttachmentsMidTurnReachesTheWire(t *testing.T) {
 	}}
 	cs := newCapturingSender(t, sampleResp, sampleEndTurn)
 	sink := &recordingSink{}
-	eng, _ := newTestEngineWithSDKConfig(t, ts, cs, func(cfg *EngineConfig) { cfg.NativeSink = sink })
+	eng, _ := newTestEngineWithConfig(t, ts, cs, func(cfg *EngineConfig) { cfg.NativeSink = sink })
 	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
 	c.NoError(err, "decode fixture")
 

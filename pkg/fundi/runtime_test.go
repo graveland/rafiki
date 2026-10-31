@@ -658,7 +658,7 @@ func TestRecallSectionFromRuntimeOptions(t *testing.T) {
 		opts := fakeRuntimeOptions(t, t.TempDir())
 		opts.FakeTurns = ""
 		opts.Recall = binding
-		opts.ProviderSenders = map[string]llm.Sender{"anthropic": llm.FromSDKSender(sender)}
+		opts.ProviderSenders = map[string]llm.Sender{"anthropic": sender}
 
 		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
@@ -698,7 +698,7 @@ func TestRecallSectionGatedOnFilteredToolSet(t *testing.T) {
 		opts.FakeTurns = ""
 		opts.Recall = fakeRecallBinding{}
 		opts.Tools = toolAllowlist
-		opts.ProviderSenders = map[string]llm.Sender{"anthropic": llm.FromSDKSender(sender)}
+		opts.ProviderSenders = map[string]llm.Sender{"anthropic": sender}
 
 		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
@@ -737,7 +737,7 @@ func TestWaitSectionFollowsFilteredToolSet(t *testing.T) {
 		opts := fakeRuntimeOptions(t, t.TempDir())
 		opts.FakeTurns = ""
 		opts.Tools = toolAllowlist
-		opts.ProviderSenders = map[string]llm.Sender{"anthropic": llm.FromSDKSender(sender)}
+		opts.ProviderSenders = map[string]llm.Sender{"anthropic": sender}
 
 		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)

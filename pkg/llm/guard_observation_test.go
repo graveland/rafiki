@@ -113,9 +113,9 @@ func runTurns(t *testing.T, conv *Conversation, n int, stream bool) {
 	for i := 0; i < n; i++ {
 		var err error
 		if stream {
-			_, err = conv.SendMsg(ctx, UserTextMsg("hi"), WithStreamHandlerMsg(func(*msg.Response) {}))
+			_, err = conv.Send(ctx, UserText("hi"), WithStreamHandler(func(*msg.Response) {}))
 		} else {
-			_, err = conv.SendMsg(ctx, UserTextMsg("hi"))
+			_, err = conv.Send(ctx, UserText("hi"))
 		}
 		assert.NewAborting(t).NoError(err, "turn %d", i+1)
 	}

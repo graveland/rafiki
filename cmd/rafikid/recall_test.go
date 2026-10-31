@@ -14,11 +14,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/recall"
@@ -31,17 +30,24 @@ import (
 // fakeSender records the last request and answers with a fixed reply — the
 // llm.Sender a test client routes through instead of a real provider.
 type fakeSender struct {
-	got   *anthropic.MessageNewParams
-	reply *anthropic.Message
+	got   *msg.Request
+	reply *msg.Response
 }
 
-func (s *fakeSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	p := params
-	s.got = &p
+func (s *fakeSender) Send(_ context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	s.got = req
 	if s.reply != nil {
 		return s.reply, nil
 	}
-	return &anthropic.Message{Role: "assistant"}, nil
+	return &msg.Response{}, nil
+}
+
+func (s *fakeSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // fakeRecallStore answers only the calls a test wires; anything else panics
@@ -171,7 +177,7 @@ func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
 	// materialize both — proving the nil above is a branch decision, not an
 	// accident of the constructor.
 	sender := &fakeSender{}
-	client, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)), llm.WithDefaultModel("claude-haiku-4-5"))
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", sender), llm.WithDefaultModel("claude-haiku-4-5"))
 	c.NoError(err, "llm.NewClient")
 	prov := &providers.Set{
 		Embeddings: &providers.EmbeddingsConfig{URL: "http://127.0.0.1:1/v1/embeddings", Model: "emb-1", Dimensions: 8},
@@ -307,14 +313,13 @@ func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := scratchPool(t)
 	ctx := t.Context()
-	sender := &fakeSender{reply: &anthropic.Message{
-		Role:    "assistant",
-		Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "the summary text"}},
+	sender := &fakeSender{reply: &msg.Response{
+		Content: []msg.Block{msg.Text{Text: "the summary text"}},
 		Model:   "claude-haiku-4-5",
-		Usage:   anthropic.Usage{InputTokens: 100, OutputTokens: 40},
+		Usage:   msg.Usage{Input: msg.Ptr(100), Output: msg.Ptr(40)},
 	}}
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-haiku-4-5"),
 		llm.WithLogger(discardLogger()),
@@ -442,16 +447,15 @@ func TestLLMCompleterPricesResponsesModelByCatalogID(t *testing.T) {
 	ctx := t.Context()
 	cat := seedResponsesCatalog()
 	prov := mustParseProviders(t, responsesProvidersTOML)
-	sender := &fakeSender{reply: &anthropic.Message{
-		Role:    "assistant",
-		Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "the summary text"}},
+	sender := &fakeSender{reply: &msg.Response{
+		Content: []msg.Block{msg.Text{Text: "the summary text"}},
 		Model:   "gpt-6.1-sol", // the provider-local spelling the upstream echoes
-		Usage:   anthropic.Usage{InputTokens: 1_000_000, OutputTokens: 500_000},
+		Usage:   msg.Usage{Input: msg.Ptr(1_000_000), Output: msg.Ptr(500_000)},
 	}}
 	client, err := llm.NewClient(
 		llm.WithProviders(prov),
 		llm.WithCatalog(cat),
-		llm.WithProviderSender("oa", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("oa", sender),
 		llm.WithStore(pool),
 		llm.WithLogger(discardLogger()),
 	)

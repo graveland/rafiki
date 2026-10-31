@@ -5,6 +5,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -293,4 +294,17 @@ func (s *httpSender) errorFor(resp *http.Response, body []byte) *msg.APIError {
 		Dialect:    s.codec.dialect,
 		Message:    errorMessageOf(body),
 	}
+}
+
+// errorMessageOf reads an Anthropic error body's error.message.
+func errorMessageOf(body []byte) string {
+	var wire struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return ""
+	}
+	return wire.Error.Message
 }

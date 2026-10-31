@@ -9,7 +9,7 @@
 // The package is pgx-free and must not import pkg/llm. pkg/llm holds the
 // Batcher through a single-method interface,
 //
-//	Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error)
+//	Park(ctx context.Context, customID, model string, body json.RawMessage, provider json.RawMessage) (json.RawMessage, error)
 //
 // and the durable Store implementation lives in pkg/batchdb.
 package batch

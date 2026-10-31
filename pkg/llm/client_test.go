@@ -8,8 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
@@ -80,14 +79,14 @@ func TestConversationCostPricesResponsesModelByCatalogID(t *testing.T) {
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(*msg.Request) (*msg.Response, error) {
 			return cannedMessage(usageJSON("gpt-6.1-sol")), nil
 		},
 	}}
 	c, err := NewClient(
 		WithProviders(responsesProviderSet(t)),
-		WithProviderSender("oa", sdkFake(sender)),
+		WithProviderSender("oa", sender),
 		WithStore(pool),
 		WithCatalog(twoIDCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -114,14 +113,14 @@ func TestConversationCostUnchangedForAnthropic(t *testing.T) {
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(*msg.Request) (*msg.Response, error) {
 			return cannedMessage(usageJSON("claude-sonnet-5")), nil
 		},
 	}}
 	c, err := NewClient(
 		WithProviders(responsesProviderSet(t)),
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(twoIDCatalog(t)),
 		WithLogger(testLogger(t)),

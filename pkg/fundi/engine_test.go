@@ -69,20 +69,6 @@ func scriptedSender(t *testing.T, bodies ...string) llm.Sender {
 	return s
 }
 
-// The SDK variants below take an SDK-typed fake — the leaf senders these tests
-// script (capturingSender, scriptedStreamingSender, panickingSender) — and wrap
-// it in the compat adapter, so a test can keep asserting on the SDK params a
-// request carried.
-func newTestEngineWithSDKSender(t *testing.T, ts fakeToolSet, sender llm.SDKSender) (*Engine, *syncBuffer) {
-	t.Helper()
-	return newTestEngineWithSender(t, ts, llm.FromSDKSender(sender))
-}
-
-func newTestEngineWithSDKConfig(t *testing.T, ts fakeToolSet, sender llm.SDKSender, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
-	t.Helper()
-	return newTestEngineWithConfig(t, ts, llm.FromSDKSender(sender), extra)
-}
-
 // fakeToolSet is a minimal agentloop.ToolSet standing in for the real registry
 // (Task 8): one no-schema definition per key, name-sorted for cache stability.
 type fakeToolSet map[string]func(ctx context.Context, in json.RawMessage) (string, error)
@@ -755,8 +741,8 @@ func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
 	eng, _ := newTestEngineWithSender(t, ts, sender)
 
 	ctx := context.Background()
-	c.NoError(eng.conv.SeedHistoryMsg(ctx, []msg.Message{
-		{Role: msg.User, Content: llm.UserTextMsg("seed")},
+	c.NoError(eng.conv.SeedHistory(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserText("seed")},
 		{Role: msg.Assistant, Content: []msg.Block{
 			msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)},
 		}},
@@ -929,7 +915,7 @@ func TestWorkerWaitsForStart(t *testing.T) {
 	silenceSlog(t)
 	sender := newCapturingSender(t, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
 	c.NoError(err)
 	out := &syncBuffer{}

@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -23,10 +21,10 @@ import (
 )
 
 // memClient builds a store-less client whose conversations live in memory.
-func memClient(t *testing.T, sender SDKSender) *Client {
+func memClient(t *testing.T, sender Sender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("anthropic", sender),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("haiku-latest"),
 		WithLogger(testLogger(t)),
@@ -37,8 +35,8 @@ func memClient(t *testing.T, sender SDKSender) *Client {
 
 // respondMsg builds a canned response with an explicit content JSON array,
 // stop reason and usage.
-func respondMsg(stop string, in, out, cacheRead, cacheCreate int64, contentJSON string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondMsg(stop string, in, out, cacheRead, cacheCreate int64, contentJSON string) func(*msg.Request) (*msg.Response, error) {
+	return func(*msg.Request) (*msg.Response, error) {
 		return cannedMessage(fmt.Sprintf(`{"id":"msg_c","type":"message","role":"assistant","model":"claude-haiku-4-5",
 			"content":%s,"stop_reason":%q,
 			"usage":{"input_tokens":%d,"output_tokens":%d,"cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`,
@@ -47,14 +45,14 @@ func respondMsg(stop string, in, out, cacheRead, cacheCreate int64, contentJSON 
 }
 
 // respondUsage builds a plain text response reporting the given usage.
-func respondUsage(in, out, cacheRead, cacheCreate int64, text string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondUsage(in, out, cacheRead, cacheCreate int64, text string) func(*msg.Request) (*msg.Response, error) {
 	return respondMsg("end_turn", in, out, cacheRead, cacheCreate,
 		fmt.Sprintf(`[{"type":"text","text":%q}]`, text))
 }
 
 // isSummaryReq reports whether p is a compaction summary call: its last user
 // content block carries the compaction prompt.
-func isSummaryReq(p anthropic.MessageNewParams) bool {
+func isSummaryReq(p *msg.Request) bool {
 	if len(p.Messages) == 0 {
 		return false
 	}
@@ -62,8 +60,8 @@ func isSummaryReq(p anthropic.MessageNewParams) bool {
 	if len(last.Content) == 0 {
 		return false
 	}
-	b := last.Content[len(last.Content)-1]
-	return b.OfText != nil && b.OfText.Text == compactionPrompt
+	tx, ok := last.Content[len(last.Content)-1].(msg.Text)
+	return ok && tx.Text == compactionPrompt
 }
 
 func countSummaryReqs(sender *scriptedSender) int {
@@ -125,7 +123,7 @@ func allRows(t *testing.T, conv *Conversation) []*convpkg.Node {
 // stripCC renders msgs as canonical JSON with every cache_control marker
 // removed, so two requests can be compared without the moving-breakpoint noise
 // the codec adds at encode time.
-func stripCC(t *testing.T, msgs []anthropic.MessageParam) string {
+func stripCC(t *testing.T, msgs []msg.Message) string {
 	t.Helper()
 	raw, err := json.Marshal(msgs)
 	assert.NewAborting(t).NoError(err, "marshal messages")
@@ -173,7 +171,7 @@ func hasKind(rows []*convpkg.Node, kind string) int {
 
 func TestCompactionProactiveFiresWhenHeadroomLow(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(80_000, 0, 0, 0, "first reply"),
 		respondUsage(100, 50, 0, 0, "<summary>handover</summary>"),
 		respondUsage(200, 20, 0, 0, "second reply"),
@@ -204,7 +202,7 @@ func TestCompactionProactiveFiresWhenHeadroomLow(t *testing.T) {
 
 func TestCompactionProactiveSilentWithPlentyOfHeadroom(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10_000, 0, 0, 0, "r1"),
 		respondUsage(10_000, 0, 0, 0, "r2"),
 	}}
@@ -231,7 +229,7 @@ func TestCompactionProactiveSilentWithPlentyOfHeadroom(t *testing.T) {
 
 func TestCompactionProactiveSilentWhenWindowUnknown(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "r"),
 	}}
 	c := memClient(t, sender)
@@ -254,7 +252,7 @@ func TestCompactionProactiveSilentWhenWindowUnknown(t *testing.T) {
 
 func TestCompactionProactiveSilentBelowMinRows(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "r"),
 	}}
 	c := memClient(t, sender)
@@ -276,7 +274,7 @@ func TestCompactionProactiveSilentBelowMinRows(t *testing.T) {
 
 func TestCompactionUsedTokensCountsCacheTokens(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(1, 100, 80_000, 5_000, "r"),
 	}}
 	c := memClient(t, sender)
@@ -292,7 +290,7 @@ func TestCompactionUsedTokensCountsCacheTokens(t *testing.T) {
 
 func TestCompactionProactiveCountsPendingRows(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(900_000, 0, 0, 0, "r1"),
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondUsage(10, 5, 0, 0, "r2"),
@@ -318,7 +316,7 @@ func TestCompactionProactiveCountsPendingRows(t *testing.T) {
 	// above the 40k buffer and nothing would fire.
 	big := strings.Repeat("z", 140_000)
 	for i := 0; i < 2; i++ {
-		content := []anthropic.ContentBlockParamUnion{anthropic.NewToolResultBlock("toolu_1", big, false)}
+		content := []msg.Block{msg.ToolResult{ToolUseID: "toolu_1", Content: []msg.Block{msg.Text{Text: big}}}}
 		if _, err := conv.AppendUser(ctx, content); err != nil {
 			t.Fatalf("append tool result %d: %v", i, err)
 		}
@@ -336,7 +334,7 @@ func TestCompactionSummaryMaxTokensClampedToConversationCap(t *testing.T) {
 	ctx := context.Background()
 
 	run := func(t *testing.T, opts ...ConvOption) int64 {
-		sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 			respondUsage(10, 5, 0, 0, "r"),
 		}}
@@ -367,7 +365,7 @@ func TestCompactionSummaryMaxTokensClampedToConversationCap(t *testing.T) {
 
 func TestCompactionUsedTokensEstimatedWhenUnset(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondUsage(10, 5, 0, 0, "r"),
 	}}
@@ -397,7 +395,7 @@ func TestCompactionSummaryRequestPrefixIsByteIdentical(t *testing.T) {
 	// The overflow path: the rejected real request and the summary request are
 	// built from the SAME working set, so they must share the cached prefix
 	// byte for byte.
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondUsage(10, 5, 0, 0, "real"),
@@ -416,9 +414,7 @@ func TestCompactionSummaryRequestPrefixIsByteIdentical(t *testing.T) {
 		textRow(3, msg.Assistant, "d"),
 		textRow(4, msg.User, "e"))
 
-	tools := []anthropic.ToolUnionParam{
-		anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{Type: "object"}, "report_findings"),
-	}
+	tools := []msg.ToolDef{{Name: "report_findings", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	if _, err := conv.Continue(ctx, WithTools(tools)); err != nil {
 		t.Fatalf("continue: %v", err)
 	}
@@ -428,18 +424,18 @@ func TestCompactionSummaryRequestPrefixIsByteIdentical(t *testing.T) {
 
 	ck.Eq(mustJSON(prev.Tools), mustJSON(sum.Tools), "tools bytes differ")
 	ck.Eq(mustJSON(prev.System), mustJSON(sum.System), "system bytes differ")
-	ck.Eq(mustJSON(prev.Thinking), mustJSON(sum.Thinking), "thinking bytes differ")
+	ck.Eq(prev.ThinkingBudget, sum.ThinkingBudget, "thinking budget differs")
 
-	want := append([]anthropic.MessageParam{}, prev.Messages...)
+	want := append([]msg.Message{}, prev.Messages...)
 	last := want[len(want)-1]
-	last.Content = append(slices.Clone(last.Content), anthropic.NewTextBlock(compactionPrompt))
+	last.Content = append(slices.Clone(last.Content), msg.Text{Text: compactionPrompt})
 	want[len(want)-1] = last
 	ck.Eq(stripCC(t, want), stripCC(t, sum.Messages), "summary messages must be the previous messages plus one prompt block")
 }
 
 func TestCompactionSummaryRequestHasNoToolChoice(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(999_000, 0, 0, 0, "r1"),
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondUsage(10, 5, 0, 0, "r2"),
@@ -455,9 +451,7 @@ func TestCompactionSummaryRequestHasNoToolChoice(t *testing.T) {
 		textRow(2, msg.User, "c"),
 		textRow(3, msg.Assistant, "d"))
 
-	tools := []anthropic.ToolUnionParam{
-		anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{Type: "object"}, "report_findings"),
-	}
+	tools := []msg.ToolDef{{Name: "report_findings", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	if _, err := conv.Send(ctx, UserText("one"), WithTools(tools), WithToolChoice("report_findings")); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
@@ -466,12 +460,12 @@ func TestCompactionSummaryRequestHasNoToolChoice(t *testing.T) {
 	}
 	ck.Require().Len(sender.lastReq, 3, "requests")
 	ck.Require().True(isSummaryReq(sender.lastReq[1]), "request 1 is not the summary call")
-	ck.Nil(sender.lastReq[1].ToolChoice.OfTool, "summary request must carry no tool_choice, got")
+	ck.Eq("", sender.lastReq[1].ForceTool, "summary request must carry no tool_choice, got %q", sender.lastReq[1].ForceTool)
 }
 
 func TestCompactionDiscardsToolUseBlocksInSummaryResponse(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondMsg("end_turn", 10, 5, 0, 0,
 			`[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}},{"type":"text","text":"<summary>X</summary>"}]`),
 		respondUsage(10, 5, 0, 0, "real"),
@@ -503,7 +497,7 @@ func TestCompactionDiscardsToolUseBlocksInSummaryResponse(t *testing.T) {
 
 func TestCompactionTruncatedSummaryWritesNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondMsg("max_tokens", 10, 5, 0, 0, `[{"type":"text","text":"<summary>partial"}]`),
 		respondUsage(10, 5, 0, 0, "real"),
 	}}
@@ -521,13 +515,13 @@ func TestCompactionTruncatedSummaryWritesNothing(t *testing.T) {
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the turn must still proceed")
-	ck.Eq("real", resp.Content[0].Text, "response")
+	ck.Eq("real", firstText(t, resp), "response")
 	ck.Eq(0, hasKind(allRows(t, conv), convpkg.KindCompactionSummary), "a truncated summary was stored")
 }
 
 func TestCompactionEmptySummaryWritesNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<analysis>just thinking</analysis>"),
 		respondUsage(10, 5, 0, 0, "real"),
 	}}
@@ -551,7 +545,7 @@ func TestCompactionEmptySummaryWritesNothing(t *testing.T) {
 
 func TestCompactionSummaryCallErrorLetsTurnProceed(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(errors.New("summary backend down")),
 		respondUsage(10, 5, 0, 0, "real"),
 	}}
@@ -569,7 +563,7 @@ func TestCompactionSummaryCallErrorLetsTurnProceed(t *testing.T) {
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the turn must proceed on the unchanged history")
-	ck.Eq("real", resp.Content[0].Text, "response")
+	ck.Eq("real", firstText(t, resp), "response")
 	ck.Eq(0, hasKind(allRows(t, conv), convpkg.KindCompactionSummary), "a summary was written after a failed call")
 }
 
@@ -577,8 +571,8 @@ func TestCompactionContextCancelledPropagates(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		func(anthropic.MessageNewParams) (*anthropic.Message, error) { cancel(); return nil, ctx.Err() },
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(*msg.Request) (*msg.Response, error) { cancel(); return nil, ctx.Err() },
 		respondUsage(10, 5, 0, 0, "real"),
 	}}
 	c := memClient(t, sender)
@@ -598,7 +592,7 @@ func TestCompactionContextCancelledPropagates(t *testing.T) {
 
 func TestCompactionWorkingSetAfterCompaction(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
 		respondUsage(10, 5, 0, 0, "reply"),
 	}}
@@ -623,9 +617,12 @@ func TestCompactionWorkingSetAfterCompaction(t *testing.T) {
 
 	real := sender.lastReq[1]
 	ck.Require().Len(real.Messages, 3, "real request messages = [summary, tail…]")
-	ck.Require().NotNil(real.Messages[0].Content[0].OfText, "first request message is not text")
-	ck.StrContains(real.Messages[0].Content[0].OfText.Text, "handover", "working set does not start at the summary")
-	ck.Eq("d", real.Messages[2].Content[0].OfText.Text, "the tail's last row is missing from the request")
+	first, ok := real.Messages[0].Content[0].(msg.Text)
+	ck.Require().True(ok, "first request message is not text")
+	ck.StrContains(first.Text, "handover", "working set does not start at the summary")
+	lastTail, ok := real.Messages[2].Content[0].(msg.Text)
+	ck.Require().True(ok, "the tail's last row is not text")
+	ck.Eq("d", lastTail.Text, "the tail's last row is missing from the request")
 
 	ck.Len(allRows(t, conv), 9, "the summary, its two tail copies, the five pre-compaction rows and the reply")
 
@@ -639,7 +636,7 @@ func TestCompactionWorkingSetAfterCompaction(t *testing.T) {
 
 func TestCompactionSecondCompactionComposes(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>first</summary>"),
 		respondUsage(10, 5, 0, 0, "r1"),
 		respondUsage(10, 5, 0, 0, "<summary>second</summary>"),
@@ -678,7 +675,7 @@ func TestCompactionSecondCompactionComposes(t *testing.T) {
 
 func TestCompactionNoTailIsSummaryOnly(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>only</summary>"),
 		respondUsage(10, 5, 0, 0, "reply"),
 	}}
@@ -709,7 +706,7 @@ func TestCompactionNoTailIsSummaryOnly(t *testing.T) {
 
 func TestCompactionOverflowNetCompactsOnceBeforeTrim(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondUsage(10, 5, 0, 0, "real"),
@@ -729,7 +726,7 @@ func TestCompactionOverflowNetCompactsOnceBeforeTrim(t *testing.T) {
 
 	resp, err := conv.Continue(ctx)
 	ck.Require().NoError(err, "the retried call must succeed")
-	ck.Eq("real", resp.Content[0].Text, "response")
+	ck.Eq("real", firstText(t, resp), "response")
 	ck.Require().Len(sender.lastReq, 3, "requests")
 	ck.True(isSummaryReq(sender.lastReq[1]), "no summary call happened on overflow")
 	ck.Eq(0, trimCalls, "trim must not run before compaction")
@@ -737,7 +734,7 @@ func TestCompactionOverflowNetCompactsOnceBeforeTrim(t *testing.T) {
 
 func TestCompactionOverflowCompactsAtMostOnce(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
 		respondErr(promptTooLargeErr()),
@@ -763,7 +760,7 @@ func TestCompactionOverflowCompactsAtMostOnce(t *testing.T) {
 
 func TestCompactionOverflowSkippedWhenTooFewRows(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 	}}
 	c := memClient(t, sender)
@@ -783,7 +780,7 @@ func TestCompactionOverflowSkippedWhenTooFewRows(t *testing.T) {
 
 func TestCompactionOverflowSummaryTooLargeFallsToTrim(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondErr(promptTooLargeErr()),
 		respondErr(promptTooLargeErr()),
 	}}
@@ -809,9 +806,9 @@ func TestCompactionOverflowSummaryTooLargeFallsToTrim(t *testing.T) {
 func TestCompactionStartEndEventsBalanced(t *testing.T) {
 	ctx := context.Background()
 
-	run := func(t *testing.T, summary func(anthropic.MessageNewParams) (*anthropic.Message, error)) []CompactionEvent {
+	run := func(t *testing.T, summary func(*msg.Request) (*msg.Response, error)) []CompactionEvent {
 		ck := assert.NewCollecting(t)
-		sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			summary,
 			respondUsage(10, 5, 0, 0, "real"),
 		}}
@@ -858,8 +855,8 @@ func TestCompactionStartEndEventsBalanced(t *testing.T) {
 // the reported usage roughly constant triggers exactly ONE summary call.
 func TestCompactionFailedSummaryNotRetriedEveryIteration(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-		func(p anthropic.MessageNewParams) (*anthropic.Message, error) {
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(p *msg.Request) (*msg.Response, error) {
 			if isSummaryReq(p) {
 				return nil, errors.New("summary backend down")
 			}
@@ -895,7 +892,7 @@ func TestCompactionStoreLoadStaysFull(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
 		respondUsage(10, 5, 0, 0, "reply"),
 	}}
@@ -905,12 +902,12 @@ func TestCompactionStoreLoadStaysFull(t *testing.T) {
 	ck.Require().NoError(err)
 
 	for i, txt := range []string{"seed0", "seed1", "seed2", "seed3"} {
-		role := anthropic.MessageParamRoleUser
+		role := msg.User
 		if i%2 == 1 {
-			role = anthropic.MessageParamRoleAssistant
+			role = msg.Assistant
 		}
 		appendNode(t, pool, conv.ID,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(txt)}})
+			msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: txt}}})
 	}
 	conv.usedTokens = 999_000
 
@@ -938,7 +935,7 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
 		respondUsage(10, 5, 0, 0, "reply"),
 	}}
@@ -948,12 +945,12 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 	ck.Require().NoError(err)
 
 	for i := 0; i < 4; i++ {
-		role := anthropic.MessageParamRoleUser
+		role := msg.User
 		if i%2 == 1 {
-			role = anthropic.MessageParamRoleAssistant
+			role = msg.Assistant
 		}
 		appendNode(t, pool, conv.ID,
-			anthropic.MessageParam{Role: role, Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("x")}})
+			msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: "x"}}})
 	}
 	conv.usedTokens = 999_000
 
@@ -973,7 +970,7 @@ func TestCompactionSummaryTurnRecordedAndNextTurnRecorded(t *testing.T) {
 // the instructions ride the summary prompt.
 func TestCompactManualSummarisesBelowThreshold(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
 	}}
 	c := memClient(t, sender)
@@ -995,7 +992,9 @@ func TestCompactManualSummarisesBelowThreshold(t *testing.T) {
 	ck.Eq("manual", trigger, "trigger")
 	ck.Require().Len(sender.lastReq, 1, "requests")
 	last := sender.lastReq[0].Messages
-	got := last[len(last)-1].Content[len(last[len(last)-1].Content)-1].OfText.Text
+	lastBlock, ok := last[len(last)-1].Content[len(last[len(last)-1].Content)-1].(msg.Text)
+	ck.Require().True(ok, "the summary prompt must be a text block")
+	got := lastBlock.Text
 	ck.StrContains(got, "keep the schema", "instructions must ride the summary prompt")
 	ck.Eq(4, len(workingRows(t, conv)), "the working set is the summary plus the three-row tail")
 }
@@ -1022,7 +1021,7 @@ func TestCompactManualNeedsPolicyAndRows(t *testing.T) {
 // Clear restarts the working set at the boundary row and keeps every earlier row.
 func TestClearRestartsWorkingSet(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "reply"),
 	}}
 	c := memClient(t, sender)
@@ -1064,7 +1063,7 @@ func TestClearRestartsWorkingSet(t *testing.T) {
 // working set.
 func TestCompactionTailCopyIsRetractable(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
 	}}
 	c := memClient(t, sender)
@@ -1110,7 +1109,7 @@ func TestCompactionTailCopyIsRetractable(t *testing.T) {
 func TestCompactionTailCopiesStoredBytes(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
-	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondUsage(10, 5, 0, 0, "<summary>handover</summary>"),
 		respondUsage(10, 5, 0, 0, "reply"),
 	}}

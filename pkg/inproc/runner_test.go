@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -802,8 +800,12 @@ func TestRunnerSurvivesAPanickingTool(t *testing.T) {
 // it the right injection point for the worker-path containment.
 type panickingSender struct{}
 
-func (panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
-	panic("sdk exploded mid-turn")
+func (panickingSender) Send(context.Context, *msg.Request, msg.EncodeOptions) (*msg.Response, error) {
+	panic("the sender exploded mid-turn")
+}
+
+func (panickingSender) Stream(context.Context, *msg.Request, msg.EncodeOptions) (msg.StreamDecoder, error) {
+	panic("the sender exploded mid-turn")
 }
 
 // panickingTurnBuildFunc wires an engine whose every turn panics on the worker
@@ -811,7 +813,7 @@ func (panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthro
 func panickingTurnBuildFunc() BuildFunc {
 	return func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
 		client, err := llm.NewClient(
-			llm.WithProviderSender("anthropic", llm.FromSDKSender(panickingSender{})),
+			llm.WithProviderSender("anthropic", panickingSender{}),
 			llm.WithDefaultModel("claude-x"))
 		if err != nil {
 			return nil, nil, err

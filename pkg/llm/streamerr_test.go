@@ -13,14 +13,6 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// sdkStreamErr builds the error ssestream v1.37.0 produces for an in-band
-// "error" event: a bare fmt.Errorf over the raw event body. The SDK-typed fakes
-// still surface a stream failure this way, and the compat adapter recovers the
-// payload from it — so the literal stays here as the wire contract.
-func sdkStreamErr(payload string) error {
-	return fmt.Errorf("received error while streaming: %s", payload)
-}
-
 // inBandErr builds the status-0 API error a codec produces for an in-band SSE
 // error event. The KIND is the codec's classification, which its own tests pin;
 // this file pins what the classifiers here do with it.

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,6 +17,9 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
@@ -29,34 +31,42 @@ import (
 
 type analyzeFakeSender struct {
 	calls   int
-	scripts []func(anthropic.MessageNewParams) (*anthropic.Message, error)
+	scripts []func(*msg.Request) (*msg.Response, error)
 }
 
-func (s *analyzeFakeSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *analyzeFakeSender) Send(_ context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
 	i := s.calls
 	if i >= len(s.scripts) {
 		i = len(s.scripts) - 1
 	}
 	s.calls++
-	return s.scripts[i](params)
+	return s.scripts[i](req)
 }
 
-func analyzeCannedMessage(t *testing.T, raw string) *anthropic.Message {
+func (s *analyzeFakeSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
+}
+
+func analyzeCannedMessage(t *testing.T, raw string) *msg.Response {
 	t.Helper()
-	var m anthropic.Message
-	assert.NewAborting(t).NoError(json.Unmarshal([]byte(raw), &m), "analyzeCannedMessage")
-	return &m
+	resp, err := msganthropic.DecodeResponse([]byte(raw))
+	assert.NewAborting(t).NoError(err, "analyzeCannedMessage")
+	return resp
 }
 
 // analyzeRespondToolUse replies with a single report_findings tool_use block
 // carrying inputJSON.
-func analyzeRespondToolUse(t *testing.T, inputJSON string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func analyzeRespondToolUse(t *testing.T, inputJSON string) func(*msg.Request) (*msg.Response, error) {
 	t.Helper()
 	raw := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 		`"content":[{"type":"tool_use","id":"tu_1","name":"report_findings","input":` + inputJSON + `}],` +
 		`"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":50}}`
-	msg := analyzeCannedMessage(t, raw)
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) { return msg, nil }
+	resp := analyzeCannedMessage(t, raw)
+	return func(*msg.Request) (*msg.Response, error) { return resp, nil }
 }
 
 // analyzeRespondToolUseNamed replies with a single tool_use block for the
@@ -66,37 +76,33 @@ func analyzeRespondToolUse(t *testing.T, inputJSON string) func(anthropic.Messag
 // analyzeFakeSender's scripted call sequence) with the preceding Detect
 // call's report_findings response, so a test folding both stages' usage into
 // Summary.Totals can tell them apart.
-func analyzeRespondToolUseNamed(t *testing.T, name, inputJSON string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func analyzeRespondToolUseNamed(t *testing.T, name, inputJSON string) func(*msg.Request) (*msg.Response, error) {
 	t.Helper()
 	raw := `{"id":"msg_2","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 		`"content":[{"type":"tool_use","id":"tu_2","name":"` + name + `","input":` + inputJSON + `}],` +
 		`"stop_reason":"tool_use","usage":{"input_tokens":40,"output_tokens":77}}`
-	msg := analyzeCannedMessage(t, raw)
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) { return msg, nil }
+	resp := analyzeCannedMessage(t, raw)
+	return func(*msg.Request) (*msg.Response, error) { return resp, nil }
 }
 
 // analyzeRespondTextOnly replies with plain text (no tool_use block): the
 // "detector didn't call the tool" malformed case.
-func analyzeRespondTextOnly(text string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func analyzeRespondTextOnly(text string) func(*msg.Request) (*msg.Response, error) {
+	return func(*msg.Request) (*msg.Response, error) {
 		raw := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 			`"content":[{"type":"text","text":"` + text + `"}],` +
 			`"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}`
-		var m anthropic.Message
-		if err := json.Unmarshal([]byte(raw), &m); err != nil {
-			panic(err)
-		}
-		return &m, nil
+		return llmtest.FromAnthropicJSON(raw), nil
 	}
 }
 
-func testAnalyzeClient(t *testing.T, sender llm.SDKSender) *llm.Client {
+func testAnalyzeClient(t *testing.T, sender llm.Sender) *llm.Client {
 	t.Helper()
 	// WithDefaultModel is required: the client invents no default model, and
 	// Profile.Defaults() deliberately leaves DetectorModel/DraftModel unset, so
 	// a zero-value Profile resolves its model from this default.
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("haiku-latest"),
 	)
 	assert.NewAborting(t).NoError(err, "NewClient")
@@ -147,7 +153,7 @@ func TestAnalyzeSingleIDFullPipeline(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -189,7 +195,7 @@ func TestAnalyzeSkipThenForce(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -231,7 +237,7 @@ func TestAnalyzeCanonicalizesConversationIDCase(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -279,7 +285,7 @@ func TestAnalyzeDetectFailure(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondTextOnly("forgot the tool"),
 		analyzeRespondTextOnly("forgot it again"),
 	}}
@@ -348,7 +354,7 @@ func TestAnalyzeNoStore(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -416,7 +422,7 @@ func TestAnalyzeNoStoreDoesNotRewriteExistingFindings(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -494,7 +500,7 @@ func TestAnalyzeCorpusDir(t *testing.T) {
 	writeTranscript("conv-b.json", "corpus-conv-b")
 	c.Require().NoError(os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{not valid json"), 0o644))
 
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -557,7 +563,7 @@ func TestAnalyzeCorpusDirSkipsArtifactsAndEmptyTranscripts(t *testing.T) {
 	writeTranscript("conv-a.draft.json", "corpus-conv-a", realTurns)
 	writeTranscript("empty.json", "corpus-conv-empty", nil)
 
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -628,7 +634,7 @@ func TestAnalyzeFoldsDraftUsageIntoTotals(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInputNewSkill),
 		analyzeRespondToolUseNamed(t, "propose_skill_edit",
 			`{"files":[{"path":"skills/pgbouncer-restart/SKILL.md","content":"# PgBouncer Restart\n"}],"rationale":"codify the steps"}`),
@@ -695,7 +701,7 @@ func TestAnalyzeForceKeepsDismissedFinding(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
@@ -731,7 +737,7 @@ func TestAnalyzeLimitRemainingArithmetic(t *testing.T) {
 	pool := newTestPool(t)
 	seedConversation(t, pool)
 	seedConversation(t, pool)
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -767,7 +773,7 @@ func TestAnalyzeInterestingnessOrder(t *testing.T) {
 	insertTurn(t, pool, healthyConvID, 0, 10000, 5000)
 	insertMessage(t, pool, healthyConvID, 0, "user", `[{"type":"text","text":"hi"}]`)
 
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}
 	b := New(Options{Pool: pool, LLM: testAnalyzeClient(t, sender)})
@@ -803,7 +809,7 @@ func TestAnalyzeFindingScoreIsRankedNotRaw(t *testing.T) {
 	// Both conversations report the exact same (axis, topic_key) finding, so
 	// Rank groups them into a single RankedFinding spanning both
 	// conversations.
-	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &analyzeFakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
 	}}

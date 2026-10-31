@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/msg/msgtest"
@@ -94,24 +92,6 @@ func corpusRequest(t *testing.T, tc msgtest.Case) *msg.Request {
 		tools:      req.Tools,
 		toolChoice: req.ForceTool,
 	})
-}
-
-// corpusParams is the SDK-shaped form of corpusRequest: the native request the
-// client would build, encoded and decoded back into the SDK's params. It is the
-// input the SDK → native compatibility hop (RequestFromSDK, used by SendParams)
-// is exercised against, and going through the codec is what gives it the same
-// cache markers a real request would carry.
-func corpusParams(t *testing.T, tc msgtest.Case) anthropic.MessageNewParams {
-	t.Helper()
-	ck := assert.NewAborting(t)
-	body, err := msganthropic.Encode(corpusRequest(t, tc), msg.EncodeOptions{})
-	ck.NoError(err, "encode corpus request")
-	var params anthropic.MessageNewParams
-	ck.NoError(json.Unmarshal(body, &params), "decode corpus params")
-	if len(tc.Extra) > 0 {
-		params.SetExtraFields(tc.Extra)
-	}
-	return params
 }
 
 // writeGoldenWithExtra compares a built body with its golden after lifting the

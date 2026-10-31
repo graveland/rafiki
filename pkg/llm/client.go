@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -97,7 +96,7 @@ func WithProviderSender(name string, s Sender) ClientOption {
 }
 
 // WithStore wires the Postgres pool for capture + DB-backed conversations.
-// Required for Conversation; SendParams degrades to capture-less without it.
+// Required for a captured conversation; a store-less one runs capture-less.
 func WithStore(pool *pgxpool.Pool) ClientOption {
 	return func(c *Client) { c.pool = pool }
 }
@@ -453,30 +452,13 @@ type SendMeta struct {
 	TrimFrom, TrimTo *int
 }
 
-// SendParams is the SDK-typed entry point: it converts params to a native
-// request, sends it, and converts the reply back. Hosts that build their own
-// params (sc's core-dump analyzer, the provider-guard config test) use it;
-// every conversation send calls send directly with a native request.
-func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	req, extra, err := msganthropic.RequestFromSDK(params)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.send(ctx, meta, req, extra)
-	if err != nil {
-		return nil, err
-	}
-	return msganthropic.ToSDKMessage(resp)
-}
-
 // send write-aheads the turn, routes the call through the primary's breaker
 // with fallback, and completes/fails the turn. Capture is best-effort: a broken
 // store degrades to pass-through, never blocks the call. Every invocation
 // inserts its own turn row and always resolves it.
 //
-// extra is the caller's top-level body fields (an SDK params' ExtraFields, for
-// the SendParams face); prepareSend merges the provider object and the
-// provider's configured extras onto a copy of it.
+// extra is the caller's top-level body fields; prepareSend merges the provider
+// object and the provider's configured extras onto a copy of it.
 func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extra map[string]any) (*msg.Response, error) {
 	p, err := c.prepareSend(ctx, meta, req, extra)
 	if err != nil {
@@ -556,7 +538,7 @@ func (c *Client) observeProvider(ref turnRef, model, servedBy string, resp *msg.
 		return
 	}
 	c.guard.Observe(time.Now(), routing.Observation{
-		Provider: ProviderOfMsg(resp), Model: model, Conversation: ref.convID,
+		Provider: ProviderOf(resp), Model: model, Conversation: ref.convID,
 		PrefixHash: ref.prefixHash, InputTokens: msg.Val(resp.Usage.Input),
 		CacheReadTokens: msg.Val(resp.Usage.CacheRead),
 	})
@@ -728,8 +710,8 @@ func (c *Client) mutateParams(p providers.Provider, decl *providers.ModelDecl, m
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
-// false. Shared by SendParams and sendStreaming so the capture-failure log
-// line stays in one place.
+// false. Shared by send and sendStreaming so the capture-failure log line
+// stays in one place.
 func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, turnCreatedAt time.Time, err error) {
 	if !capturing {
 		return
@@ -768,7 +750,7 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 // because both are set. A concrete consumer (fundi) enables a fallback chain
 // and WithBreaker together whenever an OpenRouter key is configured, which is
 // the common case, not an edge case; bailing out of streaming there made
-// WithStreamHandlerMsg silently a no-op for exactly the deployment this was
+// WithStreamHandler silently a no-op for exactly the deployment this was
 // built for.
 //
 // Breaker gate AND result recording both genuinely apply here, via the same
@@ -938,13 +920,6 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 	}
 
 	acc := msg.NewAccumulator()
-	// The SDK-typed sink gets one adapter per stream: it replays, at block
-	// stop, whatever a finalized block carries that the stream never delivered
-	// as a delta (a citation list, a server-tool block's completed input).
-	var adapter *msganthropic.SDKEventAdapter
-	if handler.sdk != nil {
-		adapter = &msganthropic.SDKEventAdapter{}
-	}
 	for serr == nil {
 		ev, derr := dec.Next()
 		if errors.Is(derr, io.EOF) {
@@ -970,22 +945,6 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 			recordPrimaryResult(breaker, now, wrapped)
 			c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
 			return nil, true, delivered, wrapped
-		}
-		if adapter != nil {
-			sdkEvents, aerr := adapter.Add(ev)
-			if aerr != nil {
-				wrapped := fmt.Errorf("llm: convert stream event: %w", aerr)
-				span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
-				span.SetStatus(codes.Error, "")
-				c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
-				recordPrimaryResult(breaker, now, wrapped)
-				c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
-				return nil, true, delivered, wrapped
-			}
-			for _, sdkEv := range sdkEvents {
-				FixEmptyToolInput(&sdkEv)
-				handler.sdk(sdkEv)
-			}
 		}
 		if content && handler.native != nil {
 			handler.native(acc.Response())
@@ -1289,32 +1248,14 @@ func (c *Client) noEligibleError(spec routing.Spec, model string, err error) err
 	return fmt.Errorf("no provider can serve %s under routing [%s]: %w", model, spec.String(), err)
 }
 
-// ProviderOfMsg returns OpenRouter's non-standard top-level "provider" field —
-// the backend that actually served the turn — or "" for a native Anthropic
+// ProviderOf returns OpenRouter's non-standard top-level "provider" field — the
+// backend that actually served the turn — or "" for a native Anthropic
 // response, which carries none.
-func ProviderOfMsg(r *msg.Response) string {
+func ProviderOf(r *msg.Response) string {
 	if r == nil {
 		return ""
 	}
 	return r.Provider
-}
-
-// ProviderOf is ProviderOfMsg for an SDK message. The Anthropic SDK has no
-// such field, but it retains unknown members in JSON.ExtraFields, so the value
-// survives the decode.
-func ProviderOf(m *anthropic.Message) string {
-	if m == nil {
-		return ""
-	}
-	f, ok := m.JSON.ExtraFields["provider"]
-	if !ok {
-		return ""
-	}
-	var s string
-	if err := json.Unmarshal([]byte(f.Raw()), &s); err != nil {
-		return ""
-	}
-	return s
 }
 
 // prefixEnvelope is the request's cacheable prefix — everything before the

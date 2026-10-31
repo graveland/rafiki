@@ -4,14 +4,14 @@ package fundi
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
@@ -19,16 +19,28 @@ import (
 )
 
 // recordingSender answers every call with a one-word reply and keeps the
-// params it was handed, which carry the SDK's ExtraFields ("provider").
-type recordingSender struct{ reqs []anthropic.MessageNewParams }
+// request and encode options it was handed, which carry the caller's extras
+// ("provider").
+type recordingSender struct {
+	reqs []*msg.Request
+	opts []msg.EncodeOptions
+}
 
-func (s *recordingSender) New(_ context.Context, p anthropic.MessageNewParams) (*anthropic.Message, error) {
-	s.reqs = append(s.reqs, p)
-	return &anthropic.Message{
-		Role:       "assistant",
-		StopReason: anthropic.StopReasonEndTurn,
-		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "ok"}},
+func (s *recordingSender) Send(_ context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	s.reqs = append(s.reqs, req)
+	s.opts = append(s.opts, opts)
+	return &msg.Response{
+		StopReason: msg.StopEndTurn,
+		Content:    []msg.Block{msg.Text{Text: "ok"}},
 	}, nil
+}
+
+func (s *recordingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // TestProviderGuardConfigReachesTheWire pins Config.ProviderGuard's last hop:
@@ -43,27 +55,32 @@ func TestProviderGuardConfigReachesTheWire(t *testing.T) {
 	ck.NoError(err, "Ban")
 
 	openrouter := &recordingSender{}
+	// A seeded catalog never refreshes, so resolving the slash model does not
+	// reach the network.
+	catalog := routing.NewModelCatalog(nil, time.Hour, nil)
+	catalog.SeedForTest([]routing.CatalogEntry{{ID: "z-ai/glm-5.3-flash"}})
 	cfg := Config{
 		Model:           "openrouter/z-ai/glm-5.3-flash",
 		Tools:           fakeToolSet{},
 		Providers:       providers.Default(),
 		Routing:         "sort=price",
-		Catalog:         routing.NewModelCatalog(nil, time.Hour, nil),
+		Catalog:         catalog,
 		ProviderGuard:   g,
-		ProviderSenders: map[string]llm.Sender{"openrouter": llm.FromSDKSender(openrouter)},
+		ProviderSenders: map[string]llm.Sender{"openrouter": openrouter},
 	}
 	opts, err := cfg.clientOptions()
 	ck.NoError(err, "clientOptions")
 	client, err := llm.NewClient(opts...)
 	ck.NoError(err, "NewClient")
 
-	params := anthropic.MessageNewParams{Model: "openrouter/z-ai/glm-5.3-flash", MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	_, err = client.SendParams(context.Background(), llm.SendMeta{}, params)
-	ck.NoError(err, "SendParams")
+	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "test"),
+		llm.Model("openrouter/z-ai/glm-5.3-flash"), llm.MaxTokens(16))
+	ck.NoError(err, "Conversation")
+	_, err = conv.Send(context.Background(), llm.UserText("hi"))
+	ck.NoError(err, "Send")
 	ck.Require().Eq(1, len(openrouter.reqs), "requests sent to openrouter")
 
-	body, err := json.Marshal(openrouter.reqs[0])
-	ck.NoError(err, "marshal wire params")
+	body, err := msganthropic.Encode(openrouter.reqs[0], openrouter.opts[0])
+	ck.NoError(err, "encode wire body")
 	ck.StrContains(string(body), `"ignore":["open-inference"]`, "operator ban missing from the child's wire body")
 }

@@ -5,14 +5,11 @@ package llm
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -20,7 +17,6 @@ import (
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/msg"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -172,26 +168,17 @@ func TopK(k int64) ConvOption { return func(c *convConfig) { c.topK = &k } }
 // MaxTokens sets the default output cap (16384 when unset).
 func MaxTokens(n int64) ConvOption { return func(c *convConfig) { c.maxTokens = n } }
 
-// SystemMsg sets the system prompt blocks. Prompt-cache breakpoints are
+// System sets the system prompt blocks. Prompt-cache breakpoints are
 // applied internally at request assembly per the conversation's CachePolicy —
 // callers never set cache_control themselves. System is immutable for the
 // conversation's life.
-func SystemMsg(blocks []msg.Text) ConvOption {
+func System(blocks []msg.Text) ConvOption {
 	return func(c *convConfig) { c.system = blocks }
-}
-
-// System is SystemMsg for the SDK-typed block list.
-func System(blocks []anthropic.TextBlockParam) ConvOption {
-	out := make([]msg.Text, len(blocks))
-	for i, b := range blocks {
-		out[i] = msg.Text{Text: b.Text}
-	}
-	return SystemMsg(out)
 }
 
 // SystemText is the single-block convenience form of System.
 func SystemText(s string) ConvOption {
-	return SystemMsg([]msg.Text{{Text: s}})
+	return System([]msg.Text{{Text: s}})
 }
 
 // WithTrimPolicy sets the prompt-too-large trim policy (default: keep the
@@ -288,14 +275,9 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	return &Conversation{client: c, ID: convID, cfg: cfg}, nil
 }
 
-// UserTextMsg builds a single-text-block user message payload for SendMsg.
-func UserTextMsg(s string) []msg.Block {
-	return []msg.Block{msg.Text{Text: s}}
-}
-
 // UserText builds a single-text-block user message payload for Send.
-func UserText(s string) []anthropic.ContentBlockParamUnion {
-	return []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(s)}
+func UserText(s string) []msg.Block {
+	return []msg.Block{msg.Text{Text: s}}
 }
 
 // UserImage is one image attached to a user message.
@@ -308,7 +290,7 @@ type UserImage struct {
 	Data      []byte
 }
 
-// UserContentMsg builds a native user message payload from text plus attached
+// UserContent builds a native user message payload from text plus attached
 // images. Images come FIRST: Anthropic's own guidance is that a model attends
 // better to an image that precedes the text asking about it, and the common
 // shape here is "here is a screenshot" followed by a question about it.
@@ -316,7 +298,7 @@ type UserImage struct {
 // Text may be empty when the images are the whole message; an empty text block
 // is omitted rather than sent, since a content block with no content is a
 // 400 on some providers and noise on the rest.
-func UserContentMsg(text string, images []UserImage) []msg.Block {
+func UserContent(text string, images []UserImage) []msg.Block {
 	out := make([]msg.Block, 0, len(images)+1)
 	for _, img := range images {
 		if len(img.Data) == 0 {
@@ -330,29 +312,9 @@ func UserContentMsg(text string, images []UserImage) []msg.Block {
 	return out
 }
 
-// UserContent builds a user message payload from text plus attached images, in
-// the SDK's block types. See UserContentMsg for the ordering rule.
-func UserContent(text string, images []UserImage) []anthropic.ContentBlockParamUnion {
-	out := make([]anthropic.ContentBlockParamUnion, 0, len(images)+1)
-	for _, img := range images {
-		if len(img.Data) == 0 {
-			continue
-		}
-		out = append(out, anthropic.NewImageBlockBase64(
-			img.MediaType, base64.StdEncoding.EncodeToString(img.Data)))
-	}
-	if text != "" {
-		out = append(out, anthropic.NewTextBlock(text))
-	}
-	return out
-}
-
 type sendConfig struct {
-	maxTokens int64
-	tools     []msg.ToolDef
-	// toolsErr records a failure to convert SDK tool definitions; a send
-	// carrying it reports the failure instead of silently dropping a tool.
-	toolsErr      error
+	maxTokens     int64
+	tools         []msg.ToolDef
 	source        string
 	authorUserID  string
 	toolChoice    string
@@ -361,61 +323,37 @@ type sendConfig struct {
 	persisted     func(store.Appended)
 }
 
-// streamSink is the per-send stream observer. At most one side is set: the
-// native handler sees accumulated responses, the SDK handler sees the SDK
-// events the adapter renders for the same stream.
+// streamSink is the per-send stream observer: the handler sees the response
+// accumulated so far after each content-bearing event.
 type streamSink struct {
-	native StreamHandlerMsg
-	sdk    StreamHandler
+	native StreamHandler
 }
 
 // active reports whether this send asked to stream.
-func (s streamSink) active() bool { return s.native != nil || s.sdk != nil }
+func (s streamSink) active() bool { return s.native != nil }
 
 type SendOption func(*sendConfig)
 
-// StreamHandler receives each streaming event as it arrives.
-type StreamHandler func(ev anthropic.MessageStreamEventUnion)
-
-// StreamHandlerMsg receives the response accumulated so far after each
+// StreamHandler receives the response accumulated so far after each
 // content-bearing stream event.
-type StreamHandlerMsg func(partial *msg.Response)
+type StreamHandler func(partial *msg.Response)
 
-// WithStreamHandlerMsg streams the response, invoking h after each event that
+// WithStreamHandler streams the response, invoking h after each event that
 // carries content, with the response accumulated so far, and returns the
 // accumulated message exactly as an unstreamed call would.
 //
 // h is never ignored: every sender streams. h is called synchronously on the
 // calling goroutine: never concurrently with itself, and never after
-// SendMsg/ContinueMsg returns. No locking is required in h.
+// Send/Continue returns. No locking is required in h.
 //
 // IMPORTANT: h may be invoked one or more times and the call may STILL
 // return an error — a stream can die after delivering content (see
 // sendStreaming's doc for the delivered/attempted bookkeeping this drives).
 // A consumer rendering h's output must be prepared for a torn, incomplete
 // message and must not treat "h fired" as "the turn succeeded". Completion
-// is signalled only by SendMsg/ContinueMsg returning a nil error.
-func WithStreamHandlerMsg(h StreamHandlerMsg) SendOption {
-	return func(s *sendConfig) { s.streamHandler.native = h }
-}
-
-// WithStreamHandler is WithStreamHandlerMsg in the SDK's event types: the
-// adapter converts each native stream event back into the SDK events the old
-// handler expects, replaying at block stop whatever the finalized block
-// carries that the stream never delivered as a delta (a citation list, a
-// server-tool block's completed input).
-//
-// h is called synchronously on the calling goroutine: never concurrently
-// with itself, and never after Send/Continue returns. No locking is
-// required in h.
-//
-// IMPORTANT: h may be invoked one or more times and the call may STILL
-// return an error — a stream can die after delivering content. A consumer
-// rendering h's output must be prepared for a torn, incomplete message and
-// must not treat "h fired" as "the turn succeeded". Completion is signalled
-// only by Send/Continue returning a nil error.
+// is signalled only by Send/Continue returning a nil error.
 func WithStreamHandler(h StreamHandler) SendOption {
-	return func(s *sendConfig) { s.streamHandler.sdk = h }
+	return func(s *sendConfig) { s.streamHandler.native = h }
 }
 
 // WithBatchWait registers fn as the send's batch-wait bracket: it is called
@@ -439,51 +377,14 @@ func WithPersisted(fn func(store.Appended)) SendOption {
 // WithMaxTokens overrides the output cap for this send only.
 func WithMaxTokens(n int64) SendOption { return func(s *sendConfig) { s.maxTokens = n } }
 
-// WithToolsMsg attaches native tool definitions for this send. Definitions
+// WithTools attaches native tool definitions for this send. Definitions
 // MUST be in a deterministic order across a conversation's sends (any stable
 // order — e.g. sc's sorted-local + sorted-upstream concatenation): a
 // reordered tools array silently busts the Anthropic prompt-cache prefix. The
 // library cannot verify cross-call stability; prefix_hash on captured turns is
 // the drift detector.
-func WithToolsMsg(tools []msg.ToolDef) SendOption {
+func WithTools(tools []msg.ToolDef) SendOption {
 	return func(s *sendConfig) { s.tools = tools }
-}
-
-// WithTools is WithToolsMsg for the SDK's tool union.
-func WithTools(tools []anthropic.ToolUnionParam) SendOption {
-	defs, err := toolDefs(tools)
-	return func(s *sendConfig) {
-		s.tools = defs
-		if err != nil {
-			s.toolsErr = err
-		}
-	}
-}
-
-// toolDefs converts SDK tool definitions to native ones: name, description,
-// and the input schema as JSON.
-func toolDefs(tools []anthropic.ToolUnionParam) ([]msg.ToolDef, error) {
-	if len(tools) == 0 {
-		return nil, nil
-	}
-	out := make([]msg.ToolDef, 0, len(tools))
-	for _, t := range tools {
-		if t.OfTool == nil {
-			// A server tool has no native declaration: the API defines its shape,
-			// and nothing in a native request names it.
-			continue
-		}
-		schema, err := json.Marshal(t.OfTool.InputSchema)
-		if err != nil {
-			return nil, fmt.Errorf("llm: tool %q input schema: %w", t.OfTool.Name, err)
-		}
-		def := msg.ToolDef{Name: t.OfTool.Name, InputSchema: schema}
-		if t.OfTool.Description.Valid() {
-			def.Description = t.OfTool.Description.Value
-		}
-		out = append(out, def)
-	}
-	return out, nil
 }
 
 // WithSource overrides the per-turn inbound entrypoint.
@@ -500,37 +401,24 @@ func WithToolChoice(name string) SendOption {
 	return func(s *sendConfig) { s.toolChoice = name }
 }
 
-// SendMsg appends userContent to the conversation and gets the assistant's
+// Send appends userContent to the conversation and gets the assistant's
 // reply: load history → persist the user message (write-ahead) → assemble →
 // call (breaker/fallback/capture, prompt-too-large trim-retry) → persist the
 // assistant message + turn. Returns the assistant response.
-func (conv *Conversation) SendMsg(ctx context.Context, userContent []msg.Block, opts ...SendOption) (*msg.Response, error) {
-	if _, err := conv.AppendUserMsg(ctx, userContent); err != nil {
+func (conv *Conversation) Send(ctx context.Context, userContent []msg.Block, opts ...SendOption) (*msg.Response, error) {
+	if _, err := conv.AppendUser(ctx, userContent); err != nil {
 		return nil, err
 	}
-	return conv.ContinueMsg(ctx, opts...)
+	return conv.Continue(ctx, opts...)
 }
 
-// Send is SendMsg in the SDK's content-block types.
-func (conv *Conversation) Send(ctx context.Context, userContent []anthropic.ContentBlockParamUnion, opts ...SendOption) (*anthropic.Message, error) {
-	blocks, err := sdkBlocks(userContent)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := conv.SendMsg(ctx, blocks, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return msganthropic.ToSDKMessage(resp)
-}
-
-// AppendUserMsg persists user content as the next message row WITHOUT sending —
+// AppendUser persists user content as the next message row WITHOUT sending —
 // the write-ahead primitive the agent loop uses to persist tool results (one
 // row per result) before continuing. Consecutive user rows merge into a
 // single wire message at request assembly. It returns the committed row's
 // identity (see store.Appended; a store-less conversation reports the
 // wall-clock time of the append).
-func (conv *Conversation) AppendUserMsg(ctx context.Context, content []msg.Block) (store.Appended, error) {
+func (conv *Conversation) AppendUser(ctx context.Context, content []msg.Block) (store.Appended, error) {
 	row, err := conv.appendMessage(ctx, msg.Message{Role: msg.User, Content: content}, nil, "")
 	if err != nil {
 		return store.Appended{}, fmt.Errorf("llm: %w", err)
@@ -538,26 +426,14 @@ func (conv *Conversation) AppendUserMsg(ctx context.Context, content []msg.Block
 	return row, nil
 }
 
-// AppendUser is AppendUserMsg in the SDK's content-block types.
-func (conv *Conversation) AppendUser(ctx context.Context, content []anthropic.ContentBlockParamUnion) (store.Appended, error) {
-	blocks, err := sdkBlocks(content)
-	if err != nil {
-		return store.Appended{}, fmt.Errorf("llm: %w", err)
-	}
-	return conv.AppendUserMsg(ctx, blocks)
-}
-
-// ContinueMsg sends the conversation AS STORED — no new user message — and
+// Continue sends the conversation AS STORED — no new user message — and
 // persists the assistant reply. This is the loop-turn / crash-recovery
 // primitive: a Resume with a pending turn just Continues, re-issuing the
 // interrupted call from persisted state.
-func (conv *Conversation) ContinueMsg(ctx context.Context, opts ...SendOption) (*msg.Response, error) {
+func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*msg.Response, error) {
 	scfg := sendConfig{maxTokens: conv.cfg.maxTokens}
 	for _, opt := range opts {
 		opt(&scfg)
-	}
-	if scfg.toolsErr != nil {
-		return nil, scfg.toolsErr
 	}
 
 	ctx, span := conv.client.tracer.Start(conv.client.spanCtx(ctx), "llm.conversation.send",
@@ -647,15 +523,6 @@ func (conv *Conversation) ContinueMsg(ctx context.Context, opts ...SendOption) (
 	return resp, nil
 }
 
-// Continue is ContinueMsg in the SDK's message type.
-func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*anthropic.Message, error) {
-	resp, err := conv.ContinueMsg(ctx, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return msganthropic.ToSDKMessage(resp)
-}
-
 // OutputCap returns the conversation's per-turn output token budget (the
 // max_tokens value sent to the upstream API). Callers can use this to
 // auto-bump the cap when a turn is truncated.
@@ -734,13 +601,13 @@ func (conv *Conversation) appendMessage(ctx context.Context, message msg.Message
 	return store.Appended{ID: n.ID, CreatedAt: n.CreatedAt, Ordinal: n.Ordinal, Depth: n.Depth}, nil
 }
 
-// SeedHistoryMsg idempotently persists msgs as the conversation's history from
+// SeedHistory idempotently persists msgs as the conversation's history from
 // a fresh root — the bridge for hosts carrying client-side history (e.g. a
 // fundi prefill, a Slack thread continuation). An existing prefix is matched by
 // node hash, so only the missing suffix is inserted and a partial earlier seed
 // is completed rather than duplicated. Re-seeding a prefix therefore inserts
 // nothing and leaves the working set unchanged.
-func (conv *Conversation) SeedHistoryMsg(ctx context.Context, msgs []msg.Message) error {
+func (conv *Conversation) SeedHistory(ctx context.Context, msgs []msg.Message) error {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -753,38 +620,6 @@ func (conv *Conversation) SeedHistoryMsg(ctx context.Context, msgs []msg.Message
 		return fmt.Errorf("llm: seed history: %w", err)
 	}
 	return nil
-}
-
-// Message is a conversation message in the SDK's request form. It is the
-// SDK-facing alias SeedHistory accepts; the library itself speaks msg.Message.
-type Message = anthropic.MessageParam
-
-// SeedHistory is SeedHistoryMsg in the SDK's message type.
-func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
-	out := make([]msg.Message, len(msgs))
-	for i, m := range msgs {
-		converted, err := msganthropic.FromParam(m)
-		if err != nil {
-			return fmt.Errorf("llm: seed history: convert message %d: %w", i, err)
-		}
-		out[i] = converted
-	}
-	return conv.SeedHistoryMsg(ctx, out)
-}
-
-// sdkBlocks converts SDK content blocks to native ones, through the Anthropic
-// codec so the conversion is the codec's, not a second copy of it.
-func sdkBlocks(content []anthropic.ContentBlockParamUnion) ([]msg.Block, error) {
-	if len(content) == 0 {
-		return nil, nil
-	}
-	m, err := msganthropic.FromParam(anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser, Content: content,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("llm: convert content blocks: %w", err)
-	}
-	return m.Content, nil
 }
 
 func randomID() string {

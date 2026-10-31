@@ -15,12 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/klauspost/compress/zstd"
 
 	"go.graveland.dev/rafiki/pkg/msg"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
@@ -117,25 +114,16 @@ func decodeMap(c *assert.C, raw []byte, what string) map[string]any {
 	return body
 }
 
-// responsesRequest converts the SDK params these tests speak into the native
-// request the sender takes.
-func responsesRequest(t *testing.T, params anthropic.MessageNewParams) *msg.Request {
-	t.Helper()
-	req, _, err := msganthropic.RequestFromSDK(params)
-	assert.NewAborting(t).NoError(err, "RequestFromSDK")
-	return req
-}
-
 // responsesSend issues one non-streamed call through s.
-func responsesSend(t *testing.T, s *responsesSender, params anthropic.MessageNewParams) (*msg.Response, error) {
+func responsesSend(t *testing.T, s *responsesSender, req *msg.Request) (*msg.Response, error) {
 	t.Helper()
-	return s.Send(context.Background(), responsesRequest(t, params), msg.EncodeOptions{})
+	return s.Send(context.Background(), req, msg.EncodeOptions{})
 }
 
 // responsesStream opens one streamed call through s and drains it.
-func responsesStream(t *testing.T, s *responsesSender, params anthropic.MessageNewParams) (*msg.Response, error) {
+func responsesStream(t *testing.T, s *responsesSender, req *msg.Request) (*msg.Response, error) {
 	t.Helper()
-	dec, err := s.Stream(context.Background(), responsesRequest(t, params), msg.EncodeOptions{})
+	dec, err := s.Stream(context.Background(), req, msg.EncodeOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +163,7 @@ func TestResponsesStreamTranslatesFixture(t *testing.T) {
 	c.NoError(err, "read fixture")
 
 	s := newResponsesSenderForTest(t, "k", sseHandler(string(body)))
-	resp, err := responsesStream(t, s, minimalParams())
+	resp, err := responsesStream(t, s, minimalRequest())
 	c.Require().NoError(err, "stream")
 
 	c.Eq("resp_0cf3ceb209f8671c016ae18df08954819ba356b3c5b74b1d53", resp.ID, "id")
@@ -278,7 +266,7 @@ func TestResponsesNonStreamingResponse(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, tc.body)
 			})
-			resp, err := responsesSend(t, s, minimalParams())
+			resp, err := responsesSend(t, s, minimalRequest())
 			c.Require().NoError(err, "Send")
 			c.Eq("POST", method, "method")
 			c.Eq("/responses", path, "path")
@@ -315,7 +303,7 @@ func TestResponsesChatGPTModeRequest(t *testing.T) {
 	})
 
 	ctx := WithSessionID(context.Background(), "sess-42")
-	_, err := s.Send(ctx, responsesRequest(t, minimalParams()), msg.EncodeOptions{})
+	_, err := s.Send(ctx, minimalRequest(), msg.EncodeOptions{})
 	c.Require().NoError(err, "Send")
 
 	mu.Lock()
@@ -358,7 +346,7 @@ func TestResponsesRetriesOnce401(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, responsesSSE(responsesCompleted(``)))
 	})
-	_, err := s.Send(context.Background(), responsesRequest(t, minimalParams()), msg.EncodeOptions{})
+	_, err := s.Send(context.Background(), minimalRequest(), msg.EncodeOptions{})
 	c.Require().NoError(err, "Send")
 	c.EqDiff([]bool{false, true}, ts.calls(), "Token force flags")
 	c.Eq(2, requests, "requests")
@@ -374,7 +362,7 @@ func TestResponsesRetriesOnce401(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
 	})
-	_, err = s2.Send(context.Background(), responsesRequest(t, minimalParams()), msg.EncodeOptions{})
+	_, err = s2.Send(context.Background(), minimalRequest(), msg.EncodeOptions{})
 	c.Require().Error(err, "Send with two 401s")
 	var apiErr *msg.APIError
 	c.True(errors.As(err, &apiErr), "error %T is not a *msg.APIError", err)
@@ -393,7 +381,7 @@ func TestResponsesKeylessSendsNoAuthorization(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"resp_1","model":"m","status":"completed","output":[]}`)
 	})
-	_, err := responsesSend(t, s, minimalParams())
+	_, err := responsesSend(t, s, minimalRequest())
 	c.Require().NoError(err, "Send")
 	c.NotHasKey(hdr, "Authorization", "Authorization header")
 	c.Eq("", hdr.Get("Authorization"), "Authorization")
@@ -417,7 +405,7 @@ func TestResponsesUsageLimitIsTerminal(t *testing.T) {
 			w.WriteHeader(status)
 			_, _ = io.WriteString(w, body)
 		})
-		_, err := responsesSend(t, s, minimalParams())
+		_, err := responsesSend(t, s, minimalRequest())
 		assert.NewAborting(t).Error(err, "Send should fail")
 		return err
 	}
@@ -479,7 +467,7 @@ func TestResponsesHTTPContextOverflowIsPromptTooLarge(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`)
 	})
-	_, err := responsesSend(t, s, minimalParams())
+	_, err := responsesSend(t, s, minimalRequest())
 	c.Require().Error(err, "Send")
 	c.True(isPromptTooLarge(err), "a context overflow must trigger the trim predicate, got: %v", err)
 	c.True(IsPromptTooLarge(err), "IsPromptTooLarge")
@@ -557,7 +545,7 @@ func TestResponsesTerminalEvents(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewAborting(t)
 			s := newResponsesSenderForTest(t, "k", sseHandler(tc.sse))
-			resp, err := responsesStream(t, s, minimalParams())
+			resp, err := responsesStream(t, s, minimalRequest())
 			tc.check(c, resp, err)
 		})
 	}
@@ -577,7 +565,7 @@ func TestResponsesLargeEventLine(t *testing.T) {
 		responsesCompleted(``),
 	)
 	s := newResponsesSenderForTest(t, "k", sseHandler(sse))
-	resp, err := responsesStream(t, s, minimalParams())
+	resp, err := responsesStream(t, s, minimalRequest())
 	c.Require().NoError(err, "stream")
 	c.Require().Len(resp.Content, 1, "content blocks")
 	text, ok := resp.Content[0].(msg.Text)
@@ -593,7 +581,7 @@ func TestResponsesLineCapOverflowNotRetried(t *testing.T) {
 		"data: "+strings.Repeat("x", 4096)+"\n\n"))
 	s.maxLineBytes = 1024
 
-	_, err := responsesStream(t, s, minimalParams())
+	_, err := responsesStream(t, s, minimalRequest())
 	c.Require().Error(err, "an over-long line must fail the stream")
 	c.False(IsTransientStreamError(err), "an over-long line is deterministic and must not be retried")
 	c.False(IsRateLimitStreamError(err), "an over-long line is not a rate limit")
@@ -622,7 +610,7 @@ func TestResponsesStreamIdleTimeout(t *testing.T) {
 	t.Cleanup(func() { close(done) })
 	s.streamIdleTimeout = 50 * time.Millisecond
 
-	dec, err := s.Stream(context.Background(), responsesRequest(t, minimalParams()), msg.EncodeOptions{})
+	dec, err := s.Stream(context.Background(), minimalRequest(), msg.EncodeOptions{})
 	c.Require().NoError(err, "Stream")
 	defer func() { _ = dec.Close() }()
 
@@ -672,7 +660,7 @@ func TestResponsesTurnStateEcho(t *testing.T) {
 
 	ctxA := WithSessionID(context.Background(), "sess-a")
 	ctxB := WithSessionID(context.Background(), "sess-b")
-	req := responsesRequest(t, minimalParams())
+	req := minimalRequest()
 	_, err := s.Send(ctxA, req, msg.EncodeOptions{})
 	c.Require().NoError(err, "first request")
 	_, err = s.Send(ctxA, req, msg.EncodeOptions{})
@@ -724,7 +712,7 @@ func TestResponsesUserAgentAndCookies(t *testing.T) {
 		return s
 	}
 	a, b := mk(), mk()
-	req := responsesRequest(t, minimalParams())
+	req := minimalRequest()
 
 	_, err := a.Send(context.Background(), req, msg.EncodeOptions{})
 	c.Require().NoError(err, "sender a, request 1")
@@ -763,18 +751,16 @@ func TestResponsesSenderResendsOnlyOwnDialect(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"resp_1","model":"m","status":"completed","output":[]}`)
 	})
 
-	params := minimalParams()
-	params.Messages = []anthropic.MessageParam{
-		{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
-			{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "api reasoning", Signature: responsesSignature(ResponsesModeAPI, "rs_api", "blob-api")}},
-			{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "chatgpt reasoning", Signature: responsesSignature(ResponsesModeChatGPT, "rs_gpt", "blob-gpt")}},
-			{OfText: &anthropic.TextBlockParam{Text: "answer"}},
+	req := minimalRequest()
+	req.Messages = []msg.Message{
+		{Role: msg.Assistant, Content: []msg.Block{
+			msg.Thinking{Text: "api reasoning", Sig: msg.Signature{Dialect: msg.DialectResponsesAPI, Value: responsesSignature(ResponsesModeAPI, "rs_api", "blob-api")}},
+			msg.Thinking{Text: "chatgpt reasoning", Sig: msg.Signature{Dialect: msg.DialectResponsesChatGPT, Value: responsesSignature(ResponsesModeChatGPT, "rs_gpt", "blob-gpt")}},
+			msg.Text{Text: "answer"},
 		}},
-		{Role: "user", Content: []anthropic.ContentBlockParamUnion{
-			{OfText: &anthropic.TextBlockParam{Text: "go on"}},
-		}},
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "go on"}}},
 	}
-	_, err := responsesSend(t, s, params)
+	_, err := responsesSend(t, s, req)
 	c.Require().NoError(err, "Send")
 
 	mu.Lock()
@@ -784,51 +770,4 @@ func TestResponsesSenderResendsOnlyOwnDialect(t *testing.T) {
 	c.StrContains(body, "blob-api", "this sender's own encrypted content must be resent")
 	c.NotStrContains(body, "rs_gpt", "the other dialect's reasoning item must be dropped")
 	c.NotStrContains(body, "blob-gpt", "the other dialect's blob must be dropped")
-}
-
-// ---- the SDK direction ----
-
-// TestSDKSenderDropsResponsesThinking pins the Anthropic direction: an sdkSender
-// never sends a thinking block whose signature the Responses sender wrote.
-func TestSDKSenderDropsResponsesThinking(t *testing.T) {
-	c := assert.NewAborting(t)
-	var (
-		mu   sync.Mutex
-		body []byte
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		body = raw
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-	}))
-	t.Cleanup(srv.Close)
-
-	sender := sdkSender{client: anthropic.NewClient(
-		option.WithBaseURL(srv.URL),
-		option.WithAPIKey("k"),
-		option.WithMaxRetries(0),
-	)}
-	params := minimalParams()
-	params.Messages = []anthropic.MessageParam{
-		{Role: "user", Content: []anthropic.ContentBlockParamUnion{
-			{OfText: &anthropic.TextBlockParam{Text: "hi"}},
-		}},
-		{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
-			{OfThinking: &anthropic.ThinkingBlockParam{Thinking: "foreign", Signature: responsesSignature(ResponsesModeAPI, "rs_1", "blob")}},
-			{OfText: &anthropic.TextBlockParam{Text: "answer"}},
-		}},
-	}
-	_, err := sender.New(context.Background(), params)
-	c.Require().NoError(err, "sender.New")
-
-	mu.Lock()
-	defer mu.Unlock()
-	c.NotStrContains(string(body), ResponsesSignaturePrefix, "the Anthropic request carried a Responses signature")
-	c.StrContains(string(body), "answer", "the assistant text must survive the filter")
-	// The caller's own history is untouched.
-	c.Require().Len(params.Messages, 2, "caller messages")
-	c.Require().Len(params.Messages[1].Content, 2, "caller message content (not mutated)")
 }

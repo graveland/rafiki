@@ -4,7 +4,6 @@ package agentloop // same package as agentloop_test.go — access to unexported 
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -14,10 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
@@ -134,16 +132,12 @@ func TestContinueWithRetry_TransientError_Recovers(t *testing.T) {
 	// First call fails transient, second succeeds.
 	fails := 1
 	sender := &conditionalSender{
-		fn: func() (*anthropic.Message, error) {
+		fn: func() (*msg.Response, error) {
 			if fails > 0 {
 				fails--
 				return nil, &net.OpError{Op: "read", Err: syscall.ECONNRESET}
 			}
-			var m anthropic.Message
-			if err := json.Unmarshal([]byte(respEndTurn), &m); err != nil {
-				panic(err)
-			}
-			return &m, nil
+			return llmtest.FromAnthropicJSON(respEndTurn), nil
 		},
 	}
 	conv := newMemConv(t, sender)
@@ -165,17 +159,13 @@ func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
 
 	fails := 1
 	sender := &conditionalSender{
-		fn: func() (*anthropic.Message, error) {
+		fn: func() (*msg.Response, error) {
 			if fails > 0 {
 				fails--
 				return nil, inBandErr(msg.ErrTransient, `{"type":"error","error":{"type":"timeout_error",`+
 					`"message":"The operation was aborted","error_type":"timeout"}}`)
 			}
-			var m anthropic.Message
-			if err := json.Unmarshal([]byte(respEndTurn), &m); err != nil {
-				panic(err)
-			}
-			return &m, nil
+			return llmtest.FromAnthropicJSON(respEndTurn), nil
 		},
 	}
 	conv := newMemConv(t, sender)
@@ -189,7 +179,7 @@ func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
 func TestContinueWithRetry_ContextCanceled_StopsRetrying(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sender := &conditionalSender{
-		fn: func() (*anthropic.Message, error) {
+		fn: func() (*msg.Response, error) {
 			cancel() // cancel after first failure
 			return nil, &net.OpError{Op: "read", Err: syscall.ECONNRESET}
 		},
@@ -219,20 +209,28 @@ func TestContinueWithRetry_ExhaustedRetries_ReturnsLastError(t *testing.T) {
 // STORED, unlike Send/Run) has something to send.
 func seedUser(t *testing.T, conv *llm.Conversation) {
 	t.Helper()
-	_, aerr := conv.AppendUserMsg(context.Background(), llm.UserTextMsg("hi"))
+	_, aerr := conv.AppendUser(context.Background(), llm.UserText("hi"))
 	assert.NewAborting(t).NoError(aerr, "seed user message")
 }
 
 // conditionalSender calls fn on each New call.
 type conditionalSender struct {
 	mu sync.Mutex
-	fn func() (*anthropic.Message, error)
+	fn func() (*msg.Response, error)
 }
 
-func (s *conditionalSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *conditionalSender) Send(_ context.Context, _ *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fn()
+}
+
+func (s *conditionalSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
 }
 
 // TestUsageLimitErrorNotRetried pins a subscription usage limit as terminal: the

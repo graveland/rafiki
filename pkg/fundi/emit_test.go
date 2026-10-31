@@ -3,15 +3,11 @@ package fundi
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -31,14 +27,14 @@ func silenceSlog(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 }
 
-// accumulateTextEvents builds the SSE events for a text block that has started
-// and received deltas but has NOT reached content_block_stop -- the state
+// accumulateTextEvents builds the events for a text block that has started and
+// received deltas but has NOT reached its block stop -- the state
 // MapAssistantMessage is handed on every message_update. Built from the same
 // event constructors engine_stream_test.go uses
 // (streamMessageStart/streamTextBlockStart/streamTextDelta) rather than a
 // parallel fixture builder.
-func accumulateTextEvents(parts ...string) []ssestream.Event {
-	ev := []ssestream.Event{streamMessageStart("claude-x"), streamTextBlockStart(0)}
+func accumulateTextEvents(parts ...string) []msg.StreamEvent {
+	ev := []msg.StreamEvent{streamMessageStart("claude-x"), streamTextBlockStart(0)}
 	for _, p := range parts {
 		ev = append(ev, streamTextDelta(0, p))
 	}
@@ -49,48 +45,21 @@ func accumulateTextEvents(parts ...string) []ssestream.Event {
 // content_block_start followed by input_json_delta fragments, again with no
 // content_block_stop -- the mid-stream state a message_update sees for a
 // still-open tool_use block.
-func accumulateToolUseEvents(toolID, name string, jsonParts ...string) []ssestream.Event {
-	ev := []ssestream.Event{streamMessageStart("claude-x"), streamToolUseStart(0, toolID, name)}
+func accumulateToolUseEvents(toolID, name string, jsonParts ...string) []msg.StreamEvent {
+	ev := []msg.StreamEvent{streamMessageStart("claude-x"), streamToolUseStart(0, toolID, name)}
 	for _, p := range jsonParts {
 		ev = append(ev, streamInputJSONDelta(0, p))
 	}
 	return ev
 }
 
-// decodeEvents replays the SSE fixtures through the Anthropic codec's own
-// stream decoder — the same decoder every real sender feeds — so these tests
-// exercise the real decode path rather than a hand-built stand-in.
-func decodeEvents(t *testing.T, evs []ssestream.Event) []msg.StreamEvent {
-	t.Helper()
-	c := assert.NewAborting(t)
-	var body strings.Builder
-	for _, ev := range evs {
-		fmt.Fprintf(&body, "event: %s\ndata: %s\n\n", ev.Type, ev.Data)
-	}
-	// These fixtures script a mid-stream prefix, so they carry no message_stop;
-	// the decoder treats a body that ends without one as truncated.
-	body.WriteString("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-	dec := msganthropic.NewStreamDecoder(io.NopCloser(strings.NewReader(body.String())))
-	defer func() { c.NoError(dec.Close(), "close decoder") }()
-	var out []msg.StreamEvent
-	for {
-		ev, err := dec.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		c.NoError(err, "decode stream event")
-		out = append(out, ev)
-	}
-	return out
-}
-
-// accumulateEvents replays evs through the codec and a native accumulator, the
-// exact pair the engine's streaming handler is fed from.
-func accumulateEvents(t *testing.T, evs []ssestream.Event) *msg.Response {
+// accumulateEvents folds evs into a native accumulator, the exact pair the
+// engine's streaming handler is fed from.
+func accumulateEvents(t *testing.T, evs []msg.StreamEvent) *msg.Response {
 	t.Helper()
 	c := assert.NewAborting(t)
 	acc := msg.NewAccumulator()
-	for _, ev := range decodeEvents(t, evs) {
+	for _, ev := range evs {
 		c.NoError(acc.Add(ev), "accumulate stream event")
 	}
 	return acc.Response()
@@ -158,11 +127,11 @@ func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	acc := msg.NewAccumulator()
-	for _, ev := range decodeEvents(t, []ssestream.Event{
+	for _, ev := range []msg.StreamEvent{
 		streamMessageStart("claude-x"),
 		streamToolUseStart(0, "tu_partial", "Write"),
 		streamInputJSONDelta(0, `{"file_path": "/Users/b`),
-	}) {
+	} {
 		c.NoError(acc.Add(ev), "accumulate stream event")
 	}
 	partial, ok := acc.Response().Content[0].(msg.ToolUse)
@@ -188,7 +157,7 @@ func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing
 	// engine.go's stream handler: MapAssistantMessage is called again against
 	// the same accumulator, not handed a delta directly) must map the full,
 	// correct arguments and still log nothing.
-	for _, ev := range decodeEvents(t, []ssestream.Event{streamInputJSONDelta(0, `rent/project"}`)}) {
+	for _, ev := range []msg.StreamEvent{streamInputJSONDelta(0, `rent/project"}`)} {
 		c.NoError(acc.Add(ev), "accumulate second delta")
 	}
 	complete, ok := acc.Response().Content[0].(msg.ToolUse)

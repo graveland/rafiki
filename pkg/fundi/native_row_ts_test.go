@@ -246,7 +246,7 @@ func TestPublishUserRowCarriesImages(t *testing.T) {
 	sink := &lockedSink{}
 	em.SetNativeSink(sink)
 
-	em.publishUserRow(llm.UserContentMsg("look", []llm.UserImage{
+	em.publishUserRow(llm.UserContent("look", []llm.UserImage{
 		{MediaType: "image/png", Data: []byte{1, 2, 3}},
 		{MediaType: "image/png"},
 		{MediaType: "image/jpeg", Data: []byte{4}},

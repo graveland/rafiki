@@ -1,56 +1,59 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package llm_test
+package llm
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
 )
 
 // tracingSender is the minimal Sender the span tests need: a canned response
-// or error, no streaming.
+// or error.
 type tracingSender struct {
-	resp *anthropic.Message
+	resp *msg.Response
 	err  error
 }
 
-func (s tracingSender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s tracingSender) Send(context.Context, *msg.Request, msg.EncodeOptions) (*msg.Response, error) {
 	return s.resp, s.err
 }
 
-func tracingMessage(model, stop string, in, out, cacheRead, cacheCreate int64) *anthropic.Message {
-	var m anthropic.Message
+func (s tracingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
+}
+
+func tracingMessage(model, stop string, in, out, cacheRead, cacheCreate int64) *msg.Response {
 	raw := `{"id":"msg_t","type":"message","role":"assistant","model":"` + model + `",
 		"content":[{"type":"text","text":"hi"}],"stop_reason":"` + stop + `",
 		"usage":{"input_tokens":` + itoa(in) + `,"output_tokens":` + itoa(out) +
 		`,"cache_read_input_tokens":` + itoa(cacheRead) + `,"cache_creation_input_tokens":` + itoa(cacheCreate) + `}}`
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		panic(err)
-	}
-	return &m
+	return llmtest.FromAnthropicJSON(raw)
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 // tracingClient builds a client over one injected anthropic sender and a
 // recorder-backed tracer provider.
-func tracingClient(t *testing.T, sender *tracingSender, opts ...llm.ClientOption) (*llm.Client, *tracetest.SpanRecorder) {
+func tracingClient(t *testing.T, sender *tracingSender, opts ...ClientOption) (*Client, *tracetest.SpanRecorder) {
 	t.Helper()
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
@@ -62,19 +65,17 @@ func tracingClient(t *testing.T, sender *tracingSender, opts ...llm.ClientOption
 			"anthropic": {Name: "anthropic", Kind: providers.KindAnthropic},
 		},
 	}
-	base := []llm.ClientOption{
-		llm.WithProviders(set),
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
-		llm.WithTracerProvider(tp),
+	base := []ClientOption{
+		WithProviders(set),
+		WithProviderSender("anthropic", sender),
+		WithTracerProvider(tp),
 	}
-	c, err := llm.NewClient(append(base, opts...)...)
+	c, err := NewClient(append(base, opts...)...)
 	assert.NewAborting(t).NoError(err, "NewClient")
 	return c, rec
 }
 
-func chatParams() anthropic.MessageNewParams {
-	return anthropic.MessageNewParams{Model: anthropic.Model("m"), MaxTokens: 8}
-}
+func chatParams() *msg.Request { return &msg.Request{Model: "m", MaxTokens: 8} }
 
 func endedSpan(t *testing.T, rec *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
 	t.Helper()
@@ -109,8 +110,8 @@ func TestChatSpanSemconv(t *testing.T) {
 	sender := &tracingSender{resp: tracingMessage("claude-haiku-4-5", "end_turn", 10, 5, 3, 2)}
 	client, rec := tracingClient(t, sender)
 
-	if _, err := client.SendParams(context.Background(), llm.SendMeta{}, chatParams()); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := client.send(context.Background(), SendMeta{}, chatParams(), nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 
 	span := endedSpan(t, rec, "chat m")
@@ -152,8 +153,8 @@ func TestChatSpanErrorFullText(t *testing.T) {
 	long := strings.Repeat("e", 70*1024) + "TAIL"
 	client, rec := tracingClient(t, &tracingSender{err: errors.New(long)})
 
-	if _, err := client.SendParams(context.Background(), llm.SendMeta{}, chatParams()); err == nil {
-		t.Fatal("SendParams succeeded, want the sender's error")
+	if _, err := client.send(context.Background(), SendMeta{}, chatParams(), nil); err == nil {
+		t.Fatal("send succeeded, want the sender's error")
 	}
 
 	span := endedSpan(t, rec, "chat m")
@@ -195,10 +196,10 @@ func TestSpanParentUsedWithoutCtxSpan(t *testing.T) {
 	c := assert.NewCollecting(t)
 	want := fixedSpanContext(1, 2)
 	client, rec := tracingClient(t, &tracingSender{resp: tracingMessage("m", "end_turn", 1, 1, 0, 0)},
-		llm.WithSpanParent(func() trace.SpanContext { return want }))
+		WithSpanParent(func() trace.SpanContext { return want }))
 
-	if _, err := client.SendParams(context.Background(), llm.SendMeta{}, chatParams()); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := client.send(context.Background(), SendMeta{}, chatParams(), nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 
 	span := endedSpan(t, rec, "chat m")
@@ -210,9 +211,9 @@ func TestChatSpanEntrypoint(t *testing.T) {
 	c := assert.NewCollecting(t)
 	client, rec := tracingClient(t, &tracingSender{resp: tracingMessage("m", "end_turn", 1, 1, 0, 0)})
 
-	if _, err := client.SendParams(context.Background(),
-		llm.SendMeta{OriginEntrypoint: "recall-summary"}, chatParams()); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := client.send(context.Background(),
+		SendMeta{OriginEntrypoint: "recall-summary"}, chatParams(), nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 
 	span := endedSpan(t, rec, "chat m")
@@ -228,14 +229,14 @@ func TestSpanParentIgnoredWhenCtxHasSpan(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ignored := fixedSpanContext(3, 4)
 	client, rec := tracingClient(t, &tracingSender{resp: tracingMessage("m", "end_turn", 1, 1, 0, 0)},
-		llm.WithSpanParent(func() trace.SpanContext { return ignored }))
+		WithSpanParent(func() trace.SpanContext { return ignored }))
 
 	callerTP := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 	t.Cleanup(func() { _ = callerTP.Shutdown(context.Background()) })
 	ctx, caller := callerTP.Tracer("test").Start(context.Background(), "caller")
 	defer caller.End()
-	if _, err := client.SendParams(ctx, llm.SendMeta{}, chatParams()); err != nil {
-		t.Fatalf("SendParams: %v", err)
+	if _, err := client.send(ctx, SendMeta{}, chatParams(), nil); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 
 	span := endedSpan(t, rec, "chat m")

@@ -23,7 +23,7 @@ import (
 func retryContent(resp *msg.Response, errText string) []msg.Block {
 	ids := toolUseIDs(resp)
 	if len(ids) == 0 {
-		return llm.UserTextMsg(errText)
+		return llm.UserText(errText)
 	}
 	blocks := make([]msg.Block, len(ids))
 	for i, id := range ids {

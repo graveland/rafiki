@@ -8,10 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/llm/llmtest"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -21,56 +22,60 @@ import (
 // responses in order (the last repeats) and records every request it saw.
 type fakeSender struct {
 	calls   int
-	scripts []func(anthropic.MessageNewParams) (*anthropic.Message, error)
-	lastReq []anthropic.MessageNewParams
+	scripts []func(*msg.Request) (*msg.Response, error)
+	lastReq []*msg.Request
 }
 
-func (s *fakeSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	s.lastReq = append(s.lastReq, params)
+func (s *fakeSender) Send(_ context.Context, req *msg.Request, _ msg.EncodeOptions) (*msg.Response, error) {
+	s.lastReq = append(s.lastReq, req)
 	i := s.calls
 	if i >= len(s.scripts) {
 		i = len(s.scripts) - 1
 	}
 	s.calls++
-	return s.scripts[i](params)
+	return s.scripts[i](req)
 }
 
-func cannedMessage(t *testing.T, raw string) *anthropic.Message {
+func (s *fakeSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	resp, err := s.Send(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return llmtest.NewDecoder(llmtest.Events(resp)), nil
+}
+
+func cannedMessage(t *testing.T, raw string) *msg.Response {
 	t.Helper()
-	var m anthropic.Message
-	assert.NewAborting(t).NoError(json.Unmarshal([]byte(raw), &m), "cannedMessage")
-	return &m
+	resp, err := msganthropic.DecodeResponse([]byte(raw))
+	assert.NewAborting(t).NoError(err, "cannedMessage")
+	return resp
 }
 
 // respondToolUse returns a script step that replies with a single
 // report_findings tool_use block carrying inputJSON.
-func respondToolUse(t *testing.T, inputJSON string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondToolUse(t *testing.T, inputJSON string) func(*msg.Request) (*msg.Response, error) {
 	t.Helper()
 	raw := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 		`"content":[{"type":"tool_use","id":"tu_1","name":"report_findings","input":` + inputJSON + `}],` +
 		`"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":50}}`
-	msg := cannedMessage(t, raw)
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) { return msg, nil }
+	resp := cannedMessage(t, raw)
+	return func(*msg.Request) (*msg.Response, error) { return resp, nil }
 }
 
 // respondTextOnly returns a script step that replies with plain text (no
 // tool_use block) — the "detector didn't call the tool" malformed case.
-func respondTextOnly(text string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondTextOnly(text string) func(*msg.Request) (*msg.Response, error) {
+	return func(*msg.Request) (*msg.Response, error) {
 		raw := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 			`"content":[{"type":"text","text":"` + text + `"}],` +
 			`"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}`
-		var m anthropic.Message
-		if err := json.Unmarshal([]byte(raw), &m); err != nil {
-			panic(err)
-		}
-		return &m, nil
+		return llmtest.FromAnthropicJSON(raw), nil
 	}
 }
 
-func testDetectClient(t *testing.T, sender llm.SDKSender) *llm.Client {
+func testDetectClient(t *testing.T, sender llm.Sender) *llm.Client {
 	t.Helper()
-	c, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)))
+	c, err := llm.NewClient(llm.WithProviderSender("anthropic", sender))
 	assert.NewAborting(t).NoError(err, "NewClient")
 	return c
 }
@@ -114,7 +119,7 @@ const wellFormedInput = `{
 
 func TestDetectWellFormedToolUse(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondToolUse(t, wellFormedInput),
 	}}
 	c := testDetectClient(t, sender)
@@ -138,8 +143,8 @@ func TestDetectWellFormedToolUse(t *testing.T) {
 	ck.Eq("ok", analysis.Verdicts["skill-gap"], "Verdicts[skill-gap]")
 
 	ck.Require().Len(sender.lastReq, 1, "requests sent = %d, want 1 (no retry needed)", len(sender.lastReq))
-	if sender.lastReq[0].ToolChoice.OfTool == nil || sender.lastReq[0].ToolChoice.OfTool.Name != "report_findings" {
-		t.Errorf("request did not force report_findings tool choice: %+v", sender.lastReq[0].ToolChoice)
+	if sender.lastReq[0].ForceTool != "report_findings" {
+		t.Errorf("request did not force report_findings tool choice: %q", sender.lastReq[0].ForceTool)
 	}
 
 	ck.Eq("", analysis.PromptHash, "PromptHash = %q, want \"\" for a default profile (builtin prompts)", analysis.PromptHash)
@@ -147,7 +152,7 @@ func TestDetectWellFormedToolUse(t *testing.T) {
 
 func TestDetectSendsProfileMaxOutputTokens(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondToolUse(t, wellFormedInput),
 	}}
 	c := testDetectClient(t, sender)
@@ -162,7 +167,7 @@ func TestDetectSendsProfileMaxOutputTokens(t *testing.T) {
 
 func TestDetectRecordsPromptHash(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondToolUse(t, wellFormedInput),
 	}}
 	c := testDetectClient(t, sender)
@@ -176,7 +181,7 @@ func TestDetectRecordsPromptHash(t *testing.T) {
 
 func TestDetectRetriesOnceOnMalformedResponse(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondTextOnly("I looked at the conversation but forgot to call the tool"),
 		respondToolUse(t, wellFormedInput),
 	}}
@@ -193,10 +198,10 @@ func TestDetectRetriesOnceOnMalformedResponse(t *testing.T) {
 	// The retry's new user turn must carry the parse error text.
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
+	ck.Require().Eq(msg.User, lastMsg.Role, "last message in retry request is role")
 	var found bool
 	for _, block := range lastMsg.Content {
-		if block.OfText != nil && strings.Contains(block.OfText.Text, "no report_findings tool_use block") {
+		if tx, ok := block.(msg.Text); ok && strings.Contains(tx.Text, "no report_findings tool_use block") {
 			found = true
 		}
 	}
@@ -223,7 +228,7 @@ const invalidAxisInput = `{
 // referencing its ID — not a plain user-text turn.
 func TestDetectRetriesWithToolResultOnInvalidEnum(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondToolUse(t, invalidAxisInput),
 		respondToolUse(t, wellFormedInput),
 	}}
@@ -238,28 +243,29 @@ func TestDetectRetriesWithToolResultOnInvalidEnum(t *testing.T) {
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
-	if len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil {
+	ck.Require().Eq(msg.User, lastMsg.Role, "last message in retry request is role")
+	if len(lastMsg.Content) != 1 {
 		t.Fatalf("retry request's last user turn = %+v, want a single tool_result block "+
 			"(a dangling tool_use must be answered, not followed by plain text)", lastMsg.Content)
 	}
-	tr := lastMsg.Content[0].OfToolResult
+	tr, ok := lastMsg.Content[0].(msg.ToolResult)
+	ck.Require().True(ok, "retry request's last user turn = %+v, want a tool_result block", lastMsg.Content)
 	ck.Eq("tu_1", tr.ToolUseID, "tool_result.tool_use_id")
-	ck.True(tr.IsError.Value, "tool_result.is_error = false, want true")
+	ck.True(tr.IsError, "tool_result.is_error = false, want true")
 }
 
 // respondTwoToolUse returns a script step that replies with TWO
 // report_findings tool_use blocks (parallel tool use) — both with
 // inputJSON, both needing a tool_result on retry.
-func respondTwoToolUse(t *testing.T, inputJSON string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondTwoToolUse(t *testing.T, inputJSON string) func(*msg.Request) (*msg.Response, error) {
 	t.Helper()
 	raw := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 		`"content":[` +
 		`{"type":"tool_use","id":"tu_1","name":"report_findings","input":` + inputJSON + `},` +
 		`{"type":"tool_use","id":"tu_2","name":"report_findings","input":` + inputJSON + `}` +
 		`],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":50}}`
-	msg := cannedMessage(t, raw)
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) { return msg, nil }
+	resp := cannedMessage(t, raw)
+	return func(*msg.Request) (*msg.Response, error) { return resp, nil }
 }
 
 // TestDetectRetriesAnswersAllToolUseBlocks covers parallel tool use: the
@@ -269,7 +275,7 @@ func respondTwoToolUse(t *testing.T, inputJSON string) func(anthropic.MessageNew
 // real Anthropic API.
 func TestDetectRetriesAnswersAllToolUseBlocks(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondTwoToolUse(t, invalidAxisInput),
 		respondToolUse(t, wellFormedInput),
 	}}
@@ -284,22 +290,23 @@ func TestDetectRetriesAnswersAllToolUseBlocks(t *testing.T) {
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
+	ck.Require().Eq(msg.User, lastMsg.Role, "last message in retry request is role")
 	ck.Require().Len(lastMsg.Content, 2, "retry request's last user turn has %d blocks, want 2 (a tool_result for EACH dangling tool_use)", len(lastMsg.Content))
 	gotIDs := map[string]bool{}
 	for _, block := range lastMsg.Content {
-		ck.Require().NotNil(block.OfToolResult, "retry request block = %+v, want tool_result", block)
-		if !block.OfToolResult.IsError.Value {
-			t.Errorf("tool_result(%s).is_error = false, want true", block.OfToolResult.ToolUseID)
+		tr, ok := block.(msg.ToolResult)
+		ck.Require().True(ok, "retry request block = %+v, want tool_result", block)
+		if !tr.IsError {
+			t.Errorf("tool_result(%s).is_error = false, want true", tr.ToolUseID)
 		}
-		gotIDs[block.OfToolResult.ToolUseID] = true
+		gotIDs[tr.ToolUseID] = true
 	}
 	ck.False(!gotIDs["tu_1"] || !gotIDs["tu_2"], "retry request tool_result ids = %v, want both tu_1 and tu_2", gotIDs)
 }
 
 func TestDetectFailsAfterTwoMalformedResponses(t *testing.T) {
 	ck := assert.NewAborting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondTextOnly("first malformed reply"),
 		respondTextOnly("second malformed reply"),
 	}}

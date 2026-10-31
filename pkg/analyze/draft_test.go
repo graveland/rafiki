@@ -7,20 +7,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
 
 // respondDraftToolUse returns a script step that replies with a single
 // propose_skill_edit tool_use block carrying inputJSON.
-func respondDraftToolUse(t *testing.T, inputJSON string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+func respondDraftToolUse(t *testing.T, inputJSON string) func(*msg.Request) (*msg.Response, error) {
 	t.Helper()
 	raw := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",` +
 		`"content":[{"type":"tool_use","id":"tu_1","name":"propose_skill_edit","input":` + inputJSON + `}],` +
 		`"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":50}}`
-	msg := cannedMessage(t, raw)
-	return func(anthropic.MessageNewParams) (*anthropic.Message, error) { return msg, nil }
+	resp := cannedMessage(t, raw)
+	return func(*msg.Request) (*msg.Response, error) { return resp, nil }
 }
 
 func fixtureRankedFinding() RankedFinding {
@@ -50,7 +50,7 @@ const editDraftInput = `{
 
 func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondDraftToolUse(t, editDraftInput),
 	}}
 	c := testDetectClient(t, sender)
@@ -72,8 +72,8 @@ func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
 	ck.NotEq("", edit.Rationale, "Rationale empty")
 
 	ck.Require().Len(sender.lastReq, 1, "requests sent = %d, want 1", len(sender.lastReq))
-	if sender.lastReq[0].ToolChoice.OfTool == nil || sender.lastReq[0].ToolChoice.OfTool.Name != "propose_skill_edit" {
-		t.Errorf("request did not force propose_skill_edit tool choice: %+v", sender.lastReq[0].ToolChoice)
+	if sender.lastReq[0].ForceTool != "propose_skill_edit" {
+		t.Errorf("request did not force propose_skill_edit tool choice: %q", sender.lastReq[0].ForceTool)
 	}
 
 	// The user turn must have surfaced the existing file content so the
@@ -81,7 +81,7 @@ func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
 	userMsg := sender.lastReq[0].Messages[len(sender.lastReq[0].Messages)-1]
 	var sawCurrentContent bool
 	for _, block := range userMsg.Content {
-		if block.OfText != nil && strings.Contains(block.OfText.Text, "old trigger") {
+		if tx, ok := block.(msg.Text); ok && strings.Contains(tx.Text, "old trigger") {
 			sawCurrentContent = true
 		}
 	}
@@ -95,7 +95,7 @@ const newSkillDraftInput = `{
 
 func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondDraftToolUse(t, newSkillDraftInput),
 	}}
 	c := testDetectClient(t, sender)
@@ -113,8 +113,8 @@ func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
 	userMsg := sender.lastReq[0].Messages[len(sender.lastReq[0].Messages)-1]
 	var sawNewSkillInstruction bool
 	for _, block := range userMsg.Content {
-		if block.OfText != nil && strings.Contains(block.OfText.Text, "new skill") &&
-			strings.Contains(block.OfText.Text, "skills/<skill-name>/SKILL.md") {
+		if tx, ok := block.(msg.Text); ok && strings.Contains(tx.Text, "new skill") &&
+			strings.Contains(tx.Text, "skills/<skill-name>/SKILL.md") {
 			sawNewSkillInstruction = true
 		}
 	}
@@ -123,7 +123,7 @@ func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
 
 func TestDraftRetriesOnceOnMalformedResponse(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondTextOnly("forgot to call the tool"),
 		respondDraftToolUse(t, editDraftInput),
 	}}
@@ -138,10 +138,10 @@ func TestDraftRetriesOnceOnMalformedResponse(t *testing.T) {
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
+	ck.Require().Eq(msg.User, lastMsg.Role, "last message in retry request is role")
 	var found bool
 	for _, block := range lastMsg.Content {
-		if block.OfText != nil && strings.Contains(block.OfText.Text, "no propose_skill_edit tool_use block") {
+		if tx, ok := block.(msg.Text); ok && strings.Contains(tx.Text, "no propose_skill_edit tool_use block") {
 			found = true
 		}
 	}
@@ -150,7 +150,7 @@ func TestDraftRetriesOnceOnMalformedResponse(t *testing.T) {
 
 func TestDraftFailsAfterTwoMalformedResponses(t *testing.T) {
 	ck := assert.NewAborting(t)
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondTextOnly("first malformed reply"),
 		respondTextOnly("second malformed reply"),
 	}}
@@ -168,7 +168,7 @@ func TestDraftRejectsAbsolutePathAndRetries(t *testing.T) {
 		"files": [{"path": "/etc/skills/SKILL.md", "content": "some content"}],
 		"rationale": "oops"
 	}`
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondDraftToolUse(t, invalidInput),
 		respondDraftToolUse(t, editDraftInput),
 	}}
@@ -182,17 +182,18 @@ func TestDraftRejectsAbsolutePathAndRetries(t *testing.T) {
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
+	ck.Require().Eq(msg.User, lastMsg.Role, "last message in retry request is role")
 	// The first response DID call propose_skill_edit (with invalid input),
 	// so the retry must answer that dangling tool_use with a tool_result —
 	// a plain user-text turn here is what the real Anthropic API rejects.
-	ck.Require().False(len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil, "retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
-	tr := lastMsg.Content[0].OfToolResult
+	ck.Require().Len(lastMsg.Content, 1, "retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
+	tr, ok := lastMsg.Content[0].(msg.ToolResult)
+	ck.Require().True(ok, "retry request's last user turn = %+v, want a tool_result block", lastMsg.Content)
 	ck.Eq("tu_1", tr.ToolUseID, "tool_result.tool_use_id")
-	ck.True(tr.IsError.Value, "tool_result.is_error = false, want true")
+	ck.True(tr.IsError, "tool_result.is_error = false, want true")
 	var found bool
 	for _, sub := range tr.Content {
-		if sub.OfText != nil && strings.Contains(sub.OfText.Text, "must be relative") {
+		if tx, ok := sub.(msg.Text); ok && strings.Contains(tx.Text, "must be relative") {
 			found = true
 		}
 	}
@@ -207,7 +208,7 @@ func TestDraftRejectsBackslashPathAndRetries(t *testing.T) {
 		"files": [{"path": "..\\\\..\\\\etc\\\\passwd", "content": "some content"}],
 		"rationale": "oops"
 	}`
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondDraftToolUse(t, invalidInput),
 		respondDraftToolUse(t, editDraftInput),
 	}}
@@ -221,11 +222,12 @@ func TestDraftRejectsBackslashPathAndRetries(t *testing.T) {
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	ck.Require().False(len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil, "retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
-	tr := lastMsg.Content[0].OfToolResult
+	ck.Require().Len(lastMsg.Content, 1, "retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
+	tr, ok := lastMsg.Content[0].(msg.ToolResult)
+	ck.Require().True(ok, "retry request's last user turn = %+v, want a tool_result block", lastMsg.Content)
 	var found bool
 	for _, sub := range tr.Content {
-		if sub.OfText != nil && strings.Contains(sub.OfText.Text, "\\\\") {
+		if tx, ok := sub.(msg.Text); ok && strings.Contains(tx.Text, "\\\\") {
 			found = true
 		}
 	}
@@ -242,7 +244,7 @@ func TestDraftRejectsNormalizedTraversalPathAndFailsAfterRetry(t *testing.T) {
 		"files": [{"path": "a/../../b", "content": "some content"}],
 		"rationale": "oops"
 	}`
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondDraftToolUse(t, invalidInput),
 		respondDraftToolUse(t, invalidInput),
 	}}
@@ -260,7 +262,7 @@ func TestDraftRejectsDotDotPathAndFailsAfterRetry(t *testing.T) {
 		"files": [{"path": "skills/../../etc/passwd", "content": "some content"}],
 		"rationale": "oops"
 	}`
-	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	sender := &fakeSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondDraftToolUse(t, invalidInput),
 		respondDraftToolUse(t, invalidInput),
 	}}

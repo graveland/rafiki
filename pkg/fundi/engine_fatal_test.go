@@ -6,9 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -51,7 +50,12 @@ func (w *stallWriter) Write(p []byte) (int, error) {
 // agentloop does not recover). That is the one path that reaches Engine.fatal.
 type panickingSender struct{ w *stallWriter }
 
-func (s panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s panickingSender) Send(context.Context, *msg.Request, msg.EncodeOptions) (*msg.Response, error) {
+	s.w.stall()
+	panic("scripted panic on the turn worker")
+}
+
+func (s panickingSender) Stream(context.Context, *msg.Request, msg.EncodeOptions) (msg.StreamDecoder, error) {
 	s.w.stall()
 	panic("scripted panic on the turn worker")
 }
@@ -77,7 +81,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 	silenceSlog(t)
 	w := newStallWriter()
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(panickingSender{w: w})),
+		llm.WithProviderSender("anthropic", panickingSender{w: w}),
 		llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 
@@ -138,7 +142,7 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 	silenceSlog(t)
 	out := &syncBuffer{}
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", llm.FromSDKSender(panickingSender{w: newStallWriter()})),
+		llm.WithProviderSender("anthropic", panickingSender{w: newStallWriter()}),
 		llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 	// The sender above stalls its OWN throwaway writer, not this one, so the

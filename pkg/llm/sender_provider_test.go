@@ -8,13 +8,18 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
 )
+
+// sendParams issues one non-streamed call through a native Sender.
+func sendParams(t *testing.T, s llm.Sender, ctx context.Context, req *msg.Request) (*msg.Response, error) {
+	t.Helper()
+	return s.Send(ctx, req, msg.EncodeOptions{})
+}
 
 // A local, keyless Anthropic-compatible server is the whole point of the
 // feature: the request must carry NO credential header at all, and must reach
@@ -41,11 +46,7 @@ func TestSenderForKeylessLocal(t *testing.T) {
 		BaseURL: srv.URL,
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	if _, err := sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
-		Model:     anthropic.Model("local"),
-		MaxTokens: 16,
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	}); err != nil {
+	if _, err := sendParams(t, sender, context.Background(), &msg.Request{Model: "local", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	c.Eq("/v1/messages", gotPath, "path")
@@ -71,10 +72,7 @@ func TestSenderForSendsKeyWhenConfigured(t *testing.T) {
 		APIKeyEnv: "TEST_PROVIDER_KEY",
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, _ = sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, context.Background(), &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.Eq("sk-test-123", gotKey, "x-api-key")
 }
 
@@ -96,10 +94,7 @@ func TestSenderForOpenRouterHeaders(t *testing.T) {
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, _ = sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, context.Background(), &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.False(referer == "" || title != "rafiki", "Referer = %q, X-OpenRouter-Title = %q; want the handler's own headers", referer, title)
 }
 
@@ -124,10 +119,7 @@ func TestSenderForOpenRouterSessionID(t *testing.T) {
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
-	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, ctx, &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.Eq("conv-abc-123", gotSession, "x-session-id")
 }
 
@@ -149,10 +141,7 @@ func TestSenderForOpenRouterNoSessionIDWithoutContextValue(t *testing.T) {
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, _ = sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, context.Background(), &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.False(sawHeader, "x-session-id header present with no session id on the context")
 }
 
@@ -174,10 +163,7 @@ func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
-	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, ctx, &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.False(sawHeader, "x-session-id header present on the Anthropic-native path")
 }
 
@@ -219,10 +205,7 @@ func TestSenderForAnthropicKindHonorsConfiguredSessionHeader(t *testing.T) {
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-xyz-789")
-	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, ctx, &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.Eq("conv-xyz-789", gotAffinity, "x-session-affinity")
 }
 
@@ -247,10 +230,7 @@ func TestSenderForOpenRouterExplicitSessionHeaderOverridesDefault(t *testing.T) 
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
-	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
-		Model: anthropic.Model("m"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	_, _ = sendParams(t, sender, ctx, &msg.Request{Model: "m", MaxTokens: 16, Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}})
 	c.Eq("conv-abc-123", gotCustom, "x-custom-session")
 	c.Eq("", gotDefault, "x-session-id")
 }

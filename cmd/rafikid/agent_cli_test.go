@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
@@ -217,11 +215,10 @@ func TestResolveUpstreamProxyDoesNotLeakAPIKey(t *testing.T) {
 	// Actually issue a call through the resolved client so the SDK's real
 	// composed request options run header-by-header, not just an inspection
 	// of the option list.
-	_, _ = client.SendParams(t.Context(), llm.SendMeta{}, anthropic.MessageNewParams{
-		Model:     "claude-haiku-4-5",
-		MaxTokens: 1,
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
+	conv, err := client.Conversation(t.Context(), llm.NewConversation("", "test"),
+		llm.Model("claude-haiku-4-5"), llm.MaxTokens(1))
+	c.Require().NoError(err, "Conversation")
+	_, _ = conv.Send(t.Context(), llm.UserText("hi"))
 	c.Require().Eq(1, requests, "proxy server saw")
 	c.Eq("", gotAPIKey, "X-Api-Key leaked to the proxy")
 	c.Eq("Bearer proxy-bearer-token", gotAuth, "Authorization")

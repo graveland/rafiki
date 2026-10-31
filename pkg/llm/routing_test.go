@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -51,12 +49,12 @@ func routingSet(t *testing.T) *providers.Set {
 
 // newSpecClient builds a client on set with the given routing spec, optional
 // guard, and openrouter sender.
-func newSpecClient(t *testing.T, set *providers.Set, spec routing.Spec, guard *routing.ProviderGuard, openrouter SDKSender) *Client {
+func newSpecClient(t *testing.T, set *providers.Set, spec routing.Spec, guard *routing.ProviderGuard, openrouter Sender) *Client {
 	t.Helper()
 	c, err := NewClient(
 		WithProviders(set),
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
-		WithProviderSender("openrouter", sdkFake(openrouter)),
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 		WithRouting(spec),
@@ -168,14 +166,14 @@ func TestApplyProviderPrefsZeroSpecUnchanged(t *testing.T) {
 // with no pin, and nothing else (no only, no ignore, no zdr) leaks in.
 func TestRoutingSpecOnBody(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	spec := routing.Spec{Sort: routing.SortPrice, Quant: []string{"fp8+"}, NoData: true}
 	c := newSpecClient(t, routingSet(t), spec, nil, openrouter)
-	sendDeclParams(t, c, "openrouter/kimi")
+	sendDecl(t, c, "openrouter/kimi")
 
-	body := wireBody(t, openrouter.lastReq, 0)
+	body := wireBody(t, openrouter, 0)
 	ck.StrContains(body,
 		`"provider":{"sort":"price","quantizations":["int8","fp8","mxfp8","fp16","bf16","fp32"],"data_collection":"deny"}`,
 		"sort + expanded quant floor + nodata must ride the provider object, wire body =")
@@ -190,14 +188,14 @@ func TestRoutingSpecOnBody(t *testing.T) {
 // fireworks with NO ignore list.
 func TestRoutingOnlyDropsGuardIgnores(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	spec := routing.Spec{Only: []string{"fireworks"}, Sort: routing.SortPrice}
 	c := newSpecClient(t, routingSet(t), spec, ejectTogether(t), openrouter)
-	sendDeclParams(t, c, "openrouter/glmflash")
+	sendDecl(t, c, "openrouter/glmflash")
 
-	body := wireBody(t, openrouter.lastReq, 0)
+	body := wireBody(t, openrouter, 0)
 	ck.StrContains(body, `"provider":{"only":["fireworks"],"sort":"price"}`,
 		"spec only must replace the pin slot and drop the guard's ejection, wire body =")
 	ck.NotStrContains(body, `"together"`, "the guard's ejection leaked past a spec only")
@@ -209,14 +207,14 @@ func TestRoutingOnlyDropsGuardIgnores(t *testing.T) {
 // per routing.Spec.Prefs).
 func TestRoutingOnlyKeepsZDR(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	spec := routing.Spec{Only: []string{"fireworks"}, ZDR: true}
 	c := newSpecClient(t, routingSet(t), spec, nil, openrouter)
-	sendDeclParams(t, c, "openrouter/glmflash")
+	sendDecl(t, c, "openrouter/glmflash")
 
-	body := wireBody(t, openrouter.lastReq, 0)
+	body := wireBody(t, openrouter, 0)
 	ck.StrContains(body, `"provider":{"only":["fireworks"],"zdr":true}`,
 		"zdr must ride along beside the spec only, wire body =")
 }
@@ -226,14 +224,14 @@ func TestRoutingOnlyKeepsZDR(t *testing.T) {
 // the more explicit, more recent declaration of where the request may go.
 func TestRoutingDeclOnlyLosesToSpecOnly(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+	openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 		respondText("ok"),
 	}}
 	spec := routing.Spec{Only: []string{"fireworks"}}
 	c := newSpecClient(t, declPinSet(t), spec, nil, openrouter)
-	sendDeclParams(t, c, "openrouter/glm-flash@together")
+	sendDecl(t, c, "openrouter/glm-flash@together")
 
-	body := wireBody(t, openrouter.lastReq, 0)
+	body := wireBody(t, openrouter, 0)
 	ck.StrContains(body, `"provider":{"only":["fireworks"]}`,
 		"the spec only must win the only slot, wire body =")
 	ck.NotStrContains(body, `"together"`, "the declaration pin leaked past the spec only")
@@ -249,12 +247,11 @@ func TestRoutingNoEligibleErrorNamesSpec(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	spec := routing.Spec{Sort: routing.SortPrice}
 	c := newSpecClient(t, routingSet(t), spec, nil,
-		&scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		&scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			respondErr(noEligibleErr(http.StatusNotFound, "No endpoints found matching your data policy")),
 		}})
-	params := anthropic.MessageNewParams{Model: anthropic.Model("openrouter/glmflash"), MaxTokens: 16,
-		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	_, err := c.SendParams(context.Background(), SendMeta{}, params)
+	req := userTextRequest("openrouter/glmflash")
+	_, err := c.send(context.Background(), SendMeta{}, req, nil)
 	ck.Require().Error(err, "the no-endpoints rejection must surface")
 
 	want := "no provider can serve z-ai/glm-5.3-flash under routing [sort=price]: "
@@ -268,10 +265,10 @@ func TestRoutingNoEligibleErrorNamesSpec(t *testing.T) {
 	// Zero-spec control: the identical upstream failure passes through
 	// undecorated — the wrap names a spec only when there is one.
 	c0 := newSpecClient(t, routingSet(t), routing.Spec{}, nil,
-		&scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		&scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
 			respondErr(noEligibleErr(http.StatusNotFound, "No endpoints found matching your data policy")),
 		}})
-	_, err0 := c0.SendParams(context.Background(), SendMeta{}, params)
+	_, err0 := c0.send(context.Background(), SendMeta{}, req, nil)
 	ck.Require().Error(err0, "the raw rejection must still surface")
 	ck.NotStrContains(err0.Error(), "under routing", "zero spec must not decorate, got: %s", err0)
 }
@@ -320,7 +317,7 @@ func TestRoutingNoEligibleErrorNamesSpecStreaming(t *testing.T) {
 		NewConversation("", "test"), Model("openrouter/glmflash"), SystemText("sys"))
 	ck.Require().NoError(err, "Conversation")
 	_, err = conv.Send(context.Background(), UserText("hi"),
-		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+		WithStreamHandler(func(*msg.Response) {}))
 	ck.Require().Error(err, "the no-endpoints rejection must surface")
 
 	ck.StrContains(err.Error(),
@@ -341,7 +338,7 @@ func TestRoutingNoEligibleErrorNamesSpecStreaming(t *testing.T) {
 		NewConversation("", "test"), Model("openrouter/glmflash"), SystemText("sys"))
 	ck.Require().NoError(err, "Conversation")
 	_, err0 := conv0.Send(context.Background(), UserText("hi"),
-		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+		WithStreamHandler(func(*msg.Response) {}))
 	ck.Require().Error(err0, "the raw rejection must still surface")
 	ck.NotStrContains(err0.Error(), "under routing", "zero spec must not decorate, got: %s", err0)
 }
