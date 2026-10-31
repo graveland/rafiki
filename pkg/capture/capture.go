@@ -890,13 +890,16 @@ func messageHasCacheControl(content json.RawMessage) bool {
 	return bytes.Contains(content, []byte(`"cache_control"`))
 }
 
-// AppendResponseMessage appends the canonical assistant Message (canonical, an
-// anthropic.Message JSON) as a child of `parentID` — the request head
-// DecomposeRequest returned — with content stored verbatim from
-// canonical.content, plus token usage, stop_reason and the response's provider
-// message id. Also sets the turn's response_ordinal to the node's ordinal; a
-// turn row that cannot be found to point at the reply fails the turn rather than
-// leaving the reply unaccounted for.
+// AppendResponseMessage appends the canonical assistant message as a child of
+// `parentID` — the request head DecomposeRequest returned — with content stored
+// verbatim from canonical.content, plus token usage, stop_reason and the
+// response's provider message id. canonical is the recorded response body
+// routing.ParseCapturedResponse built: the Anthropic message envelope around the
+// codec's content blocks, which is what capture stores and what this package
+// reads, so nothing here decodes an SDK type. Also sets the turn's
+// response_ordinal to the node's ordinal; a turn row that cannot be found to
+// point at the reply fails the turn rather than leaving the reply unaccounted
+// for.
 //
 // The tree makes the old ordinal collision impossible to lose a reply to: the
 // same reply appended twice is the same node (no new row, head still moves to
@@ -1066,8 +1069,9 @@ func escapeLikePattern(s string) string {
 
 // MessageIDFromCanonical reads the assistant message id out of a canonical
 // response. Both branches of routing.ParseCapturedResponse carry it: the SSE
-// branch marshals an accumulated anthropic.Message, the JSON branch is the
-// upstream body verbatim.
+// branch reassembles the stream with msg.Accumulator and renders the envelope
+// from the codec's blocks (capturedResponse, pkg/routing/sse.go), the JSON
+// branch is the upstream body verbatim.
 func MessageIDFromCanonical(canonical []byte) string {
 	var m struct {
 		ID string `json:"id"`

@@ -320,8 +320,9 @@ func TestBackfillProviderMessageID(t *testing.T) {
 	c.Nil(rows[2].providerID, "a row no turn names carries no reply id")
 }
 
-// interimSnapshot is the committed fixture: a real claude session replayed
-// through the pre-tree capture code (pkg/capture's TestWriteInterimCaptureSnapshot).
+// interimSnapshot is the committed fixture: the row stream a pre-tree capture
+// wrote for a real claude session, with each row's content refreshed against the
+// live capture path (pkg/capture's TestWriteInterimCaptureSnapshot).
 type interimSnapshot struct {
 	ResumeFromOrdinal *int                  `json:"resume_from_ordinal"`
 	Messages          []interimSnapshotRow  `json:"messages"`
@@ -343,7 +344,7 @@ type interimSnapshotTurn struct {
 }
 
 // loadInterimSnapshot reads the committed fixture: a real claude session as the
-// pre-tree capture path stored it.
+// pre-tree capture path stored it, in the content shape capture stores now.
 func loadInterimSnapshot(t *testing.T) interimSnapshot {
 	t.Helper()
 	c := assert.NewAborting(t)

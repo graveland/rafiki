@@ -496,6 +496,15 @@ nodes, 57 interim copies, 0 unmatched, 0 other duplicates
 (`TestBackfillSnapshotFixture`), and the tree it builds equals live capture of the
 same session node for node (`TestBackfillMatchesTreeCapture`, `pkg/capture`).
 
+**The fixture's row stream is historical, its content is current.** A node's
+identity is the canon of its stored bytes, so a fixture whose content drifted
+from the codec would compare two message identities and prove nothing: each row
+carries the content the live capture path stores for that message today
+(`TestWriteInterimCaptureSnapshot`, `-update-interim`). The stream itself —
+ordinals, roles, kinds and the interim copies — cannot be regenerated: the
+pre-tree writer is gone, and a tree capture re-stores no prefix, so its row
+stream is not one a backfill can walk.
+
 **Residual risk of the looser copy rule.** A copy wrongly recognised as a
 duplicate is content-different from the node it claims to duplicate, and it keeps
 no position of its own — so the tree would be missing a message. The counters
