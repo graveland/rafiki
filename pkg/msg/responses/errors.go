@@ -56,6 +56,21 @@ var rateLimitCodes = map[string]bool{
 	"rate_limit_error":    true,
 }
 
+// overloadedCodes are the spellings the endpoint uses for "the upstream is
+// saturated". All three are carried: an in-band error event may name
+// overloaded_error, while the ChatGPT dialect's own code is server_is_overloaded
+// and its backpressure hint is slow_down.
+//
+// These must reach ErrOverloaded rather than falling through to ErrOther. An
+// overload is a transient upstream condition that a retry routinely survives, and
+// ErrOther is terminal, so reading one as unclassified turns a retry into a hard
+// failure at exactly the moment the provider is asking for patience.
+var overloadedCodes = map[string]bool{
+	"overloaded_error":     true,
+	"server_is_overloaded": true,
+	"slow_down":            true,
+}
+
 // Error renders the limit in the terms the operator can act on: which code, the
 // plan, and when it lifts.
 //
@@ -269,10 +284,10 @@ func resetTime(header http.Header, now time.Time) time.Time {
 // The body's codes win over the status, because the endpoint reports the
 // account-level conditions under an ordinary status: a usage limit normally
 // arrives as a 429 (and is never a rate limit), a prompt that does not fit as a
-// 400 whose body names context_length_exceeded, and an in-band rate limit as an
-// error event with no status at all. Everything unclassified is ErrOther, which
-// is not retryable: retrying an error nobody understood is how one failure
-// becomes a storm.
+// 400 whose body names context_length_exceeded, and an in-band rate limit or
+// overload as an error event with no status at all. Everything unclassified is
+// ErrOther, which is not retryable: retrying an error nobody understood is how
+// one failure becomes a storm.
 //
 // h is part of the codec's uniform surface and is not consulted: nothing here
 // keys on a header, and a Retry-After is the caller's to read.
@@ -287,6 +302,8 @@ func Classify(status int, h http.Header, body []byte) msg.ErrorKind {
 			return msg.ErrPromptTooLarge
 		case rateLimitCodes[c]:
 			return msg.ErrRateLimit
+		case overloadedCodes[c]:
+			return msg.ErrOverloaded
 		}
 	}
 	switch {

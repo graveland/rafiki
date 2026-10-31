@@ -179,6 +179,25 @@ func TestStreamRateLimitIsRateLimit(t *testing.T) {
 	}
 }
 
+// TestStreamOverloadIsOverloaded pins that the endpoint's overload signals reach
+// the caller as ErrOverloaded. ErrOther is terminal, so an overload read as
+// unclassified would fail a turn the sender used to retry.
+func TestStreamOverloadIsOverloaded(t *testing.T) {
+	for _, payload := range []string{
+		`{"type":"error","code":"server_is_overloaded","message":"overloaded"}`,
+		`{"type":"error","code":"slow_down","message":"slow down"}`,
+		`{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			err := drainErr(t, responses.ModeAPI, sse(payload))
+			var apiErr *msg.APIError
+			ck.True(errors.As(err, &apiErr), "an overload is an APIError, got %T: %v", err, err)
+			ck.Eq(msg.ErrOverloaded, apiErr.Kind, "kind")
+		})
+	}
+}
+
 // TestStreamIdleTimeout pins the watchdog: a backend that goes silent is a
 // retryable condition, reported as a transient APIError rather than a hang.
 func TestStreamIdleTimeout(t *testing.T) {
@@ -252,6 +271,9 @@ func TestClassify(t *testing.T) {
 		{name: "rate limit type in an in-band event", body: `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`, want: msg.ErrRateLimit},
 		{name: "rate limit code in a failed response", body: `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded"}}}`, want: msg.ErrRateLimit},
 		{name: "plain rate limit", status: http.StatusTooManyRequests, body: `{"error":{"message":"slow down"}}`, want: msg.ErrRateLimit},
+		{name: "server overloaded code in an in-band event", body: `{"type":"error","code":"server_is_overloaded","message":"overloaded"}`, want: msg.ErrOverloaded},
+		{name: "slow down code in an in-band event", body: `{"type":"error","code":"slow_down","message":"slow down"}`, want: msg.ErrOverloaded},
+		{name: "overloaded type in a failed response", body: `{"type":"response.failed","response":{"error":{"type":"overloaded_error"}}}`, want: msg.ErrOverloaded},
 		{name: "server error", status: http.StatusInternalServerError, body: ``, want: msg.ErrTransient},
 		{name: "bad gateway", status: http.StatusBadGateway, body: `not json at all`, want: msg.ErrTransient},
 		{name: "bad request", status: http.StatusBadRequest, body: `{"error":{"code":"invalid_request_error"}}`, want: msg.ErrOther},
