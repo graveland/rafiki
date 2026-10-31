@@ -1643,7 +1643,9 @@ func TestCapturePersistsAStreamWithAnUnmodellableEvent(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	fs := &fakeProxyStore{}
-	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	// A named caller so the anomaly line's `user` field is the real one, not the
+	// anonymous "<unknown>" that would pass for any value.
+	p := NewMessagesProxy(nil, staticAuthenticator{id: &Identity{Username: "brent", Via: ProvenanceUser}}, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
 
 	rec := httptest.NewRecorder()
@@ -1663,6 +1665,10 @@ func TestCapturePersistsAStreamWithAnUnmodellableEvent(t *testing.T) {
 	out := logs.String()
 	c.StrContains(out, "capture skipped stream events", "the anomaly is logged")
 	c.StrContains(out, "conv-1", "the anomaly names the conversation")
+	// The message id and the caller are what make the line actionable: which
+	// stored message to look at, and whose turn it was.
+	c.StrContains(out, "message=msg_anom", "the anomaly names the message")
+	c.StrContains(out, "user=brent", "the anomaly names the user")
 	c.StrContains(out, "future_delta", "the anomaly names the reason")
 	c.False(strings.Contains(out, "capture-parse failed"), "the turn must not be recorded as an unparseable stream: %s", out)
 }

@@ -18,6 +18,15 @@ import (
 // and buffering it would grow without bound.
 const maxStreamLine = 16 << 20
 
+// ErrStreamRead marks a failure to READ the underlying stream, as opposed to a
+// malformed event. The distinction matters to a consumer that skips what it
+// cannot fold in: a read error is STICKY — bufio.Scanner returns the same one on
+// every Scan (a data line over maxStreamLine yields bufio.ErrTooLong forever) —
+// so skipping it and calling Next again can never advance. Such a consumer must
+// treat this error as terminal and persist what it accumulated. The wrapped
+// cause is on the chain, so errors.Is(err, bufio.ErrTooLong) still holds.
+var ErrStreamRead = errors.New("anthropic: read stream")
+
 // DecodeResponse decodes a whole (non-streamed) Anthropic message body.
 //
 // The content blocks go through the same residue-aware decoder as stored
@@ -232,7 +241,7 @@ func (d *Decoder) readEvent() (string, []byte, error) {
 		}
 	}
 	if err := d.sc.Err(); err != nil {
-		return "", nil, fmt.Errorf("anthropic: read stream: %w", err)
+		return "", nil, fmt.Errorf("%w: %w", ErrStreamRead, err)
 	}
 	if name != "" || data != nil {
 		// The event never got its terminating blank line, so it never completed.

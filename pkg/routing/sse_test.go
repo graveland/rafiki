@@ -5,7 +5,9 @@ package routing
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/multigres/testkit/assert"
 	"go.graveland.dev/rafiki/pkg/msg/msgtest"
@@ -566,6 +568,92 @@ func TestParseCapturedResponseSSEKeepsStartBlockResidue(t *testing.T) {
 	c.Eq(`"hmm"`, string(stored.Content[0]["thinking"]), "thinking text")
 	c.Eq(`{"type":"direct"}`, string(stored.Content[1]["caller"]), "tool caller residue")
 	c.Eq(`{"prompt":"run"}`, string(stored.Content[1]["input"]), "tool input")
+}
+
+// TestParseCapturedResponseSSEOverLongLineStopsTheCapture pins that a
+// non-recoverable READ error ENDS the best-effort loop. bufio.Scanner hands back
+// the same bufio.ErrTooLong on every Scan once a line exceeds the codec's 16 MiB
+// maxStreamLine, so skipping and retrying would spin forever and the turn would
+// never be persisted. The events accumulated before the bad line are still the
+// record, and the read error is reported as the anomaly.
+//
+// The call runs in a goroutine behind a short deadline: a regression here is a
+// hang, so the test must fail in seconds rather than time the suite out.
+func TestParseCapturedResponseSSEOverLongLineStopsTheCapture(t *testing.T) {
+	c := assert.NewCollecting(t)
+	const prefix = "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_toolong","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n"
+	// One data line past the decoder's maxStreamLine. Nothing after it is
+	// reachable: the scanner is dead from this line on.
+	overLong := "event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` +
+		strings.Repeat("x", 20<<20) + `"}}` + "\n\n"
+	body := []byte(prefix + overLong +
+		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n")
+
+	type captured struct {
+		stop      string
+		usage     CapturedUsage
+		canonical []byte
+		diag      CaptureDiagnostics
+		err       error
+	}
+	done := make(chan captured, 1)
+	go func() {
+		stop, usage, canonical, diag, err := ParseCapturedResponse("text/event-stream", body)
+		done <- captured{stop: stop, usage: usage, canonical: canonical, diag: diag, err: err}
+	}()
+	var got captured
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ParseCapturedResponse never returned: a sticky stream read error is being skipped and retried forever")
+	}
+
+	c.Require().NoError(got.err, "a read error must not fail the capture: the accumulated prefix is the record")
+	c.Eq(int64(11), got.usage.InputTokens, "usage from the message_start before the bad line")
+	c.Eq("claude-sonnet-5", got.usage.Model, "served model")
+	c.Eq("", got.stop, "no message_delta was reached")
+	c.Require().Len(got.diag.Anomalies, 1, "the read error is reported")
+	c.StrContains(got.diag.Anomalies[0], "read stream", "the anomaly names the read failure")
+	var stored struct {
+		ID      string `json:"id"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	c.Require().NoError(json.Unmarshal(got.canonical, &stored), "canonical unmarshal")
+	c.Eq("msg_toolong", stored.ID, "reassembled message id")
+	c.Require().Len(stored.Content, 1, "the block that started before the bad line")
+	c.Eq("hi", stored.Content[0].Text, "text accumulated before the bad line")
+}
+
+// TestParseCapturedResponseSSEStopsAfterTooManyConsecutiveSkips pins the second
+// half of the same rule: the skip is bounded. An error that repeats on every
+// call without being a read error must not spin the loop either, so a run of
+// consecutive skips long enough to mean no progress ends consumption and says so
+// in the trailing anomaly.
+func TestParseCapturedResponseSSEStopsAfterTooManyConsecutiveSkips(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stream := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_skips","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1}}}` + "\n\n"
+	// Each of these is a content-level refusal the codec reports per event; a
+	// stream made entirely of them never advances past the first few.
+	refusal := "event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"future_delta","text":"x"}}` + "\n\n"
+	stream += strings.Repeat(refusal, maxConsecutiveCaptureSkips+5)
+
+	stop, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(stream))
+	c.Require().NoError(err, "the message_start is still the record")
+	c.Eq("", stop, "no message_delta was reached")
+	c.Eq(int64(11), u.InputTokens, "usage from the message_start")
+	c.Require().Len(diag.Anomalies, maxCaptureAnomalies+1, "the reasons, then the stop")
+	c.StrContains(diag.Anomalies[len(diag.Anomalies)-1], "stopped consuming the stream", "the trailing anomaly says why consumption ended")
+	c.True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
 }
 
 // assertCanonicalJSON compares two JSON documents as values, never as bytes:
