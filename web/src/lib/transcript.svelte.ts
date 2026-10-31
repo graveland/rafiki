@@ -342,10 +342,32 @@ export class Conversation {
     switch (event.payload.case) {
       case 'userMessage': {
         const content = event.payload.value.content
-        if (!fromHistory && this.trimDuplicate('user', content)) {
+        const injected = event.payload.value.injected
+        // Both lists fold into the fingerprint: an injected-only message has an
+        // empty content, so keying on content alone would make every one of them
+        // `user:[]` and drop all but the first as join overlap.
+        const keyContent = [...injected, ...content]
+        if (!fromHistory && this.trimDuplicate('user', keyContent)) {
           return
         }
-        this.recordHistory('user', content, fromHistory)
+        this.recordHistory('user', keyContent, fromHistory)
+        // Harness-injected blocks render ahead of the user's own text, in wire
+        // order, under the systemMessage block shape — a client-side rendering
+        // kind, never a role change.
+        for (const item of injected) {
+          const injectedProjected = project([item])
+          this.blocks = [
+            ...this.blocks,
+            {
+              kind: 'system',
+              content: [item],
+              text: injectedProjected.text,
+              thinking: injectedProjected.thinking,
+              toolCalls: injectedProjected.toolCalls,
+              inFlight: false,
+            },
+          ]
+        }
         const projected = project(content)
         const block: TranscriptBlock = {
           kind: 'user',

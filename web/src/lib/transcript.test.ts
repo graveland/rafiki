@@ -34,6 +34,25 @@ function userEvent(childId: string, text: string, ordinal?: number): Event {
   })
 }
 
+function injectedEvent(
+  childId: string,
+  content: string[],
+  injected: string[],
+  ordinal?: number,
+): Event {
+  return create(EventSchema, {
+    childId,
+    ordinal,
+    payload: {
+      case: 'userMessage',
+      value: create(UserMessageSchema, {
+        content: content.map(textBlock),
+        injected: injected.map(textBlock),
+      }),
+    },
+  })
+}
+
 function assistantEvent(childId: string, text: string, ordinal?: number): Event {
   return create(EventSchema, {
     childId,
@@ -206,6 +225,44 @@ it('a system_message renders under its own kind, not as a user turn', async () =
   await flush()
   expect(conversation.blocks.map((block) => block.kind)).toEqual(['system', 'user'])
   expect(conversation.blocks[0].text).toBe('Environment update')
+  conversation.dispose()
+})
+
+it('an injected block renders as a system block before the user text', async () => {
+  const events = [injectedEvent('c', ['hi'], ['<system-reminder>ctx</system-reminder>'], 0)]
+  const { control } = fakeControl({ stream: (_i, o) => replay(events, o?.signal) })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  await flush()
+  expect(conversation.blocks.map((block) => block.kind)).toEqual(['system', 'user'])
+  expect(conversation.blocks[0].text).toBe('<system-reminder>ctx</system-reminder>')
+  expect(conversation.blocks[1].text).toBe('hi')
+  conversation.dispose()
+})
+
+it('an injected-only user message renders one system block and no user block', async () => {
+  const events = [injectedEvent('c', [], ['ctx'], 0)]
+  const { control } = fakeControl({ stream: (_i, o) => replay(events, o?.signal) })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  await flush()
+  expect(conversation.blocks).toHaveLength(1)
+  expect(conversation.blocks[0].kind).toBe('system')
+  expect(conversation.blocks[0].text).toBe('ctx')
+  conversation.dispose()
+})
+
+it('injected-only messages key apart at the join, so B is not dropped as A', async () => {
+  const history = [injectedEvent('c', [], ['A'])]
+  const events = [injectedEvent('c', [], ['A'], 6), injectedEvent('c', [], ['B'], 7)]
+  const { control } = fakeControl({ latest: 5, history, stream: (_i, o) => replay(events, o?.signal) })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  await flush()
+  // A is the join overlap and is trimmed once; B is a distinct message and must
+  // render. Under a `user:[]` key both live messages collide with the history one.
+  expect(conversation.blocks.map((block) => block.kind)).toEqual(['system', 'system'])
+  expect(conversation.blocks.map((block) => block.text)).toEqual(['A', 'B'])
   conversation.dispose()
 })
 
