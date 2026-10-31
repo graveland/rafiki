@@ -134,9 +134,11 @@ func estimateHistoryTokens(nodes []*convpkg.Node) int {
 // row carrying one is off limits.
 //
 // A block that degraded to msg.Opaque is classified by the type it declares:
-// storage keeps a tool_result verbatim whenever it carries a field this model
-// does not (a caller, an SDK-union junk key), and a boundary that could not see
-// one would split the pair and have the next request rejected.
+// storage keeps a tool_result typed, with every key the core does not model in
+// its Ext, and keeps it Opaque only when it has no native core (a block type
+// this codec does not model) or cannot be re-encoded faithfully. A boundary
+// that could not see one would split the pair and have the next request
+// rejected.
 func isLegalCut(n *convpkg.Node) bool {
 	if n.Msg.Role == msg.Assistant {
 		return true

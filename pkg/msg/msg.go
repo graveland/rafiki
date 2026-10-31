@@ -120,9 +120,11 @@ type Image struct {
 // Opaque is a block kept verbatim because it has no native core to translate: a
 // block type this model does not carry (redacted_thinking, a server-tool block,
 // an unknown type), or a block whose core fields cannot be read into their typed
-// form. Extra keys on a block type this model does carry are not a reason to
-// keep it verbatim — they ride along in Ext. Provider names the dialect Raw
-// belongs to.
+// form. Extra keys on a block type this model does carry normally ride along in
+// Ext rather than demoting the block; it stays Opaque only when re-encoding its
+// core and Ext would not reproduce what was stored (an image whose nested
+// `source` carries extra keys, say), so the round-trip stays exact. Provider
+// names the dialect Raw belongs to.
 type Opaque struct {
 	Provider Dialect
 	Raw      json.RawMessage

@@ -765,8 +765,10 @@ func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID strin
 // body is request-shaped (an object whose "messages" array may be empty): the
 // shared splitter derives the stored envelope from it exactly as it does for a
 // real request, so prefix_content keeps one shape on both paths. breakpoints are
-// the message indices carrying markers; nil is recorded as [] (none), never
-// NULL.
+// the message indices carrying markers: an empty slice records [] (markers are
+// placed, none on any message), and nil records NULL (the provider does not
+// speak the Messages API, so no markers were ever sent). Those are different
+// claims and the column keeps them apart.
 func (s *CaptureStore) StoreTurnPrefixBreakpoints(ctx context.Context, convID, turnID string, createdAt time.Time, body []byte, breakpoints []int, prefixHash string) error {
 	envelope, _, err := splitEnvelopeAndBreakpoints(body)
 	if err != nil {
@@ -776,18 +778,19 @@ func (s *CaptureStore) StoreTurnPrefixBreakpoints(ctx context.Context, convID, t
 }
 
 // storeTurnPrefix writes a turn's already-split envelope and explicit
-// breakpoints: the shared write path behind both public entry points.
+// breakpoints: the shared write path behind both public entry points. A nil
+// breakpoints slice records NULL, an empty one records [].
 func (s *CaptureStore) storeTurnPrefix(ctx context.Context, convID, turnID string, createdAt time.Time, envelope []byte, breakpoints []int, prefixHash string) error {
 	changed, err := s.prefixChanged(ctx, convID, createdAt, prefixHash)
 	if err != nil {
 		return err
 	}
-	if breakpoints == nil {
-		breakpoints = []int{}
-	}
-	bps, err := json.Marshal(breakpoints)
-	if err != nil {
-		return fmt.Errorf("store turn prefix: marshal breakpoints: %w", err)
+	var bps []byte
+	if breakpoints != nil {
+		bps, err = json.Marshal(breakpoints)
+		if err != nil {
+			return fmt.Errorf("store turn prefix: marshal breakpoints: %w", err)
+		}
 	}
 	// cache_breakpoints is a per-request property (always recorded); prefix_content
 	// is stored only when the envelope changed from the previous turn.

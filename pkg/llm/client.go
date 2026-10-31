@@ -477,7 +477,7 @@ func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extr
 
 	ref := c.beginTurn(ctx, meta, p.req, p.primary)
 	ctx = WithSessionID(ctx, ref.convID)
-	ctx, hdrs := withRawTraceHeaders(ctx)
+	ctx, hdrs := c.rawTraceContext(ctx)
 
 	start := time.Now()
 	resp, servedBy, err := c.callModel(ctx, span, p.primary, p.fallbacks, p.req, p.extra, p.spec)
@@ -873,7 +873,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 
 	ref := c.beginTurn(ctx, meta, p.req, p.primary)
 	ctx = WithSessionID(ctx, ref.convID)
-	ctx, hdrs := withRawTraceHeaders(ctx)
+	ctx, hdrs := c.rawTraceContext(ctx)
 	start := time.Now()
 
 	sessionID, _ := sessionIDFromContext(ctx)
@@ -1224,7 +1224,7 @@ func applyProviderPrefsPreSpec(model string, decl *providers.ModelDecl, g *routi
 // which is what a request whose routing spec (only, nodata, zdr, quantizations)
 // excludes every host gets back. The class is deterministic — the same body
 // fails identically forever — so it is never retried (a 400/404 is neither
-// routing.Retryable nor agentloop-retryable) and the wrapper below only
+// failover-worthy nor agentloop-retryable) and the wrapper below only
 // decorates it.
 func noEligibleUpstream(err error) bool {
 	var apiErr *msg.APIError
@@ -1237,7 +1237,7 @@ func noEligibleUpstream(err error) bool {
 // noEligibleError names the routing spec in OpenRouter's no-eligible-provider
 // rejection, so the operator sees WHICH spec excluded every provider and not
 // just OpenRouter's bare message. It wraps only when a non-zero spec is set
-// on the client, and the wrap is decoration only: %w keeps the SDK error
+// on the client, and the wrap is decoration only: %w keeps the *msg.APIError
 // reachable, so FailoverWorthy and every retry classifier see exactly what
 // they saw before (a 400/404 is not failover-worthy, and the fallback chain
 // is unchanged).
@@ -1381,9 +1381,11 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, req *msg.Request,
 }
 
 // breakpointMessages is the message indices the Anthropic codec places cache
-// markers on, or nil for a provider that does not speak the Messages API. The
-// capture row records where the markers land, so an operator can read the
-// cache layout without re-encoding the request.
+// markers on, or nil for a provider that does not speak the Messages API — nil
+// records NULL in cache_breakpoints, because no markers were ever sent, which
+// is not the same claim as "markers were placed and none landed". The capture
+// row records where the markers land, so an operator can read the cache layout
+// without re-encoding the request.
 func (c *Client) breakpointMessages(req *msg.Request, primary string) []int {
 	p, ok := c.set.Get(primary)
 	if !ok || (p.Kind != providers.KindAnthropic && p.Kind != providers.KindAnthropicOpenRouter) {
@@ -1410,7 +1412,7 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 		c.logger.Warn("capture: marshal response failed", "error", mErr)
 	} else if cErr = c.capture.CompleteTurn(ctx, capture.TurnResult{
 		TurnID: turnID, CreatedAt: createdAt, Model: resp.Model, Response: respJSON,
-		StopReason: resp.StopReason.String(), Upstream: upstream,
+		StopReason: resp.StopReasonWire(), Upstream: upstream,
 		// OpenRouter's non-standard top-level "provider" field names the actual
 		// backend that served the turn ("Together", "Parasail", …); "" for a
 		// native Anthropic response, which has no such field.

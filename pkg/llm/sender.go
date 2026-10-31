@@ -128,6 +128,17 @@ func withRawTraceHeaders(ctx context.Context) (context.Context, *rawTraceHeaders
 	return context.WithValue(ctx, rawTraceHeaderKey{}, h), h
 }
 
+// rawTraceContext attaches the capture point only when raw tracing is on. With
+// it off nothing will be recorded, so attaching one would make every request
+// pay a body read (and, for a compressed dialect, a decompression) for a record
+// nobody writes.
+func (c *Client) rawTraceContext(ctx context.Context) (context.Context, *rawTraceHeaders) {
+	if c.rawTrace == nil {
+		return ctx, nil
+	}
+	return withRawTraceHeaders(ctx)
+}
+
 // headerCaptureTransport records the real outbound request headers, the
 // outbound body (decompressed), the request path and the real inbound response
 // headers of every call, so raw-trace capture reflects what actually went over

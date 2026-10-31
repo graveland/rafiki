@@ -1111,3 +1111,98 @@ func TestCompleteTurnStoresNativeResponseUnderProtocolRafiki(t *testing.T) {
 		  WHERE conversation_id=$1::uuid AND ordinal=1`, conv.ID).Scan(&storedContent), "read the assistant row")
 	ck.StrContains(string(storedContent), `"hello"`, "the assistant row must carry the reply text")
 }
+
+// TestCompleteTurnKeepsAnUnmodelledStopReason pins that a stop reason the codec
+// does not model reaches both records: the stored response body and the turn's
+// stop_reason column carry the provider's own spelling, not "".
+func TestCompleteTurnKeepsAnUnmodelledStopReason(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+	const wire = "model_context_window_exceeded"
+
+	sender := nativeFakeSender{resp: &msg.Response{
+		ID: "msg_ctx", Model: "claude-sonnet-5",
+		StopReason:    msg.StopUnknown,
+		StopReasonRaw: wire,
+		Usage:         msg.Usage{Input: msg.Ptr(2), Output: msg.Ptr(3)},
+		Content:       []msg.Block{msg.Text{Text: "partial"}},
+	}}
+	set := &providers.Set{
+		DefaultProvider: "anthropic",
+		Providers: map[string]providers.Provider{
+			"anthropic": {Name: "anthropic", Kind: providers.KindAnthropic},
+		},
+	}
+	c, err := NewClient(
+		WithProviders(set),
+		WithProviderSender("anthropic", sender),
+		WithStore(pool),
+		WithCatalog(seededCatalog(t)),
+		WithDefaultModel("haiku-latest"),
+		WithLogger(testLogger(t)),
+	)
+	ck.Require().NoError(err, "NewClient")
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	ck.Require().NoError(err, "Conversation")
+	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var column *string
+	var raw []byte
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT stop_reason, response FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&column, &raw), "read the turn row")
+	ck.Require().NotNil(column, "the stop_reason column must be set")
+	ck.Eq(wire, *column, "the column keeps the provider's own spelling")
+
+	var body struct {
+		StopReason string `json:"stop_reason"`
+	}
+	ck.Require().NoError(json.Unmarshal(raw, &body), "the stored response must be a JSON object: %s", raw)
+	ck.Eq(wire, body.StopReason, "the stored response keeps the provider's own spelling")
+
+	// The assistant row's stop reason carries the same value.
+	var nodeStop *string
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT stop_reason FROM conversations.conversation_message
+		  WHERE conversation_id=$1::uuid AND ordinal=1`, conv.ID).Scan(&nodeStop), "read the assistant row's stop reason")
+	ck.Require().NotNil(nodeStop, "the assistant row's stop reason must be set")
+	ck.Eq(wire, *nodeStop, "the assistant row keeps the provider's own spelling")
+}
+
+// TestConversationRecordsNullBreakpointsForANonAnthropicPrimary pins the
+// distinction the column draws: NULL means no markers were ever sent because the
+// provider does not speak the Messages API, while [] means markers were placed
+// and none landed on a message. A non-Anthropic primary must record NULL.
+func TestConversationRecordsNullBreakpointsForANonAnthropicPrimary(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		func(*msg.Request) (*msg.Response, error) {
+			return cannedMessage(usageJSON("gpt-6.1-sol")), nil
+		},
+	}}
+	c, err := NewClient(
+		WithProviders(responsesProviderSet(t)),
+		WithProviderSender("oa", sender),
+		WithStore(pool),
+		WithCatalog(twoIDCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	ck.Require().NoError(err, "NewClient")
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("oa/gpt-6.1-sol"))
+	ck.Require().NoError(err, "Conversation")
+	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var breakpoints []byte
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT cache_breakpoints FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&breakpoints), "read cache_breakpoints")
+	ck.Nil(breakpoints, "a provider that never places markers must record NULL, not []")
+}

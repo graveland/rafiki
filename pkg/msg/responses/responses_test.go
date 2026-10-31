@@ -136,6 +136,33 @@ func TestDecodeResponse(t *testing.T) {
 	}, resp.Content, "content")
 }
 
+// TestDecodeResponseKeepsIncompleteReason pins that the endpoint's own reason
+// for an incomplete response is carried beside the modelled stop reason, in both
+// the whole-body and the streamed decode: the native enum cannot express a value
+// it does not model, and the record must still say why the turn ended.
+func TestDecodeResponseKeepsIncompleteReason(t *testing.T) {
+	const reason = "model_context_window_exceeded"
+
+	t.Run("whole body", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		body := `{"id":"resp_1","model":"m","status":"incomplete",` +
+			`"incomplete_details":{"reason":"` + reason + `"},"output":[]}`
+		resp, err := responses.Codec{Mode: responses.ModeAPI}.DecodeResponse([]byte(body))
+		ck.NoError(err, "decode")
+		ck.Eq(reason, resp.StopReasonRaw, "the endpoint's own reason is kept")
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		body := sse(
+			`{"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+			`{"type":"response.incomplete","response":{"id":"resp_1","model":"m","status":"incomplete","incomplete_details":{"reason":"`+reason+`"}}}`,
+		)
+		resp := accumulate(t, responses.ModeAPI, body)
+		ck.Eq(reason, resp.StopReasonRaw, "the stream carries the endpoint's own reason")
+	})
+}
+
 // TestDecodeResponseUsageByPresence pins the by-presence usage rules: a count the
 // wire did not report stays nil, a reported zero does not.
 func TestDecodeResponseUsageByPresence(t *testing.T) {

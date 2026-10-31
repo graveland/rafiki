@@ -137,8 +137,26 @@ type Response struct {
 	Model      string
 	Content    []Block
 	StopReason StopReason
-	Usage      Usage
-	Provider   string // OpenRouter's top-level "provider" (served-by); "" when absent
+	// StopReasonRaw is the provider's own spelling of why it stopped, verbatim,
+	// or "" when it reported none. StopReason is the modelled enum, so a wire
+	// value this package does not model lands here instead of being lost; a
+	// record carries StopReasonWire, not StopReason.String.
+	StopReasonRaw string
+	Usage         Usage
+	Provider      string // OpenRouter's top-level "provider" (served-by); "" when absent
+}
+
+// StopReasonWire returns the stop reason a record should carry: the modelled
+// spelling when this package models it, and otherwise the provider's own
+// spelling verbatim. An unrecognised wire value is reported, never erased to "".
+func (r *Response) StopReasonWire() string {
+	if r == nil {
+		return ""
+	}
+	if s := r.StopReason.String(); s != "" {
+		return s
+	}
+	return r.StopReasonRaw
 }
 
 // EncodeOptions are the per-call knobs a codec's Encode honours.

@@ -24,8 +24,9 @@ var RetryBackoffs = []time.Duration{500 * time.Millisecond, 2 * time.Second, 5 *
 // failure worth failing over on: a 5xx or 429 status, or a transport error with
 // no HTTP status — but NOT client cancellation (context.Canceled /
 // DeadlineExceeded), which is not an upstream-health signal. It is the single
-// definition shared by the SDK path (Core.callModel, via the error's embedded
-// status) and the HTTP proxy path (ServeHTTP, via resp.StatusCode + err).
+// definition shared by the native classifier (retryable, via a *msg.APIError's
+// embedded status) and the HTTP proxy path (ServeHTTP, via resp.StatusCode +
+// err).
 //
 // statusCode is the HTTP status of a completed transport call (0 when the call
 // itself errored before yielding a response); err is that call's error, if any.
@@ -92,14 +93,10 @@ func creditExhausted(err error) bool {
 
 // FailoverWorthy reports whether an error means the primary should be abandoned
 // for the fallback chain (and the breaker tripped): a retryable failure, or a
-// credit-exhausted account. It is the one failover gate — Retryable alone would
+// credit-exhausted account. It is the one failover gate — retryable alone would
 // strand every caller on a primary that cannot answer until someone pays the
 // bill.
 func FailoverWorthy(err error) bool { return retryable(err) || creditExhausted(err) }
-
-// Retryable classifies a provider error, mapping its HTTP status onto
-// ClassifyFailure — the per-upstream routing rule.
-func Retryable(err error) bool { return retryable(err) }
 
 // retryable classifies a provider error, mapping its embedded HTTP status onto
 // ClassifyFailure. A *msg.APIError with Status 0 is an in-band stream error:

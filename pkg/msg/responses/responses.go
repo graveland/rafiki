@@ -642,6 +642,9 @@ func (c Codec) DecodeResponse(body []byte) (*msg.Response, error) {
 	if wire.IncompleteDetails != nil {
 		reason = wire.IncompleteDetails.Reason
 	}
+	// The endpoint reports why it stopped as incomplete_details.reason, or not
+	// at all; keep its own spelling beside the modelled enum for a record.
+	resp.StopReasonRaw = reason
 	switch {
 	case reason == reasonContentFilter:
 		return nil, &msg.APIError{Kind: msg.ErrOther, Dialect: c.Mode.Dialect(), Message: contentFilterMessage}

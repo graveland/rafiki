@@ -24,7 +24,9 @@ const maxStreamLine = 16 << 20
 // history, so a caller, a citation, or a server-tool block survives exactly as
 // it would from a stored row. Usage is decoded by PRESENCE: a count the body
 // does not carry stays nil, because a provider that did not report a cache
-// count has not reported zero of them.
+// count has not reported zero of them. The stop reason keeps the wire's own
+// spelling alongside the modelled enum, so a value this package does not model
+// still reaches the record.
 func DecodeResponse(body []byte) (*msg.Response, error) {
 	var wire struct {
 		ID         string                     `json:"id"`
@@ -42,12 +44,13 @@ func DecodeResponse(body []byte) (*msg.Response, error) {
 		return nil, err
 	}
 	return &msg.Response{
-		ID:         wire.ID,
-		Model:      wire.Model,
-		Content:    content,
-		StopReason: msg.ParseStopReason(wire.StopReason),
-		Usage:      decodeUsage(wire.Usage),
-		Provider:   providerOf(wire.Provider),
+		ID:            wire.ID,
+		Model:         wire.Model,
+		Content:       content,
+		StopReason:    msg.ParseStopReason(wire.StopReason),
+		StopReasonRaw: wire.StopReason,
+		Usage:         decodeUsage(wire.Usage),
+		Provider:      providerOf(wire.Provider),
 	}, nil
 }
 
@@ -120,10 +123,12 @@ func NewStreamDecoder(r io.ReadCloser) msg.StreamDecoder {
 	}
 }
 
-// InvalidInput returns the raw, unparseable tool-input fragments the decoder
-// buffered for the block at index, if any. The finalized block's input is left
-// to the accumulator's repair policy, which substitutes an empty object; the
-// original bytes are retained here so a proxy can still repair or report them.
+// InvalidInput returns the raw, unparseable input fragments the decoder buffered
+// for the block at index, if any. Every block kind that carries an input is
+// covered: a client tool call's finalized input is left to the accumulator's
+// repair policy, which substitutes an empty object, while an opaque server-tool
+// block is decoded with an empty input of its own type. Either way the original
+// bytes are retained here so a proxy can repair or report them.
 func (d *Decoder) InvalidInput(index int) (json.RawMessage, bool) {
 	raw, ok := d.invalid[index]
 	return raw, ok
@@ -280,8 +285,9 @@ func (d *Decoder) messageDelta(data []byte) (msg.StreamEvent, bool, error) {
 		return nil, false, fmt.Errorf("anthropic: decode message_delta: %w", err)
 	}
 	return msg.MessageDelta{
-		StopReason: msg.ParseStopReason(wire.Delta.StopReason),
-		Usage:      decodeUsage(wire.Usage),
+		StopReason:    msg.ParseStopReason(wire.Delta.StopReason),
+		StopReasonRaw: wire.Delta.StopReason,
+		Usage:         decodeUsage(wire.Usage),
 	}, true, nil
 }
 
@@ -430,6 +436,8 @@ type blockState struct {
 // finalize rebuilds the block's JSON from its fragments and decodes it with the
 // same residue-aware rules a whole body gets. A nil block means the input could
 // not be parsed and the accumulator's repair policy should apply instead.
+// Unparseable input is retained on the decoder for BOTH block kinds, so a
+// caller that records the response can put the fragments where the input was.
 func (s *blockState) finalize() (msg.Block, error) {
 	for _, f := range []struct {
 		key   string
@@ -464,7 +472,11 @@ func (s *blockState) finalize() (msg.Block, error) {
 			return nil, nil
 		default:
 			// An opaque server-tool block still has to be sent on with its own
-			// type and every other key intact.
+			// type and every other key intact, so it decodes with an empty
+			// input. Its fragments are retained exactly as a client tool call's
+			// are: the record must say the input was malformed, not that the
+			// tool was called with no arguments.
+			s.invalidInput = json.RawMessage(fragments)
 			s.raw["input"] = json.RawMessage("{}")
 		}
 	}

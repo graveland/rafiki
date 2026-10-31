@@ -568,7 +568,7 @@ func (d *streamDecoder) complete(resp *responseObject, incomplete bool) {
 	if resp != nil {
 		usage = resp.Usage
 	}
-	d.emitMessageDelta(stop, usageOf(usage))
+	d.emitMessageDelta(stop, reason, usageOf(usage))
 	d.done = true
 }
 
@@ -649,8 +649,8 @@ func (d *streamDecoder) emitBlockStop(index int) {
 	d.emit(msg.BlockStop{Index: index})
 }
 
-func (d *streamDecoder) emitMessageDelta(stop msg.StopReason, usage msg.Usage) {
-	d.emit(msg.MessageDelta{StopReason: stop, Usage: usage})
+func (d *streamDecoder) emitMessageDelta(stop msg.StopReason, stopRaw string, usage msg.Usage) {
+	d.emit(msg.MessageDelta{StopReason: stop, StopReasonRaw: stopRaw, Usage: usage})
 }
 
 // streamEvent is one SSE payload. Only the fields this translation consumes are

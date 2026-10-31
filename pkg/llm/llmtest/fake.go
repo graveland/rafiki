@@ -115,7 +115,7 @@ func Events(resp *msg.Response) []msg.StreamEvent {
 		}
 		events = append(events, msg.BlockStop{Index: i, Block: b})
 	}
-	return append(events, msg.MessageDelta{StopReason: resp.StopReason, Usage: resp.Usage})
+	return append(events, msg.MessageDelta{StopReason: resp.StopReason, StopReasonRaw: resp.StopReasonRaw, Usage: resp.Usage})
 }
 
 // NewDecoder returns a StreamDecoder replaying events in order, for a fake

@@ -93,11 +93,12 @@ func (a *Accumulator) HasContent() bool { return len(a.blocks) > 0 }
 // snapshot.
 func (a *Accumulator) Response() *Response {
 	r := &Response{
-		ID:         a.resp.ID,
-		Model:      a.resp.Model,
-		StopReason: a.resp.StopReason,
-		Usage:      cloneUsage(a.resp.Usage),
-		Provider:   a.resp.Provider,
+		ID:            a.resp.ID,
+		Model:         a.resp.Model,
+		StopReason:    a.resp.StopReason,
+		StopReasonRaw: a.resp.StopReasonRaw,
+		Usage:         cloneUsage(a.resp.Usage),
+		Provider:      a.resp.Provider,
 	}
 	for _, b := range a.blocks {
 		r.Content = append(r.Content, b.snapshot())
@@ -115,6 +116,9 @@ func (a *Accumulator) messageStart(e MessageStart) {
 func (a *Accumulator) messageDelta(e MessageDelta) {
 	if e.StopReason != StopUnknown {
 		a.resp.StopReason = e.StopReason
+	}
+	if e.StopReasonRaw != "" {
+		a.resp.StopReasonRaw = e.StopReasonRaw
 	}
 	a.resp.Usage = mergeUsage(a.resp.Usage, e.Usage)
 }

@@ -125,5 +125,5 @@ func fakeStreamEvents(resp *msg.Response) []msg.StreamEvent {
 	for i, b := range resp.Content {
 		events = append(events, msg.BlockStart{Index: i, Block: b}, msg.BlockStop{Index: i, Block: b})
 	}
-	return append(events, msg.MessageDelta{StopReason: resp.StopReason, Usage: resp.Usage})
+	return append(events, msg.MessageDelta{StopReason: resp.StopReason, StopReasonRaw: resp.StopReasonRaw, Usage: resp.Usage})
 }

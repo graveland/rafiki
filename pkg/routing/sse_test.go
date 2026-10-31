@@ -263,6 +263,80 @@ func TestParseCapturedResponseNoProvider(t *testing.T) {
 	c.Eq("", u.Provider, "Provider")
 }
 
+// TestParseCapturedResponseSSERepairsMalformedServerToolInput pins the same
+// repair for a server-tool block. Its input is part of the record: storing an
+// empty object would claim the tool was called with no arguments, so the block
+// keeps its own type and every other key while the input becomes the
+// malformed-input placeholder carrying the fragments.
+func TestParseCapturedResponseSSERepairsMalformedServerToolInput(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":4,"output_tokens":2}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{},"provider_metadata":{"source":"web"}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"rafiki\""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":", , "}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	_, u, canonical, repaired, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Require().NoError(err, "a malformed server-tool input must be repaired, not fail the whole turn")
+	c.Eq(int64(4), u.InputTokens, "usage is accumulated independently of the block")
+	c.Require().Len(repaired, 1, "expected exactly one repaired block, got")
+	c.StrContains(repaired[0], "server_tool_use", "the report names the block type")
+	c.StrContains(repaired[0], `raw="{\"query\": \"rafiki\", ,"`, "the report carries the fragments")
+
+	var stored struct {
+		Content []struct {
+			Type     string          `json:"type"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
+			Metadata map[string]any  `json:"provider_metadata"`
+		} `json:"content"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Require().Len(stored.Content, 1, "content blocks")
+	c.Eq("server_tool_use", stored.Content[0].Type, "the block keeps the server tool's own type")
+	c.Eq("web_search", stored.Content[0].Name, "the tool name survives")
+	c.Eq("web", stored.Content[0].Metadata["source"], "the block's other keys survive")
+	var input struct {
+		Malformed string `json:"_rafiki_malformed_input"`
+	}
+	c.Require().NoError(json.Unmarshal(stored.Content[0].Input, &input), "the placeholder must be valid JSON: %s", stored.Content[0].Input)
+	c.Eq(`{"query": "rafiki", ,`, input.Malformed, "the raw fragments are preserved")
+}
+
+// TestParseCapturedResponseSSEKeepsUnmodelledStopReason pins that the proxy's
+// captured record keeps a stop reason the codec does not model, in both the
+// stop_reason column value and the stored response body. Erasing it to "" would
+// lose the only signal of why the turn ended.
+func TestParseCapturedResponseSSEKeepsUnmodelledStopReason(t *testing.T) {
+	c := assert.NewCollecting(t)
+	const wire = "model_context_window_exceeded"
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_ctx","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":2}}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"` + wire + `"},"usage":{"output_tokens":3}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	stop, _, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Require().NoError(err, "ParseCapturedResponse")
+	c.Eq(wire, stop, "the stop_reason column keeps the provider's own spelling")
+
+	var stored struct {
+		StopReason string `json:"stop_reason"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Eq(wire, stored.StopReason, "the stored response keeps the provider's own spelling")
+}
+
 // TestParseSSEUsageInMessageDelta pins OpenRouter's deepseek shape: the
 // message_start reports zeros and the final message_delta carries the real
 // counts. The accumulator's backfill must take every field the delta actually

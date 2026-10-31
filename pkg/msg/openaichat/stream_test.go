@@ -101,6 +101,22 @@ func TestStreamOneBlockOpen(t *testing.T) {
 	}, resp.Content, "each block keeps its own deltas")
 }
 
+// TestStreamKeepsUnmodelledFinishReason pins the streaming half of the rule: a
+// finish_reason this codec does not map reaches the response verbatim through
+// the MessageDelta, rather than being erased to "".
+func TestStreamKeepsUnmodelledFinishReason(t *testing.T) {
+	c := assert.NewAborting(t)
+	const wire = "model_context_window_exceeded"
+	body := chunk(`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`) +
+		chunk(`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"`+wire+`"}],`+
+			`"usage":{"prompt_tokens":3,"completion_tokens":1}}`) +
+		chunk("[DONE]")
+	resp := accumulate(c, strings.NewReader(body))
+	c.Eq(msg.StopUnknown, resp.StopReason, "a value this codec does not map stays unknown")
+	c.Eq(wire, resp.StopReasonRaw, "the stream's finish_reason is carried verbatim")
+	c.Eq(wire, resp.StopReasonWire(), "the record falls back to the wire's spelling")
+}
+
 // TestStreamInBandTransientIsRetryable pins that an in-band chunk error becomes
 // a status-0 APIError classified from its own payload.
 func TestStreamInBandTransientIsRetryable(t *testing.T) {

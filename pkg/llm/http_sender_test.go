@@ -371,7 +371,7 @@ func TestNoEligibleDecoratesOpenAIChat(t *testing.T) {
 	var apiErr *msg.APIError
 	c.True(errors.As(err, &apiErr), "the API error must stay reachable through the wrap: %v", err)
 	c.Eq(msg.ErrNoEligible, apiErr.Kind)
-	c.False(routing.Retryable(err), "deterministic: the same request fails forever")
+	c.False(routing.ClassifyFailure(apiErr.Status, nil), "deterministic: the same request fails forever")
 	c.False(routing.FailoverWorthy(err), "a 404 is not an upstream-health signal")
 }
 

@@ -32,6 +32,7 @@ type streamDecoder struct {
 	finishSeen bool // a finish_reason chunk was processed
 	deltaSent  bool // MessageDelta emitted
 	stop       msg.StopReason
+	stopRaw    string    // the finish_reason exactly as the wire spelled it
 	usage      msg.Usage // the latest usage any chunk reported
 	haveUsage  bool
 
@@ -272,6 +273,7 @@ func (d *streamDecoder) translate(chunk *streamChunk) {
 		d.finishSeen = true
 		d.closeActiveBlock()
 		d.stop = stopReason(*choice.FinishReason)
+		d.stopRaw = *choice.FinishReason
 		if d.haveUsage {
 			d.emitMessageDelta()
 		}
@@ -324,7 +326,7 @@ func (d *streamDecoder) emitMessageDelta() {
 		return
 	}
 	d.deltaSent = true
-	d.queue = append(d.queue, msg.MessageDelta{StopReason: d.stop, Usage: d.usage})
+	d.queue = append(d.queue, msg.MessageDelta{StopReason: d.stop, StopReasonRaw: d.stopRaw, Usage: d.usage})
 }
 
 // fail ends the stream. Events already queued are delivered first.

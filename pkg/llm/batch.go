@@ -158,12 +158,15 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 		convID = meta.ConversationID
 	}
 	ctx = WithSessionID(ctx, ref.convID)
-	ctx, hdrs := withRawTraceHeaders(ctx)
+	ctx, hdrs := c.rawTraceContext(ctx)
 	// A parked call makes no HTTP request in this process, so the transport
 	// never fills the capture point in. The body is known here — it is exactly
 	// what the batcher will submit — so record it, and leave the path empty:
-	// the Batch API's own paths are the batcher's business.
-	hdrs.reqBody = body
+	// the Batch API's own paths are the batcher's business. Nothing is attached
+	// when raw tracing is off.
+	if hdrs != nil {
+		hdrs.reqBody = body
+	}
 
 	provider, err := batchProviderJSON(p.batchOnly)
 	if err != nil {

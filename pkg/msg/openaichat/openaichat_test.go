@@ -117,6 +117,29 @@ func TestEncodeDropsThinkingAndOpaque(t *testing.T) {
 	}, call)
 }
 
+// TestDecodeResponseKeepsUnmodelledFinishReason pins that a finish_reason this
+// codec does not map is not erased: the enum stays unknown and the wire's own
+// spelling rides on the response, so a record keeps what the provider said.
+func TestDecodeResponseKeepsUnmodelledFinishReason(t *testing.T) {
+	c := assert.NewAborting(t)
+	const wire = "model_context_window_exceeded"
+	resp, err := openaichat.DecodeResponse([]byte(`{"id":"c1","model":"m","choices":[{"index":0,` +
+		`"message":{"role":"assistant","content":"hi"},"finish_reason":"` + wire + `"}],` +
+		`"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	c.NoError(err, "decode")
+	c.Eq(msg.StopUnknown, resp.StopReason, "a value this codec does not map stays unknown")
+	c.Eq(wire, resp.StopReasonRaw, "the wire's own spelling is kept")
+	c.Eq(wire, resp.StopReasonWire(), "the record falls back to the wire's spelling")
+
+	body, err := msganthropic.ResponseJSON(resp)
+	c.NoError(err, "ResponseJSON")
+	var stored struct {
+		StopReason string `json:"stop_reason"`
+	}
+	c.NoError(json.Unmarshal(body, &stored), "unmarshal the stored response")
+	c.Eq(wire, stored.StopReason, "the record keeps the stop reason the provider reported")
+}
+
 // TestDecodeGolden compares a decoded response with its recorded decode, apart
 // from the intended differences: the cache-adjusted input, the reasoning count,
 // and absence rather than zero for a count the wire did not report.

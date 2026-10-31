@@ -235,3 +235,39 @@ func TestRawTraceDecodeFailureIsBestEffort(t *testing.T) {
 		c.EqDeep(original, wire, "the send must be unaltered")
 	})
 }
+
+// TestRawTraceBodyCaptureIsGatedOnTheRecorder pins that capture costs nothing
+// when it is off: a client without a raw-trace recorder attaches no capture
+// point, so the transport reads no request body and decompresses nothing for a
+// record nobody will write.
+func TestRawTraceBodyCaptureIsGatedOnTheRecorder(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	off := &Client{}
+	ctx, hdrs := off.rawTraceContext(context.Background())
+	c.Nil(hdrs, "capture off must attach no capture point")
+	c.Nil(ctx.Value(rawTraceHeaderKey{}), "capture off must attach no capture point")
+
+	// With no capture point on the context, the transport reads no body: the
+	// replayable body is left untouched.
+	reads := 0
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://example.test/v1/messages", bytes.NewReader([]byte(`{}`)))
+	c.NoError(err, "build request")
+	req.GetBody = func() (io.ReadCloser, error) {
+		reads++
+		return io.NopCloser(strings.NewReader(`{}`)), nil
+	}
+	res, err := headerCaptureTransport{base: &recordingRoundTripper{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+	}}}.RoundTrip(req)
+	c.NoError(err, "round trip")
+	c.NoError(res.Body.Close(), "close response body")
+	c.Eq(0, reads, "no request body is read with capture off")
+
+	on := &Client{rawTrace: newFakeRawTraceRecorder()}
+	_, hdrs = on.rawTraceContext(context.Background())
+	c.NotNil(hdrs, "capture on must attach a capture point")
+}

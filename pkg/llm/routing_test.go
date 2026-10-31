@@ -259,7 +259,7 @@ func TestRoutingNoEligibleErrorNamesSpec(t *testing.T) {
 	var apiErr *msg.APIError
 	ck.True(errors.As(err, &apiErr), "the API error must stay reachable through the wrap: %v", err)
 	ck.Eq(http.StatusNotFound, apiErr.Status, "the wrapped status is preserved")
-	ck.False(routing.Retryable(err), "deterministic: the same request fails forever, never retry")
+	ck.False(routing.ClassifyFailure(apiErr.Status, nil), "deterministic: the same request fails forever, never retry")
 	ck.False(routing.FailoverWorthy(err), "not failover-worthy either (a 404 is not a health signal)")
 
 	// Zero-spec control: the identical upstream failure passes through
@@ -326,7 +326,7 @@ func TestRoutingNoEligibleErrorNamesSpecStreaming(t *testing.T) {
 	var apiErr *msg.APIError
 	ck.True(errors.As(err, &apiErr), "the API error must stay reachable through the wrap: %v", err)
 	ck.Eq(http.StatusNotFound, apiErr.Status, "the wrapped status is preserved")
-	ck.False(routing.Retryable(err), "deterministic: never retried on the streaming path either")
+	ck.False(routing.ClassifyFailure(apiErr.Status, nil), "deterministic: never retried on the streaming path either")
 	ck.False(routing.FailoverWorthy(err), "not failover-worthy either")
 
 	// Zero-spec control on the same path: undecorated passthrough.

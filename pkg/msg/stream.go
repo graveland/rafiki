@@ -51,7 +51,11 @@ type BlockStop struct {
 // MessageDelta closes a streamed response with its stop reason and final usage.
 type MessageDelta struct {
 	StopReason StopReason
-	Usage      Usage
+	// StopReasonRaw is the stop reason exactly as the wire spelled it, carried
+	// for the same reason Response.StopReasonRaw is: a value the enum does not
+	// model must still reach the record.
+	StopReasonRaw string
+	Usage         Usage
 }
 
 // StreamDecoder yields a response's events in order.

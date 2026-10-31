@@ -15,6 +15,8 @@ import (
 // provider actually reported, and the content blocks. It is the canonical
 // recorded form (capture's turn response and the raw trace), so it carries
 // exactly the fields the native model has — never the SDK's own wire shape.
+// The stop reason is the wire's own spelling when this package does not model
+// it, so an unrecognised value is recorded rather than erased.
 func ResponseJSON(r *msg.Response) ([]byte, error) {
 	if r == nil {
 		return nil, errors.New("anthropic: nil response")
@@ -26,7 +28,7 @@ func ResponseJSON(r *msg.Response) ([]byte, error) {
 	body := map[string]any{
 		"id":          r.ID,
 		"model":       r.Model,
-		"stop_reason": r.StopReason.String(),
+		"stop_reason": r.StopReasonWire(),
 		"usage":       usageBody(r.Usage),
 		"content":     json.RawMessage(content),
 	}
@@ -42,7 +44,9 @@ func ResponseJSON(r *msg.Response) ([]byte, error) {
 
 // usageBody renders the counts a native usage reports. A count the provider did
 // not report is omitted: an absent count and a reported zero are different
-// facts, and only the provider knows which it sent.
+// facts, and only the provider knows which it sent. Reasoning is the endpoint's
+// own reasoning-token count, reported by the Responses dialect; it is stored
+// under the same presence rule as the cache counts.
 func usageBody(u msg.Usage) map[string]any {
 	body := map[string]any{}
 	if u.Input != nil {
@@ -56,6 +60,9 @@ func usageBody(u msg.Usage) map[string]any {
 	}
 	if u.CacheWrite != nil {
 		body["cache_creation_input_tokens"] = *u.CacheWrite
+	}
+	if u.Reasoning != nil {
+		body["reasoning_tokens"] = *u.Reasoning
 	}
 	return body
 }

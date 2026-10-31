@@ -120,7 +120,8 @@ The native codec (`pkg/msg/anthropic`) sits downstream of that and cannot move a
 hash. It decodes stored content into typed blocks, keeping every key the native
 core does not model in that block's `msg.Ext` (tagged with the dialect that
 produced it) rather than demoting the whole block; `msg.Opaque` is only for a
-block type with no native core, or one whose core fields cannot be read. Node
+block type with no native core, or one whose core plus `Ext` would not re-encode
+to the stored bytes (an image with extra keys nested inside `source`, say). Node
 identity is the canonical form of the stored bytes, so a block that gains or
 loses `Ext` on its way through the codec hashes exactly as it did before.
 

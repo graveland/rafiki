@@ -511,7 +511,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*ms
 
 	row, err := conv.appendMessage(ctx, msg.Message{Role: msg.Assistant, Content: resp.Content},
 		&store.AssistantMeta{Input: msg.Val(resp.Usage.Input), Output: msg.Val(resp.Usage.Output),
-			StopReason: resp.StopReason.String()}, resp.ID)
+			StopReason: resp.StopReasonWire()}, resp.ID)
 	if err != nil {
 		// The turn is already captured; a failed message append must be loud —
 		// resume protocol depends on message rows.

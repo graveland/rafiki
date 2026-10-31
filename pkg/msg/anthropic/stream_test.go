@@ -105,6 +105,53 @@ func TestDecodeStoredMessageAPIUnchanged(t *testing.T) {
 	c.EqDeep(stored, msg.Message{Role: msg.Assistant, Content: resp.Content})
 }
 
+// TestUnmodelledStopReasonIsKept pins that a stop reason outside the modelled
+// enum is not erased: the enum stays StopUnknown, the wire's own spelling rides
+// on the response, and the recorded body carries it. The base path stored the
+// provider's string verbatim, and a record that said "" would lose the only
+// signal of why the turn ended.
+func TestUnmodelledStopReasonIsKept(t *testing.T) {
+	const wire = "model_context_window_exceeded"
+
+	t.Run("whole body", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		resp, err := anthropic.DecodeResponse([]byte(`{"id":"msg_1","model":"m","content":[],"stop_reason":"` + wire + `","usage":{"output_tokens":9}}`))
+		c.NoError(err, "decode")
+		c.Eq(msg.StopUnknown, resp.StopReason, "a value this package does not model stays unknown")
+		c.Eq(wire, resp.StopReasonRaw, "the wire's own spelling is kept")
+		c.Eq(wire, resp.StopReasonWire(), "the record falls back to the wire's spelling")
+		assertStoredStopReason(c, resp, wire)
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		resp, _ := streamResponse(t, []byte(`event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":3}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"`+wire+`"},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`))
+		c.Eq(msg.StopUnknown, resp.StopReason, "a value this package does not model stays unknown")
+		c.Eq(wire, resp.StopReasonRaw, "the stream's stop reason is carried verbatim")
+		assertStoredStopReason(c, resp, wire)
+	})
+}
+
+// assertStoredStopReason pins the recorded body's stop_reason field.
+func assertStoredStopReason(c *assert.C, resp *msg.Response, want string) {
+	body, err := anthropic.ResponseJSON(resp)
+	c.NoError(err, "ResponseJSON")
+	var stored struct {
+		StopReason string `json:"stop_reason"`
+	}
+	c.NoError(json.Unmarshal(body, &stored), "unmarshal the stored response")
+	c.Eq(want, stored.StopReason, "the record keeps the stop reason the provider reported")
+}
+
 // TestStreamProviderPreserved pins that OpenRouter's served-by field survives
 // the stream: it is reported once, on message_start.
 func TestStreamProviderPreserved(t *testing.T) {
@@ -288,7 +335,8 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"mystery_delta","v
 // TestStreamMalformedToolInput pins the repair policy split: a client tool
 // call whose arguments did not parse leaves the accumulator to substitute an
 // empty object while the raw fragments stay available, and a server-tool block
-// keeps its own type either way.
+// keeps its own type either way — with its fragments retained too, because a
+// record that lost them could only claim the tool was called with no arguments.
 func TestStreamMalformedToolInput(t *testing.T) {
 	c := assert.NewAborting(t)
 
@@ -312,7 +360,7 @@ data: {"type":"message_stop"}
 	c.True(ok, "the unparseable fragments must be retained")
 	c.Eq(`{"path":`, string(raw))
 
-	server, _ := streamResponse(t, []byte(`event: content_block_start
+	server, sdec := streamResponse(t, []byte(`event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}
 
 event: content_block_delta
@@ -329,6 +377,9 @@ data: {"type":"message_stop"}
 	c.True(ok, "a server-tool block stays opaque, got %T", server.Content[0])
 	c.Eq("server_tool_use", msg.OpaqueType(opaque), "the server-tool type must be preserved")
 	c.Eq(`{}`, string(rawObject(t, opaque.Raw)["input"]), "a repaired server-tool input is an empty object")
+	sraw, ok := sdec.InvalidInput(0)
+	c.True(ok, "a server-tool block's unparseable fragments must be retained too")
+	c.Eq(`{oops`, string(sraw))
 }
 
 // anthropicFixtures are the recorded Anthropic responses, each with a

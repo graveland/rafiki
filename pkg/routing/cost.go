@@ -19,10 +19,10 @@ type CostBreakdown struct {
 }
 
 // CostOf prices raw token counts at this model's list rates. This is the
-// primitive: it takes counts rather than an anthropic.Usage so a SQL rollup
+// primitive: it takes counts rather than a usage struct so a SQL rollup
 // (per-model BIGINT sums out of conversation_turn) prices through the same
-// formula as a live response, without the DB-facing packages importing the
-// Anthropic SDK.
+// formula as a live response, without a DB-facing package importing a provider
+// codec.
 //
 // A zero-value ModelPricing (an unpriced model) yields a zero CostBreakdown, so
 // callers can treat 0 as "unpriced" without a separate ok check.

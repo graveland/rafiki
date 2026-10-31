@@ -430,6 +430,7 @@ func DecodeResponse(body []byte) (*msg.Response, error) {
 	}
 	if choice.FinishReason != nil {
 		resp.StopReason = stopReason(*choice.FinishReason)
+		resp.StopReasonRaw = *choice.FinishReason
 	}
 	resp.Usage = decodeUsage(wire.Usage)
 	return resp, nil

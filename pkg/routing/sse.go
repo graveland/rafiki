@@ -84,7 +84,7 @@ func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
 }
 
 // invalidInputs is the codec decoder's repair hook: the raw, unparseable
-// tool-input fragments it buffered for a block. The accumulator replaces such a
+// input fragments it buffered for a block. The accumulator replaces such a
 // block's input with an empty object, so this is the only place the original
 // bytes survive.
 type invalidInputs interface {
@@ -160,14 +160,15 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, []string, error) {
 		Model:               resp.Model,
 		Provider:            resp.Provider,
 	}
-	return resp.StopReason.String(), u, canonical, repaired, nil
+	return resp.StopReasonWire(), u, canonical, repaired, nil
 }
 
 // capturedResponse renders a reassembled response as the recorded body: the
 // Anthropic message envelope this path has always stored (id, type, role,
 // model, and the served-by provider when OpenRouter named one) around the
 // codec's content blocks, with usage by presence — a count the provider did not
-// report is omitted rather than recorded as zero.
+// report is omitted rather than recorded as zero. The stop reason keeps the
+// wire's own spelling when the codec does not model it.
 func capturedResponse(r *msg.Response) ([]byte, error) {
 	content, err := msganthropic.EncodeContent(msg.Message{Role: msg.Assistant, Content: r.Content})
 	if err != nil {
@@ -179,7 +180,7 @@ func capturedResponse(r *msg.Response) ([]byte, error) {
 		"role":        "assistant",
 		"model":       r.Model,
 		"content":     json.RawMessage(content),
-		"stop_reason": r.StopReason.String(),
+		"stop_reason": r.StopReasonWire(),
 		"usage":       capturedUsageBody(r.Usage),
 	}
 	if r.Provider != "" {
@@ -210,20 +211,23 @@ func capturedUsageBody(u msg.Usage) map[string]int64 {
 	return body
 }
 
-// repairToolInput repairs any tool_use block whose reassembled Input is not
-// valid JSON, replacing it with a placeholder that preserves the raw fragments
-// for forensics. Returns a description per repaired block, or nil if nothing
+// repairToolInput repairs any block whose reassembled input is not valid JSON,
+// replacing the input with a placeholder that preserves the raw fragments for
+// forensics. Both block kinds are repaired: a client tool call keeps its typed
+// block, and an opaque server-tool block keeps its own type and every other key
+// it carried. Returns a description per repaired block, or nil if nothing
 // needed fixing.
 //
 // Anthropic has been observed sending a spurious duplicate input_json_delta
 // chunk for a tool_use block (an extra fragment repeating part of the next one),
 // and the accumulator concatenates partial_json chunks with no validation, so
-// one bad chunk corrupts that block's Input into invalid JSON. usage/stop are
+// one bad chunk corrupts that block's input into invalid JSON. usage/stop are
 // accumulated independently and are already correct — repair the block instead
 // of discarding the whole turn over it, or a rare upstream glitch silently drops
-// billing data for that turn. A server-tool block is opaque: the codec rebuilds
-// it with its own type and an empty input, so there is no client tool executor
-// to misroute it to and no fragments to record.
+// billing data for that turn. A server-tool block is opaque, so there is no
+// client tool executor to misroute it to, but its input is still part of the
+// record: storing an empty object would claim the tool was called with no
+// arguments.
 func repairToolInput(r *msg.Response, dec msg.StreamDecoder) []string {
 	invalid, ok := dec.(invalidInputs)
 	if !ok {
@@ -231,23 +235,47 @@ func repairToolInput(r *msg.Response, dec msg.StreamDecoder) []string {
 	}
 	var repaired []string
 	for i, block := range r.Content {
-		t, isTool := block.(msg.ToolUse)
-		if !isTool {
-			continue
-		}
 		raw, bad := invalid.InvalidInput(i)
 		if !bad {
 			continue
 		}
-		repaired = append(repaired, fmt.Sprintf("content[%d] tool_use %q: invalid input JSON replaced with placeholder (raw=%q)", i, t.Name, string(raw)))
-		t.Input = malformedInput(raw)
-		r.Content[i] = t
+		switch b := block.(type) {
+		case msg.ToolUse:
+			b.Input = malformedInput(raw)
+			r.Content[i] = b
+			repaired = append(repaired, fmt.Sprintf("content[%d] tool_use %q: invalid input JSON replaced with placeholder (raw=%q)", i, b.Name, string(raw)))
+		case msg.Opaque:
+			patched, err := opaqueMalformedInput(b.Raw, raw)
+			if err != nil {
+				repaired = append(repaired, fmt.Sprintf("content[%d] %s: invalid input JSON could not be recorded (raw=%q): %v", i, msg.OpaqueType(b), string(raw), err))
+				continue
+			}
+			b.Raw = patched
+			r.Content[i] = b
+			repaired = append(repaired, fmt.Sprintf("content[%d] %s: invalid input JSON replaced with placeholder (raw=%q)", i, msg.OpaqueType(b), string(raw)))
+		}
 	}
 	return repaired
 }
 
-// malformedInput is the placeholder a repaired tool_use input is replaced with:
-// an object carrying the original fragments as a string.
+// opaqueMalformedInput replaces an opaque block's input with the malformed-input
+// placeholder, leaving its own type and every other key as the provider sent
+// them.
+func opaqueMalformedInput(block, raw json.RawMessage) (json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(block, &obj); err != nil {
+		return nil, fmt.Errorf("read opaque block: %w", err)
+	}
+	obj["input"] = malformedInput(raw)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("encode opaque block: %w", err)
+	}
+	return out, nil
+}
+
+// malformedInput is the placeholder a repaired input is replaced with: an
+// object carrying the original fragments as a string.
 func malformedInput(raw json.RawMessage) json.RawMessage {
 	quoted, err := json.Marshal(string(raw))
 	if err != nil {
