@@ -226,6 +226,30 @@ Pinned by `convtest.RunBackendSuite` (`pkg/conv/convtest`) and
 `TestAppend*`/`TestRetractHead*` (`pkg/conv`), plus `TestConvBackend*`
 (`pkg/store`).
 
+## Origin: which harness wrote a node
+
+`conversation_message.origin`, decoded as `conv.Node.Origin`, names the writer:
+`claude-code` for a node captured by the Anthropic proxy face, `fundi` for one
+`pkg/llm` wrote, NULL (`conv.OriginUnclassified`) when nothing classified it. It
+is outside `path_hash` (see "The model"), so identity is unaffected and a node a
+replay matches keeps the origin already stored. Migration 0064 backfilled
+`claude-code` for every conversation with `driven_by = 'client'`, and a
+compaction tail copy keeps its source's origin.
+
+Origin decides how a stored node is read, and `pkg/harness` is the only code
+that recognises a harness's injected text: `harness.For(origin)` returns that
+harness, and only the harness's own package knows its wrapper (today
+`pkg/harness/claudecode`: exactly `<system-reminder>\n` + body +
+`\n</system-reminder>`, optionally followed by one `\n`, with the body free of
+either tag). `Mark` marks such a block `msg.Text.Injected` — an annotation, never
+stored — and `Unwrap` returns its body for display, wrapper removed. Reading a
+node for a request, `pkg/llm` passes a node it did not write through that
+harness's `ForeignReplay`, which drops the blocks that are false under another
+harness (Claude Code's model-identity reminder) before the merge; the remaining marked
+blocks are encoded as they stand under Anthropic and prefixed with
+`msg.InjectedTextNote` under the OpenAI dialects, and no block is ever moved or
+role-promoted.
+
 ## claude: the request names its parent
 
 A replaying client sends its whole history every turn. Within the conversation

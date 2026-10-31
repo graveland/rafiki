@@ -363,6 +363,16 @@ deltas, tool events, errors) keeps its emit-time `ts`. Behaviour this implies:
 - Rows the loop fabricates (wrap-up notices, truncated-call errors) are not
   published live; they appear in `GetHistory` only.
 
+**Harness-injected text is split out, not merged in.** A `UserMessage` carries
+`repeated ContentBlock injected` beside `content`: the text blocks the child's
+harness inserted (Claude Code's `<system-reminder>` context), split out of
+`content` with the wrapper removed. The split is additive — a new field, no
+protocol epoch bump — so a client that ignores it shows the user's own text
+without the reminders. Every block in both lists keeps its `index` in the stored
+message, so a client can put them back in order. It applies to the live stream
+and to `GetHistory` alike, because both render through
+`eventconv.EventsFromNodes`.
+
 **Claude children meet it too.** Their `AssistantMessage`/`UserMessage` events
 are published from the stored rows, not from the claude stream: the proxy
 reports each capture of a client-tool-declaring session request once, after its
@@ -1905,7 +1915,7 @@ Every event payload is classified into a tier:
 
 | Event | Tier | Purpose |
 |---|---|---|
-| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way |
+| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way. Text the child's harness inserted rides `injected` instead of `content`, split out with its wrapper removed; every block in both lists keeps its `index` in the stored message |
 | `SystemMessage` | durable | A persisted `system`-role row: a message the child's harness injected (a heartbeat nudge, an environment update, a file-changed notice), not something the user typed. Same `ts` rule as the other message events. Clients may render it distinctly and hide it by default; it is real history and is never omitted from `GetHistory` |
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn, emitted once per turn by both model-backed kinds: a fundi turn opens at `Emitter.AgentStart` (`pkg/fundi/emit.go`) before its first request, so `model` is unset there; a claude turn opens at prompt delivery — its prompt echo (`OutboundEchoNative`, `pkg/child/provider_claude_state.go`), before the first model request reaches the proxy — so `model` is unset there too, and the first assistant frame (which names one) does not reopen it. A second prompt/steer inside the same turn publishes no second `TurnStart`. `turn_id` is unset on both, since no producer mints one and `TurnEnd` carries none either |

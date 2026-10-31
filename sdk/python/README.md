@@ -65,7 +65,8 @@ states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
 transcript = c.export(child)              # the child's decomposed transcript (fundi or claude; last assistant turn = the answer)
 page = c.get_history(child, limit=50)     # the newest 50 transcript events, oldest first, each with ts;
-                                          #   (system rows come back as SystemMessage, not UserMessage)
+                                          #   (system rows come back as SystemMessage, not UserMessage, and
+                                          #   a UserMessage splits harness-injected text into `injected`)
 older = c.get_history(child, limit=50, before=page[0].ts)
                                           #   page backwards with the oldest ts held (an empty page is
                                           #   the start; a page never splits events sharing a ts)

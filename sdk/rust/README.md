@@ -104,7 +104,10 @@ child that spawned it and is empty for a top-level child.
 with `before` set to the oldest `ts` you hold. A page never splits events that
 share a `ts`, so it can hold more than `limit`; an empty page is the start of
 the conversation. A stored `system`-role row comes back as `SystemMessage`, not
-`UserMessage`.
+`UserMessage`. A `UserMessage` splits the text its child's harness injected
+(Claude Code's `<system-reminder>` context) out of `content` into `injected`,
+with the wrapper removed; a client that ignores the field shows the user's own
+text.
 
 `begin_provider_login` / `complete_provider_login` / `delete_provider_credential`
 manage the CALLING USER's own provider credentials. `provider` is the NAME of a
