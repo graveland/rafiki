@@ -17,10 +17,6 @@ import (
 // fails review. The native-sender design reduces it to pkg/msg/anthropic and
 // the Anthropic sender.
 var sdkImporters = []string{
-	"go.graveland.dev/rafiki/pkg/agentloop",
-	"go.graveland.dev/rafiki/pkg/analyze",
-	"go.graveland.dev/rafiki/pkg/fundi",
-	"go.graveland.dev/rafiki/pkg/fundi/tools",
 	"go.graveland.dev/rafiki/pkg/llm",
 	"go.graveland.dev/rafiki/pkg/msg/anthropic",
 	"go.graveland.dev/rafiki/pkg/routing",
