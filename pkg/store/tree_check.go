@@ -5,6 +5,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -319,6 +320,11 @@ type checkTreeRow struct {
 // It walks EVERY conversation with messages, via
 // checkConversationsWithMessages: hashes are a property of the tree, not of the
 // storage a conversation happened to use.
+//
+// A conversation's fork-from row belongs to another conversation, so it is read
+// in beside its own rows: that one declared edge is what a boundary node's slot
+// and a root's derived-from seed are computed from. Every other foreign parent
+// stays absent and still counts as a bad hash.
 func checkBadHashes(ctx context.Context, pool *pgxpool.Pool, ids []string) (int, error) {
 	conversations, err := checkConversationsWithMessages(ctx, pool, ids)
 	if err != nil {
@@ -330,9 +336,12 @@ func checkBadHashes(ctx context.Context, pool *pgxpool.Pool, ids []string) (int,
 		if err != nil {
 			return 0, err
 		}
-		byID := make(map[string]checkTreeRow, len(rows))
+		byID := make(map[string]checkTreeRow, len(rows)+1)
 		for _, row := range rows {
 			byID[row.id] = row
+		}
+		if err := checkAddForkFromRow(ctx, pool, id, byID); err != nil {
+			return 0, err
 		}
 		for _, row := range rows {
 			if row.hash == nil {
@@ -346,10 +355,13 @@ func checkBadHashes(ctx context.Context, pool *pgxpool.Pool, ids []string) (int,
 	return bad, nil
 }
 
+// checkTreeRowColumns is the column list a tree row is read with.
+const checkTreeRowColumns = `
+	id::text, parent_id::text, derived_from_id::text, kind, role, content::text,
+	path_hash, hash_version, depth`
+
 func checkTreeRowsOf(ctx context.Context, pool *pgxpool.Pool, conversationID string) ([]checkTreeRow, error) {
-	rows, err := pool.Query(ctx, `
-		SELECT id::text, parent_id::text, derived_from_id::text, kind, role, content::text,
-		       path_hash, hash_version, depth
+	rows, err := pool.Query(ctx, `SELECT `+checkTreeRowColumns+`
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid`, conversationID)
 	if err != nil {
@@ -368,9 +380,53 @@ func checkTreeRowsOf(ctx context.Context, pool *pgxpool.Pool, conversationID str
 	return out, rows.Err()
 }
 
+// checkAddForkFromRow reads the conversation's fork-from row, which belongs to
+// another conversation, into byID. It is the only foreign row a conversation may
+// hang off, and adding it is what makes a boundary node's slot and a root's
+// derived-from seed checkable instead of counting them as missing parents.
+func checkAddForkFromRow(ctx context.Context, pool *pgxpool.Pool, conversationID string, byID map[string]checkTreeRow) error {
+	var forkFrom string
+	err := pool.QueryRow(ctx,
+		`SELECT coalesce(fork_from::text, '') FROM conversations.conversation WHERE id = $1::uuid`,
+		conversationID).Scan(&forkFrom)
+	if err != nil {
+		return fmt.Errorf("tree check: read fork edge of %s: %w", conversationID, err)
+	}
+	if forkFrom == "" {
+		return nil
+	}
+	if _, ok := byID[forkFrom]; ok {
+		return nil
+	}
+	row, ok, err := checkTreeRowOf(ctx, pool, forkFrom)
+	if err != nil {
+		return err
+	}
+	if ok {
+		byID[forkFrom] = row
+	}
+	return nil
+}
+
+// checkTreeRowOf reads one row by id, wherever it lives.
+func checkTreeRowOf(ctx context.Context, pool *pgxpool.Pool, id string) (checkTreeRow, bool, error) {
+	var row checkTreeRow
+	err := pool.QueryRow(ctx, `SELECT `+checkTreeRowColumns+`
+		  FROM conversations.conversation_message WHERE id = $1::uuid`, id).
+		Scan(&row.id, &row.parent, &row.derived, &row.kind, &row.role, &row.content,
+			&row.hash, &row.version, &row.depth)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return checkTreeRow{}, false, nil
+	}
+	if err != nil {
+		return checkTreeRow{}, false, fmt.Errorf("tree check: read tree row %s: %w", id, err)
+	}
+	return row, true, nil
+}
+
 // checkHashMatches reports whether a node's stored hash is the hash its position
-// implies. byID holds every row of the conversation, so a parent from another
-// conversation is simply absent.
+// implies. byID holds every row of the conversation plus its fork-from row, so a
+// parent from another conversation is absent unless it is that declared edge.
 func checkHashMatches(byID map[string]checkTreeRow, row checkTreeRow) bool {
 	if row.version == nil || *row.version != convtree.HashVersion {
 		return false

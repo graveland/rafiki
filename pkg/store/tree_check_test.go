@@ -715,3 +715,124 @@ func TestTreeCheckOKRequiresIncreasingOrdinals(t *testing.T) {
 	c.Eq(0, report.ProviderIDMissing, "no turn recorded a reply id")
 	c.False(report.OK(), "a report whose only defect is an inverted edge is not OK")
 }
+
+// checkTestFork creates a conversation forked from the row at fromOrdinal of
+// fromConvID, with next_ordinal one past that row — the edge and the counter a
+// fork is created with.
+func checkTestFork(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fromConvID string, fromOrdinal int) string {
+	t.Helper()
+	var convID string
+	assert.NewAborting(t).NoError(pool.QueryRow(ctx, `
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by, fork_from, next_ordinal)
+		SELECT 'test', 'client', m.id, m.ordinal + 1
+		  FROM conversations.conversation_message m
+		 WHERE m.conversation_id = $1::uuid AND m.ordinal = $2
+		RETURNING id::text`, fromConvID, fromOrdinal).Scan(&convID), "create fork")
+	return convID
+}
+
+// checkInsertChild writes one row under parentID, which may belong to another
+// conversation, computing the path hash that position requires.
+func checkInsertChild(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string, ordinal int, role, content, parentID string, parentHash []byte, depth int32) []byte {
+	t.Helper()
+	c := assert.NewAborting(t)
+	hash, err := convtree.NodeHash(convtree.Hash(parentHash), convtree.Msg{Role: role, Content: []byte(content)})
+	c.NoError(err, "hash the child")
+	_, err = pool.Exec(ctx, `
+		INSERT INTO conversations.conversation_message
+			(conversation_id, ordinal, role, content, parent_id, path_hash, hash_version, depth)
+		VALUES ($1::uuid, $2, $3, $4::jsonb, $5::uuid, $6, 1, $7)`,
+		convID, ordinal, role, content, parentID, hash[:], depth)
+	c.NoError(err, "insert child ordinal %d", ordinal)
+	return hash[:]
+}
+
+// TestTreeCheckForkBoundaryHashesClean: the fork-from row is the slot a fork's
+// boundary node chains from, so a fork's hashes verify once that one foreign row
+// is read in. The depth query already joins parent_id without a conversation
+// filter, so it crosses the edge as it stands.
+func TestTreeCheckForkBoundaryHashesClean(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	srcID := checkTestConv(t, ctx, pool)
+	srcHash := checkInsertNode(t, ctx, pool, srcID, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkSetConversation(t, ctx, pool, srcID, checkInt(0), checkInt(1))
+
+	forkID := checkTestFork(t, ctx, pool, srcID, 0)
+	checkInsertChild(t, ctx, pool, forkID, 1, "assistant", `[{"type":"text","text":"forked reply"}]`,
+		checkRowID(t, ctx, pool, srcID, 0), srcHash, 1)
+	checkSetConversation(t, ctx, pool, forkID, checkInt(1), checkInt(2))
+
+	report, err := checkTree(ctx, pool, []string{forkID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.Conversations, "conversations checked")
+	c.Eq(0, report.BadHash, "a boundary node's slot is the fork-from row's hash")
+	c.Eq(0, report.BadDepth, "the depth check crosses the edge")
+	c.Eq(0, report.MissingHash, "the row holds a position")
+	c.True(report.OK(), "report: %+v", report)
+}
+
+// TestTreeCheckForeignParentNotForkFromIsBadHash: only the declared edge is read
+// in. A parent in an unrelated conversation stays absent from the check's rows,
+// however correct the hash for that position would be.
+func TestTreeCheckForeignParentNotForkFromIsBadHash(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	unrelatedID := checkTestConv(t, ctx, pool)
+	unrelatedHash := checkInsertNode(t, ctx, pool, unrelatedID, 0, "user", `[{"type":"text","text":"elsewhere"}]`, nil, nil, nil, 0)
+	checkSetConversation(t, ctx, pool, unrelatedID, checkInt(0), checkInt(1))
+
+	srcID := checkTestConv(t, ctx, pool)
+	checkInsertNode(t, ctx, pool, srcID, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkSetConversation(t, ctx, pool, srcID, checkInt(0), checkInt(1))
+
+	forkID := checkTestFork(t, ctx, pool, srcID, 0)
+	checkInsertChild(t, ctx, pool, forkID, 1, "assistant", `[{"type":"text","text":"child"}]`,
+		checkRowID(t, ctx, pool, unrelatedID, 0), unrelatedHash, 1)
+	checkSetConversation(t, ctx, pool, forkID, checkInt(1), checkInt(2))
+
+	report, err := checkTree(ctx, pool, []string{forkID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.BadHash, "a parent that is not the fork-from node is still foreign")
+	c.Eq(0, report.BadDepth, "its depth is arithmetically fine")
+	c.False(report.OK(), "a foreign parent fails the check")
+}
+
+// TestTreeCheckFlagsOrdinalInversionAcrossForkEdge: the ordinal queries join
+// parent_id without a conversation filter, so the fork edge is checked like any
+// other. Cursors read ordinals as monotonic along every linear history, and a
+// fork's history starts at the node it borrows.
+func TestTreeCheckFlagsOrdinalInversionAcrossForkEdge(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.Require().NoError(Migrate(ctx, pool), "Migrate")
+
+	srcID := checkTestConv(t, ctx, pool)
+	srcHash := checkInsertNode(t, ctx, pool, srcID, 0, "user", `[{"type":"text","text":"ask"}]`, nil, nil, nil, 0)
+	checkSetConversation(t, ctx, pool, srcID, checkInt(0), checkInt(1))
+
+	forkID := checkTestFork(t, ctx, pool, srcID, 0)
+	checkInsertChild(t, ctx, pool, forkID, 1, "assistant", `[{"type":"text","text":"reply"}]`,
+		checkRowID(t, ctx, pool, srcID, 0), srcHash, 1)
+	checkSetConversation(t, ctx, pool, forkID, checkInt(1), checkInt(2))
+
+	// Raw SQL, before the check: the fork's first row takes the ordinal of the
+	// node it hangs from, so the edge no longer strictly increases.
+	_, err := pool.Exec(ctx, `
+		UPDATE conversations.conversation_message SET ordinal = 0
+		 WHERE conversation_id = $1::uuid AND ordinal = 1`, forkID)
+	c.Require().NoError(err, "invert the fork's ordinal")
+	checkSetConversation(t, ctx, pool, forkID, checkInt(0), checkInt(1))
+
+	report, err := checkTree(ctx, pool, []string{forkID})
+	c.Require().NoError(err, "checkTree")
+	c.Eq(1, report.OrdinalNotIncreasing, "the fork's first ordinal is not past the node it hangs from")
+	c.Eq(0, report.BadHash, "the hash is still the hash of its position")
+}

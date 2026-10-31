@@ -50,6 +50,7 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
+		h.store.cacheEdge(e, st)
 		res, err := h.appendAttempt(ctx, a, st)
 		if err == nil {
 			h.store.refreshAfterCommit(ctx, h.convID)
@@ -67,7 +68,7 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 // and is retried by the caller. It never touches the cached head: the caller
 // refreshes it after a successful attempt.
 func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result, error) {
-	parent, isRoot, rootKind, derivedFromID, err := h.resolveParent(ctx, a, st.HeadID)
+	parent, isRoot, rootKind, derivedFromID, err := h.resolveParent(ctx, a, st)
 	if err != nil {
 		return Result{}, err
 	}
@@ -237,19 +238,35 @@ func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result,
 
 // resolveParent finds the slot the chain starts from. isRoot reports whether
 // Nodes[0] is a root (an explicit Root, or a FromHead append on a conversation
-// with no head yet), rootKind the resolved root kind, and derivedFromID the node
-// a root is derived from ("" when none).
-func (h *Handle) resolveParent(ctx context.Context, a Append, head string) (parent chainParent, isRoot bool, rootKind, derivedFromID string, err error) {
-	if a.ParentID != "" || (a.FromHead && head != "") {
-		parentID := a.ParentID
-		if parentID == "" {
-			parentID = head
+// with no head and no fork edge), rootKind the resolved root kind, and
+// derivedFromID the node a root is derived from ("" when none).
+//
+// A fork's empty head is not nothing to append under: the chain hangs from the
+// borrowed fork-from node, which lives in another conversation and is resolved
+// there.
+func (h *Handle) resolveParent(ctx context.Context, a Append, st State) (parent chainParent, isRoot bool, rootKind, derivedFromID string, err error) {
+	ref := func(id string) (Ref, error) {
+		if st.ForkFromID != "" && id == st.ForkFromID {
+			return h.store.nodeRef(ctx, st.ForkFromConversationID, id)
 		}
-		ref, err := h.store.nodeRef(ctx, h.convID, parentID)
+		return h.store.nodeRef(ctx, h.convID, id)
+	}
+
+	parentID := a.ParentID
+	if parentID == "" && a.FromHead {
+		switch {
+		case st.HeadID != "":
+			parentID = st.HeadID
+		case st.ForkFromID != "":
+			parentID = st.ForkFromID
+		}
+	}
+	if parentID != "" {
+		r, err := ref(parentID)
 		if err != nil {
 			return chainParent{}, false, "", "", fmt.Errorf("conv: append: %w", err)
 		}
-		return chainParent{id: parentID, slot: ref.PathHash, depth: ref.Depth + 1}, false, "", "", nil
+		return chainParent{id: parentID, slot: r.PathHash, depth: r.Depth + 1}, false, "", "", nil
 	}
 
 	rootKind = a.Root
@@ -258,16 +275,19 @@ func (h *Handle) resolveParent(ctx context.Context, a Append, head string) (pare
 	}
 	derivedFromID = a.DerivedFromID
 	if derivedFromID == "" && a.DerivedFromHead {
-		derivedFromID = head
+		derivedFromID = st.HeadID
+		if derivedFromID == "" {
+			derivedFromID = st.ForkFromID
+		}
 	}
 	if derivedFromID == "" {
 		return chainParent{slot: convtree.RootSeed(rootKind, nil)}, true, rootKind, "", nil
 	}
-	ref, err := h.store.nodeRef(ctx, h.convID, derivedFromID)
+	r, err := ref(derivedFromID)
 	if err != nil {
 		return chainParent{}, false, "", "", fmt.Errorf("conv: append: derived-from: %w", err)
 	}
-	return chainParent{slot: convtree.RootSeed(rootKind, &ref.PathHash)}, true, rootKind, derivedFromID, nil
+	return chainParent{slot: convtree.RootSeed(rootKind, &r.PathHash)}, true, rootKind, derivedFromID, nil
 }
 
 // nodeContent returns the stored bytes a node is hashed and published as.
@@ -378,7 +398,8 @@ func (h *Handle) RetractHead(ctx context.Context, id string) error {
 }
 
 // retractTarget reports the head a retract of id would leave, or that id is not
-// retractable at all.
+// retractable at all. Retracting the first row of a fork leaves no head rather
+// than the borrowed node it hung from: an empty head reads the borrowed segment.
 func (h *Handle) retractTarget(ctx context.Context, id string, st State) (newHead string, refused bool, err error) {
 	if st.HeadID != id {
 		return "", true, nil
@@ -389,6 +410,9 @@ func (h *Handle) retractTarget(ctx context.Context, id string, st State) (newHea
 	}
 	if node == nil || node.Msg.Role != msg.User {
 		return "", true, nil
+	}
+	if st.ForkFromID != "" && node.ParentID == st.ForkFromID {
+		return "", false, nil
 	}
 	return node.ParentID, false, nil
 }

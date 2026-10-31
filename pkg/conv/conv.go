@@ -89,6 +89,11 @@ type State struct {
 	HeadID       string
 	NextOrdinal  int
 	ClearPending bool
+	// ForkFromID is the node this conversation was forked from, "" for none.
+	// It is set when the conversation is created and never changes.
+	ForkFromID string
+	// ForkFromConversationID is the conversation ForkFromID belongs to.
+	ForkFromConversationID string
 }
 
 // Lease is a write fence on one conversation. A zero Lease is unfenced.
@@ -127,14 +132,20 @@ type Commit struct {
 }
 
 // Backend is the storage a Store sits in front of. Every method is
-// conversation-scoped: a node id from another conversation is not found.
+// conversation-scoped, with one exception: the conversation's ForkFromID is a
+// legal foreign parent of its rows and a legal foreign DerivedFromID of its
+// roots. Walk stops at it (the foreign node is not returned); any other foreign
+// id is ErrNotFound from Walk and from Commit.
 type Backend interface {
 	State(ctx context.Context, convID string) (State, error)
 	// Walk returns refs from fromID toward the root, head-first. crossRoots follows a
 	// root's DerivedFromID; false stops at the first root. An id the conversation
 	// does not hold — including a node of another conversation — is ErrNotFound,
 	// never an empty chain: an empty walk would hide a head pointing out of its
-	// conversation.
+	// conversation. The conversation's ForkFromID is the one legal foreign
+	// reference: a walk reaching it ends there and does not return it, and any
+	// other id outside the conversation is ErrNotFound rather than a truncated
+	// chain.
 	Walk(ctx context.Context, convID, fromID string, crossRoots bool) ([]Ref, error)
 	Fetch(ctx context.Context, convID string, ids []string) ([]*Node, error)
 	Lookup(ctx context.Context, convID string, hashes []convtree.Hash) (map[convtree.Hash]Ref, error)
@@ -146,7 +157,10 @@ type Backend interface {
 	// taken-over writer always sees ErrLeaseLost, even when the head moved too — a
 	// conflict is retried and a lost lease is not. A row whose ParentID or
 	// DerivedFromID names a node the conversation does not hold is ErrNotFound,
-	// never ErrConflict, so a caller does not retry a write that cannot land.
+	// never ErrConflict, so a caller does not retry a write that cannot land. The
+	// conversation's ForkFromID is that one legal foreign reference: it may be
+	// any row's ParentID and a root row's DerivedFromID, and every other foreign
+	// id is still ErrNotFound.
 	// Returns the rows' created_at.
 	Commit(ctx context.Context, c Commit) (time.Time, error)
 }

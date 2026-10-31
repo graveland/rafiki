@@ -190,6 +190,23 @@ func TestMemBackendConformance(t *testing.T) {
 	})
 }
 
+// The fork edge is the one cross-conversation reference, so its suite runs beside
+// the ordinary conformance one. The mem backend cannot hand-write the row the
+// walk-refusal case needs — Commit refuses it and the in-process backend has no
+// raw insert — so that one case runs for Postgres, and mem's walk is pinned by
+// TestMemWalkRefusesUndeclaredForeignParent instead.
+func TestMemBackendForkSuite(t *testing.T) {
+	convtest.RunForkSuite(t, func(t *testing.T) (conv.Backend, func(string), func(string, string, string)) {
+		t.Helper()
+		m := conv.NewMemBackend()
+		return m, m.Ensure, func(convID, fromConvID, fromNodeID string) {
+			if err := m.EnsureFork(convID, fromConvID, fromNodeID); err != nil {
+				t.Fatalf("EnsureFork %s from %s in %s: %v", convID, fromNodeID, fromConvID, err)
+			}
+		}
+	})
+}
+
 // A reader's observation that lands after a retract carries the SAME next
 // ordinal as the state the retract installed, so only the version can order
 // them: the retracted row must not come back as the head.

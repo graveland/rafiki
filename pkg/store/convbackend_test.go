@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -720,4 +721,64 @@ func checkSnapshot(t *testing.T, rep snapshotReport, committed map[string]bool) 
 	c.NotEq("", head, "the snapshot is not empty")
 	c.True(committed[head], "head %s was committed by a writer", head)
 	return rep.snapshot
+}
+
+// plantingBackend is ConvBackend plus the one write no Commit accepts: a row
+// whose parent is another conversation's node that is not the conversation's
+// fork-from. The walk's refusal to follow an undeclared edge can only be observed
+// on such a row, so the test harness writes it around Commit.
+type plantingBackend struct {
+	*ConvBackend
+	pool *pgxpool.Pool
+}
+
+// PlantUndeclaredParentRow inserts the row and makes it the conversation's head,
+// the shape a hand-written row leaves behind.
+func (p plantingBackend) PlantUndeclaredParentRow(convID, parentID, content string) (string, error) {
+	ctx := context.Background()
+	body := []byte(strconv.Quote(content))
+	hashes, err := convtree.Chain(convtree.RootSeed(convtree.RootKindRoot, nil),
+		[]convtree.Msg{{Role: "user", Content: body}})
+	if err != nil {
+		return "", err
+	}
+	var id string
+	err = p.pool.QueryRow(ctx, `
+		WITH next AS (
+			SELECT coalesce(max(ordinal) + 1, 0) AS ordinal
+			  FROM conversations.conversation_message WHERE conversation_id = $1::uuid
+		)
+		INSERT INTO conversations.conversation_message
+			(conversation_id, ordinal, role, content, parent_id, path_hash, hash_version, depth)
+		SELECT $1::uuid, next.ordinal, 'user', $2::jsonb, $3::uuid, $4, 1, 1 FROM next
+		RETURNING id::text`, convID, body, parentID, hashes[0][:]).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	_, err = p.pool.Exec(ctx,
+		`UPDATE conversations.conversation SET head_id = $2::uuid WHERE id = $1::uuid`, convID, id)
+	return id, err
+}
+
+// TestConvBackendForkSuite runs the fork conformance suite against Postgres. The
+// fork helper is the raw insert creation does, because a fork's edge and ordinal
+// counter are set once, when the conversation is created.
+func TestConvBackendForkSuite(t *testing.T) {
+	pool := leasePool(t)
+	convtest.RunForkSuite(t, func(t *testing.T) (conv.Backend, func(string), func(string, string, string)) {
+		create := func(convID string) { createConversation(t, pool, convID) }
+		fork := func(convID, fromConvID, fromNodeID string) {
+			t.Helper()
+			tag, err := pool.Exec(context.Background(), `
+				INSERT INTO conversations.conversation (id, origin_entrypoint, driven_by, fork_from, next_ordinal)
+				SELECT $1::uuid, 'test', 'server', m.id, m.ordinal + 1
+				  FROM conversations.conversation_message m
+				 WHERE m.id = $2::uuid`, convID, fromNodeID)
+			c := assert.NewAborting(t)
+			c.NoError(err, "insert fork %s from %s in %s", convID, fromNodeID, fromConvID)
+			c.Eq(int64(1), tag.RowsAffected(), "exactly one fork row inserted")
+			t.Cleanup(func() { dropConversation(t, pool, convID) })
+		}
+		return plantingBackend{ConvBackend: NewConvBackend(pool), pool: pool}, create, fork
+	})
 }

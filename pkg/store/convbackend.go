@@ -51,13 +51,17 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// State returns the conversation's head, next ordinal and pending-clear flag.
+// State returns the conversation's head, next ordinal, pending-clear flag and
+// its immutable fork edge.
 func (b *ConvBackend) State(ctx context.Context, convID string) (conv.State, error) {
 	var st conv.State
 	err := b.pool.QueryRow(ctx, `
-		SELECT coalesce(head_id::text, ''), next_ordinal, clear_pending
-		  FROM conversations.conversation WHERE id = $1::uuid`, convID).
-		Scan(&st.HeadID, &st.NextOrdinal, &st.ClearPending)
+		SELECT coalesce(c.head_id::text, ''), c.next_ordinal, c.clear_pending,
+		       coalesce(c.fork_from::text, ''), coalesce(f.conversation_id::text, '')
+		  FROM conversations.conversation c
+		  LEFT JOIN conversations.conversation_message f ON f.id = c.fork_from
+		 WHERE c.id = $1::uuid`, convID).
+		Scan(&st.HeadID, &st.NextOrdinal, &st.ClearPending, &st.ForkFromID, &st.ForkFromConversationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return conv.State{}, fmt.Errorf("%w: %s", conv.ErrNotFound, convID)
 	}
@@ -74,6 +78,11 @@ func (b *ConvBackend) State(ctx context.Context, convID string) (conv.State, err
 // compaction or clear boundary. An id the conversation does not hold is
 // conv.ErrNotFound, never an empty chain: an empty answer would hide a head
 // pointing out of its conversation.
+//
+// The CTE truncates silently at a foreign parent, so the last ref it reached is
+// checked against the conversation's fork edge: stopping there is the borrowed
+// segment, and any other id outside the conversation is conv.ErrNotFound rather
+// than a chain that quietly ends early.
 func (b *ConvBackend) Walk(ctx context.Context, convID, fromID string, crossRoots bool) ([]conv.Ref, error) {
 	if fromID == "" {
 		return nil, fmt.Errorf("%w: no node to walk from in conversation %s", conv.ErrNotFound, convID)
@@ -116,7 +125,37 @@ func (b *ConvBackend) Walk(ctx context.Context, convID, fromID string, crossRoot
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%w: node %s is not in conversation %s", conv.ErrNotFound, fromID, convID)
 	}
+	last := out[len(out)-1]
+	next := last.ParentID
+	if next == "" && crossRoots {
+		next = last.DerivedFromID
+	}
+	if next != "" {
+		forkFrom, err := b.forkFromOf(ctx, convID)
+		if err != nil {
+			return nil, err
+		}
+		if next != forkFrom {
+			return nil, fmt.Errorf("%w: node %s's parent %s is not in conversation %s",
+				conv.ErrNotFound, last.ID, next, convID)
+		}
+	}
 	return out, nil
+}
+
+// forkFromOf reads the conversation's one declared foreign edge.
+func (b *ConvBackend) forkFromOf(ctx context.Context, convID string) (string, error) {
+	var forkFrom string
+	err := b.pool.QueryRow(ctx,
+		`SELECT coalesce(fork_from::text, '') FROM conversations.conversation WHERE id = $1::uuid`,
+		convID).Scan(&forkFrom)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", conv.ErrNotFound, convID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("conv backend: read fork edge of %s: %w", convID, err)
+	}
+	return forkFrom, nil
 }
 
 // Fetch returns the nodes of ids the conversation holds, in the order asked
@@ -252,11 +291,12 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 	var (
 		head        string
 		nextOrdinal int
+		forkFrom    string
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT coalesce(head_id::text, ''), next_ordinal
+		SELECT coalesce(head_id::text, ''), next_ordinal, coalesce(fork_from::text, '')
 		  FROM conversations.conversation WHERE id = $1::uuid FOR UPDATE`, c.ConversationID).
-		Scan(&head, &nextOrdinal)
+		Scan(&head, &nextOrdinal, &forkFrom)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, fmt.Errorf("%w: %s", conv.ErrNotFound, c.ConversationID)
 	}
@@ -277,7 +317,7 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 			conv.ErrConflict, c.ConversationID, head, nextOrdinal, c.ExpectHead, c.ExpectNextOrdinal)
 	}
 
-	if err := checkCommitParents(ctx, tx, c); err != nil {
+	if err := checkCommitParents(ctx, tx, c, forkFrom); err != nil {
 		return time.Time{}, fmt.Errorf("conv commit: %w", err)
 	}
 
@@ -344,7 +384,10 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 // unique, so parent_id's foreign key accepts a node of ANOTHER conversation;
 // this check is what keeps one conversation's tree out of another's. Ids minted
 // by this same commit are known, so a chain inserted in one transaction passes.
-func checkCommitParents(ctx context.Context, tx pgx.Tx, c conv.Commit) error {
+// forkFrom is the conversation's one declared foreign edge — a legal parent of
+// any row and a legal derived-from of a root — and the only foreign id this
+// check lets through.
+func checkCommitParents(ctx context.Context, tx pgx.Tx, c conv.Commit, forkFrom string) error {
 	known := make(map[string]bool, len(c.Rows))
 	for _, row := range c.Rows {
 		known[row.ID] = true
@@ -352,7 +395,7 @@ func checkCommitParents(ctx context.Context, tx pgx.Tx, c conv.Commit) error {
 	var refs []string
 	for _, row := range c.Rows {
 		for _, id := range [2]string{row.ParentID, row.DerivedFromID} {
-			if id == "" || known[id] {
+			if id == "" || known[id] || (forkFrom != "" && id == forkFrom) {
 				continue
 			}
 			known[id] = true

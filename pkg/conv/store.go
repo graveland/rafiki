@@ -37,6 +37,17 @@ func (h *headState) ver() int64 {
 	return h.version
 }
 
+// forkEdge is a conversation's immutable foreign edge: the node it borrows its
+// history from and the conversation that node belongs to. Both empty means the
+// conversation has no edge.
+type forkEdge struct {
+	convID string
+	fromID string
+}
+
+// has reports whether the conversation borrows a segment at all.
+func (e forkEdge) has() bool { return e.fromID != "" }
+
 // entry is the per-conversation cache state.
 type entry struct {
 	// writeMu serialises Append and RetractHead while this entry is the
@@ -47,6 +58,10 @@ type entry struct {
 	// started from: there is no window between winning the version and storing
 	// the position. nil means nothing was ever installed.
 	head atomic.Pointer[headState]
+	// edge is the conversation's immutable fork edge, cached at most once from
+	// any State observation of this conversation. It is never cleared: the column
+	// it comes from cannot change, so it dies with the entry.
+	edge atomic.Pointer[forkEdge]
 	// lastAccess and dead are guarded by Store.mu.
 	lastAccess time.Time
 	// dead is set when the sweep drops this entry, and nothing clears it: a
@@ -215,6 +230,33 @@ func (s *Store) sweepLocked() {
 	}
 }
 
+// edgeOf returns convID's fork edge: the entry's cached edge, or one State read
+// of the conversation, cached on the entry. A conversation with no edge caches
+// an empty edge, so the read happens once per entry rather than once per walk.
+func (s *Store) edgeOf(ctx context.Context, convID string) (forkEdge, error) {
+	e := s.touch(convID)
+	if edge := e.edge.Load(); edge != nil {
+		return *edge, nil
+	}
+	st, err := s.backend.State(ctx, convID)
+	if err != nil {
+		return forkEdge{}, err
+	}
+	return s.cacheEdge(e, st), nil
+}
+
+// cacheEdge records the edge a State observation carried, and answers the edge
+// the entry holds: a first observation wins, because the column is immutable and
+// every observation of it agrees.
+func (s *Store) cacheEdge(e *entry, st State) forkEdge {
+	observed := forkEdge{convID: st.ForkFromConversationID, fromID: st.ForkFromID}
+	e.edge.CompareAndSwap(nil, &observed)
+	if edge := e.edge.Load(); edge != nil {
+		return *edge
+	}
+	return observed
+}
+
 // lookupLocked returns a cached node of THIS conversation. A node id from
 // another conversation is a miss, never a hit: the id space is global but a
 // conversation's tree is not.
@@ -296,16 +338,19 @@ func (s *Store) cachedNode(convID, id string) (*Node, bool) {
 }
 
 // cachedPath walks from toward the root entirely out of the cache. ok is false
-// on the first miss, which is what sends the caller to the backend.
+// on the first miss, which is what sends the caller to the backend. A walk that
+// reaches stopAt — a fork's declared foreign node — ends there successfully: the
+// borrowed segment is another conversation's, and the cache is keyed by
+// conversation.
 //
 // Recency is applied afterwards, root first and head last, so the head — the
 // node every read starts at — ends hottest and eviction drops the oldest part
 // of the history rather than the part a reader needs next.
-func (s *Store) cachedPath(convID, from string, crossRoots bool) ([]*Node, bool) {
+func (s *Store) cachedPath(convID, from string, crossRoots bool, stopAt string) ([]*Node, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var rev []*Node
-	for id := from; id != ""; {
+	for id := from; id != "" && id != stopAt; {
 		n, ok := s.lookupLocked(convID, id)
 		if !ok {
 			return nil, false
@@ -329,33 +374,85 @@ func (s *Store) cachedPath(convID, from string, crossRoots bool) ([]*Node, bool)
 	return rev, true
 }
 
-// pathFrom returns the chain from fromID toward the root, chronological. A
-// cached walk answers it with no backend call; the first miss falls back to one
-// Walk and one Fetch of the ids the cache lacks.
+// maxForkSegments bounds how many conversations one walk may cross. It is a
+// guard against an edge chain that loops, not a limit anything legitimate
+// approaches: a fork of a fork of a fork is three.
+const maxForkSegments = 64
+
+// pathFrom returns the chain from fromID toward the root, chronological,
+// crossing the conversation's fork edge — and any edge beyond it — one segment
+// at a time. A cached walk answers a segment with no backend call; the first
+// miss falls back to one Walk and one Fetch of the ids the cache lacks.
+//
+// An empty from is a fork's empty head, which is its borrowed segment; a from
+// naming the fork-from node is the same segment, which is the head RequestAt is
+// handed on a fork's first turn.
 func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]*Node, error) {
-	if from == "" {
-		return nil, nil
-	}
-	if path, ok := h.store.cachedPath(h.convID, from, crossRoots); ok {
-		return path, nil
-	}
-	refs, err := h.store.backend.Walk(ctx, h.convID, from, crossRoots)
+	edge, err := h.store.edgeOf(ctx, h.convID)
 	if err != nil {
 		return nil, err
 	}
-	if len(refs) == 0 {
-		// from is not "" here, so a walk that reached nothing names a node this
-		// conversation does not hold — another conversation's, or none.
-		return nil, fmt.Errorf("conv: walk: node %s not in conversation %s", from, h.convID)
+	segConv, segFrom := h.convID, from
+	if from == "" || from == edge.fromID {
+		if !edge.has() {
+			return nil, nil
+		}
+		segConv, segFrom = edge.convID, edge.fromID
 	}
-	nodes, err := h.store.nodesFor(ctx, h.convID, refs)
-	if err != nil {
-		return nil, err
+
+	var out []*Node
+	for segment := 0; ; segment++ {
+		if segment >= maxForkSegments {
+			return nil, fmt.Errorf("conv: walk: more than %d fork segments from conversation %s",
+				maxForkSegments, h.convID)
+		}
+		segEdge, err := h.store.edgeOf(ctx, segConv)
+		if err != nil {
+			return nil, err
+		}
+		stopAt := segEdge.fromID
+
+		var nodes []*Node
+		if path, ok := h.store.cachedPath(segConv, segFrom, crossRoots, stopAt); ok {
+			nodes = path
+		} else {
+			refs, err := h.store.backend.Walk(ctx, segConv, segFrom, crossRoots)
+			if err != nil {
+				return nil, err
+			}
+			if len(refs) == 0 {
+				return nil, fmt.Errorf("conv: walk: node %s not in conversation %s", segFrom, segConv)
+			}
+			nodes, err = h.store.nodesFor(ctx, segConv, refs)
+			if err != nil {
+				return nil, err
+			}
+			for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
+				nodes[i], nodes[j] = nodes[j], nodes[i]
+			}
+		}
+		if len(nodes) == 0 {
+			// A segment that begins at its own conversation's fork edge holds no
+			// rows of its own: the borrowed segment is the whole of it.
+			segConv, segFrom = segEdge.convID, segEdge.fromID
+			continue
+		}
+		out = append(nodes, out...)
+
+		first := nodes[0]
+		next := first.ParentID
+		if next == "" && crossRoots {
+			next = first.DerivedFromID
+		}
+		if next == "" {
+			return out, nil
+		}
+		if next != stopAt {
+			return nil, fmt.Errorf("conv: walk: node %s leaves conversation %s by an undeclared edge",
+				first.ID, segConv)
+		}
+		segConv, segFrom = segEdge.convID, segEdge.fromID
 	}
-	for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
-		nodes[i], nodes[j] = nodes[j], nodes[i]
-	}
-	return nodes, nil
 }
 
 // nodesFor resolves refs, head-first, to nodes, fetching the ones the cache
@@ -442,10 +539,16 @@ func (s *Store) node(ctx context.Context, convID, id string) (*Node, error) {
 }
 
 // State returns the conversation's position, always from the backend and never
-// through the cached head: it carries ClearPending, which is not cached.
+// through the cached head: it carries ClearPending, which is not cached. The
+// read also caches the conversation's fork edge, which is immutable.
 func (h *Handle) State(ctx context.Context) (State, error) {
-	h.store.touch(h.convID)
-	return h.store.backend.State(ctx, h.convID)
+	e := h.store.touch(h.convID)
+	st, err := h.store.backend.State(ctx, h.convID)
+	if err != nil {
+		return State{}, err
+	}
+	h.store.cacheEdge(e, st)
+	return st, nil
 }
 
 // headID returns the conversation's head: for an owner, the entry's cached head
@@ -520,6 +623,7 @@ func (s *Store) refresh(ctx context.Context, convID string) (st State, installed
 		if err != nil {
 			return State{}, false, err
 		}
+		s.cacheEdge(e, st)
 		if s.install(convID, e, old, st) {
 			return st, true, nil
 		}

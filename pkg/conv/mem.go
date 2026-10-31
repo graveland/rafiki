@@ -29,6 +29,8 @@ type memConversation struct {
 	head         string
 	nextOrdinal  int
 	clearPending bool
+	forkFrom     string
+	forkFromConv string
 	nodes        []*Node
 	byID         map[string]*Node
 	byHash       map[convtree.Hash]*Node
@@ -52,6 +54,36 @@ func (m *MemBackend) Ensure(convID string) {
 	if _, ok := m.convs[convID]; !ok {
 		m.convs[convID] = newMemConversation()
 	}
+}
+
+// EnsureFork creates an empty conversation whose one foreign edge is
+// fromNodeID, a node of fromConvID, and whose next ordinal is that node's plus
+// one: the first row of a fork is inserted after the history it borrows. It is
+// the mem twin of what creation does for a real fork, and it refuses an existing
+// conversation or a node its source does not hold.
+func (m *MemBackend) EnsureFork(convID, fromConvID, fromNodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.convs == nil {
+		m.convs = make(map[string]*memConversation)
+	}
+	if _, ok := m.convs[convID]; ok {
+		return fmt.Errorf("ensure fork: conversation %s already exists", convID)
+	}
+	from, ok := m.convs[fromConvID]
+	if !ok {
+		return fmt.Errorf("%w: conversation %s", ErrNotFound, fromConvID)
+	}
+	node, ok := from.byID[fromNodeID]
+	if !ok {
+		return fmt.Errorf("%w: node %s is not in conversation %s", ErrNotFound, fromNodeID, fromConvID)
+	}
+	c := newMemConversation()
+	c.nextOrdinal = node.Ordinal + 1
+	c.forkFrom = fromNodeID
+	c.forkFromConv = fromConvID
+	m.convs[convID] = c
+	return nil
 }
 
 func newMemConversation() *memConversation {
@@ -80,7 +112,8 @@ func (m *MemBackend) conversation(convID string) (*memConversation, error) {
 	return c, nil
 }
 
-// State returns the conversation's head, next ordinal and clear flag.
+// State returns the conversation's head, next ordinal, clear flag and fork
+// edge.
 func (m *MemBackend) State(_ context.Context, convID string) (State, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -88,13 +121,20 @@ func (m *MemBackend) State(_ context.Context, convID string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	return State{HeadID: c.head, NextOrdinal: c.nextOrdinal, ClearPending: c.clearPending}, nil
+	return State{
+		HeadID:                 c.head,
+		NextOrdinal:            c.nextOrdinal,
+		ClearPending:           c.clearPending,
+		ForkFromID:             c.forkFrom,
+		ForkFromConversationID: c.forkFromConv,
+	}, nil
 }
 
 // Walk returns the chain from fromID toward the root, head-first, following a
 // root's DerivedFromID only when crossRoots is set. An id the conversation does
-// not hold is ErrNotFound: a walk that answered with an empty chain instead
-// would hide a head pointing out of its conversation.
+// not hold is ErrNotFound — a walk that answered with an empty chain instead
+// would hide a head pointing out of its conversation — except the conversation's
+// fork-from node, where the borrowed history ends and the walk ends with it.
 func (m *MemBackend) Walk(_ context.Context, convID, fromID string, crossRoots bool) ([]Ref, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -109,7 +149,7 @@ func (m *MemBackend) Walk(_ context.Context, convID, fromID string, crossRoots b
 	for id := fromID; id != ""; {
 		n, ok := c.byID[id]
 		if !ok {
-			return nil, fmt.Errorf("%w: node %s is not in conversation %s", ErrNotFound, id, convID)
+			break
 		}
 		out = append(out, n.Ref)
 		switch {
@@ -121,7 +161,25 @@ func (m *MemBackend) Walk(_ context.Context, convID, fromID string, crossRoots b
 			id = ""
 		}
 	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: node %s is not in conversation %s", ErrNotFound, fromID, convID)
+	}
+	if next := walkNext(out[len(out)-1], crossRoots); next != "" && next != c.forkFrom {
+		return nil, fmt.Errorf("%w: node %s's parent %s is not in conversation %s",
+			ErrNotFound, out[len(out)-1].ID, next, convID)
+	}
 	return out, nil
+}
+
+// walkNext is the id a walk would step to from the last ref it reached.
+func walkNext(r Ref, crossRoots bool) string {
+	if r.ParentID != "" {
+		return r.ParentID
+	}
+	if crossRoots {
+		return r.DerivedFromID
+	}
+	return ""
 }
 
 // Fetch returns the nodes it holds, in the order asked for. Ids the
@@ -203,7 +261,8 @@ func (m *MemBackend) HasChild(_ context.Context, convID, parentID string) (bool,
 // Commit applies one atomic tree write. The rows are copied, stamped with one
 // created_at, and the head moves only when the expectation held. A row whose
 // parent or derived-from names a node of ANOTHER conversation is refused: this
-// check is what keeps one conversation's tree out of another's.
+// check is what keeps one conversation's tree out of another's, and the
+// conversation's fork-from node is its one declared exception.
 func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, err
@@ -227,7 +286,7 @@ func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, erro
 		}
 		seen[row.PathHash] = true
 	}
-	if err := checkCommitParents(c.byID, commit); err != nil {
+	if err := checkCommitParents(c.byID, c.forkFrom, commit); err != nil {
 		return time.Time{}, err
 	}
 
@@ -259,15 +318,16 @@ func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, erro
 // checkCommitParents refuses a commit whose rows hang off nodes the
 // conversation does not hold. A node of another conversation is exactly that
 // case: its id is globally unique, so nothing but this check distinguishes it
-// from a parent of the conversation being written.
-func checkCommitParents(byID map[string]*Node, commit Commit) error {
+// from a parent of the conversation being written. forkFrom is the conversation's
+// one declared foreign edge, and the only id this check lets through.
+func checkCommitParents(byID map[string]*Node, forkFrom string, commit Commit) error {
 	known := make(map[string]bool, len(commit.Rows))
 	for _, row := range commit.Rows {
 		known[row.ID] = true
 	}
 	for _, row := range commit.Rows {
 		for _, id := range [2]string{row.ParentID, row.DerivedFromID} {
-			if id == "" || known[id] {
+			if id == "" || known[id] || (forkFrom != "" && id == forkFrom) {
 				continue
 			}
 			if _, ok := byID[id]; !ok {
