@@ -43,8 +43,8 @@ func TestThinkingCompatStripsBothDirections(t *testing.T) {
 	msgs := mkMessages()
 
 	// Toward Responses: both Responses modes survive the FAMILY filter, which
-	// says nothing about which dialect may resume them (the sender applies that
-	// with StripForeignResponsesThinking).
+	// says nothing about which dialect may resume them (each Responses sender
+	// applies that itself, at the HTTP level).
 	toResponses := llm.StripForeignThinking(msgs, true)
 	c.Require().Len(toResponses, 2, "messages")
 	c.Require().Len(toResponses[1].Content, 3, "assistant blocks toward Responses")
@@ -78,49 +78,6 @@ func TestThinkingCompatStripsBothDirections(t *testing.T) {
 	c.Require().Len(stripped, 1, "messages")
 	c.NotNil(stripped[0].Content, "content slice")
 	c.Len(stripped[0].Content, 0, "content blocks")
-}
-
-// TestStripForeignResponsesThinkingKeepsOnlyOwnMode pins the dialect rule one
-// level below the family split: the encrypted blob is bound to the backend that
-// produced it, so a Responses sender may resend only the mode it talks to. The
-// other Responses mode is dropped exactly as an Anthropic signature is.
-func TestStripForeignResponsesThinkingKeepsOnlyOwnMode(t *testing.T) {
-	const (
-		anthropicSig = "EqQBCgIYAhIM-sig-from-claude"
-		apiSig       = "openai-responses:api:rs_api:gAAAA-api-blob"
-		chatgptSig   = "openai-responses:chatgpt:rs_chat:gAAAA-chat-blob"
-	)
-	mkMessages := func() []anthropic.MessageParam {
-		return []anthropic.MessageParam{
-			{Role: "assistant", Content: []anthropic.ContentBlockParamUnion{
-				{OfThinking: &anthropic.ThinkingBlockParam{Signature: anthropicSig}},
-				{OfThinking: &anthropic.ThinkingBlockParam{Signature: apiSig}},
-				{OfThinking: &anthropic.ThinkingBlockParam{Signature: chatgptSig}},
-				{OfText: &anthropic.TextBlockParam{Text: "answer"}},
-			}},
-		}
-	}
-
-	cases := []struct {
-		mode     llm.ResponsesSignatureMode
-		wantKept string
-	}{
-		{llm.ResponsesModeAPI, apiSig},
-		{llm.ResponsesModeChatGPT, chatgptSig},
-	}
-	for _, tc := range cases {
-		t.Run(string(tc.mode), func(t *testing.T) {
-			c := assert.NewCollecting(t)
-			msgs := mkMessages()
-			got := llm.StripForeignResponsesThinking(msgs, tc.mode)
-			c.Require().Len(got, 1, "messages")
-			c.Require().Len(got[0].Content, 2, "assistant blocks toward %s", tc.mode)
-			c.Eq(tc.wantKept, got[0].Content[0].OfThinking.Signature, "kept signature")
-			c.Eq("answer", got[0].Content[1].OfText.Text, "text block")
-			// The caller's history is never mutated.
-			c.Require().Len(msgs[0].Content, 4, "caller's assistant blocks")
-		})
-	}
 }
 
 // TestThinkingCompatSignatureShapes pins the signature format every Responses

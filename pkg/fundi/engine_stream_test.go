@@ -221,7 +221,7 @@ func TestEngine_StreamsDeltasAndPricesFinalMessageOnce(t *testing.T) {
 	c := assert.NewAborting(t)
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{events: textTurnEvents("claude-x", "Hel", "lo")})
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -296,7 +296,7 @@ func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
 			[]string{"", `{"command":"ls `, `-la"}`})},
 		streamScript{events: textTurnEvents("claude-x", "done")},
 	)
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("go")
 	eng.Wait()
@@ -355,7 +355,7 @@ func TestEngine_HasContentGatePreventsOrphanedMessageStartOnPreContentFailure(t 
 		events:   preContentFailureEvents(),
 		trailErr: errors.New("stream dropped before any content"),
 	})
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -390,7 +390,7 @@ func TestEngine_NonStreamingFallbackProducesWellFormedFrameSequence(t *testing.T
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn, non-streaming fallback
+		"message_start", "message_update", "message_update", "message_end", // assistant turn, non-streaming fallback
 		"agent_end", "agent_settled",
 	})
 }
@@ -585,7 +585,7 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 		release: release,
 	}
 	ts := fakeToolSet{}
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi") // queues and returns immediately; the turn runs on Engine's own worker goroutine
 
@@ -690,7 +690,7 @@ func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
 		},
 	}}
 	ts := fakeToolSet{}
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 
@@ -780,7 +780,7 @@ func TestEngine_CoalescingStillDeliversFinalContent(t *testing.T) {
 	sender := newScriptedStreamingSender(streamScript{
 		events: textTurnEvents("claude-x", "H", "e", "l", "l", "o"),
 	})
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -803,7 +803,7 @@ func TestEngine_CoalescesManyDeltasIntoFewFrames(t *testing.T) {
 
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{events: ev})
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -870,7 +870,7 @@ func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
 	sender := newScriptedStreamingSender(streamScript{
 		events: textTurnEvents("claude-x", "Hel", "lo", " world"),
 	})
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()
@@ -985,7 +985,7 @@ func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
 		release: release,
 	}
 	ts := fakeToolSet{}
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 
@@ -1032,7 +1032,7 @@ func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
 	sender := newScriptedStreamingSender(streamScript{
 		events: thinkingTurnEvents("deepseek/deepseek-v4-pro", "Let me think about this...", 3),
 	})
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 
 	eng.HandlePrompt("hi")
 	eng.Wait()

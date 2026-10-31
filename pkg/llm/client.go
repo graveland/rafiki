@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -769,13 +772,13 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 	model := string(params.Model)
 
 	for attempt := 0; attempt <= rlp.MaxRetries; attempt++ {
-		msg, attempted, delivered, err := c.sendStreamingAttempt(ctx, meta, params, handler)
+		resp, attempted, delivered, err := c.sendStreamingAttempt(ctx, meta, params, handler)
 		if err == nil || !attempted {
-			return msg, attempted, delivered, err
+			return resp, attempted, delivered, err
 		}
 		// A streaming error with delivered==true is never retryable.
 		if delivered {
-			return msg, attempted, delivered, err
+			return resp, attempted, delivered, err
 		}
 		isRL, retryAfter := isRateLimit(err)
 		if !isRL && IsRateLimitStreamError(err) {
@@ -786,7 +789,7 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 			isRL = true
 		}
 		if !isRL || attempt >= rlp.MaxRetries {
-			return msg, attempted, delivered, err
+			return resp, attempted, delivered, err
 		}
 		c.modelGate.record429(model, retryAfter)
 		c.logger.Warn("rate limit hit; retrying after backoff",
@@ -795,7 +798,7 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 	return nil, true, false, fmt.Errorf("llm: rate limit retries exhausted for model %s", model)
 }
 
-func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
+func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (resp *anthropic.Message, attempted bool, delivered bool, err error) {
 	ctx, span, primary, fallbacks, _, params, spec, err := c.prepareSend(ctx, meta, params)
 	if err != nil {
 		return nil, false, false, err
@@ -814,8 +817,9 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	}
 
 	sender := c.senders[primary]
-	streamer, canStream := sender.(StreamingSender)
-	if !canStream {
+	if sender == nil {
+		// No sender for this provider: step aside without a request, so the
+		// caller's SendParams call reports "provider not configured" precisely.
 		return nil, false, false, nil
 	}
 
@@ -836,18 +840,22 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	ctx, hdrs := withRawTraceHeaders(ctx)
 	start := time.Now()
 
-	stream, serr := streamer.NewStreaming(ctx, params)
+	req, extra, cerr := msganthropic.RequestFromSDK(params)
+	if cerr != nil {
+		return nil, false, false, cerr
+	}
+	sessionID, _ := sessionIDFromContext(ctx)
+	dec, serr := sender.Stream(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
 	// The defer is registered BEFORE the error checks below, and guarded on
-	// stream != nil rather than serr == nil: the SDK's own sdkSender.NewStreaming
-	// never returns a non-nil error (see its doc), but StreamingSender's
-	// contract does not forbid a third-party implementation from returning
-	// (non-nil stream, non-nil err). Registering the defer only after those
-	// checks would leak that stream's decoder and response body on exactly
-	// that path — this is what TestSendStreaming_ClosesStreamEvenWhenNewStreamingReturnsBothStreamAndError
+	// dec != nil rather than serr == nil: Sender's contract does not forbid an
+	// implementation from returning (non-nil decoder, non-nil error).
+	// Registering the defer only after those checks would leak that decoder and
+	// its response body on exactly that path — this is what
+	// TestSendStreaming_ClosesStreamEvenWhenNewStreamingReturnsBothStreamAndError
 	// pins down.
-	if stream != nil {
+	if dec != nil {
 		defer func() {
-			if cerr := stream.Close(); cerr != nil {
+			if cerr := dec.Close(); cerr != nil {
 				c.logger.Warn("llm: close stream failed", "error", cerr)
 			}
 		}()
@@ -880,21 +888,32 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		return nil, true, false, c.noEligibleError(spec, string(params.Model), serr)
 	}
 
+	// The handler and the accumulator are still SDK-typed this wave: the
+	// adapter turns each native event back into the SDK events they expect,
+	// replaying at block stop whatever the finalized block carries that the
+	// stream never delivered as a delta (a citation list, a server-tool block's
+	// completed input).
 	acc := anthropic.Message{}
-	for stream.Next() {
-		ev := stream.Current()
-		FixEmptyToolInput(&ev)
+	adapter := &msganthropic.SDKEventAdapter{}
+	for serr == nil {
+		ev, derr := dec.Next()
+		if errors.Is(derr, io.EOF) {
+			break
+		}
+		if derr != nil {
+			serr = derr
+			break
+		}
 		// Only content-bearing events count as delivered. message_start
 		// carries no text, so treating it as delivery would make the failover
 		// branch below unreachable for the common "connected, then died before
 		// any output" failure — which the non-streaming path recovers from.
-		if eventDeliversContent(ev) {
+		if msg.DeliversContent(ev) {
 			delivered = true
 		}
-		handler(ev)
-		SanitizeInvalidAccumulatedInput(&acc, ev)
-		if aerr := acc.Accumulate(ev); aerr != nil {
-			wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
+		sdkEvents, aerr := adapter.Add(ev)
+		if aerr != nil {
+			wrapped := fmt.Errorf("llm: convert stream event: %w", aerr)
 			span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
 			span.SetStatus(codes.Error, "")
 			c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
@@ -902,10 +921,24 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 			c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
 			return nil, true, delivered, wrapped
 		}
-		FixAccumulatedEmptyToolInput(&acc, ev)
-		backfillDeltaUsage(&acc, ev)
+		for _, sdkEv := range sdkEvents {
+			FixEmptyToolInput(&sdkEv)
+			handler(sdkEv)
+			SanitizeInvalidAccumulatedInput(&acc, sdkEv)
+			if aerr := acc.Accumulate(sdkEv); aerr != nil {
+				wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
+				span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
+				span.SetStatus(codes.Error, "")
+				c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
+				recordPrimaryResult(breaker, now, wrapped)
+				c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
+				return nil, true, delivered, wrapped
+			}
+			FixAccumulatedEmptyToolInput(&acc, sdkEv)
+			backfillDeltaUsage(&acc, sdkEv)
+		}
 	}
-	if serr := stream.Err(); serr != nil {
+	if serr != nil {
 		span.RecordError(errors.New(telemetry.ErrorText(serr.Error())))
 		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
@@ -961,32 +994,6 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	}
 	c.recordRawTrace(ctx, meta, ref.turnID, params, &acc, 200, primary, latency, nil, hdrs)
 	return &acc, true, delivered, nil
-}
-
-// eventDeliversContent reports whether ev is one of the content-bearing
-// stream event variants — content_block_start/delta/stop — as opposed to
-// message-envelope bookkeeping (message_start/delta/stop). A "ping"
-// keep-alive never reaches here in the first place: the SDK's
-// ssestream.Stream.Next() filters it out before Current() ever surfaces it.
-//
-// Uses the SDK's typed AsAny() discriminator (a switch on the real event
-// struct type) rather than string-matching ev.Type, so this can't drift from
-// the SDK's own variant set. AsAny() only returns one of the six known
-// MessageStreamEventUnion variants for this SDK version (v1.37.0); the
-// default case treats anything else (e.g. a variant added by a future SDK
-// bump we haven't taught this switch about yet) as content-bearing —
-// erring toward the ORIGINAL bug's safe direction (over-counting as
-// delivered, which only narrows the failover window) rather than the
-// unsafe one (under-counting, which risks double-delivery on retry).
-func eventDeliversContent(ev anthropic.MessageStreamEventUnion) bool {
-	switch ev.AsAny().(type) {
-	case anthropic.ContentBlockStartEvent, anthropic.ContentBlockDeltaEvent, anthropic.ContentBlockStopEvent:
-		return true
-	case anthropic.MessageStartEvent, anthropic.MessageDeltaEvent, anthropic.MessageStopEvent:
-		return false
-	default:
-		return true
-	}
 }
 
 // backfillDeltaUsage corrects a gap in the SDK's own Message.Accumulate:
@@ -1087,6 +1094,24 @@ func (c *Client) recordModelResult(params anthropic.MessageNewParams, err error)
 	}
 }
 
+// sendTo is the ONE conversion point between the SDK params this wave's Client
+// still builds and the native request every Sender speaks. The session id rides
+// EncodeOptions as well as the context: the Anthropic kinds send it as a header
+// through sessionIDTransport, and the Responses codec puts it in the request
+// body's prompt_cache_key.
+func (c *Client) sendTo(ctx context.Context, s Sender, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	req, extra, err := msganthropic.RequestFromSDK(params)
+	if err != nil {
+		return nil, err
+	}
+	sessionID, _ := sessionIDFromContext(ctx)
+	resp, err := s.Send(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
+	if err != nil {
+		return nil, err
+	}
+	return msganthropic.ToSDKMessage(resp)
+}
+
 // callModel routes primary-with-breaker then the fallback chain. Fallback
 // sends rewrite the model via the catalog (Anthropic id → OpenRouter id when
 // the fallback is OpenRouter). A send with NO fallback configured bypasses
@@ -1102,13 +1127,13 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 	usePrimary, breaker := c.primaryGate(primary, fallbacks, now)
 
 	if breaker == nil {
-		resp, err := sender.New(ctx, params)
+		resp, err := c.sendTo(ctx, sender, params)
 		c.recordModelResult(params, err)
 		return resp, primary, c.noEligibleError(spec, string(params.Model), err)
 	}
 
 	if usePrimary {
-		resp, err := sender.New(ctx, params)
+		resp, err := c.sendTo(ctx, sender, params)
 		recordPrimaryResult(breaker, now, err)
 		c.recordModelResult(params, err)
 		if err == nil {
@@ -1148,7 +1173,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		// about the primary's declared models, so nil means only the
 		// fallback's own guard ejections apply, never a stale declaration pin.
 		c.mutateParams(fbProvider, nil, &fbParams, spec)
-		resp, err := fbSender.New(ctx, fbParams)
+		resp, err := c.sendTo(ctx, fbSender, fbParams)
 		if err == nil {
 			c.modelGate.recordSuccess(string(params.Model))
 			return resp, fb, nil
@@ -1239,48 +1264,20 @@ func applyProviderPrefsPreSpec(params *anthropic.MessageNewParams, decl *provide
 	params.SetExtraFields(fields)
 }
 
-// noEligibleStatuses are the HTTP statuses OpenRouter reports "nothing can
-// serve this request under its provider routing" with: 404 for the
-// "No endpoints found ..." family (including its data-policy variant) and 400
-// for "No allowed providers ...".
-var noEligibleStatuses = map[int]bool{
-	http.StatusBadRequest: true,
-	http.StatusNotFound:   true,
-}
-
-// noEligibleMarkers are that family's message fragments, matched
-// case-insensitively as substrings: OpenRouter returns them as prose inside
-// error.message with no machine-readable code distinguishing them from any
-// other 4xx (the same shape as pkg/routing's creditMarkers). The status
-// restriction in noEligibleUpstream keeps an unrelated 4xx that happens to
-// quote one of these phrases (an echoed prompt, say) from masquerading.
-var noEligibleMarkers = []string{
-	"no endpoints found",
-	"no allowed providers",
-}
-
 // noEligibleUpstream reports whether err is OpenRouter's no-eligible-provider
-// rejection: a 400/404 whose body's error message is about endpoints or
-// providers being unavailable — what a request whose routing spec (only,
-// nodata, zdr, quantizations) excludes every host gets back. The class is
-// deterministic — the same body fails identically forever — so it is never
-// retried (a 400/404 is neither routing.Retryable nor agentloop-retryable)
-// and the wrapper below only decorates it.
+// rejection: the class the Anthropic codec names ErrNoEligible — a 400/404
+// whose body's error message is about endpoints or providers being unavailable,
+// which is what a request whose routing spec (only, nodata, zdr, quantizations)
+// excludes every host gets back. The class is deterministic — the same body
+// fails identically forever — so it is never retried (a 400/404 is neither
+// routing.Retryable nor agentloop-retryable) and the wrapper below only
+// decorates it.
 func noEligibleUpstream(err error) bool {
-	var apiErr *anthropic.Error
+	var apiErr *msg.APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	if !noEligibleStatuses[apiErr.StatusCode] {
-		return false
-	}
-	lower := strings.ToLower(apiErr.RawJSON())
-	for _, m := range noEligibleMarkers {
-		if strings.Contains(lower, m) {
-			return true
-		}
-	}
-	return false
+	return apiErr.Kind == msg.ErrNoEligible
 }
 
 // noEligibleError names the routing spec in OpenRouter's no-eligible-provider

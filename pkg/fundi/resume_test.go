@@ -52,7 +52,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	// --- process 1: create a genuine dangling tool_use, bypassing Engine ---
 	sender1 := newCapturingSender(t, sampleResp)
 	client1, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender1),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender1)),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)
@@ -118,7 +118,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	// what any real client would send next.
 	sender3 := newCapturingSender(t, sampleEndTurn)
 	client3, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender3),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender3)),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)

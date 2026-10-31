@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	anthropic "github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
@@ -225,12 +225,12 @@ func (s ownerBearer) Token(context.Context, bool) (string, http.Header, error) {
 // request never reached an endpoint.
 func exerciseSender(t *testing.T, sender llm.Sender) {
 	t.Helper()
-	_, err := sender.New(context.Background(), anthropic.MessageNewParams{
+	_, err := sender.Send(context.Background(), &msg.Request{
 		Model:     "gpt-6.1-sol",
 		MaxTokens: 16,
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-	})
-	assert.NewAborting(t).Error(err, "sender.New succeeded; the sender never resolved a credential, so this test observed nothing")
+		Messages:  []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}},
+	}, msg.EncodeOptions{})
+	assert.NewAborting(t).Error(err, "sender.Send succeeded; the sender never resolved a credential, so this test observed nothing")
 }
 
 // Two owners spawning on the same ChatGPT provider must get two senders, each

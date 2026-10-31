@@ -68,9 +68,9 @@ func respondTextOnly(text string) func(anthropic.MessageNewParams) (*anthropic.M
 	}
 }
 
-func testDetectClient(t *testing.T, sender llm.Sender) *llm.Client {
+func testDetectClient(t *testing.T, sender llm.SDKSender) *llm.Client {
 	t.Helper()
-	c, err := llm.NewClient(llm.WithProviderSender("anthropic", sender))
+	c, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)))
 	assert.NewAborting(t).NoError(err, "NewClient")
 	return c
 }

@@ -21,6 +21,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -364,11 +365,18 @@ func (ts *blockingToolSet) Execute(ctx context.Context, name string, _ json.RawM
 // replay script even after an abort landed.
 type ctxCheckingSender struct{ inner llm.Sender }
 
-func (s ctxCheckingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s ctxCheckingSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.inner.New(ctx, params)
+	return s.inner.Send(ctx, req, opts)
+}
+
+func (s ctxCheckingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.inner.Stream(ctx, req, opts)
 }
 
 // blockingBuildFunc returns a BuildFunc that constructs a real fundi.Engine
@@ -806,7 +814,7 @@ func (panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthro
 func panickingTurnBuildFunc() BuildFunc {
 	return func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
 		client, err := llm.NewClient(
-			llm.WithProviderSender("anthropic", panickingSender{}),
+			llm.WithProviderSender("anthropic", llm.FromSDKSender(panickingSender{})),
 			llm.WithDefaultModel("claude-x"))
 		if err != nil {
 			return nil, nil, err

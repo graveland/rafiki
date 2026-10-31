@@ -231,7 +231,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 	c := assert.NewAborting(t)
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithDefaultModel("claude-x"))
 	c.NoError(err)
 	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "agent"))

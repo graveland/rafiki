@@ -20,7 +20,7 @@ func TestHaltedChildRunsNoLLMCallButKeepsThePrompt(t *testing.T) {
 	halted.Store(true)
 	var got []TurnOutcome
 	sender := newCapturingSender(t, sampleEndTurn)
-	eng, out := newTestEngineWithConfig(t, fakeToolSet{}, sender, func(cfg *EngineConfig) {
+	eng, out := newTestEngineWithSDKConfig(t, fakeToolSet{}, sender, func(cfg *EngineConfig) {
 		cfg.Halted = func() (bool, string) { return halted.Load(), "budget held by c_root" }
 		cfg.OnTurnEnded = func(o TurnOutcome) { got = append(got, o) }
 	})

@@ -50,7 +50,7 @@ func TestProviderGuardConfigReachesTheWire(t *testing.T) {
 		Routing:         "sort=price",
 		Catalog:         routing.NewModelCatalog(nil, time.Hour, nil),
 		ProviderGuard:   g,
-		ProviderSenders: map[string]llm.Sender{"openrouter": openrouter},
+		ProviderSenders: map[string]llm.Sender{"openrouter": llm.FromSDKSender(openrouter)},
 	}
 	opts, err := cfg.clientOptions()
 	ck.NoError(err, "clientOptions")

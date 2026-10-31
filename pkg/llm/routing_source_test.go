@@ -15,12 +15,12 @@ import (
 
 // newSourceClient builds a client on the openrouter-only registry with a
 // routing source and an optional static spec, plus an openrouter sender.
-func newSourceClient(t *testing.T, src func() routing.Spec, static routing.Spec, openrouter Sender) *Client {
+func newSourceClient(t *testing.T, src func() routing.Spec, static routing.Spec, openrouter SDKSender) *Client {
 	t.Helper()
 	c, err := NewClient(
 		WithProviders(routingSet(t)),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 		WithRoutingSource(src),

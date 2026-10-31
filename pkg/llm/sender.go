@@ -8,33 +8,15 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
-
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 )
 
-// Sender issues one Messages-API call. The SDK client is wrapped behind this
-// seam so tests inject fakes and the client stays provider-agnostic.
+// Sender issues one model call in rafiki's native types. Every first-party
+// sender implements both methods; Stream's decoder must be closed by the caller.
 type Sender interface {
-	New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error)
-}
-
-// StreamingSender is an optional capability: a Sender that can also open a
-// streaming Messages call. Callers type-assert for it and fall back to New,
-// so a Sender that cannot stream (test fakes, custom transports) stays valid.
-// Kept separate from Sender so this remains an additive change upstream.
-// The error return exists for implementations other than sdkSender: the
-// Anthropic SDK's own Messages.NewStreaming never fails this way (see
-// sdkSender.NewStreaming below), so no first-party sender ever returns a
-// non-nil error here. A StreamingSender that does MAY also return a non-nil
-// stream alongside it — sendStreaming's caller is responsible for closing
-// that stream on every path, including this one, so implementations should
-// not assume an error return means nothing needs cleanup.
-type StreamingSender interface {
-	Sender
-	NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error)
+	Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error)
+	Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error)
 }
 
 // sessionIDContextKey is the context key WithSessionID writes and
@@ -147,40 +129,6 @@ func (t headerCaptureTransport) RoundTrip(req *http.Request) (*http.Response, er
 	return resp, err
 }
 
-type sdkSender struct{ client anthropic.Client }
-
-// New sends one Messages call with foreign thinking removed: a thinking block
-// whose signature was minted by another provider (the Responses senders write
-// openai-responses:<mode>:<id>:<blob>) is unverifiable here, and Anthropic
-// rejects a request carrying one. params is copied first: this is a filter on
-// the way out, never a mutation of the caller's history.
-func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	params = withoutForeignThinking(params, false)
-	return s.client.Messages.New(ctx, params)
-}
-
-// withoutForeignThinking applies StripForeignThinking to a shallow copy of
-// params: the filter lives in the Messages slice, so nothing else needs copying.
-func withoutForeignThinking(params anthropic.MessageNewParams, forResponses bool) anthropic.MessageNewParams {
-	params.Messages = StripForeignThinking(params.Messages, forResponses)
-	return params
-}
-
-// NewStreaming opens a streaming Messages call. The SDK's NewStreaming does
-// not itself return an error (errors surface as an error event on the stream
-// or from the stream's Err() after iteration), so the nil here is not a
-// stub — it matches the real signature.
-func (s sdkSender) NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
-	params = withoutForeignThinking(params, false)
-	return s.client.Messages.NewStreaming(ctx, params), nil
-}
-
-// FromSDK wraps a pre-built SDK client as a Sender — e.g. sc's forward-mode
-// diagnose client pointed at the central /v1/messages proxy.
-func FromSDK(client anthropic.Client) Sender {
-	return sdkSender{client: client}
-}
-
 // ErrNeedsOwnerSender marks the one refusal SenderForKey makes that is not a
 // fault: a kind that authenticates as an OWNER (openai-responses-chatgpt) has
 // no key-based sender by design, so its sender is bound per owner at spawn
@@ -196,35 +144,21 @@ func SenderFor(p providers.Provider, rt http.RoundTripper) (Sender, error) {
 
 // SenderForKey is SenderFor with an explicit credential, for the per-spawn key
 // a caller forwards (SpawnRequest.APIKey) which the daemon's environment does
-// not hold. An empty key means keyless: no x-api-key header is sent at all.
+// not hold. An empty key means keyless: no credential header is sent at all.
 func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sender, error) {
-	opts := []option.RequestOption{}
-
-	base := p.BaseURL
-	sessionHeader := p.SessionHeader
 	switch p.Kind {
 	case providers.KindAnthropic:
+		base := p.BaseURL
 		if base == "" {
 			base = anthropicBaseURL
 		}
+		return newAnthropicSender(p, base, key, rt)
 	case providers.KindAnthropicOpenRouter:
+		base := p.BaseURL
 		if base == "" {
 			base = openRouterBaseURL
 		}
-		opts = append(opts,
-			option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
-			option.WithHeader("X-OpenRouter-Title", "rafiki"),
-			option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
-		)
-		// "x-session-id" is OpenRouter's implicit default, unconditional
-		// before session_header was configurable — preserved here so an
-		// ad-hoc Provider{Kind: KindAnthropicOpenRouter} literal (any code
-		// that doesn't go through providers.Default() or a providers.toml
-		// entry naming session_header explicitly) keeps working exactly as
-		// before. An explicit session_header always wins over this default.
-		if sessionHeader == "" {
-			sessionHeader = "x-session-id"
-		}
+		return newOpenRouterSender(p, base, key, rt)
 	case providers.KindOpenAI:
 		return newOpenAISender(p, key, rt)
 	case providers.KindOpenAIResponses:
@@ -238,24 +172,4 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 	default:
 		return nil, fmt.Errorf("llm: provider %q: unknown kind %q", p.Name, p.Kind)
 	}
-	opts = append(opts, option.WithBaseURL(base))
-
-	// Opt-in per provider, not tied to Kind: a plain KindAnthropic entry
-	// (e.g. Fireworks' Anthropic-compatible endpoint) wants this exactly as
-	// much as KindAnthropicOpenRouter does when it declares session_header —
-	// the header NAME is provider-specific, the need for sticky routing is
-	// not. KindAnthropic has no implicit default (unlike OpenRouter above),
-	// so it stays silent unless session_header is set.
-	if sessionHeader != "" {
-		rt = sessionIDTransport{base: rt, header: sessionHeader}
-	}
-
-	if key != "" {
-		opts = append(opts, option.WithAPIKey(key))
-	}
-	// Unconditional, and last: every sender's transport must be capturable
-	// regardless of whether a caller passed one, or fundi's raw-trace capture
-	// silently sees nothing for a provider that had no custom rt.
-	opts = append(opts, option.WithHTTPClient(&http.Client{Transport: headerCaptureTransport{base: rt}}))
-	return sdkSender{client: anthropic.NewClient(opts...)}, nil
 }

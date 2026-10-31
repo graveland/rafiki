@@ -53,7 +53,7 @@ func prefillFakeRead(failPaths map[string]bool) fakeToolSet {
 func prefillSimpleEngine(t *testing.T, ts fakeToolSet, entries []protocol.PrefillRead, extra ...func(*EngineConfig)) (*Engine, *syncBuffer, *capturingSender) {
 	t.Helper()
 	sender := newCapturingSender(t, sampleEndTurn)
-	eng, out := newTestEngineWithConfig(t, ts, sender, func(cfg *EngineConfig) {
+	eng, out := newTestEngineWithSDKConfig(t, ts, sender, func(cfg *EngineConfig) {
 		cfg.Prefill = entries
 		for _, fn := range extra {
 			if fn != nil {

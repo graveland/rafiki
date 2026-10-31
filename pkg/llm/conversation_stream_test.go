@@ -19,11 +19,11 @@ import (
 
 // newTestConversation builds a store-less (in-memory) Conversation around
 // sender — fast unit-test scaffolding for the streaming path, no DB needed.
-func newTestConversation(t *testing.T, sender Sender) *Conversation {
+func newTestConversation(t *testing.T, sender SDKSender) *Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
@@ -38,12 +38,12 @@ func newTestConversation(t *testing.T, sender Sender) *Conversation {
 // AND a fallback chain configured on the primary — the shape needed for
 // sendStreaming to genuinely consult and update the primary's breaker
 // (mirrors TestSend_StreamEngagesWithFallbackAndBreakerConfigured's setup).
-func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Conversation, *Client) {
+func newTestConversationWithBreaker(t *testing.T, primary, fallback SDKSender) (*Conversation, *Client) {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -61,7 +61,7 @@ func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Co
 // the primary's breaker pre-tripped open by a prior retryable failure —
 // models the sustained-primary-degradation state the breaker exists to
 // detect, independent of anything sendStreaming itself does in the test.
-func newTestConversationWithOpenBreaker(t *testing.T, primary, fallback Sender) (*Conversation, *Client) {
+func newTestConversationWithOpenBreaker(t *testing.T, primary, fallback SDKSender) (*Conversation, *Client) {
 	t.Helper()
 	conv, c := newTestConversationWithBreaker(t, primary, fallback)
 	c.Breaker("anthropic").RecordResult(time.Now(), true)
@@ -243,10 +243,8 @@ func (f *fakeStreamingSender) NewStreaming(_ context.Context, params anthropic.M
 		&fakeDecoder{events: s.events, trailErr: s.trailErr}, s.openErr), nil
 }
 
-// nonStreamingFake satisfies Sender only (no NewStreaming) — proves the
-// silent-fallback path: WithStreamHandler must never fire its handler, and
-// Send must still return the plain reply, when the resolved sender can't
-// stream.
+// nonStreamingFake satisfies SDKSender only (no NewStreaming) — the shape the
+// compat adapter's Stream falls back on: Send's reply is replayed as events.
 type nonStreamingFake struct {
 	reply string
 	calls int
@@ -384,7 +382,12 @@ func TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens(t *testing
 	c.Eq(10, msg.Usage.InputTokens, "InputTokens")
 }
 
-func TestSend_FallsBackWhenSenderCannotStream(t *testing.T) {
+// TestSend_StreamsThroughASenderWithNoStreamMethod pins the compat adapter's
+// fallback: every native Sender streams, so an SDK-typed fake that only
+// implements New still drives the streaming path — the adapter replays its
+// reply as events rather than making the caller fall back to a non-streamed
+// send.
+func TestSend_StreamsThroughASenderWithNoStreamMethod(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sender := &nonStreamingFake{reply: "Hello"}
 	conv := newTestConversation(t, sender)
@@ -393,8 +396,8 @@ func TestSend_FallsBackWhenSenderCannotStream(t *testing.T) {
 	msg, err := conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) { called = true }))
 	c.Require().NoError(err, "Send")
-	c.False(called, "handler must not fire for a non-streaming sender")
-	c.Eq("Hello", textOfMessage(msg), "non-streaming fallback message")
+	c.True(called, "the handler must fire: every Sender streams")
+	c.Eq("Hello", textOfMessage(msg), "message")
 	c.Eq(1, sender.calls, "New calls")
 }
 
@@ -503,8 +506,8 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 	primary := newFakeStreamingSender(textStreamEvents("Hi", " there")...)
 	fallback := &nonStreamingFake{reply: "must not be used"}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -543,8 +546,8 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 	primary := &fakeStreamingSender{scripts: []streamScript{{openErr: overloadedErr()}}}
 	fallback := &nonStreamingFake{reply: "fallback done"}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -591,8 +594,8 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 	}}}
 	fallback := &nonStreamingFake{reply: "recovered"}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -695,7 +698,7 @@ func TestSend_StreamRetriesOnPreDeliveryInBandRateLimit(t *testing.T) {
 		{events: textStreamEvents("after retry")},
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
@@ -753,7 +756,7 @@ func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
 		{events: textStreamEvents("after retry")},
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
@@ -823,7 +826,7 @@ func TestSend_StreamRespectsRateLimitPolicyMaxRetries(t *testing.T) {
 	}}
 
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)

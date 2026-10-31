@@ -6,13 +6,12 @@ import (
 	"context"
 	"errors"
 	"math"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // RateLimitPolicy is a per-conversation tuning knob for rate-limit retries.
@@ -112,26 +111,19 @@ func (g *ModelGate) recordSuccess(model string) {
 	delete(g.blockedUntil, model)
 }
 
-// isRateLimit reports whether err is a rate-limit rejection (HTTP 429) and
-// returns the parsed Retry-After duration, or (false, 0).
+// isRateLimit reports whether err is a rate-limit rejection and returns the
+// Retry-After duration the refusal carried, or (false, 0). The kind comes from
+// the codec that decoded the response; RetryAfter is the sender's reading of the
+// header.
 func isRateLimit(err error) (bool, time.Duration) {
-	var apiErr *anthropic.Error
 	if err == nil {
 		return false, 0
 	}
-	if !errors.As(err, &apiErr) {
+	var apiErr *msg.APIError
+	if !errors.As(err, &apiErr) || apiErr.Kind != msg.ErrRateLimit {
 		return false, 0
 	}
-	if apiErr.StatusCode != http.StatusTooManyRequests {
-		return false, 0
-	}
-	var retryAfter time.Duration
-	if apiErr.Response != nil {
-		if v := apiErr.Response.Header.Get("Retry-After"); v != "" {
-			retryAfter = parseRetryAfter(v)
-		}
-	}
-	return true, retryAfter
+	return true, apiErr.RetryAfter
 }
 
 // parseRetryAfter parses an RFC 7231 §7.1.1.1 Retry-After value.

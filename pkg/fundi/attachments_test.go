@@ -74,7 +74,7 @@ func assertImageThenText(t *testing.T, blocks []contentBlock) {
 func TestPromptWithAttachmentsReachesTheWire(t *testing.T) {
 	c := assert.NewAborting(t)
 	cs := newCapturingSender(t, sampleEndTurn)
-	eng, _ := newTestEngineWithSender(t, fakeToolSet{}, cs)
+	eng, _ := newTestEngineWithSDKSender(t, fakeToolSet{}, cs)
 	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
 	c.NoError(err, "decode fixture")
 	eng.HandlePromptWithAttachments("F1", "look", []llm.UserImage{{MediaType: "image/png", Data: png}})
@@ -90,7 +90,7 @@ func TestPromptWithAttachmentsReachesTheWire(t *testing.T) {
 func TestAttachmentFrameThroughTheRealFrontendReachesTheWire(t *testing.T) {
 	c := assert.NewAborting(t)
 	cs := newCapturingSender(t, sampleEndTurn)
-	eng, _ := newTestEngineWithSender(t, fakeToolSet{}, cs)
+	eng, _ := newTestEngineWithSDKSender(t, fakeToolSet{}, cs)
 	frame := `{"type":"prompt","id":"F1","message":"look",` +
 		`"attachments":[{"media_type":"image/png","data":"` + png1x1Base64 + `"}]}` + "\n"
 	fe := NewFrontend(strings.NewReader(frame), io.Discard, eng)
@@ -147,7 +147,7 @@ func TestAttachmentFrameDispatchesToTheAttachmentHandler(t *testing.T) {
 func TestPromptWithAttachmentsEchoesTheImage(t *testing.T) {
 	c := assert.NewAborting(t)
 	sink := &recordingSink{}
-	eng, _ := newTestEngineWithConfig(t, fakeToolSet{}, newCapturingSender(t, sampleEndTurn), func(cfg *EngineConfig) {
+	eng, _ := newTestEngineWithSDKConfig(t, fakeToolSet{}, newCapturingSender(t, sampleEndTurn), func(cfg *EngineConfig) {
 		cfg.NativeSink = sink
 	})
 	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
@@ -200,7 +200,7 @@ func TestSteerWithAttachmentsMidTurnReachesTheWire(t *testing.T) {
 	}}
 	cs := newCapturingSender(t, sampleResp, sampleEndTurn)
 	sink := &recordingSink{}
-	eng, _ := newTestEngineWithConfig(t, ts, cs, func(cfg *EngineConfig) { cfg.NativeSink = sink })
+	eng, _ := newTestEngineWithSDKConfig(t, ts, cs, func(cfg *EngineConfig) { cfg.NativeSink = sink })
 	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
 	c.NoError(err, "decode fixture")
 

@@ -45,7 +45,7 @@ func TestConversationHistoryHitsCacheBetweenIterations(t *testing.T) {
 	mem.Ensure("conv-cache")
 	counting := convtest.NewCounting(mem)
 	cl, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
@@ -131,7 +131,7 @@ func TestConversationLeaseLostStopsWriting(t *testing.T) {
 	mem := convpkg.NewMemBackend()
 	mem.Ensure("conv-lease")
 	cl, err := NewClient(
-		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),

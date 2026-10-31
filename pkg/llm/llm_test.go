@@ -8,13 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -24,6 +24,11 @@ func testLogger(t *testing.T) *slog.Logger {
 	t.Helper()
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
+
+// sdkFake wraps an SDK-typed test sender so it satisfies the native Sender.
+// The fakes stay SDK-shaped on purpose: they are the ones the client's own
+// conversion is exercised against.
+func sdkFake(s SDKSender) Sender { return FromSDKSender(s) }
 
 // scriptedSender returns queued results in order; the last repeats.
 type scriptedSender struct {
@@ -114,16 +119,27 @@ func rateLimitErr() *anthropic.Error {
 	return e
 }
 
-func rateLimitErrWithRetryAfter(secs int) *anthropic.Error {
-	e := &anthropic.Error{StatusCode: http.StatusTooManyRequests}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{
-		StatusCode: http.StatusTooManyRequests,
-		Header:     http.Header{"Retry-After": {strconv.Itoa(secs)}},
+// promptTooLargeAPIErr fabricates the native prompt-too-large refusal the
+// classifiers read: the SDK-typed helper above goes through the compat adapter
+// to produce exactly this.
+func promptTooLargeAPIErr() *msg.APIError {
+	return &msg.APIError{
+		Status:  http.StatusBadRequest,
+		Body:    []byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`),
+		Kind:    msg.ErrPromptTooLarge,
+		Dialect: msg.DialectAnthropic,
+		Message: "prompt is too long: too many tokens",
 	}
-	_ = e.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error"}}`))
-	return e
+}
+
+// rateLimitAPIErrWithRetryAfter fabricates the native 429 the sender returns.
+func rateLimitAPIErrWithRetryAfter(secs int) *msg.APIError {
+	return &msg.APIError{
+		Status:     http.StatusTooManyRequests,
+		Kind:       msg.ErrRateLimit,
+		RetryAfter: time.Duration(secs) * time.Second,
+		Dialect:    msg.DialectAnthropic,
+	}
 }
 
 func seededCatalog(t *testing.T) *routing.ModelCatalog {
@@ -151,8 +167,8 @@ func TestSendParamsFailsOverAndMapsModel(t *testing.T) {
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -183,8 +199,8 @@ func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -211,8 +227,8 @@ func TestSendParamsFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -239,8 +255,8 @@ func TestSendParamsSlashModelRoutesToOpenRouter(t *testing.T) {
 		respondText("from openrouter"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -265,8 +281,8 @@ func TestSendParamsUnpinnedModelCarriesNoProviderPrefs(t *testing.T) {
 		respondText("ok"), respondText("ok"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -300,7 +316,7 @@ func TestSendParamsSlashModelWithoutOpenRouterErrors(t *testing.T) {
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
+		WithProviderSender("anthropic", sdkFake(primary)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -327,8 +343,8 @@ func TestSendParamsAnthropicPrefixRoutesNative(t *testing.T) {
 		respondText("from openrouter"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", anthropicSender),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(anthropicSender)),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -366,8 +382,8 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 		respondText("openrouter"),
 	}}
 	c := newMemClient(t,
-		WithProviderSender("anthropic", anthropicSender),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(anthropicSender)),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 	)
 	conv, err := c.Conversation(context.Background(),
@@ -386,7 +402,7 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 // loudly rather than silently selecting a model.
 func TestConversationNoModelNoDefaultErrors(t *testing.T) {
 	c, err := NewClient(
-		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -406,8 +422,8 @@ func TestSendParamsNoFallbackBypassesBreaker(t *testing.T) {
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", primary),
-		WithProviderSender("openrouter", fallback),
+		WithProviderSender("anthropic", sdkFake(primary)),
+		WithProviderSender("openrouter", sdkFake(fallback)),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -438,7 +454,7 @@ func TestInMemoryConversation(t *testing.T) {
 	}}
 	// No WithStore: conversation degrades to in-memory history.
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -480,8 +496,8 @@ func TestInMemoryConversation(t *testing.T) {
 
 func TestIsPromptTooLarge(t *testing.T) {
 	c := assert.NewCollecting(t)
-	c.True(isPromptTooLarge(promptTooLargeErr()), "fabricated prompt-too-long error not recognized")
-	c.False(isPromptTooLarge(authErr()), "401 misclassified as prompt-too-large")
+	c.True(isPromptTooLarge(promptTooLargeAPIErr()), "fabricated prompt-too-long error not recognized")
+	c.False(isPromptTooLarge(&msg.APIError{Status: http.StatusUnauthorized, Kind: msg.ErrOther}), "401 misclassified as prompt-too-large")
 	c.False(isPromptTooLarge(nil), "nil misclassified")
 }
 
@@ -658,8 +674,8 @@ func TestPrimaryOptionRoutesUpstream(t *testing.T) {
 		respondText("from openrouter"),
 	}}
 	c := newMemClient(t,
-		WithProviderSender("anthropic", anthropicSender),
-		WithProviderSender("openrouter", openrouterSender),
+		WithProviderSender("anthropic", sdkFake(anthropicSender)),
+		WithProviderSender("openrouter", sdkFake(openrouterSender)),
 	)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-test"), Primary("openrouter"))
@@ -676,7 +692,7 @@ func TestThinkingBudgetSetsParam(t *testing.T) {
 	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
-	c := newMemClient(t, WithProviderSender("anthropic", sender))
+	c := newMemClient(t, WithProviderSender("anthropic", sdkFake(sender)))
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-test"), ThinkingBudget(8192))
 	ck.NoError(err)

@@ -90,13 +90,13 @@ func analyzeRespondTextOnly(text string) func(anthropic.MessageNewParams) (*anth
 	}
 }
 
-func testAnalyzeClient(t *testing.T, sender llm.Sender) *llm.Client {
+func testAnalyzeClient(t *testing.T, sender llm.SDKSender) *llm.Client {
 	t.Helper()
 	// WithDefaultModel is required: the client invents no default model, and
 	// Profile.Defaults() deliberately leaves DetectorModel/DraftModel unset, so
 	// a zero-value Profile resolves its model from this default.
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithDefaultModel("haiku-latest"),
 	)
 	assert.NewAborting(t).NoError(err, "NewClient")

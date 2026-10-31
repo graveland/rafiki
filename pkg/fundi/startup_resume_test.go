@@ -22,9 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -36,13 +35,24 @@ type failFirstSender struct {
 	err   error
 }
 
-func (s *failFirstSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *failFirstSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	if err := s.failOnce(); err != nil {
+		return nil, err
+	}
+	return s.inner.Send(ctx, req, opts)
+}
+
+func (s *failFirstSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	if err := s.failOnce(); err != nil {
+		return nil, err
+	}
+	return s.inner.Stream(ctx, req, opts)
+}
+
+func (s *failFirstSender) failOnce() error {
 	var e error
 	s.once.Do(func() { e = s.err })
-	if e != nil {
-		return nil, e
-	}
-	return s.inner.New(ctx, params)
+	return e
 }
 
 func TestStartupResumeSurvivesAFailedResume(t *testing.T) {
@@ -119,15 +129,29 @@ type blockFirstSender struct {
 	started chan struct{}
 }
 
-func (s *blockFirstSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *blockFirstSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	if err := s.blockOnce(ctx); err != nil {
+		return nil, err
+	}
+	return s.inner.Send(ctx, req, opts)
+}
+
+func (s *blockFirstSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	if err := s.blockOnce(ctx); err != nil {
+		return nil, err
+	}
+	return s.inner.Stream(ctx, req, opts)
+}
+
+func (s *blockFirstSender) blockOnce(ctx context.Context) error {
 	block := false
 	s.once.Do(func() { block = true })
 	if block {
 		close(s.started)
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
-	return s.inner.New(ctx, params)
+	return nil
 }
 
 // TestStartupResumeIsAbortable pins that a turn re-issued by startup resume

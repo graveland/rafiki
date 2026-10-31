@@ -83,8 +83,8 @@ func TestSendParamsDeclOnlyPinsProvider(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(declPinSet(t)),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -121,8 +121,8 @@ func TestSendParamsDeclarationOnlyIsTheOnlyPin(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(declPinSet(t)),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -148,8 +148,8 @@ func TestSendParamsUndeclaredUnaffectedByDeclarations(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(declPinSet(t)),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -171,8 +171,8 @@ func TestSendParamsDeclOnlyMergesGuardIgnore(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(declPinSet(t)),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -207,8 +207,8 @@ func TestSendParamsOperatorBanReachesTheWire(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(declPinSet(t)),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)

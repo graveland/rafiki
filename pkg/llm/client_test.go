@@ -87,7 +87,7 @@ func TestConversationCostPricesResponsesModelByCatalogID(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(responsesProviderSet(t)),
-		WithProviderSender("oa", sender),
+		WithProviderSender("oa", sdkFake(sender)),
 		WithStore(pool),
 		WithCatalog(twoIDCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -121,7 +121,7 @@ func TestConversationCostUnchangedForAnthropic(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(responsesProviderSet(t)),
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithStore(pool),
 		WithCatalog(twoIDCatalog(t)),
 		WithLogger(testLogger(t)),

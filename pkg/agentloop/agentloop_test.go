@@ -144,12 +144,12 @@ func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic
 	c.NoError(err, "append node")
 }
 
-func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string) *llm.Conversation {
+func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender, ref string) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithStore(pool),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
@@ -161,12 +161,12 @@ func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref strin
 	return conv
 }
 
-func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversation {
+func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithStore(pool),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
@@ -654,12 +654,12 @@ func TestConcurrentResume(t *testing.T) {
 
 // newMemConv builds a store-less (in-memory) conversation: full loop
 // semantics, no DB — the fast path for exercising drive() without a store.
-func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
+func newMemConv(t *testing.T, sender llm.SDKSender) *llm.Conversation {
 	t.Helper()
 	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
 	)

@@ -49,7 +49,7 @@ func LoadFakeSender(path string) (llm.Sender, error) {
 		}
 		s.turns = append(s.turns, &msg)
 	}
-	return s, nil
+	return llm.FromSDKSender(s), nil
 }
 
 // New returns the next scripted message. Safe for concurrent use; the agent

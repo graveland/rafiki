@@ -5,10 +5,10 @@ package llm
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
-	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // Message is a conversation message in request form. Alias of the SDK param
@@ -85,16 +85,14 @@ func messageSize(m Message) int {
 // first message, which the library structurally never trims).
 func IsPromptTooLarge(err error) bool { return isPromptTooLarge(err) }
 
-// isPromptTooLarge reports whether err is the API's prompt-size rejection
-// (HTTP 400 whose body says the prompt is too long) — the trigger for
-// TrimPolicy trim-and-retry. Ported from sc's diagnose loop.
+// isPromptTooLarge reports whether err is the API's prompt-size rejection — the
+// trigger for TrimPolicy trim-and-retry. The codec that decoded the refusal
+// decides the kind, so every dialect's spelling of "this prompt does not fit"
+// reaches the same predicate.
 func isPromptTooLarge(err error) bool {
-	var apiErr *anthropic.Error
+	var apiErr *msg.APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	if apiErr.StatusCode != http.StatusBadRequest {
-		return false
-	}
-	return strings.Contains(strings.ToLower(apiErr.RawJSON()), "prompt is too long")
+	return apiErr.Kind == msg.ErrPromptTooLarge
 }

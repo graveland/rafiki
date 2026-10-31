@@ -66,10 +66,10 @@ func convTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
+func testClient(t *testing.T, pool *pgxpool.Pool, sender SDKSender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("haiku-latest"), // conversations created without Model() intend this default
@@ -95,8 +95,8 @@ func TestSendParamsSetsSessionIDFromConversationID(t *testing.T) {
 		respondText("ok"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -141,7 +141,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 		}},
 	})
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithStore(pool),
 		WithCatalog(cat),
 		WithDefaultModel("haiku-latest"),
@@ -163,7 +163,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 	ck.LessOrEqual(1e-9, math.Abs(got-want), "ConversationCost = %v, want %v", got, want)
 
 	// A store-less client reports 0 rather than a bogus figure.
-	bare, err := NewClient(WithProviderSender("anthropic", sender), WithDefaultModel("haiku-latest"))
+	bare, err := NewClient(WithProviderSender("anthropic", sdkFake(sender)), WithDefaultModel("haiku-latest"))
 	ck.Require().NoError(err)
 	ck.Eq(0, bare.ConversationCost(ctx, "some-id"), "ConversationCost without a store")
 }

@@ -22,10 +22,10 @@ import (
 )
 
 // memClient builds a store-less client whose conversations live in memory.
-func memClient(t *testing.T, sender Sender) *Client {
+func memClient(t *testing.T, sender SDKSender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("haiku-latest"),
 		WithLogger(testLogger(t)),

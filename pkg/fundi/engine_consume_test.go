@@ -35,6 +35,13 @@ func (a *ackLog) snapshot() []string {
 
 func (a *ackLog) joined() string { return strings.Join(a.snapshot(), ",") }
 
+// newConsumingEngineSDK is newConsumingEngine for an SDK-typed fake.
+func newConsumingEngineSDK(t *testing.T, ts fakeToolSet, sender llm.SDKSender,
+	onConsumed func([]string), onFatal func(error)) (*Engine, *syncBuffer) {
+	t.Helper()
+	return newConsumingEngine(t, ts, llm.FromSDKSender(sender), onConsumed, onFatal)
+}
+
 // newConsumingEngine mirrors newTestEngineWithSender's config and adds the two
 // hooks these tests need. It builds the EngineConfig here rather than widening
 // newTestEngineWithSender, whose ~20 callers have no use for either hook.
@@ -147,7 +154,7 @@ func TestEngineDoesNotAckWhatFatalDiscards(t *testing.T) {
 	// The sender panics on the turn worker, which is the one path to fatal().
 	// It stalls its own throwaway writer, not the Frontend's, so nothing here
 	// blocks on stdout.
-	eng, _ := newConsumingEngine(t, fakeToolSet{}, panickingSender{w: newStallWriter()},
+	eng, _ := newConsumingEngineSDK(t, fakeToolSet{}, panickingSender{w: newStallWriter()},
 		acked.record, func(error) { close(fatalCalled) })
 
 	eng.HandlePromptID("F1", "first")

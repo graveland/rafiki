@@ -18,6 +18,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -61,15 +62,15 @@ func TestIsRetryable(t *testing.T) {
 		// In-band SSE "error" events (the SDK's opaque ssestream wrapper).
 		// The first is the exact payload a live OpenRouter gemini turn aborted
 		// with mid-iteration; without recognition it killed the whole turn.
-		{"sse timeout_error", streamSSErr(`{"type":"error","error":{"type":"timeout_error","message":"The operation was aborted","error_type":"timeout"}}`), liveCtx, true},
-		{"sse overloaded_error", streamSSErr(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), liveCtx, true},
+		{"sse timeout_error", inBandErr(msg.ErrTransient, `{"type":"error","error":{"type":"timeout_error","message":"The operation was aborted","error_type":"timeout"}}`), liveCtx, true},
+		{"sse overloaded_error", inBandErr(msg.ErrOverloaded, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), liveCtx, true},
 		// The exact payload a live OpenRouter gemini turn aborted with at
 		// iteration 41 — a provider rate limit relayed in-band. False for the
 		// same reason the typed 429 above is: sendStreaming's rate-limit loop
 		// owns it (ModelGate backpressure); this loop must not stack a second
 		// backoff on top.
-		{"sse rate_limit_error", streamSSErr(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error","error_type":"rate_limit_exceeded"}}`), liveCtx, false},
-		{"sse invalid_request_error", streamSSErr(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`), liveCtx, false},
+		{"sse rate_limit_error", inBandErr(msg.ErrRateLimit, `{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error","error_type":"rate_limit_exceeded"}}`), liveCtx, false},
+		{"sse invalid_request_error", inBandErr(msg.ErrOther, `{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`), liveCtx, false},
 
 		// String fallback.
 		{"contains 'connection reset'", fmt.Errorf("read: connection reset by peer"), liveCtx, true},
@@ -106,10 +107,11 @@ func (e *timedoutErr) Error() string   { return "i/o timeout" }
 func (e *timedoutErr) Timeout() bool   { return true }
 func (e *timedoutErr) Temporary() bool { return true }
 
-// streamSSErr builds the exact error the SDK's ssestream produces for an
-// in-band "error" event (ssestream v1.37.0, Stream.Next's error case).
-func streamSSErr(payload string) error {
-	return fmt.Errorf("received error while streaming: %s", payload)
+// inBandErr builds the error a native sender surfaces for an in-band SSE
+// "error" event: a status-0 APIError carrying the event's own JSON and the kind
+// its codec derived from it.
+func inBandErr(kind msg.ErrorKind, payload string) error {
+	return &msg.APIError{Status: 0, Body: []byte(payload), Kind: kind, Dialect: msg.DialectAnthropic}
 }
 
 func TestContinueWithRetry_NonTransientError_ReturnsImmediately(t *testing.T) {
@@ -159,7 +161,7 @@ func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
 		fn: func() (*anthropic.Message, error) {
 			if fails > 0 {
 				fails--
-				return nil, streamSSErr(`{"type":"error","error":{"type":"timeout_error",` +
+				return nil, inBandErr(msg.ErrTransient, `{"type":"error","error":{"type":"timeout_error",`+
 					`"message":"The operation was aborted","error_type":"timeout"}}`)
 			}
 			var m anthropic.Message

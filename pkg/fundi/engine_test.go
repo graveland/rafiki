@@ -71,6 +71,20 @@ func scriptedSender(t *testing.T, bodies ...string) llm.Sender {
 	return s
 }
 
+// The SDK variants below take an SDK-typed fake — the leaf senders these tests
+// script (capturingSender, scriptedStreamingSender, panickingSender) — and wrap
+// it in the compat adapter, so a test can keep asserting on the SDK params a
+// request carried.
+func newTestEngineWithSDKSender(t *testing.T, ts fakeToolSet, sender llm.SDKSender) (*Engine, *syncBuffer) {
+	t.Helper()
+	return newTestEngineWithSender(t, ts, llm.FromSDKSender(sender))
+}
+
+func newTestEngineWithSDKConfig(t *testing.T, ts fakeToolSet, sender llm.SDKSender, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
+	t.Helper()
+	return newTestEngineWithConfig(t, ts, llm.FromSDKSender(sender), extra)
+}
+
 // fakeToolSet is a minimal agentloop.ToolSet standing in for the real registry
 // (Task 8): one no-schema definition per key, name-sorted for cache stability.
 type fakeToolSet map[string]func(ctx context.Context, in json.RawMessage) (string, error)
@@ -115,6 +129,26 @@ func frameTypes(t *testing.T, out string) []string {
 		types = append(types, f.Type)
 	}
 	return types
+}
+
+// assertFrameTypesCollapsed compares frame types with consecutive duplicates
+// collapsed, for a sequence whose repeat count is a flush cadence rather than a
+// property of the turn.
+func assertFrameTypesCollapsed(t *testing.T, out string, want []string) {
+	t.Helper()
+	got := collapseRepeats(frameTypes(t, out))
+	assert.NewAborting(t).Eq(strings.Join(want, ","), strings.Join(got, ","), "frame sequence (repeats collapsed):\n got %v\nwant %v", got, want)
+}
+
+func collapseRepeats(types []string) []string {
+	out := make([]string, 0, len(types))
+	for i, typ := range types {
+		if i > 0 && typ == types[i-1] {
+			continue
+		}
+		out = append(out, typ)
+	}
+	return out
 }
 
 func assertFrameTypes(t *testing.T, out string, want []string) {
@@ -305,7 +339,20 @@ type blockingSender struct {
 	release chan struct{}
 }
 
-func (s *blockingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *blockingSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	s.gate()
+	return s.inner.Send(ctx, req, opts)
+}
+
+func (s *blockingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	s.gate()
+	return s.inner.Stream(ctx, req, opts)
+}
+
+// gate parks the call it is asked about. A test drives one path at a time
+// (fundi always attaches a stream handler, so that path is Stream), which is
+// what keeps the counter meaning "the n-th request".
+func (s *blockingSender) gate() {
 	s.mu.Lock()
 	s.n++
 	hit := s.n == s.blockAt
@@ -314,7 +361,6 @@ func (s *blockingSender) New(ctx context.Context, params anthropic.MessageNewPar
 		close(s.started)
 		<-s.release
 	}
-	return s.inner.New(ctx, params)
 }
 
 // userMessageTexts returns, in order, the Content of every user-role
@@ -358,9 +404,9 @@ func TestEngineRunsScriptedTurn(t *testing.T) {
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo, before agent_start
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_update", "message_end", // assistant turn 1 (tool_use)
 		"tool_execution_start", "tool_execution_end",
-		"message_start", "message_update", "message_end", // assistant turn 2 (end_turn)
+		"message_start", "message_update", "message_update", "message_end", // assistant turn 2 (end_turn)
 		"agent_end", "agent_settled"})
 
 	c.NotEq("", eng.State().SessionID, "State().SessionID is empty; the daemon sniffs it from get_state")
@@ -459,7 +505,11 @@ func TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn(t *testing.T
 
 	eng.Wait()
 
-	assertFrameTypes(t, out.String(), []string{
+	// The count of message_update frames is a wall-clock cadence
+	// (streamFlushInterval), not a property of the turn — and this test holds a
+	// call open long enough for an extra flush to land under load. Collapse the
+	// consecutive repeats: the SHAPE is what this test is about.
+	assertFrameTypesCollapsed(t, out.String(), []string{
 		"message_start", "message_end", // user echo: "go"
 		"agent_start",
 		"message_start", "message_update", "message_end", // assistant iter 1 (tool_use)
@@ -496,7 +546,7 @@ func TestEngineEmitsAgentErrorOnLoopFailure(t *testing.T) {
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_update", "message_end", // assistant turn 1 (tool_use)
 		"tool_execution_start", "tool_execution_end",
 		"agent_error",
 		"agent_end", "agent_settled",
@@ -565,13 +615,15 @@ func TestEnginePublishesNativeErrorEventOnLoopFailure(t *testing.T) {
 func TestLoadFakeSenderReplaysInOrderThenErrors(t *testing.T) {
 	c := assert.NewAborting(t)
 	s := scriptedSender(t, sampleResp, sampleEndTurn)
-	first, err := s.New(context.Background(), anthropic.MessageNewParams{})
+	req := &msg.Request{Model: "claude-x", MaxTokens: 16,
+		Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}}
+	first, err := s.Send(context.Background(), req, msg.EncodeOptions{})
 	c.NoError(err)
 	c.Eq("msg_1", first.ID, "first replayed message id")
-	second, err := s.New(context.Background(), anthropic.MessageNewParams{})
+	second, err := s.Send(context.Background(), req, msg.EncodeOptions{})
 	c.NoError(err)
 	c.Eq("msg_2", second.ID, "second replayed message id")
-	if _, err := s.New(context.Background(), anthropic.MessageNewParams{}); err == nil {
+	if _, err := s.Send(context.Background(), req, msg.EncodeOptions{}); err == nil {
 		t.Fatal("exhausted scripted sender returned no error")
 	}
 }
@@ -609,11 +661,18 @@ func blockOnCtxTool(started chan struct{}) func(ctx context.Context, in json.Raw
 // so a later turn can still replay it.
 type ctxCheckingSender struct{ inner llm.Sender }
 
-func (s ctxCheckingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s ctxCheckingSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.inner.New(ctx, params)
+	return s.inner.Send(ctx, req, opts)
+}
+
+func (s ctxCheckingSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.inner.Stream(ctx, req, opts)
 }
 
 // TestEngineAbortMidTurnEndsCleanlyAndStaysReusable covers in-band abort end
@@ -639,7 +698,7 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo: "go"
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_update", "message_end", // assistant turn 1 (tool_use)
 		"tool_execution_start", "tool_execution_end", // isError, checked below
 		"agent_end", "agent_settled",
 	})
@@ -658,11 +717,11 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 	eng.Wait()
 
 	allTypes := frameTypes(t, out.String())
-	secondTurn := allTypes[len(allTypes)-8:]
+	secondTurn := allTypes[len(allTypes)-9:]
 	want := []string{
 		"message_start", "message_end", // user echo: "second"
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn (end_turn)
+		"message_start", "message_update", "message_update", "message_end", // assistant turn (end_turn)
 		"agent_end", "agent_settled",
 	}
 	c.Eq(strings.Join(want, ","), strings.Join(secondTurn, ","), "second turn's frames:\n got %v\nwant %v (a clean run, no agent_error)", secondTurn, want)
@@ -818,7 +877,7 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo: "go"
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn (tool_use)
+		"message_start", "message_update", "message_update", "message_end", // assistant turn (tool_use)
 		"tool_execution_start", "tool_execution_end", // isError: the tool observed the abort
 		"agent_end", "agent_settled",
 	})
@@ -875,7 +934,7 @@ func TestWorkerWaitsForStart(t *testing.T) {
 	silenceSlog(t)
 	sender := newCapturingSender(t, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithDefaultModel("claude-x"))
 	c.NoError(err)
 	out := &syncBuffer{}

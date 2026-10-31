@@ -77,7 +77,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 	silenceSlog(t)
 	w := newStallWriter()
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", panickingSender{w: w}),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(panickingSender{w: w})),
 		llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 
@@ -138,7 +138,7 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 	silenceSlog(t)
 	out := &syncBuffer{}
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", panickingSender{w: newStallWriter()}),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(panickingSender{w: newStallWriter()})),
 		llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 	// The sender above stalls its OWN throwaway writer, not this one, so the

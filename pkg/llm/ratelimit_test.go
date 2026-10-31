@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -113,40 +113,25 @@ func TestIsRateLimit(t *testing.T) {
 			wantRL: false,
 		},
 		{
-			name: "429 with Retry-After seconds",
-			err: &anthropic.Error{
-				StatusCode: http.StatusTooManyRequests,
-				Response: &http.Response{
-					StatusCode: http.StatusTooManyRequests,
-					Header:     http.Header{"Retry-After": {"30"}},
-				},
-			},
+			name:   "429 with Retry-After seconds",
+			err:    rateLimitAPIErrWithRetryAfter(30),
 			wantRL: true,
 			wantRA: 30 * time.Second,
 		},
 		{
-			name: "429 without Retry-After",
-			err: &anthropic.Error{
-				StatusCode: http.StatusTooManyRequests,
-				Response: &http.Response{
-					StatusCode: http.StatusTooManyRequests,
-				},
-			},
+			name:   "429 without Retry-After",
+			err:    &msg.APIError{Status: http.StatusTooManyRequests, Kind: msg.ErrRateLimit},
 			wantRL: true,
 			wantRA: 0,
 		},
 		{
-			name: "529 not rate limit",
-			err: &anthropic.Error{
-				StatusCode: 529,
-			},
+			name:   "529 not rate limit",
+			err:    &msg.APIError{Status: 529, Kind: msg.ErrOverloaded},
 			wantRL: false,
 		},
 		{
-			name: "400 not rate limit",
-			err: &anthropic.Error{
-				StatusCode: http.StatusBadRequest,
-			},
+			name:   "400 not rate limit",
+			err:    &msg.APIError{Status: http.StatusBadRequest, Kind: msg.ErrOther},
 			wantRL: false,
 		},
 	}
@@ -173,7 +158,7 @@ func TestRateLimitPolicyEffective(t *testing.T) {
 
 func TestIsRateLimitWithRetryAfterHelper(t *testing.T) {
 	c := assert.NewCollecting(t)
-	rl, ra := isRateLimit(rateLimitErrWithRetryAfter(45))
+	rl, ra := isRateLimit(rateLimitAPIErrWithRetryAfter(45))
 	c.True(rl, "expected 429 with Retry-After to be a rate limit")
 	c.Eq(45*time.Second, ra, "retryAfter")
 }

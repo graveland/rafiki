@@ -6,21 +6,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/klauspost/compress/zstd"
 
+	"go.graveland.dev/rafiki/pkg/msg"
+	"go.graveland.dev/rafiki/pkg/msg/responses"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -32,6 +32,18 @@ const (
 	openAIResponsesBaseURL = "https://api.openai.com/v1"
 	chatGPTBaseURL         = "https://chatgpt.com/backend-api/codex"
 )
+
+// responsesMaxLineBytes caps one SSE line. It is not a formality: the endpoint
+// sends whole output items on a single `data:` line, and a reasoning item's
+// encrypted_content is a multi-kilobyte (sometimes multi-megabyte) base64 blob.
+const responsesMaxLineBytes = 64 << 20
+
+// defaultResponsesStreamIdleTimeout is how long the decoder waits for the next
+// event before declaring the stream dead. codex uses 300 s; a reasoning model
+// can sit silent for a long time before the first token, so a short timeout
+// would fail healthy turns. Held in the sender (not hardcoded) so tests can
+// shorten it.
+const defaultResponsesStreamIdleTimeout = 300 * time.Second
 
 // chatGPTInstructionsAsDeveloperMessage places the system prompt where current
 // codex puts it: the first input item, as a developer message, with no top-level
@@ -72,27 +84,21 @@ func (t StaticToken) Token(context.Context, bool) (string, http.Header, error) {
 }
 
 // ModelFact is what the serving account's /models entry says about one model.
-//
-// Every field is optional in the server's answer, and "absent" means "this
-// deployment does not tell us", not "false" and not "empty". The sender's rule
-// is to omit a field the server's answer does not mention rather than send a
-// value the endpoint may reject: these four are exactly the fields codex gates
-// its own request on from its /models response.
-type ModelFact struct {
-	SupportsReasoningSummary bool     // supports_reasoning_summary_parameter
-	SupportsVerbosity        bool     // support_verbosity
-	DefaultVerbosity         string   // default_verbosity
-	ReasoningLevels          []string // supported_reasoning_levels[].effort, server order
-}
+// It is the Responses codec's fact, aliased so callers keep their spelling.
+type ModelFact = responses.ModelFact
 
 // ModelFacts looks a model up in the owner's /models cache; ok=false when
 // unknown. Nil is legal.
-type ModelFacts func(model string) (ModelFact, bool)
+type ModelFacts = responses.ModelFacts
+
+// UsageLimitError is a subscription usage limit: terminal for the turn, never
+// retried, because the reset is hours or days away. The Responses codec builds
+// it; no classifier in this package matches it.
+type UsageLimitError = responses.UsageLimitError
 
 // responsesSender is the Sender for providers.KindOpenAIResponses and
-// providers.KindOpenAIResponsesChatGPT: the OpenAI Responses API, translated
-// to/from the Anthropic Messages shape at this boundary so nothing above
-// pkg/llm learns a second wire format.
+// providers.KindOpenAIResponsesChatGPT: the OpenAI Responses API, spoken
+// through the Responses codec.
 //
 // The two modes differ in exactly four ways, and each is a field here rather
 // than a second sender type: the base URL (fixed for ChatGPT), the credential
@@ -107,9 +113,9 @@ type ModelFacts func(model string) (ModelFact, bool)
 type responsesSender struct {
 	baseURL string // scheme+host+path prefix, trailing "/" trimmed; never empty
 	chatGPT bool
+	codec   responses.Codec
 
 	tokens TokenSource // never nil: NewChatGPTResponsesSender refuses nil, newResponsesSender wraps the key
-	facts  ModelFacts  // nil means nothing is known about any model
 
 	client *http.Client
 
@@ -145,6 +151,7 @@ func newResponsesSender(p providers.Provider, key string, rt http.RoundTripper) 
 	}
 	return &responsesSender{
 		baseURL:           strings.TrimRight(base, "/"),
+		codec:             responses.Codec{Mode: responses.ModeAPI},
 		tokens:            StaticToken(key),
 		client:            &http.Client{Transport: headerCaptureTransport{base: rt}},
 		streamIdleTimeout: defaultResponsesStreamIdleTimeout,
@@ -154,11 +161,6 @@ func newResponsesSender(p providers.Provider, key string, rt http.RoundTripper) 
 
 // NewChatGPTResponsesSender builds the KindOpenAIResponsesChatGPT sender bound to
 // one owner's TokenSource.
-//
-// It returns the Sender interface because that is what a caller wiring a
-// provider table holds, but the value also satisfies StreamingSender: ChatGPT
-// mode is stream-only (the endpoint refuses store:true, and New assembles the
-// streamed events into a message).
 //
 // Each sender owns its own cookie jar. The chatgpt.com edge answers a challenge
 // with a Set-Cookie the follow-up request must replay; a jar shared between
@@ -173,118 +175,107 @@ func NewChatGPTResponsesSender(p providers.Provider, ts TokenSource, facts Model
 		return nil, fmt.Errorf("llm: provider %q: cookie jar: %w", p.Name, err)
 	}
 	return &responsesSender{
-		baseURL:           chatGPTBaseURL,
-		chatGPT:           true,
+		baseURL: chatGPTBaseURL,
+		chatGPT: true,
+		codec: responses.Codec{
+			Mode:       responses.ModeChatGPT,
+			Facts:      facts,
+			DevMessage: chatGPTInstructionsAsDeveloperMessage,
+		},
 		tokens:            ts,
-		facts:             facts,
 		client:            &http.Client{Transport: headerCaptureTransport{base: rt}, Jar: jar},
 		streamIdleTimeout: defaultResponsesStreamIdleTimeout,
 		maxLineBytes:      responsesMaxLineBytes,
 	}, nil
 }
 
-// New issues one Responses call and translates the response into an
-// anthropic.Message.
+// Send issues one Responses call.
 //
 // In ChatGPT mode there is no non-streamed call to make (store must be false and
-// the endpoint always streams), so New opens the stream and accumulates it: the
-// caller gets the same fully-formed message either way.
-func (s *responsesSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+// the endpoint always streams), so Send opens the stream and accumulates it: the
+// caller gets the same fully-formed response either way.
+func (s *responsesSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
 	if s.chatGPT {
-		return s.newFromStream(ctx, params)
+		return s.sendFromStream(ctx, req, opts)
 	}
-	req, resp, err := s.post(ctx, params, false)
+	opts.Stream = false
+	_, resp, err := s.post(ctx, req, opts)
 	if err != nil {
 		return nil, err
 	}
+	// responsesMaxLineBytes, not the error cap: a non-streamed reply carries whole
+	// output items, and a reasoning item's encrypted content alone can be
+	// megabytes.
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, responsesMaxLineBytes))
 	resp.Body.Close()
-	if err := s.errorFor(req, resp, body); err != nil {
+	if err := s.errorFor(resp, body); err != nil {
 		return nil, err
 	}
 	if readErr != nil {
 		return nil, fmt.Errorf("llm: openai-responses: read response: %w", readErr)
 	}
-	var wire responsesResponseObject
-	if err := json.Unmarshal(body, &wire); err != nil {
-		return nil, fmt.Errorf("llm: openai-responses: decode response (status %d): %w: %.200s", resp.StatusCode, err, body)
-	}
-	return parseResponsesResponse(&wire, s.signatureMode())
+	return s.codec.DecodeResponse(body)
 }
 
-// signatureMode is the Responses dialect this sender talks to, and therefore
-// the only mode of reasoning blob it may mint or resend. The encrypted content
-// is bound to the backend that produced it, so a failover between the two
-// Responses kinds has to drop the foreign blob exactly as a failover to
-// Anthropic does.
-func (s *responsesSender) signatureMode() ResponsesSignatureMode {
-	if s.chatGPT {
-		return ResponsesModeChatGPT
-	}
-	return ResponsesModeAPI
-}
-
-// newFromStream is ChatGPT mode's New: stream, accumulate, and hand back the
-// message. The stream's own error is returned verbatim so the classifiers above
+// sendFromStream is ChatGPT mode's Send: stream, accumulate, and hand back the
+// response. The stream's own error is returned verbatim so the classifiers above
 // this package see the same values the streaming path produces.
-func (s *responsesSender) newFromStream(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	stream, err := s.NewStreaming(ctx, params)
+func (s *responsesSender) sendFromStream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	dec, err := s.Stream(ctx, req, opts)
 	if err != nil {
 		return nil, err
 	}
-	defer stream.Close()
-	acc := anthropic.Message{}
-	for stream.Next() {
-		ev := stream.Current()
-		FixEmptyToolInput(&ev)
-		SanitizeInvalidAccumulatedInput(&acc, ev)
-		if aerr := acc.Accumulate(ev); aerr != nil {
+	defer func() {
+		if cerr := dec.Close(); cerr != nil {
+			slog.Debug("llm: openai-responses: close stream failed", "error", cerr)
+		}
+	}()
+	acc := msg.NewAccumulator()
+	for {
+		ev, err := dec.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if aerr := acc.Add(ev); aerr != nil {
 			return nil, fmt.Errorf("llm: openai-responses: accumulate stream event: %w", aerr)
 		}
-		FixAccumulatedEmptyToolInput(&acc, ev)
-		backfillDeltaUsage(&acc, ev)
 	}
-	if serr := stream.Err(); serr != nil {
-		return nil, serr
-	}
-	return &acc, nil
+	return acc.Response(), nil
 }
 
-// NewStreaming opens one Responses call with "stream": true and returns the
-// response translated into the Anthropic stream event sequence.
-func (s *responsesSender) NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
-	req, resp, err := s.post(ctx, params, true)
+// Stream opens one Responses call with the stream flag set and hands back the
+// codec's decoder.
+func (s *responsesSender) Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error) {
+	opts.Stream = true
+	_, resp, err := s.post(ctx, req, opts)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Drain before closing so the connection stays reusable. The body is
-		// what a usage limit is recognized by, so it is read rather than
-		// discarded.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		// Read the body before closing: it is where a usage limit and the
+		// classification live, and draining keeps the connection reusable.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		resp.Body.Close()
-		if uerr := s.errorFor(req, resp, body); uerr != nil {
-			return nil, uerr
-		}
-		// errorFor only returns nil for a 2xx; defensive.
-		return nil, &anthropic.Error{StatusCode: resp.StatusCode, Request: req, Response: resp}
+		return nil, s.errorFor(resp, body)
 	}
-	return ssestream.NewStream[anthropic.MessageStreamEventUnion](newResponsesSSEDecoder(resp.Body, s.streamIdleTimeout, s.maxLineBytes, s.signatureMode()), nil), nil
+	return s.codec.NewStreamDecoder(resp.Body, s.streamIdleTimeout, s.maxLineBytes), nil
 }
 
 // post issues one request, retrying once after a 401 with a forced credential
 // refresh. A second 401 is returned as-is: a credential the token source cannot
 // fix is a configuration problem, and a third attempt would only spend more time
 // reaching the same answer.
-func (s *responsesSender) post(ctx context.Context, params anthropic.MessageNewParams, stream bool) (*http.Request, *http.Response, error) {
-	sessionID, _ := sessionIDFromContext(ctx)
-	body, err := buildResponsesRequestBody(params, responsesBuildOptions{
-		chatGPT:    s.chatGPT,
-		stream:     stream,
-		sessionID:  sessionID,
-		devMessage: s.chatGPT && chatGPTInstructionsAsDeveloperMessage,
-		facts:      s.facts,
-	})
+func (s *responsesSender) post(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*http.Request, *http.Response, error) {
+	if opts.SessionID == "" {
+		// The session id rides the body (prompt_cache_key) as well as the header,
+		// so it is resolved before the body is encoded.
+		opts.SessionID, _ = sessionIDFromContext(ctx)
+	}
+	sessionID := opts.SessionID
+	body, err := s.codec.Encode(req, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -293,30 +284,30 @@ func (s *responsesSender) post(ctx context.Context, params anthropic.MessageNewP
 		return nil, nil, err
 	}
 
-	var req *http.Request
+	var httpReq *http.Request
 	for attempt := 0; attempt < 2; attempt++ {
 		bearer, extra, terr := s.tokens.Token(ctx, attempt > 0)
 		if terr != nil {
 			return nil, nil, fmt.Errorf("llm: openai-responses: resolve credential: %w", terr)
 		}
-		req, err = s.newRequest(ctx, payload, stream, bearer, extra, sessionID)
+		httpReq, err = s.newRequest(ctx, payload, opts.Stream, bearer, extra, sessionID)
 		if err != nil {
 			return nil, nil, err
 		}
-		resp, derr := s.client.Do(req)
+		resp, derr := s.client.Do(httpReq)
 		if derr != nil {
 			return nil, nil, fmt.Errorf("llm: openai-responses: post responses: %w", derr)
 		}
 		s.rememberTurnState(sessionID, resp.Header)
 		if resp.StatusCode != http.StatusUnauthorized || attempt > 0 {
-			return req, resp, nil
+			return httpReq, resp, nil
 		}
 		// First 401: drain and close so the connection stays reusable, ask the
 		// token source for a forced refresh, and try once more.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
 		resp.Body.Close()
 	}
-	return req, nil, fmt.Errorf("llm: openai-responses: post responses: unauthorized")
+	return httpReq, nil, fmt.Errorf("llm: openai-responses: post responses: unauthorized")
 }
 
 // encodeBody compresses the request body when the mode needs it. The ChatGPT
@@ -382,30 +373,47 @@ func (s *responsesSender) newRequest(ctx context.Context, payload []byte, stream
 }
 
 // errorFor classifies a non-2xx response. A subscription usage limit becomes its
-// own terminal type; a context-length overflow becomes the error pkg/llm's trim
-// predicate recognises (so a non-streamed send trims and retries instead of
-// failing the turn); everything else is an *anthropic.Error carrying the status,
-// exactly what openAISender.New returns, so pkg/agentloop's retry classification
-// works unchanged.
-func (s *responsesSender) errorFor(req *http.Request, resp *http.Response, body []byte) error {
+// own terminal type; everything else is an APIError carrying the status and the
+// codec's classification, so a context overflow reaches trim's retry predicate
+// and a 5xx stays retryable.
+func (s *responsesSender) errorFor(resp *http.Response, body []byte) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
-	if u := responsesUsageLimitError(resp.StatusCode, resp.Header, body); u != nil {
+	if u := responses.UsageLimitFromResponse(resp.StatusCode, resp.Header, body); u != nil {
 		return u
 	}
-	// The endpoint reports a context overflow in-band on the streaming path; a
-	// non-streamed call gets it as a 400 whose body carries the same code. Without
-	// this the body was discarded and IsPromptTooLarge could never be true, so
-	// TrimPolicy never fired on this provider.
-	if resp.StatusCode == http.StatusBadRequest {
-		env := decodeResponsesAPIError(body)
-		if responsesErrorCode(env) == "context_length_exceeded" {
-			_, _, message, _ := env.info()
-			return newResponsesPromptTooLargeError(message)
-		}
+	stored := body
+	if len(stored) > maxErrorBody {
+		stored = stored[:maxErrorBody]
 	}
-	return &anthropic.Error{StatusCode: resp.StatusCode, Request: req, Response: resp}
+	return &msg.APIError{
+		Status:     resp.StatusCode,
+		Header:     resp.Header.Clone(),
+		Body:       stored,
+		Kind:       responses.Classify(resp.StatusCode, resp.Header, body),
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		Dialect:    s.codec.Mode.Dialect(),
+		Message:    responsesErrorMessage(body),
+	}
+}
+
+// responsesErrorMessage reads an error message from the endpoint's body, in
+// either the nested or the flat envelope.
+func responsesErrorMessage(body []byte) string {
+	var wire struct {
+		Message string `json:"message"`
+		Error   *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return ""
+	}
+	if wire.Error != nil && wire.Error.Message != "" {
+		return wire.Error.Message
+	}
+	return wire.Message
 }
 
 // rememberTurnState records x-codex-turn-state for the session it arrived on.
@@ -430,556 +438,4 @@ func (s *responsesSender) turnStateFor(sessionID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.turnState[sessionID]
-}
-
-// ---- request shape ----
-
-// responsesBuildOptions is everything the request's SHAPE depends on, kept
-// together because each field is a decision the two modes make differently.
-type responsesBuildOptions struct {
-	chatGPT    bool   // the ChatGPT-subscription dialect
-	stream     bool   // NewStreaming (always true in ChatGPT mode)
-	sessionID  string // prompt_cache_key, and in ChatGPT mode the session-id header
-	devMessage bool   // system prompt as a developer input item
-	facts      ModelFacts
-}
-
-// buildResponsesRequest is the three-argument form of the request builder, for
-// the shape a ChatGPT-mode call always has: streaming.
-func buildResponsesRequest(params anthropic.MessageNewParams, chatgpt bool, sessionID string) ([]byte, error) {
-	return buildResponsesRequestBody(params, responsesBuildOptions{
-		chatGPT:    chatgpt,
-		stream:     chatgpt,
-		sessionID:  sessionID,
-		devMessage: chatgpt && chatGPTInstructionsAsDeveloperMessage,
-	})
-}
-
-// buildResponsesRequestBody translates MessageNewParams into a Responses request
-// body.
-//
-// The shape is the STANDARD Responses shape: top-level instructions and tools,
-// function_call items, no codex dialect. That is not a stylistic preference: the
-// endpoint's lite dialect is selected by the
-// x-openai-internal-codex-responses-lite header and imposes requirements
-// (reasoning.context all_turns, parallel_tool_calls false, function tools
-// replaced by an additional_tools item) that a standard body contradicts. Spike 2
-// confirmed the endpoint accepts the standard shape.
-func buildResponsesRequestBody(params anthropic.MessageNewParams, opts responsesBuildOptions) ([]byte, error) {
-	var fact ModelFact
-	var haveFact bool
-	if opts.facts != nil {
-		fact, haveFact = opts.facts(string(params.Model))
-	}
-
-	req := responsesRequest{
-		Model:             string(params.Model),
-		Input:             []any{},
-		ParallelToolCalls: true,
-		Stream:            opts.stream || opts.chatGPT,
-		MaxOutputTokens:   params.MaxTokens,
-	}
-	if opts.chatGPT {
-		store := false
-		req.Store = &store
-	}
-
-	// Anthropic's system is a top-level field; Responses has both a top-level
-	// instructions string and (as current codex uses) a developer input item.
-	system := responsesSystemText(params.System)
-	switch {
-	case opts.devMessage:
-		if system != "" {
-			req.Input = append(req.Input, responsesMessage{
-				Type:    "message",
-				Role:    "developer",
-				Content: []any{responsesTextPart{Type: "input_text", Text: system}},
-			})
-		}
-	case system != "" || opts.chatGPT:
-		// ChatGPT mode always sends the key (empty when there is no system
-		// prompt): the endpoint's own request shape has it, and an absent
-		// instructions field reads as "use the default", not "no system
-		// prompt".
-		req.Instructions = &system
-	}
-
-	// Foreign thinking has no meaning for this endpoint, and a Responses
-	// reasoning blob is only meaningful to the backend that produced it: a
-	// ChatGPT blob is not resumable on api.openai.com and vice versa. Keep this
-	// sender's own mode only; Anthropic signatures go too.
-	mode := ResponsesModeAPI
-	if opts.chatGPT {
-		mode = ResponsesModeChatGPT
-	}
-	for _, mp := range StripForeignResponsesThinking(params.Messages, mode) {
-		items, err := responsesMessageItems(&mp)
-		if err != nil {
-			return nil, err
-		}
-		req.Input = append(req.Input, items...)
-	}
-
-	for _, t := range params.Tools {
-		if t.OfTool == nil {
-			// Server-side tools (web_search, bash_20250124, ...) have no
-			// function definition to send.
-			slog.Debug("llm: openai-responses: dropping tool with no function equivalent")
-			continue
-		}
-		tp := t.OfTool
-		def := responsesFunctionTool{
-			Type: "function",
-			Name: tp.Name,
-			// strict:false is what the fixture shape carries: strict mode is a
-			// separate, schema-rewriting feature, and a caller that wanted it
-			// has no way to ask through the Anthropic tool shape.
-			Strict:     false,
-			Parameters: responsesToolSchema(tp.InputSchema),
-		}
-		if tp.Description.Valid() {
-			def.Description = tp.Description.Value
-		}
-		req.Tools = append(req.Tools, def)
-	}
-	// tool_choice without tools is an API error, so it is only sent when at
-	// least one function tool survived translation.
-	if len(req.Tools) > 0 {
-		req.ToolChoice = translateResponsesToolChoice(params.ToolChoice)
-	}
-
-	effort, reasoning := responsesEffort(params.Thinking, fact, haveFact)
-	if reasoning {
-		r := responsesReasoning{Effort: effort}
-		// summary is available on openai-responses, and on the ChatGPT
-		// dialect only for models whose /models entry offers it.
-		if !opts.chatGPT || fact.SupportsReasoningSummary {
-			r.Summary = "auto"
-		}
-		req.Reasoning = &r
-	}
-	// Encrypted reasoning content is what makes a reasoning item resendable, so
-	// it is requested whenever reasoning is, and always in ChatGPT mode (where
-	// the endpoint emits reasoning items regardless of our effort choice).
-	if reasoning || opts.chatGPT {
-		req.Include = []string{"reasoning.encrypted_content"}
-	}
-	// verbosity is a ChatGPT-dialect field: it is sent only for a model whose
-	// /models entry declares support AND a default, since an empty verbosity is
-	// not a value the endpoint can act on.
-	if opts.chatGPT && fact.SupportsVerbosity && fact.DefaultVerbosity != "" {
-		req.Text = &responsesText{Verbosity: fact.DefaultVerbosity}
-	}
-	// temperature is not a supported parameter on the ChatGPT dialect (400
-	// "Unsupported parameter: temperature"), so it is never sent there.
-	if !opts.chatGPT && params.Temperature.Valid() {
-		t := params.Temperature.Value
-		req.Temperature = &t
-	}
-	if opts.sessionID != "" {
-		req.PromptCacheKey = opts.sessionID
-	}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("llm: openai-responses: marshal request: %w", err)
-	}
-	return body, nil
-}
-
-// responsesSystemText joins the system blocks with a blank line. One string, not
-// one per block: the Responses API has a single system field either way.
-func responsesSystemText(blocks []anthropic.TextBlockParam) string {
-	parts := make([]string, 0, len(blocks))
-	for _, b := range blocks {
-		if b.Text != "" {
-			parts = append(parts, b.Text)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-// responsesToolSchema renders a tool's input schema. Only the three keys every
-// input schema in this codebase declares are carried: an Anthropic tool has no
-// place to put JSON-schema keywords the API does not model, so inventing them
-// (additionalProperties: false, for instance) would silently narrow a caller's
-// schema.
-func responsesToolSchema(s anthropic.ToolInputSchemaParam) map[string]any {
-	schema := map[string]any{"type": "object"}
-	if v := string(s.Type); v != "" {
-		schema["type"] = v
-	}
-	if s.Properties != nil {
-		schema["properties"] = s.Properties
-	}
-	if len(s.Required) > 0 {
-		schema["required"] = s.Required
-	}
-	return schema
-}
-
-// translateResponsesToolChoice maps Anthropic's tool_choice onto the Responses
-// spelling: auto, required, none, or {"type":"function","name":…}. A zero union
-// maps to nil, which omits the field. Same mapping as translateOpenAIToolChoice
-// except the named form, which Responses spells without the nested function
-// object.
-func translateResponsesToolChoice(tc anthropic.ToolChoiceUnionParam) any {
-	switch {
-	case tc.OfAuto != nil:
-		return "auto"
-	case tc.OfAny != nil:
-		return "required"
-	case tc.OfTool != nil:
-		return responsesToolChoiceFunction{Type: "function", Name: tc.OfTool.Name}
-	case tc.OfNone != nil:
-		return "none"
-	default:
-		return nil
-	}
-}
-
-// responsesEffortOrder is fundi's escalating ladder, lowest first. It is both
-// the clamp order and the vocabulary the endpoint's /models entries use.
-var responsesEffortOrder = []string{"minimal", "low", "medium", "high", "xhigh"}
-
-// responsesEffort resolves one thinking budget to a reasoning effort, and says
-// whether reasoning was requested at all.
-//
-// The budget thresholds are fundi's own levels (low 4096, medium 8192, high
-// 16384, xhigh 32768). When the model's facts are known its supported levels
-// win: the desired level if listed, else the highest listed level below it, else
-// the lowest listed level. Without facts the only correction is xhigh to high,
-// because xhigh is a codex-dialect level a plain api.openai.com model may not
-// accept.
-func responsesEffort(t anthropic.ThinkingConfigParamUnion, fact ModelFact, haveFact bool) (string, bool) {
-	if t.OfEnabled == nil {
-		// Disabled, absent, or adaptive (the model picks its own effort): no
-		// reasoning block to send.
-		return "", false
-	}
-	b := t.OfEnabled.BudgetTokens
-	desired := "xhigh"
-	switch {
-	case b <= 4096:
-		desired = "low"
-	case b <= 8192:
-		desired = "medium"
-	case b <= 16384:
-		desired = "high"
-	}
-	if haveFact && len(fact.ReasoningLevels) > 0 {
-		return clampResponsesEffort(desired, fact.ReasoningLevels), true
-	}
-	if desired == "xhigh" {
-		desired = "high"
-	}
-	return desired, true
-}
-
-// clampResponsesEffort keeps desired if levels supports it, else lowers to the
-// highest supported level below it, else the lowest supported level. levels
-// arrives in the server's order; the clamp walks responsesEffortOrder so an
-// unfamiliar level name in the middle cannot reorder the ladder.
-func clampResponsesEffort(desired string, levels []string) string {
-	if slices.Contains(levels, desired) {
-		return desired
-	}
-	desiredRank := slices.Index(responsesEffortOrder, desired)
-	if desiredRank < 0 {
-		desiredRank = len(responsesEffortOrder) - 1
-	}
-	best := ""
-	bestRank := -1
-	lowest := ""
-	lowestRank := len(responsesEffortOrder)
-	for _, l := range levels {
-		rank := slices.Index(responsesEffortOrder, l)
-		if rank < 0 {
-			continue // a level this ladder does not know
-		}
-		if rank < desiredRank && rank > bestRank {
-			best, bestRank = l, rank
-		}
-		if rank < lowestRank {
-			lowest, lowestRank = l, rank
-		}
-	}
-	if best != "" {
-		return best
-	}
-	if lowest != "" {
-		return lowest
-	}
-	return desired
-}
-
-// responsesMessageItems translates one Anthropic message into Responses input
-// items, preserving block order.
-//
-// tool_use becomes function_call with NO id key, ever. The endpoint's own item
-// ids are fc_… and it rejects any other prefix (a resent id that came from
-// Anthropic after a failover would be toolu_…), while it accepts a function_call
-// without one. The id an Anthropic tool_use block HAS is the endpoint's call_id,
-// which is what correlates the call with its output; the separate fc_… item id
-// has nowhere to live in an Anthropic tool_use block and is discarded.
-func responsesMessageItems(mp *anthropic.MessageParam) ([]any, error) {
-	var items []any
-	var textParts []any
-	role := "user"
-	partType := "input_text"
-	if mp.Role == "assistant" {
-		role = "assistant"
-		partType = "output_text"
-	} else if mp.Role != "user" {
-		return nil, fmt.Errorf("llm: openai-responses: message role %q has no Responses equivalent", mp.Role)
-	}
-	flush := func() {
-		if len(textParts) == 0 {
-			return
-		}
-		items = append(items, responsesMessage{Type: "message", Role: role, Content: textParts})
-		textParts = nil
-	}
-
-	for i := range mp.Content {
-		b := &mp.Content[i]
-		switch {
-		case b.OfText != nil:
-			if b.OfText.Text == "" {
-				continue
-			}
-			textParts = append(textParts, responsesTextPart{Type: partType, Text: b.OfText.Text})
-		case b.OfImage != nil:
-			img, err := responsesImagePart(b.OfImage)
-			if err != nil {
-				return nil, err
-			}
-			textParts = append(textParts, img)
-		case b.OfThinking != nil:
-			_, id, blob, ok := ParseResponsesSignature(b.OfThinking.Signature)
-			if !ok || blob == "" {
-				// Not our reasoning (dropped by StripForeignResponsesThinking
-				// already, so this is a block that names no item: unparseable or
-				// the other Responses dialect), or a reasoning item whose encrypted
-				// content is empty: an empty blob carries nothing, so resending it
-				// only costs tokens.
-				continue
-			}
-			flush()
-			summary := []responsesSummaryPart{}
-			if txt := b.OfThinking.Thinking; txt != "" {
-				summary = append(summary, responsesSummaryPart{Type: "summary_text", Text: txt})
-			}
-			items = append(items, responsesReasoningItem{
-				Type:             "reasoning",
-				ID:               id,
-				EncryptedContent: blob,
-				Summary:          summary,
-			})
-		case b.OfToolUse != nil:
-			if role != "assistant" {
-				return nil, fmt.Errorf("llm: openai-responses: tool_use in a %q message", mp.Role)
-			}
-			args, err := openAIToolArguments(b.OfToolUse.Input)
-			if err != nil {
-				return nil, fmt.Errorf("llm: openai-responses: tool_use %q: %w", b.OfToolUse.ID, err)
-			}
-			flush()
-			items = append(items, responsesFunctionCall{
-				Type:      "function_call",
-				CallID:    b.OfToolUse.ID,
-				Name:      b.OfToolUse.Name,
-				Arguments: args,
-			})
-		case b.OfToolResult != nil:
-			flush()
-			items = append(items, responsesFunctionCallOutputFrom(b.OfToolResult))
-		default:
-			logDroppedResponsesBlock(b, string(mp.Role))
-		}
-	}
-	flush()
-	return items, nil
-}
-
-// responsesFunctionCallOutputFrom renders one tool result. Text-only results
-// carry a plain string; a result with an image carries the array form, which the
-// endpoint accepts (spike 5) and which is the only way to send an image back.
-func responsesFunctionCallOutputFrom(tr *anthropic.ToolResultBlockParam) responsesFunctionCallOutput {
-	var text strings.Builder
-	var parts []any
-	for _, c := range tr.Content {
-		switch {
-		case c.OfText != nil:
-			text.WriteString(c.OfText.Text)
-			if c.OfText.Text != "" {
-				parts = append(parts, responsesTextPart{Type: "input_text", Text: c.OfText.Text})
-			}
-		case c.OfImage != nil:
-			img, err := responsesImagePart(c.OfImage)
-			if err != nil {
-				// An unrenderable image is dropped from the array form rather
-				// than failing the turn: the text of the result still reaches
-				// the model, which is the whole point of the tool result.
-				logDroppedResponsesBlock(&anthropic.ContentBlockParamUnion{OfImage: c.OfImage}, "tool_result")
-				continue
-			}
-			parts = append(parts, img)
-		default:
-			logDroppedResponsesBlock(&anthropic.ContentBlockParamUnion{OfText: c.OfText}, "tool_result")
-		}
-	}
-	out := responsesFunctionCallOutput{Type: "function_call_output", CallID: tr.ToolUseID}
-	if parts != nil && containsImagePart(parts) {
-		out.Output = parts
-	} else {
-		out.Output = text.String()
-	}
-	return out
-}
-
-// containsImagePart reports whether any part of a tool result is an image, which
-// is what selects the array form of "output".
-func containsImagePart(parts []any) bool {
-	for _, p := range parts {
-		if _, ok := p.(responsesInputImage); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// responsesImagePart renders an Anthropic image block as a data URL, which is the
-// only image form the Responses input accepts for a base64 source. A URL source
-// passes through unchanged.
-func responsesImagePart(b *anthropic.ImageBlockParam) (responsesInputImage, error) {
-	if u := b.Source.OfURL; u != nil && u.URL != "" {
-		return responsesInputImage{Type: "input_image", ImageURL: u.URL}, nil
-	}
-	if s := b.Source.OfBase64; s != nil && s.Data != "" {
-		media := string(s.MediaType)
-		if media == "" {
-			media = "image/png"
-		}
-		return responsesInputImage{
-			Type:     "input_image",
-			ImageURL: "data:" + media + ";base64," + s.Data,
-		}, nil
-	}
-	return responsesInputImage{}, fmt.Errorf("llm: openai-responses: image block has no usable source")
-}
-
-// logDroppedResponsesBlock reports a content block this translation cannot
-// represent. Images and documents carry user content, so losing them is worth a
-// warning; thinking blocks are routine and carry no user content.
-func logDroppedResponsesBlock(b *anthropic.ContentBlockParamUnion, role string) {
-	name := "unknown"
-	if t := b.GetType(); t != nil && *t != "" {
-		name = *t
-	}
-	loud := name == "image" || name == "document" || name == "search_result"
-	msg := "llm: openai-responses: dropping content block with no Responses equivalent"
-	if loud {
-		slog.Warn(msg, "role", role, "type", name)
-		return
-	}
-	slog.Debug(msg, "role", role, "type", name)
-}
-
-// ---- wire shapes of a Responses request ----
-
-// responsesRequest is one POST /responses body. Absent fields are absent for a
-// reason and each is documented above at its assignment site.
-type responsesRequest struct {
-	Model             string                  `json:"model"`
-	Instructions      *string                 `json:"instructions,omitempty"`
-	Input             []any                   `json:"input"`
-	Tools             []responsesFunctionTool `json:"tools,omitempty"`
-	ToolChoice        any                     `json:"tool_choice,omitempty"`
-	ParallelToolCalls bool                    `json:"parallel_tool_calls"`
-	Reasoning         *responsesReasoning     `json:"reasoning,omitempty"`
-	Text              *responsesText          `json:"text,omitempty"`
-	MaxOutputTokens   int64                   `json:"max_output_tokens"`
-	Temperature       *float64                `json:"temperature,omitempty"`
-	Stream            bool                    `json:"stream"`
-	Store             *bool                   `json:"store,omitempty"`
-	Include           []string                `json:"include,omitempty"`
-	PromptCacheKey    string                  `json:"prompt_cache_key,omitempty"`
-}
-
-type responsesReasoning struct {
-	Effort string `json:"effort"`
-	// Summary is "auto" only where the model's facts allow it. context is never
-	// sent: codex sends it only in the lite dialect, and the standard shape
-	// omits it.
-	Summary string `json:"summary,omitempty"`
-}
-
-type responsesText struct {
-	Verbosity string `json:"verbosity"`
-}
-
-type responsesFunctionTool struct {
-	Type        string         `json:"type"` // always "function"
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
-	Strict      bool           `json:"strict"`
-}
-
-// responsesToolChoiceFunction is the named-tool spelling: no nested function
-// object, unlike Chat Completions.
-type responsesToolChoiceFunction struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-}
-
-// responsesMessage is an input item carrying conversation content: role user or
-// assistant for the transcript, developer for the system prompt's alternative
-// placement.
-type responsesMessage struct {
-	Type    string `json:"type"` // "message"
-	Role    string `json:"role"`
-	Content []any  `json:"content"`
-}
-
-// responsesTextPart is one content part of a message item. The type differs by
-// role: input_text for a user or developer message, output_text for an
-// assistant's own words.
-type responsesTextPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type responsesInputImage struct {
-	Type     string `json:"type"` // "input_image"
-	ImageURL string `json:"image_url"`
-}
-
-// responsesReasoningItem resends one reasoning item from the transcript. id and
-// encrypted_content are the two halves of this package's thinking signature;
-// summary echoes the thinking text so a human reading the transcript sees what
-// the item's summary was.
-type responsesReasoningItem struct {
-	Type             string                 `json:"type"` // "reasoning"
-	ID               string                 `json:"id"`
-	EncryptedContent string                 `json:"encrypted_content"`
-	Summary          []responsesSummaryPart `json:"summary"`
-}
-
-// responsesFunctionCall is a resent tool call. It deliberately has no id field:
-// see responsesMessageItems.
-type responsesFunctionCall struct {
-	Type      string `json:"type"` // "function_call"
-	CallID    string `json:"call_id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
-// responsesFunctionCallOutput is one tool result. Output is a string for a text
-// result and an array of input parts when the result carries an image.
-type responsesFunctionCallOutput struct {
-	Type   string `json:"type"` // "function_call_output"
-	CallID string `json:"call_id"`
-	Output any    `json:"output"`
 }

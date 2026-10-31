@@ -59,6 +59,12 @@ func (s *prefillGateSender) openGate() {
 // callCount reports how many requests the inner sender actually served.
 func (s *prefillGateSender) callCount() int { return s.inner.callCount() }
 
+// prefillDBEngineSDK is prefillDBEngine for an SDK-typed fake (the gate sender).
+func prefillDBEngineSDK(t *testing.T, pool *pgxpool.Pool, sender llm.SDKSender, ref string, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
+	t.Helper()
+	return prefillDBEngine(t, pool, llm.FromSDKSender(sender), ref, extra)
+}
+
 // prefillDBEngine builds an engine over a DB-backed conversation reattached
 // by external ref, with the shared wiring every test in this file needs.
 func prefillDBEngine(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
@@ -92,7 +98,7 @@ func prefillDBEngine(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref st
 func prefillDBSeedClient(t *testing.T, pool *pgxpool.Pool) *llm.Client {
 	t.Helper()
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", newCapturingSender(t, sampleEndTurn)),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(newCapturingSender(t, sampleEndTurn))),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"))
 	assert.NewAborting(t).NoError(err)
@@ -174,7 +180,7 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
 	var eng *Engine
 	var out *syncBuffer
-	eng, out = prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out = prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		cfg.Prefill = prefill
 		if len(prefill) > 0 {
@@ -254,7 +260,7 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
 	var eng *Engine
 	var out *syncBuffer
-	eng, out = prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out = prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		if configured {
 			// runPrefill must NOT run either: the shape is already complete.
@@ -325,7 +331,7 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 	}
 
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
-	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out := prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		cfg.Prefill = []protocol.PrefillRead{{Path: "/tmp/a.txt"}}
 		cfg.Tools = ts
@@ -365,7 +371,7 @@ func TestPrefillSyntheticRowUsageIsNull(t *testing.T) {
 	ref := "prefill-usage-null"
 
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
-	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out := prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.Prefill = []protocol.PrefillRead{{Path: "/tmp/a.txt"}}
 	})
 	defer eng.Close()
@@ -410,7 +416,7 @@ func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
 
 	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
 	fatalCalled := make(chan error, 1)
-	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+	eng, out := prefillDBEngineSDK(t, pool, gate, ref, func(cfg *EngineConfig) {
 		cfg.AutoResume = true
 		cfg.OnFatal = func(err error) { fatalCalled <- err }
 	})

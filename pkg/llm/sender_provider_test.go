@@ -41,12 +41,12 @@ func TestSenderForKeylessLocal(t *testing.T) {
 		BaseURL: srv.URL,
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	if _, err := sender.New(context.Background(), anthropic.MessageNewParams{
+	if _, err := sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
 		Model:     anthropic.Model("local"),
 		MaxTokens: 16,
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	}); err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("Send: %v", err)
 	}
 	c.Eq("/v1/messages", gotPath, "path")
 	c.Eq("", gotKey, "x-api-key")
@@ -71,7 +71,7 @@ func TestSenderForSendsKeyWhenConfigured(t *testing.T) {
 		APIKeyEnv: "TEST_PROVIDER_KEY",
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
@@ -96,7 +96,7 @@ func TestSenderForOpenRouterHeaders(t *testing.T) {
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
@@ -124,7 +124,7 @@ func TestSenderForOpenRouterSessionID(t *testing.T) {
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
-	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
@@ -149,7 +149,7 @@ func TestSenderForOpenRouterNoSessionIDWithoutContextValue(t *testing.T) {
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, context.Background(), anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
@@ -174,32 +174,27 @@ func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
-	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
 	c.False(sawHeader, "x-session-id header present on the Anthropic-native path")
 }
 
-// The kind is implemented (Task 2.1): SenderForKey routes it through
-// newOpenAISender and must hand back a StreamingSender, like the other kinds.
-// The constructor's empty-BaseURL-is-a-config-error contract is pinned in
-// openai_sender_test.go (TestOpenAISenderNewRequiresBaseURL,
-// TestSenderForKeyBuildsOpenAISender).
+// The openai kind is an ordinary SenderForKey case. Its
+// empty-BaseURL-is-a-config-error contract is pinned in http_sender_test.go.
 func TestSenderForKeyOpenAIKindBuildsSender(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s, err := llm.SenderFor(providers.Provider{Name: "x", Kind: providers.KindOpenAI, BaseURL: "http://x"}, nil)
 	c.Require().NoError(err, "SenderFor(openai)")
-	_, ok := s.(llm.StreamingSender)
-	c.True(ok, "SenderFor(openai) must return a StreamingSender; streaming would silently degrade to non-streaming")
+	c.NotNil(s, "SenderFor(openai)")
 }
 
 func TestSenderForStreams(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sender, err := llm.SenderFor(providers.Provider{Name: "x", Kind: providers.KindAnthropic, BaseURL: "http://127.0.0.1:1"}, nil)
 	c.Require().NoError(err, "SenderFor")
-	_, ok := sender.(llm.StreamingSender)
-	c.True(ok, "SenderFor must return a StreamingSender; the streaming path silently degrades to non-streaming otherwise")
+	c.NotNil(sender, "SenderFor")
 }
 
 // A KindAnthropic provider (e.g. Fireworks' Anthropic-compatible endpoint)
@@ -224,7 +219,7 @@ func TestSenderForAnthropicKindHonorsConfiguredSessionHeader(t *testing.T) {
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-xyz-789")
-	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
@@ -252,7 +247,7 @@ func TestSenderForOpenRouterExplicitSessionHeaderOverridesDefault(t *testing.T) 
 	}, nil)
 	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
-	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+	_, _ = sendParams(t, sender, ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})

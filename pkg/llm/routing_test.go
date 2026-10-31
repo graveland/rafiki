@@ -13,6 +13,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
@@ -49,12 +51,12 @@ func routingSet(t *testing.T) *providers.Set {
 
 // newSpecClient builds a client on set with the given routing spec, optional
 // guard, and openrouter sender.
-func newSpecClient(t *testing.T, set *providers.Set, spec routing.Spec, guard *routing.ProviderGuard, openrouter Sender) *Client {
+func newSpecClient(t *testing.T, set *providers.Set, spec routing.Spec, guard *routing.ProviderGuard, openrouter SDKSender) *Client {
 	t.Helper()
 	c, err := NewClient(
 		WithProviders(set),
-		WithProviderSender("anthropic", &scriptedSender{}),
-		WithProviderSender("openrouter", openrouter),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
+		WithProviderSender("openrouter", sdkFake(openrouter)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 		WithRouting(spec),
@@ -82,16 +84,19 @@ func ejectTogether(t *testing.T) *routing.ProviderGuard {
 	return g
 }
 
-// noEligibleErr fabricates the SDK error OpenRouter returns when its provider
+// noEligibleErr fabricates the refusal OpenRouter returns when its provider
 // routing excludes every host for the model (the 404 "No endpoints found ..."
-// family and the 400 "No allowed providers ..." one).
-func noEligibleErr(status int, msg string) *anthropic.Error {
-	e := &anthropic.Error{StatusCode: status}
-	req, _ := http.NewRequest(http.MethodPost, "https://openrouter.ai/api/v1/chat/completions", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: status}
-	_ = e.UnmarshalJSON([]byte(`{"error":{"message":"` + msg + `","code":` + strconv.Itoa(status) + `}}`))
-	return e
+// family and the 400 "No allowed providers ..." one), classified by the
+// Anthropic codec exactly as the sender would classify the real body.
+func noEligibleErr(status int, message string) *msg.APIError {
+	body := []byte(`{"error":{"message":"` + message + `","code":` + strconv.Itoa(status) + `}}`)
+	return &msg.APIError{
+		Status:  status,
+		Body:    body,
+		Kind:    msganthropic.Classify(status, nil, body),
+		Dialect: msg.DialectAnthropic,
+		Message: message,
+	}
 }
 
 // TestApplyProviderPrefsZeroSpecUnchanged pins the pre-spec behaviour: with a
@@ -254,9 +259,9 @@ func TestRoutingNoEligibleErrorNamesSpec(t *testing.T) {
 
 	want := "no provider can serve z-ai/glm-5.3-flash under routing [sort=price]: "
 	ck.StrContains(err.Error(), want, "the error must name the model and the spec, got: %s", err)
-	var apiErr *anthropic.Error
-	ck.True(errors.As(err, &apiErr), "the SDK error must stay reachable through the wrap: %v", err)
-	ck.Eq(http.StatusNotFound, apiErr.StatusCode, "the wrapped status is preserved")
+	var apiErr *msg.APIError
+	ck.True(errors.As(err, &apiErr), "the API error must stay reachable through the wrap: %v", err)
+	ck.Eq(http.StatusNotFound, apiErr.Status, "the wrapped status is preserved")
 	ck.False(routing.Retryable(err), "deterministic: the same request fails forever, never retry")
 	ck.False(routing.FailoverWorthy(err), "not failover-worthy either (a 404 is not a health signal)")
 
@@ -288,7 +293,7 @@ func TestRoutingNoEligibleClassification(t *testing.T) {
 		{"404 other message", noEligibleErr(http.StatusNotFound, "No such model: z-ai/glm-5.2"), false},
 		{"500 quoting the words", noEligibleErr(http.StatusInternalServerError, "No endpoints found matching your data policy"), false},
 		{"429 quoting the words", noEligibleErr(http.StatusTooManyRequests, "No allowed providers are available."), false},
-		{"plain 400", promptTooLargeErr(), false},
+		{"plain 400", promptTooLargeAPIErr(), false},
 		{"plain error", errors.New("connection refused"), false},
 		{"nil", nil, false},
 	}
@@ -321,9 +326,9 @@ func TestRoutingNoEligibleErrorNamesSpecStreaming(t *testing.T) {
 	ck.StrContains(err.Error(),
 		"no provider can serve z-ai/glm-5.3-flash under routing [sort=price]: ",
 		"the streaming error must name the model and the spec, got: %s", err)
-	var apiErr *anthropic.Error
-	ck.True(errors.As(err, &apiErr), "the SDK error must stay reachable through the wrap: %v", err)
-	ck.Eq(http.StatusNotFound, apiErr.StatusCode, "the wrapped status is preserved")
+	var apiErr *msg.APIError
+	ck.True(errors.As(err, &apiErr), "the API error must stay reachable through the wrap: %v", err)
+	ck.Eq(http.StatusNotFound, apiErr.Status, "the wrapped status is preserved")
 	ck.False(routing.Retryable(err), "deterministic: never retried on the streaming path either")
 	ck.False(routing.FailoverWorthy(err), "not failover-worthy either")
 

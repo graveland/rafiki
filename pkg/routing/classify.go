@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // RetryBackoffs is the fixed backoff schedule between primary retry attempts
@@ -79,32 +79,32 @@ func CreditExhausted(statusCode int, body []byte) bool {
 	return false
 }
 
-// creditExhausted is the SDK-error counterpart of CreditExhausted, reading the
-// rejection body off an *anthropic.Error. RawJSON (not Error(), which
-// dereferences Request/Response) so a status-only error value is safe.
+// creditExhausted is the native counterpart of CreditExhausted, reading the
+// rejection body off a *msg.APIError. An in-band error (Status 0) carries no
+// status to restrict the match to, so it is not a billing rejection.
 func creditExhausted(err error) bool {
-	var apiErr *anthropic.Error
-	if !errors.As(err, &apiErr) {
+	var apiErr *msg.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status == 0 {
 		return false
 	}
-	return CreditExhausted(apiErr.StatusCode, []byte(apiErr.RawJSON()))
+	return CreditExhausted(apiErr.Status, apiErr.Body)
 }
 
-// FailoverWorthy reports whether an SDK error means the primary should be
-// abandoned for the fallback chain (and the breaker tripped): a retryable
-// failure, or a credit-exhausted account. It is the SDK path's single
-// failover gate — Retryable alone would strand every caller on a primary that
-// cannot answer until someone pays the bill.
+// FailoverWorthy reports whether an error means the primary should be abandoned
+// for the fallback chain (and the breaker tripped): a retryable failure, or a
+// credit-exhausted account. It is the one failover gate — Retryable alone would
+// strand every caller on a primary that cannot answer until someone pays the
+// bill.
 func FailoverWorthy(err error) bool { return retryable(err) || creditExhausted(err) }
 
-// Retryable classifies an Anthropic SDK error, mapping its embedded HTTP
-// status onto ClassifyFailure — the SDK-error counterpart used by the llm
-// package's per-upstream routing.
+// Retryable classifies a provider error, mapping its HTTP status onto
+// ClassifyFailure — the per-upstream routing rule.
 func Retryable(err error) bool { return retryable(err) }
 
-// retryable classifies an Anthropic SDK error, mapping its embedded HTTP status
-// onto ClassifyFailure. An *anthropic.Error with StatusCode 0 (SDK-side error
-// before a response) is treated like a transport error and is retryable.
+// retryable classifies a provider error, mapping its embedded HTTP status onto
+// ClassifyFailure. A *msg.APIError with Status 0 is an in-band stream error:
+// it is retryable when its kind says the upstream had a bad moment, and not
+// otherwise, because a status-less error has no status to classify.
 func retryable(err error) bool {
 	if err == nil {
 		return false
@@ -112,9 +112,12 @@ func retryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode != 0 {
-		return ClassifyFailure(apiErr.StatusCode, nil)
+	var apiErr *msg.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.Status != 0 {
+			return ClassifyFailure(apiErr.Status, nil)
+		}
+		return apiErr.Kind == msg.ErrTransient || apiErr.Kind == msg.ErrOverloaded
 	}
-	return ClassifyFailure(0, err) // transport/timeout or status-less SDK error
+	return ClassifyFailure(0, err) // transport/timeout or a status-less failure
 }

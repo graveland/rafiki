@@ -52,11 +52,11 @@ func batchReply() *anthropic.Message {
 // newBatchClient builds a store-less client whose "openrouter" provider is
 // backed by sender (never expected to be called on the park path) and whose
 // batcher is b.
-func newBatchClient(t *testing.T, b Batcher, sender Sender) *Client {
+func newBatchClient(t *testing.T, b Batcher, sender SDKSender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithProviderSender("anthropic", sender),
-		WithProviderSender("openrouter", sender),
+		WithProviderSender("anthropic", sdkFake(sender)),
+		WithProviderSender("openrouter", sdkFake(sender)),
 		WithBatcher(b),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -136,7 +136,7 @@ func TestBatchNoBatcherErrors(t *testing.T) {
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithProviderSender("openrouter", sender),
+		WithProviderSender("openrouter", sdkFake(sender)),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -230,7 +230,7 @@ func TestBatchTurnCaptured(t *testing.T) {
 		t.Helper()
 		ck := assert.NewAborting(t)
 		c, err := NewClient(
-			WithProviderSender("openrouter", &scriptedSender{}),
+			WithProviderSender("openrouter", sdkFake(&scriptedSender{})),
 			WithBatcher(b),
 			WithStore(pool),
 			WithCatalog(seededCatalog(t)),

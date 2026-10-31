@@ -170,7 +170,7 @@ func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
 	// materialize both — proving the nil above is a branch decision, not an
 	// accident of the constructor.
 	sender := &fakeSender{}
-	client, err := llm.NewClient(llm.WithProviderSender("anthropic", sender), llm.WithDefaultModel("claude-haiku-4-5"))
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)), llm.WithDefaultModel("claude-haiku-4-5"))
 	c.NoError(err, "llm.NewClient")
 	prov := &providers.Set{
 		Embeddings: &providers.EmbeddingsConfig{URL: "http://127.0.0.1:1/v1/embeddings", Model: "emb-1", Dimensions: 8},
@@ -313,7 +313,7 @@ func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
 		Usage:   anthropic.Usage{InputTokens: 100, OutputTokens: 40},
 	}}
 	client, err := llm.NewClient(
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-haiku-4-5"),
 		llm.WithLogger(discardLogger()),
@@ -450,7 +450,7 @@ func TestLLMCompleterPricesResponsesModelByCatalogID(t *testing.T) {
 	client, err := llm.NewClient(
 		llm.WithProviders(prov),
 		llm.WithCatalog(cat),
-		llm.WithProviderSender("oa", sender),
+		llm.WithProviderSender("oa", llm.FromSDKSender(sender)),
 		llm.WithStore(pool),
 		llm.WithLogger(discardLogger()),
 	)

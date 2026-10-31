@@ -119,13 +119,13 @@ func TestCompactionContextWindowUnknownIsZero(t *testing.T) {
 	// model it does not carry answers ok=false without ever hitting the network.
 	empty := routing.NewModelCatalog(nil, time.Hour, nil)
 	empty.SeedForTest([]routing.CatalogEntry{{ID: "some-other-model", Created: 1}})
-	unknown, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(empty), llm.WithDefaultModel("claude-x"))
+	unknown, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(neverSender{})), llm.WithCatalog(empty), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 	c.Eq(0, compactionContextWindow(unknown, providers.KindAnthropic, "not-in-catalog", 0), "model the catalog does not know")
 
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
 	cat.SeedForTest([]routing.CatalogEntry{{ID: "z-ai/glm-5.3-flash", Created: 1, ContextLength: 1048576}})
-	known, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
+	known, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(neverSender{})), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 	c.Eq(1048576, compactionContextWindow(known, providers.KindAnthropicOpenRouter, "z-ai/glm-5.3-flash", 0), "known model")
 	c.NotEq(prefillFallbackContext, compactionContextWindow(unknown, providers.KindAnthropic, "not-in-catalog", 0),
@@ -141,7 +141,7 @@ func TestCompactionContextWindowOverrideWins(t *testing.T) {
 	c := assert.NewCollecting(t)
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
 	cat.SeedForTest([]routing.CatalogEntry{{ID: "openai/gpt-6.1-sol", Created: 1, ContextLength: 400000}})
-	client, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(neverSender{})), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 
 	c.Eq(400000, compactionContextWindow(client, providers.KindOpenAIResponsesChatGPT, "gpt-6.1-sol", 0),
@@ -181,7 +181,7 @@ func TestPricerMapsResponsesModelToCatalogID(t *testing.T) {
 		PromptUSD:     0.000001,
 		CompletionUSD: 0.000002,
 	}}})
-	client, err := llm.NewClient(llm.WithProviderSender("anthropic", neverSender{}), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(neverSender{})), llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 
 	responses := pricerFor(client, providers.KindOpenAIResponses)

@@ -143,7 +143,7 @@ func (s *ctxBlockingSender) New(ctx context.Context, _ anthropic.MessageNewParam
 func TestSlashCompactIsAbortable(t *testing.T) {
 	c := assert.NewCollecting(t)
 	bs := &ctxBlockingSender{started: make(chan struct{})}
-	eng, out := newTestEngineWithConfig(t, fakeToolSet{}, bs, compactionPolicyOpt)
+	eng, out := newTestEngineWithSDKConfig(t, fakeToolSet{}, bs, compactionPolicyOpt)
 	seedFourRows(t, eng)
 
 	eng.HandlePrompt("/compact")
@@ -208,7 +208,7 @@ func TestSlashStartupResumeSkipsAfterClear(t *testing.T) {
 	c := assert.NewCollecting(t)
 	silenceSlog(t)
 	bs := &ctxBlockingSender{started: make(chan struct{})}
-	client, err := llm.NewClient(llm.WithProviderSender("anthropic", bs), llm.WithDefaultModel("claude-x"))
+	client, err := llm.NewClient(llm.WithProviderSender("anthropic", llm.FromSDKSender(bs)), llm.WithDefaultModel("claude-x"))
 	c.Require().NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)

@@ -75,7 +75,7 @@ func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 	// left for the SECOND prompt, and the assertion that it is still available
 	// is assertion 3.
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
-	eng, out := newTestEngineWithSender(t, ts, sender)
+	eng, out := newTestEngineWithSDKSender(t, ts, sender)
 	logs := capturedLogs(t)
 
 	eng.HandlePrompt("go")
@@ -126,7 +126,7 @@ func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 	assertFrameTypes(t, out.String()[before:], []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
-		"message_start", "message_update", "message_end", // the scripted end_turn the abort preserved
+		"message_start", "message_update", "message_update", "message_end", // the scripted end_turn the abort preserved
 		"agent_end", "agent_settled"})
 	c.Require().Eq(2, sender.callCount(), "sender served")
 	// The invariant RepairOrphans exists to protect: the request carries a

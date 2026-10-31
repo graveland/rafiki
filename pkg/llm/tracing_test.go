@@ -64,7 +64,7 @@ func tracingClient(t *testing.T, sender *tracingSender, opts ...llm.ClientOption
 	}
 	base := []llm.ClientOption{
 		llm.WithProviders(set),
-		llm.WithProviderSender("anthropic", sender),
+		llm.WithProviderSender("anthropic", llm.FromSDKSender(sender)),
 		llm.WithTracerProvider(tp),
 	}
 	c, err := llm.NewClient(append(base, opts...)...)

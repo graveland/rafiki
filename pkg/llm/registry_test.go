@@ -62,7 +62,7 @@ func TestNewClientNeedsNoAnthropicSender(t *testing.T) {
 	var calls []string
 	c, err := llm.NewClient(
 		llm.WithProviders(localSet(t)),
-		llm.WithProviderSender("vmlx", recordingSender{name: "vmlx", calls: &calls}),
+		llm.WithProviderSender("vmlx", llm.FromSDKSender(recordingSender{name: "vmlx", calls: &calls})),
 		llm.WithDefaultModel("vmlx/qwen3"),
 	)
 	ck.Require().NoError(err, "NewClient with no anthropic sender")
@@ -80,7 +80,7 @@ func TestSendParamsUnknownProviderErrors(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c, err := llm.NewClient(
 		llm.WithProviders(localSet(t)),
-		llm.WithProviderSender("vmlx", recordingSender{name: "vmlx", calls: &[]string{}}),
+		llm.WithProviderSender("vmlx", llm.FromSDKSender(recordingSender{name: "vmlx", calls: &[]string{}})),
 	)
 	ck.Require().NoError(err, "NewClient")
 	_, err = c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
@@ -109,8 +109,8 @@ base_url = "http://localhost:2"
 	var calls []string
 	c, err := llm.NewClient(
 		llm.WithProviders(set),
-		llm.WithProviderSender("primary", recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()}),
-		llm.WithProviderSender("backup", recordingSender{name: "backup", calls: &calls}),
+		llm.WithProviderSender("primary", llm.FromSDKSender(recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()})),
+		llm.WithProviderSender("backup", llm.FromSDKSender(recordingSender{name: "backup", calls: &calls})),
 		llm.WithBreaker(time.Minute),
 	)
 	ck.Require().NoError(err, "NewClient")
@@ -146,9 +146,9 @@ base_url = "http://localhost:3"
 	var calls []string
 	c, err := llm.NewClient(
 		llm.WithProviders(set),
-		llm.WithProviderSender("primary", recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()}),
-		llm.WithProviderSender("backup", recordingSender{name: "backup", calls: &calls}),
-		llm.WithProviderSender("other", recordingSender{name: "other", calls: &calls}),
+		llm.WithProviderSender("primary", llm.FromSDKSender(recordingSender{name: "primary", calls: &calls, err: failoverWorthyErr()})),
+		llm.WithProviderSender("backup", llm.FromSDKSender(recordingSender{name: "backup", calls: &calls})),
+		llm.WithProviderSender("other", llm.FromSDKSender(recordingSender{name: "other", calls: &calls})),
 		llm.WithBreaker(time.Minute),
 	)
 	ck.Require().NoError(err, "NewClient")

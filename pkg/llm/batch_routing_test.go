@@ -62,10 +62,10 @@ func newRoutingBatchClient(t *testing.T, set *providers.Set, spec routing.Spec) 
 	t.Helper()
 	c, err := NewClient(
 		WithProviders(set),
-		WithProviderSender("openrouter", &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		WithProviderSender("openrouter", sdkFake(&scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 			respondText("must not be reached"),
-		}}),
-		WithProviderSender("anthropic", &scriptedSender{}),
+		}})),
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{})),
 		WithBatcher(&routingFakeBatcher{}),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -169,8 +169,8 @@ func TestBatchDeclToBatchIDParksFirstCallOnly(t *testing.T) {
 	}}
 	c, err := NewClient(
 		WithProviders(set),
-		WithProviderSender("openrouter", sender),
-		WithProviderSender("anthropic", sender),
+		WithProviderSender("openrouter", sdkFake(sender)),
+		WithProviderSender("anthropic", sdkFake(sender)),
 		WithBatcher(b),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),

@@ -27,6 +27,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -56,11 +57,25 @@ import (
 // end_turn reply per request. It is the fake-LLM seat a spawned fundi child
 // runs on: the daemon routes "fakellm/mini" to it through a providers.toml
 // [providers.fakellm] block (kind = "anthropic", base_url = this server).
+//
+// A request that asks for a stream gets SSE, because that is what the endpoint
+// is: a fundi child always attaches a stream handler, and a plain JSON body
+// answering a stream request is a truncated stream (the decoder reads SSE and
+// finds no terminating message_stop), not a reply.
 func fakeAnthropicServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.Stream {
+			replyFakeSSE(w, "done", 10, 5)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -72,6 +87,31 @@ func fakeAnthropicServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// replyFakeSSE writes one complete streamed Messages reply: a single text block
+// carrying text, then the terminal events.
+func replyFakeSSE(w http.ResponseWriter, text string, inputTokens, outputTokens int) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	delta, err := json.Marshal(text)
+	if err != nil {
+		delta = []byte(`"done"`)
+	}
+	events := []string{
+		"event: message_start\n" + fmt.Sprintf(`data: {"type":"message_start","message":{"id":"msg_fake_1","type":"message","role":"assistant","model":"mini","content":[],"usage":{"input_tokens":%d,"output_tokens":1}}}`, inputTokens) + "\n\n",
+		"event: content_block_start\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n",
+		"event: content_block_delta\n" + fmt.Sprintf(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, delta) + "\n\n",
+		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n",
+		"event: message_delta\n" + fmt.Sprintf(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":%d}}`, outputTokens) + "\n\n",
+		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n",
+	}
+	for _, ev := range events {
+		_, _ = io.WriteString(w, ev)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
 }
 
 // writeFakeProviders writes a providers.toml routing provider "fakellm" at
