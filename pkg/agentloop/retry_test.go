@@ -34,14 +34,18 @@ func TestIsRetryable(t *testing.T) {
 		ctx   context.Context
 		retry bool
 	}{
-		// Nil / cancelled context.
+		// Nil / cancelled context. The cancelled case carries an error that is
+		// otherwise retryable, so only the ctx guard can make it false.
 		{"nil error", nil, liveCtx, false},
-		{"cancelled context", errors.New("any"), cancelledCtx, false},
+		{"cancelled context", &net.OpError{Op: "read", Err: syscall.ECONNRESET}, cancelledCtx, false},
 
 		// Network errors.
 		{"net.OpError (connection reset)", &net.OpError{Op: "read", Err: syscall.ECONNRESET}, liveCtx, true},
 		{"net.OpError (connection refused)", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, liveCtx, true},
 		{"net.OpError (timeout)", &net.OpError{Op: "read", Err: &timedoutErr{}}, liveCtx, true},
+		// An OpError wrapping nothing the syscall or string arms recognize: only
+		// the net.OpError branch can answer true.
+		{"net.OpError (opaque cause)", &net.OpError{Op: "read", Err: errors.New("socket closed")}, liveCtx, true},
 
 		// Syscall errors.
 		{"syscall.ECONNRESET", syscall.ECONNRESET, liveCtx, true},
@@ -50,16 +54,19 @@ func TestIsRetryable(t *testing.T) {
 		{"syscall.ETIMEDOUT", syscall.ETIMEDOUT, liveCtx, true},
 		{"wrapped syscall error", fmt.Errorf("wrap: %w", syscall.ECONNRESET), liveCtx, true},
 
-		// HTTP errors.
-		{"HTTP 502", &anthropic.Error{StatusCode: 502}, liveCtx, true},
-		{"HTTP 503", &anthropic.Error{StatusCode: 503}, liveCtx, true},
-		{"HTTP 504", &anthropic.Error{StatusCode: 504}, liveCtx, true},
-		{"HTTP 400", &anthropic.Error{StatusCode: 400}, liveCtx, false},
-		{"HTTP 401", &anthropic.Error{StatusCode: 401}, liveCtx, false},
-		{"HTTP 404", &anthropic.Error{StatusCode: 404}, liveCtx, false},
-		{"HTTP 429", &anthropic.Error{StatusCode: 429}, liveCtx, false}, // already handled
+		// HTTP errors from the native senders.
+		{"HTTP 502", &msg.APIError{Status: 502}, liveCtx, true},
+		{"HTTP 503", &msg.APIError{Status: 503}, liveCtx, true},
+		{"HTTP 504", &msg.APIError{Status: 504}, liveCtx, true},
+		{"HTTP 529", &msg.APIError{Status: 529, Kind: msg.ErrOverloaded}, liveCtx, true},
+		{"HTTP 400", &msg.APIError{Status: 400}, liveCtx, false},
+		{"HTTP 401", &msg.APIError{Status: 401}, liveCtx, false},
+		{"HTTP 404", &msg.APIError{Status: 404}, liveCtx, false},
+		{"HTTP 429", &msg.APIError{Status: 429, Kind: msg.ErrRateLimit}, liveCtx, false}, // already handled
+		{"prompt too large", &msg.APIError{Status: 400, Kind: msg.ErrPromptTooLarge}, liveCtx, false},
+		{"HTTP 500 wrapped", fmt.Errorf("llm: post: %w", &msg.APIError{Status: 500}), liveCtx, true},
 
-		// In-band SSE "error" events (the SDK's opaque ssestream wrapper).
+		// In-band SSE "error" events (a status-0 APIError the codec classified).
 		// The first is the exact payload a live OpenRouter gemini turn aborted
 		// with mid-iteration; without recognition it killed the whole turn.
 		{"sse timeout_error", inBandErr(msg.ErrTransient, `{"type":"error","error":{"type":"timeout_error","message":"The operation was aborted","error_type":"timeout"}}`), liveCtx, true},

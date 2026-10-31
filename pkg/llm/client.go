@@ -842,7 +842,16 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 
 	req, extra, cerr := msganthropic.RequestFromSDK(params)
 	if cerr != nil {
-		return nil, false, false, cerr
+		// The turn row is already written, so this must close it exactly like
+		// every other post-beginTurn failure — otherwise an open capture turn
+		// outlives the call that opened it. The failure is deterministic (the
+		// same params convert the same way), so no handoff to SendParams: this
+		// result is final.
+		span.RecordError(errors.New(telemetry.ErrorText(cerr.Error())))
+		span.SetStatus(codes.Error, "")
+		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, cerr)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), cerr, hdrs)
+		return nil, true, false, cerr
 	}
 	sessionID, _ := sessionIDFromContext(ctx)
 	dec, serr := sender.Stream(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})

@@ -15,6 +15,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // isRetryable reports whether err is a transient error worth retrying.
@@ -41,14 +42,16 @@ func isRetryable(err error, ctx context.Context) bool {
 		return true
 	}
 
-	// HTTP errors from the SDK.
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
-		code := apiErr.StatusCode
-		if code == 429 {
+	// HTTP errors from the native senders: every refusal is a *msg.APIError
+	// carrying the response status. An in-band stream error also arrives as an
+	// APIError, but with Status 0 (there was no response), so it falls through
+	// to the stream classifiers below.
+	var apiErr *msg.APIError
+	if errors.As(err, &apiErr) && apiErr.Status != 0 {
+		if apiErr.Status == 429 {
 			return false // handled by sendStreaming's own retry loop
 		}
-		return code >= 500 && code < 600
+		return apiErr.Status >= 500 && apiErr.Status < 600
 	}
 
 	// An in-band SSE rate_limit_error mirrors the typed 429 above exactly —
@@ -61,13 +64,13 @@ func isRetryable(err error, ctx context.Context) bool {
 		return false
 	}
 
-	// An in-band SSE "error" event reaches here stripped of all type info:
-	// the SDK wraps the raw JSON body in a plain fmt.Errorf (see
-	// llm.sseStreamErrPrefix), so the anthropic.Error check above and the
-	// net/syscall checks below both miss it. Look inside the payload — this
-	// is how an OpenRouter upstream timeout mid-turn ("timeout_error", "The
-	// operation was aborted") is recognized as transient instead of ending
-	// the whole turn.
+	// An in-band SSE "error" event arrives as a status-0 *msg.APIError whose
+	// Kind its codec derived from the event's own payload. The status check
+	// above deliberately skips it (there was no HTTP response), and the
+	// net/syscall checks below see nothing to match, so its Kind is what
+	// decides — this is how an OpenRouter upstream timeout mid-turn
+	// ("timeout_error", "The operation was aborted") is recognized as
+	// transient instead of ending the whole turn.
 	if llm.IsTransientStreamError(err) {
 		return true
 	}

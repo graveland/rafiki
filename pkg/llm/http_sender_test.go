@@ -368,3 +368,54 @@ func modelGateBlocked(g *ModelGate, model string) bool {
 	until, ok := g.blockedUntil[model]
 	return ok && time.Until(until) > -time.Minute
 }
+
+// roundTripFunc adapts a function to http.RoundTripper, so a test can hand a
+// sender a response it could not get from a real server.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// unreadableBody yields its bytes once, then fails: a refusal whose connection
+// dies mid-body.
+type unreadableBody struct {
+	data []byte
+	done bool
+}
+
+func (b *unreadableBody) Read(p []byte) (int, error) {
+	if b.done {
+		return 0, errors.New("read tcp: connection reset by peer")
+	}
+	b.done = true
+	return copy(p, b.data), nil
+}
+
+func (b *unreadableBody) Close() error { return nil }
+
+// TestHTTPSenderStreamRefusalWithUnreadableBody pins that a refusal whose body
+// read FAILS is still reported as an *msg.APIError carrying its status, and that
+// the bytes that did arrive are not read as evidence: this body names a 503,
+// which must not turn the 400 into a retryable classification.
+func TestHTTPSenderStreamRefusalWithUnreadableBody(t *testing.T) {
+	c := assert.NewAborting(t)
+	const body = `{"error":{"code":503}}`
+	sender, err := SenderForKey(providers.Provider{
+		Name: "oa", Kind: providers.KindOpenAI, BaseURL: "http://example.invalid",
+	}, "sk-test", roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       &unreadableBody{data: []byte(body)},
+		}, nil
+	}))
+	c.Require().NoError(err, "SenderForKey")
+
+	_, err = sender.Stream(context.Background(), nativeRequest(t), msg.EncodeOptions{})
+	c.Require().Error(err, "Stream must report the refusal")
+
+	var apiErr *msg.APIError
+	c.Require().True(errors.As(err, &apiErr), "error %T is not a *msg.APIError", err)
+	c.Eq(http.StatusBadRequest, apiErr.Status, "status")
+	c.Eq(msg.ErrOther, apiErr.Kind, "an unreadable body must not classify as retryable from its bytes")
+	c.StrContains(string(apiErr.Body), "503", "the bytes that arrived are kept for diagnosis")
+}

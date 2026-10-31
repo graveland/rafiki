@@ -1,7 +1,10 @@
 package anthropic_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
@@ -283,4 +286,88 @@ func TestSDKEventAdapterRefusesMisorderedEvents(t *testing.T) {
 	c.NoError(err, "start")
 	_, err = adapter.Add(msg.BlockStart{Index: 0, Block: msg.Text{}})
 	c.Error(err, "a second start for the same index must be refused")
+}
+
+// captureWarnings points the default logger at a buffer for one test and
+// restores it afterwards, so a warning the adapter emits can be asserted.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// TestSDKEventAdapterReconcilesAnExtendedFinalBlock is the control for the
+// divergence test below: a finalized block that EXTENDS what the deltas
+// delivered replays exactly the unseen suffix, with nothing logged.
+func TestSDKEventAdapterReconcilesAnExtendedFinalBlock(t *testing.T) {
+	ck := assert.NewAborting(t)
+	buf := captureWarnings(t)
+	adapter := &anthropic.SDKEventAdapter{}
+
+	_, err := adapter.Add(msg.BlockStart{Index: 0, Block: msg.Text{}})
+	ck.NoError(err, "start")
+	_, err = adapter.Add(msg.BlockDelta{Index: 0, Kind: msg.DeltaText, Text: "hi"})
+	ck.NoError(err, "delta")
+
+	out, err := adapter.Add(msg.BlockStop{Index: 0, Block: msg.Text{Text: "hi there"}})
+	ck.NoError(err, "stop")
+	ck.Require().Len(out, 2, "the unseen suffix then the stop")
+	ck.Eq("content_block_delta", out[0].Type, "first event")
+	ck.Eq(" there", out[0].Delta.Text, "only the suffix may be replayed")
+	ck.Eq("content_block_stop", out[1].Type, "second event")
+	ck.NotStrContains(buf.String(), "diverges", "an extension is not a divergence")
+}
+
+// TestSDKEventAdapterReportsDivergentFinalBlock pins what the adapter does with
+// a finalized block that REWRITES what the deltas already delivered instead of
+// extending it. The SDK's accumulator can only append, so the delivered form
+// stands and the difference cannot be replayed — but it must not disappear
+// silently, and the warning is one per stream, not one per block.
+func TestSDKEventAdapterReportsDivergentFinalBlock(t *testing.T) {
+	t.Run("rewritten text", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		buf := captureWarnings(t)
+		adapter := &anthropic.SDKEventAdapter{}
+
+		_, err := adapter.Add(msg.BlockStart{Index: 0, Block: msg.Text{}})
+		ck.NoError(err, "start")
+		_, err = adapter.Add(msg.BlockDelta{Index: 0, Kind: msg.DeltaText, Text: "hello"})
+		ck.NoError(err, "delta")
+
+		out, err := adapter.Add(msg.BlockStop{Index: 0, Block: msg.Text{Text: "goodbye"}})
+		ck.NoError(err, "stop")
+		ck.Require().Len(out, 1, "a rewrite cannot be replayed; only the stop is emitted")
+		ck.Eq("content_block_stop", out[0].Type, "only the stop")
+		ck.StrContains(buf.String(), "diverges", "the dropped rewrite must be logged")
+
+		// A second divergent block in the same stream is not logged again.
+		_, err = adapter.Add(msg.BlockStart{Index: 1, Block: msg.Text{}})
+		ck.NoError(err, "second start")
+		_, err = adapter.Add(msg.BlockDelta{Index: 1, Kind: msg.DeltaText, Text: "one"})
+		ck.NoError(err, "second delta")
+		_, err = adapter.Add(msg.BlockStop{Index: 1, Block: msg.Text{Text: "two"}})
+		ck.NoError(err, "second stop")
+		ck.Eq(1, strings.Count(buf.String(), "diverges"), "one warning per stream")
+	})
+
+	t.Run("rewritten tool input", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		buf := captureWarnings(t)
+		adapter := &anthropic.SDKEventAdapter{}
+
+		_, err := adapter.Add(msg.BlockStart{Index: 0, Block: msg.ToolUse{ID: "tool_1", Name: "read", Input: json.RawMessage(`{}`)}})
+		ck.NoError(err, "start")
+		_, err = adapter.Add(msg.BlockDelta{Index: 0, Kind: msg.DeltaInputJSON, Text: `{"path":"a"}`})
+		ck.NoError(err, "delta")
+
+		out, err := adapter.Add(msg.BlockStop{Index: 0, Block: msg.ToolUse{ID: "tool_1", Name: "read", Input: json.RawMessage(`{"path":"b"}`)}})
+		ck.NoError(err, "stop")
+		ck.Require().Len(out, 1, "input that was already delivered cannot be replaced; only the stop is emitted")
+		ck.Eq("content_block_stop", out[0].Type, "only the stop")
+		ck.StrContains(buf.String(), "diverges", "the dropped input must be logged")
+		ck.StrContains(buf.String(), "input", "the warning names the field")
+	})
 }

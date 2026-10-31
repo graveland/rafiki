@@ -206,9 +206,18 @@ func (s *httpSender) Stream(ctx context.Context, req *msg.Request, opts msg.Enco
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Read the body before closing: it is where the classification lives.
 		// Draining keeps the connection reusable.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		resp.Body.Close()
-		return nil, s.errorFor(resp, body)
+		apiErr := s.errorFor(resp, body)
+		if readErr != nil {
+			// The refusal still happened, so it is still an APIError carrying
+			// whatever status and partial body arrived. What it must NOT do is
+			// read body-derived evidence out of a truncated body: classify on
+			// the status alone, where ErrOther is the answer for anything the
+			// status does not settle.
+			apiErr.Kind = s.codec.classify(resp.StatusCode, resp.Header, nil)
+		}
+		return nil, apiErr
 	}
 	return s.codec.stream(resp.Body), nil
 }

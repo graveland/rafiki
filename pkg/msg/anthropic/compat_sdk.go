@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 
@@ -200,6 +201,11 @@ func ToSDKMessage(r *msg.Response) (*sdk.Message, error) {
 // replayed twice.
 type SDKEventAdapter struct {
 	blocks map[int]*adapterBlock
+	// warned keeps the divergence warning to one per adapter (one per stream):
+	// a provider that rewrites blocks it already streamed would otherwise
+	// repeat the same line for every block. Like blocks, it is not synchronised:
+	// an adapter belongs to one stream, driven by one goroutine.
+	warned bool
 }
 
 // adapterBlock is one open block: its start JSON, the fields it started with,
@@ -419,7 +425,15 @@ func (a *SDKEventAdapter) reconcile(index int, st *adapterBlock, final msg.Block
 	} {
 		delivered := f.start + f.emitted.String()
 		got := rawString(fields[f.key])
-		if len(got) <= len(delivered) || !strings.HasPrefix(got, delivered) {
+		if got == delivered {
+			continue
+		}
+		if !strings.HasPrefix(got, delivered) {
+			// The finalized value does not extend what was already delivered
+			// (a provider rewrote it rather than growing it). The SDK's
+			// accumulator can only append, so the delivered bytes stand and the
+			// difference cannot be replayed; it must not vanish silently either.
+			a.warnDivergence(index, f.key)
 			continue
 		}
 		suffix := got[len(delivered):]
@@ -434,13 +448,28 @@ func (a *SDKEventAdapter) reconcile(index int, st *adapterBlock, final msg.Block
 	// codec folds into the block itself) has not. The SDK's accumulator replaces
 	// an initial "{}" with the first fragment and appends every later one, so a
 	// single fragment is only faithful when nothing was delivered yet.
-	if in, ok := fields["input"]; ok && !st.inputSeen && !jsonEqual(st.startInput, in) && isJSONObject(st.startInput) && isEmptyObject(st.startInput) {
-		compacted, err := compactJSON(in)
-		if err != nil {
-			return nil, err
+	if in, ok := fields["input"]; ok {
+		delivered := st.startInput
+		if st.inputSeen {
+			delivered = json.RawMessage(st.input.String())
 		}
-		if err := appendDelta(map[string]any{"type": "input_json_delta", "partial_json": string(compacted)}); err != nil {
-			return nil, err
+		switch {
+		case jsonEqual(delivered, in):
+			// Nothing the stream has not already delivered.
+		case !st.inputSeen && isJSONObject(st.startInput) && isEmptyObject(st.startInput):
+			compacted, err := compactJSON(in)
+			if err != nil {
+				return nil, err
+			}
+			if err := appendDelta(map[string]any{"type": "input_json_delta", "partial_json": string(compacted)}); err != nil {
+				return nil, err
+			}
+		default:
+			// Input was already delivered (as fragments, or as a non-empty
+			// start) and the finalized form differs from it. Appending the
+			// final value would corrupt the accumulated JSON, and nothing can
+			// retract what was sent, so the delivered form stands — visibly.
+			a.warnDivergence(index, "input")
 		}
 	}
 
@@ -455,6 +484,20 @@ func (a *SDKEventAdapter) reconcile(index int, st *adapterBlock, final msg.Block
 		}
 	}
 	return out, nil
+}
+
+// warnDivergence reports a finalized block that the deltas already delivered
+// cannot be reconciled with: the provider rewrote text, a signature or a tool
+// input instead of extending it. The SDK's accumulator only appends, so the
+// delivered form stands and the difference cannot be replayed — but it is not
+// dropped in silence, and one warning per stream is enough to make it visible.
+func (a *SDKEventAdapter) warnDivergence(index int, field string) {
+	if a.warned {
+		return
+	}
+	a.warned = true
+	slog.Warn("anthropic: finalized block diverges from the deltas already delivered; keeping the delivered form",
+		"index", index, "field", field)
 }
 
 // wrapEvent renders one SDK stream event from its wire JSON, so the typed union

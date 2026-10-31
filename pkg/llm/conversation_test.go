@@ -1026,3 +1026,53 @@ func TestRequestDescriptorInMemoryConversationHasNoHead(t *testing.T) {
 	ck.Eq("", conv.requestHeadID(hist), "the head stays empty after a send")
 	c.True(hist[len(hist)-1].ID != "", "the appended reply has no id of its own")
 }
+
+// TestSendStreamingClosesTheTurnWhenRequestConversionFails pins that a failure
+// to convert the SDK params into a native request — which happens AFTER
+// beginTurn has written the turn row — still resolves that row. Returning early
+// without failTurn leaves an open capture turn behind for every such failure.
+//
+// An unknown message role is the reachable shape: it marshals into the params
+// (so beginTurn's request marshal succeeds and the row is written) and is
+// refused by the native conversion, which is exactly the ordering under test.
+func TestSendStreamingClosesTheTurnWhenRequestConversionFails(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	cl, err := NewClient(
+		WithProviderSender("anthropic", sdkFake(&scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+			respondText("never sent"),
+		}})),
+		WithStore(pool),
+		WithCatalog(seededCatalog(t)),
+		WithDefaultModel("haiku-latest"),
+		WithLogger(testLogger(t)),
+	)
+	ck.NoError(err, "NewClient")
+	conv, err := cl.Conversation(ctx, NewConversation("", "test"))
+	ck.NoError(err, "Conversation")
+
+	params := anthropic.MessageNewParams{
+		Model:     "haiku-latest",
+		MaxTokens: 16,
+		Messages: []anthropic.MessageParam{{
+			Role: anthropic.MessageParamRole("moderator"),
+			Content: []anthropic.ContentBlockParamUnion{
+				{OfText: &anthropic.TextBlockParam{Text: "hi"}},
+			},
+		}},
+	}
+	_, attempted, delivered, serr := cl.sendStreamingAttempt(ctx,
+		SendMeta{ConversationID: conv.ID}, params, func(anthropic.MessageStreamEventUnion) {})
+	ck.Require().Error(serr, "the conversion failure must surface")
+	ck.StrContains(serr.Error(), "unknown role", "conversion error")
+	ck.True(attempted, "a conversion failure is final: SendParams would convert the same params and fail identically")
+	ck.False(delivered, "nothing reached the handler")
+
+	var status string
+	ck.NoError(pool.QueryRow(ctx,
+		`SELECT status FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&status), "read the turn row beginTurn wrote")
+	ck.Eq("error", status, "the turn must be failed, not left pending")
+}
