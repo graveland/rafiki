@@ -165,6 +165,49 @@ func RunConformance(t *testing.T, mk func(*testing.T) (inbox.Store, string)) {
 		}
 	})
 
+	t.Run("RejectTerminatesOnlyTheNamedRows", func(t *testing.T) {
+		s, pfx := mk(t)
+		ctx := context.Background()
+		doomed, _ := s.Accept(ctx, inbox.Inbound{ChildID: pfx + "a", Mode: inbox.ModePrompt, Text: "too big"})
+		behind, _ := s.Accept(ctx, inbox.Inbound{ChildID: pfx + "a", Mode: inbox.ModePrompt, Text: "still deliverable"})
+		other, _ := s.Accept(ctx, inbox.Inbound{ChildID: pfx + "b", Mode: inbox.ModePrompt, Text: "someone else's"})
+
+		n, err := s.Reject(ctx, []string{doomed.ID}, "message is 20 MiB")
+		if err != nil {
+			t.Fatalf("Reject: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("Reject returned %d, want 1", n)
+		}
+		rows, err := s.Pending(ctx, pfx+"a")
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != behind.ID {
+			t.Fatalf("Reject must retire exactly the named row and leave the rest pending; got %+v", rows)
+		}
+		if rows, _ := s.Pending(ctx, pfx+"b"); len(rows) != 1 || rows[0].ID != other.ID {
+			t.Errorf("Reject reached another child's rows: %+v", rows)
+		}
+		// A rejected row is terminal: the ack path's MarkConsumed must not
+		// restate it as consumed, and a later ResetSent must not hand it back
+		// to delivery.
+		if err := s.MarkConsumed(ctx, []string{doomed.ID}); err != nil {
+			t.Fatalf("MarkConsumed after Reject: %v", err)
+		}
+		if n, err := s.ResetSent(ctx, pfx+"a"); err != nil || n != 0 {
+			t.Errorf("ResetSent after Reject = (%d, %v), want (0, nil)", n, err)
+		}
+		if rows, _ := s.Pending(ctx, pfx+"a"); len(rows) != 1 || rows[0].ID != behind.ID {
+			t.Errorf("a rejected row came back as pending: %+v", rows)
+		}
+		// Already-terminal rows are left alone, so a Reject racing a Consume is
+		// harmless either way.
+		if n, err := s.Reject(ctx, []string{doomed.ID}, "again"); err != nil || n != 0 {
+			t.Errorf("second Reject = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+
 	t.Run("SweepDeletesOnlyTerminalRows", func(t *testing.T) {
 		s, pfx := mk(t)
 		ctx := context.Background()

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -138,5 +139,40 @@ func TestFrontendFallsBackToThePlainHandler(t *testing.T) {
 	}
 	if len(h.steers) != 1 || h.steers[0] != "stop" {
 		t.Errorf("steers = %v, want [stop]", h.steers)
+	}
+}
+
+// An oversized frame must not end the child. This is the failure that killed a
+// live conversation: bufio.Scanner returned "token too long", Run returned, the
+// daemon's next write hit a broken pipe, and the row behind the frame came back
+// to pending — so every resume replayed it and killed the next child too.
+//
+// The frame is REPORTED (an agent_error frame, which is how the sender learns
+// which message was dropped) and SKIPPED, and the prompt after it still runs.
+func TestOversizedFrameIsReportedAndSkipped(t *testing.T) {
+	c := assert.NewAborting(t)
+	oversized := strings.Repeat("a", protocol.MaxFrameBytes+1)
+	in := strings.NewReader(
+		`{"type":"prompt","id":"F1","message":"` + oversized + `"}` + "\n" +
+			`{"type":"prompt","id":"F2","message":"still here"}` + "\n")
+	var out bytes.Buffer
+	h := &idRecorder{}
+	c.NoError(NewFrontend(in, &out, h).Run(), "Run must survive an oversized frame")
+
+	if len(h.prompts) != 1 || h.prompts[0] != "F2|still here" {
+		t.Fatalf("prompts = %v, want [F2|still here] -- the frame after the oversized one must run", h.prompts)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var f struct {
+			Type  string `json:"type"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &f) == nil && f.Type == "agent_error" && f.Error != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no agent_error frame reported the dropped message; output:\n%s", out.String())
 	}
 }

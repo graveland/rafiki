@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1006,4 +1007,90 @@ func TestStaleClaudeAbortRowIsRetiredNotReplayed(t *testing.T) {
 	if ch, ok := ctrl.cm.Get(childID); !ok || ch.PID() != pidBefore {
 		t.Fatal("the stored abort reached the interrupt path: the process was replaced")
 	}
+}
+
+// A prompt whose frame is past the child's limit is refused BEFORE it is
+// persisted, exactly like an over-budget send: the sender gets a real error
+// instead of silence, and no row is left for a resume to replay into the same
+// wall. Before this, the frame was written, the child's reader died on it
+// ("bufio.Scanner: token too long"), the row came back to pending, and every
+// resume killed the next child the same way.
+func TestAcceptAndDeliverRefusesAnOversizedPrompt(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctx := context.Background()
+	st := inbox.NewMemory()
+	c := &Controller{st: childstore.New(), cm: newChildManager(),
+		inbox: inbox.NewQueue(inbox.QueueConfig{Store: st})}
+	c.st.Insert(&childstore.Session{ChildID: "c_big", Kind: protocol.KindFundi, Status: protocol.StatusIdle})
+
+	_, err := c.acceptAndDeliver(ctx, inbox.Inbound{
+		ChildID: "c_big", Mode: inbox.ModePrompt,
+		Text: strings.Repeat("a", protocol.MaxFrameBytes+1),
+	})
+	var ce *connectapi.ControllerError
+	ck.Require().True(errors.As(err, &ce), "want a ControllerError naming the limit, got %v", err)
+	ck.Eq(protocol.ErrPayloadTooLarge, ce.Code, "error code")
+	ck.True(strings.Contains(ce.Message, "Nothing was queued"), "the refusal must say nothing was queued: %q", ce.Message)
+
+	rows, err := st.Pending(ctx, "c_big")
+	ck.Require().NoError(err, "Pending")
+	ck.Empty(rows, "a refused prompt must not be persisted")
+}
+
+// The same limit, enforced at DELIVERY, for a row that got past accept: a
+// coalesced batch, a row from a daemon that predates the check, or one already
+// in the queue at upgrade time. It must be refused rather than written —
+// writing it is what killed the child — and it must go TERMINAL, because a
+// pending row replays on the next resume and takes the next child with it.
+func TestDeliverInboxRefusesAFramePastTheLimit(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctx := context.Background()
+	st := inbox.NewMemory()
+
+	rec, err := st.Accept(ctx, inbox.Inbound{
+		ChildID: "c_big", Mode: inbox.ModePrompt, Text: "look at this",
+		Attachments: []inbox.Attachment{{
+			MediaType: "image/png",
+			Data:      make([]byte, protocol.MaxFrameBytes),
+		}},
+	})
+	ck.Require().NoError(err, "Accept")
+	rows, err := st.Pending(ctx, "c_big")
+	ck.Require().NoError(err, "Pending")
+	batches := inbox.Coalesce(rows, inbox.BatchConfig{MaxFragments: 30, MaxBytesPerFlush: 65536})
+	ck.Require().Len(batches, 1, "batches")
+
+	c := &Controller{st: childstore.New(), cm: newChildManager(),
+		inbox: inbox.NewQueue(inbox.QueueConfig{Store: st})}
+	c.st.Insert(&childstore.Session{ChildID: "c_big", Kind: protocol.KindFundi, Status: protocol.StatusIdle})
+
+	awaitAck, err := c.deliverInbox(ctx, batches[0])
+	ck.NoError(err, "a refused batch is handled, not an error the queue must keep retrying")
+	ck.False(awaitAck, "nothing was written, so nothing will ack it")
+
+	rows, err = st.Pending(ctx, "c_big")
+	ck.Require().NoError(err, "Pending")
+	ck.Empty(rows, "the refused row must be terminal, not pending")
+
+	// The queue marks a non-acking batch consumed on the spot. That must not
+	// restate a dropped row as consumed — the child never saw it.
+	ck.NoError(st.MarkConsumed(ctx, []string{rec.ID}), "MarkConsumed after reject")
+	rows, _ = st.Pending(ctx, "c_big")
+	ck.Empty(rows, "a rejected row came back as pending")
+}
+
+// A batch that fits is untouched by the guard, including for a runtime with no
+// limit of its own: the check is a floor on what reaches the child, not a new
+// cap on everyone.
+func TestChildFrameLimitIsPerRuntime(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := &Controller{st: childstore.New()}
+	c.st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi})
+	c.st.Insert(&childstore.Session{ChildID: "c_claude", Kind: protocol.KindClaude})
+	c.st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript})
+
+	ck.Eq(protocol.MaxFrameBytes, c.childFrameLimit("c_fundi"), "fundi child limit")
+	ck.Eq(0, c.childFrameLimit("c_claude"), "claude child limit (no reader of its own to protect)")
+	ck.Eq(0, c.childFrameLimit("c_script"), "script child limit (never written to)")
+	ck.Eq(0, c.childFrameLimit("c_unknown"), "unknown child limit")
 }

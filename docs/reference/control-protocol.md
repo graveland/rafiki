@@ -1800,6 +1800,19 @@ returns success with an **empty `message_id`**, because there is no row to
 name and an invented id would resolve to nothing. Storing it would risk
 replaying a cancellation into an unrelated later turn.
 
+**One message is one frame, and a frame has a size ceiling.** The row's text
+plus every attachment is rendered as a single NDJSON frame written to the
+child's stdin, capped at `protocol.MaxFrameBytes` (16 MiB) in BOTH directions.
+A prompt that would exceed it is refused before it is persisted, with
+`payload_too_large` and nothing queued — a frame the child's reader would
+discard can only deliver nothing, and (before that check) it killed the child
+and came back to pending, so every resume replayed it and killed the next one
+too. The same limit is enforced again at delivery, where the rows are dropped
+with reason `inbox_too_large` on the child's event stream instead of written.
+Images are the realistic way to hit it: each attachment is downscaled at
+ingest (`imagefit`, 1568×1568 / 1.15 Mpx) but stays lossless PNG, and the cap
+applies to the SUM of one prompt's attachments, base64-inflated by ~4/3.
+
 ### Slash commands in a prompt
 
 A `PROMPT` whose trimmed text begins with a registered `/command` is a **slash
@@ -2797,7 +2810,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `internal` | `internal` | Unexpected daemon-side error. |
 | `no_agent_db` | `unavailable` | The conversation/recall/pymodule backend is unwired (`RAFIKI_DB` unset). |
 | `unavailable` | `unavailable` | The daemon cannot take the request RIGHT NOW, and the same request may succeed later: `Notify`'s unwired notifier, missing durable child store, name-resolve failure or failed durable accept; `ModelRoutes` with no endpoint catalog. Retryable — the webhook gateway's `503` rests on it (`docs/guide/webhooks.md`). |
-| `payload_too_large` | `invalid_argument` | A transcript or report exceeds its size cap. |
+| `payload_too_large` | `invalid_argument` | A transcript or report exceeds its size cap — or a `Send` prompt/steer whose frame would exceed the target child's per-message limit (`protocol.MaxFrameBytes`, 16 MiB, for a fundi child; a claude or script child imposes none). Refused BEFORE anything is persisted, exactly like `budget_exhausted`: the message names the size and the limit, and nothing was queued. A row that reaches delivery over the limit anyway (a coalesced batch, or one queued by a daemon predating the check) is dropped with reason `inbox_too_large` on the child's event stream rather than written — writing it is what used to kill the child, and leaving it pending replays it into the next resume. |
 | `protocol_mismatch` | `failed_precondition` | A Connect request's `Rafiki-Protocol` header is missing or names a different epoch (`pkg/server.RequireEpoch`). Attached by the epoch gate, not the domain error table — see "The protocol epoch" above. |
 
 **Reasons ride `google.rpc.ErrorInfo`** (`pkg/rpcreason`): `Attach` puts the

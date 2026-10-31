@@ -152,6 +152,16 @@ type Store interface {
 	// returns how many were dropped.
 	Drop(ctx context.Context, childID, reason string) (int, error)
 
+	// Reject terminates exactly the rows named, as dropped with a reason, and
+	// returns how many moved.
+	//
+	// This is Drop narrowed to ONE batch: a message the child can never be
+	// given (a frame past the runtime's size limit) must retire without
+	// taking everything queued behind it, and without going back to pending
+	// for the next resume to replay. Rows already terminal are left alone, so
+	// a Reject racing a Consume is harmless either way.
+	Reject(ctx context.Context, ids []string, reason string) (int, error)
+
 	// Sweep deletes terminal rows accepted before the cutoff, across all
 	// children, and returns how many were deleted. Deleting a terminal row
 	// cannot affect any daemon's delivery decisions, which is why this one is

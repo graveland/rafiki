@@ -58,6 +58,13 @@ UPDATE conversations.agent_inbox
    SET state = 'dropped', drop_reason = $2, updated_at = now()
  WHERE child_id = $1 AND state IN ('pending', 'sent')`
 
+// rejectSQL is dropSQL scoped to the named rows rather than the whole child:
+// one undeliverable batch retires, and everything queued behind it still goes.
+const rejectSQL = `
+UPDATE conversations.agent_inbox
+   SET state = 'dropped', drop_reason = $2, updated_at = now()
+ WHERE id = ANY($1) AND state IN ('pending', 'sent')`
+
 const sweepSQL = `
 DELETE FROM conversations.agent_inbox
  WHERE state IN ('consumed', 'dropped') AND accepted_at < $1`
@@ -163,6 +170,17 @@ func (s *Store) Drop(ctx context.Context, childID, reason string) (int, error) {
 	tag, err := s.pool.Exec(ctx, dropSQL, childID, reason)
 	if err != nil {
 		return 0, fmt.Errorf("inbox: drop: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (s *Store) Reject(ctx context.Context, ids []string, reason string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tag, err := s.pool.Exec(ctx, rejectSQL, ids, reason)
+	if err != nil {
+		return 0, fmt.Errorf("inbox: reject: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }

@@ -4,14 +4,15 @@
 package fundi
 
 import (
-	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"sync"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // Frontend speaks pi's rpc protocol over stdio: ndjson frames in (prompt,
@@ -130,10 +131,18 @@ type modelField struct {
 }
 
 // Run reads ndjson frames from in until EOF, dispatching each to the
-// handler, and blocks until stdin is exhausted or a scan error occurs.
+// handler, and blocks until stdin is exhausted or a read error occurs.
 // Dispatch to the Handler is synchronous and inline, so the Handler contract
 // (see Handler) requires prompt returns to keep the reader loop responsive to
 // abort/steer frames while a turn is in flight.
+//
+// A frame larger than protocol.MaxFrameBytes is REPORTED and skipped, never
+// fatal: the cap is the daemon's to respect (it refuses an oversized prompt
+// before writing), but a runtime that died on one bad line would take the
+// conversation down with it — and the row behind the frame would be
+// redelivered on resume, killing the next child the same way. Skipping keeps
+// the child alive for the next prompt; the agent_error frame is how the
+// sender learns which message was dropped and why.
 func (f *Frontend) Run() error {
 	// Resolved once per connection rather than per frame: the handler is fixed
 	// for a Frontend's lifetime, so this is the ONE type assertion IDHandler's
@@ -142,10 +151,21 @@ func (f *Frontend) Run() error {
 	// Resolved once, beside IDHandler and for the same reason: a type assertion
 	// per frame in the reader loop is a cost paid on every message forever.
 	ah, _ := f.handler.(AttachmentHandler)
-	sc := bufio.NewScanner(f.in)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
+	fr := protocol.NewFrameReader(f.in, protocol.MaxFrameBytes)
+	for {
+		line, err := fr.ReadFrame()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if errors.Is(err, protocol.ErrFrameTooLarge) {
+			f.Emit(map[string]any{"type": "agent_error", "error": fmt.Sprintf(
+				"inbound frame exceeded %d bytes and was discarded; send fewer or smaller attachments",
+				protocol.MaxFrameBytes)})
+			continue
+		}
+		if err != nil {
+			return err
+		}
 		var hdr struct {
 			Type        string `json:"type"`
 			ID          string `json:"id,omitempty"`
@@ -208,5 +228,4 @@ func (f *Frontend) Run() error {
 			}
 		}
 	}
-	return sc.Err()
 }

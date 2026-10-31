@@ -874,6 +874,15 @@ func (c *Child) readStdout() {
 		if err == io.EOF {
 			break
 		}
+		if errors.Is(err, protocol.ErrFrameTooLarge) {
+			// Discard and keep pumping. Breaking here would leave the child's
+			// stdout undrained, so its next write blocks and a live child looks
+			// dead — one oversized frame (a tool result carrying a huge image)
+			// must not do that. The reader has resynced on the following frame.
+			slog.Warn("stdout frame too large; discarded",
+				"child", c.ID, "limit", protocol.MaxFrameBytes)
+			continue
+		}
 		if err != nil {
 			slog.Warn("stdout read error", "child", c.ID, "error", err)
 			break

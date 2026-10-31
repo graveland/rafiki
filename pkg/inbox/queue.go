@@ -216,6 +216,22 @@ func (q *Queue) Drop(ctx context.Context, childID, reason string) (int, error) {
 	return q.cfg.Store.Drop(ctx, childID, reason)
 }
 
+// Reject terminates exactly the rows named — one batch that can never be
+// delivered, as opposed to Drop's whole queue.
+//
+// It takes the same per-child lock as Consume and for the same reason: a
+// child's exit-triggered Reset racing a Reject must not interleave into a row
+// that is back to pending and therefore deliverable. Everything queued behind
+// the rejected batch is left untouched and still goes.
+func (q *Queue) Reject(ctx context.Context, childID string, ids []string, reason string) (int, error) {
+	if q.cfg.Store == nil || len(ids) == 0 {
+		return 0, nil
+	}
+	unlock := q.locks.lock(childID)
+	defer unlock()
+	return q.cfg.Store.Reject(ctx, ids, reason)
+}
+
 // Sweep deletes terminal rows older than before.
 func (q *Queue) Sweep(ctx context.Context, before time.Time) (int, error) {
 	if q.cfg.Store == nil {

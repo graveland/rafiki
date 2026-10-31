@@ -70,6 +70,40 @@ func TestFrameReader_FrameTooLarge(t *testing.T) {
 	assert.NewAborting(t).ErrorIs(err, protocol.ErrFrameTooLarge, "got")
 }
 
+// An oversized frame is discarded WHOLE and the reader resynchronises on the
+// next one. That is what lets a caller that must stay alive — a child's stdin
+// pump — report one bad frame and keep reading instead of tearing the child
+// down; an undefined cursor would force every caller to die.
+func TestFrameReader_ResyncsAfterFrameTooLarge(t *testing.T) {
+	c := assert.NewAborting(t)
+	big := strings.Repeat("a", 2*1024)
+	input := big + "\n" + `{"type":"prompt"}` + "\n" + "short\n"
+	r := protocol.NewFrameReader(strings.NewReader(input), 1024)
+
+	_, err := r.ReadFrame()
+	c.ErrorIs(err, protocol.ErrFrameTooLarge, "first frame")
+
+	line, err := r.ReadFrame()
+	c.NoError(err, "the frame after an oversized one")
+	c.Eq(`{"type":"prompt"}`, string(line), "resumed at the wrong offset: got %q, want")
+
+	line, err = r.ReadFrame()
+	c.NoError(err, "third frame")
+	c.Eq("short", string(line), "third frame: got %q, want")
+
+	_, err = r.ReadFrame()
+	c.ErrorIs(err, io.EOF, "after the last frame")
+}
+
+// A stream that ENDS mid-oversized-frame reports the oversize rather than a
+// truncated frame: nothing half-read is ever handed back.
+func TestFrameReader_TooLargeAtEOF(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := protocol.NewFrameReader(strings.NewReader(strings.Repeat("a", 2*1024)), 1024)
+	_, err := r.ReadFrame()
+	c.ErrorIs(err, protocol.ErrFrameTooLarge, "unterminated oversized frame")
+}
+
 func TestFrameReader_PartialFrameAtEOF(t *testing.T) {
 	t.Run("no_cr", func(t *testing.T) {
 		c := assert.NewAborting(t)

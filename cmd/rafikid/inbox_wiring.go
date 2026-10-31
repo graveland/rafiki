@@ -178,6 +178,76 @@ func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error)
 	return out, nil
 }
 
+// childFrameLimit is the largest stdin frame childID's runtime will accept, or
+// 0 for a runtime that imposes no limit of its own.
+//
+// fundi reads stdin through protocol.FrameReader at protocol.MaxFrameBytes, so
+// a larger frame is one it discards. Refusing it before the write is what
+// turns a silently dropped message into an error its sender can act on. A
+// claude child has no such reader and a script child is never written to at
+// all, so both keep their existing behaviour (0).
+func (c *Controller) childFrameLimit(childID string) int {
+	snap, ok := c.st.Get(childID)
+	if !ok || snap.Kind != protocol.KindFundi {
+		return 0
+	}
+	return protocol.MaxFrameBytes
+}
+
+// promptFrameBytes is the size the frame for in will be, rendered by the same
+// builder delivery uses — so the estimate cannot drift from the real thing —
+// with a REAL id, whose length delivery will also write. Minting one costs a
+// rand read and keeps an at-the-limit prompt from passing here only to be
+// refused at delivery. It materialises the base64 to measure it, which is the
+// price of not duplicating the frame's shape: a send is one human action, and
+// the payload is about to be marshalled for the inbox row anyway.
+func promptFrameBytes(in inbox.Inbound) (int, error) {
+	id, _ := inbox.NewID()
+	frame, err := buildInjectionFrame(inbox.Batch{
+		ChildID:     in.ChildID,
+		Mode:        in.Mode,
+		Source:      in.Source,
+		Frags:       []string{in.Text},
+		Attachments: in.Attachments,
+	}, id)
+	if err != nil {
+		return 0, err
+	}
+	return len(frame), nil
+}
+
+// rejectBatch retires rows the child can never be given, and says so on the
+// child's own event stream.
+//
+// Not silent, and not a Drop: only this batch goes, so a message stuck behind
+// it is still delivered. The event is the durable record — a direct sender
+// already got ErrPayloadTooLarge at accept, but a row can also arrive from the
+// event buffer or from a daemon that predates the check, and this is the one
+// place an operator hears about that.
+func (c *Controller) rejectBatch(b inbox.Batch, reason string) error {
+	if c.inbox == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := c.inbox.Reject(ctx, b.ChildID, b.IDs, reason)
+	if err != nil {
+		return fmt.Errorf("inbox: reject oversized batch: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	c.publishEvent(b.ChildID, &rafikiv1.Event{
+		ChildId: b.ChildID,
+		Ts:      timestamppb.Now(),
+		Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+			Code:    "inbox_too_large",
+			Message: fmt.Sprintf("%d message(s) dropped: %s", n, reason),
+		}},
+	})
+	return nil
+}
+
 // deliverInbox writes one batch to its child and reports whether an ack is
 // coming.
 //
@@ -261,6 +331,23 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 	frame, err := buildInjectionFrame(b, frameID)
 	if err != nil {
 		return false, err
+	}
+
+	// Never write a frame the child's reader will refuse. Without this the
+	// frame is written, the reader discards it (or, on a build predating that,
+	// dies), the child never acks, and releaseInboxOnExit returns the rows to
+	// pending — so every resume replays the same message and kills the next
+	// child too. Retiring exactly this batch keeps the child alive and leaves
+	// everything queued behind it deliverable.
+	if limit := c.childFrameLimit(b.ChildID); limit > 0 && len(frame) > limit {
+		reason := fmt.Sprintf("message is %d bytes; the agent accepts at most %d per message",
+			len(frame), limit)
+		slog.Warn("inbox: refusing an oversized message", "childId", b.ChildID,
+			"rows", len(b.IDs), "bytes", len(frame), "limit", limit)
+		if err := c.rejectBatch(b, reason); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 
 	// Record the frame BEFORE the write. The ack arrives on the child's own
@@ -357,6 +444,21 @@ func (c *Controller) acceptAndDeliver(ctx context.Context, in inbox.Inbound) (st
 				Code: protocol.ErrBudgetExhausted,
 				Message: fmt.Sprintf("agent %s is over budget (budget held by %s); nothing was queued. "+
 					"Raise the budget with agent_set_budget, then send again", in.ChildID, root),
+			}
+		}
+		// Same contract as the budget refusal, for a reason the child's own
+		// reader would enforce anyway: a frame past its limit is discarded, so
+		// queueing one delivers nothing and (before this check) killed the
+		// child. Refused up front, the sender gets a real error and nothing is
+		// persisted.
+		if limit := c.childFrameLimit(in.ChildID); limit > 0 {
+			if n, err := promptFrameBytes(in); err == nil && n > limit {
+				return "", &connectapi.ControllerError{
+					Code: protocol.ErrPayloadTooLarge,
+					Message: fmt.Sprintf("message would be %d bytes; agent %s accepts at most %d bytes "+
+						"per message. Nothing was queued — send fewer or smaller attachments, or split "+
+						"the prompt into several messages", n, in.ChildID, limit),
+				}
 			}
 		}
 	}

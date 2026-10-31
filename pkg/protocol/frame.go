@@ -20,10 +20,12 @@ import (
 const MaxFrameBytes = 16 << 20
 
 // ErrFrameTooLarge is returned by ReadFrame when a frame exceeds the
-// reader's configured maxBytes. After this error, the FrameReader's
-// state is undefined — the underlying reader's cursor is left mid-frame
-// and any subsequent ReadFrame would return corrupted data. Callers
-// must discard the FrameReader.
+// reader's configured maxBytes. The oversized frame is DISCARDED whole and
+// the reader resynchronises on the next '\n', so a subsequent ReadFrame
+// returns the frame after it — a caller that must stay alive (a child's
+// stdin pump, its stdout reader) can report one bad frame and keep reading
+// instead of tearing the child down. That resync is the whole reason this
+// is a sentinel error rather than a fatal one.
 var ErrFrameTooLarge = errors.New("frame too large")
 
 // FrameReader reads LF-terminated frames from an underlying reader, enforcing
@@ -53,23 +55,36 @@ func NewFrameReader(r io.Reader, maxBytes int) *FrameReader {
 // '\r') removed. It returns (nil, io.EOF) only when the underlying reader is
 // exhausted and no partial data remained. A partial frame at EOF (no trailing
 // newline) is returned as a final frame on one call, then io.EOF on the next.
-// On ErrFrameTooLarge the reader's state is undefined; the FrameReader must
-// be discarded.
+//
+// A frame larger than maxBytes is discarded whole: the reader drains to the
+// next '\n' without accumulating, returns ErrFrameTooLarge, and is left
+// positioned at the following frame. Nothing is ever returned half a frame.
 func (f *FrameReader) ReadFrame() ([]byte, error) {
 	f.buf.Reset()
+	tooLarge := false
 	for {
 		chunk, err := f.r.ReadSlice('\n')
 		if len(chunk) > 0 {
-			if f.buf.Len()+len(chunk) > f.maxBytes {
-				return nil, ErrFrameTooLarge
+			switch {
+			case tooLarge:
+				// Already over the cap: keep draining, never accumulate, so a
+				// hostile or accidental multi-gigabyte line costs I/O but not
+				// memory.
+			case f.buf.Len()+len(chunk) > f.maxBytes:
+				tooLarge = true
+				f.buf.Reset()
+			default:
+				f.buf.Write(chunk)
 			}
-			f.buf.Write(chunk)
 		}
 		if err == bufio.ErrBufferFull {
 			// Internal buffer filled before '\n' — keep accumulating.
 			continue
 		}
 		if err == nil {
+			if tooLarge {
+				return nil, ErrFrameTooLarge
+			}
 			// Complete frame ending in '\n'.
 			line := f.buf.Bytes()
 			line = line[:len(line)-1] // drop trailing \n
@@ -81,6 +96,9 @@ func (f *FrameReader) ReadFrame() ([]byte, error) {
 			return out, nil
 		}
 		if err == io.EOF {
+			if tooLarge {
+				return nil, ErrFrameTooLarge
+			}
 			if f.buf.Len() > 0 {
 				// Partial frame without a terminating newline — return it once,
 				// then the caller will get io.EOF on the next call.

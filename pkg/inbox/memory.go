@@ -117,6 +117,22 @@ func (m *Memory) Drop(_ context.Context, childID, _ string) (int, error) {
 	return n, nil
 }
 
+func (m *Memory) Reject(_ context.Context, ids []string, _ string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, id := range ids {
+		if _, exists := m.rows[id]; !exists {
+			continue
+		}
+		if m.st[id] == StatePending || m.st[id] == StateSent {
+			m.st[id] = StateDropped
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *Memory) Sweep(_ context.Context, before time.Time) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
