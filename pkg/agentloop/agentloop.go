@@ -503,7 +503,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			}
 
 		default:
-			return &Result{Stats: stats}, fmt.Errorf("agentloop: unexpected stop reason %q", resp.StopReason.String())
+			return &Result{Stats: stats}, fmt.Errorf("agentloop: unexpected stop reason %q", resp.StopReasonWire())
 		}
 	}
 	// Unreachable, for one of two reasons depending on limit's sign. When

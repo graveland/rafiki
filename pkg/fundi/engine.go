@@ -1265,7 +1265,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 					"input_tokens", msg.Val(resp.Usage.Input), "output_tokens", msg.Val(resp.Usage.Output),
 					"cache_read_tokens", msg.Val(resp.Usage.CacheRead), "cache_creation_tokens", msg.Val(resp.Usage.CacheWrite),
 					"cache_pct", cachePct,
-					"stop_reason", resp.StopReason.String(), "latency", dur.Round(100*time.Millisecond),
+					"stop_reason", resp.StopReasonWire(), "latency", dur.Round(100*time.Millisecond),
 					"cost_total", fmt.Sprintf("%.2f", conversationTotal))
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any

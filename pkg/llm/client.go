@@ -520,7 +520,9 @@ func setUsageAttrs(span trace.Span, resp *msg.Response) {
 		attribute.Int64("gen_ai.usage.output_tokens", msg.Val(u.Output)),
 		attribute.Int64("gen_ai.usage.cache_read.input_tokens", msg.Val(u.CacheRead)),
 		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", msg.Val(u.CacheWrite)),
-		attribute.StringSlice("gen_ai.response.finish_reasons", []string{resp.StopReason.String()}),
+		// StopReasonWire keeps an unmodelled provider value on the span instead
+		// of recording an empty finish reason.
+		attribute.StringSlice("gen_ai.response.finish_reasons", []string{resp.StopReasonWire()}),
 	)
 }
 

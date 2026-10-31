@@ -51,6 +51,36 @@ func TestEmitterPublishesNativeAssistantMessage(t *testing.T) {
 	c.False(tu.GetId() != "tu_1" || tu.GetName() != "bash" || tu.GetInputJson() != `{"cmd":"ls"}`, "tool use = %+v", tu)
 }
 
+// An unmodelled provider stop reason must reach RawStopReason verbatim: it is
+// the event stream's own spelling of why the turn stopped, and erasing it to ""
+// loses the one signal that explains a turn ending oddly (Anthropic's
+// model_context_window_exceeded, say). A modelled value is unchanged.
+func TestEmitterKeepsAnUnmodelledStopReasonVerbatim(t *testing.T) {
+	c := assert.NewCollecting(t)
+	em := NewEmitter(NewFrontend(bytes.NewReader(nil), io.Discard, nil), "anthropic", nil)
+	sink := &nativeCapture{}
+	em.SetNativeSink(sink)
+
+	em.publishAssistant(&msg.Response{
+		StopReasonRaw: "model_context_window_exceeded",
+		Content:       []msg.Block{msg.Text{Text: "cut off"}},
+	}, 0, store.Appended{CreatedAt: time.Now()})
+
+	am := findAssistant(t, sink.events)
+	c.Eq("model_context_window_exceeded", am.GetRawStopReason(), "unmodelled raw stop reason")
+	c.Eq(rafikiv1.StopReason_STOP_REASON_UNSPECIFIED, am.GetStopReason(), "unmodelled stop reason")
+
+	// A modelled value is unaffected by the fallback.
+	sink.events = nil
+	em.publishAssistant(&msg.Response{
+		StopReason: msg.StopEndTurn,
+		Content:    []msg.Block{msg.Text{Text: "done"}},
+	}, 0, store.Appended{CreatedAt: time.Now()})
+	am = findAssistant(t, sink.events)
+	c.Eq("end_turn", am.GetRawStopReason(), "modelled raw stop reason")
+	c.Eq(rafikiv1.StopReason_STOP_REASON_END_TURN, am.GetStopReason(), "modelled stop reason")
+}
+
 // The STREAMED path must publish it too, and this is the arm that actually
 // matters: content_block_delta is ephemeral and never logged, so a streamed
 // turn that skipped the assistant message would be lost on every replay — and

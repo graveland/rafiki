@@ -66,7 +66,9 @@ func (e *Emitter) publishAssistant(resp *msg.Response, turnCostUSD float64, row 
 		}
 		blocks = append(blocks, cb)
 	}
-	e.lastStop = resp.StopReason.String()
+	// StopReasonWire, not StopReason.String: a wire value this package does not
+	// model must reach RawStopReason verbatim rather than being erased to "".
+	e.lastStop = resp.StopReasonWire()
 	e.publishNativeAt(&rafikiv1.AssistantMessage{
 		Content:       blocks,
 		StopReason:    eventconv.StopReasonFromString(e.lastStop),
