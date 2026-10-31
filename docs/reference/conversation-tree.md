@@ -460,6 +460,79 @@ cached for the next.
   a request needs it, so a `/clear` a client just sent is visible to the next
   request on any face.
 
+## Forks
+
+A fork is a conversation that **borrows** another's history instead of copying
+it. The link is `conversation.fork_from` (migration 0065): one node id, written
+once when the conversation is created and never changed. It is the
+conversation's **single immutable foreign edge** — the only place a `Backend`
+call may leave its own conversation.
+
+- **Legal foreign references are exactly two**: a boundary row's `parent_id`,
+  and a root's `derived_from_id`. Each must name the conversation's
+  `fork_from` node; any other id outside the conversation is `ErrNotFound` from
+  `Walk` and from `Commit` (`checkCommitParents`). No backend walk follows
+  `parent_id` anywhere — deliberately, because a backend following a foreign
+  parent would make every read a cross-conversation query the cache and the
+  lease model do not cover.
+- **An empty head means the borrowed segment.** A fork starts with `head_id`
+  NULL and reads its source up to `fork_from` until its own first append. No
+  placeholder row is written: walking from an empty head IS the borrowed
+  segment.
+- **Every `Backend` method stays conversation-scoped; only the `pkg/conv` core
+  crosses the edge**, segment by segment. `Handle.pathFrom` reads a
+  conversation's edge, walks that conversation's segment, and on reaching the
+  edge continues in the edge's conversation — looping for a fork of a fork. The
+  loop is capped at `maxForkSegments` (64), a guard against an edge chain that
+  loops rather than a limit anything legitimate approaches.
+- **The edge is cached per entry.** `Store.edgeOf` caches the conversation's
+  `State.ForkFromID`/`ForkFromConversationID` on its cache entry — once, since
+  `cacheEdge`'s compare-and-swap installs only the first observation, and the
+  column is immutable so every observation agrees. A conversation with no edge
+  caches an empty one, so the `State` read happens once per entry rather than
+  once per walk. A warm owner read of a fork therefore makes no backend call:
+  it answers each segment from the cache. The borrowed segment is SHARED by
+  every fork, because nodes are cached by `(conversation, node)` — N forks of
+  one node hold one copy of the history before it.
+- **Ordinals continue across the edge.** A fork's `next_ordinal` is its source
+  node's ordinal + 1, so a chronological read (`ORDER BY ordinal`) puts the
+  borrowed history before the fork's own rows and a cursor (`m:<ordinal>`) stays
+  monotonic across the join.
+- **The tree check covers the edge.** `rafikid tree check` reads a
+  conversation's `fork_from` row in beside its own rows (`checkAddForkFromRow`),
+  because that one declared edge is what a boundary node's slot and a root's
+  derived-from seed are computed from; every other foreign parent still counts
+  as a bad hash.
+
+### Borrowed history under another harness
+
+A fork may run under a harness other than the one that wrote the history it
+borrows — a fundi child forking a claude child's session is the common case.
+`pkg/harness` dispatches on `conv.Node.Origin`, and a foreign node is replayed
+through that harness's `Replayer`, consulted from `forRequest`
+(`pkg/llm/trimrange.go`) before the merge.
+
+`claudecode`'s per-request `Replayer` is stateful: a call it renders as text
+renders that call's result as text too.
+
+- Tool names map `Read→read`, `Edit→edit`, `Write→write`, `Glob→glob`,
+  `Grep→grep`, `Bash→bash`, `mcp__rafiki__<x>→<x>` — and only when the child has
+  that tool.
+- Everything else renders as text, call and result both, wrapped in
+  self-describing `<borrowed_tool_call tool="…">` /
+  `<borrowed_tool_result tool="…">` blocks that stay in their original roles:
+  the call in the assistant message, its result in the user message.
+
+The pair travels together because a `tool_result` whose call became text is
+silently dropped by OpenRouter — leaving one behind loses the output with no
+error. Borrowed thinking blocks are stripped: a signature replays across Claude
+models but is bound to the upstream that minted it, and a fork may route
+elsewhere.
+
+Raw-SQL readers stay conversation-local: `pkg/insights` Export/Query/Search and
+recall read one conversation's rows and never cross the edge, so a fork's
+export or recall window covers only the rows the fork itself wrote.
+
 ## Stats
 
 Four denormalised counters on the `conversation` row, updated by the same
@@ -685,7 +758,8 @@ runs — never a retry.
   / `TestParityStoredVersusReplayed` over `testdata/claude-capture`.
 - `pkg/store` — `TestBackfill*`, `TestCheckTree*`, `TestConvBackend*`,
   `TestStoredResponsesSignatureSurvivesTheTreeRoundTrip`.
-- `pkg/conv` — `convtest.RunBackendSuite`, `TestAppend*`, `TestRetractHead*`,
+- `pkg/conv` — `convtest.RunBackendSuite`, `convtest.RunForkSuite`,
+  `TestAppend*`, `TestRetractHead*`,
   `TestPage*`, `TestTranscript*`, `TestWorking*`, `TestTwoClearsAreDistinctRoots`.
 - `pkg/capture` — `TestCapturedClaudeSessionReplays`, `TestReplayTwiceAddsNoRows`,
   `TestBackfillMatchesTreeCapture`, `TestARewindAttachesAtTheNamedNode`,
