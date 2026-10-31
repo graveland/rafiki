@@ -369,9 +369,13 @@ harness inserted (Claude Code's `<system-reminder>` context), split out of
 `content` with the wrapper removed. The split is additive — a new field, no
 protocol epoch bump — so a client that ignores it shows the user's own text
 without the reminders. Every block in both lists keeps its `index` in the stored
-message, so a client can put them back in order. It applies to the live stream
-and to `GetHistory` alike, because both render through
-`eventconv.EventsFromNodes`.
+message, so a client can put them back in order. The split happens where a
+node's origin names a harness with reminders to split — a captured `claude-code`
+node; a fundi node carries no injected text, so there is nothing to split. A
+claude child's live `UserMessage` (`cmd/rafikid/capture_sink.go`) and the
+`GetHistory` read (`pkg/connectapi/server.go`) both render through
+`eventconv.EventsFromNodes`, so both show the same split; a fundi child's live
+event is built by `Emitter.publishUserRow` (`pkg/fundi/native.go`) without it.
 
 **Claude children meet it too.** Their `AssistantMessage`/`UserMessage` events
 are published from the stored rows, not from the claude stream: the proxy

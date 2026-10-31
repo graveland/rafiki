@@ -236,16 +236,18 @@ replay matches keeps the origin already stored. Migration 0064 backfilled
 `claude-code` for every conversation with `driven_by = 'client'`, and a
 compaction tail copy keeps its source's origin.
 
-Origin decides how a stored node is read, and `pkg/harness` is the only code
+Origin decides how a stored node is read, and `pkg/harness` — which only
+dispatches by origin — plus the per-harness package under it are the only code
 that recognises a harness's injected text: `harness.For(origin)` returns that
-harness, and only the harness's own package knows its wrapper (today
+harness, and only that package knows its wrapper (today
 `pkg/harness/claudecode`: exactly `<system-reminder>\n` + body +
 `\n</system-reminder>`, optionally followed by one `\n`, with the body free of
 either tag). `Mark` marks such a block `msg.Text.Injected` — an annotation, never
 stored — and `Unwrap` returns its body for display, wrapper removed. Reading a
-node for a request, `pkg/llm` passes a node it did not write through that
-harness's `ForeignReplay`, which drops the blocks that are false under another
-harness (Claude Code's model-identity reminder) before the merge; the remaining marked
+node for a request, `pkg/llm` replays a node whose origin names another harness
+through that harness's `ForeignReplay`, which drops the blocks that are false
+under another harness (Claude Code's model-identity reminder) before the merge;
+fundi's own nodes and unclassified nodes go as stored. The remaining marked
 blocks are encoded as they stand under Anthropic and prefixed with
 `msg.InjectedTextNote` under the OpenAI dialects, and no block is ever moved or
 role-promoted.
