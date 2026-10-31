@@ -3,16 +3,14 @@
 package fundi
 
 import (
-	"log/slog"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -37,47 +35,38 @@ func (e *Emitter) SetNativeSink(s NativeSink) { e.native = s }
 // event log came to hold child_spawned, user_message, the tool events and
 // nothing the model ever said.
 //
-// The content blocks are read from resp's FLATTENED FIELDS rather than through
-// resp.ToParam(), for the reason MapAssistantMessage documents at length:
-// ToParam goes through AsAny(), which unmarshals ContentBlockUnion.JSON.raw,
-// and Message.Accumulate only rewrites that raw JSON on content_block_stop.
-// A mid-stream accumulated message therefore yields EMPTY blocks through
-// ToParam while the struct fields are already correct. Both current callers
-// pass a complete response, so ToParam would work today — and would silently
-// start dropping content the first time anyone published from a partial one.
-//
 // It is called only once the assistant row is committed, and the event's ts is
 // that row's created_at (row), the value GetHistory reports for the message.
-func (e *Emitter) publishAssistant(resp *anthropic.Message, turnCostUSD float64, row store.Appended) {
+func (e *Emitter) publishAssistant(resp *msg.Response, turnCostUSD float64, row store.Appended) {
 	if e.native == nil {
 		return
 	}
 	blocks := make([]*rafikiv1.ContentBlock, 0, len(resp.Content))
 	for _, b := range resp.Content {
 		cb := &rafikiv1.ContentBlock{Index: int32(len(blocks))}
-		switch b.Type {
-		case "text":
-			if b.Text == "" {
+		switch blk := b.(type) {
+		case msg.Text:
+			if blk.Text == "" {
 				continue
 			}
-			cb.Block = &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: b.Text}}
-		case "thinking":
-			if b.Thinking == "" {
+			cb.Block = &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: blk.Text}}
+		case msg.Thinking:
+			if blk.Text == "" {
 				continue
 			}
 			cb.Block = &rafikiv1.ContentBlock_Thinking{
-				Thinking: &rafikiv1.ThinkingBlock{Thinking: b.Thinking, Signature: b.Signature},
+				Thinking: &rafikiv1.ThinkingBlock{Thinking: blk.Text, Signature: blk.Sig.Value},
 			}
-		case "tool_use":
+		case msg.ToolUse:
 			cb.Block = &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
-				Id: b.ID, Name: b.Name, InputJson: string(b.Input),
+				Id: blk.ID, Name: blk.Name, InputJson: string(blk.Input),
 			}}
 		default:
 			continue
 		}
 		blocks = append(blocks, cb)
 	}
-	e.lastStop = string(resp.StopReason)
+	e.lastStop = resp.StopReason.String()
 	e.publishNativeAt(&rafikiv1.AssistantMessage{
 		Content:       blocks,
 		StopReason:    eventconv.StopReasonFromString(e.lastStop),
@@ -160,34 +149,20 @@ func (e *Emitter) publishError(err error) {
 
 // publishUserRow publishes a persisted user row — a prompt, a drained steer,
 // or one tool's result — as a durable UserMessage whose ts is the row's
-// created_at. The content is converted with msganthropic.FromParam and rendered
-// through eventconv.BlocksFromMsg, the same bridge the history read uses, so the
-// live copy and a replayed one agree on every block the proto vocabulary can
-// name. The two inputs are not identical — an SDK param here, the stored JSON
-// there — so an opaque-by-type block can still render differently; the row's ts
-// is what identifies the message across the two.
+// created_at. The content is rendered through eventconv.BlocksFromMsg, the same
+// bridge the history read uses, so the live copy and a replayed one agree on
+// every block the proto vocabulary can name.
 //
 // A tool_result rides a UserMessage because that is the shape history has:
 // Anthropic puts tool_result in the user turn. ToolExecutionEnd carries a
 // duration and an error flag and no text, so this event is the only live
 // source of a tool's output.
-func (e *Emitter) publishUserRow(content []anthropic.ContentBlockParamUnion, row store.Appended) {
+func (e *Emitter) publishUserRow(content []msg.Block, row store.Appended) {
 	if e.native == nil {
 		return
 	}
-	message, err := msganthropic.FromParam(anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: content,
-	})
-	if err != nil {
-		// The row is already committed, so history still renders it; only the
-		// live copy is lost, and saying so is better than publishing a blank
-		// message or swallowing the failure.
-		slog.Warn("fundi: publish user row: convert content", "error", err)
-		return
-	}
 	e.publishNativeAt(&rafikiv1.UserMessage{
-		Content: eventconv.BlocksFromMsg(message),
+		Content: eventconv.BlocksFromMsg(msg.Message{Role: msg.User, Content: content}),
 	}, row.CreatedAt)
 }
 

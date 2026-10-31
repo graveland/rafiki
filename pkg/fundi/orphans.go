@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
@@ -61,7 +59,7 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 		}
 	}
 
-	var blocks []anthropic.ContentBlockParamUnion
+	var blocks []msg.Block
 	for _, block := range history[lastAssistant].Msg.Content {
 		tu, ok := block.(msg.ToolUse)
 		if !ok || resolved[tu.ID] {
@@ -72,14 +70,17 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 		if strings.HasPrefix(tu.ID, prefillIDPrefix) {
 			continue
 		}
-		blocks = append(blocks, anthropic.NewToolResultBlock(tu.ID,
-			"Tool execution aborted by user.", true))
+		blocks = append(blocks, msg.ToolResult{
+			ToolUseID: tu.ID,
+			Content:   []msg.Block{msg.Text{Text: "Tool execution aborted by user."}},
+			IsError:   true,
+		})
 	}
 	if len(blocks) == 0 {
 		return 0, nil
 	}
 
-	if _, err := conv.AppendUser(ctx, blocks); err != nil {
+	if _, err := conv.AppendUserMsg(ctx, blocks); err != nil {
 		return 0, fmt.Errorf("agent: repair orphans: append synthetic results: %w", err)
 	}
 	return len(blocks), nil

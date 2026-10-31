@@ -81,7 +81,7 @@ func TestSkillToolRegistersUnderName(t *testing.T) {
 
 	found := false
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == "skill" {
+		if def.Name == "skill" {
 			found = true
 		}
 	}

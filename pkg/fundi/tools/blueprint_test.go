@@ -6,8 +6,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -88,21 +86,22 @@ func TestBuildDefRoundTrip(t *testing.T) {
 	}
 
 	def := BuildDef(tool)
-	c.NotNil(def.OfTool, "expected OfTool variant")
-	c.Eq("echo", def.OfTool.Name, "name =")
-	if !def.OfTool.Description.Valid() || def.OfTool.Description.Value != "echoes a thing" {
-		t.Fatalf("description = %+v", def.OfTool.Description)
-	}
-	if len(def.OfTool.InputSchema.Required) != 1 || def.OfTool.InputSchema.Required[0] != "path" {
-		t.Fatalf("required = %v", def.OfTool.InputSchema.Required)
-	}
+	c.Eq("echo", def.Name, "name =")
+	c.Eq("echoes a thing", def.Description, "description =")
 
-	// Round-trip through the SDK's own serialization.
-	b, err := json.Marshal(def)
-	c.NoError(err, "marshal def")
-	var back anthropic.ToolUnionParam
-	c.NoError(json.Unmarshal(b, &back), "unmarshal def")
-	c.False(back.OfTool == nil || back.OfTool.Name != "echo", "round-trip lost name")
+	var schema struct {
+		Type       string `json:"type"`
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	c.NoError(json.Unmarshal(def.InputSchema, &schema), "input schema is not valid JSON")
+	c.Eq("object", schema.Type, "schema type")
+	c.EqDeep([]string{"path"}, schema.Required, "required")
+	c.Eq("string", schema.Properties["path"].Type, "properties.path.type")
+	c.Eq("the file path", schema.Properties["path"].Description, "properties.path.description")
 }
 
 func TestMaterializeAllStatelessTools(t *testing.T) {
@@ -114,8 +113,8 @@ func TestMaterializeAllStatelessTools(t *testing.T) {
 	r := br.MaterializeAll(ToolOpts{})
 	defs := r.Definitions()
 	c.Len(defs, 2, "expected 2 definitions, got %d", len(defs))
-	if defs[0].OfTool.Name != "a" || defs[1].OfTool.Name != "b" {
-		t.Fatalf("expected [a, b], got %v", []string{defs[0].OfTool.Name, defs[1].OfTool.Name})
+	if defs[0].Name != "a" || defs[1].Name != "b" {
+		t.Fatalf("expected [a, b], got %v", []string{defs[0].Name, defs[1].Name})
 	}
 
 	outRes, err := r.Execute(context.Background(), "a", json.RawMessage(`{}`))

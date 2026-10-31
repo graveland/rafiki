@@ -210,9 +210,7 @@ func TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools(t *testing.T) {
 
 	names := map[string]bool{}
 	for _, def := range eng.tools.Definitions() {
-		if def.OfTool != nil {
-			names[def.OfTool.Name] = true
-		}
+		names[def.Name] = true
 	}
 	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
 		c.False(!names[name], "%q is missing; the standalone mode must keep its workspace tools", name)
@@ -243,9 +241,7 @@ func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
 	if defs := eng.tools.Definitions(); len(defs) != 0 {
 		names := make([]string, 0, len(defs))
 		for _, d := range defs {
-			if d.OfTool != nil {
-				names = append(names, d.OfTool.Name)
-			}
+			names = append(names, d.Name)
 		}
 		t.Fatalf("model tool definitions = %v, want none under NoBuiltinTools", names)
 	}
@@ -294,7 +290,7 @@ func TestBuildRuntimeNilPoolIsInMemory(t *testing.T) {
 // name, via the same Definitions() list sent to the model on every turn.
 func hasToolNamed(registry *tools.Registry, name string) bool {
 	for _, def := range registry.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == name {
+		if def.Name == name {
 			return true
 		}
 	}
@@ -366,9 +362,7 @@ func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
 	toolNames := func(eng *Engine) []string {
 		var names []string
 		for _, def := range eng.tools.Definitions() {
-			if def.OfTool != nil {
-				names = append(names, def.OfTool.Name)
-			}
+			names = append(names, def.Name)
 		}
 		return names
 	}

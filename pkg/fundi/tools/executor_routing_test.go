@@ -61,9 +61,7 @@ func TestNoExecutorMeansNoWorkspaceTools(t *testing.T) {
 
 	names := map[string]bool{}
 	for _, def := range reg.Definitions() {
-		if def.OfTool != nil {
-			names[def.OfTool.Name] = true
-		}
+		names[def.Name] = true
 	}
 
 	for _, name := range tools.WorkspaceTools() {

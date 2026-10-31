@@ -149,8 +149,8 @@ func TestRepairOrphansNoOpWhenTrailingMessageIsUser(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	c.NoError(conv.SeedHistory(ctx, []llm.Message{
-		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("go")},
+	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserTextMsg("go")},
 	}))
 	n, err := RepairOrphans(ctx, conv)
 	c.NoError(err)
@@ -161,13 +161,13 @@ func TestRepairOrphansNoOpWhenAllToolUseResolved(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	c.NoError(conv.SeedHistory(ctx, []llm.Message{
-		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("go")},
-		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
+	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserTextMsg("go")},
+		{Role: msg.Assistant, Content: []msg.Block{
+			msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)},
 		}},
-		{Role: anthropic.MessageParamRoleUser, Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolResultBlock("tu_1", "file.txt", false),
+		{Role: msg.User, Content: []msg.Block{
+			msg.ToolResult{ToolUseID: "tu_1", Content: []msg.Block{msg.Text{Text: "file.txt"}}},
 		}},
 	}))
 	n, err := RepairOrphans(ctx, conv)
@@ -188,14 +188,14 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	c.NoError(conv.SeedHistory(ctx, []llm.Message{
-		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("go")},
-		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
-			anthropic.NewToolUseBlock("tu_2", map[string]any{}, "bash"),
+	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserTextMsg("go")},
+		{Role: msg.Assistant, Content: []msg.Block{
+			msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)},
+			msg.ToolUse{ID: "tu_2", Name: "bash", Input: json.RawMessage(`{}`)},
 		}},
-		{Role: anthropic.MessageParamRoleUser, Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolResultBlock("tu_1", "file.txt", false),
+		{Role: msg.User, Content: []msg.Block{
+			msg.ToolResult{ToolUseID: "tu_1", Content: []msg.Block{msg.Text{Text: "file.txt"}}},
 		}},
 	}))
 
@@ -240,7 +240,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 
 	// sampleResp is a tool_use response (id tu_1); the tool it names never
 	// runs, so its result is never appended — the orphan.
-	if _, err := conv.Send(ctx, llm.UserText("go")); err != nil {
+	if _, err := conv.SendMsg(ctx, llm.UserTextMsg("go")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -257,7 +257,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 		t.Fatalf("trailing row's block = %+v, want a tool_result for tu_1", last.Msg.Content[0])
 	}
 
-	if _, err := conv.Continue(ctx); err != nil {
+	if _, err := conv.ContinueMsg(ctx); err != nil {
 		t.Fatalf("Continue after RepairOrphans failed: %v", err)
 	}
 

@@ -7,11 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -68,9 +67,9 @@ func TestTurnEndUsageIsTheFinalCallNotTheSum(t *testing.T) {
 			"stop_reason":"tool_use","content":[{"type":"text","text":"x"}],
 			"usage":{"input_tokens":%d,"output_tokens":10,"cache_read_input_tokens":%d}}`,
 			input, input, cacheRead)
-		var resp anthropic.Message
-		c.Require().NoError(json.Unmarshal([]byte(raw), &resp))
-		em.AssistantTurn(&resp)
+		resp, err := msganthropic.DecodeResponse([]byte(raw))
+		c.Require().NoError(err)
+		em.AssistantTurn(resp)
 	}
 
 	assistantTurn(1000, 50_000) // call 1

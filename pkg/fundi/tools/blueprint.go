@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
@@ -44,18 +43,19 @@ func (br *BlueprintRegistry) All() []Tool {
 	return out
 }
 
-// BuildDef converts a Tool to the Anthropic SDK tool definition. It panics if
-// the tool's InputSchema().JSON() produces invalid JSON — a programmer error
-// caught at registration time.
-func BuildDef(t Tool) anthropic.ToolUnionParam {
+// BuildDef converts a Tool to the native tool definition. It panics if the
+// tool's InputSchema().JSON() produces invalid JSON — a programmer error caught
+// at registration time.
+func BuildDef(t Tool) msg.ToolDef {
 	schemaJSON := t.InputSchema().JSON()
-	var schema anthropic.ToolInputSchemaParam
-	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
-		panic(fmt.Sprintf("tools: BuildDef: invalid schema for %q: %v", t.Name(), err))
+	if !json.Valid(schemaJSON) {
+		panic(fmt.Sprintf("tools: BuildDef: invalid schema for %q", t.Name()))
 	}
-	def := anthropic.ToolUnionParamOfTool(schema, t.Name())
-	def.OfTool.Description = anthropic.String(t.Description())
-	return def
+	return msg.ToolDef{
+		Name:        t.Name(),
+		Description: t.Description(),
+		InputSchema: schemaJSON,
+	}
 }
 
 // MaterializeAll iterates every registered blueprint and builds a per-agent

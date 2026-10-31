@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -89,18 +87,15 @@ func newTestEngineWithSDKConfig(t *testing.T, ts fakeToolSet, sender llm.SDKSend
 // (Task 8): one no-schema definition per key, name-sorted for cache stability.
 type fakeToolSet map[string]func(ctx context.Context, in json.RawMessage) (string, error)
 
-func (ts fakeToolSet) Definitions() []anthropic.ToolUnionParam {
+func (ts fakeToolSet) Definitions() []msg.ToolDef {
 	names := make([]string, 0, len(ts))
 	for n := range ts {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	defs := make([]anthropic.ToolUnionParam, 0, len(names))
+	defs := make([]msg.ToolDef, 0, len(names))
 	for _, n := range names {
-		defs = append(defs, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
-			Name:        n,
-			InputSchema: anthropic.ToolInputSchemaParam{Type: "object"},
-		}})
+		defs = append(defs, msg.ToolDef{Name: n, InputSchema: json.RawMessage(`{"type":"object"}`)})
 	}
 	return defs
 }
@@ -760,10 +755,10 @@ func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
 	eng, _ := newTestEngineWithSender(t, ts, sender)
 
 	ctx := context.Background()
-	c.NoError(eng.conv.SeedHistory(ctx, []llm.Message{
-		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("seed")},
-		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
+	c.NoError(eng.conv.SeedHistoryMsg(ctx, []msg.Message{
+		{Role: msg.User, Content: llm.UserTextMsg("seed")},
+		{Role: msg.Assistant, Content: []msg.Block{
+			msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)},
 		}},
 	}))
 

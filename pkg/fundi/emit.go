@@ -9,18 +9,18 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
-// Emitter converts Anthropic SDK messages and tool-execution events into pi
+// Emitter converts native model responses and tool-execution events into pi
 // AgentSessionEvent frames and writes them through a Frontend, so the daemon
 // (identity provider) and pi's TUI render fundi's native agent turns
 // indistinguishably from a real pi child.
@@ -160,7 +160,7 @@ func (e *Emitter) UserMessage(text string) {
 // AssistantTurn maps resp into a PiAssistantMessage and emits
 // message_start/message_update/message_end, accumulating the mapped message
 // and folding its usage into the turn total.
-func (e *Emitter) AssistantTurn(resp *anthropic.Message) {
+func (e *Emitter) AssistantTurn(resp *msg.Response) {
 	msg := MapAssistantMessage(resp, e.provider, e.pricer)
 	e.fe.Emit(child.PiMessageStart(msg, ""))
 	e.fe.Emit(child.PiMessageUpdate(msg, ""))
@@ -224,7 +224,7 @@ func (e *Emitter) StreamEnd(msg child.PiAssistantMessage) {
 // so the engine's streaming handler (package fundi, but a different type) can
 // build the child.PiAssistantMessage that StreamStart/StreamDelta/StreamEnd
 // take without reaching into Emitter's provider/pricer fields directly.
-func (e *Emitter) mapMessage(resp *anthropic.Message) child.PiAssistantMessage {
+func (e *Emitter) mapMessage(resp *msg.Response) child.PiAssistantMessage {
 	return MapAssistantMessage(resp, e.provider, e.pricer)
 }
 
@@ -329,14 +329,14 @@ func (e *Emitter) addUsage(u child.PiUsage) {
 }
 
 // costOf prices usage for the model that actually served the response, using
-// rafiki's shared per-component formula (routing.ModelPricing.Cost) so this
+// rafiki's shared per-component formula (routing.ModelPricing.UsageCost) so this
 // runtime and rafiki's analyze pipeline can never drift on the arithmetic.
 //
 // Zero is returned when there is no pricer or the model is unpriced — both are
 // normal (a fake sender in tests, a catalog that hasn't loaded, a model
 // OpenRouter doesn't list), which is why an unpriced turn reports cost 0 rather
 // than failing the turn.
-func costOf(pricer Pricer, model string, usage anthropic.Usage) child.PiCost {
+func costOf(pricer Pricer, model string, usage msg.Usage) child.PiCost {
 	if pricer == nil {
 		return child.PiCost{}
 	}
@@ -344,7 +344,7 @@ func costOf(pricer Pricer, model string, usage anthropic.Usage) child.PiCost {
 	if !ok {
 		return child.PiCost{}
 	}
-	c := price.Cost(usage)
+	c := price.UsageCost(usage)
 	return child.PiCost{
 		Input:      c.Input,
 		Output:     c.Output,
@@ -358,14 +358,9 @@ func costOf(pricer Pricer, model string, usage anthropic.Usage) child.PiCost {
 // distinguishing "still streaming" from "genuinely malformed" so only the
 // latter warns.
 //
-// Per anthropic.Message.Accumulate (messageutil.go), a tool_use block's Input
-// starts as the literal "{}" (content_block_start) and is then either
-// REPLACED wholesale by the first non-empty input_json_delta or APPENDED to
-// by every one after that. So while the block is still open, Input is a JSON
-// *prefix* of the eventual object — e.g. `{"file_path": "/Users/b` — not a
-// malformed document. Only content_block_stop (which this function has no
-// visibility into; see MapAssistantMessage's doc on why it reads fields
-// directly) guarantees Input is complete.
+// While a block is still open its Input is a JSON *prefix* of the eventual
+// object — e.g. `{"file_path": "/Users/b` — not a malformed document; only the
+// block's close guarantees it is complete.
 //
 // A byte-slice json.Unmarshal can't tell a truncated prefix from a syntax
 // error — both just fail. Decoding through a json.Decoder over a
@@ -385,10 +380,8 @@ func costOf(pricer Pricer, model string, usage anthropic.Usage) child.PiCost {
 // the first delta lands and Input stops being "{}"), then reappear (once the
 // block closes) in successive message_update frames — worse for an attached
 // TUI than staying present throughout with a placeholder that fills in once
-// complete, and it exactly matches the pre-regression AsAny() path's
-// behavior for this case ("wrong, but benign" — see this file's package
-// doc). A genuinely malformed *complete* input still warns and falls back to
-// {"_raw": ...}, unchanged from before.
+// complete. A genuinely malformed *complete* input still warns and falls back
+// to {"_raw": ...}.
 func streamingToolArgs(id, name string, input json.RawMessage) map[string]any {
 	var args map[string]any
 	dec := json.NewDecoder(bytes.NewReader(input))
@@ -406,76 +399,62 @@ func streamingToolArgs(id, name string, input json.RawMessage) map[string]any {
 	}
 }
 
-// MapAssistantMessage maps an Anthropic SDK response message onto the pi
-// AssistantMessage wire shape, tagging it with provider and this layer's
-// fixed API identifier ("anthropic-messages"). Timestamp is captured at map
-// time (time.Now().UnixMilli()).
-func MapAssistantMessage(resp *anthropic.Message, provider string, pricer Pricer) child.PiAssistantMessage {
+// MapAssistantMessage maps a native model response onto the pi AssistantMessage
+// wire shape, tagging it with provider and this layer's fixed API identifier
+// ("anthropic-messages"). Timestamp is captured at map time
+// (time.Now().UnixMilli()).
+func MapAssistantMessage(resp *msg.Response, provider string, pricer Pricer) child.PiAssistantMessage {
 	// Non-nil (rather than a nil slice growing via append) so a response with
 	// no mappable blocks still marshals content as [] and not JSON null — the
 	// pi TUI expects an array here, matching the nil-coercion precedent
 	// elsewhere in child.Pi* (PiToolExecutionStart args, PiAgentEnd messages).
 	blocks := make([]child.PiContentBlock, 0, len(resp.Content))
 	for _, b := range resp.Content {
-		// Read the union's flattened variant fields directly rather than going
-		// through b.AsAny(). AsAny() delegates to AsText()/AsToolUse()/etc., each
-		// of which unmarshals from ContentBlockUnion.JSON.raw — and
-		// anthropic.Message.Accumulate only rewrites that raw JSON on
-		// content_block_stop/message_stop (see messageutil.go). While a block is
-		// still accumulating (i.e. on every message_update fired from a
-		// content_block_delta), the struct fields (b.Text, b.Thinking, ...) have
-		// already grown but JSON.raw has not been re-marshaled yet. So on a
-		// mid-stream accumulated message every As*() returns an EMPTY block,
-		// which is how streaming shipped emitting 23 content-free message_update
-		// frames per turn while hasContent (reading b.Text directly) correctly
-		// saw content. A complete API response populates both the fields and
-		// the raw JSON, so reading fields directly is correct for both and
-		// needs no second code path.
-		switch b.Type {
-		case "text":
+		switch blk := b.(type) {
+		case msg.Text:
 			// Skip empty text. PiContentBlock.Text is `omitempty`, so an empty
 			// string serializes to {type:"text"} with no `text` field, and pi's
 			// TUI does c.text.trim() → crashes on the undefined field. Mirrors
 			// the same guard in provider_claude_state.go's emitAssistant.
-			if b.Text != "" {
-				blocks = append(blocks, child.PiTextBlock(b.Text))
+			if blk.Text != "" {
+				blocks = append(blocks, child.PiTextBlock(blk.Text))
 			}
-		case "thinking":
+		case msg.Thinking:
 			// Same hazard for thinking: an empty string would serialize to
 			// {type:"thinking"} (no `thinking` field) and crash pi's TUI at
 			// c.thinking.trim(). Skip empty thinking blocks entirely.
-			if b.Thinking != "" {
-				blocks = append(blocks, child.PiThinkingBlock(b.Thinking))
+			if blk.Text != "" {
+				blocks = append(blocks, child.PiThinkingBlock(blk.Text))
 			}
-		case "tool_use":
-			blocks = append(blocks, child.PiToolCallBlock(b.ID, b.Name, streamingToolArgs(b.ID, b.Name, b.Input)))
+		case msg.ToolUse:
+			blocks = append(blocks, child.PiToolCallBlock(blk.ID, blk.Name, streamingToolArgs(blk.ID, blk.Name, blk.Input)))
 		}
 	}
 
 	stop := "stop"
 	switch resp.StopReason {
-	case anthropic.StopReasonToolUse:
+	case msg.StopToolUse:
 		stop = "toolUse"
-	case anthropic.StopReasonMaxTokens:
+	case msg.StopMaxTokens:
 		stop = "length"
 	}
 
 	u := resp.Usage
 	usage := child.PiUsage{
-		Input:      int(u.InputTokens),
-		Output:     int(u.OutputTokens),
-		CacheRead:  int(u.CacheReadInputTokens),
-		CacheWrite: int(u.CacheCreationInputTokens),
+		Input:      int(msg.Val(u.Input)),
+		Output:     int(msg.Val(u.Output)),
+		CacheRead:  int(msg.Val(u.CacheRead)),
+		CacheWrite: int(msg.Val(u.CacheWrite)),
 	}
 	usage.TotalTokens = usage.Input + usage.Output + usage.CacheRead + usage.CacheWrite
-	usage.Cost = costOf(pricer, string(resp.Model), u)
+	usage.Cost = costOf(pricer, resp.Model, u)
 
 	return child.PiAssistantMessage{
 		Role:       "assistant",
 		Content:    blocks,
 		API:        "anthropic-messages",
 		Provider:   provider,
-		Model:      string(resp.Model),
+		Model:      resp.Model,
 		Usage:      usage,
 		StopReason: stop,
 		Timestamp:  time.Now().UnixMilli(),

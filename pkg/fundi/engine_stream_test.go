@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -1078,4 +1081,221 @@ func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
 		}
 	}
 	ck.True(foundThinking, "thinking content missing from agent_end messages array")
+}
+
+// ---- native stream fixtures ----
+
+// nativeStreamScript is one scripted native stream: the events, plus a pause
+// to wait BEFORE delivering events[i]. The pause is what forces a later event
+// into its own flush window, since the engine coalesces frames per
+// streamFlushInterval.
+type nativeStreamScript struct {
+	events []msg.StreamEvent
+	pauses map[int]time.Duration
+}
+
+// nativeStreamSender is a native llm.Sender replaying queued native streams in
+// order, so a test drives the engine's streaming handler with no SDK adapter
+// in between.
+type nativeStreamSender struct {
+	mu      sync.Mutex
+	scripts []nativeStreamScript
+	calls   int
+}
+
+func (s *nativeStreamSender) Stream(ctx context.Context, _ *msg.Request, _ msg.EncodeOptions) (msg.StreamDecoder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.calls >= len(s.scripts) {
+		return nil, errors.New("nativeStreamSender: scripts exhausted")
+	}
+	sc := s.scripts[s.calls]
+	s.calls++
+	return &pacedNativeDecoder{events: sc.events, pauses: sc.pauses}, nil
+}
+
+func (s *nativeStreamSender) Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error) {
+	dec, err := s.Stream(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dec.Close() }()
+	acc := msg.NewAccumulator()
+	for {
+		ev, derr := dec.Next()
+		if errors.Is(derr, io.EOF) {
+			break
+		}
+		if derr != nil {
+			return nil, derr
+		}
+		if aerr := acc.Add(ev); aerr != nil {
+			return nil, aerr
+		}
+	}
+	return acc.Response(), nil
+}
+
+type pacedNativeDecoder struct {
+	events []msg.StreamEvent
+	pauses map[int]time.Duration
+	next   int
+}
+
+func (d *pacedNativeDecoder) Next() (msg.StreamEvent, error) {
+	if d.next >= len(d.events) {
+		return nil, io.EOF
+	}
+	if p := d.pauses[d.next]; p > 0 {
+		time.Sleep(p)
+	}
+	ev := d.events[d.next]
+	d.next++
+	return ev, nil
+}
+
+func (d *pacedNativeDecoder) Close() error { return nil }
+
+// assistantUpdateToolArgs returns, in frame order, the toolCall blocks every
+// message_update carries — the partial arguments an attached TUI renders.
+func assistantUpdateToolArgs(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	c := assert.NewAborting(t)
+	var found []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l == "" {
+			continue
+		}
+		var f struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		c.NoError(json.Unmarshal([]byte(l), &f), "bad frame %q", l)
+		if f.Type != "message_update" || len(f.Message.Content) == 0 || f.Message.Content[0] != '[' {
+			continue
+		}
+		var blocks []struct {
+			Type      string          `json:"type"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		c.NoError(json.Unmarshal(f.Message.Content, &blocks), "bad message_update content %q", l)
+		for _, b := range blocks {
+			if b.Type != "toolCall" {
+				continue
+			}
+			args := map[string]any{}
+			c.NoError(json.Unmarshal(b.Arguments, &args), "toolCall arguments %s", b.Arguments)
+			found = append(found, args)
+		}
+	}
+	return found
+}
+
+// lastAssistantToolArgs returns the toolCall arguments of the LAST
+// message_end frame — the finalized assistant message.
+func lastAssistantToolArgs(t *testing.T, out string) map[string]any {
+	t.Helper()
+	c := assert.NewAborting(t)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var f struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		c.NoError(json.Unmarshal([]byte(lines[i]), &f), "bad frame %q", lines[i])
+		if f.Type != "message_end" || len(f.Message.Content) == 0 || f.Message.Content[0] != '[' {
+			continue
+		}
+		var blocks []struct {
+			Type      string          `json:"type"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		c.NoError(json.Unmarshal(f.Message.Content, &blocks), "bad message_end content %q", lines[i])
+		for _, b := range blocks {
+			if b.Type != "toolCall" {
+				continue
+			}
+			args := map[string]any{}
+			c.NoError(json.Unmarshal(b.Arguments, &args), "toolCall arguments %s", b.Arguments)
+			return args
+		}
+	}
+	t.Fatalf("no toolCall block in any message_end frame: %q", out)
+	return nil
+}
+
+// TestStreamHandlerGetsPartialSnapshots drives a NATIVE stream (no SDK adapter
+// in between) and pins what the handler is handed as it goes: a growing text
+// block, then an open tool_use block whose input is still a JSON prefix. The
+// emitted frames are the same ones the SDK path produced — a text update per
+// flush window, an empty-arguments toolCall while the input is incomplete, and
+// the complete arguments only in the final message.
+func TestStreamHandlerGetsPartialSnapshots(t *testing.T) {
+	c := assert.NewAborting(t)
+	var gotInput json.RawMessage
+	ts := fakeToolSet{"bash": func(_ context.Context, in json.RawMessage) (string, error) {
+		gotInput = in
+		return "ok", nil
+	}}
+	sender := &nativeStreamSender{scripts: []nativeStreamScript{
+		{
+			events: []msg.StreamEvent{
+				msg.MessageStart{ID: "msg_stream", Model: "claude-x"},
+				msg.BlockStart{Index: 0, Block: msg.Text{}},
+				msg.BlockDelta{Index: 0, Kind: msg.DeltaText, Text: "Hel"},
+				msg.BlockDelta{Index: 0, Kind: msg.DeltaText, Text: "lo"},
+				msg.BlockStop{Index: 0, Block: msg.Text{Text: "Hello"}},
+				msg.BlockStart{Index: 1, Block: msg.ToolUse{ID: "tu_1", Name: "bash", Input: json.RawMessage(`{}`)}},
+				msg.BlockDelta{Index: 1, Kind: msg.DeltaInputJSON, Text: `{"command":"ls`},
+				msg.BlockDelta{Index: 1, Kind: msg.DeltaInputJSON, Text: ` -la"}`},
+				msg.BlockStop{Index: 1},
+				msg.MessageDelta{StopReason: msg.StopToolUse, Usage: msg.Usage{Output: msg.Ptr(5)}},
+			},
+			// Force the second text delta and the still-open tool's first input
+			// fragment into their own flush windows.
+			pauses: map[int]time.Duration{
+				3: streamFlushInterval + 100*time.Millisecond,
+				6: streamFlushInterval + 100*time.Millisecond,
+			},
+		},
+		{
+			events: []msg.StreamEvent{
+				msg.MessageStart{ID: "msg_2", Model: "claude-x"},
+				msg.BlockStart{Index: 0, Block: msg.Text{}},
+				msg.BlockDelta{Index: 0, Kind: msg.DeltaText, Text: "done"},
+				msg.BlockStop{Index: 0, Block: msg.Text{Text: "done"}},
+				msg.MessageDelta{StopReason: msg.StopEndTurn, Usage: msg.Usage{Output: msg.Ptr(2)}},
+			},
+		},
+	}}
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+	eng.Wait()
+
+	texts := assistantUpdateTexts(t, out.String())
+	c.Require().GreaterOrEqual(2, len(texts), "message_update frames = %q, want the growing text then the open tool", texts)
+	c.Eq("Hel", texts[0], "first partial text")
+	c.Eq("Hello", texts[1], "second partial text")
+
+	// The open tool's input was a JSON prefix at flush time, so its partial
+	// arguments are empty — exactly the pre-native behaviour (an incomplete
+	// document must never surface as _raw or as a truncated value).
+	partialArgs := assistantUpdateToolArgs(t, out.String())
+	c.Require().NotEmpty(partialArgs, "no toolCall block in any message_update: %q", out.String())
+	c.Eq(0, len(partialArgs[0]), "partial tool arguments = %+v, want {} while the input is a prefix", partialArgs[0])
+
+	finalArgs := lastAssistantToolArgs(t, out.String())
+	c.Eq("ls -la", finalArgs["command"], "final tool arguments = %+v, want the completed input", finalArgs)
+
+	var input map[string]any
+	c.NoError(json.Unmarshal(gotInput, &input), "tool input %s is not JSON", gotInput)
+	c.Eq("ls -la", input["command"], "tool received %+v, want the fully reassembled input", input)
 }

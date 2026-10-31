@@ -25,9 +25,7 @@ func TestRegistryRetainToolAllowlist(t *testing.T) {
 
 	var names []string
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil {
-			names = append(names, def.OfTool.Name)
-		}
+		names = append(names, def.Name)
 	}
 	c.Require().EqDiff([]string{"a"}, names, "Definitions after Retain([a zzz])")
 

@@ -32,9 +32,7 @@ func NewInProcessExecutor(opts ToolOpts) (ExecutorClient, map[string]bool) {
 
 	served := make(map[string]bool, len(names))
 	for _, def := range reg.Definitions() {
-		if def.OfTool != nil {
-			served[def.OfTool.Name] = true
-		}
+		served[def.Name] = true
 	}
 	return &inProcessExecutor{reg: reg}, served
 }

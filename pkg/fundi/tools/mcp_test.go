@@ -122,9 +122,7 @@ func TestRegisterMCPServerTools(t *testing.T) {
 
 	names := map[string]bool{}
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil {
-			names[def.OfTool.Name] = true
-		}
+		names[def.Name] = true
 	}
 	for _, want := range []string{"mcp__my_server__add", "mcp__my_server__list_items", "mcp__my_server__fail"} {
 		c.False(!names[want], "expected tool %q to be registered, got %v", want, names)
@@ -150,7 +148,7 @@ func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
 
 	found := false
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == "mcp__my_cool_server__list_items" {
+		if def.Name == "mcp__my_cool_server__list_items" {
 			found = true
 		}
 	}
@@ -185,10 +183,8 @@ func TestRegisterMCPServerToolsInputSchemaPassedThrough(t *testing.T) {
 
 	var propsJSON []byte
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == "mcp__srv__add" {
-			b, err := json.Marshal(def.OfTool.InputSchema.Properties)
-			c.NoError(err, "marshal properties")
-			propsJSON = b
+		if def.Name == "mcp__srv__add" {
+			propsJSON = def.InputSchema
 		}
 	}
 	c.NotNil(propsJSON, "mcp__srv__add not found")
@@ -288,7 +284,7 @@ func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
 	const want = "mcp__srv__github_create_issue"
 	var found bool
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == want {
+		if def.Name == want {
 			found = true
 		}
 	}
@@ -318,9 +314,7 @@ func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
 
 	names := map[string]bool{}
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil {
-			names[def.OfTool.Name] = true
-		}
+		names[def.Name] = true
 	}
 	for name := range names {
 		c.LessOrEqual(128, len(name), "expected no registered name over 128 characters, got %q (%d chars)", name, len(name))
@@ -344,7 +338,7 @@ func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
 
 	count := 0
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == "mcp__srv__list_items" {
+		if def.Name == "mcp__srv__list_items" {
 			count++
 		}
 	}

@@ -63,7 +63,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel() // no-op once the tool has already cancelled; guards early-return paths
 	tools := cancelOnExecuteTools{cancel: cancel}
-	_, runErr := agentloop.Run(turnCtx, conv1, tools, nil, llm.UserText("go"))
+	_, runErr := agentloop.Run(turnCtx, conv1, tools, nil, llm.UserTextMsg("go"))
 	c.Error(runErr, "agentloop.Run (process 1) succeeded, want an error from the cancelled-context persist "+
 		"(the tool cancels turnCtx before the tool_result gets persisted)")
 

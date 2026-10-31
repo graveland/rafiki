@@ -3,16 +3,19 @@ package fundi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -28,14 +31,10 @@ func silenceSlog(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 }
 
-// accumulateTextEvents builds the SDK's own stream events for a text block
-// that has started and received deltas but has NOT reached
-// content_block_stop -- the exact state MapAssistantMessage is handed on
-// every message_update (engine.go's stream handler maps the accumulator on
-// every content_block_delta, well before that block's content_block_stop,
-// which is the only thing that resyncs ContentBlockUnion.JSON.raw -- see
-// anthropic.Message.Accumulate in messageutil.go). Built from the same
-// SDK-shaped event constructors engine_stream_test.go uses
+// accumulateTextEvents builds the SSE events for a text block that has started
+// and received deltas but has NOT reached content_block_stop -- the state
+// MapAssistantMessage is handed on every message_update. Built from the same
+// event constructors engine_stream_test.go uses
 // (streamMessageStart/streamTextBlockStart/streamTextDelta) rather than a
 // parallel fixture builder.
 func accumulateTextEvents(parts ...string) []ssestream.Event {
@@ -58,21 +57,52 @@ func accumulateToolUseEvents(toolID, name string, jsonParts ...string) []ssestre
 	return ev
 }
 
-// accumulateSDKEvents replays evs into a fresh anthropic.Message via the real
-// SDK Accumulate method, unmarshaling each event's Data exactly the way
-// ssestream.Stream[T] does before handing it to the caller (see
-// packages/ssestream/ssestream.go: json.Unmarshal(s.decoder.Event().Data,
-// &nxt)) -- so this is the real accumulation path, not a simplified stand-in.
-func accumulateSDKEvents(t *testing.T, evs []ssestream.Event) *anthropic.Message {
+// decodeEvents replays the SSE fixtures through the Anthropic codec's own
+// stream decoder — the same decoder every real sender feeds — so these tests
+// exercise the real decode path rather than a hand-built stand-in.
+func decodeEvents(t *testing.T, evs []ssestream.Event) []msg.StreamEvent {
 	t.Helper()
 	c := assert.NewAborting(t)
-	var acc anthropic.Message
+	var body strings.Builder
 	for _, ev := range evs {
-		var u anthropic.MessageStreamEventUnion
-		c.NoError(json.Unmarshal(ev.Data, &u), "unmarshal stream event %s", ev.Type)
-		c.NoError(acc.Accumulate(u), "accumulate stream event %s", ev.Type)
+		fmt.Fprintf(&body, "event: %s\ndata: %s\n\n", ev.Type, ev.Data)
 	}
-	return &acc
+	// These fixtures script a mid-stream prefix, so they carry no message_stop;
+	// the decoder treats a body that ends without one as truncated.
+	body.WriteString("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	dec := msganthropic.NewStreamDecoder(io.NopCloser(strings.NewReader(body.String())))
+	defer func() { c.NoError(dec.Close(), "close decoder") }()
+	var out []msg.StreamEvent
+	for {
+		ev, err := dec.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		c.NoError(err, "decode stream event")
+		out = append(out, ev)
+	}
+	return out
+}
+
+// accumulateEvents replays evs through the codec and a native accumulator, the
+// exact pair the engine's streaming handler is fed from.
+func accumulateEvents(t *testing.T, evs []ssestream.Event) *msg.Response {
+	t.Helper()
+	c := assert.NewAborting(t)
+	acc := msg.NewAccumulator()
+	for _, ev := range decodeEvents(t, evs) {
+		c.NoError(acc.Add(ev), "accumulate stream event")
+	}
+	return acc.Response()
+}
+
+// mustDecodeResponse decodes a whole Anthropic message body into a native
+// response, the shape every emitter entry point takes.
+func mustDecodeResponse(t *testing.T, body string) *msg.Response {
+	t.Helper()
+	resp, err := msganthropic.DecodeResponse([]byte(body))
+	assert.NewAborting(t).NoError(err)
+	return resp
 }
 
 // TestMapAssistantMessage_MapsAccumulatedTextBlock guards the bug this
@@ -85,8 +115,8 @@ func accumulateSDKEvents(t *testing.T, evs []ssestream.Event) *anthropic.Message
 // flushed: 23 empty frames per turn, and the full reply only in message_end.
 func TestMapAssistantMessage_MapsAccumulatedTextBlock(t *testing.T) {
 	c := assert.NewCollecting(t)
-	acc := accumulateSDKEvents(t, accumulateTextEvents("Hel", "lo"))
-	got := MapAssistantMessage(acc, "anthropic", nil)
+	resp := accumulateEvents(t, accumulateTextEvents("Hel", "lo"))
+	got := MapAssistantMessage(resp, "anthropic", nil)
 	c.Require().Len(got.Content, 1, "content")
 	c.Eq("Hello", got.Content[0].Text, "text")
 }
@@ -97,8 +127,8 @@ func TestMapAssistantMessage_MapsAccumulatedTextBlock(t *testing.T) {
 // vanished from message_update the same way a text block did.
 func TestMapAssistantMessage_MapsAccumulatedToolUseBlock(t *testing.T) {
 	c := assert.NewAborting(t)
-	acc := accumulateSDKEvents(t, accumulateToolUseEvents("call-1", "bash", `{"command":"ls"}`))
-	got := MapAssistantMessage(acc, "anthropic", nil)
+	resp := accumulateEvents(t, accumulateToolUseEvents("call-1", "bash", `{"command":"ls"}`))
+	got := MapAssistantMessage(resp, "anthropic", nil)
 	c.Len(got.Content, 1, "content")
 	c.Eq("toolCall", got.Content[0].Type, "content[0].type")
 	c.NotNil(got.Content[0].Arguments, "arguments is nil")
@@ -109,23 +139,17 @@ func TestMapAssistantMessage_MapsAccumulatedToolUseBlock(t *testing.T) {
 
 // TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate is H6: a
 // mid-stream flush must not warn, and must not surface a truncated JSON
-// fragment as {"_raw": ...}. This is the fresh regression from d53d5dc:
-// MapAssistantMessage now reads b.Input directly (correctly, per
-// TestMapAssistantMessage_MapsAccumulatedToolUseBlock above) and unmarshals
-// it, but per anthropic.Message.Accumulate a tool_use block's Input is a
-// growing JSON *prefix* until content_block_stop, not a complete document --
-// so every flush before that point handed json.Unmarshal a truncated
-// fragment, which is neither empty nor valid, and previously always took the
-// warn+_raw path meant for GENUINELY malformed complete input.
+// fragment as {"_raw": ...}. An open tool_use block's input is a JSON
+// *prefix* until the block closes, not a complete document — so every flush
+// before that point hands json.Unmarshal a truncated fragment, which is
+// neither empty nor valid, and must not take the warn+_raw path meant for
+// GENUINELY malformed complete input.
 //
 // accumulateToolUseEvents (used by TestMapAssistantMessage_MapsAccumulatedToolUseBlock)
-// feeds its whole input as ONE input_json_delta, which Accumulate replaces
-// "{}" with wholesale -- that is always complete JSON and never exercises a
-// truncated state, which is exactly why the brief calls that guard vacuous.
-// This test instead splits `{"file_path": "/Users/brent/project"}` across
-// TWO deltas and asserts against the state after only the first has landed
-// -- a genuine SDK-accumulated prefix, not a hand-typed guess at what one
-// looks like.
+// feeds its whole input as ONE input_json_delta, which is always complete JSON
+// and never exercises a truncated state. This test instead splits
+// `{"file_path": "/Users/brent/project"}` across TWO deltas and asserts
+// against the state after only the first has landed.
 func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing.T) {
 	c := assert.NewAborting(t)
 	logs := &syncBuffer{}
@@ -133,17 +157,23 @@ func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	acc := accumulateSDKEvents(t, []ssestream.Event{
+	acc := msg.NewAccumulator()
+	for _, ev := range decodeEvents(t, []ssestream.Event{
 		streamMessageStart("claude-x"),
 		streamToolUseStart(0, "tu_partial", "Write"),
 		streamInputJSONDelta(0, `{"file_path": "/Users/b`),
-	})
-	if json.Valid(acc.Content[0].Input) {
-		t.Fatalf("test fixture bug: b.Input = %q must be an INCOMPLETE JSON prefix, not valid JSON",
-			acc.Content[0].Input)
+	}) {
+		c.NoError(acc.Add(ev), "accumulate stream event")
+	}
+	partial, ok := acc.Response().Content[0].(msg.ToolUse)
+	if !ok {
+		t.Fatalf("content[0] = %T, want a tool_use block", acc.Response().Content[0])
+	}
+	if json.Valid(partial.Input) {
+		t.Fatalf("test fixture bug: input = %q must be an INCOMPLETE JSON prefix, not valid JSON", partial.Input)
 	}
 
-	got := MapAssistantMessage(acc, "anthropic", nil)
+	got := MapAssistantMessage(acc.Response(), "anthropic", nil)
 
 	c.Eq("", logs.String(), "logged a warning for input that is merely still streaming")
 	c.False(len(got.Content) != 1 || got.Content[0].Type != "toolCall", "content = %+v, want one toolCall block (never dropped mid-stream, to avoid TUI flicker)", got.Content)
@@ -158,16 +188,18 @@ func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing
 	// engine.go's stream handler: MapAssistantMessage is called again against
 	// the same accumulator, not handed a delta directly) must map the full,
 	// correct arguments and still log nothing.
-	var u anthropic.MessageStreamEventUnion
-	ev2 := streamInputJSONDelta(0, `rent/project"}`)
-	c.NoError(json.Unmarshal(ev2.Data, &u), "unmarshal second delta")
-	c.NoError(acc.Accumulate(u), "accumulate second delta")
-	if !json.Valid(acc.Content[0].Input) {
-		t.Fatalf("test fixture bug: b.Input = %q must be complete valid JSON after the second delta",
-			acc.Content[0].Input)
+	for _, ev := range decodeEvents(t, []ssestream.Event{streamInputJSONDelta(0, `rent/project"}`)}) {
+		c.NoError(acc.Add(ev), "accumulate second delta")
+	}
+	complete, ok := acc.Response().Content[0].(msg.ToolUse)
+	if !ok {
+		t.Fatalf("content[0] = %T, want a tool_use block", acc.Response().Content[0])
+	}
+	if !json.Valid(complete.Input) {
+		t.Fatalf("test fixture bug: input = %q must be complete valid JSON after the second delta", complete.Input)
 	}
 
-	got2 := MapAssistantMessage(acc, "anthropic", nil)
+	got2 := MapAssistantMessage(acc.Response(), "anthropic", nil)
 	c.Eq("", logs.String(), "logged a warning after the second delta completed valid JSON")
 	args2 := got2.Content[0].Arguments
 	c.False(args2 == nil || (*args2)["file_path"] != "/Users/brent/project", "arguments after completion = %+v, want file_path=/Users/brent/project", args2)
@@ -182,14 +214,12 @@ const sampleResp = `{
 
 func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 	c := assert.NewAborting(t)
-	var resp anthropic.Message
-	c.NoError(json.Unmarshal([]byte(sampleResp), &resp))
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	em := NewEmitter(fe, "anthropic", nil)
 	em.AgentStart()
 	em.UserMessage("go")
-	em.AssistantTurn(&resp)
+	em.AssistantTurn(mustDecodeResponse(t, sampleResp))
 	em.ToolStart("tu_1", "bash", json.RawMessage(`{"command":"ls"}`))
 	em.ToolEnd("tu_1", "bash", toolmeta.Result{Text: "file.txt"}, false)
 	em.AgentEnd()
@@ -241,9 +271,7 @@ func TestMapAssistantMessageEmptyContentIsEmptyArray(t *testing.T) {
  "stop_reason":"end_turn",
  "content":[],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-	var msg anthropic.Message
-	c.NoError(json.Unmarshal([]byte(resp), &msg))
-	mapped := MapAssistantMessage(&msg, "anthropic", nil)
+	mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 	b, err := json.Marshal(mapped)
 	c.NoError(err)
 	var raw map[string]json.RawMessage
@@ -301,9 +329,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "stop_reason":"end_turn",
  "content":[{"type":"thinking","thinking":"pondering the mysteries"}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-		var msg anthropic.Message
-		c.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "anthropic", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 		c.Len(mapped.Content, 1, "content")
 		c.Eq("thinking", mapped.Content[0].Type, "content[0].type")
 		c.Eq("pondering the mysteries", mapped.Content[0].Thinking, "content[0].thinking =")
@@ -322,9 +348,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "stop_reason":"max_tokens",
  "content":[{"type":"text","text":"cut off"}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-		var msg anthropic.Message
-		c.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "anthropic", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 		c.Eq("length", mapped.StopReason, "stopReason")
 	})
 
@@ -335,9 +359,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "stop_reason":"end_turn",
  "content":[{"type":"text","text":"ok"}],
  "usage":{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":13,"cache_creation_input_tokens":17}}`
-		var msg anthropic.Message
-		c.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "anthropic", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 		c.False(mapped.Usage.Input != 7 || mapped.Usage.Output != 11, "input/output = %d/%d, want 7/11", mapped.Usage.Input, mapped.Usage.Output)
 		c.Eq(13, mapped.Usage.CacheRead, "cacheRead")
 		c.Eq(17, mapped.Usage.CacheWrite, "cacheWrite")
@@ -352,9 +374,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "stop_reason":"end_turn",
  "content":[{"type":"text","text":"ok"}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-		var msg anthropic.Message
-		c.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "some-custom-provider", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "some-custom-provider", nil)
 		c.Eq("anthropic-messages", mapped.API, "API")
 		c.Eq("some-custom-provider", mapped.Provider, "Provider")
 	})
@@ -366,9 +386,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "stop_reason":"end_turn",
  "content":[{"type":"text","text":"ok"}],
  "usage":{"input_tokens":42,"output_tokens":99,"cache_read_input_tokens":5,"cache_creation_input_tokens":6}}`
-		var msg anthropic.Message
-		ck.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "anthropic", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 		c := mapped.Usage.Cost
 		ck.False(c.Input != 0 || c.Output != 0 || c.CacheRead != 0 || c.CacheWrite != 0 || c.Total != 0, "cost = %+v, want all-zero (unknown at this layer)", c)
 	})
@@ -381,9 +399,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "stop_reason":"tool_use",
  "content":[{"type":"tool_use","id":"tu_9","name":"weird","input":[1,2,3]}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-		var msg anthropic.Message
-		c.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "anthropic", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 		c.False(len(mapped.Content) != 1 || mapped.Content[0].Type != "toolCall", "content = %+v, want one toolCall block", mapped.Content)
 		args := mapped.Content[0].Arguments
 		c.NotNil(args, "arguments is nil")
@@ -403,9 +419,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
             {"type":"text","text":"hi"},
             {"type":"text","text":""}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-		var msg anthropic.Message
-		c.NoError(json.Unmarshal([]byte(resp), &msg))
-		mapped := MapAssistantMessage(&msg, "anthropic", nil)
+		mapped := MapAssistantMessage(mustDecodeResponse(t, resp), "anthropic", nil)
 		c.Len(mapped.Content, 1, "content")
 		if mapped.Content[0].Type != "text" || mapped.Content[0].Text != "hi" {
 			t.Fatalf("content[0] = %+v, want text %q", mapped.Content[0], "hi")

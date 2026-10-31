@@ -39,7 +39,7 @@ func TestUninstalledServerMeansNoLSPTools(t *testing.T) {
 
 func registryHas(r *tools.Registry, name string) bool {
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil && def.OfTool.Name == name {
+		if def.Name == name {
 			return true
 		}
 	}

@@ -18,6 +18,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -107,25 +108,22 @@ func prefillDBSeedClient(t *testing.T, pool *pgxpool.Pool) *llm.Client {
 
 // prefillSeedRows builds the r0/r1/r2 history rows a pre-fill persists, with
 // path in every read input.
-func prefillSeedRows(path string) []llm.Message {
-	r0 := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(PrefillPreamble)},
-	}
+func prefillSeedRows(path string) []msg.Message {
+	r0 := msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: PrefillPreamble}}}
 	input, _ := json.Marshal(prefillReadInput{Path: path, Offset: 1, Limit: prefillOpenLimit})
-	r1 := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleAssistant,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolUseBlock("prefill_0001", json.RawMessage(input), "read"),
+	r1 := msg.Message{
+		Role: msg.Assistant,
+		Content: []msg.Block{
+			msg.ToolUse{ID: "prefill_0001", Name: "read", Input: json.RawMessage(input)},
 		},
 	}
-	r2 := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewToolResultBlock("prefill_0001", path+" body", false),
+	r2 := msg.Message{
+		Role: msg.User,
+		Content: []msg.Block{
+			msg.ToolResult{ToolUseID: "prefill_0001", Content: []msg.Block{msg.Text{Text: path + " body"}}},
 		},
 	}
-	return []llm.Message{r0, r1, r2}
+	return []msg.Message{r0, r1, r2}
 }
 
 // waitForPrefillDBRows polls the DB-backed history until it reaches wantRows
@@ -172,7 +170,7 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err, "seed conversation")
-	c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")), "seed history")
+	c.NoError(conv.SeedHistoryMsg(ctx, prefillSeedRows("/tmp/a.txt")), "seed history")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 3 {
 		t.Fatalf("seeded history = %d rows (%v), want 3", len(hist), err)
 	}
@@ -246,13 +244,13 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err, "seed conversation")
-	textRow := anthropic.MessageParam{
-		Role: anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{
-			anthropic.NewTextBlock(PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"),
+	textRow := msg.Message{
+		Role: msg.User,
+		Content: []msg.Block{
+			msg.Text{Text: PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"},
 		},
 	}
-	c.NoError(conv.SeedHistory(ctx, []llm.Message{textRow}), "seed history")
+	c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{textRow}), "seed history")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 1 {
 		t.Fatalf("seeded history = %d rows (%v), want 1", len(hist), err)
 	}
@@ -313,7 +311,7 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 	c.NoError(err, "seed conversation")
 	// Seed only r0+r1: r2 is what the pre-fill must write.
 	rows := prefillSeedRows("/tmp/a.txt")
-	c.NoError(conv.SeedHistory(ctx, rows[:2]), "seed history")
+	c.NoError(conv.SeedHistoryMsg(ctx, rows[:2]), "seed history")
 
 	var mu sync.Mutex
 	var readPaths []string
@@ -482,7 +480,7 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
 	c.NoError(err, "seed conversation")
-	c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
+	c.NoError(conv.SeedHistoryMsg(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
 
 	var mu sync.Mutex
 	var reads int

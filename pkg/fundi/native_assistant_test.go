@@ -4,12 +4,12 @@ package fundi
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
@@ -32,13 +32,12 @@ func TestEmitterPublishesNativeAssistantMessage(t *testing.T) {
 	sink := &nativeCapture{}
 	em.SetNativeSink(sink)
 
-	em.publishAssistant(&anthropic.Message{
-		Role:       "assistant",
-		StopReason: anthropic.StopReasonEndTurn,
-		Content: []anthropic.ContentBlockUnion{
-			{Type: "thinking", Thinking: "hmm"},
-			{Type: "text", Text: "the answer"},
-			{Type: "tool_use", ID: "tu_1", Name: "bash", Input: []byte(`{"cmd":"ls"}`)},
+	em.publishAssistant(&msg.Response{
+		StopReason: msg.StopEndTurn,
+		Content: []msg.Block{
+			msg.Thinking{Text: "hmm", Sig: msg.Signature{Value: "sig-1"}},
+			msg.Text{Text: "the answer"},
+			msg.ToolUse{ID: "tu_1", Name: "bash", Input: []byte(`{"cmd":"ls"}`)},
 		},
 	}, 0, store.Appended{CreatedAt: time.Now()})
 
@@ -62,10 +61,9 @@ func TestStreamedTurnPublishesTheAssistantMessage(t *testing.T) {
 	sink := &nativeCapture{}
 	em.SetNativeSink(sink)
 
-	resp := &anthropic.Message{
-		Role:       "assistant",
-		StopReason: anthropic.StopReasonEndTurn,
-		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "streamed reply"}},
+	resp := &msg.Response{
+		StopReason: msg.StopEndTurn,
+		Content:    []msg.Block{msg.Text{Text: "streamed reply"}},
 	}
 	em.StreamStart(MapAssistantMessage(resp, "anthropic", nil))
 	em.StreamEnd(MapAssistantMessage(resp, "anthropic", nil))
@@ -81,10 +79,9 @@ func TestPublishAssistantCarriesRunningCost(t *testing.T) {
 	sink := &nativeCapture{}
 	em.SetNativeSink(sink)
 
-	em.publishAssistant(&anthropic.Message{
-		Role:       "assistant",
-		StopReason: anthropic.StopReasonEndTurn,
-		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "hi"}},
+	em.publishAssistant(&msg.Response{
+		StopReason: msg.StopEndTurn,
+		Content:    []msg.Block{msg.Text{Text: "hi"}},
 	}, 1.2345, store.Appended{CreatedAt: time.Now()})
 
 	am := findAssistant(t, sink.events)
@@ -105,11 +102,10 @@ func TestAgentEndPublishesTurnEnd(t *testing.T) {
 
 	// Driven exactly as the engine drives it: the pi frames fold the usage,
 	// then the durable publication, then the turn ends.
-	resp := &anthropic.Message{
-		Role:       "assistant",
-		StopReason: anthropic.StopReasonEndTurn,
-		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "done"}},
-		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 3},
+	resp := &msg.Response{
+		StopReason: msg.StopEndTurn,
+		Content:    []msg.Block{msg.Text{Text: "done"}},
+		Usage:      msg.Usage{Input: msg.Ptr(10), Output: msg.Ptr(3)},
 	}
 	em.AssistantTurn(resp)
 	em.publishAssistant(resp, 0, store.Appended{CreatedAt: time.Now()})
@@ -156,8 +152,12 @@ func TestToolResultPublishesWithItsRow(t *testing.T) {
 	}
 
 	at := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
-	em.publishUserRow([]anthropic.ContentBlockParamUnion{
-		anthropic.NewToolResultBlock("tu_1", "cat: /nope: No such file", true),
+	em.publishUserRow([]msg.Block{
+		msg.ToolResult{
+			ToolUseID: "tu_1",
+			Content:   []msg.Block{msg.Text{Text: "cat: /nope: No such file"}},
+			IsError:   true,
+		},
 	}, store.Appended{CreatedAt: at})
 
 	ev := sink.events[len(sink.events)-1]
@@ -167,4 +167,40 @@ func TestToolResultPublishesWithItsRow(t *testing.T) {
 	c.Eq("tu_1", tr.GetToolUseId(), "tool_use_id")
 	c.True(tr.GetIsError(), "a failed tool's result must carry is_error")
 	c.Eq("cat: /nope: No such file", tr.GetContent()[0].GetText().GetText(), "result text =")
+}
+
+// publishUserRow takes native blocks directly, with no SDK conversion in
+// between: what the caller stored is what a durable consumer reads. A
+// tool_result's text, its is_error flag and the image bytes all survive.
+func TestPublishUserRowNative(t *testing.T) {
+	c := assert.NewCollecting(t)
+	em := NewEmitter(NewFrontend(bytes.NewReader(nil), io.Discard, nil), "anthropic", nil)
+	sink := &nativeCapture{}
+	em.SetNativeSink(sink)
+
+	at := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	em.publishUserRow([]msg.Block{
+		msg.Text{Text: "a prompt"},
+		msg.Image{MediaType: "image/png", Data: []byte{1, 2, 3}},
+		msg.ToolResult{
+			ToolUseID: "tu_1",
+			Content:   []msg.Block{msg.Text{Text: "tool output"}},
+			IsError:   true,
+		},
+	}, store.Appended{CreatedAt: at})
+
+	c.Require().Len(sink.events, 1, "native events")
+	ev := sink.events[0]
+	c.True(ev.GetTs().AsTime().Equal(at), "ts = %v, want the row's created_at %v", ev.GetTs().AsTime(), at)
+	got := ev.GetUserMessage().GetContent()
+	c.Require().Len(got, 3, "blocks")
+	c.Eq("a prompt", got[0].GetText().GetText(), "text")
+	c.EqDeep([]byte{1, 2, 3}, got[1].GetImage().GetData(), "image data")
+	tr := got[2].GetToolResult()
+	c.Require().NotNil(tr, "tool_result block")
+	c.Eq("tu_1", tr.GetToolUseId(), "tool_use_id")
+	c.True(tr.GetIsError(), "is_error")
+	c.Require().Len(tr.GetContent(), 1, "tool_result content")
+	c.Eq("tool output", tr.GetContent()[0].GetText().GetText(), "tool_result text")
+	c.Eq(int32(2), got[2].GetIndex(), "block index")
 }

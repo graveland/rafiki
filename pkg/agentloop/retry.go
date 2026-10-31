@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
@@ -146,12 +144,12 @@ func backoffFor(attempt int) time.Duration {
 	return d + jitter
 }
 
-// continueWithRetry wraps conv.Continue with transient-error retries.
+// continueWithRetry wraps conv.ContinueMsg with transient-error retries.
 // On each retry it logs a warning and sleeps the backoff delay.
 // On recovery it logs an info line. On exhaustion it returns the last error.
-func continueWithRetry(ctx context.Context, conv *llm.Conversation, opts ...llm.SendOption) (*anthropic.Message, error) {
+func continueWithRetry(ctx context.Context, conv *llm.Conversation, opts ...llm.SendOption) (*msg.Response, error) {
 	for attempt := 0; ; attempt++ {
-		resp, err := conv.Continue(ctx, opts...)
+		resp, err := conv.ContinueMsg(ctx, opts...)
 		if err == nil || !isRetryable(err, ctx) {
 			if attempt > 0 && err == nil {
 				slog.Info("agentloop: turn recovered",

@@ -6,10 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -234,11 +233,11 @@ func TestContextWindowOverrideDrivesCompaction(t *testing.T) {
 	// (and nowhere near the catalog's 1M). Alternating roles keep
 	// mergeForRequest from collapsing them.
 	big := strings.Repeat("x", 100_000)
-	c.Require().NoError(eng.conv.SeedHistory(context.Background(), []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock(big)),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock(big)),
-		anthropic.NewUserMessage(anthropic.NewTextBlock(big)),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock(big)),
+	c.Require().NoError(eng.conv.SeedHistoryMsg(context.Background(), []msg.Message{
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: big}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: big}}},
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: big}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: big}}},
 	}), "seed history")
 
 	eng.HandlePrompt("go")
@@ -276,11 +275,11 @@ func TestCompactionEngineRegistersHook(t *testing.T) {
 	// so the very first Continue's proactive check fires. Alternating roles keep
 	// mergeForRequest from collapsing them.
 	big := strings.Repeat("x", 100_000)
-	c.Require().NoError(eng.conv.SeedHistory(context.Background(), []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock(big)),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock(big)),
-		anthropic.NewUserMessage(anthropic.NewTextBlock(big)),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock(big)),
+	c.Require().NoError(eng.conv.SeedHistoryMsg(context.Background(), []msg.Message{
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: big}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: big}}},
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: big}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: big}}},
 	}))
 
 	eng.HandlePrompt("go")

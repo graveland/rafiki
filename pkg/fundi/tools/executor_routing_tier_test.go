@@ -77,9 +77,7 @@ func TestRoutingLists(t *testing.T) {
 func registryNames(r *Registry) map[string]bool {
 	names := map[string]bool{}
 	for _, def := range r.Definitions() {
-		if def.OfTool != nil {
-			names[def.OfTool.Name] = true
-		}
+		names[def.Name] = true
 	}
 	return names
 }

@@ -342,11 +342,8 @@ type blockingToolSet struct {
 	once    sync.Once
 }
 
-func (*blockingToolSet) Definitions() []anthropic.ToolUnionParam {
-	return []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{
-		Name:        "bash",
-		InputSchema: anthropic.ToolInputSchemaParam{Type: "object"},
-	}}}
+func (*blockingToolSet) Definitions() []msg.ToolDef {
+	return []msg.ToolDef{{Name: "bash", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 }
 
 func (ts *blockingToolSet) Execute(ctx context.Context, name string, _ json.RawMessage) (toolmeta.Result, error) {

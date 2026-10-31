@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -42,11 +42,11 @@ const costResp = `{
  "content":[{"type":"text","text":"done"}],
  "usage":{"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":5000,"cache_creation_input_tokens":400}}`
 
-func mustCostResp(t *testing.T) *anthropic.Message {
+func mustCostResp(t *testing.T) *msg.Response {
 	t.Helper()
-	var resp anthropic.Message
-	assert.NewAborting(t).NoError(json.Unmarshal([]byte(costResp), &resp))
-	return &resp
+	resp, err := msganthropic.DecodeResponse([]byte(costResp))
+	assert.NewAborting(t).NoError(err)
+	return resp
 }
 
 // A priced turn must carry a per-component cost breakdown on its usage, and the
@@ -177,10 +177,10 @@ func TestStreamEndFoldsCostIdenticallyToAssistantTurn(t *testing.T) {
 	var outB bytes.Buffer
 	feB := NewFrontend(strings.NewReader(""), &outB, &fakeHandler{})
 	emB := NewEmitter(feB, "anthropic", pricer)
-	msg := MapAssistantMessage(resp, "anthropic", pricer)
+	mapped := MapAssistantMessage(resp, "anthropic", pricer)
 	emB.AgentStart()
-	emB.StreamStart(msg)
-	emB.StreamEnd(msg)
+	emB.StreamStart(mapped)
+	emB.StreamEnd(mapped)
 	emB.AgentEnd()
 
 	totalA, messagesA := agentEndCostAndCount(t, outA.String())

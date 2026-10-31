@@ -12,8 +12,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -318,11 +316,8 @@ func (e *Engine) runPrefill(ctx context.Context, history []*conv.Node, st prefil
 		// time, so a single-row shape has no partial prefix for a crash to
 		// leave behind — a restart either re-runs the whole pre-fill (empty
 		// history) or finds it complete (prefillTextComplete).
-		r0 := anthropic.MessageParam{
-			Role:    anthropic.MessageParamRoleUser,
-			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(rendered)},
-		}
-		if err := e.conv.SeedHistory(ctx, []llm.Message{r0}); err != nil {
+		r0 := msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: rendered}}}
+		if err := e.conv.SeedHistoryMsg(ctx, []msg.Message{r0}); err != nil {
 			return fmt.Errorf("prefill: seed history: %w", err)
 		}
 		slog.Info("agent: prefill complete", "conversation", e.conv.ID, "reads", len(calls), "est_tokens", est, "shape", "text")
@@ -333,29 +328,28 @@ func (e *Engine) runPrefill(ctx context.Context, history []*conv.Node, st prefil
 	// rebuilt from history block for block: SeedHistory matches by node hash,
 	// and a rebuilt row with the same blocks hashes to the row already there,
 	// so only the missing rows are new.
-	r0 := anthropic.MessageParam{
-		Role:    anthropic.MessageParamRoleUser,
-		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(PrefillPreamble)},
-	}
-	r1 := anthropic.MessageParam{Role: anthropic.MessageParamRoleAssistant}
+	r0 := msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: PrefillPreamble}}}
+	r1 := msg.Message{Role: msg.Assistant}
 	if st == prefillHasR1 {
 		// r1 already carries its tool_use blocks — the calls were built FROM
 		// them, so rebuilding from calls would duplicate every block.
 		for _, b := range history[1].Msg.Content {
 			if tu, ok := b.(msg.ToolUse); ok {
-				r1.Content = append(r1.Content, anthropic.NewToolUseBlock(tu.ID, tu.Input, tu.Name))
+				r1.Content = append(r1.Content, msg.ToolUse{ID: tu.ID, Input: tu.Input, Name: tu.Name})
 			}
 		}
 	} else {
 		for _, c := range calls {
-			r1.Content = append(r1.Content, anthropic.NewToolUseBlock(c.id, c.input, "read"))
+			r1.Content = append(r1.Content, msg.ToolUse{ID: c.id, Input: c.input, Name: "read"})
 		}
 	}
-	r2 := anthropic.MessageParam{Role: anthropic.MessageParamRoleUser}
+	r2 := msg.Message{Role: msg.User}
 	for _, c := range calls {
-		r2.Content = append(r2.Content, anthropic.NewToolResultBlock(c.id, c.result, c.isError))
+		r2.Content = append(r2.Content, msg.ToolResult{
+			ToolUseID: c.id, Content: []msg.Block{msg.Text{Text: c.result}}, IsError: c.isError,
+		})
 	}
-	if err := e.conv.SeedHistory(ctx, []llm.Message{r0, r1, r2}); err != nil {
+	if err := e.conv.SeedHistoryMsg(ctx, []msg.Message{r0, r1, r2}); err != nil {
 		return fmt.Errorf("prefill: seed history: %w", err)
 	}
 
@@ -534,7 +528,7 @@ func (e *Engine) prefillReader() agentloop.ToolSet {
 // rejected by some providers.
 func (e *Engine) modelHasReadTool() bool {
 	for _, d := range e.tools.Definitions() {
-		if d.OfTool != nil && d.OfTool.Name == "read" {
+		if d.Name == "read" {
 			return true
 		}
 	}
@@ -552,9 +546,7 @@ func (e *Engine) modelHasReadTool() bool {
 func (e *Engine) prefillToolsAvailable() error {
 	names := make(map[string]bool)
 	for _, d := range e.prefillReader().Definitions() {
-		if d.OfTool != nil {
-			names[d.OfTool.Name] = true
-		}
+		names[d.Name] = true
 	}
 	if !names["read"] {
 		return errors.New("prefill: the internal read tool is unavailable to this child")

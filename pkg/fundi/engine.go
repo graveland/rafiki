@@ -12,12 +12,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -40,9 +39,9 @@ const repairTimeout = 10 * time.Second
 const fatalEmitTimeout = 2 * time.Second
 
 // streamFlushInterval is the coalescing cadence for streamed message_update
-// frames: at most one flush per interval, regardless of how many SDK stream
-// events arrive. Each frame carries the WHOLE accumulated message (see
-// events' doc), so emitting one per SDK event makes wire volume O(response²)
+// frames: at most one flush per interval, regardless of how many stream events
+// arrive. Each frame carries the WHOLE accumulated message (see events' doc),
+// so emitting one per stream event makes wire volume O(response²)
 // — a 16 KB reply at realistic 15-50 char chunks is 330-1100 frames
 // averaging ~8 KB, 2.6-8.8 MB for a single LLM call, and agentloop allows 20
 // iterations per turn. 250ms is ~4 frames/second: imperceptible for a
@@ -817,7 +816,7 @@ func (e *Engine) startupResume() {
 //
 // A turn panic ends the child rather than being swallowed and retried. The
 // panic can land anywhere in agentloop.Run — mid-stream inside
-// acc.Accumulate/MapAssistantMessage, or between a tool_use being emitted and
+// MapAssistantMessage, or between a tool_use being emitted and
 // its tool_result being appended — so the conversation may now carry a
 // dangling tool_use that the API rejects outright on the next request. A child
 // that keeps accepting prompts and fails every one of them is worse than a
@@ -871,7 +870,7 @@ func (e *Engine) runSlash(text string, images []llm.UserImage) bool {
 
 		// Only the tool definitions matter for the cached prefix: Compact drops
 		// the stream and batch hooks a turn's options would add.
-		done, err := e.conv.Compact(ctx, args, llm.WithTools(e.tools.Definitions()))
+		done, err := e.conv.Compact(ctx, args, llm.WithToolsMsg(e.tools.Definitions()))
 		aborted := errors.Is(ctx.Err(), context.Canceled)
 
 		e.mu.Lock()
@@ -1030,15 +1029,15 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	var result *agentloop.Result
 	var err error
 	if stop, why := e.haltedNow(); stop {
-		content := llm.UserContent(text, images)
+		content := llm.UserContentMsg(text, images)
 		var row store.Appended
-		if row, err = e.conv.AppendUser(ctx, content); err == nil {
+		if row, err = e.conv.AppendUserMsg(ctx, content); err == nil {
 			e.em.publishUserRow(content, row)
 			result = &agentloop.Result{LimitReached: true, LimitReason: why}
 		}
 	} else {
 		events, sendOpts := e.events()
-		result, err = agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), sendOpts...)
+		result, err = agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContentMsg(text, images), sendOpts...)
 	}
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
@@ -1146,26 +1145,26 @@ func (e *Engine) priorConversationCost() float64 {
 // returns the llm.SendOptions that must ride along on every conv.Continue call
 // of THIS turn so the loop actually streams and parks honestly.
 //
-// The stream handler and OnTurn are built together, sharing one accumulator,
-// because of how agentloop.drive is structured: it builds its sendOpts ONCE
-// (llm.WithTools(defs) plus whatever this method returns) and reuses that
-// same slice — and therefore this same handler closure — for every iteration
-// of the turn's tool-use loop (drive calls conv.Continue once per iteration,
-// stopping only at end_turn). Both stream events and OnTurn fire on the
-// loop's own goroutine, and the handler for iteration N is always fully done
-// (conv.Continue has returned) before OnTurn(N) runs and before
-// conv.Continue(N+1) can start — so it's safe for OnTurn to consume and reset
-// the closure's accumulator with no locking, but the reset is mandatory:
-// without it, iteration N+1's deltas would accumulate onto iteration N's
-// stale content.
+// The stream handler and OnTurn are built together, sharing one coalescing
+// window, because of how agentloop.drive is structured: it builds its
+// sendOpts ONCE (llm.WithToolsMsg(defs) plus whatever this method returns)
+// and reuses that same slice — and therefore this same handler closure — for
+// every iteration of the turn's tool-use loop (drive calls conv.ContinueMsg
+// once per iteration, stopping only at end_turn). Both stream events and
+// OnTurn fire on the loop's own goroutine, and the handler for iteration N is
+// always fully done (conv.ContinueMsg has returned) before OnTurn(N) runs and
+// before conv.ContinueMsg(N+1) can start — so it's safe for OnTurn to reset
+// the closure's streamed/lastFlush state with no locking, but the reset is
+// mandatory: without it, iteration N+1 would inherit iteration N's
+// coalescing window and suppress its own first flush.
 //
 // OnTurn also has to decide, per iteration, whether anything actually
-// streamed: a Sender that doesn't implement llm.StreamingSender (every
-// fake-turn child, and any pre-delivery failover handoff) makes the handler
-// never fire at all. Unconditionally calling StreamEnd there would emit a
-// message_end with no preceding message_start — so streamed tracks whether
-// the handler ran (past the hasContent gate) THIS iteration, and OnTurn
-// falls back to the plain AssistantTurn triple when it didn't.
+// streamed: a send that delivers no content event (a pre-delivery failure, a
+// sender that ignores the stream) makes the handler never fire at all.
+// Unconditionally calling StreamEnd there would emit a message_end with no
+// preceding message_start — so streamed tracks whether the handler ran THIS
+// iteration, and OnTurn falls back to the plain AssistantTurn triple when it
+// didn't.
 func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 	// Fetched once per turn: prior completed turns don't change while THIS
 	// turn is in flight, so the conversation-lifetime rollup is constant across
@@ -1173,7 +1172,6 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 	// in e.em.usage) moves iteration to iteration.
 	priorCost := e.priorConversationCost()
 
-	var acc anthropic.Message
 	var streamed bool
 	var lastFlush time.Time
 	// runningTotal is the CONVERSATION-LIFETIME cost-so-far (every completed
@@ -1195,22 +1193,17 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 	var runningTotal float64
 	var turnCost float64
 
-	handler := func(ev anthropic.MessageStreamEventUnion) {
-		llm.FixEmptyToolInput(&ev)
-		llm.SanitizeInvalidAccumulatedInput(&acc, ev)
-		if err := acc.Accumulate(ev); err != nil {
-			slog.Warn("agent: accumulate stream event", "error", err)
-			return
-		}
-		llm.FixAccumulatedEmptyToolInput(&acc, ev)
-		// Emit only once content actually exists: a trim-retry fails before
-		// any content event, so this keeps message_start off the wire until
-		// the attempt is real. See hasContent's doc.
-		if !hasContent(&acc) {
+	handler := func(partial *msg.Response) {
+		// Emit only once content actually exists: a text or thinking block's
+		// content_block_start carries no text, so without this every streamed
+		// turn would open with an empty message_start, and a trim-retry that
+		// fails before any real content would leave that message_start
+		// orphaned. See hasContent's doc.
+		if !hasContent(partial) {
 			return
 		}
 		streamed = true
-		// Coalesce: one frame per streamFlushInterval, not one per SDK event.
+		// Coalesce: one frame per streamFlushInterval, not one per stream event.
 		// Each frame carries the whole accumulated message, so emitting per
 		// event makes wire volume O(response^2) — thousands of multi-KB
 		// frames per turn, which saturates the per-subscriber bus buffer and
@@ -1231,13 +1224,13 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			return
 		}
 		lastFlush = now
-		msg := e.em.mapMessage(&acc)
-		e.em.StreamStart(msg)
-		e.em.StreamDelta(msg)
+		m := e.em.mapMessage(partial)
+		e.em.StreamStart(m)
+		e.em.StreamDelta(m)
 	}
 
 	ev := &agentloop.Events{
-		OnTurn: func(iteration int, resp *anthropic.Message, dur time.Duration, err error) {
+		OnTurn: func(iteration int, resp *msg.Response, dur time.Duration, err error) {
 			// The fundi-side equivalent of the proxy's per-turn "llm turn"
 			// log line (pkg/server/proxy.go) — without it, a fundi child's
 			// turns are invisible in the daemon's own logs even though they
@@ -1256,7 +1249,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 				// e.em.usage, this iteration added here). It mirrors the proxy's
 				// "llm turn" cost_total so the two log lines agree, and it does NOT
 				// reset at a turn boundary the way a per-turn running total would.
-				iterCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
+				iterCost := costOf(e.em.pricer, resp.Model, resp.Usage)
 				conversationTotal := priorCost + e.em.usage.Cost.Total + iterCost.Total
 				runningTotal = conversationTotal
 				// turnCost excludes priorCost deliberately — see its declaration
@@ -1268,23 +1261,23 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
-					"upstream_provider", e.client.ProviderSlug(llm.ProviderOf(resp)),
-					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
-					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
+					"upstream_provider", e.client.ProviderSlug(llm.ProviderOfMsg(resp)),
+					"input_tokens", msg.Val(resp.Usage.Input), "output_tokens", msg.Val(resp.Usage.Output),
+					"cache_read_tokens", msg.Val(resp.Usage.CacheRead), "cache_creation_tokens", msg.Val(resp.Usage.CacheWrite),
 					"cache_pct", cachePct,
-					"stop_reason", resp.StopReason, "latency", dur.Round(100*time.Millisecond),
+					"stop_reason", resp.StopReason.String(), "latency", dur.Round(100*time.Millisecond),
 					"cost_total", fmt.Sprintf("%.2f", conversationTotal))
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
-			// leaks state into the next conv.Continue call. lastFlush resets
-			// alongside acc/streamed for the same reason: agentloop runs
-			// Continue once per tool-calling iteration, reusing this same
+			// leaks state into the next conv.ContinueMsg call. lastFlush resets
+			// alongside streamed for the same reason: agentloop runs
+			// ContinueMsg once per tool-calling iteration, reusing this same
 			// closure (see this method's doc), so each iteration must start
 			// its own coalescing window rather than inheriting the previous
 			// iteration's lastFlush and suppressing its own first flush.
 			wasStreamed := streamed
-			acc, streamed, lastFlush = anthropic.Message{}, false, time.Time{}
+			streamed, lastFlush = false, time.Time{}
 			if err != nil {
 				return // a failed call has no assistant message to render
 			}
@@ -1301,7 +1294,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 		// The durable assistant event waits for the committed row: its ts is
 		// the row's created_at. It runs on the turn goroutine right after
 		// OnTurn, so turnCost is the figure OnTurn just computed.
-		OnAssistantRow: func(resp *anthropic.Message, row store.Appended) {
+		OnAssistantRow: func(resp *msg.Response, row store.Appended) {
 			e.em.publishAssistant(resp, turnCost, row)
 		},
 		OnUserRow: e.em.publishUserRow,
@@ -1347,7 +1340,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			e.em.BatchWaitEnd()
 		}
 	}
-	return ev, []llm.SendOption{llm.WithStreamHandler(handler), llm.WithBatchWait(batchWait)}
+	return ev, []llm.SendOption{llm.WithStreamHandlerMsg(handler), llm.WithBatchWait(batchWait)}
 }
 
 // effectiveMaxCost returns the live cap when an accessor was configured,
@@ -1435,19 +1428,25 @@ func recoverEmit(callback, tool string) {
 	}
 }
 
-// hasContent reports whether any content block has arrived yet. Guards the
-// first emission: sendWithTrim can retry a prompt-too-large failure, and that
-// failure lands before any content event, so gating on this keeps an
-// abandoned attempt from putting a message_start (and therefore text) into an
-// attached TUI. See spec §0.2.
-func hasContent(m *anthropic.Message) bool {
+// hasContent reports whether a partial response carries anything renderable
+// yet. A text or thinking block's content_block_start carries no text — the
+// text arrives as deltas — so the first content-bearing event of a streamed
+// turn is not yet something a TUI can render. Guards the first emission:
+// sendWithTrim can retry a prompt-too-large failure, and that failure lands
+// before any real content, so gating on this keeps an abandoned attempt from
+// putting a message_start (and therefore text) into an attached TUI.
+func hasContent(m *msg.Response) bool {
 	for _, b := range m.Content {
-		switch {
-		case b.Type == "text" && b.Text != "":
-			return true
-		case b.Type == "tool_use":
-			return true
-		case b.Type == "thinking" && b.Thinking != "":
+		switch blk := b.(type) {
+		case msg.Text:
+			if blk.Text != "" {
+				return true
+			}
+		case msg.Thinking:
+			if blk.Text != "" {
+				return true
+			}
+		case msg.ToolUse:
 			return true
 		}
 	}
@@ -1476,12 +1475,12 @@ func fullModel(prefix, bareID string) string {
 // cacheHitPct returns the cache-read hit rate for an input as a percentage
 // rounded to one decimal place (e.g. 75.3). Returns 0 when there are no
 // input tokens.
-func cacheHitPct(u anthropic.Usage) float64 {
-	total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+func cacheHitPct(u msg.Usage) float64 {
+	total := msg.Val(u.Input) + msg.Val(u.CacheRead) + msg.Val(u.CacheWrite)
 	if total == 0 {
 		return 0
 	}
-	return math.Round(float64(u.CacheReadInputTokens)/float64(total)*1000) / 10
+	return math.Round(float64(msg.Val(u.CacheRead))/float64(total)*1000) / 10
 }
 
 // drainSteers is the loop's mid-turn steer seam: it takes everything buffered
@@ -1491,7 +1490,7 @@ func cacheHitPct(u anthropic.Usage) float64 {
 // This is the steer half of the ack point. A steer is retired HERE, as it is
 // handed to the running turn — not when its frame arrived, which may be a
 // whole tool call earlier, and not at turn end.
-func (e *Engine) drainSteers() []anthropic.ContentBlockParamUnion {
+func (e *Engine) drainSteers() []msg.Block {
 	e.mu.Lock()
 	entries := e.steerBuf
 	e.steerBuf = nil
@@ -1511,7 +1510,7 @@ func (e *Engine) drainSteers() []anthropic.ContentBlockParamUnion {
 		e.em.UserMessage(q.text)
 	}
 	if len(images) > 0 {
-		return llm.UserContent(strings.Join(texts, "\n"), images)
+		return llm.UserContentMsg(strings.Join(texts, "\n"), images)
 	}
-	return llm.UserText(strings.Join(texts, "\n"))
+	return llm.UserTextMsg(strings.Join(texts, "\n"))
 }

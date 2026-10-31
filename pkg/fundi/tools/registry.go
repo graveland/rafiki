@@ -14,8 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"go.graveland.dev/rafiki/pkg/msg"
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -478,26 +477,26 @@ type Materializer interface {
 // multiple goroutines at once.
 type Registry struct {
 	mu   sync.RWMutex
-	defs map[string]anthropic.ToolUnionParam
+	defs map[string]msg.ToolDef
 	fns  map[string]func(context.Context, json.RawMessage) (toolmeta.Result, error)
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		defs: make(map[string]anthropic.ToolUnionParam),
+		defs: make(map[string]msg.ToolDef),
 		fns:  make(map[string]func(context.Context, json.RawMessage) (toolmeta.Result, error)),
 	}
 }
 
-// Register adds a Tool to the registry. The tool's Anthropic definition is
+// Register adds a Tool to the registry. The tool's native definition is
 // built from its Name(), Description(), and InputSchema().JSON().
 func (r *Registry) Register(t Tool) {
 	def := BuildDef(t)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.defs[def.OfTool.Name] = def
-	r.fns[def.OfTool.Name] = func(ctx context.Context, input json.RawMessage) (toolmeta.Result, error) {
+	r.defs[def.Name] = def
+	r.fns[def.Name] = func(ctx context.Context, input json.RawMessage) (toolmeta.Result, error) {
 		result, err := t.Execute(ctx, ToolInput(input))
 		if err != nil {
 			return toolmeta.Result{}, err
@@ -510,7 +509,7 @@ func (r *Registry) Register(t Tool) {
 // The sort is load-bearing, not cosmetic: Definitions backs the tools array
 // sent on every turn, and a reordered array silently busts the Anthropic
 // prompt-cache prefix (see rafiki's agentloop.ToolSet).
-func (r *Registry) Definitions() []anthropic.ToolUnionParam {
+func (r *Registry) Definitions() []msg.ToolDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.defs))
@@ -518,7 +517,7 @@ func (r *Registry) Definitions() []anthropic.ToolUnionParam {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	out := make([]anthropic.ToolUnionParam, 0, len(names))
+	out := make([]msg.ToolDef, 0, len(names))
 	for _, name := range names {
 		out = append(out, r.defs[name])
 	}

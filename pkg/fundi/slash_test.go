@@ -30,11 +30,11 @@ func compactionPolicyOpt(cfg *EngineConfig) {
 
 func seedFourRows(t *testing.T, eng *Engine) {
 	t.Helper()
-	assert.NewAborting(t).NoError(eng.conv.SeedHistory(context.Background(), []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock("a")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("b")),
-		anthropic.NewUserMessage(anthropic.NewTextBlock("c")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("d")),
+	assert.NewAborting(t).NoError(eng.conv.SeedHistoryMsg(context.Background(), []msg.Message{
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "a"}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "b"}}},
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "c"}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "d"}}},
 	}))
 }
 

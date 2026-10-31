@@ -263,7 +263,7 @@ func TestFundiNilConvStoreUsesThePrivateDefault(t *testing.T) {
 	t.Cleanup(eng.Close)
 
 	ctx := context.Background()
-	_, err = eng.conv.AppendUser(ctx, llm.UserText("hello"))
+	_, err = eng.conv.AppendUserMsg(ctx, llm.UserTextMsg("hello"))
 	c.NoError(err, "AppendUser through the client's private default store")
 	hist, err := eng.conv.History(ctx)
 	c.NoError(err, "History through the client's private default store")

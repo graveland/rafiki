@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
@@ -92,11 +91,8 @@ type cancelOnExecuteTools struct {
 	cancel context.CancelFunc
 }
 
-func (cancelOnExecuteTools) Definitions() []anthropic.ToolUnionParam {
-	return []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{
-		Name:        "bash",
-		InputSchema: anthropic.ToolInputSchemaParam{Type: "object"},
-	}}}
+func (cancelOnExecuteTools) Definitions() []msg.ToolDef {
+	return []msg.ToolDef{{Name: "bash", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 }
 
 func (c cancelOnExecuteTools) Execute(_ context.Context, name string, _ json.RawMessage) (toolmeta.Result, error) {
@@ -137,7 +133,7 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	defer cancel() // no-op once the tool has already cancelled; guards early-return paths
 	tools := cancelOnExecuteTools{cancel: cancel}
 
-	_, runErr := agentloop.Run(turnCtx, conv, tools, nil, llm.UserText("go"))
+	_, runErr := agentloop.Run(turnCtx, conv, tools, nil, llm.UserTextMsg("go"))
 	c.Error(runErr, "agentloop.Run succeeded, want an error from the cancelled-context persist "+
 		"(the tool cancels turnCtx before the tool_result gets persisted)")
 	t.Logf("agentloop.Run failed as expected: %v", runErr)
@@ -179,9 +175,9 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	}
 	c.True(tr.IsError, "synthesized tool_result is not marked IsError")
 
-	resp, err := conv.Continue(background)
+	resp, err := conv.ContinueMsg(background)
 	c.NoError(err, "Continue after RepairOrphans failed")
-	c.Eq("end_turn", resp.StopReason, "post-repair Continue stop_reason")
+	c.Eq(msg.StopEndTurn, resp.StopReason, "post-repair Continue stop_reason")
 
 	// The real proof of the API-shape invariant: assert on the shape of the
 	// request this Continue actually sent. Without repair, the assistant
@@ -209,7 +205,7 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 		c.NoError(err, "seed conversation")
 		// r0+r1 with no r2: the state a dead process leaves mid-prefill,
 		// and what boot-time RepairOrphans sees in BuildEngine.
-		c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
+		c.NoError(conv.SeedHistoryMsg(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
 
 		n, err := RepairOrphans(ctx, conv)
 		c.NoError(err, "RepairOrphans")
@@ -229,14 +225,14 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 		// The same r0+r1-no-r2 shape, but the tool_use id is a real model id
 		// — an ordinary orphan, which repair must still fabricate a result for.
 		r0 := prefillSeedRows("/tmp/a.txt")[0]
-		r1 := anthropic.MessageParam{
-			Role: anthropic.MessageParamRoleAssistant,
-			Content: []anthropic.ContentBlockParamUnion{
-				anthropic.NewToolUseBlock("toolu_01ABC",
-					json.RawMessage(`{"path":"/tmp/a.txt","offset":1,"limit":1000000}`), "read"),
+		r1 := msg.Message{
+			Role: msg.Assistant,
+			Content: []msg.Block{
+				msg.ToolUse{ID: "toolu_01ABC", Name: "read",
+					Input: json.RawMessage(`{"path":"/tmp/a.txt","offset":1,"limit":1000000}`)},
 			},
 		}
-		c.NoError(conv.SeedHistory(ctx, []llm.Message{r0, r1}), "seed history")
+		c.NoError(conv.SeedHistoryMsg(ctx, []msg.Message{r0, r1}), "seed history")
 
 		n, err := RepairOrphans(ctx, conv)
 		c.NoError(err, "RepairOrphans")

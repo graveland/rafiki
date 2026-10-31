@@ -347,9 +347,7 @@ func (s *Server) LaunchKinds() []string {
 func (s *Server) servedTools() []string {
 	names := make([]string, 0, 16)
 	for _, def := range s.reg.Definitions() {
-		if def.OfTool != nil {
-			names = append(names, def.OfTool.Name)
-		}
+		names = append(names, def.Name)
 	}
 	return names
 }

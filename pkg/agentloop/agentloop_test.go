@@ -22,7 +22,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 
@@ -104,10 +103,10 @@ type fakeTools struct {
 	executed []string
 }
 
-func (f *fakeTools) Definitions() []anthropic.ToolUnionParam {
-	return []anthropic.ToolUnionParam{
-		{OfTool: &anthropic.ToolParam{Name: "alpha", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}}},
-		{OfTool: &anthropic.ToolParam{Name: "beta", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}}},
+func (f *fakeTools) Definitions() []msg.ToolDef {
+	return []msg.ToolDef{
+		{Name: "alpha", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "beta", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 }
 
@@ -128,11 +127,9 @@ func (f *fakeTools) executedNames() []string {
 // to hand each concurrent racer its own handle on one stored conversation.
 // appendNode persists one message under the conversation's head, the fixture
 // shape these resume tests need: a row with no client-side history above it.
-func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic.MessageParam, meta *store.AssistantMeta, providerID string) {
+func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, message msg.Message, meta *store.AssistantMeta, providerID string) {
 	t.Helper()
 	c := assert.NewAborting(t)
-	message, err := msganthropic.FromParam(param)
-	c.NoError(err, "convert message")
 	node := conv.NewNode{Msg: message, ProviderMessageID: providerID}
 	if meta != nil {
 		node.StopReason = meta.StopReason
@@ -140,7 +137,7 @@ func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, param anthropic
 		node.OutputTokens = &meta.Output
 	}
 	handle := conv.NewStore(store.NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
-	_, err = handle.Append(context.Background(), conv.Append{FromHead: true, Nodes: []conv.NewNode{node}})
+	_, err := handle.Append(context.Background(), conv.Append{FromHead: true, Nodes: []conv.NewNode{node}})
 	c.NoError(err, "append node")
 }
 
@@ -209,10 +206,10 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 		OnToolCall:   func(name string, _ json.RawMessage) { events = append(events, "call:"+name) },
 		OnToolResult: func(name string, _ toolmeta.Result, _ error) { events = append(events, "result:"+name) },
 		OnText:       func(text string) { events = append(events, "text") },
-		OnTurn: func(_ int, resp *anthropic.Message, dur time.Duration, err error) {
+		OnTurn: func(_ int, resp *msg.Response, dur time.Duration, err error) {
 			turns++
 			if err == nil {
-				turnTokens += resp.Usage.InputTokens
+				turnTokens += msg.Val(resp.Usage.Input)
 			}
 			if dur < 0 {
 				panic("negative turn duration")
@@ -220,7 +217,7 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 		},
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("diagnose it"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("diagnose it"))
 	c.Require().NoError(err, "Run")
 	c.Eq("final analysis", result.Text, "Text =")
 	if result.Stats.ToolCalls != 2 || result.Stats.Iterations != 2 {
@@ -258,7 +255,7 @@ func TestResumeReissuesPendingCall(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	_, aerr := conv.AppendUser(context.Background(), llm.UserText("diagnose it"))
+	_, aerr := conv.AppendUserMsg(context.Background(), llm.UserTextMsg("diagnose it"))
 	c.Require().NoError(aerr)
 	// (crash here: no assistant, no results)
 
@@ -309,8 +306,8 @@ func TestResumeInterleavesPartialResults(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	realResult := anthropic.NewToolResultBlock("toolu_a", "real result of alpha", false)
-	seedInterruptedBatch(t, pool, conv, []anthropic.ContentBlockParamUnion{realResult})
+	realResult := msg.ToolResult{ToolUseID: "toolu_a", Content: []msg.Block{msg.Text{Text: "real result of alpha"}}}
+	seedInterruptedBatch(t, pool, conv, []msg.Block{realResult})
 
 	_, err := Resume(context.Background(), conv, tools, nil)
 	c.NoError(err, "Resume")
@@ -336,8 +333,8 @@ func TestResumeAlreadyComplete(t *testing.T) {
 	conv := newConv(t, pool, sender)
 
 	ctx := context.Background()
-	appendNode(t, pool, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
-	appendNode(t, pool, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserTextMsg("q")}, nil, "")
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "done earlier"}}},
 		&store.AssistantMeta{StopReason: "end_turn"}, "")
 
 	result, err := Resume(ctx, conv, tools, nil)
@@ -399,18 +396,16 @@ func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 
 // seedInterruptedBatch persists: user question + assistant with two tool_use
 // blocks + optional partial results — the state a crash mid-batch leaves.
-func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversation, partial []anthropic.ContentBlockParamUnion) {
+func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversation, partial []msg.Block) {
 	t.Helper()
-	appendNode(t, pool, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil, "")
-	assistant := anthropic.NewAssistantMessage(
-		anthropic.NewToolUseBlock("toolu_a", map[string]any{"k": "a"}, "alpha"),
-		anthropic.NewToolUseBlock("toolu_b", map[string]any{"k": "b"}, "beta"),
-	)
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserTextMsg("diagnose it")}, nil, "")
+	assistant := msg.Message{Role: msg.Assistant, Content: []msg.Block{
+		msg.ToolUse{ID: "toolu_a", Name: "alpha", Input: json.RawMessage(`{"k":"a"}`)},
+		msg.ToolUse{ID: "toolu_b", Name: "beta", Input: json.RawMessage(`{"k":"b"}`)},
+	}}
 	appendNode(t, pool, conv.ID, assistant, nil, "")
 	for _, block := range partial {
-		appendNode(t, pool, conv.ID,
-			anthropic.MessageParam{Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{block}}, nil, "")
+		appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: []msg.Block{block}}, nil, "")
 	}
 }
 
@@ -448,9 +443,9 @@ func TestResumePostToolsPersistedContinues(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	seedInterruptedBatch(t, pool, conv, []anthropic.ContentBlockParamUnion{
-		anthropic.NewToolResultBlock("toolu_a", "real result of alpha", false),
-		anthropic.NewToolResultBlock("toolu_b", "real result of beta", false),
+	seedInterruptedBatch(t, pool, conv, []msg.Block{
+		msg.ToolResult{ToolUseID: "toolu_a", Content: []msg.Block{msg.Text{Text: "real result of alpha"}}},
+		msg.ToolResult{ToolUseID: "toolu_b", Content: []msg.Block{msg.Text{Text: "real result of beta"}}},
 	})
 	// (crash here: both results persisted, follow-up Continue never happened)
 
@@ -474,8 +469,8 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
-	appendNode(t, pool, conv.ID, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil, "")
-	appendNode(t, pool, conv.ID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.User, Content: llm.UserTextMsg("q")}, nil, "")
+	appendNode(t, pool, conv.ID, msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "truncated mid-"}}},
 		&store.AssistantMeta{StopReason: "max_tokens"}, "")
 
 	result, err := Resume(ctx, conv, tools, nil)
@@ -502,7 +497,7 @@ func TestDriveHandlesMaxTokensTextOnly(t *testing.T) {
 		respEndTurn,
 	}}
 	conv := newConv(t, pool, sender)
-	result, err := Run(context.Background(), conv, &fakeTools{}, nil, llm.UserText("go"))
+	result, err := Run(context.Background(), conv, &fakeTools{}, nil, llm.UserTextMsg("go"))
 	c.Require().NoError(err, "Run")
 	c.Eq("final analysis", result.Text, "Text")
 	params := sender.allParams()
@@ -528,7 +523,7 @@ func TestDriveHandlesMaxTokensWithToolCalls(t *testing.T) {
 	}}
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
-	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("go"))
 	c.Require().NoError(err, "Run")
 	// No tools should have been executed — both were truncated.
 	c.Empty(tools.executedNames(), "executed")
@@ -554,7 +549,7 @@ func TestToolErrorBecomesIsErrorResultAndLoopContinues(t *testing.T) {
 	tools := &failingTools{failName: "beta"}
 	conv := newConv(t, pool, sender)
 
-	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("go"))
 	c.Require().NoError(err, "Run")
 	c.Eq("final analysis", result.Text, "Text =")
 	rows := messageRows(t, pool, conv.ID)
@@ -676,9 +671,9 @@ type recordingTools struct {
 	ctxID string
 }
 
-func (r *recordingTools) Definitions() []anthropic.ToolUnionParam {
-	return []anthropic.ToolUnionParam{
-		{OfTool: &anthropic.ToolParam{Name: "echo", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}}},
+func (r *recordingTools) Definitions() []msg.ToolDef {
+	return []msg.ToolDef{
+		{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 }
 
@@ -699,7 +694,7 @@ func TestOnToolStartEndCarryID(t *testing.T) {
 		OnToolStart: func(id, _ string, _ json.RawMessage) { startID = id },
 		OnToolEnd:   func(id, _ string, _ toolmeta.Result, _ error) { endID = id },
 	}
-	_, err := Run(context.Background(), conv, tools, ev, llm.UserText("hi"))
+	_, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("hi"))
 	assert.NewAborting(t).NoError(err)
 	if startID != "tu_1" || endID != "tu_1" || tools.ctxID != "tu_1" {
 		t.Fatalf("ids: start=%q end=%q ctx=%q, want tu_1", startID, endID, tools.ctxID)
@@ -708,13 +703,13 @@ func TestOnToolStartEndCarryID(t *testing.T) {
 
 func TestPendingUserInjectedBetweenIterations(t *testing.T) {
 	conv := newMemConv(t, &scriptedSender{scripts: []string{respEchoTool, respEndTurn}})
-	injected := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("steer!")}
-	ev := &Events{PendingUser: func() []anthropic.ContentBlockParamUnion {
+	injected := []msg.Block{msg.Text{Text: "steer!"}}
+	ev := &Events{PendingUser: func() []msg.Block {
 		out := injected
 		injected = nil // fire once
 		return out
 	}}
-	if _, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi")); err != nil {
+	if _, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserTextMsg("hi")); err != nil {
 		t.Fatal(err)
 	}
 	hist, err := conv.History(context.Background())
@@ -738,13 +733,13 @@ func TestPendingUserInjectedBetweenIterations(t *testing.T) {
 func TestPendingUserInjectedAtEndTurnContinuesTheLoop(t *testing.T) {
 	c := assert.NewAborting(t)
 	conv := newMemConv(t, &scriptedSender{scripts: []string{respEndTurn, respEndTurn}})
-	injected := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("steer!")}
-	ev := &Events{PendingUser: func() []anthropic.ContentBlockParamUnion {
+	injected := []msg.Block{msg.Text{Text: "steer!"}}
+	ev := &Events{PendingUser: func() []msg.Block {
 		out := injected
 		injected = nil // fire once
 		return out
 	}}
-	result, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi"))
+	result, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserTextMsg("hi"))
 	c.NoError(err)
 	c.Eq(2, result.Stats.Iterations, "Iterations = %d, want 2 -- the steer must force a second Continue "+
 		"call rather than ending on the first end_turn", result.Stats.Iterations)
@@ -832,15 +827,15 @@ func TestDriveKeepsToolsWhenExtraSendOptionsPassed(t *testing.T) {
 	// differentDefs stands in for a caller override: a single tool distinct
 	// from fakeTools' alpha/beta pair, so any leakage of drive's own defs
 	// into the wire request is unambiguous.
-	differentDefs := []anthropic.ToolUnionParam{
-		{OfTool: &anthropic.ToolParam{Name: "override", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}}},
+	differentDefs := []msg.ToolDef{
+		{Name: "override", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 	sender := &trackingSender{scripts: []string{respTwoTools, respEndTurn}}
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
 
-	_, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
-		llm.WithTools(differentDefs))
+	_, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("hi"),
+		llm.WithToolsMsg(differentDefs))
 	c.NoError(err, "Run")
 
 	all := sender.allParams()
@@ -923,7 +918,7 @@ func TestRunThreadsCallerSendOptionToContinue(t *testing.T) {
 		}
 	}
 
-	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserTextMsg("hi"),
 		llm.WithStreamHandler(handler))
 	c.Require().NoError(err, "Run")
 	c.Require().Eq("streamed hello", seen.String(), "stream handler saw")
@@ -966,12 +961,12 @@ func TestIterationCapEndsGracefullyInsteadOfErroring(t *testing.T) {
 	var iterations []int
 	ev := &Events{
 		MaxIterations: 2,
-		OnTurn: func(iteration int, _ *anthropic.Message, _ time.Duration, _ error) {
+		OnTurn: func(iteration int, _ *msg.Response, _ time.Duration, _ error) {
 			iterations = append(iterations, iteration)
 		},
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("go"))
 	c.Require().NoError(err, "Run")
 	c.True(result.LimitReached, "LimitReached = false, want true")
 	c.StrContains(result.LimitReason, "maximum tool iterations (2)", "LimitReason =")
@@ -997,7 +992,7 @@ func TestShouldStopEndsTurnGracefully(t *testing.T) {
 		ShouldStop: func() (bool, string) { return true, "cost budget exceeded" },
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("go"))
 	c.Require().NoError(err, "Run")
 	if !result.LimitReached || result.LimitReason != "cost budget exceeded" {
 		t.Errorf("LimitReached=%v LimitReason=%q, want true/%q", result.LimitReached, result.LimitReason, "cost budget exceeded")
@@ -1025,7 +1020,7 @@ func TestNoDefaultIterationCap(t *testing.T) {
 		},
 	}
 
-	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserTextMsg("go"))
 	c.Require().NoError(err, "Run")
 	c.Greater(250, result.Stats.Iterations, "Stats.Iterations")
 	if !result.LimitReached || result.LimitReason != "test cutoff past the old 250 default" {
@@ -1046,16 +1041,16 @@ func slicesEqualInt(a, b []int) bool {
 	return true
 }
 
-// promptTooLargeErr fabricates the API's prompt-size rejection (HTTP 400 whose
-// body says the prompt is too long) — the trigger for the write-ahead
+// promptTooLargeErr fabricates the API's prompt-size rejection (a 400 the
+// codec classifies as prompt-too-large) — the trigger for the write-ahead
 // retraction.
-func promptTooLargeErr() *anthropic.Error {
-	e := &anthropic.Error{StatusCode: http.StatusBadRequest}
-	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-	e.Request = req
-	e.Response = &http.Response{StatusCode: http.StatusBadRequest}
-	_ = e.UnmarshalJSON([]byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`))
-	return e
+func promptTooLargeErr() *msg.APIError {
+	return &msg.APIError{
+		Status:  http.StatusBadRequest,
+		Kind:    msg.ErrPromptTooLarge,
+		Body:    []byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`),
+		Message: "prompt is too long: too many tokens",
+	}
 }
 
 // TestOversizedFirstPromptRetractsTheUserRow pins the write-ahead retraction: a
@@ -1069,7 +1064,7 @@ func TestOversizedFirstPromptRetractsTheUserRow(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := Run(ctx, conv, &fakeTools{}, nil,
-		[]anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(strings.Repeat("x", 4096))})
+		[]msg.Block{msg.Text{Text: strings.Repeat("x", 4096)}})
 	ck.Require().Error(err, "an oversized first prompt must fail the run")
 	ck.True(llm.IsPromptTooLarge(err), "error = %v, want the prompt-too-large rejection", err)
 

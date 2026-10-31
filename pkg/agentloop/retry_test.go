@@ -182,7 +182,7 @@ func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
 	seedUser(t, conv)
 	resp, err := continueWithRetry(context.Background(), conv)
 	c.NoError(err, "expected recovery from sse timeout_error, got error")
-	c.False(resp == nil || resp.StopReason != "end_turn", "expected an end_turn message after recovery, got %+v", resp)
+	c.False(resp == nil || resp.StopReason.String() != "end_turn", "expected an end_turn message after recovery, got %+v", resp)
 	c.Eq(0, fails, "sender still has")
 }
 
@@ -219,7 +219,7 @@ func TestContinueWithRetry_ExhaustedRetries_ReturnsLastError(t *testing.T) {
 // STORED, unlike Send/Run) has something to send.
 func seedUser(t *testing.T, conv *llm.Conversation) {
 	t.Helper()
-	_, aerr := conv.AppendUser(context.Background(), llm.UserText("hi"))
+	_, aerr := conv.AppendUserMsg(context.Background(), llm.UserTextMsg("hi"))
 	assert.NewAborting(t).NoError(aerr, "seed user message")
 }
 
@@ -237,7 +237,7 @@ func (s *conditionalSender) New(_ context.Context, _ anthropic.MessageNewParams)
 
 // TestUsageLimitErrorNotRetried pins a subscription usage limit as terminal: the
 // reset is hours or days away, so a retry loop against it only burns budget. The
-// type is deliberately not an *anthropic.Error, and its text avoids every string
+// type is deliberately not a *msg.APIError, and its text avoids every string
 // fragment the fallback below looks for, so nothing in isRetryable can rescue it
 // into a retry.
 func TestUsageLimitErrorNotRetried(t *testing.T) {

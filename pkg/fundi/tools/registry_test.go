@@ -10,9 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 func TestToolResultContentBlocksFromText(t *testing.T) {
@@ -56,14 +55,27 @@ func TestParseRTKMode(t *testing.T) {
 	}
 }
 
-func toolNames(defs []anthropic.ToolUnionParam) []string {
+func toolNames(defs []msg.ToolDef) []string {
 	names := make([]string, len(defs))
 	for i, d := range defs {
-		if d.OfTool != nil {
-			names[i] = d.OfTool.Name
-		}
+		names[i] = d.Name
 	}
 	return names
+}
+
+// TestRegistryDefinitionsOrderIsStable pins the order Definitions returns:
+// name-sorted, independent of registration order. The order is load-bearing,
+// not cosmetic — the tools array is part of the Anthropic prompt-cache prefix,
+// so a reorder silently busts the cache on every turn.
+func TestRegistryDefinitionsOrderIsStable(t *testing.T) {
+	r := NewRegistry()
+	for _, name := range []string{"write", "bash", "read", "glob"} {
+		r.Register(&testEchoTool{name: name, schema: Schema{Type: "object"}})
+	}
+	assert.NewAborting(t).EqDiff(
+		[]string{"bash", "glob", "read", "write"},
+		toolNames(r.Definitions()),
+		"Definitions order")
 }
 
 func TestEditRequiresPriorRead(t *testing.T) {
@@ -133,14 +145,13 @@ func TestBuildDefFromRegistryTest(t *testing.T) {
 		Required: []string{"path"},
 	}
 	def := BuildDef(&testEchoTool{name: "mytool", desc: "does a thing", schema: schema})
-	c.NotNil(def.OfTool, "expected OfTool variant")
-	c.Eq("mytool", def.OfTool.Name, "name =")
-	if !def.OfTool.Description.Valid() || def.OfTool.Description.Value != "does a thing" {
-		t.Fatalf("description = %+v", def.OfTool.Description)
+	c.Eq("mytool", def.Name, "name =")
+	c.Eq("does a thing", def.Description, "description =")
+	var parsed struct {
+		Required []string `json:"required"`
 	}
-	if len(def.OfTool.InputSchema.Required) != 1 || def.OfTool.InputSchema.Required[0] != "path" {
-		t.Fatalf("required = %v", def.OfTool.InputSchema.Required)
-	}
+	c.NoError(json.Unmarshal(def.InputSchema, &parsed), "input schema is not valid JSON")
+	c.EqDeep([]string{"path"}, parsed.Required, "required")
 }
 
 // panickingTool panics in Execute for containment tests.
