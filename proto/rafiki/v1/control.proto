@@ -430,7 +430,7 @@ message SpawnRequest {
   ScriptSpec script = 14;
 
   // Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
-  // This is enforced as a child-ALLOWED set (fields 1-14, see verbs.go's
+  // This is enforced as a child-ALLOWED set (fields 1-14, 30-33, see verbs.go's
   // childAllowedSpawnFields), not a literal list of these 15 -- so a NEW
   // SpawnRequest field is OPERATOR-ONLY by default. Adding one requires an
   // explicit decision: either add its number to childAllowedSpawnFields (and
@@ -481,6 +481,22 @@ message SpawnRequest {
   // pkg/sandbox.Validate). A child that may spawn may therefore also ask its
   // sandbox to be provisioned with it.
   SandboxSpec sandbox = 31;
+
+  // fork_from (32) starts this child from a point in another child's history,
+  // by reference: the new child's conversation borrows the source's history up
+  // to that node. Child-allowed: a child may fork only children it could already
+  // read (itself and its subtree). Only kind=fundi can be forked to.
+  message ForkFrom {
+    string child_id = 1;
+    // m:<ordinal> or m:<ordinal>.<n> as agent_view prints it; empty = the last
+    // completed turn (the last assistant message with no pending tool call).
+    string cursor = 2;
+  }
+  ForkFrom fork_from = 32;
+
+  // from_tag (33) forks from the node a tag names, resolved nearest scope first
+  // (lineage, then tree, then owner), once, at spawn. Exclusive with fork_from.
+  string from_tag = 33;
 
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
@@ -1416,6 +1432,14 @@ service Control {
   // A raw child-protocol frame, for debugging/scripting. userOnly: children
   // use Send.
   rpc SendFrame(SendFrameRequest) returns (SendFrameResponse);
+  // Tags: named, scoped handles to a node another child may fork from. Tag
+  // creates or moves one, Untag tombstones one, ListTags reads the live tags
+  // visible to the caller (or one tag's whole history). All three are
+  // childScoped at the gate; the handler bounds a child through the
+  // Controller's tag authority.
+  rpc Tag(TagRequest) returns (TagResponse);
+  rpc Untag(UntagRequest) returns (UntagResponse);
+  rpc ListTags(ListTagsRequest) returns (ListTagsResponse);
 }
 
 // SkillFileInfo describes one supporting file of a skill without carrying it:
@@ -2385,3 +2409,65 @@ message SendFrameRequest {
   string frame_json = 2;
 }
 message SendFrameResponse {}
+
+// ─── Tags (Tag / Untag / ListTags) ─────────────────────────────────────────
+
+// TagScope says who may see and fork from a tag. TAG_SCOPE_UNSPECIFIED means
+// "the default" (lineage) on create only; it is never stored.
+enum TagScope {
+  TAG_SCOPE_UNSPECIFIED = 0; // lineage, on create only
+  TAG_SCOPE_LINEAGE = 1;
+  TAG_SCOPE_TREE = 2;
+  TAG_SCOPE_OWNER = 3;
+}
+
+// TagRow is one version of one named tag: a move supersedes the current row
+// and appends the next, an untag tombstones it. Every version carries the
+// same tag_id.
+message TagRow {
+  string tag_id = 1;
+  string name = 2;
+  TagScope scope = 3;
+  string scope_root = 4;
+  string child_id = 5;
+  string node_id = 6;
+  int32 ordinal = 7;
+  string creator_child_id = 8;
+  bool creator_is_user = 9;
+  string actor_child_id = 10;
+  string note = 11;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp superseded_at = 13;
+  google.protobuf.Timestamp deleted_at = 14;
+}
+
+// Create a tag (tag_id empty) or move one (tag_id and expect_node_id set; name,
+// scope and replace must then be unset). child_id + cursor name the node.
+message TagRequest {
+  string name = 1;
+  TagScope scope = 2;
+  string child_id = 3;
+  string cursor = 4;
+  string note = 5;
+  string tag_id = 6;
+  string expect_node_id = 7;
+  // replace: user credentials only — tombstone the live holder of the name first.
+  bool replace = 8;
+}
+message TagResponse {
+  TagRow tag = 1;
+}
+message UntagRequest {
+  string tag_id = 1;
+}
+message UntagResponse {}
+// tag_id set: that tag's whole history, oldest first. Otherwise live tags
+// visible to the caller, nearest scope first. limit: default 50, max 500.
+message ListTagsRequest {
+  string name_prefix = 1;
+  int32 limit = 2;
+  string tag_id = 3;
+}
+message ListTagsResponse {
+  repeated TagRow rows = 1;
+}

@@ -1027,7 +1027,7 @@ pub struct SpawnRequest {
     #[prost(message, optional, tag = "14")]
     pub script: ::core::option::Option<spawn_request::ScriptSpec>,
     /// Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
-    /// This is enforced as a child-ALLOWED set (fields 1-14, see verbs.go's
+    /// This is enforced as a child-ALLOWED set (fields 1-14, 30-33, see verbs.go's
     /// childAllowedSpawnFields), not a literal list of these 15 -- so a NEW
     /// SpawnRequest field is OPERATOR-ONLY by default. Adding one requires an
     /// explicit decision: either add its number to childAllowedSpawnFields (and
@@ -1096,6 +1096,12 @@ pub struct SpawnRequest {
     /// sandbox to be provisioned with it.
     #[prost(message, optional, tag = "31")]
     pub sandbox: ::core::option::Option<SandboxSpec>,
+    #[prost(message, optional, tag = "32")]
+    pub fork_from: ::core::option::Option<spawn_request::ForkFrom>,
+    /// from_tag (33) forks from the node a tag names, resolved nearest scope first
+    /// (lineage, then tree, then owner), once, at spawn. Exclusive with fork_from.
+    #[prost(string, tag = "33")]
+    pub from_tag: ::prost::alloc::string::String,
     /// The three budgets are optional because zero and unset differ, in OPPOSITE
     /// directions per field: unset max_depth means 1 and zero means "may not
     /// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -1124,6 +1130,19 @@ pub mod spawn_request {
         pub modules: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
         #[prost(string, repeated, tag = "4")]
         pub args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    }
+    /// fork_from (32) starts this child from a point in another child's history,
+    /// by reference: the new child's conversation borrows the source's history up
+    /// to that node. Child-allowed: a child may fork only children it could already
+    /// read (itself and its subtree). Only kind=fundi can be forked to.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct ForkFrom {
+        #[prost(string, tag = "1")]
+        pub child_id: ::prost::alloc::string::String,
+        /// m:<ordinal> or m:<ordinal>.<n> as agent_view prints it; empty = the last
+        /// completed turn (the last assistant message with no pending tool call).
+        #[prost(string, tag = "2")]
+        pub cursor: ::prost::alloc::string::String,
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3665,6 +3684,90 @@ pub struct SendFrameRequest {
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct SendFrameResponse {}
+/// TagRow is one version of one named tag: a move supersedes the current row
+/// and appends the next, an untag tombstones it. Every version carries the
+/// same tag_id.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TagRow {
+    #[prost(string, tag = "1")]
+    pub tag_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "TagScope", tag = "3")]
+    pub scope: i32,
+    #[prost(string, tag = "4")]
+    pub scope_root: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub child_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub node_id: ::prost::alloc::string::String,
+    #[prost(int32, tag = "7")]
+    pub ordinal: i32,
+    #[prost(string, tag = "8")]
+    pub creator_child_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "9")]
+    pub creator_is_user: bool,
+    #[prost(string, tag = "10")]
+    pub actor_child_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub note: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "12")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "13")]
+    pub superseded_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "14")]
+    pub deleted_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// Create a tag (tag_id empty) or move one (tag_id and expect_node_id set; name,
+/// scope and replace must then be unset). child_id + cursor name the node.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TagRequest {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration = "TagScope", tag = "2")]
+    pub scope: i32,
+    #[prost(string, tag = "3")]
+    pub child_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub cursor: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub note: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub tag_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub expect_node_id: ::prost::alloc::string::String,
+    /// replace: user credentials only — tombstone the live holder of the name first.
+    #[prost(bool, tag = "8")]
+    pub replace: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TagResponse {
+    #[prost(message, optional, tag = "1")]
+    pub tag: ::core::option::Option<TagRow>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UntagRequest {
+    #[prost(string, tag = "1")]
+    pub tag_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct UntagResponse {}
+/// tag_id set: that tag's whole history, oldest first. Otherwise live tags
+/// visible to the caller, nearest scope first. limit: default 50, max 500.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListTagsRequest {
+    #[prost(string, tag = "1")]
+    pub name_prefix: ::prost::alloc::string::String,
+    #[prost(int32, tag = "2")]
+    pub limit: i32,
+    #[prost(string, tag = "3")]
+    pub tag_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListTagsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub rows: ::prost::alloc::vec::Vec<TagRow>,
+}
 /// EventTier is the guarantee a subscriber asks for, not a storage detail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -3871,6 +3974,41 @@ impl ReviewAcceptStatus {
             "REVIEW_ACCEPT_STATUS_ENQUEUED" => Some(Self::Enqueued),
             "REVIEW_ACCEPT_STATUS_ALREADY_RUNNING" => Some(Self::AlreadyRunning),
             "REVIEW_ACCEPT_STATUS_QUEUE_FULL" => Some(Self::QueueFull),
+            _ => None,
+        }
+    }
+}
+/// TagScope says who may see and fork from a tag. TAG_SCOPE_UNSPECIFIED means
+/// "the default" (lineage) on create only; it is never stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TagScope {
+    /// lineage, on create only
+    Unspecified = 0,
+    Lineage = 1,
+    Tree = 2,
+    Owner = 3,
+}
+impl TagScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "TAG_SCOPE_UNSPECIFIED",
+            Self::Lineage => "TAG_SCOPE_LINEAGE",
+            Self::Tree => "TAG_SCOPE_TREE",
+            Self::Owner => "TAG_SCOPE_OWNER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TAG_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "TAG_SCOPE_LINEAGE" => Some(Self::Lineage),
+            "TAG_SCOPE_TREE" => Some(Self::Tree),
+            "TAG_SCOPE_OWNER" => Some(Self::Owner),
             _ => None,
         }
     }

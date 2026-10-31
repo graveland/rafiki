@@ -241,6 +241,12 @@ const (
 	ControlGetStreamsProcedure = "/rafiki.v1.Control/GetStreams"
 	// ControlSendFrameProcedure is the fully-qualified name of the Control's SendFrame RPC.
 	ControlSendFrameProcedure = "/rafiki.v1.Control/SendFrame"
+	// ControlTagProcedure is the fully-qualified name of the Control's Tag RPC.
+	ControlTagProcedure = "/rafiki.v1.Control/Tag"
+	// ControlUntagProcedure is the fully-qualified name of the Control's Untag RPC.
+	ControlUntagProcedure = "/rafiki.v1.Control/Untag"
+	// ControlListTagsProcedure is the fully-qualified name of the Control's ListTags RPC.
+	ControlListTagsProcedure = "/rafiki.v1.Control/ListTags"
 	// LoginBeginLoginProcedure is the fully-qualified name of the Login's BeginLogin RPC.
 	LoginBeginLoginProcedure = "/rafiki.v1.Login/BeginLogin"
 	// LoginCompleteLoginProcedure is the fully-qualified name of the Login's CompleteLogin RPC.
@@ -370,6 +376,14 @@ type ControlClient interface {
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
 	SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error)
+	// Tags: named, scoped handles to a node another child may fork from. Tag
+	// creates or moves one, Untag tombstones one, ListTags reads the live tags
+	// visible to the caller (or one tag's whole history). All three are
+	// childScoped at the gate; the handler bounds a child through the
+	// Controller's tag authority.
+	Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error)
+	Untag(context.Context, *connect.Request[v1.UntagRequest]) (*connect.Response[v1.UntagResponse], error)
+	ListTags(context.Context, *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -947,6 +961,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("SendFrame")),
 			connect.WithClientOptions(opts...),
 		),
+		tag: connect.NewClient[v1.TagRequest, v1.TagResponse](
+			httpClient,
+			baseURL+ControlTagProcedure,
+			connect.WithSchema(controlMethods.ByName("Tag")),
+			connect.WithClientOptions(opts...),
+		),
+		untag: connect.NewClient[v1.UntagRequest, v1.UntagResponse](
+			httpClient,
+			baseURL+ControlUntagProcedure,
+			connect.WithSchema(controlMethods.ByName("Untag")),
+			connect.WithClientOptions(opts...),
+		),
+		listTags: connect.NewClient[v1.ListTagsRequest, v1.ListTagsResponse](
+			httpClient,
+			baseURL+ControlListTagsProcedure,
+			connect.WithSchema(controlMethods.ByName("ListTags")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -1046,6 +1078,9 @@ type controlClient struct {
 	deleteProviderCredential *connect.Client[v1.DeleteProviderCredentialRequest, v1.DeleteProviderCredentialResponse]
 	getStreams               *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
 	sendFrame                *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
+	tag                      *connect.Client[v1.TagRequest, v1.TagResponse]
+	untag                    *connect.Client[v1.UntagRequest, v1.UntagResponse]
+	listTags                 *connect.Client[v1.ListTagsRequest, v1.ListTagsResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -1518,6 +1553,21 @@ func (c *controlClient) SendFrame(ctx context.Context, req *connect.Request[v1.S
 	return c.sendFrame.CallUnary(ctx, req)
 }
 
+// Tag calls rafiki.v1.Control.Tag.
+func (c *controlClient) Tag(ctx context.Context, req *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error) {
+	return c.tag.CallUnary(ctx, req)
+}
+
+// Untag calls rafiki.v1.Control.Untag.
+func (c *controlClient) Untag(ctx context.Context, req *connect.Request[v1.UntagRequest]) (*connect.Response[v1.UntagResponse], error) {
+	return c.untag.CallUnary(ctx, req)
+}
+
+// ListTags calls rafiki.v1.Control.ListTags.
+func (c *controlClient) ListTags(ctx context.Context, req *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error) {
+	return c.listTags.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -1641,6 +1691,14 @@ type ControlHandler interface {
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
 	SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error)
+	// Tags: named, scoped handles to a node another child may fork from. Tag
+	// creates or moves one, Untag tombstones one, ListTags reads the live tags
+	// visible to the caller (or one tag's whole history). All three are
+	// childScoped at the gate; the handler bounds a child through the
+	// Controller's tag authority.
+	Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error)
+	Untag(context.Context, *connect.Request[v1.UntagRequest]) (*connect.Response[v1.UntagResponse], error)
+	ListTags(context.Context, *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -2214,6 +2272,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("SendFrame")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlTagHandler := connect.NewUnaryHandler(
+		ControlTagProcedure,
+		svc.Tag,
+		connect.WithSchema(controlMethods.ByName("Tag")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlUntagHandler := connect.NewUnaryHandler(
+		ControlUntagProcedure,
+		svc.Untag,
+		connect.WithSchema(controlMethods.ByName("Untag")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListTagsHandler := connect.NewUnaryHandler(
+		ControlListTagsProcedure,
+		svc.ListTags,
+		connect.WithSchema(controlMethods.ByName("ListTags")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -2404,6 +2480,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlGetStreamsHandler.ServeHTTP(w, r)
 		case ControlSendFrameProcedure:
 			controlSendFrameHandler.ServeHTTP(w, r)
+		case ControlTagProcedure:
+			controlTagHandler.ServeHTTP(w, r)
+		case ControlUntagProcedure:
+			controlUntagHandler.ServeHTTP(w, r)
+		case ControlListTagsProcedure:
+			controlListTagsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -2787,6 +2869,18 @@ func (UnimplementedControlHandler) GetStreams(context.Context, *connect.Request[
 
 func (UnimplementedControlHandler) SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SendFrame is not implemented"))
+}
+
+func (UnimplementedControlHandler) Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Tag is not implemented"))
+}
+
+func (UnimplementedControlHandler) Untag(context.Context, *connect.Request[v1.UntagRequest]) (*connect.Response[v1.UntagResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Untag is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListTags(context.Context, *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListTags is not implemented"))
 }
 
 // LoginClient is a client for the rafiki.v1.Login service.

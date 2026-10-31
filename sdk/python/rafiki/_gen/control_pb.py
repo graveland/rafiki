@@ -54,6 +54,12 @@ class ReviewAcceptStatus:
     REVIEW_ACCEPT_STATUS_ALREADY_RUNNING = "REVIEW_ACCEPT_STATUS_ALREADY_RUNNING"
     REVIEW_ACCEPT_STATUS_QUEUE_FULL = "REVIEW_ACCEPT_STATUS_QUEUE_FULL"
 
+class TagScope:
+    TAG_SCOPE_UNSPECIFIED = "TAG_SCOPE_UNSPECIFIED"
+    TAG_SCOPE_LINEAGE = "TAG_SCOPE_LINEAGE"
+    TAG_SCOPE_TREE = "TAG_SCOPE_TREE"
+    TAG_SCOPE_OWNER = "TAG_SCOPE_OWNER"
+
 @dataclasses.dataclass
 class GetHistoryRequest:
     child_id: str = ""
@@ -951,6 +957,8 @@ class SpawnRequest:
     passthrough_auth: str = ""
     skip_derived_index: bool = False
     sandbox: Optional[SandboxSpec] = None
+    fork_from: Optional[SpawnRequest.ForkFrom] = None
+    from_tag: str = ""
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -1013,6 +1021,10 @@ class SpawnRequest:
             out["skipDerivedIndex"] = self.skip_derived_index
         if self.sandbox is not None:
             out["sandbox"] = self.sandbox.to_dict()
+        if self.fork_from is not None:
+            out["forkFrom"] = self.fork_from.to_dict()
+        if self.from_tag != "":
+            out["fromTag"] = self.from_tag
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1107,6 +1119,12 @@ class SpawnRequest:
         _v = _d.get("sandbox")
         if _v is not None:
             obj.sandbox = SandboxSpec.from_dict(_v)
+        _v = _d.get("forkFrom")
+        if _v is not None:
+            obj.fork_from = SpawnRequest.ForkFrom.from_dict(_v)
+        _v = _d.get("fromTag")
+        if _v is not None:
+            obj.from_tag = _v
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)
@@ -1151,6 +1169,29 @@ class SpawnRequest:
             _v = _d.get("args")
             if _v is not None:
                 obj.args = [x for x in _v]
+            return obj
+    
+    @dataclasses.dataclass
+    class ForkFrom:
+        child_id: str = ""
+        cursor: str = ""
+
+        def to_dict(self) -> dict:
+            out = {}
+            if self.child_id != "":
+                out["childId"] = self.child_id
+            if self.cursor != "":
+                out["cursor"] = self.cursor
+            return out
+        @classmethod
+        def from_dict(cls, _d: dict) -> "SpawnRequest.ForkFrom":
+            obj = cls()
+            _v = _d.get("childId")
+            if _v is not None:
+                obj.child_id = _v
+            _v = _d.get("cursor")
+            if _v is not None:
+                obj.cursor = _v
             return obj
     
 @dataclasses.dataclass
@@ -7412,6 +7453,252 @@ class SendFrameResponse:
     @classmethod
     def from_dict(cls, _d: dict) -> "SendFrameResponse":
         obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class TagRow:
+    tag_id: str = ""
+    name: str = ""
+    scope: str = "TAG_SCOPE_UNSPECIFIED"
+    scope_root: str = ""
+    child_id: str = ""
+    node_id: str = ""
+    ordinal: int = 0
+    creator_child_id: str = ""
+    creator_is_user: bool = False
+    actor_child_id: str = ""
+    note: str = ""
+    created_at: Optional[datetime.datetime] = None
+    superseded_at: Optional[datetime.datetime] = None
+    deleted_at: Optional[datetime.datetime] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.tag_id != "":
+            out["tagId"] = self.tag_id
+        if self.name != "":
+            out["name"] = self.name
+        if self.scope != "TAG_SCOPE_UNSPECIFIED":
+            out["scope"] = self.scope
+        if self.scope_root != "":
+            out["scopeRoot"] = self.scope_root
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.node_id != "":
+            out["nodeId"] = self.node_id
+        if self.ordinal != 0:
+            out["ordinal"] = self.ordinal
+        if self.creator_child_id != "":
+            out["creatorChildId"] = self.creator_child_id
+        if self.creator_is_user != False:
+            out["creatorIsUser"] = self.creator_is_user
+        if self.actor_child_id != "":
+            out["actorChildId"] = self.actor_child_id
+        if self.note != "":
+            out["note"] = self.note
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.superseded_at is not None:
+            out["supersededAt"] = _ts_out(self.superseded_at)
+        if self.deleted_at is not None:
+            out["deletedAt"] = _ts_out(self.deleted_at)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "TagRow":
+        obj = cls()
+        _v = _d.get("tagId")
+        if _v is not None:
+            obj.tag_id = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
+        _v = _d.get("scopeRoot")
+        if _v is not None:
+            obj.scope_root = _v
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("nodeId")
+        if _v is not None:
+            obj.node_id = _v
+        _v = _d.get("ordinal")
+        if _v is not None:
+            obj.ordinal = _int_in(_v)
+        _v = _d.get("creatorChildId")
+        if _v is not None:
+            obj.creator_child_id = _v
+        _v = _d.get("creatorIsUser")
+        if _v is not None:
+            obj.creator_is_user = _v
+        _v = _d.get("actorChildId")
+        if _v is not None:
+            obj.actor_child_id = _v
+        _v = _d.get("note")
+        if _v is not None:
+            obj.note = _v
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _ts_in(_v, "createdAt")
+        _v = _d.get("supersededAt")
+        if _v is not None:
+            obj.superseded_at = _ts_in(_v, "supersededAt")
+        _v = _d.get("deletedAt")
+        if _v is not None:
+            obj.deleted_at = _ts_in(_v, "deletedAt")
+        return obj
+
+@dataclasses.dataclass
+class TagRequest:
+    name: str = ""
+    scope: str = "TAG_SCOPE_UNSPECIFIED"
+    child_id: str = ""
+    cursor: str = ""
+    note: str = ""
+    tag_id: str = ""
+    expect_node_id: str = ""
+    replace: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.scope != "TAG_SCOPE_UNSPECIFIED":
+            out["scope"] = self.scope
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.cursor != "":
+            out["cursor"] = self.cursor
+        if self.note != "":
+            out["note"] = self.note
+        if self.tag_id != "":
+            out["tagId"] = self.tag_id
+        if self.expect_node_id != "":
+            out["expectNodeId"] = self.expect_node_id
+        if self.replace != False:
+            out["replace"] = self.replace
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "TagRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("cursor")
+        if _v is not None:
+            obj.cursor = _v
+        _v = _d.get("note")
+        if _v is not None:
+            obj.note = _v
+        _v = _d.get("tagId")
+        if _v is not None:
+            obj.tag_id = _v
+        _v = _d.get("expectNodeId")
+        if _v is not None:
+            obj.expect_node_id = _v
+        _v = _d.get("replace")
+        if _v is not None:
+            obj.replace = _v
+        return obj
+
+@dataclasses.dataclass
+class TagResponse:
+    tag: Optional[TagRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.tag is not None:
+            out["tag"] = self.tag.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "TagResponse":
+        obj = cls()
+        _v = _d.get("tag")
+        if _v is not None:
+            obj.tag = TagRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class UntagRequest:
+    tag_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.tag_id != "":
+            out["tagId"] = self.tag_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UntagRequest":
+        obj = cls()
+        _v = _d.get("tagId")
+        if _v is not None:
+            obj.tag_id = _v
+        return obj
+
+@dataclasses.dataclass
+class UntagResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UntagResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ListTagsRequest:
+    name_prefix: str = ""
+    limit: int = 0
+    tag_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name_prefix != "":
+            out["namePrefix"] = self.name_prefix
+        if self.limit != 0:
+            out["limit"] = self.limit
+        if self.tag_id != "":
+            out["tagId"] = self.tag_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListTagsRequest":
+        obj = cls()
+        _v = _d.get("namePrefix")
+        if _v is not None:
+            obj.name_prefix = _v
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
+        _v = _d.get("tagId")
+        if _v is not None:
+            obj.tag_id = _v
+        return obj
+
+@dataclasses.dataclass
+class ListTagsResponse:
+    rows: list[TagRow] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.rows:
+            out["rows"] = [x.to_dict() for x in self.rows]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListTagsResponse":
+        obj = cls()
+        _v = _d.get("rows")
+        if _v is not None:
+            obj.rows = [TagRow.from_dict(x) for x in _v]
         return obj
 
 

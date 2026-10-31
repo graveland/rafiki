@@ -90,6 +90,7 @@ type Server struct {
 	execSessions   atomic.Pointer[ExecutorSessions]
 	sandboxes      atomic.Pointer[SandboxManager]
 	syncers        atomic.Pointer[PathSyncer]
+	tags           atomic.Pointer[TagManager]
 
 	// stopOnce guards closing stopped, the shutdown signal long-lived
 	// handlers select on. NewServer creates the channel; the zero value's

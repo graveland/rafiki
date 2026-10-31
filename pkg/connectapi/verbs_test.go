@@ -75,9 +75,10 @@ const (
 )
 
 // childAllowedFieldNumbers mirrors verbs.go's childAllowedSpawnFields (fields
-// 1-14, 30 and 31: cwd through script, the three budget fields,
-// skip_derived_index, and sandbox). It is kept as its own copy, not an import of the
-// unexported production set, because this file is package connectapi_test --
+// 1-14, 30-33: cwd through script, the three budget fields,
+// skip_derived_index, sandbox, and the two fork fields). It is kept as its own
+// copy, not an import of the unexported production set, because this file is
+// package connectapi_test --
 // and duplicating it here is the point: TestSpawnRequestFieldsAreClassified
 // fails the moment a field number exists that this list and
 // operatorOnlyFieldMin/Max don't between them cover, forcing a conscious
@@ -87,6 +88,8 @@ var childAllowedFieldNumbers = map[protoreflect.FieldNumber]bool{
 	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
 	30: true,
 	31: true,
+	32: true,
+	33: true,
 }
 
 // TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller walks SpawnRequest's
@@ -172,6 +175,39 @@ func TestSpawnAdmitsSkipDerivedIndexFromAChild(t *testing.T) {
 	_, err := s.Spawn(context.Background(), connect.NewRequest(req))
 	c.Require().NoError(err, "child Spawn with only skip_derived_index refused")
 	c.Eq(true, f.got.SkipDerivedIndex, "skip_derived_index did not reach SpawnParams: %+v", f.got)
+}
+
+// TestSpawnForkFromForeignChildIsRefusedLikeUnknown pins the fork source as a
+// second owner-guarded target on Spawn: a non-admin user may fork only from a
+// child it owns, and a foreign id gets the guard's one identical
+// PermissionDenied — the answer an unknown id gets — before the spawn is
+// attempted. An owned source is admitted.
+func TestSpawnForkFromForeignChildIsRefusedLikeUnknown(t *testing.T) {
+	c := assert.NewAborting(t)
+	guarded := func(f *fakeLifecycle) *connectapi.Server {
+		s := connectapi.NewServer(nil)
+		s.SetChildLifecycle(f)
+		s.SetOwnerGuardSource(func(context.Context) connectapi.OwnerGuard {
+			return &fakeOwnerGuard{owned: map[string]bool{"c_mine": true}}
+		})
+		return s
+	}
+
+	for _, src := range []string{"c_foreign", "c_unknown"} {
+		f := &fakeLifecycle{}
+		_, err := guarded(f).Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
+			Cwd: "/tmp", Name: "w", ForkFrom: &rafikiv1.SpawnRequest_ForkFrom{ChildId: src},
+		}))
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Spawn forking from %q = %v, want PermissionDenied", src, err)
+		c.Eq("", f.got.Cwd, "Spawn reached the lifecycle despite forking from %q: %+v", src, f.got)
+	}
+
+	f := &fakeLifecycle{}
+	_, err := guarded(f).Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd: "/tmp", Name: "w", ForkFrom: &rafikiv1.SpawnRequest_ForkFrom{ChildId: "c_mine"},
+	}))
+	c.NoError(err, "Spawn forking from an owned child")
+	c.Eq("/tmp", f.got.Cwd, "Spawn forking from an owned child never reached the lifecycle")
 }
 
 // TestSpawnAdmitsAUserCallerWithEveryOperatorOnlyFieldSet is the positive

@@ -157,6 +157,13 @@ var controlPolicyTable = map[string]controlPolicy{
 	// top-level — the MCP face's presetStoreForChild rule.
 	"PutPreset":    policyChildScoped,
 	"DeletePreset": policyChildScoped,
+	// Tags: a child credential creates, moves and lists the tags it can
+	// already read; the gate names no target, so the handler bounds it through
+	// the Controller's tag authority (TagCaller.ChildID, resolved from the
+	// credential).
+	"Tag":      policyChildScoped,
+	"Untag":    policyChildScoped,
+	"ListTags": policyChildScoped,
 	// Script children (Report / Receive / SetResult). Report acts OUTWARD on
 	// the caller's own parent; Receive and SetResult are self-only. All three
 	// resolve the caller's position from the credential — the request carries

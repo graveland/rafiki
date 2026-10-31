@@ -216,6 +216,19 @@ type ScriptSpec struct {
 	Args    []string `json:"args,omitempty"`
 }
 
+// ForkFrom names the point in another child's history a new child starts
+// from: the new child's conversation borrows the source's history up to
+// ChildID's Cursor node. Only kind=fundi can be forked to.
+//
+// Cursor is m:<ordinal> or m:<ordinal>.<n> as agent_view prints it; empty
+// means the last completed turn (the last assistant message with no pending
+// tool call). A child may fork only children it could already read: itself
+// and its subtree.
+type ForkFrom struct {
+	ChildID string `json:"childId,omitempty"`
+	Cursor  string `json:"cursor,omitempty"`
+}
+
 // SpawnRequest starts a new child (§6.3).
 // cwd is required; all other fields are optional and forwarded to the child
 // as flags. apiKey is used at spawn time only and is never written to the
@@ -258,6 +271,18 @@ type SpawnRequest struct {
 	// cannot express privilege (host paths are bounded by the launcher's mount
 	// roots, volumes are owner-prefixed, resources are clamped).
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+
+	// ForkFrom starts this child from a point in another child's history, by
+	// reference: the new child's conversation borrows the source's history up
+	// to that node. Child-allowed on the Connect wire (SpawnRequest.fork_from =
+	// 32): a child may fork only children it could already read. Only kind=fundi
+	// can be forked to. Nil means no fork.
+	ForkFrom *ForkFrom `json:"forkFrom,omitempty"`
+
+	// FromTag forks from the node a tag names, resolved nearest scope first
+	// (lineage, then tree, then owner), once, at spawn. Exclusive with
+	// ForkFrom. Child-allowed (SpawnRequest.from_tag = 33).
+	FromTag string `json:"fromTag,omitempty"`
 
 	// ConfigDir, for kind=claude, is exported to the child as CLAUDE_CONFIG_DIR
 	// — it selects the claude config dir (plugins, hooks, MCP, settings). It is

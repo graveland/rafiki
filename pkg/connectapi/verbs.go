@@ -319,12 +319,12 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14, 30 and 31: the child-reachable
+// with child provenance may set (fields 1-14, 30-33: the child-reachable
 // shape of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any
 // other set field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
 // in this set, rather than open on a literal operator-only list that a new
-// field could silently miss. See control.proto:310 and
+// field could silently miss. See control.proto's comment on SpawnRequest and
 // TestSpawnRequestFieldsAreClassified, which fails the build the day a new
 // SpawnRequest field lands unclassified.
 var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
@@ -334,6 +334,12 @@ var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	// 31 (sandbox) is child-allowed on purpose: SandboxSpec cannot express
 	// privilege (see control.proto's comment on SpawnRequest.sandbox).
 	31: true,
+	// 32 (fork_from) and 33 (from_tag) are child-allowed on the WIRE only:
+	// a child may fork just the children it could already read, and that
+	// authority check lives in Controller.Spawn (mayRead), not here — the
+	// handler has no parent chain to walk.
+	32: true,
+	33: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req
@@ -432,6 +438,14 @@ func (s *Server) Spawn(
 	if g := s.ownerGuard(ctx); g != nil {
 		if parent := sp.ParentChildID; parent != "" {
 			if err := g.Authorize(parent); err != nil {
+				return nil, err
+			}
+		}
+		// The fork source is the other target: a non-admin user may fork only
+		// from a child it owns. Foreign and unknown ids get the guard's one
+		// identical refusal, before the spawn is attempted.
+		if f := req.Msg.GetForkFrom(); f != nil && f.GetChildId() != "" {
+			if err := g.Authorize(f.GetChildId()); err != nil {
 				return nil, err
 			}
 		}

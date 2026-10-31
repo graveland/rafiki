@@ -182,6 +182,13 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"PutPreset":    ownerExempt,
 	"DeletePreset": ownerExempt,
 
+	// Tag is guarded on child_id: the node a tag names lives in some child's
+	// conversation, so the handler authorizes that child through the guard
+	// before the store is touched.
+	"Tag":      ownerGuarded,
+	"Untag":    ownerExempt,
+	"ListTags": ownerExempt,
+
 	"ListModelAliases": ownerExempt,
 	"PutModelAlias":    ownerExempt,
 	"DeleteModelAlias": ownerExempt,
@@ -286,6 +293,9 @@ var ownerExemptReasons = map[string]string{
 
 	"PutPreset":    "presets resolve against the connection's owner",
 	"DeletePreset": "presets resolve against the connection's owner",
+
+	"Untag":    "tags are keyed by the connection's owner in pkg/tagsdb; a foreign tag id is not found",
+	"ListTags": "tags are keyed by the connection's owner in pkg/tagsdb; a foreign tag id is not found",
 
 	"Report":    "identity-position verbs: a user credential names no child and the handler refuses by construction",
 	"Receive":   "identity-position verbs: a user credential names no child and the handler refuses by construction",
