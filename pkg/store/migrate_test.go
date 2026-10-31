@@ -663,22 +663,29 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 
 	chain, err := loadMigrations()
 	c.Require().NoError(err, "load chain")
-	head := chain[len(chain)-1]
-	// 0064 is the migration whose rollback is observed below; a new head means
-	// this test must be repointed, not silently left asserting an older one.
-	c.Eq(64, head.version, "this test observes 0064's rollback")
+	// 0064 is the migration whose rollback is observed below. It is named
+	// explicitly rather than taken as the chain head: 0065 and later may add no
+	// SQL this test can observe, and repointing silently would weaken it.
+	const observed = 64
+	var found bool
+	for _, m := range chain {
+		if m.version == observed {
+			found = true
+		}
+	}
+	c.True(found, "the chain contains migration %d", observed)
 
-	prev, hadPrev := goSteps[head.version]
-	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
+	prev, hadPrev := goSteps[observed]
+	goSteps[observed] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
 	t.Cleanup(func() {
 		if hadPrev {
-			goSteps[head.version] = prev
+			goSteps[observed] = prev
 			return
 		}
-		delete(goSteps, head.version)
+		delete(goSteps, observed)
 	})
 
-	c.Require().NoError(migrateTo(ctx, pool, head.version-1), "migrate to one version below the head")
+	c.Require().NoError(migrateTo(ctx, pool, observed-1), "migrate to one version below the observed migration")
 
 	err = Migrate(ctx, pool)
 	c.Error(err, "Migrate must fail when the head's go step fails")
@@ -686,9 +693,9 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 
 	var recorded bool
 	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM `+migrationsTable+` WHERE version=$1)`, head.version).Scan(&recorded),
+		`SELECT EXISTS (SELECT 1 FROM `+migrationsTable+` WHERE version=$1)`, observed).Scan(&recorded),
 		"probe the migrations table")
-	c.False(recorded, "version %d was recorded despite its go step failing", head.version)
+	c.False(recorded, "version %d was recorded despite its go step failing", observed)
 
 	// 0063 commits on its own; it is 0064's ALTER TABLE that must roll back with
 	// its step, so the origin column is absent.
