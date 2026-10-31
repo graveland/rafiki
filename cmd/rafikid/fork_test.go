@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tags"
@@ -332,81 +332,149 @@ func TestForkFromClaudeSourceResolvesRootThread(t *testing.T) {
 	ck.Eq(node.ID, got, "the root thread's completed turn")
 }
 
-// TestForkResumeKeepsTheOriginalNode is design D11: the fork records the
-// concrete node at spawn, so moving the tag afterwards never reaches it and a
-// resume reopens the conversation the fork already created.
-func TestForkResumeKeepsTheOriginalNode(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	f := newForkFixture(t)
-	ctx := context.Background()
-	caller := connectapi.TagCaller{Owner: users.Identity{UserID: f.owner}}
-	src := uniqueForkName("tagged")
-	convID, nodes := f.forkableChild(t, src, "", src, f.owner, 1)
+// forkTestModel is a provider-qualified model providers.Default() knows, so a
+// real fundi spawn can build an engine without an API key or a network.
+const forkTestModel = "anthropic/claude-sonnet-4-5"
 
+// TestForkResumeKeepsTheOriginalNode is design D11, driven through the real
+// entry points: Spawn resolves the tag to a concrete node and records it, a
+// later move of the tag never reaches that fork, and Resume reopens the
+// conversation the fork already created with its edge unchanged.
+func TestForkResumeKeepsTheOriginalNode(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := newForkFixture(t)
+	ctx := t.Context()
+	caller := tagCaller(f.owner, "")
+
+	src := uniqueForkName("tagged")
+	srcConv, nodes := f.forkableChild(t, src, "", src, f.owner, 1)
 	name := uniqueForkName("point")
-	created, err := f.manager().Tag(ctx, caller, connectapi.TagInput{
+	tag, err := f.manager().Tag(ctx, caller, connectapi.TagInput{
 		Name: name, ChildID: src, Scope: tags.ScopeOwner,
 	})
 	ck.Require().NoError(err, "create the tag")
-	ck.Eq(nodes[0].ID, created.NodeID, "the tag names the completed turn")
+	ck.Eq(nodes[0].ID, tag.NodeID, "the tag names the completed turn")
 
-	spawned, err := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: f.owner})
-	ck.Require().NoError(err, "fork from the tag")
-	ck.Eq(nodes[0].ID, spawned, "the tag resolves to its node")
+	res, err := f.ctrl.Spawn(ctx, protocol.SpawnRequest{
+		Kind:    protocol.KindFundi,
+		Cwd:     t.TempDir(),
+		Model:   forkTestModel,
+		FromTag: name,
+		Name:    uniqueForkName("fork"),
+	}, users.Identity{UserID: f.owner})
+	ck.Require().NoError(err, "spawn from the tag")
 
-	// The spawn stores the resolved node on the child's record; that record is
-	// the ONLY source a resume reads.
-	forkID := uniqueForkName("fork")
-	ck.Require().NoError(f.store.Upsert(ctx, childstore.RecordFromSnapshot(childstore.Snapshot{
-		ChildID:        forkID,
-		OwnerUserID:    f.owner,
-		Kind:           protocol.KindFundi,
-		ForkFromNodeID: spawned,
-		Status:         protocol.StatusIdle,
-		StartedAt:      time.Now(),
-		Labels:         map[string]string{childstore.LabelRoot: forkID},
-	})), "store the fork's record")
+	convID, edge := waitForChildConversation(t, f, res.ChildID)
+	ck.Eq(nodes[0].ID, edge, "the new child's conversation forks from the node the tag named")
+	ck.Eq(nodes[0].ID, mustSnapshot(t, f.ctrl, res.ChildID).ForkFromNodeID,
+		"Spawn did not store the resolved node on the child's session")
 
-	// A second completed turn, then the tag moves onto it.
-	later := f.turn(t, convID)
+	// The tag moves on. A fork records the CONCRETE node, so the move must not
+	// reach the child that already resolved it.
+	later := f.turn(t, srcConv)
 	_, err = f.manager().Tag(ctx, caller, connectapi.TagInput{
-		TagID: created.TagID, ExpectNodeID: nodes[0].ID, Cursor: fmt.Sprintf("m:%d", later.Ordinal),
+		TagID: tag.TagID, ExpectNodeID: nodes[0].ID, Cursor: cursorAt(later),
 	})
 	ck.Require().NoError(err, "move the tag")
 
-	// Resume: rebuild the session from the durable record.
-	recs, err := f.store.List(ctx)
-	ck.Require().NoError(err, "list children")
-	var resumed *childstore.Session
-	for _, rec := range recs {
-		if rec.ChildID == forkID {
-			resumed = childstore.SessionFromRecord(rec)
-		}
-	}
-	ck.Require().True(resumed != nil, "the fork's record")
-	ck.Eq(spawned, resumed.ForkFromNodeID, "moving the tag never reaches an existing fork")
+	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = f.ctrl.Kill(killCtx, res.ChildID, 2*time.Second, 500*time.Millisecond)
+	ck.Require().NoError(err, "kill")
+	waitForExited(t, f.ctrl.st, res.ChildID, 5*time.Second)
 
-	// The record's node is what the engine forks from, and the edge it writes
-	// is the ORIGINAL node.
-	client, err := llm.NewClient(llm.WithStore(f.pool), llm.WithDefaultModel("anthropic/claude-sonnet-4-5"))
-	ck.Require().NoError(err, "llm client")
-	forked, err := client.Conversation(ctx, llm.NewConversation(f.owner, "agent"),
-		llm.ForkFrom(resumed.ForkFromNodeID))
-	ck.Require().NoError(err, "create the forked conversation")
-	var edge string
-	ck.Require().NoError(f.pool.QueryRow(ctx,
-		`SELECT fork_from::text FROM conversations.conversation WHERE id = $1::uuid`,
-		forked.ID).Scan(&edge), "read the fork edge")
-	ck.Eq(spawned, edge, "the conversation forks from the node resolved at spawn")
+	ck.Eq(nodes[0].ID, mustSnapshot(t, f.ctrl, res.ChildID).ForkFromNodeID,
+		"the durable record lost the fork node")
+
+	_, err = f.ctrl.Resume(ctx, res.ChildID, "")
+	ck.Require().NoError(err, "resume")
+
+	afterConv, afterEdge := waitForChildConversation(t, f, res.ChildID)
+	ck.Eq(convID, afterConv, "a resume reopens the conversation the fork created")
+	ck.Eq(nodes[0].ID, afterEdge, "a resume re-resolved the fork: the edge followed the moved tag")
+	ck.Eq(nodes[0].ID, mustSnapshot(t, f.ctrl, res.ChildID).ForkFromNodeID,
+		"the resumed session lost the fork node")
 }
 
-// mustListTags lists the caller's tags through the manager.
-func mustListTags(t *testing.T, f *forkFixture, prefix string) []tags.Tag {
+// TestResumedForkChildStillForksFromItsStoredNode is the other half of the
+// resume contract: a child whose conversation does not exist yet (a recovered
+// row) must CREATE it as a fork of the node the record carries. This is what
+// fails if agentRunner stops reading the node off the snapshot, or the record
+// stops carrying it.
+func TestResumedForkChildStillForksFromItsStoredNode(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := newForkFixture(t)
+	ctx := t.Context()
+
+	src := uniqueForkName("stored")
+	_, nodes := f.forkableChild(t, src, "", src, f.owner, 1)
+
+	childID := uniqueForkName("recovered")
+	rec := childstore.RecordFromSnapshot(childstore.Snapshot{
+		ChildID:        childID,
+		OwnerUserID:    f.owner,
+		Kind:           protocol.KindFundi,
+		Cwd:            t.TempDir(),
+		Model:          forkTestModel,
+		ForkFromNodeID: nodes[0].ID,
+		Status:         protocol.StatusExited,
+		StartedAt:      time.Now(),
+		Labels:         map[string]string{childstore.LabelRoot: childID},
+	})
+	ck.Require().NoError(f.store.Upsert(ctx, rec), "seed the record")
+	// Read it back the way boot recovery does: the durable row, decoded through
+	// SessionFromRecord, so the config JSONB is in the loop too.
+	f.ctrl.st.Insert(sessionFromStore(t, f, childID))
+
+	_, err := f.ctrl.Resume(ctx, childID, "")
+	ck.Require().NoError(err, "resume the recovered child")
+
+	_, edge := waitForChildConversation(t, f, childID)
+	ck.Eq(nodes[0].ID, edge, "the resumed engine created its conversation unforked: the stored node was dropped")
+}
+
+// sessionFromStore reads a child back out of the durable store.
+func sessionFromStore(t *testing.T, f *forkFixture, childID string) *childstore.Session {
 	t.Helper()
-	rows, err := f.manager().ListTags(context.Background(),
-		connectapi.TagCaller{Owner: users.Identity{UserID: f.owner}}, prefix, 500, "")
-	assert.NewAborting(t).NoError(err, "list tags")
-	return rows
+	recs, err := f.store.List(context.Background())
+	assert.NewAborting(t).NoError(err, "list children")
+	for _, rec := range recs {
+		if rec.ChildID == childID {
+			return childstore.SessionFromRecord(rec)
+		}
+	}
+	t.Fatalf("no durable row for %s", childID)
+	return nil
+}
+
+// waitForChildConversation polls for the conversation the child's engine
+// created (external_ref = child id) and returns its id and fork edge.
+func waitForChildConversation(t *testing.T, f *forkFixture, childID string) (string, string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var (
+			id   string
+			edge *string
+		)
+		err := f.pool.QueryRow(context.Background(),
+			`SELECT id::text, fork_from::text FROM conversations.conversation WHERE external_ref = $1`,
+			childID).Scan(&id, &edge)
+		switch {
+		case err == nil:
+			if edge == nil {
+				return id, ""
+			}
+			return id, *edge
+		case errors.Is(err, pgx.ErrNoRows):
+			if time.Now().After(deadline) {
+				t.Fatalf("child %s never created a conversation", childID)
+			}
+			time.Sleep(50 * time.Millisecond)
+		default:
+			t.Fatalf("read the conversation of %s: %v", childID, err)
+		}
+	}
 }
 
 // TestSpawnRuntimeCarriesTheResolvedForkNode pins the one hop between the

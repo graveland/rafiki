@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -317,4 +320,55 @@ func TestContextWindowOverrideReachesEngine(t *testing.T) {
 		"the catalog's window must still answer the compaction policy when no override is set")
 	c.Eq(1_000_000, prefillContextWindow(plain.client, plain.kind, plain.state.ModelID, plain.contextWindow),
 		"the catalog's window must still answer the pre-fill when no override is set")
+}
+
+// TestBuildEngineForksFromTheConfiguredNode pins Config.ForkFromNodeID →
+// llm.ForkFrom. Deleting that append makes every fork a silent no-op: the
+// conversation is created unforked and nothing downstream ever notices.
+func TestBuildEngineForksFromTheConfiguredNode(t *testing.T) {
+	c := assert.NewAborting(t)
+	silenceSlog(t)
+	pool, _ := dbTestPool(t)
+	ctx := context.Background()
+
+	var srcID string
+	c.NoError(pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		 VALUES ('fork-test', 'server') RETURNING id::text`).Scan(&srcID), "insert the source conversation")
+	appended, err := conv.NewStore(store.NewConvBackend(pool), conv.Options{}).Open(srcID, conv.AsOwner()).
+		Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{
+			Msg: msg.Message{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "done"}}},
+		}}})
+	c.NoError(err, "append the node to fork from")
+	node := appended.Nodes[0].ID
+
+	build := func(forkFromNodeID string) (*Engine, *string) {
+		cfg := Config{
+			Model:          "anthropic/claude-x",
+			Cwd:            t.TempDir(),
+			Name:           "forked",
+			FakeTurns:      writeFakeTurns(t, sampleEndTurn),
+			Tools:          fakeToolSet{},
+			Providers:      providers.Default(),
+			Pool:           pool,
+			ForkFromNodeID: forkFromNodeID,
+		}
+		eng, shutdown, err := cfg.BuildEngine(ctx, NewFrontend(strings.NewReader(""), &syncBuffer{}, nil))
+		c.NoError(err, "BuildEngine")
+		t.Cleanup(shutdown)
+		t.Cleanup(eng.Close)
+
+		var edge *string
+		c.NoError(pool.QueryRow(ctx,
+			`SELECT fork_from::text FROM conversations.conversation WHERE id = $1::uuid`,
+			eng.conv.ID).Scan(&edge), "read the conversation's fork edge")
+		return eng, edge
+	}
+
+	_, edge := build(node)
+	c.Require().True(edge != nil, "the engine's conversation is not a fork: Config.ForkFromNodeID was dropped")
+	c.Eq(node, *edge, "the conversation must fork from Config.ForkFromNodeID")
+
+	_, plain := build("")
+	c.True(plain == nil, "a Config with no fork node must create an unforked conversation, got %v", plain)
 }

@@ -2915,7 +2915,8 @@ func (c *Controller) activateLiveChild(
 		Tools:              snap.Tools,
 		NoTools:            snap.NoTools,
 		NoBuiltinTools:     snap.NoBuiltinTools,
-		Routing:            snap.Routing, // resolved ONCE at the original spawn; never re-resolved
+		Routing:            snap.Routing,        // resolved ONCE at the original spawn; never re-resolved
+		ForkFromNodeID:     snap.ForkFromNodeID, // same rule: the fork edge never moves
 		Extensions:         snap.Extensions,
 		NoExtensions:       snap.NoExtensions,
 		Skills:             snap.Skills,
