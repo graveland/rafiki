@@ -40,6 +40,22 @@ var usageLimitCodes = map[string]bool{
 // fit: in-band on the streaming path, and in the body of a 400 on the plain one.
 const codeContextLengthExceeded = "context_length_exceeded"
 
+// rateLimitCodes are the spellings the endpoint uses for "back off". Both are
+// carried, because the two backends do not agree on the name: the ChatGPT
+// dialect sends rate_limit_exceeded and an in-band error event may say
+// rate_limit_error.
+//
+// It matters which kind this becomes. A rate limit needs BACKPRESSURE — the
+// sender's rate-limit loop, which blocks every send for that model while it
+// backs off — not a generic per-turn retry, and certainly not a terminal
+// failure: an in-band rate limit classified as anything else either burns the
+// turn's budget against a shared limit or fails a turn a pause would have
+// rescued.
+var rateLimitCodes = map[string]bool{
+	"rate_limit_exceeded": true,
+	"rate_limit_error":    true,
+}
+
 // Error renders the limit in the terms the operator can act on: which code, the
 // plan, and when it lifts.
 //
@@ -252,18 +268,25 @@ func resetTime(header http.Header, now time.Time) time.Time {
 //
 // The body's codes win over the status, because the endpoint reports the
 // account-level conditions under an ordinary status: a usage limit normally
-// arrives as a 429, and a prompt that does not fit as a 400 whose body names
-// context_length_exceeded. Everything unclassified is ErrOther, which is not
-// retryable: retrying an error nobody understood is how one failure becomes a
-// storm.
+// arrives as a 429 (and is never a rate limit), a prompt that does not fit as a
+// 400 whose body names context_length_exceeded, and an in-band rate limit as an
+// error event with no status at all. Everything unclassified is ErrOther, which
+// is not retryable: retrying an error nobody understood is how one failure
+// becomes a storm.
+//
+// h is part of the codec's uniform surface and is not consulted: nothing here
+// keys on a header, and a Retry-After is the caller's to read.
 func Classify(status int, h http.Header, body []byte) msg.ErrorKind {
 	env := decodeErrorEnvelope(body)
 	if _, ok := env.usageLimitCode(); ok {
 		return msg.ErrUsageLimit
 	}
 	for _, c := range env.codes() {
-		if c == codeContextLengthExceeded {
+		switch {
+		case c == codeContextLengthExceeded:
 			return msg.ErrPromptTooLarge
+		case rateLimitCodes[c]:
+			return msg.ErrRateLimit
 		}
 	}
 	switch {

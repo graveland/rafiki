@@ -157,6 +157,28 @@ func TestStreamContextLengthIsPromptTooLarge(t *testing.T) {
 	}
 }
 
+// TestStreamRateLimitIsRateLimit pins that an in-band rate limit reaches the
+// caller as ErrRateLimit. That kind is what routes the send to the sender's
+// rate-limit loop (backpressure across every send for the model) instead of a
+// generic per-turn retry or a terminal failure.
+func TestStreamRateLimitIsRateLimit(t *testing.T) {
+	for _, payload := range []string{
+		`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`,
+		`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`,
+		`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"rate_limit_exceeded"}}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			err := drainErr(t, responses.ModeAPI, sse(payload))
+			var apiErr *msg.APIError
+			ck.True(errors.As(err, &apiErr), "a rate limit is an APIError, got %T: %v", err, err)
+			ck.Eq(msg.ErrRateLimit, apiErr.Kind, "kind")
+			var ue *responses.UsageLimitError
+			ck.False(errors.As(err, &ue), "a rate limit is not a usage limit")
+		})
+	}
+}
+
 // TestStreamIdleTimeout pins the watchdog: a backend that goes silent is a
 // retryable condition, reported as a transient APIError rather than a hang.
 func TestStreamIdleTimeout(t *testing.T) {
@@ -221,11 +243,14 @@ func TestClassify(t *testing.T) {
 		body   string
 		want   msg.ErrorKind
 	}{
-		{name: "usage limit code", status: http.StatusTooManyRequests, body: `{"error":{"code":"usage_limit_reached"}}`, want: msg.ErrUsageLimit},
+		{name: "usage limit code on a 429 is not a rate limit", status: http.StatusTooManyRequests, body: `{"error":{"code":"usage_limit_reached"}}`, want: msg.ErrUsageLimit},
 		{name: "usage limit type", status: http.StatusBadRequest, body: `{"error":{"type":"usage_not_included"}}`, want: msg.ErrUsageLimit},
 		{name: "insufficient quota", status: http.StatusTooManyRequests, body: `{"code":"insufficient_quota"}`, want: msg.ErrUsageLimit},
 		{name: "context length", status: http.StatusBadRequest, body: `{"error":{"code":"context_length_exceeded","message":"too long"}}`, want: msg.ErrPromptTooLarge},
 		{name: "context length in a failed response", body: `{"type":"response.failed","response":{"error":{"code":"context_length_exceeded"}}}`, want: msg.ErrPromptTooLarge},
+		{name: "rate limit code in a body", status: http.StatusBadRequest, body: `{"error":{"code":"rate_limit_exceeded"}}`, want: msg.ErrRateLimit},
+		{name: "rate limit type in an in-band event", body: `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`, want: msg.ErrRateLimit},
+		{name: "rate limit code in a failed response", body: `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded"}}}`, want: msg.ErrRateLimit},
 		{name: "plain rate limit", status: http.StatusTooManyRequests, body: `{"error":{"message":"slow down"}}`, want: msg.ErrRateLimit},
 		{name: "server error", status: http.StatusInternalServerError, body: ``, want: msg.ErrTransient},
 		{name: "bad gateway", status: http.StatusBadGateway, body: `not json at all`, want: msg.ErrTransient},
