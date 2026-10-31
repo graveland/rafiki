@@ -475,6 +475,8 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Prefill:          prefillFromProto(m.GetPrefill()),
 		Script:           scriptFromProto(m.GetScript()),
 		Sandbox:          sandboxSpecFromProto(m.GetSandbox()),
+		ForkFrom:         forkFromFromProto(m.GetForkFrom()),
+		FromTag:          m.GetFromTag(),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
 		SkipDerivedIndex: m.GetSkipDerivedIndex(),
@@ -510,6 +512,15 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		p.MaxChildren = &v
 	}
 	return p
+}
+
+// forkFromFromProto maps the wire ForkFrom onto the domain type, nil when the
+// request carries none — the shape Controller.Spawn reads as "no fork".
+func forkFromFromProto(m *rafikiv1.SpawnRequest_ForkFrom) *protocol.ForkFrom {
+	if m == nil {
+		return nil
+	}
+	return &protocol.ForkFrom{ChildID: m.GetChildId(), Cursor: m.GetCursor()}
 }
 
 // prefillFromProto maps the wire pre-fill onto protocol.PrefillRead entries,

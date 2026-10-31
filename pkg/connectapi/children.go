@@ -132,6 +132,16 @@ type SpawnParams struct {
 	// the controller provisions and validates the container (pkg/sandbox).
 	Sandbox *protocol.SandboxSpec
 
+	// ForkFrom is fork_from as the wire sent it: the point in another child's
+	// history this child starts from (proto field 32, child-allowed). Nil
+	// means the wire sent none. The daemon resolves it once, at spawn.
+	ForkFrom *protocol.ForkFrom
+
+	// FromTag is from_tag as the wire sent it: the tag naming the node to fork
+	// from (proto field 33, child-allowed). Empty means the wire sent none.
+	// The daemon resolves it once, at spawn; it is exclusive with ForkFrom.
+	FromTag string
+
 	MaxDepth    *int
 	MaxCost     *float64
 	MaxChildren *int

@@ -177,6 +177,39 @@ func TestSpawnAdmitsSkipDerivedIndexFromAChild(t *testing.T) {
 	c.Eq(true, f.got.SkipDerivedIndex, "skip_derived_index did not reach SpawnParams: %+v", f.got)
 }
 
+// TestSpawnCarriesForkFieldsToSpawnParams pins fields 32 and 33 through the
+// proto->SpawnParams mapping: a fork-less spawn carries a nil ForkFrom, and a
+// set one reaches the lifecycle with its child_id and cursor intact. It dies
+// if either field is dropped from connectapiSpawnParams, which would leave the
+// daemon unable to resolve a fork at all.
+func TestSpawnCarriesForkFieldsToSpawnParams(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	f := &fakeLifecycle{}
+	_, err := childScopedServer(f).Spawn(context.Background(),
+		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp"}))
+	c.Require().NoError(err, "child Spawn with no fork refused")
+	c.Nil(f.got.ForkFrom, "an absent fork_from must stay nil: %+v", f.got.ForkFrom)
+	c.Eq("", f.got.FromTag, "from_tag")
+
+	f = &fakeLifecycle{}
+	_, err = childScopedServer(f).Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:      "/tmp",
+		ForkFrom: &rafikiv1.SpawnRequest_ForkFrom{ChildId: "c_src", Cursor: "m:3"},
+	}))
+	c.Require().NoError(err, "child Spawn with a fork refused")
+	c.Require().NotNil(f.got.ForkFrom, "fork_from did not reach SpawnParams: %+v", f.got)
+	c.Eq("c_src", f.got.ForkFrom.ChildID, "fork_from.child_id")
+	c.Eq("m:3", f.got.ForkFrom.Cursor, "fork_from.cursor")
+
+	f = &fakeLifecycle{}
+	_, err = childScopedServer(f).Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd: "/tmp", FromTag: "fix-bug",
+	}))
+	c.Require().NoError(err, "child Spawn with from_tag refused")
+	c.Eq("fix-bug", f.got.FromTag, "from_tag did not reach SpawnParams")
+}
+
 // TestSpawnForkFromForeignChildIsRefusedLikeUnknown pins the fork source as a
 // second owner-guarded target on Spawn: a non-admin user may fork only from a
 // child it owns, and a foreign id gets the guard's one identical
