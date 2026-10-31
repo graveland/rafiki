@@ -165,7 +165,7 @@ func parseReportFindings(resp *msg.Response) (*detectorOutput, error) {
 		}
 	}
 	if raw == nil {
-		return nil, fmt.Errorf("no report_findings tool_use block in response (stop_reason=%s)", resp.StopReason)
+		return nil, fmt.Errorf("no report_findings tool_use block in response (stop_reason=%s)", resp.StopReasonWire())
 	}
 
 	var out detectorOutput

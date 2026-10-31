@@ -169,7 +169,7 @@ func parseProposeSkillEdit(resp *msg.Response) (*draftOutput, error) {
 		}
 	}
 	if raw == nil {
-		return nil, fmt.Errorf("no propose_skill_edit tool_use block in response (stop_reason=%s)", resp.StopReason)
+		return nil, fmt.Errorf("no propose_skill_edit tool_use block in response (stop_reason=%s)", resp.StopReasonWire())
 	}
 
 	var out draftOutput

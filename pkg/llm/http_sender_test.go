@@ -313,6 +313,7 @@ func TestAnthropicBearerSenderSendsBearerNoAPIKey(t *testing.T) {
 	c.Eq("", got.Get("X-Api-Key"), "x-api-key must never be sent to the proxy")
 	c.Eq("2023-06-01", got.Get("Anthropic-Version"), "anthropic-version")
 	c.True(strings.HasPrefix(got.Get("User-Agent"), "rafiki/"), "User-Agent = %q, want a rafiki/ prefix", got.Get("User-Agent"))
+	c.Eq(userAgent(), got.Get("User-Agent"), "User-Agent is the package's own, not Go's default")
 	c.Eq("/v1/messages", gotPath, "proxy path")
 }
 

@@ -227,6 +227,35 @@ func TestAccumulateProviderPreserved(t *testing.T) {
 	c.Eq("", absent.Response().Provider, "an absent provider is never inferred from the configured sender")
 }
 
+// TestAccumulateResponseKeepsTheRawStopReason pins that Response() copies
+// StopReasonRaw as well as the modelled StopReason. The raw value is the only
+// surviving spelling of a reason this package does not model — StopReason's zero
+// is StopUnknown and renders "" — so a snapshot that dropped it would erase why
+// the turn ended from every record built on an accumulator snapshot.
+func TestAccumulateResponseKeepsTheRawStopReason(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	unmodelled := msg.NewAccumulator()
+	addAll(c, unmodelled,
+		msg.MessageStart{ID: "msg_raw"},
+		msg.MessageDelta{StopReason: msg.StopUnknown, StopReasonRaw: "model_context_window_exceeded"},
+	)
+	r := unmodelled.Response()
+	c.Eq(msg.StopUnknown, r.StopReason, "an unmodelled reason stays unmodelled")
+	c.Eq("model_context_window_exceeded", r.StopReasonRaw, "the raw spelling is copied into the snapshot")
+	c.Eq("model_context_window_exceeded", r.StopReasonWire(), "the wire spelling survives the snapshot")
+
+	modelled := msg.NewAccumulator()
+	addAll(c, modelled,
+		msg.MessageStart{ID: "msg_mod"},
+		msg.MessageDelta{StopReason: msg.StopEndTurn, StopReasonRaw: "end_turn"},
+	)
+	r = modelled.Response()
+	c.Eq(msg.StopEndTurn, r.StopReason, "modelled reason")
+	c.Eq("end_turn", r.StopReasonRaw, "a modelled reason still keeps its raw spelling")
+	c.Eq("end_turn", r.StopReasonWire(), "wire spelling")
+}
+
 func TestAccumulateFinalBlockReplacement(t *testing.T) {
 	c := assert.NewAborting(t)
 	a := msg.NewAccumulator()

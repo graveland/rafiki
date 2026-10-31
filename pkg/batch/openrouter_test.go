@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 func TestOpenRouterDefaultsToPublicBase(t *testing.T) {
@@ -87,6 +88,26 @@ func TestOpenRouterBatchGet(t *testing.T) {
 	c.Eq("Bearer sk-test", gotAuth, "Authorization =")
 	c.False(b.Status != "completed" || !b.Terminal() || len(b.Results) != 1 ||
 		b.Results[0].CustomID != "conv-1" || b.Results[0].Response.StatusCode != 200, "decoded batch = %+v", b)
+}
+
+// TestOpenRouterSendsARealUserAgent pins that the Batch API carries the same
+// rafiki identity every other outbound client sends. Go's default
+// "Go-http-client/2.0" is exactly the string a bot filter rejects, and a
+// rejection there reads like an authentication failure.
+func TestOpenRouterSendsARealUserAgent(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"id":"batch-1","status":"in_progress"}`))
+	}))
+	defer srv.Close()
+
+	o := NewOpenRouter(srv.URL, "sk-test", srv.Client())
+	_, err := o.Batch(context.Background(), "batch-1")
+	c.Require().NoError(err, "Batch")
+	c.Eq(version.UserAgent(), got, "User-Agent")
+	c.False(strings.HasPrefix(got, "Go-http-client"), "User-Agent is Go's default: %q", got)
 }
 
 func TestOpenRouterListPagingParams(t *testing.T) {

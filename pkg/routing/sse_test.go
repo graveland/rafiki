@@ -46,11 +46,12 @@ func TestParseCapturedResponseSSE(t *testing.T) {
 	c.False(len(reassembled.Content) == 0 || reassembled.Content[0].Text != "hi", "reassembled content did not accumulate the text delta: %+v", reassembled.Content)
 }
 
-// A content_block_delta for a block that never started is a reassembly gap: the
-// codec hands the delta through and the accumulator refuses it, so the turn is a
-// parse error (recorded errored, with the raw body as the forensic trace) rather
-// than a completion that silently lost model output.
-func TestParseCapturedResponseSSEDeltaWithoutBlockStartIsAnError(t *testing.T) {
+// A content_block_delta for a block that never started is a reassembly gap, and
+// on the proxy path capture is BEST-EFFORT: the client already has the bytes, so
+// the delta is skipped and reported while the turn still persists with the usage
+// the message_delta carried. Failing the capture over it would only lose the
+// record and the billing row.
+func TestParseCapturedResponseSSEDeltaWithoutBlockStartIsSkipped(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sse := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}` + "\n\n" +
@@ -59,9 +60,85 @@ func TestParseCapturedResponseSSEDeltaWithoutBlockStartIsAnError(t *testing.T) {
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}` + "\n\n" +
 		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
-	_, _, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
-	c.Error(err, "a delta with no block start must be a reassembly-gap error")
-	c.Nil(canonical, "canonical must be nil on a reassembly gap; got")
+	stop, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Require().NoError(err, "a reassembly gap must not discard the accumulated turn")
+	c.Eq("end_turn", stop, "stop_reason")
+	c.False(u.InputTokens != 100 || u.OutputTokens != 25, "usage = %+v, want the counts the stream did report", u)
+	c.Require().Len(diag.Anomalies, 1, "the skipped delta must be reported, got")
+	c.StrContains(diag.Anomalies[0], "never started", "the report names the reason")
+	c.Len(diag.Repaired, 0, "repaired blocks")
+	c.True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
+}
+
+// TestParseCapturedResponseSSESkipsUnmodellableEvents pins the best-effort rule
+// for the three shapes that used to fail the whole capture: an unsupported
+// content delta, a delta for a block index that never started, and an in-band
+// error event. Each one still stores the content and usage that accumulated, and
+// reports the anomaly — a claude turn carrying a delta the codec does not model
+// yet must not lose its conversation rows and its billing row.
+func TestParseCapturedResponseSSESkipsUnmodellableEvents(t *testing.T) {
+	const start = "event: message_start\n" +
+		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}` + "\n\n"
+	const block = "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n"
+	const stop0 = "event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n"
+	const delta = "event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}` + "\n\n"
+	const end = "event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
+
+	cases := []struct {
+		name     string
+		body     string
+		wantStop string
+		wantOut  int64
+		wantIn   string // a substring of the reported anomaly
+	}{
+		{
+			name: "unsupported content delta",
+			body: start + block + "event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"future_delta","text":"x"}}` + "\n\n" +
+				stop0 + delta + end,
+			wantStop: "end_turn", wantOut: 25, wantIn: "future_delta",
+		},
+		{
+			name: "delta for a block index that never started",
+			body: start + block + stop0 + "event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"orphan"}}` + "\n\n" +
+				delta + end,
+			wantStop: "end_turn", wantOut: 25, wantIn: "never started",
+		},
+		{
+			// An in-band error ends the stream where it arrives: the record is
+			// what the provider had already sent.
+			name: "in-band error event",
+			body: start + block + "event: error\n" +
+				`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n",
+			wantStop: "", wantOut: 1, wantIn: "Overloaded",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			stop, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(tc.body))
+			c.Require().NoError(err, "an event the codec cannot fold in must not discard the turn")
+			c.Eq(tc.wantStop, stop, "stop_reason")
+			c.Eq(int64(100), u.InputTokens, "input tokens from message_start")
+			c.Eq(tc.wantOut, u.OutputTokens, "output tokens accumulated")
+			c.Require().True(len(diag.Anomalies) > 0, "the skipped event must be reported")
+			c.StrContains(diag.Anomalies[0], tc.wantIn, "the report names the reason")
+			var stored struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+			c.Require().Len(stored.Content, 1, "the block that did accumulate is still stored")
+			c.Eq("hi", stored.Content[0].Text, "the accumulated text survives the skipped event")
+		})
+	}
 }
 
 // A stream that legitimately produces no content block at all (max_tokens can
@@ -74,11 +151,12 @@ func TestParseCapturedResponseContentlessMessage(t *testing.T) {
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":25}}` + "\n\n" +
 		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
-	stop, u, canonical, repaired, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	stop, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	c.Require().NoError(err, "a content-less Message must parse")
 	c.Eq("max_tokens", stop, "stop_reason")
 	c.Eq(int64(25), u.OutputTokens, "output tokens")
-	c.Len(repaired, 0, "repaired blocks")
+	c.Len(diag.Repaired, 0, "repaired blocks")
+	c.Len(diag.Anomalies, 0, "anomalies")
 	var stored struct {
 		Content []json.RawMessage `json:"content"`
 	}
@@ -226,15 +304,16 @@ func TestParseCapturedResponseSSERepairsMalformedToolInput(t *testing.T) {
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
 
-	stop, u, canonical, repaired, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	stop, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	c.Require().NoError(err, "a malformed tool_use input must be repaired, not fail the whole turn")
 	c.False(stop != "tool_use" || u.OutputTokens != 118 || u.InputTokens != 2, "usage lost despite independent extraction: stop=%q usage=%+v", stop, u)
 	c.Require().True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
-	c.Require().Len(repaired, 1, "expected exactly one repaired block, got")
+	c.Len(diag.Anomalies, 0, "anomalies")
+	c.Require().Len(diag.Repaired, 1, "expected exactly one repaired block, got")
 	// The repair is reported AND the raw fragments are kept: the stored input is
 	// a placeholder object carrying them, so a corrupted call stays forensically
 	// readable after the turn.
-	c.StrContains(repaired[0], `raw="{\"file_path\": \"/a.go\", \"offset\": 140, , \"limit\": 100}"`, "repair detail")
+	c.StrContains(diag.Repaired[0], `raw="{\"file_path\": \"/a.go\", \"offset\": 140, , \"limit\": 100}"`, "repair detail")
 	var stored struct {
 		Content []struct {
 			Type  string          `json:"type"`
@@ -285,12 +364,12 @@ func TestParseCapturedResponseSSERepairsMalformedServerToolInput(t *testing.T) {
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
 
-	_, u, canonical, repaired, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	_, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	c.Require().NoError(err, "a malformed server-tool input must be repaired, not fail the whole turn")
 	c.Eq(int64(4), u.InputTokens, "usage is accumulated independently of the block")
-	c.Require().Len(repaired, 1, "expected exactly one repaired block, got")
-	c.StrContains(repaired[0], "server_tool_use", "the report names the block type")
-	c.StrContains(repaired[0], `raw="{\"query\": \"rafiki\", ,"`, "the report carries the fragments")
+	c.Require().Len(diag.Repaired, 1, "expected exactly one repaired block, got")
+	c.StrContains(diag.Repaired[0], "server_tool_use", "the report names the block type")
+	c.StrContains(diag.Repaired[0], `raw="{\"query\": \"rafiki\", ,"`, "the report carries the fragments")
 
 	var stored struct {
 		Content []struct {
@@ -398,9 +477,10 @@ func TestParseCapturedResponseCorpusPairedSSEAndJSON(t *testing.T) {
 			}
 			c.Require().NoError(json.Unmarshal(msgtest.Golden(filepath.Join("golden", name+".sse.decoded.json")), &golden), "read the decoded golden")
 
-			stop, usage, canonical, repaired, err := ParseCapturedResponse("text/event-stream", msgtest.Golden(filepath.Join("responses", name+".sse")))
+			stop, usage, canonical, diag, err := ParseCapturedResponse("text/event-stream", msgtest.Golden(filepath.Join("responses", name+".sse")))
 			c.Require().NoError(err, "streamed capture")
-			c.Len(repaired, 0, "repaired blocks")
+			c.Len(diag.Repaired, 0, "repaired blocks")
+			c.Len(diag.Anomalies, 0, "a modelled stream skips nothing")
 
 			var streamed struct {
 				ID         string           `json:"id"`

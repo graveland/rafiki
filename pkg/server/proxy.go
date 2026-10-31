@@ -1353,7 +1353,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	stop, usage, canonical, repaired, perr := routing.ParseCapturedResponse(resp.Header.Get("Content-Type"), acc.Bytes())
+	stop, usage, canonical, diag, perr := routing.ParseCapturedResponse(resp.Header.Get("Content-Type"), acc.Bytes())
 	if perr != nil {
 		// A stream we could not parse must not be persisted as a clean
 		// completion — record it errored (the client already got the bytes).
@@ -1369,12 +1369,25 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.failTurn(r, cr, reason)
 		return
 	}
-	if len(repaired) > 0 {
+	if len(diag.Anomalies) > 0 {
+		// Reassembly skipped one or more events it could not fold in — an
+		// unsupported content delta, an out-of-order block index, an in-band
+		// error event. Capture is best-effort: the client already has the bytes
+		// and the events that did accumulate are intact, so the turn is recorded
+		// as the completion it was and the anomaly is reported here instead.
+		// Loud on purpose — this is the only signal that a provider shipped a
+		// stream shape the codec does not model yet.
+		p.logger.WarnContext(r.Context(), "llm turn: capture skipped stream events",
+			"conversation", cr.convID, "message", capture.MessageIDFromCanonical(canonical),
+			"user", user, "upstream", upstream, "model", model,
+			"reported", len(diag.Anomalies), "detail", diag.Anomalies)
+	}
+	if len(diag.Repaired) > 0 {
 		// A tool_use input block failed to reassemble cleanly (an upstream SSE
 		// glitch, not a client-visible problem — the client already got the
 		// correct bytes); usage/canonical are otherwise intact, so the turn is
 		// still recorded as a normal completion below.
-		p.logger.WarnContext(r.Context(), "llm turn: tool input repaired", "conversation", cr.convID, "upstream", upstream, "model", model, "detail", repaired)
+		p.logger.WarnContext(r.Context(), "llm turn: tool input repaired", "conversation", cr.convID, "upstream", upstream, "model", model, "detail", diag.Repaired)
 	}
 	turnFields := []any{
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -26,10 +25,9 @@ const maxErrorBody = 1 << 20
 // userAgent is the User-Agent every request this package sends carries. Every
 // client in this space sends a real one: Go's default "Go-http-client/2.0" is
 // exactly the kind of string a bot filter rejects, and a rejection here looks
-// like an authentication failure.
-func userAgent() string {
-	return fmt.Sprintf("rafiki/%s (%s; %s)", version.String(), runtime.GOOS, runtime.GOARCH)
-}
+// like an authentication failure. The string itself lives in pkg/version so the
+// batch client, which links no llm code, sends the same one.
+func userAgent() string { return version.UserAgent() }
 
 // maxResponseBody bounds a non-streamed response body. It is generous on
 // purpose: a refusal is classified from its first bytes, but a SUCCESS has to be

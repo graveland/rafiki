@@ -148,6 +148,25 @@ func TestChatSpanSemconv(t *testing.T) {
 	}
 }
 
+// TestChatSpanFinishReasonKeepsAnUnmodelledStopReason pins the OTel consumer of
+// the raw stop reason: gen_ai.response.finish_reasons must carry the provider's
+// own spelling for a reason the codec does not model. Rendering StopReason with
+// String() emits "" and loses the only signal of why the turn ended.
+func TestChatSpanFinishReasonKeepsAnUnmodelledStopReason(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sender := &tracingSender{resp: tracingMessage("claude-haiku-4-5", "model_context_window_exceeded", 10, 5, 0, 0)}
+	client, rec := tracingClient(t, sender)
+
+	if _, err := client.send(context.Background(), SendMeta{}, chatParams(), nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	span := endedSpan(t, rec, "chat m")
+	v, ok := attrValue(span, "gen_ai.response.finish_reasons")
+	c.Require().True(ok, "finish_reasons missing")
+	c.EqDeep([]string{"model_context_window_exceeded"}, v.AsStringSlice(), "finish_reasons keeps the provider's spelling")
+}
+
 func TestChatSpanErrorFullText(t *testing.T) {
 	c := assert.NewCollecting(t)
 	long := strings.Repeat("e", 70*1024) + "TAIL"

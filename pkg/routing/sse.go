@@ -40,31 +40,48 @@ type wireUsage struct {
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
+// CaptureDiagnostics is what reassembly noticed but did not fail the turn over.
+// The proxy's capture is BEST-EFFORT: the client already has the bytes, so
+// discarding an accumulated turn over a shape the codec did not model would
+// only lose the record and the billing row. The caller logs every entry loudly
+// and persists the turn as the normal completion it was.
+type CaptureDiagnostics struct {
+	// Repaired describes each content block whose input JSON did not reassemble
+	// and was replaced with the malformed-input placeholder (repairToolInput).
+	Repaired []string
+	// Anomalies describes each stream event reassembly could not fold in and
+	// therefore skipped, in arrival order — an unsupported content delta, a delta
+	// or stop for a block index that was never started, an in-band error event, a
+	// malformed event. Bounded by maxCaptureAnomalies, with a trailing count.
+	Anomalies []string
+}
+
 // ParseCapturedResponse extracts stop_reason + usage from an Anthropic response
 // AND returns the canonical response body to persist: a streaming (SSE) response
 // is reassembled into the final Message JSON so the stored `response` is always
 // a valid JSON Message (the same shape the in-process core stores), never raw
 // SSE. A non-SSE body is already a JSON Message and is returned unchanged.
 //
-// repaired is non-empty when a tool_use block's input JSON failed to reassemble
-// cleanly (see repairToolInput) but the rest of the message — including usage,
-// which the caller must not lose — is intact; the caller should log it but treat
-// the turn as a normal completion.
+// diag is what reassembly skipped or repaired along the way: non-empty for a
+// turn that still persists, and the caller should log it. A tool_use block whose
+// input JSON failed to reassemble is repaired, and an event the codec or the
+// accumulator refuses is skipped, so neither costs the turn its usage or its
+// content.
 //
-// The error is non-nil when the body is not a recognizable Message at all —
-// a gateway error page delivered with a success status, wire skew, a truncated
-// stream, or a reassembly gap — in which case canonical is nil and the caller
-// must mark the turn errored: recording a zero-usage "completion" would both lie
-// in the metrics and crash the JSONB append (raw SSE is not a valid canonical).
-func ParseCapturedResponse(contentType string, body []byte) (string, CapturedUsage, []byte, []string, error) {
+// The error is non-nil only when the body is not a recognizable Message at all —
+// a gateway error page delivered with a success status, wire skew, a body with
+// no reassemblable event — in which case canonical is nil and the caller must
+// mark the turn errored: recording a zero-usage "completion" would both lie in
+// the metrics and crash the JSONB append (raw SSE is not a valid canonical).
+func ParseCapturedResponse(contentType string, body []byte) (string, CapturedUsage, []byte, CaptureDiagnostics, error) {
 	if strings.Contains(contentType, "text/event-stream") {
 		return parseSSE(body)
 	}
 	stop, u, err := parseJSONMessage(body)
 	if err != nil {
-		return "", CapturedUsage{}, nil, nil, err
+		return "", CapturedUsage{}, nil, CaptureDiagnostics{}, err
 	}
-	return stop, u, body, nil, nil
+	return stop, u, body, CaptureDiagnostics{}, nil
 }
 
 func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
@@ -91,6 +108,11 @@ type invalidInputs interface {
 	InvalidInput(index int) (json.RawMessage, bool)
 }
 
+// maxCaptureAnomalies bounds how many skipped events reassembly reports. A
+// stream carrying one unsupported delta per token can refuse thousands; the
+// first few identify the shape and a trailing count covers the rest.
+const maxCaptureAnomalies = 10
+
 // parseSSE walks the event stream once through the shared Anthropic codec,
 // accumulating the events into a native response so the caller can persist the
 // finished message as canonical JSON instead of the raw stream.
@@ -101,14 +123,29 @@ type invalidInputs interface {
 // type and metadata), citations added by a delta, a signature seeded at the
 // block start, and usage backfill (Anthropic reports input/cache counts in
 // message_start, OpenRouter sends zeros there and the full usage in
-// message_delta) all come from the one implementation. A stream that does not
-// reassemble — an event the codec cannot decode, a delta for a block that never
-// started — is a parse error, not a zero-usage completion.
-func parseSSE(body []byte) (string, CapturedUsage, []byte, []string, error) {
+// message_delta) all come from the one implementation.
+//
+// Reassembly is BEST-EFFORT, deliberately unlike msg.StreamDecoder's callers: an
+// event the codec refuses (an unsupported content block delta, an in-band error
+// event, a malformed event) or the accumulator refuses (a delta or a stop for a
+// block index that was never started) is SKIPPED and recorded in the returned
+// diagnostics, and the events that did accumulate are still persisted. On this
+// path the client has already received its bytes, so failing the capture over
+// one event only loses the record and the billing row — the very outcome
+// best-effort capture exists to prevent. A body that produced no event at all is
+// still a parse error: there is nothing to persist.
+func parseSSE(body []byte) (string, CapturedUsage, []byte, CaptureDiagnostics, error) {
 	dec := msganthropic.NewStreamDecoder(io.NopCloser(bytes.NewReader(body)))
 	acc := msg.NewAccumulator()
+	var diag CaptureDiagnostics
+	skipped := 0
+	skip := func(reason string) {
+		skipped++
+		if len(diag.Anomalies) < maxCaptureAnomalies {
+			diag.Anomalies = append(diag.Anomalies, reason)
+		}
+	}
 	seen := false
-	var rerr error
 	for {
 		ev, err := dec.Next()
 		if errors.Is(err, io.EOF) {
@@ -122,20 +159,20 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, []string, error) {
 			break
 		}
 		if err != nil {
-			rerr = err
-			break
+			skip(err.Error())
+			continue
 		}
 		if err := acc.Add(ev); err != nil {
-			rerr = err
-			break
+			skip(err.Error())
+			continue
 		}
 		seen = true
 	}
-	if cerr := dec.Close(); cerr != nil && rerr == nil {
-		rerr = cerr
+	if cerr := dec.Close(); cerr != nil {
+		return "", CapturedUsage{}, nil, diag, fmt.Errorf("reassemble response stream: %w", cerr)
 	}
-	if rerr != nil {
-		return "", CapturedUsage{}, nil, nil, fmt.Errorf("reassemble response stream: %w", rerr)
+	if skipped > len(diag.Anomalies) {
+		diag.Anomalies = append(diag.Anomalies, fmt.Sprintf("%d further event(s) skipped", skipped-len(diag.Anomalies)))
 	}
 	// Nothing reassembling means the stream wasn't Anthropic wire format at all
 	// (a gateway error page with a success status, wire skew): a failed parse,
@@ -144,13 +181,16 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, []string, error) {
 	// content-less Message (max_tokens can stop a turn before the first content
 	// block) must not be lost.
 	if !seen {
-		return "", CapturedUsage{}, nil, nil, fmt.Errorf("response stream did not reassemble into a Message (%d bytes captured)", len(body))
+		if len(diag.Anomalies) > 0 {
+			return "", CapturedUsage{}, nil, diag, fmt.Errorf("response stream did not reassemble into a Message (%d bytes captured): %s", len(body), diag.Anomalies[0])
+		}
+		return "", CapturedUsage{}, nil, diag, fmt.Errorf("response stream did not reassemble into a Message (%d bytes captured)", len(body))
 	}
 	resp := acc.Response()
-	repaired := repairToolInput(resp, dec)
+	diag.Repaired = repairToolInput(resp, dec)
 	canonical, err := capturedResponse(resp)
 	if err != nil {
-		return "", CapturedUsage{}, nil, nil, err
+		return "", CapturedUsage{}, nil, diag, err
 	}
 	u := CapturedUsage{
 		InputTokens:         msg.Val(resp.Usage.Input),
@@ -160,7 +200,7 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, []string, error) {
 		Model:               resp.Model,
 		Provider:            resp.Provider,
 	}
-	return resp.StopReasonWire(), u, canonical, repaired, nil
+	return resp.StopReasonWire(), u, canonical, diag, nil
 }
 
 // capturedResponse renders a reassembled response as the recorded body: the

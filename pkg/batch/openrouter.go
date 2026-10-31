@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 const (
@@ -184,6 +186,10 @@ func (o *OpenRouter) do(ctx context.Context, method, path string, body []byte, o
 		return fmt.Errorf("batch: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// The same identity every other outbound client sends: OpenRouter's Batch
+	// API is as able to reject Go's default "Go-http-client/2.0" as the
+	// Messages API is.
+	req.Header.Set("User-Agent", version.UserAgent())
 	if o.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+o.apiKey)
 	}

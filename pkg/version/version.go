@@ -4,7 +4,11 @@
 // neither source is available.
 package version
 
-import "runtime/debug"
+import (
+	"fmt"
+	"runtime"
+	"runtime/debug"
+)
 
 // Version is set at build time via -ldflags "-X go.graveland.dev/rafiki/pkg/version.Version=<hash>".
 // When empty (go run, plain go build), String() falls back to the embedded VCS info.
@@ -43,4 +47,14 @@ func String() string {
 		rev += "-dirty"
 	}
 	return rev
+}
+
+// UserAgent returns the build's HTTP User-Agent: rafiki/<version> (<os>; <arch>).
+// Every LLM HTTP client in the repo sends it — the llm senders, the Anthropic
+// bearer sender the fundi runtime uses, and the batch client — so an upstream
+// sees one identity instead of Go's default "Go-http-client/2.0", exactly the
+// string a bot filter rejects, and a rejection there reads like an
+// authentication failure. One definition, so the shapes cannot drift.
+func UserAgent() string {
+	return fmt.Sprintf("rafiki/%s (%s; %s)", String(), runtime.GOOS, runtime.GOARCH)
 }

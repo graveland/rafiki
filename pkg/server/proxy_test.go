@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1611,6 +1612,59 @@ func TestRawTraceRecordsACaptureParseFailure(t *testing.T) {
 	c.Require().Len(rec.inserted, 1, "raw traces recorded = %d, want 1", len(rec.inserted))
 	c.StrContains(rec.inserted[0].Error, "capture parse failed", "trace error")
 	c.StrContains(string(rec.inserted[0].RespBody), "nothing resembling an SSE stream", "resp body")
+}
+
+// TestCapturePersistsAStreamWithAnUnmodellableEvent pins capture as BEST-EFFORT
+// on the proxy path. A stream event the codec does not model yet — here a
+// content delta type Anthropic could ship tomorrow — must not discard the turn:
+// the client already received its bytes, so failing the capture would lose the
+// conversation rows, the token usage and the guard's observation, and record a
+// billed turn nowhere. The accumulated turn is stored and the anomaly is logged.
+func TestCapturePersistsAStreamWithAnUnmodellableEvent(t *testing.T) {
+	c := assert.NewCollecting(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"msg_anom","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1}}}`+"\n\n"+
+			"event: content_block_start\n"+
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`+"\n\n"+
+			"event: content_block_delta\n"+
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`+"\n\n"+
+			"event: content_block_delta\n"+
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"future_delta","text":"x"}}`+"\n\n"+
+			"event: content_block_stop\n"+
+			`data: {"type":"content_block_stop","index":0}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-Rafiki-Session", "sess-anom")
+	p.ServeHTTP(rec, req)
+
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Eq(0, fs.fails, "a skipped stream event must not fail the turn")
+	c.Eq(1, fs.completes, "the turn is recorded complete")
+	c.Eq("end_turn", fs.lastStop, "stop reason")
+	c.Eq(int64(7), fs.lastOut, "output tokens from the message_delta")
+	c.Eq(1, fs.intents, "turn intents")
+	c.Eq(1, fs.decomposes, "the request rows are still written")
+	c.Eq("", fs.lastFailMsg, "no failure recorded")
+
+	out := logs.String()
+	c.StrContains(out, "capture skipped stream events", "the anomaly is logged")
+	c.StrContains(out, "conv-1", "the anomaly names the conversation")
+	c.StrContains(out, "future_delta", "the anomaly names the reason")
+	c.False(strings.Contains(out, "capture-parse failed"), "the turn must not be recorded as an unparseable stream: %s", out)
 }
 
 func TestSubagentTurnsAreAttributedToAnAgent(t *testing.T) {
