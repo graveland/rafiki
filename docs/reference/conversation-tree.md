@@ -34,6 +34,11 @@ A **node** is one `conversations.conversation_message` row.
   the value a later request names in `diagnostics.previous_message_id`, copied
   onto the node from `conversation_turn.response_message_id` so the lookup does
   not touch the hypertable.
+- `origin` is the harness that wrote the node (`claude-code` for a captured
+  proxy session, `fundi` for a `pkg/llm` turn), NULL when unclassified. It is
+  NOT part of `path_hash`: an identical node at the same position is only
+  re-written by a replay of that same history, so the first writer is the
+  author and a matched node keeps the origin already stored.
 - `derived_from_id` is a lineage edge that is NOT a parent: a compaction summary
   or a `/clear` root points at the node it replaced. It lets a history view
   follow "before the compaction" without making the summary a child of what it

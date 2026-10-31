@@ -55,6 +55,18 @@ type Ref struct {
 	PathHash           convtree.Hash
 }
 
+// Origin is the harness that wrote a node. It is stored beside the node,
+// outside its content hash: an identical node at the same path position is
+// only re-written by a replay of that same history, so the first writer is
+// the author and dedup is unaffected. The zero value is unclassified.
+type Origin string
+
+const (
+	OriginUnclassified Origin = ""
+	OriginClaudeCode   Origin = "claude-code"
+	OriginFundi        Origin = "fundi"
+)
+
 // Node is one message of a conversation tree. It is immutable once published:
 // every field is set before the node enters the cache, and no code path writes
 // to a node the cache can hand out.
@@ -67,6 +79,7 @@ type Node struct {
 	InputTokens       *int64
 	OutputTokens      *int64
 	ProviderMessageID string
+	Origin            Origin
 }
 
 // State is a conversation's mutable position: where its head is and which
@@ -186,6 +199,7 @@ type NewNode struct {
 	OutputTokens      *int64
 	Kind              string // non-root rows only (KindCompactionTail)
 	ProviderMessageID string
+	Origin            Origin // "" = unclassified
 }
 
 // Result is what an append did: the identity of every input node, in order,

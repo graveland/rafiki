@@ -227,6 +227,47 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		c.False(ok, "an unknown provider id is not found")
 	})
 
+	t.Run("OriginRoundTrips", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, convID := setup(t)
+		ctx := context.Background()
+		h := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
+
+		_, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{
+			{Msg: text(msg.User, "hello"), Origin: conv.OriginClaudeCode},
+			{Msg: text(msg.Assistant, "hi"), Origin: conv.OriginFundi},
+			{Msg: text(msg.User, "again")},
+		}})
+		c.NoError(err, "append")
+
+		// A fresh store has an empty cache, so this read comes from the backend.
+		fresh := conv.NewStore(b, conv.Options{}).Open(convID)
+		path, err := fresh.Working(ctx)
+		c.NoError(err, "Working")
+		c.Len(path, 3, "three nodes")
+		c.Eq(conv.OriginClaudeCode, path[0].Origin, "the first node's origin")
+		c.Eq(conv.OriginFundi, path[1].Origin, "the second node's origin")
+		c.Eq(conv.OriginUnclassified, path[2].Origin, "a node written with no origin is unclassified")
+	})
+
+	t.Run("OriginIsOutsideTheHash", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		b, mine, other := setupTwo(t)
+		ctx := context.Background()
+
+		// The same message at the same position is one node whatever harness
+		// wrote it: origin is stored beside the node, not hashed into it.
+		first, err := conv.NewStore(b, conv.Options{}).Open(mine, conv.AsOwner()).Append(ctx,
+			conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: text(msg.User, "same"), Origin: conv.OriginClaudeCode}}})
+		c.NoError(err, "append in the first conversation")
+		second, err := conv.NewStore(b, conv.Options{}).Open(other, conv.AsOwner()).Append(ctx,
+			conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: text(msg.User, "same"), Origin: conv.OriginFundi}}})
+		c.NoError(err, "append in the second conversation")
+
+		c.EqDeep(first.Nodes[0].PathHash, second.Nodes[0].PathHash, "the same message has the same path hash whatever its origin")
+		c.NotEq(first.Nodes[0].ID, second.Nodes[0].ID, "the two nodes are distinct rows")
+	})
+
 	t.Run("HasChild", func(t *testing.T) {
 		c := assert.NewAborting(t)
 		b, convID := setup(t)

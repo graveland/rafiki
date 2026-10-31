@@ -44,7 +44,7 @@ const refColumns = `
 // from, not whatever bytes the writer happened to hand the append.
 const nodeColumns = refColumns + `,
 	role, content::text, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''),
-	input_tokens, output_tokens, coalesce(provider_message_id, '')`
+	input_tokens, output_tokens, coalesce(provider_message_id, ''), coalesce(origin, '')`
 
 // rowScanner is the half of pgx.Row and pgx.Rows a scan helper needs.
 type rowScanner interface {
@@ -289,15 +289,16 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 			INSERT INTO conversations.conversation_message
 				(id, conversation_id, ordinal, role, content, tool_use_ids, input_tokens,
 				 output_tokens, stop_reason, kind, parent_id, derived_from_id, path_hash,
-				 hash_version, depth, provider_message_id)
+				 hash_version, depth, provider_message_id, origin)
 			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::uuid, $12::uuid,
-			        $13, $14, $15, $16)
+			        $13, $14, $15, $16, $17)
 			ON CONFLICT (conversation_id, path_hash) DO NOTHING
 			RETURNING created_at`,
 			row.ID, c.ConversationID, row.Ordinal, row.Msg.Role.String(), row.Content,
 			row.ToolUseIDs, row.InputTokens, row.OutputTokens, nullString(row.StopReason),
 			nullString(row.Kind), nullString(row.ParentID), nullString(row.DerivedFromID),
 			row.PathHash[:], convtree.HashVersion, row.Depth, nullString(row.ProviderMessageID),
+			nullString(string(row.Origin)),
 		).Scan(&at)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return time.Time{}, fmt.Errorf("%w: node %d's path hash is already stored", conv.ErrConflict, i)
@@ -445,13 +446,15 @@ func scanNode(convID string, r rowScanner) (*conv.Node, error) {
 		hash    []byte
 		role    string
 		content []byte
+		origin  string
 	)
 	if err := r.Scan(&n.ID, &n.ParentID, &n.DerivedFromID, &n.Ordinal, &n.Depth, &n.Kind,
 		&n.CreatedAt, &hash, &role, &content, &n.ToolUseIDs, &n.StopReason,
-		&n.InputTokens, &n.OutputTokens, &n.ProviderMessageID); err != nil {
+		&n.InputTokens, &n.OutputTokens, &n.ProviderMessageID, &origin); err != nil {
 		return nil, err
 	}
 	n.ConversationID = convID
+	n.Origin = conv.Origin(origin)
 	h, err := decodeHash(n.ID, hash)
 	if err != nil {
 		return nil, err

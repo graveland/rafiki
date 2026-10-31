@@ -194,6 +194,7 @@ func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result,
 			InputTokens:       copyInt64(a.Nodes[i].InputTokens),
 			OutputTokens:      copyInt64(a.Nodes[i].OutputTokens),
 			ProviderMessageID: a.Nodes[i].ProviderMessageID,
+			Origin:            a.Nodes[i].Origin,
 		})
 	}
 

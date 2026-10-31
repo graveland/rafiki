@@ -664,9 +664,9 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 	chain, err := loadMigrations()
 	c.Require().NoError(err, "load chain")
 	head := chain[len(chain)-1]
-	// 0063 is the migration whose rollback is observed below; a new head means
+	// 0064 is the migration whose rollback is observed below; a new head means
 	// this test must be repointed, not silently left asserting an older one.
-	c.Eq(63, head.version, "this test observes 0063's rollback")
+	c.Eq(64, head.version, "this test observes 0064's rollback")
 
 	prev, hadPrev := goSteps[head.version]
 	goSteps[head.version] = func(context.Context, pgx.Tx) error { return errors.New("step refuses") }
@@ -690,12 +690,14 @@ func TestMigrateGoStepRunsInMigrationTransaction(t *testing.T) {
 		"probe the migrations table")
 	c.False(recorded, "version %d was recorded despite its go step failing", head.version)
 
-	// 0062 commits on its own; it is 0063's CREATE TABLE that must roll back
-	// with its step, so model_alias is absent.
-	var aliasTable bool
-	c.Require().NoError(pool.QueryRow(ctx,
-		`SELECT to_regclass('conversations.model_alias') IS NOT NULL`).Scan(&aliasTable), "probe model_alias")
-	c.False(aliasTable, "0063's CREATE TABLE survived a failed go step; the SQL did not roll back with it")
+	// 0063 commits on its own; it is 0064's ALTER TABLE that must roll back with
+	// its step, so the origin column is absent.
+	var originColumn bool
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema='conversations' AND table_name='conversation_message'
+		                  AND column_name='origin')`).Scan(&originColumn), "probe origin")
+	c.False(originColumn, "0064's ALTER TABLE survived a failed go step; the SQL did not roll back with it")
 }
 
 // TestMigrateGoStepUnknownVersion pins loadMigrations' refusal of a step for a
@@ -872,4 +874,96 @@ func TestMigrate0063CreatesModelAlias(t *testing.T) {
 	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT to_regclass('conversations.model_alias') IS NOT NULL`).Scan(&tableExists), "re-probe model_alias")
 	c.False(tableExists, "the down migration did not drop conversations.model_alias")
+}
+
+// TestMigrate0064BackfillsClientConversations pins 0064: conversation_message
+// gains an origin column that sits outside the path hash, the up migration
+// backfills 'claude-code' for every message of a client-driven conversation and
+// leaves a server-driven one unclassified, the CHECK constraint admits only the
+// two modelled harnesses, and the down migration drops the column.
+func TestMigrate0064BackfillsClientConversations(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	originExists := func() bool {
+		t.Helper()
+		var exists bool
+		c.Require().NoError(pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			                WHERE table_schema='conversations' AND table_name='conversation_message'
+			                  AND column_name='origin')`).Scan(&exists), "probe origin")
+		return exists
+	}
+	c.True(originExists(), "conversations.conversation_message.origin is missing after migration 0064")
+
+	// There is no MigrateTo API, so exercise the down migration directly: a
+	// no-op body must fail this test, not leave the column in place.
+	down, err := os.ReadFile("migrations/0064_node_origin.down.sql")
+	c.Require().NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	c.False(originExists(), "the down migration did not drop conversations.conversation_message.origin")
+
+	// Seeded with the column absent, so the rows are exactly the pre-0064 shape
+	// the backfill has to classify. The per-run tag keeps this idempotent on a
+	// database other runs share; only these rows are ever asserted on.
+	tag := fmt.Sprintf("m64%d", time.Now().UnixNano())
+	newConversation := func(drivenBy string) string {
+		t.Helper()
+		var id string
+		c.Require().NoError(pool.QueryRow(ctx, `
+			INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref)
+			VALUES ('test', $1, $2) RETURNING id::text`, drivenBy, tag+"-"+drivenBy).Scan(&id),
+			"insert the %s conversation", drivenBy)
+		return id
+	}
+	newMessage := func(convID string) string {
+		t.Helper()
+		var id string
+		c.Require().NoError(pool.QueryRow(ctx, `
+			INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
+			VALUES ($1::uuid, 0, 'user', '[{"type":"text","text":"hi"}]'::jsonb) RETURNING id::text`,
+			convID).Scan(&id), "insert a message of %s", convID)
+		return id
+	}
+	clientConv, serverConv := newConversation("client"), newConversation("server")
+	clientMsg, serverMsg := newMessage(clientConv), newMessage(serverConv)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation_message WHERE id = ANY($1::uuid[])`,
+			[]string{clientMsg, serverMsg})
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`,
+			[]string{clientConv, serverConv})
+	})
+
+	up, err := os.ReadFile("migrations/0064_node_origin.up.sql")
+	c.Require().NoError(err, "read up migration")
+	if _, err := pool.Exec(ctx, string(up)); err != nil {
+		t.Fatalf("apply up migration: %v", err)
+	}
+
+	originOf := func(msgID string) *string {
+		t.Helper()
+		var origin *string
+		c.Require().NoError(pool.QueryRow(ctx,
+			`SELECT origin FROM conversations.conversation_message WHERE id = $1::uuid`, msgID).Scan(&origin),
+			"read the origin of %s", msgID)
+		return origin
+	}
+	clientOrigin := originOf(clientMsg)
+	c.Require().NotNil(clientOrigin, "a client-driven conversation's message must be backfilled")
+	c.Eq("claude-code", *clientOrigin, "a client-driven conversation's message is Claude Code's")
+	c.Nil(originOf(serverMsg), "a server-driven conversation's message stays unclassified")
+
+	// The constraint admits only the two modelled harnesses, and NULL.
+	_, err = pool.Exec(ctx, `
+		INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content, origin)
+		VALUES ($1::uuid, 1, 'user', '[{"type":"text","text":"bogus"}]'::jsonb, 'bogus')`, clientConv)
+	c.Require().Error(err, "an unmodelled origin was accepted")
+	pgErr := c.Require().ErrorAs[*pgconn.PgError](err, "insert error must be a *pgconn.PgError")
+	c.Eq("23514", pgErr.Code, "an unmodelled origin must be a check violation")
 }
