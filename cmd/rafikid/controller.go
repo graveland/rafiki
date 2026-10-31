@@ -1664,7 +1664,7 @@ func agentRunnerError(err error) *connectapi.ControllerError {
 	if errors.Is(err, errScriptHosting) {
 		code = protocol.ErrFailedPrecondition
 	}
-	return &connectapi.ControllerError{Code: code, Message: "agent runner: " + err.Error()}
+	return &connectapi.ControllerError{Code: code, Message: "agent runner: " + err.Error(), Err: err}
 }
 
 func (c *Controller) ConversationExport(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error) {

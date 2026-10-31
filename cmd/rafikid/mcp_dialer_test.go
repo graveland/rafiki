@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -258,4 +259,35 @@ func newMCPPool(t *testing.T, execs ...fakeMCPExec) *execpool.Pool {
 	}
 	t.Fatalf("fake executors never joined the pool: %d of %d live", len(pool.Live()), len(execs))
 	return nil
+}
+
+// A server no connected executor declares is the transient case recovery pends
+// on; one an executor declares under a selector that cannot match is a deploy
+// mistake and must not be.
+func TestResolveMCPExecutorMarksOnlyTheNotLiveCase(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cfg := `{"mcpServers":{"hesabu":{"via_executor":{"selector":"name=greyshift","command":"hesabu"}}}}`
+
+	empty := newMCPPool(t, fakeMCPExec{
+		token: "t_one",
+		exec:  executors.Executor{ID: "exec-1", Enabled: true, Labels: map[string]string{"name": "greyshift"}},
+	})
+	_, err := resolveMCPDialer(writeMCPConfig(t, cfg), "", empty)
+	c.True(errors.Is(err, errMCPExecutorNotLive), "no executor declares the command: %v", err)
+
+	wrongLabels := newMCPPool(t, fakeMCPExec{
+		token:       "t_two",
+		exec:        executors.Executor{ID: "exec-2", Enabled: true, Labels: map[string]string{"name": "other"}},
+		mcpCommands: []string{"hesabu"},
+	})
+	_, err = resolveMCPDialer(writeMCPConfig(t, cfg), "", wrongLabels)
+	c.Require().Error(err, "mismatched selector")
+	c.False(errors.Is(err, errMCPExecutorNotLive), "a selector mismatch is not transient: %v", err)
+}
+
+// The resume path stringifies runner failures into a ControllerError; recovery
+// still has to see through it.
+func TestAgentRunnerErrorKeepsTheCause(t *testing.T) {
+	ce := agentRunnerError(fmt.Errorf("agent runtime options: %w", errMCPExecutorNotLive))
+	assert.NewCollecting(t).True(errors.Is(ce, errMCPExecutorNotLive), "errors.Is through agentRunnerError")
 }

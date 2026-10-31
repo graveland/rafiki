@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"sync"
@@ -158,7 +159,11 @@ func (c *Controller) claudeExecutorLive(executorID string) bool {
 // TestAutoResumeWithNoLiveExecutorStartsUnbound) — so an executor that is not
 // connected yet degrades the re-issued cycle's first tool calls, not the
 // resume; waiting would strand the child on any daemon where nothing will
-// ever connect (a fleet-less or DB-only setup).
+// ever connect (a fleet-less or DB-only setup). The one exception is learned
+// from the resume itself rather than predicted here: a via_executor MCP server
+// is resolved once at spawn, so a resume that fails with errMCPExecutorNotLive
+// is pended by spawnRecoveryResume and retried by the connect sweep. A connect
+// landing between that failure and the pend is missed until the next one.
 //
 // A claude child on a daemon with no executor pool takes the
 // local-subprocess path: nothing to wait for. One WITH a pool waits for the
@@ -275,6 +280,15 @@ func (c *Controller) spawnRecoveryResume(pr pendingResume) {
 		}
 
 		if _, err := c.resumeClaimedWithAutoRecovery(rctx, id); err != nil {
+			if errors.Is(err, errMCPExecutorNotLive) {
+				// The child's MCP server lives on an executor that has not
+				// reconnected yet (resolved once, at spawn). Park it; the sweep
+				// fired on every executor connection retries it.
+				c.pendResume(pr)
+				slog.Info("deferring auto-resume until an executor serving the child's MCP servers connects",
+					"childId", id, "error", err)
+				return
+			}
 			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
 			c.dropLease(id)
 			return

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,12 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
+
+// errMCPExecutorNotLive marks a via_executor server whose executor is not
+// connected right now, as opposed to one that can never match. It is the
+// transient case: recovery pends the resume on it and retries when an executor
+// connects.
+var errMCPExecutorNotLive = errors.New("no live executor serves the mcp server")
 
 // mcpDialer resolves every via_executor MCP server this child may use ONCE, at
 // spawn, and closes the chosen executor IDs into the dialer (D10's "resolved
@@ -163,11 +170,11 @@ func resolveMCPExecutor(name string, ve *tools.MCPViaExecutor, pool *execpool.Po
 	}
 	if !sawAdvertised {
 		if ve.Proxy != "" {
-			return "", fmt.Errorf("mcp server %q: no live executor matching selector %q advertises proxy %q (start one with --proxy %s=…)",
-				name, ve.Selector, ve.Proxy, ve.Proxy)
+			return "", fmt.Errorf("mcp server %q: no live executor matching selector %q advertises proxy %q (start one with --proxy %s=…): %w",
+				name, ve.Selector, ve.Proxy, ve.Proxy, errMCPExecutorNotLive)
 		}
-		return "", fmt.Errorf("mcp server %q: no live executor matching selector %q declares MCP command %q (start it with --mcp-command %s=…)",
-			name, ve.Selector, ve.Command, ve.Command)
+		return "", fmt.Errorf("mcp server %q: no live executor matching selector %q declares MCP command %q (start it with --mcp-command %s=…): %w",
+			name, ve.Selector, ve.Command, ve.Command, errMCPExecutorNotLive)
 	}
 	if ve.Proxy != "" {
 		return "", fmt.Errorf("mcp server %q: no executor matching selector %q advertises proxy %q", name, ve.Selector, ve.Proxy)

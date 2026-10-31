@@ -35,9 +35,14 @@ import (
 type ControllerError struct {
 	Code    string
 	Message string
+	// Err is the underlying cause, kept so in-process callers can errors.Is
+	// through the classification. It never reaches the wire.
+	Err error
 }
 
 func (e *ControllerError) Error() string { return e.Message }
+
+func (e *ControllerError) Unwrap() error { return e.Err }
 
 // errCodeTable maps every protocol.Err* code onto its Connect code. The code
 // the daemon attached at the source IS the classification; Connect codes are
