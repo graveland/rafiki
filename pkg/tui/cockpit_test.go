@@ -3051,3 +3051,23 @@ func TestCockpitNamesWhatItHidesWhenNothingElseIsLeft(t *testing.T) {
 	ck.StrContains(ansi.Strip(empty.View().Content), "No messages yet",
 		"a conversation with no blocks at all must keep the empty copy:\n")
 }
+
+// A history fetch that lands after the agent already answered ends in an
+// assistant block, but the user's message is still in it: the ghost must not
+// outlive the transcript that contains its echo.
+func TestPendingClearsWhenHistoryHoldsTheEchoBehindAReply(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	ck.Require().EqDeep([]string{"hello"}, pendingTexts(c), "pending")
+
+	c.Update(historyMsg{childID: "c_1", after: 6, events: []*rafikiv1.Event{
+		historyEvent("c_1", "hello", 5, false),
+		historyEvent("c_1", "hi back", 6, true),
+	}})
+	ck.EqDeep([]string(nil), pendingTexts(c), "the transcript held the echo and the ghost survived")
+}

@@ -1072,11 +1072,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The message may have been persisted while this child was not being
 		// streamed (a claude child's echo only arrives with its capture), in
 		// which case the history is the acknowledgement.
-		if len(s.Blocks) > 0 {
-			if last := s.Blocks[len(s.Blocks)-1]; last.Kind == session.KindUser {
-				c.ackPending(msg.childID, last.Text)
-			}
-		}
+		c.ackPendingFromHistory(msg.childID, s.Blocks)
 		// The cursor takes the LOG watermark captured before the fetch -- never
 		// a conversation ordinal; ApplyHistory's doc has the full hazard. It is
 		// the resume point the subscription opens from. A session holding history
@@ -3254,6 +3250,37 @@ func (c *Cockpit) ackPending(child, text string) {
 	if first >= 0 {
 		c.pending = slices.Delete(c.pending, first, first+1)
 	}
+}
+
+// ackPendingFromHistory retires pending sends to child that a fetched
+// transcript already holds. The echo is not necessarily the last block -- the
+// agent may have answered before the fetch landed -- so every user block is
+// checked, newest first, each retiring at most one send and only on an exact
+// text match. The last block alone keeps ackPending's oldest-send fallback,
+// which is what an image-only message (no text to match) needs.
+func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
+	if len(blocks) == 0 {
+		return
+	}
+	if last := blocks[len(blocks)-1]; last.Kind == session.KindUser {
+		c.ackPending(child, last.Text)
+		blocks = blocks[:len(blocks)-1]
+	}
+	for i := len(blocks) - 1; i >= 0 && c.hasPending(child); i-- {
+		if blocks[i].Kind != session.KindUser {
+			continue
+		}
+		for j, p := range c.pending {
+			if p.childID == child && p.text == blocks[i].Text {
+				c.pending = slices.Delete(c.pending, j, j+1)
+				break
+			}
+		}
+	}
+}
+
+func (c *Cockpit) hasPending(child string) bool {
+	return slices.ContainsFunc(c.pending, func(p pendingSend) bool { return p.childID == child })
 }
 
 // dropPending removes the pending send to child with this text, or every one
