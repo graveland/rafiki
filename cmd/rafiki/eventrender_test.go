@@ -356,3 +356,35 @@ func TestContentSummaryNamesImage(t *testing.T) {
 	}
 	c.StrContains(contentSummary(empty), "(image ?)", "unnamed media type")
 }
+
+// A user message carrying only injected blocks has no content to summarise, so
+// the line names the count instead of trailing off into nothing. A message with
+// content renders exactly as it always did.
+func TestInjectedOnlyUserMessageRendersCount(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := newEventRenderer()
+	_ = r.observe(spawnedFor("c_inj", "impl", ""), atClock(9, 3, 0.0))
+
+	injected := func(texts ...string) []*rafikiv1.ContentBlock {
+		out := make([]*rafikiv1.ContentBlock, 0, len(texts))
+		for i, txt := range texts {
+			out = append(out, &rafikiv1.ContentBlock{
+				Index: int32(i),
+				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: txt}},
+			})
+		}
+		return out
+	}
+
+	got := r.observe(withTS(&rafikiv1.Event{ChildId: "c_inj", Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
+		Injected: injected("nudge one", "nudge two"),
+	}}}, atClock(9, 3, 1.0)), atClock(9, 3, 1.0))
+	c.StrContains(got, "(2 injected)", "injected-only line = %q", got)
+	c.Eq("09:03:01  user_message c_inj  impl (2 injected)", got, "injected-only line")
+
+	got = r.observe(withTS(&rafikiv1.Event{ChildId: "c_inj", Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
+		Injected: injected("nudge one"),
+		Content:  injected("hello world"),
+	}}}, atClock(9, 3, 2.0)), atClock(9, 3, 2.0))
+	c.Eq("09:03:02  user_message c_inj  impl hello world", got, "a message with content keeps its content summary")
+}

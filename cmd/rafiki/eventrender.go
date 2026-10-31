@@ -213,7 +213,14 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 			detail += " " + reason
 		}
 	case *rafikiv1.Event_UserMessage:
-		detail = " " + oneLine(contentSummary(p.UserMessage.GetContent()))
+		// A message can carry only injected blocks -- the harness's own words,
+		// with no user text at all. Its content summary would then be empty, so
+		// name the count instead of printing a blank tail.
+		if len(p.UserMessage.GetContent()) == 0 && len(p.UserMessage.GetInjected()) > 0 {
+			detail = fmt.Sprintf(" (%d injected)", len(p.UserMessage.GetInjected()))
+		} else {
+			detail = " " + oneLine(contentSummary(p.UserMessage.GetContent()))
+		}
 	case *rafikiv1.Event_SystemMessage:
 		detail = " " + oneLine(contentSummary(p.SystemMessage.GetContent()))
 	case *rafikiv1.Event_AssistantMessage:

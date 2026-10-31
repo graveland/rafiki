@@ -817,3 +817,57 @@ func TestSessionAppliesSystemMessage(t *testing.T) {
 	c.True(last.ToolCalls[0].Running, "an injected message resolved an in-flight tool call")
 	c.NotEq(len(s.Blocks), s.Finalized, "Finalized: an injected message settled the live region")
 }
+
+// injectedUserMessage builds one user-role message carrying the harness's own
+// injected blocks ahead of (or instead of) the user's own text.
+func injectedUserMessage(childID string, injected, content []string) *rafikiv1.Event {
+	blocks := func(texts []string) []*rafikiv1.ContentBlock {
+		out := make([]*rafikiv1.ContentBlock, 0, len(texts))
+		for i, t := range texts {
+			out = append(out, &rafikiv1.ContentBlock{
+				Index: int32(i),
+				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: t}},
+			})
+		}
+		return out
+	}
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
+			Injected: blocks(injected),
+			Content:  blocks(content),
+		}},
+	}
+}
+
+// Injected blocks are the harness's words and precede the user's own, each list
+// keeping the wire's order. They are never interleaved or reordered.
+func TestInjectedBlocksPrecedeUserBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_test")
+	s.Apply(injectedUserMessage("c_test", []string{"A", "B"}, []string{"hi"}))
+
+	c.Require().Len(s.Blocks, 3, "blocks")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "block[0] kind")
+	c.Eq("A", s.Blocks[0].Text, "block[0] text")
+	c.Eq(session.KindInjected, s.Blocks[1].Kind, "block[1] kind")
+	c.Eq("B", s.Blocks[1].Text, "block[1] text")
+	c.Eq(session.KindUser, s.Blocks[2].Kind, "block[2] kind")
+	c.Eq("hi", s.Blocks[2].Text, "block[2] text")
+}
+
+// An injected-only message appends its injected block and NO KindUser block --
+// a user block is what clears the cockpit's pending echo, and nothing the
+// harness says on its own behalf acknowledges a prompt.
+func TestInjectedOnlyMessageAppendsNoUserBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_test")
+	s.Apply(injectedUserMessage("c_test", []string{"A"}, nil))
+
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "block[0] kind")
+	c.Eq("A", s.Blocks[0].Text, "block[0] text")
+	for _, b := range s.Blocks {
+		c.NotEq(session.KindUser, b.Kind, "an injected-only message appended a KindUser block")
+	}
+}

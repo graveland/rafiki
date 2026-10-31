@@ -33,12 +33,13 @@ const (
 	// KindScriptOutput is one chunk of a script child's stdout or stderr. Its
 	// Stream field says which; Text is the verbatim output.
 	KindScriptOutput
-	// KindInjected is a system-role message the child's own harness put into
-	// the conversation -- a heartbeat nudge, an environment update, a
-	// file-changed notice. It is real history, so it stays in the model, but it
-	// is not conversation: the cockpit hides these unless asked, and it is a
-	// kind of its own rather than KindSystem because KindSystem (errors,
-	// compaction boundaries) is always worth seeing.
+	// KindInjected is text the child's own harness put into the conversation
+	// rather than the user -- a heartbeat nudge, an environment update, a
+	// file-changed notice. It covers both shapes on the wire: a system-role
+	// message, and an injected block of a user-role message. It is real history,
+	// so it stays in the model, but it is not conversation: the cockpit hides
+	// these unless asked, and it is a kind of its own rather than KindSystem
+	// because KindSystem (errors, compaction boundaries) is always worth seeing.
 	KindInjected
 )
 
@@ -438,7 +439,23 @@ func (s *Session) LastAssistant() *Block {
 // only, so those messages used to render as EMPTY user bubbles and the results
 // were dropped on the floor -- one blank bubble per tool call, and no output
 // anywhere. A message that carries only results appends no block at all.
+//
+// A user-role message may also carry injected blocks -- the harness's own words
+// recorded alongside the user's. Those become KindInjected blocks ahead of the
+// user's block, in wire order.
 func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
+	// Injected blocks precede the user's own: they are the harness's words, and
+	// the wire's order within each list is the order they happened. Never
+	// interleave the two lists.
+	for _, cb := range um.GetInjected() {
+		s.Blocks = append(s.Blocks, Block{
+			Kind:  KindInjected,
+			At:    time.Now(),
+			Text:  TextFromContent([]*rafikiv1.ContentBlock{cb}),
+			Final: true,
+		})
+	}
+
 	var results int
 	for _, cb := range um.GetContent() {
 		tr, ok := cb.Block.(*rafikiv1.ContentBlock_ToolResult)
@@ -451,9 +468,12 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 
 	text := TextFromContent(um.GetContent())
 	images := imagesFrom(um.GetContent())
-	if text == "" && len(images) == 0 && results > 0 {
+	if text == "" && len(images) == 0 && (results > 0 || len(um.GetInjected()) > 0) {
 		// A results-only message appends no block, but it just answered tool
-		// calls -- which is exactly what unsticks the watermark.
+		// calls -- which is exactly what unsticks the watermark. An
+		// injected-only message likewise appends no KindUser block: a user-role
+		// block is what clears the cockpit's ⏳ pending echo, and the harness
+		// speaking on its own behalf acknowledges no prompt.
 		s.recomputeFinalized()
 		return
 	}
