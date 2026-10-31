@@ -153,3 +153,117 @@ func TestMergeForRequestRowsMatchesMergeForRequest(t *testing.T) {
 		})
 	}
 }
+
+// The reminders a Claude Code user message carries, in the order Claude Code
+// writes them: the running model's identity (false under fundi), then a date.
+const (
+	modelReminderBlock = "<system-reminder>\nYou are powered by the model named Haiku 4.5. The exact model ID is claude-haiku-4-5-20251001.\n</system-reminder>"
+	dateReminderBlock  = "<system-reminder>\nToday's date is 2026-10-31.\n</system-reminder>"
+)
+
+// originRow builds one fixture node written by origin.
+func originRow(ordinal int, origin convpkg.Origin, role msg.Role, blocks ...msg.Block) *convpkg.Node {
+	return &convpkg.Node{
+		Ref:    convpkg.Ref{Ordinal: ordinal},
+		Msg:    msg.Message{Role: role, Content: blocks},
+		Origin: origin,
+	}
+}
+
+// TestForRequestDropsModelReminderFromClaudeCodeNodes pins that a node another
+// harness wrote is replayed through that harness before it reaches a request:
+// Claude Code's model reminder is false under fundi and is dropped, and the
+// remaining reminder is marked for the encoder in the order it was written.
+func TestForRequestDropsModelReminderFromClaudeCodeNodes(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	history := []*convpkg.Node{
+		originRow(0, convpkg.OriginClaudeCode, msg.User,
+			msg.Text{Text: modelReminderBlock},
+			msg.Text{Text: dateReminderBlock},
+			msg.Text{Text: "hello"},
+		),
+	}
+
+	msgs, _, err := mergeForRequestRows(history)
+	c.Require().NoError(err, "merge")
+	c.Require().Len(msgs, 1, "one user message")
+	c.Eq(msg.User, msgs[0].Role, "role")
+	c.EqDeep([]msg.Block{
+		msg.Text{Text: dateReminderBlock, Injected: true},
+		msg.Text{Text: "hello"},
+	}, msgs[0].Content, "the model reminder is dropped, the rest kept in order")
+}
+
+// TestForRequestLeavesFundiAndUnclassifiedNodesUntouched pins the other side:
+// content pkg/llm wrote itself, or wrote before origins existed, is sent as
+// stored — every block survives and none is marked.
+func TestForRequestLeavesFundiAndUnclassifiedNodesUntouched(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	blocks := []msg.Block{
+		msg.Text{Text: modelReminderBlock},
+		msg.Text{Text: dateReminderBlock},
+		msg.Text{Text: "hello"},
+	}
+
+	for _, origin := range []convpkg.Origin{convpkg.OriginFundi, convpkg.OriginUnclassified} {
+		got := forRequest(originRow(0, origin, msg.User, blocks...))
+		c.Eq(msg.User, got.Role, "%q: role", origin)
+		c.EqDeep(blocks, got.Content, "%q: every block survives, none marked", origin)
+	}
+}
+
+// TestForRequestIsDeterministic pins replay as a pure function of the stored
+// node: two passes over the same history agree, and the node is not written to
+// — a node's Msg is shared by the cache, so a mutation here would change every
+// later turn's prefix.
+func TestForRequestIsDeterministic(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	history := []*convpkg.Node{
+		originRow(0, convpkg.OriginClaudeCode, msg.User,
+			msg.Text{Text: modelReminderBlock},
+			msg.Text{Text: dateReminderBlock},
+			msg.Text{Text: "hello"},
+		),
+	}
+	wantStored := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.Text{Text: modelReminderBlock},
+		msg.Text{Text: dateReminderBlock},
+		msg.Text{Text: "hello"},
+	}}
+
+	first, _, err := mergeForRequestRows(history)
+	c.Require().NoError(err, "first merge")
+	second, _, err := mergeForRequestRows(history)
+	c.Require().NoError(err, "second merge")
+
+	c.EqDeep(first, second, "two passes over the same history agree")
+	c.EqDeep(wantStored, history[0].Msg, "the stored node is unchanged")
+}
+
+// TestMergeForRequestFiltersBeforeMerging pins WHERE the replay happens: per
+// node, before consecutive user rows fuse. A merged run would otherwise carry
+// the dropped reminder from the Claude Code row into the fundi row's message.
+func TestMergeForRequestFiltersBeforeMerging(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	history := []*convpkg.Node{
+		originRow(0, convpkg.OriginClaudeCode, msg.User,
+			msg.Text{Text: modelReminderBlock},
+			msg.Text{Text: "first"},
+		),
+		originRow(1, convpkg.OriginFundi, msg.User,
+			msg.Text{Text: "second"},
+		),
+	}
+
+	msgs, _, err := mergeForRequestRows(history)
+	c.Require().NoError(err, "merge")
+	c.Require().Len(msgs, 1, "the two user rows merge into one message")
+	c.EqDeep([]msg.Block{
+		msg.Text{Text: "first"},
+		msg.Text{Text: "second"},
+	}, msgs[0].Content, "the Claude Code row was filtered before the merge")
+}

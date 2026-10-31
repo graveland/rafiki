@@ -7,8 +7,21 @@ import (
 	"slices"
 
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/harness"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
+
+// forRequest is n's message as pkg/llm sends it. pkg/llm is the fundi
+// harness: a node another harness wrote passes through that harness's
+// ForeignReplay, which drops what is false here and marks its injected text
+// for the encoder. It depends only on the node, so replayed history encodes
+// to the same bytes every turn.
+func forRequest(n *convpkg.Node) msg.Message {
+	if n.Origin == convpkg.OriginUnclassified || n.Origin == convpkg.OriginFundi {
+		return n.Msg
+	}
+	return harness.For(n.Origin).ForeignReplay(n.Msg)
+}
 
 // mergeForRequestRows is mergeForRequest plus rowStart[i], the index in
 // history of the first stored row merged into msgs[i].
@@ -32,10 +45,11 @@ func mergeForRequestRows(history []*convpkg.Node) (msgs []msg.Message, rowStart 
 	out := make([]msg.Message, 0, len(history))
 	start := make([]int, 0, len(history))
 	for i, n := range history {
-		if n.Msg.Role == msg.System {
+		nm := forRequest(n)
+		if nm.Role == msg.System {
 			continue
 		}
-		m := msg.Message{Role: n.Msg.Role, Content: replaceEmptyToolUses(n.Msg)}
+		m := msg.Message{Role: nm.Role, Content: replaceEmptyToolUses(nm)}
 		if m.Role == msg.User && len(out) > 0 && out[len(out)-1].Role == msg.User {
 			last := &out[len(out)-1]
 			// Clone before appending: appending into a stored message's backing
