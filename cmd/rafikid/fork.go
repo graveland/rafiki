@@ -163,9 +163,9 @@ func localOrAdmin(ctx context.Context) bool {
 // itself or one of its ancestors (so it can fork itself and its descendants,
 // never a sibling or its own parent); a user is satisfied by ownership alone.
 func (c *Controller) mayRead(ctx context.Context, owner users.Identity, callerChildID string, src childstore.ForkSource) bool {
-	switch {
-	case src.OwnerUserID == owner.UserID:
-	case src.OwnerUserID == "":
+	switch src.OwnerUserID {
+	case owner.UserID:
+	case "":
 		if !localOrAdmin(ctx) {
 			return false
 		}
