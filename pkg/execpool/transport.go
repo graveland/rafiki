@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -101,6 +102,28 @@ func serveInvertedOn(ctx context.Context, conn net.Conn, handler http.Handler, s
 		Context: ctx,
 	})
 	return nil
+}
+
+// goneConn reports the first failed Read on the wrapped connection. The
+// HTTP/2 client transport reads its connection continuously, so a closed or
+// reset peer surfaces here the moment the kernel delivers it, which is what
+// lets the pool drop an executor without waiting for a health poll.
+type goneConn struct {
+	net.Conn
+	once sync.Once
+	gone chan struct{}
+}
+
+func newGoneConn(c net.Conn) *goneConn {
+	return &goneConn{Conn: c, gone: make(chan struct{})}
+}
+
+func (c *goneConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err != nil {
+		c.once.Do(func() { close(c.gone) })
+	}
+	return n, err
 }
 
 // ClientForConn returns an http.Client that speaks HTTP/2 over exactly this

@@ -430,7 +430,8 @@ func (p *Pool) serve(conn *upgradeconn.Conn, a admission) {
 
 	remote := conn.RemoteAddr().String()
 
-	httpClient, err := ClientForConn(conn)
+	watched := newGoneConn(conn)
+	httpClient, err := ClientForConn(watched)
 	if err != nil {
 		slog.Warn("execpool: client for conn failed", "error", err, "executorId", e.ID)
 		return
@@ -494,9 +495,16 @@ func (p *Pool) serve(conn *upgradeconn.Conn, a admission) {
 
 	p.fireOnConnect(e.ID)
 
-	// Block until the connection is done (ServeInverted-style, but since
-	// we're the HTTP client, we detect departure when health fails).
-	<-lc.done
+	// Block until the connection is done: torn down by a health failure or a
+	// displacing reconnect, or closed by the peer. A closed connection is
+	// gone until the executor redials, so it leaves the pool now and is
+	// parked like any other departure.
+	select {
+	case <-lc.done:
+	case <-watched.gone:
+		slog.Info("execpool: executor connection closed", "executorId", e.ID)
+		p.onHealthFailure(e.ID, lc)
+	}
 
 	p.removeLive(e.ID, lc)
 	slog.Info("execpool: executor left", "id", e.ID)

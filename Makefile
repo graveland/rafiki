@@ -309,8 +309,22 @@ check-sdk-rust: ## Test, lint and format-check the Rust SDK (needs cargo).
 check-sdk-rust-live: ## Run the Rust SDK's live-daemon test (needs cargo and RAFIKI_SDK_TEST_URL).
 	cd sdk/rust && cargo test --locked --all-features --test daemon -- --ignored
 
+# vet, lint and test run concurrently: lint's serial analysis chain and the
+# test suite each take minutes and use different resources. Each target's
+# output is held back and printed in order, so a failure reads the same as a
+# serial run. Plain shell rather than `make -j -O`, which needs GNU make 4.
 .PHONY: check
-check: vet lint test ## Run vet + lint + tests (the full local gate).
+check: ## Run vet + lint + tests concurrently (the full local gate).
+	@d=$$(mktemp -d); trap 'rm -rf "$$d"' EXIT; \
+	for t in vet lint test; do \
+		( $(MAKE) --no-print-directory $$t >"$$d/$$t.log" 2>&1; echo $$? >"$$d/$$t.rc" ) & \
+	done; \
+	wait; rc=0; \
+	for t in vet lint test; do \
+		echo "=== $$t (exit $$(cat "$$d/$$t.rc")) ==="; cat "$$d/$$t.log"; \
+		[ "$$(cat "$$d/$$t.rc")" = 0 ] || rc=1; \
+	done; \
+	exit $$rc
 
 .PHONY: vet
 vet: ## Run go vet.
@@ -318,7 +332,7 @@ vet: ## Run go vet.
 
 .PHONY: lint
 lint: ## Run golangci-lint.
-	golangci-lint run ./...
+	golangci-lint run --concurrency 4 ./...
 
 # Sources .env the same way `run` does, so the DB-backed tests actually run
 # outside a direnv-hooked shell. Without this they skip on a missing

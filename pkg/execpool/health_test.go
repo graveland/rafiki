@@ -140,6 +140,14 @@ func TestTransportEnablesHTTP2Keepalive(t *testing.T) {
 // upgrade path.
 func joinViaUpgrade(t *testing.T, p *Pool, handler executorpbconnect.ExecutorServiceHandler) error {
 	t.Helper()
+	_, err := joinViaUpgradeConn(t, p, handler)
+	return err
+}
+
+// joinViaUpgradeConn is joinViaUpgrade that also hands back the executor-side
+// connection, so a test can close it.
+func joinViaUpgradeConn(t *testing.T, p *Pool, handler executorpbconnect.ExecutorServiceHandler) (net.Conn, error) {
+	t.Helper()
 	c := assert.NewAborting(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSConfig(t))
 	c.NoError(err)
@@ -159,12 +167,31 @@ func joinViaUpgrade(t *testing.T, p *Pool, handler executorpbconnect.ExecutorSer
 	upConn, _, err := upgradeconn.Dial(dialed, upgradeconn.Executor, "localhost",
 		http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " c"}})
 	if err != nil {
-		return err // refused: the caller asserts on the refusal
+		return nil, err // refused: the caller asserts on the refusal
 	}
 
 	_, h := executorpbconnect.NewExecutorServiceHandler(handler)
 	go func() { _ = ServeInverted(t.Context(), upConn, h) }()
-	return nil
+	return upConn, nil
+}
+
+// A closed connection is gone until the executor redials: it must leave the
+// pool and be parked at once, not at the next health tick.
+func TestClosedConnectionLeavesThePoolWithoutAHealthTick(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newFakeStore("exec-closed")
+	p := New(store)
+	p.healthInterval = time.Hour
+
+	conn, err := joinViaUpgradeConn(t, p, &stubHandler{executorID: "exec-closed"})
+	c.NoError(err)
+	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
+
+	c.NoError(conn.Close())
+
+	waitFor(t, 5*time.Second, "closed executor to leave the pool", func() bool {
+		return len(p.Live()) == 0 && p.Parked("exec-closed")
+	})
 }
 
 func waitFor(t *testing.T, limit time.Duration, what string, cond func() bool) {

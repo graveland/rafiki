@@ -434,7 +434,8 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	// cannot happen before the SIGKILL even on a stalled host: the delivery
 	// after restart is a genuine REPLAY, never a live push the old daemon made
 	// and the first stream happened to miss.
-	script := writeAutoBgTurns(t, "sleep 8; echo "+marker, 1000)
+	done := filepath.Join(t.TempDir(), "job-done")
+	script := writeAutoBgTurns(t, "sleep 4; echo "+marker+"; touch '"+done+"'", 1000)
 
 	childID := spawnAutoBgChild(t, g.grantDaemon, script)
 	dropAutoBgInboxRows(t, dsn, childID)
@@ -444,7 +445,7 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	promptAutoBgChild(t, g.grantDaemon, childID)
 	// Barrier: the handoff proves the command was promoted to a running job
 	// BEFORE the daemon is killed, so the restart test cannot pass by the call
-	// never having started. The job minimum (sleep 8, promoted at ~1s) then
+	// never having started. The job minimum (sleep 4, promoted at ~1s) then
 	// outlives the kill below with room to spare.
 	es.waitEvent(t, userTextContains(childID, "moved to the background as job"), 30*time.Second)
 
@@ -454,16 +455,16 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	// the test would pass without exercising the no-loss property at all.
 	es.noEventWithin(t, userTextContainsAll(childID, "finished with exit code 0", marker), time.Second)
 
-	// SIGKILL the daemon before the job (sleep 8, promoted at ~1s) can exit:
+	// SIGKILL the daemon before the job (sleep 4, promoted at ~1s) can exit:
 	// no handleChildExit, no workspace release, no job teardown, and no ack,
 	// so the executor keeps the exit unacked.
 	g.kill(t)
 
 	// Let the job finish while the daemon is down: this is what makes the
-	// delivery below a REPLAY of an unacked exit rather than a live push. A
-	// bounded wait for an external process — the executor's job is unreachable
-	// from here, so there is no event to subscribe to, only its own 8s runtime.
-	time.Sleep(10 * time.Second)
+	// delivery below a REPLAY of an unacked exit rather than a live push. The
+	// executor's job is unreachable from here, so the wait is on the file the
+	// job touches as its last act.
+	waitForMarker(t, done, 30*time.Second)
 
 	// The successor recovers the child, the executor reconnects and replays the
 	// unacked exit, and the daemon hands the fragment to the event buffer.
@@ -475,7 +476,7 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 
 	// EXACTLY once: an exit acked after delivery must not be replayed again on
 	// the next subscribe. The window is far shorter than the resumed child's
-	// own new job (sleep 8), so a second occurrence can only be a duplicate of
+	// own new job (sleep 4), so a second occurrence can only be a duplicate of
 	// THIS exit.
 	mark := userTextContainsAll(childID, "finished with exit code 0", marker)
 	ck := assert.NewAborting(t)
@@ -562,7 +563,8 @@ func TestAutoBackgroundExitDuringDaemonRestartOverUnixSocketIsDelivered(t *testi
 	g.waitForLiveExecutors(t, 1)
 
 	marker := "autobg-" + uniqueSuffix()
-	script := writeAutoBgTurns(t, "sleep 8; echo "+marker, 1000)
+	done := filepath.Join(t.TempDir(), "job-done")
+	script := writeAutoBgTurns(t, "sleep 4; echo "+marker+"; touch '"+done+"'", 1000)
 
 	childID := spawnAutoBgChild(t, g.grantDaemon, script)
 	dropAutoBgInboxRows(t, dsn, childID)
@@ -576,8 +578,8 @@ func TestAutoBackgroundExitDuringDaemonRestartOverUnixSocketIsDelivered(t *testi
 	es.noEventWithin(t, userTextContainsAll(childID, "finished with exit code 0", marker), time.Second)
 
 	g.kill(t)
-	// The job (sleep 8, promoted at ~1s) finishes while the daemon is down.
-	time.Sleep(10 * time.Second)
+	// The job (sleep 4, promoted at ~1s) finishes while the daemon is down.
+	waitForMarker(t, done, 30*time.Second)
 
 	g.bootSuccessor(t)
 	waitForStatus(t, g.daemon, childID, "idle", 60*time.Second)
