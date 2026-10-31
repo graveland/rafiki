@@ -153,6 +153,37 @@ data: {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}
 	c.NoError(dec.Close(), "close")
 }
 
+// TestStreamInBandErrorKinds pins every rule classifyInBand applies. An SSE
+// error event carries no HTTP status, so its own type, its numeric code and its
+// message are all a sender has to route on, and each rule must be reachable.
+func TestStreamInBandErrorKinds(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want msg.ErrorKind
+	}{
+		{"rate limit type", `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`, msg.ErrRateLimit},
+		{"rate limit exceeded", `{"type":"error","error":{"type":"rate_limit_exceeded","message":"slow down"}}`, msg.ErrRateLimit},
+		{"overloaded type", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, msg.ErrOverloaded},
+		{"timeout type", `{"type":"error","error":{"type":"timeout_error","message":"timed out"}}`, msg.ErrTransient},
+		{"api error type", `{"type":"error","error":{"type":"api_error","message":"internal"}}`, msg.ErrTransient},
+		{"numeric code 500", `{"type":"error","error":{"type":"something_else","code":500,"message":"boom"}}`, msg.ErrTransient},
+		{"prompt too long message", `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens"}}`, msg.ErrPromptTooLarge},
+		{"bare envelope timeout", `{"type":"timeout_error","message":"timed out"}`, msg.ErrTransient},
+		{"fallthrough", `{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`, msg.ErrOther},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			dec := anthropic.NewStreamDecoder(io.NopCloser(strings.NewReader("event: error\ndata: " + tc.body + "\n\n")))
+			_, err := dec.Next()
+			apiErr := c.ErrorAs[*msg.APIError](err, "an in-band error must be an APIError")
+			c.Eq(tc.want, apiErr.Kind, "an in-band %s must classify as %v", tc.name, tc.want)
+			c.NoError(dec.Close(), "close")
+		})
+	}
+}
+
 // TestStreamTruncatedIsUnexpectedEOF pins that a stream cut before its
 // message_stop is a failure, not a short answer: a caller must not store a
 // half-generated turn as if the model had finished.
@@ -171,6 +202,44 @@ func TestStreamTruncatedIsUnexpectedEOF(t *testing.T) {
 		break
 	}
 	c.NoError(dec.Close(), "close")
+}
+
+// TestStreamTruncatedMidEventIsUnexpectedEOF pins the shapes a real truncation
+// takes. An SSE event is dispatched only once a blank line terminates it, so a
+// body that stops inside one — mid data line, after a message_stop's event name
+// but before its data, or right after the last complete event — never completed
+// the stream and must not be read as a short answer.
+func TestStreamTruncatedMidEventIsUnexpectedEOF(t *testing.T) {
+	start := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":1}}}
+
+`
+	cases := []struct{ name, body string }{
+		{"cut inside a data line", start + `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel`},
+		{"message_stop with no data line", start + `event: message_stop
+`},
+		{"cut after a complete event", start},
+		{"message_stop without its blank line", start + `event: message_stop
+data: {"type":"message_stop"}
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			dec := anthropic.NewStreamDecoder(io.NopCloser(strings.NewReader(tc.body)))
+			for {
+				_, err := dec.Next()
+				if err == nil {
+					continue
+				}
+				c.True(errors.Is(err, io.ErrUnexpectedEOF),
+					"a stream cut %s must end in io.ErrUnexpectedEOF, got %v", tc.name, err)
+				break
+			}
+			c.NoError(dec.Close(), "close")
+		})
+	}
 }
 
 // TestStreamServerToolStaysOpaque pins that a server-tool block is never
@@ -396,4 +465,5 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
 
 event: message_stop
 data: {"type":"message_stop"}
+
 `

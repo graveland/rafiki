@@ -70,7 +70,7 @@ func mergeFields(body []byte, fields map[string]any) ([]byte, error) {
 // encodeParams assembles the SDK's request params: the provider-independent
 // request, the dialect's own filtering, and the cache policy's markers.
 func encodeParams(req *msg.Request) (sdk.MessageNewParams, error) {
-	messages, remap := dropForeign(req.Messages)
+	messages, _ := dropForeign(req.Messages)
 	params := sdk.MessageNewParams{
 		Model:     sdk.Model(req.Model),
 		MaxTokens: req.MaxTokens,
@@ -114,7 +114,7 @@ func encodeParams(req *msg.Request) (sdk.MessageNewParams, error) {
 	if req.ThinkingBudget > 0 {
 		params.Thinking = sdk.ThinkingConfigParamOfEnabled(req.ThinkingBudget)
 	}
-	applyBreakpoints(params.Messages, req, remap)
+	applyBreakpoints(params.Messages, breakpoints(messages, req.Cache), req.Cache.MessagesTTL)
 	return params, nil
 }
 
@@ -152,23 +152,19 @@ func cacheControlFor(ttl msg.CacheTTL) (sdk.CacheControlEphemeralParam, bool) {
 	return sdk.CacheControlEphemeralParam{}, false
 }
 
-// applyBreakpoints writes the message markers Breakpoints places. remap carries
-// each original block's index in the converted messages (-1 for a dropped
-// block), because the foreign-block rule can remove blocks ahead of a marker.
-// A marker whose block did not survive is simply not written.
-func applyBreakpoints(messages []sdk.MessageParam, req *msg.Request, remap [][]int) {
-	cc, on := cacheControlFor(req.Cache.MessagesTTL)
+// applyBreakpoints writes the message markers breakpoints placed. The positions
+// index the filtered messages, which is exactly how params.Messages was built,
+// so a marker always lands on a block that survived the foreign-block rule.
+func applyBreakpoints(messages []sdk.MessageParam, positions []Position, ttl msg.CacheTTL) {
+	cc, on := cacheControlFor(ttl)
 	if !on {
 		return
 	}
-	for _, p := range Breakpoints(req) {
-		if p.Message < 0 || p.Message >= len(messages) || p.Message >= len(remap) {
+	for _, p := range positions {
+		if p.Message < 0 || p.Message >= len(messages) {
 			continue
 		}
-		block := -1
-		if p.Block >= 0 && p.Block < len(remap[p.Message]) {
-			block = remap[p.Message][p.Block]
-		}
+		block := p.Block
 		if block < 0 || block >= len(messages[p.Message].Content) {
 			continue
 		}

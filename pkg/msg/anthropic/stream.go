@@ -133,9 +133,9 @@ func (d *Decoder) InvalidInput(index int) (json.RawMessage, bool) {
 func (d *Decoder) Close() error { return d.r.Close() }
 
 // Next returns the next native event, or io.EOF once the stream's message_stop
-// has been read and the body ends. A body that ends without message_stop is
-// io.ErrUnexpectedEOF: a truncated stream is a failed response, not a short
-// one.
+// has been read and the body ends. A body that ends without message_stop —
+// including one cut mid-event — is io.ErrUnexpectedEOF: a truncated stream is a
+// failed response, not a short one.
 func (d *Decoder) Next() (msg.StreamEvent, error) {
 	for {
 		ev, ok, err := d.next()
@@ -192,6 +192,12 @@ func (d *Decoder) next() (msg.StreamEvent, bool, error) {
 
 // readEvent reads one SSE event: its event name and its data, which may be
 // spread over several data lines. A blank line terminates it.
+//
+// An event is dispatched only once that blank line arrives, as the SSE spec
+// says. A body that stops inside one — after the event name, or part way
+// through a data line — was truncated, and reports io.ErrUnexpectedEOF rather
+// than handing back a half-read event: a cut stream is a failed response, not a
+// short one.
 func (d *Decoder) readEvent() (string, []byte, error) {
 	var (
 		name string
@@ -224,7 +230,10 @@ func (d *Decoder) readEvent() (string, []byte, error) {
 		return "", nil, fmt.Errorf("anthropic: read stream: %w", err)
 	}
 	if name != "" || data != nil {
-		return name, data, nil // a last event with no terminating blank line
+		// The event never got its terminating blank line, so it never completed.
+		// Discarding it is what the SSE spec asks for; reporting EOF here would
+		// turn a truncated body into a clean end of stream.
+		return "", nil, io.ErrUnexpectedEOF
 	}
 	return "", nil, io.EOF
 }
