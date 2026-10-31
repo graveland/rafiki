@@ -18,6 +18,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"go.graveland.dev/rafiki/pkg/msg"
+	"go.graveland.dev/rafiki/pkg/msg/responses"
 	"go.graveland.dev/rafiki/pkg/providers"
 
 	"github.com/multigres/testkit/assert"
@@ -173,9 +174,9 @@ func TestResponsesStreamTranslatesFixture(t *testing.T) {
 
 	thinking, ok := resp.Content[0].(msg.Thinking)
 	c.Require().True(ok, "block 0 is %T, want msg.Thinking", resp.Content[0])
-	mode, id, blob, sigOK := ParseResponsesSignature(thinking.Sig.Value)
+	mode, id, blob, sigOK := responses.ParseSignature(thinking.Sig.Value)
 	c.True(sigOK, "signature %q is not a Responses signature", thinking.Sig.Value)
-	c.Eq(ResponsesModeAPI, mode, "signature mode")
+	c.Eq(responses.ModeAPI, mode, "signature mode")
 	c.Eq("rs_0cf3ceb209f8671c016ae18df1d0b8819baece265f64916983", id, "item id")
 	c.NotEmpty(blob, "encrypted content")
 
@@ -221,9 +222,9 @@ func TestResponsesNonStreamingResponse(t *testing.T) {
 				thinking, ok := resp.Content[0].(msg.Thinking)
 				c.Require().True(ok, "block 0 is %T", resp.Content[0])
 				c.Eq("weighing", thinking.Text, "thinking text")
-				mode, id, blob, sigOK := ParseResponsesSignature(thinking.Sig.Value)
+				mode, id, blob, sigOK := responses.ParseSignature(thinking.Sig.Value)
 				c.True(sigOK, "signature %q is not a Responses signature", thinking.Sig.Value)
-				c.Eq(ResponsesModeAPI, mode, "signature mode")
+				c.Eq(responses.ModeAPI, mode, "signature mode")
 				c.Eq("rs_1", id, "item id")
 				c.Eq("blob-1", blob, "blob")
 
@@ -249,7 +250,7 @@ func TestResponsesNonStreamingResponse(t *testing.T) {
 				c.Require().Len(resp.Content, 2, "blocks")
 				thinking, ok := resp.Content[0].(msg.Thinking)
 				c.Require().True(ok, "block 0 is %T", resp.Content[0])
-				c.Eq(ResponsesSignaturePrefix+"api:rs_nosig:", thinking.Sig.Value,
+				c.Eq(responses.Signature(responses.ModeAPI, "rs_nosig", ""), thinking.Sig.Value,
 					"a reasoning item with no encrypted_content must still be signed, with an empty blob")
 				text, ok := resp.Content[1].(msg.Text)
 				c.Require().True(ok, "block 1 is %T", resp.Content[1])
@@ -754,8 +755,8 @@ func TestResponsesSenderResendsOnlyOwnDialect(t *testing.T) {
 	req := minimalRequest()
 	req.Messages = []msg.Message{
 		{Role: msg.Assistant, Content: []msg.Block{
-			msg.Thinking{Text: "api reasoning", Sig: msg.Signature{Dialect: msg.DialectResponsesAPI, Value: responsesSignature(ResponsesModeAPI, "rs_api", "blob-api")}},
-			msg.Thinking{Text: "chatgpt reasoning", Sig: msg.Signature{Dialect: msg.DialectResponsesChatGPT, Value: responsesSignature(ResponsesModeChatGPT, "rs_gpt", "blob-gpt")}},
+			msg.Thinking{Text: "api reasoning", Sig: msg.Signature{Dialect: msg.DialectResponsesAPI, Value: responses.Signature(responses.ModeAPI, "rs_api", "blob-api")}},
+			msg.Thinking{Text: "chatgpt reasoning", Sig: msg.Signature{Dialect: msg.DialectResponsesChatGPT, Value: responses.Signature(responses.ModeChatGPT, "rs_gpt", "blob-gpt")}},
 			msg.Text{Text: "answer"},
 		}},
 		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "go on"}}},

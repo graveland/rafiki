@@ -18,10 +18,11 @@ import (
 // ---- streaming event fixtures ----
 //
 // These mirror rafiki's own (package-private) llm/conversation_stream_test.go
-// fixtures, rebuilt here against the exported llm.StreamingSender interface
-// so the engine's streaming wiring (Task B4) can be driven end to end with no
-// network. The tool_use case's input_json_delta fragmentation (including the
-// "{}"-replaced-not-appended first chunk) matches what the real API sends.
+// fixtures, rebuilt here as msg.StreamEvent values behind a scripted
+// llm.Sender (scriptedStreamingSender), so the engine's streaming wiring can be
+// driven end to end with no network. The tool_use case's input_json_delta
+// fragmentation (including the "{}"-replaced-not-appended first chunk) matches
+// what the real API sends.
 
 func streamMessageStart(model string) msg.StreamEvent {
 	return msg.MessageStart{ID: "msg_stream", Model: model,
@@ -363,7 +364,7 @@ func TestEngine_NonStreamingFallbackProducesWellFormedFrameSequence(t *testing.T
 	})
 }
 
-// ---- mid-flight timing fixtures (Task B5) ----
+// ---- mid-flight timing fixtures ----
 //
 // The four tests above all assert on frame TYPES and COUNTS, which are
 // identical whether the engine streams deltas as they arrive or buffers the

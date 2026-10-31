@@ -89,6 +89,63 @@ func TestHTTPSenderMakesOneAttemptOn529(t *testing.T) {
 	c.Eq(int32(1), hits.Load(), "attempts")
 }
 
+// TestHTTPSenderMapsRateLimitWithRetryAfter pins that a 429 refusal reaches the
+// layers above with everything the rate-limit loop and the operator need: the
+// status, the rate-limit class, the upstream's Retry-After as a duration, the
+// dialect that refused, and the provider's own message. Dropping the
+// Retry-After loses the backoff the rate-limit loop waits on, and dropping the
+// message leaves the operator with a bare status.
+func TestHTTPSenderMapsRateLimitWithRetryAfter(t *testing.T) {
+	const providerMessage = "Number of requests exceeded your rate limit"
+	cases := []struct {
+		name    string
+		kind    providers.Kind
+		dialect msg.Dialect
+		body    string
+	}{
+		{
+			name:    "anthropic",
+			kind:    providers.KindAnthropic,
+			dialect: msg.DialectAnthropic,
+			body:    `{"type":"error","error":{"type":"rate_limit_error","message":"` + providerMessage + `"}}`,
+		},
+		{
+			name:    "openai chat",
+			kind:    providers.KindOpenAI,
+			dialect: msg.DialectOpenAIChat,
+			body:    `{"error":{"code":429,"type":"rate_limit_exceeded","message":"` + providerMessage + `"}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "7")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			sender, err := SenderForKey(providers.Provider{
+				Name: "p", Kind: tc.kind, BaseURL: srv.URL,
+			}, "sk-test", nil)
+			c.Require().NoError(err, "SenderForKey")
+
+			_, err = sender.Send(context.Background(), nativeRequest(t), msg.EncodeOptions{})
+			c.Require().Error(err, "Send must fail on 429")
+
+			var apiErr *msg.APIError
+			c.Require().True(errors.As(err, &apiErr), "error %T is not a *msg.APIError", err)
+			c.Eq(http.StatusTooManyRequests, apiErr.Status, "status")
+			c.Eq(msg.ErrRateLimit, apiErr.Kind, "kind")
+			c.Eq(7*time.Second, apiErr.RetryAfter, "Retry-After header as a duration")
+			c.Eq(tc.dialect, apiErr.Dialect, "dialect")
+			c.Eq(providerMessage, apiErr.Message, "the provider's own error message")
+		})
+	}
+}
+
 // TestHTTPSenderSetsSessionHeaderOpenRouter pins the sticky-routing header that
 // keeps a whole conversation on one backend for prompt-cache locality. Every
 // OpenRouter sender must carry it, and SenderForKey is the only correct way to
@@ -259,10 +316,9 @@ func openAIConversation(t *testing.T, srv *httptest.Server, opts ...ClientOption
 // openAIChatOK is a minimal well-formed Chat Completions response body.
 const openAIChatOK = `{"id":"c1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"after trim"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`
 
-// TestTrimRetryOnOpenAIChatPromptTooLarge pins the new behaviour this wave
-// buys: a context overflow from a Chat Completions endpoint is classified
-// ErrPromptTooLarge by the codec, so Conversation.Send trims and retries
-// instead of failing the turn.
+// TestTrimRetryOnOpenAIChatPromptTooLarge pins that a context overflow from a
+// Chat Completions endpoint is classified ErrPromptTooLarge by the codec, so
+// Conversation.Send trims and retries instead of failing the turn.
 func TestTrimRetryOnOpenAIChatPromptTooLarge(t *testing.T) {
 	c := assert.NewAborting(t)
 	var hits atomic.Int32
