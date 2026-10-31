@@ -131,11 +131,15 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 	if meta.ConversationID == "" {
 		return nil, errors.New("llm: a :batch send needs a conversation id")
 	}
-	// The parked call's body is the dialect's own request body. Encoding it
-	// before the turn is begun means an unencodable request leaves no open turn;
-	// the Anthropic codec also drops a foreign thinking signature here, so the
-	// recorded request is the request parked.
-	body, err := msganthropic.Encode(p.req, msg.EncodeOptions{})
+	// The parked call's body is the dialect's own request body — the SAME body
+	// the live call would send, extras included (the provider preferences
+	// applyProviderPrefs assembled, a provider's own extras, the caller's).
+	// pkg/batch strips model, stream and provider from it, so the per-call body
+	// the batch envelope carries is exactly the live body minus those three.
+	// Encoding it before the turn is begun means an unencodable request leaves
+	// no open turn; the Anthropic codec also drops a foreign thinking signature
+	// here, so the recorded request is the request parked.
+	body, err := msganthropic.Encode(p.req, msg.EncodeOptions{Extra: p.extra})
 	if err != nil {
 		return nil, fmt.Errorf("llm: %s: encode batch request: %w", p.req.Model, err)
 	}

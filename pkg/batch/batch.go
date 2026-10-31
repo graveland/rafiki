@@ -27,9 +27,11 @@ import (
 )
 
 // Error is the only error type the Batcher delivers for a failed parked call.
-// It must stay PLAIN — never wrap an *anthropic.Error, context.DeadlineExceeded
-// or a net error in it — because pkg/agentloop retries errors that look like
-// those, and a retried parked send would resubmit an already-created batch.
+// It must stay PLAIN — never wrap a retryable *msg.APIError,
+// context.DeadlineExceeded or a net error in it — because pkg/agentloop retries
+// errors that look like those, and a retried parked send would resubmit an
+// already-created batch. A batch outcome is terminal, so its failure is a plain
+// *Error even when the item's own error said something retryable.
 // Every message is a string assembled from the batch outcome.
 type Error struct {
 	Msg string

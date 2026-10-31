@@ -387,11 +387,12 @@ func testBody(model string) json.RawMessage {
 		`"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
 }
 
-// testBodyWithExtras is testBody carrying the two keys the batch envelope owns
-// elsewhere (stream, provider): requestJSON must strip both.
+// testBodyWithExtras is testBody carrying the keys the batch envelope owns
+// elsewhere (stream, provider) and one extra it does NOT own ("reasoning"):
+// requestJSON must strip the first three and keep the rest.
 func testBodyWithExtras(model string) json.RawMessage {
 	return json.RawMessage(`{"model":"` + model + `","max_tokens":32,"stream":false,` +
-		`"provider":{"order":["vendor"]},` +
+		`"provider":{"order":["vendor"]},"reasoning":{"effort":"high"},` +
 		`"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
 }
 
@@ -499,7 +500,7 @@ func TestBatchBodyShape(t *testing.T) {
 		_, ok := callBody[banned]
 		c.False(ok, "call body contains %q", banned)
 	}
-	for _, kept := range []string{"max_tokens", "messages"} {
+	for _, kept := range []string{"max_tokens", "messages", "reasoning"} {
 		_, ok := callBody[kept]
 		c.True(ok, "call body lost %q", kept)
 	}

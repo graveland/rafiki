@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -33,8 +34,8 @@ func prefixRequest() *msg.Request {
 // turns of one conversation share a prefix hash exactly when the provider's
 // cacheable prefix is unchanged, and the messages are the part that grows every
 // turn. A caller's top-level extra fields are not part of msg.Request at all —
-// they ride EncodeOptions and never reach the request — so they cannot move the
-// hash either.
+// they ride EncodeOptions and are merged into the encoded body afterwards — so
+// they cannot move the hash either.
 func TestNativePrefixHashIgnoresMessagesAndExtra(t *testing.T) {
 	c := assert.NewCollecting(t)
 	base := prefixRequest()
@@ -47,12 +48,22 @@ func TestNativePrefixHashIgnoresMessagesAndExtra(t *testing.T) {
 		msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "next"}}})
 	c.Eq(hash, nativePrefixHash(grown), "the prefix hash changed with the message history")
 
-	// Encoding with extras must not change the request the hash reads: the
-	// extras are an EncodeOptions concern, and nativePrefixHash sees the
-	// request alone.
-	extra := map[string]any{"provider": map[string]any{"only": []string{"together"}}, "top_k": 7}
+	// Extras are not a msg.Request field at all: they ride msg.EncodeOptions and
+	// are merged into the encoded body afterwards. Encode the same request with
+	// and without them — proving the extras really reach the wire body, so this
+	// half is not a no-op — and check the request, and so the hash, is untouched.
+	extra := map[string]any{
+		"provider":  map[string]any{"only": []string{"together"}},
+		"reasoning": map[string]any{"effort": "high"},
+	}
+	plain, err := msganthropic.Encode(prefixRequest(), msg.EncodeOptions{})
+	c.Require().NoError(err, "encode without extras")
+	withExtras, err := msganthropic.Encode(base, msg.EncodeOptions{Extra: extra})
+	c.Require().NoError(err, "encode with extras")
+	c.NotEq(string(plain), string(withExtras), "the fixture's extras never reached the encoded body")
+	c.StrContains(string(withExtras), `"reasoning"`, "a non-provider extra must reach the encoded body")
+	c.StrContains(string(withExtras), `"provider"`, "the provider extra must reach the encoded body")
 	c.Eq(hash, nativePrefixHash(base), "the prefix hash changed after an extra-field build")
-	c.NotEmpty(extra, "the fixture must carry extras")
 }
 
 // TestNativePrefixHashChangesWithSystem pins the other half: the system prompt

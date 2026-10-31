@@ -350,8 +350,11 @@ func TestBatchParkStripsForeignThinking(t *testing.T) {
 
 // TestBatchParkSendsAnthropicBody pins what actually leaves for the provider:
 // the parked call's per-call body is the ANTHROPIC wire form of the native
-// request — model, system, messages, tools, tool_choice and the cache policy's
-// breakpoint — and it never asks for a stream (a batch call cannot stream).
+// request — model, system, messages, tools, tool_choice, the cache policy's
+// breakpoint and the request's extras — and it never asks for a stream (a
+// batch call cannot stream). The extras matter: pkg/batch strips model, stream
+// and provider from this body and keeps the rest, so the per-call body the
+// envelope carries is exactly the live body minus those three.
 func TestBatchParkSendsAnthropicBody(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
@@ -368,16 +371,27 @@ func TestBatchParkSendsAnthropicBody(t *testing.T) {
 		Cache:     CachePolicy{SystemTTL: Cache5m, MessagesTTL: CacheOff, Breakpoints: 1},
 	}
 	ctx := context.Background()
-	p := &preparedSend{ctx: ctx, span: trace.SpanFromContext(ctx), primary: "openrouter", req: req}
+	// The extras prepareSend resolved — the provider preferences
+	// applyProviderPrefs assembled plus a provider's own fields — must ride the
+	// parked body, or a parked call silently loses what a live call sends.
+	extras := map[string]any{
+		"provider":  map[string]any{"only": []string{"together"}},
+		"reasoning": map[string]any{"effort": "high"},
+	}
+	p := &preparedSend{ctx: ctx, span: trace.SpanFromContext(ctx), primary: "openrouter", req: req, extra: extras}
 	_, err := c.parkSend(ctx, p.span, SendMeta{ConversationID: "conv", Ordinal: 3}, p)
 	ck.Require().NoError(err, "parkSend")
 	ck.Require().Eq(1, b.calls, "batcher called")
 
 	var body struct {
-		Model     string `json:"model"`
-		MaxTokens int64  `json:"max_tokens"`
-		Stream    *bool  `json:"stream"`
-		System    []struct {
+		Model     string         `json:"model"`
+		MaxTokens int64          `json:"max_tokens"`
+		Stream    *bool          `json:"stream"`
+		Provider  map[string]any `json:"provider"`
+		Reasoning *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		System []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"system"`
@@ -412,5 +426,8 @@ func TestBatchParkSendsAnthropicBody(t *testing.T) {
 	ck.Eq("run", body.Tools[0].Description, "tool description")
 	ck.Require().NotNil(body.ToolChoice, "tool_choice")
 	ck.Eq("bash", body.ToolChoice.Name, "forced tool")
+	ck.Require().NotNil(body.Reasoning, "the parked body lost a non-provider extra: %s", b.lastBody)
+	ck.Eq("high", body.Reasoning.Effort, "non-provider extra value")
+	ck.Require().NotNil(body.Provider, "the parked body lost the provider extras: %s", b.lastBody)
 	ck.StrContains(string(b.lastBody), `"cache_control"`, "the cache policy's breakpoint must ride the parked body")
 }
