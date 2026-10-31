@@ -113,14 +113,6 @@ type invalidInputs interface {
 // first few identify the shape and a trailing count covers the rest.
 const maxCaptureAnomalies = 10
 
-// maxConsecutiveCaptureSkips bounds how many events reassembly may skip in a
-// row before it stops consuming the stream. A recoverable skip ADVANCES the
-// decoder, so a real stream resets this constantly; only an error that repeats
-// on every call — a sticky scanner error nobody classified, a decoder that
-// refuses the same event forever — reaches it. Without it, one unclassified
-// sticky error would spin this loop forever and the turn would never persist.
-const maxConsecutiveCaptureSkips = 100
-
 // parseSSE walks the event stream once through the shared Anthropic codec,
 // accumulating the events into a native response so the caller can persist the
 // finished message as canonical JSON instead of the raw stream.
@@ -144,28 +136,23 @@ const maxConsecutiveCaptureSkips = 100
 // still a parse error: there is nothing to persist.
 //
 // The skip is for CONTENT, never for a read: a stream read error is sticky (see
-// msganthropic.ErrStreamRead), so it ends the loop with what accumulated, as
-// does a run of skips long enough to mean the loop is not advancing.
+// msganthropic.ErrStreamRead), so it ends the loop with what accumulated. Skips
+// are deliberately NOT capped: a content-level skip consumes an event, so a
+// finite body always terminates, and a cap would discard the tail of a
+// legitimate turn — the final message_delta and its usage — over a long run of
+// events the codec merely did not model.
 func parseSSE(body []byte) (string, CapturedUsage, []byte, CaptureDiagnostics, error) {
 	dec := msganthropic.NewStreamDecoder(io.NopCloser(bytes.NewReader(body)))
 	acc := msg.NewAccumulator()
 	var diag CaptureDiagnostics
 	skipped := 0
-	consecutive := 0
 	skip := func(reason string) {
 		skipped++
-		consecutive++
 		if len(diag.Anomalies) < maxCaptureAnomalies {
 			diag.Anomalies = append(diag.Anomalies, reason)
 		}
 	}
-	// stopAfterSkips reports whether this run of consecutive skips means the
-	// loop is not making progress and must stop consuming the stream.
-	stopAfterSkips := func() bool {
-		return consecutive >= maxConsecutiveCaptureSkips
-	}
 	seen := false
-	stoppedByCap := false
 	for {
 		ev, err := dec.Next()
 		if errors.Is(err, io.EOF) {
@@ -187,21 +174,10 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, CaptureDiagnostics, e
 				break
 			}
 			skip(err.Error())
-			if stopAfterSkips() {
-				stoppedByCap = true
-				break
-			}
 			continue
 		}
-		// A decoded event means the decoder advanced, so the run of skips (if
-		// any) is over even when the accumulator refuses this event.
-		consecutive = 0
 		if err := acc.Add(ev); err != nil {
 			skip(err.Error())
-			if stopAfterSkips() {
-				stoppedByCap = true
-				break
-			}
 			continue
 		}
 		seen = true
@@ -209,13 +185,7 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, CaptureDiagnostics, e
 	if cerr := dec.Close(); cerr != nil {
 		return "", CapturedUsage{}, nil, diag, fmt.Errorf("reassemble response stream: %w", cerr)
 	}
-	switch {
-	case stoppedByCap:
-		// The loop stopped on its own rather than at end of stream, so the
-		// trailing entry is what says why: a run of skips this long means the
-		// decoder is not advancing.
-		diag.Anomalies = append(diag.Anomalies, fmt.Sprintf("%d event(s) skipped; stopped consuming the stream after %d consecutive skips", skipped, consecutive))
-	case skipped > len(diag.Anomalies):
+	if skipped > len(diag.Anomalies) {
 		diag.Anomalies = append(diag.Anomalies, fmt.Sprintf("%d further event(s) skipped", skipped-len(diag.Anomalies)))
 	}
 	// Nothing reassembling means the stream wasn't Anthropic wire format at all

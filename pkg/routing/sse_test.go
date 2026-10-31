@@ -4,6 +4,7 @@ package routing
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -632,28 +633,53 @@ func TestParseCapturedResponseSSEOverLongLineStopsTheCapture(t *testing.T) {
 	c.Eq("hi", stored.Content[0].Text, "text accumulated before the bad line")
 }
 
-// TestParseCapturedResponseSSEStopsAfterTooManyConsecutiveSkips pins the second
-// half of the same rule: the skip is bounded. An error that repeats on every
-// call without being a read error must not spin the loop either, so a run of
-// consecutive skips long enough to mean no progress ends consumption and says so
-// in the trailing anomaly.
-func TestParseCapturedResponseSSEStopsAfterTooManyConsecutiveSkips(t *testing.T) {
+// TestParseCapturedResponseSSELongRunOfSkipsStillReachesTheTerminalEvents pins
+// that the best-effort skip is NOT capped. A content-level skip consumes an
+// event, so a finite body always terminates without a cap; a cap would instead
+// cut the loop off mid-stream and discard the tail of a legitimate turn — the
+// final message_delta and the usage it carries, which is the billing row. A long
+// run of events the codec merely did not model must cost anomalies, never the
+// stop reason or the final usage.
+func TestParseCapturedResponseSSELongRunOfSkipsStillReachesTheTerminalEvents(t *testing.T) {
 	c := assert.NewCollecting(t)
+	const skips = 150
 	stream := "event: message_start\n" +
-		`data: {"type":"message_start","message":{"id":"msg_skips","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1}}}` + "\n\n"
-	// Each of these is a content-level refusal the codec reports per event; a
-	// stream made entirely of them never advances past the first few.
+		`data: {"type":"message_start","message":{"id":"msg_skips","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":11,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n"
+	// Each of these is a content-level refusal the codec reports per event, and
+	// the decoder consumes every one of them: the loop advances.
 	refusal := "event: content_block_delta\n" +
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"future_delta","text":"x"}}` + "\n\n"
-	stream += strings.Repeat(refusal, maxConsecutiveCaptureSkips+5)
+	stream += strings.Repeat(refusal, skips)
+	stream += "event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":99}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
 
 	stop, u, canonical, diag, err := ParseCapturedResponse("text/event-stream", []byte(stream))
-	c.Require().NoError(err, "the message_start is still the record")
-	c.Eq("", stop, "no message_delta was reached")
+	c.Require().NoError(err, "ParseCapturedResponse")
+	c.Eq("end_turn", stop, "the message_delta past the skips is still reached")
 	c.Eq(int64(11), u.InputTokens, "usage from the message_start")
-	c.Require().Len(diag.Anomalies, maxCaptureAnomalies+1, "the reasons, then the stop")
-	c.StrContains(diag.Anomalies[len(diag.Anomalies)-1], "stopped consuming the stream", "the trailing anomaly says why consumption ended")
-	c.True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
+	c.Eq(int64(99), u.OutputTokens, "the final usage is not lost to the skips")
+	c.Require().Len(diag.Anomalies, maxCaptureAnomalies+1, "the bounded reasons, then a trailing count")
+	c.Eq(fmt.Sprintf("%d further event(s) skipped", skips-maxCaptureAnomalies), diag.Anomalies[len(diag.Anomalies)-1], "the trailing anomaly counts the rest")
+	for _, a := range diag.Anomalies {
+		c.NotStrContains(a, "stopped consuming the stream", "consumption is never cut off by a skip count")
+	}
+	var stored struct {
+		StopReason string            `json:"stop_reason"`
+		Usage      map[string]int64  `json:"usage"`
+		Content    []json.RawMessage `json:"content"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Eq("end_turn", stored.StopReason, "stored stop reason")
+	c.Eq(int64(99), stored.Usage["output_tokens"], "stored output tokens")
+	c.Require().Len(stored.Content, 1, "the text block that accumulated")
 }
 
 // assertCanonicalJSON compares two JSON documents as values, never as bytes:
