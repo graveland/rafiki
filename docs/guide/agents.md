@@ -138,13 +138,16 @@ tree:
 
 | Tool | Purpose |
 |---|---|
-| `agent_spawn` | start a subagent (`kind: fundi\|claude`); returns a handle immediately, does not block |
+| `agent_spawn` | start a subagent (`kind: fundi\|claude`); returns a handle immediately, does not block. `fork_from` or `from_tag` starts it from a point in another agent's history, by reference |
 | `agent_list` | your subtree — id, name, model, status, assigned task |
 | `agent_view` | a descendant's transcript: the newest entries, or a page (`before=`/`after=`), one entry in full (`entry=`), or a search (`find=`) by the cursors its markers print |
 | `agent_send` | steer a descendant mid-flight, or give it more work |
 | `agent_route` | steer a descendant's provider routing — `prefer`/`sort`/`quant`; `only` is operator-only |
 | `agent_kill` | stop a descendant and everything below it |
 | `agent_models` | the models you may spawn on |
+| `agent_tag` | create a named, scoped handle others in its scope may fork from, or move one by `tag_id` + `expect_node_id` |
+| `agent_untag` | tombstone a tag you created, or one of your descendants created |
+| `agent_tags` | the tags you can see, nearest scope first |
 
 Every verb naming another agent is checked against stored lineage (an agent
 may only see/steer/kill its own descendants) — read from `childstore`, never

@@ -2641,9 +2641,9 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Thirty-two, materialized per caller: twenty-nine come from the same
+**Tools.** Thirty-five, materialized per caller: thirty-two come from the same
 registered blueprints the fundi registry serves (`DefaultBlueprint` — a fundi
-child gets the same twenty-nine, subject to the same per-caller declines;
+child gets the same thirty-two, subject to the same per-caller declines;
 `pymodule_start` is one of them, which a fundi child with a spawner
 materializes from its own registry), and three (`pymodule_list`,
 `pymodule_run`, and the face's own `pymodule_start` wrapper over that registry
@@ -2664,7 +2664,7 @@ transport error, and never a successful result carrying the text.
 
 | Tool | Purpose |
 |---|---|
-| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used) |
+| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used). `fork_from` (`child_id` + `cursor`) or `from_tag` starts it from a point in another agent's history, by reference |
 | `agent_list` | Every agent the daemon knows: id, name, model, current status, working directory, assigned task handle |
 | `agent_view` | Transcript of one agent — prompts, replies, tool calls with their results; newest entries by default, paged/searched/expanded by cursor (`before`, `after`, `entry`, `find`; only `find`+`after` combine) on a stored conversation, newest page only for a live/exited child without one; a deliberate check, not a polling loop. A cursor names a row of the transcript, so one minted before a retract (`m:<ordinal>` of a row the head no longer reaches) refuses rather than silently returning its neighbours |
 | `agent_send` | Deliver a prompt to a running agent |
@@ -2672,6 +2672,9 @@ transport error, and never a successful result carrying the text.
 | `agent_set_budget` | Change a TOP-LEVEL agent's USD budget (the exception above) |
 | `agent_route` | Change where a child's model requests are served, on its next request: a bracket-free spec delta (`prefer=`, `sort=`, `quant=`) merged over the child's stored routing. A child caller steers only its own subtree and may not set `only=`; a user caller is an operator and may route any child at any depth |
 | `agent_models` | Query the daemon's model catalog with filter/sort; a bare call returns a summary, rows come from a narrowed query |
+| `agent_tag` | Create a tag — a named, scoped handle others in its scope may fork from — or move one by `tag_id` + `expect_node_id` (a stale expected node is `FailedPrecondition`); `replace` is a user credential's alone |
+| `agent_untag` | Tombstone a live tag by `tag_id`; only its creator, that child's ancestors (closed included) or a user credential may |
+| `agent_tags` | Live tags visible to the caller, nearest scope first (lineage, then tree, then owner), filtered by `name_prefix` and `limit`; with `tag_id`, that tag's whole history |
 | `task_add` | Add a task (imperative `content`, present-continuous `active_form`; optional `parent` handle to nest); returns the full list with handles |
 | `task_update` | Change task statuses (pending, in_progress, blocked, completed, failed), touching only the named handles |
 | `task_drop` | Abandon a task with a required `reason`; drops its subtasks |
