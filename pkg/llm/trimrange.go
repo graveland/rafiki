@@ -11,16 +11,93 @@ import (
 	"go.graveland.dev/rafiki/pkg/msg"
 )
 
-// forRequest is n's message as pkg/llm sends it. pkg/llm is the fundi
-// harness: a node another harness wrote passes through that harness's
-// ForeignReplay, which drops what is false here and marks its injected text
-// for the encoder. It depends only on the node, so replayed history encodes
-// to the same bytes every turn.
-func forRequest(n *convpkg.Node) msg.Message {
-	if n.Origin == convpkg.OriginUnclassified || n.Origin == convpkg.OriginFundi {
-		return n.Msg
+// borrowedThinkingPlaceholder stands in for a borrowed assistant message whose
+// only content was reasoning: a message is never emptied.
+const borrowedThinkingPlaceholder = "(borrowed reasoning omitted)"
+
+// replayContext is one request's replay state: which conversation is asking,
+// which tool names the request offers, and one replayer per foreign origin.
+//
+// It is built fresh per request and never shared: a replayer carries state
+// between messages, so two requests sharing one would make the second's bytes
+// depend on the first's history.
+type replayContext struct {
+	convID string
+	has    func(name string) bool
+	// replayers is created lazily, one per origin the history actually holds.
+	replayers map[convpkg.Origin]harness.Replayer
+}
+
+// newReplayContext builds the replay state for a request from convID offering
+// tools.
+func newReplayContext(convID string, tools []msg.ToolDef) *replayContext {
+	names := make(map[string]struct{}, len(tools))
+	for _, t := range tools {
+		names[t.Name] = struct{}{}
 	}
-	return harness.For(n.Origin).ForeignReplay(n.Msg)
+	return &replayContext{
+		convID:    convID,
+		has:       func(name string) bool { _, ok := names[name]; return ok },
+		replayers: make(map[convpkg.Origin]harness.Replayer, 1),
+	}
+}
+
+// replayer returns the replayer for origin, creating it on first use. A nil
+// context has none: nothing is replayed.
+func (rc *replayContext) replayer(origin convpkg.Origin) harness.Replayer {
+	if rc == nil {
+		return nil
+	}
+	if r, ok := rc.replayers[origin]; ok {
+		return r
+	}
+	r := harness.For(origin).Replayer(rc.has)
+	rc.replayers[origin] = r
+	return r
+}
+
+// forRequest is n's message as pkg/llm sends it. pkg/llm is the fundi
+// harness: a node another harness wrote passes through that harness's replayer,
+// which renames the tool calls this run can serve, renders the rest as text and
+// drops what is false here. A borrowed assistant node's thinking is stripped
+// too, because its signature is bound to the upstream that minted it. A nil rc
+// replays nothing.
+//
+// It depends only on the node sequence and rc, so replayed history encodes to
+// the same bytes every turn.
+func forRequest(n *convpkg.Node, rc *replayContext) msg.Message {
+	if n.Origin == convpkg.OriginUnclassified || n.Origin == convpkg.OriginFundi {
+		return stripBorrowedThinking(n, n.Msg, rc)
+	}
+	if r := rc.replayer(n.Origin); r != nil {
+		return stripBorrowedThinking(n, r.Replay(n.Msg), rc)
+	}
+	return stripBorrowedThinking(n, harness.For(n.Origin).ForeignReplay(n.Msg), rc)
+}
+
+// stripBorrowedThinking drops every thinking block from a borrowed assistant
+// message — a node another conversation wrote, whose signature only its own
+// upstream accepts — keeping a placeholder when nothing else is left. Own nodes
+// are returned unchanged.
+func stripBorrowedThinking(n *convpkg.Node, m msg.Message, rc *replayContext) msg.Message {
+	if rc == nil || n.ConversationID == rc.convID || m.Role != msg.Assistant {
+		return m
+	}
+	kept := make([]msg.Block, 0, len(m.Content))
+	for _, b := range m.Content {
+		if _, ok := b.(msg.Thinking); ok {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	if len(kept) == len(m.Content) {
+		return m
+	}
+	if len(kept) == 0 {
+		kept = append(kept, msg.Text{Text: borrowedThinkingPlaceholder})
+	}
+	m.Content = kept
+	return m
 }
 
 // mergeForRequestRows is mergeForRequest plus rowStart[i], the index in
@@ -41,11 +118,11 @@ func forRequest(n *convpkg.Node) msg.Message {
 // notice, an environment update) that no provider request can carry as a turn,
 // and dropping it keeps the turn alive instead of failing on a row the model
 // never wrote.
-func mergeForRequestRows(history []*convpkg.Node) (msgs []msg.Message, rowStart []int, err error) {
+func mergeForRequestRows(history []*convpkg.Node, rc *replayContext) (msgs []msg.Message, rowStart []int, err error) {
 	out := make([]msg.Message, 0, len(history))
 	start := make([]int, 0, len(history))
 	for i, n := range history {
-		nm := forRequest(n)
+		nm := forRequest(n, rc)
 		if nm.Role == msg.System {
 			continue
 		}

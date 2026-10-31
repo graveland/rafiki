@@ -54,7 +54,7 @@ func TestMergeForRequestReplacesEmptyNameToolUses(t *testing.T) {
 		msg.ToolResult{ToolUseID: "id_broken", Content: []msg.Block{msg.Text{Text: "error: empty name"}}, IsError: true},
 	}}}
 
-	result, err := mergeForRequest([]*convpkg.Node{assistant, user})
+	result, err := mergeForRequest([]*convpkg.Node{assistant, user}, nil)
 	c.Require().NoError(err)
 
 	c.Eq(2, len(result), "two messages")
@@ -82,7 +82,7 @@ func TestMergeForRequestReplacesOnlyEmptyNames(t *testing.T) {
 		msg.ToolUse{ID: "id_2", Name: "read", Input: json.RawMessage(`{"path":"/tmp"}`)},
 	}}}
 
-	result, err := mergeForRequest([]*convpkg.Node{assistant})
+	result, err := mergeForRequest([]*convpkg.Node{assistant}, nil)
 	c.Require().NoError(err)
 
 	c.Eq(1, len(result))
@@ -102,7 +102,7 @@ func TestMergeForRequestLeavesUserMessagesUntouched(t *testing.T) {
 		msg.ToolUse{ID: "id_broken", Name: "", Input: json.RawMessage(`{}`)},
 	}}}
 
-	result, err := mergeForRequest([]*convpkg.Node{assistant, user})
+	result, err := mergeForRequest([]*convpkg.Node{assistant, user}, nil)
 	c.Require().NoError(err)
 
 	c.Eq(2, len(result))
@@ -126,7 +126,7 @@ func TestMergeForRequestMultipleReplacedToolUses(t *testing.T) {
 		msg.ToolResult{ToolUseID: "id_d", Content: []msg.Block{msg.Text{Text: "ok d"}}},
 	}}}
 
-	result, err := mergeForRequest([]*convpkg.Node{assistant, user})
+	result, err := mergeForRequest([]*convpkg.Node{assistant, user}, nil)
 	c.Require().NoError(err)
 
 	// Assistant: 4 blocks — two kept (read, bash), two replaced with text

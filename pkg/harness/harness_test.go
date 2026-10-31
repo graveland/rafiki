@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
@@ -27,4 +28,20 @@ func TestForUnclassifiedAndFundiAreNoOps(t *testing.T) {
 
 	got := harness.For(conv.OriginClaudeCode).Mark(in)
 	c.True(got.Content[0].(msg.Text).Injected, "claude-code marks its own reminder")
+}
+
+// TestNoneReplayerIsIdentity pins that an origin with no harness package has
+// nothing to replay: its replayer returns every message unchanged.
+func TestNoneReplayerIsIdentity(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	r := harness.For(conv.OriginFundi).Replayer(func(string) bool { return true })
+	in := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.Text{Text: reminder},
+		msg.ToolUse{ID: "t1", Name: "Read", Input: json.RawMessage(`{"file_path":"/tmp/a"}`)},
+	}}
+	c.EqDeep(in, r.Replay(in), "the none replayer rewrites nothing")
+
+	unclassified := harness.For(conv.OriginUnclassified).Replayer(nil)
+	c.EqDeep(in, unclassified.Replay(in), "and neither does the unclassified one")
 }

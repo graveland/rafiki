@@ -76,6 +76,10 @@ type ConversationRef struct {
 	ExternalRef      string
 	Cwd              string
 	RepoRoot         string
+	// ForkFromNodeID, when set, makes the new conversation a fork of that
+	// message row: its history is the source's up to the node, by reference.
+	// It is written once, at creation, and never updated.
+	ForkFromNodeID string
 }
 
 // EnsureConversation creates the conversation row if it doesn't already exist
@@ -85,8 +89,35 @@ type ConversationRef struct {
 // new conversation is inserted and its DB-generated id (uuidv7() default) is
 // returned. EnsureConversation does not correlate by external_ref; use
 // EnsureConversationByExternalRef for the client-driven correlation path.
+//
+// With ref.ForkFromNodeID the insert selects the fork edge and the next
+// ordinal from the node itself, so a node that does not exist inserts nothing
+// and is refused. An existing row is never updated: a fork's edge is immutable.
 func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationRef) (string, error) {
 	if ref.ID != "" {
+		if ref.ForkFromNodeID != "" {
+			var id string
+			err := s.pool.QueryRow(ctx,
+				`INSERT INTO conversations.conversation (id, owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, fork_from, next_ordinal)
+				 SELECT $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10, m.id, m.ordinal + 1
+				   FROM conversations.conversation_message m WHERE m.id = $11::uuid
+				 ON CONFLICT (id) DO NOTHING RETURNING id::text`,
+				ref.ID, nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
+				nullify(ref.Cwd), nullify(ref.RepoRoot), ref.ForkFromNodeID,
+			).Scan(&id)
+			if err == nil {
+				return id, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return "", err
+			}
+			// Nothing inserted: the conversation already exists (a resume) or
+			// the node does not.
+			if err := s.checkForkNode(ctx, ref.ForkFromNodeID); err != nil {
+				return "", err
+			}
+			return ref.ID, nil
+		}
 		_, err := s.pool.Exec(ctx,
 			`INSERT INTO conversations.conversation (id, owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
 			 VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
@@ -99,13 +130,47 @@ func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationR
 		return ref.ID, nil
 	}
 	var id string
-	err := s.pool.QueryRow(ctx,
+	var err error
+	if ref.ForkFromNodeID != "" {
+		err = s.pool.QueryRow(ctx,
+			`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, fork_from, next_ordinal)
+			 SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9, m.id, m.ordinal + 1
+			   FROM conversations.conversation_message m WHERE m.id = $10::uuid
+			 RETURNING id::text`,
+			nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
+			nullify(ref.Cwd), nullify(ref.RepoRoot), ref.ForkFromNodeID,
+		).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errNoForkNode(ref.ForkFromNodeID)
+		}
+		return id, err
+	}
+	err = s.pool.QueryRow(ctx,
 		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
 		 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text`,
 		nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
 		nullify(ref.Cwd), nullify(ref.RepoRoot),
 	).Scan(&id)
 	return id, err
+}
+
+// errNoForkNode is the refusal for a fork whose source node is not stored.
+func errNoForkNode(id string) error {
+	return fmt.Errorf("capture: fork-from node %s does not exist", id)
+}
+
+// checkForkNode reports whether a fork's source node exists, so an insert that
+// produced no row can be told apart from a node that does not.
+func (s *CaptureStore) checkForkNode(ctx context.Context, id string) error {
+	var ok bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM conversations.conversation_message WHERE id = $1::uuid)`, id).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return errNoForkNode(id)
+	}
+	return nil
 }
 
 // ResolveThreadConversation returns the conversation row a thread's turns
@@ -203,6 +268,34 @@ func (s *CaptureStore) SessionFamilyExists(ctx context.Context, session string) 
 // case is bounded by X-Rafiki-Session being per-session.
 func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref ConversationRef) (string, error) {
 	if ref.ExternalRef != "" {
+		if ref.ForkFromNodeID != "" {
+			var id string
+			err := s.pool.QueryRow(ctx,
+				`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, fork_from, next_ordinal)
+				 SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9, m.id, m.ordinal + 1
+				   FROM conversations.conversation_message m WHERE m.id = $10::uuid
+				 ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
+				 RETURNING id::text`,
+				nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
+				nullify(ref.Cwd), nullify(ref.RepoRoot), ref.ForkFromNodeID,
+			).Scan(&id)
+			if err == nil {
+				return id, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return "", err
+			}
+			// Nothing inserted: the session's conversation already exists (a
+			// resume, whose fork edge never changes) or the node does not.
+			if err := s.checkForkNode(ctx, ref.ForkFromNodeID); err != nil {
+				return "", err
+			}
+			err = s.pool.QueryRow(ctx,
+				`SELECT id::text FROM conversations.conversation
+				  WHERE external_ref=$1 AND driven_by=$2 ORDER BY created_at LIMIT 1`,
+				ref.ExternalRef, ref.DrivenBy).Scan(&id)
+			return id, err
+		}
 		// Race-safe: the partial unique index on (external_ref, driven_by) makes
 		// concurrent sessions collide on INSERT; the winner gets its id back, the
 		// loser gets no row and falls through to SELECT the existing one.
@@ -229,7 +322,7 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 	return s.EnsureConversation(ctx, ConversationRef{
 		OriginEntrypoint: ref.OriginEntrypoint, DrivenBy: ref.DrivenBy,
 		OwnerUserID: ref.OwnerUserID, Persona: ref.Persona, Model: ref.Model, Name: ref.Name, ExternalRef: ref.ExternalRef,
-		Cwd: ref.Cwd, RepoRoot: ref.RepoRoot,
+		Cwd: ref.Cwd, RepoRoot: ref.RepoRoot, ForkFromNodeID: ref.ForkFromNodeID,
 	})
 }
 

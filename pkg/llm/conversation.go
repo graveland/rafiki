@@ -91,11 +91,12 @@ type Conversation struct {
 
 type convConfig struct {
 	// identity/creation
-	externalRef string
-	ownerUserID string
-	entrypoint  string
-	persona     string
-	name        string
+	externalRef  string
+	forkFromNode string
+	ownerUserID  string
+	entrypoint   string
+	persona      string
+	name         string
 
 	// send defaults
 	model          string // resolved to a concrete id at Conversation()
@@ -119,6 +120,13 @@ type ConvOption func(*convConfig)
 // e.g. a Slack thread ts — race-safe via the store's partial unique index.
 func ByExternalRef(ref string) ConvOption {
 	return func(c *convConfig) { c.externalRef = ref }
+}
+
+// ForkFrom creates the conversation as a fork of nodeID: its history is the
+// source's up to that node, by reference. Ignored when the conversation
+// already exists (a resume), since a fork's edge never changes.
+func ForkFrom(nodeID string) ConvOption {
+	return func(c *convConfig) { c.forkFromNode = nodeID }
 }
 
 // NewConversation creates a fresh conversation owned by ownerUserID — a
@@ -251,6 +259,9 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	cfg.model = resolved
 
 	if c.capture == nil {
+		if cfg.forkFromNode != "" {
+			return nil, errors.New("llm: a fork needs a conversation store")
+		}
 		// Store-less (in-memory) conversation: full loop semantics, no
 		// capture and no Resume. ID is local-only.
 		id := "mem-" + randomID()
@@ -262,6 +273,7 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	ref := capture.ConversationRef{
 		OriginEntrypoint: cfg.entrypoint, DrivenBy: string(store.DrivenByServer),
 		OwnerUserID: cfg.ownerUserID, Persona: cfg.persona, Model: cfg.model, Name: cfg.name, ExternalRef: cfg.externalRef,
+		ForkFromNodeID: cfg.forkFromNode,
 	}
 	var convID string
 	if cfg.externalRef != "" {
@@ -495,7 +507,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*ms
 			if err != nil {
 				return 0, nil, nil, "", false
 			}
-			msgs, rowStart, err := mergeForRequestRows(h)
+			msgs, rowStart, err := mergeForRequestRows(h, newReplayContext(conv.ID, scfg.tools))
 			if err != nil {
 				return 0, nil, nil, "", false
 			}
@@ -503,7 +515,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*ms
 		}
 	}
 
-	msgs, rowStart, err := mergeForRequestRows(history)
+	msgs, rowStart, err := mergeForRequestRows(history, newReplayContext(conv.ID, scfg.tools))
 	if err != nil {
 		return nil, fmt.Errorf("llm: %w", err)
 	}
@@ -643,8 +655,8 @@ func randomID() string {
 //
 // The merge rules live in mergeForRequestRows, which also reports where each
 // wire message began; a request that does not need the row mapping calls this.
-func mergeForRequest(history []*convpkg.Node) ([]msg.Message, error) {
-	msgs, _, err := mergeForRequestRows(history)
+func mergeForRequest(history []*convpkg.Node, rc *replayContext) ([]msg.Message, error) {
+	msgs, _, err := mergeForRequestRows(history, rc)
 	return msgs, err
 }
 

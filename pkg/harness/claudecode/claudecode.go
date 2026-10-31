@@ -2,8 +2,9 @@
 // text blocks in a user message are its injected reminders, and which of those
 // reminders are false once the history is replayed under another harness.
 //
-// It is the only code that knows the wrapper's shape. It satisfies
-// harness.Harness structurally and must not import pkg/harness.
+// It is the only code that knows the wrapper's shape. It must not import
+// pkg/harness: pkg/harness wraps this package's Harness and Replayer in its own
+// interfaces.
 package claudecode
 
 import (

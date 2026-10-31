@@ -32,7 +32,7 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 		textRow(6, msg.Assistant, "a6"),
 		textRow(7, msg.User, "u7"),
 	}
-	msgs, rowStart, err := mergeForRequestRows(history)
+	msgs, rowStart, err := mergeForRequestRows(history, nil)
 	c.Require().NoError(err, "merge")
 	c.Eq(7, len(msgs), "wire messages")
 	c.EqDeep([]int{0, 1, 2, 3, 4, 6, 7}, rowStart, "rowStart")
@@ -57,7 +57,7 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 		textRow(3, msg.User, "u3"),
 		textRow(4, msg.Assistant, "a4"),
 	}
-	msgs2, rowStart2, err := mergeForRequestRows(mergedAnchor)
+	msgs2, rowStart2, err := mergeForRequestRows(mergedAnchor, nil)
 	c.Require().NoError(err, "merge")
 	c.Eq(4, len(msgs2), "wire messages with a merged anchor")
 	c.EqDeep([]int{0, 2, 3, 4}, rowStart2, "rowStart with a merged anchor")
@@ -132,9 +132,9 @@ func TestMergeForRequestRowsMatchesMergeForRequest(t *testing.T) {
 	for name, history := range cases {
 		t.Run(name, func(t *testing.T) {
 			c := assert.NewAborting(t)
-			msgs, rowStart, err := mergeForRequestRows(history)
+			msgs, rowStart, err := mergeForRequestRows(history, nil)
 			c.Require().NoError(err, "merge")
-			merged, err := mergeForRequest(history)
+			merged, err := mergeForRequest(history, nil)
 			c.Require().NoError(err, "mergeForRequest")
 			if !reflect.DeepEqual(merged, msgs) {
 				t.Fatalf("mergeForRequestRows output differs from mergeForRequest:\n%#v\n%#v",
@@ -185,7 +185,7 @@ func TestForRequestDropsModelReminderFromClaudeCodeNodes(t *testing.T) {
 		),
 	}
 
-	msgs, _, err := mergeForRequestRows(history)
+	msgs, _, err := mergeForRequestRows(history, nil)
 	c.Require().NoError(err, "merge")
 	c.Require().Len(msgs, 1, "one user message")
 	c.Eq(msg.User, msgs[0].Role, "role")
@@ -208,7 +208,7 @@ func TestForRequestLeavesFundiAndUnclassifiedNodesUntouched(t *testing.T) {
 	}
 
 	for _, origin := range []convpkg.Origin{convpkg.OriginFundi, convpkg.OriginUnclassified} {
-		got := forRequest(originRow(0, origin, msg.User, blocks...))
+		got := forRequest(originRow(0, origin, msg.User, blocks...), nil)
 		c.Eq(msg.User, got.Role, "%q: role", origin)
 		c.EqDeep(blocks, got.Content, "%q: every block survives, none marked", origin)
 	}
@@ -234,9 +234,9 @@ func TestForRequestIsDeterministic(t *testing.T) {
 		msg.Text{Text: "hello"},
 	}}
 
-	first, _, err := mergeForRequestRows(history)
+	first, _, err := mergeForRequestRows(history, nil)
 	c.Require().NoError(err, "first merge")
-	second, _, err := mergeForRequestRows(history)
+	second, _, err := mergeForRequestRows(history, nil)
 	c.Require().NoError(err, "second merge")
 
 	c.EqDeep(first, second, "two passes over the same history agree")
@@ -259,11 +259,139 @@ func TestMergeForRequestFiltersBeforeMerging(t *testing.T) {
 		),
 	}
 
-	msgs, _, err := mergeForRequestRows(history)
+	msgs, _, err := mergeForRequestRows(history, nil)
 	c.Require().NoError(err, "merge")
 	c.Require().Len(msgs, 1, "the two user rows merge into one message")
 	c.EqDeep([]msg.Block{
 		msg.Text{Text: "first"},
 		msg.Text{Text: "second"},
 	}, msgs[0].Content, "the Claude Code row was filtered before the merge")
+}
+
+// nodeRow builds one fixture node written by origin in conversation convID.
+func nodeRow(convID string, ordinal int, origin convpkg.Origin, role msg.Role, blocks ...msg.Block) *convpkg.Node {
+	return &convpkg.Node{
+		Ref:    convpkg.Ref{ConversationID: convID, Ordinal: ordinal},
+		Msg:    msg.Message{Role: role, Content: blocks},
+		Origin: origin,
+	}
+}
+
+// toolDefs builds the send's tool set from names alone.
+func toolDefs(names ...string) []msg.ToolDef {
+	out := make([]msg.ToolDef, 0, len(names))
+	for _, n := range names {
+		out = append(out, msg.ToolDef{Name: n})
+	}
+	return out
+}
+
+// claudeToolHistory is a borrowed Claude Code turn: a call to Read and a call
+// to Task, each answered in the next user row.
+func claudeToolHistory(convID string) []*convpkg.Node {
+	return []*convpkg.Node{
+		nodeRow(convID, 0, convpkg.OriginClaudeCode, msg.Assistant,
+			msg.ToolUse{ID: "t_read", Name: "Read", Input: json.RawMessage(`{"file_path":"/tmp/a"}`)},
+			msg.ToolUse{ID: "t_task", Name: "Task", Input: json.RawMessage(`{"description":"find it"}`)},
+		),
+		nodeRow(convID, 1, convpkg.OriginClaudeCode, msg.User,
+			msg.ToolResult{ToolUseID: "t_read", Content: []msg.Block{msg.Text{Text: "file body"}}},
+			msg.ToolResult{ToolUseID: "t_task", Content: []msg.Block{msg.Text{Text: "subagent report"}}},
+		),
+	}
+}
+
+// TestForRequestReplaysClaudeToolsAgainstTheSendsTools pins that a borrowed
+// Claude Code call becomes a call to the fundi tool of the same name when the
+// send offers it, and that its result stays a tool_result.
+func TestForRequestReplaysClaudeToolsAgainstTheSendsTools(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	msgs, _, err := mergeForRequestRows(claudeToolHistory("src"), newReplayContext("fork", toolDefs("read")))
+	c.Require().NoError(err, "merge")
+	c.Require().Len(msgs, 2, "assistant and user")
+
+	use, ok := msgs[0].Content[0].(msg.ToolUse)
+	c.Require().True(ok, "the Read call is still a tool_use")
+	c.Eq("read", use.Name, "renamed to the fundi tool")
+	c.Eq("t_read", use.ID, "the id is untouched")
+	c.Eq(`{"file_path":"/tmp/a"}`, string(use.Input), "the input is untouched")
+
+	result, ok := msgs[1].Content[0].(msg.ToolResult)
+	c.Require().True(ok, "the result of a renamed call stays a tool_result")
+	c.Eq("t_read", result.ToolUseID, "same id")
+
+	_, ok = msgs[0].Content[1].(msg.Text)
+	c.True(ok, "the Task call the send cannot serve became text")
+	_, ok = msgs[1].Content[1].(msg.Text)
+	c.True(ok, "and so did its result")
+}
+
+// TestForRequestLeavesFundiOriginUntouched pins the other side of the replay:
+// a fundi node's tool calls are fundi's already, whatever names they carry.
+func TestForRequestLeavesFundiOriginUntouched(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	blocks := []msg.Block{
+		msg.ToolUse{ID: "t_read", Name: "Read", Input: json.RawMessage(`{"file_path":"/tmp/a"}`)},
+	}
+	got := forRequest(nodeRow("fork", 0, convpkg.OriginFundi, msg.Assistant, blocks...),
+		newReplayContext("fork", toolDefs("read")))
+	c.EqDeep(msg.Message{Role: msg.Assistant, Content: blocks}, got, "a fundi node is sent as stored")
+}
+
+// TestBorrowedThinkingIsStripped pins that reasoning another conversation wrote
+// never reaches the request: its signature belongs to the upstream that minted
+// it, and a fork routes independently of its source.
+func TestBorrowedThinkingIsStripped(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	history := []*convpkg.Node{
+		nodeRow("src", 0, convpkg.OriginClaudeCode, msg.Assistant,
+			msg.Thinking{Text: "reasoning", Sig: msg.Signature{Dialect: msg.DialectAnthropic, Value: "sig"}},
+			msg.Text{Text: "the answer"},
+		),
+	}
+
+	msgs, _, err := mergeForRequestRows(history, newReplayContext("fork", nil))
+	c.Require().NoError(err, "merge")
+	c.Require().Len(msgs, 1, "one assistant message")
+	c.EqDeep([]msg.Block{msg.Text{Text: "the answer"}}, msgs[0].Content,
+		"the borrowed thinking is gone and the rest is kept")
+}
+
+// TestBorrowedThinkingOnlyMessageKeepsPlaceholder pins that stripping never
+// empties a message: a borrowed assistant row that was only reasoning keeps a
+// placeholder in its place.
+func TestBorrowedThinkingOnlyMessageKeepsPlaceholder(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	history := []*convpkg.Node{
+		nodeRow("src", 0, convpkg.OriginFundi, msg.Assistant,
+			msg.Thinking{Text: "reasoning", Sig: msg.Signature{Dialect: msg.DialectAnthropic, Value: "sig"}},
+		),
+	}
+
+	msgs, _, err := mergeForRequestRows(history, newReplayContext("fork", nil))
+	c.Require().NoError(err, "merge")
+	c.Require().Len(msgs, 1, "the message survives")
+	c.EqDeep([]msg.Block{msg.Text{Text: "(borrowed reasoning omitted)"}}, msgs[0].Content,
+		"a placeholder stands in for the reasoning")
+}
+
+// TestOwnThinkingIsNeverStripped pins the boundary: the same block on a node of
+// the requesting conversation is that conversation's own reasoning and stays.
+func TestOwnThinkingIsNeverStripped(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	thinking := msg.Thinking{Text: "reasoning", Sig: msg.Signature{Dialect: msg.DialectAnthropic, Value: "sig"}}
+	history := []*convpkg.Node{
+		nodeRow("fork", 0, convpkg.OriginClaudeCode, msg.Assistant, thinking, msg.Text{Text: "the answer"}),
+	}
+
+	msgs, _, err := mergeForRequestRows(history, newReplayContext("fork", nil))
+	c.Require().NoError(err, "merge")
+	c.Require().Len(msgs, 1, "one assistant message")
+	c.EqDeep([]msg.Block{thinking, msg.Text{Text: "the answer"}}, msgs[0].Content,
+		"own thinking is kept")
 }

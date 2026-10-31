@@ -47,7 +47,7 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	if instructions != "" {
 		prompt += "\n\nAdditional instructions for the summary:\n" + instructions
 	}
-	reqMsgs, err := mergeForRequest(history)
+	reqMsgs, err := mergeForRequest(history, newReplayContext(conv.ID, scfg.tools))
 	if err != nil {
 		return false, err
 	}
