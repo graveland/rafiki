@@ -746,13 +746,48 @@ func headText(content []byte) string {
 // align with DecomposeRequest's index-in-request ordinals once history is merged
 // or trimmed. Best-effort: returns an error for the caller to Warn; never panics.
 func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) error {
+	envelope, breakpoints, err := splitEnvelopeAndBreakpoints(reqBody)
+	if err != nil {
+		return fmt.Errorf("store turn prefix: %w", err)
+	}
+	var idx []int
+	if err := json.Unmarshal(breakpoints, &idx); err != nil {
+		return fmt.Errorf("store turn prefix: read breakpoints: %w", err)
+	}
+	return s.storeTurnPrefix(ctx, convID, turnID, createdAt, envelope, idx, prefixHash)
+}
+
+// StoreTurnPrefixBreakpoints is StoreTurnPrefix with the cache breakpoints
+// supplied by the caller. The codec that will place the markers already knows
+// where they land, so a caller assembling a native request does not have to
+// encode markers into a body only to read them back out.
+//
+// body is request-shaped (an object whose "messages" array may be empty): the
+// shared splitter derives the stored envelope from it exactly as it does for a
+// real request, so prefix_content keeps one shape on both paths. breakpoints are
+// the message indices carrying markers; nil is recorded as [] (none), never
+// NULL.
+func (s *CaptureStore) StoreTurnPrefixBreakpoints(ctx context.Context, convID, turnID string, createdAt time.Time, body []byte, breakpoints []int, prefixHash string) error {
+	envelope, _, err := splitEnvelopeAndBreakpoints(body)
+	if err != nil {
+		return fmt.Errorf("store turn prefix: %w", err)
+	}
+	return s.storeTurnPrefix(ctx, convID, turnID, createdAt, envelope, breakpoints, prefixHash)
+}
+
+// storeTurnPrefix writes a turn's already-split envelope and explicit
+// breakpoints: the shared write path behind both public entry points.
+func (s *CaptureStore) storeTurnPrefix(ctx context.Context, convID, turnID string, createdAt time.Time, envelope []byte, breakpoints []int, prefixHash string) error {
 	changed, err := s.prefixChanged(ctx, convID, createdAt, prefixHash)
 	if err != nil {
 		return err
 	}
-	envelope, breakpoints, err := splitEnvelopeAndBreakpoints(reqBody)
+	if breakpoints == nil {
+		breakpoints = []int{}
+	}
+	bps, err := json.Marshal(breakpoints)
 	if err != nil {
-		return fmt.Errorf("store turn prefix: %w", err)
+		return fmt.Errorf("store turn prefix: marshal breakpoints: %w", err)
 	}
 	// cache_breakpoints is a per-request property (always recorded); prefix_content
 	// is stored only when the envelope changed from the previous turn.
@@ -760,14 +795,14 @@ func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID strin
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET prefix_content=$3, cache_breakpoints=$4
 			  WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, conv.StorableJSON(envelope), breakpoints); err != nil {
+			turnID, createdAt, conv.StorableJSON(envelope), bps); err != nil {
 			return fmt.Errorf("store turn prefix: prefix_content: %w", err)
 		}
 		return nil
 	}
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE conversations.conversation_turn SET cache_breakpoints=$3 WHERE id=$1::uuid AND created_at=$2`,
-		turnID, createdAt, breakpoints); err != nil {
+		turnID, createdAt, bps); err != nil {
 		return fmt.Errorf("store turn prefix: breakpoints: %w", err)
 	}
 	return nil

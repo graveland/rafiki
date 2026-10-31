@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/telemetry"
@@ -36,10 +36,14 @@ func IsBatchModel(id string) bool { return strings.HasSuffix(id, BatchSuffix) }
 // pkg/batch; the method set is exactly this — pkg/llm must not import
 // pkg/batch (interface only), and no batch DB or Batch-API HTTP lives here.
 //
-// Park MUST NOT return or wrap an *anthropic.Error, context.DeadlineExceeded,
-// or a net/syscall error: a retryable error would make pkg/agentloop's
-// isRetryable resubmit the batch up to 7 times. Terminal batch failures are a
-// plain error.
+// body is the per-call request body, already encoded for the parked model's
+// dialect (the Anthropic Messages wire form); the returned bytes are that
+// dialect's raw response body. pkg/llm owns both conversions, so pkg/batch
+// never decodes a provider message.
+//
+// Park MUST NOT return or wrap a *msg.APIError, context.DeadlineExceeded, or a
+// net/syscall error: a retryable error would make pkg/agentloop's isRetryable
+// resubmit the batch up to 7 times. Terminal batch failures are a plain error.
 //
 // provider is the raw JSON of the NARROWED provider object the batch envelope
 // carries at its TOP level — {"only": [...]} — or nil when nothing pins the
@@ -47,7 +51,7 @@ func IsBatchModel(id string) bool { return strings.HasSuffix(id, BatchSuffix) }
 // probe: sort, data_collection, zdr and ignore are each a submit-time 400
 // "Unrecognized key"), so this is never the live path's full provider prefs.
 type Batcher interface {
-	Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error)
+	Park(ctx context.Context, customID, model string, body json.RawMessage, provider json.RawMessage) (json.RawMessage, error)
 }
 
 // BatchCustomID is "<conversationID>-<ordinal>" — the key a parked call is
@@ -96,39 +100,44 @@ func batchProviderJSON(only []string) (json.RawMessage, error) {
 	return json.RawMessage(raw), nil
 }
 
-// firstCall reports whether params contains no assistant-role message —
-// i.e. this send is the conversation's first call, the one that parks.
-func firstCall(params anthropic.MessageNewParams) bool {
-	for _, m := range params.Messages {
-		if m.Role == anthropic.MessageParamRoleAssistant {
+// firstCall reports whether req contains no assistant-role message — i.e.
+// this send is the conversation's first call, the one that parks.
+func firstCall(req *msg.Request) bool {
+	for _, m := range req.Messages {
+		if m.Role == msg.Assistant {
 			return false
 		}
 	}
 	return true
 }
 
-// parkSend is SendParams's batch branch: the request parks with the batcher
-// instead of going through a live sender. Runs only after prepareSend has
-// established that params.Model ends in :batch (the park invariant) — the
-// caller checked that, never re-derive it here.
+// parkSend is send's batch branch: the request parks with the batcher instead
+// of going through a live sender. Runs only after prepareSend has established
+// that p.req.Model ends in :batch (the park invariant) — the caller checked
+// that, never re-derive it here.
 //
 // It skips the model gate, the breaker and the fallback chain entirely (a
 // parked call names no provider to gate or fail over between), write-aheads
-// the turn exactly as the live path does, and resolves the turn with the
-// batch result. c.guard.Observe is deliberately NOT called: a batch response
-// names no provider, so there is nothing to observe. Capture still records
-// primary as the turn's upstream — the provider the send WOULD have gone
-// live through — so conversation_turn.upstream stays a provider name on the
-// batch path too (insights joins it, never a model id).
-// batchOnly is the only-list batchOnlyList computed for this park (prepareSend
-// resolves it while it still holds the declaration); nil = no pin, no provider
-// key.
-func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, params anthropic.MessageNewParams, primary string, batchOnly []string) (*anthropic.Message, error) {
+// the turn exactly as the live path does, and resolves the turn with the batch
+// result. c.guard.Observe is deliberately NOT called: a batch response names no
+// provider, so there is nothing to observe. Capture still records primary as
+// the turn's upstream — the provider the send WOULD have gone live through — so
+// conversation_turn.upstream stays a provider name on the batch path too
+// (insights joins it, never a model id).
+func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p *preparedSend) (*msg.Response, error) {
 	if c.batcher == nil {
-		return nil, errors.New("llm: " + string(params.Model) + ": no batcher configured")
+		return nil, errors.New("llm: " + p.req.Model + ": no batcher configured")
 	}
 	if meta.ConversationID == "" {
 		return nil, errors.New("llm: a :batch send needs a conversation id")
+	}
+	// The parked call's body is the dialect's own request body. Encoding it
+	// before the turn is begun means an unencodable request leaves no open turn;
+	// the Anthropic codec also drops a foreign thinking signature here, so the
+	// recorded request is the request parked.
+	body, err := msganthropic.Encode(p.req, msg.EncodeOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("llm: %s: encode batch request: %w", p.req.Model, err)
 	}
 
 	if meta.OnBatchWait != nil {
@@ -136,13 +145,7 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 		defer meta.OnBatchWait(false)
 	}
 
-	// A parked call can name an Anthropic batch model in a conversation that
-	// started on OpenAI Responses, and the sender-level strip lives in
-	// sdkSender's New/NewStreaming, which this path never reaches. Strip here,
-	// before the write-ahead, so the recorded request is the request parked.
-	params = withoutForeignThinking(params, false)
-
-	ref := c.beginTurn(ctx, meta, params)
+	ref := c.beginTurn(ctx, meta, p.req, p.primary)
 	// ref.convID equals meta.ConversationID for a captured conversation; when
 	// capture is off (store-less), beginTurn leaves it empty and the caller's
 	// id is the only handle the custom_id can carry.
@@ -152,37 +155,42 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 	}
 	ctx = WithSessionID(ctx, ref.convID)
 	ctx, hdrs := withRawTraceHeaders(ctx)
+	// A parked call makes no HTTP request in this process, so the transport
+	// never fills the capture point in. The body is known here — it is exactly
+	// what the batcher will submit — so record it, and leave the path empty:
+	// the Batch API's own paths are the batcher's business.
+	hdrs.reqBody = body
 
-	provider, err := batchProviderJSON(batchOnly)
+	provider, err := batchProviderJSON(p.batchOnly)
 	if err != nil {
-		return nil, fmt.Errorf("llm: %s: marshal batch provider: %w", params.Model, err)
+		return nil, fmt.Errorf("llm: %s: marshal batch provider: %w", p.req.Model, err)
 	}
 	start := time.Now()
-	resp, err := c.batcher.Park(ctx, BatchCustomID(convID, meta.Ordinal), string(params.Model), params, provider)
+	raw, err := c.batcher.Park(ctx, BatchCustomID(convID, meta.Ordinal), p.req.Model, body, provider)
 	latency := int(time.Since(start).Milliseconds())
 	if err != nil {
 		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
 		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err, hdrs)
+		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, latency, err, hdrs)
 		return nil, err
 	}
 
-	span.SetAttributes(
-		attribute.Int64("rafiki.tokens.input", resp.Usage.InputTokens),
-		attribute.Int64("rafiki.tokens.output", resp.Usage.OutputTokens),
-		attribute.Int64("rafiki.tokens.cache_read", resp.Usage.CacheReadInputTokens),
-		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
-		attribute.String("gen_ai.response.model", resp.Model),
-		attribute.Int64("gen_ai.usage.input_tokens", resp.Usage.InputTokens),
-		attribute.Int64("gen_ai.usage.output_tokens", resp.Usage.OutputTokens),
-		attribute.Int64("gen_ai.usage.cache_read.input_tokens", resp.Usage.CacheReadInputTokens),
-		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", resp.Usage.CacheCreationInputTokens),
-		attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(resp.StopReason)}),
-	)
-	if ref.capturing {
-		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, primary, latency)
+	resp, derr := msganthropic.DecodeResponse(raw)
+	if derr != nil {
+		wrapped := fmt.Errorf("llm: %s: decode batch response: %w", p.req.Model, derr)
+		span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
+		span.SetStatus(codes.Error, "")
+		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
+		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, latency, wrapped, hdrs)
+		return nil, wrapped
 	}
-	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, primary, latency, nil, hdrs)
+
+	setUsageAttrs(span, resp)
+	warnNewExt(c.logger, resp)
+	if ref.capturing {
+		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, p.primary, latency)
+	}
+	c.recordRawTrace(ctx, meta, ref.turnID, p.req, resp, 200, p.primary, latency, nil, hdrs)
 	return resp, nil
 }

@@ -7,6 +7,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/msg"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -84,4 +86,36 @@ func TestModelPricingCostOfArgumentOrder(t *testing.T) {
 	c.False(got.Input != testPricing.PromptUSD || got.Output != 0 || got.CacheRead != 0 || got.CacheWrite != 0, "CostOf(1,0,0,0) = %+v, want only Input charged at the prompt rate", got)
 	got = testPricing.CostOf(0, 0, 0, 1)
 	c.False(got.CacheWrite != testPricing.CacheWriteUSD || got.Input != 0, "CostOf(0,0,0,1) = %+v, want only CacheWrite charged", got)
+}
+
+// TestUsageCostNilIsZero pins the presence rule at the pricing boundary: a
+// count the provider did not report prices as zero, and a nil count must never
+// read as anything else (a panic, or a fabricated number).
+func TestUsageCostNilIsZero(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	c.Eq(CostBreakdown{}, testPricing.UsageCost(msg.Usage{}), "an all-nil usage is free")
+
+	// A nil field beside a reported one: only the reported one is charged.
+	got := testPricing.UsageCost(msg.Usage{
+		Input:  msg.Ptr(1000),
+		Output: msg.Ptr(200),
+	})
+	want := CostBreakdown{
+		Input:  1000 * testPricing.PromptUSD,
+		Output: 200 * testPricing.CompletionUSD,
+	}
+	want.Total = want.Input + want.Output
+	c.Eq(want, got, "UsageCost with cache counts unreported")
+
+	// The same numbers through the native and the SDK-shaped adapter agree.
+	sdk := testPricing.Cost(anthropic.Usage{
+		InputTokens: 1000, OutputTokens: 200,
+		CacheReadInputTokens: 5000, CacheCreationInputTokens: 400,
+	})
+	native := testPricing.UsageCost(msg.Usage{
+		Input: msg.Ptr(1000), Output: msg.Ptr(200),
+		CacheRead: msg.Ptr(5000), CacheWrite: msg.Ptr(400),
+	})
+	c.Eq(sdk, native, "UsageCost and Cost disagree for the same counts")
 }

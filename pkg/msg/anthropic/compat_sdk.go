@@ -189,6 +189,36 @@ func ToSDKMessage(r *msg.Response) (*sdk.Message, error) {
 	return &out, nil
 }
 
+// ResponseJSON renders a native response as the body this package records: id,
+// model, stop reason, the served-by provider when present, the usage counts the
+// provider actually reported, and the content blocks. It is the canonical
+// recorded form (capture's turn response and the raw trace), so it carries
+// exactly the fields the native model has — never the SDK's own wire shape.
+func ResponseJSON(r *msg.Response) ([]byte, error) {
+	if r == nil {
+		return nil, errors.New("anthropic: nil response")
+	}
+	content, err := EncodeContent(msg.Message{Role: msg.Assistant, Content: r.Content})
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{
+		"id":          r.ID,
+		"model":       r.Model,
+		"stop_reason": r.StopReason.String(),
+		"usage":       usageBody(r.Usage),
+		"content":     json.RawMessage(content),
+	}
+	if r.Provider != "" {
+		body["provider"] = r.Provider
+	}
+	out, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: encode response: %w", err)
+	}
+	return out, nil
+}
+
 // SDKEventAdapter converts native stream events back into the SDK's events, for
 // the one wave in which the client's stream handler and accumulator are still
 // SDK-typed.

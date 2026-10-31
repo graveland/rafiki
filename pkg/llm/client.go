@@ -4,6 +4,8 @@ package llm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -451,15 +453,137 @@ type SendMeta struct {
 	TrimFrom, TrimTo *int
 }
 
+// SendParams is the SDK-typed entry point: it converts params to a native
+// request, sends it, and converts the reply back. Hosts that build their own
+// params (sc's core-dump analyzer, the provider-guard config test) use it;
+// every conversation send calls send directly with a native request.
+func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	req, extra, err := msganthropic.RequestFromSDK(params)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.send(ctx, meta, req, extra)
+	if err != nil {
+		return nil, err
+	}
+	return msganthropic.ToSDKMessage(resp)
+}
+
+// send write-aheads the turn, routes the call through the primary's breaker
+// with fallback, and completes/fails the turn. Capture is best-effort: a broken
+// store degrades to pass-through, never blocks the call. Every invocation
+// inserts its own turn row and always resolves it.
+//
+// extra is the caller's top-level body fields (an SDK params' ExtraFields, for
+// the SendParams face); prepareSend merges the provider object and the
+// provider's configured extras onto a copy of it.
+func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extra map[string]any) (*msg.Response, error) {
+	p, err := c.prepareSend(ctx, meta, req, extra)
+	if err != nil {
+		return nil, err
+	}
+	ctx, span := p.ctx, p.span
+	defer span.End()
+
+	if IsBatchModel(p.req.Model) {
+		return c.parkSend(ctx, span, meta, p)
+	}
+
+	if err := c.modelGate.beforeSend(ctx, p.req.Model); err != nil {
+		return nil, err
+	}
+
+	ref := c.beginTurn(ctx, meta, p.req, p.primary)
+	ctx = WithSessionID(ctx, ref.convID)
+	ctx, hdrs := withRawTraceHeaders(ctx)
+
+	start := time.Now()
+	resp, servedBy, err := c.callModel(ctx, span, p.primary, p.fallbacks, p.req, p.extra, p.spec)
+	latency := int(time.Since(start).Milliseconds())
+	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
+
+	if err != nil {
+		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
+		span.SetStatus(codes.Error, "")
+		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
+		// Raw trace: non-streaming error path.
+		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, latency, err, hdrs)
+		return nil, err
+	}
+
+	setUsageAttrs(span, resp)
+	c.observeProvider(ref, p.req.Model, servedBy, resp)
+	warnNewExt(c.logger, resp)
+
+	if ref.capturing {
+		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, servedBy, latency)
+	}
+	// Raw trace: non-streaming success path.
+	c.recordRawTrace(ctx, meta, ref.turnID, p.req, resp, 200, servedBy, latency, nil, hdrs)
+	return resp, nil
+}
+
+// setUsageAttrs records a response's model and token counts on the span. Every
+// send path uses it, so the attribute keys and the nil-as-zero reading cannot
+// drift between them.
+func setUsageAttrs(span trace.Span, resp *msg.Response) {
+	u := resp.Usage
+	span.SetAttributes(
+		attribute.Int64("rafiki.tokens.input", msg.Val(u.Input)),
+		attribute.Int64("rafiki.tokens.output", msg.Val(u.Output)),
+		attribute.Int64("rafiki.tokens.cache_read", msg.Val(u.CacheRead)),
+		attribute.Int64("rafiki.tokens.cache_creation", msg.Val(u.CacheWrite)),
+		attribute.String("gen_ai.response.model", resp.Model),
+		attribute.Int64("gen_ai.usage.input_tokens", msg.Val(u.Input)),
+		attribute.Int64("gen_ai.usage.output_tokens", msg.Val(u.Output)),
+		attribute.Int64("gen_ai.usage.cache_read.input_tokens", msg.Val(u.CacheRead)),
+		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", msg.Val(u.CacheWrite)),
+		attribute.StringSlice("gen_ai.response.finish_reasons", []string{resp.StopReason.String()}),
+	)
+}
+
+// observeProvider feeds the provider cache guard — but only with evidence. An
+// OpenRouter turn that reports neither a cache-read nor an input count says
+// nothing about the backend's cache behaviour, and a fabricated observation
+// would eject a healthy provider. The gate is the guard's own input contract,
+// not a heuristic: both counts must be present.
+func (c *Client) observeProvider(ref turnRef, model, servedBy string, resp *msg.Response) {
+	p, ok := c.set.Get(servedBy)
+	if !ok || p.Kind != providers.KindAnthropicOpenRouter {
+		return
+	}
+	if resp.Usage.CacheRead == nil || resp.Usage.Input == nil {
+		return
+	}
+	c.guard.Observe(time.Now(), routing.Observation{
+		Provider: ProviderOfMsg(resp), Model: model, Conversation: ref.convID,
+		PrefixHash: ref.prefixHash, InputTokens: msg.Val(resp.Usage.Input),
+		CacheReadTokens: msg.Val(resp.Usage.CacheRead),
+	})
+}
+
+// preparedSend is prepareSend's answer: everything a send needs after routing
+// has been decided once, so no later stage re-derives any of it.
+type preparedSend struct {
+	ctx       context.Context
+	span      trace.Span
+	primary   string
+	fallbacks []string
+	batchOnly []string
+	req       *msg.Request
+	spec      routing.Spec
+	extra     map[string]any
+}
+
 // prepareSend is the ONE place that decides how a request is routed. Every
-// send path (SendParams, sendStreaming) calls it first and MUST NOT re-derive
+// send path (send, sendStreamingAttempt) calls it first and MUST NOT re-derive
 // any of this itself — a second copy would silently drift, e.g. streaming
 // requests reaching a different provider than non-streaming ones for the same
 // model id. It:
 //
-//  1. Resolves params.Model ("<provider>/<model>", or a bare id against
+//  1. Resolves req.Model ("<provider>/<model>", or a bare id against
 //     default_provider) to a provider and a provider-local model id, and
-//     rewrites params.Model to the local id.
+//     rewrites req.Model to the local id.
 //  2. Picks the fallback chain: the caller's when they supplied one (including
 //     an explicitly empty one, which means "no failover"), the provider's
 //     configured chain otherwise.
@@ -469,18 +593,24 @@ type SendMeta struct {
 //  4. Opens the "llm.send" tracing span and records breaker state.
 //  5. Applies the :batch routing rule: a model id ending in ":batch" is only
 //     ever served by an anthropic-openrouter provider (anything else is an
-//     error, never a live send), and the suffix survives into params.Model
+//     error, never a live send), and the suffix survives into req.Model
 //     exactly when this send PARKS — a first call (no assistant-role message
-//     in params.Messages) keeps ":batch", a later call has it stripped and
+//     in req.Messages) keeps ":batch", a later call has it stripped and
 //     goes through the normal live sender.
 //
 // The resulting INVARIANT every later check reads instead of re-deriving the
-// rule: **after prepareSend, params.Model ends in ":batch" iff this send
+// rule: **after prepareSend, req.Model ends in ":batch" iff this send
 // parks.**
 // The returned error is a resolution failure (unknown provider, empty model);
 // callers must abort the send on it.
-func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, []string, anthropic.MessageNewParams, routing.Spec, error) {
-	requested := string(params.Model)
+func (c *Client) prepareSend(ctx context.Context, meta SendMeta, in *msg.Request, extra map[string]any) (*preparedSend, error) {
+	// Work on a copy: routing rewrites Model, and a caller's request must stay
+	// the one it built — a streaming attempt that steps aside hands the SAME
+	// request to the non-streaming path, which must resolve the original id
+	// again rather than a provider-local one.
+	req := new(msg.Request)
+	*req = *in
+	requested := req.Model
 	if requested == "" {
 		requested = c.defaultModel
 	}
@@ -498,7 +628,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	batched := IsBatchModel(requested)
 	p, modelID, decl, err := c.set.Resolve(strings.TrimSuffix(requested, BatchSuffix))
 	if err != nil {
-		return ctx, nil, "", nil, nil, params, routing.Spec{}, err
+		return nil, err
 	}
 	batched = batched || IsBatchModel(modelID)
 	// baseID is the suffix-free id every arm builds from: a declaration's raw ID
@@ -506,16 +636,16 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	// re-appending (adding a suffix to a suffixed id would park
 	// "…:batch:batch", a model no endpoint serves).
 	baseID := strings.TrimSuffix(modelID, BatchSuffix)
-	params.Model = anthropic.Model(modelID)
+	req.Model = modelID
 
-	// The :batch routing rule, in one place. After this block: params.Model
-	// ends in ":batch" iff this send parks (the invariant SendParams,
+	// The :batch routing rule, in one place. After this block: req.Model
+	// ends in ":batch" iff this send parks (the invariant send,
 	// sendStreamingAttempt and everything downstream rely on).
 	if batched {
 		if p.Kind != providers.KindAnthropicOpenRouter {
-			return ctx, nil, "", nil, nil, params, routing.Spec{}, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
+			return nil, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
 		}
-		if firstCall(params) {
+		if firstCall(req) {
 			modelID = baseID + BatchSuffix
 		} else {
 			// Later calls go live on the base id, for every batched shape (the
@@ -523,7 +653,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 			// may have carried the suffix in its own id).
 			modelID = baseID
 		}
-		params.Model = anthropic.Model(modelID)
+		req.Model = modelID
 	}
 
 	primary := p.Name
@@ -535,12 +665,12 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 		primary = meta.Primary
 	}
 	// Resolve the routing spec ONCE for this request and thread the local
-	// through — the body build (mutateParams), the parked batch envelope's
-	// only-list, the tracing attribute and the no-eligible error decoration
-	// all read THIS value, so a steer landing mid-request applies to the NEXT
-	// request and never makes one request's body and error disagree.
+	// through — the body build, the parked batch envelope's only-list, the
+	// tracing attribute and the no-eligible error decoration all read THIS
+	// value, so a steer landing mid-request applies to the NEXT request and
+	// never makes one request's body and error disagree.
 	spec := c.spec()
-	c.mutateParams(p, decl, &params, spec)
+	extra = c.mutateParams(p, decl, req.Model, extra, spec)
 
 	// The parked call's only-list, computed HERE while the declaration is in
 	// hand — the same pinOnly rule applyProviderPrefs applies (spec Only >
@@ -552,10 +682,10 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	}
 
 	attrs := []attribute.KeyValue{
-		attribute.String("rafiki.model", string(params.Model)),
+		attribute.String("rafiki.model", req.Model),
 		attribute.String("rafiki.primary", primary),
 		attribute.String("gen_ai.operation.name", "chat"),
-		attribute.String("gen_ai.request.model", string(params.Model)),
+		attribute.String("gen_ai.request.model", req.Model),
 		attribute.String("gen_ai.provider.name", primary),
 	}
 	if !spec.IsZero() {
@@ -564,12 +694,15 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	if meta.OriginEntrypoint != "" {
 		attrs = append(attrs, attribute.String("rafiki.entrypoint", meta.OriginEntrypoint))
 	}
-	ctx, span := c.tracer.Start(c.spanCtx(ctx), "chat "+string(params.Model),
+	sctx, span := c.tracer.Start(c.spanCtx(ctx), "chat "+req.Model,
 		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
-	return ctx, span, primary, fallbacks, batchOnly, params, spec, nil
+	return &preparedSend{
+		ctx: sctx, span: span, primary: primary, fallbacks: fallbacks,
+		batchOnly: batchOnly, req: req, spec: spec, extra: extra,
+	}, nil
 }
 
 // mutateParams applies a kind's request-body mutation. Only
@@ -584,11 +717,14 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 // providers.Set.Resolve; nil for the fallback path (callModel re-resolves the
 // model against the FALLBACK provider via the catalog, which knows nothing
 // about the primary's declarations) and for undeclared ids.
-func (c *Client) mutateParams(p providers.Provider, decl *providers.ModelDecl, params *anthropic.MessageNewParams, spec routing.Spec) {
+//
+// The result is the request's top-level extra fields, passed to the codec as
+// msg.EncodeOptions.Extra; the caller's own fields are carried through.
+func (c *Client) mutateParams(p providers.Provider, decl *providers.ModelDecl, model string, extra map[string]any, spec routing.Spec) map[string]any {
 	if p.Kind != providers.KindAnthropicOpenRouter {
-		return
+		return extra
 	}
-	applyProviderPrefs(params, decl, c.guard, p.Extras, spec)
+	return applyProviderPrefs(model, decl, c.guard, p.Extras, spec, extra)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -603,176 +739,93 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 	}
 }
 
-// SendParams write-aheads the turn, routes the call through the primary's
-// breaker with fallback, and completes/fails the turn. Capture is
-// best-effort: a broken store degrades to pass-through, never blocks the
-// call. Every invocation inserts its own turn row and always resolves it.
-func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	ctx, span, primary, fallbacks, batchOnly, params, spec, err := c.prepareSend(ctx, meta, params)
-	if err != nil {
-		return nil, err
-	}
-	defer span.End()
-
-	if IsBatchModel(string(params.Model)) {
-		return c.parkSend(ctx, span, meta, params, primary, batchOnly)
-	}
-
-	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
-		return nil, err
-	}
-
-	ref := c.beginTurn(ctx, meta, params)
-	ctx = WithSessionID(ctx, ref.convID)
-	ctx, hdrs := withRawTraceHeaders(ctx)
-
-	start := time.Now()
-	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params, spec)
-	latency := int(time.Since(start).Milliseconds())
-	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
-
-	if err != nil {
-		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
-		span.SetStatus(codes.Error, "")
-		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
-		// Raw trace: non-streaming error path.
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err, hdrs)
-		return nil, err
-	}
-
-	span.SetAttributes(
-		attribute.Int64("rafiki.tokens.input", resp.Usage.InputTokens),
-		attribute.Int64("rafiki.tokens.output", resp.Usage.OutputTokens),
-		attribute.Int64("rafiki.tokens.cache_read", resp.Usage.CacheReadInputTokens),
-		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
-		attribute.String("gen_ai.response.model", resp.Model),
-		attribute.Int64("gen_ai.usage.input_tokens", resp.Usage.InputTokens),
-		attribute.Int64("gen_ai.usage.output_tokens", resp.Usage.OutputTokens),
-		attribute.Int64("gen_ai.usage.cache_read.input_tokens", resp.Usage.CacheReadInputTokens),
-		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", resp.Usage.CacheCreationInputTokens),
-		attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(resp.StopReason)}),
-	)
-	if p, ok := c.set.Get(servedBy); ok && p.Kind == providers.KindAnthropicOpenRouter {
-		c.guard.Observe(time.Now(), routing.Observation{
-			Provider: ProviderOf(resp), Model: string(params.Model), Conversation: ref.convID,
-			PrefixHash: ref.prefixHash, InputTokens: resp.Usage.InputTokens,
-			CacheReadTokens: resp.Usage.CacheReadInputTokens,
-		})
-	}
-
-	if ref.capturing {
-		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, servedBy, latency)
-	}
-	// Raw trace: non-streaming success path.
-	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, servedBy, latency, nil, hdrs)
-	return resp, nil
-}
-
-// sendStreaming issues params through the streaming path when the resolved
-// primary sender implements StreamingSender, invoking handler once per event
-// AS IT ARRIVES and accumulating the events into the returned message via
-// anthropic.Message.Accumulate (the same accumulation pattern the SDK docs
-// use for a caller driving stream.Next() itself).
+// sendStreaming issues req through the streaming path, invoking the sink once
+// per event AS IT ARRIVES and accumulating the events into the returned
+// response via msg.Accumulator.
 //
-// attempted reports whether the CALLER must fall back to SendParams itself:
-//   - false means the caller must call SendParams — either no request was
-//     sent at all here (the resolved sender doesn't implement
-//     StreamingSender: no turn row, no side effect), or a request WAS sent
-//     and failed, but delivered is also false (see below), so SendParams
-//     retrying the whole send — including its full breaker/fallback chain
-//     — is safe.
+// attempted reports whether the CALLER must fall back to send itself:
+//   - false means the caller must call send — either no request was
+//     sent at all here (the resolved sender has no streaming capability: no
+//     turn row, no side effect), or a request WAS sent and failed, but
+//     delivered is also false (see below), so send retrying the whole send —
+//     including its full breaker/fallback chain — is safe.
 //   - true means the result here is final: either it succeeded, or it
 //     failed after already delivering at least one event, in which case a
 //     retry is never safe and the caller must surface err directly.
 //
-// delivered reports whether AT LEAST ONE event reached handler during this
-// call. This is the structural guard sendWithTrim's trim-retry loop (and,
-// transitively, sendAttempt's own-package caller) relies on: once delivered
-// is true, retrying — here or in SendParams — is never safe, because a
-// retry opens a brand new, independent request and the caller has no way to
-// know the previous one already delivered partial output to handler. This
-// holds regardless of what the resulting error turns out to be; nothing
-// here or in sendWithTrim assumes a particular failure shape delivers
-// before content.
+// delivered reports whether AT LEAST ONE content-bearing event reached the
+// sink during this call. This is the structural guard sendWithTrim's
+// trim-retry loop (and, transitively, sendAttempt's own-package caller) relies
+// on: once delivered is true, retrying — here or in send — is never safe,
+// because a retry opens a brand new, independent request and the caller has no
+// way to know the previous one already delivered partial output to the sink.
+// This holds regardless of what the resulting error turns out to be; nothing
+// here or in sendWithTrim assumes a particular failure shape delivers before
+// content.
 //
-// Failover: unlike an earlier version of this method, sendStreaming DOES
-// engage even when a fallback chain and an active breaker are configured —
-// it no longer bails out of streaming entirely just because both are set.
-// A concrete consumer (fundi) enables a fallback chain and
-// WithBreaker together whenever an OpenRouter key is configured, which is
+// Failover: sendStreaming DOES engage even when a fallback chain and an active
+// breaker are configured — it never bails out of streaming entirely just
+// because both are set. A concrete consumer (fundi) enables a fallback chain
+// and WithBreaker together whenever an OpenRouter key is configured, which is
 // the common case, not an edge case; bailing out of streaming there made
-// WithStreamHandler silently a no-op for exactly the deployment this was
+// WithStreamHandlerMsg silently a no-op for exactly the deployment this was
 // built for.
 //
 // Breaker gate AND result recording both genuinely apply here, via the same
-// primaryGate/recordPrimaryResult helpers callModel itself uses — this used
-// to only be true of the gate (an earlier version of this comment claimed
-// the breaker's semantics were "mirrored" while only the len(fallbacks) != 0
-// && c.breakers[primary] != nil shape was reused, and the actual UsePrimary
-// decision plus RecordResult bookkeeping were skipped entirely, so an open
-// breaker never stopped a streaming send from reaching the dead primary and
-// a streamed failure/success never updated breaker state). Concretely:
+// primaryGate/recordPrimaryResult helpers callModel itself uses:
 //   - Before issuing anything, primaryGate(primary, fallbacks, now) is
 //     consulted. When it says NOT to use primary (breaker open, no probe
 //     slot available), sendStreaming issues NOTHING — no request, no turn
-//     row — and reports attempted=false so the caller's SendParams call
-//     runs the complete breaker-gated fallback chain non-streamed, exactly
-//     the handoff shape already used when the resolved sender lacks
-//     streaming capability at all.
+//     row — and reports attempted=false so the caller's send call runs the
+//     complete breaker-gated fallback chain non-streamed, exactly the handoff
+//     shape already used when the resolved sender lacks streaming capability
+//     at all.
 //   - When primaryGate does say to use primary, the returned breaker (nil
 //     when bypassed — no fallback configured, or breakers disabled) is used
-//     to recordPrimaryResult once the attempt resolves: success closes it,
-//     a retryable failure trips/extends it, a non-retryable failure is left
-//     alone — the identical rule callModel applies to its own sender.New()
-//     call. EXCEPTION: recording is skipped exactly on the two pre-delivery
-//     hand-off paths below (breaker != nil, nothing delivered yet) — the
-//     caller's own follow-up callModel attempt is what records there, and
-//     it runs moments later. Recording in both places would double-record
-//     one logical failure and pre-emptively trip the breaker before that
-//     retry ever gets a chance to run — this is not an oversight, it is
-//     enforced per-branch below and is exactly the failure mode the
-//     TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure and
-//     TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent
-//     regression tests exist to catch if this "simplifies" back to an
-//     unconditional call.
-//   - breaker (the second primaryGate return, non-nil only when a fallback
-//     chain AND an active breaker both genuinely apply) is ALSO still used,
-//     as before, to decide what a PRE-delivery failure (delivered still
-//     false) should report:
-//   - breaker != nil: nothing has reached handler yet, so nothing can be
-//     double-delivered by a retry. sendStreaming reports attempted=false;
-//     the caller's subsequent SendParams call re-tries primary (subject to
-//     the SAME breaker gate — see above) and, on a retryable failure, runs
-//     the complete breaker-gated fallback chain non-streamed.
-//   - breaker == nil (no fallback configured, or no breaker — the same
-//     shape callModel itself would call directly with no failover to
-//     offer): bouncing to SendParams would only re-issue to the identical
-//     primary sender, wasting a request. sendStreaming instead reports
-//     attempted=true so the caller's own retry logic (sendWithTrim's
-//     trim-retry loop) can re-attempt via a fresh streaming call, exactly
-//     as it always has.
+//     to recordPrimaryResult once the attempt resolves: success closes it, a
+//     retryable failure trips/extends it, a non-retryable failure is left
+//     alone — the identical rule callModel applies to its own sender call.
+//     EXCEPTION: recording is skipped exactly on the two pre-delivery hand-off
+//     paths below (breaker != nil, nothing delivered yet) — the caller's own
+//     follow-up callModel attempt is what records there, and it runs moments
+//     later. Recording in both places would double-record one logical failure
+//     and pre-emptively trip the breaker before that retry ever gets a chance
+//     to run — this is not an oversight, it is enforced per-branch below.
+//   - breaker is ALSO still used to decide what a PRE-delivery failure
+//     (delivered still false) should report:
+//   - breaker != nil: nothing has reached the sink yet, so nothing can be
+//     double-delivered by a retry. sendStreaming reports attempted=false; the
+//     caller's subsequent send call re-tries primary (subject to the SAME
+//     breaker gate) and, on a retryable failure, runs the complete
+//     breaker-gated fallback chain non-streamed.
+//   - breaker == nil (no fallback configured, or no breaker — the same shape
+//     callModel itself would call directly with no failover to offer):
+//     bouncing to send would only re-issue to the identical primary sender,
+//     wasting a request. sendStreaming instead reports attempted=true so the
+//     caller's own retry logic (sendWithTrim's trim-retry loop) can re-attempt
+//     via a fresh streaming call.
 //
 // A MID-stream failure (delivered already true) is never safe to hand off
 // regardless of breaker — see above — so sendStreaming always reports
 // attempted=true there and the error surfaces directly, with no failover.
 //
-// Turn bookkeeping on a breaker-eligible pre-delivery handoff: this method still
-// calls beginTurn before issuing the request and failTurn on the resulting
-// error, so the streaming attempt's own turn row is written and correctly
-// marked failed, even though attempted=false. The caller's subsequent
-// SendParams call then begins and resolves ITS OWN, separate turn row for
-// its own (possibly multi-upstream, via callModel) request. This is not an
-// orphan or a duplicate: it is the same one-row-per-invocation convention
-// sendWithTrim's own trim-retry loop already relies on (each retry attempt
-// is its own SendParams call and so its own turn row) — two real requests
-// were made here (one streamed and rejected, one non-streamed and
-// resolved), so two rows accurately reflect that.
-func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (*anthropic.Message, bool, bool, error) {
+// Turn bookkeeping on a breaker-eligible pre-delivery handoff: this method
+// still calls beginTurn before issuing the request and failTurn on the
+// resulting error, so the streaming attempt's own turn row is written and
+// correctly marked failed, even though attempted=false. The caller's subsequent
+// send call then begins and resolves ITS OWN, separate turn row for its own
+// (possibly multi-upstream, via callModel) request. This is not an orphan or a
+// duplicate: it is the same one-row-per-invocation convention sendWithTrim's
+// own trim-retry loop already relies on (each retry attempt is its own send
+// call and so its own turn row) — two real requests were made here (one
+// streamed and rejected, one non-streamed and resolved), so two rows accurately
+// reflect that.
+func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, req *msg.Request, handler streamSink) (*msg.Response, bool, bool, error) {
 	rlp := meta.RateLimit.effective()
-	model := string(params.Model)
+	model := req.Model
 
 	for attempt := 0; attempt <= rlp.MaxRetries; attempt++ {
-		resp, attempted, delivered, err := c.sendStreamingAttempt(ctx, meta, params, handler)
+		resp, attempted, delivered, err := c.sendStreamingAttempt(ctx, meta, req, handler)
 		if err == nil || !attempted {
 			return resp, attempted, delivered, err
 		}
@@ -798,63 +851,51 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 	return nil, true, false, fmt.Errorf("llm: rate limit retries exhausted for model %s", model)
 }
 
-func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (resp *anthropic.Message, attempted bool, delivered bool, err error) {
-	ctx, span, primary, fallbacks, _, params, spec, err := c.prepareSend(ctx, meta, params)
+func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *msg.Request, handler streamSink) (resp *msg.Response, attempted bool, delivered bool, err error) {
+	p, err := c.prepareSend(ctx, meta, req, nil)
 	if err != nil {
 		return nil, false, false, err
 	}
+	ctx, span := p.ctx, p.span
 	defer span.End()
 
 	// The prepareSend park invariant: a ":batch" model here means this send
 	// parks. Step aside BEFORE beginTurn — no turn row, no stream opened — so
-	// the caller falls through to SendParams, which owns the batch path.
-	if IsBatchModel(string(params.Model)) {
+	// the caller falls through to send, which owns the batch path.
+	if IsBatchModel(p.req.Model) {
 		return nil, false, false, nil
 	}
 
-	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
+	if err := c.modelGate.beforeSend(ctx, p.req.Model); err != nil {
 		return nil, false, false, err
 	}
 
-	sender := c.senders[primary]
+	sender := c.senders[p.primary]
 	if sender == nil {
 		// No sender for this provider: step aside without a request, so the
-		// caller's SendParams call reports "provider not configured" precisely.
+		// caller's send call reports "provider not configured" precisely.
 		return nil, false, false, nil
 	}
 
 	now := time.Now()
-	usePrimary, breaker := c.primaryGate(primary, fallbacks, now)
+	usePrimary, breaker := c.primaryGate(p.primary, p.fallbacks, now)
 	if !usePrimary {
 		// The breaker is open and holds no probe slot right now: the primary
 		// is known-bad. Issue nothing at all — no request, no turn row, the
 		// same shape as the capability-bypass case above — so the caller's
-		// SendParams call runs the complete breaker-gated fallback chain
+		// send call runs the complete breaker-gated fallback chain
 		// non-streamed instead of burning a full timeout on a dead primary.
-		c.logger.Warn("breaker open; stepping aside from streaming primary", "primary", string(primary))
+		c.logger.Warn("breaker open; stepping aside from streaming primary", "primary", p.primary)
 		return nil, false, false, nil
 	}
 
-	ref := c.beginTurn(ctx, meta, params)
+	ref := c.beginTurn(ctx, meta, p.req, p.primary)
 	ctx = WithSessionID(ctx, ref.convID)
 	ctx, hdrs := withRawTraceHeaders(ctx)
 	start := time.Now()
 
-	req, extra, cerr := msganthropic.RequestFromSDK(params)
-	if cerr != nil {
-		// The turn row is already written, so this must close it exactly like
-		// every other post-beginTurn failure — otherwise an open capture turn
-		// outlives the call that opened it. The failure is deterministic (the
-		// same params convert the same way), so no handoff to SendParams: this
-		// result is final.
-		span.RecordError(errors.New(telemetry.ErrorText(cerr.Error())))
-		span.SetStatus(codes.Error, "")
-		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, cerr)
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), cerr, hdrs)
-		return nil, true, false, cerr
-	}
 	sessionID, _ := sessionIDFromContext(ctx)
-	dec, serr := sender.Stream(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
+	dec, serr := sender.Stream(ctx, p.req, msg.EncodeOptions{SessionID: sessionID, Extra: p.extra})
 	// The defer is registered BEFORE the error checks below, and guarded on
 	// dec != nil rather than serr == nil: Sender's contract does not forbid an
 	// implementation from returning (non-nil decoder, non-nil error).
@@ -875,35 +916,35 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
 		if breaker != nil {
 			// Nothing delivered yet and a real fallback exists: hand off
-			// WITHOUT recording here. SendParams's callModel is about to make
-			// its OWN authoritative attempt against primary and will record
-			// THAT result; recording this pre-delivery failure too would
+			// WITHOUT recording here. send's callModel is about to make its
+			// OWN authoritative attempt against primary and will record THAT
+			// result; recording this pre-delivery failure too would
 			// pre-emptively trip the breaker and make callModel skip the very
 			// retry this handoff exists to give it.
 			return nil, false, false, serr
 		}
 		// No fallback to offer: breaker is nil here (primaryGate's bypass
 		// case), so there's nothing to record — report attempted=true so
-		// sendWithTrim's own retry loop (not SendParams) re-attempts via
-		// streaming again, instead of wastefully re-issuing to the same
-		// primary sender.
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr, hdrs)
+		// sendWithTrim's own retry loop (not send) re-attempts via streaming
+		// again, instead of wastefully re-issuing to the same primary sender.
+		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), serr, hdrs)
 		// The breaker==nil branch is production's shape (daemon children run
 		// with no fallback chain), so THIS is the return a no-eligible routing
 		// rejection surfaces through on the streaming path — decorate it here,
 		// or decision 6's "error naming the spec and the model" only ever fired
 		// for non-streamed sends. The trace and turn rows above keep the raw
 		// upstream error; the decoration is for the caller.
-		return nil, true, false, c.noEligibleError(spec, string(params.Model), serr)
+		return nil, true, false, c.noEligibleError(p.spec, p.req.Model, serr)
 	}
 
-	// The handler and the accumulator are still SDK-typed this wave: the
-	// adapter turns each native event back into the SDK events they expect,
-	// replaying at block stop whatever the finalized block carries that the
-	// stream never delivered as a delta (a citation list, a server-tool block's
-	// completed input).
-	acc := anthropic.Message{}
-	adapter := &msganthropic.SDKEventAdapter{}
+	acc := msg.NewAccumulator()
+	// The SDK-typed sink gets one adapter per stream: it replays, at block
+	// stop, whatever a finalized block carries that the stream never delivered
+	// as a delta (a citation list, a server-tool block's completed input).
+	var adapter *msganthropic.SDKEventAdapter
+	if handler.sdk != nil {
+		adapter = &msganthropic.SDKEventAdapter{}
+	}
 	for serr == nil {
 		ev, derr := dec.Next()
 		if errors.Is(derr, io.EOF) {
@@ -917,34 +958,37 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// carries no text, so treating it as delivery would make the failover
 		// branch below unreachable for the common "connected, then died before
 		// any output" failure — which the non-streaming path recovers from.
-		if msg.DeliversContent(ev) {
+		content := msg.DeliversContent(ev)
+		if content {
 			delivered = true
 		}
-		sdkEvents, aerr := adapter.Add(ev)
-		if aerr != nil {
-			wrapped := fmt.Errorf("llm: convert stream event: %w", aerr)
+		if aerr := acc.Add(ev); aerr != nil {
+			wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
 			span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
 			span.SetStatus(codes.Error, "")
 			c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
 			recordPrimaryResult(breaker, now, wrapped)
-			c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
+			c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
 			return nil, true, delivered, wrapped
 		}
-		for _, sdkEv := range sdkEvents {
-			FixEmptyToolInput(&sdkEv)
-			handler(sdkEv)
-			SanitizeInvalidAccumulatedInput(&acc, sdkEv)
-			if aerr := acc.Accumulate(sdkEv); aerr != nil {
-				wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
+		if adapter != nil {
+			sdkEvents, aerr := adapter.Add(ev)
+			if aerr != nil {
+				wrapped := fmt.Errorf("llm: convert stream event: %w", aerr)
 				span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
 				span.SetStatus(codes.Error, "")
 				c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
 				recordPrimaryResult(breaker, now, wrapped)
-				c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
+				c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
 				return nil, true, delivered, wrapped
 			}
-			FixAccumulatedEmptyToolInput(&acc, sdkEv)
-			backfillDeltaUsage(&acc, sdkEv)
+			for _, sdkEv := range sdkEvents {
+				FixEmptyToolInput(&sdkEv)
+				handler.sdk(sdkEv)
+			}
+		}
+		if content && handler.native != nil {
+			handler.native(acc.Response())
 		}
 	}
 	if serr != nil {
@@ -953,7 +997,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
 		if !delivered && breaker != nil {
 			// Hand off WITHOUT recording, for the same reason as the
-			// NewStreaming-error branch above: callModel's own imminent
+			// Stream-error branch above: callModel's own imminent
 			// primary retry is the authoritative attempt and will record its
 			// own result. Recording this one too would trip the breaker
 			// before that retry runs at all.
@@ -963,88 +1007,31 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// regardless of breaker state) or breaker is nil (bypass, no handoff
 		// exists to defer to): this IS the final result, so record it.
 		recordPrimaryResult(breaker, now, serr)
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr, hdrs)
+		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), serr, hdrs)
 		// The breaker==nil !delivered shape is production's child-send path,
-		// and the SDK's sender surfaces a pre-delivery HTTP failure through
-		// the STREAM (NewStreaming returns (stream, nil); the error arrives on
-		// the first Next) — so THIS is where a no-eligible routing rejection
-		// decorates for streamed sends. The trace keeps the raw error.
-		return nil, true, delivered, c.noEligibleError(spec, string(params.Model), serr)
+		// and a codec surfaces a pre-delivery HTTP failure through the STREAM
+		// (Stream returns a decoder; the error arrives on the first Next) — so
+		// THIS is where a no-eligible routing rejection decorates for streamed
+		// sends. The trace keeps the raw error.
+		return nil, true, delivered, c.noEligibleError(p.spec, p.req.Model, serr)
 	}
 
 	recordPrimaryResult(breaker, now, nil)
-	c.modelGate.recordSuccess(string(params.Model))
+	c.modelGate.recordSuccess(p.req.Model)
 	latency := int(time.Since(start).Milliseconds())
-	span.SetAttributes(
-		attribute.String("rafiki.upstream", string(primary)),
-		attribute.Int64("rafiki.tokens.input", acc.Usage.InputTokens),
-		attribute.Int64("rafiki.tokens.output", acc.Usage.OutputTokens),
-		attribute.Int64("rafiki.tokens.cache_read", acc.Usage.CacheReadInputTokens),
-		attribute.Int64("rafiki.tokens.cache_creation", acc.Usage.CacheCreationInputTokens),
-		attribute.String("gen_ai.response.model", acc.Model),
-		attribute.Int64("gen_ai.usage.input_tokens", acc.Usage.InputTokens),
-		attribute.Int64("gen_ai.usage.output_tokens", acc.Usage.OutputTokens),
-		attribute.Int64("gen_ai.usage.cache_read.input_tokens", acc.Usage.CacheReadInputTokens),
-		attribute.Int64("gen_ai.usage.cache_creation.input_tokens", acc.Usage.CacheCreationInputTokens),
-		attribute.StringSlice("gen_ai.response.finish_reasons", []string{string(acc.StopReason)}),
-	)
-	if p, ok := c.set.Get(primary); ok && p.Kind == providers.KindAnthropicOpenRouter {
-		// acc is the fully accumulated message at this point (the loop above
-		// has already run to completion) — this is a completed turn's final
-		// usage, not a partial mid-stream snapshot.
-		c.guard.Observe(time.Now(), routing.Observation{
-			Provider: ProviderOf(&acc), Model: string(params.Model), Conversation: ref.convID,
-			PrefixHash: ref.prefixHash, InputTokens: acc.Usage.InputTokens,
-			CacheReadTokens: acc.Usage.CacheReadInputTokens,
-		})
-	}
+	// acc is the fully accumulated response at this point (the loop above has
+	// already run to completion) — this is a completed turn's final usage, not
+	// a partial mid-stream snapshot.
+	resp = acc.Response()
+	span.SetAttributes(attribute.String("rafiki.upstream", p.primary))
+	setUsageAttrs(span, resp)
+	c.observeProvider(ref, p.req.Model, p.primary, resp)
+	warnNewExt(c.logger, resp)
 	if ref.capturing {
-		c.completeTurn(ctx, ref.turnID, ref.createdAt, &acc, primary, latency)
+		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, p.primary, latency)
 	}
-	c.recordRawTrace(ctx, meta, ref.turnID, params, &acc, 200, primary, latency, nil, hdrs)
-	return &acc, true, delivered, nil
-}
-
-// backfillDeltaUsage corrects a gap in the SDK's own Message.Accumulate:
-// message_delta only ever merges OutputTokens into the accumulated message,
-// because for real Anthropic the input/cache token counts are fixed and
-// reported once, correctly, in message_start — message_delta's own copies of
-// those fields come back zero there, which is exactly why Accumulate ignores
-// them.
-//
-// OpenRouter's Anthropic-compatible face does the reverse for at least two
-// non-Anthropic backends (deepseek, moonshotai): message_start reports all
-// prompt-side usage as zero, and the real cumulative input/cache token
-// counts only appear in the final message_delta — verified directly against
-// both APIs (a padded-prompt request against api.anthropic.com's real
-// streaming endpoint keeps input_tokens fixed from message_start onward; the
-// identical request against openrouter.ai/api's endpoint for
-// deepseek/deepseek-v4-pro reports input_tokens:0 in message_start and the
-// correct non-zero count only in message_delta). Accumulate silently drops
-// that correction, so every OpenRouter-routed turn through this path
-// persisted and displayed a real prompt with 0 input/cache tokens — visible
-// as "0.0%" context usage in pi's attach TUI with no way to tell it apart
-// from a genuinely token-free turn.
-//
-// Backfill whatever a delta actually populates (guarded on > 0, so a real
-// Anthropic delta's zeroed fields never clobber message_start's correct
-// values) — mirrors pkg/routing/sse.go's parseSSE, which already does this
-// for the proxy's raw-bytes-based capture path; this is the equivalent for
-// sendStreaming's typed-event path.
-func backfillDeltaUsage(acc *anthropic.Message, ev anthropic.MessageStreamEventUnion) {
-	delta, ok := ev.AsAny().(anthropic.MessageDeltaEvent)
-	if !ok {
-		return
-	}
-	if delta.Usage.InputTokens > 0 {
-		acc.Usage.InputTokens = delta.Usage.InputTokens
-	}
-	if delta.Usage.CacheReadInputTokens > 0 {
-		acc.Usage.CacheReadInputTokens = delta.Usage.CacheReadInputTokens
-	}
-	if delta.Usage.CacheCreationInputTokens > 0 {
-		acc.Usage.CacheCreationInputTokens = delta.Usage.CacheCreationInputTokens
-	}
+	c.recordRawTrace(ctx, meta, ref.turnID, p.req, resp, 200, p.primary, latency, nil, hdrs)
+	return resp, true, delivered, nil
 }
 
 // primaryGate is the ONE place that decides whether a send should issue to
@@ -1093,32 +1080,23 @@ func recordPrimaryResult(breaker *routing.Breaker, now time.Time, err error) {
 }
 
 // recordModelResult updates the model gate from a callModel result.
-func (c *Client) recordModelResult(params anthropic.MessageNewParams, err error) {
+func (c *Client) recordModelResult(req *msg.Request, err error) {
 	if err == nil {
-		c.modelGate.recordSuccess(string(params.Model))
+		c.modelGate.recordSuccess(req.Model)
 		return
 	}
 	if isRL, retryAfter := isRateLimit(err); isRL {
-		c.modelGate.record429(string(params.Model), retryAfter)
+		c.modelGate.record429(req.Model, retryAfter)
 	}
 }
 
-// sendTo is the ONE conversion point between the SDK params this wave's Client
-// still builds and the native request every Sender speaks. The session id rides
-// EncodeOptions as well as the context: the Anthropic kinds send it as a header
-// through sessionIDTransport, and the Responses codec puts it in the request
-// body's prompt_cache_key.
-func (c *Client) sendTo(ctx context.Context, s Sender, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	req, extra, err := msganthropic.RequestFromSDK(params)
-	if err != nil {
-		return nil, err
-	}
+// callSender issues one request through s. The session id rides EncodeOptions
+// as well as the context: the Anthropic kinds send it as a header through
+// sessionIDTransport, and the Responses codec puts it in the request body's
+// prompt_cache_key.
+func callSender(ctx context.Context, s Sender, req *msg.Request, extra map[string]any) (*msg.Response, error) {
 	sessionID, _ := sessionIDFromContext(ctx)
-	resp, err := s.Send(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
-	if err != nil {
-		return nil, err
-	}
-	return msganthropic.ToSDKMessage(resp)
+	return s.Send(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
 }
 
 // callModel routes primary-with-breaker then the fallback chain. Fallback
@@ -1127,7 +1105,7 @@ func (c *Client) sendTo(ctx context.Context, s Sender, params anthropic.MessageN
 // the breaker entirely (direct primary, mirroring the routing core's
 // fallback-less behavior) — per the design, an empty Fallback chain is how a
 // consumer opts out of being pinned.
-func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, params anthropic.MessageNewParams, spec routing.Spec) (*anthropic.Message, string, error) {
+func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, req *msg.Request, extra map[string]any, spec routing.Spec) (*msg.Response, string, error) {
 	sender := c.senders[primary]
 	if sender == nil {
 		return nil, primary, fmt.Errorf("llm: provider %q not configured", primary)
@@ -1136,15 +1114,15 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 	usePrimary, breaker := c.primaryGate(primary, fallbacks, now)
 
 	if breaker == nil {
-		resp, err := c.sendTo(ctx, sender, params)
-		c.recordModelResult(params, err)
-		return resp, primary, c.noEligibleError(spec, string(params.Model), err)
+		resp, err := callSender(ctx, sender, req, extra)
+		c.recordModelResult(req, err)
+		return resp, primary, c.noEligibleError(spec, req.Model, err)
 	}
 
 	if usePrimary {
-		resp, err := c.sendTo(ctx, sender, params)
+		resp, err := callSender(ctx, sender, req, extra)
 		recordPrimaryResult(breaker, now, err)
-		c.recordModelResult(params, err)
+		c.recordModelResult(req, err)
 		if err == nil {
 			return resp, primary, nil
 		}
@@ -1152,7 +1130,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			// not failover-worthy: don't fail over or trip. The no-eligible
 			// wrap below is decoration only (%w), so this classification
 			// sees exactly the error the sender returned.
-			return nil, primary, c.noEligibleError(spec, string(params.Model), err)
+			return nil, primary, c.noEligibleError(spec, req.Model, err)
 		}
 		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", telemetry.ErrorText(err.Error()))))
 		c.logger.Warn("primary failed; failing over", "primary", primary, "error", err)
@@ -1170,26 +1148,28 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			lastErr = fmt.Errorf("llm: fallback provider %q not in the registry", fb)
 			continue
 		}
-		fbParams := params
+		// A shallow copy: the fallback's model is a translation of the
+		// primary's, and the primary's request must stay the one it was.
+		fbReq := *req
 		// Model-id translation between a primary and its fallback is the
 		// RECEIVING kind's job: anthropic-openrouter maps an Anthropic id
 		// through the catalog; an anthropic -> anthropic fallback needs none.
 		if fbProvider.Kind == providers.KindAnthropicOpenRouter {
-			fbParams.Model = anthropic.Model(c.catalog.OpenRouterModel(string(params.Model)))
+			fbReq.Model = c.catalog.OpenRouterModel(req.Model)
 		}
 		// The fallback path has no declaration: the model was re-resolved
 		// against the FALLBACK provider via the catalog, which knows nothing
 		// about the primary's declared models, so nil means only the
 		// fallback's own guard ejections apply, never a stale declaration pin.
-		c.mutateParams(fbProvider, nil, &fbParams, spec)
-		resp, err := c.sendTo(ctx, fbSender, fbParams)
+		fbExtra := c.mutateParams(fbProvider, nil, fbReq.Model, extra, spec)
+		resp, err := callSender(ctx, fbSender, &fbReq, fbExtra)
 		if err == nil {
-			c.modelGate.recordSuccess(string(params.Model))
+			c.modelGate.recordSuccess(req.Model)
 			return resp, fb, nil
 		}
 		// Wrapped with the fallback's own (translated) model id, so the
 		// message names the id OpenRouter actually rejected.
-		lastErr = c.noEligibleError(spec, string(fbParams.Model), err)
+		lastErr = c.noEligibleError(spec, fbReq.Model, err)
 	}
 	return nil, primary, lastErr
 }
@@ -1218,21 +1198,24 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 // serve; the guard vetoes who must not. With a declaration pin the body
 // carries "provider" even when nothing has to be ignored.
 //
-// SetExtraFields REPLACES the whole map, so everything that belongs in it must
-// be assembled here in one call. "provider" is a reserved extras key
+// The returned map is the WHOLE extra set the codec merges into the body
+// (msg.EncodeOptions.Extra), so everything that belongs in it must be
+// assembled here in one call. "provider" is a reserved extras key
 // (providers.Validate refuses it) precisely because a user-supplied one would
 // otherwise delete the guard's ejections with no error and no log line.
-func applyProviderPrefs(params *anthropic.MessageNewParams, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec) {
+func applyProviderPrefs(model string, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec, caller map[string]any) map[string]any {
 	if spec.IsZero() {
-		applyProviderPrefsPreSpec(params, decl, g, extras)
-		return
+		return applyProviderPrefsPreSpec(model, decl, g, extras, caller)
 	}
 	var pinOnly []string
 	if decl != nil && len(decl.Only) > 0 {
 		pinOnly = decl.Only
 	}
-	prefs, send := spec.Prefs(pinOnly, g.IgnoredFor(time.Now(), string(params.Model)))
-	fields := make(map[string]any, len(extras)+1)
+	prefs, send := spec.Prefs(pinOnly, g.IgnoredFor(time.Now(), model))
+	fields := make(map[string]any, len(extras)+len(caller)+1)
+	for k, v := range caller {
+		fields[k] = v
+	}
 	for k, v := range extras {
 		fields[k] = v
 	}
@@ -1240,9 +1223,9 @@ func applyProviderPrefs(params *anthropic.MessageNewParams, decl *providers.Mode
 		fields["provider"] = prefs
 	}
 	if len(fields) == 0 {
-		return
+		return nil
 	}
-	params.SetExtraFields(fields)
+	return fields
 }
 
 // applyProviderPrefsPreSpec is the pre-routing-spec code path, run for a zero
@@ -1251,18 +1234,21 @@ func applyProviderPrefs(params *anthropic.MessageNewParams, decl *providers.Mode
 // applyProviderPrefs. It sends a "provider" object only when a declaration
 // pins providers or the guard has something to ignore; extras alone stay
 // top-level.
-func applyProviderPrefsPreSpec(params *anthropic.MessageNewParams, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any) {
+func applyProviderPrefsPreSpec(model string, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any, caller map[string]any) map[string]any {
 	var prefs routing.ProviderPrefs
 	pinned := false
 	if decl != nil && len(decl.Only) > 0 {
 		prefs.Only = decl.Only
 		pinned = true
 	}
-	ignore := g.IgnoredFor(time.Now(), string(params.Model))
-	if !pinned && len(ignore) == 0 && len(extras) == 0 {
-		return
+	ignore := g.IgnoredFor(time.Now(), model)
+	if !pinned && len(ignore) == 0 && len(extras) == 0 && len(caller) == 0 {
+		return nil
 	}
-	fields := make(map[string]any, len(extras)+1)
+	fields := make(map[string]any, len(extras)+len(caller)+1)
+	for k, v := range caller {
+		fields[k] = v
+	}
 	for k, v := range extras {
 		fields[k] = v
 	}
@@ -1270,7 +1256,7 @@ func applyProviderPrefsPreSpec(params *anthropic.MessageNewParams, decl *provide
 		prefs.Ignore = append(prefs.Ignore, ignore...)
 		fields["provider"] = prefs
 	}
-	params.SetExtraFields(fields)
+	return fields
 }
 
 // noEligibleUpstream reports whether err is OpenRouter's no-eligible-provider
@@ -1303,15 +1289,24 @@ func (c *Client) noEligibleError(spec routing.Spec, model string, err error) err
 	return fmt.Errorf("no provider can serve %s under routing [%s]: %w", model, spec.String(), err)
 }
 
-// ProviderOf extracts OpenRouter's non-standard top-level "provider" field
-// from a decoded Message. The Anthropic SDK has no such field, but it retains
-// unknown members in JSON.ExtraFields, so the value survives the decode.
-// Returns "" for native Anthropic responses, which carry no provider.
-func ProviderOf(msg *anthropic.Message) string {
-	if msg == nil {
+// ProviderOfMsg returns OpenRouter's non-standard top-level "provider" field —
+// the backend that actually served the turn — or "" for a native Anthropic
+// response, which carries none.
+func ProviderOfMsg(r *msg.Response) string {
+	if r == nil {
 		return ""
 	}
-	f, ok := msg.JSON.ExtraFields["provider"]
+	return r.Provider
+}
+
+// ProviderOf is ProviderOfMsg for an SDK message. The Anthropic SDK has no
+// such field, but it retains unknown members in JSON.ExtraFields, so the value
+// survives the decode.
+func ProviderOf(m *anthropic.Message) string {
+	if m == nil {
+		return ""
+	}
+	f, ok := m.JSON.ExtraFields["provider"]
 	if !ok {
 		return ""
 	}
@@ -1320,6 +1315,50 @@ func ProviderOf(msg *anthropic.Message) string {
 		return ""
 	}
 	return s
+}
+
+// prefixEnvelope is the request's cacheable prefix — everything before the
+// messages — in the canonical form nativePrefixHash digests. Field order is
+// fixed by the struct, so two equal prefixes always marshal identically.
+type prefixEnvelope struct {
+	Model          string          `json:"model"`
+	System         []string        `json:"system"`
+	Tools          []msg.ToolDef   `json:"tools"`
+	ForceTool      string          `json:"force_tool,omitempty"`
+	MaxTokens      int64           `json:"max_tokens"`
+	Temperature    *float64        `json:"temperature,omitempty"`
+	TopK           *int64          `json:"top_k,omitempty"`
+	ThinkingBudget int64           `json:"thinking_budget,omitempty"`
+	Cache          msg.CachePolicy `json:"cache"`
+}
+
+// nativePrefixEnvelope builds req's prefix envelope: the system blocks as
+// text, and every static request knob.
+func nativePrefixEnvelope(req *msg.Request) prefixEnvelope {
+	system := make([]string, 0, len(req.System))
+	for _, s := range req.System {
+		system = append(system, s.Text)
+	}
+	return prefixEnvelope{
+		Model: req.Model, System: system, Tools: req.Tools, ForceTool: req.ForceTool,
+		MaxTokens: req.MaxTokens, Temperature: req.Temperature, TopK: req.TopK,
+		ThinkingBudget: req.ThinkingBudget, Cache: req.Cache,
+	}
+}
+
+// nativePrefixHash digests the request's static prefix: the model, system,
+// tools, sampling knobs and cache policy, with Messages left out. Two turns of
+// one conversation share a prefix hash exactly when everything a provider
+// caches is unchanged, and the provider guard reads that as its cache-miss
+// evidence. An unencodable request hashes to "" — a value no captured turn
+// shares, which fails the guard's comparison closed rather than open.
+func nativePrefixHash(req *msg.Request) string {
+	b, err := json.Marshal(nativePrefixEnvelope(req))
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // turnRef is what a write-ahead turn leaves behind for the paths that resolve
@@ -1339,7 +1378,7 @@ type turnRef struct {
 // off the zero value is returned with capturing false — convID and
 // prefixHash stay empty, which correctly disqualifies every ProviderGuard
 // observation derived from it (see ProviderGuard.Observe's doc comment).
-func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) turnRef {
+func (c *Client) beginTurn(ctx context.Context, meta SendMeta, req *msg.Request, primary string) turnRef {
 	if c.capture == nil {
 		return turnRef{}
 	}
@@ -1349,7 +1388,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	}
 	convRef := capture.ConversationRef{
 		ID: meta.ConversationID, OriginEntrypoint: meta.OriginEntrypoint, DrivenBy: string(drivenBy),
-		OwnerUserID: meta.OwnerUserID, Persona: meta.Persona, Model: string(params.Model), Name: meta.Name, ExternalRef: meta.ExternalRef,
+		OwnerUserID: meta.OwnerUserID, Persona: meta.Persona, Model: req.Model, Name: meta.Name, ExternalRef: meta.ExternalRef,
 	}
 	var convID string
 	var err error
@@ -1365,20 +1404,15 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 		c.logger.Warn("capture: ensure-conversation failed (capturing disabled for this turn)", "error", err)
 		return turnRef{}
 	}
-	reqJSON, mErr := json.Marshal(params)
-	if mErr != nil {
-		c.logger.Warn("capture: marshal request failed", "error", mErr)
-		return turnRef{}
-	}
 	source := meta.Source
 	if source == "" {
 		source = meta.OriginEntrypoint
 	}
-	prefixHash := routing.PrefixHash(reqJSON)
+	prefixHash := nativePrefixHash(req)
 	turnID, createdAt, iErr := c.capture.InsertTurnIntent(ctx, capture.TurnIntent{
-		ConversationID: convID, Ordinal: meta.Ordinal, Model: string(params.Model),
+		ConversationID: convID, Ordinal: meta.Ordinal, Model: req.Model,
 		Source: source, AuthorUserID: meta.AuthorUserID, AuthorKind: meta.AuthorKind,
-		PrefixHash: prefixHash, Protocol: string(store.ProtocolAnthropic),
+		PrefixHash: prefixHash, Protocol: string(store.ProtocolRafiki),
 		// The request body is not stored: the head names the rows it sent and
 		// the trim range names what it left out.
 		RequestHeadID: meta.RequestHeadID, TrimFrom: meta.TrimFrom, TrimTo: meta.TrimTo,
@@ -1390,32 +1424,61 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	// Record prefix_content (on-change) + cache_breakpoints for parity with the
 	// proxy path — the message rows are written separately by Conversation, so
 	// only the turn's prefix metadata is stored here (StoreTurnPrefix, not the
-	// message-writing DecomposeRequest). Best-effort: never fails the turn.
-	if err := c.capture.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqJSON, prefixHash); err != nil {
+	// message-writing DecomposeRequest). The body is the envelope plus an empty
+	// messages array, so the shared splitter sees the same shape it strips for a
+	// real request; the breakpoints are the codec's placement, not re-derived
+	// from markers. Best-effort: never fails the turn.
+	if body, mErr := json.Marshal(struct {
+		prefixEnvelope
+		Messages []msg.Message `json:"messages"`
+	}{prefixEnvelope: nativePrefixEnvelope(req), Messages: []msg.Message{}}); mErr != nil {
+		c.logger.Warn("capture: marshal turn prefix failed", "error", mErr)
+	} else if err := c.capture.StoreTurnPrefixBreakpoints(ctx, convID, turnID, createdAt, body, c.breakpointMessages(req, primary), prefixHash); err != nil {
 		c.logger.Warn("capture: store turn prefix failed", "error", err)
 	}
 	return turnRef{turnID: turnID, createdAt: createdAt, convID: convID, prefixHash: prefixHash, capturing: true}
 }
 
+// breakpointMessages is the message indices the Anthropic codec places cache
+// markers on, or nil for a provider that does not speak the Messages API. The
+// capture row records where the markers land, so an operator can read the
+// cache layout without re-encoding the request.
+func (c *Client) breakpointMessages(req *msg.Request, primary string) []int {
+	p, ok := c.set.Get(primary)
+	if !ok || (p.Kind != providers.KindAnthropic && p.Kind != providers.KindAnthropicOpenRouter) {
+		return nil
+	}
+	positions := msganthropic.Breakpoints(req)
+	out := make([]int, 0, len(positions))
+	for _, pos := range positions {
+		if len(out) == 0 || out[len(out)-1] != pos.Message {
+			out = append(out, pos.Message)
+		}
+	}
+	return out
+}
+
 // completeTurn records the response; on a completion/marshal failure the turn
 // is failed rather than stranded pending (mirrors the routing core).
-func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time.Time, resp *anthropic.Message, upstream string, latencyMS int) {
+func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time.Time, resp *msg.Response, upstream string, latencyMS int) {
 	var cErr error
 	reason := "complete-turn failed: "
-	respJSON, mErr := json.Marshal(resp)
+	respJSON, mErr := msganthropic.ResponseJSON(resp)
 	if mErr != nil {
 		cErr, reason = mErr, "capture serialization failed: "
 		c.logger.Warn("capture: marshal response failed", "error", mErr)
 	} else if cErr = c.capture.CompleteTurn(ctx, capture.TurnResult{
-		TurnID: turnID, CreatedAt: createdAt, Model: string(resp.Model), Response: respJSON,
-		StopReason: string(resp.StopReason), Upstream: string(upstream),
+		TurnID: turnID, CreatedAt: createdAt, Model: resp.Model, Response: respJSON,
+		StopReason: resp.StopReason.String(), Upstream: upstream,
 		// OpenRouter's non-standard top-level "provider" field names the actual
 		// backend that served the turn ("Together", "Parasail", …); "" for a
 		// native Anthropic response, which has no such field.
-		ServedProvider: ProviderOf(resp),
-		InputTokens:    resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
-		CacheReadTokens: resp.Usage.CacheReadInputTokens, CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
-		LatencyMS: latencyMS,
+		ServedProvider:      resp.Provider,
+		InputTokens:         msg.Val(resp.Usage.Input),
+		OutputTokens:        msg.Val(resp.Usage.Output),
+		CacheReadTokens:     msg.Val(resp.Usage.CacheRead),
+		CacheCreationTokens: msg.Val(resp.Usage.CacheWrite),
+		LatencyMS:           latencyMS,
 	}); cErr != nil {
 		c.logger.Warn("capture: complete-turn write failed", "error", cErr)
 	}
@@ -1440,23 +1503,26 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 // that same timeout. Errors are logged, never surfaced. No-op when c.rawTrace
 // is nil.
 //
-// hdrs carries the real request/response headers captured off the wire by
-// headerCaptureTransport (see withRawTraceHeaders) — never nil in practice,
-// since every call site creates it before making the attempt, but its fields
-// stay nil when no attempt ever reached the transport (e.g. a resolution
-// error before any sender was called).
-func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream string, latency int, err error, hdrs *rawTraceHeaders) {
+// hdrs carries what headerCaptureTransport saw on the wire: the real request
+// and response headers, the request path, and the request body DECOMPRESSED to
+// the dialect's actual JSON (or a diagnostic when it could not be). Its fields
+// stay nil when no attempt ever reached the transport (e.g. a resolution error
+// before any sender was called).
+func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, req *msg.Request, resp *msg.Response, status int, upstream string, latency int, err error, hdrs *rawTraceHeaders) {
 	if c.rawTrace == nil {
 		return
 	}
-	reqJSON, mErr := json.Marshal(params)
-	if mErr != nil {
-		c.logger.Warn("raw trace: marshal request failed", "error", mErr)
-		return
+	if hdrs == nil {
+		hdrs = &rawTraceHeaders{}
 	}
 	var respJSON json.RawMessage
 	if resp != nil {
-		respJSON, _ = json.Marshal(resp)
+		b, mErr := msganthropic.ResponseJSON(resp)
+		if mErr != nil {
+			c.logger.Warn("raw trace: marshal response failed", "error", mErr)
+		} else {
+			respJSON = b
+		}
 	}
 
 	var respStatus *int
@@ -1467,15 +1533,27 @@ func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID strin
 	if err != nil {
 		errStr = err.Error()
 	}
+	// A capture failure is a diagnostic, never an error of the send: it rides
+	// the recorded Error field beside whatever the call itself returned.
+	if hdrs.captureErr != "" {
+		if errStr == "" {
+			errStr = hdrs.captureErr
+		} else {
+			errStr += "; " + hdrs.captureErr
+		}
+	}
 
 	r := rawtrace.RawHTTPRequest{
-		Source:      "fundi",
-		Model:       string(params.Model),
-		Upstream:    string(upstream),
-		ReqMethod:   "POST",
-		ReqPath:     "/v1/messages",
-		ReqHeaders:  redactedHeaderJSON(hdrs.req, "Authorization", "X-Api-Key"),
-		ReqBody:     reqJSON,
+		Source:     "fundi",
+		Model:      req.Model,
+		Upstream:   upstream,
+		ReqMethod:  "POST",
+		ReqPath:    hdrs.reqPath,
+		ReqHeaders: redactedHeaderJSON(hdrs.req, "Authorization", "X-Api-Key"),
+		// The real wire body, decompressed. The headers above describe the
+		// TRANSPORT (their Content-Encoding/Content-Length are the compressed
+		// ones); this field is the JSON the provider actually parsed.
+		ReqBody:     hdrs.reqBody,
 		RespStatus:  respStatus,
 		RespHeaders: redactedHeaderJSON(hdrs.resp),
 		RespBody:    respJSON,

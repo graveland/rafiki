@@ -27,6 +27,9 @@ type Protocol string
 const (
 	ProtocolAnthropic Protocol = "anthropic"
 	ProtocolOpenAI    Protocol = "openai"
+	// ProtocolRafiki marks a turn the library itself sent from a native
+	// request, whatever provider dialect served it.
+	ProtocolRafiki Protocol = "rafiki"
 )
 
 // ConversationStatus is the conversation lifecycle state.

@@ -3,17 +3,10 @@
 package llm
 
 import (
-	"encoding/json"
 	"errors"
-
-	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/msg"
 )
-
-// Message is a conversation message in request form. Alias of the SDK param
-// type: stored rows round-trip through it byte-identically.
-type Message = anthropic.MessageParam
 
 // TrimPolicy shrinks the message history when the API rejects a request as
 // too large. It receives ONLY the message history — never system, never
@@ -26,7 +19,7 @@ type Message = anthropic.MessageParam
 // further (Send then surfaces the too-large error to the caller). attempt is
 // 0-based and increments per retry.
 type TrimPolicy interface {
-	Trim(msgs []Message, attempt int) (trimmed []Message, ok bool)
+	Trim(msgs []msg.Message, attempt int) (trimmed []msg.Message, ok bool)
 }
 
 // Default trim budgets: ported from sc's diagnose loop (maxConversationChars
@@ -38,7 +31,7 @@ const defaultTrimBudget = 300 * 1024
 // halving byte budget, dropping from the middle.
 type defaultTrimPolicy struct{}
 
-func (defaultTrimPolicy) Trim(msgs []Message, attempt int) ([]Message, bool) {
+func (defaultTrimPolicy) Trim(msgs []msg.Message, attempt int) ([]msg.Message, bool) {
 	if len(msgs) <= 2 {
 		return msgs, false
 	}
@@ -48,7 +41,7 @@ func (defaultTrimPolicy) Trim(msgs []Message, attempt int) ([]Message, bool) {
 	}
 
 	total := messageSize(msgs[0])
-	kept := []Message{}
+	kept := []msg.Message{}
 	// Walk the tail backwards, keeping the most recent messages that fit.
 	for i := len(msgs) - 1; i >= 1; i-- {
 		size := messageSize(msgs[i])
@@ -59,7 +52,7 @@ func (defaultTrimPolicy) Trim(msgs []Message, attempt int) ([]Message, bool) {
 		total += size
 	}
 	// Reverse kept into chronological order after msgs[0].
-	out := make([]Message, 0, 1+len(kept))
+	out := make([]msg.Message, 0, 1+len(kept))
 	out = append(out, msgs[0])
 	for i := len(kept) - 1; i >= 0; i-- {
 		out = append(out, kept[i])
@@ -70,13 +63,42 @@ func (defaultTrimPolicy) Trim(msgs []Message, attempt int) ([]Message, bool) {
 	return out, true
 }
 
-// messageSize estimates a message's request footprint by marshaled length.
-func messageSize(m Message) int {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return 0
+// blockOverhead is the per-block byte allowance messageSize adds for the
+// envelope around a block's payload (its type, braces and separators).
+const blockOverhead = 32
+
+// messageSize estimates a message's request footprint from its native content:
+// the text, tool-input and raw lengths it carries, plus a fixed allowance per
+// block and per image.
+func messageSize(m msg.Message) int {
+	size := len(m.Role.String()) + blockOverhead
+	for _, b := range m.Content {
+		size += blockSize(b)
 	}
-	return len(b)
+	return size
+}
+
+// blockSize is one content block's estimated footprint.
+func blockSize(b msg.Block) int {
+	switch t := b.(type) {
+	case msg.Text:
+		return len(t.Text) + len(t.Ext.Raw) + blockOverhead
+	case msg.Thinking:
+		return len(t.Text) + len(t.Sig.Value) + len(t.Ext.Raw) + blockOverhead
+	case msg.ToolUse:
+		return len(t.Name) + len(t.Input) + len(t.Ext.Raw) + blockOverhead
+	case msg.ToolResult:
+		size := len(t.ToolUseID) + len(t.Ext.Raw) + blockOverhead
+		for _, c := range t.Content {
+			size += blockSize(c)
+		}
+		return size
+	case msg.Image:
+		return 1000 + len(t.Ext.Raw)
+	case msg.Opaque:
+		return len(t.Raw) + blockOverhead
+	}
+	return blockOverhead
 }
 
 // IsPromptTooLarge reports whether err is the API's prompt-size rejection.

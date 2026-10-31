@@ -15,6 +15,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -504,9 +505,9 @@ func TestIsPromptTooLarge(t *testing.T) {
 func TestDefaultTrimPolicyKeepsFirstAndRecent(t *testing.T) {
 	c := assert.NewCollecting(t)
 	big := strings.Repeat("x", 60*1024)
-	msgs := make([]Message, 0, 8)
+	msgs := make([]msg.Message, 0, 8)
 	for range 8 {
-		msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock(big)))
+		msgs = append(msgs, msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: big}}})
 	}
 	p := defaultTrimPolicy{}
 
@@ -529,10 +530,10 @@ func TestDefaultTrimPolicyKeepsFirstAndRecent(t *testing.T) {
 	}
 
 	// Already within budget: dropping nothing must report ok=false, not spin.
-	small := []Message{
-		anthropic.NewUserMessage(anthropic.NewTextBlock("a")),
-		anthropic.NewAssistantMessage(anthropic.NewTextBlock("b")),
-		anthropic.NewUserMessage(anthropic.NewTextBlock("c")),
+	small := []msg.Message{
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "a"}}},
+		{Role: msg.Assistant, Content: []msg.Block{msg.Text{Text: "b"}}},
+		{Role: msg.User, Content: []msg.Block{msg.Text{Text: "c"}}},
 	}
 	if _, ok := p.Trim(small, 0); ok {
 		t.Error("no-op trim must report ok=false")
@@ -544,7 +545,7 @@ func TestAssembleAppliesCachePolicy(t *testing.T) {
 	conv := &Conversation{cfg: convConfig{
 		model:     "claude-haiku-4-5",
 		maxTokens: 16384,
-		system: []anthropic.TextBlockParam{
+		system: []msg.Text{
 			{Text: "part one"},
 			{Text: "part two"},
 		},
@@ -554,103 +555,59 @@ func TestAssembleAppliesCachePolicy(t *testing.T) {
 	conv.cfg.temperature, conv.cfg.topK = &temp, &k
 
 	msgs := UserTextMessages("hi")
-	params := conv.assemble(msgs, sendConfig{maxTokens: 1024})
-	c.Eq(1024, params.MaxTokens, "per-send max_tokens override lost")
-	// Default policy: one 5m breakpoint on the LAST system block.
-	var withCC int
-	for i, b := range params.System {
-		if b.CacheControl.Type != "" || b.CacheControl.TTL != "" {
-			withCC++
-			c.Eq(len(params.System)-1, i, "breakpoint on block")
-			c.Eq("", b.CacheControl.TTL, "TTL")
-		}
+	req := conv.assemble(msgs, sendConfig{maxTokens: 1024})
+	c.Eq(int64(1024), req.MaxTokens, "per-send max_tokens override lost")
+	c.Eq(DefaultCachePolicy(), req.Cache, "the request carries the conversation's cache policy")
+	c.Require().Len(req.System, 2, "system blocks")
+	c.Eq("part two", req.System[1].Text, "system text")
+	c.Eq(0.7, *req.Temperature, "temperature")
+	c.Eq(int64(40), *req.TopK, "top_k")
+	// The codec places the markers the policy asks for: the default policy's
+	// one moving breakpoint sits on the request's last message block.
+	positions := msganthropic.Breakpoints(req)
+	c.Require().Len(positions, 1, "moving breakpoints")
+	c.Eq(0, positions[0].Message, "moving breakpoint message")
+	c.Eq(0, positions[0].Block, "moving breakpoint block")
+
+	// And one 5m system breakpoint, on the LAST system block.
+	body, err := msganthropic.Encode(req, msg.EncodeOptions{})
+	c.Require().NoError(err, "encode request")
+	var wire struct {
+		System []struct {
+			CacheControl json.RawMessage `json:"cache_control"`
+		} `json:"system"`
 	}
-	c.Eq(1, withCC, "%d system cache breakpoints, want exactly 1", withCC)
-	// Default policy: moving breakpoint on the request's last message block —
-	// on the assembled request only; the caller's messages stay untouched.
-	last := params.Messages[len(params.Messages)-1].Content
-	if cc := last[len(last)-1].GetCacheControl(); cc == nil || cc.Type == "" {
-		t.Error("no moving breakpoint on the last message block")
-	}
-	origLast := msgs[len(msgs)-1].Content
-	if cc := origLast[len(origLast)-1].GetCacheControl(); cc != nil && cc.Type != "" {
-		t.Error("assemble mutated the caller's message blocks")
-	}
-	// The conversation's configured system must NOT be mutated by assembly.
-	c.Eq("", conv.cfg.system[len(conv.cfg.system)-1].CacheControl.Type, "assemble mutated the conversation's system blocks")
-	v, _ := params.Temperature.Value, false
-	c.Eq(0.7, v, "temperature")
+	c.Require().NoError(json.Unmarshal(body, &wire), "decode body")
+	c.Require().Len(wire.System, 2)
+	c.Eq(0, len(wire.System[0].CacheControl), "breakpoint must be on the LAST system block")
+	c.NotEmpty(wire.System[1].CacheControl, "no system cache breakpoint")
+	// The conversation's own system blocks are values: assembly hands out a
+	// copy, so nothing a codec does can reach the config.
+	c.Eq("part two", conv.cfg.system[1].Text, "assemble mutated the conversation's system blocks")
 }
 
 func TestAssembleCachePolicyVariants(t *testing.T) {
 	c := assert.NewCollecting(t)
-	system := []anthropic.TextBlockParam{{Text: "sys"}}
+	system := []msg.Text{{Text: "sys"}}
 
 	// 1h system, messages off.
 	conv := &Conversation{cfg: convConfig{model: "m", system: system,
 		cache: &CachePolicy{SystemTTL: Cache1h, MessagesTTL: CacheOff, Breakpoints: 1}}}
-	params := conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 64})
-	c.Eq(anthropic.CacheControlEphemeralTTLTTL1h, params.System[0].CacheControl.TTL, "system TTL")
-	mLast := params.Messages[0].Content
-	if cc := mLast[len(mLast)-1].GetCacheControl(); cc != nil && cc.Type != "" {
-		t.Error("messages off: unexpected moving breakpoint")
-	}
+	req := conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 64})
+	c.Eq(Cache1h, req.Cache.SystemTTL, "system TTL")
+	c.Nil(msganthropic.Breakpoints(req), "messages off: unexpected moving breakpoint")
 
 	// Everything off.
 	conv = &Conversation{cfg: convConfig{model: "m", system: system,
 		cache: &CachePolicy{SystemTTL: CacheOff, MessagesTTL: CacheOff, Breakpoints: 1}}}
-	params = conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 64})
-	c.Eq("", params.System[0].CacheControl.Type, "system off: unexpected breakpoint")
+	req = conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 64})
+	c.Eq(CacheOff, req.Cache.SystemTTL, "system off")
+	c.Nil(msganthropic.Breakpoints(req), "everything off: unexpected moving breakpoint")
 }
 
-func TestWithMessageBreakpoints(t *testing.T) {
-	c := assert.NewCollecting(t)
-	policy := &CachePolicy{MessagesTTL: Cache5m, Breakpoints: 2}
-
-	markedAt := func(msgs []Message) []int {
-		var marked []int
-		for i := range msgs {
-			if cc := msgs[i].Content[0].GetCacheControl(); cc != nil && cc.Type != "" {
-				marked = append(marked, i)
-			}
-		}
-		return marked
-	}
-
-	// A block-heavy history: 30 single-block user messages.
-	var msgs []Message
-	for i := 0; i < 30; i++ {
-		msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock("b")))
-	}
-	out := withMessageBreakpoints(msgs, policy)
-	marked := markedAt(out)
-	c.Require().Len(marked, 2, "marked")
-	c.Eq(len(msgs)-1, marked[len(marked)-1], "last message not marked: %v", marked)
-	c.GreaterOrEqual(lookbackStride, marked[1]-marked[0], "breakpoint gap")
-	// Copy-on-write: the input history carries no markers.
-	c.Nil(markedAt(msgs), "input mutated: markers at")
-
-	// A history reloaded from capture carries stale markers verbatim; they
-	// must be cleared on the assembled request (4-breakpoint API limit).
-	stale := withMessageBreakpoints(out, policy) // out has markers baked in
-	c.Len(markedAt(stale), 2, "stale markers not consolidated")
-
-	// One more message MOVES the markers on the new request.
-	grown := append(append([]Message{}, msgs...), anthropic.NewUserMessage(anthropic.NewTextBlock("new")))
-	out2 := withMessageBreakpoints(grown, policy)
-	m2 := markedAt(out2)
-	if len(m2) != 2 || m2[len(m2)-1] != len(grown)-1 {
-		t.Errorf("after growth: markers %v, want last=%d", m2, len(grown)-1)
-	}
-
-	// Off policy still scrubs stale markers.
-	off := withMessageBreakpoints(out, &CachePolicy{MessagesTTL: CacheOff, Breakpoints: 1})
-	c.Nil(markedAt(off), "off policy left markers")
-}
-
-// UserTextMessages is a test helper: one user message wrapping UserText.
-func UserTextMessages(s string) []Message {
-	return []Message{anthropic.NewUserMessage(anthropic.NewTextBlock(s))}
+// UserTextMessages is a test helper: one native user message wrapping UserText.
+func UserTextMessages(s string) []msg.Message {
+	return []msg.Message{{Role: msg.User, Content: UserTextMsg(s)}}
 }
 
 // ---- Task 2 primitives: Primary + ThinkingBudget conv options -------------

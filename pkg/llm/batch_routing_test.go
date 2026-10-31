@@ -26,7 +26,7 @@ type routingFakeBatcher struct {
 	models    []string // Park's model argument — what the batch envelope would name
 }
 
-func (b *routingFakeBatcher) Park(_ context.Context, _ string, model string, _ anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error) {
+func (b *routingFakeBatcher) Park(_ context.Context, _ string, model string, _ json.RawMessage, provider json.RawMessage) (json.RawMessage, error) {
 	b.mu.Lock()
 	b.providers = append(b.providers, provider)
 	b.models = append(b.models, model)

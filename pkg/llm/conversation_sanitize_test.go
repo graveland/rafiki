@@ -12,6 +12,32 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
+// toolUseOf asserts b is a ToolUse.
+func toolUseOf(t *testing.T, b msg.Block) msg.ToolUse {
+	t.Helper()
+	tu, ok := b.(msg.ToolUse)
+	if !ok {
+		t.Fatalf("block %T is not a ToolUse", b)
+	}
+	return tu
+}
+
+// toolResultOf asserts b is a ToolResult.
+func toolResultOf(t *testing.T, b msg.Block) msg.ToolResult {
+	t.Helper()
+	tr, ok := b.(msg.ToolResult)
+	if !ok {
+		t.Fatalf("block %T is not a ToolResult", b)
+	}
+	return tr
+}
+
+// isText reports whether b is a text block.
+func isText(b msg.Block) bool {
+	_, ok := b.(msg.Text)
+	return ok
+}
+
 func TestMergeForRequestReplacesEmptyNameToolUses(t *testing.T) {
 	c := assert.NewAborting(t)
 
@@ -35,16 +61,17 @@ func TestMergeForRequestReplacesEmptyNameToolUses(t *testing.T) {
 
 	// Assistant: id_broken replaced with text, id_good and original text kept
 	c.Eq(3, len(result[0].Content))
-	c.Eq("bash", result[0].Content[0].OfToolUse.Name)
-	c.Eq("id_good", result[0].Content[0].OfToolUse.ID)
+	good := toolUseOf(t, result[0].Content[0])
+	c.Eq("bash", good.Name)
+	c.Eq("id_good", good.ID)
 	// Second block is the replacement text for id_broken
-	c.True(result[0].Content[1].OfText != nil, "broken tool_use replaced with text")
-	c.True(result[0].Content[2].OfText != nil, "original text block preserved")
+	c.True(isText(result[0].Content[1]), "broken tool_use replaced with text")
+	c.True(isText(result[0].Content[2]), "original text block preserved")
 
 	// User: both tool_results kept — model sees the is_error feedback
 	c.Eq(2, len(result[1].Content))
-	c.Eq("id_good", result[1].Content[0].OfToolResult.ToolUseID)
-	c.Eq("id_broken", result[1].Content[1].OfToolResult.ToolUseID, "error feedback preserved")
+	c.Eq("id_good", toolResultOf(t, result[1].Content[0]).ToolUseID)
+	c.Eq("id_broken", toolResultOf(t, result[1].Content[1]).ToolUseID, "error feedback preserved")
 }
 
 func TestMergeForRequestReplacesOnlyEmptyNames(t *testing.T) {
@@ -60,8 +87,8 @@ func TestMergeForRequestReplacesOnlyEmptyNames(t *testing.T) {
 
 	c.Eq(1, len(result))
 	c.Eq(2, len(result[0].Content))
-	c.Eq("bash", result[0].Content[0].OfToolUse.Name)
-	c.Eq("read", result[0].Content[1].OfToolUse.Name)
+	c.Eq("bash", toolUseOf(t, result[0].Content[0]).Name)
+	c.Eq("read", toolUseOf(t, result[0].Content[1]).Name)
 }
 
 func TestMergeForRequestLeavesUserMessagesUntouched(t *testing.T) {
@@ -104,15 +131,15 @@ func TestMergeForRequestMultipleReplacedToolUses(t *testing.T) {
 
 	// Assistant: 4 blocks — two kept (read, bash), two replaced with text
 	c.Eq(4, len(result[0].Content))
-	c.True(result[0].Content[0].OfText != nil, "id_a replaced with text")
-	c.Eq("read", result[0].Content[1].OfToolUse.Name)
-	c.True(result[0].Content[2].OfText != nil, "id_c replaced with text")
-	c.Eq("bash", result[0].Content[3].OfToolUse.Name)
+	c.True(isText(result[0].Content[0]), "id_a replaced with text")
+	c.Eq("read", toolUseOf(t, result[0].Content[1]).Name)
+	c.True(isText(result[0].Content[2]), "id_c replaced with text")
+	c.Eq("bash", toolUseOf(t, result[0].Content[3]).Name)
 
 	// User: all four tool_results kept — error feedback preserved
 	c.Eq(4, len(result[1].Content))
-	c.Eq("id_a", result[1].Content[0].OfToolResult.ToolUseID)
-	c.Eq("id_b", result[1].Content[1].OfToolResult.ToolUseID)
-	c.Eq("id_c", result[1].Content[2].OfToolResult.ToolUseID)
-	c.Eq("id_d", result[1].Content[3].OfToolResult.ToolUseID)
+	c.Eq("id_a", toolResultOf(t, result[1].Content[0]).ToolUseID)
+	c.Eq("id_b", toolResultOf(t, result[1].Content[1]).ToolUseID)
+	c.Eq("id_c", toolResultOf(t, result[1].Content[2]).ToolUseID)
+	c.Eq("id_d", toolResultOf(t, result[1].Content[3]).ToolUseID)
 }

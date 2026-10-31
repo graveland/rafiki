@@ -1,20 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package llm is the library front door: a typed builder over the routing
-// core with DB-backed Conversations. Callers never construct
-// anthropic.MessageNewParams for conversation sends — the library owns
-// history loading, request assembly, trimming, cache breakpoints and
-// prefix_hash.
+// core with DB-backed Conversations. Callers never construct a provider's wire
+// request for conversation sends — the library owns history loading, request
+// assembly, trimming, cache breakpoints and prefix_hash.
 package llm
-
-// CacheTTL is a prompt-cache breakpoint lifetime.
-type CacheTTL string
-
-const (
-	CacheOff CacheTTL = "off" // no breakpoint
-	Cache1h  CacheTTL = "1h"  // 2x write premium; pays off with cross-conversation reuse
-	Cache5m  CacheTTL = "5m"  // 1.25x write premium; entry lives 5 minutes
-)
 
 const (
 	anthropicBaseURL  = "https://api.anthropic.com"

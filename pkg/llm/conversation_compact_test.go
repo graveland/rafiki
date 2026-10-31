@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -121,25 +122,41 @@ func allRows(t *testing.T, conv *Conversation) []*convpkg.Node {
 	return rows
 }
 
-// stripCC returns a copy of msgs with every cache_control marker cleared, so
-// two requests can be compared without the moving-breakpoint noise.
-func stripCC(msgs []anthropic.MessageParam) []anthropic.MessageParam {
-	out := make([]anthropic.MessageParam, len(msgs))
-	for i, m := range msgs {
-		nc := make([]anthropic.ContentBlockParamUnion, len(m.Content))
-		for j, b := range m.Content {
-			nc[j] = blockWithCacheControl(b, anthropic.CacheControlEphemeralParam{})
+// stripCC renders msgs as canonical JSON with every cache_control marker
+// removed, so two requests can be compared without the moving-breakpoint noise
+// the codec adds at encode time.
+func stripCC(t *testing.T, msgs []anthropic.MessageParam) string {
+	t.Helper()
+	raw, err := json.Marshal(msgs)
+	assert.NewAborting(t).NoError(err, "marshal messages")
+	var v any
+	assert.NewAborting(t).NoError(json.Unmarshal(raw, &v), "decode messages")
+	dropCacheControl(v)
+	out, err := json.Marshal(v)
+	assert.NewAborting(t).NoError(err, "re-marshal messages")
+	return string(out)
+}
+
+// dropCacheControl removes every cache_control key, at any depth.
+func dropCacheControl(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		delete(t, "cache_control")
+		for _, c := range t {
+			dropCacheControl(c)
 		}
-		out[i] = anthropic.MessageParam{Role: m.Role, Content: nc}
+	case []any:
+		for _, c := range t {
+			dropCacheControl(c)
+		}
 	}
-	return out
 }
 
 // countingTrim is a TrimPolicy that records how many times it ran and never
 // shrinks — the signal that compaction happened (or did not) before trim.
 type countingTrim struct{ calls *int }
 
-func (c countingTrim) Trim(msgs []Message, _ int) ([]Message, bool) {
+func (c countingTrim) Trim(msgs []msg.Message, _ int) ([]msg.Message, bool) {
 	*c.calls++
 	return msgs, false
 }
@@ -413,11 +430,11 @@ func TestCompactionSummaryRequestPrefixIsByteIdentical(t *testing.T) {
 	ck.Eq(mustJSON(prev.System), mustJSON(sum.System), "system bytes differ")
 	ck.Eq(mustJSON(prev.Thinking), mustJSON(sum.Thinking), "thinking bytes differ")
 
-	want := stripCC(prev.Messages)
+	want := append([]anthropic.MessageParam{}, prev.Messages...)
 	last := want[len(want)-1]
 	last.Content = append(slices.Clone(last.Content), anthropic.NewTextBlock(compactionPrompt))
 	want[len(want)-1] = last
-	ck.Eq(mustJSON(want), mustJSON(stripCC(sum.Messages)), "summary messages must be the previous messages plus one prompt block")
+	ck.Eq(stripCC(t, want), stripCC(t, sum.Messages), "summary messages must be the previous messages plus one prompt block")
 }
 
 func TestCompactionSummaryRequestHasNoToolChoice(t *testing.T) {

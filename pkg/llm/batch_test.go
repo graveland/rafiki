@@ -14,6 +14,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"go.opentelemetry.io/otel/trace"
 
+	"go.graveland.dev/rafiki/pkg/msg"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -24,17 +26,17 @@ type fakeBatcher struct {
 	calls    int
 	lastIDs  []string
 	lastMods []string
-	// lastParams is the request the batcher parked, as it received it.
-	lastParams anthropic.MessageNewParams
-	scripts    []func() (*anthropic.Message, error)
+	// lastBody is the request body the batcher parked, as it received it.
+	lastBody json.RawMessage
+	scripts  []func() (json.RawMessage, error)
 }
 
-func (b *fakeBatcher) Park(_ context.Context, customID, model string, params anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
+func (b *fakeBatcher) Park(_ context.Context, customID, model string, body json.RawMessage, _ json.RawMessage) (json.RawMessage, error) {
 	b.mu.Lock()
 	b.calls++
 	b.lastIDs = append(b.lastIDs, customID)
 	b.lastMods = append(b.lastMods, model)
-	b.lastParams = params
+	b.lastBody = body
 	b.mu.Unlock()
 	i := b.calls - 1
 	if i >= len(b.scripts) {
@@ -43,8 +45,8 @@ func (b *fakeBatcher) Park(_ context.Context, customID, model string, params ant
 	return b.scripts[i]()
 }
 
-func batchReply() *anthropic.Message {
-	return cannedMessage(`{"id":"msg_b","type":"message","role":"assistant","model":"z-ai/glm-5.3-flash:batch",
+func batchReply() json.RawMessage {
+	return json.RawMessage(`{"id":"msg_b","type":"message","role":"assistant","model":"z-ai/glm-5.3-flash:batch",
 		"content":[{"type":"text","text":"batched"}],
 		"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}`)
 }
@@ -80,7 +82,7 @@ func laterCallParams() anthropic.MessageNewParams {
 
 func TestBatchFirstCallParks(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
 	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("must not be reached"),
 	}}
@@ -97,7 +99,7 @@ func TestBatchFirstCallParks(t *testing.T) {
 
 func TestBatchLaterCallStripsSuffix(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) {
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) {
 		t.Error("batcher must not be called on a later call")
 		return batchReply(), nil
 	}}}
@@ -159,7 +161,7 @@ func TestBatchNeedsConversationID(t *testing.T) {
 
 func TestBatchStreamingBypassed(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
 	streamer := newFakeStreamingSender(textStreamEvents("must not stream")...)
 	c := newBatchClient(t, b, streamer)
 
@@ -180,7 +182,7 @@ func TestBatchStreamingBypassed(t *testing.T) {
 
 func TestBatchWaitHookBrackets(t *testing.T) {
 	ck := assert.NewAborting(t)
-	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
 	c := newBatchClient(t, b, &scriptedSender{})
 
 	var seen []bool
@@ -194,7 +196,7 @@ func TestBatchWaitHookBrackets(t *testing.T) {
 	ck.False(len(seen) != 2 || !seen[0] || seen[1], "hook sequence = %v, want [true false]", seen)
 
 	// On a batcher error the hook must still see false.
-	bErr := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) {
+	bErr := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) {
 		return nil, errors.New("llm: batch failed")
 	}}}
 	c2 := newBatchClient(t, bErr, &scriptedSender{})
@@ -273,7 +275,7 @@ func TestBatchTurnCaptured(t *testing.T) {
 	}
 
 	// Success path.
-	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
 	c, conv := newConv(t, b)
 	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -285,7 +287,7 @@ func TestBatchTurnCaptured(t *testing.T) {
 	ck.Eq("openrouter", turnUpstream(t, conv.ID), "turn upstream")
 
 	// Error path.
-	bErr := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) {
+	bErr := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) {
 		return nil, errors.New("llm: batch failed")
 	}}}
 	c2, conv2 := newConv(t, bErr)
@@ -296,43 +298,119 @@ func TestBatchTurnCaptured(t *testing.T) {
 
 // TestBatchParkStripsForeignThinking is the :batch twin of the sender-level
 // strip. A conversation that started on OpenAI Responses carries reasoning
-// signatures in its thinking blocks, and this path never reaches
-// sdkSender.New/NewStreaming, so without a strip here a parked request would
-// carry a signature the batch provider cannot verify.
+// signatures in its thinking blocks, and this path never reaches a sender, so
+// without the codec's own foreign-block rule a parked request would carry a
+// signature the batch provider cannot verify.
 //
-// It calls parkSend DIRECTLY rather than through SendParams, and that is the
-// point: prepareSend parks only a first call (no assistant message), so today a
-// parked request cannot carry a thinking block. The strip is defence in depth
-// for the day that rule relaxes, and this pins parkSend's own contract instead
-// of a caller's.
+// It calls parkSend DIRECTLY rather than through send, and that is the point:
+// prepareSend parks only a first call (no assistant message), so today a parked
+// request cannot carry a thinking block. The strip is defence in depth for the
+// day that rule relaxes, and this pins parkSend's own contract instead of a
+// caller's.
 func TestBatchParkStripsForeignThinking(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
 	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("must not be reached"),
 	}}
 	c := newBatchClient(t, b, sender)
 
-	params := batchParams()
-	params.Messages = append(params.Messages, anthropic.NewAssistantMessage(
-		anthropic.NewThinkingBlock("openai-responses:rs_1:encrypted-blob", "reasoning text"),
-		anthropic.NewTextBlock("reply")))
-
-	_, err := c.parkSend(context.Background(), trace.SpanFromContext(context.Background()),
-		SendMeta{ConversationID: "conv"}, params, "openrouter", nil)
+	req := &msg.Request{
+		Model: "z-ai/glm-5.3-flash:batch", MaxTokens: 16,
+		Messages: []msg.Message{
+			{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}},
+			{Role: msg.Assistant, Content: []msg.Block{
+				msg.Thinking{Text: "reasoning text", Sig: msg.Signature{
+					Dialect: msg.DialectResponsesAPI, Value: "openai-responses:api:rs_1:encrypted-blob"}},
+				msg.Text{Text: "reply"},
+			}},
+		},
+	}
+	ctx := context.Background()
+	p := &preparedSend{ctx: ctx, span: trace.SpanFromContext(ctx), primary: "openrouter", req: req}
+	_, err := c.parkSend(ctx, p.span, SendMeta{ConversationID: "conv"}, p)
 	ck.Require().NoError(err, "parkSend")
 	ck.Require().Eq(1, b.calls, "batcher called")
 
-	for _, msg := range b.lastParams.Messages {
-		for _, block := range msg.Content {
-			if block.OfThinking != nil {
-				ck.Fail("a foreign thinking block reached the batcher: %q", block.OfThinking.Signature)
-			}
-		}
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
 	}
-	// The text block beside it is untouched: only the foreign thinking goes.
-	last := b.lastParams.Messages[len(b.lastParams.Messages)-1]
+	ck.Require().NoError(json.Unmarshal(b.lastBody, &body), "decode the parked body")
+	last := body.Messages[len(body.Messages)-1]
 	ck.Require().Len(last.Content, 1, "content after the strip")
-	ck.Require().NotNil(last.Content[0].OfText, "the surviving block is text")
-	ck.Eq("reply", last.Content[0].OfText.Text, "the text block survives")
+	ck.Eq("text", last.Content[0].Type, "the surviving block is text")
+	ck.Eq("reply", last.Content[0].Text, "the text block survives")
+}
+
+// TestBatchParkSendsAnthropicBody pins what actually leaves for the provider:
+// the parked call's per-call body is the ANTHROPIC wire form of the native
+// request — model, system, messages, tools, tool_choice and the cache policy's
+// breakpoint — and it never asks for a stream (a batch call cannot stream).
+func TestBatchParkSendsAnthropicBody(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	b := &fakeBatcher{scripts: []func() (json.RawMessage, error){func() (json.RawMessage, error) { return batchReply(), nil }}}
+	c := newBatchClient(t, b, &scriptedSender{})
+
+	req := &msg.Request{
+		Model: "z-ai/glm-5.3-flash:batch", MaxTokens: 32,
+		System:   []msg.Text{{Text: "sys"}},
+		Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}},
+		Tools: []msg.ToolDef{
+			{Name: "bash", Description: "run", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		},
+		ForceTool: "bash",
+		Cache:     CachePolicy{SystemTTL: Cache5m, MessagesTTL: CacheOff, Breakpoints: 1},
+	}
+	ctx := context.Background()
+	p := &preparedSend{ctx: ctx, span: trace.SpanFromContext(ctx), primary: "openrouter", req: req}
+	_, err := c.parkSend(ctx, p.span, SendMeta{ConversationID: "conv", Ordinal: 3}, p)
+	ck.Require().NoError(err, "parkSend")
+	ck.Require().Eq(1, b.calls, "batcher called")
+
+	var body struct {
+		Model     string `json:"model"`
+		MaxTokens int64  `json:"max_tokens"`
+		Stream    *bool  `json:"stream"`
+		System    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"system"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+		Tools []struct {
+			Name        string         `json:"name"`
+			Description string         `json:"description"`
+			InputSchema map[string]any `json:"input_schema"`
+		} `json:"tools"`
+		ToolChoice *struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"tool_choice"`
+	}
+	ck.Require().NoError(json.Unmarshal(b.lastBody, &body), "the parked body must be Anthropic JSON: %s", b.lastBody)
+	ck.Eq("z-ai/glm-5.3-flash:batch", body.Model, "model")
+	ck.Eq(int64(32), body.MaxTokens, "max_tokens")
+	ck.Nil(body.Stream, "a parked call must never ask for a stream")
+	ck.Require().Len(body.System, 1, "system blocks")
+	ck.Eq("sys", body.System[0].Text, "system text")
+	ck.Require().Len(body.Messages, 1, "messages")
+	ck.Require().Len(body.Messages[0].Content, 1, "content blocks")
+	ck.Eq("hi", body.Messages[0].Content[0].Text, "message text")
+	ck.Require().Len(body.Tools, 1, "tools")
+	ck.Eq("bash", body.Tools[0].Name, "tool name")
+	ck.Eq("run", body.Tools[0].Description, "tool description")
+	ck.Require().NotNil(body.ToolChoice, "tool_choice")
+	ck.Eq("bash", body.ToolChoice.Name, "forced tool")
+	ck.StrContains(string(b.lastBody), `"cache_control"`, "the cache policy's breakpoint must ride the parked body")
 }

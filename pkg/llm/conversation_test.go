@@ -4,10 +4,10 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +20,7 @@ import (
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -217,12 +218,13 @@ func TestConversationSendPersistsBothGranularities(t *testing.T) {
 	rows.Close()
 	ck.False(msgCount != 4 || strings.Join(roles, ",") != "user,assistant,user,assistant", "message rows = %v, want user,assistant,user,assistant", roles)
 
-	// Turn granularity: 2 complete turns, protocol anthropic, prefix_hash set,
-	// and prefix_hash IDENTICAL across the conversation (stable prefix).
+	// Turn granularity: 2 complete turns, protocol rafiki (the library sent
+	// them from a native request), prefix_hash set, and prefix_hash IDENTICAL
+	// across the conversation (stable prefix).
 	var turns, complete, hashes int
 	ck.Require().NoError(pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE status='complete'),
 		count(DISTINCT prefix_hash) FROM conversations.conversation_turn
-		WHERE conversation_id=$1::uuid AND protocol='anthropic'`, conv.ID).Scan(&turns, &complete, &hashes))
+		WHERE conversation_id=$1::uuid AND protocol='rafiki'`, conv.ID).Scan(&turns, &complete, &hashes))
 	ck.False(turns != 2 || complete != 2, "turns=%d complete=%d, want 2/2", turns, complete)
 	ck.Eq(1, hashes, "prefix_hash values across the conversation")
 
@@ -403,40 +405,6 @@ func TestWithCache_EachApplicationGetsItsOwnPolicy(t *testing.T) {
 	c.NotEq(cfg2.cache, cfg1.cache, "WithCache applications share one CachePolicy pointer")
 	cfg1.cache.Breakpoints = 3 // what Conversation()'s clamp does
 	c.Eq(9, cfg2.cache.Breakpoints, "clamping one conversation's policy leaked: Breakpoints")
-}
-
-func TestBlockWithCacheControl_CoversEveryCacheableUnionMember(t *testing.T) {
-	c := assert.NewCollecting(t)
-	// Exhaustiveness guard against SDK bumps: if a new ContentBlockParamUnion
-	// member carries cache_control and blockWithCacheControl doesn't handle
-	// it, a stale marker on reloaded history couldn't be cleared and a
-	// request could exceed the API's 4-breakpoint limit.
-	marker := anthropic.NewCacheControlEphemeralParam()
-	ut := reflect.TypeOf(anthropic.ContentBlockParamUnion{})
-	tested := 0
-	for i := 0; i < ut.NumField(); i++ {
-		f := ut.Field(i)
-		if !strings.HasPrefix(f.Name, "Of") || f.Type.Kind() != reflect.Pointer {
-			continue
-		}
-		cc, ok := f.Type.Elem().FieldByName("CacheControl")
-		if !ok || cc.Type != reflect.TypeOf(marker) {
-			continue // member cannot carry cache_control (thinking blocks etc.)
-		}
-		member := reflect.New(f.Type.Elem())
-		member.Elem().FieldByName("CacheControl").Set(reflect.ValueOf(marker))
-		var b anthropic.ContentBlockParamUnion
-		reflect.ValueOf(&b).Elem().Field(i).Set(member)
-
-		got := blockWithCacheControl(b, anthropic.CacheControlEphemeralParam{})
-		ptr := got.GetCacheControl()
-		c.False(ptr == nil || ptr.Type != "" || ptr.TTL != "", "%s: blockWithCacheControl did not clear cache_control (got %+v) — add it to the switch", f.Name, ptr)
-		if orig := b.GetCacheControl(); orig == nil || orig.Type == "" {
-			t.Errorf("%s: input block was mutated; blockWithCacheControl must copy", f.Name)
-		}
-		tested++
-	}
-	c.Require().GreaterOrEqual(14, tested, "only") // the cacheable members as of anthropic-sdk-go v1.56
 }
 
 func TestConversationWithToolChoice(t *testing.T) {
@@ -810,11 +778,11 @@ func TestFundiAssistantNodeCarriesProviderMessageID(t *testing.T) {
 // recognises. The byte-budgeted default policy would depend on fixture sizes.
 type anchorTailTrim struct{}
 
-func (anchorTailTrim) Trim(msgs []Message, _ int) ([]Message, bool) {
+func (anchorTailTrim) Trim(msgs []msg.Message, _ int) ([]msg.Message, bool) {
 	if len(msgs) <= 3 {
 		return msgs, false
 	}
-	return []Message{msgs[0], msgs[len(msgs)-2], msgs[len(msgs)-1]}, true
+	return []msg.Message{msgs[0], msgs[len(msgs)-2], msgs[len(msgs)-1]}, true
 }
 
 // TestTurnRecordsRequestHeadAndNoTrimRange pins a turn row's shape after one
@@ -1027,52 +995,129 @@ func TestRequestDescriptorInMemoryConversationHasNoHead(t *testing.T) {
 	c.True(hist[len(hist)-1].ID != "", "the appended reply has no id of its own")
 }
 
-// TestSendStreamingClosesTheTurnWhenRequestConversionFails pins that a failure
-// to convert the SDK params into a native request — which happens AFTER
-// beginTurn has written the turn row — still resolves that row. Returning early
-// without failTurn leaves an open capture turn behind for every such failure.
-//
-// An unknown message role is the reachable shape: it marshals into the params
-// (so beginTurn's request marshal succeeds and the row is written) and is
-// refused by the native conversion, which is exactly the ordering under test.
-func TestSendStreamingClosesTheTurnWhenRequestConversionFails(t *testing.T) {
-	ck := assert.NewAborting(t)
+// TestCompleteTurnStoresNativeResponseUnderProtocolRafiki pins what a completed
+// library turn records: protocol "rafiki" (the library sent it from a native
+// request), and the response body in the NATIVE form — id, model, stop reason,
+// provider, usage and content — never the SDK's wire shape. The usage presence
+// rule survives storage: a count the provider did not report is ABSENT from the
+// stored JSON rather than a zero, so a later reader can still tell "unreported"
+// from "reported zero".
+func TestCompleteTurnStoresNativeResponseUnderProtocolRafiki(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	pool := convTestPool(t)
 	ctx := context.Background()
 
-	cl, err := NewClient(
-		WithProviderSender("anthropic", sdkFake(&scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
-			respondText("never sent"),
-		}})),
+	// A NATIVE sender, not the SDK-typed fake: the SDK's Usage has no way to say
+	// "not reported", so only a native response can prove presence survives
+	// storage.
+	sender := nativeFakeSender{resp: &msg.Response{
+		ID: "msg_n", Model: "claude-sonnet-5", Provider: "Together",
+		StopReason: msg.StopToolUse,
+		Usage:      msg.Usage{Input: msg.Ptr(11), Output: msg.Ptr(7)},
+		Content:    []msg.Block{msg.Text{Text: "hello"}},
+	}}
+	set := &providers.Set{
+		DefaultProvider: "anthropic",
+		Providers: map[string]providers.Provider{
+			"anthropic": {Name: "anthropic", Kind: providers.KindAnthropic},
+		},
+	}
+	c, err := NewClient(
+		WithProviders(set),
+		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("haiku-latest"),
 		WithLogger(testLogger(t)),
 	)
-	ck.NoError(err, "NewClient")
-	conv, err := cl.Conversation(ctx, NewConversation("", "test"))
-	ck.NoError(err, "Conversation")
-
-	params := anthropic.MessageNewParams{
-		Model:     "haiku-latest",
-		MaxTokens: 16,
-		Messages: []anthropic.MessageParam{{
-			Role: anthropic.MessageParamRole("moderator"),
-			Content: []anthropic.ContentBlockParamUnion{
-				{OfText: &anthropic.TextBlockParam{Text: "hi"}},
-			},
-		}},
+	ck.Require().NoError(err, "NewClient")
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	ck.Require().NoError(err, "Conversation")
+	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
+		t.Fatalf("Send: %v", err)
 	}
-	_, attempted, delivered, serr := cl.sendStreamingAttempt(ctx,
-		SendMeta{ConversationID: conv.ID}, params, func(anthropic.MessageStreamEventUnion) {})
-	ck.Require().Error(serr, "the conversion failure must surface")
-	ck.StrContains(serr.Error(), "unknown role", "conversion error")
-	ck.True(attempted, "a conversion failure is final: SendParams would convert the same params and fail identically")
-	ck.False(delivered, "nothing reached the handler")
 
-	var status string
-	ck.NoError(pool.QueryRow(ctx,
-		`SELECT status FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
-		conv.ID).Scan(&status), "read the turn row beginTurn wrote")
-	ck.Eq("error", status, "the turn must be failed, not left pending")
+	var protocol string
+	var raw []byte
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT protocol, response FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&protocol, &raw), "read the turn row")
+	ck.Eq("rafiki", protocol, "turn protocol")
+
+	var body map[string]json.RawMessage
+	ck.Require().NoError(json.Unmarshal(raw, &body), "the stored response must be a JSON object: %s", raw)
+	for _, key := range []string{"id", "model", "stop_reason", "usage", "content", "provider"} {
+		ck.HasKey(body, key, "stored response keys")
+	}
+	for _, key := range []string{"type", "role"} {
+		ck.NotHasKey(body, key, "the stored response must be the native form, not the SDK wire shape")
+	}
+
+	var id, model, stopReason, provider string
+	ck.Require().NoError(json.Unmarshal(body["id"], &id), "id")
+	ck.Require().NoError(json.Unmarshal(body["model"], &model), "model")
+	ck.Require().NoError(json.Unmarshal(body["stop_reason"], &stopReason), "stop_reason")
+	ck.Require().NoError(json.Unmarshal(body["provider"], &provider), "provider")
+	ck.Eq("msg_n", id, "stored id")
+	ck.Eq("claude-sonnet-5", model, "stored model")
+	ck.Eq("tool_use", stopReason, "stored stop reason")
+	ck.Eq("Together", provider, "stored served-by provider")
+
+	var usage map[string]json.RawMessage
+	ck.Require().NoError(json.Unmarshal(body["usage"], &usage), "usage")
+	ck.HasKey(usage, "input_tokens", "reported counts")
+	ck.HasKey(usage, "output_tokens", "reported counts")
+	ck.NotHasKey(usage, "cache_read_input_tokens", "an unreported cache count must stay absent, not become zero")
+	ck.NotHasKey(usage, "cache_creation_input_tokens", "an unreported cache count must stay absent, not become zero")
+
+	var content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	ck.Require().NoError(json.Unmarshal(body["content"], &content), "content")
+	ck.Require().Len(content, 1, "content blocks")
+	ck.Eq("text", content[0].Type, "content block type")
+	ck.Eq("hello", content[0].Text, "content text")
+
+	// The token columns are msg.Val of each field: reported counts land, and an
+	// unreported one is zero.
+	var in, out, cacheRead, cacheCreate int64
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+		        COALESCE(cache_read_tokens,0), COALESCE(cache_creation_tokens,0)
+		   FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&in, &out, &cacheRead, &cacheCreate), "read token columns")
+	ck.Eq(int64(11), in, "input tokens")
+	ck.Eq(int64(7), out, "output tokens")
+	ck.Eq(int64(0), cacheRead, "cache read tokens")
+	ck.Eq(int64(0), cacheCreate, "cache creation tokens")
+
+	// prefix_content is the request MINUS its messages: the same envelope shape
+	// the proxy path stores, with the cache policy in it.
+	var prefixContent []byte
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT prefix_content FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&prefixContent), "read prefix_content")
+	var envelope map[string]json.RawMessage
+	ck.Require().NoError(json.Unmarshal(prefixContent, &envelope), "prefix_content must be a JSON object: %s", prefixContent)
+	ck.NotHasKey(envelope, "messages", "prefix_content must be the request minus its messages")
+	ck.HasKey(envelope, "model", "prefix_content")
+	ck.HasKey(envelope, "cache", "prefix_content")
+
+	// cache_breakpoints is the codec's placement, recorded explicitly: the
+	// default policy puts one moving marker on the request's single message.
+	var breakpoints []byte
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT cache_breakpoints FROM conversations.conversation_turn WHERE conversation_id=$1::uuid`,
+		conv.ID).Scan(&breakpoints), "read cache_breakpoints")
+	var idx []int
+	ck.Require().NoError(json.Unmarshal(breakpoints, &idx), "cache_breakpoints")
+	ck.EqDeep([]int{0}, idx, "cache breakpoints")
+
+	// The assistant row carries the same native content.
+	var storedContent []byte
+	ck.Require().NoError(pool.QueryRow(ctx,
+		`SELECT content FROM conversations.conversation_message
+		  WHERE conversation_id=$1::uuid AND ordinal=1`, conv.ID).Scan(&storedContent), "read the assistant row")
+	ck.StrContains(string(storedContent), `"hello"`, "the assistant row must carry the reply text")
 }

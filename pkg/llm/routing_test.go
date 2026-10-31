@@ -152,11 +152,11 @@ func TestApplyProviderPrefsZeroSpecUnchanged(t *testing.T) {
 		return string(out)
 	}
 	for _, tc := range cases {
-		params := anthropic.MessageNewParams{Model: anthropic.Model(tc.model), MaxTokens: 16,
-			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-		applyProviderPrefs(&params, tc.decl, tc.guard, tc.extras, routing.Spec{})
-		b, err := json.Marshal(params)
-		ck.Require().NoError(err, "marshal %s", tc.name)
+		req := &msg.Request{Model: tc.model, MaxTokens: 16,
+			Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}}
+		extra := applyProviderPrefs(tc.model, tc.decl, tc.guard, tc.extras, routing.Spec{}, nil)
+		b, err := msganthropic.Encode(req, msg.EncodeOptions{Extra: extra})
+		ck.Require().NoError(err, "encode %s", tc.name)
 		ck.Eq(canonicalBody(t, []byte(tc.golden)), canonicalBody(t, b),
 			"%s: body must be identical to the pre-spec client", tc.name)
 	}

@@ -3,15 +3,11 @@
 package llm
 
 import (
-	"fmt"
 	"reflect"
 	"slices"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
-	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 )
 
 // mergeForRequestRows is mergeForRequest plus rowStart[i], the index in
@@ -32,28 +28,23 @@ import (
 // notice, an environment update) that no provider request can carry as a turn,
 // and dropping it keeps the turn alive instead of failing on a row the model
 // never wrote.
-func mergeForRequestRows(history []*convpkg.Node) (msgs []Message, rowStart []int, err error) {
-	out := make([]Message, 0, len(history))
+func mergeForRequestRows(history []*convpkg.Node) (msgs []msg.Message, rowStart []int, err error) {
+	out := make([]msg.Message, 0, len(history))
 	start := make([]int, 0, len(history))
 	for i, n := range history {
 		if n.Msg.Role == msg.System {
 			continue
 		}
-		param, err := msganthropic.ToParam(n.Msg)
-		if err != nil {
-			return nil, nil, fmt.Errorf("llm: message %d: %w", i, err)
-		}
-		param.Content = replaceEmptyToolUses(param)
-		if param.Role == anthropic.MessageParamRoleUser && len(out) > 0 &&
-			out[len(out)-1].Role == anthropic.MessageParamRoleUser {
+		m := msg.Message{Role: n.Msg.Role, Content: replaceEmptyToolUses(n.Msg)}
+		if m.Role == msg.User && len(out) > 0 && out[len(out)-1].Role == msg.User {
 			last := &out[len(out)-1]
-			// Clone before appending: appending into a stored param's backing
+			// Clone before appending: appending into a stored message's backing
 			// array would mutate history the caller may still hold.
-			last.Content = append(slices.Clone(last.Content), param.Content...)
+			last.Content = append(slices.Clone(last.Content), m.Content...)
 			continue
 		}
 		start = append(start, i)
-		out = append(out, param)
+		out = append(out, m)
 	}
 	return out, start, nil
 }
@@ -67,7 +58,7 @@ func mergeForRequestRows(history []*convpkg.Node) (msgs []Message, rowStart []in
 // is rowStart for trimmed (the anchor plus the kept suffix). k == 1 is the
 // no-op trim — the suffix would be all of orig[1:] — so it is refused with the
 // same shape rules: a policy that dropped nothing has no range to record.
-func trimDropped(orig, trimmed []Message, rowStart []int) (to int, keptRowStart []int, ok bool) {
+func trimDropped(orig, trimmed []msg.Message, rowStart []int) (to int, keptRowStart []int, ok bool) {
 	n := len(trimmed) - 1
 	k := len(orig) - n
 	if n < 1 || k < 2 || len(rowStart) != len(orig) {

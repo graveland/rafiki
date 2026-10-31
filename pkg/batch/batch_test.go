@@ -17,10 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	batch "go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/batch/batchtest"
+	"go.graveland.dev/rafiki/pkg/msg"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -292,23 +291,23 @@ func (h *harness) listCount() int {
 }
 
 type parkRes struct {
-	msg *anthropic.Message
-	err error
+	body json.RawMessage
+	err  error
 }
 
 func (h *harness) park(customID, model string) <-chan parkRes {
-	return h.parkParams(customID, model, testParams(model))
+	return h.parkBody(customID, model, testBody(model))
 }
 
-func (h *harness) parkParams(customID, model string, params anthropic.MessageNewParams) <-chan parkRes {
-	return h.parkCtx(h.ctx, customID, model, params)
+func (h *harness) parkBody(customID, model string, body json.RawMessage) <-chan parkRes {
+	return h.parkCtx(h.ctx, customID, model, body)
 }
 
-func (h *harness) parkCtx(ctx context.Context, customID, model string, params anthropic.MessageNewParams) <-chan parkRes {
+func (h *harness) parkCtx(ctx context.Context, customID, model string, body json.RawMessage) <-chan parkRes {
 	ch := make(chan parkRes, 1)
 	go func() {
-		msg, err := h.b.Park(ctx, customID, model, params, nil)
-		ch <- parkRes{msg: msg, err: err}
+		raw, err := h.b.Park(ctx, customID, model, body, nil)
+		ch <- parkRes{body: raw, err: err}
 	}()
 	return ch
 }
@@ -381,21 +380,32 @@ func (h *harness) seedSubmitted(t *testing.T, customID, model, batchID string) b
 	return row
 }
 
-func testParams(model string) anthropic.MessageNewParams {
-	return anthropic.MessageNewParams{
-		Model:     anthropic.Model(model),
-		MaxTokens: 32,
-		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))},
-	}
+// testBody is the per-call body a caller hands Park: an already-encoded
+// Messages-API request for model.
+func testBody(model string) json.RawMessage {
+	return json.RawMessage(`{"model":"` + model + `","max_tokens":32,` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
 }
 
-func testParamsWithExtras(model string) anthropic.MessageNewParams {
-	params := testParams(model)
-	params.SetExtraFields(map[string]any{
-		"stream":   false,
-		"provider": map[string]any{"order": []string{"vendor"}},
-	})
-	return params
+// testBodyWithExtras is testBody carrying the two keys the batch envelope owns
+// elsewhere (stream, provider): requestJSON must strip both.
+func testBodyWithExtras(model string) json.RawMessage {
+	return json.RawMessage(`{"model":"` + model + `","max_tokens":32,"stream":false,` +
+		`"provider":{"order":["vendor"]},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+}
+
+// parkID reads a parked result's message id, "" for an absent or id-less body.
+func parkID(t *testing.T, body json.RawMessage) string {
+	t.Helper()
+	if len(body) == 0 {
+		return ""
+	}
+	var m struct {
+		ID string `json:"id"`
+	}
+	assert.NewAborting(t).NoError(json.Unmarshal(body, &m), "decode parked response")
+	return m.ID
 }
 
 // msgBody is a minimal Messages-API response body for message id.
@@ -467,7 +477,7 @@ func TestBatchBodyShape(t *testing.T) {
 	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	const model = "vendor/m:batch"
-	_ = h.parkParams("conv-1", model, testParamsWithExtras(model))
+	_ = h.parkBody("conv-1", model, testBodyWithExtras(model))
 	h.waitInState(t, batch.StateQueued, 1, 5*time.Second)
 	h.start()
 	submits := h.waitSubmits(t, 1, 5*time.Second)
@@ -511,8 +521,8 @@ func TestBatchResultsOutOfOrder(t *testing.T) {
 	)
 	res1 := h.await(t, ch1, 5*time.Second)
 	res2 := h.await(t, ch2, 5*time.Second)
-	c.False(res1.err != nil || res1.msg == nil || res1.msg.ID != "msg_1", "conv-1: msg=%+v err=%v", res1.msg, res1.err)
-	c.False(res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2", "conv-2: msg=%+v err=%v", res2.msg, res2.err)
+	c.False(res1.err != nil || parkID(t, res1.body) != "msg_1", "conv-1: body=%s err=%v", res1.body, res1.err)
+	c.False(res2.err != nil || parkID(t, res2.body) != "msg_2", "conv-2: body=%s err=%v", res2.body, res2.err)
 }
 
 func TestBatchWholeBatchFailureFansOut(t *testing.T) {
@@ -548,7 +558,7 @@ func TestBatchPerRequestErrorIsolated(t *testing.T) {
 	res2 := h.await(t, ch2, 5*time.Second)
 	var be *batch.Error
 	c.False(!errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "quota exceeded"), "conv-1: err = %v, want *batch.Error with the item's error", res1.err)
-	c.False(res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2", "conv-2: msg=%+v err=%v, want the successful result", res2.msg, res2.err)
+	c.False(res2.err != nil || parkID(t, res2.body) != "msg_2", "conv-2: body=%s err=%v, want the successful result", res2.body, res2.err)
 }
 
 func TestBatchAdoptSubmitted(t *testing.T) {
@@ -561,7 +571,7 @@ func TestBatchAdoptSubmitted(t *testing.T) {
 	ch := h.park("conv-1", "vendor/m:batch")
 	h.start()
 	res := h.await(t, ch, 5*time.Second)
-	c.Require().False(res.err != nil || res.msg == nil || res.msg.ID != "msg_9", "park: msg=%+v err=%v", res.msg, res.err)
+	c.Require().False(res.err != nil || parkID(t, res.body) != "msg_9", "park: body=%s err=%v", res.body, res.err)
 	c.Eq(0, h.submitCount(), "submits")
 }
 
@@ -571,9 +581,9 @@ func TestBatchAdoptCompleted(t *testing.T) {
 	row := h.seedSubmitted(t, "conv-1", "vendor/m:batch", "batch-9")
 	c.Require().NoError(h.ms.Complete(context.Background(), row.ID, msgBody("msg_9")), "seed Complete")
 	h.start()
-	msg, err := h.b.Park(h.ctx, "conv-1", "vendor/m:batch", testParams("vendor/m:batch"), nil)
+	body, err := h.b.Park(h.ctx, "conv-1", "vendor/m:batch", testBody("vendor/m:batch"), nil)
 	c.Require().NoError(err, "Park")
-	c.False(msg == nil || msg.ID != "msg_9", "Park returned %+v, want the stored message", msg)
+	c.Eq("msg_9", parkID(t, body), "Park returned %s, want the stored message", body)
 	c.Eq(0, h.submitCount(), "submits")
 }
 
@@ -604,7 +614,7 @@ func TestBatchFailedRowRetries(t *testing.T) {
 		batch.BatchResult{CustomID: "conv-1", Response: &batch.BatchResponse{StatusCode: 200, Body: msgBody("msg_new")}},
 	)
 	res := h.await(t, ch, 5*time.Second)
-	c.False(res.err != nil || res.msg == nil || res.msg.ID != "msg_new", "park: msg=%+v err=%v", res.msg, res.err)
+	c.False(res.err != nil || parkID(t, res.body) != "msg_new", "park: body=%s err=%v", res.body, res.err)
 }
 
 func TestBatchRecoverySubmittingMatched(t *testing.T) {
@@ -624,7 +634,7 @@ func TestBatchRecoverySubmittingMatched(t *testing.T) {
 	ch := h.park("conv-1", "vendor/m:batch")
 	h.start()
 	res := h.await(t, ch, 5*time.Second)
-	c.Require().False(res.err != nil || res.msg == nil || res.msg.ID != "msg_7", "park: msg=%+v err=%v", res.msg, res.err)
+	c.Require().False(res.err != nil || parkID(t, res.body) != "msg_7", "park: body=%s err=%v", res.body, res.err)
 	rows, _ := h.ms.InState(context.Background(), batch.StateCompleted)
 	c.False(len(rows) != 1 || rows[0].ProviderBatchID != "batch-7", "InState(completed) = %+v, want the row adopted onto batch-7", rows)
 	c.Eq(0, h.submitCount(), "submits")
@@ -730,7 +740,7 @@ func TestBatchCtxCancelKeepsRow(t *testing.T) {
 	h := newHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := h.parkCtx(ctx, "conv-1", "vendor/m:batch", testParams("vendor/m:batch"))
+	ch := h.parkCtx(ctx, "conv-1", "vendor/m:batch", testBody("vendor/m:batch"))
 	h.waitInState(t, batch.StateQueued, 1, 5*time.Second)
 	cancel()
 	res := h.await(t, ch, 5*time.Second)
@@ -750,8 +760,8 @@ func TestBatchErrorIsPlain(t *testing.T) {
 	res := h.await(t, ch, 5*time.Second)
 	var be *batch.Error
 	c.True(errors.As(res.err, &be), "delivered error %v (%T) does not satisfy errors.As(*batch.Error)", res.err, res.err)
-	var ae *anthropic.Error
-	c.False(errors.As(res.err, &ae), "delivered error masquerades as *anthropic.Error: %v", res.err)
+	var ae *msg.APIError
+	c.False(errors.As(res.err, &ae), "delivered error masquerades as *msg.APIError (agentloop would retry it): %v", res.err)
 	c.False(errors.Is(res.err, context.DeadlineExceeded) || errors.Is(res.err, context.Canceled), "delivered error wraps a context error: %v", res.err)
 }
 
@@ -770,12 +780,12 @@ func TestBatchParkRejectsInvalidCustomID(t *testing.T) {
 	for _, id := range invalid {
 		// Park returns before any store interaction, so the call is
 		// synchronous and must fail fast with a plain *batch.Error.
-		msg, err := h.b.Park(h.ctx, id, "vendor/m:batch", testParams("vendor/m:batch"), nil)
-		c.Require().Error(err, "Park(%q): expected a rejection, got msg=%v", id, msg)
+		body, err := h.b.Park(h.ctx, id, "vendor/m:batch", testBody("vendor/m:batch"), nil)
+		c.Require().Error(err, "Park(%q): expected a rejection, got body=%s", id, body)
 		var be *batch.Error
 		c.True(errors.As(err, &be), "Park(%q): err %v (%T) is not *batch.Error", id, err, err)
 		c.StrContains(err.Error(), "custom_id", "Park(%q): err = %q, want it to name custom_id", id, err.Error())
-		c.Nil(msg, "Park(%q): returned a message with the error", id)
+		c.Nil(body, "Park(%q): returned a body with the error", id)
 	}
 	// Nothing durable, nothing sent.
 	for _, st := range []batch.State{
@@ -818,8 +828,8 @@ func TestBatchContradictoryResultFails(t *testing.T) {
 	res2 := h.await(t, ch2, 5*time.Second)
 	var be *batch.Error
 	c.False(!errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "upstream said error"), "conv-1: err = %v, want *batch.Error with the item's error", res1.err)
-	c.Nil(res1.msg, "conv-1: completed despite the contradictory error item")
-	c.False(res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2", "conv-2: msg=%+v err=%v, want the clean sibling unaffected", res2.msg, res2.err)
+	c.Nil(res1.body, "conv-1: completed despite the contradictory error item")
+	c.False(res2.err != nil || parkID(t, res2.body) != "msg_2", "conv-2: body=%s err=%v, want the clean sibling unaffected", res2.body, res2.err)
 	rows, _ := h.ms.InState(context.Background(), batch.StateFailed)
 	c.False(len(rows) != 1 || rows[0].CustomID != "conv-1", "InState(failed) = %+v, want conv-1 failed", rows)
 	completed, _ := h.ms.InState(context.Background(), batch.StateCompleted)

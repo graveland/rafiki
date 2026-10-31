@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -58,17 +57,17 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 		return false, nil
 	}
 	last := &reqMsgs[len(reqMsgs)-1]
-	if last.Role == anthropic.MessageParamRoleUser {
-		last.Content = append(slices.Clone(last.Content), anthropic.NewTextBlock(prompt))
+	if last.Role == msg.User {
+		last.Content = append(slices.Clone(last.Content), msg.Text{Text: prompt})
 	} else {
-		reqMsgs = append(reqMsgs, anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)))
+		reqMsgs = append(reqMsgs, msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: prompt}}})
 	}
 
 	// The summary call keeps the previous turn's tools, system prompt and
 	// thinking config byte-identical so the cached prefix hits. Only the output
 	// cap, source, tool choice and the streaming/batch hooks change.
 	sc := scfg
-	sc.streamHandler = nil
+	sc.streamHandler = streamSink{}
 	sc.batchWait = nil
 	sc.source = "compaction"
 	sc.toolChoice = ""
@@ -82,15 +81,15 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	// names the same head. It never carries a trim range: nothing was dropped.
 	meta := conv.sendMeta(nextOrdinal(history), sc)
 	meta.RequestHeadID = conv.requestHeadID(history)
-	params := conv.assemble(reqMsgs, sc)
-	resp, _, err := conv.sendAttempt(ctx, meta, params, nil)
+	req := conv.assemble(reqMsgs, sc)
+	resp, _, err := conv.sendAttempt(ctx, meta, req, streamSink{})
 	if err != nil {
 		return false, err
 	}
 
 	// A summary cut off by max_tokens is never stored: an unclosed <summary>
 	// tag would otherwise be accepted downstream as a complete handover.
-	if resp.StopReason == anthropic.StopReasonMaxTokens {
+	if resp.StopReason == msg.StopMaxTokens {
 		conv.client.logger.Warn("compaction summary truncated", "conversation", conv.ID, "trigger", trigger)
 		return false, nil
 	}
@@ -99,7 +98,7 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	// prompt, and those carry no summary.
 	var text string
 	for _, b := range resp.Content {
-		if tb, ok := b.AsAny().(anthropic.TextBlock); ok {
+		if tb, ok := b.(msg.Text); ok {
 			text += tb.Text
 		}
 	}
@@ -109,7 +108,7 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 		return false, nil
 	}
 
-	replaced := int(resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens)
+	replaced := int(msg.Val(resp.Usage.Input) + msg.Val(resp.Usage.CacheRead) + msg.Val(resp.Usage.CacheWrite))
 	start := cutTail(history, p.tailBudget())
 	tail := history[start:]
 	// The summary and the boundary rows are built natively: they are content

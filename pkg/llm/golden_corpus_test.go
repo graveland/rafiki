@@ -23,19 +23,18 @@ import (
 
 var updateGolden = flag.Bool("update-golden", false, "rewrite msgtest goldens")
 
-// TestGoldenCorpus pins the one conversion the client still performs at the
-// sender call: the SDK params it builds this wave, run through RequestFromSDK,
-// must encode to the same recorded bodies the codecs were built against. The
-// codecs' own tests own the corpus for their dialects; what this adds is the
-// SDK → native hop, which is where a dropped block, a lost cache breakpoint or
-// an unmerged extra field would show up as a wire change.
+// TestGoldenCorpus pins what Conversation.assemble builds: a request assembled
+// from the conversation's defaults must encode to the same recorded bodies the
+// codecs were built against. The codecs' own tests own the corpus for their
+// dialects; what this adds is the assembly hop, which is where a dropped block,
+// a lost cache policy or an unmerged extra field would show up as a wire change.
 func TestGoldenCorpus(t *testing.T) {
 	for _, tc := range msgtest.Corpus() {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			ck := assert.NewAborting(t)
-			req, extra, err := msganthropic.RequestFromSDK(corpusParams(t, tc))
-			ck.NoError(err, "RequestFromSDK")
+			req := corpusRequest(t, tc)
+			extra := tc.Extra
 
 			anthropicBody, err := msganthropic.Encode(req, msg.EncodeOptions{Extra: extra})
 			ck.NoError(err, "encode anthropic body")
@@ -71,37 +70,11 @@ func TestGoldenCorpus(t *testing.T) {
 	}
 }
 
-// corpusParams assembles the SDK params the client would build for tc: the
-// conversation defaults, msganthropic.ToParam over the messages, and
-// Conversation.assemble's cache breakpoints.
-func corpusParams(t *testing.T, tc msgtest.Case) anthropic.MessageNewParams {
+// corpusRequest assembles the native request the client would build for tc,
+// through Conversation.assemble and the corpus's own defaults.
+func corpusRequest(t *testing.T, tc msgtest.Case) *msg.Request {
 	t.Helper()
-	ck := assert.NewAborting(t)
 	req := tc.Req
-
-	system := make([]anthropic.TextBlockParam, 0, len(req.System))
-	for _, s := range req.System {
-		system = append(system, anthropic.TextBlockParam{Text: s.Text})
-	}
-
-	tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
-	for _, td := range req.Tools {
-		var schema anthropic.ToolInputSchemaParam
-		ck.NoError(json.Unmarshal(td.InputSchema, &schema), "unmarshal %s input schema", td.Name)
-		tool := anthropic.ToolParam{Name: td.Name, InputSchema: schema}
-		if td.Description != "" {
-			tool.Description = anthropic.String(td.Description)
-		}
-		tools = append(tools, anthropic.ToolUnionParam{OfTool: &tool})
-	}
-
-	reqMsgs := make([]Message, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		param, err := msganthropic.ToParam(m)
-		ck.NoError(err, "convert %s message", m.Role)
-		reqMsgs = append(reqMsgs, param)
-	}
-
 	policy := CachePolicy{
 		SystemTTL:   CacheTTL(req.Cache.SystemTTL),
 		MessagesTTL: CacheTTL(req.Cache.MessagesTTL),
@@ -109,18 +82,32 @@ func corpusParams(t *testing.T, tc msgtest.Case) anthropic.MessageNewParams {
 	}
 	conv := &Conversation{cfg: convConfig{
 		model:          req.Model,
-		system:         system,
+		system:         req.System,
 		temperature:    req.Temperature,
 		topK:           req.TopK,
 		maxTokens:      req.MaxTokens,
 		thinkingBudget: req.ThinkingBudget,
 		cache:          &policy,
 	}}
-	params := conv.assemble(reqMsgs, sendConfig{
+	return conv.assemble(req.Messages, sendConfig{
 		maxTokens:  req.MaxTokens,
-		tools:      tools,
+		tools:      req.Tools,
 		toolChoice: req.ForceTool,
 	})
+}
+
+// corpusParams is the SDK-shaped form of corpusRequest: the native request the
+// client would build, encoded and decoded back into the SDK's params. It is the
+// input the SDK → native compatibility hop (RequestFromSDK, used by SendParams)
+// is exercised against, and going through the codec is what gives it the same
+// cache markers a real request would carry.
+func corpusParams(t *testing.T, tc msgtest.Case) anthropic.MessageNewParams {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	body, err := msganthropic.Encode(corpusRequest(t, tc), msg.EncodeOptions{})
+	ck.NoError(err, "encode corpus request")
+	var params anthropic.MessageNewParams
+	ck.NoError(json.Unmarshal(body, &params), "decode corpus params")
 	if len(tc.Extra) > 0 {
 		params.SetExtraFields(tc.Extra)
 	}

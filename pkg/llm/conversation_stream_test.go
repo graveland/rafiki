@@ -12,6 +12,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -336,11 +337,11 @@ func TestSend_StreamHandlerReceivesEventsAndAccumulates(t *testing.T) {
 // moonshotai) and only fills in the correct cumulative counts in the final
 // message_delta — a shape the SDK's own Message.Accumulate silently drops
 // (it only merges OutputTokens from message_delta, since real Anthropic
-// never needs more than that — see backfillDeltaUsage's doc). Without the
-// backfill, every turn through one of these backends persisted and reported
-// 0 input/cache tokens despite a real, non-trivial prompt — visible in pi's
-// attach TUI as a permanent "0.0%" context usage indistinguishable from a
-// genuinely empty prompt.
+// never needs more than that). msg.Accumulator's mergeUsage is where that
+// correction now lives. Without it, every turn through one of these backends
+// persisted and reported 0 input/cache tokens despite a real, non-trivial
+// prompt — visible in pi's attach TUI as a permanent "0.0%" context usage
+// indistinguishable from a genuinely empty prompt.
 func TestSend_StreamBackfillsInputTokensFromMessageDelta(t *testing.T) {
 	c := assert.NewCollecting(t)
 	events := []ssestream.Event{
@@ -368,10 +369,11 @@ func TestSend_StreamBackfillsInputTokensFromMessageDelta(t *testing.T) {
 // TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens is the
 // safety net for the fix above: real Anthropic reports input tokens once,
 // correctly, in message_start, and never repeats them in message_delta
-// (whose own input/cache fields come back zero there). backfillDeltaUsage's
-// ">0" guard must leave message_start's value alone in that case — textStreamEvents'
+// (whose own input/cache fields come back zero there). msg.Accumulator's
+// "a reported zero is not evidence the count was zero" rule must leave
+// message_start's value alone in that case — textStreamEvents'
 // messageStartEvent sets input_tokens=10 and messageDeltaEvent carries no
-// input_tokens field at all (unmarshals to 0), exactly that shape.
+// input_tokens field at all, exactly that shape.
 func TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sender := newFakeStreamingSender(textStreamEvents("hi")...)
@@ -417,13 +419,12 @@ func seedBigHistory(t *testing.T, conv *Conversation, n int) {
 	t.Helper()
 	big := strings.Repeat("y", 80*1024)
 	for i := range n {
-		role := anthropic.MessageParamRoleUser
+		role := msg.User
 		if i%2 == 1 {
-			role = anthropic.MessageParamRoleAssistant
+			role = msg.Assistant
 		}
-		msg := anthropic.MessageParam{Role: role,
-			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		_, aerr := conv.appendMessage(context.Background(), msg, nil, "")
+		_, aerr := conv.appendMessage(context.Background(),
+			msg.Message{Role: role, Content: []msg.Block{msg.Text{Text: big}}}, nil, "")
 		assert.NewAborting(t).NoError(aerr)
 	}
 }

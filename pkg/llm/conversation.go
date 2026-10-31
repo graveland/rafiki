@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -24,11 +25,42 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
+// CacheTTL is a prompt-cache breakpoint lifetime.
+type CacheTTL = msg.CacheTTL
+
+const (
+	CacheOff = msg.CacheOff // no breakpoint
+	Cache1h  = msg.Cache1h  // 2x write premium; pays off with cross-conversation reuse
+	Cache5m  = msg.Cache5m  // 1.25x write premium; entry lives 5 minutes
+)
+
+// CachePolicy controls where the conversation places prompt-cache
+// breakpoints when assembling each request. SystemTTL caches the static
+// prefix (tools render before system, so one breakpoint on the last system
+// block covers both). MessagesTTL enables moving breakpoints over the
+// message history — the standard multi-turn pattern: the last content block
+// of the request is marked each send, so turn N reads the whole history from
+// cache and pays only the delta. Breakpoints (clamped to [1,3]) is how many
+// moving markers to place; the extras trail every ~15 blocks to stay inside
+// the API's 20-block cache lookback on tool-heavy turns. At most 4 total
+// breakpoints are used (1 system + up to 3 moving), the API maximum.
+//
+// Placement itself is the Anthropic codec's (msganthropic.Breakpoints): a
+// request carries a policy, never markers.
+type CachePolicy = msg.CachePolicy
+
+// DefaultCachePolicy caches everything at the 5-minute TTL with two moving
+// breakpoints: the cheapest policy that keeps an active conversation fully
+// cached. Callers with cross-conversation prefix reuse inside an hour (batch
+// analyzers, busy alert loops) should raise SystemTTL to Cache1h.
+func DefaultCachePolicy() CachePolicy {
+	return CachePolicy{SystemTTL: Cache5m, MessagesTTL: Cache5m, Breakpoints: 2}
+}
+
 // Conversation is the core library object: DB-backed message history plus
 // conversation-level defaults. Sends load history, assemble the request
-// internally (system cache breakpoint, deterministic tools, trimming,
-// prefix_hash) and persist both granularities (messages = state, turn =
-// evidence).
+// internally (system cache policy, deterministic tools, trimming, prefix_hash)
+// and persist both granularities (messages = state, turn = evidence).
 //
 // A Conversation handle is owned by ONE goroutine at a time: methods are not
 // safe for concurrent use (two concurrent sends would each move the head, and
@@ -74,7 +106,7 @@ type convConfig struct {
 	primary        string
 	thinkingBudget int64
 	fallback       []string
-	system         []anthropic.TextBlockParam
+	system         []msg.Text
 	temperature    *float64
 	topK           *int64
 	maxTokens      int64
@@ -140,17 +172,26 @@ func TopK(k int64) ConvOption { return func(c *convConfig) { c.topK = &k } }
 // MaxTokens sets the default output cap (16384 when unset).
 func MaxTokens(n int64) ConvOption { return func(c *convConfig) { c.maxTokens = n } }
 
-// System sets the system prompt blocks. Prompt-cache breakpoints are applied
-// internally at request assembly per the conversation's CachePolicy — callers
-// never set cache_control themselves. System is immutable for the
+// SystemMsg sets the system prompt blocks. Prompt-cache breakpoints are
+// applied internally at request assembly per the conversation's CachePolicy —
+// callers never set cache_control themselves. System is immutable for the
 // conversation's life.
-func System(blocks []anthropic.TextBlockParam) ConvOption {
+func SystemMsg(blocks []msg.Text) ConvOption {
 	return func(c *convConfig) { c.system = blocks }
+}
+
+// System is SystemMsg for the SDK-typed block list.
+func System(blocks []anthropic.TextBlockParam) ConvOption {
+	out := make([]msg.Text, len(blocks))
+	for i, b := range blocks {
+		out[i] = msg.Text{Text: b.Text}
+	}
+	return SystemMsg(out)
 }
 
 // SystemText is the single-block convenience form of System.
 func SystemText(s string) ConvOption {
-	return System([]anthropic.TextBlockParam{{Text: s}})
+	return SystemMsg([]msg.Text{{Text: s}})
 }
 
 // WithTrimPolicy sets the prompt-too-large trim policy (default: keep the
@@ -164,30 +205,6 @@ func AuthorKind(k string) ConvOption { return func(c *convConfig) { c.authorKind
 // Zero values mean "use defaults" (10 retries, 10s base, 300s cap).
 func WithRateLimitPolicy(p RateLimitPolicy) ConvOption {
 	return func(c *convConfig) { c.rateLimit = p }
-}
-
-// CachePolicy controls where the conversation places prompt-cache
-// breakpoints when assembling each request. SystemTTL caches the static
-// prefix (tools render before system, so one breakpoint on the last system
-// block covers both). MessagesTTL enables moving breakpoints over the
-// message history — the standard multi-turn pattern: the last content block
-// of the request is marked each send, so turn N reads the whole history from
-// cache and pays only the delta. Breakpoints (clamped to [1,3]) is how many
-// moving markers to place; the extras trail every ~15 blocks to stay inside
-// the API's 20-block cache lookback on tool-heavy turns. At most 4 total
-// breakpoints are used (1 system + up to 3 moving), the API maximum.
-type CachePolicy struct {
-	SystemTTL   CacheTTL
-	MessagesTTL CacheTTL
-	Breakpoints int
-}
-
-// DefaultCachePolicy caches everything at the 5-minute TTL with two moving
-// breakpoints: the cheapest policy that keeps an active conversation fully
-// cached. Callers with cross-conversation prefix reuse inside an hour (batch
-// analyzers, busy alert loops) should raise SystemTTL to Cache1h.
-func DefaultCachePolicy() CachePolicy {
-	return CachePolicy{SystemTTL: Cache5m, MessagesTTL: Cache5m, Breakpoints: 2}
 }
 
 // WithCache overrides the conversation's prompt-cache policy (default:
@@ -271,6 +288,11 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	return &Conversation{client: c, ID: convID, cfg: cfg}, nil
 }
 
+// UserTextMsg builds a single-text-block user message payload for SendMsg.
+func UserTextMsg(s string) []msg.Block {
+	return []msg.Block{msg.Text{Text: s}}
+}
+
 // UserText builds a single-text-block user message payload for Send.
 func UserText(s string) []anthropic.ContentBlockParamUnion {
 	return []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(s)}
@@ -286,15 +308,30 @@ type UserImage struct {
 	Data      []byte
 }
 
-// UserContent builds a user message payload from text plus attached images.
-//
-// Images come FIRST. Anthropic's own guidance is that a model attends better to
-// an image that precedes the text asking about it, and the common shape here is
-// "here is a screenshot" followed by a question about it.
+// UserContentMsg builds a native user message payload from text plus attached
+// images. Images come FIRST: Anthropic's own guidance is that a model attends
+// better to an image that precedes the text asking about it, and the common
+// shape here is "here is a screenshot" followed by a question about it.
 //
 // Text may be empty when the images are the whole message; an empty text block
 // is omitted rather than sent, since a content block with no content is a
 // 400 on some providers and noise on the rest.
+func UserContentMsg(text string, images []UserImage) []msg.Block {
+	out := make([]msg.Block, 0, len(images)+1)
+	for _, img := range images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		out = append(out, msg.Image{MediaType: img.MediaType, Data: img.Data})
+	}
+	if text != "" {
+		out = append(out, msg.Text{Text: text})
+	}
+	return out
+}
+
+// UserContent builds a user message payload from text plus attached images, in
+// the SDK's block types. See UserContentMsg for the ordering rule.
 func UserContent(text string, images []UserImage) []anthropic.ContentBlockParamUnion {
 	out := make([]anthropic.ContentBlockParamUnion, 0, len(images)+1)
 	for _, img := range images {
@@ -311,45 +348,74 @@ func UserContent(text string, images []UserImage) []anthropic.ContentBlockParamU
 }
 
 type sendConfig struct {
-	maxTokens     int64
-	tools         []anthropic.ToolUnionParam
+	maxTokens int64
+	tools     []msg.ToolDef
+	// toolsErr records a failure to convert SDK tool definitions; a send
+	// carrying it reports the failure instead of silently dropping a tool.
+	toolsErr      error
 	source        string
 	authorUserID  string
 	toolChoice    string
-	streamHandler StreamHandler
+	streamHandler streamSink
 	batchWait     func(bool)
 	persisted     func(store.Appended)
 }
+
+// streamSink is the per-send stream observer. At most one side is set: the
+// native handler sees accumulated responses, the SDK handler sees the SDK
+// events the adapter renders for the same stream.
+type streamSink struct {
+	native StreamHandlerMsg
+	sdk    StreamHandler
+}
+
+// active reports whether this send asked to stream.
+func (s streamSink) active() bool { return s.native != nil || s.sdk != nil }
 
 type SendOption func(*sendConfig)
 
 // StreamHandler receives each streaming event as it arrives.
 type StreamHandler func(ev anthropic.MessageStreamEventUnion)
 
-// WithStreamHandler streams the response, invoking h once per event as it
-// arrives, and returns the accumulated message exactly as an unstreamed call
-// would.
+// StreamHandlerMsg receives the response accumulated so far after each
+// content-bearing stream event.
+type StreamHandlerMsg func(partial *msg.Response)
+
+// WithStreamHandlerMsg streams the response, invoking h after each event that
+// carries content, with the response accumulated so far, and returns the
+// accumulated message exactly as an unstreamed call would.
 //
-// h is ignored (never invoked, and the call transparently falls back to the
-// non-streamed path) in two cases: when the resolved sender does not
-// implement StreamingSender, or when the primary's circuit breaker is open.
-// In both cases the send behaves exactly as if WithStreamHandler had not
-// been passed at all — a caller never has to branch on sender capability,
-// but it also means a caller relying on h firing must not assume it always
-// will.
-//
-// h is called synchronously on the calling goroutine: never concurrently
-// with itself, and never after Send/Continue returns. No locking is
-// required in h.
+// h is never ignored: every sender streams. h is called synchronously on the
+// calling goroutine: never concurrently with itself, and never after
+// SendMsg/ContinueMsg returns. No locking is required in h.
 //
 // IMPORTANT: h may be invoked one or more times and the call may STILL
 // return an error — a stream can die after delivering content (see
 // sendStreaming's doc for the delivered/attempted bookkeeping this drives).
 // A consumer rendering h's output must be prepared for a torn, incomplete
 // message and must not treat "h fired" as "the turn succeeded". Completion
-// is signalled only by Send/Continue returning a nil error.
+// is signalled only by SendMsg/ContinueMsg returning a nil error.
+func WithStreamHandlerMsg(h StreamHandlerMsg) SendOption {
+	return func(s *sendConfig) { s.streamHandler.native = h }
+}
+
+// WithStreamHandler is WithStreamHandlerMsg in the SDK's event types: the
+// adapter converts each native stream event back into the SDK events the old
+// handler expects, replaying at block stop whatever the finalized block
+// carries that the stream never delivered as a delta (a citation list, a
+// server-tool block's completed input).
+//
+// h is called synchronously on the calling goroutine: never concurrently
+// with itself, and never after Send/Continue returns. No locking is
+// required in h.
+//
+// IMPORTANT: h may be invoked one or more times and the call may STILL
+// return an error — a stream can die after delivering content. A consumer
+// rendering h's output must be prepared for a torn, incomplete message and
+// must not treat "h fired" as "the turn succeeded". Completion is signalled
+// only by Send/Continue returning a nil error.
 func WithStreamHandler(h StreamHandler) SendOption {
-	return func(s *sendConfig) { s.streamHandler = h }
+	return func(s *sendConfig) { s.streamHandler.sdk = h }
 }
 
 // WithBatchWait registers fn as the send's batch-wait bracket: it is called
@@ -373,14 +439,51 @@ func WithPersisted(fn func(store.Appended)) SendOption {
 // WithMaxTokens overrides the output cap for this send only.
 func WithMaxTokens(n int64) SendOption { return func(s *sendConfig) { s.maxTokens = n } }
 
-// WithTools attaches tool definitions for this send. Definitions MUST be in
-// a deterministic order across a conversation's sends (any stable order —
-// e.g. sc's sorted-local + sorted-upstream concatenation): a reordered tools
-// array silently busts the Anthropic prompt-cache prefix. The library cannot
-// verify cross-call stability; prefix_hash on captured turns is the drift
-// detector.
-func WithTools(tools []anthropic.ToolUnionParam) SendOption {
+// WithToolsMsg attaches native tool definitions for this send. Definitions
+// MUST be in a deterministic order across a conversation's sends (any stable
+// order — e.g. sc's sorted-local + sorted-upstream concatenation): a
+// reordered tools array silently busts the Anthropic prompt-cache prefix. The
+// library cannot verify cross-call stability; prefix_hash on captured turns is
+// the drift detector.
+func WithToolsMsg(tools []msg.ToolDef) SendOption {
 	return func(s *sendConfig) { s.tools = tools }
+}
+
+// WithTools is WithToolsMsg for the SDK's tool union.
+func WithTools(tools []anthropic.ToolUnionParam) SendOption {
+	defs, err := toolDefs(tools)
+	return func(s *sendConfig) {
+		s.tools = defs
+		if err != nil {
+			s.toolsErr = err
+		}
+	}
+}
+
+// toolDefs converts SDK tool definitions to native ones: name, description,
+// and the input schema as JSON.
+func toolDefs(tools []anthropic.ToolUnionParam) ([]msg.ToolDef, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	out := make([]msg.ToolDef, 0, len(tools))
+	for _, t := range tools {
+		if t.OfTool == nil {
+			// A server tool has no native declaration: the API defines its shape,
+			// and nothing in a native request names it.
+			continue
+		}
+		schema, err := json.Marshal(t.OfTool.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("llm: tool %q input schema: %w", t.OfTool.Name, err)
+		}
+		def := msg.ToolDef{Name: t.OfTool.Name, InputSchema: schema}
+		if t.OfTool.Description.Valid() {
+			def.Description = t.OfTool.Description.Value
+		}
+		out = append(out, def)
+	}
+	return out, nil
 }
 
 // WithSource overrides the per-turn inbound entrypoint.
@@ -397,40 +500,64 @@ func WithToolChoice(name string) SendOption {
 	return func(s *sendConfig) { s.toolChoice = name }
 }
 
-// Send appends userContent to the conversation and gets the assistant's
+// SendMsg appends userContent to the conversation and gets the assistant's
 // reply: load history → persist the user message (write-ahead) → assemble →
 // call (breaker/fallback/capture, prompt-too-large trim-retry) → persist the
 // assistant message + turn. Returns the assistant response.
-func (conv *Conversation) Send(ctx context.Context, userContent []anthropic.ContentBlockParamUnion, opts ...SendOption) (*anthropic.Message, error) {
-	if _, err := conv.AppendUser(ctx, userContent); err != nil {
+func (conv *Conversation) SendMsg(ctx context.Context, userContent []msg.Block, opts ...SendOption) (*msg.Response, error) {
+	if _, err := conv.AppendUserMsg(ctx, userContent); err != nil {
 		return nil, err
 	}
-	return conv.Continue(ctx, opts...)
+	return conv.ContinueMsg(ctx, opts...)
 }
 
-// AppendUser persists user content as the next message row WITHOUT sending —
+// Send is SendMsg in the SDK's content-block types.
+func (conv *Conversation) Send(ctx context.Context, userContent []anthropic.ContentBlockParamUnion, opts ...SendOption) (*anthropic.Message, error) {
+	blocks, err := sdkBlocks(userContent)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := conv.SendMsg(ctx, blocks, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return msganthropic.ToSDKMessage(resp)
+}
+
+// AppendUserMsg persists user content as the next message row WITHOUT sending —
 // the write-ahead primitive the agent loop uses to persist tool results (one
 // row per result) before continuing. Consecutive user rows merge into a
 // single wire message at request assembly. It returns the committed row's
 // identity (see store.Appended; a store-less conversation reports the
 // wall-clock time of the append).
-func (conv *Conversation) AppendUser(ctx context.Context, content []anthropic.ContentBlockParamUnion) (store.Appended, error) {
-	userParam := anthropic.MessageParam{Role: anthropic.MessageParamRoleUser, Content: content}
-	row, err := conv.appendMessage(ctx, userParam, nil, "")
+func (conv *Conversation) AppendUserMsg(ctx context.Context, content []msg.Block) (store.Appended, error) {
+	row, err := conv.appendMessage(ctx, msg.Message{Role: msg.User, Content: content}, nil, "")
 	if err != nil {
 		return store.Appended{}, fmt.Errorf("llm: %w", err)
 	}
 	return row, nil
 }
 
-// Continue sends the conversation AS STORED — no new user message — and
+// AppendUser is AppendUserMsg in the SDK's content-block types.
+func (conv *Conversation) AppendUser(ctx context.Context, content []anthropic.ContentBlockParamUnion) (store.Appended, error) {
+	blocks, err := sdkBlocks(content)
+	if err != nil {
+		return store.Appended{}, fmt.Errorf("llm: %w", err)
+	}
+	return conv.AppendUserMsg(ctx, blocks)
+}
+
+// ContinueMsg sends the conversation AS STORED — no new user message — and
 // persists the assistant reply. This is the loop-turn / crash-recovery
 // primitive: a Resume with a pending turn just Continues, re-issuing the
 // interrupted call from persisted state.
-func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*anthropic.Message, error) {
+func (conv *Conversation) ContinueMsg(ctx context.Context, opts ...SendOption) (*msg.Response, error) {
 	scfg := sendConfig{maxTokens: conv.cfg.maxTokens}
 	for _, opt := range opts {
 		opt(&scfg)
+	}
+	if scfg.toolsErr != nil {
+		return nil, scfg.toolsErr
 	}
 
 	ctx, span := conv.client.tracer.Start(conv.client.spanCtx(ctx), "llm.conversation.send",
@@ -475,9 +602,9 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	// The reactive overflow net: if the API rejects the request as too large and
 	// compaction is available, summarise once and retry on the compacted history
 	// before falling back to the destructive trim policy.
-	var onOverflow func() (int, []Message, []int, string, bool)
+	var onOverflow func() (int, []msg.Message, []int, string, bool)
 	if conv.cfg.compaction != nil && len(history) >= minCompactableRows {
-		onOverflow = func() (int, []Message, []int, string, bool) {
+		onOverflow = func() (int, []msg.Message, []int, string, bool) {
 			ok, err := conv.compact(ctx, span, history, scfg, "overflow", "")
 			if err != nil || !ok {
 				return 0, nil, nil, "", false
@@ -503,12 +630,12 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 		return nil, err
 	}
 
-	conv.usedTokens = int(resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.OutputTokens)
+	conv.usedTokens = int(msg.Val(resp.Usage.Input) + msg.Val(resp.Usage.CacheRead) +
+		msg.Val(resp.Usage.CacheWrite) + msg.Val(resp.Usage.Output))
 
-	assistant := resp.ToParam()
-	row, err := conv.appendMessage(ctx, assistant,
-		&store.AssistantMeta{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens,
-			StopReason: string(resp.StopReason)}, resp.ID)
+	row, err := conv.appendMessage(ctx, msg.Message{Role: msg.Assistant, Content: resp.Content},
+		&store.AssistantMeta{Input: msg.Val(resp.Usage.Input), Output: msg.Val(resp.Usage.Output),
+			StopReason: resp.StopReason.String()}, resp.ID)
 	if err != nil {
 		// The turn is already captured; a failed message append must be loud —
 		// resume protocol depends on message rows.
@@ -518,6 +645,15 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 		scfg.persisted(row)
 	}
 	return resp, nil
+}
+
+// Continue is ContinueMsg in the SDK's message type.
+func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*anthropic.Message, error) {
+	resp, err := conv.ContinueMsg(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return msganthropic.ToSDKMessage(resp)
 }
 
 // OutputCap returns the conversation's per-turn output token budget (the
@@ -583,11 +719,7 @@ func (conv *Conversation) loadHistory(ctx context.Context) ([]*convpkg.Node, err
 // appendMessage writes one message as the next node under the conversation's
 // head. The tree decides identity, so a replayed node is matched by hash and
 // returns the existing row's identity instead of writing a second copy.
-func (conv *Conversation) appendMessage(ctx context.Context, param anthropic.MessageParam, meta *store.AssistantMeta, providerID string) (store.Appended, error) {
-	message, err := msganthropic.FromParam(param)
-	if err != nil {
-		return store.Appended{}, fmt.Errorf("convert message: %w", err)
-	}
+func (conv *Conversation) appendMessage(ctx context.Context, message msg.Message, meta *store.AssistantMeta, providerID string) (store.Appended, error) {
 	node := convpkg.NewNode{Msg: message, ProviderMessageID: providerID}
 	if meta != nil {
 		node.StopReason = meta.StopReason
@@ -602,29 +734,57 @@ func (conv *Conversation) appendMessage(ctx context.Context, param anthropic.Mes
 	return store.Appended{ID: n.ID, CreatedAt: n.CreatedAt, Ordinal: n.Ordinal, Depth: n.Depth}, nil
 }
 
-// SeedHistory idempotently persists msgs as the conversation's history from a
-// fresh root — the bridge for hosts carrying client-side history (e.g. a fundi
-// prefill, a Slack thread continuation). An existing prefix is matched by node
-// hash, so only the missing suffix is inserted and a partial earlier seed is
-// completed rather than duplicated. Re-seeding a prefix therefore inserts
+// SeedHistoryMsg idempotently persists msgs as the conversation's history from
+// a fresh root — the bridge for hosts carrying client-side history (e.g. a
+// fundi prefill, a Slack thread continuation). An existing prefix is matched by
+// node hash, so only the missing suffix is inserted and a partial earlier seed
+// is completed rather than duplicated. Re-seeding a prefix therefore inserts
 // nothing and leaves the working set unchanged.
-func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
+func (conv *Conversation) SeedHistoryMsg(ctx context.Context, msgs []msg.Message) error {
 	if len(msgs) == 0 {
 		return nil
 	}
 	nodes := make([]convpkg.NewNode, len(msgs))
 	for i, m := range msgs {
-		message, err := msganthropic.FromParam(m)
-		if err != nil {
-			return fmt.Errorf("llm: seed history: convert message %d: %w", i, err)
-		}
-		nodes[i] = convpkg.NewNode{Msg: message}
+		nodes[i] = convpkg.NewNode{Msg: m}
 	}
 	_, err := conv.handle().Append(ctx, convpkg.Append{Root: convtree.RootKindRoot, Nodes: nodes})
 	if err != nil {
 		return fmt.Errorf("llm: seed history: %w", err)
 	}
 	return nil
+}
+
+// Message is a conversation message in the SDK's request form. It is the
+// SDK-facing alias SeedHistory accepts; the library itself speaks msg.Message.
+type Message = anthropic.MessageParam
+
+// SeedHistory is SeedHistoryMsg in the SDK's message type.
+func (conv *Conversation) SeedHistory(ctx context.Context, msgs []Message) error {
+	out := make([]msg.Message, len(msgs))
+	for i, m := range msgs {
+		converted, err := msganthropic.FromParam(m)
+		if err != nil {
+			return fmt.Errorf("llm: seed history: convert message %d: %w", i, err)
+		}
+		out[i] = converted
+	}
+	return conv.SeedHistoryMsg(ctx, out)
+}
+
+// sdkBlocks converts SDK content blocks to native ones, through the Anthropic
+// codec so the conversion is the codec's, not a second copy of it.
+func sdkBlocks(content []anthropic.ContentBlockParamUnion) ([]msg.Block, error) {
+	if len(content) == 0 {
+		return nil, nil
+	}
+	m, err := msganthropic.FromParam(anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser, Content: content,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("llm: convert content blocks: %w", err)
+	}
+	return m.Content, nil
 }
 
 func randomID() string {
@@ -642,34 +802,36 @@ func randomID() string {
 //
 // The merge rules live in mergeForRequestRows, which also reports where each
 // wire message began; a request that does not need the row mapping calls this.
-func mergeForRequest(history []*convpkg.Node) ([]Message, error) {
+func mergeForRequest(history []*convpkg.Node) ([]msg.Message, error) {
 	msgs, _, err := mergeForRequestRows(history)
 	return msgs, err
 }
 
+// emptyToolUseNotice replaces a tool_use block the model emitted with no name.
+// Forwarded as-is it is a 400 ("tool_calls[0].function.name must be a non-empty
+// string"); as text the model sees its own malformed call and the matching
+// is_error tool_result beside it.
+const emptyToolUseNotice = "[model emitted a malformed tool call with empty name — see tool result for error]"
+
 // replaceEmptyToolUses replaces assistant tool_use blocks with empty names
 // with text blocks explaining the error. User messages pass through unchanged.
-func replaceEmptyToolUses(param anthropic.MessageParam) []anthropic.ContentBlockParamUnion {
-	if param.Role != anthropic.MessageParamRoleAssistant {
-		return param.Content
+func replaceEmptyToolUses(m msg.Message) []msg.Block {
+	if m.Role != msg.Assistant {
+		return m.Content
 	}
 	n := 0
-	for _, b := range param.Content {
-		if b.OfToolUse != nil && b.OfToolUse.Name == "" {
+	for _, b := range m.Content {
+		if t, ok := b.(msg.ToolUse); ok && t.Name == "" {
 			n++
 		}
 	}
 	if n == 0 {
-		return param.Content
+		return m.Content
 	}
-	out := make([]anthropic.ContentBlockParamUnion, 0, len(param.Content))
-	for _, b := range param.Content {
-		if b.OfToolUse != nil && b.OfToolUse.Name == "" {
-			out = append(out, anthropic.ContentBlockParamUnion{
-				OfText: &anthropic.TextBlockParam{
-					Text: "[model emitted a malformed tool call with empty name — see tool result for error]",
-				},
-			})
+	out := make([]msg.Block, 0, len(m.Content))
+	for _, b := range m.Content {
+		if t, ok := b.(msg.ToolUse); ok && t.Name == "" {
+			out = append(out, msg.Text{Text: emptyToolUseNotice})
 			continue
 		}
 		out = append(out, b)
@@ -696,8 +858,8 @@ func replaceEmptyToolUses(param anthropic.MessageParam) []anthropic.ContentBlock
 // call). The returned ordinal only labels the capture: the reply is appended
 // under the head, which the compaction already moved.
 func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ordinal int,
-	reqMsgs []Message, rowStart []int, headID string, scfg sendConfig,
-	onOverflow func() (ordinal int, msgs []Message, rowStart []int, headID string, ok bool)) (*anthropic.Message, int, error) {
+	reqMsgs []msg.Message, rowStart []int, headID string, scfg sendConfig,
+	onOverflow func() (ordinal int, msgs []msg.Message, rowStart []int, headID string, ok bool)) (*msg.Response, int, error) {
 	meta := conv.sendMeta(ordinal, scfg)
 	trimAttempt := 0
 	compacted := false
@@ -719,14 +881,14 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 			from, to := anchorEnd, dropTo
 			attemptMeta.TrimFrom, attemptMeta.TrimTo = &from, &to
 		}
-		params := conv.assemble(reqMsgs, scfg)
-		resp, delivered, err := conv.sendAttempt(ctx, attemptMeta, params, scfg.streamHandler)
+		req := conv.assemble(reqMsgs, scfg)
+		resp, delivered, err := conv.sendAttempt(ctx, attemptMeta, req, scfg.streamHandler)
 		if err == nil {
 			return resp, ordinal, nil
 		}
 		if delivered {
 			// Structural trim-retry guard: at least one event already reached
-			// scfg.streamHandler for THIS attempt. Retrying now would open a
+			// the stream handler for THIS attempt. Retrying now would open a
 			// second, independent stream for the same logical send with no way
 			// for the caller to know the first was abandoned mid-flight — never
 			// safe, regardless of what err turns out to be (isPromptTooLarge or
@@ -823,33 +985,31 @@ func (conv *Conversation) usedForCheck(history []*convpkg.Node) int {
 	return estimateHistoryTokens(history) + systemLen/4
 }
 
-// sendAttempt issues ONE request attempt, streaming through handler when set
-// and the resolved sender supports it, and transparently falling back to the
-// plain (non-streaming) path otherwise — the caller (sendWithTrim) never
-// branches on sender capability. delivered reports whether any event reached
-// handler during this attempt; see sendStreaming's doc for why the
-// trim-retry loop treats that as an absolute "never retry" signal.
-func (conv *Conversation) sendAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (resp *anthropic.Message, delivered bool, err error) {
-	if handler == nil {
-		resp, err = conv.client.SendParams(ctx, meta, params)
+// sendAttempt issues ONE request attempt, streaming through the sink when set
+// and transparently falling back to the plain (non-streaming) path otherwise —
+// the caller (sendWithTrim) never branches on sender capability. delivered
+// reports whether any content-bearing event reached the handler during this
+// attempt; see sendStreaming's doc for why the trim-retry loop treats that as
+// an absolute "never retry" signal.
+func (conv *Conversation) sendAttempt(ctx context.Context, meta SendMeta, req *msg.Request, sink streamSink) (resp *msg.Response, delivered bool, err error) {
+	if !sink.active() {
+		resp, err = conv.client.send(ctx, meta, req, nil)
 		return resp, false, err
 	}
-	resp, attempted, delivered, err := conv.client.sendStreaming(ctx, meta, params, handler)
+	resp, attempted, delivered, err := conv.client.sendStreaming(ctx, meta, req, sink)
 	if !attempted {
-		resp, err = conv.client.SendParams(ctx, meta, params)
+		resp, err = conv.client.send(ctx, meta, req, nil)
 		return resp, false, err
 	}
 	return resp, delivered, err
 }
 
-// assemble builds the wire request and places prompt-cache breakpoints per
-// the conversation's CachePolicy: one on the LAST system block (tools render
-// before system in the Anthropic prefix, so it caches tool schemas + system
-// prompt together) and up to three moving breakpoints over the message
-// history (see CachePolicy).
-func (conv *Conversation) assemble(reqMsgs []Message, scfg sendConfig) anthropic.MessageNewParams {
-	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(conv.cfg.model),
+// assemble builds the wire request. Prompt-cache placement is the codec's:
+// the request carries the conversation's CachePolicy and msganthropic.Encode
+// puts the markers where the policy says.
+func (conv *Conversation) assemble(reqMsgs []msg.Message, scfg sendConfig) *msg.Request {
+	req := &msg.Request{
+		Model:     conv.cfg.model,
 		MaxTokens: scfg.maxTokens,
 		Messages:  reqMsgs,
 	}
@@ -859,174 +1019,33 @@ func (conv *Conversation) assemble(reqMsgs []Message, scfg sendConfig) anthropic
 		policy = &d
 	}
 	if len(conv.cfg.system) > 0 {
-		system := make([]anthropic.TextBlockParam, len(conv.cfg.system))
-		copy(system, conv.cfg.system)
-		if cc, on := cacheControlFor(policy.SystemTTL); on {
-			system[len(system)-1].CacheControl = cc
-		}
-		params.System = system
+		req.System = slicesCloneText(conv.cfg.system)
 	}
-	params.Messages = withMessageBreakpoints(reqMsgs, policy)
 	if len(scfg.tools) > 0 {
-		params.Tools = scfg.tools
+		req.Tools = scfg.tools
 	}
-	if scfg.toolChoice != "" {
-		params.ToolChoice = anthropic.ToolChoiceUnionParam{
-			OfTool: &anthropic.ToolChoiceToolParam{Name: scfg.toolChoice},
-		}
-	}
+	req.ForceTool = scfg.toolChoice
 	if conv.cfg.temperature != nil {
-		params.Temperature = anthropic.Float(*conv.cfg.temperature)
+		t := *conv.cfg.temperature
+		req.Temperature = &t
 	}
 	if conv.cfg.topK != nil {
-		params.TopK = anthropic.Int(*conv.cfg.topK)
+		k := *conv.cfg.topK
+		req.TopK = &k
 	}
 	if conv.cfg.thinkingBudget > 0 {
-		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(conv.cfg.thinkingBudget)
+		req.ThinkingBudget = conv.cfg.thinkingBudget
 	}
-	return params
+	req.Cache = *policy
+	return req
 }
 
-// cacheControlFor maps a CacheTTL to its wire form. on=false for CacheOff
-// (and the zero value, so an unset field never emits a breakpoint).
-func cacheControlFor(ttl CacheTTL) (anthropic.CacheControlEphemeralParam, bool) {
-	switch ttl {
-	case Cache5m:
-		return anthropic.NewCacheControlEphemeralParam(), true // TTL omitted = 5m default
-	case Cache1h:
-		cc := anthropic.NewCacheControlEphemeralParam()
-		cc.TTL = anthropic.CacheControlEphemeralTTLTTL1h
-		return cc, true
-	default:
-		return anthropic.CacheControlEphemeralParam{}, false
-	}
-}
-
-// lookbackStride spaces trailing moving breakpoints so each stays within the
-// API's 20-block cache lookback of the previous entry on block-heavy turns.
-const lookbackStride = 15
-
-// withMessageBreakpoints returns the request's message list with up to
-// p.Breakpoints moving cache markers, walking backward from the last
-// cacheable block (thinking/redacted blocks can't carry cache_control and
-// are skipped, but still count toward the lookback stride). Stale markers —
-// possible on histories reloaded from capture, whose stored content is the
-// verbatim prior request — are removed so the request never exceeds the
-// API's 4-breakpoint limit. STRICTLY copy-on-write: the caller's messages
-// (the conversation's shared history) are never mutated; only the affected
-// blocks are cloned. This keeps previously-captured request params stable.
-func withMessageBreakpoints(msgs []Message, p *CachePolicy) []Message {
-	cc, on := cacheControlFor(p.MessagesTTL)
-
-	type edit struct {
-		i, j int
-		cc   anthropic.CacheControlEphemeralParam
-	}
-	var edits []edit
-
-	placed, walked := 0, 0
-	for i := len(msgs) - 1; i >= 0; i-- {
-		content := msgs[i].Content
-		for j := len(content) - 1; j >= 0; j-- {
-			walked++
-			ptr := content[j].GetCacheControl()
-			if ptr == nil {
-				continue
-			}
-			pick := on && placed < p.Breakpoints && (placed == 0 || walked >= lookbackStride)
-			switch {
-			case pick:
-				edits = append(edits, edit{i, j, cc})
-				placed++
-				walked = 0
-			case ptr.Type != "" || ptr.TTL != "":
-				edits = append(edits, edit{i, j, anthropic.CacheControlEphemeralParam{}}) // clear stale marker
-			}
-		}
-	}
-	if len(edits) == 0 {
-		return msgs
-	}
-
-	out := make([]Message, len(msgs))
-	copy(out, msgs)
-	copied := map[int]bool{}
-	for _, e := range edits {
-		if !copied[e.i] {
-			nc := make([]anthropic.ContentBlockParamUnion, len(out[e.i].Content))
-			copy(nc, out[e.i].Content)
-			out[e.i].Content = nc
-			copied[e.i] = true
-		}
-		out[e.i].Content[e.j] = blockWithCacheControl(out[e.i].Content[e.j], e.cc)
-	}
+// slicesCloneText copies the conversation's system blocks, so assembly never
+// hands a caller a slice that aliases the conversation's own config.
+func slicesCloneText(in []msg.Text) []msg.Text {
+	out := make([]msg.Text, len(in))
+	copy(out, in)
 	return out
-}
-
-// blockWithCacheControl returns a copy of the block with cc applied, leaving
-// the original untouched. Covers every union member that carries
-// cache_control (mirrors ContentBlockParamUnion.GetCacheControl); a
-// non-cacheable block is returned unchanged.
-func blockWithCacheControl(b anthropic.ContentBlockParamUnion, cc anthropic.CacheControlEphemeralParam) anthropic.ContentBlockParamUnion {
-	switch {
-	case b.OfText != nil:
-		v := *b.OfText
-		v.CacheControl = cc
-		b.OfText = &v
-	case b.OfImage != nil:
-		v := *b.OfImage
-		v.CacheControl = cc
-		b.OfImage = &v
-	case b.OfDocument != nil:
-		v := *b.OfDocument
-		v.CacheControl = cc
-		b.OfDocument = &v
-	case b.OfSearchResult != nil:
-		v := *b.OfSearchResult
-		v.CacheControl = cc
-		b.OfSearchResult = &v
-	case b.OfToolUse != nil:
-		v := *b.OfToolUse
-		v.CacheControl = cc
-		b.OfToolUse = &v
-	case b.OfToolResult != nil:
-		v := *b.OfToolResult
-		v.CacheControl = cc
-		b.OfToolResult = &v
-	case b.OfServerToolUse != nil:
-		v := *b.OfServerToolUse
-		v.CacheControl = cc
-		b.OfServerToolUse = &v
-	case b.OfWebSearchToolResult != nil:
-		v := *b.OfWebSearchToolResult
-		v.CacheControl = cc
-		b.OfWebSearchToolResult = &v
-	case b.OfWebFetchToolResult != nil:
-		v := *b.OfWebFetchToolResult
-		v.CacheControl = cc
-		b.OfWebFetchToolResult = &v
-	case b.OfCodeExecutionToolResult != nil:
-		v := *b.OfCodeExecutionToolResult
-		v.CacheControl = cc
-		b.OfCodeExecutionToolResult = &v
-	case b.OfBashCodeExecutionToolResult != nil:
-		v := *b.OfBashCodeExecutionToolResult
-		v.CacheControl = cc
-		b.OfBashCodeExecutionToolResult = &v
-	case b.OfTextEditorCodeExecutionToolResult != nil:
-		v := *b.OfTextEditorCodeExecutionToolResult
-		v.CacheControl = cc
-		b.OfTextEditorCodeExecutionToolResult = &v
-	case b.OfToolSearchToolResult != nil:
-		v := *b.OfToolSearchToolResult
-		v.CacheControl = cc
-		b.OfToolSearchToolResult = &v
-	case b.OfContainerUpload != nil:
-		v := *b.OfContainerUpload
-		v.CacheControl = cc
-		b.OfContainerUpload = &v
-	}
-	return b
 }
 
 func nextOrdinal(history []*convpkg.Node) int {

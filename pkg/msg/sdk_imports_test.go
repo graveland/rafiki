@@ -20,7 +20,6 @@ var sdkImporters = []string{
 	"go.graveland.dev/rafiki/cmd/rafikid",
 	"go.graveland.dev/rafiki/pkg/agentloop",
 	"go.graveland.dev/rafiki/pkg/analyze",
-	"go.graveland.dev/rafiki/pkg/batch",
 	"go.graveland.dev/rafiki/pkg/fundi",
 	"go.graveland.dev/rafiki/pkg/fundi/tools",
 	"go.graveland.dev/rafiki/pkg/llm",

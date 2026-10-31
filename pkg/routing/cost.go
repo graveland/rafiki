@@ -2,7 +2,11 @@
 
 package routing
 
-import "github.com/anthropics/anthropic-sdk-go"
+import (
+	"github.com/anthropics/anthropic-sdk-go"
+
+	"go.graveland.dev/rafiki/pkg/msg"
+)
 
 // CostBreakdown is the per-component USD cost of one request's token usage.
 // Total is always the sum of the four components; callers that only want a
@@ -47,5 +51,16 @@ func (p ModelPricing) Cost(usage anthropic.Usage) CostBreakdown {
 		usage.OutputTokens,
 		usage.CacheReadInputTokens,
 		usage.CacheCreationInputTokens,
+	)
+}
+
+// UsageCost prices a native response's usage. A count the provider did not
+// report prices as zero — "unreported" contributes nothing to the bill.
+func (p ModelPricing) UsageCost(u msg.Usage) CostBreakdown {
+	return p.CostOf(
+		msg.Val(u.Input),
+		msg.Val(u.Output),
+		msg.Val(u.CacheRead),
+		msg.Val(u.CacheWrite),
 	)
 }

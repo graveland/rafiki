@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
 
@@ -41,7 +39,7 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 	c.Eq(2, len(msgs[4].Content), "rows 4 and 5 merged into one message")
 
 	// The policy shape: the anchor plus the last two messages.
-	trimmed := []Message{msgs[0], msgs[5], msgs[6]}
+	trimmed := []msg.Message{msgs[0], msgs[5], msgs[6]}
 	to, keptRowStart, ok := trimDropped(msgs, trimmed, rowStart)
 	c.Require().True(ok, "anchor-plus-suffix trim not recognised")
 	c.Eq(6, to, "first kept suffix position")
@@ -65,7 +63,7 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 	c.EqDeep([]int{0, 2, 3, 4}, rowStart2, "rowStart with a merged anchor")
 	c.Eq(2, rowStart2[1], "anchorEnd with a merged anchor")
 
-	trimmed2 := []Message{msgs2[0], msgs2[2], msgs2[3]}
+	trimmed2 := []msg.Message{msgs2[0], msgs2[2], msgs2[3]}
 	to2, kept2, ok := trimDropped(msgs2, trimmed2, rowStart2)
 	c.Require().True(ok, "trim with a merged anchor not recognised")
 	c.Eq(3, to2, "first kept suffix position with a merged anchor")
@@ -78,29 +76,29 @@ func TestTrimRangeMapsMergedMessagesToRows(t *testing.T) {
 func TestTrimDroppedRejectsNonAnchorSuffixShape(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	orig := make([]Message, 5)
+	orig := make([]msg.Message, 5)
 	for i := range orig {
-		orig[i] = anthropic.NewUserMessage(anthropic.NewTextBlock(fmt.Sprintf("m%d", i)))
+		orig[i] = msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: fmt.Sprintf("m%d", i)}}}
 	}
 	rowStart := []int{0, 1, 2, 3, 4}
 
-	if _, _, ok := trimDropped(orig, []Message{orig[1], orig[3], orig[4]}, rowStart); ok {
+	if _, _, ok := trimDropped(orig, []msg.Message{orig[1], orig[3], orig[4]}, rowStart); ok {
 		t.Error("a trim that dropped the anchor was accepted")
 	}
-	if _, _, ok := trimDropped(orig, []Message{orig[0], orig[4], orig[3]}, rowStart); ok {
+	if _, _, ok := trimDropped(orig, []msg.Message{orig[0], orig[4], orig[3]}, rowStart); ok {
 		t.Error("a reordered trim was accepted")
 	}
 	if _, _, ok := trimDropped(orig, orig, rowStart); ok {
 		t.Error("a trim that dropped nothing was accepted")
 	}
 	// A row mapping that does not cover the original list cannot be indexed.
-	if _, _, ok := trimDropped(orig, []Message{orig[0], orig[3], orig[4]}, rowStart[:2]); ok {
+	if _, _, ok := trimDropped(orig, []msg.Message{orig[0], orig[3], orig[4]}, rowStart[:2]); ok {
 		t.Error("a short row mapping was accepted")
 	}
 
 	// The policy shape itself is accepted, so the guards above are what reject
 	// the others rather than an unconditional false.
-	to, keptRowStart, ok := trimDropped(orig, []Message{orig[0], orig[3], orig[4]}, rowStart)
+	to, keptRowStart, ok := trimDropped(orig, []msg.Message{orig[0], orig[3], orig[4]}, rowStart)
 	c.Require().True(ok, "anchor-plus-suffix trim not recognised")
 	c.Eq(3, to, "first kept suffix position")
 	c.EqDeep([]int{0, 3, 4}, keptRowStart, "keptRowStart")

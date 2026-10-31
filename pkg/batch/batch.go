@@ -24,8 +24,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // Error is the only error type the Batcher delivers for a failed parked call.
@@ -104,13 +102,13 @@ type Batcher struct {
 	waiters map[string][]chan parkOutcome
 }
 
-// parkOutcome is what a waiter receives: the decoded message, or the plain
+// parkOutcome is what a waiter receives: the raw response body, or the plain
 // *Error the row failed with. err is typed error, not *Error, so a nil stays
 // an untyped nil — a typed (*Error)(nil) would surface as a non-nil error at
 // Park's return and fail every successful park.
 type parkOutcome struct {
-	msg *anthropic.Message
-	err error
+	body json.RawMessage
+	err  error
 }
 
 // New returns a Batcher over store, submitting through api (nil disables all
@@ -180,11 +178,11 @@ func (b *Batcher) Start(ctx context.Context) {
 // replaced by a fresh queued row. On ctx cancellation the row stays and
 // completes later (a resumed child adopts it by custom_id); ctx.Err() is
 // returned raw, never wrapped in *Error.
-func (b *Batcher) Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error) {
+func (b *Batcher) Park(ctx context.Context, customID, model string, body json.RawMessage, provider json.RawMessage) (json.RawMessage, error) {
 	if !validCustomID(customID) {
 		return nil, &Error{Msg: fmt.Sprintf("invalid custom_id %q: must match %s", customID, customIDPattern)}
 	}
-	body, err := requestJSON(params)
+	call, err := requestJSON(body)
 	if err != nil {
 		return nil, err
 	}
@@ -194,12 +192,12 @@ func (b *Batcher) Park(ctx context.Context, customID, model string, params anthr
 	// out to be a failed one to tombstone first. Eight passes is already
 	// far beyond anything reachable.
 	for attempt := 0; attempt < 8; attempt++ {
-		waitCh, done, err := b.adoptOrInsert(ctx, customID, model, body, provider)
+		waitCh, done, err := b.adoptOrInsert(ctx, customID, model, call, provider)
 		switch {
 		case err != nil:
 			return nil, err
 		case done != nil:
-			return done.msg, done.err
+			return done.body, done.err
 		case waitCh != nil:
 			return b.wait(ctx, waitCh)
 		}
@@ -220,11 +218,7 @@ func (b *Batcher) adoptOrInsert(ctx context.Context, customID, model string, bod
 	if ok {
 		switch row.State {
 		case StateCompleted:
-			msg, ferr := decodeMessage(row.Response)
-			if ferr != nil {
-				return nil, &parkOutcome{err: ferr}, nil
-			}
-			return nil, &parkOutcome{msg: msg}, nil
+			return nil, &parkOutcome{body: row.Response}, nil
 		case StateQueued, StateSubmitting, StateSubmitted:
 			return b.registerLocked(customID), nil, nil
 		case StateFailed:
@@ -254,11 +248,7 @@ func (b *Batcher) adoptOrInsert(ctx context.Context, customID, model string, bod
 		}
 		switch live.State {
 		case StateCompleted:
-			msg, ferr := decodeMessage(live.Response)
-			if ferr != nil {
-				return nil, &parkOutcome{err: ferr}, nil
-			}
-			return nil, &parkOutcome{msg: msg}, nil
+			return nil, &parkOutcome{body: live.Response}, nil
 		case StateFailed:
 			return nil, nil, nil // retry: tombstone it on the next pass
 		default:
@@ -271,13 +261,13 @@ func (b *Batcher) adoptOrInsert(ctx context.Context, customID, model string, bod
 // wait blocks on the waiter channel and ctx. Exactly one of the two fires:
 // delivery removes the waiter before sending, so no outcome is ever lost to
 // a cancelled ctx — that waiter simply leaves a buffered value behind.
-func (b *Batcher) wait(ctx context.Context, ch <-chan parkOutcome) (*anthropic.Message, error) {
+func (b *Batcher) wait(ctx context.Context, ch <-chan parkOutcome) (json.RawMessage, error) {
 	select {
 	case out := <-ch:
 		if out.err != nil {
 			return nil, out.err
 		}
-		return out.msg, nil
+		return out.body, nil
 	case <-ctx.Done():
 		// The row stays and completes later; a resumed child adopts it.
 		return nil, ctx.Err()
@@ -484,17 +474,18 @@ func (b *Batcher) applyResults(ctx context.Context, batch Batch) {
 			continue // already resolved, tombstoned, or not ours
 		}
 		if res.Error == nil && res.Response != nil && res.Response.StatusCode == http.StatusOK && len(res.Response.Body) > 0 {
-			msg, ferr := decodeMessage(res.Response.Body)
-			if ferr != nil {
-				// An undecodable body is stored as the row's failure:
-				// completing it would poison every future adoption.
-				b.failRow(ctx, row, ferr.Msg)
+			if !json.Valid(res.Response.Body) {
+				// A body that is not JSON cannot be stored or read back, so it
+				// is the row's failure: completing it would poison every
+				// future adoption. The dialect's own decoding happens above
+				// this package now, so this is the only shape check left here.
+				b.failRow(ctx, row, "decode response: body is not JSON")
 				continue
 			}
 			if err := b.store.Complete(ctx, row.ID, res.Response.Body); err != nil {
 				return // store outage; the next poll re-applies
 			}
-			b.deliver(row.CustomID, parkOutcome{msg: msg})
+			b.deliver(row.CustomID, parkOutcome{body: res.Response.Body})
 			continue
 		}
 		b.failRow(ctx, row, resultErrorMessage(res))
@@ -662,23 +653,17 @@ func idsOf(rows []Row) []int64 {
 	return ids
 }
 
-// requestJSON marshals params to the per-call batch body: the Messages-API
-// params JSON with the keys the batch envelope carries elsewhere removed —
-// model (the batch-level model names it) and stream (batches are
-// non-streaming). The params' "provider" field stays deleted from the call
-// body NOT because the key is unwelcome but because the provider object is
-// NOT a per-call field: OpenRouter's Batch API accepts it only at the
-// ENVELOPE's top level, next to endpoint/model, and only narrowed to its
-// only key — {"only": [...]} (Task 0.1's probe: sort, data_collection, zdr
-// and ignore are each a submit-time 400 "Unrecognized key"). The submitter
-// injects that envelope-level object from Park's provider argument.
-func requestJSON(params anthropic.MessageNewParams) (json.RawMessage, error) {
-	raw, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("batch: marshal request: %w", err)
-	}
+// requestJSON strips the keys the batch envelope carries elsewhere from an
+// already-encoded per-call body: model (the batch-level model names it),
+// stream (batches are non-streaming) and provider. The provider object is NOT
+// a per-call field: OpenRouter's Batch API accepts it only at the ENVELOPE's
+// top level, next to endpoint/model, and only narrowed to its only key —
+// {"only": [...]} (Task 0.1's probe: sort, data_collection, zdr and ignore are
+// each a submit-time 400 "Unrecognized key"). The submitter injects that
+// envelope-level object from Park's provider argument.
+func requestJSON(body []byte) (json.RawMessage, error) {
 	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, fmt.Errorf("batch: request body is not an object: %w", err)
 	}
 	delete(m, "model")
@@ -689,15 +674,4 @@ func requestJSON(params anthropic.MessageNewParams) (json.RawMessage, error) {
 		return nil, fmt.Errorf("batch: re-marshal request body: %w", err)
 	}
 	return out, nil
-}
-
-// decodeMessage decodes a Messages-API response body. A failure is a plain
-// *Error: an undecodable stored or delivered response is a final outcome for
-// the call, never something agentloop should retry.
-func decodeMessage(raw json.RawMessage) (*anthropic.Message, *Error) {
-	var msg anthropic.Message
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		return nil, &Error{Msg: fmt.Sprintf("decode response: %v", err)}
-	}
-	return &msg, nil
 }

@@ -157,7 +157,6 @@ func accumulateSDK(t *testing.T, stream *ssestream.Stream[anthropic.MessageStrea
 		SanitizeInvalidAccumulatedInput(&acc, ev)
 		ck.NoError(acc.Accumulate(ev), "accumulate %s", ev.Type)
 		FixAccumulatedEmptyToolInput(&acc, ev)
-		backfillDeltaUsage(&acc, ev)
 	}
 	ck.NoError(stream.Err(), "stream error")
 	return &acc, types
@@ -188,7 +187,6 @@ func accumulateAdapted(t *testing.T, body []byte) (*anthropic.Message, []string)
 			SanitizeInvalidAccumulatedInput(&acc, sdkEv)
 			ck.NoError(acc.Accumulate(sdkEv), "accumulate %s", sdkEv.Type)
 			FixAccumulatedEmptyToolInput(&acc, sdkEv)
-			backfillDeltaUsage(&acc, sdkEv)
 		}
 	}
 	return &acc, types

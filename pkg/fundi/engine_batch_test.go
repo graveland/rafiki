@@ -31,7 +31,7 @@ func newBlockingBatcher() *blockingBatcher {
 	}
 }
 
-func (b *blockingBatcher) Park(ctx context.Context, _ string, _ string, _ anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
+func (b *blockingBatcher) Park(ctx context.Context, _ string, _ string, _ json.RawMessage, _ json.RawMessage) (json.RawMessage, error) {
 	b.mu.Lock()
 	b.parked++
 	b.mu.Unlock()
@@ -40,16 +40,11 @@ func (b *blockingBatcher) Park(ctx context.Context, _ string, _ string, _ anthro
 	return batchEngineReply(), nil
 }
 
-// batchEngineReply is the assistant message a parked batch call delivers.
-func batchEngineReply() *anthropic.Message {
-	msg := &anthropic.Message{}
-	raw := `{"id":"msg_b","type":"message","role":"assistant","model":"z-ai/glm-5.3-flash:batch",
+// batchEngineReply is the raw assistant response a parked batch call delivers.
+func batchEngineReply() json.RawMessage {
+	return json.RawMessage(`{"id":"msg_b","type":"message","role":"assistant","model":"z-ai/glm-5.3-flash:batch",
 		"content":[{"type":"text","text":"batched"}],
-		"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}`
-	if err := json.Unmarshal([]byte(raw), msg); err != nil {
-		panic(err)
-	}
-	return msg
+		"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}`)
 }
 
 // batchEngineClient builds a store-less client over an openrouter provider
@@ -124,10 +119,10 @@ type recordPark struct {
 	ids    []string
 	models []string
 	// parkFrom, when non-nil, is called in place of a reply.
-	parkFrom func() (*anthropic.Message, error)
+	parkFrom func() (json.RawMessage, error)
 }
 
-func (r *recordPark) Park(_ context.Context, customID, model string, _ anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
+func (r *recordPark) Park(_ context.Context, customID, model string, _ json.RawMessage, _ json.RawMessage) (json.RawMessage, error) {
 	r.mu.Lock()
 	r.ids = append(r.ids, customID)
 	r.models = append(r.models, model)
@@ -157,7 +152,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 
 	// Engine 1: parks, then is cancelled mid-park — the shape of a daemon
 	// restart while a child sits on a batch.
-	b1 := &recordPark{parkFrom: func() (*anthropic.Message, error) {
+	b1 := &recordPark{parkFrom: func() (json.RawMessage, error) {
 		return nil, context.Canceled // released by the cancel below
 	}}
 	client1, err := llm.NewClient(
