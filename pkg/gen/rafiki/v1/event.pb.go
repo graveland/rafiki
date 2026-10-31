@@ -588,9 +588,16 @@ func (*ContentBlock_Image) isContentBlock_Block() {}
 func (*ContentBlock_ToolResult) isContentBlock_Block() {}
 
 // UserMessage is a durable-tier event: a persisted user-role message.
+//
+// injected holds the text blocks the child's harness inserted into this
+// message (Claude Code's <system-reminder> context), split out of content with
+// the wrapper removed. Every block in both lists keeps its index within the
+// stored message, so the original interleaving is recoverable. An old client
+// ignores injected and shows the user's own text.
 type UserMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Content       []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	Injected      []*ContentBlock        `protobuf:"bytes,2,rep,name=injected,proto3" json:"injected,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -628,6 +635,13 @@ func (*UserMessage) Descriptor() ([]byte, []int) {
 func (x *UserMessage) GetContent() []*ContentBlock {
 	if x != nil {
 		return x.Content
+	}
+	return nil
+}
+
+func (x *UserMessage) GetInjected() []*ContentBlock {
+	if x != nil {
+		return x.Injected
 	}
 	return nil
 }
@@ -2440,9 +2454,10 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\x05image\x18\x05 \x01(\v2\x15.rafiki.v1.ImageBlockH\x00R\x05image\x12=\n" +
 	"\vtool_result\x18\x06 \x01(\v2\x1a.rafiki.v1.ToolResultBlockH\x00R\n" +
 	"toolResultB\a\n" +
-	"\x05block\"@\n" +
+	"\x05block\"u\n" +
 	"\vUserMessage\x121\n" +
-	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"B\n" +
+	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x123\n" +
+	"\binjected\x18\x02 \x03(\v2\x17.rafiki.v1.ContentBlockR\binjected\"B\n" +
 	"\rSystemMessage\x121\n" +
 	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"\xd2\x01\n" +
 	"\x10AssistantMessage\x121\n" +
@@ -2639,41 +2654,42 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	5,  // 4: rafiki.v1.ContentBlock.image:type_name -> rafiki.v1.ImageBlock
 	6,  // 5: rafiki.v1.ContentBlock.tool_result:type_name -> rafiki.v1.ToolResultBlock
 	7,  // 6: rafiki.v1.UserMessage.content:type_name -> rafiki.v1.ContentBlock
-	7,  // 7: rafiki.v1.SystemMessage.content:type_name -> rafiki.v1.ContentBlock
-	7,  // 8: rafiki.v1.AssistantMessage.content:type_name -> rafiki.v1.ContentBlock
-	0,  // 9: rafiki.v1.AssistantMessage.stop_reason:type_name -> rafiki.v1.StopReason
-	0,  // 10: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
-	1,  // 11: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
-	16, // 12: rafiki.v1.TasksChanged.tasks:type_name -> rafiki.v1.TaskChange
-	31, // 13: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
-	32, // 14: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
-	30, // 15: rafiki.v1.ChildClosed.labels:type_name -> rafiki.v1.ChildClosed.LabelsEntry
-	32, // 16: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	8,  // 17: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
-	10, // 18: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
-	11, // 19: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
-	13, // 20: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
-	12, // 21: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
-	14, // 22: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
-	18, // 23: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
-	19, // 24: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
-	20, // 25: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
-	21, // 26: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
-	22, // 27: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
-	23, // 28: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
-	25, // 29: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
-	26, // 30: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
-	27, // 31: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
-	28, // 32: rafiki.v1.Event.operator_state:type_name -> rafiki.v1.OperatorState
-	15, // 33: rafiki.v1.Event.child_renamed:type_name -> rafiki.v1.ChildRenamed
-	17, // 34: rafiki.v1.Event.tasks_changed:type_name -> rafiki.v1.TasksChanged
-	24, // 35: rafiki.v1.Event.child_closed:type_name -> rafiki.v1.ChildClosed
-	9,  // 36: rafiki.v1.Event.system_message:type_name -> rafiki.v1.SystemMessage
-	37, // [37:37] is the sub-list for method output_type
-	37, // [37:37] is the sub-list for method input_type
-	37, // [37:37] is the sub-list for extension type_name
-	37, // [37:37] is the sub-list for extension extendee
-	0,  // [0:37] is the sub-list for field type_name
+	7,  // 7: rafiki.v1.UserMessage.injected:type_name -> rafiki.v1.ContentBlock
+	7,  // 8: rafiki.v1.SystemMessage.content:type_name -> rafiki.v1.ContentBlock
+	7,  // 9: rafiki.v1.AssistantMessage.content:type_name -> rafiki.v1.ContentBlock
+	0,  // 10: rafiki.v1.AssistantMessage.stop_reason:type_name -> rafiki.v1.StopReason
+	0,  // 11: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
+	1,  // 12: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
+	16, // 13: rafiki.v1.TasksChanged.tasks:type_name -> rafiki.v1.TaskChange
+	31, // 14: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
+	32, // 15: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
+	30, // 16: rafiki.v1.ChildClosed.labels:type_name -> rafiki.v1.ChildClosed.LabelsEntry
+	32, // 17: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	8,  // 18: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
+	10, // 19: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
+	11, // 20: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
+	13, // 21: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
+	12, // 22: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
+	14, // 23: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
+	18, // 24: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
+	19, // 25: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
+	20, // 26: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
+	21, // 27: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
+	22, // 28: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
+	23, // 29: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
+	25, // 30: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
+	26, // 31: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
+	27, // 32: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
+	28, // 33: rafiki.v1.Event.operator_state:type_name -> rafiki.v1.OperatorState
+	15, // 34: rafiki.v1.Event.child_renamed:type_name -> rafiki.v1.ChildRenamed
+	17, // 35: rafiki.v1.Event.tasks_changed:type_name -> rafiki.v1.TasksChanged
+	24, // 36: rafiki.v1.Event.child_closed:type_name -> rafiki.v1.ChildClosed
+	9,  // 37: rafiki.v1.Event.system_message:type_name -> rafiki.v1.SystemMessage
+	38, // [38:38] is the sub-list for method output_type
+	38, // [38:38] is the sub-list for method input_type
+	38, // [38:38] is the sub-list for extension type_name
+	38, // [38:38] is the sub-list for extension extendee
+	0,  // [0:38] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }

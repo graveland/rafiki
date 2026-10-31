@@ -91,10 +91,18 @@ pub mod content_block {
     }
 }
 /// UserMessage is a durable-tier event: a persisted user-role message.
+///
+/// injected holds the text blocks the child's harness inserted into this
+/// message (Claude Code's <system-reminder> context), split out of content with
+/// the wrapper removed. Every block in both lists keeps its index within the
+/// stored message, so the original interleaving is recoverable. An old client
+/// ignores injected and shows the user's own text.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UserMessage {
     #[prost(message, repeated, tag = "1")]
     pub content: ::prost::alloc::vec::Vec<ContentBlock>,
+    #[prost(message, repeated, tag = "2")]
+    pub injected: ::prost::alloc::vec::Vec<ContentBlock>,
 }
 /// SystemMessage is a durable-tier event: a persisted system-role message — a
 /// message the child's harness injected (a heartbeat nudge, an environment

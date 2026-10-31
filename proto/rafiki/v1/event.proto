@@ -84,8 +84,15 @@ message ContentBlock {
 }
 
 // UserMessage is a durable-tier event: a persisted user-role message.
+//
+// injected holds the text blocks the child's harness inserted into this
+// message (Claude Code's <system-reminder> context), split out of content with
+// the wrapper removed. Every block in both lists keeps its index within the
+// stored message, so the original interleaving is recoverable. An old client
+// ignores injected and shows the user's own text.
 message UserMessage {
   repeated ContentBlock content = 1;
+  repeated ContentBlock injected = 2;
 }
 
 // SystemMessage is a durable-tier event: a persisted system-role message — a

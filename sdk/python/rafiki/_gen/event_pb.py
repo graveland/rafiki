@@ -238,11 +238,14 @@ class ContentBlock:
 @dataclasses.dataclass
 class UserMessage:
     content: list[ContentBlock] = dataclasses.field(default_factory=list)
+    injected: list[ContentBlock] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
         if self.content:
             out["content"] = [x.to_dict() for x in self.content]
+        if self.injected:
+            out["injected"] = [x.to_dict() for x in self.injected]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "UserMessage":
@@ -250,6 +253,9 @@ class UserMessage:
         _v = _d.get("content")
         if _v is not None:
             obj.content = [ContentBlock.from_dict(x) for x in _v]
+        _v = _d.get("injected")
+        if _v is not None:
+            obj.injected = [ContentBlock.from_dict(x) for x in _v]
         return obj
 
 @dataclasses.dataclass
