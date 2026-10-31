@@ -118,6 +118,36 @@ c.put_model_alias("ds", "openrouter/~deepseek/deepseek-flash-latest")  # create 
 rows = c.list_model_aliases()                          # one ModelAliasRow per alias
 c.delete_model_alias("ds")                             # not_found when there is none
 
+# Forks and tags. A fork starts a child from a point in another child's
+# history: fork_from names the child and a cursor ("m:<ordinal>"; empty = the
+# source's last completed turn), while from_tag names a tag instead, resolved
+# once at spawn, nearest scope first. They are mutually exclusive, and only
+# kind="fundi" can be forked to. A child may fork only what it could already
+# read, and a foreign or unknown tag is the same permission_denied.
+forked = c.spawn("continue from here", fork_from={"child_id": child, "cursor": "m:12"})
+tagged = c.spawn("take it from the tag", from_tag="review:checkpoint")
+
+# A tag is a named, scoped handle to a node: naming it is the grant, and the
+# scope says who holds it — "lineage" (default: the source's subtree and its
+# ancestors), "tree" (everything under the tagger's top-level ancestor), or
+# "owner" (every agent of the owner). Anyone who can read a node may tag it;
+# only its creator, that creator's ancestors or a user credential may move or
+# untag it. Tags are per owner, and an unknown tag id and another owner's are
+# both not_found: a tag you cannot see looks the same as one that is gone.
+tag = c.tag("checkpoint", child_id=child, cursor="m:12", scope="tree",
+            note="before the rewrite")   # already_exists if the name is live
+                                         # in that scope; replace=True (user
+                                         # credential only) tombstones the
+                                         # holder first
+tag_rows = c.list_tags("check")           # visible tags, nearest scope first;
+                                         # limit 0 = 50 (max 500)
+tag_history = c.list_tags(tag_id=tag.tag_id)  # one tag's whole history, oldest first
+moved = c.tag(tag_id=tag.tag_id, expect_node_id=tag.node_id, child_id=child, cursor="m:20")
+                                         # a move is compare-and-swap on the
+                                         # node it points at: a stale
+                                         # expect_node_id is failed_precondition
+c.untag(tag.tag_id)                      # tombstone; the node itself survives
+
 # Provider login (per-user provider credentials). The credential belongs to
 # the CALLING USER and is never returned: the daemon holds the tokens, and a
 # child resolves its owner's credential at spawn. Needs a user credential on

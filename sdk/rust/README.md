@@ -75,7 +75,7 @@ Typed wrappers over `Client::unary` and `Client::server_stream`, taking and
 returning the generated `pb::` types: `get_history`, `stream_events(req,
 idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
-`list_model_aliases`, `put_model_alias`, `delete_model_alias`, `list_executors`, `begin_provider_login`, `complete_provider_login`,
+`list_model_aliases`, `put_model_alias`, `delete_model_alias`, `tag`, `untag`, `list_tags`, `list_executors`, `begin_provider_login`, `complete_provider_login`,
 `delete_provider_credential`. `unary` and `server_stream` are public, so an
 RPC added to `control.proto` is callable immediately (regenerate first). `pb`
 holds the `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the
@@ -95,6 +95,72 @@ client.put_model_alias(&pb::PutModelAliasRequest {
 }).await?;
 let rows = client.list_model_aliases(&pb::ListModelAliasesRequest::default()).await?.rows;
 client.delete_model_alias(&pb::DeleteModelAliasRequest { name: "ds".into() }).await?;
+```
+
+`tag` / `untag` / `list_tags` manage the calling connection OWNER's tags. A tag
+is a named, scoped handle to a node: naming it is the grant to fork from it,
+and `scope` says who holds it — lineage (the default), tree or owner. Anyone
+who can read a node may tag it; only the tag's creator, that creator's
+ancestors or a user credential may move or untag it. `tag` creates when
+`tag_id` is empty and moves when it is set (compare-and-swap on
+`expect_node_id`; a stale expectation is `failed_precondition`), and a move
+appends a row, so a tag's history is never overwritten. `list_tags` answers the
+visible tags nearest scope first, or one tag's whole history when `tag_id` is
+set. An unknown tag id and another owner's look the same: `not_found`.
+
+`SpawnRequest.fork_from` starts a child from a point in another child's history
+and `from_tag` names a tag instead, resolved once at spawn, nearest scope
+first. They are mutually exclusive, and only `kind = "fundi"` can be forked
+to. A child may fork only what it could already read, and a foreign or unknown
+tag answers the same `permission_denied` as one it cannot see.
+
+```rust
+// Start from a point in another child's history: `cursor` is "m:<ordinal>",
+// empty = the source's last completed turn.
+let forked = client.spawn(&pb::SpawnRequest {
+    cwd: "/work/repo".into(),
+    fork_from: Some(pb::spawn_request::ForkFrom {
+        child_id: child.clone(),
+        cursor: "m:12".into(),
+    }),
+    ..Default::default()
+}).await?.child_id;
+
+// Or from whatever a tag names today, resolved once here.
+let tagged = client.spawn(&pb::SpawnRequest {
+    cwd: "/work/repo".into(),
+    from_tag: "review:checkpoint".into(),
+    ..Default::default()
+}).await?.child_id;
+
+let tag = client.tag(&pb::TagRequest {
+    name: "checkpoint".into(),
+    child_id: child.clone(),
+    cursor: "m:12".into(),
+    scope: pb::TagScope::Tree as i32,
+    note: "before the rewrite".into(),
+    ..Default::default()
+}).await?.tag.unwrap();
+
+// Move: compare-and-swap on the node the tag points at; name, scope and
+// replace must be unset. A stale expect_node_id is failed_precondition.
+client.tag(&pb::TagRequest {
+    tag_id: tag.tag_id.clone(),
+    expect_node_id: tag.node_id.clone(),
+    child_id: child.clone(),
+    cursor: "m:20".into(),
+    ..Default::default()
+}).await?;
+
+let rows = client.list_tags(&pb::ListTagsRequest {
+    name_prefix: "check".into(),
+    ..Default::default()
+}).await?.rows; // nearest scope first; limit 0 = 50 (max 500)
+let history = client.list_tags(&pb::ListTagsRequest {
+    tag_id: tag.tag_id.clone(),
+    ..Default::default()
+}).await?.rows; // one tag's whole history, oldest first
+client.untag(&pb::UntagRequest { tag_id: tag.tag_id }).await?; // tombstone
 ```
 
 `get_child` and `list_children` return `ChildSummary`; its `parent_child_id` names the

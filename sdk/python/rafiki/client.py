@@ -101,6 +101,26 @@ def _mode_wire(mode: str) -> str:
     return name
 
 
+def _tag_scope_wire(scope) -> str:
+    """Accept a TagScope number (0-3) or name ("lineage", "TAG_SCOPE_TREE")
+    and return the proto enum name. 0 is TAG_SCOPE_UNSPECIFIED, the wire's
+    unset — lineage at create time — which the daemon never stores."""
+    if isinstance(scope, int) and not isinstance(scope, bool):
+        names = {
+            0: "TAG_SCOPE_UNSPECIFIED",
+            1: "TAG_SCOPE_LINEAGE",
+            2: "TAG_SCOPE_TREE",
+            3: "TAG_SCOPE_OWNER",
+        }
+        if scope not in names:
+            raise ValueError("scope %r is not a TagScope (0-3)" % (scope,))
+        return names[scope]
+    name = str(scope).strip().replace("-", "_").upper()
+    if not name.startswith("TAG_SCOPE_"):
+        name = "TAG_SCOPE_" + name
+    return name
+
+
 def _labels_wire(labels: dict | None) -> dict:
     if labels is None:
         return {}
@@ -252,6 +272,8 @@ class Client:
         max_depth: "int | None" = None,
         max_children: "int | None" = None,
         skip_derived_index: bool = False,
+        fork_from: "dict | _gen.control_pb.SpawnRequest.ForkFrom | None" = None,
+        from_tag: "str | None" = None,
     ) -> str:
         """Spawn a child; returns its id. ``prompt``, when given, is sent as
         the child's first message (a spawn alone starts no work — fundi
@@ -270,6 +292,15 @@ class Client:
         ``skip_derived_index``: True means the recall indexer will not embed
         or summarise this child's conversations or its descendants'; keyword
         search still works; inherited by the subtree.
+
+        ``fork_from`` starts the child from a point in another child's
+        history — a dict ``{"child_id": ..., "cursor": ...}`` or a generated
+        ``SpawnRequest.ForkFrom``; ``cursor`` is ``"m:<ordinal>"`` and empty
+        means the source's last completed turn. ``from_tag`` names a tag
+        instead, resolved once here, nearest scope first. The two are
+        mutually exclusive, and only ``kind="fundi"`` can be forked to. A
+        child may fork only what it could already read, and a foreign or
+        unknown tag answers the same permission_denied as one it cannot see.
         """
         req = _gen.control_pb.SpawnRequest(
             cwd=cwd if cwd else os.getcwd(),
@@ -293,6 +324,14 @@ class Client:
                 p if isinstance(p, _gen.control_pb.PrefillRead) else _gen.control_pb.PrefillRead(**p)
                 for p in prefill
             ]
+        if fork_from is not None:
+            req.fork_from = (
+                fork_from
+                if isinstance(fork_from, _gen.control_pb.SpawnRequest.ForkFrom)
+                else _gen.control_pb.SpawnRequest.ForkFrom(**fork_from)
+            )
+        if from_tag:
+            req.from_tag = from_tag
         resp = self._call("Spawn", req, _gen.control_pb.SpawnResponse)
         child_id = resp.child_id
         if prompt:
@@ -453,6 +492,77 @@ class Client:
         ``datetime``), child counts. A user credential only: a child credential
         is refused permission_denied (callers recording a build tolerate that)."""
         return self._call("Status", _gen.control_pb.StatusRequest(), _gen.control_pb.StatusResponse)
+
+    # ── tags and forks ───────────────────────────────────────────────────────
+
+    def tag(
+        self,
+        name: str = "",
+        *,
+        child_id: str = "",
+        cursor: str = "",
+        scope=0,
+        note: str = "",
+        tag_id: str = "",
+        expect_node_id: str = "",
+        replace: bool = False,
+    ) -> _gen.control_pb.TagRow:
+        """Create a tag on a node, or move an existing one, and return the
+        stored ``TagRow``. A tag is a named, scoped handle to a node: naming
+        it is the grant to fork from it, and ``scope`` says who holds it —
+        ``"lineage"`` (the default) for the source's subtree and its
+        ancestors, ``"tree"`` for everything under the tagger's top-level
+        ancestor, ``"owner"`` for every agent of the owner. Anyone who can
+        read a node may tag it; only the tag's creator, that creator's
+        ancestors or a user credential may move or untag it.
+
+        With ``tag_id`` empty this CREATES: ``name`` (1-64 of
+        ``[a-z0-9._-]``, starting with a letter or digit) names the node
+        ``child_id`` + ``cursor`` points at (``"m:<ordinal>"``, or
+        ``"m:<ordinal>.<n>"``; empty means the last completed turn). A name
+        already live in that scope raises already_exists; ``replace=True``
+        tombstones the holder first, and only a user credential may do that
+        (a child credential is permission_denied).
+
+        With ``tag_id`` set this MOVES it: ``expect_node_id`` is required and
+        must be the node the tag currently points at (compare-and-swap),
+        while ``name``, ``scope`` and ``replace`` must be unset. A stale
+        expectation raises failed_precondition — re-read the tag and retry.
+        Every move appends a row, so a tag's history is never overwritten.
+
+        Tags are the connection owner's alone: another owner's tag id answers
+        the same not_found an unknown one does, so no caller can probe which
+        tags exist."""
+        req = _gen.control_pb.TagRequest(
+            name=name,
+            scope=_tag_scope_wire(scope),
+            child_id=child_id,
+            cursor=cursor,
+            note=note,
+            tag_id=tag_id,
+            expect_node_id=expect_node_id,
+            replace=replace,
+        )
+        return self._call("Tag", req, _gen.control_pb.TagResponse).tag
+
+    def untag(self, tag_id: str) -> None:
+        """Tombstone a tag's live row — the tag is revoked; nothing it
+        pointed at is deleted. Only the tag's creator, that creator's
+        ancestors or a user credential may untag it (permission_denied).
+        An unknown tag id and another owner's look the same: not_found."""
+        req = _gen.control_pb.UntagRequest(tag_id=tag_id)
+        self._call("Untag", req, _gen.control_pb.UntagResponse)
+
+    def list_tags(self, name_prefix: str = "", limit: int = 0, tag_id: str = "") -> "list":
+        """The tags visible to the caller, nearest scope first (lineage, then
+        tree, then owner), optionally narrowed to a name prefix; ``limit`` 0
+        means the daemon's default of 50 (anything above 500 is clamped).
+        With ``tag_id`` set the answer is that one tag's whole history, oldest
+        first. Only the connection owner's tags are ever answered, so an
+        unknown tag id and a foreign (another owner's) one look the same:
+        not_found."""
+        req = _gen.control_pb.ListTagsRequest(name_prefix=name_prefix, limit=limit, tag_id=tag_id)
+        return self._call("ListTags", req, _gen.control_pb.ListTagsResponse).rows
 
     # ── presets ──────────────────────────────────────────────────────────────
 

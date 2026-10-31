@@ -40,6 +40,50 @@ impl Client {
         self.unary("Spawn", req).await
     }
 
+    /// Create a tag on a node, or move an existing one, and answer the stored
+    /// row. A tag is a named, scoped handle to a node: naming it is the grant
+    /// to fork from it, and `scope` says who holds it — lineage (the default)
+    /// for the source's subtree and its ancestors, tree for everything under
+    /// the tagger's top-level ancestor, owner for every agent of the owner.
+    /// Anyone who can read a node may tag it; only the tag's creator, that
+    /// creator's ancestors or a user credential may move or untag it.
+    ///
+    /// With `tag_id` empty this CREATES: `name` (1–64 of `[a-z0-9._-]`,
+    /// starting with a letter or digit) names the node `child_id` + `cursor`
+    /// points at (`m:<ordinal>`, or `m:<ordinal>.<n>`; empty means the last
+    /// completed turn). A name already live in that scope is `already_exists`;
+    /// `replace` tombstones the holder first and needs a user credential.
+    ///
+    /// With `tag_id` set this MOVES it: `expect_node_id` is required and must
+    /// be the node the tag currently points at (compare-and-swap), while
+    /// `name`, `scope` and `replace` must be unset. A stale expectation is
+    /// `failed_precondition` — re-read the tag and retry. Every move appends a
+    /// row, so a tag's history is never overwritten.
+    pub async fn tag(&self, req: &pb::TagRequest) -> Result<pb::TagResponse, Error> {
+        self.unary("Tag", req).await
+    }
+
+    /// Tombstone a tag's live row — the tag is revoked; nothing it pointed at
+    /// is deleted. Only the tag's creator, that creator's ancestors or a user
+    /// credential may untag it (`permission_denied`). An unknown tag id and
+    /// another owner's look the same: `not_found`.
+    pub async fn untag(&self, req: &pb::UntagRequest) -> Result<pb::UntagResponse, Error> {
+        self.unary("Untag", req).await
+    }
+
+    /// The tags visible to the caller, nearest scope first (lineage, then tree,
+    /// then owner), narrowed by `name_prefix`; `limit` 0 is the daemon's
+    /// default of 50 (anything above 500 is clamped). With `tag_id` set the
+    /// answer is that one tag's whole history, oldest first. Only the
+    /// connection owner's tags are ever answered, so an unknown tag id and a
+    /// foreign one look the same: `not_found`.
+    pub async fn list_tags(
+        &self,
+        req: &pb::ListTagsRequest,
+    ) -> Result<pb::ListTagsResponse, Error> {
+        self.unary("ListTags", req).await
+    }
+
     pub async fn get_child(
         &self,
         req: &pb::GetChildRequest,
