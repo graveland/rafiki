@@ -4,9 +4,11 @@ package routing
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
+	"go.graveland.dev/rafiki/pkg/msg/msgtest"
 )
 
 func TestParseCapturedResponseSSE(t *testing.T) {
@@ -44,14 +46,12 @@ func TestParseCapturedResponseSSE(t *testing.T) {
 	c.False(len(reassembled.Content) == 0 || reassembled.Content[0].Text != "hi", "reassembled content did not accumulate the text delta: %+v", reassembled.Content)
 }
 
-func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
+// A content_block_delta for a block that never started is a reassembly gap: the
+// codec hands the delta through and the accumulator refuses it, so the turn is a
+// parse error (recorded errored, with the raw body as the forensic trace) rather
+// than a completion that silently lost model output.
+func TestParseCapturedResponseSSEDeltaWithoutBlockStartIsAnError(t *testing.T) {
 	c := assert.NewCollecting(t)
-	// A text_delta with no preceding content_block_start: the SDK can't attach
-	// it, so that text is dropped from the canonical message. The stream IS
-	// Anthropic wire format though (message_start accumulated), so the turn is
-	// a real completion: persist the accumulated Message — a content-less
-	// skeleton faithfully reflects a stream that produced no attachable
-	// content (e.g. max_tokens before the first block).
 	sse := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}` + "\n\n" +
 		"event: content_block_delta\n" +
@@ -59,10 +59,31 @@ func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}` + "\n\n" +
 		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
-	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
-	c.Require().NoError(err, "well-formed stream must parse")
-	c.False(stop != "end_turn" || u.OutputTokens != 25, "stop=%q out=%d, want end_turn/25", stop, u.OutputTokens)
-	c.True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
+	_, _, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Error(err, "a delta with no block start must be a reassembly-gap error")
+	c.Nil(canonical, "canonical must be nil on a reassembly gap; got")
+}
+
+// A stream that legitimately produces no content block at all (max_tokens can
+// stop a turn before the first one) is still a Message and persists as a
+// content-less one — an empty content array, not a parse failure.
+func TestParseCapturedResponseContentlessMessage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":25}}` + "\n\n" +
+		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
+	stop, u, canonical, repaired, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Require().NoError(err, "a content-less Message must parse")
+	c.Eq("max_tokens", stop, "stop_reason")
+	c.Eq(int64(25), u.OutputTokens, "output tokens")
+	c.Len(repaired, 0, "repaired blocks")
+	var stored struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Len(stored.Content, 0, "a content-less Message stores an empty content array")
 }
 
 func TestParseCapturedResponseJSON(t *testing.T) {
@@ -84,17 +105,22 @@ func TestParseCapturedResponseGarbageIsSafe(t *testing.T) {
 	c.False(stop != "" || u.InputTokens != 0, "garbage should yield zero values, got stop=%q usage=%+v", stop, u)
 }
 
+// A body that ends after a complete event but before message_stop still
+// persists: the proxy's copy loop is where a mid-stream cut is detected and the
+// turn failed, so what reaches capture is whatever the upstream wrote, and the
+// usage extracted so far is the caller's to keep.
 func TestParseCapturedResponseTruncatedStream(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sse := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}` + "\n\n"
 	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
-	// message_start accumulated, so the (content-less) Message persists; the
-	// usage extracted so far stays available to the caller.
 	c.Require().NoError(err, "message_start-only stream must still persist")
 	c.True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
 	c.Eq("", stop, "stop_reason")
-	c.False(u.InputTokens != 100 || u.OutputTokens != 0 || u.CacheReadTokens != 0 || u.CacheCreationTokens != 0, "truncated stream usage = %+v, want InputTokens=100 OutputTokens=0", u)
+	// No message_delta arrived, so output_tokens is the placeholder count
+	// message_start itself carried — the accumulator records what the provider
+	// reported rather than substituting a zero it never said.
+	c.False(u.InputTokens != 100 || u.OutputTokens != 1 || u.CacheReadTokens != 0 || u.CacheCreationTokens != 0, "truncated stream usage = %+v, want InputTokens=100 OutputTokens=1", u)
 }
 
 func TestParseCapturedResponseNonJSONBodyIsError(t *testing.T) {
@@ -146,29 +172,39 @@ func TestParseCapturedResponseProviderJSON(t *testing.T) {
 
 // TestParseCapturedResponseProviderSSE proves the same for the streaming path,
 // where "provider" rides on message_start only — the final message_delta
-// carries the usage but never the provider.
+// carries the usage but never the provider — and proves the delta's usage is
+// backfilled into both CapturedUsage and the stored response.
 func TestParseCapturedResponseProviderSSE(t *testing.T) {
 	c := assert.NewCollecting(t)
 	body := []byte("event: message_start\n" +
 		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"deepseek/deepseek-v4-pro","usage":{"input_tokens":0,"output_tokens":0},"provider":"Novita"}}` + "\n\n" +
 		"event: message_delta\n" +
-		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":4}}` + "\n\n")
-	_, u, _, _, err := ParseCapturedResponse("text/event-stream", body)
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":4}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n")
+	_, u, canonical, _, err := ParseCapturedResponse("text/event-stream", body)
 	c.Require().NoError(err, "ParseCapturedResponse")
 	c.Eq("Novita", u.Provider, "Provider")
 	c.Eq(4, u.CacheReadTokens, "CacheReadTokens")
+	var stored struct {
+		Provider string           `json:"provider"`
+		Usage    map[string]int64 `json:"usage"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Eq("Novita", stored.Provider, "stored provider")
+	c.Eq(int64(5), stored.Usage["input_tokens"], "stored input tokens")
+	c.Eq(int64(4), stored.Usage["cache_read_input_tokens"], "stored cache read tokens")
 }
 
 // TestParseCapturedResponseSSERepairsMalformedToolInput reproduces a real
 // Anthropic stream (rafikid log, 2026-09-06): a spurious duplicate
 // input_json_delta chunk (an extra ", " immediately before the next chunk,
 // which itself starts with ", ") produces a double comma, which is not valid
-// JSON. The SDK's accumulator concatenates partial_json chunks with no
-// validation, so the tool_use block's Input ends up unparseable even though
-// the turn completed normally and the client already received a correct
-// response. Losing the whole turn's usage over one corrupted tool call would
-// silently drop billing data — the block must be repaired, not the turn
-// discarded.
+// JSON. The accumulator concatenates partial_json chunks with no validation, so
+// the tool_use block's Input ends up unparseable even though the turn completed
+// normally and the client already received a correct response. Losing the whole
+// turn's usage over one corrupted tool call would silently drop billing data —
+// the block must be repaired, not the turn discarded.
 func TestParseCapturedResponseSSERepairsMalformedToolInput(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sse := "event: message_start\n" +
@@ -195,18 +231,25 @@ func TestParseCapturedResponseSSERepairsMalformedToolInput(t *testing.T) {
 	c.False(stop != "tool_use" || u.OutputTokens != 118 || u.InputTokens != 2, "usage lost despite independent extraction: stop=%q usage=%+v", stop, u)
 	c.Require().True(json.Valid(canonical), "canonical response is not valid JSON: %s", canonical)
 	c.Require().Len(repaired, 1, "expected exactly one repaired block, got")
-	var msg struct {
+	// The repair is reported AND the raw fragments are kept: the stored input is
+	// a placeholder object carrying them, so a corrupted call stays forensically
+	// readable after the turn.
+	c.StrContains(repaired[0], `raw="{\"file_path\": \"/a.go\", \"offset\": 140, , \"limit\": 100}"`, "repair detail")
+	var stored struct {
 		Content []struct {
 			Type  string          `json:"type"`
 			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 	}
-	c.Require().NoError(json.Unmarshal(canonical, &msg), "canonical unmarshal")
-	c.Require().False(len(msg.Content) != 1 || msg.Content[0].Name != "Read", "tool_use block missing from canonical: %+v", msg.Content)
-	if !json.Valid(msg.Content[0].Input) {
-		t.Errorf("sanitized input must still be valid JSON: %s", msg.Content[0].Input)
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Require().Len(stored.Content, 1, "content blocks")
+	c.Eq("Read", stored.Content[0].Name, "tool name")
+	var input struct {
+		Malformed string `json:"_rafiki_malformed_input"`
 	}
+	c.Require().NoError(json.Unmarshal(stored.Content[0].Input, &input), "sanitized input must still be valid JSON: %s", stored.Content[0].Input)
+	c.Eq(`{"file_path": "/a.go", "offset": 140, , "limit": 100}`, input.Malformed, "raw fragments preserved")
 }
 
 // TestParseCapturedResponseNoProvider proves a native Anthropic response, which
@@ -218,4 +261,166 @@ func TestParseCapturedResponseNoProvider(t *testing.T) {
 	_, u, _, _, err := ParseCapturedResponse("application/json", body)
 	c.Require().NoError(err, "ParseCapturedResponse")
 	c.Eq("", u.Provider, "Provider")
+}
+
+// TestParseSSEUsageInMessageDelta pins OpenRouter's deepseek shape: the
+// message_start reports zeros and the final message_delta carries the real
+// counts. The accumulator's backfill must take every field the delta actually
+// populates, in CapturedUsage and in the stored response alike.
+func TestParseSSEUsageInMessageDelta(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_or","type":"message","role":"assistant","content":[],"model":"deepseek/deepseek-v4-pro","usage":{"input_tokens":0,"output_tokens":0},"provider":"DeepSeek"}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Require().NoError(err, "ParseCapturedResponse")
+	c.Eq("end_turn", stop, "stop_reason")
+	c.Eq(int64(11), u.InputTokens, "input tokens")
+	c.Eq(int64(7), u.OutputTokens, "output tokens")
+	c.Eq(int64(5), u.CacheReadTokens, "cache read tokens")
+	c.Eq(int64(2), u.CacheCreationTokens, "cache creation tokens")
+	c.Eq("DeepSeek", u.Provider, "provider")
+
+	var stored struct {
+		Usage map[string]int64 `json:"usage"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.EqDeep(map[string]int64{
+		"input_tokens":                11,
+		"output_tokens":               7,
+		"cache_read_input_tokens":     5,
+		"cache_creation_input_tokens": 2,
+	}, stored.Usage, "stored usage")
+}
+
+// TestParseCapturedResponseCorpusPairedSSEAndJSON runs every Anthropic fixture of
+// the golden corpus (task 3.1) through the proxy's two capture paths. The
+// streaming and whole-body paths must produce the same stored content, and that
+// content must be the codec's own decoded golden — which is what pins
+// start-block residue (a tool's caller, a server tool's type and metadata),
+// accumulated citations and the server-tool result blocks the client must never
+// see routed to a client tool executor.
+func TestParseCapturedResponseCorpusPairedSSEAndJSON(t *testing.T) {
+	for _, name := range []string{"anthropic-caller", "anthropic-citations", "anthropic-servertool", "anthropic-tooluse"} {
+		t.Run(name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			var golden struct {
+				ID         string           `json:"id"`
+				Model      string           `json:"model"`
+				StopReason string           `json:"stop_reason"`
+				Provider   string           `json:"provider"`
+				Usage      map[string]int64 `json:"usage"`
+				Content    json.RawMessage  `json:"content"`
+			}
+			c.Require().NoError(json.Unmarshal(msgtest.Golden(filepath.Join("golden", name+".sse.decoded.json")), &golden), "read the decoded golden")
+
+			stop, usage, canonical, repaired, err := ParseCapturedResponse("text/event-stream", msgtest.Golden(filepath.Join("responses", name+".sse")))
+			c.Require().NoError(err, "streamed capture")
+			c.Len(repaired, 0, "repaired blocks")
+
+			var streamed struct {
+				ID         string           `json:"id"`
+				Type       string           `json:"type"`
+				Role       string           `json:"role"`
+				Model      string           `json:"model"`
+				Provider   string           `json:"provider"`
+				StopReason string           `json:"stop_reason"`
+				Usage      map[string]int64 `json:"usage"`
+				Content    json.RawMessage  `json:"content"`
+			}
+			c.Require().NoError(json.Unmarshal(canonical, &streamed), "stored response")
+			// The stored body keeps the Anthropic message envelope these turns are
+			// recorded under (protocol = 'anthropic').
+			c.Eq("message", streamed.Type, "stored type")
+			c.Eq("assistant", streamed.Role, "stored role")
+			c.Eq(golden.ID, streamed.ID, "id")
+			c.Eq(golden.Model, streamed.Model, "model")
+			c.Eq(golden.Provider, streamed.Provider, "provider")
+			c.Eq(golden.StopReason, streamed.StopReason, "stored stop_reason")
+			c.Eq(golden.StopReason, stop, "returned stop_reason")
+			c.Eq(golden.Usage["input"], streamed.Usage["input_tokens"], "stored input tokens")
+			c.Eq(golden.Usage["output"], streamed.Usage["output_tokens"], "stored output tokens")
+			c.Eq(golden.Usage["cache_read"], streamed.Usage["cache_read_input_tokens"], "stored cache read tokens")
+			c.Eq(golden.Usage["cache_write"], streamed.Usage["cache_creation_input_tokens"], "stored cache write tokens")
+			// The serving backend reaches CapturedUsage, which is what capture's
+			// ServedProvider and ProviderGuard read.
+			c.Eq(golden.Provider, usage.Provider, "CapturedUsage.Provider")
+			c.Eq(golden.Model, usage.Model, "CapturedUsage.Model")
+			c.Eq(golden.Usage["input"], usage.InputTokens, "CapturedUsage input tokens")
+			c.Eq(golden.Usage["output"], usage.OutputTokens, "CapturedUsage output tokens")
+			c.Eq(golden.Usage["cache_read"], usage.CacheReadTokens, "CapturedUsage cache read tokens")
+			c.Eq(golden.Usage["cache_write"], usage.CacheCreationTokens, "CapturedUsage cache creation tokens")
+			assertCanonicalJSON(t, golden.Content, streamed.Content, "streamed content vs the codec golden")
+
+			// The whole-body path of the same fixture stores the same content, so a
+			// non-streamed turn and its streamed twin are one recorded reply.
+			_, wholeUsage, wholeCanonical, _, err := ParseCapturedResponse("application/json", msgtest.Golden(filepath.Join("responses", name+".json")))
+			c.Require().NoError(err, "whole-body capture")
+			var whole struct {
+				Content json.RawMessage `json:"content"`
+			}
+			c.Require().NoError(json.Unmarshal(wholeCanonical, &whole), "whole-body response")
+			assertCanonicalJSON(t, streamed.Content, whole.Content, "streamed content vs whole-body content")
+			c.Eq(usage.Provider, wholeUsage.Provider, "provider on both paths")
+			c.Eq(usage.InputTokens, wholeUsage.InputTokens, "input tokens on both paths")
+		})
+	}
+}
+
+// TestParseCapturedResponseSSEKeepsStartBlockResidue proves a block keeps what
+// its content_block_start carried: a signature seeded before any
+// signature_delta, and a tool call's caller residue.
+func TestParseCapturedResponseSSEKeepsStartBlockResidue(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_residue","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5","usage":{"input_tokens":7,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"sig-seeded"}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_02","name":"mcp__rafiki__agent_spawn","input":{},"caller":{"type":"direct"}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"prompt\":\"run\"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	_, _, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	c.Require().NoError(err, "ParseCapturedResponse")
+	var stored struct {
+		Content []map[string]json.RawMessage `json:"content"`
+	}
+	c.Require().NoError(json.Unmarshal(canonical, &stored), "canonical unmarshal")
+	c.Require().Len(stored.Content, 2, "content blocks")
+	c.Eq(`"sig-seeded"`, string(stored.Content[0]["signature"]), "seeded signature")
+	c.Eq(`"hmm"`, string(stored.Content[0]["thinking"]), "thinking text")
+	c.Eq(`{"type":"direct"}`, string(stored.Content[1]["caller"]), "tool caller residue")
+	c.Eq(`{"prompt":"run"}`, string(stored.Content[1]["input"]), "tool input")
+}
+
+// assertCanonicalJSON compares two JSON documents as values, never as bytes:
+// key order and whitespace carry no meaning.
+func assertCanonicalJSON(t *testing.T, want, got json.RawMessage, what string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	var w, g any
+	c.NoError(json.Unmarshal(want, &w), "%s: decode want", what)
+	c.NoError(json.Unmarshal(got, &g), "%s: decode got", what)
+	c.EqDeep(w, g, what)
 }

@@ -13,11 +13,10 @@ import (
 )
 
 // sdkImporters is the closed set of packages allowed to import the Anthropic
-// SDK directly. It may only shrink. pkg/msg/anthropic is the Anthropic codec;
-// pkg/routing remains only for the proxy face's SSE decoder (routing/sse.go).
+// SDK directly. It may only shrink. pkg/msg/anthropic, the Anthropic codec, is
+// the only package that touches the SDK.
 var sdkImporters = []string{
 	"go.graveland.dev/rafiki/pkg/msg/anthropic",
-	"go.graveland.dev/rafiki/pkg/routing",
 }
 
 // TestAnthropicSDKImportRatchet asserts the tree's direct Anthropic SDK
