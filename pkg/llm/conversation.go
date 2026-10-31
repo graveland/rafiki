@@ -593,7 +593,7 @@ func (conv *Conversation) loadHistory(ctx context.Context) ([]*convpkg.Node, err
 // head. The tree decides identity, so a replayed node is matched by hash and
 // returns the existing row's identity instead of writing a second copy.
 func (conv *Conversation) appendMessage(ctx context.Context, message msg.Message, meta *store.AssistantMeta, providerID string) (store.Appended, error) {
-	node := convpkg.NewNode{Msg: message, ProviderMessageID: providerID}
+	node := convpkg.NewNode{Msg: message, ProviderMessageID: providerID, Origin: convpkg.OriginFundi}
 	if meta != nil {
 		node.StopReason = meta.StopReason
 		node.InputTokens = &meta.Input
@@ -619,7 +619,7 @@ func (conv *Conversation) SeedHistory(ctx context.Context, msgs []msg.Message) e
 	}
 	nodes := make([]convpkg.NewNode, len(msgs))
 	for i, m := range msgs {
-		nodes[i] = convpkg.NewNode{Msg: m}
+		nodes[i] = convpkg.NewNode{Msg: m, Origin: convpkg.OriginFundi}
 	}
 	_, err := conv.handle().Append(ctx, convpkg.Append{Root: convtree.RootKindRoot, Nodes: nodes})
 	if err != nil {

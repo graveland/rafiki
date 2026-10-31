@@ -665,7 +665,7 @@ func chainNodes(msgs []convtree.Msg) ([]conv.NewNode, error) {
 		if err != nil {
 			return nil, fmt.Errorf("attach: message %d: %w", i, err)
 		}
-		nodes[i] = conv.NewNode{Msg: msg.Message{Role: role}, Content: m.Content}
+		nodes[i] = conv.NewNode{Msg: msg.Message{Role: role}, Content: m.Content, Origin: conv.OriginClaudeCode}
 	}
 	return nodes, nil
 }
@@ -933,6 +933,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 				OutputTokens:      &out,
 				StopReason:        stopReason,
 				ProviderMessageID: MessageIDFromCanonical(canonical),
+				Origin:            conv.OriginClaudeCode,
 			}},
 		})
 		if err != nil {

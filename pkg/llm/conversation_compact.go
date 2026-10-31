@@ -118,6 +118,7 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	nodes = append(nodes, convpkg.NewNode{
 		Msg:         summaryMessage(summary),
 		InputTokens: &replacedTokens,
+		Origin:      convpkg.OriginFundi,
 	})
 	for _, t := range tail {
 		// The stored bytes are carried verbatim: a tail copy is the same row,
@@ -128,6 +129,7 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 			Content:    t.Content,
 			StopReason: t.StopReason,
 			Kind:       convpkg.KindCompactionTail,
+			Origin:     t.Origin,
 		})
 	}
 	res, err := conv.handle().Append(ctx, convpkg.Append{
@@ -204,7 +206,7 @@ func (conv *Conversation) Clear(ctx context.Context) error {
 	if len(history) == 0 {
 		return nil
 	}
-	boundary := convpkg.NewNode{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: store.ClearBoundaryText}}}}
+	boundary := convpkg.NewNode{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: store.ClearBoundaryText}}}, Origin: convpkg.OriginFundi}
 	if _, err := conv.handle().Append(ctx, convpkg.Append{
 		Root:            convtree.RootKindClear,
 		DerivedFromHead: true,
