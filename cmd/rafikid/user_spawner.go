@@ -94,6 +94,8 @@ func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.Ag
 		MaxChildren:      spec.MaxChildren,
 		ExecutorSelector: spec.ExecutorSelector,
 		WorkspaceMode:    spec.WorkspaceMode,
+		ForkFrom:         forkFromRequest(spec.ForkFrom),
+		FromTag:          spec.FromTag,
 		// This is an MCP tool call, not an operator: a taken sibling name
 		// becomes name-2 instead of a refusal, exactly as agent_spawn does.
 		SuffixNameOnConflict: true,
@@ -214,4 +216,27 @@ func (s *userSpawner) SetRouting(ctx context.Context, childID, spec string) (str
 		return "", errors.New("agent id is required")
 	}
 	return s.c.SetChildRoutingAsOperator(ctx, childID, spec)
+}
+
+// Tag creates or moves a tag with USER authority: the caller has no position
+// in the agent tree, so everything it reaches is its owner's. A create must
+// name the child whose history is marked — there is no "you" for a user — and
+// `replace`, which only a user credential may use, is available here.
+func (s *userSpawner) Tag(ctx context.Context, spec tools.TagSpec) (tools.TagInfo, error) {
+	in, err := tagInputFromSpec(spec)
+	if err != nil {
+		return tools.TagInfo{}, err
+	}
+	return tagWith(ctx, s.c, connectapi.TagCaller{Owner: s.owner}, in)
+}
+
+// Untag tombstones any of the owner's tags: a user credential may modify every
+// tag it owns, whoever created it.
+func (s *userSpawner) Untag(ctx context.Context, tagID string) error {
+	return untagWith(ctx, s.c, connectapi.TagCaller{Owner: s.owner}, tagID)
+}
+
+// Tags lists every tag the bound owner holds.
+func (s *userSpawner) Tags(ctx context.Context, q tools.TagQuery) ([]tools.TagInfo, error) {
+	return tagsWith(ctx, s.c, connectapi.TagCaller{Owner: s.owner}, q)
 }

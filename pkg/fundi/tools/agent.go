@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -100,6 +101,71 @@ type SpawnSpec struct {
 	// It carries no Name and no TTL — both are named-sandbox-only fields the
 	// daemon refuses on a spawn block.
 	Sandbox *protocol.SandboxSpec
+
+	// ForkFrom, when set, starts the new child from a point in another child's
+	// history instead of from nothing: it inherits that conversation up to the
+	// cursor, by reference. Authority is the daemon's — a child may fork itself
+	// or a child it could already read — and the fork is resolved ONCE, so a
+	// later tag move never reaches it. Exclusive with FromTag.
+	ForkFrom *ForkFromSpec
+	// FromTag names a tag (see agent_tags) whose node the new child starts
+	// from, resolved nearest scope first and once. Exclusive with ForkFrom.
+	FromTag string
+}
+
+// ForkFromSpec is where a fork starts: the source child and, optionally, a
+// cursor into its conversation. An empty Cursor means the source's last
+// completed turn.
+type ForkFromSpec struct {
+	ChildID string
+	Cursor  string
+}
+
+// TagSpec is one agent_tag call. TagID empty creates a tag; TagID and
+// ExpectNodeID both set move it, and Name, Scope and Replace must then be
+// unset. ChildID is the child whose conversation the tag points into, and is
+// ignored by a move that names no child (the tag keeps its own).
+type TagSpec struct {
+	Name         string
+	Scope        string
+	ChildID      string
+	Cursor       string
+	Note         string
+	TagID        string
+	ExpectNodeID string
+	// Replace takes over a live name in the same scope, which only a user
+	// credential may do.
+	Replace bool
+}
+
+// TagQuery is one agent_tags read: the caller's live tags, or one tag's whole
+// history when TagID is set.
+type TagQuery struct {
+	NamePrefix string
+	Limit      int
+	TagID      string
+}
+
+// TagInfo is one tag as the daemon reports it. Every field is daemon-stamped:
+// the creator and the node are read from stored state, never from the caller.
+type TagInfo struct {
+	TagID string
+	Name  string
+	// Scope is the stored spelling: "lineage", "tree" or "owner".
+	Scope     string
+	ScopeRoot string
+	// ChildID is the child whose conversation the tag's node belongs to.
+	ChildID string
+	NodeID  string
+	// Ordinal is the node's insertion ordinal in its conversation.
+	Ordinal int
+	// Creator is the child that created the tag; empty means a user did.
+	Creator   string
+	Note      string
+	CreatedAt time.Time
+	// Current reports whether this row is the live version. A history listing
+	// carries the superseded and tombstoned versions too, with Current false.
+	Current bool
 }
 
 // SendSpec is one agent_send: the message and the steps the daemon runs at
@@ -199,6 +265,17 @@ type AgentSpawner interface {
 	// this interface the caller identity is the binding's own, not an
 	// argument.
 	SetRouting(ctx context.Context, childID, spec string) (string, error)
+	// Tag creates the tag spec names, or moves it when spec.TagID is set.
+	// The caller's identity — and, for a child-bound spawner, its own child
+	// id, which a create defaults the source child to — is the binding's, so
+	// a tag's creator and scope root can never be asserted by the caller.
+	Tag(ctx context.Context, spec TagSpec) (TagInfo, error)
+	// Untag tombstones a tag. Only its creator, an ancestor of the creator,
+	// or a user credential may; the daemon decides that from stored lineage.
+	Untag(ctx context.Context, tagID string) error
+	// Tags lists the tags the caller may fork from, nearest scope first, or
+	// one tag's history when q.TagID is set.
+	Tags(ctx context.Context, q TagQuery) ([]TagInfo, error)
 }
 
 const (

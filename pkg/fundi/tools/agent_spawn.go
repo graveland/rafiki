@@ -143,6 +143,19 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"Put CLAUDE.md or skill files here too, with ranges. The agent does not need the read tool " +
 					"for this: a tool-less agent gets the files as text under `=== <path> ===` headers. " +
 					"A claude agent is instead told in its system prompt to Read them first."},
+			{Name: "fork_from", Type: "object",
+				Description: "Start the agent from a point in another agent's history instead of from nothing: " +
+					"it inherits that conversation up to the cursor (default: the agent's last completed turn), " +
+					"by reference. You may fork yourself or agents beneath you. The new agent runs as kind=fundi.",
+				Properties: []SchemaProperty{
+					{Name: "child_id", Type: "string",
+						Description: "The agent whose history is borrowed: your own id, or one beneath you."},
+					{Name: "cursor", Type: "string",
+						Description: "The node to start after, as agent_view prints it (m:<ordinal>). Omit for that agent's last completed turn."},
+				},
+				Required: []string{"child_id"}},
+			{Name: "from_tag", Type: "string",
+				Description: "Start from the node a tag names (see agent_tags); resolved nearest scope first, once. Exclusive with fork_from."},
 			{Name: "sandbox", Type: "object",
 				Description: "Run the new agent's workspace inside a fresh, isolated container: its executor is provisioned into a sandbox with the mounts, network and limits below. `scope` is required: \"self\" offers the container only to the new agent, \"subtree\" also to its descendants. A `ro` mount cannot be written even by root in the container; `network` confines the CONTAINER's own processes (the agent itself still runs in the daemon — see the tool description); a host_path must sit under a directory the launcher's operator allowed. If the sandbox cannot be created the spawn is refused.",
 				Properties: []SchemaProperty{
@@ -217,6 +230,8 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		MCPServers         *[]string          `json:"mcp_servers,omitempty"`
 		ContextFiles       *bool              `json:"context_files,omitempty"`
 		Prefill            []string           `json:"prefill,omitempty"`
+		ForkFrom           *forkFromParam     `json:"fork_from,omitempty"`
+		FromTag            string             `json:"from_tag,omitempty"`
 		Sandbox            *spawnSandboxParam `json:"sandbox,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
@@ -261,6 +276,15 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)
 	}
 
+	// A fork_from block with no child_id would reach the daemon as a fork from
+	// "", which it answers as not-visible; refuse it here, where the message
+	// can say what is missing. The daemon refuses fork_from and from_tag
+	// together, and is the authority for both.
+	forkFrom, err := buildForkFrom(params.ForkFrom)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)
+	}
+
 	// SpawnSpec carries no parent. The implementation supplies the caller's
 	// own id, which it closed over at construction.
 	info, err := t.agents.Spawn(ctx, SpawnSpec{
@@ -283,10 +307,32 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		MCPServers:         params.MCPServers,
 		ContextFiles:       params.ContextFiles,
 		Prefill:            prefillReads,
+		ForkFrom:           forkFrom,
+		FromTag:            params.FromTag,
 		Sandbox:            sandbox,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)
 	}
 	return NewTextResult(RenderAgents([]AgentInfo{info})), nil
+}
+
+// forkFromParam is agent_spawn's fork_from block: the source agent and,
+// optionally, the node to start after.
+type forkFromParam struct {
+	ChildID string `json:"child_id"`
+	Cursor  string `json:"cursor,omitempty"`
+}
+
+// buildForkFrom validates the block at the tool, so a missing child_id fails
+// the call with a message the model can act on rather than reaching the daemon
+// as a fork from nobody.
+func buildForkFrom(p *forkFromParam) (*ForkFromSpec, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if p.ChildID == "" {
+		return nil, errors.New("fork_from requires child_id — name the agent whose history to borrow")
+	}
+	return &ForkFromSpec{ChildID: p.ChildID, Cursor: p.Cursor}, nil
 }

@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/tags"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
 
@@ -342,6 +343,9 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 		"agent_send",
 		"agent_set_budget",
 		"agent_spawn",
+		"agent_tag",
+		"agent_tags",
+		"agent_untag",
 		"agent_view",
 		// Deliberate on a DB-less face, unlike quota_status: Conversations is
 		// set unconditionally in getServer (newMCPConversationReader degrades
@@ -390,6 +394,9 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		"agent_send",
 		"agent_set_budget",
 		"agent_spawn",
+		"agent_tag",
+		"agent_tags",
+		"agent_untag",
 		"agent_view",
 		"conversation_export",
 		"conversation_query",
@@ -845,6 +852,9 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		"agent_send",
 		"agent_set_budget",
 		"agent_spawn",
+		"agent_tag",
+		"agent_tags",
+		"agent_untag",
 		"agent_view",
 		"conversation_export",
 		"conversation_query",
@@ -966,4 +976,62 @@ func TestMCPFaceUserCallerHasNoParentTools(t *testing.T) {
 	for _, name := range []string{"agent_report", "agent_result"} {
 		assert.NewCollecting(t).NotContains(names, name, "user credential unexpectedly exposes")
 	}
+}
+
+// TestMCPFaceOffersTagToolsToChildren pins the parity rule: a per-child
+// credential gets the same tag verbs on MCP as it does on Connect, because
+// they ride the same bound spawner agent_spawn rides. A user credential gets
+// them too — it is the same blueprint set, bound to the other spawner.
+func TestMCPFaceOffersTagToolsToChildren(t *testing.T) {
+	c := assert.NewAborting(t)
+	face, _ := mcpFaceFixture(t)
+	registerMCPChild(t, face.controller(), "u-owner", "c-child")
+
+	child := mcpToolNames(t, mcpConnect(t, face.getServer(mcpChildRequestFor("u-owner", "c-child"))))
+	user := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-owner"))))
+	for _, want := range []string{"agent_tag", "agent_untag", "agent_tags"} {
+		c.Contains(child, want, "child caller's tool list is missing")
+		c.Contains(user, want, "user caller's tool list is missing")
+	}
+}
+
+// TestMCPFaceTagIgnoresSpoofedCaller is the authority pin for the tag verbs on
+// this face: the creator and the owner are read from the CREDENTIAL's binding,
+// never from a tool argument. A child that passes creator_child_id or
+// owner_user_id still creates a tag of its own, owned by its own owner — the
+// same rule every other method on tools.AgentSpawner follows.
+func TestMCPFaceTagIgnoresSpoofedCaller(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := newForkFixture(t)
+	face := newMCPFace(discardLogger(), nil, nil, "test")
+	face.SetController(f.ctrl)
+
+	child := uniqueForkName("tagger")
+	f.forkableChild(t, child, "", child, f.owner, 1)
+	// The face resolves the caller's ledger conversation before every tool
+	// call, which needs the child in the live manager as well as in the store.
+	registerMCPChild(t, f.ctrl, f.owner, child)
+
+	sess := mcpConnect(t, face.getServer(mcpChildRequestFor(f.owner, child)))
+	name := uniqueForkName("spoof")
+	res, err := sess.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "agent_tag",
+		Arguments: map[string]any{
+			"name":  name,
+			"scope": "tree",
+			// The spoof: fields the schema does not have, naming another child
+			// and another owner. They must be ignored, not honoured.
+			"creator_child_id": "c_impostor",
+			"owner_user_id":    "u_impostor",
+		},
+	})
+	ck.NoError(err, "agent_tag over MCP")
+	ck.False(res.IsError, "agent_tag answered an error: %s", mcpToolResultText(t, res))
+
+	rows, err := f.tags.ByName(context.Background(), f.owner, name)
+	ck.NoError(err, "read the tag back")
+	ck.Len(rows, 1, "tags named %q", name)
+	ck.Eq(child, rows[0].CreatorChildID, "the creator is the calling child, never a tool argument")
+	ck.Eq(f.owner, rows[0].OwnerUserID, "the tag belongs to the calling child's owner")
+	ck.Eq(tags.ScopeTree, rows[0].Scope, "scope")
 }

@@ -15,6 +15,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/tags"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -361,6 +362,144 @@ func (s *controllerSpawner) SetRouting(ctx context.Context, childID, spec string
 	return s.c.SetChildRouting(ctx, s.selfID, childID, spec)
 }
 
+// Tag creates or moves a tag with CHILD authority: the caller is this
+// spawner's own child, so a tag's creator and its lineage root are read from
+// stored state and can never be asserted by the tool argument. A create that
+// names no source child marks THIS child — "default: you" — while a move
+// leaves ChildID empty so the tag keeps the conversation it already points
+// into.
+func (s *controllerSpawner) Tag(ctx context.Context, spec tools.TagSpec) (tools.TagInfo, error) {
+	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	in, err := tagInputFromSpec(spec)
+	if err != nil {
+		return tools.TagInfo{}, err
+	}
+	if in.TagID == "" && in.ChildID == "" {
+		in.ChildID = s.selfID
+	}
+	return tagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, in)
+}
+
+// Untag tombstones a tag. Authority is the tag manager's: only the creator, an
+// ancestor of the creator, or a user credential may.
+func (s *controllerSpawner) Untag(ctx context.Context, tagID string) error {
+	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	return untagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, tagID)
+}
+
+// Tags lists the tags this child may fork from, nearest scope first, or one
+// tag's history when q.TagID is set.
+func (s *controllerSpawner) Tags(ctx context.Context, q tools.TagQuery) ([]tools.TagInfo, error) {
+	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	return tagsWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, q)
+}
+
+// tagManagerFor is the daemon's tag manager over the same store the Connect
+// Tag RPCs serve, so a tool and an RPC see one tag table. A daemon with no
+// database has none, and answers the same unavailable error the RPC does
+// rather than nil-panicking.
+func tagManagerFor(c *Controller) (connectapi.TagManager, error) {
+	if c.tagStore == nil {
+		return nil, tagUnavailableErr()
+	}
+	return newTagManager(c, c.tagStore), nil
+}
+
+// tagInputFromSpec maps the tool's argument shape onto the manager's. Scope is
+// parsed here and an unknown spelling is REFUSED: the manager reads the zero
+// scope as "unspecified", which means lineage on a create, so passing a typo
+// through would silently widen or narrow who can fork from the tag.
+func tagInputFromSpec(spec tools.TagSpec) (connectapi.TagInput, error) {
+	in := connectapi.TagInput{
+		Name:         spec.Name,
+		ChildID:      spec.ChildID,
+		Cursor:       spec.Cursor,
+		Note:         spec.Note,
+		TagID:        spec.TagID,
+		ExpectNodeID: spec.ExpectNodeID,
+		Replace:      spec.Replace,
+	}
+	if spec.Scope == "" {
+		return in, nil
+	}
+	scope, err := tags.ParseScope(spec.Scope)
+	if err != nil {
+		return connectapi.TagInput{}, fmt.Errorf("scope must be lineage, tree or owner: %w", err)
+	}
+	in.Scope = scope
+	return in, nil
+}
+
+// tagWith, untagWith and tagsWith are the three verbs every AgentSpawner
+// implementation shares: resolve the manager, call it with the binding's own
+// caller, and render the stored rows onto the tool-facing type.
+func tagWith(ctx context.Context, c *Controller, caller connectapi.TagCaller, in connectapi.TagInput) (tools.TagInfo, error) {
+	m, err := tagManagerFor(c)
+	if err != nil {
+		return tools.TagInfo{}, err
+	}
+	t, err := m.Tag(ctx, caller, in)
+	if err != nil {
+		return tools.TagInfo{}, err
+	}
+	return tagInfo(t), nil
+}
+
+func untagWith(ctx context.Context, c *Controller, caller connectapi.TagCaller, tagID string) error {
+	if tagID == "" {
+		return errors.New("tag id is required")
+	}
+	m, err := tagManagerFor(c)
+	if err != nil {
+		return err
+	}
+	return m.Untag(ctx, caller, tagID)
+}
+
+func tagsWith(ctx context.Context, c *Controller, caller connectapi.TagCaller, q tools.TagQuery) ([]tools.TagInfo, error) {
+	m, err := tagManagerFor(c)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := m.ListTags(ctx, caller, q.NamePrefix, q.Limit, q.TagID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.TagInfo, 0, len(rows))
+	for _, t := range rows {
+		out = append(out, tagInfo(t))
+	}
+	return out, nil
+}
+
+// tagInfo renders one stored tag version onto the tool-facing type. Current is
+// decided from the row's own tombstones: a history listing carries the
+// superseded versions too, and only one of them is live.
+func tagInfo(t tags.Tag) tools.TagInfo {
+	return tools.TagInfo{
+		TagID:     t.TagID,
+		Name:      t.Name,
+		Scope:     t.Scope.String(),
+		ScopeRoot: t.ScopeRoot,
+		ChildID:   t.SourceChildID,
+		NodeID:    t.NodeID,
+		Ordinal:   t.Ordinal,
+		Creator:   t.CreatorChildID,
+		Note:      t.Note,
+		CreatedAt: t.CreatedAt,
+		Current:   t.SupersededAt == nil && t.DeletedAt == nil,
+	}
+}
+
+// forkFromRequest copies the tool's fork block onto the wire shape. A nil spec
+// stays nil: "no fork", never "a fork from nobody".
+func forkFromRequest(spec *tools.ForkFromSpec) *protocol.ForkFrom {
+	if spec == nil {
+		return nil
+	}
+	return &protocol.ForkFrom{ChildID: spec.ChildID, Cursor: spec.Cursor}
+}
+
 // spawnKind resolves a spec's child kind: the caller's choice, else the fundi
 // default. The default applies ONLY when no preset is named — with a preset
 // an empty kind stays empty so the controller's applyPreset takes the kind
@@ -479,6 +618,8 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		MaxChildren:           spec.MaxChildren,
 		ExecutorSelector:      spec.ExecutorSelector,
 		WorkspaceMode:         spec.WorkspaceMode,
+		ForkFrom:              forkFromRequest(spec.ForkFrom),
+		FromTag:               spec.FromTag,
 		// A model that asks for a name one of its live workers already has
 		// gets name-2 rather than a refusal it can do nothing useful with. Set
 		// HERE only: every operator surface refuses a taken name.
