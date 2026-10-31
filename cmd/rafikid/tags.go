@@ -249,34 +249,16 @@ func (m *tagManager) Untag(ctx context.Context, caller connectapi.TagCaller, tag
 	return nil
 }
 
-// ListTags answers one tag's whole history when tagID is set, and otherwise
-// the live tags the caller can see, nearest scope first and truncated to
-// limit.
+// ListTags answers one tag's whole history when tagID is set — an untagged
+// tag's too — and otherwise the live tags the caller can see, nearest scope
+// first and truncated to limit.
 func (m *tagManager) ListTags(ctx context.Context, caller connectapi.TagCaller, namePrefix string, limit int, tagID string) ([]tags.Tag, error) {
 	pos, err := m.c.position(ctx, caller.ChildID)
 	if err != nil {
 		return nil, err
 	}
 	if tagID != "" {
-		t, err := m.get(ctx, caller.Owner.UserID, tagID)
-		if err != nil {
-			return nil, err
-		}
-		// A tag the caller cannot see AND cannot modify does not exist as far
-		// as it is concerned: the same not-found a foreign id gets.
-		visible, err := m.c.visibleTag(ctx, pos, t)
-		if err != nil {
-			return nil, err
-		}
-		if !visible {
-			if visible, err = m.mayModify(ctx, pos, t); err != nil {
-				return nil, err
-			}
-		}
-		if !visible {
-			return nil, tagNotFoundErr(tagID)
-		}
-		return m.store.History(ctx, caller.Owner.UserID, tagID)
+		return m.tagHistory(ctx, pos, caller.Owner.UserID, tagID)
 	}
 	rows, err := m.store.List(ctx, caller.Owner.UserID, namePrefix)
 	if err != nil {
@@ -303,6 +285,54 @@ func (m *tagManager) ListTags(ctx context.Context, caller connectapi.TagCaller, 
 		ranked = ranked[:limit]
 	}
 	return ranked, nil
+}
+
+// tagHistory answers one tag's whole history, oldest first. The live row is
+// the ordinary case; a tag that has been untagged has no live row left, so the
+// visibility check runs against the newest row the history still holds — a
+// tag's scope and scope root are fixed for its life (a move refuses `scope`),
+// so any row speaks for the tag — and a history with no rows keeps the same
+// not-found a foreign id gets.
+func (m *tagManager) tagHistory(ctx context.Context, pos tags.Position, ownerUserID, tagID string) ([]tags.Tag, error) {
+	t, ok, err := m.store.Get(ctx, ownerUserID, tagID)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		if err := m.requireTagVisible(ctx, pos, t, tagID); err != nil {
+			return nil, err
+		}
+		return m.store.History(ctx, ownerUserID, tagID)
+	}
+	hist, err := m.store.History(ctx, ownerUserID, tagID)
+	if err != nil {
+		return nil, err
+	}
+	if len(hist) == 0 {
+		return nil, tagNotFoundErr(tagID)
+	}
+	if err := m.requireTagVisible(ctx, pos, hist[len(hist)-1], tagID); err != nil {
+		return nil, err
+	}
+	return hist, nil
+}
+
+// requireTagVisible refuses a tag the caller can neither see nor modify. One
+// not-found for all of those, so an id cannot be probed.
+func (m *tagManager) requireTagVisible(ctx context.Context, pos tags.Position, t tags.Tag, tagID string) error {
+	visible, err := m.c.visibleTag(ctx, pos, t)
+	if err != nil {
+		return err
+	}
+	if !visible {
+		if visible, err = m.mayModify(ctx, pos, t); err != nil {
+			return err
+		}
+	}
+	if !visible {
+		return tagNotFoundErr(tagID)
+	}
+	return nil
 }
 
 // get reads the caller's own live tag, mapping an unknown id to not-found.

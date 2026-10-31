@@ -1766,39 +1766,64 @@ The rules, in order:
 - a user may fork anything they own; a user who names `parent_child_id` forks
   with that parent's authority;
 - only `kind=fundi` can be forked to;
-- the default cursor is the last assistant message with no pending tool call;
+- the default cursor is the last node on the working path that is a completed
+  turn — an assistant message with NO `tool_use` block at all, so a message
+  whose tool call was already answered is skipped too (`isCompletedTurn`,
+  `cmd/rafikid/fork.go`); an explicit `cursor` must name such a completed turn
+  (`CodeInvalidArgument` otherwise), and a `.n` suffix is parsed and ignored;
 - lineage scope = the source, its subtree and its ancestors; tree scope =
   everything under the scope root's top-level ancestor; owner scope = every
   agent of the owner;
 - names resolve lineage, then tree, then owner, nearest first; a user with no
-  parent sees owner scope only;
+  parent RESOLVES owner scope only — that is `from_tag`, where it has no
+  lineage and no tree — while `ListTags` still shows a user every scope they
+  own;
 - uniqueness is per (owner, scope, scope root, name) among live tags; only a
   user may `replace`;
 - only the creator, its ancestors (closed included) or a user may move or
   untag; a move needs `expect_node_id` and fails `FailedPrecondition` when
   stale;
 - resolution happens once, at spawn;
-- foreign and unknown always answer one identical `PermissionDenied`.
+- a source child with NO owner (`owner_user_id` is NULL — a pre-column row, or
+  the anonymous unix-socket spawn shape) is readable only by the daemon's
+  local trust or an admin credential, exactly as the owner guard treats an
+  unowned child;
+- a foreign or unknown AGENT id, or a tag NAME at fork/create time, always
+  answers one identical `PermissionDenied`; a tag ID is different — the tag
+  store is owner-keyed, so a foreign or unknown id answers `NotFound`
+  (`tag %s not found`).
 
 The refusals read `agent %s is not visible to you`, `tag %q is not visible to
 you`, and — for a move whose expectation is stale — `tag %q points at %s, not
-%s; re-read it and retry`. What the fork records is the concrete node, so
+%s; re-read it and retry`. A source with no conversation yet is
+`CodeFailedPrecondition`: `agent %s has no conversation to fork from yet`. A
+cursor is refused `CodeInvalidArgument`, as `malformed cursor %q (want
+m:<ordinal>)` or as `cursor %s is not a completed turn (an assistant message
+with no pending tool call)`. What the fork records is the concrete node, so
 moving a tag never reaches a fork already created (the preset rule, §"Presets").
 
 **`Tag`** creates or moves one tag. `name` (1–64 bytes of `[a-z0-9._-]`,
 starting with a letter or digit), `scope`, `child_id`, `cursor` and an optional
-`note` (≤1024 bytes) create; `tag_id` + `expect_node_id` move, with `name`,
-`scope` and `replace` then unset. `replace` tombstones the live holder of the
-name first and is refused to a child credential. `TAG_SCOPE_UNSPECIFIED` means
-lineage at create time and is never stored (`tags.ScopeUnset` is not a
-storable value). Answers the stored `TagRow`.
+`note` (≤1024 bytes) create; `tag_id` + `expect_node_id` move, and the move may
+also carry `child_id` + `cursor` for the node it goes to (an empty `child_id`
+re-points it inside the conversation it already names). A move carrying
+`name`, `scope` or `replace` is `CodeInvalidArgument` — they are create-only
+fields — and a `note` on a move is silently ignored, the row keeping the note
+it already had. `replace` tombstones the live holder of the name first and is
+refused to a child credential. `TAG_SCOPE_UNSPECIFIED` means lineage at create
+time and is never stored (`tags.ScopeUnset` is not a storable value). Answers
+the stored `TagRow`.
 
 **`Untag`** tombstones one tag's live row by `tag_id` (`CodeNotFound` when
 none is live).
 
 **`ListTags`** answers the live tags visible to the caller, nearest scope first
-— `name_prefix` narrows, `limit` defaults to 50 and clamps at 500 — or, with
-`tag_id` set, that one tag's whole history, oldest first.
+— `name_prefix` narrows, `limit` defaults to 50, clamps at 500 and is refused
+`CodeInvalidArgument` when negative — or, with `tag_id` set, that one tag's
+whole history, oldest first. The live row is the ordinary case; an untagged
+tag has none left, so its history is answered from the rows that survive it
+and the visibility check runs against the NEWEST of those. A user credential
+lists every tag it owns; a child lists the ones `tags.InScope` admits.
 
 A `TagRow` is one VERSION of one tag: a move supersedes the current row and
 appends the next, an untag tombstones it, and rows are otherwise immutable and

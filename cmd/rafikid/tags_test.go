@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -267,6 +268,89 @@ func TestListTagsNearestFirstAndLimited(t *testing.T) {
 	limited, err := f.manager().ListTags(ctx, tagCaller(f.owner, l.child), "", 2, "")
 	ck.Require().NoError(err, "list with a limit")
 	ck.EqDeep([]string{atSelf.TagID, atParent.TagID}, tagIDs(limited), "the limit keeps the nearest")
+}
+
+// An untag tombstones the tag's live row, so a history read must not go
+// through the live-only lookup: the tombstone is part of the audit trail.
+func TestListTagsReadsAnUntaggedTagsHistory(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	l := f.lineageTree(t)
+	caller := tagCaller(f.owner, l.child)
+
+	created := f.createTag(t, caller, connectapi.TagInput{Name: uniqueForkName("history"), ChildID: l.child})
+	ck.Require().NoError(f.manager().Untag(ctx, caller, created.TagID), "untag")
+
+	hist, err := f.manager().ListTags(ctx, caller, "", 0, created.TagID)
+	ck.Require().NoError(err, "an untagged tag's history is still readable")
+	ck.Require().Eq(1, len(hist), "one version")
+	ck.Eq(created.TagID, hist[0].TagID, "the same tag id")
+	ck.Eq(created.NodeID, hist[0].NodeID, "the node it named")
+	ck.NotNil(hist[0].DeletedAt, "the tombstone is part of the history")
+}
+
+// A move appends a row and supersedes the one it replaces, so a history read
+// lists every version of the tag, oldest first, live row included.
+func TestListTagsReadsEveryVersionOfAMovedTag(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	l := f.lineageTree(t)
+	nodes := f.turns(t, l.childConv, 2)
+	caller := tagCaller(f.owner, l.child)
+
+	created := f.createTag(t, caller, connectapi.TagInput{
+		Name: uniqueForkName("moved"), ChildID: l.child, Cursor: cursorAt(nodes[0]),
+	})
+	_, err := f.manager().Tag(ctx, caller, connectapi.TagInput{
+		TagID: created.TagID, ExpectNodeID: nodes[0].ID, Cursor: cursorAt(nodes[1]),
+	})
+	ck.Require().NoError(err, "move")
+
+	hist, err := f.manager().ListTags(ctx, caller, "", 0, created.TagID)
+	ck.Require().NoError(err, "list")
+	ck.Require().Eq(2, len(hist), "both versions")
+	ck.EqDeep([]string{nodes[0].ID, nodes[1].ID}, tagNodeIDs(hist), "oldest first")
+	ck.NotNil(hist[0].SupersededAt, "the first row is superseded")
+	ck.True(hist[1].SupersededAt == nil && hist[1].DeletedAt == nil, "the last row is live")
+}
+
+// The history fallback must not widen what a caller may probe: an id that has
+// no row at all and another owner's id answer the one not-found.
+func TestListTagsUnknownAndForeignTagIDsAreNotFound(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	l := f.lineageTree(t)
+	created := f.createTag(t, tagCaller(f.owner, l.child), connectapi.TagInput{
+		Name: uniqueForkName("mine"), ChildID: l.child,
+	})
+
+	other, _, err := usersdb.NewPostgresStore(f.pool).Create(ctx,
+		users.NewUser{Username: uniqueForkName("other")})
+	ck.Require().NoError(err, "create the other owner")
+
+	for _, want := range []struct {
+		tagID string
+		label string
+	}{
+		{uuid.Must(uuid.NewV7()).String(), "an unknown id"},
+		{created.TagID, "a foreign owner's id"},
+	} {
+		_, err := f.manager().ListTags(ctx, tagCaller(other.ID, ""), "", 0, want.tagID)
+		ck.True(err != nil, "%s must not answer a history", want.label)
+		requireExactControllerError(t, err, protocol.ErrNotFound,
+			fmt.Sprintf("tag %s not found", want.tagID))
+	}
+}
+
+func tagNodeIDs(rows []tags.Tag) []string {
+	out := make([]string, 0, len(rows))
+	for _, t := range rows {
+		out = append(out, t.NodeID)
+	}
+	return out
 }
 
 func tagIDs(rows []tags.Tag) []string {
