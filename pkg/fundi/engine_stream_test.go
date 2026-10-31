@@ -356,10 +356,15 @@ func TestEngine_NonStreamingFallbackProducesWellFormedFrameSequence(t *testing.T
 	eng.HandlePrompt("hi")
 	eng.Wait()
 
-	assertFrameTypes(t, out.String(), []string{
+	// Repeats are collapsed: HOW MANY partial updates land inside a
+	// streamFlushInterval window is a function of scheduler timing, not of the
+	// fallback's correctness, and asserting the count made this test fail under
+	// a loaded full-suite run. What must hold is the SHAPE — a start, at least
+	// one growing update, then an end.
+	assertFrameTypesCollapsed(t, out.String(), []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn, non-streaming fallback
+		"message_start", "message_update", "message_end", // assistant turn, non-streaming fallback
 		"agent_end", "agent_settled",
 	})
 }
