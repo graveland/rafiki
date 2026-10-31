@@ -9,17 +9,27 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/msg/openaichat"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 // maxErrorBody caps how much of a refusal's body an APIError carries. A provider
 // that answers with a whole HTML page must not put it in a log line.
 const maxErrorBody = 1 << 20
+
+// userAgent is the User-Agent every request this package sends carries. Every
+// client in this space sends a real one: Go's default "Go-http-client/2.0" is
+// exactly the kind of string a bot filter rejects, and a rejection here looks
+// like an authentication failure.
+func userAgent() string {
+	return fmt.Sprintf("rafiki/%s (%s; %s)", version.String(), runtime.GOOS, runtime.GOARCH)
+}
 
 // maxResponseBody bounds a non-streamed response body. It is generous on
 // purpose: a refusal is classified from its first bytes, but a SUCCESS has to be
@@ -89,6 +99,7 @@ func newAnthropicSender(p providers.Provider, base, key string, rt http.RoundTri
 	headers := http.Header{}
 	headers.Set("Anthropic-Version", "2023-06-01")
 	headers.Set("Content-Type", "application/json")
+	headers.Set("User-Agent", userAgent())
 	return &httpSender{
 		baseURL: strings.TrimRight(base, "/"),
 		headers: headers,
@@ -117,6 +128,7 @@ func newOpenRouterSender(p providers.Provider, base, key string, rt http.RoundTr
 	headers.Set("Referer", "https://github.com/graveland/rafiki")
 	headers.Set("X-OpenRouter-Title", "rafiki")
 	headers.Set("X-OpenRouter-Categories", "cli-agent")
+	headers.Set("User-Agent", userAgent())
 	return &httpSender{
 		baseURL: strings.TrimRight(base, "/"),
 		headers: headers,
@@ -136,6 +148,7 @@ func NewAnthropicBearerSender(baseURL, token string, rt http.RoundTripper) Sende
 	headers := http.Header{}
 	headers.Set("Anthropic-Version", "2023-06-01")
 	headers.Set("Content-Type", "application/json")
+	headers.Set("User-Agent", userAgent())
 	var auth func(*http.Request)
 	if token != "" {
 		auth = func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+token) }
@@ -163,6 +176,7 @@ func newOpenAISender(p providers.Provider, key string, rt http.RoundTripper) (*h
 	}
 	headers := http.Header{}
 	headers.Set("Content-Type", "application/json")
+	headers.Set("User-Agent", userAgent())
 	var auth func(*http.Request)
 	if key != "" {
 		// Keyless convention: an empty key sends no Authorization header at all —

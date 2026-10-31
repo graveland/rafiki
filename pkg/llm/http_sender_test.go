@@ -247,6 +247,48 @@ func TestHTTPSenderAnthropicStaticHeaders(t *testing.T) {
 	c.Eq("sk-test", got.Get("X-Api-Key"))
 }
 
+// TestHTTPSenderSendsARealUserAgent pins that every plain-HTTP kind carries a
+// rafiki User-Agent. Go's default "Go-http-client/2.0" is exactly the string a
+// bot filter rejects, and that rejection reads like an authentication failure.
+func TestHTTPSenderSendsARealUserAgent(t *testing.T) {
+	cases := []struct {
+		name string
+		kind providers.Kind
+		body string
+	}{
+		{name: "anthropic", kind: providers.KindAnthropic, body: anthropicOK},
+		{name: "anthropic-openrouter", kind: providers.KindAnthropicOpenRouter, body: anthropicOK},
+		{name: "openai", kind: providers.KindOpenAI, body: openAIChatOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			var got string
+			var reached bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got, reached = r.Header.Get("User-Agent"), true
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			sender, err := SenderForKey(providers.Provider{
+				Name: tc.name, Kind: tc.kind, BaseURL: srv.URL,
+			}, "sk-test", nil)
+			c.Require().NoError(err, "SenderForKey")
+			_, err = sender.Send(context.Background(), nativeRequest(t), msg.EncodeOptions{})
+			c.Require().NoError(err, "Send")
+
+			c.Require().True(reached, "no request reached the server")
+			t.Logf("observed User-Agent: %q", got)
+			c.True(got != "", "User-Agent is empty")
+			c.False(strings.HasPrefix(got, "Go-http-client"), "User-Agent is Go's default: %q", got)
+			c.True(strings.HasPrefix(got, "rafiki/"), "User-Agent = %q, want a rafiki/ prefix", got)
+			c.Eq(userAgent(), got, "User-Agent is the package's own")
+		})
+	}
+}
+
 // TestAnthropicBearerSenderSendsBearerNoAPIKey pins the one credential shape
 // rafiki's own /v1/messages proxy accepts: a bearer token and no x-api-key,
 // whatever ANTHROPIC_API_KEY the environment holds.
@@ -270,6 +312,7 @@ func TestAnthropicBearerSenderSendsBearerNoAPIKey(t *testing.T) {
 	c.Eq("Bearer rafiki-token", got.Get("Authorization"), "Authorization")
 	c.Eq("", got.Get("X-Api-Key"), "x-api-key must never be sent to the proxy")
 	c.Eq("2023-06-01", got.Get("Anthropic-Version"), "anthropic-version")
+	c.True(strings.HasPrefix(got.Get("User-Agent"), "rafiki/"), "User-Agent = %q, want a rafiki/ prefix", got.Get("User-Agent"))
 	c.Eq("/v1/messages", gotPath, "proxy path")
 }
 

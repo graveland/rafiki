@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +21,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/msg/responses"
 	"go.graveland.dev/rafiki/pkg/providers"
-	"go.graveland.dev/rafiki/pkg/version"
 )
 
 // Endpoints. openai-responses has a canonical default (api.openai.com); the
@@ -51,14 +49,6 @@ const defaultResponsesStreamIdleTimeout = 300 * time.Second
 // this sender uses by default, but codex no longer exercises that field, so a
 // backend change is plausible; this constant makes it a one-line fix.
 const chatGPTInstructionsAsDeveloperMessage = false
-
-// responsesUserAgent is the User-Agent every Responses request carries. Every
-// client in this space sends a real one: Go's default "Go-http-client/2.0" is
-// exactly the kind of string a bot filter rejects, and a rejection here looks
-// like an authentication failure.
-func responsesUserAgent() string {
-	return fmt.Sprintf("rafiki/%s (%s; %s)", version.String(), runtime.GOOS, runtime.GOARCH)
-}
 
 // TokenSource supplies the credential for one Responses request. Token is
 // called per request; force=true asks for a refreshed credential after a 401.
@@ -353,7 +343,7 @@ func (s *responsesSender) newRequest(ctx context.Context, payload []byte, stream
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	req.Header.Set("originator", "rafiki")
-	req.Header.Set("User-Agent", responsesUserAgent())
+	req.Header.Set("User-Agent", userAgent())
 	req.Header.Set("Content-Type", "application/json")
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
