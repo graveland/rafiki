@@ -614,3 +614,41 @@ func TestDownloadStopsAtLimitWhenLengthIsNotDeclared(t *testing.T) {
 	c.LessOrEqual(maxDownloadBytes+1, read.Load(), "bytes read from the response")
 	assertNoDebris(t, s)
 }
+
+// A directory the archive records as read-only must be made read-only only
+// AFTER its entries are written: applying the mode where the directory is
+// created makes the very next write fail with EACCES, and the tree the caller
+// gets is a half-extracted one. This is the behaviour the extractor's mode
+// deferral exists for, so reverting it to "chmod at mkdir time" must fail here.
+func TestExtractTarAppliesDirectoryModesAfterTheirEntries(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the 0555 mode this test needs to be a wall")
+	}
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	locked := filepath.Join(root, "locked")
+	// LIFO: registered after t.TempDir's own cleanup, so this runs first and the
+	// read-only directory can be removed at all.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	err := ExtractTar(bytes.NewReader(buildTar(t, []tarEntry{
+		{name: "locked", mode: 0o555, typeflag: tar.TypeDir},
+		{name: "locked/child", mode: 0o640, typeflag: tar.TypeReg, body: "kept"},
+	})), root)
+
+	c := assert.NewAborting(t)
+	c.NoError(err, "ExtractTar returned error")
+	body, rerr := os.ReadFile(filepath.Join(locked, "child"))
+	c.NoError(rerr, "the entry under a read-only directory must be written")
+	c.Eq("kept", string(body), "body, got")
+
+	info, serr := os.Stat(locked)
+	c.NoError(serr, "stat the extracted directory")
+	c.Eq(os.FileMode(0o555), info.Mode().Perm(), "the archived directory mode, got")
+	child, cerr := os.Stat(filepath.Join(locked, "child"))
+	c.NoError(cerr, "stat the extracted file")
+	c.Eq(os.FileMode(0o640), child.Mode().Perm(), "the archived file mode, got")
+}

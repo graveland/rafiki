@@ -304,3 +304,80 @@ func TestRelativeDataDirIsRefused(t *testing.T) {
 	s := Server{DataDir: "relative/pg"}
 	assert.NewCollecting(t).ErrorContains(s.checkDataDir(), "is not absolute")
 }
+
+// A missing data directory is not always a fresh install. A restore moves the
+// old one aside and unpacks a new one into place across two rename(2) calls, and
+// rafikid installs no signal handler, so a SIGKILL between them leaves neither a
+// data directory nor a rollback — just the preserved one beside it. initdb'ing
+// an empty cluster there would serve an empty database while every row the
+// operator has sits in that directory, so the init path refuses, names what it
+// found, and leaves the decision to a person.
+func TestInitRefusesAFreshClusterBesideAPreservedDirectory(t *testing.T) {
+	// No binaries on purpose: the refusal happens before initdb is ever run, so a
+	// server that could not initialise anything still reaches it.
+	missingInitdb := func(t *testing.T) Server {
+		t.Helper()
+		s := testServer(t)
+		s.BinDir = filepath.Join(filepath.Dir(s.LockPath), "no-binaries-here")
+		return s
+	}
+
+	t.Run("a restore marker", func(t *testing.T) {
+		s := missingInitdb(t)
+		if err := os.WriteFile(s.RestoreInProgressPath(), nil, 0o600); err != nil {
+			t.Fatalf("write the marker: %v", err)
+		}
+
+		err := s.initIfNeeded(context.Background())
+
+		c := assert.NewAborting(t)
+		c.ErrorContains(err, "refusing to initialise", "error, got: %v", err)
+		c.ErrorContains(err, s.RestoreInProgressPath(), "the refusal must name what it found, got: %v", err)
+		c.NoDirExists(s.DataDir, "a refused initialisation must create nothing")
+	})
+
+	t.Run("a directory a restore moved aside", func(t *testing.T) {
+		s := missingInitdb(t)
+		preserved := s.DataDir + ReplacedDataDirPrefix + "1700000000"
+		if err := os.MkdirAll(preserved, 0o700); err != nil {
+			t.Fatalf("mkdir the preserved directory: %v", err)
+		}
+
+		err := s.initIfNeeded(context.Background())
+
+		c := assert.NewAborting(t)
+		c.ErrorContains(err, "refusing to initialise", "error, got: %v", err)
+		c.ErrorContains(err, preserved, "the refusal must name the preserved directory, got: %v", err)
+		c.NoDirExists(s.DataDir, "a refused initialisation must create nothing")
+	})
+
+	t.Run("nothing preserved is still initialised", func(t *testing.T) {
+		s := missingInitdb(t)
+
+		err := s.initIfNeeded(context.Background())
+
+		c := assert.NewAborting(t)
+		// It fails, because there are no binaries — but for that reason, not the
+		// guard: a genuinely fresh install must still reach initdb.
+		c.Error(err, "want the missing-initdb failure, got nil")
+		c.NotStrContains(err.Error(), "refusing to initialise",
+			"a fresh install must not be refused, got: %v", err)
+	})
+
+	t.Run("a data directory that is there is never refused", func(t *testing.T) {
+		s := missingInitdb(t)
+		if err := os.MkdirAll(s.DataDir, 0o700); err != nil {
+			t.Fatalf("mkdir the data dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(s.DataDir, "PG_VERSION"), []byte(MajorVersion+"\n"), 0o600); err != nil {
+			t.Fatalf("write PG_VERSION: %v", err)
+		}
+		if err := os.WriteFile(s.RestoreInProgressPath(), nil, 0o600); err != nil {
+			t.Fatalf("write the marker: %v", err)
+		}
+
+		c := assert.NewAborting(t)
+		c.NoError(s.initIfNeeded(context.Background()),
+			"an existing data directory is not a fresh install, whatever is beside it")
+	})
+}

@@ -116,7 +116,18 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer release()
+	return s.EnsureLocked(ctx)
+}
 
+// EnsureLocked is Ensure for a caller that ALREADY holds Lock: the same
+// download, initdb, prepare and start, without taking the flock again. A
+// physical restore needs it — it holds the lock across stop → rename → rename →
+// start, and Ensure taking it a second time from one process would deadlock
+// against itself — exactly as StopLocked is Stop's counterpart.
+//
+// Calling this without the lock is safe only when nobody else can touch the
+// server: every other path that changes it takes the lock.
+func (s Server) EnsureLocked(ctx context.Context) (string, error) {
 	// The socket path is a hard limit of the platform, and it is checked before
 	// anything is written or downloaded: discovering it after a 100 MB download
 	// would be a wasted download on every attempt.
@@ -256,6 +267,9 @@ func (s Server) initIfNeeded(ctx context.Context) error {
 	if _, err := os.Stat(filepath.Join(s.DataDir, "PG_VERSION")); err == nil {
 		return nil
 	}
+	if err := s.refuseFreshInitBesideARestore(); err != nil {
+		return err
+	}
 	staging := s.DataDir + ".init"
 	if err := os.RemoveAll(staging); err != nil {
 		return fmt.Errorf("embedpg: %w", err)
@@ -305,6 +319,57 @@ func (s Server) initIfNeeded(ctx context.Context) error {
 		return fmt.Errorf("embedpg: %w", err)
 	}
 	return nil
+}
+
+// The names `rafikid db restore` leaves beside a data directory while it
+// replaces it. They live here because the init path below has to recognise them,
+// and a command and this package spelling them differently would be a guard that
+// never fires.
+const (
+	// RestoreInProgressSuffix names the marker file a restore creates before it
+	// moves the live directory aside and removes once the server is back up.
+	RestoreInProgressSuffix = ".restore-in-progress"
+	// ReplacedDataDirPrefix prefixes the directory a restore moved the previous
+	// data directory to: `<data dir>.replaced-<unix>`.
+	ReplacedDataDirPrefix = ".replaced-"
+)
+
+// RestoreInProgressPath is the marker `rafikid db restore` creates beside the
+// data directory before it moves the live one aside, and removes once the server
+// is up on the restored copy. Its presence means "between the two renames":
+// there may be no data directory, and one is on its way in.
+func (s Server) RestoreInProgressPath() string {
+	return s.DataDir + RestoreInProgressSuffix
+}
+
+// refuseFreshInitBesideARestore refuses to initdb a missing data directory while
+// a restore's marker or a replaced directory is beside it.
+//
+// A missing data directory next to a preserved one is never a fresh install: it
+// is a restore interrupted between moving the old directory aside and putting the
+// new one in place (two rename(2) calls, and rafikid installs no signal handler,
+// so a SIGKILL there skips its rollback), or an operator who put a backup next
+// to the install. initdb'ing an EMPTY cluster there would start a database that
+// looks perfectly healthy while every row the operator has sits in the directory
+// beside it — the worst outcome this package can produce — so it refuses, names
+// what it found, and leaves the decision to a person.
+func (s Server) refuseFreshInitBesideARestore() error {
+	preserved := make([]string, 0, 2)
+	if _, err := os.Lstat(s.RestoreInProgressPath()); err == nil {
+		preserved = append(preserved, s.RestoreInProgressPath())
+	}
+	if matches, err := filepath.Glob(s.DataDir + ReplacedDataDirPrefix + "*"); err == nil {
+		preserved = append(preserved, matches...)
+	}
+	if len(preserved) == 0 {
+		return nil
+	}
+	return fmt.Errorf("embedpg: refusing to initialise a data directory at %s: %s is beside it. "+
+		"A missing data directory next to a preserved one is an interrupted restore, not a fresh "+
+		"install, and creating an empty cluster here would serve an empty database while the real "+
+		"one stays on disk. Move the preserved directory back into place to use it again, or remove "+
+		"it deliberately",
+		s.DataDir, strings.Join(preserved, ", "))
 }
 
 // checkVersion refuses a data directory written by another major version.

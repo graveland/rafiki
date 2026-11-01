@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,40 +239,65 @@ type fakeRestore struct {
 	// how the rollback's restart is told apart from the restore's own start.
 	failFirstStart bool
 	starts         int
+	// failSecondStop makes the rollback's stop fail (the second one), which is the
+	// state where a postmaster is still on the restored tree and the rollback must
+	// not delete the files under it.
+	failSecondStop bool
+	stops          int
 	// unpack replaces the archiver when a test wants a real or failing one.
 	unpack func(archive, dir string) error
+	// probe, when set, runs inside stop and start: the only hook in the middle of
+	// the sequence, and where a test asks what must be true at that moment (the
+	// lock held, the marker written).
+	probe func(stage string, s embedpg.Server)
 }
 
-// stubRestoreOps points the physical path at dataDir and swaps the four operations
-// for recorders.
+// stubRestoreOps points the physical path at dataDir and swaps the operations
+// that touch the server for recorders. The LOCK is the real one and stays real:
+// it costs nothing, and it is what lets a test ask whether it is held at a point
+// in the middle of the swap.
 func stubRestoreOps(t *testing.T, dataDir string, running bool) *fakeRestore {
 	t.Helper()
 	f := &fakeRestore{running: running}
+	// A lock outside the data directory's parent, so it never shows up in a test
+	// that lists what the restore created beside the data directory.
+	lockDir := t.TempDir()
 
 	origServer := newEmbeddedServer
 	t.Cleanup(func() { newEmbeddedServer = origServer })
 	newEmbeddedServer = func() embedpg.Server {
 		return embedpg.Server{BinDir: "/fake/bin", DataDir: dataDir,
-			LockPath: filepath.Join(filepath.Dir(dataDir), "pg.lock")}
+			LockPath: filepath.Join(lockDir, "pg.lock")}
 	}
 
 	orig := restoreEmbedded
 	t.Cleanup(func() { restoreEmbedded = orig })
 	restoreEmbedded = embeddedRestoreOps{
+		lock: func(ctx context.Context, s embedpg.Server) (func(), error) { return s.Lock(ctx) },
 		status: func(context.Context, embedpg.Server) (bool, error) {
 			f.ops = append(f.ops, "status")
 			return f.running, nil
 		},
-		stop: func(context.Context, embedpg.Server) error {
+		stop: func(_ context.Context, s embedpg.Server) error {
 			f.ops = append(f.ops, "stop")
+			f.stops++
+			if f.probe != nil {
+				f.probe("stop", s)
+			}
 			if f.stopErr != nil {
 				return f.stopErr
+			}
+			if f.failSecondStop && f.stops == 2 {
+				return errors.New("pg_ctl: server does not shut down")
 			}
 			f.running = false
 			return nil
 		},
-		start: func(context.Context, embedpg.Server) error {
+		start: func(_ context.Context, s embedpg.Server) error {
 			f.ops = append(f.ops, "start")
+			if f.probe != nil {
+				f.probe("start", s)
+			}
 			f.starts++
 			if f.failFirstStart && f.starts == 1 {
 				return errors.New("pg_ctl: the restored server did not start")
@@ -440,6 +466,8 @@ func TestRestoreRefusesWithoutForce(t *testing.T) {
 		c.ErrorContains(err, "without --force", "refusal, got: %v", err)
 		c.ErrorContains(err, dataDir, "the refusal must name the data directory, got: %v", err)
 		c.ErrorContains(err, ".replaced-", "the refusal must say what happens to it, got: %v", err)
+		c.ErrorContains(err, "stop the embedded server if it is running",
+			"the refusal must say the server is stopped if it is up, got: %v", err)
 
 		c.Eq(0, len(f.ops), "a refused restore must perform no operation, got: %v", f.ops)
 		c.EqDeep(before, snapshotTree(t, dataDir), "the data directory must be untouched, got")
@@ -462,6 +490,13 @@ func TestRestoreRefusesWithoutForce(t *testing.T) {
 		c.ErrorContains(err, `"app"`, "the refusal must name the database, got: %v", err)
 		c.ErrorContains(err, "db.example:6543", "the refusal must name the host, got: %v", err)
 		c.NotStrContains(err.Error(), "s3cret", "the refusal must not echo the DSN, got: %v", err)
+		// --clean --if-exists drops what the DUMP contains, not the whole
+		// database: saying otherwise would overstate what this destroys.
+		c.ErrorContains(err, "every object the ARCHIVE contains",
+			"the refusal must bound what is dropped to the archive, got: %v", err)
+		c.ErrorContains(err, "left alone", "the refusal must say the rest survives, got: %v", err)
+		c.NotStrContains(err.Error(), "every object in it",
+			"the refusal must not claim the whole database is replaced, got: %v", err)
 
 		c.NoFileExists(argvFile, "a refused restore must not run pg_restore")
 		c.NoFileExists(envFile, "a refused restore must not run pg_restore")
@@ -787,19 +822,36 @@ func TestRestorePhysicalRollsBackWhenTheStartFails(t *testing.T) {
 	pinRestoreStamp(t, 1_700_000_000)
 	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
 		dataDirArchiveEntries()...)
+	rollbackStoppedOnRestoredTree := false
 	f := stubRestoreOps(t, dataDir, true)
 	f.failFirstStart = true
+	// The rollback must stop the postmaster the failed start may have left BEFORE
+	// it removes the tree that postmaster is using. The restored tree's marker
+	// says "restored"; the original one says "original".
+	f.probe = func(stage string, _ embedpg.Server) {
+		if stage != "stop" {
+			return
+		}
+		if body, rerr := os.ReadFile(filepath.Join(dataDir, "marker")); rerr == nil && string(body) == "restored" {
+			rollbackStoppedOnRestoredTree = true
+		}
+	}
 
 	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
 
 	c.Error(err, "want the start failure, got nil")
 	c.ErrorContains(err, "did not start", "error, got: %v", err)
 
-	// unpack, status, stop, start (fails), start (the rollback's restart).
-	c.EqDeep([]string{"unpack", "status", "stop", "start", "start"}, f.ops, "ops, got")
+	// unpack, status, stop, start (fails), then the rollback: stop (the postmaster
+	// the failed start may have left), remove the new tree, put the old one back,
+	// start (the restart the restore owed).
+	c.EqDeep([]string{"unpack", "status", "stop", "start", "stop", "start"}, f.ops, "ops, got")
 	c.EqDeep(original, snapshotTree(t, dataDir), "the rollback must put the previous directory back, got")
 	assertNoRestoreSiblings(c, dataDir)
+	c.True(rollbackStoppedOnRestoredTree,
+		"the rollback must stop the server the failed start may have left BEFORE removing its directory")
 	c.True(f.running, "the rollback must leave the server running what it was running")
+	c.NoFileExists(dataDir+embedpg.RestoreInProgressSuffix, "a rolled-back restore must remove its marker")
 }
 
 // --- the dump path ----------------------------------------------------------
@@ -853,6 +905,11 @@ func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	for _, bad := range []string{"s3cret", "db.example", "alice"} {
 		c.NotStrContains(argv, bad, "pg_restore argv must not carry %q, got: %s", bad, argv)
 	}
+	// The archive path comes last, behind `--`: a filename is not a flag.
+	args := strings.Split(strings.TrimRight(argv, "\n"), "\n")
+	c.True(len(args) >= 2, "the fake pg_restore recorded %d arguments, got: %v", len(args), args)
+	c.Eq(archive, args[len(args)-1], "the archive path must be the last argument, got: %v", args)
+	c.Eq("--", args[len(args)-2], "the path must follow `--`, got: %v", args)
 
 	env := string(mustRead(t, envFile))
 	for _, want := range []string{"PGHOST=db.example", "PGDATABASE=app", "PGUSER=alice", "PGPASSWORD=s3cret"} {
@@ -959,4 +1016,238 @@ func TestRestoreUnpackRoundTrip(t *testing.T) {
 			c.EqDeep(want, snapshotTree(t, restored), "the unpacked tree, got")
 		})
 	}
+}
+
+// --- the lock, the marker, and the ways a physical restore can fail -----------
+
+// The embedpg flock must be held across the whole swap. Without it a concurrent
+// `rafikid psql` (which resolves the DSN, so it runs Ensure) can start a
+// postmaster on the directory about to be renamed away, or initdb a fresh
+// cluster in the gap between the two renames. The probe asks the REAL lock, from
+// inside stop and start, whether it is free — an unlocked stop is the bug.
+func TestRestorePhysicalHoldsTheServerLockAcrossTheSwap(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+	var held []string
+	f.probe = func(stage string, s embedpg.Server) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		release, err := s.Lock(ctx)
+		if err == nil {
+			release()
+			t.Errorf("the embedpg lock was FREE during %s: another rafikid can change the server there", stage)
+			return
+		}
+		held = append(held, stage)
+	}
+
+	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, io.Discard), "runRestore returned error")
+	c.EqDeep([]string{"stop", "start"}, held, "the lock must be held at each stage probed, got")
+}
+
+// The marker is what covers the window no lock and no rollback can: a SIGKILL
+// between the two renames. It has to exist while the directory is being moved,
+// and be gone once the server is back up — a leftover one would make the next
+// start refuse for no reason.
+func TestRestorePhysicalWritesTheMarkerBeforeMovingTheDirectoryAside(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+
+	pinRestoreStamp(t, 1_700_000_000)
+	marker := dataDir + embedpg.RestoreInProgressSuffix
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	stubRestoreOps(t, dataDir, true)
+
+	origRename := renamePath
+	t.Cleanup(func() { renamePath = origRename })
+	renames, secondSawIt := 0, false
+	renamePath = func(from, to string) error {
+		renames++
+		switch renames {
+		case 1:
+			body, rerr := os.ReadFile(marker)
+			c.NoError(rerr, "the marker must be written BEFORE the data directory moves")
+			c.StrContains(string(body), filepath.Base(to),
+				"the marker must name where the previous directory went, got: %s", body)
+		case 2:
+			_, rerr := os.Stat(marker)
+			secondSawIt = rerr == nil
+		}
+		return os.Rename(from, to)
+	}
+
+	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, io.Discard), "runRestore returned error")
+	c.Eq(2, renames, "a restore with a data directory in place makes exactly two renames, got")
+	c.True(secondSawIt, "the marker must survive between the two renames: that window is what it is for")
+	c.NoFileExists(marker, "a completed restore must remove its marker")
+}
+
+// The rollback must never delete a directory this command did not create. If the
+// staging tree cannot be put in place — something else created the data
+// directory in the gap, exactly what a concurrent Ensure used to do — the
+// rollback leaves it alone and reports where the preserved directory is.
+func TestRestorePhysicalRollsBackAFailedSecondRename(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+	original := snapshotTree(t, dataDir)
+
+	pinRestoreStamp(t, 1_700_000_000)
+	marker := dataDir + embedpg.RestoreInProgressSuffix
+	replaced := dataDir + embedpg.ReplacedDataDirPrefix + "1700000000"
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+
+	origRename := renamePath
+	t.Cleanup(func() { renamePath = origRename })
+	renames := 0
+	renamePath = func(from, to string) error {
+		renames++
+		if renames != 2 {
+			return os.Rename(from, to)
+		}
+		// The gap: someone else's fresh cluster is now where the restored tree was
+		// going, and this rename is the one that fails.
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
+			t.Errorf("plant the concurrent data directory: %v", err)
+		}
+		writeBytes(t, filepath.Join(dataDir, "notice"), "someone else's cluster")
+		return errors.New("rename: directory not empty")
+	}
+
+	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+
+	c.Error(err, "want the second-rename failure, got nil")
+	c.ErrorContains(err, "moving the restored directory into place", "error, got: %v", err)
+	c.Eq(3, renames, "the rollback must still attempt to put the previous directory back, got %d renames", renames)
+
+	// The directory this command did NOT create survives untouched...
+	c.Eq("someone else's cluster", string(mustRead(t, filepath.Join(dataDir, "notice"))),
+		"the rollback deleted a directory the restore did not create, got")
+	// ...and the database that was there is still preserved, by name.
+	c.DirExists(replaced, "the previous data directory must be preserved")
+	c.EqDeep(original, snapshotTree(t, replaced), "the preserved directory must be untouched, got")
+	c.ErrorContains(err, replaced, "the refusal must say where the previous directory is, got: %v", err)
+
+	// The marker stays: the install is NOT back where it was, so the next start
+	// must refuse to initialise an empty cluster over it.
+	c.FileExists(marker, "a rollback that could not restore the directory must keep the marker")
+	c.EqDeep([]string{"unpack", "status", "stop", "start"}, f.ops,
+		"the restart is still owed: the server was stopped, got ops")
+}
+
+// A stop that fails means the server was never down, so no restart is owed — and
+// nothing may have been moved. This is the backup's rule, and the restore owes
+// the same one.
+func TestRestorePhysicalDoesNotRestartAfterAFailedStop(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+	before := snapshotTree(t, dataDir)
+
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+	f.stopErr = errors.New("pg_ctl: cannot stop the server")
+
+	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+
+	c.Error(err, "want the stop failure, got nil")
+	c.ErrorContains(err, "cannot stop the server", "error, got: %v", err)
+	c.EqDeep([]string{"unpack", "status", "stop"}, f.ops, "a failed stop must not be followed by a start, got ops")
+	c.EqDeep(before, snapshotTree(t, dataDir), "the data directory must be untouched, got")
+	c.NoFileExists(dataDir+embedpg.RestoreInProgressSuffix, "a refused restore must leave no marker")
+	assertNoRestoreSiblings(c, dataDir)
+	c.True(f.running, "the server was never stopped, so it must still be running")
+}
+
+// A start failure on a FRESH install has nothing to put back: the previous state
+// was "no data directory at all", so the rollback removes the tree it unpacked,
+// stops the postmaster the failed start may have left on it, and leaves no
+// marker (nothing is displaced).
+func TestRestorePhysicalRollsBackAFailedStartOnAFreshInstall(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, false)
+	f.failFirstStart = true
+
+	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+
+	c.Error(err, "want the start failure, got nil")
+	c.ErrorContains(err, "did not start", "error, got: %v", err)
+	// unpack, start (fails), stop (the postmaster the failed start may have left).
+	c.EqDeep([]string{"unpack", "start", "stop"}, f.ops, "ops, got")
+	c.NoDirExists(dataDir, "the rollback must remove the tree it unpacked")
+	c.NoFileExists(dataDir+embedpg.RestoreInProgressSuffix, "a fresh install has nothing to preserve")
+	assertNoRestoreSiblings(c, dataDir)
+	c.EqDeep([]string{"app.txz"}, namesIn(t, parent), "nothing may be left beside the data directory, got")
+}
+
+// A dump file whose name begins with "-" is a filename, not an option: the path
+// goes to pg_restore behind `--`. Without it the archive is parsed as a flag and
+// the restore fails on a file the operator can point at.
+func TestRestoreDumpPassesAFlagShapedPathAfterADoubleDash(t *testing.T) {
+	c := assert.NewAborting(t)
+	argvFile, _ := fakePgRestoreDir(t)
+
+	dir := t.TempDir()
+	archive := writeBytes(t, filepath.Join(dir, "-a-dump.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+
+	c.NoError(err, "runRestore returned error: %s", stderr.String())
+	argv := string(mustRead(t, argvFile))
+	c.StrContains(argv, "--\n"+archive+"\n", "the flag-shaped path must follow `--`, got: %s", argv)
+}
+
+// The nastiest rollback state: the restored tree is in place, its start failed,
+// and the postmaster it left will not shut down. Deleting the files under a live
+// postmaster is how a rollback corrupts a cluster, so nothing is removed — both
+// trees stay where they are, the error names both, and the marker stays so a
+// later missing data directory refuses instead of initialising an empty cluster.
+func TestRestorePhysicalLeavesBothTreesWhenTheRollbackCannotStop(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+	original := snapshotTree(t, dataDir)
+
+	pinRestoreStamp(t, 1_700_000_000)
+	replaced := dataDir + embedpg.ReplacedDataDirPrefix + "1700000000"
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+	f.failFirstStart = true
+	f.failSecondStop = true
+
+	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+
+	c.Error(err, "want the rollback's stop failure, got nil")
+	c.ErrorContains(err, "server does not shut down", "error, got: %v", err)
+	c.ErrorContains(err, dataDir, "the error must say where the restored tree is, got: %v", err)
+	c.ErrorContains(err, replaced, "the error must say where the previous tree is, got: %v", err)
+	c.EqDeep([]string{"unpack", "status", "stop", "start", "stop"}, f.ops, "ops, got")
+
+	// Nothing was removed: the restored tree is still at the live path (it is what
+	// the postmaster that would not stop is using), and the original is preserved.
+	c.Eq("restored", string(mustRead(t, filepath.Join(dataDir, "marker"))), "the restored tree must be left in place, got")
+	c.EqDeep(original, snapshotTree(t, replaced), "the previous directory must be preserved, got")
+	c.FileExists(dataDir+embedpg.RestoreInProgressSuffix, "the marker must stay while the install is displaced")
 }

@@ -81,16 +81,20 @@ file is, sniffed from its content rather than its extension:
 
   a pg_dump custom archive ("PGDMP" magic)
       pg_restore -d <database> --clean --if-exists --no-owner --single-transaction
-      over the wire. The connection is passed in the PG* environment and never on
-      pg_restore's command line — argv carries the database NAME, which pg_restore
-      requires and which the --force report already told you.
+      over the wire: every object the ARCHIVE contains is dropped and recreated,
+      and everything else in the database is left alone. The connection is passed
+      in the PG* environment and never on pg_restore's command line — argv
+      carries the database NAME, which pg_restore requires and which the --force
+      report already told you. The whole restore is one transaction, so a failure
+      rolls it back rather than leaving a half-rebuilt database.
 
   a physical archive (a tar, or a gzip/xz stream of one)
-      the embedded server's data directory is replaced: the running server is
-      stopped, the directory on disk is moved to <dir>.replaced-<unix> — never
-      deleted — and the archive is unpacked in its place, then the server is
-      started again. A running rafikid is NOT stopped by this command: stopping
-      the server drops its connections, so stop the daemon first.
+      the embedded server's data directory is replaced: the server is stopped
+      (only if it is running), the directory on disk is moved to
+      <dir>.replaced-<unix> — never deleted — and the archive is unpacked in its
+      place, then the server is started again. A running rafikid is NOT stopped
+      by this command: stopping the server drops its connections, so stop the
+      daemon first.
 
 A restore DESTROYS what it covers, so it does nothing without --force: the run
 prints the database (name and host) or the data directory path that would be
@@ -112,7 +116,18 @@ being skipped.
 A failed restore rolls back: the previous data directory is put back where it
 was (there is nothing to roll forward to, the archive is untouched) and the
 server is left running if it was running. A successful one leaves the replaced
-directory at <dir>.replaced-<unix> for the operator to keep or delete.`,
+directory at <dir>.replaced-<unix> for the operator to keep or delete.
+
+The whole physical swap happens while nothing else can change the server: the
+same lock 'db backup' takes is held from before the server is stopped until it
+is started again, so another rafikid command cannot start or initialise the
+server underneath it. For the window no lock can cover — a SIGKILL between
+moving the directory aside and putting the restored one in place — a marker is
+left beside the data directory, and rafikid refuses to initialise an EMPTY
+cluster while that marker or a <dir>.replaced-<unix> directory is there: a
+missing data directory next to a preserved one is an interrupted restore, never
+a fresh install, and starting an empty database over real data is the one
+outcome worth refusing outright.`,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -179,14 +194,16 @@ func runRestore(ctx context.Context, configured, path string, force bool, stderr
 func describeRestoreTarget(kind restoreKind, configured string) (string, error) {
 	if kind == restorePhysical {
 		dir := newEmbeddedServer().DataDir
-		return fmt.Sprintf("it would replace the embedded data directory %s (moved to %s.replaced-<unix>, "+
-			"never deleted) and start the server on the unpacked copy", dir, dir), nil
+		return fmt.Sprintf("it would stop the embedded server if it is running, move the data directory "+
+			"%s to %s%s<unix> (never deleted), unpack the archive in its place, and start the "+
+			"server on the restored copy", dir, dir, embedpg.ReplacedDataDirPrefix), nil
 	}
 
 	if configured == embeddedDSN {
 		dir := newEmbeddedServer().DataDir
 		return fmt.Sprintf("it would run pg_restore -d %s --clean --single-transaction against the embedded "+
-			"database %q served from %s, dropping and recreating every object in it",
+			"database %q served from %s: every object the ARCHIVE contains is dropped and recreated, and "+
+			"everything else in that database is left alone",
 			embedpg.Database, embedpg.Database, dir), nil
 	}
 
@@ -208,7 +225,8 @@ func describeRestoreTarget(kind restoreKind, configured string) (string, error) 
 		host += ":" + port
 	}
 	return fmt.Sprintf("it would run pg_restore -d %s --clean --single-transaction against the database "+
-		"%q on host %s, dropping and recreating every object in it", dbname, dbname, host), nil
+		"%q on host %s: every object the ARCHIVE contains is dropped and recreated, and everything "+
+		"else in that database is left alone", dbname, dbname, host), nil
 }
 
 // restoreDatabaseName is the database a dump restore targets. Only the NAME ever
@@ -282,7 +300,10 @@ func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.
 	// back on the first error. Without it, --clean drops and recreates objects as
 	// it goes, and a failure halfway leaves a half-rebuilt database.
 	inv, err := pgToolInvocation("rafikid db restore", pgRestore, "pg_restore", configured, dsn,
-		[]string{"-d", database, "--clean", "--if-exists", "--no-owner", "--single-transaction", path},
+		[]string{"-d", database, "--clean", "--if-exists", "--no-owner", "--single-transaction",
+			// `--` ends pg_restore's options, so a file whose name begins with
+			// "-" is a filename and not a flag.
+			"--", path},
 		os.Environ())
 	if err != nil {
 		return err
@@ -310,20 +331,29 @@ func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.
 // make a step fail — the real set is pg_ctl and the archiver through pkg/embedpg,
 // the test set records the order and writes a fixture tree.
 type embeddedRestoreOps struct {
+	// lock takes the flock every other state change on the server takes, and
+	// returns its release. A restore holds it across status → stop → the two
+	// renames → start, which is what keeps a concurrent Ensure (any other rafikid
+	// command resolving this DSN) from starting a postmaster on a directory about
+	// to be renamed away, or initdb'ing a fresh cluster between the two renames.
+	lock func(context.Context, embedpg.Server) (func(), error)
 	// status reports whether the server is running, WITHOUT starting it. A
 	// restore must know what it owes a restart, and Ensure is the wrong question:
 	// it starts a server that was down.
 	status func(context.Context, embedpg.Server) (bool, error)
-	// stop shuts the server down before its directory is moved. It runs detached
-	// from the restore's context and is bounded by embedpg.StopTimeout, because a
+	// stop shuts the server down before its directory is moved. The CALLER holds
+	// lock, so it is Server.StopLocked — Stop would take the flock a second time
+	// from this process and deadlock against ourselves. It runs detached from the
+	// restore's context and is bounded by embedpg.StopTimeout, because a
 	// half-stopped server is worse than a slow one.
 	stop func(context.Context, embedpg.Server) error
 	// start brings the server back up: on the restored directory after a success,
-	// on the untouched or replaced-back one after a failure. It is Server.Ensure,
-	// because a restart must end up exactly where a normal start would — same
-	// readiness check, same rafiki.conf written for THIS install's paths (an
-	// archive restored from another install names that install's socket dir), and
-	// the 0700 mode re-asserted on a directory this command created.
+	// on the untouched or replaced-back one after a failure. It is
+	// Server.EnsureLocked for the same reason stop is StopLocked, and because a
+	// restart must end up exactly where a normal start would — same readiness
+	// check, same rafiki.conf written for THIS install's paths (an archive restored
+	// from another install names that install's socket dir), and the 0700 mode
+	// re-asserted on a directory this command created.
 	start func(context.Context, embedpg.Server) error
 	// unpack unpacks the physical archive at its first argument into the
 	// directory at its second.
@@ -335,11 +365,20 @@ type embeddedRestoreOps struct {
 // so a test can pin the names a refusal and a report mention.
 var restoreStamp = time.Now
 
+// renamePath is os.Rename behind a variable. The two renames ARE the destructive
+// step of a physical restore, and the case the rollback must get right — the
+// second one failing after the live directory is already aside — cannot be
+// reached from a test any other way.
+var renamePath = os.Rename
+
 var restoreEmbedded = embeddedRestoreOps{
+	lock:   func(ctx context.Context, s embedpg.Server) (func(), error) { return s.Lock(ctx) },
 	status: func(ctx context.Context, s embedpg.Server) (bool, error) { return s.Status(ctx) },
-	stop:   func(ctx context.Context, s embedpg.Server) error { return s.Stop(context.WithoutCancel(ctx)) },
+	stop: func(ctx context.Context, s embedpg.Server) error {
+		return s.StopLocked(context.WithoutCancel(ctx))
+	},
 	start: func(ctx context.Context, s embedpg.Server) error {
-		_, err := s.Ensure(context.WithoutCancel(ctx))
+		_, err := s.EnsureLocked(context.WithoutCancel(ctx))
 		return err
 	},
 	unpack: unpackDataDirArchive,
@@ -352,20 +391,41 @@ var restoreEmbedded = embeddedRestoreOps{
 // which for the bytes means: unpack and check a STAGING directory first, and only
 // then stop the server and move the live directory aside. A corrupt, truncated,
 // escaping or wrong-major-version archive therefore leaves the install exactly as
-// it was, still running. The two renames at the end are on one filesystem, so the
-// window in which no data directory exists is two rename(2) calls long.
+// it was, still running.
+//
+// The embedpg flock is held for the whole sequence (unpack included, so the
+// staging tree cannot be built while another process replaces the install under
+// it). Without it a concurrent `rafikid psql` — which runs Ensure — could start a
+// postmaster on the directory the next rename moves away, or initdb a fresh
+// cluster in the gap between the two renames. The two renames are on one
+// filesystem, so the window in which no data directory exists is two rename(2)
+// calls long, and a marker file covers the one case neither the lock nor the
+// rollback can: a SIGKILL in that window (see embedpg's init path, which refuses
+// to initialise an empty cluster beside that marker or a preserved directory).
 func restorePhysicalArchive(ctx context.Context, configured, path string, stderr io.Writer) (err error) {
-	if configured != embeddedDSN {
-		return fmt.Errorf("rafikid db restore: %s is a physical archive, which only RAFIKI_DB=embedded "+
-			"can restore", path)
+	if !isEmbedded(configured) {
+		return fmt.Errorf("rafikid db restore: %s is a physical archive of the embedded server's data "+
+			"directory, and %s names a server this host does not manage; a dump archive is the only "+
+			"thing that restores into it", path, embeddedSettingHint)
 	}
-	s := newEmbeddedServer()
+	s := embeddedServer()
 	stamp := restoreStamp().Unix()
 	staging := fmt.Sprintf("%s.restoring-%d", s.DataDir, stamp)
-	replaced := fmt.Sprintf("%s.replaced-%d", s.DataDir, stamp)
+	replaced := s.DataDir + embedpg.ReplacedDataDirPrefix + fmt.Sprint(stamp)
+	marker := s.RestoreInProgressPath()
+
+	// The lock spans the whole sequence. It is registered before the rollback so
+	// that the rollback runs while it is still held — it restarts the server, and
+	// it must not be racing another process while it does.
+	release, lerr := restoreEmbedded.lock(ctx, s)
+	if lerr != nil {
+		return fmt.Errorf("rafikid db restore: %w", lerr)
+	}
+	defer release()
 
 	// Refusals that need nothing done: a leftover from an earlier restore, and a
-	// data directory that exists but is not one.
+	// data directory that exists but is not one. Both are re-read under the lock,
+	// because until it was taken another process could have created either.
 	if _, serr := os.Lstat(replaced); serr == nil {
 		return fmt.Errorf("rafikid db restore: %s already exists; a restore never overwrites the directory "+
 			"it replaced, so move it away first", replaced)
@@ -394,25 +454,55 @@ func restorePhysicalArchive(ctx context.Context, configured, path string, stderr
 		return fmt.Errorf("rafikid db restore: creating %s: %w", staging, serr)
 	}
 
-	stopped := false
-	movedAside := false
+	// Every flag below is set AFTER the step it describes SUCCEEDED: the rollback
+	// decides what to undo from them, and one set too early makes it undo work this
+	// command did not do.
+	stopped := false    // the server was running, and this command stopped it
+	movedAside := false // the live directory is at `replaced`
+	placed := false     // the unpacked tree is at s.DataDir
+
 	// The defer IS the rollback, and it runs however the body ended — a returned
-	// error, a cancelled context, a panic in a helper. What it removes is only
-	// ever this command's own work: the staging tree and the tree just unpacked.
-	// The directory that was there before is renamed back into place, never
-	// deleted, and the server is left up if it was up.
+	// error or a cancelled context. It removes only this command's own work (the
+	// staging tree, and the tree it unpacked), and puts back what was there before.
+	// `placed` is what separates them: without it a failed second rename would
+	// delete a directory this command never created.
 	defer func() {
 		if err == nil {
 			return
 		}
 		_ = os.RemoveAll(staging)
-		if movedAside {
-			_ = os.RemoveAll(s.DataDir)
-			if rerr := os.Rename(replaced, s.DataDir); rerr != nil {
-				err = errors.Join(err, fmt.Errorf("rafikid db restore: the previous data directory is at %s: %w",
-					replaced, rerr))
+		if placed {
+			// The tree at DataDir is this command's, but a failed start may have left
+			// a postmaster running on it: it is stopped before the tree it is using
+			// goes away. If it will not stop, BOTH trees stay exactly where they are —
+			// deleting the files under a live postmaster is how a rollback corrupts a
+			// cluster, and the operator still has the original in `replaced` — and the
+			// marker stays, so a missing data directory later refuses rather than
+			// initdb'ing an empty cluster.
+			if serr := restoreEmbedded.stop(context.WithoutCancel(ctx), s); serr != nil {
+				err = errors.Join(err, fmt.Errorf("rafikid db restore: stopping the database the failed "+
+					"restore started: %w; the restored directory is still at %s and the previous one at %s",
+					serr, s.DataDir, replaced))
 				return
 			}
+			if rerr := os.RemoveAll(s.DataDir); rerr != nil {
+				err = errors.Join(err, fmt.Errorf("rafikid db restore: removing the restored directory: %w", rerr))
+			}
+		}
+		restored := !movedAside
+		if movedAside {
+			if rerr := renamePath(replaced, s.DataDir); rerr != nil {
+				err = errors.Join(err, fmt.Errorf("rafikid db restore: the previous data directory is at %s: %w",
+					replaced, rerr))
+			} else {
+				restored = true
+			}
+		}
+		if restored {
+			// The install is back where it was, so the marker has done its job. A
+			// leftover one would make the next start refuse rather than initdb —
+			// correct while the data is displaced, wrong once it is not.
+			_ = os.Remove(marker)
 		}
 		if stopped {
 			if rerr := restoreEmbedded.start(context.WithoutCancel(ctx), s); rerr != nil {
@@ -442,21 +532,36 @@ func restorePhysicalArchive(ctx context.Context, configured, path string, stderr
 			stopped = true
 		}
 
+		// The marker is written BEFORE the directory moves, so the gap between the
+		// two renames is recorded: a run killed there leaves no data directory and
+		// no rollback, and the next start must refuse to initdb an empty cluster
+		// over a database that is still on disk.
+		if werr := os.WriteFile(marker, []byte("rafikid db restore is replacing this data directory; "+
+			"the previous one is at "+replaced+"\n"), 0o600); werr != nil {
+			return fmt.Errorf("rafikid db restore: writing %s: %w", marker, werr)
+		}
+
 		// The one move that takes the live directory out of service. It is a
 		// rename, never a delete: <dir>.replaced-<unix> is where yesterday's
 		// database stays until the operator deletes it.
-		if merr := os.Rename(s.DataDir, replaced); merr != nil {
+		if merr := renamePath(s.DataDir, replaced); merr != nil {
 			return fmt.Errorf("rafikid db restore: moving %s aside: %w", s.DataDir, merr)
 		}
 		movedAside = true
 	}
 
-	if rerr := os.Rename(staging, s.DataDir); rerr != nil {
+	if rerr := renamePath(staging, s.DataDir); rerr != nil {
 		return fmt.Errorf("rafikid db restore: moving the restored directory into place: %w", rerr)
 	}
+	placed = true
 
 	if serr := restoreEmbedded.start(ctx, s); serr != nil {
 		return fmt.Errorf("rafikid db restore: starting the restored database: %w", serr)
+	}
+	if rerr := os.Remove(marker); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		// Not fatal: the restore itself succeeded and the marker only matters if a
+		// data directory goes missing later, so it is reported rather than undone.
+		fmt.Fprintf(stderr, "rafikid db restore: warning: could not remove %s: %v\n", marker, rerr)
 	}
 
 	fmt.Fprintf(stderr, "rafikid db restore: restored %s (physical archive) into %s\n", path, s.DataDir)

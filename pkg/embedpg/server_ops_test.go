@@ -255,3 +255,53 @@ func TestStopIsIdempotentOnARealCluster(t *testing.T) {
 		t.Fatalf("Ensure after a stop: %v", err)
 	}
 }
+
+// EnsureLocked is what a caller that already holds Lock calls — a physical
+// restore holds it across stop → rename → start, and Ensure taking the flock a
+// second time from one process would deadlock against itself. The fixture is a
+// server that is already up: no download (bin/postgres exists), no initdb
+// (PG_VERSION exists), and pg_ctl status exits 0, so it never starts anything.
+func TestEnsureLockedRunsUnderAHeldLock(t *testing.T) {
+	// A short path: the socket file has to fit in sun_path.
+	dir, err := os.MkdirTemp("/tmp", "epg")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	s := Server{
+		BinDir:   filepath.Join(dir, "bin"),
+		DataDir:  filepath.Join(dir, "data"),
+		LogPath:  filepath.Join(dir, "pg.log"),
+		LockPath: filepath.Join(dir, "pg.lock"),
+	}
+	for _, binary := range []string{"postgres", "pg_ctl"} {
+		if err := os.MkdirAll(filepath.Join(s.BinDir, "bin"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(s.BinDir, "bin", binary), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", binary, err)
+		}
+	}
+	if err := os.MkdirAll(s.DataDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.DataDir, "PG_VERSION"), []byte(MajorVersion+"\n"), 0o600); err != nil {
+		t.Fatalf("write PG_VERSION: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.DataDir, "postgresql.conf"), []byte("# as initdb left it\n"), 0o600); err != nil {
+		t.Fatalf("write postgresql.conf: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c := assert.NewAborting(t)
+
+	release, err := s.Lock(ctx)
+	c.NoError(err, "Lock")
+	defer release()
+
+	dsn, err := s.EnsureLocked(ctx)
+	c.NoError(err, "EnsureLocked under a held Lock (a deadlock would show as the deadline here)")
+	c.Eq(s.DSN(), dsn, "EnsureLocked's DSN")
+}
