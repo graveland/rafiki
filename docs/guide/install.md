@@ -37,7 +37,9 @@ runtime requires on `PATH`). Docker (or OrbStack) is needed only for the
    `rafiki-pg` Docker container (`--db-mode managed`), or `--dsn` for a
    bring-your-own postgres. A saved answer is replayed, so an existing install
    keeps the mode it was set up with, and a `RAFIKI_DB` already in `service.env`
-   is adopted rather than replaced by the default.
+   is adopted rather than replaced by the default. A bring-your-own database
+   needs `vector` and `pg_textsearch` created BEFORE this migrate — see
+   [Deploying rafiki for real](deployment.md#postgresql).
 4. Migrate the schema.
 5. LLM providers: Anthropic / OpenRouter keys, a local Ollama, or any OpenAI-compatible endpoint, written to `providers.toml` (plus optional recall summaries and embeddings).
 6. Daemon service, bound to loopback unless you answer yes to network access.
@@ -56,7 +58,7 @@ install:
 
 | | |
 |---|---|
-| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from Maven Central (~32 MB) and verified against a sha256 pinned in `rafikid` |
+| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from Maven Central (~15 MB per platform) and verified against a sha256 pinned in `rafikid` |
 | data | `~/.local/share/rafiki/pg` (`$XDG_DATA_HOME`), mode 0700 — also the socket directory |
 | log | `~/.local/state/rafiki/pg.log` (`$XDG_STATE_HOME`) |
 

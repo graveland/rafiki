@@ -91,9 +91,9 @@ Prompt caching is a 90% discount on input tokens, and input tokens are 86-98% of
                              │
                              ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  Postgres / TimescaleDB                                       │
+│  PostgreSQL (TimescaleDB optional)                            │
 │                                                               │
-│  conversations schema — hypertables for time-series scaling   │
+│  conversations schema — hypertables where timescaledb exists  │
 │  ┌──────────────┐ ┌──────────────────┐ ┌──────────────────┐   │
 │  │ conversation │ │ conversation_turn│ │ conversation_msg │   │
 │  └──────────────┘ └──────────────────┘ └──────────────────┘   │

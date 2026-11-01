@@ -53,6 +53,18 @@ database, below.)
   needs the pg_textsearch extension, which this database does not have") and the
   recall indexer and summarizer do not run. Without `vector` alone, recall
   search is BM25-only and embeddings are skipped.
+- **They must exist BEFORE the first `rafikid migrate`.** The recall migration
+  picks the schema's shape once — `vector` embedding columns and the three bm25
+  indexes where the extensions are present, `bytea` placeholders and no bm25
+  indexes where they are not — and nothing re-runs it later. Install `vector` or
+  `pg_textsearch` after that first migrate and the startup probe reports them
+  present, so the daemon does not take the degraded path, while the tables keep
+  the old shape: recall search then fails at query time. Nothing converts such
+  an install automatically: it needs `ALTER TABLE ... ALTER COLUMN embedding
+  TYPE vector` on each of `memory`, `conversation_window` and
+  `conversation_summary`, plus the three bm25 `CREATE INDEX` statements, run by
+  hand — the exact DDL is in `pkg/store/migrations/0036_recall.up.sql` — or a
+  database migrated from empty.
 - **TimescaleDB is optional.** Migrations create a hypertable only where
   `timescaledb` is installed, and a plain table otherwise, so a database
   without it migrates and runs.

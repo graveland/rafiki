@@ -73,3 +73,14 @@ degrades instead of failing:
   work normally.
 - **No `vector`**: recall is BM25-only; embeddings are skipped even if
   `[embeddings]` is configured.
+
+**Order matters on a database you provide.** The migration chooses the schema's
+shape once, so `vector` and `pg_textsearch` must exist before the first
+`rafikid migrate`. Create them afterwards and the tables keep what that first
+run chose — `bytea` embedding columns, no bm25 indexes — because migrations
+never re-run, while the startup probe now reports the extension present, so the
+degradation above no longer applies and search fails at query time instead.
+Nothing converts such an install automatically: it needs `ALTER TABLE ... ALTER
+COLUMN embedding TYPE vector` on each of `memory`, `conversation_window` and
+`conversation_summary`, plus the three bm25 `CREATE INDEX` statements, by hand
+(the exact DDL is in `pkg/store/migrations/0036_recall.up.sql`).
