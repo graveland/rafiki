@@ -160,22 +160,59 @@ and the catalog is the source of truth, so an unresolvable name errors instead
 of falling back to a stale id. Slash ids require `OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
 it takes raw ids and routes by configured prefix.
 
-### The provider cache guard
+### Provider pinning and the provider guard
 
 OpenRouter picks which provider serves an unpinned model, and that choice can
 change without warning — silently, at up to 15× the input-token cost, because
 the new provider doesn't cache the way the old one did. `routing.ProviderGuard`
 watches completed OpenRouter turns for the tell (same conversation, same
 `prefix_hash` and provider as the previous turn, a prompt over 4096 tokens,
-and a cache miss). Five consecutive misses eject the provider for 24 hours,
-capped at 3 ejected providers per model line so the guard can never blacklist
-a line into unroutability. It needs capture enabled — it judges misses using
-`prefix_hash` and conversation id, both capture-only — so with capture off it
-is inert by design, and it applies **even when the caller supplied its own
-`provider` object**. Set `RAFIKI_PROVIDER_GUARD=off` to disable automatic
-ejection; operator bans (below) still apply.
+and a cache miss). Five consecutive misses eject the provider for 24 hours.
+That rule needs capture enabled — it judges a miss using `prefix_hash` and
+conversation id, both capture-only — so with capture off it never fires; the
+ban classes below are judged from the turn itself, not the captured prefix.
+The guard applies **even when the caller supplied its own `provider` object**.
+Set `RAFIKI_PROVIDER_GUARD=off` to disable automatic ejection; operator bans
+(below) still apply.
 
-Ejections are logged append-only and reseed the in-memory list at startup:
+**Pinning.** For fundi children and the daemon's own LLM jobs the guard also
+holds a conversation still: each conversation is pinned with
+`provider.only=[slug]` to the provider that served its previous turn, unless a
+spec `only=`, a model-declaration `only`, or an `exclude=` names otherwise
+(`routing.ProviderGuard.PinFor`, `Spec.AllowsPin`, `Spec.PinPrefs` in
+`pkg/routing`). The pin moves only when that provider is banned — a ban is the
+one thing that outranks stickiness. The proxy face (Claude Code children) does
+not pin: it honours every ban through `IgnoredFor` and lets OpenRouter choose.
+
+**Bans.** A provider is judged per conversation and banned per
+`(model line, provider)` for the whole process — every user's children and the
+daemon's own jobs — by `ProviderGuard.Observe`. Failures are attributed only
+through `Observation.Pinned`: an unpinned attempt says nothing about which
+provider would have been at fault.
+
+| reason | what it takes | how long |
+| --- | --- | --- |
+| `unavailable` | 4 consecutive failed pinned attempts in one conversation, or one pinned attempt answered "no eligible provider" | 4h, memory-only: a restart re-admits the provider |
+| `output_cap` | a `max_tokens` stop at no more than half the `max_tokens` the request asked for | 24h |
+| `tool_corrupt` | 2 turns in one conversation with tool calls that miss a schema-required argument | 24h |
+| `degenerate` | 2 turns in one conversation that are repetition loops — a distinct-word ratio under 0.2 over at least 8 KB of text | 24h |
+| `no_cache` | 5 consecutive cache misses on one model line (above) | 24h |
+| `operator` | `rafiki providers ban` (below) | until lifted |
+
+The rules and their constants live in `pkg/routing/providerhealth.go`
+(`pinnedFailuresToBan`, `unavailableTTL`, `structuralTTL`,
+`structuralRepeatsToBan`, `repetitionDegenerate`, `RepetitionMinBytes`).
+
+**Exhaustion.** A line can run out of providers. When a request comes back
+"no eligible provider" because of the guard's own automatic bans, the daemon
+lifts that line's automatic bans — one `lift` row per key in
+`openrouter.provider_ejection` — and resends once; a no-eligible caused only by
+operator bans or by the request's own spec is returned as an error, because
+lifting it would mean serving a host the caller or the operator ruled out
+(`ProviderGuard.LiftLine`).
+
+Ejections are logged append-only and reseed the in-memory list at startup —
+except `unavailable`, which is memory-only:
 
 ```sql
 SELECT created_at, provider, model_line, reason, expires_at, note, evidence
@@ -183,14 +220,24 @@ SELECT created_at, provider, model_line, reason, expires_at, note, evidence
  ORDER BY created_at DESC LIMIT 20;
 ```
 
-OpenRouter's catalog can't answer this for you — its `supports_implicit_caching`
-flag doesn't correlate with actual cache behavior — which is why the guard is
-observational rather than a lookup.
+Each attempt also records the provider it was forced onto, on the turn row:
+
+```sql
+SELECT pinned_provider, status, count(*)
+  FROM conversations.conversation_turn
+ WHERE pinned_provider IS NOT NULL
+ GROUP BY 1, 2;
+```
+
+OpenRouter's catalog can't answer the caching question for you — its
+`supports_implicit_caching` flag doesn't correlate with actual cache behavior —
+which is why the guard is observational rather than a lookup.
 
 ### Operator provider bans
 
-The guard only notices cache misses. For anything else (a provider that is
-slow, looping, or you simply don't trust), ban it by hand at runtime:
+The guard judges only what it can measure on a completed turn. For anything
+else (a provider that is slow, or you simply don't trust), ban it by hand at
+runtime:
 
 ```
 rafiki providers ban open-inference --note "spinning"   # every model, until lifted
@@ -202,7 +249,7 @@ rafiki providers unban open-inference
 A ban applies to every model line on the next OpenRouter request, including
 for children already running, and is written to the ejection log above
 (reason `operator`; a lift is a superseding `lift` row, never a delete), so it
-survives restarts. The daemon checks the provider against OpenRouter's provider directory, so a typo'd or display-name-guessed slug is refused rather than silently matching nothing. Bans are exempt from the guard's per-line cap. Banning and
+survives restarts. The daemon checks the provider against OpenRouter's provider directory, so a typo'd or display-name-guessed slug is refused rather than silently matching nothing. Banning and
 unbanning require an admin user credential or the local socket. The provider
 is OpenRouter's slug; a display name is lowercased with spaces turned into
 dashes. See `docs/reference/control-protocol.md` §"Provider bans".

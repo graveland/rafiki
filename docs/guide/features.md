@@ -89,9 +89,11 @@
   that detects skill gaps and triages findings, on demand
   (`rafiki conversations review`) or automatically on close (`rafiki close
   --review`) — no direct DB access needed on the client.
-- **Provider cache guard** — OpenRouter can silently move an unpinned model to
-  a colder, more expensive provider mid-conversation. `routing.ProviderGuard`
-  watches for the miss pattern and ejects the bad provider automatically.
+- **Provider pinning and the provider guard** — OpenRouter can silently move an
+  unpinned model to a colder, more expensive provider mid-conversation.
+  `routing.ProviderGuard` pins each conversation to the provider that served its
+  last turn, and bans a provider that fails, truncates, corrupts tool calls or
+  loops — see [the proxy guide](proxy.md#provider-pinning-and-the-provider-guard).
 - **Declared routing, end to end.** An OpenRouter model id can carry a
   bracketed spec (`[sort=price,quant=fp8+,prefer=…,only=…,exclude=…,nodata,zdr]`) that
   any caller who can spawn may set; `rafiki models route` shows where a spec
