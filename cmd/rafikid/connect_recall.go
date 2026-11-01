@@ -146,6 +146,15 @@ func (m connectRecall) DeleteMemory(ctx context.Context, path, name string) erro
 // backfill_budget_usd, and backfill_spent_usd reset to "0" so a previous
 // backfill's spend does not count against the new budget — followed by one
 // indexer nudge, which is what turns the new lower bound into work.
+//
+// A database without pg_textsearch can never turn an armed backfill into work —
+// there is no indexer running and no bm25 index to fill — so it is refused with
+// recall.ErrSearchUnavailable (recallError → CodeUnavailable) rather than
+// answering success for an arming nothing will consume. Authorization and
+// request validation come first: a non-admin is PermissionDenied and a
+// non-positive budget InvalidArgument on every database, so the refusal order
+// never tells a caller what the operator's Postgres has before it tells them
+// they may not call the verb at all.
 func (m connectRecall) Backfill(ctx context.Context, since time.Time, maxCostUSD float64) error {
 	rt, err := m.runtime()
 	if err != nil {
@@ -156,6 +165,11 @@ func (m connectRecall) Backfill(ctx context.Context, since time.Time, maxCostUSD
 	}
 	if maxCostUSD <= 0 {
 		return fmt.Errorf("%w: got %v", connectapi.ErrNoBackfillBudget, maxCostUSD)
+	}
+	// No search, no indexer: refuse before the first state write so nothing is
+	// armed that no one will consume.
+	if rt.searchOff {
+		return recall.ErrSearchUnavailable
 	}
 	if err := rt.st.SetState(ctx, "backfill_since", since.UTC().Format(time.RFC3339)); err != nil {
 		return err
