@@ -333,7 +333,7 @@ func lastDockerLogs(ctx context.Context, r runner) string {
 func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mode installstate.DBMode) error {
 	_, stderr, err := r.Run(ctx, []string{"RAFIKI_DB=" + dsn}, rafikidPath, "migrate")
 	if err != nil {
-		hint := "hint: a bring-your-own database needs the timescaledb, vector and pg_textsearch extensions and shared_preload_libraries=timescaledb,pg_textsearch"
+		hint := "hint: a bring-your-own database needs vector and pg_textsearch (with shared_preload_libraries=pg_textsearch) for recall search; timescaledb is optional and only turns the large tables into hypertables"
 		if mode == installstate.DBModeEmbedded {
 			hint = fmt.Sprintf("hint: rafikid runs this PostgreSQL itself, so a failure here is usually the binary download, its checksum, or an unwritable data directory. It keeps its data under %s and the server's own log under %s", paths.DataDir(), paths.StateDir())
 		}
