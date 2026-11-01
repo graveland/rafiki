@@ -23,7 +23,7 @@ planned). You run the pieces yourself; this page lists what they need.
 
 | Piece | Where it runs | Needs |
 |---|---|---|
-| PostgreSQL | managed or self-run | version 15 or newer, two extensions (below) |
+| PostgreSQL | managed or self-run | version 15 or newer; two extensions for recall search (below) |
 | `rafikid` | one process per daemon identity | the database, TLS cert, provider keys |
 | executors (`rafiki executor serve`) | wherever agents should work | outbound TLS to the daemon, an enrollment token |
 | `rafiki-hooks` | optional, internet-facing | the daemon's URL and a narrow token |
@@ -36,14 +36,26 @@ Executors can therefore sit behind NAT or inside a VM with no inbound ports.
 
 `rafikid` refuses to start without `RAFIKI_DB`: history, cost accounting, the
 task ledger, user identity, the executor plane and conversation leases all live
-in the database, so there is no database-less mode.
+in the database, so there is no database-less mode. (The `embedded` mode is a
+single-machine install — `rafikid` runs its own PostgreSQL there; see [Installing
+rafiki](install.md#the-embedded-database). A server deployment uses a real
+database, below.)
 
 - **PostgreSQL 15 or newer.** The schema uses `NULLS NOT DISTINCT`.
-- **Extensions `vector` and `pg_textsearch`.** Both are untrusted extensions.
-  A superuser must `CREATE EXTENSION` them before the daemon's own role
-  migrates, and `pg_textsearch` must be in `shared_preload_libraries`. The
-  daemon's role does not need to be, and in production should not be, a
-  superuser.
+- **Extensions `vector` and `pg_textsearch` are needed for recall SEARCH only.**
+  Both are untrusted extensions, and `pg_textsearch` must be in
+  `shared_preload_libraries`. The recall migration creates them when the server
+  has them available, but that needs superuser and the daemon's role does not
+  need to be, and in production should not be, one — so have a superuser
+  `CREATE EXTENSION` both before `rafikid migrate`. Without `pg_textsearch` the
+  daemon runs and memory put/get/tree/delete work, but recall search is off —
+  `Recall` and `RecallBackfill` answer Connect `Unavailable` ("recall search
+  needs the pg_textsearch extension, which this database does not have") and the
+  recall indexer and summarizer do not run. Without `vector` alone, recall
+  search is BM25-only and embeddings are skipped.
+- **TimescaleDB is optional.** Migrations create a hypertable only where
+  `timescaledb` is installed, and a plain table otherwise, so a database
+  without it migrates and runs.
 - **The daemon owns the schema.** `rafikid migrate` brings the database to the
   head of the embedded migration chain. It is idempotent, and concurrent callers
   are serialized by an advisory lock, so two daemons booting together apply it

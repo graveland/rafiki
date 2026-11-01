@@ -19,7 +19,11 @@ make help     # every target
 ```
 
 Integration tests (migrator, capture store) need TimescaleDB >= 2.22 on
-PostgreSQL 18 with `vector` and `pg_textsearch`. Run a dedicated, disposable
+PostgreSQL 18 with `vector` and `pg_textsearch` — the test database carries all
+three so the extension-present branch of the chain is what the suite asserts,
+while the migrations create hypertables, embedding columns and bm25 indexes only
+where those extensions are installed (see [Recall and memory](recall.md)).
+Run a dedicated, disposable
 server for them: every DB-backed test creates and drops its own scratch
 database, and with durability off a drop costs ~20ms instead of ~1s.
 
@@ -54,6 +58,11 @@ set -a; . ./.env; set +a
 go run ./cmd/rafikid migrate   # once, against a fresh database
 make run                       # rafikid in the foreground, proxy face on :8035
 ```
+
+`RAFIKI_DB=embedded` in `.env` is the alternative to a database container:
+`rafikid` runs its own PostgreSQL 18 on a unix socket (see [Installing
+rafiki](install.md#the-embedded-database)). The integration tests below still
+want the dedicated server.
 
 `rafikid` serves the proxy itself — `/v1/messages`, `/v1/chat/completions`,
 `/v1/messages/count_tokens`, and `HEAD /api/hello` — so claude

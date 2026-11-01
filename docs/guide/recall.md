@@ -57,6 +57,19 @@ there are no conversation summaries. Historical conversations are never
 summarized automatically — the summarizer only touches conversations active
 after it first ran; use `rafiki memory backfill --since DURATION|RFC3339
 --max-cost USD` (admin credential) to arm a budgeted backfill of older ones.
-The database needs three extensions created by a superuser — `ltree`,
-`vector`, `pg_textsearch` — with `pg_textsearch` also listed in
-`shared_preload_libraries`.
+
+**The database decides what recall can do.** The recall migration creates
+`ltree` for memory paths, and `vector`/`pg_textsearch` when the server has them
+available (`pg_textsearch` also belongs in `shared_preload_libraries`); both of
+those are untrusted extensions, so a superuser may have to `CREATE EXTENSION`
+them first. The daemon probes what is actually installed at startup and
+degrades instead of failing:
+
+- **No `pg_textsearch`** (always the case on an `embedded` install today):
+  recall search is off. `Recall` answers Connect `Unavailable` — "recall search
+  needs the pg_textsearch extension, which this database does not have" — and
+  `RecallBackfill` refuses the same way (after its authority and budget checks),
+  the recall indexer and summarizer do not run, and memory put/get/tree/delete
+  work normally.
+- **No `vector`**: recall is BM25-only; embeddings are skipped even if
+  `[embeddings]` is configured.

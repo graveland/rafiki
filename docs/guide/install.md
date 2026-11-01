@@ -48,6 +48,38 @@ runtime requires on `PATH`). Docker (or OrbStack) is needed only for the
 `--agent fundi:<provider/model>` (repeatable) checks a fundi agent on that model
 instead or as well.
 
+### The embedded database
+
+The default database mode. `RAFIKI_DB=embedded` makes `rafikid` run its own
+PostgreSQL 18.3, on a unix socket only — no TCP listener, no Docker, nothing to
+install:
+
+| | |
+|---|---|
+| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from Maven Central (~32 MB) and verified against a sha256 pinned in `rafikid` |
+| data | `~/.local/share/rafiki/pg` (`$XDG_DATA_HOME`), mode 0700 — also the socket directory |
+| log | `~/.local/state/rafiki/pg.log` (`$XDG_STATE_HOME`) |
+
+Supported: macOS arm64/amd64, Linux amd64/arm64 on glibc (not Alpine/musl). It
+starts on demand, from the first `rafikid` command that needs the database, and
+`rafikid` never stops it. Under systemd, stopping the rafikid service stops it
+too (the unit's cgroup is signalled); with launchd it can keep running after
+`rafikid` stops, which is harmless. To stop it yourself:
+
+```sh
+~/.cache/rafiki/embedpg/18.3.0-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
+```
+
+`rafikid psql` opens `psql` on whatever `RAFIKI_DB` names, the embedded database
+included, printing the target first (because `service.env` may name a remote
+database); the connection reaches the client in `PG*` environment variables,
+never on its command line. The embedded bundle ships no client tools, so `psql`
+comes from `PATH`: `brew install libpq && brew link --force libpq` on macOS,
+`apt install postgresql-client` on Debian/Ubuntu.
+
+**Backing it up.** Stop the server and copy `~/.local/share/rafiki/pg`, or run
+`pg_dump` (version 18 or newer) over the same connection `rafikid psql` uses.
+
 **Re-running.** Setup is safe to re-run: answers are saved in
 `~/.config/rafiki/install.toml`, with secrets (the database DSN and your API
 keys) in `service.env`/`executor.env` (0600). `rafiki setup --non-interactive`

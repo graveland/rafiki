@@ -14,10 +14,13 @@ rafiki create                       # start an agent
 rafiki                              # the cockpit
 ```
 
-`rafiki setup` needs Docker (or OrbStack), a Claude login and `ripgrep`. API
-keys are optional. [Installing rafiki](docs/guide/install.md) has the details,
-including upgrades. Running a shared daemon on a server instead of a laptop is
-[Deploying rafiki for real](docs/guide/deployment.md).
+`rafiki setup` runs its own PostgreSQL 18 by default (`RAFIKI_DB=embedded`) —
+downloaded and verified on first use, no Docker needed. `--db-mode managed` uses
+a Docker (or OrbStack) container instead, and `--dsn` points at a database you
+provide. Setup also needs a Claude login and `ripgrep`; API keys are optional.
+[Installing rafiki](docs/guide/install.md) has the details, including upgrades.
+Running a shared daemon on a server instead of a laptop is [Deploying rafiki
+for real](docs/guide/deployment.md).
 
 ## What it is
 

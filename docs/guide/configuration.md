@@ -12,6 +12,15 @@ rafiki follows the XDG base directories:
 | records | `~/.local/share/rafiki/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `profiles.toml`, `rafikid.toml`) | `$XDG_CONFIG_HOME` |
+| embedded postgres binaries | `~/.cache/rafiki/embedpg/18.3.0-<os>-<arch>` | `$XDG_CACHE_HOME` |
+| embedded postgres data | `~/.local/share/rafiki/pg` (mode 0700; also its unix socket directory) | `$XDG_DATA_HOME` |
+| embedded postgres log | `~/.local/state/rafiki/pg.log` | `$XDG_STATE_HOME` |
+
+The last three belong to the `embedded` database mode (`RAFIKI_DB=embedded`):
+`rafikid` runs its own PostgreSQL 18 there, downloading and verifying the
+binaries on first use. `rafikid psql` opens a `psql` from `PATH` on whatever
+`RAFIKI_DB` names, embedded included. See [Installing
+rafiki](install.md#the-embedded-database) for operating it.
 
 This is where the **daemon** binds and reads from — a client reaches a
 different daemon by naming it in a profile, not by overriding these paths
@@ -226,7 +235,7 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
 | `RAFIKI_CONFIG` | daemon-side: path to `rafikid.toml` (default `~/.config/rafiki/rafikid.toml`). Its `[telemetry]` section configures OTLP export; `OTEL_EXPORTER_OTLP_*` env vars override it |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
-| `RAFIKI_DB` | postgres URL for conversation persistence; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it |
+| `RAFIKI_DB` | the conversation-store database; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it. A postgres URL for a database you provide, or the word `embedded` for rafikid's own PostgreSQL 18 (see [Paths](#paths) and [Installing rafiki](install.md#the-embedded-database)); `rafikid psql` opens `psql` on either |
 | `RAFIKI_CONV_CACHE_BYTES` | daemon-side: the per-daemon conversation node cache, in bytes (default `268435456` = 256 MiB), charged by stored content bytes. One cache per daemon serves the proxy face, the review worker and every in-process child, so history captured by one is already cached for the others. Unset means `268435456`; anything that is not a positive integer (`<= 0` included) refuses startup |
 | `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated on first run); **required in Kubernetes**, where the pod filesystem is ephemeral |
 | `RAFIKI_HEARTBEAT_INTERVAL` | how long a continuously-working child runs before its parent gets a coalesced check-in (Go duration, default 4m; `0` disables). A deadline on the scheduler, not a tick — the first check-in lands exactly one interval into a working spell |
