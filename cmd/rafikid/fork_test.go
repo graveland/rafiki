@@ -493,3 +493,69 @@ func TestSpawnRuntimeCarriesTheResolvedForkNode(t *testing.T) {
 	ck.Require().NoError(err, "runtime options without a fork")
 	ck.Eq("", plain.ForkFromNodeID, "a spawn with no fork carries none")
 }
+
+// liveSpawner registers id in the controller's in-memory child store as a
+// spawner beneath parent. Spawn reads the caller's lineage, owner and limits
+// from there, not from the durable rows the fixture seeds.
+func (f *forkFixture) liveSpawner(t *testing.T, id, parent string) {
+	t.Helper()
+	f.ctrl.st.Insert(&childstore.Session{
+		ChildID:     id,
+		OwnerUserID: f.owner,
+		Kind:        protocol.KindFundi,
+		Status:      protocol.StatusIdle,
+		MaxDepth:    1,
+		MaxChildren: 2,
+		Labels: map[string]string{
+			childstore.LabelParent: parent,
+			childstore.LabelRoot:   parent,
+		},
+	})
+	t.Cleanup(func() { f.ctrl.st.Delete(id) })
+}
+
+// A spawn whose fork is REFUSED must leave nothing behind. resolveFork runs
+// before the name claim, the childID mint and the initial row, so a refusal
+// starts no process and holds no name: the sibling's fork attempt answers
+// not-visible and a later spawn of the same name is admitted. This is the
+// ordering pin — an initial row written before the fork resolved would occupy
+// the name, and the retry would answer "taken".
+func TestRefusedForkLeavesNoChildRowOrName(t *testing.T) {
+	ck := assert.NewAborting(t)
+	f := newForkFixture(t)
+	ctx := t.Context()
+	parent, self, sib := uniqueForkName("parent"), uniqueForkName("me"), uniqueForkName("sib")
+	f.forkableChild(t, parent, "", parent, f.owner, 1)
+	f.forkableChild(t, self, parent, parent, f.owner, 1)
+	f.forkableChild(t, sib, parent, parent, f.owner, 1)
+	f.liveSpawner(t, self, parent)
+
+	name := uniqueForkName("contested")
+	req := protocol.SpawnRequest{
+		Kind:          protocol.KindFundi,
+		Cwd:           t.TempDir(),
+		Model:         forkTestModel,
+		ParentChildID: self,
+		ForkFrom:      &protocol.ForkFrom{ChildID: sib},
+		Name:          name,
+	}
+	_, err := f.ctrl.Spawn(ctx, req, users.Identity{UserID: f.owner})
+	requireExactControllerError(t, err, protocol.ErrPermissionDenied,
+		fmt.Sprintf("agent %s is not visible to you", sib))
+
+	recs, err := f.store.List(ctx)
+	ck.Require().NoError(err, "list the child rows")
+	for _, rec := range recs {
+		ck.False(rec.OwnerUserID == f.owner && rec.Name == name,
+			"the refused fork wrote a child row named %q (child %s)", name, rec.ChildID)
+	}
+	holder, _, taken, err := f.store.NameHolder(ctx, f.owner, self, name)
+	ck.Require().NoError(err, "name holder")
+	ck.False(taken, "the refused fork claimed the name (held by %s)", holder)
+
+	// The name is still free: an ordinary spawn under the same parent takes it.
+	req.ForkFrom = nil
+	res, err := f.ctrl.Spawn(ctx, req, users.Identity{UserID: f.owner})
+	ck.Require().NoError(err, "a later spawn with the same name")
+	ck.Eq(name, mustSnapshot(t, f.ctrl, res.ChildID).Name, "the retry took the name")
+}

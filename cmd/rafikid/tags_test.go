@@ -430,3 +430,78 @@ func TestAgentTagsToolPathIsBounded(t *testing.T) {
 	_, err = sp.Tags(ctx, tools.TagQuery{NamePrefix: prefix, Limit: -1})
 	ck.Error(err, "a negative limit is refused, as on the Connect face")
 }
+
+// An untagged tag has no live row left, so its history is answered from the
+// NEWEST row the history still holds — and that row must carry the same
+// visibility check the live row would. A same-owner child outside the tag's
+// lineage scope (and unable to modify it) must learn nothing from it, while
+// the creator and a user credential still read the whole history.
+func TestListTagsUntaggedHistoryKeepsTheLeakGuard(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	l := f.lineageTree(t)
+
+	created := f.createTag(t, tagCaller(f.owner, l.child), connectapi.TagInput{
+		Name: uniqueForkName("leak"), ChildID: l.child,
+	})
+	ck.Require().NoError(f.manager().Untag(ctx, tagCaller(f.owner, l.child), created.TagID), "untag")
+
+	// The sibling shares the owner and the tree but is outside the tag's
+	// lineage (rooted at the creator) and is not its creator or an ancestor.
+	_, err := f.manager().ListTags(ctx, tagCaller(f.owner, l.sibling), "", 0, created.TagID)
+	requireExactControllerError(t, err, protocol.ErrNotFound,
+		fmt.Sprintf("tag %s not found", created.TagID))
+
+	for _, reader := range []struct {
+		label  string
+		caller connectapi.TagCaller
+	}{
+		{"the creator", tagCaller(f.owner, l.child)},
+		{"a user credential", tagCaller(f.owner, "")},
+	} {
+		hist, err := f.manager().ListTags(ctx, reader.caller, "", 0, created.TagID)
+		ck.Require().NoError(err, "%s reads the untagged history", reader.label)
+		ck.Require().Eq(1, len(hist), "%s sees the one version", reader.label)
+		ck.Eq(created.NodeID, hist[0].NodeID, "%s sees the node it named", reader.label)
+		ck.NotNil(hist[0].DeletedAt, "%s sees the tombstone", reader.label)
+	}
+}
+
+// A spawner whose own child is unknown to the controller resolves no owner, and
+// every tag verb must refuse rather than hand the tag authority an empty
+// UserID: "" is the NULL-owner shape, which the fundi path reads as the
+// daemon's own local trust, so proceeding would act with more authority than
+// the caller has.
+func TestAgentTagToolsRefuseAnUnresolvedOwner(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	orphan := uniqueForkName("orphan")
+	sp := newControllerSpawner(f.ctrl, orphan)
+	want := "agent " + orphan + " has no resolvable owner"
+
+	name := uniqueForkName("unowned")
+	_, err := sp.Tag(ctx, tools.TagSpec{Name: name})
+	ck.Require().Error(err, "agent_tag refuses an unresolved owner")
+	ck.StrContains(err.Error(), want, "agent_tag names the agent it could not attribute")
+
+	err = sp.Untag(ctx, "00000000-0000-7000-8000-000000000000")
+	ck.Require().Error(err, "agent_untag refuses an unresolved owner")
+	ck.StrContains(err.Error(), want, "agent_untag names the agent it could not attribute")
+
+	_, err = sp.Tags(ctx, tools.TagQuery{})
+	ck.Require().Error(err, "agent_tags refuses an unresolved owner")
+	ck.StrContains(err.Error(), want, "agent_tags names the agent it could not attribute")
+
+	_, err = sp.Models(ctx, tools.ModelQuery{})
+	ck.Require().Error(err, "agent_models refuses an unresolved owner")
+	ck.StrContains(err.Error(), want, "agent_models names the agent it could not attribute")
+
+	// Nothing was written under the empty owner the refusal replaced.
+	for _, ownerUserID := range []string{"", f.owner} {
+		live, err := f.tags.ByName(ctx, ownerUserID, name)
+		ck.Require().NoError(err, "by name")
+		ck.Len(live, 0, fmt.Sprintf("the refused create wrote no tag for owner %q", ownerUserID))
+	}
+}

@@ -16,8 +16,9 @@ func init() {
 const agentTagDescription = "Tag a point in an agent's conversation: a tag is a named handle others in its " +
 	"scope can fork from with agent_spawn from_tag, so a worker's finding can be picked up by " +
 	"anyone entitled to it without you pasting a transcript.\n\n" +
-	"`child_id` names the agent whose history the tag marks (default: you) and `cursor` a node in " +
-	"it (\"m:<ordinal>\", the cursor agent_view prints; default: that agent's last completed turn). " +
+	"`child_id` names the agent whose history the tag marks (default: you, when you are an agent; a " +
+	"user credential must name one) and `cursor` a node in it (\"m:<ordinal>\", the cursor agent_view " +
+	"prints; default: that agent's last completed turn). " +
 	"`scope` decides who can fork from it and who can see it: \"lineage\" (the default) is the " +
 	"tagged agent's lineage — itself, its descendants and its ancestors; \"tree\" is the whole " +
 	"agent tree it belongs to, so cousins may fork from it; \"owner\" is every child of its owner. " +
@@ -56,7 +57,7 @@ func (AgentTagBlueprint) InputSchema() Schema {
 			{Name: "scope", Type: "string", Enum: []string{"lineage", "tree", "owner"},
 				Description: "\"lineage\" (default) limits the tag to the tagged agent's lineage, \"tree\" to its whole agent tree, \"owner\" to every child of its owner."},
 			{Name: "child_id", Type: "string",
-				Description: "The agent whose conversation the tag marks. Defaults to you. A move that names no child keeps the tag in the conversation it already points into."},
+				Description: "The agent whose conversation the tag marks. Defaults to you when you are an agent; a user credential must name one. A move that names no child keeps the tag in the conversation it already points into."},
 			{Name: "cursor", Type: "string",
 				Description: "The node to mark, as agent_view prints it (m:<ordinal>). Omit for that agent's last completed turn. On a move an omitted cursor resolves to that agent's last completed turn as well — it never means \"leave the tag where it is\"; pass the node you want."},
 			{Name: "note", Type: "string",

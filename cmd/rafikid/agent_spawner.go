@@ -146,8 +146,24 @@ func sortAgents(a []tools.AgentInfo) {
 // read off the spawning child itself: a child has no Connect identity on this
 // path, so its OWN lineage is what names whose aliases it may see.
 func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	owner, err := s.selfOwner()
+	if err != nil {
+		return nil, err
+	}
 	return spawnerModels(ctx, s.c, owner, q)
+}
+
+// selfOwner resolves the owner of the child this spawner speaks for. An
+// unresolved owner must never fall through as "": a zero UserID is the
+// NULL-owner shape, which the tag authority and the owner guard both read as
+// the daemon's own local trust, so the tool would act with more authority than
+// its caller has. Every verb below refuses instead.
+func (s *controllerSpawner) selfOwner() (string, error) {
+	owner, ok := s.c.OwnerUserIDForChild(s.selfID)
+	if !ok || owner == "" {
+		return "", fmt.Errorf("agent %s has no resolvable owner; refusing to act on an unowned identity", s.selfID)
+	}
+	return owner, nil
 }
 
 // spawnerModels backs the Models verb for every AgentSpawner implementation.
@@ -369,7 +385,10 @@ func (s *controllerSpawner) SetRouting(ctx context.Context, childID, spec string
 // leaves ChildID empty so the tag keeps the conversation it already points
 // into.
 func (s *controllerSpawner) Tag(ctx context.Context, spec tools.TagSpec) (tools.TagInfo, error) {
-	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	owner, err := s.selfOwner()
+	if err != nil {
+		return tools.TagInfo{}, err
+	}
 	in, err := tagInputFromSpec(spec)
 	if err != nil {
 		return tools.TagInfo{}, err
@@ -383,14 +402,20 @@ func (s *controllerSpawner) Tag(ctx context.Context, spec tools.TagSpec) (tools.
 // Untag tombstones a tag. Authority is the tag manager's: only the creator, an
 // ancestor of the creator, or a user credential may.
 func (s *controllerSpawner) Untag(ctx context.Context, tagID string) error {
-	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	owner, err := s.selfOwner()
+	if err != nil {
+		return err
+	}
 	return untagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, tagID)
 }
 
 // Tags lists the tags this child may fork from, nearest scope first, or one
 // tag's history when q.TagID is set.
 func (s *controllerSpawner) Tags(ctx context.Context, q tools.TagQuery) ([]tools.TagInfo, error) {
-	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	owner, err := s.selfOwner()
+	if err != nil {
+		return nil, err
+	}
 	return tagsWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, q)
 }
 

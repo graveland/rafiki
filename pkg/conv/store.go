@@ -432,8 +432,15 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 			}
 		}
 		if len(nodes) == 0 {
-			// A segment that begins at its own conversation's fork edge holds no
-			// rows of its own: the borrowed segment is the whole of it.
+			// UNREACHABLE under the model, kept as a defensive no-progress step:
+			// an empty segment means segFrom == segEdge.fromID, i.e. a
+			// conversation whose fork_from names one of its OWN nodes. A
+			// fork_from is always a node of another conversation
+			// (checkAddForkFromRow, and capture's insert only ever crosses an
+			// edge), so the walk below always has at least the borrowed
+			// segment's rows to prepend. Crossing is still bounded by
+			// maxForkSegments, so a backend that broke the invariant loops no
+			// further than any other chain.
 			segConv, segFrom = segEdge.convID, segEdge.fromID
 			continue
 		}

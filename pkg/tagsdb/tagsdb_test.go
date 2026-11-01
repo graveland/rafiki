@@ -469,3 +469,68 @@ func TestUnknownTagIsNotFound(t *testing.T) {
 	_, err = f.s.Move(ctx, owner, "00000000-0000-7000-8000-000000000000", "", tags.Tag{})
 	c.ErrorIs(err, tagsdb.ErrNotFound, "move unknown")
 }
+
+// A tag with no owner stores owner_user_id NULL, and "" is the only spelling
+// of that owner on this side of the store. NULL-owner tags are reachable — a
+// unix-socket or admin caller creates them — so both halves of the SQL have to
+// treat "" as ONE value that is not any real owner's: the
+// IS NOT DISTINCT FROM matching (via the NULLIF-normalized owner parameter),
+// and agent_tag_live_name's `NULLS NOT DISTINCT` uniqueness.
+func TestNullOwnerTagIsItsOwnNamespace(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newFixture(t)
+	owner, convID := f.owner("tag-null"), f.conv()
+	ctx := context.Background()
+	name := unique("nullowner")
+
+	created := f.create(f.tag("", name, "root-a", convID, f.node(convID, 0)), false)
+	c.Eq("", created.OwnerUserID, "a tag created with no owner reads back as no owner")
+
+	// (a) "" finds it; a real owner does not.
+	read, ok, err := f.s.Get(ctx, "", created.TagID)
+	c.NoError(err, "get as the NULL owner")
+	c.True(ok, "a NULL-owner tag is live for the NULL owner")
+	c.Eq(created.TagID, read.TagID, "get returns the same tag")
+
+	_, ok, err = f.s.Get(ctx, owner, created.TagID)
+	c.NoError(err, "get as a real owner")
+	c.False(ok, "a real owner cannot read a NULL-owner tag by id")
+
+	live, err := f.s.ByName(ctx, "", name)
+	c.NoError(err, "by name as the NULL owner")
+	c.Len(live, 1, "the NULL owner finds its own tag by name")
+	c.Eq(created.TagID, live[0].TagID, "the same tag")
+
+	live, err = f.s.ByName(ctx, owner, name)
+	c.NoError(err, "by name as a real owner")
+	c.Len(live, 0, "a real owner does not find the NULL-owner tag")
+
+	// (b) IS NOT DISTINCT FROM: a real owner's row of the same name is not
+	// returned for "", and the NULL-owner row is not returned for it.
+	owned := f.create(f.tag(owner, name, "root-a", convID, f.node(convID, 1)), false)
+
+	live, err = f.s.ByName(ctx, "", name)
+	c.NoError(err, "by name as the NULL owner, after a real owner's tag")
+	c.Len(live, 1, "the real owner's row is not returned for the NULL owner")
+	c.Eq(created.TagID, live[0].TagID, "still the NULL owner's own tag")
+
+	live, err = f.s.ByName(ctx, owner, name)
+	c.NoError(err, "by name as the real owner")
+	c.Len(live, 1, "the NULL-owner row is not returned for a real owner")
+	c.Eq(owned.TagID, live[0].TagID, "the real owner's own tag")
+
+	_, ok, err = f.s.Get(ctx, "", owned.TagID)
+	c.NoError(err, "get the real owner's tag as the NULL owner")
+	c.False(ok, "the NULL owner cannot read a real owner's tag")
+
+	// (c) NULLS NOT DISTINCT: "" collides with "" on
+	// (scope, scope_root, name), while the real owner's identical name
+	// coexists — a NULL owner is one namespace, not an unbounded one.
+	_, err = f.s.Create(ctx, f.tag("", name, "root-a", convID, f.node(convID, 2)), false)
+	c.ErrorIs(err, tagsdb.ErrNameTaken, "a second live NULL-owner tag with the same name in the same scope is refused")
+
+	live, err = f.s.ByName(ctx, "", name)
+	c.NoError(err, "by name after the refused create")
+	c.Len(live, 1, "the refused create left one live NULL-owner tag")
+	c.Eq(created.TagID, live[0].TagID, "the original holder")
+}
