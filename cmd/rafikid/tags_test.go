@@ -468,43 +468,47 @@ func TestListTagsUntaggedHistoryKeepsTheLeakGuard(t *testing.T) {
 	}
 }
 
-// A spawner whose own child is unknown to the controller resolves no owner. The
-// TAG verbs must refuse rather than hand the tag authority an empty UserID: ""
-// is the NULL-owner shape, which the fundi path reads as the daemon's own local
-// trust, so proceeding would act with more authority than the caller has.
-// agent_models is the deliberate exception — a read, where "" grants nothing but
-// an ownerless child's own model list.
-func TestAgentTagToolsRefuseAnUnresolvedOwner(t *testing.T) {
+// A child whose whole ancestry has no owner is the UNOWNED daemon shape: zero
+// users, the unix socket as local trust. OwnerUserIDForChild answers ("", false)
+// for it, and that "" is a legitimate NULL-owner identity rather than a broken
+// one — the tag store keys it as SQL NULL — so the tool face must act as it, not
+// refuse. Tag creation lands a NULL-owner tag, listing and untagging work on it,
+// and agent_models answers too.
+func TestAgentTagToolsActAsTheNullOwnerWhenUnowned(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	f := newForkFixture(t)
 	ctx := context.Background()
-	orphan := uniqueForkName("orphan")
+	orphan := uniqueForkName("unowned")
+	// A durable row with NO owner and no in-memory session: the controller
+	// resolves no owner for it, which is exactly the local-trust case.
+	f.forkableChild(t, orphan, "", orphan, "", 1)
+	_, known := f.ctrl.st.Get(orphan)
+	ck.False(known, "the fixture child is unknown to the in-memory store")
 	sp := newControllerSpawner(f.ctrl, orphan)
-	want := "agent " + orphan + " has no resolvable owner"
+	name := uniqueForkName("nullowner")
 
-	name := uniqueForkName("unowned")
-	_, err := sp.Tag(ctx, tools.TagSpec{Name: name})
-	ck.Require().Error(err, "agent_tag refuses an unresolved owner")
-	ck.StrContains(err.Error(), want, "agent_tag names the agent it could not attribute")
+	created, err := sp.Tag(ctx, tools.TagSpec{Name: name})
+	ck.Require().NoError(err, "an unowned child may still create a tag")
+	ck.Eq(orphan, created.ChildID, "the tag marks the caller")
 
-	err = sp.Untag(ctx, "00000000-0000-7000-8000-000000000000")
-	ck.Require().Error(err, "agent_untag refuses an unresolved owner")
-	ck.StrContains(err.Error(), want, "agent_untag names the agent it could not attribute")
+	// It landed in the NULL-owner namespace, not a real owner's.
+	live, err := f.tags.ByName(ctx, "", name)
+	ck.Require().NoError(err, "by name as the NULL owner")
+	ck.Require().Eq(1, len(live), "the NULL owner holds the new tag")
+	ck.Eq(created.TagID, live[0].TagID, "the tag the tool created")
+	ck.Eq("", live[0].OwnerUserID, "the row stores SQL NULL")
 
-	_, err = sp.Tags(ctx, tools.TagQuery{})
-	ck.Require().Error(err, "agent_tags refuses an unresolved owner")
-	ck.StrContains(err.Error(), want, "agent_tags names the agent it could not attribute")
+	rows, err := sp.Tags(ctx, tools.TagQuery{NamePrefix: name})
+	ck.Require().NoError(err, "agent_tags on an unowned child")
+	ck.Require().Eq(1, len(rows), "the listing sees exactly its own tag")
+	ck.Eq(created.TagID, rows[0].TagID, "the tag the tool created")
 
-	// A read tolerates the unresolved owner: no aliases, but the model list
-	// still answers rather than failing an ownerless child outright.
 	models, err := sp.Models(ctx, tools.ModelQuery{})
-	ck.Require().NoError(err, "agent_models tolerates an unresolved owner")
+	ck.Require().NoError(err, "agent_models on an unowned child")
 	ck.NotEmpty(models, "agent_models still lists the models it can see")
 
-	// Nothing was written under the empty owner the refusal replaced.
-	for _, ownerUserID := range []string{"", f.owner} {
-		live, err := f.tags.ByName(ctx, ownerUserID, name)
-		ck.Require().NoError(err, "by name")
-		ck.Len(live, 0, fmt.Sprintf("the refused create wrote no tag for owner %q", ownerUserID))
-	}
+	ck.Require().NoError(sp.Untag(ctx, created.TagID), "agent_untag on an unowned child")
+	live, err = f.tags.ByName(ctx, "", name)
+	ck.Require().NoError(err, "by name after untag")
+	ck.Len(live, 0, "the untag tombstoned the NULL-owner tag")
 }

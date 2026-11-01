@@ -145,30 +145,21 @@ func sortAgents(a []tools.AgentInfo) {
 // Models answers agent_models. The alias rows come from the caller's owner,
 // read off the spawning child itself: a child has no Connect identity on this
 // path, so its OWN lineage is what names whose aliases it may see.
-//
-// An unresolved owner is tolerated HERE, unlike the tag verbs below: this is a
-// read, and a "" owner grants nothing — ListModelRows with no owner simply
-// carries no owner-scoped aliases, so refusing would cost an ownerless
-// (anonymous) child its model list for no authority gained. A tag write is the
-// opposite: there "" is the NULL-owner shape, which the tag authority reads as
-// the daemon's own local trust.
 func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
-	return spawnerModels(ctx, s.c, owner, q)
+	return spawnerModels(ctx, s.c, s.selfOwner(), q)
 }
 
-// selfOwner resolves the owner of the child this spawner speaks for, refusing
-// when there is none. An unresolved owner must never fall through as "": a zero
-// UserID is the NULL-owner shape, which the tag authority and the owner guard
-// both read as the daemon's own local trust, so the tool would act with more
-// authority than its caller has. Every TAG verb below refuses instead; Models
-// above reads tolerantly, for the reason stated there.
-func (s *controllerSpawner) selfOwner() (string, error) {
-	owner, ok := s.c.OwnerUserIDForChild(s.selfID)
-	if !ok {
-		return "", fmt.Errorf("agent %s has no resolvable owner; refusing to act on an unowned identity", s.selfID)
-	}
-	return owner, nil
+// selfOwner resolves the owner this spawner's child acts as, and "" is a real
+// answer rather than a failure. OwnerUserIDForChild answers ("", false) when the
+// child's WHOLE ancestry has no owner — a daemon with zero users, where the unix
+// socket is local trust — and that "" is exactly the NULL-owner (SQL NULL) case
+// the tag store is keyed on, which the tag authority reads as the daemon's own
+// local trust. Refusing it would break tag creation on an unowned daemon. A
+// genuinely missing child is not distinguishable here and does not matter: the
+// caller IS the child, so a child with no row has no tools to call.
+func (s *controllerSpawner) selfOwner() string {
+	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
+	return owner
 }
 
 // spawnerModels backs the Models verb for every AgentSpawner implementation.
@@ -390,10 +381,6 @@ func (s *controllerSpawner) SetRouting(ctx context.Context, childID, spec string
 // leaves ChildID empty so the tag keeps the conversation it already points
 // into.
 func (s *controllerSpawner) Tag(ctx context.Context, spec tools.TagSpec) (tools.TagInfo, error) {
-	owner, err := s.selfOwner()
-	if err != nil {
-		return tools.TagInfo{}, err
-	}
 	in, err := tagInputFromSpec(spec)
 	if err != nil {
 		return tools.TagInfo{}, err
@@ -401,27 +388,19 @@ func (s *controllerSpawner) Tag(ctx context.Context, spec tools.TagSpec) (tools.
 	if in.TagID == "" && in.ChildID == "" {
 		in.ChildID = s.selfID
 	}
-	return tagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, in)
+	return tagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: s.selfOwner()}, ChildID: s.selfID}, in)
 }
 
 // Untag tombstones a tag. Authority is the tag manager's: only the creator, an
 // ancestor of the creator, or a user credential may.
 func (s *controllerSpawner) Untag(ctx context.Context, tagID string) error {
-	owner, err := s.selfOwner()
-	if err != nil {
-		return err
-	}
-	return untagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, tagID)
+	return untagWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: s.selfOwner()}, ChildID: s.selfID}, tagID)
 }
 
 // Tags lists the tags this child may fork from, nearest scope first, or one
 // tag's history when q.TagID is set.
 func (s *controllerSpawner) Tags(ctx context.Context, q tools.TagQuery) ([]tools.TagInfo, error) {
-	owner, err := s.selfOwner()
-	if err != nil {
-		return nil, err
-	}
-	return tagsWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: owner}, ChildID: s.selfID}, q)
+	return tagsWith(ctx, s.c, connectapi.TagCaller{Owner: users.Identity{UserID: s.selfOwner()}, ChildID: s.selfID}, q)
 }
 
 // tagManagerFor is the daemon's tag manager over the same store the Connect
