@@ -207,6 +207,34 @@ func TestValidateRejectsUnknownEnum(t *testing.T) {
 	c.NoError(State{Channel: ChannelBrew, DB: DB{Mode: DBModeDSN}, Executor: Executor{Connect: ExecutorConnectSocket}}.Validate(), "real values are valid")
 }
 
+// TestValidateEmbeddedDBModeRoundTrip pins the third database mode: an
+// install.toml naming `embedded` validates, survives a Save/Load round trip,
+// and does not collide with the unset zero value.
+func TestValidateEmbeddedDBModeRoundTrip(t *testing.T) {
+	isolate(t)
+	c := assert.NewCollecting(t)
+
+	c.NoError(State{DB: DB{Mode: DBModeEmbedded}}.Validate(), "db.mode embedded must be valid")
+	c.True(DBModeUnset != DBModeEmbedded, "the unset zero value must not read as the embedded mode")
+
+	if err := os.MkdirAll(filepath.Dir(Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(), []byte("version = 1\n[db]\nmode = \"embedded\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := Load()
+	c.Require().NoError(err, "Load of mode = \"embedded\"")
+	c.True(ok, "ok")
+	c.Eq(DBModeEmbedded, got.DB.Mode, "db.mode must survive Load")
+
+	c.NoError(Save(State{DB: DB{Mode: DBModeEmbedded}}), "Save with the embedded mode")
+	got, ok, err = Load()
+	c.Require().NoError(err, "Load")
+	c.True(ok, "ok")
+	c.Eq(DBModeEmbedded, got.DB.Mode, "db.mode must survive a Save/Load round trip")
+}
+
 func TestDetectChannel(t *testing.T) {
 	c := assert.NewCollecting(t)
 

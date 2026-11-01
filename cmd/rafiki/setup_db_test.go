@@ -72,6 +72,9 @@ func findCall(calls []fakeCall, argv ...string) *fakeCall {
 func isolatedDBTest(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// service.env resolves through RAFIKI_ENV_FILE when it is set, which would
+	// point the test at the developer's real file regardless of the config home.
+	t.Setenv(paths.EnvFile, "")
 }
 
 func TestSetupDBRunningContainerIsDone(t *testing.T) {
@@ -84,7 +87,7 @@ func TestSetupDBRunningContainerIsDone(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	st, res, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	st, res, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -117,7 +120,7 @@ func TestSetupDBStoppedContainerIsStarted(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	_, res, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	_, res, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -142,7 +145,7 @@ func TestSetupDBVolumeWithoutPasswordRefuses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, "")
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, "")
 	if err == nil {
 		t.Fatal("want a refusal, got nil")
 	}
@@ -167,7 +170,7 @@ func TestSetupDBVolumeInspectErrorRefuses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, "")
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, "")
 	if err == nil {
 		t.Fatal("a transient volume inspect error must not be read as volume-absent")
 	}
@@ -190,7 +193,7 @@ func TestSetupDBVolumeWithUnusablePasswordRefuses(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://rafiki@127.0.0.1:5432/rafiki" // userinfo without a password
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err == nil {
 		t.Fatal("want a refusal when the saved DSN has no usable password")
 	}
@@ -215,7 +218,7 @@ func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	_, res, err := setupDatabase(ctx, r, w, installstate.DB{}, "")
+	_, res, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, "")
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -270,7 +273,7 @@ func TestSetupDBVolumeWithPasswordReusesIt(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:secretpw@127.0.0.1:5432/rafiki?sslmode=disable"
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -301,7 +304,7 @@ func TestSetupDBHealthAlreadyHealthy(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -322,7 +325,7 @@ func TestSetupDBHealthFromEvents(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -341,7 +344,7 @@ func TestSetupDBHealthDeadline(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err == nil {
 		t.Fatal("want a timeout error, got nil")
 	}
@@ -374,7 +377,7 @@ func TestSetupDBFreshCreateWaitsForInitComplete(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if _, _, err := setupDatabase(ctx, r, w, installstate.DB{}, ""); err != nil {
+	if _, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, ""); err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
 	if findStream(r.streamCalls, initLogsKey()...) == nil {
@@ -425,7 +428,7 @@ func TestSetupDBExistingVolumeSkipsInitWait(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:secretpw@127.0.0.1:5432/rafiki?sslmode=disable"
-	if _, _, err := setupDatabase(ctx, r, w, installstate.DB{}, saved); err != nil {
+	if _, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved); err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
 	if findStream(r.streamCalls, initLogsKey()...) != nil {
@@ -486,6 +489,152 @@ func TestSetupDBDSNModeSkipsDocker(t *testing.T) {
 	}
 	if len(r.runCalls) != 0 || len(r.streamCalls) != 0 {
 		t.Errorf("DSN mode must not touch docker: run=%v stream=%v", r.runCalls, r.streamCalls)
+	}
+}
+
+// An install with nothing saved and no flags gets rafikid's own PostgreSQL: no
+// docker, and service.env records the literal the daemon interprets.
+func TestSetupDatabaseDefaultsToEmbedded(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, res, err := setupDatabase(ctx, r, w, installstate.DB{}, "")
+	if err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if res.Mode != installstate.DBModeEmbedded {
+		t.Errorf("mode = %q, want embedded", res.Mode)
+	}
+	if res.DSN != embeddedDSN {
+		t.Errorf("DSN = %q, want %q", res.DSN, embeddedDSN)
+	}
+	if st.Mode != installstate.DBModeEmbedded {
+		t.Errorf("saved mode = %q, want embedded", st.Mode)
+	}
+	for _, c := range r.runCalls {
+		if len(c.argv) > 0 && c.argv[0] == "docker" {
+			t.Errorf("the embedded path must not touch docker, but ran %v", c.argv)
+		}
+	}
+	if len(r.streamCalls) != 0 {
+		t.Errorf("the embedded path must not stream, got %v", r.streamCalls)
+	}
+	if got := res.Describe(); !strings.Contains(got, "rafikid-managed PostgreSQL") {
+		t.Errorf("Describe() = %q, want it to name the embedded server", got)
+	}
+
+	data, err := os.ReadFile(paths.ServiceEnvFile())
+	if err != nil {
+		t.Fatalf("service.env not written: %v", err)
+	}
+	// SetEnvFile quotes every value, so assert on what the file parses back to
+	// rather than on the raw bytes a reader would see.
+	env, err := readEnvFile(paths.ServiceEnvFile())
+	if err != nil {
+		t.Fatalf("readEnvFile: %v", err)
+	}
+	if env["RAFIKI_DB"] != embeddedDSN {
+		t.Errorf("service.env RAFIKI_DB = %q, want %q (file: %q)", env["RAFIKI_DB"], embeddedDSN, data)
+	}
+}
+
+// A saved `managed` is a declaration: a re-run with no flags must keep the
+// container path rather than migrating the operator onto the new default.
+func TestSetupDatabaseSavedManagedStaysManaged(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	r.script(stateInspectKey(), "running\n")
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
+	_, res, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
+	if err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if res.Mode != installstate.DBModeManaged || res.DSN != saved {
+		t.Errorf("res = %+v, want the saved managed DSN %q", res, saved)
+	}
+	if findCall(r.runCalls, "docker", "inspect") == nil {
+		t.Errorf("the managed path must inspect the container, run calls = %v", r.runCalls)
+	}
+}
+
+func TestSetupDatabaseDBModeFlag(t *testing.T) {
+	isolatedDBTest(t)
+
+	t.Run("managed", func(t *testing.T) {
+		r := newFakeRunner()
+		r.script(stateInspectKey(), "running\n")
+		w := newSetupWizard(t)
+		if err := w.cmd.Flags().Set("db-mode", "managed"); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		saved := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
+		_, res, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+		if err != nil {
+			t.Fatalf("setupDatabase: %v", err)
+		}
+		if res.Mode != installstate.DBModeManaged {
+			t.Errorf("mode = %q, want managed", res.Mode)
+		}
+		if findCall(r.runCalls, "docker", "inspect") == nil {
+			t.Errorf("--db-mode managed must run the container path, run calls = %v", r.runCalls)
+		}
+	})
+
+	t.Run("bogus", func(t *testing.T) {
+		r := newFakeRunner()
+		w := newSetupWizard(t)
+		if err := w.cmd.Flags().Set("db-mode", "bogus"); err != nil {
+			t.Fatal(err)
+		}
+
+		_, _, err := setupDatabase(context.Background(), r, w, installstate.DB{}, "")
+		if err == nil {
+			t.Fatal("want an error for --db-mode bogus, got nil")
+		}
+		if err.Error() != "--db-mode must be embedded, managed or dsn" {
+			t.Errorf("error = %q, want the exact --db-mode message", err.Error())
+		}
+		if len(r.runCalls) != 0 {
+			t.Errorf("an invalid --db-mode must resolve nothing, ran %v", r.runCalls)
+		}
+	})
+}
+
+// --dsn is the most explicit answer, so it outranks --db-mode.
+func TestSetupDatabaseDSNFlagWins(t *testing.T) {
+	isolatedDBTest(t)
+	r := newFakeRunner()
+	w := newSetupWizard(t)
+	dsn := "postgres://postgres:pw@db.example.com:5432/rafiki"
+	if err := w.cmd.Flags().Set("dsn", dsn); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.cmd.Flags().Set("db-mode", "embedded"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, res, err := setupDatabase(context.Background(), r, w, installstate.DB{}, "")
+	if err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if res.Mode != installstate.DBModeDSN || res.DSN != dsn {
+		t.Errorf("res = %+v, want DSN mode with %q", res, dsn)
+	}
+	if len(r.runCalls) != 0 {
+		t.Errorf("--dsn must not touch docker, ran %v", r.runCalls)
 	}
 }
 

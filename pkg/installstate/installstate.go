@@ -36,13 +36,18 @@ const (
 	ChannelSource  Channel = "source"
 )
 
-// DBMode records how the database is provided.
+// DBMode records how the database is provided. DBModeUnset is the zero value
+// and means "nothing saved yet" — never a mode, so a caller must choose a
+// default rather than read it as one.
 type DBMode string
 
 const (
-	DBModeUnset   DBMode = ""
-	DBModeManaged DBMode = "managed"
-	DBModeDSN     DBMode = "dsn"
+	DBModeUnset DBMode = ""
+	// DBModeEmbedded means rafikid runs its own PostgreSQL under the data dir;
+	// the DSN the daemon is given is the literal `embedded`.
+	DBModeEmbedded DBMode = "embedded"
+	DBModeManaged  DBMode = "managed"
+	DBModeDSN      DBMode = "dsn"
 )
 
 // ExecutorConnect records how the daemon reaches its executor.
@@ -146,7 +151,7 @@ func (s State) Validate() error {
 	if err := validateEnum("channel", string(s.Channel), []string{string(ChannelUnset), string(ChannelBrew), string(ChannelTarball), string(ChannelSource)}); err != nil {
 		return err
 	}
-	if err := validateEnum("db.mode", string(s.DB.Mode), []string{string(DBModeUnset), string(DBModeManaged), string(DBModeDSN)}); err != nil {
+	if err := validateEnum("db.mode", string(s.DB.Mode), []string{string(DBModeUnset), string(DBModeEmbedded), string(DBModeManaged), string(DBModeDSN)}); err != nil {
 		return err
 	}
 	if err := validateEnum("executor.connect", string(s.Executor.Connect), []string{string(ExecutorConnectUnset), string(ExecutorConnectSocket), string(ExecutorConnectTCP)}); err != nil {

@@ -34,6 +34,12 @@ const (
 	// real server is up — the container's health status is already "healthy"
 	// from the temporary phase and cannot tell the two apart.
 	readyMarker = "database system is ready to accept connections"
+	// embeddedDSN is the RAFIKI_DB value that means "run your own PostgreSQL":
+	// rafikid recognises the literal and starts a private server under the data
+	// dir. It is not a connection string, so nothing here parses it — the client
+	// only ever hands it to rafikid (in the subprocess environment) and to
+	// service.env. The daemon owns the interpretation.
+	embeddedDSN = "embedded"
 )
 
 // dbResult is the resolved database connection.
@@ -43,17 +49,38 @@ type dbResult struct {
 	Port int
 }
 
+// Describe is the summary line's rendering of the resolved mode. The embedded
+// mode has no port and no container, so it says who runs the server rather than
+// leaving a bare `embedded` next to the other modes' details.
+func (r dbResult) Describe() string {
+	if r.Mode == installstate.DBModeEmbedded {
+		return "embedded (rafikid-managed PostgreSQL)"
+	}
+	return string(r.Mode)
+}
+
 // setupDatabase resolves how the daemon reaches postgres. Mode is `--dsn`
-// (flag Changed) > st.Mode > managed. A DSN mode does no connectivity probe:
-// the client must not link pgx, so migrateDatabase (which runs in rafikid) is
-// the probe.
+// (flag Changed) > `--db-mode` (flag Changed) > st.Mode > embedded. A DSN mode
+// does no connectivity probe: the client must not link pgx, so migrateDatabase
+// (which runs in rafikid) is the probe.
 func setupDatabase(ctx context.Context, r runner, w *wizard, st installstate.DB, savedDSN string) (installstate.DB, dbResult, error) {
 	mode := st.Mode
 	if w.cmd.Flags().Changed("dsn") {
 		mode = installstate.DBModeDSN
+	} else if w.cmd.Flags().Changed("db-mode") {
+		v, err := w.cmd.Flags().GetString("db-mode")
+		if err != nil {
+			return st, dbResult{}, err
+		}
+		switch installstate.DBMode(v) {
+		case installstate.DBModeEmbedded, installstate.DBModeManaged, installstate.DBModeDSN:
+			mode = installstate.DBMode(v)
+		default:
+			return st, dbResult{}, fmt.Errorf("--db-mode must be embedded, managed or dsn")
+		}
 	}
 	if mode == installstate.DBModeUnset {
-		mode = installstate.DBModeManaged
+		mode = installstate.DBModeEmbedded
 	}
 
 	if mode == installstate.DBModeDSN {
@@ -63,6 +90,15 @@ func setupDatabase(ctx context.Context, r runner, w *wizard, st installstate.DB,
 		}
 		st.Mode = installstate.DBModeDSN
 		return st, dbResult{DSN: dsn, Mode: installstate.DBModeDSN}, nil
+	}
+	if mode == installstate.DBModeEmbedded {
+		// No docker, no probe: rafikid downloads and initialises the server on
+		// the first `migrate` below, which is where a failure surfaces.
+		st.Mode = installstate.DBModeEmbedded
+		if _, err := paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{"RAFIKI_DB": embeddedDSN}, "rafiki embedded database"); err != nil {
+			return st, dbResult{}, err
+		}
+		return st, dbResult{DSN: embeddedDSN, Mode: installstate.DBModeEmbedded}, nil
 	}
 	if err := ensureDocker(ctx, r, w, runtime.GOOS); err != nil {
 		return st, dbResult{}, err

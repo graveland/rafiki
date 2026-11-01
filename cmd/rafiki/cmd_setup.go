@@ -78,7 +78,8 @@ is given.`,
 		},
 	}
 	cmd.Flags().Bool("non-interactive", false, "Never prompt; use flags, saved answers, then defaults")
-	cmd.Flags().String("dsn", "", "Database DSN (postgres://...) instead of a managed container")
+	cmd.Flags().String("dsn", "", "Database DSN (postgres://...) instead of rafikid's own PostgreSQL or a managed container")
+	cmd.Flags().String("db-mode", "", "Database mode: embedded (rafikid runs its own PostgreSQL), managed (a docker container) or dsn")
 	cmd.Flags().String("user", "", "Your rafiki user name")
 	cmd.Flags().String(keyOpenRouterFlag, "", "OpenRouter API key")
 	cmd.Flags().String(keyAnthropicFlag, "", "Anthropic API key")
@@ -173,7 +174,7 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	if err := saveStep(st, stepDatabase); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "    ok (mode %s)\n", dbRes.Mode)
+	fmt.Fprintf(out, "    ok (mode %s)\n", dbRes.Describe())
 
 	// ── 4. migrate ──────────────────────────────────────────────────────────
 	step(out, stepMigrate)

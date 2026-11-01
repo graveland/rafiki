@@ -120,6 +120,7 @@ func newSetupWizard(t *testing.T) *wizard {
 	t.Helper()
 	return newTestWizard(t, func(cmd *cobra.Command) {
 		cmd.Flags().String("dsn", "", "")
+		cmd.Flags().String("db-mode", "", "")
 		cmd.Flags().StringSlice("with", nil, "")
 	})
 }

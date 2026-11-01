@@ -25,15 +25,18 @@ curl -fsSL https://github.com/graveland/rafiki/releases/latest/download/install.
 
 That installs `rafiki` and `rafikid` into `~/.local/bin` and runs `rafiki setup`.
 
-**What setup needs:** Docker (or OrbStack) and a Claude login (plus
-`ripgrep`/`rg`, which the fundi runtime requires on `PATH`). API keys are
-optional.
+**What setup needs:** a Claude login (plus `ripgrep`/`rg`, which the fundi
+runtime requires on `PATH`). Docker (or OrbStack) is needed only for the
+`managed` database mode. API keys are optional.
 
 **What `rafiki setup` does**, in order:
 
 1. Load any saved answers and detect how rafiki was installed.
-2. Prerequisites: Docker (or OrbStack) and a logged-in Claude Code.
-3. Database: a `rafiki-pg` container, or `--dsn` for a bring-your-own postgres.
+2. Prerequisites: `rg`, a logged-in Claude Code, and — only for the `managed` database mode — Docker (or OrbStack).
+3. Database: rafikid's own PostgreSQL (the default, `--db-mode embedded`), a
+   `rafiki-pg` Docker container (`--db-mode managed`), or `--dsn` for a
+   bring-your-own postgres. A saved answer is replayed, so an existing install
+   keeps the mode it was set up with.
 4. Migrate the schema.
 5. LLM providers: Anthropic / OpenRouter keys, a local Ollama, or any OpenAI-compatible endpoint, written to `providers.toml` (plus optional recall summaries and embeddings).
 6. Daemon service, bound to loopback unless you answer yes to network access.
