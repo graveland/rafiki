@@ -158,9 +158,15 @@ func (g *ProviderGuard) banEvidenceLocked(key providerKey, obs Observation, extr
 // be called WITHOUT g.mu held: the sink write is I/O and the callback is
 // foreign code. extra carries any rule-specific log attribute (the no_cache
 // path's streak). The in-memory ban stands whatever the sink says.
+//
+// The durable append is skipped when the ban no longer stands in memory — the
+// log is latest-row-wins per (provider, model line) and seeds Rehydrate, so a
+// row appended after a concurrent LiftLine (a line exhausted while this ban was
+// being reported) would resurrect a ban the guard has already lifted.
 func (g *ProviderGuard) reportBan(rec EjectionRecord, conversation string, extra ...any) {
 	g.mu.Lock()
 	logger, sink, onEject, dir := g.logger, g.sink, g.onEject, g.dir
+	cur, standing := g.ejected[providerKey{provider: rec.Provider, modelLine: rec.ModelLine}]
 	g.mu.Unlock()
 	attrs := []any{"provider", dir.Slug(rec.Provider), "model_line", rec.ModelLine, "reason", string(rec.Reason)}
 	attrs = append(attrs, extra...)
@@ -168,6 +174,13 @@ func (g *ProviderGuard) reportBan(rec EjectionRecord, conversation string, extra
 	logger.Warn("routing: provider ejected", attrs...)
 	if onEject != nil {
 		onEject(rec.Provider, rec.ModelLine, rec.Reason)
+	}
+	if !standing || cur.reason != rec.Reason || !cur.expiresAt.Equal(rec.ExpiresAt) {
+		// Lifted or superseded while this ban was being reported: the log must
+		// agree with memory, so there is nothing to persist.
+		logger.Debug("routing: ejection no longer stands; not persisted",
+			"provider", rec.Provider, "model_line", rec.ModelLine, "reason", string(rec.Reason))
+		return
 	}
 	if sink != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -312,13 +325,22 @@ func (g *ProviderGuard) exclusionsLocked(now time.Time, line string) (operator, 
 			continue
 		}
 		slug := g.dir.Slug(k.provider)
-		if e.reason == ReasonOperator || k.modelLine == AllModelLines {
+		if k.modelLine == AllModelLines {
+			// An all-lines entry is an operator ban (Ban is the only writer of
+			// that line): it applies to every model.
 			opSet[slug] = struct{}{}
 			continue
 		}
-		if k.modelLine == line {
-			autoSet[slug] = struct{}{}
+		if k.modelLine != line {
+			continue
 		}
+		if e.reason == ReasonOperator {
+			// An operator ban recorded against one line stays on that line, as
+			// it did before the split.
+			opSet[slug] = struct{}{}
+			continue
+		}
+		autoSet[slug] = struct{}{}
 	}
 	operator = sortedSlugs(opSet)
 	for _, slug := range operator {

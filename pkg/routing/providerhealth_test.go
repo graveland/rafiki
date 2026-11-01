@@ -539,3 +539,40 @@ func TestBanSurvivesLineLift(t *testing.T) {
 	c.Eq(3, g.LiftLine(context.Background(), now, healthModel, "clean slate"), "lifted")
 	c.EqDeep([]string{"zulu"}, g.IgnoredFor(now, healthModel), "IgnoredFor")
 }
+
+// TestLiftedBanIsNotPersisted proves the durable log never records a ban the
+// guard has already lifted. The log is latest-row-wins per (provider, model
+// line) and seeds Rehydrate, so a ban row appended after LiftLine's lift row
+// would resurrect — for a structural ban, for 24h — a ban the exhaustion
+// breaker had deliberately cleared. The interleaving is reproduced without
+// concurrency: the ban is recorded in memory, the line is lifted, and only then
+// is the ban reported.
+func TestLiftedBanIsNotPersisted(t *testing.T) {
+	c := assert.NewAborting(t)
+	now := time.Now()
+
+	// Positive control: an unreported ban that still stands IS persisted, so the
+	// assertions below cannot pass by never writing anything.
+	standing := testGuard()
+	standingSink := &fakeSink{}
+	standing.SetSink(standingSink)
+	standing.mu.Lock()
+	rec := standing.banLocked(now, providerKey{provider: "deepinfra", modelLine: healthModel}, ReasonOutputCap, structuralTTL, nil)
+	standing.mu.Unlock()
+	standing.reportBan(rec, "c1")
+	c.Require().Len(standingSink.recs, 1, "a standing ban must reach the sink")
+	c.Eq(ReasonOutputCap, standingSink.recs[0].Reason, "reason")
+
+	// The interleaving: recorded in memory, lifted, then reported.
+	g := testGuard()
+	sink := &fakeSink{}
+	g.SetSink(sink)
+	g.mu.Lock()
+	rec = g.banLocked(now, providerKey{provider: "deepinfra", modelLine: healthModel}, ReasonOutputCap, structuralTTL, nil)
+	g.mu.Unlock()
+	c.Eq(1, g.LiftLine(context.Background(), now, healthModel, "line exhausted"), "LiftLine count")
+	g.reportBan(rec, "c1")
+
+	c.Require().Len(sink.recs, 1, "sink rows: the lift only")
+	c.Eq(ReasonLift, sink.recs[0].Reason, "a lifted ban must not be persisted after the lift")
+}
