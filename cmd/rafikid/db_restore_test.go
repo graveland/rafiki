@@ -1634,7 +1634,6 @@ func TestRestorePhysicalFlushesTheTreeBeforeTheSwap(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := filepath.Join(parent, "pg")
 	writeDataDirTree(t, dataDir, "original")
-	original := snapshotTree(t, dataDir)
 
 	pinRestoreStamp(t, 1_700_000_000)
 	staging := dataDir + ".restoring-1700000000"
@@ -1658,7 +1657,7 @@ func TestRestorePhysicalFlushesTheTreeBeforeTheSwap(t *testing.T) {
 	f2 := stubRestoreOps(t, dataDir, true)
 	restoreEmbedded.sync = func(context.Context, string) error { return errors.New("disk on fire") }
 	writeDataDirTree(t, dataDir, "original")
-	original = snapshotTree(t, dataDir)
+	original := snapshotTree(t, dataDir)
 	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 	c.Error(err, "want the flush failure, got nil")
 	c.StrContains(err.Error(), "disk on fire", "error, got: %v", err)
