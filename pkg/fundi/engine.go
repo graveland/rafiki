@@ -1227,6 +1227,10 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 		m := e.em.mapMessage(partial)
 		e.em.StreamStart(m)
 		e.em.StreamDelta(m)
+		// The native plane's copy of the same flush: the frames above reach
+		// only an attached child stream, and a cockpit subscriber sees nothing
+		// of a turn until it commits without these deltas.
+		e.em.publishStreamDelta(partial)
 	}
 
 	ev := &agentloop.Events{
@@ -1286,6 +1290,11 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 			// committed. The early return above is why a failed call
 			// publishes nothing: there is no assistant message.
 			if wasStreamed {
+				// The tail of the reply arrived inside the last flush window, so
+				// it would never reach a native viewer before the committed
+				// message replaced the block: publish the remainder first, or a
+				// slow-turn transcript loses its last fragment.
+				e.em.publishStreamDelta(resp)
 				e.em.StreamEnd(e.em.mapMessage(resp))
 			} else {
 				e.em.AssistantTurn(resp)

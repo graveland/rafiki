@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -62,6 +63,11 @@ type Emitter struct {
 	// response of its own to read it from.
 	lastStop string
 
+	// streamed is what has already gone out as native content_block_delta
+	// for the assistant message in flight, keyed by the block's index in
+	// msg.Response.Content. See publishStreamDelta.
+	streamed map[int32]streamedBlock
+
 	// started guards StreamStart so it is idempotent within a turn. The
 	// caller invokes StreamStart on the first CONTENT event of a streamed
 	// response, not on the API's own message_start, so that a retry (e.g.
@@ -70,6 +76,15 @@ type Emitter struct {
 	// leave an orphaned message_start — and hence abandoned text — in an
 	// attached TUI. Reset by StreamEnd so the next turn starts again.
 	started bool
+}
+
+// streamedBlock is how much of one content block has reached the native
+// plane, and as which kind. A text block and a thinking block never share an
+// index within one message, but a retry can renumber them, so the kind is
+// recorded rather than inferred.
+type streamedBlock struct {
+	thinking bool
+	text     string
 }
 
 // Pricer resolves a model id to its per-token list price, mirroring rafiki's
@@ -180,6 +195,7 @@ func (e *Emitter) StreamStart(msg child.PiAssistantMessage) {
 		return
 	}
 	e.started = true
+	e.streamed = nil
 	e.fe.Emit(child.PiMessageStart(msg, ""))
 }
 
@@ -188,6 +204,71 @@ func (e *Emitter) StreamStart(msg child.PiAssistantMessage) {
 // final message represents the turn.
 func (e *Emitter) StreamDelta(msg child.PiAssistantMessage) {
 	e.fe.Emit(child.PiMessageUpdate(msg, ""))
+}
+
+// publishStreamDelta publishes the part of a partial response that has NOT
+// reached the native plane yet, one ContentBlockDelta per content block that
+// grew since the previous flush.
+//
+// This is the ONLY live source of an assistant's text for a viewer: the pi
+// frames StreamDelta writes go to whatever is attached to the child's stdout
+// stream, and the cockpit is not (it subscribes to the Connect event plane).
+// Without this a streamed turn is silent until publishAssistant fires on the
+// committed row, so a viewer sees nothing for the whole reply and then the
+// finished paragraph at once — streaming that looks like a batch job.
+//
+// It is called from the SAME coalesced flush as StreamDelta, for the same
+// reason: one event per provider fragment is O(response²) bytes, and the
+// per-subscriber bus drops rather than blocks. Each delta carries only the
+// suffix that is new, so a consumer appends and never has to diff.
+//
+// A block whose content did not simply EXTEND what is already published (a
+// retry re-streaming the same index) is re-baselined and emits nothing:
+// repeating the text would duplicate it in the consumer, which has no way to
+// unsay what it already appended.
+//
+// Tool arguments are not streamed: the native vocabulary's input_json delta
+// has no consumer today (pkg/tui/session only appends it to a tool call it
+// already knows), and the complete arguments ride the assistant message.
+func (e *Emitter) publishStreamDelta(resp *msg.Response) {
+	if e.native == nil || !e.started {
+		return
+	}
+	if e.streamed == nil {
+		e.streamed = make(map[int32]streamedBlock, len(resp.Content))
+	}
+	for i, b := range resp.Content {
+		idx := int32(i)
+		var text string
+		var thinking bool
+		switch blk := b.(type) {
+		case msg.Text:
+			text = blk.Text
+		case msg.Thinking:
+			text, thinking = blk.Text, true
+		default:
+			continue
+		}
+		prev, seen := e.streamed[idx]
+		if seen && (prev.thinking != thinking || !strings.HasPrefix(text, prev.text)) {
+			// Rewritten rather than extended: re-baseline so the rest of the
+			// block streams from here. The consumer keeps what it already drew.
+			e.streamed[idx] = streamedBlock{thinking: thinking, text: text}
+			continue
+		}
+		if len(text) <= len(prev.text) {
+			continue
+		}
+		suffix := text[len(prev.text):]
+		e.streamed[idx] = streamedBlock{thinking: thinking, text: text}
+		d := &rafikiv1.ContentBlockDelta{Index: idx}
+		if thinking {
+			d.Delta = &rafikiv1.ContentBlockDelta_Thinking{Thinking: suffix}
+		} else {
+			d.Delta = &rafikiv1.ContentBlockDelta_Text{Text: suffix}
+		}
+		e.publishNative(d)
+	}
 }
 
 // StreamEnd emits a final message_update carrying the complete message,
@@ -218,6 +299,9 @@ func (e *Emitter) StreamEnd(msg child.PiAssistantMessage) {
 	e.accumulate(msg)
 	e.addUsage(msg.Usage)
 	e.started = false
+	// The committed assistant message carries this content, so nothing more may
+	// be diffed against it: a later turn reusing index 0 must start empty.
+	e.streamed = nil
 }
 
 // mapMessage maps resp through this emitter's own provider/pricer. It exists
@@ -292,6 +376,7 @@ func (e *Emitter) AgentEnd() {
 	// after content arrived never reaches StreamEnd, and a surviving
 	// `started` would suppress the NEXT turn's message_start entirely.
 	e.started = false
+	e.streamed = nil
 }
 
 // accumulate marshals msg and appends it to the turn's message log. A

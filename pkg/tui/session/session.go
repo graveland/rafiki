@@ -550,8 +550,58 @@ func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 			}
 		}
 	}
+	// A streamed block, or the placeholder TurnStart opened, is waiting for
+	// exactly this message: REPLACE it rather than appending a second one.
+	// Appending renders the reply twice — once as the text the deltas already
+	// accumulated, once as the committed message — and leaves an empty block
+	// ahead of the real one for a turn that never streamed at all (a claude
+	// child, whose message arrives from its captured row with no deltas
+	// before it).
+	//
+	// The replacement is WHOLE: Content, Text, ThinkText, ToolCalls, Images,
+	// StopReason and Final all come from the message, and everything the deltas
+	// accumulated is discarded. That is the point — the deltas only ever
+	// carried text and thinking, in fragments, with no argument objects, no
+	// images and no stop reason, so keeping any of it would mean trusting a
+	// partial copy over the authoritative one.
+	//
+	// It is the last ASSISTANT block that is replaced, not necessarily the last
+	// block: a steer echoed mid-stream appends a user block while the deltas go
+	// on filling the assistant one, and the committed message still belongs to
+	// that block (see openAssistantIndex).
+	if i := s.openAssistantIndex(); i >= 0 {
+		s.Blocks[i] = block
+		s.recomputeFinalized()
+		return
+	}
 	s.Blocks = append(s.Blocks, block)
 	s.recomputeFinalized()
+}
+
+// openAssistantIndex finds the most recent assistant block that is still open —
+// the one deltas are being appended to — or -1 when the last assistant block is
+// already final (or there is none).
+//
+// It walks past a NON-assistant block on purpose. A steer's echo is a
+// user_message published mid-turn, so it lands in the transcript while the
+// assistant message it interrupted is still streaming; requiring the open block
+// to be the very last one would append the committed message as a second
+// assistant block instead of completing the first.
+//
+// Final, not "the last assistant block", is the gate: a tool round commits its
+// message before the next one starts streaming, so the previous call's block is
+// final and a new call must NOT overwrite it.
+func (s *Session) openAssistantIndex() int {
+	for i := len(s.Blocks) - 1; i >= 0; i-- {
+		if s.Blocks[i].Kind != KindAssistant {
+			continue
+		}
+		if s.Blocks[i].Final {
+			return -1
+		}
+		return i
+	}
+	return -1
 }
 
 func (s *Session) applyTurnEnd(te *rafikiv1.TurnEnd) {
@@ -564,10 +614,18 @@ func (s *Session) applyTurnEnd(te *rafikiv1.TurnEnd) {
 	s.settleAll()
 }
 
+// applyDelta appends one streamed fragment to the assistant block being built.
+//
+// It OPENS that block when the most recent one is already final. A tool-calling
+// turn makes one LLM call per round, and each call's message commits (and
+// finalizes) before the next call starts streaming, so appending to the last
+// assistant block would splice the second call's text into the first call's.
+// TurnStart's own placeholder is not final, so the first call appends to it.
 func (s *Session) applyDelta(delta *rafikiv1.ContentBlockDelta) {
 	last := s.LastAssistant()
-	if last == nil {
-		return
+	if last == nil || last.Final {
+		s.Blocks = append(s.Blocks, Block{Kind: KindAssistant, At: time.Now()})
+		last = &s.Blocks[len(s.Blocks)-1]
 	}
 	switch d := delta.Delta.(type) {
 	case *rafikiv1.ContentBlockDelta_Text:

@@ -316,6 +316,23 @@ re-list with `ListChildren` rather than patching one row — and the TUI and the
 web UI also re-list on a slow timer, as a backstop for a daemon that predates
 the event.
 
+#### Who produces the deltas
+
+`content_block_delta` is the only ephemeral type, and it reaches subscribers at
+`EventTier.ALL` only. Today's producer is the `fundi` runtime: its streaming
+handler publishes one delta per coalesced flush (`streamFlushInterval`, 250 ms)
+carrying **only the fragment that is new** since the previous flush, with
+`index` naming the content block in the assistant message the deltas belong to.
+A client therefore APPENDS the text/thinking fragment; it never has to diff.
+
+The deltas are a prefix of a durable `assistant_message` that follows them, so a
+client must REPLACE the block it built from them when that message arrives
+(rather than appending a second one). The cockpit and the web UI both do this
+(`pkg/tui/session.applyDelta`/`applyAssistantMessage`,
+`web/src/lib/transcript.svelte.ts`). A `claude` child publishes no deltas — its
+`stream-json` carries complete messages — so a client sees its reply when the
+captured row is published, all at once.
+
 Ephemeral events and a durable event whose log append failed carry no ordinal
 and are delivered as they arrive. Pinned by the `TestStreamEvents*` hand-off
 tests (`pkg/connectapi/stream_handoff_test.go`).
