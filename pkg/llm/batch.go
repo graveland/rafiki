@@ -149,7 +149,10 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 		defer meta.OnBatchWait(false)
 	}
 
-	ref := c.beginTurn(ctx, meta, p.req, p.primary)
+	// A parked call records no pin: the batch envelope carries only the
+	// spec's/declaration's provider.only (batchOnlyList), never the guard's
+	// automatic pin, so naming one here would claim a pin that was not sent.
+	ref := c.beginTurn(ctx, meta, p.req, p.primary, "")
 	// ref.convID equals meta.ConversationID for a captured conversation; when
 	// capture is off (store-less), beginTurn leaves it empty and the caller's
 	// id is the only handle the custom_id can carry.

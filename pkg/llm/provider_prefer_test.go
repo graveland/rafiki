@@ -18,7 +18,7 @@ import (
 // "provider". A nil *routing.ProviderGuard is legal — IgnoredFor is nil-safe.
 func TestPreferReachesTheWireProviderObject(t *testing.T) {
 	ck := assert.NewAborting(t)
-	extra := applyProviderPrefs("deepseek/deepseek-v4.1-flash", nil, nil, nil, routing.Spec{Prefer: []string{"fireworks"}}, nil)
+	extra, _ := applyProviderPrefs("deepseek/deepseek-v4.1-flash", nil, nil, nil, routing.Spec{Prefer: []string{"fireworks"}}, nil, "")
 	b, err := msganthropic.Encode(&msg.Request{Model: "deepseek/deepseek-v4.1-flash"}, msg.EncodeOptions{Extra: extra})
 	ck.NoError(err)
 	ck.StrContains(string(b), `"provider":{"order":["fireworks"]}`,

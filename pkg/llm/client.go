@@ -452,35 +452,83 @@ type SendMeta struct {
 	TrimFrom, TrimTo *int
 }
 
-// send write-aheads the turn, routes the call through the primary's breaker
-// with fallback, and completes/fails the turn. Capture is best-effort: a broken
-// store degrades to pass-through, never blocks the call. Every invocation
-// inserts its own turn row and always resolves it.
+// send is one LOGICAL non-streaming send. It owns the no-eligible resend: an
+// attempt that failed because OpenRouter found nothing eligible under the
+// request's provider object gets exactly one more attempt, routed by the guard
+// as the failure observation left it (the pin banned, or the line's automatic
+// ejections lifted). A second no-eligible is the caller's to see.
+func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extra map[string]any) (*msg.Response, error) {
+	resp, decision, err := c.sendOnce(ctx, meta, req, extra)
+	if err == nil || !c.resendAfterNoEligible(ctx, decision, err) {
+		return resp, err
+	}
+	// The resend is a fresh attempt in every respect: its own prepareSend (so the
+	// provider object is rebuilt from the guard's new state), its own turn row
+	// and its own observation.
+	resp, _, err = c.sendOnce(ctx, meta, req, extra)
+	return resp, err
+}
+
+// resendAfterNoEligible reports whether one logical send should make ONE more
+// attempt after err, OpenRouter's no-eligible-provider rejection: nothing was
+// eligible under the provider object the request carried.
+//
+// The failure observation has already been reported by the time this runs, so
+// the guard's state is what decides where the resend goes:
+//   - a pinned request: FailureNoEligible bans the pin outright, so re-running
+//     prepareSend cannot choose it again.
+//   - automatic ejections only: they are the guard's own verdicts on a line, and
+//     a line that has run out of providers is exactly what LiftLine exists for.
+//   - otherwise the operator's own spec excluded everything, and resending the
+//     same body would fail identically.
+func (c *Client) resendAfterNoEligible(ctx context.Context, decision providerDecision, err error) bool {
+	if !noEligibleUpstream(err) {
+		return false
+	}
+	if decision.pin != "" {
+		return true
+	}
+	if decision.hadAutomatic {
+		c.guard.LiftLine(ctx, time.Now(), decision.model, "line exhausted")
+		return true
+	}
+	return false
+}
+
+// sendOnce is one non-streaming ATTEMPT: it write-aheads the turn, routes the
+// call through the primary's breaker with fallback, completes or fails the
+// turn, and reports the attempt to the provider guard. Capture is best-effort:
+// a broken store degrades to pass-through, never blocks the call. Every
+// invocation inserts its own turn row and always resolves it.
+//
+// It returns the routing decision it built even when the attempt failed, which
+// is what send's no-eligible resend reads.
 //
 // extra is the caller's top-level body fields; prepareSend merges the provider
 // object and the provider's configured extras onto a copy of it.
-func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extra map[string]any) (*msg.Response, error) {
+func (c *Client) sendOnce(ctx context.Context, meta SendMeta, req *msg.Request, extra map[string]any) (*msg.Response, providerDecision, error) {
 	p, err := c.prepareSend(ctx, meta, req, extra)
 	if err != nil {
-		return nil, err
+		return nil, providerDecision{}, err
 	}
 	ctx, span := p.ctx, p.span
 	defer span.End()
 
 	if IsBatchModel(p.req.Model) {
-		return c.parkSend(ctx, span, meta, p)
+		resp, err := c.parkSend(ctx, span, meta, p)
+		return resp, p.decision, err
 	}
 
-	if err := c.modelGate.beforeSend(ctx, p.req.Model); err != nil {
-		return nil, err
+	if err := c.modelGate.beforeSend(ctx, gateKey(p.req.Model, p.decision.pin)); err != nil {
+		return nil, p.decision, err
 	}
 
-	ref := c.beginTurn(ctx, meta, p.req, p.primary)
+	ref := c.beginTurn(ctx, meta, p.req, p.primary, p.decision.pin)
 	ctx = WithSessionID(ctx, ref.convID)
 	ctx, hdrs := c.rawTraceContext(ctx)
 
 	start := time.Now()
-	resp, servedBy, err := c.callModel(ctx, span, p.primary, p.fallbacks, p.req, p.extra, p.spec)
+	resp, servedBy, err := c.callModel(ctx, span, p.primary, p.fallbacks, p.req, p.extra, p.spec, p.decision)
 	latency := int(time.Since(start).Milliseconds())
 	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
 
@@ -488,13 +536,14 @@ func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extr
 		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
 		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
+		c.observeFailure(ref, p.decision, p.primary, err)
 		// Raw trace: non-streaming error path.
 		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, latency, err, hdrs)
-		return nil, err
+		return nil, p.decision, err
 	}
 
 	setUsageAttrs(span, resp)
-	c.observeProvider(ref, p.req.Model, servedBy, resp)
+	c.observeProvider(ref, p.decision, p.req, servedBy, resp)
 	warnNewExt(c.logger, resp)
 
 	if ref.capturing {
@@ -502,7 +551,7 @@ func (c *Client) send(ctx context.Context, meta SendMeta, req *msg.Request, extr
 	}
 	// Raw trace: non-streaming success path.
 	c.recordRawTrace(ctx, meta, ref.turnID, p.req, resp, 200, servedBy, latency, nil, hdrs)
-	return resp, nil
+	return resp, p.decision, nil
 }
 
 // setUsageAttrs records a response's model and token counts on the span. Every
@@ -532,8 +581,10 @@ func setUsageAttrs(span trace.Span, resp *msg.Response) {
 // Input must be present. An ABSENT cache-read figure is a cache miss, not
 // missing evidence — OpenRouter may omit the field when nothing was read — so
 // it is observed as 0; skipping it would blind the guard in exactly the case
-// it exists to catch.
-func (c *Client) observeProvider(ref turnRef, model, servedBy string, resp *msg.Response) {
+// it exists to catch. The rest of the evidence (the pin, the stop reason, the
+// output cap, repetition, tool-argument corruption) is built by
+// successObservation.
+func (c *Client) observeProvider(ref turnRef, decision providerDecision, req *msg.Request, servedBy string, resp *msg.Response) {
 	p, ok := c.set.Get(servedBy)
 	if !ok || p.Kind != providers.KindAnthropicOpenRouter {
 		return
@@ -541,11 +592,23 @@ func (c *Client) observeProvider(ref turnRef, model, servedBy string, resp *msg.
 	if resp.Usage.Input == nil {
 		return
 	}
-	c.guard.Observe(time.Now(), routing.Observation{
-		Provider: ProviderOf(resp), Model: model, Conversation: ref.convID,
-		PrefixHash: ref.prefixHash, InputTokens: msg.Val(resp.Usage.Input),
-		CacheReadTokens: msg.Val(resp.Usage.CacheRead),
-	})
+	c.guard.Observe(time.Now(), successObservation(ref, decision, req, resp))
+}
+
+// observeFailure reports ONE failed attempt to the guard — the other half of
+// observeProvider, on the same OpenRouter-only condition. It is the evidence a
+// pinned provider's failures are attributed through, so it runs at every point
+// an attempt fails the turn, and never for a cancellation: an operator (or a
+// shut-down daemon) cancelling a turn is not a provider misbehaving.
+func (c *Client) observeFailure(ref turnRef, decision providerDecision, primary string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	p, ok := c.set.Get(primary)
+	if !ok || p.Kind != providers.KindAnthropicOpenRouter {
+		return
+	}
+	c.guard.Observe(time.Now(), failureObservation(ref, decision, err))
 }
 
 // preparedSend is prepareSend's answer: everything a send needs after routing
@@ -558,6 +621,7 @@ type preparedSend struct {
 	batchOnly []string
 	req       *msg.Request
 	spec      routing.Spec
+	decision  providerDecision
 	extra     map[string]any
 }
 
@@ -655,8 +719,12 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, in *msg.Request
 	// tracing attribute and the no-eligible error decoration all read THIS
 	// value, so a steer landing mid-request applies to the NEXT request and
 	// never makes one request's body and error disagree.
+	//
+	// The provider decision comes back from the same call for the same reason:
+	// the body it built, the turn row this attempt writes and the evidence the
+	// guard receives must all name the same pin.
 	spec := c.spec()
-	extra = c.mutateParams(p, decl, req.Model, extra, spec)
+	extra, decision := c.mutateParams(p, decl, req.Model, extra, spec, meta.ConversationID)
 
 	// The parked call's only-list, computed HERE while the declaration is in
 	// hand — the same pinOnly rule applyProviderPrefs applies (spec Only >
@@ -687,7 +755,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, in *msg.Request
 	}
 	return &preparedSend{
 		ctx: sctx, span: span, primary: primary, fallbacks: fallbacks,
-		batchOnly: batchOnly, req: req, spec: spec, extra: extra,
+		batchOnly: batchOnly, req: req, spec: spec, decision: decision, extra: extra,
 	}, nil
 }
 
@@ -696,21 +764,29 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, in *msg.Request
 // field, carrying the declared routing preferences (a model declaration's own
 // only pin, when the request was made through one), plus whatever the cache
 // guard has ejected — and, when a routing spec is set on the client
-// (WithRouting), the spec's own provider-routing decisions.
-// providers.Validate refuses extras.provider, so the user cannot clobber it.
+// (WithRouting), the spec's own provider-routing decisions and the guard's
+// automatic pin. providers.Validate refuses extras.provider, so the user cannot
+// clobber it.
 //
 // decl is the ModelDecl the requested model id matched, from
 // providers.Set.Resolve; nil for the fallback path (callModel re-resolves the
 // model against the FALLBACK provider via the catalog, which knows nothing
 // about the primary's declarations) and for undeclared ids.
 //
+// convID is the conversation the request belongs to (SendMeta.ConversationID),
+// which is what the guard's pin is remembered under; "" never pins.
+//
 // The result is the request's top-level extra fields, passed to the codec as
-// msg.EncodeOptions.Extra; the caller's own fields are carried through.
-func (c *Client) mutateParams(p providers.Provider, decl *providers.ModelDecl, model string, extra map[string]any, spec routing.Spec) map[string]any {
+// msg.EncodeOptions.Extra (the caller's own fields are carried through), plus
+// the provider decision the body was built from.
+func (c *Client) mutateParams(p providers.Provider, decl *providers.ModelDecl, model string, extra map[string]any, spec routing.Spec, convID string) (map[string]any, providerDecision) {
 	if p.Kind != providers.KindAnthropicOpenRouter {
-		return extra
+		// No provider object at all, so nothing is pinned and the guard has
+		// nothing to lift: the decision still names the model, which is what the
+		// failure observation reports.
+		return extra, providerDecision{model: model}
 	}
-	return applyProviderPrefs(model, decl, c.guard, p.Extras, spec, extra)
+	return applyProviderPrefs(model, decl, c.guard, p.Extras, spec, extra, convID)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -748,6 +824,13 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 // This holds regardless of what the resulting error turns out to be; nothing
 // here or in sendWithTrim assumes a particular failure shape delivers before
 // content.
+//
+// One retry is NOT the caller's: a pre-delivery no-eligible rejection (nothing
+// eligible under the request's provider object) is answered here by ONE resend
+// after the attempt's failure observation moved the guard — the pin banned, or
+// the line's automatic ejections lifted (resendAfterNoEligible). The resend
+// re-runs prepareSend, so it rebuilds the provider object from that new state,
+// and writes its own turn row. A second no-eligible is returned to the caller.
 //
 // Failover: sendStreaming DOES engage even when a fallback chain and an active
 // breaker are configured — it never bails out of streaming entirely just
@@ -809,15 +892,26 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, req *msg.Request, handler streamSink) (*msg.Response, bool, bool, error) {
 	rlp := meta.RateLimit.effective()
 	model := req.Model
+	// resent is the no-eligible resend budget for this ONE logical send: one,
+	// never a loop. The attempt's own failure observation has already moved the
+	// guard by the time the resend runs, so the next prepareSend routes around
+	// the refusal.
+	resent := false
 
 	for attempt := 0; attempt <= rlp.MaxRetries; attempt++ {
-		resp, attempted, delivered, err := c.sendStreamingAttempt(ctx, meta, req, handler)
+		resp, attempted, delivered, decision, err := c.sendStreamingAttempt(ctx, meta, req, handler)
 		if err == nil || !attempted {
 			return resp, attempted, delivered, err
 		}
 		// A streaming error with delivered==true is never retryable.
 		if delivered {
 			return resp, attempted, delivered, err
+		}
+		if !resent && c.resendAfterNoEligible(ctx, decision, err) {
+			resent = true
+			c.logger.Warn("no provider eligible; resending with the guard's new state",
+				"model", model, "pin", decision.pin, "had_automatic", decision.hadAutomatic)
+			continue
 		}
 		isRL, retryAfter := isRateLimit(err)
 		if !isRL && IsRateLimitStreamError(err) {
@@ -830,17 +924,17 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, req *msg.Requ
 		if !isRL || attempt >= rlp.MaxRetries {
 			return resp, attempted, delivered, err
 		}
-		c.modelGate.record429(model, retryAfter)
+		c.modelGate.record429(gateKey(model, decision.pin), retryAfter)
 		c.logger.Warn("rate limit hit; retrying after backoff",
 			"model", model, "attempt", attempt+1, "max", rlp.MaxRetries)
 	}
 	return nil, true, false, fmt.Errorf("llm: rate limit retries exhausted for model %s", model)
 }
 
-func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *msg.Request, handler streamSink) (resp *msg.Response, attempted bool, delivered bool, err error) {
+func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *msg.Request, handler streamSink) (resp *msg.Response, attempted bool, delivered bool, decision providerDecision, err error) {
 	p, err := c.prepareSend(ctx, meta, req, nil)
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, false, providerDecision{}, err
 	}
 	ctx, span := p.ctx, p.span
 	defer span.End()
@@ -849,18 +943,18 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 	// parks. Step aside BEFORE beginTurn — no turn row, no stream opened — so
 	// the caller falls through to send, which owns the batch path.
 	if IsBatchModel(p.req.Model) {
-		return nil, false, false, nil
+		return nil, false, false, p.decision, nil
 	}
 
-	if err := c.modelGate.beforeSend(ctx, p.req.Model); err != nil {
-		return nil, false, false, err
+	if err := c.modelGate.beforeSend(ctx, gateKey(p.req.Model, p.decision.pin)); err != nil {
+		return nil, false, false, p.decision, err
 	}
 
 	sender := c.senders[p.primary]
 	if sender == nil {
 		// No sender for this provider: step aside without a request, so the
 		// caller's send call reports "provider not configured" precisely.
-		return nil, false, false, nil
+		return nil, false, false, p.decision, nil
 	}
 
 	now := time.Now()
@@ -872,10 +966,10 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 		// send call runs the complete breaker-gated fallback chain
 		// non-streamed instead of burning a full timeout on a dead primary.
 		c.logger.Warn("breaker open; stepping aside from streaming primary", "primary", p.primary)
-		return nil, false, false, nil
+		return nil, false, false, p.decision, nil
 	}
 
-	ref := c.beginTurn(ctx, meta, p.req, p.primary)
+	ref := c.beginTurn(ctx, meta, p.req, p.primary, p.decision.pin)
 	ctx = WithSessionID(ctx, ref.convID)
 	ctx, hdrs := c.rawTraceContext(ctx)
 	start := time.Now()
@@ -900,6 +994,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 		span.RecordError(errors.New(telemetry.ErrorText(serr.Error())))
 		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
+		c.observeFailure(ref, p.decision, p.primary, serr)
 		if breaker != nil {
 			// Nothing delivered yet and a real fallback exists: hand off
 			// WITHOUT recording here. send's callModel is about to make its
@@ -907,7 +1002,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 			// result; recording this pre-delivery failure too would
 			// pre-emptively trip the breaker and make callModel skip the very
 			// retry this handoff exists to give it.
-			return nil, false, false, serr
+			return nil, false, false, p.decision, serr
 		}
 		// No fallback to offer: breaker is nil here (primaryGate's bypass
 		// case), so there's nothing to record — report attempted=true so
@@ -920,7 +1015,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 		// or decision 6's "error naming the spec and the model" only ever fired
 		// for non-streamed sends. The trace and turn rows above keep the raw
 		// upstream error; the decoration is for the caller.
-		return nil, true, false, c.noEligibleError(p.spec, p.req.Model, serr)
+		return nil, true, false, p.decision, c.noEligibleError(p.spec, p.req.Model, serr)
 	}
 
 	acc := msg.NewAccumulator()
@@ -947,9 +1042,10 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 			span.RecordError(errors.New(telemetry.ErrorText(wrapped.Error())))
 			span.SetStatus(codes.Error, "")
 			c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
+			c.observeFailure(ref, p.decision, p.primary, wrapped)
 			recordPrimaryResult(breaker, now, wrapped)
 			c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
-			return nil, true, delivered, wrapped
+			return nil, true, delivered, p.decision, wrapped
 		}
 		if content && handler.native != nil {
 			// acc.Response() deep-copies every block, the open tool-input
@@ -970,13 +1066,14 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 		span.RecordError(errors.New(telemetry.ErrorText(serr.Error())))
 		span.SetStatus(codes.Error, "")
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
+		c.observeFailure(ref, p.decision, p.primary, serr)
 		if !delivered && breaker != nil {
 			// Hand off WITHOUT recording, for the same reason as the
 			// Stream-error branch above: callModel's own imminent
 			// primary retry is the authoritative attempt and will record its
 			// own result. Recording this one too would trip the breaker
 			// before that retry runs at all.
-			return nil, false, false, serr
+			return nil, false, false, p.decision, serr
 		}
 		// Either something was already delivered (no handoff is possible
 		// regardless of breaker state) or breaker is nil (bypass, no handoff
@@ -988,11 +1085,11 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 		// (Stream returns a decoder; the error arrives on the first Next) — so
 		// THIS is where a no-eligible routing rejection decorates for streamed
 		// sends. The trace keeps the raw error.
-		return nil, true, delivered, c.noEligibleError(p.spec, p.req.Model, serr)
+		return nil, true, delivered, p.decision, c.noEligibleError(p.spec, p.req.Model, serr)
 	}
 
 	recordPrimaryResult(breaker, now, nil)
-	c.modelGate.recordSuccess(p.req.Model)
+	c.modelGate.recordSuccess(gateKey(p.req.Model, p.decision.pin))
 	latency := int(time.Since(start).Milliseconds())
 	// acc is the fully accumulated response at this point (the loop above has
 	// already run to completion) — this is a completed turn's final usage, not
@@ -1000,13 +1097,13 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 	resp = acc.Response()
 	span.SetAttributes(attribute.String("rafiki.upstream", p.primary))
 	setUsageAttrs(span, resp)
-	c.observeProvider(ref, p.req.Model, p.primary, resp)
+	c.observeProvider(ref, p.decision, p.req, p.primary, resp)
 	warnNewExt(c.logger, resp)
 	if ref.capturing {
 		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, p.primary, latency)
 	}
 	c.recordRawTrace(ctx, meta, ref.turnID, p.req, resp, 200, p.primary, latency, nil, hdrs)
-	return resp, true, delivered, nil
+	return resp, true, delivered, p.decision, nil
 }
 
 // streamHandlerMinInterval is the least time between two stream-handler calls
@@ -1070,14 +1167,16 @@ func recordPrimaryResult(breaker *routing.Breaker, now time.Time, err error) {
 	}
 }
 
-// recordModelResult updates the model gate from a callModel result.
-func (c *Client) recordModelResult(req *msg.Request, err error) {
+// recordModelResult updates the model gate from a callModel result, under the
+// same key the request's own gate consultation used.
+func (c *Client) recordModelResult(req *msg.Request, err error, decision providerDecision) {
+	key := gateKey(req.Model, decision.pin)
 	if err == nil {
-		c.modelGate.recordSuccess(req.Model)
+		c.modelGate.recordSuccess(key)
 		return
 	}
 	if isRL, retryAfter := isRateLimit(err); isRL {
-		c.modelGate.record429(req.Model, retryAfter)
+		c.modelGate.record429(key, retryAfter)
 	}
 }
 
@@ -1096,7 +1195,7 @@ func callSender(ctx context.Context, s Sender, req *msg.Request, extra map[strin
 // the breaker entirely (direct primary, mirroring the routing core's
 // fallback-less behavior) — per the design, an empty Fallback chain is how a
 // consumer opts out of being pinned.
-func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, req *msg.Request, extra map[string]any, spec routing.Spec) (*msg.Response, string, error) {
+func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, req *msg.Request, extra map[string]any, spec routing.Spec, decision providerDecision) (*msg.Response, string, error) {
 	sender := c.senders[primary]
 	if sender == nil {
 		return nil, primary, fmt.Errorf("llm: provider %q not configured", primary)
@@ -1106,14 +1205,14 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 
 	if breaker == nil {
 		resp, err := callSender(ctx, sender, req, extra)
-		c.recordModelResult(req, err)
+		c.recordModelResult(req, err, decision)
 		return resp, primary, c.noEligibleError(spec, req.Model, err)
 	}
 
 	if usePrimary {
 		resp, err := callSender(ctx, sender, req, extra)
 		recordPrimaryResult(breaker, now, err)
-		c.recordModelResult(req, err)
+		c.recordModelResult(req, err, decision)
 		if err == nil {
 			return resp, primary, nil
 		}
@@ -1152,10 +1251,15 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		// against the FALLBACK provider via the catalog, which knows nothing
 		// about the primary's declared models, so nil means only the
 		// fallback's own guard ejections apply, never a stale declaration pin.
-		fbExtra := c.mutateParams(fbProvider, nil, fbReq.Model, extra, spec)
+		// Its own decision is discarded: this send's decision (and so its turn
+		// row and its gate key) is the primary's. convID "" deliberately: the
+		// fallback body is never auto-pinned — a fallback exists because the
+		// pinned path failed, and pinning it again would re-ask a provider that
+		// just refused.
+		fbExtra, _ := c.mutateParams(fbProvider, nil, fbReq.Model, extra, spec, "")
 		resp, err := callSender(ctx, fbSender, &fbReq, fbExtra)
 		if err == nil {
-			c.modelGate.recordSuccess(req.Model)
+			c.modelGate.recordSuccess(gateKey(req.Model, decision.pin))
 			return resp, fb, nil
 		}
 		// Wrapped with the fallback's own (translated) model id, so the
@@ -1189,20 +1293,48 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 // serve; the guard vetoes who must not. With a declaration pin the body
 // carries "provider" even when nothing has to be ignored.
 //
+// The AUTOMATIC pin (the guard's answer for this conversation on this model
+// line) is added only when the operator left the choice open: a spec only, a
+// declaration only, or an excluded slug all suppress it. A pin is sent as
+// spec.PinPrefs, so the data policy rides along and no sort/order/ignore does.
+//
 // The returned map is the WHOLE extra set the codec merges into the body
 // (msg.EncodeOptions.Extra), so everything that belongs in it must be
 // assembled here in one call. "provider" is a reserved extras key
 // (providers.Validate refuses it) precisely because a user-supplied one would
 // otherwise delete the guard's ejections with no error and no log line.
-func applyProviderPrefs(model string, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec, caller map[string]any) map[string]any {
+func applyProviderPrefs(model string, decl *providers.ModelDecl, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec, caller map[string]any, convID string) (map[string]any, providerDecision) {
 	if spec.IsZero() {
-		return applyProviderPrefsPreSpec(model, decl, g, extras, caller)
+		// The pre-spec path, byte for byte: no provider decision exists on a
+		// zero spec, so nothing is pinned and nothing is resend-able.
+		return applyProviderPrefsPreSpec(model, decl, g, extras, caller), providerDecision{model: model}
 	}
+	now := time.Now()
 	var pinOnly []string
 	if decl != nil && len(decl.Only) > 0 {
 		pinOnly = decl.Only
 	}
-	prefs, send := spec.Prefs(pinOnly, g.IgnoredFor(time.Now(), model))
+	// The automatic pin: the provider that served this conversation's last turn
+	// on this model line, when it is still routable. PinFor already refuses an
+	// excluded slug; AllowsPin refuses the operator's own only/exclude.
+	pin := ""
+	if convID != "" && len(pinOnly) == 0 {
+		if slug, ok := g.PinFor(now, convID, model); ok && spec.AllowsPin(slug) {
+			pin = slug
+		}
+	}
+	// Whether the guard's OWN ejections are what this request has to route
+	// around — the one thing a no-eligible rejection can be answered by lifting.
+	_, automatic := g.ExclusionsFor(now, model)
+	decision := providerDecision{pin: pin, hadAutomatic: pin == "" && len(automatic) > 0, model: model}
+
+	var prefs routing.ProviderPrefs
+	var send bool
+	if pin != "" {
+		prefs, send = spec.PinPrefs(pin), true
+	} else {
+		prefs, send = spec.Prefs(pinOnly, g.IgnoredFor(now, model))
+	}
 	fields := make(map[string]any, len(extras)+len(caller)+1)
 	for k, v := range caller {
 		fields[k] = v
@@ -1214,9 +1346,9 @@ func applyProviderPrefs(model string, decl *providers.ModelDecl, g *routing.Prov
 		fields["provider"] = prefs
 	}
 	if len(fields) == 0 {
-		return nil
+		return nil, decision
 	}
-	return fields
+	return fields, decision
 }
 
 // applyProviderPrefsPreSpec is the pre-routing-spec code path, run for a zero
@@ -1351,7 +1483,11 @@ type turnRef struct {
 // off the zero value is returned with capturing false — convID and
 // prefixHash stay empty, which correctly disqualifies every ProviderGuard
 // observation derived from it (see ProviderGuard.Observe's doc comment).
-func (c *Client) beginTurn(ctx context.Context, meta SendMeta, req *msg.Request, primary string) turnRef {
+//
+// pin is the provider slug this attempt's request was pinned to (prepareSend's
+// providerDecision.pin), recorded on the turn row so a stored turn says which
+// provider it forced; "" records NULL.
+func (c *Client) beginTurn(ctx context.Context, meta SendMeta, req *msg.Request, primary, pin string) turnRef {
 	if c.capture == nil {
 		return turnRef{}
 	}
@@ -1386,6 +1522,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, req *msg.Request,
 		ConversationID: convID, Ordinal: meta.Ordinal, Model: req.Model,
 		Source: source, AuthorUserID: meta.AuthorUserID, AuthorKind: meta.AuthorKind,
 		PrefixHash: prefixHash, Protocol: string(store.ProtocolRafiki),
+		PinnedProvider: pin,
 		// The request body is not stored: the head names the rows it sent and
 		// the trim range names what it left out.
 		RequestHeadID: meta.RequestHeadID, TrimFrom: meta.TrimFrom, TrimTo: meta.TrimTo,

@@ -152,7 +152,10 @@ func TestApplyProviderPrefsZeroSpecUnchanged(t *testing.T) {
 	for _, tc := range cases {
 		req := &msg.Request{Model: tc.model, MaxTokens: 16,
 			Messages: []msg.Message{{Role: msg.User, Content: []msg.Block{msg.Text{Text: "hi"}}}}}
-		extra := applyProviderPrefs(tc.model, tc.decl, tc.guard, tc.extras, routing.Spec{}, nil)
+		// convID is deliberately non-empty: a zero spec must not auto-pin even
+		// when there IS a conversation to pin (the guard is inert here anyway —
+		// it has never seen a turn for "conv-1").
+		extra, _ := applyProviderPrefs(tc.model, tc.decl, tc.guard, tc.extras, routing.Spec{}, nil, "conv-1")
 		b, err := msganthropic.Encode(req, msg.EncodeOptions{Extra: extra})
 		ck.Require().NoError(err, "encode %s", tc.name)
 		ck.Eq(canonicalBody(t, []byte(tc.golden)), canonicalBody(t, b),

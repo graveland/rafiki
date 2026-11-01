@@ -39,6 +39,11 @@ func (p RateLimitPolicy) effective() RateLimitPolicy {
 // receives a 429 for a model, that model is blocked until the backoff expires.
 // All sends for that model — across all conversations — sleep until unblocked.
 // A successful send resets the consecutive 429 counter.
+//
+// The key is gateKey(model, pin): a pinned request is gated per PROVIDER,
+// because a 429 from one OpenRouter provider is that provider's own capacity
+// and must not stall the others serving the same model. An unpinned request
+// keeps the bare model key, exactly as before pinning existed.
 type ModelGate struct {
 	mu           sync.Mutex
 	blockedUntil map[string]time.Time
@@ -69,6 +74,17 @@ func (g *ModelGate) backoff(consecutive int, retryAfter time.Duration) time.Dura
 		d = g.maxDelay
 	}
 	return d
+}
+
+// gateKey is the ModelGate key for one request: the model alone when the
+// request is unpinned, "model|pin" when it carries a provider pin. A 429 from
+// one OpenRouter provider is that provider's own capacity, so gating the bare
+// model on it would also stall every other provider serving the same model.
+func gateKey(model, pin string) string {
+	if pin == "" {
+		return model
+	}
+	return model + "|" + pin
 }
 
 // beforeSend blocks until the model is unblocked (or ctx is done).

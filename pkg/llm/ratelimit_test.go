@@ -162,3 +162,26 @@ func TestIsRateLimitWithRetryAfterHelper(t *testing.T) {
 	c.True(rl, "expected 429 with Retry-After to be a rate limit")
 	c.Eq(45*time.Second, ra, "retryAfter")
 }
+
+// TestRateGateKeysPinnedRequestsByProvider pins the gate's key: a 429 from one
+// pinned provider is that provider's own capacity, so it must gate that
+// provider's key alone — never another provider serving the same model, and
+// never an unpinned request for it.
+func TestRateGateKeysPinnedRequestsByProvider(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const model = "z-ai/glm-5.3-flash"
+
+	ck.Eq(model, gateKey(model, ""), "an unpinned request keeps the bare model key")
+	ck.Eq(model+"|a", gateKey(model, "a"), "a pinned request keys by provider")
+
+	g := NewModelGate(10*time.Second, 300*time.Second)
+	g.record429(gateKey(model, "a"), 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	ck.Error(g.beforeSend(ctx, gateKey(model, "a")), "the pinned provider's own key must be gated")
+	ck.NoError(g.beforeSend(context.Background(), gateKey(model, "b")),
+		"another provider serving the same model must not be gated")
+	ck.NoError(g.beforeSend(context.Background(), gateKey(model, "")),
+		"an unpinned request must not be gated by one provider's 429")
+}
