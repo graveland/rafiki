@@ -261,11 +261,14 @@ func TestExtractRejectsSymlinkChain(t *testing.T) {
 	assertNoDebris(t, s)
 }
 
-// The dangling-symlink chain: `p/q/s -> ../..` is itself refused (a link target
-// may not climb), and if it were not, the ordering would still refuse it — `a`
-// is a regular file, so it is written before any link exists, and the links
-// aimed through it are created last and collide. Nothing may appear beside the
-// extraction root, and the extraction must fail rather than half-succeed.
+// The dangling-symlink chain that escaped before the containment rework.
+// `p/q/s -> ../..` is refused here because a link target may not climb; if that
+// rule were dropped, `a` would still fail closed at the write, because
+// writeEntry's Lstat and O_NOFOLLOW refuse to write through a link. So this test
+// does NOT isolate the phase ordering — that is defence in depth and not
+// observable from outside extractTar. What it does pin: nothing may appear
+// beside the extraction root, and the extraction must fail rather than
+// half-succeed.
 func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
 	jar := buildJar(t, "postgres-test.txz", []tarEntry{
 		{name: "p", mode: 0o755, typeflag: tar.TypeDir},
@@ -291,10 +294,12 @@ func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
 	assertNoDebris(t, s)
 }
 
-// Ordering is load-bearing on its own: a regular entry named after an earlier
-// symlink must land at its own name. Created inline, the link would exist first
-// and the file would be written through it, silently landing at the link's
-// target instead; created last, the link collides and the extraction fails.
+// A regular entry named after an earlier symlink must fail closed rather than
+// resolve through the link. It fails at the write: writeEntry's Lstat sees the
+// symlink. The name describes the mechanism, not what this test isolates —
+// creating the links inline instead, the Lstat refuses the same archive and this
+// test still passes. The ordering is defence in depth (see extractTar); nothing
+// here would notice its absence.
 func TestExtractCreatesSymlinksLast(t *testing.T) {
 	jar := buildJar(t, "postgres-test.txz", []tarEntry{
 		{name: "f", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "t"},

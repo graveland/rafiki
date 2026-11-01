@@ -347,13 +347,16 @@ type pendingSymlink struct {
 // caller.
 //
 // Directories and regular files are written as they arrive; symlinks are
-// collected and created only after the archive ends. That ordering is the
-// containment mechanism: while a file is being written there is no symlink
-// anywhere under root, so there is nothing for the kernel to follow and no
-// archive, in any order, can be aimed outside the tree. A link is additionally
-// refused when it is absolute or when its target climbs with `..`, which leaves
-// every link pointing strictly down inside its own directory — a chain of those
-// can never ascend.
+// collected and created only after the archive ends, so while a file is being
+// written there is no symlink anywhere under root for the kernel to follow. That
+// ordering is DEFENCE IN DEPTH, not the guard a test proves: writeEntry's Lstat
+// and O_NOFOLLOW already refuse to write through a link, so creating the links
+// inline would leave every test in this package green. It earns its place by
+// removing the class of escape rather than by being the check that catches one —
+// keep it for that reason, not because some test would notice its absence. A
+// link is also refused when it is absolute or when its target climbs with `..`,
+// which leaves every link pointing strictly down inside its own directory — a
+// chain of those can never ascend.
 func extractTar(tr *tar.Reader, root string) error {
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
