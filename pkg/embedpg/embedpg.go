@@ -50,13 +50,43 @@ func Default() Server {
 	}
 }
 
-// DSN is the libpq keyword/value string that reaches this server. The host is
-// the data directory — a path, not a hostname — which is how libpq names a unix
-// socket directory; sslmode=disable because a socket is not a network.
+// Database is the database this server is FOR: the one rafikid migrates and
+// serves from. initdb creates only the maintenance database, so this one does
+// not exist until something creates it — and this package opens no connection,
+// so it is cmd/rafikid (resolveDSN) that does, from MaintenanceDSN. The name
+// lives here because naming a connection is what this package does.
+const Database = "rafiki"
+
+// maintenanceDatabase is the database initdb always creates. A CREATE DATABASE
+// cannot run inside a transaction block and cannot run from the database it is
+// creating, so it is issued from here: the one database that always exists.
+const maintenanceDatabase = "postgres"
+
+// DSN is the libpq keyword/value string that reaches this server's database.
+// The host is the data directory — a path, not a hostname — which is how libpq
+// names a unix socket directory; sslmode=disable because a socket is not a
+// network.
+//
+// It names Database, which on a fresh cluster does not exist yet: dial it only
+// after creating it, or over MaintenanceDSN.
 func (s Server) DSN() string {
+	return s.conninfo(Database)
+}
+
+// MaintenanceDSN is the same connection string pointing at the maintenance
+// database instead: what a caller connects to in order to CREATE the database
+// DSN names. Same host, port, user and sslmode — the same server, since only
+// dbname differs — so nothing here decides which database rafikid uses.
+func (s Server) MaintenanceDSN() string {
+	return s.conninfo(maintenanceDatabase)
+}
+
+// conninfo is the one place this package builds a connection string, so the two
+// DSNs above cannot drift apart in anything but the database name.
+func (s Server) conninfo(database string) string {
 	return "host=" + quoteConninfo(s.DataDir) +
 		" port=" + strconv.Itoa(Port) +
-		" user=rafiki dbname=postgres sslmode=disable"
+		" user=rafiki dbname=" + database + " sslmode=disable"
 }
 
 // quoteConninfo quotes one libpq keyword/value value: wrapped in single quotes,
@@ -72,6 +102,10 @@ func quoteConninfo(v string) string {
 // Ensure makes the server ready and returns its DSN. It is safe to call from
 // several processes at once: the whole body runs under an exclusive flock on
 // LockPath, so a second caller waits and then finds the work already done.
+//
+// It starts the server and never creates Database: this package opens no
+// connection, and creating a database is a connection. A caller that wants to
+// dial the returned DSN creates it first (cmd/rafikid's resolveDSN).
 func (s Server) Ensure(ctx context.Context) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(s.LockPath), 0o700); err != nil {
 		return "", fmt.Errorf("embedpg: %w", err)

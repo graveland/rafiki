@@ -79,8 +79,11 @@ yourself:
 `rafikid psql` opens `psql` on whatever `RAFIKI_DB` names, the embedded database
 included, printing the target first (because `service.env` may name a remote
 database); the connection reaches the client in `PG*` environment variables,
-never on its command line. The embedded bundle ships no client tools, so `psql`
-comes from `PATH`: `brew install libpq && brew link --force libpq` on macOS,
+never on its command line. Inside the private cluster rafiki's database is named
+`rafiki`, created on the first use of the embedded mode, so `\l` lists it next to
+the `postgres` maintenance database — which is initdb's and never holds rafiki
+data. The embedded bundle ships no client tools, so `psql` comes from `PATH`:
+`brew install libpq && brew link --force libpq` on macOS,
 `apt install postgresql-client` on Debian/Ubuntu.
 
 **Backing it up.** Stop the rafikid service (or process) FIRST, so nothing writes

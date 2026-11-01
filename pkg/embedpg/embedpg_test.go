@@ -69,19 +69,36 @@ func TestPGVersionMismatch(t *testing.T) {
 	assert.NewCollecting(t).ErrorContains(err, "major upgrades are not supported")
 }
 
-// The DSN has to survive libpq's own parser: a data directory containing a
+// Both DSNs have to survive libpq's own parser: a data directory containing a
 // space or a quote is ordinary on macOS, and an unquoted DSN would silently
-// point the daemon at a different directory.
+// point the daemon at a different directory. They must also name the two
+// databases this server has — rafiki to serve from, postgres to create it from
+// — and agree about everything else, or the database would be created on one
+// server and dialled on another.
 func TestDSNQuoting(t *testing.T) {
 	s := Server{DataDir: filepath.Join(t.TempDir(), "a b'c d")}
 
-	cfg, err := pgconn.ParseConfig(s.DSN())
 	c := assert.NewCollecting(t)
-	c.NoError(err)
-	c.Eq(s.DataDir, cfg.Host, "Host")
-	c.Eq(uint16(Port), cfg.Port, "Port")
-	c.Eq("rafiki", cfg.User, "User")
-	c.Eq("postgres", cfg.Database, "Database")
+	for _, tc := range []struct {
+		what     string
+		dsn      string
+		database string
+	}{
+		{"DSN", s.DSN(), Database},
+		{"MaintenanceDSN", s.MaintenanceDSN(), maintenanceDatabase},
+	} {
+		cfg, err := pgconn.ParseConfig(tc.dsn)
+		c.NoError(err, "%s must parse", tc.what)
+		c.Eq(s.DataDir, cfg.Host, "%s Host", tc.what)
+		c.Eq(uint16(Port), cfg.Port, "%s Port", tc.what)
+		c.Eq("rafiki", cfg.User, "%s User", tc.what)
+		c.Eq(tc.database, cfg.Database, "%s Database", tc.what)
+	}
+
+	c.Eq("rafiki", Database, "the database the daemon serves from")
+	c.Eq("postgres", maintenanceDatabase, "the database initdb creates")
+	c.Eq(s.DSN(), strings.Replace(s.MaintenanceDSN(), "dbname="+maintenanceDatabase, "dbname="+Database, 1),
+		"the two DSNs may differ only in the database name")
 }
 
 // rafiki.conf is rewritten on every start, so it is the one place these settings
