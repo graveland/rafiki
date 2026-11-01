@@ -16,6 +16,14 @@ import (
 // invariant for a future change to violate silently: Go imports whole packages,
 // so one import of a package that happens to contain a pgxpool field is enough.
 //
+// Two bans, because one does not imply the other. pgx/libpq, because rafiki is a
+// socket client and must never open a database. And pkg/embedpg, because a
+// pgx-only ban cannot catch it: embedpg imports no pgx (it shells out to the
+// postgres binaries it downloads), so a client importing it would pass a pgx
+// check while pulling the whole server-management stack into the client. setup
+// reaches the database only by exec'ing rafikid with RAFIKI_DB in the subprocess
+// environment.
+//
 // These are linker-level assertions, which are the only kind that cannot be
 // satisfied by a convention nobody re-reads. They shell out to `go list` rather
 // than importing anything, because a test that imported the offending package
@@ -36,8 +44,18 @@ func TestClientDoesNotLinkPostgres(t *testing.T) {
 			t.Errorf("cmd/rafiki links %s. rafiki is a socket client and must never open a database; "+
 				"find the path with: go mod why -m github.com/jackc/pgx/v5", dep)
 		}
+		if strings.TrimSpace(dep) == embedpgImportPath {
+			t.Errorf("cmd/rafiki links %s. pkg/embedpg runs the daemon's private PostgreSQL and is "+
+				"daemon-only: setup reaches the database by exec'ing rafikid with RAFIKI_DB in its "+
+				"environment, never by importing the server", embedpgImportPath)
+		}
 	}
 }
+
+// embedpgImportPath is the daemon-only package the client must never link. It
+// is spelled out rather than imported for the reason above: importing it to
+// name it would be the violation the test exists to catch.
+const embedpgImportPath = "go.graveland.dev/rafiki/pkg/embedpg"
 
 // TestClientDoesNotLinkOIDC pins the other half of the split: the Login flow
 // is driven by the daemon, so the client links no OIDC library and never

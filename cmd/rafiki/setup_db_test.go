@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"strings"
@@ -439,7 +440,7 @@ func TestSetupDBExistingVolumeSkipsInitWait(t *testing.T) {
 func TestMigrateDatabaseDSNInEnvNotArgv(t *testing.T) {
 	r := newFakeRunner()
 	dsn := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	if err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", dsn); err != nil {
+	if err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", dsn, installstate.DBModeDSN); err != nil {
 		t.Fatalf("migrateDatabase: %v", err)
 	}
 	if len(r.runCalls) != 1 {
@@ -460,7 +461,7 @@ func TestMigrateDatabaseDSNInEnvNotArgv(t *testing.T) {
 func TestMigrateDatabaseReportsStderrAndHint(t *testing.T) {
 	r := newFakeRunner()
 	r.scripts[runKey([]string{"/usr/local/bin/rafikid", "migrate"})] = fakeScript{stderr: []byte("no such extension"), err: errExit()}
-	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", "postgres://x")
+	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", "postgres://x", installstate.DBModeDSN)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -468,6 +469,34 @@ func TestMigrateDatabaseReportsStderrAndHint(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q must contain %q", err.Error(), want)
 		}
+	}
+}
+
+// An embedded install needs none of the extensions a supplied DSN does, and its
+// migrate is also the first binary download and initdb: the hint must point at
+// that, never at extensions the operator cannot install.
+func TestMigrateDatabaseEmbeddedHintIsNotAboutExtensions(t *testing.T) {
+	r := newFakeRunner()
+	r.scripts[runKey([]string{"/usr/local/bin/rafikid", "migrate"})] = fakeScript{stderr: []byte("checksum mismatch"), err: errExit()}
+	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", embeddedDSN, installstate.DBModeEmbedded)
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	for _, want := range []string{"checksum mismatch", "download", paths.DataDir(), paths.StateDir()} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q", err.Error(), want)
+		}
+	}
+	for _, unwanted := range []string{"pg_textsearch", "bring-your-own database"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("the embedded hint must not mention %q: %v", unwanted, err)
+		}
+	}
+	if runKey(r.runCalls[0].argv) != "/usr/local/bin/rafikid migrate" {
+		t.Errorf("argv = %v, want [rafikid migrate]", r.runCalls[0].argv)
+	}
+	if !containsString(r.runCalls[0].env, "RAFIKI_DB="+embeddedDSN) {
+		t.Errorf("env = %v, want RAFIKI_DB=%s", r.runCalls[0].env, embeddedDSN)
 	}
 }
 
@@ -539,6 +568,82 @@ func TestSetupDatabaseDefaultsToEmbedded(t *testing.T) {
 	}
 	if env["RAFIKI_DB"] != embeddedDSN {
 		t.Errorf("service.env RAFIKI_DB = %q, want %q (file: %q)", env["RAFIKI_DB"], embeddedDSN, data)
+	}
+}
+
+// "Unset mode" is not "nothing saved": a real RAFIKI_DB in service.env is an
+// install that predates db.mode (or lost its install.toml). Defaulting that to
+// embedded would point the daemon at a fresh empty server and leave the real
+// data behind, so the existing DSN is adopted untouched.
+func TestSetupDatabaseUnsetModeKeepsAConfiguredDSN(t *testing.T) {
+	isolatedDBTest(t)
+	saved := "postgres://rafiki:secret@db.internal:5432/rafiki?sslmode=require"
+	if _, err := paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{"RAFIKI_DB": saved}, "rafiki managed database"); err != nil {
+		t.Fatalf("seed service.env: %v", err)
+	}
+	before, err := os.ReadFile(paths.ServiceEnvFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := newFakeRunner()
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, res, err := setupDatabase(ctx, r, w, installstate.DB{}, saved)
+	if err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if res.Mode != installstate.DBModeDSN || res.DSN != saved {
+		t.Errorf("res = %+v, want dsn mode with the saved DSN %q", res, saved)
+	}
+	if st.Mode != installstate.DBModeDSN {
+		t.Errorf("saved mode = %q, want dsn", st.Mode)
+	}
+	if len(r.runCalls) != 0 || len(r.streamCalls) != 0 {
+		t.Errorf("an adopted DSN must not touch docker: run=%v stream=%v", r.runCalls, r.streamCalls)
+	}
+	after, err := os.ReadFile(paths.ServiceEnvFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("service.env must be left alone, but was rewritten:\nbefore %q\nafter  %q", before, after)
+	}
+}
+
+// The other half of the unset-mode rule: service.env already says `embedded`,
+// so the new default is what is already there and nothing is rewritten.
+func TestSetupDatabaseUnsetModeWithSavedEmbeddedStaysEmbedded(t *testing.T) {
+	isolatedDBTest(t)
+	if _, err := paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{"RAFIKI_DB": embeddedDSN}, "rafiki embedded database"); err != nil {
+		t.Fatalf("seed service.env: %v", err)
+	}
+
+	r := newFakeRunner()
+	w := newSetupWizard(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, res, err := setupDatabase(ctx, r, w, installstate.DB{}, embeddedDSN)
+	if err != nil {
+		t.Fatalf("setupDatabase: %v", err)
+	}
+	if res.Mode != installstate.DBModeEmbedded || res.DSN != embeddedDSN {
+		t.Errorf("res = %+v, want embedded mode with %q", res, embeddedDSN)
+	}
+	if len(r.runCalls) != 0 {
+		t.Errorf("the embedded path must not touch docker, ran %v", r.runCalls)
+	}
+	env, err := readEnvFile(paths.ServiceEnvFile())
+	if err != nil {
+		t.Fatalf("readEnvFile: %v", err)
+	}
+	if env["RAFIKI_DB"] != embeddedDSN {
+		t.Errorf("service.env RAFIKI_DB = %q, want %q", env["RAFIKI_DB"], embeddedDSN)
 	}
 }
 

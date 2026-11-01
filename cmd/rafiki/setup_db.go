@@ -87,7 +87,19 @@ func setupDatabase(ctx context.Context, r runner, w *wizard, st installstate.DB,
 		mode = installstate.DBModeDSN
 	}
 	if mode == installstate.DBModeUnset {
-		mode = installstate.DBModeEmbedded
+		// "Unset" means nothing in install.toml, which is NOT the same as
+		// nothing saved: a real RAFIKI_DB in service.env is a database this
+		// install already uses (one that predates db.mode, lost its
+		// install.toml, or was configured by hand). Defaulting that to
+		// embedded would rewrite a populated install's DSN away and leave its
+		// data behind, so an existing DSN is adopted as dsn mode instead — the
+		// file is not rewritten, and only a genuinely absent, empty or already
+		// `embedded` value takes the new default.
+		if savedDSN != "" && savedDSN != embeddedDSN {
+			mode = installstate.DBModeDSN
+		} else {
+			mode = installstate.DBModeEmbedded
+		}
 	}
 
 	if mode == installstate.DBModeDSN {
@@ -313,10 +325,19 @@ func lastDockerLogs(ctx context.Context, r runner) string {
 
 // migrateDatabase runs rafikid migrate against dsn. The DSN travels in the
 // environment (RAFIKI_DB), never in argv.
-func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string) error {
+//
+// The failure hint depends on the mode. On an embedded install the whole
+// download, checksum verification and initdb happen inside this exec, so
+// telling the operator about server extensions would point them at the wrong
+// thing entirely — the first thing they read on the most likely failure.
+func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mode installstate.DBMode) error {
 	_, stderr, err := r.Run(ctx, []string{"RAFIKI_DB=" + dsn}, rafikidPath, "migrate")
 	if err != nil {
-		return fmt.Errorf("%w\n%s\nhint: a bring-your-own database needs the timescaledb, vector and pg_textsearch extensions and shared_preload_libraries=timescaledb,pg_textsearch", err, strings.TrimSpace(string(stderr)))
+		hint := "hint: a bring-your-own database needs the timescaledb, vector and pg_textsearch extensions and shared_preload_libraries=timescaledb,pg_textsearch"
+		if mode == installstate.DBModeEmbedded {
+			hint = fmt.Sprintf("hint: rafikid runs this PostgreSQL itself, so a failure here is usually the binary download, its checksum, or an unwritable data directory. It keeps its data under %s and the server's own log under %s", paths.DataDir(), paths.StateDir())
+		}
+		return fmt.Errorf("%w\n%s\n%s", err, strings.TrimSpace(string(stderr)), hint)
 	}
 	return nil
 }

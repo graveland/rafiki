@@ -36,7 +36,8 @@ runtime requires on `PATH`). Docker (or OrbStack) is needed only for the
 3. Database: rafikid's own PostgreSQL (the default, `--db-mode embedded`), a
    `rafiki-pg` Docker container (`--db-mode managed`), or `--dsn` for a
    bring-your-own postgres. A saved answer is replayed, so an existing install
-   keeps the mode it was set up with.
+   keeps the mode it was set up with, and a `RAFIKI_DB` already in `service.env`
+   is adopted rather than replaced by the default.
 4. Migrate the schema.
 5. LLM providers: Anthropic / OpenRouter keys, a local Ollama, or any OpenAI-compatible endpoint, written to `providers.toml` (plus optional recall summaries and embeddings).
 6. Daemon service, bound to loopback unless you answer yes to network access.

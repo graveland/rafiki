@@ -182,7 +182,7 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	if err != nil {
 		return err
 	}
-	if err := migrateDatabase(ctx, r, rafikidPath, dbRes.DSN); err != nil {
+	if err := migrateDatabase(ctx, r, rafikidPath, dbRes.DSN, dbRes.Mode); err != nil {
 		return err
 	}
 	if err := saveStep(st, stepMigrate); err != nil {
