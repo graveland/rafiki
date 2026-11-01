@@ -19,6 +19,7 @@ package integration_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -178,6 +179,47 @@ func userTokenFromCreate(out string) (string, bool) {
 	return "", false
 }
 
+// stopEmbeddedServer stops the private server and reports whether it is now
+// stopped. Nothing to stop is success: a boot that never reached the start (or
+// one that already stopped) must not fail the cleanup.
+//
+// "Nothing to stop" is asked of the data directory, not of an exit code. pg_ctl
+// STOP exits 1 — "PID file ... does not exist / Is server running?" — when the
+// server is not running; only pg_ctl STATUS uses 3 for that. A postmaster.pid is
+// the only thing pg_ctl itself consults, so its absence is the same answer, and
+// it also covers a cluster that was never initialised.
+//
+// A real failure FAILS the test and returns false, so the caller keeps the data
+// directory. A postmaster left running over a deleted PGDATA is the one outcome
+// nobody can recover from — the tree is what lets a human finish the job — so it
+// must be loud rather than a log line on a green run.
+//
+// The stop is bounded twice: pg_ctl's own -t (it waits for the postmaster to
+// exit) and a context deadline, because a postmaster that will not come down
+// must not hang the suite's cleanup.
+func stopEmbeddedServer(t *testing.T, server embedpg.Server) bool {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(server.DataDir, "postmaster.pid")); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("stat the postmaster pid file: %v", err)
+			return false
+		}
+		return true // no postmaster.pid: no server pg_ctl could stop
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	pgctl := filepath.Join(server.BinDir, "bin", "pg_ctl")
+	out, err := exec.CommandContext(ctx, pgctl,
+		"stop", "-D", server.DataDir, "-m", "fast", "-t", "30",
+	).CombinedOutput()
+	if err == nil {
+		return true
+	}
+	t.Errorf("pg_ctl stop failed: %v: %s\nleft %s in place (not removed); finish with: %s stop -D %s",
+		err, strings.TrimSpace(string(out)), server.DataDir, pgctl, server.DataDir)
+	return false
+}
+
 // queryStrings runs a two-column query into a map, failing the test on error.
 func queryStrings(t *testing.T, pool *pgxpool.Pool, what, sql string) map[string]string {
 	t.Helper()
@@ -233,12 +275,8 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	// stopped the daemon. rafikid never stops the private server; the test
 	// that started it is the only thing that will.
 	t.Cleanup(func() {
-		pgctl := filepath.Join(server.BinDir, "bin", "pg_ctl")
-		// "not running" (exit 3) is not a failure worth reporting: a boot that
-		// never got as far as starting the server leaves it stopped, and the
-		// tree goes either way.
-		if out, err := exec.Command(pgctl, "stop", "-D", server.DataDir, "-m", "fast").CombinedOutput(); err != nil {
-			t.Logf("pg_ctl stop: %v: %s", err, strings.TrimSpace(string(out)))
+		if !stopEmbeddedServer(t, server) {
+			return // the data dir is what lets a human finish the job
 		}
 		if err := os.RemoveAll(dirs.root); err != nil {
 			t.Logf("remove %s: %v", dirs.root, err)
@@ -311,6 +349,13 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	} {
 		c.Eq("r", relkind[name], "%s is relkind %q, want a plain table 'r'", name, relkind[name])
 	}
+
+	// relkind 'r' alone cannot tell a plain table from a hypertable's parent
+	// table, so the absence of the catalog is what makes the loop above a claim
+	// about plain tables rather than a restatement of the extension count.
+	c.Eq(int64(0), queryInt(t, pool, "count the timescaledb catalog schema",
+		`SELECT count(*) FROM pg_namespace WHERE nspname = '_timescaledb_catalog'`),
+		"no timescaledb catalog schema may exist: nothing here is a hypertable")
 
 	embeddingType := queryStrings(t, pool, "embedding column types", `
 		SELECT c.relname, format_type(a.atttypid, a.atttypmod)
