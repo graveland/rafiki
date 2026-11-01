@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 	"github.com/ulikunitz/xz"
 
@@ -86,7 +87,14 @@ file is, sniffed from its content rather than its extension:
       in the PG* environment and never on pg_restore's command line — argv
       carries the database NAME, which pg_restore requires and which the --force
       report already told you. The whole restore is one transaction, so a failure
-      rolls it back rather than leaving a half-rebuilt database.
+      rolls it back rather than leaving a half-rebuilt database. On a database
+      with the timescaledb extension it is bracketed by that extension's own
+      timescaledb_pre_restore()/timescaledb_post_restore() calls: pg_restore
+      --clean issues ALTER TABLE ONLY statements, which TimescaleDB refuses
+      against a hypertable, so without them the restore fails on the first
+      foreign key it tries to drop. The post call runs even when the restore
+      fails, because pre_restore leaves the extension's DDL hooks off
+      database-wide until it does.
 
   a physical archive (a tar, or a gzip/xz stream of one)
       the embedded server's data directory is replaced: the server is stopped
@@ -310,19 +318,100 @@ func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.
 	}
 	fmt.Fprintln(stderr, inv.target)
 
-	cmd := exec.CommandContext(ctx, inv.path, inv.argv[1:]...)
-	cmd.Env = inv.env
-	// pg_restore's own stderr is passed straight through: a refusal such as an
-	// unsupported archive version is the only place it is explained. stdout stays
-	// clean, so a script's output is unaffected.
-	cmd.Stdout = io.Discard
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("rafikid db restore: pg_restore: %w", err)
+	// TimescaleDB has to be told the restore is coming, or pg_restore's own
+	// `ALTER TABLE ONLY` statements are refused against every hypertable. See
+	// beginTimescaleRestore: a database without the extension gets a no-op.
+	post, err := timescaleRestoreHooks(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("rafikid db restore: %w", err)
+	}
+
+	runErr := func() error {
+		cmd := exec.CommandContext(ctx, inv.path, inv.argv[1:]...)
+		cmd.Env = inv.env
+		// pg_restore's own stderr is passed straight through: a refusal such as
+		// an unsupported archive version is the only place it is explained.
+		// stdout stays clean, so a script's output is unaffected.
+		cmd.Stdout = io.Discard
+		cmd.Stderr = stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("rafikid db restore: pg_restore: %w", err)
+		}
+		return nil
+	}()
+
+	// The post hook runs on BOTH paths. timescaledb_pre_restore sets a
+	// DATABASE-level GUC, so a restore that died between the two calls would
+	// leave the extension's DDL hooks off for every later session on that
+	// database — a hypertable created afterwards would silently be a plain
+	// table, which is a worse outcome than the restore failing loudly. Its
+	// context is detached and bounded for the same reason: a cancelled command
+	// still has to put the extension back.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timescalePostRestoreTimeout)
+	defer cancel()
+	if perr := post(pctx); perr != nil {
+		return errors.Join(runErr, fmt.Errorf("rafikid db restore: %w", perr))
+	}
+	if runErr != nil {
+		return runErr
 	}
 
 	fmt.Fprintf(stderr, "rafikid db restore: restored %s (format %s)\n", path, formatDump)
 	return nil
+}
+
+// timescalePostRestoreTimeout bounds the post hook, which runs detached from the
+// restore's own context: it must complete even when the operator interrupted the
+// restore.
+const timescalePostRestoreTimeout = 30 * time.Second
+
+// timescaleRestoreHooks brackets a dump restore with TimescaleDB's own pre/post
+// restore calls when the target database has the extension. It is a variable so
+// the dump path's tests can stand in for the server: what has to be right is the
+// ORDER — pre before pg_restore, post even when pg_restore fails — and that is
+// observable without a database.
+var timescaleRestoreHooks = beginTimescaleRestore
+
+// beginTimescaleRestore runs timescaledb_pre_restore() when the database dsn
+// names has the extension, and returns the matching post call. A database
+// without it gets a no-op, because there are no hooks to disable there.
+//
+// It exists because `pg_restore --clean` drops and recreates every object in the
+// archive with `ALTER TABLE ONLY`, and TimescaleDB refuses those against a
+// hypertable: "ONLY option not supported on hypertable operations". The
+// extension's own hooks are the supported way through — pre_restore sets the
+// DATABASE-level timescaledb.restoring GUC, which makes the extension leave
+// hypertables alone while pg_restore works, and post_restore clears it. Without
+// them a dump restore into a TimescaleDB install fails on the first foreign key
+// it tries to drop, and TimescaleDB is what the deployment guide describes.
+func beginTimescaleRestore(ctx context.Context, dsn string) (func(context.Context) error, error) {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to the server: %w", err)
+	}
+	var installed bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')`).Scan(&installed); err != nil {
+		_ = conn.Close(context.WithoutCancel(ctx))
+		return nil, fmt.Errorf("reading the installed extensions: %w", err)
+	}
+	if !installed {
+		_ = conn.Close(context.WithoutCancel(ctx))
+		return func(context.Context) error { return nil }, nil
+	}
+	if _, err := conn.Exec(ctx, `SELECT timescaledb_pre_restore()`); err != nil {
+		_ = conn.Close(context.WithoutCancel(ctx))
+		return nil, fmt.Errorf("timescaledb_pre_restore: %w", err)
+	}
+	// The session stays open across pg_restore: the flag it set is database-wide,
+	// but the post call belongs to the same server and needs no second dial.
+	return func(fctx context.Context) error {
+		defer func() { _ = conn.Close(context.WithoutCancel(fctx)) }()
+		if _, err := conn.Exec(fctx, `SELECT timescaledb_post_restore()`); err != nil {
+			return fmt.Errorf("timescaledb_post_restore: %w", err)
+		}
+		return nil
+	}, nil
 }
 
 // embeddedRestoreOps are the operations a physical restore performs on the
@@ -395,7 +484,7 @@ var restoreEmbedded = embeddedRestoreOps{
 //
 // The embedpg flock is held for the whole sequence (unpack included, so the
 // staging tree cannot be built while another process replaces the install under
-// it). Without it a concurrent `rafikid psql` — which runs Ensure — could start a
+// it). Without it a concurrent `rafikid db psql` — which runs Ensure — could start a
 // postmaster on the directory the next rename moves away, or initdb a fresh
 // cluster in the gap between the two renames. The two renames are on one
 // filesystem, so the window in which no data directory exists is two rename(2)

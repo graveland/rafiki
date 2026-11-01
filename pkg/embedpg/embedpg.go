@@ -508,7 +508,7 @@ const (
 // server — Ensure's download/initdb/start, Stop, and a backup's whole
 // stop → copy → start — and returns the release. Holding it is what lets a
 // caller know no other rafikid process will start the server under its feet:
-// a physical backup takes it precisely so a concurrent `rafikid psql` cannot
+// a physical backup takes it precisely so a concurrent `rafikid db psql` cannot
 // run Ensure and restart the postmaster halfway through the archive.
 //
 // The release is idempotent and safe to defer from the moment Lock returns.

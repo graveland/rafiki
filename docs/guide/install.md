@@ -64,34 +64,71 @@ install:
 
 Supported: macOS arm64/amd64, Linux amd64/arm64 on glibc (not Alpine/musl). It
 starts on demand, from the first `rafikid` command that needs the database, and
-`rafikid` never stops it. Which process starts it decides whether stopping the
-service stops it: when the daemon starts it, the server lands in the service's
-cgroup and stops with it (systemd signals the whole group; launchd does not, so
-it can keep running, harmlessly). When the first command was run from your
-shell — `rafiki setup` runs `rafikid migrate` that way — the server lives
-outside the unit and keeps running after the service stops, until you stop it
-yourself:
+`rafikid` never stops it as a side effect. The one deliberate exception is
+`rafikid db backup --format txz|tgz --force`, which stops it for the copy and
+starts it again afterwards (below). Which process starts it decides whether
+stopping the service stops it: when the daemon starts it, the server lands in
+the service's cgroup and stops with it (systemd signals the whole group;
+launchd does not, so it can keep running, harmlessly). When the first command
+was run from your shell — `rafiki setup` runs `rafikid migrate` that way — the
+server lives outside the unit and keeps running after the service stops, until
+you stop it yourself:
 
 ```sh
 ~/.cache/rafiki/embedpg/18.3.0-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
 ```
 
-`rafikid psql` opens `psql` on whatever `RAFIKI_DB` names, the embedded database
-included, printing the target first (because `service.env` may name a remote
-database); the connection reaches the client in `PG*` environment variables,
-never on its command line. Inside the private cluster rafiki's database is named
-`rafiki`, created on the first use of the embedded mode, so `\l` lists it next to
-the `postgres` maintenance database — which is initdb's and never holds rafiki
-data. The embedded bundle ships no client tools, so `psql` comes from `PATH`:
+`rafikid db psql` opens `psql` on whatever `RAFIKI_DB` names, the embedded
+database included, printing the target first (because `service.env` may name a
+remote database); the connection reaches the client in `PG*` environment
+variables, never on its command line. `rafiki db …` forwards to it for a local
+profile and refuses one whose daemon is on another machine — the database lives
+on the daemon's host, so run it there. Inside the private cluster rafiki's
+database is named `rafiki`, created on the first use of the embedded mode, so
+`\l` lists it next to the `postgres` maintenance database — which is initdb's
+and never holds rafiki data. The embedded bundle ships no client tools (it
+carries `initdb`, `pg_ctl` and `postgres` only), so `psql`, `pg_dump` and
+`pg_restore` all come from `PATH`; `pg_dump` is refused when it is older than
+the server (it cannot dump a newer one), and `pg_restore` must be new enough to
+read the archive it is handed, so install the server's own major (18):
 `brew install libpq && brew link --force libpq` on macOS,
-`apt install postgresql-client` on Debian/Ubuntu.
+`apt install postgresql-client-18` on Debian/Ubuntu.
 
-**Backing it up.** Stop the rafikid service (or process) FIRST, so nothing writes
-while you copy, and then stop the server with the `pg_ctl stop` above. A running
-daemon does not notice the server going away and never restarts it — it stays
-without a database until rafikid itself is restarted — so stopping it first is
-not just tidiness. Copy `~/.local/share/rafiki/pg`, or run `pg_dump` (version 18
-or newer) over the same connection `rafikid psql` uses.
+**Backing it up.** `rafikid db backup <path>` writes one file and picks the
+format from what this host can do: a `pg_dump -Fc` logical dump when a usable
+`pg_dump` is on `PATH` (the portable one), otherwise a physical copy of the data
+directory — `.txz`, or `.tgz` with `--format tgz`; `--format` names one
+explicitly. A `pg_dump` older than the server is skipped on an embedded install
+(it cannot dump a newer server) and the fall-through to a physical copy is
+reported; against a configured `RAFIKI_DB` it is refused instead, because there
+is no data directory here to fall back to.
+
+A dump copies over the wire and never stops anything. A physical copy has to
+stop the embedded server for the whole copy plus its compression, taking the
+database away from a live daemon and every turn in flight for that time, so it
+refuses without `--force`; it starts the server again afterwards, on a failure
+or an interrupt too. It is embedded-only, and a backup path inside the data
+directory is refused (the archive would contain itself).
+
+`rafikid db restore <path> --force` puts a backup back. It sniffs the file's
+content — a `PGDMP` dump, or a compressed tar of the data directory — and never
+trusts its extension. A restore destroys what it covers, so it does nothing
+without `--force`: it names what it would replace and exits non-zero. A dump is
+restored with `pg_restore --clean --if-exists --no-owner --single-transaction`,
+so a failure rolls back rather than leaving a half-rebuilt database; on a
+database with the `timescaledb` extension it is bracketed by that extension's
+own pre/post restore calls, without which TimescaleDB refuses pg_restore's
+`ALTER TABLE ONLY` statements. A physical restore stops the server, unpacks the
+archive into a staging directory and checks it BEFORE moving anything, moves the
+live data directory to `<data dir>.replaced-<unix>` — never deleted — and
+unpacks the archive in its place. It does not stop a running rafikid: stopping
+the server drops its connections, so stop the service first.
+
+An interrupted physical restore leaves `<data dir>.restore-in-progress` and a
+`.replaced-<unix>` sibling, and `rafikid` then refuses to initialise an empty
+cluster there: a missing data directory next to a preserved one is an
+interrupted restore, not a fresh install. Deal with both by hand before
+starting again.
 
 **Re-running.** Setup is safe to re-run: answers are saved in
 `~/.config/rafiki/install.toml`, with secrets (the database DSN and your API

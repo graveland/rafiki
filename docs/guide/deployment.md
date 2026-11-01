@@ -79,6 +79,30 @@ database, below.)
   whatever schema is there and fails loudly on the first write a new column
   needs, so run `rafikid migrate` as its own step.
 
+### Backups
+
+`rafikid db backup <path>` writes a `pg_dump -Fc` archive over the wire (the
+connection rides `PG*`, never argv), and `rafikid db restore <path> --force`
+puts one back. Both need a `pg_dump`/`pg_restore` on the daemon host's `PATH`:
+`pg_dump` is refused when it is older than the server (it cannot dump a newer
+one), `pg_restore` must be new enough to read the archive it is given, and the
+embedded bundle ships no client tools at all. A physical copy of the data
+directory (`--format txz|tgz`) is a different thing, embedded-only, and stops
+that server for the duration.
+
+The restore is `pg_restore --clean --if-exists --no-owner --single-transaction`:
+every object the ARCHIVE contains is dropped and recreated in one transaction, so
+a failure rolls back, and everything the archive does not contain is left alone.
+It destroys what it covers, so `--force` is required; a run without it only
+names the database it would replace. On a database with `timescaledb` the
+command brackets the restore with that extension's own
+`timescaledb_pre_restore()`/`timescaledb_post_restore()` calls, which is what
+lets `--clean` drop and recreate a hypertable's constraints at all — without
+them pg_restore stops at the first `ALTER TABLE ONLY ... DROP CONSTRAINT` with
+"ONLY option not supported on hypertable operations". The post call runs even
+when the restore fails, because `pre_restore` leaves the extension's DDL hooks
+off database-wide until it does.
+
 ## The daemon image
 
 The `Dockerfile`'s default target, `release`, builds the daemon image:
@@ -249,10 +273,13 @@ order that matters:
 
 1. Truncate the debugging tables you do not need in the backup
    (`conversations.raw_http_request`), then `pg_dump -Fc` with the daemon
-   stopped. **The dump is the rollback** — a migration that rewrites data has no
+   stopped (`rafikid db backup --format dump <path>` is the same dump when the
+   daemon host has a matching `pg_dump`). **The dump is the rollback** — a
+   migration that rewrites data has no
    down path worth trusting.
 2. Rehearse the restore (`timescaledb_pre_restore()` / `…_post_restore()` for a
-   hypertable), migrate, `rafikid tree check`, repeat until clean.
+   hypertable; `rafikid db restore --force <path>` does both around pg_restore
+   itself), migrate, `rafikid tree check`, repeat until clean.
 3. On the real database: stop every daemon writing to it, `rafikid migrate`
    (capture the log — the backfill's own validity signal is a line only it
    prints), `rafikid tree check` (must exit 0), `VACUUM FULL` the rewritten table

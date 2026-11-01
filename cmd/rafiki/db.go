@@ -35,7 +35,7 @@ import (
 func newDbCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "db <verb> [args...]",
-		Short: "Run rafikid's database verbs on the daemon's host: psql, backup",
+		Short: "Run rafikid's database verbs on the daemon's host: psql, backup, restore",
 		Long: `Run rafikid's own ` + "`db`" + ` verbs against rafikid's database on this machine.
 
 There is no remote database face: RAFIKI_DB names either a server this host can

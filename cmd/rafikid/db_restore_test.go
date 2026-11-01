@@ -887,6 +887,7 @@ exit 0
 func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	c := assert.NewAborting(t)
 	argvFile, envFile := fakePgRestoreDir(t)
+	hooks := stubTimescaleHooks(t)
 
 	dir := t.TempDir()
 	archive := writeBytes(t, filepath.Join(dir, "app.dump"), "PGDMP\x01\x0e\x00archive")
@@ -919,6 +920,11 @@ func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	c.StrContains(stderr.String(), archive, "the report must name the archive, got: %s", stderr.String())
 	c.StrContains(stderr.String(), "format "+formatDump, "the report must name the format, got: %s", stderr.String())
 	c.NotStrContains(stderr.String(), "s3cret", "the report must not echo the DSN, got: %s", stderr.String())
+
+	// The TimescaleDB hooks bracket THIS database — the one the DSN resolved to —
+	// and the post call runs once, after the restore.
+	c.Eq("postgres://alice:s3cret@db.example:6543/app", hooks.dsn, "the hooks must run against the resolved DSN")
+	c.Eq(1, hooks.postCalls, "the post hook must run exactly once")
 }
 
 // A restore with no pg_restore refuses in a millisecond, BEFORE the DSN is
@@ -966,6 +972,7 @@ func TestRestoreDumpRefusesADSNWithNoDatabase(t *testing.T) {
 // unsupported archive version is only explained there.
 func TestRestoreDumpReportsAFailure(t *testing.T) {
 	c := assert.NewAborting(t)
+	hooks := stubTimescaleHooks(t)
 	dir := t.TempDir()
 	script := "#!/bin/sh\necho 'pg_restore: error: unsupported version (1.15) in file header' >&2\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(script), 0o755); err != nil {
@@ -981,6 +988,10 @@ func TestRestoreDumpReportsAFailure(t *testing.T) {
 	c.ErrorContains(err, "pg_restore", "error, got: %v", err)
 	c.StrContains(stderr.String(), "unsupported version", "pg_restore's own diagnosis must reach the operator, got: %s",
 		stderr.String())
+
+	// The extension's hooks are put back even though the restore failed: leaving
+	// timescaledb.restoring on disables its DDL hooks for every later session.
+	c.Eq(1, hooks.postCalls, "the post hook must run even when pg_restore fails")
 }
 
 // --- the unpacker, against the producer's output -----------------------------
@@ -1021,7 +1032,7 @@ func TestRestoreUnpackRoundTrip(t *testing.T) {
 // --- the lock, the marker, and the ways a physical restore can fail -----------
 
 // The embedpg flock must be held across the whole swap. Without it a concurrent
-// `rafikid psql` (which resolves the DSN, so it runs Ensure) can start a
+// `rafikid db psql` (which resolves the DSN, so it runs Ensure) can start a
 // postmaster on the directory about to be renamed away, or initdb a fresh
 // cluster in the gap between the two renames. The probe asks the REAL lock, from
 // inside stop and start, whether it is free — an unlocked stop is the bug.
@@ -1205,6 +1216,7 @@ func TestRestorePhysicalRollsBackAFailedStartOnAFreshInstall(t *testing.T) {
 func TestRestoreDumpPassesAFlagShapedPathAfterADoubleDash(t *testing.T) {
 	c := assert.NewAborting(t)
 	argvFile, _ := fakePgRestoreDir(t)
+	stubTimescaleHooks(t)
 
 	dir := t.TempDir()
 	archive := writeBytes(t, filepath.Join(dir, "-a-dump.dump"), "PGDMP\x01\x0e\x00archive")
@@ -1250,4 +1262,131 @@ func TestRestorePhysicalLeavesBothTreesWhenTheRollbackCannotStop(t *testing.T) {
 	c.Eq("restored", string(mustRead(t, filepath.Join(dataDir, "marker"))), "the restored tree must be left in place, got")
 	c.EqDeep(original, snapshotTree(t, replaced), "the previous directory must be preserved, got")
 	c.FileExists(dataDir+embedpg.RestoreInProgressSuffix, "the marker must stay while the install is displaced")
+}
+
+// timescaleHookRecorder stands in for beginTimescaleRestore. It appends "pre"
+// and "post" to a file the fake pg_restore appends to as well, which is how the
+// ORDER is checked across the two processes: an in-memory slice could only say
+// that both ran, and the property that matters is that the extension is put back
+// AFTER the restore, whatever it did.
+type timescaleHookRecorder struct {
+	t         *testing.T
+	order     string
+	dsn       string
+	preErr    error
+	postErr   error
+	postCalls int
+}
+
+// stubTimescaleHooks replaces the TimescaleDB bracketing for the duration of the
+// test, so a dump test does not dial the DSN it names. Its order file is
+// recorded; the fake pg_restore has to append to the same one.
+func stubTimescaleHooks(t *testing.T) *timescaleHookRecorder {
+	t.Helper()
+	r := &timescaleHookRecorder{t: t, order: filepath.Join(t.TempDir(), "order.txt")}
+	orig := timescaleRestoreHooks
+	t.Cleanup(func() { timescaleRestoreHooks = orig })
+	timescaleRestoreHooks = func(_ context.Context, dsn string) (func(context.Context) error, error) {
+		r.dsn = dsn
+		if r.preErr != nil {
+			return nil, r.preErr
+		}
+		r.append("pre")
+		return func(context.Context) error {
+			r.postCalls++
+			r.append("post")
+			return r.postErr
+		}, nil
+	}
+	return r
+}
+
+// append records one step of the sequence the restore performed.
+func (r *timescaleHookRecorder) append(line string) {
+	f, err := os.OpenFile(r.order, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		r.t.Fatalf("record %q: %v", line, err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, line); err != nil {
+		r.t.Fatalf("record %q: %v", line, err)
+	}
+}
+
+// steps returns the recorded sequence, one entry per line.
+func (r *timescaleHookRecorder) steps() []string {
+	body, err := os.ReadFile(r.order)
+	if err != nil {
+		r.t.Fatalf("read the order file: %v", err)
+	}
+	return strings.Fields(string(body))
+}
+
+// fakeOrderedPgRestore puts a pg_restore on PATH that appends one line to the
+// recorder's order file and exits with status, so a test can see where the
+// restore itself falls in the sequence.
+func fakeOrderedPgRestore(t *testing.T, r *timescaleHookRecorder, status int) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nprintf 'pg_restore\\n' >> %q\nexit %d\n", r.order, status)
+	if err := os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pg_restore: %v", err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// The TimescaleDB hooks bracket the restore, in that order: pre before
+// pg_restore (or its ALTER TABLE ONLY statements are refused against a
+// hypertable), and post after it. This is the ordering the real command was
+// found to need against a migrated TimescaleDB database — a restore without it
+// fails with "ONLY option not supported on hypertable operations".
+func TestRestoreDumpBracketsTheTimescaleRestore(t *testing.T) {
+	c := assert.NewAborting(t)
+	hooks := stubTimescaleHooks(t)
+	fakeOrderedPgRestore(t, hooks, 0)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	c.NoError(err, "runRestore returned error: %s", stderr.String())
+	c.EqDeep([]string{"pre", "pg_restore", "post"}, hooks.steps(),
+		"the extension must be told before pg_restore runs and put back after it")
+}
+
+// A failed pg_restore still gets the post call: timescaledb_pre_restore sets a
+// DATABASE-level flag that switches the extension's DDL hooks off, so a restore
+// that gave up between the two would leave the database silently treating every
+// later hypertable as a plain table.
+func TestRestoreDumpRestoresTheTimescaleHooksWhenPgRestoreFails(t *testing.T) {
+	c := assert.NewAborting(t)
+	hooks := stubTimescaleHooks(t)
+	fakeOrderedPgRestore(t, hooks, 1)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	c.Error(err, "want the pg_restore failure, got nil")
+	c.EqDeep([]string{"pre", "pg_restore", "post"}, hooks.steps(),
+		"the post hook must run after a FAILED restore too")
+}
+
+// A database the extension cannot be prepared on is refused before pg_restore
+// runs, because a restore that starts without the hooks fails on the first
+// foreign key it drops — and the failure would look like a broken archive.
+func TestRestoreDumpRefusesWhenTheTimescaleHooksFail(t *testing.T) {
+	c := assert.NewAborting(t)
+	hooks := stubTimescaleHooks(t)
+	hooks.preErr = errors.New("timescaledb_pre_restore: permission denied")
+	argvFile, _ := fakePgRestoreDir(t)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	c.Error(err, "want the hook failure, got nil")
+	c.ErrorContains(err, "timescaledb_pre_restore", "error, got: %v", err)
+	c.NoFileExists(argvFile, "pg_restore must not run when the extension could not be prepared")
+	c.Eq(0, hooks.postCalls, "no post call is owed when the pre call never succeeded")
 }

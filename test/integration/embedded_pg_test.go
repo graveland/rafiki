@@ -15,13 +15,16 @@ package integration_test
 //
 // Nothing here touches the suite's shared RAFIKI_TEST_DSN database: every XDG
 // base points into this test's own /tmp tree, so the cluster, its socket and
-// the daemon's state are thrown away with it.
+// the daemon's state are thrown away with it. The one test that does reach that
+// server — the TimescaleDB backup round trip — creates and drops a scratch
+// database of its own and never reads or writes rafiki_test's rows.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +38,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/embedpg"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -96,10 +100,10 @@ func (d embeddedDirs) env() []string {
 	)
 }
 
-// runRafikidEmbedded runs one rafikid subcommand against the embedded database
-// and returns its combined output. daemonBinary(), never binaryPath: the
-// helper is what makes the go test cache see the daemon's sources.
-func runRafikidEmbedded(env []string, args ...string) (string, error) {
+// runRafikid runs one rafikid subcommand with env and returns its combined
+// output. daemonBinary(), never binaryPath: the helper is what makes the go
+// test cache see the daemon's sources.
+func runRafikid(env []string, args ...string) (string, error) {
 	cmd := exec.Command(daemonBinary(), args...)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -302,7 +306,7 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	// (flock, then pg_ctl status) rather than starting a second cluster on the
 	// same data directory.
 	for run := 1; run <= 2; run++ {
-		out, err := runRafikidEmbedded(env, "migrate")
+		out, err := runRafikid(env, "migrate")
 		c.NoError(err, "rafikid migrate (run %d) failed: %v\noutput: %s", run, err, out)
 	}
 
@@ -313,6 +317,13 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	pool, err := pgxpool.New(ctx, dsn)
 	c.NoError(err, "open the embedded server")
 	defer pool.Close()
+
+	// resolveDSN hands every rafikid path — the daemon included — this DSN, and
+	// it names `rafiki`, not initdb's maintenance database. An install that
+	// migrated `postgres` instead would serve from the wrong one.
+	var servedDB string
+	c.NoError(pool.QueryRow(ctx, "SELECT current_database()").Scan(&servedDB), "current_database")
+	c.Eq(embedpg.Database, servedDB, "the daemon's database must be %q", embedpg.Database)
 
 	c.Eq(int64(0), queryInt(t, pool, "count the extensions an embedded install must not have",
 		`SELECT count(*) FROM pg_extension WHERE extname IN ('timescaledb','vector','pg_textsearch')`),
@@ -398,7 +409,7 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	// operator uses — it opens the DSN itself (resolveDSN, so it reuses the
 	// running server) and prints the token exactly once.
 	const username = "epg"
-	out, err := runRafikidEmbedded(env, "user", "create", username, "--token")
+	out, err := runRafikid(env, "user", "create", username, "--token")
 	c.NoError(err, "rafikid user create %s: %v\noutput: %s", username, err, out)
 	token, ok := userTokenFromCreate(out)
 	c.Require().True(ok, "no token in `rafikid user create --token` output: %s", out)
@@ -499,4 +510,265 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	waitForStatus(t, d, childID, "idle", 30*time.Second)
 	c.Eq(int64(1), queryInt(t, pool, "turns recorded for the child's conversation", turnSQL, childID),
 		"the fundi turn must be recorded exactly once in conversation_turn")
+}
+
+// TestEmbeddedPostgresBackupRestoreRoundTrip proves `rafikid db backup` and
+// `rafikid db restore` on the server they exist for: a memory row written, the
+// data directory archived, the row deleted, the archive put back, and the row
+// read again. "The archive was written" is not the claim — that the bytes on
+// disk ARE the database is, and only a read-back after the swap shows it.
+//
+// The server is RUNNING when the backup is taken, which is the operator's
+// situation and exactly why the command needs --force: it stops the server for
+// the copy and starts it again afterwards. The restore makes the same trade,
+// and this is the PHYSICAL path; the dump path is proved against a migrated
+// TimescaleDB database in TestDbBackupRestoreRoundTripOnTimescaleDB.
+//
+// The format is xz: tgz exists for a consumer that only speaks gzip and is
+// never chosen automatically, so txz is what a physical backup is by default.
+func TestEmbeddedPostgresBackupRestoreRoundTrip(t *testing.T) {
+	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
+		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads ~15 MB once)")
+	}
+	c := assert.NewAborting(t)
+
+	dirs := newEmbeddedDirs(t)
+
+	// The test process must compute the same paths as every subprocess:
+	// embedpg.Default() resolves all three bases through these variables.
+	t.Setenv("XDG_DATA_HOME", dirs.data)
+	t.Setenv("XDG_STATE_HOME", dirs.state)
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+
+	server := embedpg.Default()
+
+	// Registered FIRST, so it runs LAST — after any cleanup that would have to
+	// come before it. rafikid never stops the private server; the test that
+	// started it is the only thing that will.
+	t.Cleanup(func() {
+		if !stopEmbeddedServer(t, server) {
+			return // the data dir is what lets a human finish the job
+		}
+		if err := os.RemoveAll(dirs.root); err != nil {
+			t.Logf("remove %s: %v", dirs.root, err)
+		}
+	})
+
+	env := dirs.env()
+	out, err := runRafikid(env, "migrate")
+	c.NoError(err, "rafikid migrate: %v\noutput: %s", err, out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// open returns a pool for ONE interaction. Each `db backup` and `db
+	// restore` stops the server, and a connection killed by that stop is not
+	// something pgxpool replaces behind your back: the next query on a stale
+	// pool fails rather than reconnecting.
+	open := func() *pgxpool.Pool {
+		t.Helper()
+		p, err := pgxpool.New(ctx, server.DSN())
+		c.NoError(err, "open the embedded server")
+		t.Cleanup(p.Close)
+		return p
+	}
+
+	// ── the database rafikid serves from is `rafiki` ─────────────────────
+	//
+	// initdb creates only the maintenance database, so an install that migrated
+	// THAT one instead of creating rafiki's would answer here — and every
+	// later claim in this test would be about the wrong database.
+	pool := open()
+	var dbname string
+	c.NoError(pool.QueryRow(ctx, "SELECT current_database()").Scan(&dbname), "current_database")
+	c.Eq(embedpg.Database, dbname,
+		"the embedded server must serve %q, not the maintenance database", embedpg.Database)
+	c.Eq(int64(2), queryInt(t, pool, "count rafiki's database beside initdb's",
+		`SELECT count(*) FROM pg_database WHERE datname IN ('rafiki','postgres')`),
+		"the cluster must hold rafiki's database beside the postgres maintenance database")
+
+	const (
+		username = "epg-backup"
+		memName  = "roundtrip"
+		memBody  = "the row the physical backup has to bring back"
+	)
+	var ownerID string
+	c.NoError(pool.QueryRow(ctx, `INSERT INTO conversations.users (username, token_sha256)
+		VALUES ($1, $2) RETURNING id`, username, "embedded-backup-roundtrip").Scan(&ownerID),
+		"insert the memory's owner")
+	_, err = pool.Exec(ctx, `INSERT INTO conversations.memory (owner_user_id, path, name, body)
+		VALUES ($1, 'embedded_pg', $2, $3)`, ownerID, memName, memBody)
+	c.NoError(err, "write the memory")
+
+	// ── back up a running server ─────────────────────────────────────────
+	//
+	// A bare path: the suffix is the command's to add, and it must be the
+	// format's, not the one the operator typed.
+	backupPath := filepath.Join(dirs.root, "backup")
+	out, err = runRafikid(env, "db", "backup", "--format", "txz", "--force", backupPath)
+	c.NoError(err, "rafikid db backup: %v\noutput: %s", err, out)
+	archive := backupPath + ".txz"
+	c.FileExists(archive, "db backup must write the file the format names")
+
+	// ── delete the row, restore, read it back ────────────────────────────
+	pool = open()
+	_, err = pool.Exec(ctx, `DELETE FROM conversations.memory
+		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName)
+	c.NoError(err, "delete the memory")
+	c.Eq(int64(0), queryInt(t, pool, "count the memory before the restore",
+		`SELECT count(*) FROM conversations.memory WHERE owner_user_id = $1`, ownerID),
+		"the row must be gone before the restore, or the read-back proves nothing")
+
+	out, err = runRafikid(env, "db", "restore", "--force", archive)
+	c.NoError(err, "rafikid db restore: %v\noutput: %s", err, out)
+
+	pool = open()
+	var body string
+	c.NoError(pool.QueryRow(ctx, `SELECT body FROM conversations.memory
+		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName).Scan(&body),
+		"read the memory back after the restore")
+	c.Eq(memBody, body, "the row a physical restore brings back must be the one the backup wrote")
+
+	// The directory it replaced is kept, never deleted: it is the operator's
+	// only copy of the pre-restore database, and a restore that tidied it away
+	// would have destroyed the one thing it exists to preserve.
+	replaced, gerr := filepath.Glob(server.DataDir + embedpg.ReplacedDataDirPrefix + "*")
+	c.NoError(gerr, "glob the replaced data directories")
+	c.Eq(1, len(replaced), "a restore must leave exactly one replaced data directory, got %v", replaced)
+	c.FileExists(filepath.Join(server.DataDir, "PG_VERSION"), "the restored tree must be a data directory")
+	if _, lerr := os.Lstat(server.RestoreInProgressPath()); !errors.Is(lerr, os.ErrNotExist) {
+		t.Errorf("the restore-in-progress marker %s must be gone after a successful restore: %v",
+			server.RestoreInProgressPath(), lerr)
+	}
+}
+
+// TestDbBackupRestoreRoundTripOnTimescaleDB is the same round trip against the
+// database most installs actually run: a migrated TimescaleDB database on the
+// test server. `pg_restore --clean --single-transaction` is the one code path
+// an embedded install cannot exercise — a hypertable's chunks, the extension's
+// catalog and its restore hooks all have to survive a drop-and-recreate inside
+// one transaction — so a restore that only works on plain tables is caught
+// here rather than on an operator's real database.
+//
+// It uses its OWN scratch database, created and dropped here. The shared
+// RAFIKI_TEST_DSN database is not reset between runs (CLAUDE.md), and a restore
+// is precisely the operation that must not touch rows another run left behind.
+func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+	c := assert.NewAborting(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	c.NoError(err, "connect the test server")
+	t.Cleanup(admin.Close)
+
+	name := fmt.Sprintf("rafiki_bk_%d", time.Now().UnixNano())
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
+	c.NoError(err, "create scratch database %s", name)
+	// Registered AFTER admin.Close above, so it runs BEFORE it (cleanups are
+	// LIFO) and the pool it uses is still open.
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+			t.Logf("drop scratch database %s: %v", name, err)
+		}
+	})
+
+	// The DSN is rewritten, never built from pgxpool.Config.ConnString(): that
+	// returns the ORIGINAL string (pgconn.ConnConfig keeps it), so assigning
+	// ConnConfig.Database leaves it pointing at RAFIKI_TEST_DSN's own database
+	// — which is how a restore ends up aimed at rafiki_test.
+	scratchDSN := dsnForDatabase(t, dsn, name)
+
+	scratch, err := pgxpool.New(ctx, scratchDSN)
+	c.NoError(err, "connect the scratch database")
+	t.Cleanup(scratch.Close)
+
+	c.NoError(store.Migrate(ctx, scratch), "migrate the scratch database")
+
+	// The database every later step writes to must be the scratch one. Asserted
+	// because the mistake it catches is silent and destructive: a DSN that
+	// still names rafiki_test would put this test's rows, and its restore, into
+	// the suite's shared database.
+	var dbname string
+	c.NoError(scratch.QueryRow(ctx, "SELECT current_database()").Scan(&dbname), "current_database")
+	c.Eq(name, dbname, "the round trip must run against the scratch database, not RAFIKI_TEST_DSN's own")
+
+	const (
+		username = "bk-roundtrip"
+		memName  = "roundtrip"
+		memBody  = "the row pg_restore --clean has to bring back"
+	)
+	var ownerID string
+	c.NoError(scratch.QueryRow(ctx, `INSERT INTO conversations.users (username, token_sha256)
+		VALUES ($1, $2) RETURNING id`, username, "timescale-backup-roundtrip").Scan(&ownerID),
+		"insert the memory's owner")
+	_, err = scratch.Exec(ctx, `INSERT INTO conversations.memory (owner_user_id, path, name, body)
+		VALUES ($1, 'timescale_pg', $2, $3)`, ownerID, memName, memBody)
+	c.NoError(err, "write the memory")
+
+	// RAFIKI_DB carries the scratch DSN as well as --db: a flag this test
+	// dropped would otherwise fall through to RAFIKI_TEST_DSN, and rafiki_test
+	// must never be a restore target. The DSN itself is the disposable
+	// container's, not a secret.
+	env := append(os.Environ(), "RAFIKI_DB="+scratchDSN)
+
+	backupPath := filepath.Join(t.TempDir(), "scratch.dump")
+	out, err := runRafikid(env, "db", "backup", "--db", scratchDSN, "--format", "dump", backupPath)
+	c.NoError(err, "rafikid db backup: %v\noutput: %s", err, out)
+	c.FileExists(backupPath, "db backup must write the file it was given")
+
+	_, err = scratch.Exec(ctx, `DELETE FROM conversations.memory
+		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName)
+	c.NoError(err, "delete the memory")
+	c.Eq(int64(0), queryInt(t, scratch, "count the memory before the restore",
+		`SELECT count(*) FROM conversations.memory WHERE owner_user_id = $1`, ownerID),
+		"the row must be gone before the restore, or the read-back proves nothing")
+
+	out, err = runRafikid(env, "db", "restore", "--force", "--db", scratchDSN, backupPath)
+	c.NoError(err, "rafikid db restore: %v\noutput: %s", err, out)
+
+	// A fresh pool: pg_restore --clean dropped and recreated every object the
+	// archive holds, so the plans the old pool cached describe tables that no
+	// longer exist.
+	readback, err := pgxpool.New(ctx, scratchDSN)
+	c.NoError(err, "reconnect after the restore")
+	t.Cleanup(readback.Close)
+
+	var body string
+	c.NoError(readback.QueryRow(ctx, `SELECT body FROM conversations.memory
+		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName).Scan(&body),
+		"read the memory back after the restore")
+	c.Eq(memBody, body, "the row a dump restore brings back must be the one the backup wrote")
+
+	// A hypertable is the part of this schema a plain-table database cannot
+	// exercise: a --clean that dropped the parent and recreated it as an
+	// ordinary table would still return the row, and would still be a broken
+	// install. Asserted only where the extension is present, since the chain
+	// deliberately creates plain tables without it.
+	if queryInt(t, readback, "is timescaledb installed",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`) == 1 {
+		c.Eq(int64(1), queryInt(t, readback, "the hypertable after the restore",
+			`SELECT count(*) FROM timescaledb_information.hypertables
+			  WHERE hypertable_name = 'conversation_turn'`),
+			"conversations.conversation_turn must still be a hypertable after a dump restore")
+	}
+}
+
+// dsnForDatabase points a test DSN at another database on the same server,
+// whichever dialect it is written in — a URL or libpq keyword/value. It is
+// string surgery on purpose: pgx's own Config.ConnString() returns the ORIGINAL
+// connection string, so mutating ConnConfig.Database and reading it back yields
+// a DSN that still names the old database.
+func dsnForDatabase(t *testing.T, dsn, name string) string {
+	t.Helper()
+	if u, err := url.Parse(dsn); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
+		u.Path = "/" + name
+		return u.String()
+	}
+	return dsn + " dbname=" + name
 }
