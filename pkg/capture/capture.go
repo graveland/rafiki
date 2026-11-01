@@ -353,6 +353,7 @@ type TurnIntent struct {
 	RequestHeadID  string // conversation_message.id of the last path row the request covered; empty → NULL
 	TrimFrom       *int   // first path position a trim dropped; nil with TrimTo nil → nothing trimmed
 	TrimTo         *int   // one past the last dropped position
+	PinnedProvider string // OpenRouter slug the request was pinned to (provider.only); empty → NULL
 }
 
 // InsertTurnIntent write-aheads the turn's request row and returns its
@@ -375,11 +376,12 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 		protocol = string(store.ProtocolAnthropic)
 	}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, source, author_user_id, author_kind, prefix_hash, protocol, request_head_id, request_trim_from, request_trim_to)
-		 VALUES (COALESCE($9::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5::uuid,$6,$7,$8,$10::uuid,$11,$12) RETURNING id::text, created_at`,
+		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, source, author_user_id, author_kind, prefix_hash, protocol, request_head_id, request_trim_from, request_trim_to, pinned_provider)
+		 VALUES (COALESCE($9::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5::uuid,$6,$7,$8,$10::uuid,$11,$12,$13) RETURNING id::text, created_at`,
 		t.ConversationID, t.Ordinal, nullify(t.Model),
 		nullify(t.Source), nullUUID(t.AuthorUserID), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol,
-		nullUUID(t.ID), nullUUID(t.RequestHeadID), intPtrOrNil(t.TrimFrom), intPtrOrNil(t.TrimTo)).Scan(&turnID, &createdAt)
+		nullUUID(t.ID), nullUUID(t.RequestHeadID), intPtrOrNil(t.TrimFrom), intPtrOrNil(t.TrimTo),
+		nullify(t.PinnedProvider)).Scan(&turnID, &createdAt)
 	if err != nil {
 		return "", time.Time{}, err
 	}

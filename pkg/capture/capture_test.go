@@ -1693,3 +1693,36 @@ func TestInsertTurnIntentTrimRangeBothOrNeither(t *testing.T) {
 		convID).Scan(&turns), "count turns")
 	c.Eq(0, turns, "turns written by refused intents")
 }
+
+// TestInsertTurnIntentRecordsPinnedProvider pins the pinned_provider column
+// (migration 0066): an intent that names the provider slug its request was
+// pinned to stores it verbatim, and one that names none stores SQL NULL.
+func TestInsertTurnIntentRecordsPinnedProvider(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, pool, s := captureTestEnv(t)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	c.Require().NoError(err, "EnsureConversation")
+
+	read := func(turnID string, createdAt time.Time) *string {
+		t.Helper()
+		var got *string
+		c.Require().NoError(pool.QueryRow(ctx,
+			`SELECT pinned_provider FROM conversations.conversation_turn WHERE id=$1::uuid AND created_at=$2`,
+			turnID, createdAt).Scan(&got), "read back pinned_provider")
+		return got
+	}
+
+	pinnedID, pinnedAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Model: "deepseek/deepseek-v4-pro", PinnedProvider: "deepinfra",
+	})
+	c.Require().NoError(err, "InsertTurnIntent with a pin")
+	gotPinned := read(pinnedID, pinnedAt)
+	c.False(gotPinned == nil || *gotPinned != "deepinfra", "pinned_provider = %v, want deepinfra", gotPinned)
+
+	unpinnedID, unpinnedAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Model: "deepseek/deepseek-v4-pro",
+	})
+	c.Require().NoError(err, "InsertTurnIntent without a pin")
+	c.Nil(read(unpinnedID, unpinnedAt), "pinned_provider for an unpinned intent")
+}

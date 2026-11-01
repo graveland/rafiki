@@ -974,3 +974,36 @@ func TestMigrate0064BackfillsClientConversations(t *testing.T) {
 	pgErr := c.Require().ErrorAs[*pgconn.PgError](err, "insert error must be a *pgconn.PgError")
 	c.Eq("23514", pgErr.Code, "an unmodelled origin must be a check violation")
 }
+
+// TestMigrate0066AddsPinnedProvider pins 0066: a turn row records the
+// OpenRouter provider slug its request was pinned to, as a nullable text column
+// (NULL = OpenRouter chose), and the down migration drops it.
+func TestMigrate0066AddsPinnedProvider(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	c.NoError(Migrate(ctx, pool), "migrate")
+
+	var typ, nullable, hasDefault string
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT data_type, is_nullable, coalesce(column_default,'')
+		  FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name='conversation_turn'
+		   AND column_name='pinned_provider'`).Scan(&typ, &nullable, &hasDefault), "probe pinned_provider")
+	c.False(typ != "text" || nullable != "YES" || hasDefault != "",
+		"pinned_provider = (%s, nullable=%s, default=%q), want (text, YES, no default)", typ, nullable, hasDefault)
+
+	// There is no MigrateTo API, so exercise the down migration directly: a
+	// no-op body must fail this test, not silently leave the column in place.
+	down, err := os.ReadFile("migrations/0066_turn_pinned_provider.down.sql")
+	c.Require().NoError(err, "read down migration")
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	var exists bool
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_schema='conversations' AND table_name='conversation_turn'
+		                  AND column_name='pinned_provider')`).Scan(&exists), "probe pinned_provider after down")
+	c.False(exists, "pinned_provider survived the down migration")
+}
