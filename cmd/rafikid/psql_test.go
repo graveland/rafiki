@@ -244,6 +244,13 @@ func TestParseConninfoErrorDoesNotEchoPassword(t *testing.T) {
 			forbid: []string{"s3cret", "x'"},
 		},
 		{
+			// The bare token after a shaped key: `s3cret=1` parses as a keyword,
+			// so the token error's "after the keyword" phrase is the leak.
+			name:   "bare token after an unrecognised key",
+			dsn:    "password=my s3cret=1 x",
+			forbid: []string{"s3cret"},
+		},
+		{
 			// A `?` in an unquoted password turns its tail into a URL query
 			// parameter, whose name is not even checked for keyword shape.
 			name:   "URL query tail after a `?` in the password",

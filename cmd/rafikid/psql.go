@@ -191,9 +191,14 @@ func psqlTarget(configured string, kw map[string]string) string {
 // libpqKeywords is libpq's own parameter vocabulary: every name a connection
 // string may carry, whether or not pgEnv can express it in the environment. It
 // is what lets an error say "service is unsupported" instead of "some parameter
-// is unsupported" — a name from a fixed vocabulary cannot be a password
-// fragment, so printing it is safe, while printing a token that is NOT in here
-// would risk publishing one.
+// is unsupported".
+//
+// What it buys is BOUNDED, not secret: the only DSN text this command can ever
+// echo is one of these names or a byte offset. It is not a secrecy guarantee —
+// a password whose fragment happens to BE a libpq parameter name
+// (`password=my service=1`) is still printed. Tokens outside the vocabulary are
+// never printed, which is why the vocabulary is kept small: growing it grows
+// what can be echoed.
 var libpqKeywords = map[string]bool{
 	"application_name":          true,
 	"channel_binding":           true,
@@ -239,7 +244,8 @@ var libpqKeywords = map[string]bool{
 // conninfoKeyPhrase names a DSN parameter inside a sentence: a libpq keyword by
 // name, an unrecognised token by POSITION only. The position is the token's byte
 // offset, and it exists because the token may be the tail of a password that an
-// unquoted space or a stray quote cut in two.
+// unquoted space or a stray quote cut in two. See libpqKeywords for exactly what
+// the vocabulary does and does not promise.
 func conninfoKeyPhrase(key string, off int) string {
 	if libpqKeywords[key] {
 		return fmt.Sprintf("the keyword %q", key)
@@ -340,12 +346,15 @@ func parseConninfoKeywords(s string) (map[string]string, error) {
 }
 
 // conninfoTokenError reports an unparsable token WITHOUT its text: the offset
-// locates it, and the preceding keyword says what it follows. Both halves are
-// safe to print — the keyword passed validConninfoKey, and a byte offset is not
-// DSN content.
+// locates it, and — only when the keyword it follows is a real libpq parameter —
+// the keyword says what it follows. `validConninfoKey` is a SHAPE check, so the
+// preceding token can be a password fragment (`password=my s3cret=1 x` makes
+// `s3cret` the preceding "keyword"); gating on libpqKeywords is what keeps that
+// text out of the message, and a fragment that happens to be a libpq name is the
+// one thing this cannot rule out.
 func conninfoTokenError(want string, off int, lastKey string) error {
 	msg := fmt.Sprintf("rafikid psql: cannot parse DSN: expected %s at offset %d", want, off)
-	if lastKey != "" {
+	if libpqKeywords[lastKey] {
 		msg += fmt.Sprintf(" (after the keyword %q)", lastKey)
 	}
 	return errors.New(msg)
