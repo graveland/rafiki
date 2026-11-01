@@ -121,11 +121,12 @@ c.delete_model_alias("ds")                             # not_found when there is
 # Forks and tags. A fork starts a child from a point in another child's
 # history: fork_from names the child and a cursor ("m:<ordinal>"; empty = the
 # source's last completed turn), while from_tag names a tag instead, resolved
-# once at spawn, nearest scope first. They are mutually exclusive, and only
+# once at spawn, nearest scope first (a tag rooted at one of your descendants
+# ranks last). They are mutually exclusive, and only
 # kind="fundi" can be forked to. A child may fork only what it could already
 # read, and a foreign or unknown tag is the same permission_denied.
 forked = c.spawn("continue from here", fork_from={"child_id": child, "cursor": "m:12"})
-tagged = c.spawn("take it from the tag", from_tag="review:checkpoint")
+tagged = c.spawn("take it from the tag", from_tag="review-checkpoint")
 
 # A tag is a named, scoped handle to a node: naming it is the grant, and the
 # scope says who holds it — "lineage" (default: the source's subtree and its

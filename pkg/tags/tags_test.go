@@ -187,6 +187,46 @@ func TestRankTies(t *testing.T) {
 	c.EqDeep([]string{"b", "a"}, tagIDs(in), "Rank must not reorder its input")
 }
 
+// TestRankTierOrder pins the whole tier order in one place, all candidates
+// sharing a CreatedAt so only the tiers decide: the caller's own tag, then its
+// ancestors nearest first, then tree, then owner, then a tag rooted at one of
+// the caller's DESCENDANTS.
+func TestRankTierOrder(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := tags.Position{ChildID: "me", Ancestors: []string{"mid", "root"}}
+	now := time.Now()
+	got := tags.Rank([]tags.Tag{
+		{TagID: "descendant", Scope: tags.ScopeLineage, ScopeRoot: "kid", CreatedAt: now},
+		{TagID: "owner", Scope: tags.ScopeOwner, ScopeRoot: "root", CreatedAt: now},
+		{TagID: "tree", Scope: tags.ScopeTree, ScopeRoot: "root", CreatedAt: now},
+		{TagID: "far", Scope: tags.ScopeLineage, ScopeRoot: "root", CreatedAt: now},
+		{TagID: "near", Scope: tags.ScopeLineage, ScopeRoot: "mid", CreatedAt: now},
+		{TagID: "self", Scope: tags.ScopeLineage, ScopeRoot: "me", CreatedAt: now},
+	}, p)
+	c.EqDeep([]string{"self", "near", "far", "tree", "owner", "descendant"}, tagIDs(got),
+		"self, ancestors nearest first, tree, owner, then a descendant's tag")
+}
+
+// TestRankDescendantLineageBelowTreeAndOwner pins the tier a descendant's
+// lineage tag now sits in: it must lose to a tree AND to an owner tag of the
+// same name — otherwise a child could shadow a name its coordinator relies on
+// without moving it — and it beats nothing but an unset scope, which is never
+// stored.
+func TestRankDescendantLineageBelowTreeAndOwner(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := tags.Position{ChildID: "me", Ancestors: []string{"root"}}
+	now := time.Now()
+	got := tags.Rank([]tags.Tag{
+		// Newer than everything else: age must not lift it past the tiers.
+		{TagID: "kid", Scope: tags.ScopeLineage, ScopeRoot: "kid", CreatedAt: now.Add(time.Hour)},
+		{TagID: "owner", Scope: tags.ScopeOwner, ScopeRoot: "root", CreatedAt: now},
+		{TagID: "tree", Scope: tags.ScopeTree, ScopeRoot: "root", CreatedAt: now},
+		{TagID: "unset", Scope: tags.ScopeUnset, ScopeRoot: "root", CreatedAt: now.Add(2 * time.Hour)},
+	}, p)
+	c.EqDeep([]string{"tree", "owner", "kid", "unset"}, tagIDs(got),
+		"a descendant's lineage tag loses to tree and owner, and outranks only an unset scope")
+}
+
 func tagIDs(ts []tags.Tag) []string {
 	out := make([]string, 0, len(ts))
 	for _, t := range ts {

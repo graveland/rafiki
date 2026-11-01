@@ -613,7 +613,7 @@ call at all — and is described under "Owner isolation between users" below.
 | `CloseAllExited` | unary · userOnly | ownerFiltered | Finalize every exited child, optionally only those older than `older_than` (a `Duration`; unset or zero = all exited entries). Returns the closed child ids in close order, so a consumer can record exactly what was closed |
 | `Tag` | unary · childScoped | ownerGuarded — the node a tag names lives in some child's conversation, so `child_id` is authorized before the node is resolved | Create a tag (a named, scoped handle to a node another child may fork from) or move one. `name` + `scope` + `child_id` + `cursor` create; `tag_id` + `expect_node_id` move, with `name`/`scope`/`replace` then unset. Answers the stored `TagRow`. Only a user credential may `replace` (tombstone the live holder of the name first), and a move whose `expect_node_id` is stale fails `CodeFailedPrecondition`. See §"Forks and tags" below |
 | `Untag` | unary · childScoped | exempt — tags are keyed by the connection's owner in `pkg/tagsdb`; a foreign tag id is not found | Tombstone a tag's live row (`CodeNotFound` when it is already gone). Only the creator, its ancestors (closed included) or a user credential may untag. Rows are never deleted, so `ListTags{tag_id}` still reads the whole history |
-| `ListTags` | unary · childScoped | exempt — tags are keyed by the connection's owner in `pkg/tagsdb`; a foreign tag id is not found | The live tags visible to the caller, nearest scope first (lineage, then tree, then owner), optionally filtered by `name_prefix`; `limit` defaults to 50 and is capped at 500. With `tag_id` set it answers that one tag's whole history, oldest first, deleted versions included. See §"Forks and tags" below |
+| `ListTags` | unary · childScoped | exempt — tags are keyed by the connection's owner in `pkg/tagsdb`; a foreign tag id is not found | The live tags visible to the caller, in resolution order (the caller's own lineage, then its ancestors', then tree, then owner, then tags rooted at its descendants), optionally filtered by `name_prefix`; `limit` defaults to 50 and is capped at 500. With `tag_id` set it answers that one tag's whole history, oldest first, deleted versions included. See §"Forks and tags" below |
 | `SetLabels` | unary · userOnly | ownerGuarded | Set entries apply first, then remove entries are deleted, and the full post-mutation map comes back. Keys using the `rafiki/` prefix are reserved and rejected. At least one of `set`/`remove` is required (`CodeInvalidArgument`), as is `child_id` |
 | `Status` | unary · userOnly | ownerFiltered | The daemon's process vitals: `version`, `started_at` (a `Timestamp`), live/exited `children` counts, `memory_bytes`, the socket path and the logs dir |
 | `Search` | unary · userOnly | ownerFiltered | In-memory content search across live children's session buffers. `query` is required (`CodeInvalidArgument`); `regex`, `limit`, `context` and an optional `session_filter` narrow the scan (`cwd_contains`, `name_contains`, `since` as a `Timestamp` with unset unbounded, AND-matched `labels`, key-presence `has_label`). Each hit carries the child id, entry id, `timestamp` (a `Timestamp`), role, snippet and match span, plus `total_hits`/`scanned`/`elapsed` (a `Duration`) |
@@ -1774,10 +1774,16 @@ The rules, in order:
 - lineage scope = the source, its subtree and its ancestors; tree scope =
   everything under the scope root's top-level ancestor; owner scope = every
   agent of the owner;
-- names resolve lineage, then tree, then owner, nearest first; a user with no
-  parent RESOLVES owner scope only — that is `from_tag`, where it has no
-  lineage and no tree — while `ListTags` still shows a user every scope they
-  own;
+- names resolve in these tiers, highest first — the caller's OWN tag; tags
+  rooted at one of the caller's ANCESTORS, nearest ancestor first; `tree`
+  scope; `owner` scope; and last, lineage tags rooted at one of the caller's
+  DESCENDANTS, newest first. A descendant's tag ranks below the caller's tree
+  and owner tags because it is not an enclosing scope: it is a name a child
+  minted for itself, and ranking it higher would let a child shadow a name its
+  coordinator relies on without moving it. Ties within a tier go to the newer
+  `created_at`, then the smaller `tag_id`. A user with no parent RESOLVES owner
+  scope only — that is `from_tag`, where it has no lineage and no tree — while
+  `ListTags` still shows a user every scope they own;
 - uniqueness is per (owner, scope, scope root, name) among live tags; only a
   user may `replace`;
 - only the creator, its ancestors (closed included) or a user may move or
@@ -1787,11 +1793,16 @@ The rules, in order:
 - a source child with NO owner (`owner_user_id` is NULL — a pre-column row, or
   the anonymous unix-socket spawn shape) is readable only by the daemon's
   local trust or an admin credential, exactly as the owner guard treats an
-  unowned child;
-- a foreign or unknown AGENT id, or a tag NAME at fork/create time, always
-  answers one identical `PermissionDenied`; a tag ID is different — the tag
-  store is owner-keyed, so a foreign or unknown id answers `NotFound`
-  (`tag %s not found`).
+  unowned child — read from the CONNECTION's identity, which an in-process
+  fundi tool call does not carry, so on that path a fundi child counts as
+  local trust and may read a NULL-owner source; lineage still bounds it to the
+  source itself or one of its ancestors;
+- a foreign or unknown AGENT id — a fork source, or a tag's create or move
+  target — or a `from_tag` NAME that resolves to nothing, answers one identical
+  `PermissionDenied`; a taken name on create is different — create never
+  resolves a name, and a live holder is `AlreadyExists`; a tag ID is different
+  again — the tag store is owner-keyed, so a foreign or unknown id answers
+  `NotFound` (`tag %s not found`).
 
 The refusals read `agent %s is not visible to you`, `tag %q is not visible to
 you`, and — for a move whose expectation is stale — `tag %q points at %s, not
@@ -1817,13 +1828,15 @@ the stored `TagRow`.
 **`Untag`** tombstones one tag's live row by `tag_id` (`CodeNotFound` when
 none is live).
 
-**`ListTags`** answers the live tags visible to the caller, nearest scope first
-— `name_prefix` narrows, `limit` defaults to 50, clamps at 500 and is refused
-`CodeInvalidArgument` when negative — or, with `tag_id` set, that one tag's
-whole history, oldest first. The live row is the ordinary case; an untagged
-tag has none left, so its history is answered from the rows that survive it
-and the visibility check runs against the NEWEST of those. A user credential
-lists every tag it owns; a child lists the ones `tags.InScope` admits.
+**`ListTags`** answers the live tags visible to the caller, in resolution order
+(the caller's own lineage, then its ancestors', then tree, then owner, then tags
+rooted at its descendants) — `name_prefix` narrows, `limit` defaults to 50,
+clamps at 500 and is refused `CodeInvalidArgument` when negative — or, with
+`tag_id` set, that one tag's whole history, oldest first. The live row is the
+ordinary case; an untagged tag has none left, so its history is answered from
+the rows that survive it and the visibility check runs against the NEWEST of
+those. A user credential lists every tag it owns; a child lists the ones
+`tags.InScope` admits.
 
 A `TagRow` is one VERSION of one tag: a move supersedes the current row and
 appends the next, an untag tombstones it, and rows are otherwise immutable and
@@ -2699,7 +2712,7 @@ transport error, and never a successful result carrying the text.
 | `agent_models` | Query the daemon's model catalog with filter/sort; a bare call returns a summary, rows come from a narrowed query |
 | `agent_tag` | Create a tag — a named, scoped handle others in its scope may fork from — or move one by `tag_id` + `expect_node_id` (a stale expected node is `FailedPrecondition`); `replace` is a user credential's alone |
 | `agent_untag` | Tombstone a live tag by `tag_id`; only its creator, that child's ancestors (closed included) or a user credential may |
-| `agent_tags` | Live tags visible to the caller, nearest scope first (lineage, then tree, then owner), filtered by `name_prefix` and `limit`; with `tag_id`, that tag's whole history |
+| `agent_tags` | Live tags visible to the caller, in resolution order (its own lineage, then its ancestors', then tree, then owner, then tags rooted at its descendants), filtered by `name_prefix` and `limit`; with `tag_id`, that tag's whole history |
 | `task_add` | Add a task (imperative `content`, present-continuous `active_form`; optional `parent` handle to nest); returns the full list with handles |
 | `task_update` | Change task statuses (pending, in_progress, blocked, completed, failed), touching only the named handles |
 | `task_drop` | Abandon a task with a required `reason`; drops its subtasks |

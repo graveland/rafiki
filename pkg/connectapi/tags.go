@@ -16,12 +16,29 @@ import (
 )
 
 const (
-	// defaultTagListLimit and maxTagListLimit bound ListTags: 0 on the wire
-	// means the default, anything larger is clamped, and a negative limit is
-	// the caller's mistake.
+	// defaultTagListLimit and maxTagListLimit bound a tag listing: 0 means the
+	// default, anything larger is clamped, and a negative limit is the caller's
+	// mistake.
 	defaultTagListLimit = 50
 	maxTagListLimit     = 500
 )
+
+// ResolveTagListLimit maps a requested listing limit onto the bound both faces
+// share: 0 means the default, anything above the cap is clamped, and a negative
+// limit is refused. Connect's ListTags and the tool face's agent_tags both call
+// it, so an RPC client and a model asking the same question see the same rows —
+// the tool path is the one left unbounded if this is skipped.
+func ResolveTagListLimit(n int) (int, error) {
+	switch {
+	case n < 0:
+		return 0, errors.New("limit must not be negative")
+	case n == 0:
+		return defaultTagListLimit, nil
+	case n > maxTagListLimit:
+		return maxTagListLimit, nil
+	}
+	return n, nil
+}
 
 // TagCaller is who is asking: the connection's owner and, for a child
 // credential, the child (from the credential, never the request).
@@ -171,15 +188,9 @@ func (s *Server) ListTags(
 	if err != nil {
 		return nil, err
 	}
-	limit := int(req.Msg.GetLimit())
-	switch {
-	case limit < 0:
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("limit must not be negative"))
-	case limit == 0:
-		limit = defaultTagListLimit
-	case limit > maxTagListLimit:
-		limit = maxTagListLimit
+	limit, err := ResolveTagListLimit(int(req.Msg.GetLimit()))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	rows, err := m.ListTags(ctx, s.tagCaller(ctx), req.Msg.GetNamePrefix(), limit, req.Msg.GetTagId())
 	if err != nil {

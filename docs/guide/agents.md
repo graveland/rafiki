@@ -147,7 +147,7 @@ tree:
 | `agent_models` | the models you may spawn on |
 | `agent_tag` | create a named, scoped handle others in its scope may fork from, or move one by `tag_id` + `expect_node_id` |
 | `agent_untag` | tombstone a tag you created, or one of your descendants created |
-| `agent_tags` | the tags you can see, nearest scope first |
+| `agent_tags` | the tags you can see, in resolution order (your own lineage, then your ancestors', then tree, then owner, then tags rooted at your descendants) |
 
 Every verb naming another agent is checked against stored lineage (an agent
 may only see/steer/kill its own descendants) — read from `childstore`, never

@@ -10,7 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/multigres/testkit/assert"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tags"
@@ -359,4 +361,72 @@ func tagIDs(rows []tags.Tag) []string {
 		out = append(out, t.TagID)
 	}
 	return out
+}
+
+// liveChild registers id in the controller's in-memory store with the fixture's
+// owner. A spawner built over the fixture resolves its owner through
+// OwnerUserIDForChild, which reads that store rather than the database, so a
+// fixture child without this entry would look unowned to the tag authority.
+func (f *forkFixture) liveChild(t *testing.T, id string) {
+	t.Helper()
+	f.ctrl.st.Insert(&childstore.Session{ChildID: id, OwnerUserID: f.owner, Kind: protocol.KindFundi})
+	t.Cleanup(func() { f.ctrl.st.Delete(id) })
+}
+
+// TestAgentTagToolRoundTripMovesByReportedNode pins the tool face's move end to
+// end: the node id agent_tags renders is exactly the one a move's
+// expect_node_id takes, so a model can re-point a tag without provoking a
+// refusal just to read the current node out of its error.
+func TestAgentTagToolRoundTripMovesByReportedNode(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	self := uniqueForkName("roundtrip")
+	_, nodes := f.forkableChild(t, self, "", self, f.owner, 2)
+	name := uniqueForkName("move")
+	f.liveChild(t, self)
+	sp := newControllerSpawner(f.ctrl, self)
+
+	created, err := sp.Tag(ctx, tools.TagSpec{Name: name})
+	ck.Require().NoError(err, "agent_tag create")
+	ck.Eq(nodes[1].ID, created.NodeID, "a create with no cursor marks the last completed turn")
+
+	rows, err := sp.Tags(ctx, tools.TagQuery{NamePrefix: name})
+	ck.Require().NoError(err, "agent_tags")
+	ck.Require().Eq(1, len(rows), "one tag named %q", name)
+	ck.Eq(created.NodeID, rows[0].NodeID, "the listing carries the node id")
+	ck.StrContains(tools.RenderTags(rows), "node "+created.NodeID, "the rendered row carries the node id a move needs")
+
+	moved, err := sp.Tag(ctx, tools.TagSpec{TagID: created.TagID, ExpectNodeID: rows[0].NodeID, Cursor: cursorAt(nodes[0])})
+	ck.Require().NoError(err, "a move taking expect_node_id from the listing")
+	ck.Eq(nodes[0].ID, moved.NodeID, "the tag moved to the node the cursor named")
+}
+
+// TestAgentTagsToolPathIsBounded pins that the tool face applies the same list
+// bound as the Connect handler: a model that omits `limit` gets the default 50,
+// not the store's 2000-row ceiling, and a negative limit is refused the same way.
+func TestAgentTagsToolPathIsBounded(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	self := uniqueForkName("bounded")
+	_, nodes := f.forkableChild(t, self, "", self, f.owner, 1)
+	prefix := uniqueForkName("many")
+	f.liveChild(t, self)
+	sp := newControllerSpawner(f.ctrl, self)
+	for i := range 51 {
+		_, err := sp.Tag(ctx, tools.TagSpec{Name: fmt.Sprintf("%s-%02d", prefix, i), Cursor: cursorAt(nodes[0])})
+		ck.Require().NoError(err, "create tag %d", i)
+	}
+
+	rows, err := sp.Tags(ctx, tools.TagQuery{NamePrefix: prefix})
+	ck.Require().NoError(err, "agent_tags with no limit")
+	ck.Eq(50, len(rows), "an omitted limit is the default 50, not every row")
+
+	rows, err = sp.Tags(ctx, tools.TagQuery{NamePrefix: prefix, Limit: 500})
+	ck.Require().NoError(err, "agent_tags at the cap")
+	ck.Eq(51, len(rows), "a limit at the cap shows every row")
+
+	_, err = sp.Tags(ctx, tools.TagQuery{NamePrefix: prefix, Limit: -1})
+	ck.Error(err, "a negative limit is refused, as on the Connect face")
 }

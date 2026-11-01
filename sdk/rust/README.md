@@ -109,10 +109,11 @@ visible tags nearest scope first, or one tag's whole history when `tag_id` is
 set. An unknown tag id and another owner's look the same: `not_found`.
 
 `SpawnRequest.fork_from` starts a child from a point in another child's history
-and `from_tag` names a tag instead, resolved once at spawn, nearest scope
-first. They are mutually exclusive, and only `kind = "fundi"` can be forked
-to. A child may fork only what it could already read, and a foreign or unknown
-tag answers the same `permission_denied` as one it cannot see.
+and `from_tag` names a tag instead, resolved once at spawn, nearest scope first
+(a tag rooted at one of your descendants ranks last). They are mutually
+exclusive, and only `kind = "fundi"` can be forked to. A child may fork only
+what it could already read, and a foreign or unknown tag answers the same
+`permission_denied` as one it cannot see.
 
 ```rust
 // Start from a point in another child's history: `cursor` is "m:<ordinal>",
@@ -129,7 +130,7 @@ let forked = client.spawn(&pb::SpawnRequest {
 // Or from whatever a tag names today, resolved once here.
 let tagged = client.spawn(&pb::SpawnRequest {
     cwd: "/work/repo".into(),
-    from_tag: "review:checkpoint".into(),
+    from_tag: "review-checkpoint".into(),
     ..Default::default()
 }).await?.child_id;
 

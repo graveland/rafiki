@@ -154,12 +154,15 @@ func CanModify(t Tag, p Position, creatorAncestors []string) bool {
 	return p.ChildID == t.CreatorChildID || slices.Contains(creatorAncestors, p.ChildID)
 }
 
-// Rank orders in-scope candidates nearest first, stably. All lineage tags come
-// before tree, and all tree before owner. Within lineage: the tag rooted at the
-// caller first, then tags whose root is one of the caller's ancestors by that
-// ancestor's index (nearest first), then the rest — the caller is an ancestor
-// of the root — newest first. Remaining ties go to newer CreatedAt, then the
-// smaller TagID.
+// Rank orders in-scope candidates nearest first, stably. The tiers, highest
+// first: the tag rooted at the caller; tags whose root is one of the caller's
+// ancestors, by that ancestor's index (nearest first); tree scope; owner
+// scope; then lineage tags whose root is one of the caller's DESCENDANTS,
+// newest CreatedAt first. A descendant's tag sorts below the caller's tree and
+// owner tags because it is not an enclosing scope: it is a name a child
+// minted for itself, and letting it win would let a child shadow a name its
+// coordinator relies on without moving it. Remaining ties go to newer
+// CreatedAt, then the smaller TagID.
 func Rank(cands []Tag, p Position) []Tag {
 	ranked := make([]rankedTag, len(cands))
 	for i, t := range cands {
@@ -167,11 +170,8 @@ func Rank(cands []Tag, p Position) []Tag {
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
 		a, b := ranked[i].key, ranked[j].key
-		if a.scope != b.scope {
-			return a.scope < b.scope
-		}
-		if a.group != b.group {
-			return a.group < b.group
+		if a.tier != b.tier {
+			return a.tier < b.tier
 		}
 		if a.ancestor != b.ancestor {
 			return a.ancestor < b.ancestor
@@ -195,12 +195,25 @@ type rankedTag struct {
 	key rankKey
 }
 
-// rankKey is one candidate's sort position. scope is the scope group (lineage,
-// tree, owner, unset), group/ancestor are the lineage sub-ordering, and the
+// The resolution tiers, highest priority first. A lineage tag rooted at one of
+// the caller's descendants is the LAST tier: it is not an enclosing scope, so
+// it must not shadow a name the caller's own tree or owner published.
+const (
+	tierSelfLineage = iota
+	tierAncestorLineage
+	tierTree
+	tierOwner
+	tierDescendantLineage
+	// tierUnset sorts after every real tier: an unset scope is never stored, and
+	// it must not silently claim lineage's first place.
+	tierUnset
+)
+
+// rankKey is one candidate's sort position. tier is the resolution tier above,
+// ancestor is the caller's ancestor index within tierAncestorLineage, and the
 // rest break ties.
 type rankKey struct {
-	scope    int
-	group    int
+	tier     int
 	ancestor int
 	created  time.Time
 	tagID    string
@@ -210,25 +223,22 @@ func keyFor(t Tag, p Position) rankKey {
 	k := rankKey{created: t.CreatedAt, tagID: t.TagID}
 	switch t.Scope {
 	case ScopeLineage:
-		k.scope = 0
 		switch {
 		case t.ScopeRoot == p.ChildID:
-			k.group, k.ancestor = 0, 0
+			k.tier = tierSelfLineage
 		case slices.Contains(p.Ancestors, t.ScopeRoot):
-			k.group, k.ancestor = 1, slices.Index(p.Ancestors, t.ScopeRoot)
+			k.tier, k.ancestor = tierAncestorLineage, slices.Index(p.Ancestors, t.ScopeRoot)
 		default:
-			// The caller is an ancestor of the root: no distance to rank by,
-			// so the newest tag wins.
-			k.group, k.ancestor = 2, 0
+			// The caller is an ancestor of the root: a descendant's tag. No
+			// distance to rank by, so the newest tag wins within the tier.
+			k.tier = tierDescendantLineage
 		}
 	case ScopeTree:
-		k.scope = 1
+		k.tier = tierTree
 	case ScopeOwner:
-		k.scope = 2
+		k.tier = tierOwner
 	default:
-		// An unset scope is never stored; it sorts last rather than silently
-		// claiming lineage's first place.
-		k.scope = 3
+		k.tier = tierUnset
 	}
 	return k
 }

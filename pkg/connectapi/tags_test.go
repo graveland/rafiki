@@ -222,3 +222,28 @@ func TestListTagsLimitIsResolved(t *testing.T) {
 	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ListTags limit -1 = %v, want InvalidArgument", err)
 	c.Eq(0, len(m.calls), "a negative limit reached the store: %v", m.calls)
 }
+
+// TestResolveTagListLimit pins the bound both faces share. The Connect handler
+// and the tool path's agent_tags both resolve their limit through it, so this
+// table is what keeps a model and an RPC client agreeing.
+func TestResolveTagListLimit(t *testing.T) {
+	c := assert.NewAborting(t)
+	for _, tc := range []struct {
+		in   int
+		want int
+	}{
+		{0, 50},
+		{1, 1},
+		{50, 50},
+		{500, 500},
+		{501, 500},
+		{2000, 500},
+	} {
+		got, err := connectapi.ResolveTagListLimit(tc.in)
+		c.NoError(err, "ResolveTagListLimit(%d)", tc.in)
+		c.Eq(tc.want, got, "ResolveTagListLimit(%d)", tc.in)
+	}
+	got, err := connectapi.ResolveTagListLimit(-1)
+	c.Error(err, "a negative limit is refused")
+	c.Eq(0, got, "a refused limit resolves to nothing")
+}

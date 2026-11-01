@@ -23,10 +23,10 @@ const agentTagDescription = "Tag a point in an agent's conversation: a tag is a 
 	"agent tree it belongs to, so cousins may fork from it; \"owner\" is every child of its owner. " +
 	"A name already live in that scope is refused unless you pass `replace`, which takes the name " +
 	"over and which only a user credential may do.\n\n" +
-	"To MOVE a tag, pass `tag_id` and `expect_node_id` — the node you believe it currently points " +
-	"at, as agent_tags reports it — plus the new `cursor`. A stale expect_node_id is refused rather " +
-	"than silently repointing the tag. Only the tag's creator, an ancestor of the creator, or a " +
-	"user credential may move or untag it.\n\n" +
+	"To MOVE a tag, pass `tag_id` and `expect_node_id` — the node id agent_tags prints as " +
+	"`node <id>`, which is what the tag points at — plus the new `cursor`. A stale expect_node_id " +
+	"is refused rather than silently repointing the tag. Only the tag's creator, an ancestor of the " +
+	"creator, or a user credential may move or untag it.\n\n" +
 	"A tag is not retroactive: an agent that already forked from it keeps the node it was given, " +
 	"so moving a tag only changes what the NEXT fork starts from."
 
@@ -35,8 +35,9 @@ const agentUntagDescription = "Delete a tag. It stops appearing in agent_tags an
 	"ancestor of the creator, or a user credential may untag it. Pass `tag_id`, which agent_tags prints."
 
 const agentTagsDescription = "List tags: the ones you can fork from, nearest scope first — your own lineage " +
-	"before your tree before your owner's — each with its name, scope, tag_id, the agent whose history " +
-	"it marks, the cursor it points at (m:<ordinal>, which agent_view also prints) and its note. Pass " +
+	"before your tree before your owner's, and a tag rooted at one of your descendants last — each with " +
+	"its name, scope, tag_id, the agent whose history it marks, the cursor it points at (m:<ordinal>, " +
+	"which agent_view also prints), the node id a move's expect_node_id takes, and its note. Pass " +
 	"`tag_id` for one tag's whole history instead, oldest first, which is how you see where it has been " +
 	"moved. Narrow with `name_prefix`, and cap the rows with `limit`."
 
@@ -57,13 +58,13 @@ func (AgentTagBlueprint) InputSchema() Schema {
 			{Name: "child_id", Type: "string",
 				Description: "The agent whose conversation the tag marks. Defaults to you. A move that names no child keeps the tag in the conversation it already points into."},
 			{Name: "cursor", Type: "string",
-				Description: "The node to mark, as agent_view prints it (m:<ordinal>). Omit for that agent's last completed turn; on a move, omit to keep the current node."},
+				Description: "The node to mark, as agent_view prints it (m:<ordinal>). Omit for that agent's last completed turn. On a move an omitted cursor resolves to that agent's last completed turn as well — it never means \"leave the tag where it is\"; pass the node you want."},
 			{Name: "note", Type: "string",
 				Description: "Optional note shown next to the tag in agent_tags, for whoever picks it up (what is at this point, and why fork from it)."},
 			{Name: "tag_id", Type: "string",
 				Description: "Set with expect_node_id to MOVE an existing tag instead of creating one."},
 			{Name: "expect_node_id", Type: "string",
-				Description: "On a move, the node you believe the tag points at (from agent_tags). A stale value refuses the move."},
+				Description: "On a move, the node id agent_tags prints (`node <id>`) — the node you believe the tag points at. A stale value refuses the move."},
 			{Name: "replace", Type: "boolean",
 				Description: "Take over a live name in the same scope. Only a user credential may."},
 		},
@@ -187,7 +188,7 @@ func (AgentTagsBlueprint) InputSchema() Schema {
 			{Name: "name_prefix", Type: "string",
 				Description: "Only tags whose name starts with this."},
 			{Name: "limit", Type: "integer",
-				Description: "Cap the rows returned. Omit for the daemon's default."},
+				Description: "Cap the rows returned. Omit for the daemon's default of 50; the cap is 500."},
 			{Name: "tag_id", Type: "string",
 				Description: "List this tag's whole history (every version, oldest first) instead of the tags you can fork from."},
 		},
@@ -235,12 +236,13 @@ func (t *agentTagsTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 
 // RenderTags formats a tag list for the model: one line per tag, carrying the
 // name, the scope, the id a later agent_untag or move needs, the agent whose
-// history it marks, the cursor to fork at, and the note.
+// history it marks, the cursor to fork at, the node id a move's expect_node_id
+// must carry, and the note.
 func RenderTags(rows []TagInfo) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d tag(s)\n", len(rows))
 	for _, t := range rows {
-		fmt.Fprintf(&sb, "%s  %s  %s  %s  m:%d", orDash(t.Name), orDash(t.Scope), t.TagID, orDash(t.ChildID), t.Ordinal)
+		fmt.Fprintf(&sb, "%s  %s  %s  %s  m:%d  node %s", orDash(t.Name), orDash(t.Scope), t.TagID, orDash(t.ChildID), t.Ordinal, orDash(t.NodeID))
 		if t.Note != "" {
 			fmt.Fprintf(&sb, "  %s", t.Note)
 		}

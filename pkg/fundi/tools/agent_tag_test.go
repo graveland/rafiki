@@ -40,7 +40,7 @@ func (s *tagSpawner) Tag(_ context.Context, spec TagSpec) (TagInfo, error) {
 	if len(s.rows) > 0 {
 		return s.rows[0], nil
 	}
-	return TagInfo{TagID: "t_1", Name: spec.Name, Scope: spec.Scope, ChildID: spec.ChildID, Ordinal: 7, Current: true}, nil
+	return TagInfo{TagID: "t_1", Name: spec.Name, Scope: spec.Scope, ChildID: spec.ChildID, NodeID: "node-7", Ordinal: 7, Current: true}, nil
 }
 
 func (s *tagSpawner) Untag(_ context.Context, tagID string) error {
@@ -77,9 +77,9 @@ func TestAgentTagCreateAndMoveArgs(t *testing.T) {
 		c.Len(sp.tagged, 1, "agent_tag handed the spawner %d spec(s)", len(sp.tagged))
 		c.EqDeep(TagSpec{Name: "build-ok", Scope: "tree", ChildID: "c_other", Cursor: "m:7", Note: "green"}, sp.tagged[0],
 			"create spec")
-		// The row is rendered with the fork cursor, so the model can hand the
-		// same value back to agent_spawn.
-		for _, want := range []string{"build-ok", "tree", "t_1", "c_other", "m:7"} {
+		// The row is rendered with the fork cursor and the node id a move's
+		// expect_node_id must carry, so the model can hand either back.
+		for _, want := range []string{"build-ok", "tree", "t_1", "c_other", "m:7", "node node-7"} {
 			c.StrContains(out, want, "agent_tag output missing a field")
 		}
 	})
@@ -108,14 +108,16 @@ func TestAgentTagCreateAndMoveArgs(t *testing.T) {
 
 	t.Run("agent_tags passes the query and renders history markers", func(t *testing.T) {
 		sp := &tagSpawner{rows: []TagInfo{
-			{TagID: "t_1", Name: "first", Scope: "lineage", ChildID: "c_a", Ordinal: 3, Current: false},
-			{TagID: "t_1", Name: "first", Scope: "lineage", ChildID: "c_a", Ordinal: 9, Current: true},
+			{TagID: "t_1", Name: "first", Scope: "lineage", ChildID: "c_a", NodeID: "node-old", Ordinal: 3, Current: false},
+			{TagID: "t_1", Name: "first", Scope: "lineage", ChildID: "c_a", NodeID: "node-live", Ordinal: 9, Current: true},
 		}}
 		out, err := runTagTool(t, sp, "agent_tags", `{"name_prefix":"fir","limit":5,"tag_id":"t_1"}`)
 		c.Require().NoError(err, "agent_tags")
 		c.EqDeep(TagQuery{NamePrefix: "fir", Limit: 5, TagID: "t_1"}, sp.queries[0], "tag query")
 		c.StrContains(out, "m:3", "history row's cursor")
 		c.StrContains(out, "m:9", "live row's cursor")
+		c.StrContains(out, "node node-live", "the node id a move's expect_node_id must carry")
+		c.StrContains(out, "node node-old", "a superseded version's node id too")
 		c.StrContains(out, "(not current)", "a superseded version must be marked")
 	})
 
@@ -196,4 +198,34 @@ func TestAgentTagToolsDeclineWithoutSpawner(t *testing.T) {
 			t.Errorf("%s must not be registered without a spawner", name)
 		}
 	}
+}
+
+// TestAgentTagMoveDescriptionMatchesTheDaemon pins the two things the tool text
+// used to get wrong: a move needs the node id agent_tags prints, and an omitted
+// cursor on a move does NOT keep the tag where it is — the daemon re-resolves it
+// to the target's last completed turn, so a model following the old wording
+// silently re-pointed the tag.
+func TestAgentTagMoveDescriptionMatchesTheDaemon(t *testing.T) {
+	c := assert.NewCollecting(t)
+	props := map[string]string{}
+	for _, p := range (AgentTagBlueprint{}).InputSchema().Properties {
+		props[p.Name] = p.Description
+	}
+	c.StrContains(props["expect_node_id"], "node <id>", "expect_node_id must point at the node id agent_tags prints")
+	c.NotStrContains(props["cursor"], "keep the current node", "the cursor description still claims an omitted move cursor keeps the current node")
+	c.StrContains(props["cursor"], "last completed turn", "the cursor description must say what an omitted move cursor resolves to")
+	c.StrContains(agentTagDescription, "node <id>", "the move paragraph must name the node id agent_tags prints")
+}
+
+// TestRenderTagsPrintsTheNodeID pins the row's shape: the node id is what a
+// move's expect_node_id takes, so it has to be in the listing a model reads.
+func TestRenderTagsPrintsTheNodeID(t *testing.T) {
+	c := assert.NewCollecting(t)
+	out := RenderTags([]TagInfo{
+		{TagID: "t_1", Name: "green", Scope: "tree", ChildID: "c_a", NodeID: "11111111-2222-3333-4444-555555555555", Ordinal: 4, Current: true},
+		{TagID: "t_2", Name: "bare", Scope: "owner", ChildID: "c_b", Ordinal: 2, Current: true},
+	})
+	c.StrContains(out, "green  tree  t_1  c_a  m:4  node 11111111-2222-3333-4444-555555555555",
+		"a tag row carries name, scope, tag_id, child, cursor and node")
+	c.StrContains(out, "m:2  node -", "a row with no node id renders a dash rather than an empty field")
 }

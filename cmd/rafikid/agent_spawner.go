@@ -461,7 +461,13 @@ func tagsWith(ctx context.Context, c *Controller, caller connectapi.TagCaller, q
 	if err != nil {
 		return nil, err
 	}
-	rows, err := m.ListTags(ctx, caller, q.NamePrefix, q.Limit, q.TagID)
+	// The same bound the Connect handler applies: a model that omits `limit` gets
+	// the default 50, not the store's 2000-row ceiling.
+	limit, err := connectapi.ResolveTagListLimit(q.Limit)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := m.ListTags(ctx, caller, q.NamePrefix, limit, q.TagID)
 	if err != nil {
 		return nil, err
 	}
