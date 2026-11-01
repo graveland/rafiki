@@ -611,9 +611,35 @@ func TestSetupDatabaseDBModeFlag(t *testing.T) {
 			t.Errorf("an invalid --db-mode must resolve nothing, ran %v", r.runCalls)
 		}
 	})
+
+	// A typo is refused even when --dsn outranks the mode: silently ignoring a
+	// value the operator typed is how a wrong database gets used for a month.
+	t.Run("bogus beside dsn", func(t *testing.T) {
+		r := newFakeRunner()
+		w := newSetupWizard(t)
+		if err := w.cmd.Flags().Set("dsn", "postgres://postgres:pw@db.example.com:5432/rafiki"); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.cmd.Flags().Set("db-mode", "bogus"); err != nil {
+			t.Fatal(err)
+		}
+
+		_, _, err := setupDatabase(context.Background(), r, w, installstate.DB{}, "")
+		if err == nil {
+			t.Fatal("want an error for --db-mode bogus beside --dsn, got nil")
+		}
+		if err.Error() != "--db-mode must be embedded, managed or dsn" {
+			t.Errorf("error = %q, want the exact --db-mode message", err.Error())
+		}
+		if len(r.runCalls) != 0 {
+			t.Errorf("nothing must be resolved for an invalid --db-mode, ran %v", r.runCalls)
+		}
+	})
 }
 
-// --dsn is the most explicit answer, so it outranks --db-mode.
+// --dsn is the most explicit answer, so it outranks --db-mode (including a VALID
+// one: this is the `--dsn` + `--db-mode embedded` pair, which must stay in dsn
+// mode rather than being refused).
 func TestSetupDatabaseDSNFlagWins(t *testing.T) {
 	isolatedDBTest(t)
 	r := newFakeRunner()

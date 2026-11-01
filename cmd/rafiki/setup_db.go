@@ -35,11 +35,12 @@ const (
 	// from the temporary phase and cannot tell the two apart.
 	readyMarker = "database system is ready to accept connections"
 	// embeddedDSN is the RAFIKI_DB value that means "run your own PostgreSQL":
-	// rafikid recognises the literal and starts a private server under the data
-	// dir. It is not a connection string, so nothing here parses it — the client
-	// only ever hands it to rafikid (in the subprocess environment) and to
-	// service.env. The daemon owns the interpretation.
-	embeddedDSN = "embedded"
+	// rafikid recognises it and starts a private server under the data dir. It is
+	// not a connection string, so nothing here parses it — the client only ever
+	// hands it to rafikid (in the subprocess environment) and to service.env. The
+	// sentinel is the MODE's own value (installstate.DBModeEmbedded), not a second
+	// literal, so the client and the daemon cannot drift apart on its spelling.
+	embeddedDSN = string(installstate.DBModeEmbedded)
 )
 
 // dbResult is the resolved database connection.
@@ -65,19 +66,25 @@ func (r dbResult) Describe() string {
 // (which runs in rafikid) is the probe.
 func setupDatabase(ctx context.Context, r runner, w *wizard, st installstate.DB, savedDSN string) (installstate.DB, dbResult, error) {
 	mode := st.Mode
-	if w.cmd.Flags().Changed("dsn") {
-		mode = installstate.DBModeDSN
-	} else if w.cmd.Flags().Changed("db-mode") {
+	if w.cmd.Flags().Changed("db-mode") {
 		v, err := w.cmd.Flags().GetString("db-mode")
 		if err != nil {
 			return st, dbResult{}, err
 		}
+		// The value is validated whenever the flag was given, BEFORE the
+		// precedence chain: a typo must fail even when --dsn outranks it, rather
+		// than be silently ignored.
 		switch installstate.DBMode(v) {
 		case installstate.DBModeEmbedded, installstate.DBModeManaged, installstate.DBModeDSN:
-			mode = installstate.DBMode(v)
+			if !w.cmd.Flags().Changed("dsn") {
+				mode = installstate.DBMode(v)
+			}
 		default:
 			return st, dbResult{}, fmt.Errorf("--db-mode must be embedded, managed or dsn")
 		}
+	}
+	if w.cmd.Flags().Changed("dsn") {
+		mode = installstate.DBModeDSN
 	}
 	if mode == installstate.DBModeUnset {
 		mode = installstate.DBModeEmbedded
