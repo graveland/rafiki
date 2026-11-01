@@ -1014,7 +1014,7 @@ func TestRestoreUnpackRoundTrip(t *testing.T) {
 			archive := filepath.Join(dir, "app."+format)
 			f, err := os.Create(archive)
 			c.NoError(err, "create the archive")
-			c.NoError(writeDataDirArchive(f, source, format), "writeDataDirArchive returned error")
+			c.NoError(writeDataDirArchive(context.Background(), f, source, format), "writeDataDirArchive returned error")
 			c.NoError(f.Close(), "close the archive")
 
 			kind, serr := sniffRestoreFile(archive)
@@ -1273,6 +1273,7 @@ type timescaleHookRecorder struct {
 	t         *testing.T
 	order     string
 	dsn       string
+	database  string
 	preErr    error
 	postErr   error
 	postCalls int
@@ -1286,8 +1287,9 @@ func stubTimescaleHooks(t *testing.T) *timescaleHookRecorder {
 	r := &timescaleHookRecorder{t: t, order: filepath.Join(t.TempDir(), "order.txt")}
 	orig := timescaleRestoreHooks
 	t.Cleanup(func() { timescaleRestoreHooks = orig })
-	timescaleRestoreHooks = func(_ context.Context, dsn string) (func(context.Context) error, error) {
+	timescaleRestoreHooks = func(_ context.Context, dsn, database string) (func(context.Context) error, error) {
 		r.dsn = dsn
+		r.database = database
 		if r.preErr != nil {
 			return nil, r.preErr
 		}
@@ -1389,4 +1391,57 @@ func TestRestoreDumpRefusesWhenTheTimescaleHooksFail(t *testing.T) {
 	c.ErrorContains(err, "timescaledb_pre_restore", "error, got: %v", err)
 	c.NoFileExists(argvFile, "pg_restore must not run when the extension could not be prepared")
 	c.Eq(0, hooks.postCalls, "no post call is owed when the pre call never succeeded")
+}
+
+// A restore that has been interrupted BEFORE the swap does not perform it. The
+// staging tree is this command's own, so the rollback removes it; the live data
+// directory is never moved and the server is never stopped, which is what keeps
+// a Ctrl-C from taking an install out of service for no reason.
+func TestRestorePhysicalRefusesACancelledContext(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+	original := snapshotTree(t, dataDir)
+
+	pinRestoreStamp(t, 1_700_000_000)
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The interrupt arrives while the archive is being unpacked — the last step
+	// before the swap, and the one that takes the longest.
+	f.unpack = func(_, dir string) error {
+		writeBytes(t, filepath.Join(dir, "PG_VERSION"), embedpg.MajorVersion+"\n")
+		writeBytes(t, filepath.Join(dir, "postgresql.conf"), "# restored\n")
+		cancel()
+		return nil
+	}
+
+	err := runRestore(ctx, embeddedDSN, archive, true, io.Discard)
+
+	c.Error(err, "want the cancellation, got nil")
+	c.True(errors.Is(err, context.Canceled), "error, got: %v", err)
+	c.EqDeep([]string{"unpack"}, f.ops,
+		"an interrupted restore must not stop the server or move any directory, got ops")
+	c.EqDeep(original, snapshotTree(t, dataDir), "the live data directory must be untouched, got")
+	assertNoRestoreSiblings(c, dataDir)
+	c.NoFileExists(dataDir+embedpg.RestoreInProgressSuffix, "no marker may be left behind")
+}
+
+// A post hook that cannot run leaves the database in restoring mode, and that is
+// the one thing an operator cannot work out from a bare error: the message has
+// to name the state and the manual remedy.
+func TestPostRestoreErrorNamesTheManualRemedy(t *testing.T) {
+	c := assert.NewAborting(t)
+	err := postRestoreLeftTheDatabase(
+		errors.New("conn closed"), errors.New("dial tcp 10.0.0.1:5432: connect: refused"), "rafiki")
+	c.Require().NotNil(err)
+
+	msg := err.Error()
+	c.StrContains(msg, "timescaledb.restoring", "the error must name the setting, got: %s", msg)
+	c.StrContains(msg, "SELECT timescaledb_post_restore()", "the error must carry the remedy, got: %s", msg)
+	c.StrContains(msg, `"rafiki"`, "the error must name the database, got: %s", msg)
+	c.NotStrContains(msg, "postgres://", "the error must not leak a DSN, got: %s", msg)
 }

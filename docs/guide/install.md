@@ -64,9 +64,10 @@ install:
 
 Supported: macOS arm64/amd64, Linux amd64/arm64 on glibc (not Alpine/musl). It
 starts on demand, from the first `rafikid` command that needs the database, and
-`rafikid` never stops it as a side effect. The one deliberate exception is
-`rafikid db backup --format txz|tgz --force`, which stops it for the copy and
-starts it again afterwards (below). Which process starts it decides whether
+`rafikid` never stops it as a side effect. The deliberate exceptions are both
+physical ones — `rafikid db backup --format txz|tgz` and `rafikid db restore` —
+which stop it for their work and start it again afterwards, under the lock every
+other rafikid process takes (below). Which process starts it decides whether
 stopping the service stops it: when the daemon starts it, the server lands in
 the service's cgroup and stops with it (systemd signals the whole group;
 launchd does not, so it can keep running, harmlessly). When the first command
@@ -92,7 +93,8 @@ carries `initdb`, `pg_ctl` and `postgres` only), so `psql`, `pg_dump` and
 the server (it cannot dump a newer one), and `pg_restore` must be new enough to
 read the archive it is handed, so install the server's own major (18):
 `brew install libpq && brew link --force libpq` on macOS,
-`apt install postgresql-client-18` on Debian/Ubuntu.
+`apt install postgresql-client` on Debian/Ubuntu (the distro package may lag the
+server's major; add the PGDG repository if it does).
 
 **Backing it up.** `rafikid db backup <path>` writes one file and picks the
 format from what this host can do: a `pg_dump -Fc` logical dump when a usable
@@ -105,24 +107,50 @@ is no data directory here to fall back to.
 
 A dump copies over the wire and never stops anything. A physical copy has to
 stop the embedded server for the whole copy plus its compression, taking the
-database away from a live daemon and every turn in flight for that time, so it
-refuses without `--force`; it starts the server again afterwards, on a failure
-or an interrupt too. It is embedded-only, and a backup path inside the data
-directory is refused (the archive would contain itself).
+database away from whatever uses it — a live daemon and every turn in flight —
+for that time, so a server that is RUNNING refuses without `--force` (a server
+that is already stopped is copied as it stands). It starts the server again
+afterwards, on a failure or an interrupt too, and a daemon picks the database
+back up with its next request rather than waiting for a restart. If you stop the
+server yourself and leave it down, nothing brings it back while rafikid runs — a
+daemon never starts a server that went away underneath it — and it reconnects by
+itself once something does. The copy is embedded-only, and a backup path inside
+the data directory is refused (the archive would contain itself).
 
 `rafikid db restore <path> --force` puts a backup back. It sniffs the file's
 content — a `PGDMP` dump, or a compressed tar of the data directory — and never
 trusts its extension. A restore destroys what it covers, so it does nothing
 without `--force`: it names what it would replace and exits non-zero. A dump is
 restored with `pg_restore --clean --if-exists --no-owner --single-transaction`,
-so a failure rolls back rather than leaving a half-rebuilt database; on a
-database with the `timescaledb` extension it is bracketed by that extension's
-own pre/post restore calls, without which TimescaleDB refuses pg_restore's
-`ALTER TABLE ONLY` statements. A physical restore stops the server, unpacks the
-archive into a staging directory and checks it BEFORE moving anything, moves the
-live data directory to `<data dir>.replaced-<unix>` — never deleted — and
-unpacks the archive in its place. It does not stop a running rafikid: stopping
-the server drops its connections, so stop the service first.
+so a failure rolls back rather than leaving a half-rebuilt database.
+
+On a database with the `timescaledb` extension the dump restore is bracketed by
+that extension's own `timescaledb_pre_restore()`/`timescaledb_post_restore()`
+calls, without which TimescaleDB refuses pg_restore's `ALTER TABLE ONLY`
+statements. Those hooks run `ALTER DATABASE ... SET timescaledb.restoring`, a
+superuser-only setting, so restoring in place over a real TimescaleDB database
+needs a `--db` whose role is a superuser — the daemon's own role deliberately is
+not one, and without that privilege the restore is refused before anything is
+touched. Restoring into a database where the extension is not installed yet
+needs no hooks (the archive creates it), which is what makes a rehearsal restore
+into a fresh database work for any role. Whenever the target database has the
+extension, stop the rafikid service first: a connection opened while the restore
+runs inherits the restoring flag for its whole life, and only new sessions see it
+cleared.
+
+A dump restore runs over the wire and stops nothing. A physical one stops the
+embedded server (and starts it again), so the backup's downtime rules apply to
+it: it unpacks the archive into a staging directory and checks it BEFORE moving
+anything, moves the live data directory to `<data dir>.replaced-<unix>` — never
+deleted — and unpacks the archive in its place. It does not stop a running
+rafikid: stopping the server drops its connections, so stop the service first.
+
+Interrupting a backup or a restore (Ctrl-C, SIGHUP, SIGTERM) cancels it rather
+than killing it, so the safety work still happens — a dump restore puts the
+TimescaleDB hooks back and a physical one rolls back — and the command exits
+non-zero. A second interrupt kills the process outright, which can leave a
+TimescaleDB database in restoring mode (`SELECT timescaledb_post_restore();` as
+a superuser is the remedy) or a physical restore's marker in place.
 
 An interrupted physical restore leaves `<data dir>.restore-in-progress` and a
 `.replaced-<unix>` sibling, and `rafikid` then refuses to initialise an empty

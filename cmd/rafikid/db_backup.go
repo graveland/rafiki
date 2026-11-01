@@ -83,13 +83,16 @@ directory is copied as it stands. A server that is RUNNING has to be stopped
 (-m fast, bounded) for the copy, which takes the database away from whatever is
 using it — a live daemon and every turn in flight — for the whole copy plus its
 compression, so that is a downtime an operator has to accept with --force; it is
-started again afterwards, on a failure or an interrupt too. The stop, the copy
-and the restart happen under the same lock the daemon takes, so no other rafikid
-process can start the server halfway through the archive. A data directory that
-does not exist is an error, never something this command creates, and a backup
-path inside the data directory is refused (the archive would contain itself). A
-configured RAFIKI_DB names a server on some other host, which has no data
-directory here, so the physical formats are refused for it.
+started again afterwards, on a failure or an interrupt too. An interrupt cancels
+the copy itself (the archive is abandoned and its partial file removed) and still
+restarts the server, so the one thing Ctrl-C cannot do is leave the install
+down; only a second signal, which kills this process outright, can. The stop,
+the copy and the restart happen under the same lock the daemon takes, so no
+other rafikid process can start the server halfway through the archive. A data
+directory that does not exist is an error, never something this command creates,
+and a backup path inside the data directory is refused (the archive would contain
+itself). A configured RAFIKI_DB names a server on some other host, which has no
+data directory here, so the physical formats are refused for it.
 
 The path, format and size are printed to stderr, so a script's stdout stays
 clean. The extension is appended when <path> has none.`,
@@ -382,8 +385,12 @@ type embeddedBackupOps struct {
 	// rafiki.conf — and it cannot create anything here: the server was running, so
 	// the directory and its PG_VERSION exist.
 	start func(context.Context, embedpg.Server) error
-	// pack writes one archive of dir in format.
-	pack func(io.Writer, string, string) error
+	// pack writes one archive of dir in format. It takes the context because a
+	// physical copy runs with the server STOPPED: an interrupt has to be able to
+	// abort the archive (and let runPhysicalBackup's defer restart the server)
+	// rather than leaving an operator waiting on a multi-minute xz with no
+	// feedback, which is what would push them to SIGKILL.
+	pack func(context.Context, io.Writer, string, string) error
 }
 
 var backupEmbedded = embeddedBackupOps{
@@ -468,6 +475,13 @@ func runPhysicalBackup(ctx context.Context, configured, path, format string, for
 				"that time. Re-run with --force to accept that downtime, or use --format dump, which "+
 				"copies over the wire and never stops the server", s.DataDir)
 		}
+		// An interrupt that arrived before the stop must not be acted on AT ALL:
+		// the server is still up, so the cheapest safe answer is to leave it up
+		// rather than stop it and hand the operator a restart they did not ask
+		// for.
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("rafikid db backup: %w; the embedded server was not stopped", cerr)
+		}
 		// Set before the stop: see the defer above.
 		restart = true
 		if serr := backupEmbedded.stop(ctx, s); serr != nil {
@@ -476,7 +490,7 @@ func runPhysicalBackup(ctx context.Context, configured, path, format string, for
 	}
 
 	size, perr := writeBackupFile(path, func(w io.Writer, _ string) error {
-		return backupEmbedded.pack(w, s.DataDir, format)
+		return backupEmbedded.pack(ctx, w, s.DataDir, format)
 	})
 	if perr != nil {
 		return fmt.Errorf("rafikid db backup: %w", perr)
@@ -539,8 +553,10 @@ func writeBackupFile(path string, write func(w io.Writer, tmp string) error) (in
 
 // writeDataDirArchive writes dir as a tar archive to w, compressed in format.
 // Entry names are relative to dir with no wrapper directory, so a restore
-// unpacks the tree straight into place.
-func writeDataDirArchive(w io.Writer, dir, format string) error {
+// unpacks the tree straight into place. It stops between entries when ctx is
+// cancelled, so an interrupted physical backup does not hold the server down for
+// the whole copy.
+func writeDataDirArchive(ctx context.Context, w io.Writer, dir, format string) error {
 	var (
 		cw  io.WriteCloser
 		err error
@@ -558,7 +574,7 @@ func writeDataDirArchive(w io.Writer, dir, format string) error {
 	}
 
 	tw := tar.NewWriter(cw)
-	walkErr := tarDataDir(tw, dir)
+	walkErr := tarDataDir(ctx, tw, dir)
 	// Both closers always run: a truncated archive must still be a readable
 	// archive, and the error reported is the first reason it went wrong.
 	return errors.Join(walkErr, tw.Close(), cw.Close())
@@ -579,9 +595,15 @@ func writeDataDirArchive(w io.Writer, dir, format string) error {
 // Every link a real cluster's data directory holds points at a sibling or down
 // into its own subtree; one that leaves the tree — a hand-moved pg_wal, a
 // tablespace kept outside it — has to be re-homed, or the backup taken as a dump.
-func tarDataDir(tw *tar.Writer, dir string) error {
+func tarDataDir(ctx context.Context, tw *tar.Writer, dir string) error {
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		// Between entries, never inside one: a half-copied file would make an
+		// archive that unpacks into a corrupt cluster, and the copy already
+		// refuses a file that changed underneath it.
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(dir, path)

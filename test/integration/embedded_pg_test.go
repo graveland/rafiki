@@ -644,11 +644,16 @@ func TestEmbeddedPostgresBackupRestoreRoundTrip(t *testing.T) {
 
 // TestDbBackupRestoreRoundTripOnTimescaleDB is the same round trip against the
 // database most installs actually run: a migrated TimescaleDB database on the
-// test server. `pg_restore --clean --single-transaction` is the one code path
-// an embedded install cannot exercise — a hypertable's chunks, the extension's
-// catalog and its restore hooks all have to survive a drop-and-recreate inside
-// one transaction — so a restore that only works on plain tables is caught
-// here rather than on an operator's real database.
+// test server. It is the only test that exercises the extension's restore hooks
+// and the only one that runs `pg_restore --clean` against a hypertable, so a
+// restore that only works on plain tables is caught here rather than on an
+// operator's real database.
+//
+// No chunk ROW is written: the claim is about the hypertable's parent table and
+// its foreign keys, which --clean has to drop and recreate through TimescaleDB's
+// hooks, and about the extension's catalog surviving the restore (a --clean that
+// recreated the parent as an ordinary table would still return the row, and
+// would still be a broken install). The row itself goes into a plain table.
 //
 // It uses its OWN scratch database, created and dropped here. The shared
 // RAFIKI_TEST_DSN database is not reset between runs (CLAUDE.md), and a restore
@@ -667,22 +672,7 @@ func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
 	c.NoError(err, "connect the test server")
 	t.Cleanup(admin.Close)
 
-	name := fmt.Sprintf("rafiki_bk_%d", time.Now().UnixNano())
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
-	c.NoError(err, "create scratch database %s", name)
-	// Registered AFTER admin.Close above, so it runs BEFORE it (cleanups are
-	// LIFO) and the pool it uses is still open.
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
-			t.Logf("drop scratch database %s: %v", name, err)
-		}
-	})
-
-	// The DSN is rewritten, never built from pgxpool.Config.ConnString(): that
-	// returns the ORIGINAL string (pgconn.ConnConfig keeps it), so assigning
-	// ConnConfig.Database leaves it pointing at RAFIKI_TEST_DSN's own database
-	// — which is how a restore ends up aimed at rafiki_test.
-	scratchDSN := dsnForDatabase(t, dsn, name)
+	name, scratchDSN := scratchDatabase(t, admin, dsn, "rafiki_bk", "")
 
 	scratch, err := pgxpool.New(ctx, scratchDSN)
 	c.NoError(err, "connect the scratch database")
@@ -697,6 +687,20 @@ func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
 	var dbname string
 	c.NoError(scratch.QueryRow(ctx, "SELECT current_database()").Scan(&dbname), "current_database")
 	c.Eq(name, dbname, "the round trip must run against the scratch database, not RAFIKI_TEST_DSN's own")
+
+	// The extension is what this test exists for. A plain server would run the
+	// restore with beginTimescaleRestore's no-op and pass — proving nothing
+	// about the hooks, while looking exactly like a pass.
+	c.Require().Eq(int64(1), queryInt(t, scratch, "is timescaledb installed",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
+		"RAFIKI_TEST_DSN's server must have timescaledb installed (and in template1): this round trip "+
+			"is the only test of the extension's restore hooks, and it proves nothing without them")
+	// Before the backup, so a restore that silently turned the parent into a
+	// plain table is a difference rather than a coincidence.
+	c.Eq(int64(1), queryInt(t, scratch, "the hypertable before the backup",
+		`SELECT count(*) FROM timescaledb_information.hypertables
+		  WHERE hypertable_name = 'conversation_turn'`),
+		"conversations.conversation_turn must be a hypertable here, or the restore proves nothing")
 
 	const (
 		username = "bk-roundtrip"
@@ -745,18 +749,16 @@ func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
 		"read the memory back after the restore")
 	c.Eq(memBody, body, "the row a dump restore brings back must be the one the backup wrote")
 
-	// A hypertable is the part of this schema a plain-table database cannot
-	// exercise: a --clean that dropped the parent and recreated it as an
-	// ordinary table would still return the row, and would still be a broken
-	// install. Asserted only where the extension is present, since the chain
-	// deliberately creates plain tables without it.
-	if queryInt(t, readback, "is timescaledb installed",
-		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`) == 1 {
-		c.Eq(int64(1), queryInt(t, readback, "the hypertable after the restore",
-			`SELECT count(*) FROM timescaledb_information.hypertables
-			  WHERE hypertable_name = 'conversation_turn'`),
-			"conversations.conversation_turn must still be a hypertable after a dump restore")
-	}
+	c.Eq(int64(1), queryInt(t, readback, "the hypertable after the restore",
+		`SELECT count(*) FROM timescaledb_information.hypertables
+		  WHERE hypertable_name = 'conversation_turn'`),
+		"conversations.conversation_turn must still be a hypertable after a dump restore")
+	// The hooks put the extension back: a restore that left the database in
+	// restoring mode would have the extension's DDL hooks off for every new
+	// session, which is the failure the bracket exists to prevent.
+	var restoring string
+	c.NoError(readback.QueryRow(ctx, "SHOW timescaledb.restoring").Scan(&restoring), "SHOW timescaledb.restoring")
+	c.Eq("off", restoring, "the restore must leave the extension's restore mode off, got %q", restoring)
 }
 
 // dsnForDatabase points a test DSN at another database on the same server,
@@ -771,4 +773,190 @@ func dsnForDatabase(t *testing.T, dsn, name string) string {
 		return u.String()
 	}
 	return dsn + " dbname=" + name
+}
+
+// TestEmbeddedPostgresDaemonReconnectsAfterAPhysicalBackup pins what an operator
+// sees when they accept a physical backup's downtime on a live install: the
+// server goes away under the daemon, and the daemon reconnects on its own. It
+// does not sit without a database until rafikid itself is restarted, which is
+// what makes `db backup --force` (and a physical restore) usable there rather
+// than a stop-the-world operation nobody would run.
+//
+// The row is written and read THROUGH the daemon, so the claim is about the
+// daemon's pool. A client dialling afresh would prove nothing about it, and a
+// one-shot assertion would be a race: the pool discards a dead connection when
+// it next needs one, so the read is retried until the daemon answers.
+func TestEmbeddedPostgresDaemonReconnectsAfterAPhysicalBackup(t *testing.T) {
+	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
+		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads ~15 MB once)")
+	}
+	c := assert.NewAborting(t)
+
+	dirs := newEmbeddedDirs(t)
+	t.Setenv("XDG_DATA_HOME", dirs.data)
+	t.Setenv("XDG_STATE_HOME", dirs.state)
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+	server := embedpg.Default()
+	t.Cleanup(func() {
+		if !stopEmbeddedServer(t, server) {
+			return
+		}
+		if err := os.RemoveAll(dirs.root); err != nil {
+			t.Logf("remove %s: %v", dirs.root, err)
+		}
+	})
+
+	env := dirs.env()
+	out, err := runRafikid(env, "migrate")
+	c.NoError(err, "rafikid migrate: %v\noutput: %s", err, out)
+	out, err = runRafikid(env, "user", "create", "epg-live", "--token")
+	c.NoError(err, "rafikid user create: %v\noutput: %s", err, out)
+	token, ok := userTokenFromCreate(out)
+	c.Require().True(ok, "no token in `rafikid user create --token` output: %s", out)
+
+	d := bootEmbeddedDaemon(t, dirs)
+	client := d.control(t)
+
+	const (
+		memPath = "embedded_pg_live"
+		memName = "backup"
+		memBody = "written before the backup stopped the server"
+	)
+	call := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, err := client.PutMemory(ctx, authorize(token, connect.NewRequest(&rafikiv1.PutMemoryRequest{
+			Path: memPath, Name: memName, Body: memBody,
+		})))
+		return err
+	}
+	c.NoError(call(), "PutMemory before the backup")
+
+	backupPath := filepath.Join(dirs.root, "live")
+	out, err = runRafikid(env, "db", "backup", "--format", "txz", "--force", backupPath)
+	c.NoError(err, "rafikid db backup against a live daemon: %v\noutput: %s", err, out)
+
+	c.Eventually(60*time.Second, "the daemon serves again after the shared server restarted", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		got, err := client.GetMemory(ctx, authorize(token, connect.NewRequest(&rafikiv1.GetMemoryRequest{
+			Path: memPath, Name: memName,
+		})))
+		if err != nil {
+			return err
+		}
+		if body := got.Msg.GetMemory().GetBody(); body != memBody {
+			return fmt.Errorf("the memory body came back as %q, want %q", body, memBody)
+		}
+		return nil
+	})
+}
+
+// scratchDatabase creates a database on the RAFIKI_TEST_DSN server and returns
+// its name and a DSN pointing at it. template is the template database to copy,
+// or "" for the server's default; template0 is how a test asks for a database
+// carrying none of template1's extensions.
+//
+// The DSN is rewritten, never built from pgxpool.Config.ConnString(): that
+// returns the ORIGINAL string (pgconn.ConnConfig keeps it), so assigning
+// ConnConfig.Database leaves the DSN naming RAFIKI_TEST_DSN's own database —
+// which is how a restore ends up aimed at rafiki_test.
+func scratchDatabase(t *testing.T, admin *pgxpool.Pool, dsn, prefix, template string) (name, scratchDSN string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+
+	name = fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	create := "CREATE DATABASE " + name
+	if template != "" {
+		create += " TEMPLATE " + template
+	}
+	_, err := admin.Exec(context.Background(), create)
+	c.NoError(err, "create scratch database %s", name)
+	// Registered after the caller's admin.Close, so it runs BEFORE it (cleanups
+	// are LIFO) and the pool it uses is still open.
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+			t.Logf("drop scratch database %s: %v", name, err)
+		}
+	})
+	return name, dsnForDatabase(t, dsn, name)
+}
+
+// TestDbRestoreIntoAFreshDatabaseWithoutTheExtension pins the one Timescale
+// restore path that needs NO hooks: a target where the extension is available
+// but not installed. The archive's own CREATE EXTENSION creates it, so --clean
+// finds nothing to drop and pg_restore's ALTER TABLE ONLY statements never reach
+// a hypertable — which is what makes the documented rehearsal ("restore the
+// dump into a new database") work, and work for a role that is not a superuser.
+//
+// The target is created from template0 ON PURPOSE: rafiki's test container puts
+// timescaledb in template1, so an ordinary new database would have it installed
+// and this would be the in-place case again.
+func TestDbRestoreIntoAFreshDatabaseWithoutTheExtension(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+	c := assert.NewAborting(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	c.NoError(err, "connect the test server")
+	t.Cleanup(admin.Close)
+
+	// The source is an ordinary database: migrated, with a row to find again.
+	_, sourceDSN := scratchDatabase(t, admin, dsn, "rafiki_bk_src", "")
+	source, err := pgxpool.New(ctx, sourceDSN)
+	c.NoError(err, "connect the source database")
+	t.Cleanup(source.Close)
+	c.NoError(store.Migrate(ctx, source), "migrate the source database")
+
+	const (
+		memBody = "the row a restore into a fresh database has to bring back"
+		memName = "roundtrip"
+	)
+	var ownerID string
+	c.NoError(source.QueryRow(ctx, `INSERT INTO conversations.users (username, token_sha256)
+		VALUES ('bk-fresh', 'fresh') RETURNING id`).Scan(&ownerID), "insert the memory's owner")
+	_, err = source.Exec(ctx, `INSERT INTO conversations.memory (owner_user_id, path, name, body)
+		VALUES ($1, 'timescale_pg', $2, $3)`, ownerID, memName, memBody)
+	c.NoError(err, "write the memory")
+
+	env := append(os.Environ(), "RAFIKI_DB="+sourceDSN)
+	backupPath := filepath.Join(t.TempDir(), "fresh.dump")
+	out, err := runRafikid(env, "db", "backup", "--db", sourceDSN, "--format", "dump", backupPath)
+	c.NoError(err, "rafikid db backup: %v\noutput: %s", err, out)
+
+	// The target: empty, and without the extension.
+	_, targetDSN := scratchDatabase(t, admin, dsn, "rafiki_bk_dst", "template0")
+	target, err := pgxpool.New(ctx, targetDSN)
+	c.NoError(err, "connect the fresh database")
+	t.Cleanup(target.Close)
+	c.Require().Eq(int64(0), queryInt(t, target, "is timescaledb absent",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
+		"the fresh database must NOT have the extension installed, or this is the in-place case")
+	c.Require().Eq(int64(1), queryInt(t, target, "is timescaledb available",
+		`SELECT count(*) FROM pg_available_extensions WHERE name = 'timescaledb'`),
+		"the fresh database must be on a server that can create the extension")
+
+	out, err = runRafikid(append(os.Environ(), "RAFIKI_DB="+targetDSN),
+		"db", "restore", "--force", "--db", targetDSN, backupPath)
+	c.NoError(err, "rafikid db restore into a fresh database: %v\noutput: %s", err, out)
+
+	// The archive carried the extension, so the database is a TimescaleDB one
+	// now — and it is whole, not the half-built result of a refused `ONLY`.
+	var body string
+	c.NoError(target.QueryRow(ctx, `SELECT body FROM conversations.memory
+		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName).Scan(&body),
+		"read the memory back from the fresh database")
+	c.Eq(memBody, body, "the row the backup wrote must be the row the fresh database holds")
+	c.Eq(int64(1), queryInt(t, target, "the extension the archive created",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
+		"the archive's CREATE EXTENSION must have installed timescaledb")
+	c.Eq(int64(1), queryInt(t, target, "the hypertable in the fresh database",
+		`SELECT count(*) FROM timescaledb_information.hypertables
+		  WHERE hypertable_name = 'conversation_turn'`),
+		"conversations.conversation_turn must be a hypertable in the restored database")
 }

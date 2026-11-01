@@ -286,7 +286,7 @@ func TestDbBackupRefusesOlderPgDump(t *testing.T) {
 // watch the order — in particular that the lock spans the whole sequence, that
 // the restart cannot be skipped, and that a server that was down is never started.
 func stubBackupOps(t *testing.T, running bool, stop func(context.Context, embedpg.Server) error,
-	pack func(io.Writer, string, string) error, ops *[]string) {
+	pack func(context.Context, io.Writer, string, string) error, ops *[]string) {
 	t.Helper()
 
 	// A real data directory: the command stats it before asking anything, and a
@@ -329,7 +329,7 @@ func TestDbBackupPhysicalRestartsAfterFailedArchive(t *testing.T) {
 			ops = append(ops, "stop")
 			return nil
 		},
-		func(io.Writer, string, string) error {
+		func(context.Context, io.Writer, string, string) error {
 			ops = append(ops, "pack")
 			return errors.New("no space left on device")
 		},
@@ -360,7 +360,7 @@ func TestDbBackupPhysicalRestartsEvenAfterAFailedStop(t *testing.T) {
 			ops = append(ops, "stop")
 			return errors.New("pg_ctl: server does not shut down")
 		},
-		func(io.Writer, string, string) error {
+		func(context.Context, io.Writer, string, string) error {
 			ops = append(ops, "pack")
 			return nil
 		},
@@ -385,7 +385,7 @@ func TestDbBackupPhysicalRefusesToStopARunningServerWithoutForce(t *testing.T) {
 			t.Error("stop was called without --force")
 			return nil
 		},
-		func(io.Writer, string, string) error {
+		func(context.Context, io.Writer, string, string) error {
 			t.Error("pack was called without --force")
 			return nil
 		},
@@ -415,7 +415,7 @@ func TestDbBackupPhysicalLeavesAColdInstallAlone(t *testing.T) {
 			t.Error("stop was called for a server that was not running")
 			return nil
 		},
-		func(w io.Writer, _ string, _ string) error {
+		func(_ context.Context, w io.Writer, _ string, _ string) error {
 			ops = append(ops, "pack")
 			_, err := io.WriteString(w, "archive bytes")
 			return err
@@ -464,7 +464,7 @@ func TestDbBackupPhysicalRefusesAMissingDataDir(t *testing.T) {
 			t.Error("start was called with no data directory")
 			return nil
 		},
-		pack: func(io.Writer, string, string) error {
+		pack: func(context.Context, io.Writer, string, string) error {
 			t.Error("pack was called with no data directory")
 			return nil
 		},
@@ -503,7 +503,7 @@ func TestDbBackupPhysicalRefusesAPathInsideTheDataDir(t *testing.T) {
 			t.Error("stop was called for a path refusal")
 			return nil
 		},
-		func(io.Writer, string, string) error {
+		func(context.Context, io.Writer, string, string) error {
 			t.Error("pack was called for a path refusal")
 			return nil
 		},
@@ -524,26 +524,26 @@ func TestDbBackupPhysicalRefusesAPathInsideTheDataDir(t *testing.T) {
 // it — dropping WithoutCancel fails this test.
 func TestDbBackupPhysicalRestartSurvivesACancelledContext(t *testing.T) {
 	var ops []string
+	ctx, cancel := context.WithCancel(context.Background())
 	stubBackupOps(t, true,
 		func(context.Context, embedpg.Server) error {
 			ops = append(ops, "stop")
 			return nil
 		},
-		func(io.Writer, string, string) error {
+		func(context.Context, io.Writer, string, string) error {
 			ops = append(ops, "pack")
+			cancel() // the operator's Ctrl-C, arriving once the server is down
 			return errors.New("interrupted")
 		},
 		&ops)
 
 	var startCtxErr error
-	backupEmbedded.start = func(ctx context.Context, _ embedpg.Server) error {
+	backupEmbedded.start = func(startCtx context.Context, _ embedpg.Server) error {
 		ops = append(ops, "start")
-		startCtxErr = ctx.Err()
+		startCtxErr = startCtx.Err()
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	err := runBackup(ctx, embeddedDSN, filepath.Join(t.TempDir(), "app"), formatTXZ, true, io.Discard)
 
 	c := assert.NewAborting(t)
@@ -562,7 +562,7 @@ func TestDbBackupPhysicalSurfacesAFailedRestart(t *testing.T) {
 			ops = append(ops, "stop")
 			return nil
 		},
-		func(w io.Writer, _ string, _ string) error {
+		func(_ context.Context, w io.Writer, _ string, _ string) error {
 			ops = append(ops, "pack")
 			_, err := io.WriteString(w, "archive bytes")
 			return err
@@ -603,7 +603,7 @@ func TestDbBackupPhysicalArchiveRoundTrip(t *testing.T) {
 		t.Run(format, func(t *testing.T) {
 			var buf bytes.Buffer
 			c := assert.NewAborting(t)
-			c.NoError(writeDataDirArchive(&buf, dir, format), "writeDataDirArchive returned error")
+			c.NoError(writeDataDirArchive(context.Background(), &buf, dir, format), "writeDataDirArchive returned error")
 
 			var r io.Reader
 			switch format {
@@ -657,7 +657,7 @@ func TestDbBackupArchiveRefusesAFifo(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := writeDataDirArchive(&buf, dir, formatTGZ)
+	err := writeDataDirArchive(context.Background(), &buf, dir, formatTGZ)
 
 	c := assert.NewAborting(t)
 	c.Error(err, "want a refusal for a fifo in the data directory, got nil")
@@ -688,7 +688,7 @@ func TestDbBackupArchiveRefusesAnEscapingSymlink(t *testing.T) {
 			c.NoError(os.Symlink(tc.target, link), "symlink %s -> %s", link, tc.target)
 
 			var buf bytes.Buffer
-			err := writeDataDirArchive(&buf, dir, formatTGZ)
+			err := writeDataDirArchive(context.Background(), &buf, dir, formatTGZ)
 
 			c.Error(err, "want a refusal for a symlink target the restore refuses, got nil")
 			c.StrContains(err.Error(), link, "the refusal must name the entry, got: %v", err)
@@ -704,7 +704,7 @@ func TestDbBackupArchiveRefusesAnEscapingSymlink(t *testing.T) {
 	c.NoError(os.Symlink("PG_VERSION", filepath.Join(dir, "version-link")), "symlink")
 
 	var buf bytes.Buffer
-	c.NoError(writeDataDirArchive(&buf, dir, formatTGZ), "a sibling symlink must be archived, got error")
+	c.NoError(writeDataDirArchive(context.Background(), &buf, dir, formatTGZ), "a sibling symlink must be archived, got error")
 }
 
 // The cobra wiring, not just the function: one path and no more, an unknown
@@ -737,7 +737,7 @@ func TestDbBackupCmdWiring(t *testing.T) {
 			ops = append(ops, "stop")
 			return nil
 		},
-		func(w io.Writer, _ string, _ string) error {
+		func(_ context.Context, w io.Writer, _ string, _ string) error {
 			ops = append(ops, "pack")
 			_, werr := io.WriteString(w, "archive bytes")
 			return werr
@@ -809,4 +809,57 @@ func TestDbBackupFormatSuffixesCoverFormats(t *testing.T) {
 		c.True(ok, "format %q has no suffix in backupFormatExt", format)
 	}
 	c.Eq(3, len(backupFormatExt), "backupFormatExt must hold exactly the three formats, got: %v", backupFormatExt)
+}
+
+// An interrupt during an archive STOPS it. The server is stopped while this
+// runs, so a copy that ignored a Ctrl-C would hold the database down for its
+// whole length (minutes on a large data directory) and invite the SIGKILL that
+// leaves the server down for good.
+func TestDbBackupArchiveStopsWhenTheContextIsCancelled(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	dir := t.TempDir()
+	writeDataDirTree(t, dir, "original")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var buf bytes.Buffer
+	err := writeDataDirArchive(ctx, &buf, dir, formatTGZ)
+
+	c.Error(err, "want the cancellation, got nil")
+	c.True(errors.Is(err, context.Canceled), "the archive must stop with the context, got: %v", err)
+}
+
+// An interrupt that arrived BEFORE the stop is not acted on at all: the server
+// is still up, so the cheapest safe answer is to leave it up rather than stop it
+// and hand the operator a restart they did not ask for.
+func TestDbBackupDoesNotStopAServerAfterAnInterrupt(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var ops []string
+	stubBackupOps(t, true,
+		func(context.Context, embedpg.Server) error {
+			ops = append(ops, "stop")
+			return nil
+		},
+		func(context.Context, io.Writer, string, string) error {
+			ops = append(ops, "pack")
+			return nil
+		},
+		&ops)
+
+	dir := t.TempDir()
+	err := runBackup(ctx, embeddedDSN, filepath.Join(dir, "app"), formatTXZ, true, io.Discard)
+
+	c.Error(err, "want the cancellation, got nil")
+	c.True(errors.Is(err, context.Canceled), "error, got: %v", err)
+	c.StrContains(err.Error(), "was not stopped", "the error must say what was left alone, got: %v", err)
+	c.EqDeep([]string{"lock", "status", "unlock"}, ops,
+		"an interrupted run must not stop or start a server it never touched, got ops")
+	entries, rerr := os.ReadDir(dir)
+	c.NoError(rerr, "read the backup directory")
+	c.Eq(0, len(entries), "an interrupted backup must leave no file behind, got: %v", entries)
 }

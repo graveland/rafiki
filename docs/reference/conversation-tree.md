@@ -686,7 +686,10 @@ cutover is a restart.
    what makes the backup and the rehearsal copy cheap.
 2. Stop the daemon. `pg_dump -Fc` the database.
 3. **Rehearse:** restore the dump into a new database `rafiki_migrate`
-   (`timescaledb_pre_restore()` before, `timescaledb_post_restore()` after).
+   (`timescaledb_pre_restore()` before, `timescaledb_post_restore()` after —
+   `rafikid db restore --force --db <new database> <dump>` does both itself when
+   the target database has the extension, and needs neither when it does not,
+   which is what a database created from `template0` gives you).
    Restoring, rather than `CREATE DATABASE … TEMPLATE`, is the point: it proves
    the backup restores. Run `rafikid migrate` against it, then `rafikid tree
    check`, and record the time of each step. Repeat from the dump until clean.

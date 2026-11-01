@@ -103,6 +103,20 @@ them pg_restore stops at the first `ALTER TABLE ONLY ... DROP CONSTRAINT` with
 when the restore fails, because `pre_restore` leaves the extension's DDL hooks
 off database-wide until it does.
 
+That bracketing has two consequences a production operator at this privilege
+level will meet. **The hooks need a superuser connection**: they run `ALTER
+DATABASE ... SET timescaledb.restoring`, which no other role may set, so an
+in-place restore over a TimescaleDB database is refused cleanly — before anything
+is touched — unless `--db` names a superuser's connection. The daemon's own role
+deliberately is not one, which is why this verb is an operator step and not
+something the daemon runs. (Restoring into a database where the extension is not
+installed yet needs no hooks: the archive creates it, so a rehearsal restore into
+a fresh database works for any role.) **Stop every daemon on the database
+first**, dump restores included: `pre_restore` works by setting a database-level
+default, so a connection opened while the restore runs inherits the restoring
+flag for its whole life, and the post call cannot clear a session that is
+already open.
+
 ## The daemon image
 
 The `Dockerfile`'s default target, `release`, builds the daemon image:
@@ -273,13 +287,13 @@ order that matters:
 
 1. Truncate the debugging tables you do not need in the backup
    (`conversations.raw_http_request`), then `pg_dump -Fc` with the daemon
-   stopped (`rafikid db backup --format dump <path>` is the same dump when the
+   stopped (`rafikid db backup --format dump <path>` is the same dump, when the
    daemon host has a matching `pg_dump`). **The dump is the rollback** — a
-   migration that rewrites data has no
-   down path worth trusting.
-2. Rehearse the restore (`timescaledb_pre_restore()` / `…_post_restore()` for a
-   hypertable; `rafikid db restore --force <path>` does both around pg_restore
-   itself), migrate, `rafikid tree check`, repeat until clean.
+   migration that rewrites data has no down path worth trusting.
+2. Rehearse the restore (into a fresh database, or in place as `rafikid db
+   restore --force <path>`, which runs `timescaledb_pre_restore()` and
+   `timescaledb_post_restore()` around pg_restore itself when the target has the
+   extension), migrate, `rafikid tree check`, repeat until clean.
 3. On the real database: stop every daemon writing to it, `rafikid migrate`
    (capture the log — the backfill's own validity signal is a line only it
    prints), `rafikid tree check` (must exit 0), `VACUUM FULL` the rewritten table
