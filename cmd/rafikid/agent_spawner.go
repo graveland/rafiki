@@ -145,22 +145,27 @@ func sortAgents(a []tools.AgentInfo) {
 // Models answers agent_models. The alias rows come from the caller's owner,
 // read off the spawning child itself: a child has no Connect identity on this
 // path, so its OWN lineage is what names whose aliases it may see.
+//
+// An unresolved owner is tolerated HERE, unlike the tag verbs below: this is a
+// read, and a "" owner grants nothing — ListModelRows with no owner simply
+// carries no owner-scoped aliases, so refusing would cost an ownerless
+// (anonymous) child its model list for no authority gained. A tag write is the
+// opposite: there "" is the NULL-owner shape, which the tag authority reads as
+// the daemon's own local trust.
 func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	owner, err := s.selfOwner()
-	if err != nil {
-		return nil, err
-	}
+	owner, _ := s.c.OwnerUserIDForChild(s.selfID)
 	return spawnerModels(ctx, s.c, owner, q)
 }
 
-// selfOwner resolves the owner of the child this spawner speaks for. An
-// unresolved owner must never fall through as "": a zero UserID is the
-// NULL-owner shape, which the tag authority and the owner guard both read as
-// the daemon's own local trust, so the tool would act with more authority than
-// its caller has. Every verb below refuses instead.
+// selfOwner resolves the owner of the child this spawner speaks for, refusing
+// when there is none. An unresolved owner must never fall through as "": a zero
+// UserID is the NULL-owner shape, which the tag authority and the owner guard
+// both read as the daemon's own local trust, so the tool would act with more
+// authority than its caller has. Every TAG verb below refuses instead; Models
+// above reads tolerantly, for the reason stated there.
 func (s *controllerSpawner) selfOwner() (string, error) {
 	owner, ok := s.c.OwnerUserIDForChild(s.selfID)
-	if !ok || owner == "" {
+	if !ok {
 		return "", fmt.Errorf("agent %s has no resolvable owner; refusing to act on an unowned identity", s.selfID)
 	}
 	return owner, nil

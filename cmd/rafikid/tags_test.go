@@ -468,11 +468,12 @@ func TestListTagsUntaggedHistoryKeepsTheLeakGuard(t *testing.T) {
 	}
 }
 
-// A spawner whose own child is unknown to the controller resolves no owner, and
-// every tag verb must refuse rather than hand the tag authority an empty
-// UserID: "" is the NULL-owner shape, which the fundi path reads as the
-// daemon's own local trust, so proceeding would act with more authority than
-// the caller has.
+// A spawner whose own child is unknown to the controller resolves no owner. The
+// TAG verbs must refuse rather than hand the tag authority an empty UserID: ""
+// is the NULL-owner shape, which the fundi path reads as the daemon's own local
+// trust, so proceeding would act with more authority than the caller has.
+// agent_models is the deliberate exception — a read, where "" grants nothing but
+// an ownerless child's own model list.
 func TestAgentTagToolsRefuseAnUnresolvedOwner(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	f := newForkFixture(t)
@@ -494,9 +495,11 @@ func TestAgentTagToolsRefuseAnUnresolvedOwner(t *testing.T) {
 	ck.Require().Error(err, "agent_tags refuses an unresolved owner")
 	ck.StrContains(err.Error(), want, "agent_tags names the agent it could not attribute")
 
-	_, err = sp.Models(ctx, tools.ModelQuery{})
-	ck.Require().Error(err, "agent_models refuses an unresolved owner")
-	ck.StrContains(err.Error(), want, "agent_models names the agent it could not attribute")
+	// A read tolerates the unresolved owner: no aliases, but the model list
+	// still answers rather than failing an ownerless child outright.
+	models, err := sp.Models(ctx, tools.ModelQuery{})
+	ck.Require().NoError(err, "agent_models tolerates an unresolved owner")
+	ck.NotEmpty(models, "agent_models still lists the models it can see")
 
 	// Nothing was written under the empty owner the refusal replaced.
 	for _, ownerUserID := range []string{"", f.owner} {
