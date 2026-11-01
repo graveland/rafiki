@@ -140,8 +140,21 @@ func (s Server) ensureBinaries(ctx context.Context) error {
 		os.Remove(jar)
 		return err
 	}
-	return os.Remove(jar)
+	// The tree is what this function is for, and it is complete: a jar that will
+	// not go away is debris the next run's embedpg-* sweep collects, not a failed
+	// install.
+	_ = os.Remove(jar)
+	return nil
 }
+
+// maxDownloadBytes bounds one jar download. The pinned artifacts are 15-35 MB;
+// the limit is generous enough for a future build and small enough that a
+// broken or hostile mirror cannot fill the cache disk before the digest check
+// refuses the bytes.
+//
+// A variable, not a constant, so the bound itself is testable without
+// downloading 128 MB.
+var maxDownloadBytes int64 = 128 << 20
 
 // download fetches url into a temporary file in dir, returning its path and the
 // hex sha256 of the bytes written. The digest covers exactly what landed on
@@ -160,16 +173,30 @@ func (s Server) download(ctx context.Context, url, dir string) (string, string, 
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("embedpg: %s: unexpected status %s", url, resp.Status)
 	}
+	// A declared length over the bound is refused before a byte is written. The
+	// length is the mirror's claim, so the copy below is bounded independently.
+	if resp.ContentLength > maxDownloadBytes {
+		return "", "", fmt.Errorf("embedpg: %s: %d bytes exceeds the %d-byte download limit",
+			url, resp.ContentLength, maxDownloadBytes)
+	}
 
 	f, err := os.CreateTemp(dir, "embedpg-*.jar")
 	if err != nil {
 		return "", "", fmt.Errorf("embedpg: %w", err)
 	}
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxDownloadBytes+1))
+	if err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return "", "", fmt.Errorf("embedpg: %s: %w", url, err)
+	}
+	// One byte past the bound is what the LimitReader allows through, so a body
+	// that reached it is over the limit whether or not it declared a length.
+	if n > maxDownloadBytes {
+		f.Close()
+		os.Remove(f.Name())
+		return "", "", fmt.Errorf("embedpg: %s: download exceeds the %d-byte limit", url, maxDownloadBytes)
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(f.Name())

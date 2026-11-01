@@ -2,6 +2,10 @@
 // install: it downloads and verifies the server binaries, initialises a data
 // directory, and starts the server listening on a unix socket only. It is
 // daemon-only: cmd/rafiki must never import it.
+//
+// Every subprocess it starts gets a minimal environment (see command): the
+// postmaster outlives the command that started it, so nothing rafikid was
+// started with — RAFIKI_SECRETS_KEY above all — may be readable from it.
 package embedpg
 
 import (
@@ -140,6 +144,37 @@ func lockFile(ctx context.Context, f *os.File) error {
 	}
 }
 
+// command builds one embedpg subprocess. Every exec in this package goes
+// through it, because the environment here is a security property and not a
+// convenience: initdb starts a cluster, pg_ctl starts the postmaster, and that
+// postmaster outlives the command that started it — its environment stays
+// readable (ps eww, /proc/<pid>/environ) for as long as it runs, and nothing in
+// this package ever stops it. By the time Ensure runs, rafikid has already been
+// started with RAFIKI_SECRETS_KEY and its provider API keys in its own
+// environment, so handing a child os.Environ() would keep those alive in the one
+// process that lives longest.
+func command(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = execEnv()
+	return cmd
+}
+
+// execEnv is the whole environment an embedpg subprocess gets: PATH, so the
+// binaries resolve their own helpers, HOME, and TMPDIR when it is set. It is a
+// whitelist rather than a filtered copy of os.Environ() on purpose — a new
+// variable appearing in the daemon's environment cannot widen it by accident.
+// The cluster's locale is fixed by initdb's --locale=C, so no LANG/LC_* is
+// needed, and a postmaster has no use for anything else here.
+func execEnv() []string {
+	env := make([]string, 0, 3)
+	for _, name := range []string{"PATH", "HOME", "TMPDIR"} {
+		if v := os.Getenv(name); v != "" {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
+}
+
 // checkDataDir refuses a data directory that is not absolute. Postgres resolves
 // a relative unix_socket_directories against its own data directory, so the
 // socket would not be where the length check below thinks it is.
@@ -193,7 +228,7 @@ func (s Server) initIfNeeded(ctx context.Context) error {
 	}
 
 	initdb := filepath.Join(s.BinDir, "bin", "initdb")
-	out, err := exec.CommandContext(ctx, initdb,
+	out, err := command(ctx, initdb,
 		"-D", staging,
 		"-U", "rafiki",
 		"--auth-local=trust",
@@ -257,7 +292,16 @@ func (s Server) checkVersion() error {
 // create — an upgrade, a restored backup, one built by hand — gets the same
 // treatment as one initdb made here. Without it Postgres ignores rafiki.conf
 // entirely and falls back to its own defaults, which listen on TCP localhost.
+//
+// The 0700 mode is re-asserted here for the same reason: initIfNeeded narrows a
+// directory it just created, and nothing else re-checks a mode that has drifted
+// since (a copy, a restore, a chmod by hand). The data directory is the access
+// control for this server — it is also the socket directory, and pg_hba is
+// `trust` for local — so a group-readable one admits group members as superuser.
 func (s Server) prepareDataDir() error {
+	if err := os.Chmod(s.DataDir, 0o700); err != nil {
+		return fmt.Errorf("embedpg: data dir %s: %w", s.DataDir, err)
+	}
 	if err := s.writeRafikiConf(); err != nil {
 		return err
 	}
@@ -273,7 +317,11 @@ func (s Server) writeRafikiConf() error {
 	body := "# Written by rafikid on every start; edits are overwritten.\n" +
 		"listen_addresses = ''\n" +
 		"port = " + strconv.Itoa(Port) + "\n" +
-		"unix_socket_directories = '" + quoteConf(s.DataDir) + "'\n"
+		"unix_socket_directories = '" + quoteConf(s.DataDir) + "'\n" +
+		// The socket inherits the data directory's mode by default, but the
+		// setting is what makes the guarantee independent of the directory's
+		// mode on disk; 0700 is octal, as postgresql.conf reads it.
+		"unix_socket_permissions = 0700\n"
 
 	path := filepath.Join(s.DataDir, "rafiki.conf")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -327,7 +375,7 @@ func (s Server) ensureInclude() error {
 // failure worth reporting.
 func (s Server) status(ctx context.Context) (bool, error) {
 	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
-	out, err := exec.CommandContext(ctx, pgctl, "status", "-D", s.DataDir).CombinedOutput()
+	out, err := command(ctx, pgctl, "status", "-D", s.DataDir).CombinedOutput()
 	if err == nil {
 		return true, nil
 	}
@@ -346,7 +394,7 @@ func (s Server) start(ctx context.Context) error {
 		return fmt.Errorf("embedpg: %w", err)
 	}
 	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
-	out, err := exec.CommandContext(ctx, pgctl,
+	out, err := command(ctx, pgctl,
 		"start", "-w", "-t", "60", "-D", s.DataDir, "-l", s.LogPath,
 	).CombinedOutput()
 	if err != nil {

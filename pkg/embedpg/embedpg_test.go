@@ -106,7 +106,8 @@ func TestRafikiConfQuotesSocketDir(t *testing.T) {
 	want := "# Written by rafikid on every start; edits are overwritten.\n" +
 		"listen_addresses = ''\n" +
 		"port = 5432\n" +
-		"unix_socket_directories = '" + dir + `/o''brien\\pg'` + "\n"
+		"unix_socket_directories = '" + dir + `/o''brien\\pg'` + "\n" +
+		"unix_socket_permissions = 0700\n"
 	c.Eq(want, string(body), "rafiki.conf")
 
 	info, err := os.Stat(filepath.Join(dataDir, "rafiki.conf"))
@@ -220,6 +221,55 @@ func TestEnsureLockWaitHonoursContext(t *testing.T) {
 	c := assert.NewCollecting(t)
 	c.ErrorIs(err, context.Canceled)
 	c.Less(2*time.Second, elapsed, "Ensure waited %s behind a held lock", elapsed)
+}
+
+// The data directory is the access control for this server — it is also the
+// socket directory, and local auth is `trust` — so its mode is re-asserted on
+// every start, not just when initdb happened to create it. A directory that was
+// copied, restored, or chmodded by hand is exactly the case this catches.
+func TestPrepareDataDirRestoresDataDirMode(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "postgresql.conf"), []byte("# as initdb left it\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(dataDir, 0o750); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	s := Server{DataDir: dataDir}
+
+	c := assert.NewCollecting(t)
+	c.NoError(s.prepareDataDir())
+
+	info, err := os.Stat(dataDir)
+	c.NoError(err)
+	c.Eq(os.FileMode(0o700), info.Mode().Perm(), "data dir mode after prepareDataDir")
+
+	rafiki, err := os.ReadFile(filepath.Join(dataDir, "rafiki.conf"))
+	c.NoError(err)
+	c.StrContains(string(rafiki), "unix_socket_permissions = 0700")
+}
+
+// The postmaster outlives the command that started it, and its environment is
+// readable (ps eww, /proc/<pid>/environ) for as long as it runs. The daemon has
+// already been started with RAFIKI_SECRETS_KEY and its provider API keys by the
+// time Ensure runs, so none of them may reach a subprocess. This drives the
+// helper every exec in the package is built by, so it fails if one goes back to
+// inheriting os.Environ().
+func TestSubprocessEnvironmentIsMinimal(t *testing.T) {
+	t.Setenv("RAFIKI_SECRETS_KEY", "sentinel-secrets-key")
+	t.Setenv("OPENROUTER_API_KEY", "sentinel-provider-key")
+	t.Setenv("PGPASSWORD", "sentinel-pg-password")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "sentinel-aws-key")
+
+	cmd := command(context.Background(), filepath.Join(t.TempDir(), "initdb"), "-D", "staging")
+
+	c := assert.NewCollecting(t)
+	c.NotZero(len(cmd.Env), "subprocess environment is empty; PATH must survive")
+	for _, kv := range cmd.Env {
+		c.NotStrContains(kv, "sentinel", "subprocess environment leaked %q", kv)
+	}
+	// PATH is what lets the binaries find their own helpers.
+	c.StrContains(strings.Join(cmd.Env, "\n"), "PATH=")
 }
 
 // A relative data directory is refused: Postgres resolves a relative socket

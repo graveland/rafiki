@@ -7,11 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -358,4 +360,172 @@ func TestEnsureBinariesMissingTxz(t *testing.T) {
 	c := assert.NewCollecting(t)
 	c.ErrorContains(err, "postgres-test.txz")
 	c.NoDirExists(s.BinDir)
+}
+
+// An absolute entry name is refused by the extractor's own check. Without it,
+// filepath.Join would quietly anchor the name under the extraction root: the
+// archive would appear to succeed, which is why the assertion is on the error
+// and on BinDir, not on a file beside it.
+func TestExtractRejectsAbsoluteEntryName(t *testing.T) {
+	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+		{name: filepath.Join(t.TempDir(), "evil"), mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
+	})
+	srv, _ := serveJar(t, jar)
+	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "escapes the extraction root")
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
+// A symlink inside the tree may point at anything except an absolute path: the
+// link itself is harmless to create, but following it later is not.
+func TestExtractRejectsAbsoluteSymlinkTarget(t *testing.T) {
+	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+		{name: "lib", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "lib/x", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+	})
+	srv, _ := serveJar(t, jar)
+	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "points at the absolute path")
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
+// The extractor handles directories, regular files and symlinks, and refuses
+// everything else rather than guessing: a device node or a fifo in the archive
+// is not something this package can make.
+func TestExtractRejectsUnsupportedEntryType(t *testing.T) {
+	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+		{name: "bin", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "bin/pipe", mode: 0o644, typeflag: tar.TypeFifo},
+	})
+	srv, _ := serveJar(t, jar)
+	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "unsupported type")
+	c.ErrorContains(err, "bin/pipe")
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
+// A mirror answering anything but 200 is an error naming the status, and it
+// leaves nothing behind: no jar, no tree.
+func TestEnsureBinariesRejectsNon200(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "gone", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "unexpected status")
+	c.ErrorContains(err, "404")
+	c.Eq(int64(1), hits.Load(), "requests")
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
+// A declared length past the cap is refused before a byte is written, so a
+// broken or hostile mirror cannot fill the cache disk on the way to a digest
+// check that would have refused the bytes anyway.
+func TestDownloadRejectsDeclaredLengthOverLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1099511627776") // 1 TiB
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "download limit")
+	c.ErrorContains(err, strconv.FormatInt(maxDownloadBytes, 10))
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
+// countingBody records how much of a response the client actually read, which
+// is what tells a bounded copy apart from an unbounded one that only complains
+// afterwards.
+type countingBody struct {
+	r    io.Reader
+	read *atomic.Int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.read.Add(int64(n))
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+// countingTransport answers every request with body and no declared length, so
+// only the copy's own bound can stop it.
+type countingTransport struct {
+	body []byte
+	read *atomic.Int64
+}
+
+func (t countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Status:        "200 OK",
+		ContentLength: -1,
+		Body:          &countingBody{r: bytes.NewReader(t.body), read: t.read},
+	}, nil
+}
+
+// The declared length is the mirror's claim, so the copy is bounded
+// independently: a body streamed without a Content-Length stops at the cap
+// instead of landing on disk first and being refused afterwards. The assertion
+// is on how much was READ, not only on the error — a copy that read the whole
+// body and then checked the size would report the same error.
+func TestDownloadStopsAtLimitWhenLengthIsNotDeclared(t *testing.T) {
+	old := maxDownloadBytes
+	maxDownloadBytes = 64
+	t.Cleanup(func() { maxDownloadBytes = old })
+
+	var read atomic.Int64
+	s := testServer(t)
+	s.Client = &http.Client{Transport: countingTransport{
+		body: bytes.Repeat([]byte("x"), 1<<20),
+		read: &read,
+	}}
+
+	_, _, err := s.download(context.Background(), "http://example.invalid/jar", filepath.Dir(s.BinDir))
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "exceeds the")
+	c.ErrorContains(err, "limit")
+	c.LessOrEqual(maxDownloadBytes+1, read.Load(), "bytes read from the response")
+	assertNoDebris(t, s)
 }
