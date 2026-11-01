@@ -6,7 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -27,6 +30,40 @@ const embeddedDSN = string(installstate.DBModeEmbedded)
 // download instead of the real per-user install.
 var newEmbeddedServer = embedpg.Default
 
+// isEmbedded reports whether a configured DSN selects the private server.
+//
+// RAFIKI_DB=embedded is interpreted HERE, in resolveDSN and in the two accessors
+// below — nowhere else. The db verbs ask this instead of comparing the sentinel
+// themselves, so "which database is embedded" and "what does embedded mean" stay
+// one answer: pkg/embedpg names the server, this file decides when it is in use.
+func isEmbedded(configured string) bool {
+	return configured == embeddedDSN
+}
+
+// embeddedSettingHint spells the setting that selects the private server, from
+// the sentinel itself, so a message telling an operator how to get back to it
+// cannot drift from the value that does it.
+const embeddedSettingHint = "RAFIKI_DB=" + embeddedDSN
+
+// embeddedServer is the private server the embedded DSN names, exactly as
+// configured: it is NOT made ready. Server.Ensure is what starts one (and
+// downloads, and initdbs), so a caller that must not change whether the install
+// is up — a physical backup — needs the struct and nothing more.
+func embeddedServer() embedpg.Server {
+	return newEmbeddedServer()
+}
+
+// embeddedServerMajor is the PostgreSQL major the private server's binaries
+// carry, known without starting anything and without reading a data directory.
+func embeddedServerMajor() (int, error) {
+	major, err := strconv.Atoi(embedpg.MajorVersion)
+	if err != nil {
+		return 0, fmt.Errorf("embedded database: cannot read the server's major version %q: %w",
+			embedpg.MajorVersion, err)
+	}
+	return major, nil
+}
+
 // resolveDSN turns a configured DSN into one pgx can dial. "embedded" starts
 // the private server if it is not running (downloading its binaries on first
 // use, progress on stderr), creates its database if it is absent, and returns
@@ -34,21 +71,30 @@ var newEmbeddedServer = embedpg.Default
 // "embedded" is interpreted, and the only place an embedded database is
 // created.
 func resolveDSN(ctx context.Context, dsn string) (string, error) {
-	if dsn != embeddedDSN {
+	if !isEmbedded(dsn) {
 		return dsn, nil
 	}
-	s := newEmbeddedServer()
+	_, resolved, err := resolveEmbedded(ctx)
+	return resolved, err
+}
+
+// resolveEmbedded is the embedded half of resolveDSN: the server that answers to
+// the embedded sentinel, made ready, and the DSN naming the database it serves.
+// A caller that needs the Server itself (a physical backup, which must NOT make
+// it ready) asks embeddedServer instead — this one starts it.
+func resolveEmbedded(ctx context.Context) (embedpg.Server, string, error) {
+	s := embeddedServer()
 	s.Progress = os.Stderr
 	// Ensure starts the server; it does not create Database, because
 	// pkg/embedpg opens no connection and a CREATE DATABASE is one. A fresh
 	// cluster has only the maintenance database.
 	if _, err := s.Ensure(ctx); err != nil {
-		return "", fmt.Errorf("embedded database: %w", err)
+		return embedpg.Server{}, "", fmt.Errorf("embedded database: %w", err)
 	}
 	if err := ensureEmbeddedDatabase(ctx, s); err != nil {
-		return "", err
+		return embedpg.Server{}, "", err
 	}
-	return s.DSN(), nil
+	return s, s.DSN(), nil
 }
 
 // createEmbeddedDatabase makes the database a resolved embedded DSN names. It
@@ -57,20 +103,93 @@ func resolveDSN(ctx context.Context, dsn string) (string, error) {
 // maintenance DSN it is issued on, and the SQLSTATE it tolerates — does not.
 var createEmbeddedDatabase = createEmbeddedDatabaseFor
 
-// createEmbeddedDatabaseFor runs the CREATE DATABASE over a short-lived
-// connection to the maintenance database: initdb creates only that one, so it
-// is the only database a fresh cluster can be asked from. The connection is
-// closed before returning whether or not the statement worked, and on a context
-// the caller has already cancelled too, so a failed create does not leave a
-// session parked on a server nothing here ever stops.
+// createEmbeddedDatabaseFor runs the existence check and the CREATE DATABASE
+// over a short-lived connection to the MAINTENANCE database: initdb creates only
+// that one, so it is the only database a fresh cluster can be asked from (and
+// the database being created cannot be the one the CREATE is issued on).
+//
+// The connection is closed on a bounded, detached context, so a caller whose own
+// context was cancelled — or a wedged server — cannot hold this open on a socket
+// write.
 func createEmbeddedDatabaseFor(ctx context.Context, s embedpg.Server) error {
 	conn, err := pgx.Connect(ctx, s.MaintenanceDSN())
 	if err != nil {
 		return fmt.Errorf("connecting to the maintenance database: %w", err)
 	}
-	defer conn.Close(context.WithoutCancel(ctx))
-	_, err = conn.Exec(ctx, embeddedDatabaseStatement())
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), databaseCloseTimeout)
+		defer cancel()
+		_ = conn.Close(cctx)
+	}()
+	return createDatabaseUnlessPresent(ctx, conn)
+}
+
+// databaseCloseTimeout bounds closing the maintenance connection.
+const databaseCloseTimeout = 5 * time.Second
+
+// dbCatalog is the slice of one connection this file's create path uses: the
+// existence query, the legacy-schema probe and the CREATE. Keeping the decisions
+// behind it is what lets a test pin them without a cluster — the dial itself is
+// the only part that needs a server, and it has its own test.
+type dbCatalog interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+const (
+	// databaseExistsSQL asks the catalog whether the database is there, so the
+	// CREATE is issued only when it is not. Asking the CREATE instead means a
+	// failed statement on every daemon start, `psql`, `user create` and
+	// `migrate` — each one an ERROR line in pg.log that an operator debugging a
+	// start has to read past.
+	databaseExistsSQL = "SELECT 1 FROM pg_database WHERE datname = $1"
+
+	// legacySchemaSQL asks whether the maintenance database already holds
+	// rafiki's schema. That schema is the one pkg/store's migrations create; the
+	// name is a literal because pkg/store exports none, and this file must not
+	// depend on the store to ask a catalog question.
+	legacySchemaSQL  = "SELECT 1 FROM pg_namespace WHERE nspname = '" + legacySchemaName + "'"
+	legacySchemaName = "conversations"
+)
+
+// createDatabaseUnlessPresent creates the database embeddedDatabaseStatement
+// names, and does nothing when it is already there. c must be connected to the
+// maintenance database.
+func createDatabaseUnlessPresent(ctx context.Context, c dbCatalog) error {
+	var one int
+	err := c.QueryRow(ctx, databaseExistsSQL, embedpg.Database).Scan(&one)
+	switch {
+	case err == nil:
+		// It is there: nothing to create, and nothing to say about it.
+		return nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("checking whether the %s database exists: %w", embedpg.Database, err)
+	}
+
+	// The create path only: this is the one moment an install that already keeps
+	// rafiki's data somewhere else can be noticed before it is handed an empty
+	// database to migrate into.
+	warnIfMaintenanceDatabaseHoldsRafikiData(ctx, c)
+
+	_, err = c.Exec(ctx, embeddedDatabaseStatement())
 	return err
+}
+
+// warnIfMaintenanceDatabaseHoldsRafikiData names the split an operator would
+// otherwise discover as "all my history is gone": a data directory from before
+// the embedded database had its own name keeps everything in `postgres`, and
+// the daemon would migrate a fresh, empty schema into the new one. The databases
+// are still on disk, so this is a warning and not a refusal.
+//
+// A failed probe is silent: not knowing is no reason to refuse to create a
+// database the daemon needs to start.
+func warnIfMaintenanceDatabaseHoldsRafikiData(ctx context.Context, c dbCatalog) {
+	var one int
+	if err := c.QueryRow(ctx, legacySchemaSQL).Scan(&one); err != nil {
+		return
+	}
+	slog.Warn("the maintenance database already holds a rafiki schema; the embedded database is being created empty",
+		"creating", embedpg.Database, "existing", embedpg.MaintenanceDatabase)
 }
 
 // embeddedDatabaseStatement is the CREATE DATABASE itself. The identifier is

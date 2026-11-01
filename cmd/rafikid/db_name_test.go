@@ -122,12 +122,14 @@ func pointResolverAt(t *testing.T, s embedpg.Server) {
 	newEmbeddedServer = func() embedpg.Server { return s }
 }
 
-// Every embedded resolve creates the database, from the maintenance database,
-// and every answer that means "it is already there" is a successful resolve:
-// duplicate_database for a caller that comes after the first one, and the lost
+// Every embedded resolve goes through the create path, against the maintenance
+// database, and every answer that means "it is already there" is a successful
+// resolve: the existence query on the ordinary second call, duplicate_database
+// for a caller that raced the first one, and the lost
 // pg_database_datname_index for one that arrives at the same instant. Resolving
 // more than once is ordinary — `rafikid migrate`, then `rafikid user create`,
-// then the daemon — and so is two of those starting together.
+// then the daemon — and so is two of those starting together. Which of those
+// paths issues a CREATE is createDatabaseUnlessPresent's business, pinned below.
 func TestResolveDSNEmbeddedCreatesTheDatabase(t *testing.T) {
 	c := assert.NewAborting(t)
 	s := fakeEmbeddedServer(t)
@@ -231,9 +233,8 @@ func TestEmbeddedDatabaseIsCreatedOnARealServer(t *testing.T) {
 		"count the embedded database")
 	c.Eq(int64(1), databases, "exactly one %s database", embedpg.Database)
 
-	// The second resolve: the server is already running and the database is
-	// already there, so PostgreSQL answers duplicate_database (42P04) and the
-	// resolver must treat it as done.
+	// The second resolve: the server is already running and the existence query
+	// finds the database, so no CREATE is issued at all and the resolver is done.
 	second, err := resolveDSN(ctx, embeddedDSN)
 	c.NoError(err, "the second resolveDSN must be a no-op, not an error")
 	c.Eq(first, second, "the second resolveDSN must return the same DSN")
@@ -251,4 +252,162 @@ func stopEmbeddedServer(t *testing.T, s embedpg.Server) bool {
 		return false
 	}
 	return true
+}
+
+// fakeCatalog is a dbCatalog with scripted answers, recording what it was asked.
+type fakeCatalog struct {
+	exists    bool
+	existsErr error
+	legacy    bool
+	legacyErr error
+	execErr   error
+	queries   []string
+	execs     []string
+}
+
+func (f *fakeCatalog) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+	f.queries = append(f.queries, sql)
+	switch sql {
+	case databaseExistsSQL:
+		if f.existsErr != nil {
+			return fakeRow{err: f.existsErr}
+		}
+		if f.exists {
+			return fakeRow{ok: true}
+		}
+		return fakeRow{err: pgx.ErrNoRows}
+	case legacySchemaSQL:
+		if f.legacyErr != nil {
+			return fakeRow{err: f.legacyErr}
+		}
+		if f.legacy {
+			return fakeRow{ok: true}
+		}
+		return fakeRow{err: pgx.ErrNoRows}
+	}
+	return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+}
+
+func (f *fakeCatalog) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	f.execs = append(f.execs, sql)
+	return pgconn.CommandTag{}, f.execErr
+}
+
+// fakeRow answers one Scan: ok means "a row was there".
+type fakeRow struct {
+	ok  bool
+	err error
+}
+
+func (r fakeRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if !r.ok {
+		return pgx.ErrNoRows
+	}
+	if len(dest) == 1 {
+		if p, ok := dest[0].(*int); ok {
+			*p = 1
+		}
+	}
+	return nil
+}
+
+// The existence query is what keeps the CREATE — and the ERROR line PostgreSQL
+// writes into pg.log for a database that is already there — off every resolve,
+// `psql`, `migrate` and `user create`. Only a miss creates.
+func TestCreateDatabaseSkipsTheCreateWhenItExists(t *testing.T) {
+	c := assert.NewAborting(t)
+	cat := &fakeCatalog{exists: true}
+
+	c.NoError(createDatabaseUnlessPresent(context.Background(), cat), "createDatabaseUnlessPresent")
+	c.EqDeep([]string{databaseExistsSQL}, cat.queries, "exactly the existence query, got")
+	c.Eq(0, len(cat.execs), "no CREATE may be issued when the database exists, got: %v", cat.execs)
+}
+
+// A miss creates, and the legacy-schema probe runs on that path only.
+func TestCreateDatabaseCreatesOnAMiss(t *testing.T) {
+	c := assert.NewAborting(t)
+	cat := &fakeCatalog{}
+
+	c.NoError(createDatabaseUnlessPresent(context.Background(), cat), "createDatabaseUnlessPresent")
+	c.EqDeep([]string{embeddedDatabaseStatement()}, cat.execs, "the create, got")
+	c.EqDeep([]string{databaseExistsSQL, legacySchemaSQL}, cat.queries, "the catalog queries, got")
+}
+
+// A create that cannot even check whether the database is there is a failure: the
+// resolver promises a DSN that connects, and guessing would send the next
+// statement at a database that may not exist.
+func TestCreateDatabaseRefusesWhenTheExistenceCheckFails(t *testing.T) {
+	c := assert.NewAborting(t)
+	cat := &fakeCatalog{existsErr: errors.New("connection reset by peer")}
+
+	err := createDatabaseUnlessPresent(context.Background(), cat)
+	c.Error(err, "want an error when the catalog cannot be asked, got nil")
+	c.StrContains(err.Error(), "checking whether the "+embedpg.Database+" database exists", "error, got: %v", err)
+	c.StrContains(err.Error(), "connection reset by peer", "the cause must survive, got: %v", err)
+	c.Eq(0, len(cat.execs), "no CREATE may be attempted after a failed check, got: %v", cat.execs)
+}
+
+// A data directory from before the embedded database had its own name keeps the
+// whole schema in the maintenance database. Creating the new, empty one is still
+// right — the databases are both on disk — but it must not happen silently, or
+// the operator discovers it as "all my history is gone".
+func TestCreateDatabaseWarnsWhenTheMaintenanceDatabaseHoldsRafikiData(t *testing.T) {
+	c := assert.NewAborting(t)
+	logs := captureLogs(t)
+	cat := &fakeCatalog{legacy: true}
+
+	c.NoError(createDatabaseUnlessPresent(context.Background(), cat), "createDatabaseUnlessPresent")
+	c.EqDeep([]string{embeddedDatabaseStatement()}, cat.execs, "the create still happens, got")
+
+	logged := logs.String()
+	c.StrContains(logged, "level=WARN", "the split must be a warning, got: %s", logged)
+	c.StrContains(logged, "creating="+embedpg.Database, "the warning must name the database being created, got: %s", logged)
+	c.StrContains(logged, "existing="+embedpg.MaintenanceDatabase, "the warning must name the database that already holds the data, got: %s", logged)
+}
+
+// The probe runs on the create path only: a database that is already there has
+// nothing to warn about, and one catalog query is enough for the case that does.
+func TestCreateDatabaseDoesNotProbeForLegacySchemaWhenItExists(t *testing.T) {
+	c := assert.NewAborting(t)
+	logs := captureLogs(t)
+	cat := &fakeCatalog{exists: true, legacy: true}
+
+	c.NoError(createDatabaseUnlessPresent(context.Background(), cat), "createDatabaseUnlessPresent")
+	c.EqDeep([]string{databaseExistsSQL}, cat.queries, "only the existence query, got")
+	c.NotStrContains(logs.String(), "level=WARN", "a database that exists must warn about nothing, got: %s", logs.String())
+}
+
+// A failed probe is silent: not knowing whether the maintenance database holds a
+// rafiki schema is no reason to refuse to create the one the daemon needs.
+func TestCreateDatabaseIgnoresAFailedLegacyProbe(t *testing.T) {
+	c := assert.NewAborting(t)
+	cat := &fakeCatalog{legacyErr: errors.New("permission denied for schema")}
+
+	c.NoError(createDatabaseUnlessPresent(context.Background(), cat), "createDatabaseUnlessPresent")
+	c.EqDeep([]string{embeddedDatabaseStatement()}, cat.execs, "the create must still happen, got")
+}
+
+// The real dial: the create must be issued on the MAINTENANCE database, because
+// on a fresh cluster the other one does not exist yet and a CREATE cannot run
+// from the database it creates. The dial fails here — there is no cluster — and
+// the error names the database it tried, which is the pin.
+func TestCreateEmbeddedDatabaseDialsTheMaintenanceDSN(t *testing.T) {
+	c := assert.NewAborting(t)
+	root, err := os.MkdirTemp("/tmp", "epg") // short: the socket lives in the data dir
+	c.NoError(err, "MkdirTemp")
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	s := embedpg.Server{
+		BinDir:  filepath.Join(root, "bin"),
+		DataDir: filepath.Join(root, "pg"),
+	}
+
+	err = createEmbeddedDatabaseFor(context.Background(), s)
+	c.Error(err, "want a connection error, got nil")
+	c.StrContains(err.Error(), "database="+embedpg.MaintenanceDatabase,
+		"the create must dial the maintenance database, got: %v", err)
+	c.NotStrContains(err.Error(), "database="+embedpg.Database,
+		"the create must not dial the database it is creating, got: %v", err)
 }

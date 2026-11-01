@@ -49,7 +49,10 @@ const pgDumpMissing = "pg_dump not found on PATH; install the PostgreSQL client 
 
 // newDbBackupCmd writes a backup of rafikid's database to one file.
 func newDbBackupCmd() *cobra.Command {
-	var format string
+	var (
+		format string
+		force  bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "backup <path>",
@@ -61,23 +64,32 @@ func newDbBackupCmd() *cobra.Command {
   tgz   the same copy, gzip-compressed.
 
 --format picks one explicitly; without it the priority is dump > txz > tgz
-resolved at run time: when pg_dump is on PATH the dump is preferred (it is the
-portable one), otherwise an embedded install gets a physical copy. tgz is never
-chosen automatically because xz is linked into rafikid and cannot be missing —
-it is there for a consumer that only speaks gzip.
+resolved at run time: when pg_dump is on PATH AND can dump this server the dump
+is preferred (it is the portable one). An embedded install knows its server's
+major version without starting anything, so a pg_dump that is absent, older, or
+unreadable is skipped — the priority falls through to the physical copy and says
+so on stderr — while a configured DSN, which has no data directory to fall back
+to, refuses. tgz is never chosen automatically because xz is linked into rafikid
+and cannot be missing; it is there for a consumer that only speaks gzip.
 
 The dump is taken over the wire with the connection in the PG* environment,
 never on pg_dump's command line, exactly as psql receives it. A pg_dump older
-than the server's major version is refused: it cannot dump a newer server.
+than the server's major version is refused at run time: it cannot dump a newer
+server.
 
 A physical copy is of a quiet data directory, and a backup does not change
-whether the install is up: a server that is RUNNING is stopped (-m fast,
-bounded) and started again in a defer, so a copy that fails or is interrupted
-still leaves it up, while a server that is NOT running is left alone and its
-directory is copied as it stands. A data directory that does not exist is an
-error, never something this command creates. A configured RAFIKI_DB names a
-server on some other host, which has no data directory here, so the physical
-formats are refused for it.
+whether the install is up. A server that is NOT running is left alone and its
+directory is copied as it stands. A server that is RUNNING has to be stopped
+(-m fast, bounded) for the copy, which takes the database away from whatever is
+using it — a live daemon and every turn in flight — for the whole copy plus its
+compression, so that is a downtime an operator has to accept with --force; it is
+started again afterwards, on a failure or an interrupt too. The stop, the copy
+and the restart happen under the same lock the daemon takes, so no other rafikid
+process can start the server halfway through the archive. A data directory that
+does not exist is an error, never something this command creates, and a backup
+path inside the data directory is refused (the archive would contain itself). A
+configured RAFIKI_DB names a server on some other host, which has no data
+directory here, so the physical formats are refused for it.
 
 The path, format and size are printed to stderr, so a script's stdout stays
 clean. The extension is appended when <path> has none.`,
@@ -89,23 +101,25 @@ clean. The extension is appended when <path> has none.`,
 			if err != nil {
 				return err
 			}
-			return runBackup(cmd.Context(), db, args[0], format, os.Stderr)
+			return runBackup(cmd.Context(), db, args[0], format, force, os.Stderr)
 		},
 	}
 
 	cmd.Flags().StringVar(&format, "format", "",
-		"dump (pg_dump -Fc), txz or tgz (physical, embedded only); default: dump when pg_dump is on PATH, else txz")
+		"dump (pg_dump -Fc), txz or tgz (physical, embedded only); default: dump when a usable pg_dump is on PATH, else txz")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"stop the embedded server for a physical copy even though it is running (its users lose the database for the whole copy)")
 
 	return cmd
 }
 
 // runBackup resolves the format, gives the path its suffix and dispatches.
-func runBackup(ctx context.Context, configured, path, format string, stderr io.Writer) error {
+func runBackup(ctx context.Context, configured, path, format string, force bool, stderr io.Writer) error {
 	if configured == "" {
 		return errors.New("--db (or RAFIKI_DB) is required")
 	}
 	if format == "" {
-		resolved, err := resolveBackupFormat(configured)
+		resolved, err := backupFormatPriority(ctx, configured, stderr)
 		if err != nil {
 			return err
 		}
@@ -121,23 +135,77 @@ func runBackup(ctx context.Context, configured, path, format string, stderr io.W
 	if format == formatDump {
 		return runDumpBackup(ctx, configured, path, stderr)
 	}
-	return runPhysicalBackup(ctx, configured, path, format, stderr)
+	return runPhysicalBackup(ctx, configured, path, format, force, stderr)
 }
 
-// resolveBackupFormat is the format priority, resolved against what this host
-// can do right now: dump > txz > tgz, where a step is skipped when its tool is
-// not there. tgz is unreachable by priority — xz is linked into rafikid, so the
-// physical copy it guards is never unavailable — and is chosen only explicitly.
-func resolveBackupFormat(configured string) (string, error) {
-	if _, err := lookPgDump(); err == nil {
+// errPgDumpMissing marks "there is no pg_dump at all", as opposed to "the one
+// there cannot be used": only the first is silent when the priority falls
+// through, because only the first is self-evident.
+var errPgDumpMissing = errors.New(pgDumpMissing)
+
+// backupFormatPriority resolves the default format against what this host can do
+// right now: dump > txz > tgz, where a step is skipped when its tool is not
+// there OR cannot do this job.
+//
+// The version matters here and not only at run time: an embedded install knows
+// its server's major without starting anything, so an old pg_dump is skipped and
+// the physical copy taken, rather than chosen and then refused. A configured DSN
+// has no data directory to fall back to, so there the refusal is the answer.
+//
+// tgz is unreachable by priority — xz is linked into rafikid, so the physical
+// copy it guards is never unavailable — and is chosen only explicitly.
+func backupFormatPriority(ctx context.Context, configured string, stderr io.Writer) (string, error) {
+	unusable := pgDumpUnusable(ctx, configured)
+	if unusable == nil {
 		return formatDump, nil
 	}
-	if configured == embeddedDSN {
+	if isEmbedded(configured) {
+		// Say it: an operator who expected a dump needs to know why the file is
+		// an archive, and why it needs the server stopped.
+		if !errors.Is(unusable, errPgDumpMissing) {
+			fmt.Fprintf(stderr, "rafikid db backup: %v; falling back to a physical copy (%s)\n",
+				unusable, formatTXZ)
+		}
 		return formatTXZ, nil
 	}
-	return "", fmt.Errorf("rafikid db backup: %s; a physical format (txz, tgz) copies the embedded "+
-		"server's data directory, and RAFIKI_DB names a server this host does not manage — install "+
-		"the client, or set RAFIKI_DB=embedded", pgDumpMissing)
+	if errors.Is(unusable, errPgDumpMissing) {
+		return "", fmt.Errorf("rafikid db backup: %w; a physical format (txz, tgz) copies the embedded "+
+			"server's data directory, and %s names a server this host does not manage",
+			unusable, embeddedSettingHint)
+	}
+	return "", fmt.Errorf("rafikid db backup: %w", unusable)
+}
+
+// pgDumpUnusable reports why a dump cannot be taken from here, or nil when it
+// can. For an embedded install it also compares the client's major against the
+// server's, which is what makes the priority fall through instead of failing.
+func pgDumpUnusable(ctx context.Context, configured string) error {
+	pgDump, err := lookPgDump()
+	if err != nil {
+		return errPgDumpMissing
+	}
+	out, err := exec.CommandContext(ctx, pgDump, "--version").Output()
+	if err != nil {
+		return fmt.Errorf("pg_dump --version: %w", err)
+	}
+	toolMajor, err := pgDumpMajor(string(out))
+	if err != nil {
+		return err
+	}
+	if !isEmbedded(configured) {
+		// The server's own major needs a connection, and the run-time gate asks
+		// it there; the priority only decides what this host can offer.
+		return nil
+	}
+	serverMajor, err := embeddedServerMajor()
+	if err != nil {
+		return err
+	}
+	if toolMajor < serverMajor {
+		return fmt.Errorf("pg_dump is PostgreSQL %d, older than the embedded server's major "+
+			"version %d, so it cannot dump it", toolMajor, serverMajor)
+	}
+	return nil
 }
 
 // withExtension gives a bare path the format's suffix. A path the operator
@@ -291,30 +359,38 @@ func majorFromVersion(v string) (int, error) {
 
 // embeddedBackupOps are the operations a physical backup performs on the private
 // server. They are function fields because the restart is the safety property
-// here, and the only way to prove it is to make packing fail: the real set is
-// pg_ctl through pkg/embedpg, the test set records the order.
+// here, and the only way to prove it is to make packing fail or the context
+// cancel: the real set is pg_ctl through pkg/embedpg, the test set records the
+// order.
 type embeddedBackupOps struct {
+	// lock takes the flock every other state change on the server takes, and
+	// returns its release. It is what keeps a concurrent resolveDSN — `rafikid
+	// psql`, a second daemon, `migrate` — from running Ensure and starting the
+	// postmaster in the middle of the archive.
+	lock func(context.Context, embedpg.Server) (func(), error)
 	// status reports whether the server is running, WITHOUT starting it. A backup
 	// must not change whether the install is up, so it may not call Ensure (which
 	// starts a server that was down, and initdbs a directory that has none).
 	status func(context.Context, embedpg.Server) (bool, error)
 	// stop shuts the server down: a quiet cluster is what makes a physical copy
-	// consistent. It is bounded by embedpg.StopTimeout and runs detached from the
-	// backup's context, because a half-stopped server is worse than a slow one.
+	// consistent. The CALLER holds lock, so it is Server.StopLocked — Stop would
+	// take it again and deadlock against ourselves.
 	stop func(context.Context, embedpg.Server) error
-	// start brings back the server stop shut down. It is Server.Ensure, because a
-	// restart must end up exactly where a normal start would — same readiness
-	// check, same rafiki.conf — and it cannot create anything here: the server
-	// was running, so the directory and its PG_VERSION exist.
+	// start brings back the server stop shut down, and is called with the lock
+	// released so it can take it. It is Server.Ensure, because a restart must end
+	// up exactly where a normal start would — same readiness check, same
+	// rafiki.conf — and it cannot create anything here: the server was running, so
+	// the directory and its PG_VERSION exist.
 	start func(context.Context, embedpg.Server) error
 	// pack writes one archive of dir in format.
 	pack func(io.Writer, string, string) error
 }
 
 var backupEmbedded = embeddedBackupOps{
+	lock:   func(ctx context.Context, s embedpg.Server) (func(), error) { return s.Lock(ctx) },
 	status: func(ctx context.Context, s embedpg.Server) (bool, error) { return s.Status(ctx) },
 	stop: func(ctx context.Context, s embedpg.Server) error {
-		return s.Stop(context.WithoutCancel(ctx))
+		return s.StopLocked(context.WithoutCancel(ctx))
 	},
 	start: func(ctx context.Context, s embedpg.Server) error {
 		_, err := s.Ensure(ctx)
@@ -324,15 +400,16 @@ var backupEmbedded = embeddedBackupOps{
 }
 
 // runPhysicalBackup copies the embedded data directory as it is: a server that
-// is running is stopped for the copy and started again afterwards, and one that
-// is not is left alone.
-func runPhysicalBackup(ctx context.Context, configured, path, format string, stderr io.Writer) (err error) {
-	if configured != embeddedDSN {
+// is not running is left alone, and one that is running is stopped for the copy
+// and started again afterwards — the latter only when the operator accepted the
+// downtime with --force.
+func runPhysicalBackup(ctx context.Context, configured, path, format string, force bool, stderr io.Writer) (err error) {
+	if !isEmbedded(configured) {
 		return fmt.Errorf("rafikid db backup: --format %s copies the embedded server's data "+
-			"directory, and RAFIKI_DB names a server this host does not manage; use --format dump, "+
-			"or set RAFIKI_DB=embedded", format)
+			"directory, and %s names a server this host does not manage; use --format dump, or "+
+			"point %s at the rafikid-managed database", format, embeddedSettingHint, embeddedSettingHint)
 	}
-	s := newEmbeddedServer()
+	s := embeddedServer()
 
 	// The directory is copied, never created: there is nothing to back up in one
 	// that does not exist, and creating it here would be a backup that quietly
@@ -346,24 +423,56 @@ func runPhysicalBackup(ctx context.Context, configured, path, format string, std
 	if !info.IsDir() {
 		return fmt.Errorf("rafikid db backup: %s is not a directory", s.DataDir)
 	}
+	// The archive is written next to <path> as a .partial-* file and only then
+	// renamed; under the data directory the archiver would walk into the growing
+	// file it is writing, so that is refused before anything is opened.
+	if insideDir(path, s.DataDir) {
+		return fmt.Errorf("rafikid db backup: %s is inside the embedded data directory %s; write the "+
+			"backup somewhere else", path, s.DataDir)
+	}
+
+	// The lock spans stop → copy → start. Without it a concurrent Ensure (any
+	// other rafikid command that resolves this DSN) would see the server down and
+	// start it while the archiver is reading its files.
+	release, lerr := backupEmbedded.lock(ctx, s)
+	if lerr != nil {
+		return fmt.Errorf("rafikid db backup: %w", lerr)
+	}
+	restart := false
+	// The restart is registered BEFORE the stop, and runs on every way out: a
+	// pack failure, a cancelled context, and a stop that failed or timed out. The
+	// pg_ctl case is the one that matters — pg_ctl can give up while the
+	// postmaster still goes on to shut down, so "the stop failed" does not mean
+	// "the server is up", and an install left down by a backup is the outcome this
+	// whole sequence exists to prevent. Ensure is idempotent: a server that is
+	// still running is a no-op.
+	defer func() {
+		release()
+		if !restart {
+			return
+		}
+		if serr := backupEmbedded.start(context.WithoutCancel(ctx), s); serr != nil {
+			err = errors.Join(err, fmt.Errorf("rafikid db backup: restarting the embedded database: %w", serr))
+		}
+	}()
 
 	running, serr := backupEmbedded.status(ctx, s)
 	if serr != nil {
 		return fmt.Errorf("rafikid db backup: %w", serr)
 	}
 	if running {
+		if !force {
+			return fmt.Errorf("rafikid db backup: the embedded database is running at %s, and a "+
+				"physical copy stops it with pg_ctl -m fast for the whole copy and its compression: "+
+				"whatever uses it — a live daemon and every turn in flight — loses the database for "+
+				"that time. Re-run with --force to accept that downtime, or use --format dump, which "+
+				"copies over the wire and never stops the server", s.DataDir)
+		}
+		// Set before the stop: see the defer above.
+		restart = true
 		if serr := backupEmbedded.stop(ctx, s); serr != nil {
 			return fmt.Errorf("rafikid db backup: %w", serr)
 		}
-		// From here on the server is DOWN, so the restart is unconditional: it runs
-		// on a packing failure and on a cancelled context alike. The context is
-		// detached for exactly that reason — Ctrl-C must not be able to leave the
-		// install down.
-		defer func() {
-			if serr := backupEmbedded.start(context.WithoutCancel(ctx), s); serr != nil {
-				err = errors.Join(err, fmt.Errorf("rafikid db backup: restarting the embedded database: %w", serr))
-			}
-		}()
 	}
 
 	size, perr := writeBackupFile(path, func(w io.Writer, _ string) error {
@@ -375,6 +484,18 @@ func runPhysicalBackup(ctx context.Context, configured, path, format string, std
 	fmt.Fprintf(stderr, "rafikid db backup: wrote %s (format %s, %s)\n",
 		path, format, humanize.Bytes(uint64(size)))
 	return nil
+}
+
+// insideDir reports whether path is dir itself or lies under it. The check is
+// lexical — the data directory is not a symlink in any install this command
+// serves — and its only job is to keep the archiver from walking into the file it
+// is writing.
+func insideDir(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // writeBackupFile writes a backup atomically: the bytes go to a temporary

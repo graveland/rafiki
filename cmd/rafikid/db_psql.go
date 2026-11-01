@@ -143,7 +143,7 @@ func psqlInvocation(configured, dsn string, args, environ []string) (pgToolInv, 
 	if err != nil {
 		return pgToolInv{}, err
 	}
-	return pgToolInvocation("rafikid psql", path, "psql", configured, dsn, args, environ)
+	return pgToolInvocation("rafikid db psql", path, "psql", configured, dsn, args, environ)
 }
 
 // pgToolInvocation builds the argv, environment and target line for one libpq

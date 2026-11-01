@@ -127,7 +127,7 @@ func TestPsqlInvocationKeywordDSN(t *testing.T) {
 	got, ok := envValue(inv.env, "PGHOST")
 	c.True(ok, "PGHOST must be set, got: %v", inv.env)
 	c.Eq("/tmp/a b", got, "PGHOST must be the socket directory, got")
-	c.Eq("rafikid psql: embedded database at /tmp/a b", inv.target, "target, got")
+	c.Eq("rafikid db psql: embedded database at /tmp/a b", inv.target, "target, got")
 }
 
 // A parameter this command cannot express in the environment is refused. A name

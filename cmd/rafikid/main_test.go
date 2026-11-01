@@ -182,11 +182,19 @@ func TestNormalizeArgsForPflagStopsAtDoubleDash(t *testing.T) {
 	c.EqDeep([]string{"rafikid", "fundi", "--model", "x"}, os.Args,
 		"a long form before the -- must still be normalized, got")
 
-	// A single-character shorthand was never rewritten, before or after the --.
-	os.Args = []string{"rafikid", "db", "psql", "--", "-c", "select 1"}
+	// A multi-character single-dash flag with a value is the class the guard
+	// exists for: rewritten before the --, untouched after it. (A lone `-c` would
+	// pass either way — single-char args are never rewritten — so it is not the
+	// case that pins this.)
+	os.Args = []string{"rafikid", "fundi", "-ab=c"}
 	normalizeArgsForPflag()
-	c.EqDeep([]string{"rafikid", "db", "psql", "--", "-c", "select 1"}, os.Args,
-		"a single-char shorthand must survive, got")
+	c.EqDeep([]string{"rafikid", "fundi", "--ab=c"}, os.Args,
+		"a long form with a value before the -- must still be normalized, got")
+
+	os.Args = []string{"rafikid", "db", "psql", "--", "-ab=c"}
+	normalizeArgsForPflag()
+	c.EqDeep([]string{"rafikid", "db", "psql", "--", "-ab=c"}, os.Args,
+		"nothing after the -- may be rewritten, got")
 }
 
 // The end of the same path, through cobra: what psql is actually handed. This is

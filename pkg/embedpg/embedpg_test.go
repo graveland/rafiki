@@ -85,7 +85,7 @@ func TestDSNQuoting(t *testing.T) {
 		database string
 	}{
 		{"DSN", s.DSN(), Database},
-		{"MaintenanceDSN", s.MaintenanceDSN(), maintenanceDatabase},
+		{"MaintenanceDSN", s.MaintenanceDSN(), MaintenanceDatabase},
 	} {
 		cfg, err := pgconn.ParseConfig(tc.dsn)
 		c.NoError(err, "%s must parse", tc.what)
@@ -96,8 +96,8 @@ func TestDSNQuoting(t *testing.T) {
 	}
 
 	c.Eq("rafiki", Database, "the database the daemon serves from")
-	c.Eq("postgres", maintenanceDatabase, "the database initdb creates")
-	c.Eq(s.DSN(), strings.Replace(s.MaintenanceDSN(), "dbname="+maintenanceDatabase, "dbname="+Database, 1),
+	c.Eq("postgres", MaintenanceDatabase, "the database initdb creates")
+	c.Eq(s.DSN(), strings.Replace(s.MaintenanceDSN(), "dbname="+MaintenanceDatabase, "dbname="+Database, 1),
 		"the two DSNs may differ only in the database name")
 }
 

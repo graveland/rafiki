@@ -68,45 +68,80 @@ func stubServerMajor(t *testing.T, major int) {
 }
 
 // The default format is resolved at run time, so the same command on the same
-// host produces a dump where pg_dump exists and a physical copy where it does
-// not — and refuses when neither is available.
+// host produces a dump where a USABLE pg_dump exists and a physical copy where
+// it does not or cannot do the job — and refuses when neither is available.
+//
+// The version is part of "usable": an embedded install knows its server's major
+// without starting anything, so an old pg_dump falls through to the physical copy
+// and says so, instead of being chosen and then refused. A configured DSN has no
+// data directory to fall back to, so its answer there is still the dump (the
+// run-time gate asks the server's own version and refuses if it has to).
 func TestDbBackupFormatPriority(t *testing.T) {
 	cases := []struct {
 		name       string
 		configured string
-		pgDump     bool
+		pgDump     string // "" = nothing on PATH, otherwise the --version it reports
 		want       string
 		wantErr    string
+		wantOnErr  string // a stderr line the fallback must have printed
 	}{
-		{name: "pg_dump present, embedded", configured: embeddedDSN, pgDump: true, want: formatDump},
-		{name: "pg_dump present, configured DSN", configured: "postgres://u@h/db", pgDump: true, want: formatDump},
+		{name: "usable pg_dump, embedded", configured: embeddedDSN, pgDump: "18.3", want: formatDump},
+		{name: "usable pg_dump, configured DSN", configured: "postgres://u@h/db", pgDump: "18.3", want: formatDump},
 		{name: "no pg_dump, embedded", configured: embeddedDSN, want: formatTXZ},
 		{name: "no pg_dump, configured DSN", configured: "postgres://u@h/db", wantErr: "pg_dump not found"},
+		{
+			name:       "older pg_dump, embedded: falls back and says so",
+			configured: embeddedDSN,
+			pgDump:     "16.4",
+			want:       formatTXZ,
+			wantOnErr:  "falling back to a physical copy",
+		},
+		{
+			name:       "unreadable pg_dump version, embedded: falls back",
+			configured: embeddedDSN,
+			pgDump:     "not a version",
+			want:       formatTXZ,
+			wantOnErr:  "cannot read a version",
+		},
+		{
+			name:       "older pg_dump, configured DSN: the run-time gate owns it",
+			configured: "postgres://u@h/db",
+			pgDump:     "16.4",
+			want:       formatDump,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewAborting(t)
-			if tc.pgDump {
-				fakePgDumpDir(t, "18.3")
+			if tc.pgDump != "" {
+				fakePgDumpDir(t, tc.pgDump)
 			} else {
 				t.Setenv("PATH", t.TempDir())
 			}
 
-			got, err := resolveBackupFormat(tc.configured)
+			var stderr bytes.Buffer
+			got, err := backupFormatPriority(context.Background(), tc.configured, &stderr)
 			if tc.wantErr != "" {
 				c.Error(err, "want a refusal, got nil")
 				c.StrContains(err.Error(), tc.wantErr, "error, got: %v", err)
 				return
 			}
-			c.NoError(err, "resolveBackupFormat returned error")
+			c.NoError(err, "backupFormatPriority returned error")
 			c.Eq(tc.want, got, "format, got")
+			if tc.wantOnErr != "" {
+				c.StrContains(stderr.String(), tc.wantOnErr,
+					"the fallback must say why, got: %s", stderr.String())
+			}
+			if tc.want == formatTXZ && tc.wantOnErr == "" {
+				c.Eq("", stderr.String(), "a fallback with nothing to explain must be silent, got: %s", stderr.String())
+			}
 		})
 	}
 }
 
 func TestDbBackupUnknownFormat(t *testing.T) {
 	c := assert.NewAborting(t)
-	err := runBackup(context.Background(), "postgres://u@h/db", filepath.Join(t.TempDir(), "app"), "zip", io.Discard)
+	err := runBackup(context.Background(), "postgres://u@h/db", filepath.Join(t.TempDir(), "app"), "zip", false, io.Discard)
 	c.Error(err, "want an error for an unknown format, got nil")
 	c.StrContains(err.Error(), `unknown format "zip"`, "error, got: %v", err)
 }
@@ -142,7 +177,7 @@ func TestDbBackupPhysicalRefusesConfiguredDSN(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "app")
-	err := runBackup(context.Background(), "postgres://alice:s3cret@db.example:6543/app", path, formatTXZ, io.Discard)
+	err := runBackup(context.Background(), "postgres://alice:s3cret@db.example:6543/app", path, formatTXZ, true, io.Discard)
 
 	c := assert.NewAborting(t)
 	c.Error(err, "want a refusal for a physical format on a configured DSN, got nil")
@@ -167,7 +202,7 @@ func TestDbBackupDumpPutsConnectionInEnvNotArgv(t *testing.T) {
 	var stderr bytes.Buffer
 
 	err := runBackup(context.Background(),
-		"postgres://alice:s3cret@db.example:6543/app", path, formatDump, &stderr)
+		"postgres://alice:s3cret@db.example:6543/app", path, formatDump, false, &stderr)
 
 	c := assert.NewAborting(t)
 	c.NoError(err, "runBackup returned error: %s", stderr.String())
@@ -239,7 +274,7 @@ func TestDbBackupRefusesOlderPgDump(t *testing.T) {
 	stubServerMajor(t, 18)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app")
-	err = runBackup(context.Background(), "postgres://u@h/db", path, formatDump, io.Discard)
+	err = runBackup(context.Background(), "postgres://u@h/db", path, formatDump, false, io.Discard)
 	c.Error(err, "want the version refusal, got nil")
 	c.StrContains(err.Error(), "older than the server's major version 18", "error, got: %v", err)
 	entries, rerr := os.ReadDir(dir)
@@ -247,9 +282,9 @@ func TestDbBackupRefusesOlderPgDump(t *testing.T) {
 	c.Eq(0, len(entries), "a refused backup must leave no file behind, got: %v", entries)
 }
 
-// stubBackupOps replaces the four operations a physical backup performs, so a
-// test can watch the order — in particular that the restart cannot be skipped
-// and that a server that was down is never started.
+// stubBackupOps replaces the operations a physical backup performs, so a test can
+// watch the order — in particular that the lock spans the whole sequence, that
+// the restart cannot be skipped, and that a server that was down is never started.
 func stubBackupOps(t *testing.T, running bool, stop func(context.Context, embedpg.Server) error,
 	pack func(io.Writer, string, string) error, ops *[]string) {
 	t.Helper()
@@ -266,6 +301,10 @@ func stubBackupOps(t *testing.T, running bool, stop func(context.Context, embedp
 	orig := backupEmbedded
 	t.Cleanup(func() { backupEmbedded = orig })
 	backupEmbedded = embeddedBackupOps{
+		lock: func(context.Context, embedpg.Server) (func(), error) {
+			*ops = append(*ops, "lock")
+			return func() { *ops = append(*ops, "unlock") }, nil
+		},
 		status: func(context.Context, embedpg.Server) (bool, error) {
 			*ops = append(*ops, "status")
 			return running, nil
@@ -279,10 +318,10 @@ func stubBackupOps(t *testing.T, running bool, stop func(context.Context, embedp
 	}
 }
 
-// The safety property of a physical backup: a server that was running is
-// stopped for the copy and started again even when the copy fails. Leaving the
-// install down would make the failure worse than the backup was worth, and the
-// operator would have no working database to take a second backup with.
+// The safety property of a physical backup: a server that was running is stopped
+// for the copy and started again even when the copy fails. Leaving the install
+// down would make the failure worse than the backup was worth, and the operator
+// would have no working database to take a second backup with.
 func TestDbBackupPhysicalRestartsAfterFailedArchive(t *testing.T) {
 	var ops []string
 	stubBackupOps(t, true,
@@ -298,21 +337,77 @@ func TestDbBackupPhysicalRestartsAfterFailedArchive(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app")
-	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, true, io.Discard)
 
 	c := assert.NewAborting(t)
 	c.Error(err, "want the packing error, got nil")
 	c.StrContains(err.Error(), "no space left on device", "error, got: %v", err)
-	c.EqDeep([]string{"status", "stop", "pack", "start"}, ops,
-		"the server must be stopped once and started again after the failure, got ops")
+	c.EqDeep([]string{"lock", "status", "stop", "pack", "unlock", "start"}, ops,
+		"the server must be locked throughout, stopped once and started again after the failure, got ops")
 	entries, rerr := os.ReadDir(dir)
 	c.NoError(rerr, "read the backup directory")
 	c.Eq(0, len(entries), "a failed backup must leave no partial file behind, got: %v", entries)
 }
 
+// A stop that FAILED does not mean the server is up: pg_ctl can give up while the
+// postmaster goes on to shut down. The restart is therefore registered before the
+// stop and runs anyway — Ensure is idempotent, so a server that really is up is a
+// no-op, and one that is not is the whole point.
+func TestDbBackupPhysicalRestartsEvenAfterAFailedStop(t *testing.T) {
+	var ops []string
+	stubBackupOps(t, true,
+		func(context.Context, embedpg.Server) error {
+			ops = append(ops, "stop")
+			return errors.New("pg_ctl: server does not shut down")
+		},
+		func(io.Writer, string, string) error {
+			ops = append(ops, "pack")
+			return nil
+		},
+		&ops)
+
+	err := runBackup(context.Background(), embeddedDSN, filepath.Join(t.TempDir(), "app"), formatTXZ, true, io.Discard)
+
+	c := assert.NewAborting(t)
+	c.Error(err, "want the stop error, got nil")
+	c.StrContains(err.Error(), "does not shut down", "error, got: %v", err)
+	c.EqDeep([]string{"lock", "status", "stop", "unlock", "start"}, ops,
+		"a failed stop must still be followed by a restart, got ops")
+}
+
+// Stopping a running server takes the database away from whatever is using it —
+// a live daemon, every turn in flight — for the whole copy plus compression, so
+// it is a downtime the operator has to accept explicitly.
+func TestDbBackupPhysicalRefusesToStopARunningServerWithoutForce(t *testing.T) {
+	var ops []string
+	stubBackupOps(t, true,
+		func(context.Context, embedpg.Server) error {
+			t.Error("stop was called without --force")
+			return nil
+		},
+		func(io.Writer, string, string) error {
+			t.Error("pack was called without --force")
+			return nil
+		},
+		&ops)
+
+	path := filepath.Join(t.TempDir(), "app")
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, false, io.Discard)
+
+	c := assert.NewAborting(t)
+	c.Error(err, "want a refusal for a running server without --force, got nil")
+	c.StrContains(err.Error(), "--force", "the refusal must say how to proceed, got: %v", err)
+	c.StrContains(err.Error(), "--format dump", "the refusal must name the alternative that needs no downtime, got: %v", err)
+	c.StrContains(err.Error(), "in flight", "the refusal must say what is lost, got: %v", err)
+	c.EqDeep([]string{"lock", "status", "unlock"}, ops,
+		"nothing may be stopped, packed or started, and the lock must be released, got ops")
+	_, statErr := os.Stat(path + ".txz")
+	c.True(os.IsNotExist(statErr), "a refused backup must write nothing, got stat: %v", statErr)
+}
+
 // A backup must not change whether the install is up: a server that was DOWN is
-// never started, so a cold install stays cold and the copy is of a quiet
-// cluster either way.
+// never started, so a cold install stays cold and the copy is of a quiet cluster
+// either way. It needs no --force: nothing is stopped.
 func TestDbBackupPhysicalLeavesAColdInstallAlone(t *testing.T) {
 	var ops []string
 	stubBackupOps(t, false,
@@ -328,11 +423,11 @@ func TestDbBackupPhysicalLeavesAColdInstallAlone(t *testing.T) {
 		&ops)
 
 	path := filepath.Join(t.TempDir(), "app")
-	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, false, io.Discard)
 
 	c := assert.NewAborting(t)
 	c.NoError(err, "runBackup returned error")
-	c.EqDeep([]string{"status", "pack"}, ops,
+	c.EqDeep([]string{"lock", "status", "pack", "unlock"}, ops,
 		"a stopped server must be packed as it is, with no stop and no start, got ops")
 	data, rerr := os.ReadFile(path + ".txz")
 	c.NoError(rerr, "the archive must be at the suffixed path")
@@ -353,6 +448,10 @@ func TestDbBackupPhysicalRefusesAMissingDataDir(t *testing.T) {
 	orig := backupEmbedded
 	t.Cleanup(func() { backupEmbedded = orig })
 	backupEmbedded = embeddedBackupOps{
+		lock: func(context.Context, embedpg.Server) (func(), error) {
+			t.Error("the lock was taken for a service whose data directory does not exist")
+			return func() {}, nil
+		},
 		status: func(context.Context, embedpg.Server) (bool, error) {
 			t.Error("status was asked about a service whose data directory does not exist")
 			return false, nil
@@ -372,7 +471,7 @@ func TestDbBackupPhysicalRefusesAMissingDataDir(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "app")
-	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, true, io.Discard)
 
 	c := assert.NewAborting(t)
 	c.Error(err, "want a refusal for a missing data directory, got nil")
@@ -384,7 +483,7 @@ func TestDbBackupPhysicalRefusesAMissingDataDir(t *testing.T) {
 
 	// The same refusal covers a path that exists but is not a directory.
 	c.NoError(os.WriteFile(missing, []byte("not a directory"), 0o600), "write the blocker file")
-	err = runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+	err = runBackup(context.Background(), embeddedDSN, path, formatTXZ, true, io.Discard)
 	c.Error(err, "want a refusal for a non-directory data dir, got nil")
 	c.StrContains(err.Error(), "is not a directory", "error, got: %v", err)
 }
@@ -395,57 +494,98 @@ func filepathExists(path string) bool {
 	return err == nil
 }
 
-// A successful physical backup has the same shape, and reports the format it
-// actually wrote.
-func TestDbBackupPhysicalReportsTheArchive(t *testing.T) {
+// The archive is written next to <path> as a .partial-* file, so a path inside
+// the data directory would make the archiver walk into the file it is writing.
+func TestDbBackupPhysicalRefusesAPathInsideTheDataDir(t *testing.T) {
+	var ops []string
+	stubBackupOps(t, false,
+		func(context.Context, embedpg.Server) error {
+			t.Error("stop was called for a path refusal")
+			return nil
+		},
+		func(io.Writer, string, string) error {
+			t.Error("pack was called for a path refusal")
+			return nil
+		},
+		&ops)
+
+	dataDir := newEmbeddedServer().DataDir
+	err := runBackup(context.Background(), embeddedDSN, filepath.Join(dataDir, "backups", "app"), formatTXZ, false, io.Discard)
+
+	c := assert.NewAborting(t)
+	c.Error(err, "want a refusal for a backup inside the data directory, got nil")
+	c.StrContains(err.Error(), "inside the embedded data directory", "error, got: %v", err)
+	c.StrContains(err.Error(), dataDir, "the refusal must name the data directory, got: %v", err)
+	c.Eq(0, len(ops), "nothing may be locked, stopped or packed, got ops: %v", ops)
+}
+
+// The restart runs on a DETACHED context: Ctrl-C during the copy must not be able
+// to leave the install down. A stub start that records its context is what pins
+// it — dropping WithoutCancel fails this test.
+func TestDbBackupPhysicalRestartSurvivesACancelledContext(t *testing.T) {
 	var ops []string
 	stubBackupOps(t, true,
 		func(context.Context, embedpg.Server) error {
 			ops = append(ops, "stop")
 			return nil
 		},
-		func(w io.Writer, dir, format string) error {
-			ops = append(ops, "pack "+format)
+		func(io.Writer, string, string) error {
+			ops = append(ops, "pack")
+			return errors.New("interrupted")
+		},
+		&ops)
+
+	var startCtxErr error
+	backupEmbedded.start = func(ctx context.Context, _ embedpg.Server) error {
+		ops = append(ops, "start")
+		startCtxErr = ctx.Err()
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runBackup(ctx, embeddedDSN, filepath.Join(t.TempDir(), "app"), formatTXZ, true, io.Discard)
+
+	c := assert.NewAborting(t)
+	c.Error(err, "want the packing error, got nil")
+	c.StrContains(err.Error(), "interrupted", "error, got: %v", err)
+	c.EqDeep([]string{"lock", "status", "stop", "pack", "unlock", "start"}, ops, "ops, got")
+	c.NoError(startCtxErr, "the restart must not see a cancelled context, got: %v", startCtxErr)
+}
+
+// A restart that FAILS is the operator's business even when the copy succeeded:
+// the install is down and the command must say so.
+func TestDbBackupPhysicalSurfacesAFailedRestart(t *testing.T) {
+	var ops []string
+	stubBackupOps(t, true,
+		func(context.Context, embedpg.Server) error {
+			ops = append(ops, "stop")
+			return nil
+		},
+		func(w io.Writer, _ string, _ string) error {
+			ops = append(ops, "pack")
 			_, err := io.WriteString(w, "archive bytes")
 			return err
 		},
 		&ops)
+	backupEmbedded.start = func(context.Context, embedpg.Server) error {
+		ops = append(ops, "start")
+		return errors.New("pg_ctl: could not start server")
+	}
 
 	path := filepath.Join(t.TempDir(), "app")
-	var stderr bytes.Buffer
-	err := runBackup(context.Background(), embeddedDSN, path, formatTGZ, &stderr)
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, true, io.Discard)
 
 	c := assert.NewAborting(t)
-	c.NoError(err, "runBackup returned error: %s", stderr.String())
-	c.EqDeep([]string{"status", "stop", "pack " + formatTGZ, "start"}, ops, "ops, got")
-	data, rerr := os.ReadFile(path + ".tgz")
-	c.NoError(rerr, "the archive must be at the suffixed path")
-	c.Eq("archive bytes", string(data), "archive contents, got")
-	c.StrContains(stderr.String(), "format "+formatTGZ, "stderr must name the format, got: %s", stderr.String())
-	c.StrContains(stderr.String(), path+".tgz", "stderr must name the file, got: %s", stderr.String())
-}
-
-// When the STOP fails the server was never down, so there is nothing to start:
-// starting it again would be a second start of a running server.
-func TestDbBackupPhysicalDoesNotRestartAfterFailedStop(t *testing.T) {
-	var ops []string
-	stubBackupOps(t, true,
-		func(context.Context, embedpg.Server) error {
-			ops = append(ops, "stop")
-			return errors.New("pg_ctl: cannot stop the server")
-		},
-		func(io.Writer, string, string) error {
-			ops = append(ops, "pack")
-			return nil
-		},
-		&ops)
-
-	err := runBackup(context.Background(), embeddedDSN, filepath.Join(t.TempDir(), "app"), formatTXZ, io.Discard)
-
-	c := assert.NewAborting(t)
-	c.Error(err, "want the stop error, got nil")
-	c.StrContains(err.Error(), "cannot stop the server", "error, got: %v", err)
-	c.EqDeep([]string{"status", "stop"}, ops, "a failed stop must not be followed by a restart, got ops")
+	c.Error(err, "a failed restart must be reported, got nil")
+	c.StrContains(err.Error(), "restarting the embedded database", "error, got: %v", err)
+	c.StrContains(err.Error(), "could not start server", "the cause must survive, got: %v", err)
+	c.EqDeep([]string{"lock", "status", "stop", "pack", "unlock", "start"}, ops, "ops, got")
+	// The copy itself is complete and on disk: the failure is the restart, not
+	// the archive.
+	if _, statErr := os.Stat(path + ".txz"); statErr != nil {
+		t.Fatalf("the archive must still be there: %v", statErr)
+	}
 }
 
 // The archive is a real tar stream: names are relative to the data directory
@@ -524,6 +664,56 @@ func TestDbBackupArchiveRefusesAFifo(t *testing.T) {
 	c.StrContains(err.Error(), fifo, "the refusal must name the entry, got: %v", err)
 }
 
+// The cobra wiring, not just the function: one path and no more, an unknown
+// --format refused before anything is created, and --force carried through to the
+// physical path (the only place the downtime is accepted).
+func TestDbBackupCmdWiring(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, args := range [][]string{{"backup"}, {"backup", "one", "two"}} {
+		cmd := newDbCmd()
+		cmd.SetArgs(args)
+		c.Error(cmd.Execute(), "db backup %v must be a usage error", args)
+	}
+
+	dir := t.TempDir()
+	cmd := newDbCmd()
+	cmd.SetArgs([]string{"backup", filepath.Join(dir, "app"), "--format", "zip", "--db", embeddedDSN, "--force"})
+	err := cmd.Execute()
+	c.Error(err, "want an unknown-format refusal, got nil")
+	c.StrContains(err.Error(), `unknown format "zip"`, "error, got: %v", err)
+	entries, rerr := os.ReadDir(dir)
+	c.NoError(rerr, "read the directory")
+	c.Eq(0, len(entries), "a rejected format must create nothing, got: %v", entries)
+
+	// --force is what lets a running server be stopped: through cobra it must
+	// reach runPhysicalBackup, or the copy would be refused.
+	var ops []string
+	stubBackupOps(t, true,
+		func(context.Context, embedpg.Server) error {
+			ops = append(ops, "stop")
+			return nil
+		},
+		func(w io.Writer, _ string, _ string) error {
+			ops = append(ops, "pack")
+			_, werr := io.WriteString(w, "archive bytes")
+			return werr
+		},
+		&ops)
+
+	var stderr bytes.Buffer
+	cmd = newDbCmd()
+	cmd.SetOut(&stderr)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"backup", filepath.Join(dir, "forced"), "--format", "txz", "--db", embeddedDSN, "--force"})
+	c.NoError(cmd.Execute(), "db backup --force: %s", stderr.String())
+	c.EqDeep([]string{"lock", "status", "stop", "pack", "unlock", "start"}, ops,
+		"--force must reach the physical path, got ops")
+	if _, statErr := os.Stat(filepath.Join(dir, "forced.txz")); statErr != nil {
+		t.Fatalf("the archive must be at the suffixed path: %v", statErr)
+	}
+}
+
 // The group is what the root registers: its verbs, and one --db for all of them.
 func TestDbCmdHasItsVerbs(t *testing.T) {
 	cmd := newDbCmd()
@@ -555,7 +745,7 @@ func TestDbBackupDumpKeepsAnOperatorSuffix(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "app.backup")
 	var stderr bytes.Buffer
-	err := runBackup(context.Background(), "postgres://u@h/db", path, formatDump, &stderr)
+	err := runBackup(context.Background(), "postgres://u@h/db", path, formatDump, false, &stderr)
 
 	c := assert.NewAborting(t)
 	c.NoError(err, "runBackup returned error: %s", stderr.String())

@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,10 +58,13 @@ func Default() Server {
 // lives here because naming a connection is what this package does.
 const Database = "rafiki"
 
-// maintenanceDatabase is the database initdb always creates. A CREATE DATABASE
+// MaintenanceDatabase is the database initdb always creates. A CREATE DATABASE
 // cannot run inside a transaction block and cannot run from the database it is
-// creating, so it is issued from here: the one database that always exists.
-const maintenanceDatabase = "postgres"
+// creating, so it is issued from here: the one database that always exists. It
+// is exported because a caller that creates Database has to name both — an
+// install that already holds rafiki's schema HERE is the one a fresh, empty
+// Database would silently replace.
+const MaintenanceDatabase = "postgres"
 
 // DSN is the libpq keyword/value string that reaches this server's database.
 // The host is the data directory — a path, not a hostname — which is how libpq
@@ -78,7 +82,7 @@ func (s Server) DSN() string {
 // DSN names. Same host, port, user and sslmode — the same server, since only
 // dbname differs — so nothing here decides which database rafikid uses.
 func (s Server) MaintenanceDSN() string {
-	return s.conninfo(maintenanceDatabase)
+	return s.conninfo(MaintenanceDatabase)
 }
 
 // conninfo is the one place this package builds a connection string, so the two
@@ -107,18 +111,11 @@ func quoteConninfo(v string) string {
 // connection, and creating a database is a connection. A caller that wants to
 // dial the returned DSN creates it first (cmd/rafikid's resolveDSN).
 func (s Server) Ensure(ctx context.Context) (string, error) {
-	if err := os.MkdirAll(filepath.Dir(s.LockPath), 0o700); err != nil {
-		return "", fmt.Errorf("embedpg: %w", err)
-	}
-	lock, err := os.OpenFile(s.LockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	release, err := s.Lock(ctx)
 	if err != nil {
-		return "", fmt.Errorf("embedpg: %w", err)
+		return "", err
 	}
-	defer lock.Close()
-	if err := lockFile(ctx, lock); err != nil {
-		return "", fmt.Errorf("embedpg: locking %s: %w", s.LockPath, err)
-	}
-	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	defer release()
 
 	// The socket path is a hard limit of the platform, and it is checked before
 	// anything is written or downloaded: discovering it after a 100 MB download
@@ -182,8 +179,12 @@ func lockFile(ctx context.Context, f *os.File) error {
 // through it, because the environment here is a security property and not a
 // convenience: initdb starts a cluster, pg_ctl starts the postmaster, and that
 // postmaster outlives the command that started it — its environment stays
-// readable (ps eww, /proc/<pid>/environ) for as long as it runs, and nothing in
-// this package ever stops it. By the time Ensure runs, rafikid has already been
+// readable (ps eww, /proc/<pid>/environ) for as long as it runs, and it outlives
+// every command that touches it — nothing here stops it as a side effect of
+// anything. It IS stopped deliberately, and only by Server.Stop (a physical
+// backup is the caller that uses it), which is why the environment still has to
+// stay this narrow: the shutdown's own subprocess is short-lived, the postmaster
+// it talks to is not. By the time Ensure runs, rafikid has already been
 // started with RAFIKI_SECRETS_KEY and its provider API keys in its own
 // environment, so handing a child os.Environ() would keep those alive in the one
 // process that lives longest.
@@ -414,6 +415,8 @@ func (s Server) ensureInclude() error {
 // down, so asking it would change the very thing the caller is trying not to
 // change. pg_ctl's exit codes are the interface: 0 means running, 3 means not
 // running, anything else is a failure worth reporting.
+//
+// It takes no lock: it reads the postmaster's pid file and changes nothing.
 func (s Server) Status(ctx context.Context) (bool, error) {
 	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
 	out, err := command(ctx, pgctl, "status", "-D", s.DataDir).CombinedOutput()
@@ -427,32 +430,104 @@ func (s Server) Status(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("embedpg: %s status failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
 }
 
-// StopTimeout bounds Stop: pg_ctl's "fast" shutdown waits for clients to leave,
-// and one stuck client must not keep the server up (or the caller blocked)
-// indefinitely.
-const StopTimeout = 60 * time.Second
+// StopTimeout bounds a whole Stop: pg_ctl's own -t wait (stopWaitSeconds) plus
+// grace for pg_ctl to report that it gave up. A context that expired exactly at
+// -t would kill pg_ctl at the instant it would have printed "server does not
+// shut down", leaving a bare "signal: killed" and no message.
+const (
+	stopWaitSeconds = 60
+	StopTimeout     = (stopWaitSeconds + 30) * time.Second
+)
 
-// Stop shuts the server down with pg_ctl stop -m fast, waiting up to StopTimeout
-// for the postmaster to exit. A server that is not running is not an error:
-// there is nothing to stop, which is the state the caller asked for.
+// Lock takes the exclusive flock that serialises every state change on the
+// server — Ensure's download/initdb/start, Stop, and a backup's whole
+// stop → copy → start — and returns the release. Holding it is what lets a
+// caller know no other rafikid process will start the server under its feet:
+// a physical backup takes it precisely so a concurrent `rafikid psql` cannot
+// run Ensure and restart the postmaster halfway through the archive.
+//
+// The release is idempotent and safe to defer from the moment Lock returns.
+func (s Server) Lock(ctx context.Context) (release func(), err error) {
+	lock, err := s.acquireLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			_ = lock.Close()
+		})
+	}, nil
+}
+
+// acquireLock opens LockPath and takes the flock on it, creating the directory
+// the lock lives in. It is the ONE lock implementation: Ensure, Stop and Lock
+// all reach it.
+func (s Server) acquireLock(ctx context.Context) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(s.LockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("embedpg: %w", err)
+	}
+	lock, err := os.OpenFile(s.LockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("embedpg: %w", err)
+	}
+	if err := lockFile(ctx, lock); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("embedpg: locking %s: %w", s.LockPath, err)
+	}
+	return lock, nil
+}
+
+// Stop shuts the server down with pg_ctl stop -m fast, under the package's
+// flock. A server that is not running is not an error: there is nothing to
+// stop, which is the state the caller asked for.
 //
 // The caller owns whether a cancellation should reach this: pass
 // context.WithoutCancel's result when a shutdown must finish even if the work
 // that triggered it was interrupted.
 func (s Server) Stop(ctx context.Context) error {
+	release, err := s.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.StopLocked(ctx)
+}
+
+// StopLocked is Stop for a caller that ALREADY holds Lock. A backup needs it:
+// it must hold the flock across stop → copy → start, and taking it twice from
+// one process would deadlock against itself. Calling this without the lock is
+// safe only when nobody else can touch the server — reach for Stop instead.
+func (s Server) StopLocked(ctx context.Context) error {
 	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
 	ctx, cancel := context.WithTimeout(ctx, StopTimeout)
 	defer cancel()
 
 	out, err := command(ctx, pgctl, "stop", "-m", "fast", "-w",
-		"-t", strconv.Itoa(int(StopTimeout.Seconds())), "-D", s.DataDir).CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(out), "no server running") {
-			return nil
-		}
-		return fmt.Errorf("embedpg: %s stop failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
+		"-t", strconv.Itoa(stopWaitSeconds), "-D", s.DataDir).CombinedOutput()
+	if err == nil {
+		return nil
 	}
-	return nil
+
+	// "Nothing to stop" is success, and pg_ctl gives it no reliable signal: on
+	// the pinned 18.3 a stop with no server prints
+	//   pg_ctl: PID file "<data dir>/postmaster.pid" does not exist
+	//   Is server running?
+	// and exits 1, while "no server running" is what STATUS prints (exit 3).
+	// Matching text would therefore pin an implementation detail of one
+	// release, so the answer comes from Status instead: a server that really is
+	// down is the state the caller wanted, whatever pg_ctl said on its way
+	// there, and a server that is still up is a failure worth reporting.
+	running, serr := s.Status(ctx)
+	if serr == nil && !running {
+		return nil
+	}
+	if serr != nil {
+		return fmt.Errorf("embedpg: %s stop failed: %w: %s (and checking whether the server is running failed too: %v)",
+			pgctl, err, strings.TrimSpace(string(out)), serr)
+	}
+	return fmt.Errorf("embedpg: %s stop failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
 }
 
 // start runs pg_ctl start, which waits for the server to accept connections
