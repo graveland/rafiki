@@ -5,8 +5,8 @@ package integration_test
 // The embedded-database end-to-end proof: RAFIKI_DB=embedded makes rafikid run
 // its own PostgreSQL (pkg/embedpg), and this is the only test that exercises a
 // REAL extracted server — a real migration chain applied to it, a real daemon
-// serving from it, and the degradation that server's missing extensions
-// impose on recall.
+// serving from it, a real child turn written to it, and the degradation that
+// server's missing extensions impose on recall.
 //
 // Gated on RAFIKI_TEST_EMBEDPG=1 because the first run downloads the pinned
 // binaries from Maven Central (~15 MB for one platform, cached under
@@ -20,6 +20,7 @@ package integration_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -109,7 +110,10 @@ func runRafikidEmbedded(env []string, args ...string) (string, error) {
 // names. It mirrors bootDaemon's isolation — scratch HOME, ephemeral proxy
 // port, executors off, no real provider credentials — with one deliberate
 // difference: the XDG bases come from env, not from a fresh temp HOME.
-func bootEmbeddedDaemon(t *testing.T, d embeddedDirs) *daemon {
+//
+// extraEnv is appended last, so it wins over every default here (exec.Cmd.Env
+// keeps the last value for a duplicate key).
+func bootEmbeddedDaemon(t *testing.T, d embeddedDirs, extraEnv ...string) *daemon {
 	t.Helper()
 	c := assert.NewAborting(t)
 
@@ -122,8 +126,8 @@ func bootEmbeddedDaemon(t *testing.T, d embeddedDirs) *daemon {
 	cmd := exec.Command(daemonBinary())
 	cmd.Stderr = stderr
 	cmd.Env = append(d.env(),
-		// A DB-backed daemon builds an executor pool by default; nothing here
-		// spawns a child, and a pool of zero live executors would only add
+		// Executors are the CONTAINER plane, and this test spawns a fundi child,
+		// which runs in-process. A pool with zero live executors would only add
 		// noise to a degraded-boot diagnosis.
 		"RAFIKI_EXECUTORS_ENABLED=0",
 		// Ephemeral loopback port: a developer's own `rafiki serve` on :8035
@@ -132,6 +136,7 @@ func bootEmbeddedDaemon(t *testing.T, d embeddedDirs) *daemon {
 		"RAFIKI_DAEMON_ID=embedded-pg-test",
 	)
 	cmd.Env = append(cmd.Env, noRealProviderEnv()...)
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	c.NoError(cmd.Start(), "start daemon")
 	daemon := &daemon{
@@ -240,13 +245,13 @@ func queryStrings(t *testing.T, pool *pgxpool.Pool, what, sql string) map[string
 }
 
 // queryInt runs a one-column integer query.
-func queryInt(t *testing.T, pool *pgxpool.Pool, what, sql string) int64 {
+func queryInt(t *testing.T, pool *pgxpool.Pool, what, sql string, args ...any) int64 {
 	t.Helper()
 	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var n int64
-	c.NoError(pool.QueryRow(ctx, sql).Scan(&n), "%s", what)
+	c.NoError(pool.QueryRow(ctx, sql, args...).Scan(&n), "%s", what)
 	return n
 }
 
@@ -399,7 +404,14 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	c.Require().True(ok, "no token in `rafikid user create --token` output: %s", out)
 
 	// ── the daemon serves from it ────────────────────────────────────────
-	d := bootEmbeddedDaemon(t, dirs)
+	//
+	// The model is the suite's fake Anthropic SSE server, wired through a
+	// providers.toml the daemon reads from RAFIKI_PROVIDERS, so nothing here can
+	// reach a real provider. release is closed so every request is answered
+	// immediately — the same fake blocks instead, elsewhere.
+	fake := newBlockingFakeLLM(t)
+	close(fake.release)
+	d := bootEmbeddedDaemon(t, dirs, "RAFIKI_PROVIDERS="+writeFakeSSEProviders(t, fake.srv.URL))
 	client := d.control(t)
 
 	// Search is off: startRecall probed pg_extension once at startup, so the
@@ -430,4 +442,37 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	})))
 	c.NoError(err, "GetMemory on the embedded server")
 	c.Eq(memBody, got.Msg.GetMemory().GetBody(), "the memory body did not round-trip")
+
+	// ── a child spawns and completes a turn ──────────────────────────────
+	//
+	// Everything above is the schema; this is the RUNTIME writing to it, which is
+	// where a Timescale-only assumption would break first: a write-ahead
+	// conversation_turn row (PRIMARY KEY (id, created_at)), the conversation
+	// tree, the child row, and — because the spawn records requests — a
+	// raw_http_request row. None of it needs timescaledb.
+	childID := spawnResumeChild(t, d, "fakellm/mini")
+	waitForStatus(t, d, childID, "idle", 30*time.Second)
+	sendPrompt(t, client, childID, "say hi")
+
+	// Poll for the ROW, not for the status: the child is idle both before and
+	// after its turn, so a status wait would pass instantly on the wrong edge.
+	// The turn row is the proof the turn happened at all.
+	turnSQL := `SELECT count(*) FROM conversations.conversation_turn t
+	              JOIN conversations.child ch ON ch.conversation_id = t.conversation_id
+	             WHERE ch.child_id = $1`
+	c.Eventually(30*time.Second, "the turn is recorded in conversation_turn", func() error {
+		var n int64
+		if err := pool.QueryRow(ctx, turnSQL, childID).Scan(&n); err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("no conversation_turn row for child %s yet", childID)
+		}
+		return nil
+	})
+	// Exactly one: the turn closed cleanly (the child is back to idle, not
+	// failed) and nothing wrote the row twice.
+	waitForStatus(t, d, childID, "idle", 30*time.Second)
+	c.Eq(int64(1), queryInt(t, pool, "turns recorded for the child's conversation", turnSQL, childID),
+		"the fundi turn must be recorded exactly once in conversation_turn")
 }
