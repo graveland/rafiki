@@ -70,7 +70,9 @@ degrades instead of failing:
   needs the pg_textsearch extension, which this database does not have" — and
   `RecallBackfill` refuses the same way (after its authority and budget checks),
   the recall indexer and summarizer do not run, and memory put/get/tree/delete
-  work normally.
+  work normally. Those two verbs are the only ones gated: expanding a hit id you
+  already hold (`RecallContext`) still works, because it reads one entry and
+  never searches — and so do the memory verbs and `RecallStatus`.
 - **No `vector`**: recall is BM25-only; embeddings are skipped even if
   `[embeddings]` is configured.
 

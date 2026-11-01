@@ -58,15 +58,19 @@ install:
 
 | | |
 |---|---|
-| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from Maven Central (~15 MB per platform) and verified against a sha256 pinned in `rafikid` |
+| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from Maven Central (~15 MB on Linux, ~33 MB on macOS) and verified against a sha256 pinned in `rafikid` |
 | data | `~/.local/share/rafiki/pg` (`$XDG_DATA_HOME`), mode 0700 — also the socket directory |
 | log | `~/.local/state/rafiki/pg.log` (`$XDG_STATE_HOME`) |
 
 Supported: macOS arm64/amd64, Linux amd64/arm64 on glibc (not Alpine/musl). It
 starts on demand, from the first `rafikid` command that needs the database, and
-`rafikid` never stops it. Under systemd, stopping the rafikid service stops it
-too (the unit's cgroup is signalled); with launchd it can keep running after
-`rafikid` stops, which is harmless. To stop it yourself:
+`rafikid` never stops it. Which process starts it decides whether stopping the
+service stops it: when the daemon starts it, the server lands in the service's
+cgroup and stops with it (systemd signals the whole group; launchd does not, so
+it can keep running, harmlessly). When the first command was run from your
+shell — `rafiki setup` runs `rafikid migrate` that way — the server lives
+outside the unit and keeps running after the service stops, until you stop it
+yourself:
 
 ```sh
 ~/.cache/rafiki/embedpg/18.3.0-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
@@ -79,8 +83,12 @@ never on its command line. The embedded bundle ships no client tools, so `psql`
 comes from `PATH`: `brew install libpq && brew link --force libpq` on macOS,
 `apt install postgresql-client` on Debian/Ubuntu.
 
-**Backing it up.** Stop the server and copy `~/.local/share/rafiki/pg`, or run
-`pg_dump` (version 18 or newer) over the same connection `rafikid psql` uses.
+**Backing it up.** Stop the rafikid service (or process) FIRST, so nothing writes
+while you copy, and then stop the server with the `pg_ctl stop` above. A running
+daemon does not notice the server going away and never restarts it — it stays
+without a database until rafikid itself is restarted — so stopping it first is
+not just tidiness. Copy `~/.local/share/rafiki/pg`, or run `pg_dump` (version 18
+or newer) over the same connection `rafikid psql` uses.
 
 **Re-running.** Setup is safe to re-run: answers are saved in
 `~/.config/rafiki/install.toml`, with secrets (the database DSN and your API

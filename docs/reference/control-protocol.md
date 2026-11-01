@@ -582,7 +582,7 @@ call at all — and is described under "Owner isolation between users" below.
 | `PutPreset` | unary · childScoped | exempt — presets resolve against the connection's owner | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level off|low|medium|high|xhigh, budgets >= 0, known tool names, label keys mirroring the spawn path's rules — `[A-Za-z0-9_./-]` only, never `owner` or a `rafiki/`/`fundi/` key); a user credential, or the per-child secret of a TOP-LEVEL child (stamped as the writer); a parented child is refused `CodePermissionDenied` (`connectPresets.authoringChild`) and every other child shape by the provenance gate ("Who may call what") |
 | `DeletePreset` | unary · childScoped | exempt — presets resolve against the connection's owner | Stamp `deleted_at` on every live version of one preset's name — the only mutation a preset row ever undergoes; the history keeps the rows. Admitted like `PutPreset` |
 | `Recall` | unary · ownerScoped | exempt — recallOwner binds the caller's owner's non-admin identity | Hybrid search (BM25 + vector, RRF-fused) over memories, conversation summaries and windows. `query` is required (`CodeInvalidArgument` otherwise); `sources` filters to some of `memory`/`summary`/`window` (empty = all three, an unknown name `CodeInvalidArgument`); `under` is an ltree path prefix for memories, `repo` a basename filter for conversation sources; `since`/`until` are `Timestamp`s bounding hit activity (**unset or the epoch = unbounded**); `limit` 0 means the default (10), clamped to 50. Hits carry `id` (`m:`/`s:`/`w:`-prefixed — the key `RecallContext` expands), `source`, `snippet`, `when` (a `Timestamp`), conversation identity/repo/kind, ordinal span, memory path/name, summary title and the fused `score`. **A database without `pg_textsearch` cannot search**: it answers `CodeUnavailable` (`recall.ErrSearchUnavailable`, "recall search needs the pg_textsearch extension, which this database does not have") before the store is reached, the same way the in-process `recall` tool does |
-| `RecallContext` | unary · ownerScoped | exempt — recallOwner binds the caller's owner's non-admin identity | Expand one hit id: a window (`w:`) renders its message span plus `before`/`after` neighbouring messages (the wire takes 0 as "the window's own span" — the 3-each default is the fundi `recall_context` tool's substitution, not this verb's); a summary (`s:`) renders title + summary with its conversation header; a memory (`m:`) renders its full body. `max_chars` caps the text with **0 = uncapped** (the 8000 default is likewise the tool's substitution). An empty `id` is `CodeInvalidArgument`; a well-formed but unknown id is `CodeNotFound`; a malformed one (no `m:`/`s:`/`w:` prefix) falls through to `CodeInternal` |
+| `RecallContext` | unary · ownerScoped | exempt — recallOwner binds the caller's owner's non-admin identity | Expand one hit id: a window (`w:`) renders its message span plus `before`/`after` neighbouring messages (the wire takes 0 as "the window's own span" — the 3-each default is the fundi `recall_context` tool's substitution, not this verb's); a summary (`s:`) renders title + summary with its conversation header; a memory (`m:`) renders its full body. `max_chars` caps the text with **0 = uncapped** (the 8000 default is likewise the tool's substitution). An empty `id` is `CodeInvalidArgument`; a well-formed but unknown id is `CodeNotFound`; a malformed one (no `m:`/`s:`/`w:` prefix) falls through to `CodeInternal`. Not gated on the recall extension, unlike `Recall`: it expands an id the caller already holds, so it answers normally where search is off |
 | `GetMemory` | unary · ownerScoped | exempt — recallOwner binds the caller's owner's non-admin identity | One of the CALLER'S own memories by `(path, name)`, body and meta included. Memories are always owner-scoped to the caller's own user id — an admin gets no one else's |
 | `MemoryTree` | unary · ownerScoped | exempt — recallOwner binds the caller's owner's non-admin identity | The caller's memories under `path`, to `depth` (0 = unlimited), ordered by path; the rendered tree is byte-budgeted (`recall.TreeMaxChars`) on the tool surface |
 | `PutMemory` | unary · ownerScoped | exempt — recallOwner binds the caller's owner's non-admin identity | Save or replace a memory at `(path, name)` under the CALLER'S OWN user id — even for an admin. `path` must be dot-separated labels matching `[A-Za-z0-9_-]{1,256}` (`CodeInvalidArgument` otherwise), `meta_json` must parse as JSON (empty means `{}`) and an empty owner is `CodeInvalidArgument` (`recall.ErrNoOwner`). Replace is a new row; the old one is tombstoned, never deleted |
@@ -1897,13 +1897,16 @@ the case on an `embedded` install today): `Recall` and `RecallBackfill` answer
 `CodeUnavailable` with `recall.ErrSearchUnavailable` — "recall search needs the
 pg_textsearch extension, which this database does not have" — and the recall
 indexer and summarizer never start, so no window, embedding or summary is
-ever derived. `RecallBackfill` reaches that answer only AFTER its authority and
-budget checks, so the refusal order never tells a caller what the operator's
-Postgres has before it tells them they may not call the verb. The remaining six
-verbs are unaffected: `conversation_window` and `conversation_summary` are
-empty, `RecallContext`/`RecallStatus` read what is there, and the memory CRUD
-four work normally — memories are plain SQL. Without `vector` alone the
-embedding columns stay `bytea` placeholders and search is BM25-only
+ever derived. Those two are the ONLY verbs gated on the extension.
+`RecallBackfill` reaches that answer only AFTER its authority and budget checks,
+so the refusal order never tells a caller what the operator's Postgres has
+before it tells them they may not call the verb. The remaining six verbs are
+unaffected, `RecallContext` most deliberately: it EXPANDS a hit id the caller
+already holds (it reads one entry, it never searches), so it is not gated even
+though `Recall` is — a memory's `m:` id still expands, while window and summary
+ids cannot exist on such a database. `RecallStatus` reports the empty index and
+the memory CRUD four work normally — memories are plain SQL. Without `vector`
+alone the embedding columns stay `bytea` placeholders and search is BM25-only
 (`recallCaps`, `cmd/rafikid/recall.go`).
 
 Zero asymmetry between the two time-bearing requests: `Recall`'s

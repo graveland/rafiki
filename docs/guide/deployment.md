@@ -23,7 +23,7 @@ planned). You run the pieces yourself; this page lists what they need.
 
 | Piece | Where it runs | Needs |
 |---|---|---|
-| PostgreSQL | managed or self-run | version 15 or newer; two extensions for recall search (below) |
+| PostgreSQL | managed or self-run | version 18 or newer; two extensions for recall search (below) |
 | `rafikid` | one process per daemon identity | the database, TLS cert, provider keys |
 | executors (`rafiki executor serve`) | wherever agents should work | outbound TLS to the daemon, an enrollment token |
 | `rafiki-hooks` | optional, internet-facing | the daemon's URL and a narrow token |
@@ -41,7 +41,10 @@ single-machine install — `rafikid` runs its own PostgreSQL there; see [Install
 rafiki](install.md#the-embedded-database). A server deployment uses a real
 database, below.)
 
-- **PostgreSQL 15 or newer.** The schema uses `NULLS NOT DISTINCT`.
+- **PostgreSQL 18 or newer.** The schema defaults every id to `uuidv7()`, which
+  is PostgreSQL 18's own function and ships with no shim here, so an older server
+  fails at the first migration. (`NULLS NOT DISTINCT`, which the schema also
+  uses, only needs 15.)
 - **Extensions `vector` and `pg_textsearch` are needed for recall SEARCH only.**
   Both are untrusted extensions, and `pg_textsearch` must be in
   `shared_preload_libraries`. The recall migration creates them when the server
