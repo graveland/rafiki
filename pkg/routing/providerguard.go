@@ -4,7 +4,6 @@ package routing
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,17 +14,16 @@ import (
 )
 
 // EjectReason names why a provider was removed from routing. The guard's
-// eject/persist/expire machinery is reason-agnostic: a future detector (a
-// provider that mangles tool-call records, say) adds a constant and an Observe
-// rule, not new plumbing.
+// eject/persist/expire machinery is reason-agnostic: a new detector adds a
+// constant and an Observe rule, not new plumbing.
 type EjectReason string
 
 // ReasonNoCache: the provider stopped serving prompt-cache hits on prompts
 // large enough that it should have.
 const ReasonNoCache EjectReason = "no_cache"
 
-// ReasonOperator: a human banned the provider (Ban). Exempt from the per-line
-// cap, and may carry no expiry at all.
+// ReasonOperator: a human banned the provider (Ban). May carry no expiry at
+// all, and is never lifted by the guard's own sweep (LiftLine).
 const ReasonOperator EjectReason = "operator"
 
 // ReasonLift: a human lifted an operator ban (Lift). Log-only — it supersedes
@@ -51,16 +49,9 @@ const (
 	// minCacheableTokens is the prompt size below which a provider declining to
 	// cache is not evidence of anything.
 	minCacheableTokens = 4096
-	// maxEjectedPerModelLine bounds a pathological cascade: however many
-	// providers break, a model line never loses more than this many automatic
-	// ejections at once. At the cap a NEW automatic ejection is declined — the
-	// line keeps the ones it has, first-come — rather than the oldest being
-	// evicted: under a fixed ranking (sort=price) evicting the oldest sends
-	// traffic straight back to the freed provider, which re-earns its ejection,
-	// forever. Operator bans are exempt.
-	maxEjectedPerModelLine = 3
-	// convMemoryLimit caps the per-conversation memory of the previous turn.
-	// Exceeding it prunes entries untouched for convMemoryTTL.
+	// convMemoryLimit caps the per-conversation memory of the previous turn and
+	// of each conversation's health evidence. Exceeding it prunes entries
+	// untouched for convMemoryTTL.
 	convMemoryLimit = 512
 	convMemoryTTL   = time.Hour
 )
@@ -86,9 +77,11 @@ func (e ejection) live(now time.Time) bool {
 }
 
 // lastTurn is what the guard remembers about a conversation's previous turn:
-// enough to tell whether the next turn is evidence about a provider.
+// enough to tell whether the next turn is evidence about a provider, and which
+// provider served it on which model line (PinFor).
 type lastTurn struct {
 	provider   string
+	modelLine  string
 	prefixHash string
 	at         time.Time
 }
@@ -101,6 +94,25 @@ type Observation struct {
 	PrefixHash      string
 	InputTokens     int64
 	CacheReadTokens int64
+	// Pinned is the provider slug this attempt was forced onto with only=[slug];
+	// "" when OpenRouter chose. Failures are attributed ONLY through Pinned.
+	Pinned string
+	// Failed reports the attempt returned an error. FailureKind says what kind;
+	// FailureDetail is a short excerpt (<= 300 bytes) for ban evidence.
+	Failed        bool
+	FailureKind   FailureKind
+	FailureDetail string
+	// StopReason is the response's stop reason spelling ("max_tokens", "tool_use", ...); "" unknown.
+	StopReason   string
+	OutputTokens int64
+	// MaxTokens is the max_tokens the REQUEST asked for; 0 unknown.
+	MaxTokens int64
+	// Repetition is RepetitionScore of the turn's text+thinking; nil = not scored
+	// (too short). Never use 0 for "not scored": 0 is maximal repetition.
+	Repetition *float64
+	// ToolArgsInvalid counts tool calls whose input was not a JSON object or lacked
+	// a key the tool's schema marks required.
+	ToolArgsInvalid int
 }
 
 // EjectionRecord is one ejection, as written to the durable log.
@@ -121,10 +133,13 @@ type EjectionSink interface {
 	Active(ctx context.Context, now time.Time) ([]EjectionRecord, error)
 }
 
-// ProviderGuard watches completed OpenRouter turns for a provider that has
-// stopped serving prompt-cache hits, and ejects it from routing. It also holds
-// operator bans (Ban/Lift). In-memory state is authoritative; the sink is
-// history that reseeds it at startup.
+// ProviderGuard judges provider health turn by turn and ejects a provider from
+// routing when a verdict lands: the cache rule (a provider that stopped serving
+// prompt-cache hits) plus the per-conversation rules in providerhealth.go
+// (unavailable, output_cap, tool_corrupt, degenerate). It also holds operator
+// bans (Ban/Lift) and remembers which provider each conversation is on, for
+// pinning (PinFor). In-memory state is authoritative; the sink is history that
+// reseeds it at startup.
 //
 // A nil *ProviderGuard is valid and inert. RAFIKI_PROVIDER_GUARD=off does NOT
 // produce one: it calls SetObserve(false), which stops automatic ejection
@@ -138,12 +153,16 @@ type ProviderGuard struct {
 	observe  bool
 	ejected  map[providerKey]ejection
 	streaks  map[providerKey]int
-	lastSeen map[string]lastTurn // by conversation id
-	ttl      time.Duration
-	sink     EjectionSink
-	logger   *slog.Logger
-	onEject  func(provider, modelLine string, reason EjectReason)
-	dir      *ProviderDirectory
+	lastSeen map[string]lastTurn    // by conversation id
+	health   map[string]*convHealth // by conversation id
+	// turns counts successful attempts per (slug, line) this process has seen.
+	// Evidence only: it never decides a ban on its own.
+	turns   map[providerKey]int64
+	ttl     time.Duration
+	sink    EjectionSink
+	logger  *slog.Logger
+	onEject func(provider, modelLine string, reason EjectReason)
+	dir     *ProviderDirectory
 }
 
 func NewProviderGuard(ttl time.Duration, logger *slog.Logger) *ProviderGuard {
@@ -155,6 +174,8 @@ func NewProviderGuard(ttl time.Duration, logger *slog.Logger) *ProviderGuard {
 		ejected:  map[providerKey]ejection{},
 		streaks:  map[providerKey]int{},
 		lastSeen: map[string]lastTurn{},
+		health:   map[string]*convHealth{},
+		turns:    map[providerKey]int64{},
 		ttl:      ttl,
 		logger:   logger,
 	}
@@ -245,6 +266,11 @@ func (g *ProviderGuard) SetOnEject(fn func(provider, modelLine string, reason Ej
 // hash, both of which come from the capture path: with capture disabled the
 // guard receives empty values, nothing qualifies, and the guard is inert. That
 // is the intended fail-safe — no evidence beats false evidence.
+//
+// Beyond the cache rule, an observation can ban a provider outright: a run of
+// failed pinned attempts (unavailable), a truncated answer (output_cap),
+// mangled tool arguments (tool_corrupt) or a repetition loop (degenerate). At
+// most one ban per observation, in that order of precedence.
 func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 	if g == nil {
 		return
@@ -255,6 +281,28 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 	if !g.observe {
 		g.mu.Unlock()
 		return
+	}
+	if obs.Failed {
+		rec, banned := g.failureBanLocked(now, line, obs)
+		g.mu.Unlock()
+		if banned {
+			g.reportBan(rec, obs.Conversation, "failure_kind", obs.FailureKind.String())
+		}
+		return
+	}
+	if obs.Provider != "" {
+		rec, banned := g.successBanLocked(now, line, obs)
+		if banned {
+			// Remember the turn before leaving: the ban's key is the slug, the
+			// no_cache path's key is the display name, so the already-ejected
+			// check below would NOT stop a second ban for the same provider.
+			if obs.Conversation != "" {
+				g.rememberLocked(now, obs)
+			}
+			g.mu.Unlock()
+			g.reportBan(rec, obs.Conversation)
+			return
+		}
 	}
 	prev, hadPrev := g.lastSeen[obs.Conversation]
 	if obs.Conversation != "" {
@@ -280,107 +328,19 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 		g.mu.Unlock()
 		return
 	}
-	rec, ok := g.ejectLocked(now, key, ReasonNoCache, streak, obs)
-	sink, onEject, logger, dir := g.sink, g.onEject, g.logger, g.dir
-	g.mu.Unlock()
-
-	if !ok {
-		// The decline is Info once per provider — the miss that would have
-		// ejected it — and Debug for every repeat (the kept streak grows while
-		// a slot stays occupied), so a line parked at the cap under sustained
-		// traffic logs one line per provider, not one per miss.
-		attrs := []any{"provider", dir.Slug(key.provider), "model_line", key.modelLine, "cap", maxEjectedPerModelLine}
-		if streak == missStreakToEject {
-			logger.Info("routing: ejection declined at cap", attrs...)
-		} else {
-			logger.Debug("routing: ejection declined at cap", attrs...)
-		}
-		return
-	}
-	logger.Warn("routing: provider ejected",
-		"provider", dir.Slug(rec.Provider), "model_line", rec.ModelLine, "reason", string(rec.Reason),
-		"streak", streak, "expires_at", rec.ExpiresAt, "conversation", obs.Conversation)
-	if onEject != nil {
-		onEject(rec.Provider, rec.ModelLine, rec.Reason)
-	}
-	if sink != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := sink.Append(ctx, rec); err != nil {
-			// The in-memory ejection stands regardless; the log is history.
-			logger.Warn("routing: ejection log append failed", "provider", rec.Provider, "error", err)
-		}
-	}
-}
-
-// ejectLocked records the ejection in memory and returns the record to
-// persist, with ok true. When the model line already holds the cap of live
-// automatic ejections the new one is declined instead: ok is false, nothing
-// is recorded, the streak is kept, and the caller must not write the sink —
-// the provider stays routable and takes the freed slot on its next miss.
-// Caller holds g.mu.
-func (g *ProviderGuard) ejectLocked(now time.Time, key providerKey, reason EjectReason, streak int, obs Observation) (rec EjectionRecord, ok bool) {
-	if g.capReachedLocked(now, key.modelLine) {
-		return EjectionRecord{}, false
-	}
-	g.ejected[key] = ejection{reason: reason, at: now, expiresAt: now.Add(g.ttl)}
-	delete(g.streaks, key)
-	evidence, _ := json.Marshal(map[string]any{
+	// The no_cache evidence keys are the ones this rule has always written; the
+	// newer rules carry banEvidenceLocked's common set instead.
+	rec := g.banLocked(now, key, ReasonNoCache, g.ttl, map[string]any{
 		"streak":            streak,
 		"conversation":      obs.Conversation,
 		"input_tokens":      obs.InputTokens,
 		"cache_read_tokens": obs.CacheReadTokens,
 		"model":             obs.Model,
 	})
-	return EjectionRecord{
-		Provider:  key.provider,
-		ModelLine: key.modelLine,
-		Reason:    reason,
-		ExpiresAt: now.Add(g.ttl),
-		Evidence:  evidence,
-	}, true
-}
+	delete(g.streaks, key)
+	g.mu.Unlock()
 
-// capReachedLocked reports whether the model line already holds
-// maxEjectedPerModelLine live automatic ejections, so recording another would
-// put it over the cap. Operator bans are neither counted nor capped: the cap
-// stops the automatic detector banning a line into unroutability, and a
-// human's ban is a deliberate choice that must never be silently dropped.
-// Caller holds g.mu.
-func (g *ProviderGuard) capReachedLocked(now time.Time, line string) bool {
-	n := 0
-	for k, e := range g.ejected {
-		if k.modelLine == line && e.reason != ReasonOperator && e.live(now) {
-			n++
-		}
-	}
-	return n >= maxEjectedPerModelLine
-}
-
-// enforceCapLocked drops the oldest live automatic ejections for a model line
-// until at most maxEjectedPerModelLine remain. Recording no longer calls it —
-// at the cap a new ejection is declined (see capReachedLocked) — so this
-// survives only as Rehydrate's backstop against history holding more live
-// automatic rows for one line than the cap allows (an older binary's log,
-// say). Caller holds g.mu.
-//
-// Operator bans are neither counted nor evicted: the cap stops the automatic
-// detector banning a line into unroutability, and a human's ban is a
-// deliberate choice that must never be silently dropped.
-func (g *ProviderGuard) enforceCapLocked(now time.Time, line string) {
-	var keys []providerKey
-	for k, e := range g.ejected {
-		if k.modelLine == line && e.reason != ReasonOperator && e.live(now) {
-			keys = append(keys, k)
-		}
-	}
-	if len(keys) <= maxEjectedPerModelLine {
-		return
-	}
-	sort.Slice(keys, func(i, j int) bool { return g.ejected[keys[i]].at.Before(g.ejected[keys[j]].at) })
-	for _, k := range keys[:len(keys)-maxEjectedPerModelLine] {
-		delete(g.ejected, k)
-	}
+	g.reportBan(rec, obs.Conversation, "streak", streak)
 }
 
 // rememberLocked stores this turn as the conversation's previous turn, pruning
@@ -393,7 +353,12 @@ func (g *ProviderGuard) rememberLocked(now time.Time, obs Observation) {
 			}
 		}
 	}
-	g.lastSeen[obs.Conversation] = lastTurn{provider: obs.Provider, prefixHash: obs.PrefixHash, at: now}
+	g.lastSeen[obs.Conversation] = lastTurn{
+		provider:   obs.Provider,
+		modelLine:  ModelLine(obs.Model),
+		prefixHash: obs.PrefixHash,
+		at:         now,
+	}
 }
 
 // qualifies reports whether obs is evidence about its provider's cache. All
@@ -422,26 +387,13 @@ func (g *ProviderGuard) IgnoredFor(now time.Time, model string) []string {
 	if g == nil {
 		return nil
 	}
-	line := ModelLine(model)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	seen := map[string]struct{}{}
-	for k, e := range g.ejected {
-		if !e.live(now) {
-			delete(g.ejected, k)
-			continue
-		}
-		if k.modelLine == line || k.modelLine == AllModelLines {
-			seen[g.dir.Slug(k.provider)] = struct{}{}
-		}
-	}
-	if len(seen) == 0 {
+	operator, automatic := g.ExclusionsFor(now, model)
+	if len(operator) == 0 && len(automatic) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(seen))
-	for slug := range seen {
-		out = append(out, slug)
-	}
+	out := make([]string, 0, len(operator)+len(automatic))
+	out = append(out, operator...)
+	out = append(out, automatic...)
 	sort.Strings(out)
 	return out
 }
@@ -592,8 +544,10 @@ func (g *ProviderGuard) Ejected(now time.Time) []EjectionRecord {
 }
 
 // Rehydrate seeds in-memory state from the sink's unexpired ejections. A
-// failure is logged and swallowed: ejection state is a cost optimisation, not a
-// correctness requirement, and a daemon must not fail to start over it.
+// ReasonUnavailable record is skipped: those bans are memory-only, so a restart
+// gives the provider a fresh chance at a capacity problem. A failure is logged
+// and swallowed: ejection state is a cost optimisation, not a correctness
+// requirement, and a daemon must not fail to start over it.
 func (g *ProviderGuard) Rehydrate(ctx context.Context, now time.Time) {
 	if g == nil {
 		return
@@ -611,6 +565,11 @@ func (g *ProviderGuard) Rehydrate(ctx context.Context, now time.Time) {
 	}
 	g.mu.Lock()
 	for _, r := range recs {
+		if r.Reason == ReasonUnavailable {
+			// Short bans are memory-only: a restart gives the provider a fresh
+			// chance at a capacity problem that has very likely cleared.
+			continue
+		}
 		at := r.CreatedAt
 		if at.IsZero() {
 			at = now
@@ -619,20 +578,9 @@ func (g *ProviderGuard) Rehydrate(ctx context.Context, now time.Time) {
 			reason: r.Reason, at: at, expiresAt: r.ExpiresAt, note: r.Note,
 		}
 	}
-	for line := range linesOf(recs) {
-		g.enforceCapLocked(now, line)
-	}
 	n := len(g.ejected)
 	g.mu.Unlock()
 	logger.Info("routing: rehydrated provider ejections", "count", n)
-}
-
-func linesOf(recs []EjectionRecord) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, r := range recs {
-		out[r.ModelLine] = struct{}{}
-	}
-	return out
 }
 
 // ModelLine folds a stamped point release into its model line, so an ejection

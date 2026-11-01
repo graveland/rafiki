@@ -15,9 +15,10 @@ import (
 // fakeSink is an in-memory EjectionSink that records appends and can be told
 // to fail.
 type fakeSink struct {
-	mu   sync.Mutex
-	recs []EjectionRecord
-	err  error
+	mu     sync.Mutex
+	recs   []EjectionRecord
+	err    error
+	active []EjectionRecord // what Active reports; nil by default
 }
 
 func (s *fakeSink) Append(_ context.Context, e EjectionRecord) error {
@@ -30,7 +31,11 @@ func (s *fakeSink) Append(_ context.Context, e EjectionRecord) error {
 	return nil
 }
 
-func (s *fakeSink) Active(context.Context, time.Time) ([]EjectionRecord, error) { return nil, nil }
+func (s *fakeSink) Active(context.Context, time.Time) ([]EjectionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active, nil
+}
 
 // TestBanAppliesToEveryModelLine proves an operator ban is global: it lands in
 // the ignore list of models the guard has never observed.
@@ -65,26 +70,6 @@ func TestBanWithTTLExpires(t *testing.T) {
 	c.Require().NoError(err)
 	c.Len(g.IgnoredFor(now.Add(59*time.Minute), "any/model"), 1, "at 59m IgnoredFor")
 	c.Empty(g.IgnoredFor(now.Add(61*time.Minute), "any/model"), "at 61m IgnoredFor")
-}
-
-// TestBanSurvivesPerLineCap proves operator bans are exempt from the cap: the
-// guard recording its own ejections on a line — three land, the rest are
-// declined at the cap — neither evicts the ban nor has the ban count against
-// the guard's own three.
-func TestBanSurvivesPerLineCap(t *testing.T) {
-	c := assert.NewCollecting(t)
-	g := testGuard()
-	now := time.Now()
-	_, err := g.Ban(context.Background(), now, "zulu", 0, "")
-	c.Require().NoError(err)
-	for i, p := range []string{"Alpha", "Bravo", "Charlie", "Delta", "Echo"} {
-		conv := string(rune('a' + i))
-		for range 6 {
-			g.Observe(now.Add(time.Duration(i)*time.Second), miss(conv, p))
-		}
-	}
-	got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro")
-	c.False(len(got) != 4 || got[3] != "zulu", "IgnoredFor = %v, want three guard ejections plus zulu", got)
 }
 
 // TestBanDeduplicatesWithGuardEjection proves a provider both ejected by the
