@@ -9,6 +9,14 @@ import (
 	"unicode"
 )
 
+// ErrSearchUnavailable is returned INSTEAD of searching when the database has
+// no bm25 access method — an install without the pg_textsearch extension (an
+// embedded one has neither pg_textsearch nor vector). Every search source is
+// BM25-backed, so there is nothing to degrade to: the caller gets this
+// sentinel rather than the SQL error an index-less search would raise. Memory
+// tools do not go through search and keep working.
+var ErrSearchUnavailable = errors.New("recall search needs the pg_textsearch extension, which this database does not have")
+
 // Fuse merges per-source ranked lists with reciprocal rank fusion: each hit
 // scores 1/(RRFK+rank) per list that contains it. Duplicate ids keep the
 // first-seen hit's fields; the result is sorted by score, then recency, then

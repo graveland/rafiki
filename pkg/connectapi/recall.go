@@ -70,8 +70,9 @@ var ErrNoBackfillBudget = errors.New("recall backfill: a positive max_cost_usd i
 // recallError maps a manager failure onto a Connect code: an unknown row is
 // CodeNotFound, a bad memory path or a missing owner is the caller's fault
 // (CodeInvalidArgument), a scope that admits nothing is CodePermissionDenied,
-// and everything else — a store failure — is CodeInternal rather than
-// something that reads as the caller's fault.
+// a database without the pg_textsearch extension is CodeUnavailable (the
+// deployment's gap, not the caller's), and everything else — a store failure —
+// is CodeInternal rather than something that reads as the caller's fault.
 func recallError(err error) error {
 	switch {
 	case errors.Is(err, recall.ErrNotFound):
@@ -80,6 +81,8 @@ func recallError(err error) error {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	case errors.Is(err, recall.ErrInvalidScope):
 		return connect.NewError(connect.CodePermissionDenied, err)
+	case errors.Is(err, recall.ErrSearchUnavailable):
+		return connect.NewError(connect.CodeUnavailable, err)
 	case errors.Is(err, ErrNoBackfillBudget):
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}

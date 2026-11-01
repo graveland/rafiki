@@ -152,6 +152,13 @@ func completionCost(pricer insights.Pricer, model, catalogModel string, usage ms
 	return price.Cost(usage).Total
 }
 
+// recallCaps is what the DATABASE can do, probed once at startup
+// (recalldb.Store.InstalledExtensions) — not what the config asks for. An
+// embedded install has neither extension: search is off entirely without
+// pg_textsearch, and embeddings are skipped without vector (their columns are
+// bytea placeholders there).
+type recallCaps struct{ textsearch, vector bool }
+
 // recallBinding is recall + memories for one caller, bound at construction —
 // the caller's conversation scope and own owner id are the constructor's
 // inputs, never method arguments, so a tool argument can never widen them.
@@ -160,6 +167,9 @@ type recallBinding struct {
 	emb   recall.Embedder // nil = BM25-only search
 	scope recall.Scope
 	owner string
+	// searchOff is the database's lack of pg_textsearch, copied from the
+	// runtime: search is refused before the store is touched.
+	searchOff bool
 }
 
 var _ tools.RecallBinding = (*recallBinding)(nil)
@@ -195,10 +205,16 @@ func newRecallBinding(c *Controller, owner users.Identity) tools.RecallBinding {
 	default:
 		scope = recall.Scope{}
 	}
-	return &recallBinding{st: c.recall.st, emb: c.recall.emb, scope: scope, owner: owner.UserID}
+	return &recallBinding{st: c.recall.st, emb: c.recall.emb, scope: scope, owner: owner.UserID, searchOff: c.recall.searchOff}
 }
 
 func (b *recallBinding) Recall(ctx context.Context, q tools.RecallQuery) (string, error) {
+	// A database with no bm25 access method has nothing to search: refuse
+	// before the store is reached, so the caller reads the degradation
+	// instead of a missing-index SQL error.
+	if b.searchOff {
+		return "", recall.ErrSearchUnavailable
+	}
 	sq := recall.SearchQuery{
 		Scope:       b.scope,
 		MemoryOwner: b.owner,
@@ -351,6 +367,9 @@ type recallRuntime struct {
 	indexer *recall.Indexer
 	// summaryModel is the configured [summaries] model, "" when none.
 	summaryModel string
+	// searchOff is true when the database has no pg_textsearch: Recall answers
+	// recall.ErrSearchUnavailable, no indexer runs.
+	searchOff bool
 }
 
 // buildRecallRuntime assembles the runtime without starting anything: the
@@ -362,13 +381,19 @@ type recallRuntime struct {
 // *recall.Summarizer built from a nil dependency) would enter the interface as
 // non-nil and the indexer would then dereference it — the zero-value/typed-nil
 // trap, mirrored by every caller of newRecallBinding.
-func buildRecallRuntime(pool *pgxpool.Pool, prov *providers.Set, client *llm.Client, logger *slog.Logger) *recallRuntime {
+//
+// caps is what the DATABASE can do, not what the config asks for: the embedder
+// is built only when embeddings are configured AND the vector extension is
+// installed, because without it the embedding columns are bytea placeholders
+// that no vector query can read. searchOff records the missing bm25 access
+// method, which startRecall uses to skip the indexer entirely.
+func buildRecallRuntime(pool *pgxpool.Pool, prov *providers.Set, client *llm.Client, logger *slog.Logger, caps recallCaps) *recallRuntime {
 	st := recalldb.New(pool)
 	var emb recall.Embedder
 	var sums recall.SummaryPass
 	var summaryModel string
 	if prov != nil {
-		if prov.Embeddings != nil {
+		if prov.Embeddings != nil && caps.vector {
 			emb = embed.New(*prov.Embeddings, nil)
 		}
 		if prov.Summaries != nil {
@@ -389,7 +414,7 @@ func buildRecallRuntime(pool *pgxpool.Pool, prov *providers.Set, client *llm.Cli
 		Summaries: sums,
 		Logger:    logger,
 	})
-	return &recallRuntime{st: st, emb: emb, sums: sums, indexer: ix, summaryModel: summaryModel}
+	return &recallRuntime{st: st, emb: emb, sums: sums, indexer: ix, summaryModel: summaryModel, searchOff: !caps.textsearch}
 }
 
 // startRecall wires the recall subsystem on a daemon with a database: the
@@ -398,14 +423,37 @@ func buildRecallRuntime(pool *pgxpool.Pool, prov *providers.Set, client *llm.Cli
 //
 // A nil pool disables recall entirely — the DB-less daemon's posture, logged
 // once at Info like every other degradation, never an error.
+//
+// The two extensions are probed ONCE here, and the runtime degrades by what the
+// database actually has rather than by what providers.toml asks for: an
+// embedded install has neither pg_textsearch nor vector. A failed probe keeps
+// today's behaviour (both assumed present) — the alternative, assuming them
+// absent, would disable search on every install that simply could not answer.
 func startRecall(ctx context.Context, c *Controller, pool *pgxpool.Pool, prov *providers.Set, client *llm.Client, logger *slog.Logger) {
 	if pool == nil {
 		logger.Info("recall disabled: no agent database")
 		return
 	}
-	rt := buildRecallRuntime(pool, prov, client, logger)
+	caps := recallCaps{textsearch: true, vector: true}
+	ts, vec, err := recalldb.New(pool).InstalledExtensions(ctx)
+	if err != nil {
+		logger.Warn("recall: could not read installed extensions; assuming pg_textsearch and vector are present", "error", err)
+	} else {
+		caps = recallCaps{textsearch: ts, vector: vec}
+	}
+	if !caps.vector && prov != nil && prov.Embeddings != nil {
+		logger.Warn("recall: embeddings are configured but the vector extension is not installed; search is BM25-only")
+	}
+	rt := buildRecallRuntime(pool, prov, client, logger, caps)
 	if prov != nil && prov.Summaries != nil && client == nil {
 		logger.Warn("recall summaries configured but the daemon has no llm client; continuing without summaries")
+	}
+	// The store is assigned in EVERY case: memories are plain SQL and keep
+	// working on a database that can search nothing.
+	c.recall = rt
+	if rt.searchOff {
+		logger.Info("recall search disabled: the pg_textsearch extension is not installed; memory tools still work")
+		return
 	}
 	if rt.emb != nil {
 		// Once, at startup: the HNSW indexes the vector search needs. A failure
@@ -416,7 +464,6 @@ func startRecall(ctx context.Context, c *Controller, pool *pgxpool.Pool, prov *p
 			logger.Warn("recall: could not ensure vector indexes; vector search degraded to BM25", "error", err)
 		}
 	}
-	c.recall = rt
 	c.recallWg.Add(1)
 	go func() {
 		defer c.recallWg.Done()

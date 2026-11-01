@@ -166,9 +166,13 @@ func TestRecallWiring(t *testing.T) {
 
 func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
 	c := assert.NewAborting(t)
-	rt := buildRecallRuntime(nil, &providers.Set{}, nil, discardLogger())
+	// bothCaps is a database with both extensions — what the test database
+	// has, and what this test's assertions assume.
+	bothCaps := recallCaps{textsearch: true, vector: true}
+	rt := buildRecallRuntime(nil, &providers.Set{}, nil, discardLogger(), bothCaps)
 	c.NotNil(rt.st, "store must always be built when a pool exists")
 	c.NotNil(rt.indexer, "indexer must always be built; it runs BM25-only without an embedder")
+	c.False(rt.searchOff, "searchOff with pg_textsearch installed")
 	c.Nil(rt.emb, "embedder")
 	c.Nil(rt.sums, "summarizer")
 	c.Eq("", rt.summaryModel, "summaryModel")
@@ -183,7 +187,7 @@ func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
 		Embeddings: &providers.EmbeddingsConfig{URL: "http://127.0.0.1:1/v1/embeddings", Model: "emb-1", Dimensions: 8},
 		Summaries:  &providers.SummariesConfig{Model: "claude-haiku-4-5", MaxSegmentTokens: 9000},
 	}
-	rt = buildRecallRuntime(nil, prov, client, discardLogger())
+	rt = buildRecallRuntime(nil, prov, client, discardLogger(), bothCaps)
 	c.NotNil(rt.emb, "[embeddings] config must build the embedder")
 	c.NotNil(rt.sums, "[summaries] config with a client must build the summarizer")
 	c.Eq("claude-haiku-4-5", rt.summaryModel, "summaryModel")
@@ -191,7 +195,7 @@ func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
 	// Summaries configured but no client: the completer is what the
 	// summarizer drives, so without one the pass stays off — windowing and
 	// memories are client-free and still run.
-	rt = buildRecallRuntime(nil, prov, nil, discardLogger())
+	rt = buildRecallRuntime(nil, prov, nil, discardLogger(), bothCaps)
 	c.Nil(rt.sums, "summarizer built without an llm client")
 }
 

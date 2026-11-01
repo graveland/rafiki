@@ -75,6 +75,11 @@ func (m connectRecall) Recall(ctx context.Context, q recall.SearchQuery, limit i
 	if err != nil {
 		return nil, err
 	}
+	// The database has no bm25 access method: refuse the same way the
+	// in-process binding does, so a CLI recall and a tool recall agree.
+	if rt.searchOff {
+		return nil, recall.ErrSearchUnavailable
+	}
 	owner := recallIdentity(ctx)
 	q.Scope = recallScopeFor(owner)
 	q.MemoryOwner = owner.UserID

@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,37 @@ type Store struct {
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 var _ recall.Store = (*Store)(nil)
+
+// InstalledExtensions reports which of the two recall extensions this database
+// actually has. Migration 0036 creates each one only when the server ships it,
+// so an install can be missing either: without pg_textsearch there are no bm25
+// indexes and no search, without vector the embedding columns are bytea
+// placeholders and vector search is unavailable. The daemon probes once at
+// startup and degrades by the answer rather than by its config.
+func (s *Store) InstalledExtensions(ctx context.Context) (textsearch, vector bool, err error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT extname FROM pg_extension WHERE extname IN ('pg_textsearch', 'vector')`)
+	if err != nil {
+		return false, false, fmt.Errorf("recalldb: read installed extensions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, false, fmt.Errorf("recalldb: read installed extensions: %w", err)
+		}
+		switch name {
+		case "pg_textsearch":
+			textsearch = true
+		case "vector":
+			vector = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, false, fmt.Errorf("recalldb: read installed extensions: %w", err)
+	}
+	return textsearch, vector, nil
+}
 
 // sqlb assembles a query while collecting positional bind values; fragments
 // appended after earlier args keep their own numbering, so helpers that bind

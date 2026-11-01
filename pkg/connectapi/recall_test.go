@@ -235,6 +235,24 @@ func TestRecallErrorMapping(t *testing.T) {
 	}
 }
 
+// TestRecallErrorMapsSearchUnavailable pins the degradation's wire code: a
+// database without pg_textsearch makes the manager answer
+// recall.ErrSearchUnavailable, which is the DEPLOYMENT's gap — CodeUnavailable,
+// never CodeInternal (a bug) and never CodePermissionDenied (the caller's
+// fault). It goes through the Recall handler rather than recallError directly
+// because routing the manager's error through the mapper is half of what this
+// pins: a handler returning the raw error would surface as Unknown.
+func TestRecallErrorMapsSearchUnavailable(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := &Server{}
+	f := &fakeRecall{recallErr: fmt.Errorf("search: %w", recall.ErrSearchUnavailable)}
+	s.SetRecallManager(f)
+	_, err := s.Recall(context.Background(), connect.NewRequest(&rafikiv1.RecallRequest{Query: "q"}))
+	c.Require().Error(err, "recall on a search-less database")
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "got code")
+	c.True(errors.Is(err, recall.ErrSearchUnavailable), "error does not wrap recall.ErrSearchUnavailable: %v", err)
+}
+
 func TestRecallLimitClamp(t *testing.T) {
 	c := assert.NewCollecting(t)
 	for _, tc := range []struct{ wire, want int }{
