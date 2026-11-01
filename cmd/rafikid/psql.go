@@ -144,7 +144,7 @@ func psqlInvocation(configured, dsn string, args, environ []string) (psqlInv, er
 		keys = append(keys, k)
 	}
 	sort.Strings(keys) // stable env order, so a test can compare it
-	for _, k := range keys {
+	for i, k := range keys {
 		// pgx pool settings are not libpq parameters and mean nothing to psql;
 		// a DSN carrying them is still usable, so they are skipped, not refused.
 		if strings.HasPrefix(k, "pool_") {
@@ -152,7 +152,16 @@ func psqlInvocation(configured, dsn string, args, environ []string) (psqlInv, er
 		}
 		name, ok := pgEnv[k]
 		if !ok {
-			return psqlInv{}, fmt.Errorf("rafikid psql: cannot pass DSN parameter %q; run psql directly", k)
+			// A name libpq knows is worth printing: "service" or "passfile" tells
+			// the operator exactly what this command cannot do. A name it does NOT
+			// know is never printed — a password that an unquoted space or a `?`
+			// split leaves its tail sitting where a key would be, and the tail can
+			// even arrive through a URL's query string (postgres://u:1234?abc@h/db).
+			if libpqKeywords[k] {
+				return psqlInv{}, fmt.Errorf("rafikid psql: cannot pass DSN parameter %q; run psql directly", k)
+			}
+			return psqlInv{}, fmt.Errorf("rafikid psql: cannot pass the DSN parameter at position %d of %d; run psql directly",
+				i+1, len(keys))
 		}
 		env = append(env, name+"="+kw[k])
 	}
@@ -177,6 +186,65 @@ func psqlTarget(configured string, kw map[string]string) string {
 		}
 	}
 	return out
+}
+
+// libpqKeywords is libpq's own parameter vocabulary: every name a connection
+// string may carry, whether or not pgEnv can express it in the environment. It
+// is what lets an error say "service is unsupported" instead of "some parameter
+// is unsupported" — a name from a fixed vocabulary cannot be a password
+// fragment, so printing it is safe, while printing a token that is NOT in here
+// would risk publishing one.
+var libpqKeywords = map[string]bool{
+	"application_name":          true,
+	"channel_binding":           true,
+	"client_encoding":           true,
+	"connect_timeout":           true,
+	"dbname":                    true,
+	"fallback_application_name": true,
+	"gssdelegation":             true,
+	"gssencmode":                true,
+	"gsslib":                    true,
+	"host":                      true,
+	"hostaddr":                  true,
+	"keepalives":                true,
+	"keepalives_count":          true,
+	"keepalives_idle":           true,
+	"keepalives_interval":       true,
+	"krbsrvname":                true,
+	"load_balance_hosts":        true,
+	"options":                   true,
+	"passfile":                  true,
+	"password":                  true,
+	"port":                      true,
+	"replication":               true,
+	"require_auth":              true,
+	"requirepeer":               true,
+	"service":                   true,
+	"sslcert":                   true,
+	"sslcompression":            true,
+	"sslcrl":                    true,
+	"sslcrldir":                 true,
+	"sslkey":                    true,
+	"sslmode":                   true,
+	"sslnegotiation":            true,
+	"sslpassword":               true,
+	"sslrootcert":               true,
+	"ssl_max_protocol_version":  true,
+	"ssl_min_protocol_version":  true,
+	"target_session_attrs":      true,
+	"tcp_user_timeout":          true,
+	"user":                      true,
+}
+
+// conninfoKeyPhrase names a DSN parameter inside a sentence: a libpq keyword by
+// name, an unrecognised token by POSITION only. The position is the token's byte
+// offset, and it exists because the token may be the tail of a password that an
+// unquoted space or a stray quote cut in two.
+func conninfoKeyPhrase(key string, off int) string {
+	if libpqKeywords[key] {
+		return fmt.Sprintf("the keyword %q", key)
+	}
+	return fmt.Sprintf("the parameter at offset %d", off)
 }
 
 // parseConninfo turns a DSN into libpq keyword/value pairs. Both shapes libpq
@@ -261,7 +329,7 @@ func parseConninfoKeywords(s string) (map[string]string, error) {
 			return nil, conninfoTokenError("a keyword", start, lastKey)
 		}
 		i++ // '='
-		val, next, err := parseConninfoValue(s, i, key)
+		val, next, err := parseConninfoValue(s, i, key, start)
 		if err != nil {
 			return nil, err
 		}
@@ -285,28 +353,33 @@ func conninfoTokenError(want string, off int, lastKey string) error {
 
 // parseConninfoValue reads one value starting at i, returning it and the index
 // just past it. A value may be quoted; the quote is the only thing that lets it
-// hold whitespace, and \' and \\ are its escapes.
-func parseConninfoValue(s string, i int, key string) (string, int, error) {
+// hold whitespace, and \' and \\ are its escapes. keyOff is where the key token
+// started, which is all an unrecognised key may be located by.
+func parseConninfoValue(s string, i int, key string, keyOff int) (string, int, error) {
 	var b strings.Builder
 	if i < len(s) && s[i] == '\'' {
 		i++
 		for {
 			if i >= len(s) {
-				return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unterminated quoted value for %q", key)
+				return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unterminated quoted value for %s",
+					conninfoKeyPhrase(key, keyOff))
 			}
 			switch s[i] {
 			case '\\':
 				if i+1 >= len(s) {
-					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unterminated quoted value for %q", key)
+					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unterminated quoted value for %s",
+						conninfoKeyPhrase(key, keyOff))
 				}
 				b.WriteByte(s[i+1])
 				i += 2
 			case '\'':
 				i++
 				if i < len(s) && !isConninfoSpace(s[i]) {
-					// The character is not named: after `password='abc'` it is the
-					// first byte of the password's continuation.
-					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unexpected character after the quoted value of %q", key)
+					// Neither the character nor an unrecognised key is named: after
+					// `password='abc'` the character is the first byte of the
+					// password's continuation.
+					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unexpected character after the quoted value of %s",
+						conninfoKeyPhrase(key, keyOff))
 				}
 				return b.String(), i, nil
 			default:

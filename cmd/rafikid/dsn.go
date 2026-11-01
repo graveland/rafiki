@@ -9,12 +9,15 @@ import (
 	"os"
 
 	"go.graveland.dev/rafiki/pkg/embedpg"
+	"go.graveland.dev/rafiki/pkg/installstate"
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// embeddedDSN is the RAFIKI_DB value that means "the rafiki-managed PostgreSQL
-// under this user's data dir" (pkg/embedpg).
-const embeddedDSN = "embedded"
+// embeddedDSN is the RAFIKI_DB value that means "the rafikid-managed PostgreSQL
+// under this user's data dir" (pkg/embedpg). It is installstate's database mode
+// value, not a second literal: `rafiki setup` writes that mode into service.env
+// as RAFIKI_DB, so the two binaries must spell it the same way.
+const embeddedDSN = string(installstate.DBModeEmbedded)
 
 // newEmbeddedServer builds the private server Default describes. It is a
 // variable so tests can point the resolver at a scratch data dir and a fixture

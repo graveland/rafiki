@@ -130,18 +130,39 @@ func TestPsqlInvocationKeywordDSN(t *testing.T) {
 	c.Eq("rafikid psql: embedded database at /tmp/a b", inv.target, "target, got")
 }
 
+// A parameter this command cannot express in the environment is refused. A name
+// libpq knows is printed, because it is a real parameter the operator wrote and
+// naming it is what makes the refusal actionable. A name libpq does NOT know is
+// reported by position only: an unrecognised token can be the tail of a
+// password, and printing it would publish one.
 func TestPsqlInvocationRejectsUnknownParam(t *testing.T) {
 	t.Setenv("PATH", fakePsqlDir(t))
 	c := assert.NewAborting(t)
 
-	_, err := psqlInvocation("postgres://u@h/db?foo=1", "postgres://u@h/db?foo=1", nil, nil)
+	// `service` is a libpq keyword the env mapping has no variable for.
+	_, err := psqlInvocation("postgres://u@h/db?service=foo", "postgres://u@h/db?service=foo", nil, nil)
 	c.Error(err, "want an error for an unmappable keyword, got nil")
-	c.StrContains(err.Error(), `cannot pass DSN parameter "foo"`, "error must name the keyword, got: %v", err)
+	c.StrContains(err.Error(), `cannot pass DSN parameter "service"`, "error must name the libpq keyword, got: %v", err)
+
+	// `foo` is not a libpq keyword at all, so it is located, never printed.
+	_, err = psqlInvocation("postgres://u@h/db?foo=1", "postgres://u@h/db?foo=1", nil, nil)
+	c.Error(err, "want an error for an unrecognised parameter, got nil")
+	c.StrContains(err.Error(), "at position", "error must locate the parameter, got: %v", err)
+	c.NotStrContains(err.Error(), "foo", "error must not print an unrecognised name, got: %v", err)
 
 	// pgx pool settings are not libpq parameters; a DSN carrying them still
 	// reaches psql, they are just skipped.
 	_, err = psqlInvocation("postgres://u@h/db?pool_max_conns=4", "postgres://u@h/db?pool_max_conns=4", nil, nil)
 	c.NoError(err, "pool_ settings must be skipped, got error")
+}
+
+// The vocabulary that decides whether a name may be printed has to cover every
+// keyword the mapping table maps, or a mapped key would be refused by position.
+func TestPsqlLibpqKeywordsCoverPgEnv(t *testing.T) {
+	c := assert.NewAborting(t)
+	for k := range pgEnv {
+		c.True(libpqKeywords[k], "pgEnv maps %q but libpqKeywords does not list it", k)
+	}
 }
 
 func TestPsqlInvocationMissingPsql(t *testing.T) {
@@ -174,37 +195,84 @@ func TestPsqlCmdChecksTheClientBeforeResolving(t *testing.T) {
 	c.StrContains(err.Error(), "brew install libpq", "error must be the install remedy, got: %v", err)
 }
 
-// A parse error must never echo any part of a password. The two hard cases are
-// a password whose value is cut short by an unquoted space (making the rest of
-// it a bare token) and one followed immediately by a closing quote and more text
-// (making the next byte look like a stray character) — both used to be echoed
-// verbatim.
+// No error on the psql path may echo any part of a password. A password that an
+// unquoted space (keyword form) or a `?` (URL form) cuts in two leaves its tail
+// sitting where a key would be, so the tail reaches three different errors: the
+// bare-token one, the unterminated-quote one, and the mapping one. Each case is
+// its own subtest so each is shown to bite on its own.
 func TestParseConninfoErrorDoesNotEchoPassword(t *testing.T) {
-	c := assert.NewAborting(t)
-
 	cases := []struct {
+		name   string
 		dsn    string
 		forbid []string // substrings that must not appear in the error
 	}{
-		// `s3cret` becomes a bare token after the unquoted value `my`.
-		{"password=my s3cret", []string{"s3cret", "my "}},
-		// The byte after the closing quote is the password's continuation.
-		{`password='abc'def`, []string{"abc", "def", `"d"`}},
-		// Same shape, hitting the "not a keyword" branch instead.
-		{"password=abc 1x=y", []string{"abc", "1x"}},
-		// A value that is quoted and never closed.
-		{"host=/tmp password='s3cret", []string{"s3cret"}},
-		// A well-formed password followed by a bare token.
-		{"password=s3cret dbname", []string{"s3cret"}},
-		// A URL whose port is invalid: url.Parse's own error embeds the URL.
-		{"postgres://alice:s3cret@db.example:notaport/app", []string{"s3cret"}},
+		{
+			name:   "bare token after an unquoted value",
+			dsn:    "password=my s3cret",
+			forbid: []string{"s3cret", "my "},
+		},
+		{
+			name:   "byte after a closing quote",
+			dsn:    `password='abc'def`,
+			forbid: []string{"abc", "def", `"d"`},
+		},
+		{
+			name:   "valid keyword shape",
+			dsn:    "password=abc 1x=y",
+			forbid: []string{"abc", "1x"},
+		},
+		{
+			name:   "unterminated quote on a known keyword",
+			dsn:    "host=/tmp password='s3cret",
+			forbid: []string{"s3cret"},
+		},
+		{
+			name:   "well-formed password then a bare token",
+			dsn:    "password=s3cret dbname",
+			forbid: []string{"s3cret"},
+		},
+		{
+			// The mapping error, not a parse error: `s3cret=1` has a valid
+			// keyword shape, so it is a key the table cannot pass.
+			name:   "mapping error names an unrecognised key by position",
+			dsn:    "password=my s3cret=1",
+			forbid: []string{"s3cret"},
+		},
+		{
+			name:   "unterminated quote on an unrecognised key",
+			dsn:    "password=my s3cret='x",
+			forbid: []string{"s3cret", "x'"},
+		},
+		{
+			// A `?` in an unquoted password turns its tail into a URL query
+			// parameter, whose name is not even checked for keyword shape.
+			name:   "URL query tail after a `?` in the password",
+			dsn:    "postgres://u:1234?abc@h/db",
+			forbid: []string{"abc", "abc@h/db", "1234?abc"},
+		},
+		{
+			name:   "URL whose port is invalid",
+			dsn:    "postgres://alice:s3cret@db.example:notaport/app",
+			forbid: []string{"s3cret"},
+		},
 	}
 	for _, tc := range cases {
-		_, err := parseConninfo(tc.dsn)
-		c.Error(err, "want a parse error for a malformed DSN, got nil")
-		for _, bad := range tc.forbid {
-			c.NotStrContains(err.Error(), bad, "error must not echo %q, got: %v", bad, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", fakePsqlDir(t))
+			c := assert.NewAborting(t)
+
+			// The DSN has to be rejected somewhere: parseConninfo for a malformed
+			// connection string, psqlInvocation for a parameter that parsed but
+			// cannot be passed.
+			_, err := parseConninfo(tc.dsn)
+			if err == nil {
+				_, err = psqlInvocation(tc.dsn, tc.dsn, nil, nil)
+			}
+			c.Error(err, "want the DSN rejected, got nil")
+			for _, bad := range tc.forbid {
+				c.NotStrContains(err.Error(), bad, "error must not echo %q, got: %v", bad, err)
+			}
+		})
 	}
 }
 
