@@ -49,6 +49,10 @@ func openUserStore(ctx context.Context, dsn string) (*pgxpool.Pool, users.Store,
 	if dsn == "" {
 		return nil, nil, errors.New("--db (or RAFIKI_DB) is required")
 	}
+	dsn, err := resolveDSN(ctx, dsn)
+	if err != nil {
+		return nil, nil, err
+	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, nil, err

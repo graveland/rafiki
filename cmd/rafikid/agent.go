@@ -250,7 +250,12 @@ func runAgentWithFlags(f agentFlags) int {
 	// means an in-memory conversation, matching the old empty-DBURL behaviour.
 	var pool *pgxpool.Pool
 	if f.db != "" {
-		pool, err = pgxpool.New(ctx, f.db)
+		db, err := resolveDSN(ctx, f.db)
+		if err != nil {
+			slog.Error("agent: open database", "error", err)
+			return 1
+		}
+		pool, err = pgxpool.New(ctx, db)
 		if err != nil {
 			slog.Error("agent: open database", "error", err)
 			return 1

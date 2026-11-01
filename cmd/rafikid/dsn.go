@@ -3,10 +3,40 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
 
+	"go.graveland.dev/rafiki/pkg/embedpg"
 	"go.graveland.dev/rafiki/pkg/paths"
 )
+
+// embeddedDSN is the RAFIKI_DB value that means "the rafiki-managed PostgreSQL
+// under this user's data dir" (pkg/embedpg).
+const embeddedDSN = "embedded"
+
+// newEmbeddedServer builds the private server Default describes. It is a
+// variable so tests can point the resolver at a scratch data dir and a fixture
+// download instead of the real per-user install.
+var newEmbeddedServer = embedpg.Default
+
+// resolveDSN turns a configured DSN into one pgx can dial. "embedded" starts
+// the private server if it is not running (downloading its binaries on first
+// use, progress on stderr) and returns its socket DSN; any other value is
+// returned unchanged. It is the only place "embedded" is interpreted.
+func resolveDSN(ctx context.Context, dsn string) (string, error) {
+	if dsn != embeddedDSN {
+		return dsn, nil
+	}
+	s := newEmbeddedServer()
+	s.Progress = os.Stderr
+	out, err := s.Ensure(ctx)
+	if err != nil {
+		return "", fmt.Errorf("embedded database: %w", err)
+	}
+	return out, nil
+}
 
 // requireDSN resolves the daemon's database DSN, preferring an explicit --db
 // over RAFIKI_DB, and returns an error when neither is set.
@@ -27,9 +57,9 @@ func requireDSN(optsDB string) (string, error) {
 		dsn = paths.Get(paths.DB)
 	}
 	if dsn == "" {
-		return "", errors.New("no database configured: set RAFIKI_DB (or pass --db). " +
-			"rafikid requires TimescaleDB; the documented local setup is: " +
-			"docker run -d -p 5433:5432 -e POSTGRES_PASSWORD=postgres timescale/timescaledb:2.28.2-pg18")
+		return "", errors.New(`no database configured: set RAFIKI_DB (or pass --db). ` +
+			`For a local install run "rafiki setup", or set RAFIKI_DB=embedded to let ` +
+			`rafikid run its own PostgreSQL`)
 	}
 	return dsn, nil
 }

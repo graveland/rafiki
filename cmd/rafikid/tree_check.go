@@ -53,7 +53,11 @@ Exits non-zero when any check fails.`,
 				return errors.New("--db (or RAFIKI_DB) is required")
 			}
 			ctx := context.Background()
-			pool, err := pgxpool.New(ctx, dbDSN)
+			dsn, err := resolveDSN(ctx, dbDSN)
+			if err != nil {
+				return err
+			}
+			pool, err := pgxpool.New(ctx, dsn)
 			if err != nil {
 				return err
 			}

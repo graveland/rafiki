@@ -46,7 +46,11 @@ func connectPool(ctx context.Context, db string) (*pgxpool.Pool, error) {
 	if db == "" {
 		return nil, errors.New("--db (or RAFIKI_DB, or RAFIKI_TEST_DSN) is required")
 	}
-	return pgxpool.New(ctx, db)
+	dsn, err := resolveDSN(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return pgxpool.New(ctx, dsn)
 }
 
 // jsonMode maps the -j/-J flag pair onto the render mode shared with

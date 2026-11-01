@@ -181,6 +181,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newFundiCmd())
 	root.AddCommand(newAgentCmd())
 	root.AddCommand(newMigrateCmd())
+	root.AddCommand(newPsqlCmd())
 	root.AddCommand(newTreeCmd())
 	root.AddCommand(newUserCmd())
 	root.AddCommand(newProxyRecordCmd())
@@ -283,7 +284,11 @@ func newMigrateCmd() *cobra.Command {
 				return errors.New("--db (or RAFIKI_DB) is required")
 			}
 			ctx := context.Background()
-			pool, err := pgxpool.New(ctx, dbDSN)
+			dsn, err := resolveDSN(ctx, dbDSN)
+			if err != nil {
+				return err
+			}
+			pool, err := pgxpool.New(ctx, dsn)
 			if err != nil {
 				return err
 			}
@@ -367,6 +372,13 @@ func runDaemon(opts runDaemonOpts) error {
 	// database is required' is a phase 2 decision that has not been made".
 	// It has been made.
 	dsn, err := requireDSN(opts.DB)
+	if err != nil {
+		slog.Error("cannot start", "error", err)
+		os.Exit(1)
+	}
+	// A configured RAFIKI_DB=embedded is resolved here, before anything reads
+	// the DSN: the private server has to be running before the pool parses it.
+	dsn, err = resolveDSN(baseCtx, dsn)
 	if err != nil {
 		slog.Error("cannot start", "error", err)
 		os.Exit(1)
