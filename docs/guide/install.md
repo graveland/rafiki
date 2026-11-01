@@ -91,7 +91,12 @@ a local daemon pointed at a remote database means these verbs act on that remote
 one. Read the target line it prints before giving a destructive verb `--force`. Inside the private cluster rafiki's
 database is named `rafiki`, created on the first use of the embedded mode, so
 `\l` lists it next to the `postgres` maintenance database — which is initdb's
-and never holds rafiki data. The embedded bundle ships no client tools (it
+and never holds rafiki data. Embedded provisioning also sets the `rafiki` role's
+`search_path` to `public, conversations` for this database only, repairing that
+default on existing installs as well. `db psql` independently supplies the same
+session default (including for external databases); explicit DSN `options` can
+override it. `public` stays first so extension creation still uses that schema.
+The embedded bundle ships no client tools (it
 carries `initdb`, `pg_ctl` and `postgres` only), so `psql`, `pg_dump` and
 `pg_restore` all come from `PATH`; `pg_dump` is refused when it is older than
 the server (it cannot dump a newer one), and `pg_restore` must be new enough to

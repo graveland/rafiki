@@ -122,32 +122,23 @@ func pointResolverAt(t *testing.T, s embedpg.Server) {
 	newEmbeddedServer = func() embedpg.Server { return s }
 }
 
-// Every embedded resolve goes through the create path, against the maintenance
-// database, and every answer that means "it is already there" is a successful
-// resolve: the existence query on the ordinary second call, duplicate_database
-// for a caller that raced the first one, and the lost
-// pg_database_datname_index for one that arrives at the same instant. Resolving
-// more than once is ordinary — `rafikid migrate`, then `rafikid user create`,
-// then the daemon — and so is two of those starting together. Which of those
-// paths issues a CREATE is createDatabaseUnlessPresent's business, pinned below.
+// Every embedded resolve provisions against the maintenance database, even
+// when the database already exists: older installs still need role defaults.
+// Creation races are handled inside the provisioner, not at the resolver boundary.
 func TestResolveDSNEmbeddedCreatesTheDatabase(t *testing.T) {
 	c := assert.NewAborting(t)
 	s := fakeEmbeddedServer(t)
 	pointResolverAt(t, s)
-	answers := []error{
-		nil,
-		&pgconn.PgError{Code: sqlstateDuplicateDatabase},
-		&pgconn.PgError{Code: sqlstateUniqueViolation, ConstraintName: pgDatabaseNameIndex},
-	}
-	seen := stubCreateDatabase(t, answers...)
+	const runs = 3
+	seen := stubCreateDatabase(t)
 
-	for run := 1; run <= len(answers); run++ {
+	for run := 1; run <= runs; run++ {
 		got, err := resolveDSN(context.Background(), embeddedDSN)
 		c.NoError(err, "resolveDSN (run %d)", run)
 		c.Eq(s.DSN(), got, "resolveDSN must hand back the server's own DSN (run %d)", run)
 	}
 
-	c.Eq(len(answers), len(*seen), "the create must be attempted on every resolve, got %d attempt(s)", len(*seen))
+	c.Eq(runs, len(*seen), "provisioning must run on every resolve, got %d attempt(s)", len(*seen))
 	for i, srv := range *seen {
 		c.Eq(s.DataDir, srv.DataDir, "attempt %d must be against the resolved server", i+1)
 		cfg, err := pgconn.ParseConfig(srv.MaintenanceDSN())
@@ -174,7 +165,7 @@ func TestResolveDSNEmbeddedRefusesAfterACreateFailure(t *testing.T) {
 
 // The real claim, on a real cluster: the first resolveDSN starts a private
 // server and creates its database, the DSN it returns really connects to that
-// database, and the second resolveDSN finds it and is a no-op.
+// database, and the second resolveDSN finds it and reapplies role defaults.
 //
 // Gated on RAFIKI_TEST_EMBEDPG=1 because the first run downloads the pinned
 // binaries (~33 MB on macOS, ~15 MB on Linux) from Maven Central; the cache is
@@ -233,11 +224,64 @@ func TestEmbeddedDatabaseIsCreatedOnARealServer(t *testing.T) {
 		"count the embedded database")
 	c.Eq(int64(1), databases, "exactly one %s database", embedpg.Database)
 
-	// The second resolve: the server is already running and the existence query
-	// finds the database, so no CREATE is issued at all and the resolver is done.
+	// The second resolve finds the database, so no CREATE is issued; provisioning
+	// still reapplies the database-scoped role defaults.
 	second, err := resolveDSN(ctx, embeddedDSN)
 	c.NoError(err, "the second resolveDSN must be a no-op, not an error")
 	c.Eq(first, second, "the second resolveDSN must return the same DSN")
+
+	checkPath := func(dsn, want string) {
+		t.Helper()
+		fresh, err := pgx.Connect(ctx, dsn)
+		c.NoError(err, "new connection for role defaults")
+		defer fresh.Close(context.WithoutCancel(ctx))
+		var got string
+		c.NoError(fresh.QueryRow(ctx, "SHOW search_path").Scan(&got), "search_path")
+		c.Eq(want, strings.ReplaceAll(got, " ", ""), "new connection search_path")
+	}
+	checkPath(first, rafikiSearchPath)
+	checkPath(server.MaintenanceDSN(), `"$user",public`)
+
+	// Simulate an existing install predating the role default. psql's separate
+	// session fallback must work even before provisioning repairs the role.
+	_, err = conn.Exec(ctx, `ALTER ROLE CURRENT_USER IN DATABASE rafiki RESET search_path`)
+	c.NoError(err, "remove the role default")
+	checkPath(first, `"$user",public`)
+	t.Run("psql session fallback and explicit override", func(t *testing.T) {
+		if _, err := exec.LookPath("psql"); err != nil {
+			t.Skip("psql is not installed")
+		}
+		for _, tc := range []struct{ options, want string }{
+			{"", rafikiSearchPath},
+			{" options='-c statement_timeout=1234 -c search_path=pg_catalog'", "pg_catalog"},
+		} {
+			inv, err := psqlInvocation(embeddedDSN, first+tc.options,
+				[]string{"-X", "-At", "-v", "ON_ERROR_STOP=1", "-c", "SHOW search_path"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(ctx, inv.path, inv.argv[1:]...)
+			cmd.Env = inv.env
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("psql: %v: %s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Fatalf("psql search_path = %q, want %q", got, tc.want)
+			}
+		}
+	})
+
+	// Concurrent existing-database repairs must not race on pg_db_role_setting.
+	errs := make(chan error, 4)
+	for range 4 {
+		go func() { errs <- createEmbeddedDatabaseFor(ctx, server) }()
+	}
+	for range 4 {
+		c.NoError(<-errs, "concurrent repair")
+	}
+	checkPath(first, rafikiSearchPath)
+	checkPath(server.MaintenanceDSN(), `"$user",public`)
 }
 
 // stopEmbeddedServer stops a private server this test started and reports
@@ -261,6 +305,7 @@ type fakeCatalog struct {
 	legacy    bool
 	legacyErr error
 	execErr   error
+	execErrs  []error
 	queries   []string
 	execs     []string
 }
@@ -290,6 +335,11 @@ func (f *fakeCatalog) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row 
 
 func (f *fakeCatalog) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
 	f.execs = append(f.execs, sql)
+	if len(f.execErrs) > 0 {
+		err := f.execErrs[0]
+		f.execErrs = f.execErrs[1:]
+		return pgconn.CommandTag{}, err
+	}
 	return pgconn.CommandTag{}, f.execErr
 }
 

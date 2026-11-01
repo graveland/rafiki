@@ -32,6 +32,9 @@ command line: psql's argv is visible in the process table to every user on the
 machine, and a DSN may hold a password. Inherited PG* variables are dropped, so
 what psql connects to is exactly what --db (or RAFIKI_DB) named.
 
+The session defaults to search_path=public,conversations, even when the database
+role has no default. Explicit DSN options can override it.
+
 Everything after "--" is handed to psql unchanged.`,
 		Args:          cobra.ArbitraryArgs,
 		SilenceUsage:  true,
@@ -143,7 +146,22 @@ func psqlInvocation(configured, dsn string, args, environ []string) (pgToolInv, 
 	if err != nil {
 		return pgToolInv{}, err
 	}
-	return pgToolInvocation("rafikid db psql", path, "psql", configured, dsn, args, environ)
+	inv, err := pgToolInvocation("rafikid db psql", path, "psql", configured, dsn, args, environ)
+	if err != nil {
+		return pgToolInv{}, err
+	}
+	// This is a psql convenience only: never change pg_dump/pg_restore sessions.
+	// Prepend the default so explicit DSN options (including another search_path)
+	// still win, without parsing or dropping unrelated/escaped server options.
+	options := "-c search_path=" + rafikiSearchPath
+	for i, kv := range inv.env {
+		if existing, ok := strings.CutPrefix(kv, "PGOPTIONS="); ok {
+			inv.env[i] = "PGOPTIONS=" + options + " " + existing
+			return inv, nil
+		}
+	}
+	inv.env = append(inv.env, "PGOPTIONS="+options)
+	return inv, nil
 }
 
 // pgToolInvocation builds the argv, environment and target line for one libpq

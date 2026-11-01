@@ -25,6 +25,10 @@ import (
 // as RAFIKI_DB, so the two binaries must spell it the same way.
 const embeddedDSN = string(installstate.DBModeEmbedded)
 
+// Keep public first: migrations create extensions without an explicit schema.
+// psql also supplies this default for databases whose roles we do not manage.
+const rafikiSearchPath = "public,conversations"
+
 // newEmbeddedServer builds the private server Default describes. It is a
 // variable so tests can point the resolver at a scratch data dir and a fixture
 // download instead of the real per-user install.
@@ -103,7 +107,7 @@ func resolveEmbedded(ctx context.Context) (embedpg.Server, string, error) {
 // maintenance DSN it is issued on, and the SQLSTATE it tolerates — does not.
 var createEmbeddedDatabase = createEmbeddedDatabaseFor
 
-// createEmbeddedDatabaseFor runs the existence check and the CREATE DATABASE
+// createEmbeddedDatabaseFor ensures the database and its role defaults
 // over a short-lived connection to the MAINTENANCE database: initdb creates only
 // that one, so it is the only database a fresh cluster can be asked from (and
 // the database being created cannot be the one the CREATE is issued on).
@@ -121,16 +125,42 @@ func createEmbeddedDatabaseFor(ctx context.Context, s embedpg.Server) error {
 		defer cancel()
 		_ = conn.Close(cctx)
 	}()
-	return createDatabaseUnlessPresent(ctx, conn)
+	return provisionEmbeddedDatabase(ctx, conn)
+}
+
+// provisionEmbeddedDatabase repairs existing installs as well as fresh ones.
+// A concurrent CREATE's duplicate is success here, BEFORE applying defaults;
+// an error configuring defaults must never be mistaken for that CREATE race.
+func provisionEmbeddedDatabase(ctx context.Context, c dbCatalog) error {
+	if err := createDatabaseUnlessPresent(ctx, c); err != nil && !databaseAlreadyExists(err) {
+		return err
+	}
+	// These are separate statements: CREATE DATABASE cannot run in a transaction.
+	// The DO block makes the advisory lock transaction-scoped, serializing role
+	// catalog updates from concurrent resolvers without leaving a session lock.
+	_, err := c.Exec(ctx, embeddedDatabaseDefaultsStatement())
+	if err != nil {
+		return fmt.Errorf("configuring embedded database role defaults: %w", err)
+	}
+	return nil
+}
+
+func embeddedDatabaseDefaultsStatement() string {
+	return fmt.Sprintf(`DO $rafiki$
+BEGIN
+    PERFORM pg_advisory_xact_lock(7261666969);
+    ALTER ROLE CURRENT_USER IN DATABASE %s SET search_path TO %s;
+END;
+$rafiki$;`, pgx.Identifier{embedpg.Database}.Sanitize(), rafikiSearchPath)
 }
 
 // databaseCloseTimeout bounds closing the maintenance connection.
 const databaseCloseTimeout = 5 * time.Second
 
-// dbCatalog is the slice of one connection this file's create path uses: the
-// existence query, the legacy-schema probe and the CREATE. Keeping the decisions
-// behind it is what lets a test pin them without a cluster — the dial itself is
-// the only part that needs a server, and it has its own test.
+// dbCatalog is the slice of one connection this file's provisioner uses: the
+// existence query, legacy-schema probe, CREATE and role defaults. Keeping these
+// decisions behind it lets tests pin them without a cluster; only the dial
+// itself needs a server.
 type dbCatalog interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
@@ -242,15 +272,15 @@ func databaseAlreadyExists(err error) bool {
 	return false
 }
 
-// ensureEmbeddedDatabase creates the database s.DSN() names, and is a no-op
-// when it is already there. Nothing is read back: the next statement on the
+// ensureEmbeddedDatabase creates the database s.DSN() names if needed and
+// reapplies its role defaults. Nothing is read back: the next statement on the
 // resolved DSN is the proof, and it belongs to the caller.
 func ensureEmbeddedDatabase(ctx context.Context, s embedpg.Server) error {
 	err := createEmbeddedDatabase(ctx, s)
-	if err == nil || databaseAlreadyExists(err) {
+	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("embedded database: creating %s: %w", embedpg.Database, err)
+	return fmt.Errorf("embedded database: provisioning %s: %w", embedpg.Database, err)
 }
 
 // requireDSN resolves the daemon's database DSN, preferring an explicit --db
