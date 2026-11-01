@@ -4,6 +4,7 @@ package routing
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -508,4 +509,28 @@ func (s Spec) Prefs(pinOnly, ignore []string) (ProviderPrefs, bool) {
 		len(prefs.Order) > 0 ||
 		len(prefs.Quantizations) > 0 || prefs.DataCollection != "" || prefs.ZDR
 	return prefs, sent
+}
+
+// AllowsPin reports whether this spec leaves room for the guard's automatic
+// pin to slug: no operator pin (an Only that names providers wins; a cleared
+// Only= is no pin) and slug not in the spec's exclude list.
+func (s Spec) AllowsPin(slug string) bool {
+	return len(s.Only) == 0 && !slices.Contains(s.Exclude, slug)
+}
+
+// PinPrefs is the provider object for a request pinned to slug: only=[slug]
+// plus the spec's data policy (quantizations, data_collection "deny" for
+// nodata, zdr). sort, order and ignore are omitted — with one provider named
+// they have nothing to apply to, and only= bypasses ignore anyway (the caller
+// has already checked the pin is not excluded).
+func (s Spec) PinPrefs(slug string) ProviderPrefs {
+	prefs := ProviderPrefs{
+		Only:          []string{slug},
+		Quantizations: s.Quantizations(),
+		ZDR:           s.ZDR,
+	}
+	if s.NoData {
+		prefs.DataCollection = "deny"
+	}
+	return prefs
 }

@@ -677,3 +677,52 @@ func TestPreferPrefsEmitsOrderAndKeepsIgnore(t *testing.T) {
 	ck.Eq(0, len(contrast.Ignore), "a spec only drops ignore")
 	ck.EqDeep([]string{"fireworks"}, contrast.Order, "Order rides even under an only")
 }
+
+// TestPinPrefsKeepsDataPolicyAndDropsRanking pins the guard's pin object: one
+// named provider plus the spec's data policy, and nothing whose only purpose is
+// choosing among providers — sort, order and ignore all have nothing to apply
+// to once the pin decides who serves.
+func TestPinPrefsKeepsDataPolicyAndDropsRanking(t *testing.T) {
+	ck := assert.NewAborting(t)
+	spec, err := ParseSpec("sort=price,quant=fp8+,nodata,zdr,prefer=a,exclude=b")
+	if err != nil {
+		t.Fatalf("ParseSpec = %v", err)
+	}
+	plain, _ := spec.Prefs(nil, nil)
+	pinned := spec.PinPrefs("deepinfra")
+
+	ck.EqDeep([]string{"deepinfra"}, pinned.Only, "Only")
+	ck.EqDeep(plain.Quantizations, pinned.Quantizations, "Quantizations must match Prefs")
+	ck.Eq("deny", pinned.DataCollection, "DataCollection")
+	ck.True(pinned.ZDR, "ZDR")
+	ck.Eq("", pinned.Sort, "Sort must be omitted: one provider named, nothing to sort")
+	ck.Eq(0, len(pinned.Order), "Order must be omitted")
+	ck.Eq(0, len(pinned.Ignore), "Ignore must be omitted: only= bypasses it")
+}
+
+// TestAllowsPin pins the one predicate the guard's automatic pin consults: an
+// operator pin (a named only=) wins over it, a cleared only= is no pin at all,
+// and a slug the spec excludes is never pinned.
+func TestAllowsPin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		slug string
+		want bool
+	}{
+		{"zero spec allows", "", "deepinfra", true},
+		{"only=x refuses", "only=x", "deepinfra", false},
+		{"cleared only allows", "only=", "deepinfra", true},
+		{"exclude refuses that slug", "exclude=deepinfra", "deepinfra", false},
+		{"exclude allows another slug", "exclude=deepinfra", "other", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := ParseSpec(tc.in)
+			if err != nil {
+				t.Fatalf("ParseSpec(%q) = %v", tc.in, err)
+			}
+			assert.NewAborting(t).Eq(tc.want, spec.AllowsPin(tc.slug),
+				"AllowsPin("+tc.slug+") for "+tc.in)
+		})
+	}
+}
