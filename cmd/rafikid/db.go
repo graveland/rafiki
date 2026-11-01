@@ -12,7 +12,7 @@ import "github.com/spf13/cobra"
 func newDbCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "db",
-		Short: "Operate on rafikid's database on this host: psql, backup",
+		Short: "Operate on rafikid's database on this host: psql, backup, restore",
 		Long: `Verbs that reach rafikid's database from the machine rafikid runs on.
 
 A database has no remote face here: RAFIKI_DB names either a server this host
@@ -21,7 +21,8 @@ data directory. That is why these verbs belong to rafikid, and why the rafiki
 client's own "rafiki db" passthrough forwards to them instead of dialling.
 
 Subcommands: psql (open a client on the database), backup (write a dump, or a
-physical copy of the embedded data directory).`,
+physical copy of the embedded data directory), restore (put one back — it needs
+--force, because it destroys what the backup covers).`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -32,6 +33,7 @@ physical copy of the embedded data directory).`,
 
 	cmd.AddCommand(newDbPsqlCmd())
 	cmd.AddCommand(newDbBackupCmd())
+	cmd.AddCommand(newDbRestoreCmd())
 
 	return cmd
 }

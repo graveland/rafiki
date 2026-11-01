@@ -723,10 +723,10 @@ func TestDbCmdHasItsVerbs(t *testing.T) {
 		got[sub.Name()] = true
 	}
 	c := assert.NewAborting(t)
-	for _, want := range []string{"psql", "backup"} {
+	for _, want := range []string{"psql", "backup", "restore"} {
 		c.True(got[want], "db must register %q, got: %v", want, got)
 	}
-	c.Eq(2, len(got), "db must register exactly psql and backup, got: %v", got)
+	c.Eq(3, len(got), "db must register exactly psql, backup and restore, got: %v", got)
 
 	// --db is persistent, so every verb resolves the database the same way and
 	// no verb declares a flag of that name itself.
