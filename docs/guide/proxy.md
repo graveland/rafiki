@@ -50,7 +50,7 @@ silently ignored (a misread spec silently changes where requests are served):
 - `prefer=slug|slug` — provider slugs to try FIRST, with fallback: sets the
   OpenRouter `provider.order`. Unlike `only`, it is a preference, not a
   restriction — the request may still be served by any other eligible host,
-  and it RESPECTS operator bans and the cache guard's ejections (`only`
+  and it RESPECTS operator bans and the guard's ejections (`only`
   bypasses them);
 - `only=slug|slug` — OpenRouter provider slugs the request may be served by;
 - `exclude=slug|slug` — provider slugs NEVER served for this spec. It lands in
@@ -99,8 +99,8 @@ around them with `only=[...]`. A spec's `exclude=` is the per-line form of a
 ban: it unions with the daemon's ban list into `provider.ignore`, it is
 monotone (no spawn, preset or child steer can clear it), and like every ban
 it is dropped by an explicit `only=`. **Data policy cannot be bypassed**:
-`nodata`/`zdr` ride along even under a spec `only`, and the cache guard's
-ejections are dropped only by an explicit `only`. Authority
+`nodata`/`zdr` ride along even under a spec `only`, and the guard's
+ejections ride in `provider.ignore`, which an explicit `only` drops. Authority
 splits the other way: a spec is caller-settable by anyone who can spawn (it
 rides the model string's brackets), while policy rows are operator-only
 (set/delete need a user credential or the local socket).
@@ -178,17 +178,25 @@ Set `RAFIKI_PROVIDER_GUARD=off` to disable automatic ejection; operator bans
 **Pinning.** For fundi children and the daemon's own LLM jobs the guard also
 holds a conversation still: each conversation is pinned with
 `provider.only=[slug]` to the provider that served its previous turn, unless a
-spec `only=`, a model-declaration `only`, or an `exclude=` names otherwise
+spec `only=`, a model-declaration `only`, an `exclude=` naming that slug, a
+zero routing spec, or an empty conversation id says otherwise
 (`routing.ProviderGuard.PinFor`, `Spec.AllowsPin`, `Spec.PinPrefs` in
-`pkg/routing`). The pin moves only when that provider is banned — a ban is the
-one thing that outranks stickiness. The proxy face (Claude Code children) does
-not pin: it honours every ban through `IgnoredFor` and lets OpenRouter choose.
+`pkg/routing`; pinned by `TestPinSkippedForOperatorOnlyAndExclude`,
+`TestPinSkippedForZeroSpec`, `TestPinSkippedWithoutConversationID` and
+`TestPinnedRequestSendsOnlyThePin` in `pkg/llm`). The pin IS the provider that
+last served the conversation, so it moves when that provider is banned, when
+another provider serves the line, or when the spec starts excluding it. The
+proxy face (Claude Code children) does not pin: it honours every ban through
+`IgnoredFor` and lets OpenRouter choose.
 
 **Bans.** A provider is judged per conversation and banned per
 `(model line, provider)` for the whole process — every user's children and the
 daemon's own jobs — by `ProviderGuard.Observe`. Failures are attributed only
 through `Observation.Pinned`: an unpinned attempt says nothing about which
-provider would have been at fault.
+provider would have been at fault. The proxy face feeds this only the
+cache-miss evidence (a completed turn's usage); `unavailable`, `output_cap`,
+tool corruption and degeneracy are judged from fundi children and the daemon's
+own jobs, which is where the attempt outcome and the turn's text are visible.
 
 | reason | what it takes | how long |
 | --- | --- | --- |
@@ -201,7 +209,12 @@ provider would have been at fault.
 
 The rules and their constants live in `pkg/routing/providerhealth.go`
 (`pinnedFailuresToBan`, `unavailableTTL`, `structuralTTL`,
-`structuralRepeatsToBan`, `repetitionDegenerate`, `RepetitionMinBytes`).
+`structuralRepeatsToBan`, `repetitionDegenerate`, `RepetitionMinBytes`),
+pinned by `TestPinnedTransientFailuresBanAtK`,
+`TestPinnedNoEligibleBansAtOnce`, `TestOutputCapNeedsTheMargin`,
+`TestToolCorruptionBansOnSecond` and `TestDegenerateBansOnSecond`; the
+`llm` side that feeds them is `pkg/llm/provider_health.go`
+(`failureKind`, `repetition`, `invalidToolArgs`).
 
 **Exhaustion.** A line can run out of providers. When a request comes back
 "no eligible provider" because of the guard's own automatic bans, the daemon
@@ -209,7 +222,12 @@ lifts that line's automatic bans — one `lift` row per key in
 `openrouter.provider_ejection` — and resends once; a no-eligible caused only by
 operator bans or by the request's own spec is returned as an error, because
 lifting it would mean serving a host the caller or the operator ruled out
-(`ProviderGuard.LiftLine`).
+(`ProviderGuard.LiftLine`, `llm.resendAfterNoEligible`; pinned by
+`TestLiftLineRemovesOnlyAutomaticOnThatLine`,
+`TestNoEligibleResendLiftsAutomaticExclusions`,
+`TestNoEligibleResendAfterPinnedRefusal`,
+`TestNoEligibleOperatorOnlyDoesNotResend` and `TestNoEligibleResendsOnlyOnce`).
+A resend is one more attempt, never a loop.
 
 Ejections are logged append-only and reseed the in-memory list at startup —
 except `unavailable`, which is memory-only:
@@ -405,7 +423,7 @@ the spawn always overrides the model's declared default.
 `only` is an OpenRouter-only pin on an `anthropic-openrouter` provider's
 model declaration: requests made through the declared key are sent with
 `"provider": {"only": [...]}` so only those OpenRouter provider slugs may
-serve them, unless a routing spec sets its own `only` (the cache guard's
+serve them, unless a routing spec sets its own `only` (the guard's
 ignore list still merges in). Because the pin lives on the declaration, two
 declarations can route the SAME model id to different providers — an eval
 compares `openrouter/glm-flash@together` against

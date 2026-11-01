@@ -2788,7 +2788,8 @@ pub struct RecallStatusResponse {
 }
 /// ProviderBan is one live exclusion of an OpenRouter provider from routing:
 /// an operator ban (reason "operator", model_line "*" = every model line) or a
-/// cache-guard ejection (reason "no_cache", scoped to one model line).
+/// provider-guard ejection (reason "no_cache", "unavailable", "output_cap",
+/// "tool_corrupt" or "degenerate", scoped to one model line).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProviderBan {
     /// OpenRouter slug ("openinference"); a guard ejection may carry the display name

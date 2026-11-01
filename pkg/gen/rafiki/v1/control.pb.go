@@ -11000,7 +11000,8 @@ func (x *RecallStatusResponse) GetSummaryModel() string {
 
 // ProviderBan is one live exclusion of an OpenRouter provider from routing:
 // an operator ban (reason "operator", model_line "*" = every model line) or a
-// cache-guard ejection (reason "no_cache", scoped to one model line).
+// provider-guard ejection (reason "no_cache", "unavailable", "output_cap",
+// "tool_corrupt" or "degenerate", scoped to one model line).
 type ProviderBan struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Provider  string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"` // OpenRouter slug ("openinference"); a guard ejection may carry the display name

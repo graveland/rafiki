@@ -263,11 +263,14 @@ func providerBanViewOf(b *rafikiv1.ProviderBan) providerBanView {
 func newProvidersBansCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "bans",
-		Short: "List excluded providers: operator bans and the cache guard's ejections",
+		Short: "List excluded providers: operator bans and the guard's ejections",
 		Long: `List every provider currently excluded from routing: your bans (reason
-"operator") and the cache guard's automatic ejections (e.g. "no_cache" for a
-provider that stopped serving prompt-cache hits). An ejection expires on its
-own TTL and does not respond to ` + "`unban`" + `; only an operator ban does.
+"operator") and the provider guard's automatic ejections — "no_cache" for a
+provider that stopped serving prompt-cache hits, "unavailable" for a pinned
+provider that kept failing, "output_cap" for a truncated answer, "tool_corrupt"
+for mangled tool arguments, "degenerate" for a repetition loop. An ejection
+expires on its own TTL and does not respond to ` + "`unban`" + `; only an
+operator ban does.
 
 Example:
   rafiki providers bans

@@ -1574,7 +1574,8 @@ every outgoing OpenRouter request's `provider.ignore` alongside the guard's
 own ejections. There is no per-model-line cap: a line may lose every provider
 it has, and a request answered no-eligible while the line held automatic
 exclusions lifts those exclusions (`ProviderGuard.LiftLine`, one `lift` row
-per key) and resends once. Every ban and lift is appended to
+per key) and resends once — never an operator ban, and never a ban on another
+line. Every ban and lift is appended to
 `openrouter.provider_ejection` (a lift is a superseding `reason = 'lift'` row,
 never a delete) BEFORE it takes effect, and a failed write fails the call; the
 daemon rehydrates the latest row per `(provider, model_line)` at startup,
