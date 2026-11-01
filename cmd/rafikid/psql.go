@@ -42,6 +42,13 @@ Everything after "--" is handed to psql unchanged.`,
 			if db == "" {
 				return errors.New("--db (or RAFIKI_DB) is required")
 			}
+			// The client is looked up BEFORE the DSN is resolved: resolving an
+			// embedded DSN can download tens of megabytes and run initdb, and a
+			// user with no psql installed should learn that in a millisecond
+			// rather than after that.
+			if _, err := lookPsql(); err != nil {
+				return err
+			}
 			dsn, err := resolveDSN(cmd.Context(), db)
 			if err != nil {
 				return err
@@ -98,13 +105,24 @@ var pgEnv = map[string]string{
 	"gssencmode":           "PGGSSENCMODE",
 }
 
+// lookPsql finds the psql binary, or reports the install remedy. RunE calls it
+// before resolving the DSN and psqlInvocation calls it again, so the cheap check
+// is what a user without psql sees first.
+func lookPsql() (string, error) {
+	path, err := exec.LookPath("psql")
+	if err != nil {
+		return "", errors.New(psqlMissing)
+	}
+	return path, nil
+}
+
 // psqlInvocation resolves psql and the environment it should run in. configured
 // is the DSN as the operator wrote it (it selects the wording of target); dsn is
 // what resolveDSN returned. The connection reaches psql only through env.
 func psqlInvocation(configured, dsn string, args, environ []string) (psqlInv, error) {
-	path, err := exec.LookPath("psql")
+	path, err := lookPsql()
 	if err != nil {
-		return psqlInv{}, errors.New(psqlMissing)
+		return psqlInv{}, err
 	}
 	kw, err := parseConninfo(dsn)
 	if err != nil {
@@ -212,11 +230,18 @@ func parseConninfoURL(dsn string) (map[string]string, error) {
 
 // parseConninfoKeywords parses libpq's keyword/value syntax: whitespace
 // separated key=value pairs, a value optionally single-quoted with \' and \\
-// escapes. The error text names the offending key or token and never a value
-// that belongs to the password.
+// escapes.
+//
+// NO error here repeats the DSN's text. A token that failed to parse can be the
+// continuation of a password (`password=my s3cret` makes `s3cret` a bare token,
+// and `password='abc'def` leaves `def` after the closing quote), so naming the
+// offending fragment would publish part of a secret. The errors locate it by
+// byte offset and by the keyword it follows instead — a keyword that has already
+// passed validConninfoKey, so it cannot itself hold anything sensitive.
 func parseConninfoKeywords(s string) (map[string]string, error) {
 	kw := make(map[string]string, 8)
 	i := 0
+	lastKey := ""
 	for {
 		for i < len(s) && isConninfoSpace(s[i]) {
 			i++
@@ -229,13 +254,11 @@ func parseConninfoKeywords(s string) (map[string]string, error) {
 			i++
 		}
 		if i >= len(s) || s[i] != '=' {
-			return nil, fmt.Errorf("rafikid psql: cannot parse DSN: %q is not a key=value pair",
-				conninfoFragment(s[start:i]))
+			return nil, conninfoTokenError("a key=value pair", start, lastKey)
 		}
 		key := s[start:i]
 		if !validConninfoKey(key) {
-			return nil, fmt.Errorf("rafikid psql: cannot parse DSN: %q is not a keyword",
-				conninfoFragment(key))
+			return nil, conninfoTokenError("a keyword", start, lastKey)
 		}
 		i++ // '='
 		val, next, err := parseConninfoValue(s, i, key)
@@ -244,7 +267,20 @@ func parseConninfoKeywords(s string) (map[string]string, error) {
 		}
 		i = next
 		kw[key] = val
+		lastKey = key
 	}
+}
+
+// conninfoTokenError reports an unparsable token WITHOUT its text: the offset
+// locates it, and the preceding keyword says what it follows. Both halves are
+// safe to print — the keyword passed validConninfoKey, and a byte offset is not
+// DSN content.
+func conninfoTokenError(want string, off int, lastKey string) error {
+	msg := fmt.Sprintf("rafikid psql: cannot parse DSN: expected %s at offset %d", want, off)
+	if lastKey != "" {
+		msg += fmt.Sprintf(" (after the keyword %q)", lastKey)
+	}
+	return errors.New(msg)
 }
 
 // parseConninfoValue reads one value starting at i, returning it and the index
@@ -268,8 +304,9 @@ func parseConninfoValue(s string, i int, key string) (string, int, error) {
 			case '\'':
 				i++
 				if i < len(s) && !isConninfoSpace(s[i]) {
-					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: %q follows the quoted value of %q",
-						string(s[i]), key)
+					// The character is not named: after `password='abc'` it is the
+					// first byte of the password's continuation.
+					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unexpected character after the quoted value of %q", key)
 				}
 				return b.String(), i, nil
 			default:
@@ -288,16 +325,6 @@ func parseConninfoValue(s string, i int, key string) (string, int, error) {
 		i++
 	}
 	return b.String(), i, nil
-}
-
-// conninfoFragment makes a piece of the DSN safe to name in an error: a
-// password's value is elided, everything else is shown so the operator can find
-// it.
-func conninfoFragment(tok string) string {
-	if k, _, ok := strings.Cut(tok, "="); ok && strings.Contains(strings.ToLower(k), "pass") {
-		return k + "=…"
-	}
-	return tok
 }
 
 // validConninfoKey reports whether key is shaped like a libpq parameter name.
