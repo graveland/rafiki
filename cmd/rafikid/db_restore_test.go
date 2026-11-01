@@ -466,7 +466,7 @@ func TestRestoreRefusesWithoutForce(t *testing.T) {
 		f := stubRestoreOps(t, dataDir, true)
 		var stderr bytes.Buffer
 
-		err := runRestore(context.Background(), embeddedDSN, archive, false, &stderr)
+		err := runRestore(context.Background(), embeddedDSN, archive, false, false, &stderr)
 
 		c.Error(err, "want a refusal without --force, got nil")
 		c.ErrorContains(err, "without --force", "refusal, got: %v", err)
@@ -489,7 +489,7 @@ func TestRestoreRefusesWithoutForce(t *testing.T) {
 		var stderr bytes.Buffer
 
 		err := runRestore(context.Background(),
-			"postgres://alice:s3cret@db.example:6543/app", archive, false, &stderr)
+			"postgres://alice:s3cret@db.example:6543/app", archive, false, false, &stderr)
 
 		c.Error(err, "want a refusal without --force, got nil")
 		c.ErrorContains(err, "without --force", "refusal, got: %v", err)
@@ -521,7 +521,7 @@ func TestRestoreRefusesEmbeddedDumpWithoutForce(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	err := runRestore(context.Background(), embeddedDSN, archive, false, &stderr)
+	err := runRestore(context.Background(), embeddedDSN, archive, false, false, &stderr)
 
 	c.Error(err, "want a refusal without --force, got nil")
 	c.ErrorContains(err, embedpg.Database, "the refusal must name the embedded database, got: %v", err)
@@ -548,7 +548,7 @@ func TestRestorePhysicalMovesTheDataDirAside(t *testing.T) {
 	f := stubRestoreOps(t, dataDir, true)
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, &stderr)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, &stderr)
 
 	c.NoError(err, "runRestore returned error: %s", stderr.String())
 	c.EqDeep([]string{"unpack", "status", "stop", "start"}, f.ops,
@@ -582,7 +582,7 @@ func TestRestorePhysicalIntoAMissingDataDir(t *testing.T) {
 	f := stubRestoreOps(t, dataDir, false)
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, &stderr)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, &stderr)
 
 	c.NoError(err, "runRestore returned error: %s", stderr.String())
 	c.EqDeep([]string{"unpack", "start"}, f.ops,
@@ -630,7 +630,7 @@ func TestRestorePhysicalRefusesConfiguredDSN(t *testing.T) {
 		dataDirArchiveEntries()...)
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), "postgres://alice:s3cret@db.example:6543/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://alice:s3cret@db.example:6543/app", archive, true, false, &stderr)
 
 	c.Error(err, "want a refusal for a physical archive on a configured DSN, got nil")
 	c.ErrorContains(err, "embedded", "the refusal must say why, got: %v", err)
@@ -675,7 +675,7 @@ func TestRestorePhysicalNeverOverwritesAReplacedDir(t *testing.T) {
 		dataDirArchiveEntries()...)
 	f := stubRestoreOps(t, dataDir, true)
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want a refusal when the replaced name is taken, got nil")
 	c.ErrorContains(err, earlier, "the refusal must name the existing directory, got: %v", err)
@@ -748,7 +748,7 @@ func TestRestorePhysicalRefusesAnEscapingArchive(t *testing.T) {
 			f := stubRestoreOps(t, dataDir, true)
 			f.unpack = unpackDataDirArchive // the real unpacker
 
-			err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+			err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 			c.Error(err, "want a refusal for %s, got nil", tc.name)
 			c.ErrorContains(err, tc.want, "refusal, got: %v", err)
@@ -780,7 +780,7 @@ func TestRestorePhysicalRefusesAMismatchedMajor(t *testing.T) {
 	f := stubRestoreOps(t, dataDir, true)
 	f.unpack = unpackDataDirArchive
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want a refusal for a mismatched major version, got nil")
 	c.ErrorContains(err, "PostgreSQL 17", "the refusal must name the archive's version, got: %v", err)
@@ -806,7 +806,7 @@ func TestRestorePhysicalRefusesANonDataDirArchive(t *testing.T) {
 	f := stubRestoreOps(t, dataDir, true)
 	f.unpack = unpackDataDirArchive
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want a refusal for a non-data-directory archive, got nil")
 	c.ErrorContains(err, "no PG_VERSION", "the refusal must say what is missing, got: %v", err)
@@ -843,7 +843,7 @@ func TestRestorePhysicalRollsBackWhenTheStartFails(t *testing.T) {
 		}
 	}
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the start failure, got nil")
 	c.ErrorContains(err, "did not start", "error, got: %v", err)
@@ -901,7 +901,7 @@ func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	var stderr bytes.Buffer
 
 	err := runRestore(context.Background(),
-		"postgres://alice:s3cret@db.example:6543/app", archive, true, &stderr)
+		"postgres://alice:s3cret@db.example:6543/app", archive, true, false, &stderr)
 
 	c.NoError(err, "runRestore returned error: %s", stderr.String())
 
@@ -951,7 +951,7 @@ func TestRestoreDumpChecksTheClientBeforeResolving(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	err := restoreDumpArchive(context.Background(), embeddedDSN, archive, &stderr)
+	err := restoreDumpArchive(context.Background(), embeddedDSN, archive, false, &stderr)
 
 	c.Error(err, "want a refusal for a missing pg_restore, got nil")
 	c.ErrorContains(err, "pg_restore not found on PATH", "refusal, got: %v", err)
@@ -967,7 +967,7 @@ func TestRestoreDumpRefusesADSNWithNoDatabase(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	err := runRestore(context.Background(), "postgres://alice:s3cret@db.example:6543", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://alice:s3cret@db.example:6543", archive, true, false, &stderr)
 
 	c.Error(err, "want a refusal for a DSN with no database, got nil")
 	c.ErrorContains(err, "names no database", "refusal, got: %v", err)
@@ -990,7 +990,7 @@ func TestRestoreDumpReportsAFailure(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
 
 	c.Error(err, "want the pg_restore failure, got nil")
 	c.ErrorContains(err, "pg_restore", "error, got: %v", err)
@@ -1066,7 +1066,7 @@ func TestRestorePhysicalHoldsTheServerLockAcrossTheSwap(t *testing.T) {
 		held = append(held, stage)
 	}
 
-	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, io.Discard), "runRestore returned error")
+	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard), "runRestore returned error")
 	c.EqDeep([]string{"stop", "start"}, held, "the lock must be held at each stage probed, got")
 }
 
@@ -1104,7 +1104,7 @@ func TestRestorePhysicalWritesTheMarkerBeforeMovingTheDirectoryAside(t *testing.
 		return os.Rename(from, to)
 	}
 
-	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, io.Discard), "runRestore returned error")
+	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard), "runRestore returned error")
 	c.Eq(2, renames, "a restore with a data directory in place makes exactly two renames, got")
 	c.True(secondSawIt, "the marker must survive between the two renames: that window is what it is for")
 	c.NoFileExists(marker, "a completed restore must remove its marker")
@@ -1145,7 +1145,7 @@ func TestRestorePhysicalRollsBackAFailedSecondRename(t *testing.T) {
 		return errors.New("rename: directory not empty")
 	}
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the second-rename failure, got nil")
 	c.ErrorContains(err, "moving the restored directory into place", "error, got: %v", err)
@@ -1181,7 +1181,7 @@ func TestRestorePhysicalDoesNotRestartAfterAFailedStop(t *testing.T) {
 	f := stubRestoreOps(t, dataDir, true)
 	f.stopErr = errors.New("pg_ctl: cannot stop the server")
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the stop failure, got nil")
 	c.ErrorContains(err, "cannot stop the server", "error, got: %v", err)
@@ -1206,7 +1206,7 @@ func TestRestorePhysicalRollsBackAFailedStartOnAFreshInstall(t *testing.T) {
 	f := stubRestoreOps(t, dataDir, false)
 	f.failFirstStart = true
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the start failure, got nil")
 	c.ErrorContains(err, "did not start", "error, got: %v", err)
@@ -1231,7 +1231,7 @@ func TestRestoreDumpPassesAFlagShapedPathAfterADoubleDash(t *testing.T) {
 	archive := writeBytes(t, filepath.Join(dir, "-a-dump.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
 
 	c.NoError(err, "runRestore returned error: %s", stderr.String())
 	argv := string(mustRead(t, argvFile))
@@ -1258,7 +1258,7 @@ func TestRestorePhysicalLeavesBothTreesWhenTheRollbackCannotStop(t *testing.T) {
 	f.failFirstStart = true
 	f.failSecondStop = true
 
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the rollback's stop failure, got nil")
 	c.ErrorContains(err, "server does not shut down", "error, got: %v", err)
@@ -1384,7 +1384,7 @@ func TestRestoreDumpBracketsTheTimescaleRestore(t *testing.T) {
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
 	c.NoError(err, "runRestore returned error: %s", stderr.String())
 	c.EqDeep([]string{"pre", "pg_restore", "post"}, hooks.steps(),
 		"the extension must be told before pg_restore runs and put back after it")
@@ -1403,7 +1403,7 @@ func TestRestoreDumpRestoresTheTimescaleHooksWhenPgRestoreFails(t *testing.T) {
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
 	c.Error(err, "want the pg_restore failure, got nil")
 	c.EqDeep([]string{"pre", "pg_restore", "post"}, hooks.steps(),
 		"the post hook must run after a FAILED restore too")
@@ -1422,7 +1422,7 @@ func TestRestoreDumpRefusesWhenTheTimescaleHooksFail(t *testing.T) {
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
 
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
 	c.Error(err, "want the hook failure, got nil")
 	c.ErrorContains(err, "timescaledb_pre_restore", "error, got: %v", err)
 	c.NoFileExists(argvFile, "pg_restore must not run when the extension could not be prepared")
@@ -1455,7 +1455,7 @@ func TestRestorePhysicalRefusesACancelledContext(t *testing.T) {
 		return nil
 	}
 
-	err := runRestore(ctx, embeddedDSN, archive, true, io.Discard)
+	err := runRestore(ctx, embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the cancellation, got nil")
 	c.True(errors.Is(err, context.Canceled), "error, got: %v", err)
@@ -1509,7 +1509,7 @@ func TestRestoreDumpPassesNoOwnerOnlyForANonSuperuser(t *testing.T) {
 			gates.superuser = tc.superuser
 
 			var stderr bytes.Buffer
-			c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr),
+			c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr),
 				"runRestore: %s", stderr.String())
 
 			argv := string(mustRead(t, argvFile))
@@ -1547,7 +1547,7 @@ func TestRestoreDumpPropagatesAMissingOwnerRole(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
 
 	c.Error(err, "want the restore failure, got nil")
 	c.StrContains(stderr.String(), "does not exist", "pg_restore's own diagnosis must reach the operator, got: %s",
@@ -1566,7 +1566,7 @@ func TestRestoreDumpRefusesUnderALiveDaemon(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, false, &stderr)
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, false, false, &stderr)
 
 	c.Error(err, "want a refusal while a local daemon is running, got nil")
 	c.ErrorContains(err, "rafikid is running", "the refusal must name the daemon, got: %v", err)
@@ -1584,7 +1584,7 @@ func TestRestoreDumpProceedsUnderALiveDaemonWithForce(t *testing.T) {
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
-	c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr),
+	c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr),
 		"runRestore: %s", stderr.String())
 
 	c.FileExists(argvFile, "an accepted restore must run pg_restore")
@@ -1613,7 +1613,7 @@ func TestRestorePhysicalHonoursAnInterruptDuringTheStop(t *testing.T) {
 		}
 	}
 
-	err := runRestore(ctx, embeddedDSN, archive, true, io.Discard)
+	err := runRestore(ctx, embeddedDSN, archive, true, false, io.Discard)
 
 	c.Error(err, "want the cancellation, got nil")
 	c.True(errors.Is(err, context.Canceled), "error, got: %v", err)
@@ -1647,7 +1647,7 @@ func TestRestorePhysicalFlushesTheTreeBeforeTheSwap(t *testing.T) {
 		flushed = append(flushed, dir)
 		return nil
 	}
-	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, io.Discard), "runRestore")
+	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard), "runRestore")
 	c.EqDeep([]string{staging}, flushed, "the STAGING tree must be flushed, before it is moved into place")
 	c.EqDeep([]string{"unpack", "status", "stop"}, f.ops[:3], "the flush must happen before the server is stopped")
 	c.FileExists(filepath.Join(dataDir, "PG_VERSION"), "the restored tree is in place")
@@ -1659,9 +1659,49 @@ func TestRestorePhysicalFlushesTheTreeBeforeTheSwap(t *testing.T) {
 	restoreEmbedded.sync = func(context.Context, string) error { return errors.New("disk on fire") }
 	writeDataDirTree(t, dataDir, "original")
 	original = snapshotTree(t, dataDir)
-	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, false, io.Discard)
 	c.Error(err, "want the flush failure, got nil")
 	c.StrContains(err.Error(), "disk on fire", "error, got: %v", err)
 	c.EqDeep([]string{"unpack"}, f2.ops, "a failed flush must stop before the server is touched")
 	c.EqDeep(original, snapshotTree(t, dataDir), "the live data directory must be untouched, got")
+}
+
+// A dump taken from ANOTHER cluster names roles this one does not have, and a
+// superuser restore applies those OWNER TO statements — so the whole transaction
+// fails and there is no way out. --no-owner is that way out, and it says what it
+// costs; the default keeps the archive's owners.
+func TestRestoreDumpNoOwnerFlagOverridesArchiveOwnership(t *testing.T) {
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+
+	for _, tc := range []struct {
+		name    string
+		noOwner bool
+		want    bool
+	}{
+		{name: "default: a superuser keeps the archive's owners", noOwner: false, want: false},
+		{name: "--no-owner: everything belongs to the connecting role", noOwner: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			argvFile, _ := fakePgRestoreDir(t)
+			stubTimescaleHooks(t)
+			stubRestoreGates(t).superuser = true
+
+			var stderr bytes.Buffer
+			c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, tc.noOwner, &stderr),
+				"runRestore: %s", stderr.String())
+
+			has := false
+			for _, arg := range strings.Split(string(mustRead(t, argvFile)), "\n") {
+				if arg == "--no-owner" {
+					has = true
+				}
+			}
+			c.Eq(tc.want, has, "pg_restore argv with --no-owner=%v, got: %s", tc.noOwner, string(mustRead(t, argvFile)))
+			if tc.noOwner {
+				c.StrContains(stderr.String(), "fix ownership afterwards",
+					"the flag must say what it costs, got: %s", stderr.String())
+			}
+		})
+	}
 }

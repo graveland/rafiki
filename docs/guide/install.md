@@ -174,8 +174,10 @@ than killing it, so the safety work still happens — a dump restore puts the
 TimescaleDB hooks back, and a physical one never starts the swap (it checks
 again after a stop that can take 90 seconds), restarts the server it stopped and
 leaves the data directory untouched — and the command exits non-zero. Once the
-two renames have begun the swap runs to completion: they are not interruptible,
-and the restore then reports what it did. A second interrupt kills the process outright, which can leave a
+two renames have begun the command finishes the swap — the renames themselves are
+not interruptible — and an interrupt that arrives then rolls the completed swap
+back: the previous data directory is put back, the restored tree is discarded,
+and the command exits non-zero. A second interrupt kills the process outright, which can leave a
 TimescaleDB database in restoring mode (`SELECT timescaledb_post_restore();` as
 a superuser is the remedy) or a physical restore's marker in place.
 

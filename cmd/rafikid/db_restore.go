@@ -75,7 +75,10 @@ const pgRestoreMissing = "pg_restore not found on PATH; install the PostgreSQL c
 
 // newDbRestoreCmd restores rafikid's database from one backup file.
 func newDbRestoreCmd() *cobra.Command {
-	var force bool
+	var (
+		force   bool
+		noOwner bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "restore <path>",
@@ -102,7 +105,11 @@ file is, sniffed from its content rather than its extension:
       leave the daemon with permission denied on its first query, which is why
       the flag is decided rather than constant. A role the archive names that
       does not exist on the target fails the whole restore (loudly) instead of
-      having its objects reassigned.
+      having its objects reassigned — which is also the case for a dump taken
+      from a DIFFERENT cluster, and the reason this command has its own
+      --no-owner: it owns every restored object as the connecting role instead,
+      and then ownership has to be fixed by hand or the daemon cannot read the
+      data.
 
       On a database with the timescaledb extension it is bracketed by that
       extension's own timescaledb_pre_restore()/timescaledb_post_restore()
@@ -173,8 +180,10 @@ pg_restore (whose single transaction rolls back) and puts TimescaleDB's hooks
 back, and a physical one never starts the swap — before the first rename, and
 again after a stop that took up to 90 seconds — restarting the server it stopped
 and leaving the data directory untouched. Once the two renames have begun the
-swap runs to completion (they are not interruptible), and then the restore
-reports what it did. A SECOND signal kills the process outright, which can leave a
+command finishes the swap — the renames themselves are not interruptible — and an
+interrupt that arrives then rolls the completed swap BACK: the previous data
+directory is put in place again, the restored tree is discarded, and the command
+exits non-zero. A SECOND signal kills the process outright, which can leave a
 TimescaleDB database in restoring mode (the manual remedy is SELECT
 timescaledb_post_restore()) or a physical restore's marker in place.`,
 		Args:          cobra.ExactArgs(1),
@@ -185,12 +194,16 @@ timescaledb_post_restore()) or a physical restore's marker in place.`,
 			if err != nil {
 				return err
 			}
-			return runRestore(cmd.Context(), db, args[0], force, os.Stderr)
+			return runRestore(cmd.Context(), db, args[0], force, noOwner, os.Stderr)
 		},
 	}
 
 	cmd.Flags().BoolVar(&force, "force", false,
 		"replace what the backup covers; without it nothing is changed and the target is only named")
+	cmd.Flags().BoolVar(&noOwner, "no-owner", false,
+		"own every restored object as the CONNECTING role instead of the archive's original owners "+
+			"(the escape hatch for a dump taken from another cluster whose role names do not exist here); "+
+			"ownership then has to be fixed afterwards, or the daemon cannot read the data")
 
 	return cmd
 }
@@ -199,7 +212,7 @@ timescaledb_post_restore()) or a physical restore's marker in place.`,
 // dispatches. The order here is the safety property: the --force gate, the
 // embedded-only rule and the target description all run before anything is
 // started, stopped, renamed or dropped.
-func runRestore(ctx context.Context, configured, path string, force bool, stderr io.Writer) error {
+func runRestore(ctx context.Context, configured, path string, force, noOwner bool, stderr io.Writer) error {
 	if configured == "" {
 		return errors.New("--db (or RAFIKI_DB) is required")
 	}
@@ -247,7 +260,7 @@ func runRestore(ctx context.Context, configured, path string, force bool, stderr
 
 	switch kind {
 	case restoreDump:
-		return restoreDumpArchive(ctx, configured, path, stderr)
+		return restoreDumpArchive(ctx, configured, path, noOwner, stderr)
 	case restorePhysical:
 		return restorePhysicalArchive(ctx, configured, path, stderr)
 	default:
@@ -341,7 +354,7 @@ func lookPgRestore() (string, error) {
 }
 
 // restoreDumpArchive restores a pg_dump custom archive over the wire.
-func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.Writer) error {
+func restoreDumpArchive(ctx context.Context, configured, path string, noOwner bool, stderr io.Writer) error {
 	// The client is looked up BEFORE the DSN is resolved, as psql and pg_dump do
 	// it: resolving an embedded DSN downloads and initdbs, and an operator
 	// without pg_restore should learn that in a millisecond rather than after
@@ -383,12 +396,22 @@ func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.
 	// back on the first error. Without it, --clean drops and recreates objects as
 	// it goes, and a failure halfway leaves a half-rebuilt database.
 	args := []string{"-d", database, "--clean", "--if-exists", "--single-transaction"}
-	if !superuser {
+	switch {
+	case noOwner:
+		// The operator's escape hatch, for a dump taken from another cluster
+		// whose role names do not exist here: the archive's OWNER TO would fail
+		// the whole transaction. The cost is stated where it is paid.
 		args = append(args, "--no-owner")
-	} else {
+		fmt.Fprintf(stderr, "rafikid db restore: --no-owner: every restored object will belong to the "+
+			"connecting role; fix ownership afterwards (`ALTER ... OWNER TO`) or the daemon cannot read "+
+			"the restored data\n")
+	case !superuser:
+		args = append(args, "--no-owner")
+	default:
 		fmt.Fprintf(stderr, "rafikid db restore: restoring object ownership from the archive (the "+
 			"connecting role is a superuser); a role the archive names that does not exist here fails the "+
-			"whole restore rather than reassigning its objects\n")
+			"whole restore rather than reassigning its objects — pass --no-owner to own everything as "+
+			"this role instead\n")
 	}
 	// `--` ends pg_restore's options, so a file whose name begins with "-" is a
 	// filename and not a flag.
@@ -808,6 +831,14 @@ func restorePhysicalArchive(ctx context.Context, configured, path string, stderr
 					replaced, rerr))
 			} else {
 				restored = true
+				// The forward path flushes the parent after its renames; the
+				// rollback is the same kind of pointer write and gets the same
+				// treatment, or a power loss right after a rollback can leave
+				// the directory naming a tree that is not there.
+				if serr := syncDir(filepath.Dir(s.DataDir)); serr != nil {
+					err = errors.Join(err, fmt.Errorf("rafikid db restore: flushing the directory the "+
+						"previous data directory was moved back into: %w", serr))
+				}
 			}
 		}
 		if restored {
