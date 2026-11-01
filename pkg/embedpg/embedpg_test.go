@@ -255,11 +255,16 @@ func TestPrepareDataDirRestoresDataDirMode(t *testing.T) {
 // time Ensure runs, so none of them may reach a subprocess. This drives the
 // helper every exec in the package is built by, so it fails if one goes back to
 // inheriting os.Environ().
+//
+// TZ is the other half of the assertion: a whitelist that dropped it would give
+// the cluster the system's timezone instead of the daemon's, and the mistake is
+// invisible until a timestamp is read back.
 func TestSubprocessEnvironmentIsMinimal(t *testing.T) {
 	t.Setenv("RAFIKI_SECRETS_KEY", "sentinel-secrets-key")
 	t.Setenv("OPENROUTER_API_KEY", "sentinel-provider-key")
 	t.Setenv("PGPASSWORD", "sentinel-pg-password")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "sentinel-aws-key")
+	t.Setenv("TZ", "Pacific/Auckland")
 
 	cmd := command(context.Background(), filepath.Join(t.TempDir(), "initdb"), "-D", "staging")
 
@@ -268,8 +273,11 @@ func TestSubprocessEnvironmentIsMinimal(t *testing.T) {
 	for _, kv := range cmd.Env {
 		c.NotStrContains(kv, "sentinel", "subprocess environment leaked %q", kv)
 	}
-	// PATH is what lets the binaries find their own helpers.
-	c.StrContains(strings.Join(cmd.Env, "\n"), "PATH=")
+	// PATH is what lets the binaries find their own helpers, and TZ is what
+	// makes initdb take the daemon's timezone rather than the system's.
+	env := strings.Join(cmd.Env, "\n")
+	c.StrContains(env, "PATH=")
+	c.StrContains(env, "TZ=Pacific/Auckland")
 }
 
 // A relative data directory is refused: Postgres resolves a relative socket

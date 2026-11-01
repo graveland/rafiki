@@ -160,14 +160,16 @@ func command(ctx context.Context, name string, args ...string) *exec.Cmd {
 }
 
 // execEnv is the whole environment an embedpg subprocess gets: PATH, so the
-// binaries resolve their own helpers, HOME, and TMPDIR when it is set. It is a
-// whitelist rather than a filtered copy of os.Environ() on purpose — a new
-// variable appearing in the daemon's environment cannot widen it by accident.
-// The cluster's locale is fixed by initdb's --locale=C, so no LANG/LC_* is
-// needed, and a postmaster has no use for anything else here.
+// binaries resolve their own helpers, HOME, and TMPDIR and TZ when they are set.
+// It is a whitelist rather than a filtered copy of os.Environ() on purpose — a
+// new variable appearing in the daemon's environment cannot widen it by
+// accident. TZ is not a secret and initdb reads it for the cluster's timezone,
+// so dropping it would quietly give the server the system's zone instead of the
+// daemon's. The cluster's locale is fixed by initdb's --locale=C, so no
+// LANG/LC_* is needed, and a postmaster has no use for anything else here.
 func execEnv() []string {
-	env := make([]string, 0, 3)
-	for _, name := range []string{"PATH", "HOME", "TMPDIR"} {
+	env := make([]string, 0, 4)
+	for _, name := range []string{"PATH", "HOME", "TMPDIR", "TZ"} {
 		if v := os.Getenv(name); v != "" {
 			env = append(env, name+"="+v)
 		}
