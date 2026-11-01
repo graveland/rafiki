@@ -448,21 +448,29 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	// Everything above is the schema; this is the RUNTIME writing to it, which is
 	// where a Timescale-only assumption would break first: a write-ahead
 	// conversation_turn row (PRIMARY KEY (id, created_at)), the conversation
-	// tree, the child row, and — because the spawn records requests — a
-	// raw_http_request row. None of it needs timescaledb.
+	// tree, the child row, and — because spawnResumeChild sets RecordRequests and
+	// the daemon builds its raw-trace store whenever it has a pool — a
+	// raw_http_request row (source 'fundi'). None of it needs timescaledb.
 	childID := spawnResumeChild(t, d, "fakellm/mini")
 	waitForStatus(t, d, childID, "idle", 30*time.Second)
 	sendPrompt(t, client, childID, "say hi")
 
-	// Poll for the ROW, not for the status: the child is idle both before and
+	// Poll for the ROWS, not for the status: the child is idle both before and
 	// after its turn, so a status wait would pass instantly on the wrong edge.
-	// The turn row is the proof the turn happened at all.
+	// The turn row is the proof the turn happened at all, and the raw trace
+	// insert runs on its own goroutine (recordRawTrace detaches it), so neither
+	// can be read once.
+	countFor := func(sql string) (int64, error) {
+		var n int64
+		err := pool.QueryRow(ctx, sql, childID).Scan(&n)
+		return n, err
+	}
 	turnSQL := `SELECT count(*) FROM conversations.conversation_turn t
 	              JOIN conversations.child ch ON ch.conversation_id = t.conversation_id
 	             WHERE ch.child_id = $1`
 	c.Eventually(30*time.Second, "the turn is recorded in conversation_turn", func() error {
-		var n int64
-		if err := pool.QueryRow(ctx, turnSQL, childID).Scan(&n); err != nil {
+		n, err := countFor(turnSQL)
+		if err != nil {
 			return err
 		}
 		if n < 1 {
@@ -470,7 +478,23 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 		}
 		return nil
 	})
-	// Exactly one: the turn closed cleanly (the child is back to idle, not
+	// The fundi writer of the raw trace (pkg/llm's recordRawTrace) is what a
+	// --record-requests spawn turns on; the row is the evidence that the plain
+	// raw_http_request table accepts its insert.
+	rawSQL := `SELECT count(*) FROM conversations.raw_http_request r
+	             JOIN conversations.child ch ON ch.conversation_id = r.conversation_id
+	            WHERE ch.child_id = $1`
+	c.Eventually(30*time.Second, "the request is recorded in raw_http_request", func() error {
+		n, err := countFor(rawSQL)
+		if err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("no raw_http_request row for child %s yet", childID)
+		}
+		return nil
+	})
+	// Exactly one turn: it closed cleanly (the child is back to idle, not
 	// failed) and nothing wrote the row twice.
 	waitForStatus(t, d, childID, "idle", 30*time.Second)
 	c.Eq(int64(1), queryInt(t, pool, "turns recorded for the child's conversation", turnSQL, childID),
