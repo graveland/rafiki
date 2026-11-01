@@ -1,0 +1,149 @@
+name: embedpg
+
+# Builds and publishes the embedded PostgreSQL artifacts pkg/embedpg downloads
+# (build/embedpg). A tag push releases; workflow_dispatch builds and tests only.
+
+on:
+  push:
+    tags:
+      - 'embedpg-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: embedpg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: tag matches versions.env
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare
+        if: github.ref_type == 'tag'
+        run: |
+          . build/embedpg/versions.env
+          want="embedpg-v${PG_VERSION}-${BUILD_REV}"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "tag $GITHUB_REF_NAME does not match build/embedpg/versions.env ($want)" >&2
+            exit 1
+          fi
+
+  linux:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    name: linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: build/embedpg/build-linux.sh out
+      - name: Extract with embedpg.ExtractTar
+        run: |
+          go run ./build/embedpg/extract out/postgres-linux-${{ matrix.arch }}.txz tree
+          chmod 755 tree
+      - name: Smoke test in clean images
+        run: |
+          for img in ubuntu:24.04 debian:trixie-slim; do
+            echo "=== $img"
+            docker run --rm --user 65534:65534 \
+              -v "$PWD/tree:/pg:ro" -v "$PWD/build/embedpg/smoke.sh:/smoke.sh:ro" \
+              "$img" bash /smoke.sh /pg /tmp/scratch
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: embedpg-linux-${{ matrix.arch }}
+          path: out/postgres-linux-${{ matrix.arch }}.txz
+          if-no-files-found: error
+
+  darwin:
+    needs: check
+    name: darwin/universal
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: build/embedpg/build-darwin.sh out
+      - name: Extract with embedpg.ExtractTar
+        run: go run ./build/embedpg/extract out/postgres-darwin-universal.txz tree
+      - name: Smoke test (arm64 slice)
+        run: build/embedpg/smoke.sh tree
+      - uses: actions/upload-artifact@v7
+        with:
+          name: embedpg-darwin
+          path: out/postgres-darwin-universal.txz
+          if-no-files-found: error
+
+  # The universal tarball's x86_64 slice only runs on an Intel machine.
+  darwin-x86_64:
+    needs: darwin
+    name: darwin/universal (x86_64 slice)
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v8
+        with:
+          name: embedpg-darwin
+          path: out
+      - name: Extract with embedpg.ExtractTar
+        run: go run ./build/embedpg/extract out/postgres-darwin-universal.txz tree
+      - name: Smoke test
+        run: |
+          test "$(uname -m)" = x86_64
+          build/embedpg/smoke.sh tree
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [linux, darwin, darwin-x86_64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: embedpg-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum postgres-*.txz | tee checksums.txt
+      - name: Publish
+        # --latest=false: `rafiki upgrade` installs whatever
+        # github.com/<repo>/releases/latest names, and this is not a rafiki release.
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "Embedded PostgreSQL $GITHUB_REF_NAME" \
+            --notes "Artifacts for pkg/embedpg. Pin these digests in pkg/embedpg/fetch.go:
+
+          \`\`\`
+          $(cat dist/checksums.txt)
+          \`\`\`"
+      - name: This release must not be the repository's latest
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [ "$latest" = "$GITHUB_REF_NAME" ]; then
+            echo "$GITHUB_REF_NAME became the latest release; rafiki upgrade would install it" >&2
+            exit 1
+          fi

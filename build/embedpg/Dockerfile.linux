@@ -1,0 +1,56 @@
+# Builds postgres-linux-<arch>.txz for the architecture of the builder:
+#
+#   docker buildx build -f Dockerfile.linux --target artifact --output type=local,dest=out ...
+#
+# build-linux.sh supplies the build arguments from versions.env.
+
+# The build image, pinned by digest (the multi-arch index) so the toolchain and the
+# glibc floor do not move under a rebuild. Bumping it means re-checking GLIBC_MAX.
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+FROM ${UBUNTU_IMAGE} AS build
+
+ARG TARGETARCH
+ARG PG_VERSION
+ARG PG_SOURCE_SHA256
+ARG PGVECTOR_TAG
+ARG PGVECTOR_COMMIT
+ARG PG_TEXTSEARCH_TAG
+ARG PG_TEXTSEARCH_COMMIT
+ARG GLIBC_MAX
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl git bzip2 xz-utils pkg-config patchelf bison flex \
+        libssl-dev libicu-dev libxml2-dev liblz4-dev libzstd-dev zlib1g-dev uuid-dev libedit-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# PostgreSQL, from source. No gssapi, ldap, pam, selinux, systemd, perl, python or tcl:
+# each links libraries the tarball would then have to carry, and none is used.
+# libedit rather than readline: readline is GPL and psql would carry it.
+RUN curl -fsSL -o /pg.tar.bz2 "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" \
+    && echo "${PG_SOURCE_SHA256}  /pg.tar.bz2" | sha256sum -c - \
+    && mkdir /src && tar -xjf /pg.tar.bz2 -C /src --strip-components=1 \
+    && cd /src \
+    && ./configure --prefix=/opt/pg CFLAGS="-O2" \
+        --with-openssl --with-icu --with-lz4 --with-zstd --with-libxml \
+        --with-uuid=e2fs --with-libedit-preferred \
+    && make -j"$(nproc)" world-bin \
+    && make install-world-bin
+
+# Extensions are pinned by commit as well as tag: a tag can be moved.
+# OPTFLAGS="" because pgvector's default is -march=native, the build host's CPU.
+RUN set -eux; \
+    clone() { git -c advice.detachedHead=false clone -q --branch "$2" "https://github.com/$1.git" "/ext/$3"; \
+              [ "$(git -C "/ext/$3" rev-parse HEAD)" = "$4" ]; }; \
+    clone pgvector/pgvector "${PGVECTOR_TAG}" pgvector "${PGVECTOR_COMMIT}"; \
+    clone timescale/pg_textsearch "${PG_TEXTSEARCH_TAG}" pg_textsearch "${PG_TEXTSEARCH_COMMIT}"; \
+    make -C /ext/pgvector PG_CONFIG=/opt/pg/bin/pg_config OPTFLAGS= -j"$(nproc)"; \
+    make -C /ext/pgvector PG_CONFIG=/opt/pg/bin/pg_config OPTFLAGS= install; \
+    make -C /ext/pg_textsearch PG_CONFIG=/opt/pg/bin/pg_config -j"$(nproc)"; \
+    make -C /ext/pg_textsearch PG_CONFIG=/opt/pg/bin/pg_config install
+
+COPY bundle-linux.sh /bundle-linux.sh
+RUN /bundle-linux.sh /opt/pg /out "postgres-linux-${TARGETARCH}.txz" "${GLIBC_MAX}"
+
+FROM scratch AS artifact
+COPY --from=build /out/ /
