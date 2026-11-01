@@ -21,6 +21,12 @@ import (
 const (
 	managedPGContainer = "rafiki-pg"
 	managedPGVolume    = "rafiki-pgdata"
+	// managedPGUser is the role a rafiki-owned container is initialised with:
+	// the same name embedded's initdb bootstrap superuser gets, so the role a
+	// client connects as does not depend on which mode the install uses.
+	// POSTGRES_USER only applies to a FRESH volume — a container rebuilt over
+	// an already-initialised data dir keeps the role that dir was created with.
+	managedPGUser = "rafiki"
 	// managedPGImage is pinned to an exact tag so a release that bumps it is how
 	// `rafiki update` learns the container needs replacing.
 	managedPGImage = "timescale/timescaledb-ha:pg18.6-ts2.30.2"
@@ -160,11 +166,21 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 			port = p
 		}
 
+		// A fresh volume is initialised by this run, so it gets managedPGUser.
+		// A volume being re-adopted was initialised by an earlier container:
+		// POSTGRES_USER is ignored against an existing data dir, so the role
+		// there is whatever its saved DSN names (an install predating
+		// managedPGUser connects as `postgres`).
+		role := managedPGUser
 		var pw string
 		if volumeExists {
-			pw = passwordFromDSN(savedDSN)
+			var savedRole string
+			savedRole, pw = dsnCredentials(savedDSN)
 			if pw == "" {
 				return st, dbResult{}, fmt.Errorf("volume %s exists but the saved RAFIKI_DB has no usable password; restore a valid RAFIKI_DB in service.env or pass --dsn", managedPGVolume)
+			}
+			if savedRole != "" {
+				role = savedRole
 			}
 		} else {
 			p, err := randomPassword()
@@ -174,7 +190,7 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 			pw = p
 		}
 
-		env := []string{"POSTGRES_PASSWORD=" + pw}
+		env := []string{"POSTGRES_USER=" + managedPGUser, "POSTGRES_PASSWORD=" + pw}
 		if _, stderr, rerr := r.Run(ctx, env, dockerRunArgs(port)...); rerr != nil {
 			return st, dbResult{}, fmt.Errorf("docker run %s: %s", managedPGContainer, strings.TrimSpace(string(stderr)))
 		}
@@ -190,7 +206,7 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 		if err := waitForHealthy(ctx, r); err != nil {
 			return st, dbResult{}, err
 		}
-		dsn := managedDSN(pw, port)
+		dsn := managedDSN(role, pw, port)
 		if _, err := paths.SetEnvFile(paths.ServiceEnvFile(), map[string]string{"RAFIKI_DB": dsn}, "rafiki managed database"); err != nil {
 			return st, dbResult{}, err
 		}
@@ -219,8 +235,9 @@ func setupManagedDatabase(ctx context.Context, r runner, w *wizard, st installst
 	}
 }
 
-// dockerRunArgs is the `docker run` argv. POSTGRES_PASSWORD is a bare -e so the
-// value never lands in argv; the caller passes it through the runner's env.
+// dockerRunArgs is the `docker run` argv. POSTGRES_USER and POSTGRES_PASSWORD
+// are bare -e flags so no credential lands in argv; the caller passes both
+// values through the runner's env.
 func dockerRunArgs(port int) []string {
 	return []string{
 		"docker", "run", "-d",
@@ -228,9 +245,10 @@ func dockerRunArgs(port int) []string {
 		"--restart", "unless-stopped",
 		"-p", fmt.Sprintf("127.0.0.1:%d:5432", port),
 		"-v", managedPGVolume + ":/home/postgres/pgdata",
+		"-e", "POSTGRES_USER",
 		"-e", "POSTGRES_PASSWORD",
 		"-e", "POSTGRES_DB=rafiki",
-		"--health-cmd", "pg_isready -U postgres -d rafiki",
+		"--health-cmd", "pg_isready -U " + managedPGUser + " -d rafiki",
 		"--health-interval", "1s",
 		"--health-retries", "120",
 		managedPGImage,
@@ -342,20 +360,25 @@ func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mod
 	return nil
 }
 
-// managedDSN builds the connection string for the rafiki-owned container.
-func managedDSN(password string, port int) string {
-	return fmt.Sprintf("postgres://postgres:%s@127.0.0.1:%d/rafiki?sslmode=disable", password, port)
+// managedDSN builds the connection string for the rafiki-owned container. The
+// role is a parameter rather than managedPGUser because a container rebuilt
+// over an existing volume keeps the role that volume was initialised with, and
+// its saved DSN is the only record of which role that is.
+func managedDSN(role, password string, port int) string {
+	return fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/rafiki?sslmode=disable", role, password, port)
 }
 
-// passwordFromDSN extracts the password from a postgres DSN, so an existing
-// volume's container can be recreated with the same credentials.
-func passwordFromDSN(dsn string) string {
+// dsnCredentials extracts the role and password from a postgres DSN, so an
+// existing volume's container can be recreated against the same credentials —
+// the role included, since POSTGRES_USER never applies to a data dir that is
+// already initialised.
+func dsnCredentials(dsn string) (role, password string) {
 	u, err := url.Parse(dsn)
 	if err != nil || u.User == nil {
-		return ""
+		return "", ""
 	}
 	pw, _ := u.User.Password()
-	return pw
+	return u.User.Username(), pw
 }
 
 // isNoSuchVolume reports whether a docker volume inspect stderr means the

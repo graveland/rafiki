@@ -232,6 +232,18 @@ func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 	if !strings.Contains(argvJoined, "-e POSTGRES_PASSWORD") {
 		t.Errorf("docker run argv must carry a bare -e POSTGRES_PASSWORD: %v", run.argv)
 	}
+	if !strings.Contains(argvJoined, "-e POSTGRES_USER") {
+		t.Errorf("docker run argv must carry a bare -e POSTGRES_USER: %v", run.argv)
+	}
+	if !containsString(run.env, "POSTGRES_USER=rafiki") {
+		t.Errorf("env = %v, want POSTGRES_USER=rafiki beside the password", run.env)
+	}
+	if !strings.Contains(argvJoined, "pg_isready -U rafiki -d rafiki") {
+		t.Errorf("the health check must probe the rafiki role: %v", run.argv)
+	}
+	if !strings.HasPrefix(res.DSN, "postgres://rafiki:") {
+		t.Errorf("DSN %q must connect as the rafiki role", res.DSN)
+	}
 
 	var pw string
 	for _, e := range run.env {
@@ -274,7 +286,7 @@ func TestSetupDBVolumeWithPasswordReusesIt(t *testing.T) {
 	defer cancel()
 
 	saved := "postgres://postgres:secretpw@127.0.0.1:5432/rafiki?sslmode=disable"
-	_, _, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
+	_, res, err := setupDatabase(ctx, r, w, installstate.DB{Mode: installstate.DBModeManaged}, saved)
 	if err != nil {
 		t.Fatalf("setupDatabase: %v", err)
 	}
@@ -290,6 +302,13 @@ func TestSetupDBVolumeWithPasswordReusesIt(t *testing.T) {
 	}
 	if pw != "secretpw" {
 		t.Errorf("password = %q, want the one from the existing volume's DSN", pw)
+	}
+	// The volume holds an already-initialised data dir, which POSTGRES_USER
+	// never touches, so this container's role stays whatever the saved DSN
+	// names — and the DSN handed back must keep that same role rather than
+	// switching the install onto a role this data dir does not have.
+	if !strings.HasPrefix(res.DSN, "postgres://postgres:") {
+		t.Errorf("DSN = %q, want the saved DSN's postgres role kept", res.DSN)
 	}
 }
 
