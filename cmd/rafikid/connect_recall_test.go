@@ -35,6 +35,13 @@ type fakeConnectRecallStore struct {
 	owner  string
 	hits   []recall.Hit
 	states map[string]string
+
+	// The memory verbs, so a test can prove they keep working on a runtime
+	// whose search is off (they never read searchOff and use only the store).
+	putOwner string
+	putMem   recall.Memory
+	memories []recall.Memory
+	deleted  string
 }
 
 func (f *fakeConnectRecallStore) SearchBM25(_ context.Context, q recall.SearchQuery, _ recall.Source) ([]recall.Hit, error) {
@@ -55,6 +62,25 @@ func (f *fakeConnectRecallStore) SetState(_ context.Context, key, value string) 
 
 func (f *fakeConnectRecallStore) Status(_ context.Context) (recall.Status, error) {
 	return recall.Status{}, nil
+}
+
+func (f *fakeConnectRecallStore) PutMemory(_ context.Context, ownerUserID string, m recall.Memory) (recall.Memory, error) {
+	f.putOwner, f.putMem = ownerUserID, m
+	m.ID = "m-id"
+	return m, nil
+}
+
+func (f *fakeConnectRecallStore) GetMemory(_ context.Context, _, path, name string) (recall.Memory, error) {
+	return recall.Memory{ID: "m-id", Path: path, Name: name, Body: "body"}, nil
+}
+
+func (f *fakeConnectRecallStore) MemoryTree(_ context.Context, _, _ string, _ int) ([]recall.Memory, error) {
+	return f.memories, nil
+}
+
+func (f *fakeConnectRecallStore) DeleteMemory(_ context.Context, _, path, name string) error {
+	f.deleted = path + "/" + name
+	return nil
 }
 
 // connectRecallWith wires a controller whose recall runtime is backed by st —

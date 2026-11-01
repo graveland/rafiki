@@ -43,28 +43,37 @@ var _ recall.Store = (*Store)(nil)
 // placeholders and vector search is unavailable. The daemon probes once at
 // startup and degrades by the answer rather than by its config.
 func (s *Store) InstalledExtensions(ctx context.Context) (textsearch, vector bool, err error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT extname FROM pg_extension WHERE extname IN ('pg_textsearch', 'vector')`)
+	have, err := s.installedExtensions(ctx, "pg_textsearch", "vector")
 	if err != nil {
-		return false, false, fmt.Errorf("recalldb: read installed extensions: %w", err)
+		return false, false, err
+	}
+	return have["pg_textsearch"], have["vector"], nil
+}
+
+// installedExtensions reports, per NAME, whether this database has it. Each
+// name is answered independently against pg_extension, so nothing is
+// positional (a caller cannot get the two recall flags crossed) and a name the
+// server does not ship answers false rather than erroring — the whole point of
+// the probe, and what makes it testable with an extension this repo knows
+// nothing about.
+func (s *Store) installedExtensions(ctx context.Context, names ...string) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx, `SELECT extname FROM pg_extension WHERE extname = ANY($1)`, names)
+	if err != nil {
+		return nil, fmt.Errorf("recalldb: read installed extensions: %w", err)
 	}
 	defer rows.Close()
+	have := make(map[string]bool, len(names))
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return false, false, fmt.Errorf("recalldb: read installed extensions: %w", err)
+			return nil, fmt.Errorf("recalldb: read installed extensions: %w", err)
 		}
-		switch name {
-		case "pg_textsearch":
-			textsearch = true
-		case "vector":
-			vector = true
-		}
+		have[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		return false, false, fmt.Errorf("recalldb: read installed extensions: %w", err)
+		return nil, fmt.Errorf("recalldb: read installed extensions: %w", err)
 	}
-	return textsearch, vector, nil
+	return have, nil
 }
 
 // sqlb assembles a query while collecting positional bind values; fragments
