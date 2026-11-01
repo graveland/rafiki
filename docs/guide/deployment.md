@@ -103,19 +103,38 @@ them pg_restore stops at the first `ALTER TABLE ONLY ... DROP CONSTRAINT` with
 when the restore fails, because `pre_restore` leaves the extension's DDL hooks
 off database-wide until it does.
 
-That bracketing has two consequences a production operator at this privilege
-level will meet. **The hooks need a superuser connection**: they run `ALTER
-DATABASE ... SET timescaledb.restoring`, which no other role may set, so an
-in-place restore over a TimescaleDB database is refused cleanly — before anything
-is touched — unless `--db` names a superuser's connection. The daemon's own role
-deliberately is not one, which is why this verb is an operator step and not
-something the daemon runs. (Restoring into a database where the extension is not
-installed yet needs no hooks: the archive creates it, so a rehearsal restore into
-a fresh database works for any role.) **Stop every daemon on the database
-first**, dump restores included: `pre_restore` works by setting a database-level
-default, so a connection opened while the restore runs inherits the restoring
-flag for its whole life, and the post call cannot clear a session that is
-already open.
+That bracketing has consequences a production operator at this privilege level
+will meet.
+
+**The hooks need a superuser connection**: they run `ALTER DATABASE ... SET
+timescaledb.restoring`, which no other role may set, and then stop and restart
+the extension's background workers, which only a superuser may do. `GRANT SET ON
+PARAMETER timescaledb.restoring TO <role>` does not get you there — it clears the
+setting and then fails on the workers (measured on a TimescaleDB 2.x server). So
+an in-place restore over a TimescaleDB database is refused cleanly, before
+anything is touched, unless `--db` names a superuser's connection. The daemon's
+own role deliberately is not one, which is why this verb is an operator step and
+not something the daemon runs.
+
+**Ownership is the connecting role's, decided rather than constant.** `pg_restore
+--no-owner` makes that role the owner of everything it creates, so a superuser
+restore does not pass it: the archive's `OWNER TO` statements put the original
+owners back, which for an in-place restore is the daemon's unprivileged role. A
+dump restored by a superuser *with* `--no-owner` hands the whole schema to the
+superuser, and the daemon then gets `permission denied` on its first query —
+during an incident. If the archive names a role this server does not have, the
+restore fails whole rather than reassigning.
+
+**A restore into a fresh database is a superuser operation too**, even though it
+needs none of those hooks: rafiki's dump creates the untrusted `vector` and
+`pg_textsearch` extensions, and only a superuser may `CREATE EXTENSION` them.
+
+**Stop every daemon on the database first**, dump restores included: `pre_restore`
+works by setting a database-level default, so a connection opened while the
+restore runs inherits the restoring flag for its whole life, and the post call
+cannot clear a session that is already open. `rafikid db restore` refuses to
+start while a local daemon answers on its socket for that reason, and `--force`
+is the acknowledgement.
 
 ## The daemon image
 

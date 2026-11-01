@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,10 +20,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 	"github.com/ulikunitz/xz"
 
 	"go.graveland.dev/rafiki/pkg/embedpg"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // restoreKind is what a backup file IS, sniffed from its content. See
@@ -81,29 +84,47 @@ func newDbRestoreCmd() *cobra.Command {
 file is, sniffed from its content rather than its extension:
 
   a pg_dump custom archive ("PGDMP" magic)
-      pg_restore -d <database> --clean --if-exists --no-owner --single-transaction
+      pg_restore -d <database> --clean --if-exists --single-transaction, plus
+      --no-owner when the connecting role is NOT a superuser
       over the wire: every object the ARCHIVE contains is dropped and recreated,
       and everything else in the database is left alone. The connection is passed
       in the PG* environment and never on pg_restore's command line — argv
       carries the database NAME, which pg_restore requires and which the --force
       report already told you. The whole restore is one transaction, so a failure
-      rolls it back rather than leaving a half-rebuilt database. On a database
-      with the timescaledb extension it is bracketed by that extension's own
-      timescaledb_pre_restore()/timescaledb_post_restore() calls: pg_restore
-      --clean issues ALTER TABLE ONLY statements, which TimescaleDB refuses
-      against a hypertable, so without them the restore fails on the first
-      foreign key it tries to drop. The post call runs even when the restore
-      fails, because pre_restore leaves the extension's DDL hooks off
-      database-wide until it does. Those hooks need a SUPERUSER connection: they
-      run ALTER DATABASE ... SET timescaledb.restoring, which no other role may
-      set, so a restore of a TimescaleDB database is refused cleanly (before
-      anything is touched) unless --db names a superuser's connection. A
-      database where the extension is NOT installed needs no hooks at all — the
-      archive's own CREATE EXTENSION creates it — so restoring into a fresh
-      database works for any role. Whatever the path, stop the daemon first if
-      the database has the extension: a session opened while the restore runs
-      inherits timescaledb.restoring for its whole life, and the post call
-      cannot clear a session that is already open.
+      rolls it back rather than leaving a half-rebuilt database.
+
+      OWNERSHIP follows the connecting role, because --no-owner makes that role
+      the owner of everything pg_restore creates. An unprivileged role can only
+      own what it creates, so it gets the flag; a SUPERUSER does not, and the
+      archive's own OWNER TO statements put the original owners back — for an
+      in-place restore of a real install that is the daemon's unprivileged role.
+      Restoring as a superuser WITH --no-owner would hand it the whole schema and
+      leave the daemon with permission denied on its first query, which is why
+      the flag is decided rather than constant. A role the archive names that
+      does not exist on the target fails the whole restore (loudly) instead of
+      having its objects reassigned.
+
+      On a database with the timescaledb extension it is bracketed by that
+      extension's own timescaledb_pre_restore()/timescaledb_post_restore()
+      calls: pg_restore --clean issues ALTER TABLE ONLY statements, which
+      TimescaleDB refuses against a hypertable, so without them the restore
+      fails on the first foreign key it tries to drop. The post call runs even
+      when the restore fails, because pre_restore leaves the extension's DDL
+      hooks off database-wide until it does. Those hooks need a SUPERUSER
+      connection: they run ALTER DATABASE ... SET timescaledb.restoring, which
+      no other role may set, and then stop background workers, which only a
+      superuser may do (a GRANT SET ON PARAMETER covers the setting and not the
+      workers). So a restore of a non-empty TimescaleDB database is refused
+      cleanly, before anything is touched, unless --db names a superuser's
+      connection. A database where the extension is NOT installed needs no hooks
+      — the archive's own CREATE EXTENSION makes it — but rafiki's own dump
+      creates the untrusted vector and pg_textsearch extensions too, so a
+      non-superuser restore into a fresh database fails at that CREATE EXTENSION
+      and rolls back. Whichever way: stop the daemon first if the database has
+      the extension (a session opened while the restore runs inherits
+      timescaledb.restoring for its whole life), and a dump restore REFUSES to
+      start while a local rafikid answers on its socket unless --force accepts
+      that.
 
   a physical archive (a tar, or a gzip/xz stream of one)
       the embedded server's data directory is replaced: the server is stopped
@@ -149,9 +170,11 @@ outcome worth refusing outright.
 SIGINT, SIGTERM and SIGHUP cancel a restore rather than killing the process, so
 an interrupted run takes the failure path and says so: a dump restore stops
 pg_restore (whose single transaction rolls back) and puts TimescaleDB's hooks
-back, a physical one refuses before it moves anything if the interrupt arrives
-before the swap and rolls back if it arrives after, and either way the command
-exits non-zero. A SECOND signal kills the process outright, which can leave a
+back, and a physical one never starts the swap — before the first rename, and
+again after a stop that took up to 90 seconds — restarting the server it stopped
+and leaving the data directory untouched. Once the two renames have begun the
+swap runs to completion (they are not interruptible), and then the restore
+reports what it did. A SECOND signal kills the process outright, which can leave a
 TimescaleDB database in restoring mode (the manual remedy is SELECT
 timescaledb_post_restore()) or a physical restore's marker in place.`,
 		Args:          cobra.ExactArgs(1),
@@ -190,6 +213,26 @@ func runRestore(ctx context.Context, configured, path string, force bool, stderr
 		return fmt.Errorf("rafikid db restore: %s is a physical archive of the embedded server's data "+
 			"directory, and RAFIKI_DB names a server this host does not manage; a dump archive is the "+
 			"only thing that restores into it", path)
+	}
+
+	// A dump restore into a database with the TimescaleDB extension changes a
+	// DATABASE-level default (timescaledb.restoring), and a daemon connection
+	// opened while the restore runs keeps it for its whole life: its DDL hooks
+	// stay off after the restore has "succeeded", which is not something the
+	// docs can be trusted to prevent. So a local daemon is refused here, before
+	// anything is touched, unless the operator accepts it explicitly.
+	if kind == restoreDump {
+		if listening, socket := daemonListening(); listening {
+			if !force {
+				return fmt.Errorf("rafikid db restore: rafikid is running on this host (%s accepts connections), "+
+					"and a connection it opens while this restore runs keeps timescaledb.restoring on for its "+
+					"whole life — the extension's DDL hooks stay off in that session. Stop it first (rafiki "+
+					"service stop), or re-run with --force to accept that a live daemon may hold a session in "+
+					"restore mode", socket)
+			}
+			fmt.Fprintf(stderr, "rafikid db restore: warning: rafikid is running on this host (%s); a database "+
+				"session it opens while this restore runs can keep timescaledb.restoring on until it is closed\n", socket)
+		}
 	}
 
 	destroys, err := describeRestoreTarget(kind, configured)
@@ -318,6 +361,20 @@ func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.
 		return fmt.Errorf("rafikid db restore: %w", err)
 	}
 
+	// Ownership is the difference between a usable database and a dead one, and
+	// it follows the connecting role rather than a constant. `--no-owner` makes
+	// the CONNECTING user the owner of everything pg_restore creates: correct
+	// for the daemon's own unprivileged role, which can only own what it
+	// creates, and wrong for a superuser, which would then own the whole schema
+	// and leave the daemon role with permission denied on its next query. A
+	// superuser restore therefore keeps the archive's OWNER TO statements, which
+	// put the original owners back — for an in-place restore that IS the daemon's
+	// role.
+	superuser, err := restoreConnectedSuperuser(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("rafikid db restore: %w", err)
+	}
+
 	// argv holds the flags, the database name and the archive path — none is a
 	// secret. The connection rides PG* alone.
 	//
@@ -325,12 +382,20 @@ func restoreDumpArchive(ctx context.Context, configured, path string, stderr io.
 	// as it was: pg_restore runs the whole thing in one transaction and rolls it
 	// back on the first error. Without it, --clean drops and recreates objects as
 	// it goes, and a failure halfway leaves a half-rebuilt database.
+	args := []string{"-d", database, "--clean", "--if-exists", "--single-transaction"}
+	if !superuser {
+		args = append(args, "--no-owner")
+	} else {
+		fmt.Fprintf(stderr, "rafikid db restore: restoring object ownership from the archive (the "+
+			"connecting role is a superuser); a role the archive names that does not exist here fails the "+
+			"whole restore rather than reassigning its objects\n")
+	}
+	// `--` ends pg_restore's options, so a file whose name begins with "-" is a
+	// filename and not a flag.
+	args = append(args, "--", path)
+
 	inv, err := pgToolInvocation("rafikid db restore", pgRestore, "pg_restore", configured, dsn,
-		[]string{"-d", database, "--clean", "--if-exists", "--no-owner", "--single-transaction",
-			// `--` ends pg_restore's options, so a file whose name begins with
-			// "-" is a filename and not a flag.
-			"--", path},
-		os.Environ())
+		args, os.Environ())
 	if err != nil {
 		return err
 	}
@@ -421,7 +486,16 @@ func beginTimescaleRestore(ctx context.Context, dsn, database string) (func(cont
 	}
 	if _, err := conn.Exec(ctx, `SELECT timescaledb_pre_restore()`); err != nil {
 		_ = conn.Close(context.WithoutCancel(ctx))
-		return nil, fmt.Errorf("timescaledb_pre_restore: %w; %s", err, timescaleSuperuserHint)
+		// The hint is the remedy for ONE failure, the privilege refusal; a
+		// cancelled context or a lost connection gets the real error instead.
+		// Those can still have COMMITTED the setting before the error reached
+		// us, and it is database state, so putting it back is attempted on
+		// every other failure path too (post_restore is idempotent).
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("timescaledb_pre_restore: %w; %s", err, timescaleSuperuserHint)
+		}
+		return nil, errors.Join(fmt.Errorf("timescaledb_pre_restore: %w", err),
+			clearTimescaleRestoring(ctx, dsn, database))
 	}
 	// The session stays open across pg_restore: the flag it set is database-wide,
 	// but the post call belongs to the same server. It may die meanwhile (an idle
@@ -437,11 +511,11 @@ func beginTimescaleRestore(ctx context.Context, dsn, database string) (func(cont
 		}
 		fresh, derr := pgx.Connect(fctx, dsn)
 		if derr != nil {
-			return postRestoreLeftTheDatabase(first, derr, database)
+			return postRestoreLeftTheDatabase(database, first, derr)
 		}
 		defer func() { _ = fresh.Close(context.WithoutCancel(fctx)) }()
 		if rerr := execPostRestore(fctx, fresh); rerr != nil {
-			return postRestoreLeftTheDatabase(first, rerr, database)
+			return postRestoreLeftTheDatabase(database, first, rerr)
 		}
 		return nil
 	}, nil
@@ -468,11 +542,90 @@ const timescaleSuperuserHint = "the hook runs ALTER DATABASE ... SET timescaledb
 // at all, even after a redial. It names the state the database is in and the
 // manual remedy, because there is nothing left to try automatically and silence
 // would leave every later session with the extension's DDL hooks switched off.
-func postRestoreLeftTheDatabase(first, second error, database string) error {
-	return fmt.Errorf("the extension could not be put back into service (%v; retry: %v): the database %q "+
+func postRestoreLeftTheDatabase(database string, errs ...error) error {
+	return fmt.Errorf("the extension could not be put back into service (%v): the database %q "+
 		"is left with timescaledb.restoring on, which switches the extension's DDL hooks off for every "+
 		"session started from now on — clear it with `rafikid db psql -- -c 'SELECT timescaledb_post_restore()'` "+
-		"as a superuser", first, second, database)
+		"as a superuser", errors.Join(errs...), database)
+}
+
+// clearTimescaleRestoring puts the extension back after a pre_restore whose
+// outcome is unknown, on its OWN connection: the session that ran it is gone,
+// which is usually why the outcome is unknown. nil means the database is back to
+// normal.
+func clearTimescaleRestoring(ctx context.Context, dsn, database string) error {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timescalePostRestoreTimeout)
+	defer cancel()
+	conn, err := pgx.Connect(cctx, dsn)
+	if err != nil {
+		return postRestoreLeftTheDatabase(database, err)
+	}
+	defer func() { _ = conn.Close(context.WithoutCancel(cctx)) }()
+	if perr := execPostRestore(cctx, conn); perr != nil {
+		return postRestoreLeftTheDatabase(database, perr)
+	}
+	return nil
+}
+
+// restoreConnectedSuperuser reports whether the role dsn connects as is a
+// PostgreSQL superuser. It is a variable so the dump path's tests can answer
+// without a database; the pooled/one-shot connection it opens is closed again
+// before pg_restore runs.
+var restoreConnectedSuperuser = connectedRoleIsSuperuser
+
+// connectedRoleIsSuperuser asks the server what it already knows about the role
+// on this connection: no pg_authid read, no privilege beyond the connection the
+// restore is about to use anyway.
+func connectedRoleIsSuperuser(ctx context.Context, dsn string) (bool, error) {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return false, fmt.Errorf("connecting to the server: %w", err)
+	}
+	defer func() { _ = conn.Close(context.WithoutCancel(ctx)) }()
+	var superuser bool
+	if err := conn.QueryRow(ctx,
+		`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`).Scan(&superuser); err != nil {
+		return false, fmt.Errorf("reading the connecting role: %w", err)
+	}
+	return superuser, nil
+}
+
+// daemonListening reports whether a rafikid on THIS host answers on its control
+// socket, and names the socket. It is a variable so the refusal can be tested
+// without a daemon.
+var daemonListening = localDaemonListening
+
+// localDaemonListening dials the daemon's unix socket: anything listening is a
+// daemon, and a socket file with nothing behind it is not. The deadline is short
+// because this only decides whether to ask the operator to stop something.
+func localDaemonListening() (bool, string) {
+	socket := paths.SocketPath()
+	conn, err := net.DialTimeout("unix", socket, 250*time.Millisecond)
+	if err != nil {
+		return false, socket
+	}
+	_ = conn.Close()
+	return true, socket
+}
+
+// syncDir flushes a directory's own entries (the pointers a rename writes) to
+// disk. A rename is atomic but not durable: without this, a power loss can
+// leave the directory pointing at neither the old tree nor the new one.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// isPermissionDenied reports whether err is PostgreSQL's own refusal (SQLSTATE
+// 42501) rather than a cancellation or a lost connection — the one case where
+// the superuser requirement is the remedy the operator needs told.
+func isPermissionDenied(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42501"
 }
 
 // embeddedRestoreOps are the operations a physical restore performs on the
@@ -508,6 +661,12 @@ type embeddedRestoreOps struct {
 	// unpack unpacks the physical archive at its first argument into the
 	// directory at its second.
 	unpack func(archive, dir string) error
+	// sync flushes an unpacked tree to disk before it becomes the live data
+	// directory. A clean shutdown's data directory is what a restarted server
+	// starts from with no crash recovery, so a torn tree after a power loss is
+	// a corrupt cluster that looks restored. It is pkg/embedpg's
+	// `initdb --sync-only`, the same call PostgreSQL itself makes.
+	sync func(ctx context.Context, dir string) error
 }
 
 // restoreStamp is when one restore began. The sibling names it builds carry it,
@@ -532,6 +691,9 @@ var restoreEmbedded = embeddedRestoreOps{
 		return err
 	},
 	unpack: unpackDataDirArchive,
+	sync: func(ctx context.Context, dir string) error {
+		return embeddedServer().SyncTree(ctx, dir)
+	},
 }
 
 // restorePhysicalArchive replaces the embedded server's data directory with the
@@ -675,6 +837,13 @@ func restorePhysicalArchive(ctx context.Context, configured, path string, stderr
 	if cerr := ctx.Err(); cerr != nil {
 		return fmt.Errorf("rafikid db restore: %w; nothing was replaced", cerr)
 	}
+	// The tree becomes the live data directory in a moment and a server starts
+	// on it with NO crash recovery to replay, so its files have to be on the
+	// platter before that: a power loss after "restored" would otherwise leave a
+	// torn cluster that looks healthy.
+	if serr := restoreEmbedded.sync(ctx, staging); serr != nil {
+		return fmt.Errorf("rafikid db restore: flushing the unpacked data directory: %w", serr)
+	}
 
 	if hadDataDir {
 		running, serr := restoreEmbedded.status(ctx, s)
@@ -688,6 +857,16 @@ func restorePhysicalArchive(ctx context.Context, configured, path string, stderr
 				return fmt.Errorf("rafikid db restore: %w", serr)
 			}
 			stopped = true
+
+			// A stop can take until embedpg.StopTimeout (90s on a busy
+			// server), and an interrupt that arrived while it ran is honoured
+			// HERE — before the marker, before any directory moves. The
+			// rollback only has to restart a server this command stopped, so
+			// refusing costs one restart and saves an operator who pressed
+			// Ctrl-C the destructive outcome.
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("rafikid db restore: %w; the data directory was not replaced", cerr)
+			}
 		}
 
 		// The marker is written BEFORE the directory moves, so the gap between the
@@ -706,12 +885,20 @@ func restorePhysicalArchive(ctx context.Context, configured, path string, stderr
 			return fmt.Errorf("rafikid db restore: moving %s aside: %w", s.DataDir, merr)
 		}
 		movedAside = true
+		if serr := syncDir(filepath.Dir(s.DataDir)); serr != nil {
+			return fmt.Errorf("rafikid db restore: flushing the directory the data directory was moved "+
+				"out of: %w", serr)
+		}
 	}
 
 	if rerr := renamePath(staging, s.DataDir); rerr != nil {
 		return fmt.Errorf("rafikid db restore: moving the restored directory into place: %w", rerr)
 	}
 	placed = true
+	if serr := syncDir(filepath.Dir(s.DataDir)); serr != nil {
+		return fmt.Errorf("rafikid db restore: flushing the directory the restored data directory was "+
+			"moved into: %w", serr)
+	}
 
 	if serr := restoreEmbedded.start(ctx, s); serr != nil {
 		return fmt.Errorf("rafikid db restore: starting the restored database: %w", serr)

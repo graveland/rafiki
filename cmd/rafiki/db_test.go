@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -170,19 +169,22 @@ func TestDbEndpointLocality(t *testing.T) {
 
 // TestDbWithNoVerbPrintsHelp keeps a bare `rafiki db` from exec'ing rafikid's
 // group just to read its help: the client explains the passthrough itself.
-func TestDbWithNoVerbPrintsHelp(t *testing.T) {
+// A bare `rafiki db` hands the terminal to `rafikid db`, which lists the verbs
+// it actually has: the verbs live in rafikid, so its help is the only one that
+// cannot drift from them.
+func TestDbWithNoVerbExecsTheDaemonsHelp(t *testing.T) {
 	isolateProfiles(t)
+	fake := fakeRafikidOnPATH(t)
 	rec := stubDbExec(t)
 	resetProfileCache()
 
 	root := newRootCmd()
-	var out bytes.Buffer
-	root.SetOut(&out)
 	root.SetErr(io.Discard)
 	root.SetArgs([]string{"db"})
 
 	c := assert.NewCollecting(t)
 	c.Require().NoError(root.Execute(), "rafiki db")
-	c.False(rec.executed, "a bare `rafiki db` must not exec")
-	c.StrContains(out.String(), "rafiki db psql", "the help must show how to pass arguments through:")
+	c.True(rec.executed, "a bare `rafiki db` must exec rafikid's own help")
+	c.Eq(fake, rec.path, "the exec target must be the rafikid findDaemonBinary resolved")
+	c.EqDeep([]string{fake, "db"}, rec.argv, "argv must be rafikid with the db group and nothing else")
 }

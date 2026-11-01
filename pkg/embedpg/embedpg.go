@@ -192,10 +192,10 @@ func lockFile(ctx context.Context, f *os.File) error {
 // postmaster outlives the command that started it — its environment stays
 // readable (ps eww, /proc/<pid>/environ) for as long as it runs, and it outlives
 // every command that touches it — nothing here stops it as a side effect of
-// anything. It IS stopped deliberately, and only by Server.Stop (a physical
-// backup is the caller that uses it), which is why the environment still has to
-// stay this narrow: the shutdown's own subprocess is short-lived, the postmaster
-// it talks to is not. By the time Ensure runs, rafikid has already been
+// anything. It IS stopped deliberately, by Server.StopLocked from the two
+// physical verbs (`db backup --format txz|tgz` and `db restore`), which is why
+// the environment still has to stay this narrow: the shutdown's own subprocess is
+// short-lived, the postmaster it talks to is not. By the time Ensure runs, rafikid has already been
 // started with RAFIKI_SECRETS_KEY and its provider API keys in its own
 // environment, so handing a child os.Environ() would keep those alive in the one
 // process that lives longest.
@@ -347,9 +347,10 @@ func (s Server) RestoreInProgressPath() string {
 //
 // A missing data directory next to a preserved one is never a fresh install: it
 // is a restore interrupted between moving the old directory aside and putting the
-// new one in place (two rename(2) calls, and rafikid installs no signal handler,
-// so a SIGKILL there skips its rollback), or an operator who put a backup next
-// to the install. initdb'ing an EMPTY cluster there would start a database that
+// new one in place (two rename(2) calls, and nothing can run a rollback for a
+// SIGKILL or a power loss there — rafikid's SIGINT/SIGTERM/SIGHUP handling
+// covers only an orderly interrupt), or an operator who put a backup next to the
+// install. initdb'ing an EMPTY cluster there would start a database that
 // looks perfectly healthy while every row the operator has sits in the directory
 // beside it — the worst outcome this package can produce — so it refuses, names
 // what it found, and leaves the decision to a person.
@@ -493,6 +494,21 @@ func (s Server) Status(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("embedpg: %s status failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
+}
+
+// SyncTree flushes every file under dir to disk with initdb --sync-only, the
+// call PostgreSQL itself makes to trust a directory's contents. A restore
+// unpacks a data directory out of an archive and starts a server on it with NO
+// crash recovery to replay, so a file still in the page cache when the power
+// goes leaves a cluster that starts and is corrupt.
+func (s Server) SyncTree(ctx context.Context, dir string) error {
+	initdb := filepath.Join(s.BinDir, "bin", "initdb")
+	out, err := command(ctx, initdb, "--sync-only", "-D", dir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("embedpg: initdb --sync-only %s: %w: %s", dir, err,
+			strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // StopTimeout bounds a whole Stop: pg_ctl's own -t wait (stopWaitSeconds) plus

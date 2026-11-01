@@ -534,15 +534,25 @@ func writeBackupFile(path string, write func(w io.Writer, tmp string) error) (in
 
 	werr := write(f, tmp)
 	// The archiver's writer and pg_dump's file are the same fd; closing it after
-	// the callback is what flushes what the kernel still holds.
+	// the callback is what flushes what the kernel still holds. Sync is what the
+	// kernel does NOT do on close: without it a power loss just after "wrote"
+	// can leave a truncated file that looks like a complete backup and is only
+	// discovered when it is needed. It comes before the rename, so a failure
+	// here leaves no file that pretends to be one.
+	serr := f.Sync()
 	cerr := f.Close()
-	if werr != nil || cerr != nil {
+	if werr != nil || serr != nil || cerr != nil {
 		_ = os.Remove(tmp)
-		return 0, fmt.Errorf("writing the backup: %w", errors.Join(werr, cerr))
+		return 0, fmt.Errorf("writing the backup: %w", errors.Join(werr, serr, cerr))
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return 0, fmt.Errorf("moving the backup into place: %w", err)
+	}
+	// The rename is atomic but not durable on its own: flush the directory so
+	// the name points at the bytes on disk, not only in the page cache.
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return 0, fmt.Errorf("flushing the directory the backup was written to: %w", err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {

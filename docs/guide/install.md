@@ -84,7 +84,11 @@ database included, printing the target first (because `service.env` may name a
 remote database); the connection reaches the client in `PG*` environment
 variables, never on its command line. `rafiki db …` forwards to it for a local
 profile and refuses one whose daemon is on another machine — the database lives
-on the daemon's host, so run it there. Inside the private cluster rafiki's
+on the daemon's host, so run it there. That check is about where the DAEMON is,
+not the database: `rafikid` resolves `RAFIKI_DB` on its own host (its
+environment, and `service.env` when that is where the daemon's settings live), so
+a local daemon pointed at a remote database means these verbs act on that remote
+one. Read the target line it prints before giving a destructive verb `--force`. Inside the private cluster rafiki's
 database is named `rafiki`, created on the first use of the embedded mode, so
 `\l` lists it next to the `postgres` maintenance database — which is initdb's
 and never holds rafiki data. The embedded bundle ships no client tools (it
@@ -124,19 +128,39 @@ without `--force`: it names what it would replace and exits non-zero. A dump is
 restored with `pg_restore --clean --if-exists --no-owner --single-transaction`,
 so a failure rolls back rather than leaving a half-rebuilt database.
 
+**Ownership.** `pg_restore --no-owner` makes the CONNECTING role the owner of
+everything it creates, so whether the restore passes it is decided by that role
+rather than fixed: a non-superuser restore keeps it (it can only own what it
+creates), and a superuser restore omits it, so the archive's own `OWNER TO`
+statements put the original owners back — for an in-place restore of this
+install, the daemon's own unprivileged role. Restoring as a superuser *with*
+`--no-owner` would hand the whole schema to that superuser and leave the daemon
+with permission denied on its first query, which is why the flag follows the
+role. A role the archive names that does not exist on the target fails the
+whole restore, loudly, rather than having its objects reassigned.
+
 On a database with the `timescaledb` extension the dump restore is bracketed by
 that extension's own `timescaledb_pre_restore()`/`timescaledb_post_restore()`
 calls, without which TimescaleDB refuses pg_restore's `ALTER TABLE ONLY`
-statements. Those hooks run `ALTER DATABASE ... SET timescaledb.restoring`, a
-superuser-only setting, so restoring in place over a real TimescaleDB database
-needs a `--db` whose role is a superuser — the daemon's own role deliberately is
-not one, and without that privilege the restore is refused before anything is
-touched. Restoring into a database where the extension is not installed yet
-needs no hooks (the archive creates it), which is what makes a rehearsal restore
-into a fresh database work for any role. Whenever the target database has the
-extension, stop the rafikid service first: a connection opened while the restore
-runs inherits the restoring flag for its whole life, and only new sessions see it
-cleared.
+statements. Those hooks run `ALTER DATABASE ... SET timescaledb.restoring` (a
+superuser-only setting) and then stop and restart the extension's background
+workers (which only a superuser may do — `GRANT SET ON PARAMETER
+timescaledb.restoring` covers the setting and not the workers), so restoring in
+place over a real TimescaleDB database needs a `--db` whose role is a superuser.
+The daemon's own role deliberately is not one, and without that privilege the
+restore is refused before anything is touched.
+
+A database where the extension is not installed yet needs no hooks (the archive's
+`CREATE EXTENSION` makes it), but rafiki's own dump creates `vector` and
+`pg_textsearch` as well, and both are UNTRUSTED extensions only a superuser may
+create — so a restore into a fresh database is a superuser operation too, and a
+non-superuser attempt fails at that `CREATE EXTENSION` and rolls back.
+
+Whenever the target database has the extension, stop the rafikid service first: a
+connection opened while the restore runs inherits the restoring flag for its
+whole life, and only new sessions see it cleared. A dump restore also REFUSES to
+start while a local `rafikid` answers on its socket, for exactly that reason —
+`--force` accepts it if you have decided you can.
 
 A dump restore runs over the wire and stops nothing. A physical one stops the
 embedded server (and starts it again), so the backup's downtime rules apply to
@@ -147,8 +171,11 @@ rafikid: stopping the server drops its connections, so stop the service first.
 
 Interrupting a backup or a restore (Ctrl-C, SIGHUP, SIGTERM) cancels it rather
 than killing it, so the safety work still happens — a dump restore puts the
-TimescaleDB hooks back and a physical one rolls back — and the command exits
-non-zero. A second interrupt kills the process outright, which can leave a
+TimescaleDB hooks back, and a physical one never starts the swap (it checks
+again after a stop that can take 90 seconds), restarts the server it stopped and
+leaves the data directory untouched — and the command exits non-zero. Once the
+two renames have begun the swap runs to completion: they are not interruptible,
+and the restore then reports what it did. A second interrupt kills the process outright, which can leave a
 TimescaleDB database in restoring mode (`SELECT timescaledb_post_restore();` as
 a superuser is the remedy) or a physical restore's marker in place.
 

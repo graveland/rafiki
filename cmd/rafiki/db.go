@@ -46,6 +46,13 @@ data directory. So these verbs belong to rafikid, and this command forwards to
 A profile naming a remote daemon is refused before anything runs: the database
 lives on the daemon's host, so run this command there (or over ssh).
 
+That check is about where the DAEMON is, not where the database lives. rafikid
+resolves RAFIKI_DB on its own host — its environment, and service.env when that
+is where the daemon's settings live — so a local daemon configured against a
+remote database means these verbs act on THAT database. rafikid db prints the
+target (host and database, or the data directory) before it acts: read that line
+before giving a destructive verb its --force.
+
 Everything from the verb onward is passed through unchanged, including a bare
 ` + "`--`" + `. This client's flags (-P, -o, -c …) must therefore come BEFORE the
 verb; rafikid's own flags (--db) belong AFTER it, where they are forwarded
@@ -76,10 +83,9 @@ var dbExec = syscall.Exec
 // runDb forwards the verb and its arguments to rafikid, after refusing a
 // profile whose daemon is not on this machine.
 func runDb(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return cmd.Help()
-	}
-
+	// A bare `rafiki db` hands the terminal to `rafikid db`, which lists the
+	// verbs it actually has. The verbs live in rafikid, so its help is the only
+	// one that cannot drift from them.
 	p, err := resolveProfile(cmd)
 	if err != nil {
 		return err

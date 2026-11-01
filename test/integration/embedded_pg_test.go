@@ -887,7 +887,12 @@ func scratchDatabase(t *testing.T, admin *pgxpool.Pool, dsn, prefix, template st
 // but not installed. The archive's own CREATE EXTENSION creates it, so --clean
 // finds nothing to drop and pg_restore's ALTER TABLE ONLY statements never reach
 // a hypertable — which is what makes the documented rehearsal ("restore the
-// dump into a new database") work, and work for a role that is not a superuser.
+// dump into a new database") work.
+//
+// It still runs as a superuser, deliberately: the same archive creates the
+// UNTRUSTED vector and pg_textsearch extensions, and a non-superuser cannot
+// CREATE EXTENSION them, so a fresh-database restore is a superuser step
+// whatever the timescaledb hook question is.
 //
 // The target is created from template0 ON PURPOSE: rafiki's test container puts
 // timescaledb in template1, so an ordinary new database would have it installed
@@ -959,4 +964,109 @@ func TestDbRestoreIntoAFreshDatabaseWithoutTheExtension(t *testing.T) {
 		`SELECT count(*) FROM timescaledb_information.hypertables
 		  WHERE hypertable_name = 'conversation_turn'`),
 		"conversations.conversation_turn must be a hypertable in the restored database")
+}
+
+// dsnAsUser points a test DSN at another role on the same server. It is the
+// same string surgery as dsnForDatabase, for the same reason: pgx's
+// Config.ConnString() returns the ORIGINAL connection string.
+func dsnAsUser(t *testing.T, dsn, user string) string {
+	t.Helper()
+	if u, err := url.Parse(dsn); err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql") {
+		u.User = url.User(user)
+		return u.String()
+	}
+	return dsn + " user=" + user
+}
+
+// TestDbRestoreKeepsObjectOwnershipForTheDaemonRole is what an in-place restore
+// is FOR, and the one thing every other test here cannot see: they all run as a
+// superuser end to end.
+//
+// pg_restore --no-owner makes the CONNECTING user the owner of everything it
+// creates. That is right for the daemon's own unprivileged role, which can only
+// own what it creates, and catastrophic for the superuser restore the docs give
+// for a TimescaleDB install: the whole schema would come back owned by the
+// superuser, and the daemon would get permission denied on its first query. So
+// this restores AS superuser and then READS as a separate unprivileged role —
+// the role a real install's daemon runs as.
+func TestDbRestoreKeepsObjectOwnershipForTheDaemonRole(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+	c := assert.NewAborting(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	c.NoError(err, "connect the test server")
+	t.Cleanup(admin.Close)
+
+	// The daemon's role. Registered FIRST so it is dropped LAST: a role cannot
+	// go while it owns anything, and the databases that hold its objects are
+	// dropped by their own (later-registered) cleanups.
+	role := fmt.Sprintf("rafiki_own_%d", time.Now().UnixNano())
+	_, err = admin.Exec(ctx, "CREATE ROLE "+role+" LOGIN NOSUPERUSER")
+	c.NoError(err, "create the unprivileged role %s", role)
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP ROLE IF EXISTS "+role); err != nil {
+			t.Logf("drop role %s: %v", role, err)
+		}
+	})
+
+	// The source: migrated, one row, and owned the way an install owns it — by
+	// the unprivileged role, not by postgres.
+	_, sourceDSN := scratchDatabase(t, admin, dsn, "rafiki_own_src", "")
+	source, err := pgxpool.New(ctx, sourceDSN)
+	c.NoError(err, "connect the source database")
+	t.Cleanup(source.Close)
+	c.NoError(store.Migrate(ctx, source), "migrate the source database")
+
+	const memBody = "the row the restore has to keep readable for the daemon"
+	var ownerID string
+	c.NoError(source.QueryRow(ctx, `INSERT INTO conversations.users (username, token_sha256)
+		VALUES ('own', 'own') RETURNING id`).Scan(&ownerID), "insert the memory's owner")
+	_, err = source.Exec(ctx, `INSERT INTO conversations.memory (owner_user_id, path, name, body)
+		VALUES ($1, 'ownership', 'owned', $2)`, ownerID, memBody)
+	c.NoError(err, "write the memory")
+	for _, stmt := range []string{
+		"ALTER SCHEMA conversations OWNER TO " + role,
+		"ALTER TABLE conversations.users OWNER TO " + role,
+		"ALTER TABLE conversations.memory OWNER TO " + role,
+	} {
+		_, err = source.Exec(ctx, stmt)
+		c.NoError(err, "%s", stmt)
+	}
+
+	env := append(os.Environ(), "RAFIKI_DB="+sourceDSN)
+	backupPath := filepath.Join(t.TempDir(), "ownership.dump")
+	out, err := runRafikid(env, "db", "backup", "--db", sourceDSN, "--format", "dump", backupPath)
+	c.NoError(err, "rafikid db backup: %v\noutput: %s", err, out)
+
+	_, targetDSN := scratchDatabase(t, admin, dsn, "rafiki_own_dst", "template0")
+	out, err = runRafikid(append(os.Environ(), "RAFIKI_DB="+targetDSN),
+		"db", "restore", "--force", "--db", targetDSN, backupPath)
+	c.NoError(err, "rafikid db restore as superuser: %v\noutput: %s", err, out)
+
+	// The owner is the archive's, not the connecting superuser's.
+	target, err := pgxpool.New(ctx, targetDSN)
+	c.NoError(err, "connect the restored database")
+	t.Cleanup(target.Close)
+	owners := queryStrings(t, target, "restored object owners", `
+		SELECT c.relname, pg_get_userbyid(c.relowner)
+		  FROM pg_class c
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'conversations' AND c.relname IN ('users','memory')`)
+	c.Eq(role, owners["memory"], "conversations.memory must belong to %q, not to the restoring superuser", role)
+	c.Eq(role, owners["users"], "conversations.users must belong to %q, not to the restoring superuser", role)
+
+	// And the point of all of it: that role can read what was restored.
+	app, err := pgxpool.New(ctx, dsnAsUser(t, targetDSN, role))
+	c.NoError(err, "connect as %s", role)
+	t.Cleanup(app.Close)
+	var body string
+	c.NoError(app.QueryRow(ctx, `SELECT body FROM conversations.memory WHERE name = 'owned'`).Scan(&body),
+		"the daemon's own role must be able to read the restored table")
+	c.Eq(memBody, body, "the restored row must be the one the backup wrote")
 }

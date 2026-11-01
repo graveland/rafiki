@@ -249,7 +249,8 @@ type fakeRestore struct {
 	// probe, when set, runs inside stop and start: the only hook in the middle of
 	// the sequence, and where a test asks what must be true at that moment (the
 	// lock held, the marker written).
-	probe func(stage string, s embedpg.Server)
+	probe   func(stage string, s embedpg.Server)
+	syncErr error
 }
 
 // stubRestoreOps points the physical path at dataDir and swaps the operations
@@ -307,6 +308,11 @@ func stubRestoreOps(t *testing.T, dataDir string, running bool) *fakeRestore {
 			}
 			f.running = true
 			return nil
+		},
+		sync: func(context.Context, string) error {
+			// Not recorded: the tree-flush is asserted by its own test, and
+			// every other test's expected op sequence predates it.
+			return f.syncErr
 		},
 		unpack: func(archive, dir string) error {
 			f.ops = append(f.ops, "unpack")
@@ -888,6 +894,7 @@ func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	c := assert.NewAborting(t)
 	argvFile, envFile := fakePgRestoreDir(t)
 	hooks := stubTimescaleHooks(t)
+	stubRestoreGates(t)
 
 	dir := t.TempDir()
 	archive := writeBytes(t, filepath.Join(dir, "app.dump"), "PGDMP\x01\x0e\x00archive")
@@ -973,6 +980,7 @@ func TestRestoreDumpRefusesADSNWithNoDatabase(t *testing.T) {
 func TestRestoreDumpReportsAFailure(t *testing.T) {
 	c := assert.NewAborting(t)
 	hooks := stubTimescaleHooks(t)
+	stubRestoreGates(t)
 	dir := t.TempDir()
 	script := "#!/bin/sh\necho 'pg_restore: error: unsupported version (1.15) in file header' >&2\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(script), 0o755); err != nil {
@@ -1217,6 +1225,7 @@ func TestRestoreDumpPassesAFlagShapedPathAfterADoubleDash(t *testing.T) {
 	c := assert.NewAborting(t)
 	argvFile, _ := fakePgRestoreDir(t)
 	stubTimescaleHooks(t)
+	stubRestoreGates(t)
 
 	dir := t.TempDir()
 	archive := writeBytes(t, filepath.Join(dir, "-a-dump.dump"), "PGDMP\x01\x0e\x00archive")
@@ -1315,6 +1324,30 @@ func (r *timescaleHookRecorder) append(line string) {
 	}
 }
 
+// stubRestoreGates replaces the dump path's two other server-facing seams: the
+// role probe (which would dial the DSN) and the local-daemon probe (which would
+// find a DEVELOPER's rafikid on the real socket and refuse the test's restore).
+func stubRestoreGates(t *testing.T) *restoreGates {
+	t.Helper()
+	g := &restoreGates{superuser: false, daemonSocket: "/tmp/fake-controller.sock"}
+	origRole, origDaemon := restoreConnectedSuperuser, daemonListening
+	t.Cleanup(func() { restoreConnectedSuperuser, daemonListening = origRole, origDaemon })
+	restoreConnectedSuperuser = func(context.Context, string) (bool, error) {
+		return g.superuser, g.roleErr
+	}
+	daemonListening = func() (bool, string) { return g.daemonAlive, g.daemonSocket }
+	return g
+}
+
+// restoreGates is what stubRestoreGates answers with; fields can be changed
+// between calls.
+type restoreGates struct {
+	superuser    bool
+	roleErr      error
+	daemonAlive  bool
+	daemonSocket string
+}
+
 // steps returns the recorded sequence, one entry per line.
 func (r *timescaleHookRecorder) steps() []string {
 	body, err := os.ReadFile(r.order)
@@ -1346,6 +1379,7 @@ func TestRestoreDumpBracketsTheTimescaleRestore(t *testing.T) {
 	c := assert.NewAborting(t)
 	hooks := stubTimescaleHooks(t)
 	fakeOrderedPgRestore(t, hooks, 0)
+	stubRestoreGates(t)
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
@@ -1364,6 +1398,7 @@ func TestRestoreDumpRestoresTheTimescaleHooksWhenPgRestoreFails(t *testing.T) {
 	c := assert.NewAborting(t)
 	hooks := stubTimescaleHooks(t)
 	fakeOrderedPgRestore(t, hooks, 1)
+	stubRestoreGates(t)
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
@@ -1382,6 +1417,7 @@ func TestRestoreDumpRefusesWhenTheTimescaleHooksFail(t *testing.T) {
 	hooks := stubTimescaleHooks(t)
 	hooks.preErr = errors.New("timescaledb_pre_restore: permission denied")
 	argvFile, _ := fakePgRestoreDir(t)
+	stubRestoreGates(t)
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
@@ -1435,8 +1471,8 @@ func TestRestorePhysicalRefusesACancelledContext(t *testing.T) {
 // to name the state and the manual remedy.
 func TestPostRestoreErrorNamesTheManualRemedy(t *testing.T) {
 	c := assert.NewAborting(t)
-	err := postRestoreLeftTheDatabase(
-		errors.New("conn closed"), errors.New("dial tcp 10.0.0.1:5432: connect: refused"), "rafiki")
+	err := postRestoreLeftTheDatabase("rafiki",
+		errors.New("conn closed"), errors.New("dial tcp 10.0.0.1:5432: connect: refused"))
 	c.Require().NotNil(err)
 
 	msg := err.Error()
@@ -1444,4 +1480,188 @@ func TestPostRestoreErrorNamesTheManualRemedy(t *testing.T) {
 	c.StrContains(msg, "SELECT timescaledb_post_restore()", "the error must carry the remedy, got: %s", msg)
 	c.StrContains(msg, `"rafiki"`, "the error must name the database, got: %s", msg)
 	c.NotStrContains(msg, "postgres://", "the error must not leak a DSN, got: %s", msg)
+}
+
+// --- ownership, the daemon gate, the interrupt and the flush ---------------
+
+// Ownership follows the role that connects. pg_restore --no-owner makes the
+// CONNECTING user the owner of everything it creates: right for the daemon's
+// unprivileged role, and catastrophic for a superuser, which would then own the
+// whole schema and leave the daemon with permission denied. So a superuser
+// restore must NOT pass it — the archive's OWNER TO statements are what put the
+// original owners back.
+func TestRestoreDumpPassesNoOwnerOnlyForANonSuperuser(t *testing.T) {
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+
+	for _, tc := range []struct {
+		name      string
+		superuser bool
+		wantFlag  bool
+	}{
+		{name: "superuser keeps the archive's owners", superuser: true, wantFlag: false},
+		{name: "unprivileged role owns what it creates", superuser: false, wantFlag: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			argvFile, _ := fakePgRestoreDir(t)
+			stubTimescaleHooks(t)
+			gates := stubRestoreGates(t)
+			gates.superuser = tc.superuser
+
+			var stderr bytes.Buffer
+			c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr),
+				"runRestore: %s", stderr.String())
+
+			argv := string(mustRead(t, argvFile))
+			has := false
+			for _, arg := range strings.Split(argv, "\n") {
+				if arg == "--no-owner" {
+					has = true
+				}
+			}
+			c.Eq(tc.wantFlag, has, "pg_restore argv for superuser=%v must %s --no-owner, got: %s",
+				tc.superuser, map[bool]string{true: "carry", false: "omit"}[tc.wantFlag], argv)
+			// Either way the target is named before anything runs, and ownership
+			// is stated rather than implied.
+			if tc.superuser {
+				c.StrContains(stderr.String(), "ownership", "a superuser restore must say what it does about ownership, got: %s",
+					stderr.String())
+			}
+		})
+	}
+}
+
+// A role the archive names that does not exist here fails the restore; the flag
+// that makes that possible is the one under test above, so the message at least
+// has to be predictable. Pinned through the seam: pg_restore reports it.
+func TestRestoreDumpPropagatesAMissingOwnerRole(t *testing.T) {
+	c := assert.NewAborting(t)
+	stubTimescaleHooks(t)
+	gates := stubRestoreGates(t)
+	gates.superuser = true
+
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'pg_restore: error: could not execute query: ERROR:  role \"rafiki\" does not exist' >&2\nexit 1\n"
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(script), 0o755), "write fake pg_restore")
+	t.Setenv("PATH", dir)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr)
+
+	c.Error(err, "want the restore failure, got nil")
+	c.StrContains(stderr.String(), "does not exist", "pg_restore's own diagnosis must reach the operator, got: %s",
+		stderr.String())
+}
+
+// A daemon left running while a TimescaleDB dump restore runs is refused, not
+// merely warned about: a connection it opens during the restore keeps
+// timescaledb.restoring on for its whole life, after the restore reports
+// success. --force is the escape hatch, and it says what it accepted.
+func TestRestoreDumpRefusesUnderALiveDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
+	stubTimescaleHooks(t)
+	stubRestoreGates(t).daemonAlive = true
+	argvFile, _ := fakePgRestoreDir(t)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+	err := runRestore(context.Background(), "postgres://u@h/app", archive, false, &stderr)
+
+	c.Error(err, "want a refusal while a local daemon is running, got nil")
+	c.ErrorContains(err, "rafikid is running", "the refusal must name the daemon, got: %v", err)
+	c.ErrorContains(err, "timescaledb.restoring", "the refusal must name the hazard, got: %v", err)
+	c.ErrorContains(err, "--force", "the refusal must name the escape hatch, got: %v", err)
+	c.NoFileExists(argvFile, "a refused restore must not run pg_restore")
+}
+
+// ...and with --force it proceeds, having said so. Same socket, same restore.
+func TestRestoreDumpProceedsUnderALiveDaemonWithForce(t *testing.T) {
+	c := assert.NewAborting(t)
+	stubTimescaleHooks(t)
+	stubRestoreGates(t).daemonAlive = true
+	argvFile, _ := fakePgRestoreDir(t)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+	c.NoError(runRestore(context.Background(), "postgres://u@h/app", archive, true, &stderr),
+		"runRestore: %s", stderr.String())
+
+	c.FileExists(argvFile, "an accepted restore must run pg_restore")
+	c.StrContains(stderr.String(), "warning", "the accepted run must say what it accepted, got: %s", stderr.String())
+}
+
+// A stop can take up to 90 seconds, so an interrupt during it lands after the
+// pre-swap check. It must still be honoured: the rollback restarts the server
+// this command stopped, and no directory is moved.
+func TestRestorePhysicalHonoursAnInterruptDuringTheStop(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+	original := snapshotTree(t, dataDir)
+
+	pinRestoreStamp(t, 1_700_000_000)
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	f.probe = func(stage string, _ embedpg.Server) {
+		if stage == "stop" {
+			cancel()
+		}
+	}
+
+	err := runRestore(ctx, embeddedDSN, archive, true, io.Discard)
+
+	c.Error(err, "want the cancellation, got nil")
+	c.True(errors.Is(err, context.Canceled), "error, got: %v", err)
+	c.StrContains(err.Error(), "was not replaced", "the error must say nothing was replaced, got: %v", err)
+	c.EqDeep([]string{"unpack", "status", "stop", "start"}, f.ops,
+		"an interrupt during the stop must restart the server it stopped and move nothing, got ops")
+	c.EqDeep(original, snapshotTree(t, dataDir), "the live data directory must be untouched, got")
+	c.True(f.running, "the server must be left running, as it was")
+	assertNoRestoreSiblings(c, dataDir)
+	c.NoFileExists(dataDir+embedpg.RestoreInProgressSuffix, "no marker may be written")
+}
+
+// The unpacked tree is flushed before it becomes the live data directory, and a
+// flush that fails refuses the swap instead of installing a tree the kernel has
+// not committed to disk.
+func TestRestorePhysicalFlushesTheTreeBeforeTheSwap(t *testing.T) {
+	c := assert.NewAborting(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "pg")
+	writeDataDirTree(t, dataDir, "original")
+	original := snapshotTree(t, dataDir)
+
+	pinRestoreStamp(t, 1_700_000_000)
+	staging := dataDir + ".restoring-1700000000"
+	archive := writeTarArchive(t, filepath.Join(parent, "app.txz"), formatTXZ,
+		dataDirArchiveEntries()...)
+	f := stubRestoreOps(t, dataDir, true)
+
+	var flushed []string
+	restoreEmbedded.sync = func(_ context.Context, dir string) error {
+		flushed = append(flushed, dir)
+		return nil
+	}
+	c.NoError(runRestore(context.Background(), embeddedDSN, archive, true, io.Discard), "runRestore")
+	c.EqDeep([]string{staging}, flushed, "the STAGING tree must be flushed, before it is moved into place")
+	c.EqDeep([]string{"unpack", "status", "stop"}, f.ops[:3], "the flush must happen before the server is stopped")
+	c.FileExists(filepath.Join(dataDir, "PG_VERSION"), "the restored tree is in place")
+
+	// And a flush that fails never reaches the destructive phase. A later stamp,
+	// because the first restore left its own .replaced-<stamp> beside the tree.
+	pinRestoreStamp(t, 1_700_000_100)
+	f2 := stubRestoreOps(t, dataDir, true)
+	restoreEmbedded.sync = func(context.Context, string) error { return errors.New("disk on fire") }
+	writeDataDirTree(t, dataDir, "original")
+	original = snapshotTree(t, dataDir)
+	err := runRestore(context.Background(), embeddedDSN, archive, true, io.Discard)
+	c.Error(err, "want the flush failure, got nil")
+	c.StrContains(err.Error(), "disk on fire", "error, got: %v", err)
+	c.EqDeep([]string{"unpack"}, f2.ops, "a failed flush must stop before the server is touched")
+	c.EqDeep(original, snapshotTree(t, dataDir), "the live data directory must be untouched, got")
 }
