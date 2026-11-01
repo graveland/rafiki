@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/paths"
 )
@@ -76,7 +77,7 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("embedpg: %w", err)
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFile(ctx, lock); err != nil {
 		return "", fmt.Errorf("embedpg: locking %s: %w", s.LockPath, err)
 	}
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
@@ -84,7 +85,7 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 	// The socket path is a hard limit of the platform, and it is checked before
 	// anything is written or downloaded: discovering it after a 100 MB download
 	// would be a wasted download on every attempt.
-	if err := s.checkSocketPath(); err != nil {
+	if err := s.checkDataDir(); err != nil {
 		return "", err
 	}
 	if err := s.ensureBinaries(ctx); err != nil {
@@ -99,6 +100,9 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 	if err := s.writeRafikiConf(); err != nil {
 		return "", err
 	}
+	if err := s.ensureInclude(); err != nil {
+		return "", err
+	}
 	running, err := s.status(ctx)
 	if err != nil {
 		return "", err
@@ -109,6 +113,44 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 		}
 	}
 	return s.DSN(), nil
+}
+
+// lockPollInterval is how long lockFile waits between non-blocking attempts at
+// the flock: short enough that a cancelled caller reacts immediately, long
+// enough that waiting costs nothing.
+const lockPollInterval = 10 * time.Millisecond
+
+// lockFile takes the exclusive flock on f without blocking, so a caller whose
+// context is cancelled stops waiting. The lock is held for the whole of Ensure
+// — a download, an initdb or a 60s pg_ctl start can each take a while — and a
+// blocking flock would make that wait uninterruptible.
+func lockFile(ctx context.Context, f *os.File) error {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, syscall.EINTR):
+			continue
+		case !errors.Is(err, syscall.EWOULDBLOCK):
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(lockPollInterval):
+		}
+	}
+}
+
+// checkDataDir refuses a data directory that is not absolute. Postgres resolves
+// a relative unix_socket_directories against its own data directory, so the
+// socket would not be where the length check below thinks it is.
+func (s Server) checkDataDir() error {
+	if !filepath.IsAbs(s.DataDir) {
+		return fmt.Errorf("embedpg: data dir %q is not absolute; set XDG_DATA_HOME to an absolute path", s.DataDir)
+	}
+	return s.checkSocketPath()
 }
 
 // socketPath is the unix socket file the server creates in the data directory.
@@ -175,7 +217,7 @@ func (s Server) initIfNeeded(ctx context.Context) error {
 		os.RemoveAll(staging)
 		return fmt.Errorf("embedpg: %w", err)
 	}
-	_, werr := conf.WriteString("\ninclude 'rafiki.conf'\n")
+	_, werr := conf.WriteString(includeLine)
 	cerr := conf.Close()
 	if werr != nil || cerr != nil {
 		os.RemoveAll(staging)
@@ -211,15 +253,16 @@ func (s Server) checkVersion() error {
 	return nil
 }
 
+// includeLine is the one line rafiki.conf is reachable through.
+const includeLine = "\ninclude 'rafiki.conf'\n"
+
 // writeRafikiConf writes the settings this package owns, overwriting whatever a
 // previous run (or a curious operator) left there.
 func (s Server) writeRafikiConf() error {
 	body := "# Written by rafikid on every start; edits are overwritten.\n" +
 		"listen_addresses = ''\n" +
 		"port = " + strconv.Itoa(Port) + "\n" +
-		// A single quote in a PostgreSQL string literal is doubled, and the
-		// data directory is where the only socket lives.
-		"unix_socket_directories = '" + strings.ReplaceAll(s.DataDir, "'", "''") + "'\n"
+		"unix_socket_directories = '" + quoteConf(s.DataDir) + "'\n"
 
 	path := filepath.Join(s.DataDir, "rafiki.conf")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -229,6 +272,44 @@ func (s Server) writeRafikiConf() error {
 	// path, so its permissions are pinned on every write.
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("embedpg: %w", err)
+	}
+	return nil
+}
+
+// quoteConf quotes a value for a single-quoted postgresql.conf string. Both the
+// quote and the backslash are escapes inside one, so a data directory holding
+// either would otherwise be read as a different path.
+func quoteConf(v string) string {
+	v = strings.ReplaceAll(v, `\`, `\\`)
+	return strings.ReplaceAll(v, "'", "''")
+}
+
+// ensureInclude makes postgresql.conf include rafiki.conf, which is the only
+// reason any setting this package owns takes effect. initIfNeeded adds it to a
+// data directory it just created, but a directory that already has a PG_VERSION
+// — an upgrade, a restored backup, one built by hand — never went through that
+// path. Without the include, Postgres ignores rafiki.conf entirely and falls
+// back to its own defaults, which listen on TCP localhost. Idempotent, because
+// it runs on every Ensure.
+func (s Server) ensureInclude() error {
+	path := filepath.Join(s.DataDir, "postgresql.conf")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("embedpg: %w", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "include 'rafiki.conf'" {
+			return nil
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("embedpg: %w", err)
+	}
+	_, werr := f.WriteString(includeLine)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		return fmt.Errorf("embedpg: %w", errors.Join(werr, cerr))
 	}
 	return nil
 }

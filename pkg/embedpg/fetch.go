@@ -6,8 +6,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -108,6 +110,14 @@ func (s Server) ensureBinaries(ctx context.Context) error {
 	dir := filepath.Dir(s.BinDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("embedpg: %w", err)
+	}
+	// Debris from a run that was killed mid-download or mid-extract: neither a
+	// partial jar nor a partial tree can be resumed, and nothing else ever
+	// removes them.
+	if stale, err := filepath.Glob(filepath.Join(dir, "embedpg-*")); err == nil {
+		for _, path := range stale {
+			os.RemoveAll(path)
+		}
 	}
 
 	url := jarURL(s.baseURL(), a)
@@ -221,11 +231,58 @@ func (s Server) extract(jarPath, url string, a artifact) error {
 	return nil
 }
 
+// errEscapesRoot is what every path check in the extractor reports. The archive
+// is the only untrusted input in this package.
+var errEscapesRoot = errors.New("escapes the extraction root")
+
+// resolveWithin maps dest onto the real path creating it would touch, and
+// refuses anything that lands outside root.
+//
+// The lexical check on an entry NAME is not enough on its own: an earlier entry
+// can be a symlink and a later entry's path can walk through it. `a -> .`, then
+// `a/b -> ..`, then `a/b/evil` passes every name check and still writes outside
+// the tree, because MkdirAll and OpenFile follow the links. Resolving the
+// deepest existing ancestor — and dest itself, when it exists — closes both
+// halves: a chain leading out of the root is refused, and the returned path has
+// no symlinks in its existing prefix, so a write cannot be redirected either.
+//
+// root must already be resolved; extractTar does that once, because the
+// temporary directory is under a symlinked /tmp on macOS.
+func resolveWithin(root, dest string) (string, error) {
+	probe := dest
+	var missing []string
+	for {
+		real, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			if real != root && !strings.HasPrefix(real, root+string(filepath.Separator)) {
+				return "", errEscapesRoot
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				real = filepath.Join(real, missing[i])
+			}
+			return real, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", errEscapesRoot
+		}
+		missing = append(missing, filepath.Base(probe))
+		probe = parent
+	}
+}
+
 // extractTar writes every entry of tr under root. Anything that could land
-// outside root — an absolute name, a parent-relative name, a symlink pointing
-// out — aborts the extraction: the archive is the only untrusted input in this
-// package, and a partial tree is discarded by the caller.
+// outside root — an absolute name, a parent-relative name, a symlink chain
+// pointing out — aborts the extraction: a partial tree is discarded by the
+// caller.
 func extractTar(tr *tar.Reader, root string) error {
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("embedpg: %w", err)
+	}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -237,12 +294,15 @@ func extractTar(tr *tar.Reader, root string) error {
 
 		name := filepath.Clean(hdr.Name)
 		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("embedpg: archive entry %q escapes the extraction root", hdr.Name)
+			return fmt.Errorf("embedpg: archive entry %q %w", hdr.Name, errEscapesRoot)
 		}
 		if name == "." {
 			continue
 		}
-		dest := filepath.Join(root, name)
+		dest, err := resolveWithin(root, filepath.Join(root, name))
+		if err != nil {
+			return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
+		}
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -260,9 +320,11 @@ func extractTar(tr *tar.Reader, root string) error {
 			if filepath.IsAbs(hdr.Linkname) {
 				return fmt.Errorf("embedpg: archive symlink %q points at the absolute path %q", hdr.Name, hdr.Linkname)
 			}
-			rel := filepath.Clean(filepath.Join(filepath.Dir(name), hdr.Linkname))
-			if rel == ".." || strings.HasPrefix(rel, "../") {
-				return fmt.Errorf("embedpg: archive symlink %q escapes the extraction root: %q", hdr.Name, hdr.Linkname)
+			// The target is resolved against dest's real parent, not the entry's
+			// lexical name, so a link is refused when the directory it sits in
+			// is itself a link out of the tree.
+			if _, err := resolveWithin(root, filepath.Join(filepath.Dir(dest), hdr.Linkname)); err != nil {
+				return fmt.Errorf("embedpg: archive symlink %q: %w", hdr.Name, err)
 			}
 			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)

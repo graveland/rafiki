@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/multigres/testkit/assert"
@@ -84,9 +86,11 @@ func TestDSNQuoting(t *testing.T) {
 
 // rafiki.conf is rewritten on every start, so it is the one place these settings
 // live: no TCP socket, the pinned port, and a socket directory quoted for
-// PostgreSQL's own string-literal rules.
+// PostgreSQL's own string-literal rules — where both the quote and the
+// backslash are escapes.
 func TestRafikiConfQuotesSocketDir(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "o'brien")
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, `o'brien\pg`)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -97,13 +101,74 @@ func TestRafikiConfQuotesSocketDir(t *testing.T) {
 
 	body, err := os.ReadFile(filepath.Join(dataDir, "rafiki.conf"))
 	c.NoError(err)
+	// The escaping is spelled out literally here rather than reusing quoteConf,
+	// so the test fails if the escaping changes.
 	want := "# Written by rafikid on every start; edits are overwritten.\n" +
 		"listen_addresses = ''\n" +
 		"port = 5432\n" +
-		"unix_socket_directories = '" + strings.ReplaceAll(dataDir, "'", "''") + "'\n"
+		"unix_socket_directories = '" + dir + `/o''brien\\pg'` + "\n"
 	c.Eq(want, string(body), "rafiki.conf")
 
 	info, err := os.Stat(filepath.Join(dataDir, "rafiki.conf"))
 	c.NoError(err)
 	c.Eq(os.FileMode(0o600), info.Mode().Perm(), "rafiki.conf mode")
+}
+
+// The include is what makes rafiki.conf effective at all. A data directory that
+// already has a PG_VERSION never went through initdb here, so Ensure has to add
+// the include on every start — and only once.
+func TestEnsureIncludeAppendedToExistingDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	conf := filepath.Join(dataDir, "postgresql.conf")
+	if err := os.WriteFile(conf, []byte("listen_addresses = 'localhost'\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "PG_VERSION"), []byte("18\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := Server{DataDir: dataDir}
+
+	c := assert.NewCollecting(t)
+	c.NoError(s.ensureInclude())
+	c.NoError(s.ensureInclude()) // idempotent: the second start must not append again
+
+	body, err := os.ReadFile(conf)
+	c.NoError(err)
+	c.Eq(1, strings.Count(string(body), "include 'rafiki.conf'"), "include count in %q", string(body))
+	// The operator's own settings are still there; the include is appended.
+	c.StrContains(string(body), "listen_addresses = 'localhost'")
+}
+
+// A caller waiting behind another process's initdb must be able to give up: the
+// flock is taken without blocking, so a cancelled context ends the wait instead
+// of parking for the length of someone else's download.
+func TestEnsureLockWaitHonoursContext(t *testing.T) {
+	s := testServer(t)
+	holder, err := os.OpenFile(s.LockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer holder.Close()
+	if err := syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("Flock: %v", err)
+	}
+	defer func() { _ = syscall.Flock(int(holder.Fd()), syscall.LOCK_UN) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, err = s.Ensure(ctx)
+	elapsed := time.Since(start)
+
+	c := assert.NewCollecting(t)
+	c.ErrorIs(err, context.Canceled)
+	c.Less(2*time.Second, elapsed, "Ensure waited %s behind a held lock", elapsed)
+}
+
+// A relative data directory is refused: Postgres resolves a relative socket
+// directory against its own data directory, so the path this package measures
+// would not be the path the server uses.
+func TestRelativeDataDirIsRefused(t *testing.T) {
+	s := Server{DataDir: "relative/pg"}
+	assert.NewCollecting(t).ErrorContains(s.checkDataDir(), "is not absolute")
 }

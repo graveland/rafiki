@@ -132,6 +132,16 @@ func testServer(t *testing.T) Server {
 	}
 }
 
+// assertNoDebris checks that a failed download or extraction left neither a jar
+// nor a half-extracted tree beside BinDir. Both cleanups are error paths, so
+// without this they can be deleted and every test still passes.
+func assertNoDebris(t *testing.T, s Server) {
+	t.Helper()
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(s.BinDir), "embedpg-*"))
+	assert.NewCollecting(t).NoError(err)
+	assert.NewCollecting(t).Len(leftovers, 0, "debris left behind: %v", leftovers)
+}
+
 func TestArtifactForUnsupportedPlatform(t *testing.T) {
 	_, err := artifactFor("windows", "amd64")
 	assert.NewCollecting(t).ErrorContains(err, "supported: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64")
@@ -205,7 +215,8 @@ func TestEnsureBinariesExtracts(t *testing.T) {
 	c.Eq(int64(1), hits.Load(), "requests after a second ensure")
 }
 
-// An entry that climbs out of the extraction root aborts the whole extraction.
+// An entry that climbs out of the extraction root aborts the whole extraction,
+// and nothing it produced survives: no BinDir, no jar, no temporary tree.
 func TestExtractRejectsPathTraversal(t *testing.T) {
 	jar := buildJar(t, "postgres-test.txz", []tarEntry{
 		{name: "../evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
@@ -222,6 +233,32 @@ func TestExtractRejectsPathTraversal(t *testing.T) {
 	c.ErrorContains(err, "escapes the extraction root")
 	c.NoDirExists(s.BinDir)
 	c.NoFileExists(filepath.Join(filepath.Dir(s.BinDir), "evil"))
+	assertNoDebris(t, s)
+}
+
+// A symlink chain is the case a lexical name check cannot see: `a -> .` and
+// `a/b -> ..` are individually harmless names, and together they aim the next
+// entry at the parent of the extraction root. The chain has to be resolved, not
+// read.
+func TestExtractRejectsSymlinkChain(t *testing.T) {
+	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+		{name: "a", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "."},
+		{name: "a/b", mode: 0o777, typeflag: tar.TypeSymlink, linkname: ".."},
+		{name: "a/b/evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
+	})
+	srv, _ := serveJar(t, jar)
+	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.ErrorContains(err, "escapes the extraction root")
+	c.NoDirExists(s.BinDir)
+	c.NoFileExists(filepath.Join(filepath.Dir(s.BinDir), "evil"))
+	assertNoDebris(t, s)
 }
 
 // A symlink whose target climbs out of the extraction root is refused just like
@@ -243,6 +280,7 @@ func TestExtractRejectsEscapingSymlink(t *testing.T) {
 	c := assert.NewCollecting(t)
 	c.ErrorContains(err, "escapes the extraction root")
 	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
 }
 
 // A jar whose layout does not match the pinned artifact is an error naming the
