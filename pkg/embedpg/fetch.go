@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/ulikunitz/xz"
 )
@@ -241,10 +242,16 @@ var errEscapesRoot = errors.New("escapes the extraction root")
 // The lexical check on an entry NAME is not enough on its own: an earlier entry
 // can be a symlink and a later entry's path can walk through it. `a -> .`, then
 // `a/b -> ..`, then `a/b/evil` passes every name check and still writes outside
-// the tree, because MkdirAll and OpenFile follow the links. Resolving the
-// deepest existing ancestor — and dest itself, when it exists — closes both
-// halves: a chain leading out of the root is refused, and the returned path has
-// no symlinks in its existing prefix, so a write cannot be redirected either.
+// the tree, because creating a file follows the links. Resolving the deepest
+// existing ancestor — and dest itself, when it exists — closes both halves: a
+// chain leading out of the root is refused, and the returned path has no
+// symlinks in its existing prefix, so a write cannot be redirected either.
+//
+// A DANGLING symlink is the subtle case: EvalSymlinks reports ErrNotExist for it
+// exactly as it does for a component that does not exist yet, and treating the
+// two alike hands the link back as a plain name for the kernel to follow. The
+// Lstat below separates them. (extractTar's phase ordering means no link exists
+// while files are written at all; this is the second, independent layer.)
 //
 // root must already be resolved; extractTar does that once, because the
 // temporary directory is under a symlinked /tmp on macOS.
@@ -265,6 +272,11 @@ func resolveWithin(root, dest string) (string, error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", err
 		}
+		if _, lerr := os.Lstat(probe); lerr == nil {
+			return "", fmt.Errorf("%w: %s is a dangling symlink", errEscapesRoot, probe)
+		} else if !errors.Is(lerr, fs.ErrNotExist) {
+			return "", lerr
+		}
 		parent := filepath.Dir(probe)
 		if parent == probe {
 			return "", errEscapesRoot
@@ -274,19 +286,84 @@ func resolveWithin(root, dest string) (string, error) {
 	}
 }
 
+// mkdirParents creates every component of dir under root, refusing to walk
+// through anything that is not a real directory. A component that already
+// exists as a symlink is an error, never something to follow.
+func mkdirParents(root, dir string) error {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("%w: %s", errEscapesRoot, dir)
+	}
+	cur := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			if err := os.Mkdir(cur, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %s is a symlink", errEscapesRoot, cur)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("embedpg: %s is not a directory", cur)
+		}
+	}
+	return nil
+}
+
+// hasParentComponent reports whether a relative link target climbs with `..`.
+func hasParentComponent(link string) bool {
+	for _, part := range strings.Split(link, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// pendingSymlink is a symlink entry held back until every directory and file has
+// been written.
+type pendingSymlink struct {
+	name string
+	dest string
+	link string
+}
+
 // extractTar writes every entry of tr under root. Anything that could land
 // outside root — an absolute name, a parent-relative name, a symlink chain
 // pointing out — aborts the extraction: a partial tree is discarded by the
 // caller.
+//
+// Directories and regular files are written as they arrive; symlinks are
+// collected and created only after the archive ends. That ordering is the
+// containment mechanism: while a file is being written there is no symlink
+// anywhere under root, so there is nothing for the kernel to follow and no
+// archive, in any order, can be aimed outside the tree. A link is additionally
+// refused when it is absolute or when its target climbs with `..`, which leaves
+// every link pointing strictly down inside its own directory — a chain of those
+// can never ascend.
 func extractTar(tr *tar.Reader, root string) error {
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return fmt.Errorf("embedpg: %w", err)
 	}
+	var links []pendingSymlink
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
 			return fmt.Errorf("embedpg: reading archive: %w", err)
@@ -306,11 +383,11 @@ func extractTar(tr *tar.Reader, root string) error {
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(dest, 0o755); err != nil {
+			if err := mkdirParents(root, dest); err != nil {
 				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			if err := mkdirParents(root, filepath.Dir(dest)); err != nil {
 				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
 			}
 			if err := writeEntry(dest, os.FileMode(hdr.Mode)&0o777, tr); err != nil {
@@ -320,27 +397,39 @@ func extractTar(tr *tar.Reader, root string) error {
 			if filepath.IsAbs(hdr.Linkname) {
 				return fmt.Errorf("embedpg: archive symlink %q points at the absolute path %q", hdr.Name, hdr.Linkname)
 			}
-			// The target is resolved against dest's real parent, not the entry's
-			// lexical name, so a link is refused when the directory it sits in
-			// is itself a link out of the tree.
-			if _, err := resolveWithin(root, filepath.Join(filepath.Dir(dest), hdr.Linkname)); err != nil {
-				return fmt.Errorf("embedpg: archive symlink %q: %w", hdr.Name, err)
+			if hasParentComponent(hdr.Linkname) {
+				return fmt.Errorf("embedpg: archive symlink %q %w: %q", hdr.Name, errEscapesRoot, hdr.Linkname)
 			}
-			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
-			}
-			if err := os.Symlink(hdr.Linkname, dest); err != nil {
-				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
-			}
+			links = append(links, pendingSymlink{name: name, dest: dest, link: hdr.Linkname})
 		default:
 			return fmt.Errorf("embedpg: archive entry %q has unsupported type %q", hdr.Name, string(hdr.Typeflag))
 		}
 	}
+
+	for _, l := range links {
+		if err := mkdirParents(root, filepath.Dir(l.dest)); err != nil {
+			return fmt.Errorf("embedpg: archive symlink %q: %w", l.name, err)
+		}
+		if _, err := os.Lstat(l.dest); err == nil {
+			return fmt.Errorf("embedpg: archive symlink %q collides with an entry already extracted", l.name)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("embedpg: %w", err)
+		}
+		if err := os.Symlink(l.link, l.dest); err != nil {
+			return fmt.Errorf("embedpg: archive symlink %q: %w", l.name, err)
+		}
+	}
+	return nil
 }
 
-// writeEntry creates dest with mode and copies the entry's body into it.
+// writeEntry creates dest with mode and copies the entry's body into it. The
+// final component must not be a symlink: O_NOFOLLOW makes the kernel refuse one
+// even if it appeared between the check and the open.
 func writeEntry(dest string, mode os.FileMode, r io.Reader) error {
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s is a symlink", errEscapesRoot, dest)
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
 	if err != nil {
 		return err
 	}

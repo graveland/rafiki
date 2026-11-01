@@ -114,10 +114,11 @@ func TestRafikiConfQuotesSocketDir(t *testing.T) {
 	c.Eq(os.FileMode(0o600), info.Mode().Perm(), "rafiki.conf mode")
 }
 
-// The include is what makes rafiki.conf effective at all. A data directory that
-// already has a PG_VERSION never went through initdb here, so Ensure has to add
-// the include on every start — and only once.
-func TestEnsureIncludeAppendedToExistingDataDir(t *testing.T) {
+// prepareDataDir is what makes rafiki.conf effective at all: the file itself,
+// and the include that is the only way Postgres reads it. A data directory that
+// already has a PG_VERSION never went through initdb here, so this has to run on
+// every start — and be idempotent, because it does.
+func TestPrepareDataDir(t *testing.T) {
 	dataDir := t.TempDir()
 	conf := filepath.Join(dataDir, "postgresql.conf")
 	if err := os.WriteFile(conf, []byte("listen_addresses = 'localhost'\n"), 0o600); err != nil {
@@ -129,14 +130,70 @@ func TestEnsureIncludeAppendedToExistingDataDir(t *testing.T) {
 	s := Server{DataDir: dataDir}
 
 	c := assert.NewCollecting(t)
-	c.NoError(s.ensureInclude())
-	c.NoError(s.ensureInclude()) // idempotent: the second start must not append again
+	c.NoError(s.prepareDataDir())
+	c.NoError(s.prepareDataDir()) // idempotent: the second start must not append again
 
 	body, err := os.ReadFile(conf)
 	c.NoError(err)
 	c.Eq(1, strings.Count(string(body), "include 'rafiki.conf'"), "include count in %q", string(body))
 	// The operator's own settings are still there; the include is appended.
 	c.StrContains(string(body), "listen_addresses = 'localhost'")
+
+	rafiki, err := os.ReadFile(filepath.Join(dataDir, "rafiki.conf"))
+	c.NoError(err)
+	c.StrContains(string(rafiki), "listen_addresses = ''")
+}
+
+// Ensure must actually call prepareDataDir — the helper being correct is not the
+// same as the daemon running it. The binaries here are stubs: pg_ctl status
+// exits 0, so Ensure believes the server is already up and never starts one, and
+// bin/postgres exists, so nothing is downloaded. The data dir has to be short
+// enough for its socket path, so it does not come from t.TempDir().
+func TestEnsurePreparesDataDir(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "epg")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	s := Server{
+		BinDir:   filepath.Join(dir, "bin"),
+		DataDir:  filepath.Join(dir, "data"),
+		LogPath:  filepath.Join(dir, "pg.log"),
+		LockPath: filepath.Join(dir, "pg.lock"),
+	}
+	if err := os.MkdirAll(filepath.Join(s.BinDir, "bin"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.BinDir, "bin", "postgres"), nil, 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.BinDir, "bin", "pg_ctl"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.MkdirAll(s.DataDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.DataDir, "PG_VERSION"), []byte("18\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	conf := filepath.Join(s.DataDir, "postgresql.conf")
+	if err := os.WriteFile(conf, []byte("# as initdb left it\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	dsn, err := s.Ensure(context.Background())
+	c := assert.NewCollecting(t)
+	c.NoError(err)
+	c.Eq(s.DSN(), dsn, "Ensure's DSN")
+
+	body, err := os.ReadFile(conf)
+	c.NoError(err)
+	c.StrContains(string(body), "include 'rafiki.conf'", "postgresql.conf after Ensure")
+
+	rafiki, err := os.ReadFile(filepath.Join(s.DataDir, "rafiki.conf"))
+	c.NoError(err)
+	c.StrContains(string(rafiki), "listen_addresses = ''")
 }
 
 // A caller waiting behind another process's initdb must be able to give up: the

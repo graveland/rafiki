@@ -97,10 +97,7 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 	if err := s.checkVersion(); err != nil {
 		return "", err
 	}
-	if err := s.writeRafikiConf(); err != nil {
-		return "", err
-	}
-	if err := s.ensureInclude(); err != nil {
+	if err := s.prepareDataDir(); err != nil {
 		return "", err
 	}
 	running, err := s.status(ctx)
@@ -253,6 +250,20 @@ func (s Server) checkVersion() error {
 	return nil
 }
 
+// prepareDataDir writes everything this package owns inside a data directory
+// that already exists: rafiki.conf, and the include in postgresql.conf that is
+// the only way rafiki.conf takes effect. Ensure calls it on every start, after
+// the version check and before the server is started, so a directory it did not
+// create — an upgrade, a restored backup, one built by hand — gets the same
+// treatment as one initdb made here. Without it Postgres ignores rafiki.conf
+// entirely and falls back to its own defaults, which listen on TCP localhost.
+func (s Server) prepareDataDir() error {
+	if err := s.writeRafikiConf(); err != nil {
+		return err
+	}
+	return s.ensureInclude()
+}
+
 // includeLine is the one line rafiki.conf is reachable through.
 const includeLine = "\ninclude 'rafiki.conf'\n"
 
@@ -284,13 +295,10 @@ func quoteConf(v string) string {
 	return strings.ReplaceAll(v, "'", "''")
 }
 
-// ensureInclude makes postgresql.conf include rafiki.conf, which is the only
-// reason any setting this package owns takes effect. initIfNeeded adds it to a
-// data directory it just created, but a directory that already has a PG_VERSION
-// — an upgrade, a restored backup, one built by hand — never went through that
-// path. Without the include, Postgres ignores rafiki.conf entirely and falls
-// back to its own defaults, which listen on TCP localhost. Idempotent, because
-// it runs on every Ensure.
+// ensureInclude makes postgresql.conf include rafiki.conf. initIfNeeded adds it
+// to a data directory it just created; a directory that already has a
+// PG_VERSION never went through that path, hence the scan. Idempotent, because
+// prepareDataDir runs on every Ensure.
 func (s Server) ensureInclude() error {
 	path := filepath.Join(s.DataDir, "postgresql.conf")
 	b, err := os.ReadFile(path)

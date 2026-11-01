@@ -261,6 +261,59 @@ func TestExtractRejectsSymlinkChain(t *testing.T) {
 	assertNoDebris(t, s)
 }
 
+// The dangling-symlink chain: `p/q/s -> ../..` is itself refused (a link target
+// may not climb), and if it were not, the ordering would still refuse it — `a`
+// is a regular file, so it is written before any link exists, and the links
+// aimed through it are created last and collide. Nothing may appear beside the
+// extraction root, and the extraction must fail rather than half-succeed.
+func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
+	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+		{name: "p", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "p/q", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "p/q/s", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "../.."},
+		{name: "a", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "d/x"},
+		{name: "d", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "p/q/s/.."},
+		{name: "a", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
+	})
+	srv, _ := serveJar(t, jar)
+	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.Error(err)
+	// The escape this archive aims at: <root>/../x, i.e. beside the root.
+	c.NoFileExists(filepath.Join(filepath.Dir(s.BinDir), "x"))
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
+// Ordering is load-bearing on its own: a regular entry named after an earlier
+// symlink must land at its own name. Created inline, the link would exist first
+// and the file would be written through it, silently landing at the link's
+// target instead; created last, the link collides and the extraction fails.
+func TestExtractCreatesSymlinksLast(t *testing.T) {
+	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+		{name: "f", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "t"},
+		{name: "f", mode: 0o644, typeflag: tar.TypeReg, body: "body"},
+	})
+	srv, _ := serveJar(t, jar)
+	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+
+	s := testServer(t)
+	s.BaseURL = srv.URL
+	s.Client = srv.Client()
+
+	err := s.ensureBinaries(context.Background())
+	c := assert.NewCollecting(t)
+	c.Error(err, "a symlink colliding with an extracted file must fail, not resolve through it")
+	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
+}
+
 // A symlink whose target climbs out of the extraction root is refused just like
 // a directory-traversing name: writing the link is harmless, following it later
 // is not.
