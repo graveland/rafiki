@@ -181,7 +181,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newFundiCmd())
 	root.AddCommand(newAgentCmd())
 	root.AddCommand(newMigrateCmd())
-	root.AddCommand(newPsqlCmd())
+	root.AddCommand(newDbCmd())
 	root.AddCommand(newTreeCmd())
 	root.AddCommand(newUserCmd())
 	root.AddCommand(newProxyRecordCmd())

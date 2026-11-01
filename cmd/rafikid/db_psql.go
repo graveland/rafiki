@@ -15,14 +15,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newPsqlCmd opens psql on whatever database rafikid is configured for,
+// newDbPsqlCmd opens psql on whatever database rafikid is configured for,
 // including the embedded one. It exists because the embedded server's binaries
 // ship no client (the zonky artifacts carry initdb, pg_ctl and postgres only),
 // so an operator inspecting that database needs the system psql pointed at the
 // right socket — which is a data directory path, not a hostname.
-func newPsqlCmd() *cobra.Command {
-	var db string
-
+func newDbPsqlCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "psql [-- psql args...]",
 		Short: "Open psql on rafikid's database (RAFIKI_DB, including the embedded one)",
@@ -39,6 +37,12 @@ Everything after "--" is handed to psql unchanged.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --db is the db group's persistent flag; psql reads it from the
+			// inherited set rather than declaring a second flag of that name.
+			db, err := cmd.Flags().GetString("db")
+			if err != nil {
+				return err
+			}
 			if db == "" {
 				return errors.New("--db (or RAFIKI_DB) is required")
 			}
@@ -62,24 +66,27 @@ Everything after "--" is handed to psql unchanged.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&db, "db", dbDSNDefault(), "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
 	return cmd
 }
 
-// psqlInv is one fully resolved psql exec: the program, its argv, the
+// pgToolInv is one fully resolved libpq client exec: the program, its argv, the
 // environment carrying the connection, and the line telling the operator where
-// that connection goes.
-type psqlInv struct {
-	path   string   // absolute psql path from exec.LookPath
-	argv   []string // "psql" followed by args, unchanged; NEVER any DSN part
+// that connection goes. psql and pg_dump share it because the rule that matters
+// — the DSN rides PG*, never argv — is the same for both.
+type pgToolInv struct {
+	path   string   // absolute program path from exec.LookPath
+	argv   []string // the program's name followed by args, unchanged; NEVER any DSN part
 	env    []string // environ minus every PG* variable, plus the connection's PG* variables
-	target string   // one line naming where psql will connect
+	target string   // one line naming where the program will connect
 }
 
 // psqlMissing is the whole remedy an operator needs, in the error itself: psql
 // is a separate package from the server on every platform rafiki runs on.
-const psqlMissing = "psql not found on PATH; install the PostgreSQL client " +
-	"(macOS: brew install libpq && brew link --force libpq; " +
+const psqlMissing = "psql not found on PATH; install the PostgreSQL client " + pgClientInstallHint
+
+// pgClientInstallHint is the install remedy every libpq client these commands
+// need shares, so psql and pg_dump never drift apart.
+const pgClientInstallHint = "(macOS: brew install libpq && brew link --force libpq; " +
 	"Debian/Ubuntu: apt install postgresql-client)"
 
 // pgEnv maps one libpq connection keyword to the environment variable psql
@@ -105,32 +112,46 @@ var pgEnv = map[string]string{
 	"gssencmode":           "PGGSSENCMODE",
 }
 
+// lookPgClient finds a libpq client program, or reports the install remedy.
+func lookPgClient(name, missing string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", errors.New(missing)
+	}
+	return path, nil
+}
+
 // lookPsql finds the psql binary, or reports the install remedy. RunE calls it
 // before resolving the DSN and psqlInvocation calls it again, so the cheap check
 // is what a user without psql sees first.
 func lookPsql() (string, error) {
-	path, err := exec.LookPath("psql")
-	if err != nil {
-		return "", errors.New(psqlMissing)
-	}
-	return path, nil
+	return lookPgClient("psql", psqlMissing)
 }
 
 // psqlInvocation resolves psql and the environment it should run in. configured
 // is the DSN as the operator wrote it (it selects the wording of target); dsn is
 // what resolveDSN returned. The connection reaches psql only through env.
-func psqlInvocation(configured, dsn string, args, environ []string) (psqlInv, error) {
+func psqlInvocation(configured, dsn string, args, environ []string) (pgToolInv, error) {
 	path, err := lookPsql()
 	if err != nil {
-		return psqlInv{}, err
+		return pgToolInv{}, err
 	}
+	return pgToolInvocation("rafikid psql", path, "psql", configured, dsn, args, environ)
+}
+
+// pgToolInvocation builds the argv, environment and target line for one libpq
+// client (psql, pg_dump, ...). prefix is how the command names itself in
+// messages; name is argv[0] and the word a refusal tells the operator to run
+// instead. The DSN reaches the program through env ONLY — argv carries the
+// arguments the caller wrote and nothing they did not.
+func pgToolInvocation(prefix, path, name, configured, dsn string, args, environ []string) (pgToolInv, error) {
 	kw, err := parseConninfo(dsn)
 	if err != nil {
-		return psqlInv{}, err
+		return pgToolInv{}, fmt.Errorf("%s: %w", prefix, err)
 	}
 
 	// Every inherited PG* variable is dropped first: an exported PGHOST from the
-	// operator's shell would otherwise be what psql dials, and the DSN's own
+	// operator's shell would otherwise be what the client dials, and the DSN's own
 	// values are appended after, so each mapped keyword wins.
 	env := make([]string, 0, len(environ)+len(kw))
 	for _, kv := range environ {
@@ -145,12 +166,13 @@ func psqlInvocation(configured, dsn string, args, environ []string) (psqlInv, er
 	}
 	sort.Strings(keys) // stable env order, so a test can compare it
 	for i, k := range keys {
-		// pgx pool settings are not libpq parameters and mean nothing to psql;
-		// a DSN carrying them is still usable, so they are skipped, not refused.
+		// pgx pool settings are not libpq parameters and mean nothing to a libpq
+		// client; a DSN carrying them is still usable, so they are skipped, not
+		// refused.
 		if strings.HasPrefix(k, "pool_") {
 			continue
 		}
-		name, ok := pgEnv[k]
+		envName, ok := pgEnv[k]
 		if !ok {
 			// A name libpq knows is worth printing: "service" or "passfile" tells
 			// the operator exactly what this command cannot do. A name it does NOT
@@ -158,28 +180,28 @@ func psqlInvocation(configured, dsn string, args, environ []string) (psqlInv, er
 			// split leaves its tail sitting where a key would be, and the tail can
 			// even arrive through a URL's query string (postgres://u:1234?abc@h/db).
 			if libpqKeywords[k] {
-				return psqlInv{}, fmt.Errorf("rafikid psql: cannot pass DSN parameter %q; run psql directly", k)
+				return pgToolInv{}, fmt.Errorf("%s: cannot pass DSN parameter %q; run %s directly", prefix, k, name)
 			}
-			return psqlInv{}, fmt.Errorf("rafikid psql: cannot pass the DSN parameter at position %d of %d; run psql directly",
-				i+1, len(keys))
+			return pgToolInv{}, fmt.Errorf("%s: cannot pass the DSN parameter at position %d of %d; run %s directly",
+				prefix, i+1, len(keys), name)
 		}
-		env = append(env, name+"="+kw[k])
+		env = append(env, envName+"="+kw[k])
 	}
 
 	argv := make([]string, 0, len(args)+1)
-	argv = append(argv, "psql")
+	argv = append(argv, name)
 	argv = append(argv, args...)
 
-	return psqlInv{path: path, argv: argv, env: env, target: psqlTarget(configured, kw)}, nil
+	return pgToolInv{path: path, argv: argv, env: env, target: pgToolTarget(prefix, configured, kw)}, nil
 }
 
-// psqlTarget is the one line printed before exec, so the operator knows which
-// database psql is about to open. The password is never part of it.
-func psqlTarget(configured string, kw map[string]string) string {
+// pgToolTarget is the one line printed before exec, so the operator knows which
+// database the client is about to reach. The password is never part of it.
+func pgToolTarget(prefix, configured string, kw map[string]string) string {
 	if configured == embeddedDSN {
-		return "rafikid psql: embedded database at " + kw["host"]
+		return prefix + ": embedded database at " + kw["host"]
 	}
-	out := "rafikid psql:"
+	out := prefix + ":"
 	for _, k := range []string{"host", "port", "dbname", "user"} {
 		if v, ok := kw[k]; ok {
 			out += " " + k + "=" + v
@@ -270,10 +292,10 @@ func parseConninfoURL(dsn string) (map[string]string, error) {
 	if err != nil {
 		// url.Parse's own error embeds the whole URL, so it is deliberately not
 		// wrapped: the password would go straight to stderr.
-		return nil, errors.New("rafikid psql: cannot parse the DSN as a postgres URL (the DSN is not echoed: it may hold a password)")
+		return nil, errors.New("cannot parse the DSN as a postgres URL (the DSN is not echoed: it may hold a password)")
 	}
 	if strings.Contains(u.Host, ",") {
-		return nil, errors.New("rafikid psql: multi-host DSNs are not supported")
+		return nil, errors.New("multi-host DSNs are not supported")
 	}
 
 	kw := make(map[string]string, 8)
@@ -356,7 +378,7 @@ func parseConninfoKeywords(s string) (map[string]string, error) {
 // text out of the message, and a fragment that happens to be a libpq name is the
 // one thing this cannot rule out.
 func conninfoTokenError(want string, off int, lastKey string) error {
-	msg := fmt.Sprintf("rafikid psql: cannot parse DSN: expected %s at offset %d", want, off)
+	msg := fmt.Sprintf("cannot parse DSN: expected %s at offset %d", want, off)
 	if libpqKeywords[lastKey] {
 		msg += fmt.Sprintf(" (after the keyword %q)", lastKey)
 	}
@@ -373,13 +395,13 @@ func parseConninfoValue(s string, i int, key string, keyOff int) (string, int, e
 		i++
 		for {
 			if i >= len(s) {
-				return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unterminated quoted value for %s",
+				return "", 0, fmt.Errorf("cannot parse DSN: unterminated quoted value for %s",
 					conninfoKeyPhrase(key, keyOff))
 			}
 			switch s[i] {
 			case '\\':
 				if i+1 >= len(s) {
-					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unterminated quoted value for %s",
+					return "", 0, fmt.Errorf("cannot parse DSN: unterminated quoted value for %s",
 						conninfoKeyPhrase(key, keyOff))
 				}
 				b.WriteByte(s[i+1])
@@ -390,7 +412,7 @@ func parseConninfoValue(s string, i int, key string, keyOff int) (string, int, e
 					// Neither the character nor an unrecognised key is named: after
 					// `password='abc'` the character is the first byte of the
 					// password's continuation.
-					return "", 0, fmt.Errorf("rafikid psql: cannot parse DSN: unexpected character after the quoted value of %s",
+					return "", 0, fmt.Errorf("cannot parse DSN: unexpected character after the quoted value of %s",
 						conninfoKeyPhrase(key, keyOff))
 				}
 				return b.String(), i, nil

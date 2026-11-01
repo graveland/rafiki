@@ -186,8 +186,8 @@ func TestPsqlCmdChecksTheClientBeforeResolving(t *testing.T) {
 		return embedpg.Server{}
 	}
 
-	cmd := newPsqlCmd()
-	cmd.SetArgs([]string{"--db", embeddedDSN})
+	cmd := newDbCmd()
+	cmd.SetArgs([]string{"psql", "--db", embeddedDSN})
 	err := cmd.Execute()
 
 	c := assert.NewAborting(t)
