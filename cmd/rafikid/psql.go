@@ -310,8 +310,11 @@ func parseConninfoURL(dsn string) (map[string]string, error) {
 // continuation of a password (`password=my s3cret` makes `s3cret` a bare token,
 // and `password='abc'def` leaves `def` after the closing quote), so naming the
 // offending fragment would publish part of a secret. The errors locate it by
-// byte offset and by the keyword it follows instead — a keyword that has already
-// passed validConninfoKey, so it cannot itself hold anything sensitive.
+// byte offset and, when the preceding token is a real libpq parameter name, by
+// that name. The vocabulary bounds what can be echoed to a fixed set of
+// parameter names, which is what keeps a password out of the message — it is
+// not a claim that a name is secret, since a password can contain the word
+// "service" itself.
 func parseConninfoKeywords(s string) (map[string]string, error) {
 	kw := make(map[string]string, 8)
 	i := 0
