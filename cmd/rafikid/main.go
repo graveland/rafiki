@@ -1526,9 +1526,22 @@ func loadServiceEnv() {
 // buildAgentArgv, so single-dash forms are a wire-visible contract.
 //
 // Single-character args (-j) are left alone as shorthands.
+//
+// It stops at the first `--`, POSIX end-of-flags: everything after it is an
+// operand, and rewriting one changes what the command hands on.
+// `rafikid db psql -- -Atc "select 1"` passes psql its own combined shorthand,
+// and "-Atc" rewritten to "--Atc" is a psql option that does not exist ("psql:
+// unrecognized option `--Atc'"). The stop is at the `--` and NOT at the first
+// positional argument on purpose: pflag parses interspersed by default, so
+// `rafikid fundi some text -model x` reaches a flag today, and that keeps
+// working.
 func normalizeArgsForPflag() {
 	normalized := make([]string, len(os.Args))
 	for i, a := range os.Args {
+		if a == "--" {
+			copy(normalized[i:], os.Args[i:])
+			break
+		}
 		normalized[i] = normalizeArg(a)
 	}
 	os.Args = normalized

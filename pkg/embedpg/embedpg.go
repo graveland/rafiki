@@ -138,7 +138,7 @@ func (s Server) Ensure(ctx context.Context) (string, error) {
 	if err := s.prepareDataDir(); err != nil {
 		return "", err
 	}
-	running, err := s.status(ctx)
+	running, err := s.Status(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -406,10 +406,15 @@ func (s Server) ensureInclude() error {
 	return nil
 }
 
-// status reports whether the server is already running. pg_ctl's exit codes are
-// the interface: 0 means running, 3 means not running, anything else is a
-// failure worth reporting.
-func (s Server) status(ctx context.Context) (bool, error) {
+// Status reports whether the server is running, WITHOUT starting it.
+//
+// It is exported because a caller that has to stop the server (rafikid's
+// physical backup and restore) must know whether it owes a restart, and
+// Server.Ensure is the wrong question for that: Ensure STARTS a server that was
+// down, so asking it would change the very thing the caller is trying not to
+// change. pg_ctl's exit codes are the interface: 0 means running, 3 means not
+// running, anything else is a failure worth reporting.
+func (s Server) Status(ctx context.Context) (bool, error) {
 	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
 	out, err := command(ctx, pgctl, "status", "-D", s.DataDir).CombinedOutput()
 	if err == nil {
@@ -420,6 +425,34 @@ func (s Server) status(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("embedpg: %s status failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
+}
+
+// StopTimeout bounds Stop: pg_ctl's "fast" shutdown waits for clients to leave,
+// and one stuck client must not keep the server up (or the caller blocked)
+// indefinitely.
+const StopTimeout = 60 * time.Second
+
+// Stop shuts the server down with pg_ctl stop -m fast, waiting up to StopTimeout
+// for the postmaster to exit. A server that is not running is not an error:
+// there is nothing to stop, which is the state the caller asked for.
+//
+// The caller owns whether a cancellation should reach this: pass
+// context.WithoutCancel's result when a shutdown must finish even if the work
+// that triggered it was interrupted.
+func (s Server) Stop(ctx context.Context) error {
+	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
+	ctx, cancel := context.WithTimeout(ctx, StopTimeout)
+	defer cancel()
+
+	out, err := command(ctx, pgctl, "stop", "-m", "fast", "-w",
+		"-t", strconv.Itoa(int(StopTimeout.Seconds())), "-D", s.DataDir).CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "no server running") {
+			return nil
+		}
+		return fmt.Errorf("embedpg: %s stop failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // start runs pg_ctl start, which waits for the server to accept connections

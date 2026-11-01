@@ -247,37 +247,45 @@ func TestDbBackupRefusesOlderPgDump(t *testing.T) {
 	c.Eq(0, len(entries), "a refused backup must leave no file behind, got: %v", entries)
 }
 
-// stubBackupOps replaces the three operations a physical backup performs, so a
-// test can watch the order — in particular that the restart cannot be skipped.
-func stubBackupOps(t *testing.T, stop func(context.Context, embedpg.Server) error,
+// stubBackupOps replaces the four operations a physical backup performs, so a
+// test can watch the order — in particular that the restart cannot be skipped
+// and that a server that was down is never started.
+func stubBackupOps(t *testing.T, running bool, stop func(context.Context, embedpg.Server) error,
 	pack func(io.Writer, string, string) error, ops *[]string) {
 	t.Helper()
 
+	// A real data directory: the command stats it before asking anything, and a
+	// backup may not create one.
+	dataDir := t.TempDir()
 	origServer := newEmbeddedServer
 	t.Cleanup(func() { newEmbeddedServer = origServer })
 	newEmbeddedServer = func() embedpg.Server {
-		return embedpg.Server{BinDir: "/fake/bin", DataDir: "/fake/pg"}
+		return embedpg.Server{BinDir: "/fake/bin", DataDir: dataDir}
 	}
 
 	orig := backupEmbedded
 	t.Cleanup(func() { backupEmbedded = orig })
 	backupEmbedded = embeddedBackupOps{
-		ensure: func(context.Context, embedpg.Server) error {
-			*ops = append(*ops, "ensure")
-			return nil
+		status: func(context.Context, embedpg.Server) (bool, error) {
+			*ops = append(*ops, "status")
+			return running, nil
 		},
 		stop: stop,
+		start: func(context.Context, embedpg.Server) error {
+			*ops = append(*ops, "start")
+			return nil
+		},
 		pack: pack,
 	}
 }
 
-// The safety property of a physical backup: the server is stopped for the copy
-// and started again even when the copy fails. Leaving the install down would
-// make the failure worse than the backup was worth, and the operator would have
-// no working database to take a second backup with.
+// The safety property of a physical backup: a server that was running is
+// stopped for the copy and started again even when the copy fails. Leaving the
+// install down would make the failure worse than the backup was worth, and the
+// operator would have no working database to take a second backup with.
 func TestDbBackupPhysicalRestartsAfterFailedArchive(t *testing.T) {
 	var ops []string
-	stubBackupOps(t,
+	stubBackupOps(t, true,
 		func(context.Context, embedpg.Server) error {
 			ops = append(ops, "stop")
 			return nil
@@ -295,18 +303,103 @@ func TestDbBackupPhysicalRestartsAfterFailedArchive(t *testing.T) {
 	c := assert.NewAborting(t)
 	c.Error(err, "want the packing error, got nil")
 	c.StrContains(err.Error(), "no space left on device", "error, got: %v", err)
-	c.EqDeep([]string{"ensure", "stop", "pack", "ensure"}, ops,
+	c.EqDeep([]string{"status", "stop", "pack", "start"}, ops,
 		"the server must be stopped once and started again after the failure, got ops")
 	entries, rerr := os.ReadDir(dir)
 	c.NoError(rerr, "read the backup directory")
 	c.Eq(0, len(entries), "a failed backup must leave no partial file behind, got: %v", entries)
 }
 
+// A backup must not change whether the install is up: a server that was DOWN is
+// never started, so a cold install stays cold and the copy is of a quiet
+// cluster either way.
+func TestDbBackupPhysicalLeavesAColdInstallAlone(t *testing.T) {
+	var ops []string
+	stubBackupOps(t, false,
+		func(context.Context, embedpg.Server) error {
+			t.Error("stop was called for a server that was not running")
+			return nil
+		},
+		func(w io.Writer, _ string, _ string) error {
+			ops = append(ops, "pack")
+			_, err := io.WriteString(w, "archive bytes")
+			return err
+		},
+		&ops)
+
+	path := filepath.Join(t.TempDir(), "app")
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+
+	c := assert.NewAborting(t)
+	c.NoError(err, "runBackup returned error")
+	c.EqDeep([]string{"status", "pack"}, ops,
+		"a stopped server must be packed as it is, with no stop and no start, got ops")
+	data, rerr := os.ReadFile(path + ".txz")
+	c.NoError(rerr, "the archive must be at the suffixed path")
+	c.Eq("archive bytes", string(data), "archive contents, got")
+}
+
+// A data directory that does not exist is an error: a backup copies what is
+// there, and creating the directory would produce an empty archive that looks
+// like a success. Nothing is asked of the server, let alone started.
+func TestDbBackupPhysicalRefusesAMissingDataDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-pg")
+
+	origServer := newEmbeddedServer
+	t.Cleanup(func() { newEmbeddedServer = origServer })
+	newEmbeddedServer = func() embedpg.Server {
+		return embedpg.Server{BinDir: "/fake/bin", DataDir: missing}
+	}
+	orig := backupEmbedded
+	t.Cleanup(func() { backupEmbedded = orig })
+	backupEmbedded = embeddedBackupOps{
+		status: func(context.Context, embedpg.Server) (bool, error) {
+			t.Error("status was asked about a service whose data directory does not exist")
+			return false, nil
+		},
+		stop: func(context.Context, embedpg.Server) error {
+			t.Error("stop was called with no data directory")
+			return nil
+		},
+		start: func(context.Context, embedpg.Server) error {
+			t.Error("start was called with no data directory")
+			return nil
+		},
+		pack: func(io.Writer, string, string) error {
+			t.Error("pack was called with no data directory")
+			return nil
+		},
+	}
+
+	path := filepath.Join(t.TempDir(), "app")
+	err := runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+
+	c := assert.NewAborting(t)
+	c.Error(err, "want a refusal for a missing data directory, got nil")
+	c.StrContains(err.Error(), missing, "the refusal must name the directory, got: %v", err)
+	c.StrContains(err.Error(), "no data directory", "the refusal must say what is wrong, got: %v", err)
+	_, statErr := os.Stat(path + ".txz")
+	c.True(os.IsNotExist(statErr), "a refused backup must write nothing, got stat: %v", statErr)
+	c.True(!filepathExists(missing), "the refusal must not create the data directory, got: %s", missing)
+
+	// The same refusal covers a path that exists but is not a directory.
+	c.NoError(os.WriteFile(missing, []byte("not a directory"), 0o600), "write the blocker file")
+	err = runBackup(context.Background(), embeddedDSN, path, formatTXZ, io.Discard)
+	c.Error(err, "want a refusal for a non-directory data dir, got nil")
+	c.StrContains(err.Error(), "is not a directory", "error, got: %v", err)
+}
+
+// filepathExists reports whether path exists at all.
+func filepathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // A successful physical backup has the same shape, and reports the format it
 // actually wrote.
 func TestDbBackupPhysicalReportsTheArchive(t *testing.T) {
 	var ops []string
-	stubBackupOps(t,
+	stubBackupOps(t, true,
 		func(context.Context, embedpg.Server) error {
 			ops = append(ops, "stop")
 			return nil
@@ -324,7 +417,7 @@ func TestDbBackupPhysicalReportsTheArchive(t *testing.T) {
 
 	c := assert.NewAborting(t)
 	c.NoError(err, "runBackup returned error: %s", stderr.String())
-	c.EqDeep([]string{"ensure", "stop", "pack " + formatTGZ, "ensure"}, ops, "ops, got")
+	c.EqDeep([]string{"status", "stop", "pack " + formatTGZ, "start"}, ops, "ops, got")
 	data, rerr := os.ReadFile(path + ".tgz")
 	c.NoError(rerr, "the archive must be at the suffixed path")
 	c.Eq("archive bytes", string(data), "archive contents, got")
@@ -336,7 +429,7 @@ func TestDbBackupPhysicalReportsTheArchive(t *testing.T) {
 // starting it again would be a second start of a running server.
 func TestDbBackupPhysicalDoesNotRestartAfterFailedStop(t *testing.T) {
 	var ops []string
-	stubBackupOps(t,
+	stubBackupOps(t, true,
 		func(context.Context, embedpg.Server) error {
 			ops = append(ops, "stop")
 			return errors.New("pg_ctl: cannot stop the server")
@@ -352,7 +445,7 @@ func TestDbBackupPhysicalDoesNotRestartAfterFailedStop(t *testing.T) {
 	c := assert.NewAborting(t)
 	c.Error(err, "want the stop error, got nil")
 	c.StrContains(err.Error(), "cannot stop the server", "error, got: %v", err)
-	c.EqDeep([]string{"ensure", "stop"}, ops, "a failed stop must not be followed by a restart, got ops")
+	c.EqDeep([]string{"status", "stop"}, ops, "a failed stop must not be followed by a restart, got ops")
 }
 
 // The archive is a real tar stream: names are relative to the data directory

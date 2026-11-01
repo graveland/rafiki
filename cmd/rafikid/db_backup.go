@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/jackc/pgx/v5"
@@ -71,11 +70,14 @@ The dump is taken over the wire with the connection in the PG* environment,
 never on pg_dump's command line, exactly as psql receives it. A pg_dump older
 than the server's major version is refused: it cannot dump a newer server.
 
-A physical copy needs a quiet data directory, so the embedded server is stopped
-(-m fast, bounded) and started again in a defer — a backup that fails, or is
-interrupted, still leaves the install up. A configured RAFIKI_DB names a server
-on some other host, which has no data directory here, so the physical formats
-are refused for it.
+A physical copy is of a quiet data directory, and a backup does not change
+whether the install is up: a server that is RUNNING is stopped (-m fast,
+bounded) and started again in a defer, so a copy that fails or is interrupted
+still leaves it up, while a server that is NOT running is left alone and its
+directory is copied as it stands. A data directory that does not exist is an
+error, never something this command creates. A configured RAFIKI_DB names a
+server on some other host, which has no data directory here, so the physical
+formats are refused for it.
 
 The path, format and size are printed to stderr, so a script's stdout stays
 clean. The extension is appended when <path> has none.`,
@@ -290,30 +292,40 @@ func majorFromVersion(v string) (int, error) {
 // embeddedBackupOps are the operations a physical backup performs on the private
 // server. They are function fields because the restart is the safety property
 // here, and the only way to prove it is to make packing fail: the real set is
-// pg_ctl (through Server.Ensure for start), the test set records the order.
+// pg_ctl through pkg/embedpg, the test set records the order.
 type embeddedBackupOps struct {
-	// ensure makes the server ready, starting it if it is not running. It runs
-	// before the stop (so the data directory exists and the stop is a stop) and
-	// again from the defer (so a failed backup never leaves the install down).
-	ensure func(context.Context, embedpg.Server) error
+	// status reports whether the server is running, WITHOUT starting it. A backup
+	// must not change whether the install is up, so it may not call Ensure (which
+	// starts a server that was down, and initdbs a directory that has none).
+	status func(context.Context, embedpg.Server) (bool, error)
 	// stop shuts the server down: a quiet cluster is what makes a physical copy
-	// consistent. It is bounded, and it finishes even if the backup was
-	// interrupted — a half-stopped server is worse than a slow one.
+	// consistent. It is bounded by embedpg.StopTimeout and runs detached from the
+	// backup's context, because a half-stopped server is worse than a slow one.
 	stop func(context.Context, embedpg.Server) error
+	// start brings back the server stop shut down. It is Server.Ensure, because a
+	// restart must end up exactly where a normal start would — same readiness
+	// check, same rafiki.conf — and it cannot create anything here: the server
+	// was running, so the directory and its PG_VERSION exist.
+	start func(context.Context, embedpg.Server) error
 	// pack writes one archive of dir in format.
 	pack func(io.Writer, string, string) error
 }
 
 var backupEmbedded = embeddedBackupOps{
-	ensure: func(ctx context.Context, s embedpg.Server) error {
+	status: func(ctx context.Context, s embedpg.Server) (bool, error) { return s.Status(ctx) },
+	stop: func(ctx context.Context, s embedpg.Server) error {
+		return s.Stop(context.WithoutCancel(ctx))
+	},
+	start: func(ctx context.Context, s embedpg.Server) error {
 		_, err := s.Ensure(ctx)
 		return err
 	},
-	stop: stopEmbeddedServer,
 	pack: writeDataDirArchive,
 }
 
-// runPhysicalBackup copies the embedded data directory, stopped.
+// runPhysicalBackup copies the embedded data directory as it is: a server that
+// is running is stopped for the copy and started again afterwards, and one that
+// is not is left alone.
 func runPhysicalBackup(ctx context.Context, configured, path, format string, stderr io.Writer) (err error) {
 	if configured != embeddedDSN {
 		return fmt.Errorf("rafikid db backup: --format %s copies the embedded server's data "+
@@ -322,21 +334,37 @@ func runPhysicalBackup(ctx context.Context, configured, path, format string, std
 	}
 	s := newEmbeddedServer()
 
-	if err := backupEmbedded.ensure(ctx, s); err != nil {
-		return fmt.Errorf("rafikid db backup: embedded database: %w", err)
+	// The directory is copied, never created: there is nothing to back up in one
+	// that does not exist, and creating it here would be a backup that quietly
+	// produced an empty archive.
+	info, err := os.Stat(s.DataDir)
+	if err != nil {
+		return fmt.Errorf("rafikid db backup: the embedded database has no data directory at %s "+
+			"(a backup copies what is there; start the server once, or set RAFIKI_DB to a server "+
+			"you provide): %w", s.DataDir, err)
 	}
-	if serr := backupEmbedded.stop(ctx, s); serr != nil {
+	if !info.IsDir() {
+		return fmt.Errorf("rafikid db backup: %s is not a directory", s.DataDir)
+	}
+
+	running, serr := backupEmbedded.status(ctx, s)
+	if serr != nil {
 		return fmt.Errorf("rafikid db backup: %w", serr)
 	}
-	// From here on the server is DOWN, so the restart is unconditional: it runs
-	// on a packing failure and on a cancelled context alike. The context is
-	// detached for exactly that reason — Ctrl-C must not be able to leave the
-	// install down.
-	defer func() {
-		if serr := backupEmbedded.ensure(context.WithoutCancel(ctx), s); serr != nil {
-			err = errors.Join(err, fmt.Errorf("rafikid db backup: restarting the embedded database: %w", serr))
+	if running {
+		if serr := backupEmbedded.stop(ctx, s); serr != nil {
+			return fmt.Errorf("rafikid db backup: %w", serr)
 		}
-	}()
+		// From here on the server is DOWN, so the restart is unconditional: it runs
+		// on a packing failure and on a cancelled context alike. The context is
+		// detached for exactly that reason — Ctrl-C must not be able to leave the
+		// install down.
+		defer func() {
+			if serr := backupEmbedded.start(context.WithoutCancel(ctx), s); serr != nil {
+				err = errors.Join(err, fmt.Errorf("rafikid db backup: restarting the embedded database: %w", serr))
+			}
+		}()
+	}
 
 	size, perr := writeBackupFile(path, func(w io.Writer, _ string) error {
 		return backupEmbedded.pack(w, s.DataDir, format)
@@ -347,48 +375,6 @@ func runPhysicalBackup(ctx context.Context, configured, path, format string, std
 	fmt.Fprintf(stderr, "rafikid db backup: wrote %s (format %s, %s)\n",
 		path, format, humanize.Bytes(uint64(size)))
 	return nil
-}
-
-// stopEmbeddedTimeout bounds pg_ctl stop: "fast" waits for clients to leave, and
-// one stuck client must not keep the install down (or this command running)
-// indefinitely.
-const stopEmbeddedTimeout = 60 * time.Second
-
-// stopEmbeddedServer runs pg_ctl stop -m fast against the private server.
-func stopEmbeddedServer(ctx context.Context, s embedpg.Server) error {
-	pgctl := filepath.Join(s.BinDir, "bin", "pg_ctl")
-	// Detached from the backup's context for the reason the restart is: this is
-	// the command that puts the server into the state the restart has to undo.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopEmbeddedTimeout)
-	defer cancel()
-
-	out, err := embedpgCommand(ctx, pgctl, "stop", "-m", "fast", "-w",
-		"-t", strconv.Itoa(int(stopEmbeddedTimeout.Seconds())), "-D", s.DataDir)
-	if err != nil {
-		// pg_ctl reports "no server running" as an ordinary failure. There is
-		// nothing to stop, which is the state the caller wanted.
-		if strings.Contains(string(out), "no server running") {
-			return nil
-		}
-		return fmt.Errorf("%s stop failed: %w: %s", pgctl, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// embedpgCommand runs one pg_ctl command with the same minimal environment
-// pkg/embedpg gives its subprocesses. pg_ctl is short-lived, but it is handed
-// the daemon's data directory, and nothing about a backup needs the daemon's
-// secrets in the environment of the process doing it.
-func embedpgCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	env := make([]string, 0, 4)
-	for _, k := range []string{"PATH", "HOME", "TMPDIR", "TZ"} {
-		if v := os.Getenv(k); v != "" {
-			env = append(env, k+"="+v)
-		}
-	}
-	cmd.Env = env
-	return cmd.CombinedOutput()
 }
 
 // writeBackupFile writes a backup atomically: the bytes go to a temporary

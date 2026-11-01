@@ -159,3 +159,66 @@ func TestResolveLogLevel(t *testing.T) {
 		t.Errorf("unset everywhere = %v, %v; want info, nil", level, err)
 	}
 }
+
+// A `--` is POSIX end-of-flags: everything after it is an operand, however it is
+// spelled, and rewriting one changes what it means. `rafikid db psql -- -Atc …`
+// is exactly that case — psql's combined shorthands are operands here, not
+// rafikid flags — and normalizeArg would otherwise hand psql a `--Atc` it
+// rejects.
+func TestNormalizeArgsForPflagStopsAtDoubleDash(t *testing.T) {
+	origArgs := os.Args
+	t.Cleanup(func() { os.Args = origArgs })
+	c := assert.NewAborting(t)
+
+	os.Args = []string{"rafikid", "db", "psql", "--db", "postgres://u@h/db", "--", "-Atc", "select 1"}
+	normalizeArgsForPflag()
+	c.EqDeep([]string{"rafikid", "db", "psql", "--db", "postgres://u@h/db", "--", "-Atc", "select 1"},
+		os.Args, "nothing after the -- may be rewritten, got")
+
+	// Before the -- the single-dash long form is still rewritten for pflag: that
+	// half of the contract is unchanged.
+	os.Args = []string{"rafikid", "fundi", "-model", "x"}
+	normalizeArgsForPflag()
+	c.EqDeep([]string{"rafikid", "fundi", "--model", "x"}, os.Args,
+		"a long form before the -- must still be normalized, got")
+
+	// A single-character shorthand was never rewritten, before or after the --.
+	os.Args = []string{"rafikid", "db", "psql", "--", "-c", "select 1"}
+	normalizeArgsForPflag()
+	c.EqDeep([]string{"rafikid", "db", "psql", "--", "-c", "select 1"}, os.Args,
+		"a single-char shorthand must survive, got")
+}
+
+// The end of the same path, through cobra: what psql is actually handed. This is
+// the test the unit-level ones cannot be — it starts from a realistic os.Args,
+// runs the normaliser main() runs, and lets the root command parse it.
+func TestNormalizeArgsForPflagReachesPsqlUnchanged(t *testing.T) {
+	origArgs := os.Args
+	t.Cleanup(func() { os.Args = origArgs })
+	os.Args = []string{"rafikid", "db", "psql", "--db", "postgres://alice@db.example/app", "--", "-Atc", "select 1"}
+	normalizeArgsForPflag()
+
+	// psql has to be findable; it is never run (execProcess records instead).
+	t.Setenv("PATH", fakePsqlDir(t))
+	origExec := execProcess
+	t.Cleanup(func() { execProcess = origExec })
+	var argv, env []string
+	execProcess = func(_ string, a, e []string) error {
+		argv, env = a, e
+		return nil
+	}
+
+	// No SetArgs: ExecuteC reads os.Args[1:], which is the path main() takes.
+	err := newRootCmd().Execute()
+
+	c := assert.NewAborting(t)
+	c.NoError(err, "the passthrough returned an error")
+	c.EqDeep([]string{"psql", "-Atc", "select 1"}, argv, "psql's argv, got")
+
+	host, ok := envValue(env, "PGHOST")
+	c.True(ok, "the connection must still arrive through the environment, got: %v", env)
+	c.Eq("db.example", host, "PGHOST, got")
+	for _, a := range argv {
+		c.NotStrContains(a, "db.example", "argv must carry no DSN part, got: %v", argv)
+	}
+}

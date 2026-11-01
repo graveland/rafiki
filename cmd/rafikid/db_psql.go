@@ -62,12 +62,19 @@ Everything after "--" is handed to psql unchanged.`,
 				return err
 			}
 			fmt.Fprintln(os.Stderr, inv.target)
-			return syscall.Exec(inv.path, inv.argv, inv.env)
+			return execProcess(inv.path, inv.argv, inv.env)
 		},
 	}
 
 	return cmd
 }
+
+// execProcess is syscall.Exec behind a variable. The passthrough REPLACES this
+// process with psql — the only way it can hand the terminal to a client without
+// going through a shell — and replacing the process is the one thing a test
+// cannot observe. So the single test that has to see the argv psql receives
+// records it here instead.
+var execProcess = syscall.Exec
 
 // pgToolInv is one fully resolved libpq client exec: the program, its argv, the
 // environment carrying the connection, and the line telling the operator where
