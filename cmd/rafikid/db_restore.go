@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -619,208 +618,23 @@ func openDataDirArchive(path string) (*dataDirArchiveReader, error) {
 
 // unpackDataDirArchive unpacks the physical archive at path into dir, which must
 // be a directory this command created for exactly this purpose.
+//
+// The unpacker is pkg/embedpg's ExtractTar, and these are its containment rules:
+// an absolute name or a `..` component is refused lexically; a write may not be
+// redirected through a symlink (O_NOFOLLOW on the final component, and the
+// deepest existing ancestor of the path resolved); a symlink may not be absolute
+// or climb with `..`; every link is created only after the last file; and any
+// other entry type — a socket, a fifo, a device — is refused rather than skipped,
+// because `db backup` refuses to archive one (a skipped entry restores as a
+// corrupt database). That code lives in ONE place deliberately: a second copy
+// here would be the copy that drifts, and it is the same untrusted-input problem
+// in both directions. `db backup` applies the same symlink rule before it writes,
+// so what this refuses is what the archiver refuses to produce.
 func unpackDataDirArchive(path, dir string) error {
 	r, err := openDataDirArchive(path)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	return extractDataDirTar(tar.NewReader(r), dir)
-}
-
-// errEscapesDataDir is what every path check in the unpacker reports. A restore
-// archive is untrusted input: it may have been written by a different install,
-// copied by hand, or not written by rafikid at all.
-var errEscapesDataDir = errors.New("escapes the restored data directory")
-
-// pendingRestoreLink is a symlink entry held back until every directory and file
-// has been written.
-type pendingRestoreLink struct {
-	name string
-	dest string
-	link string
-}
-
-// extractDataDirTar writes every entry of tr into root, the contract `db backup`
-// writes: names relative to the data directory with no wrapper directory, and
-// regular files, directories and symlinks only.
-//
-// The containment rules are the ones pkg/embedpg's binary extractor applies to a
-// downloaded archive (extractTar, fetch.go) — kept in step with it deliberately,
-// because the reason is the same: the archive is untrusted, and a write that
-// follows a link lands outside the tree. An absolute name or a `..` component is
-// refused lexically; mkdirRestoreParents refuses to walk through a symlink;
-// writeRestoreEntry refuses a symlink as its final component with O_NOFOLLOW; a
-// symlink is refused when it is absolute or climbs with `..`; and links are
-// created only after the last file, so while a file is being written there is no
-// link anywhere under root for the kernel to follow.
-//
-// A socket, fifo or device entry is REFUSED rather than skipped: `db backup`
-// refuses to archive one (a skipped entry restores as a corrupt database), so an
-// archive carrying one was not written by this rafikid.
-func extractDataDirTar(tr *tar.Reader, root string) error {
-	var links []pendingRestoreLink
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("reading the archive: %w", err)
-		}
-
-		name := filepath.Clean(hdr.Name)
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("archive entry %q %w", hdr.Name, errEscapesDataDir)
-		}
-		if name == "." {
-			continue // the archive's own root is the directory itself
-		}
-		dest := filepath.Join(root, name)
-		mode := os.FileMode(hdr.Mode) & os.ModePerm
-
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := mkdirRestoreParents(root, dest); err != nil {
-				return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
-			}
-			if err := os.Chmod(dest, dirMode(mode)); err != nil {
-				return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
-			}
-		case tar.TypeReg:
-			if err := mkdirRestoreParents(root, filepath.Dir(dest)); err != nil {
-				return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
-			}
-			if err := writeRestoreEntry(dest, fileMode(mode), tr); err != nil {
-				return fmt.Errorf("archive entry %q: %w", hdr.Name, err)
-			}
-		case tar.TypeSymlink:
-			if filepath.IsAbs(hdr.Linkname) {
-				return fmt.Errorf("archive symlink %q points at the absolute path %q", hdr.Name, hdr.Linkname)
-			}
-			if hasParentRestoreComponent(hdr.Linkname) {
-				return fmt.Errorf("archive symlink %q %w: %q", hdr.Name, errEscapesDataDir, hdr.Linkname)
-			}
-			links = append(links, pendingRestoreLink{name: name, dest: dest, link: hdr.Linkname})
-		default:
-			return fmt.Errorf("archive entry %q is %s; a data directory archive holds regular files, "+
-				"directories and symlinks only", hdr.Name, tarEntryKind(hdr.Typeflag))
-		}
-	}
-
-	for _, l := range links {
-		if err := mkdirRestoreParents(root, filepath.Dir(l.dest)); err != nil {
-			return fmt.Errorf("archive symlink %q: %w", l.name, err)
-		}
-		if _, err := os.Lstat(l.dest); err == nil {
-			return fmt.Errorf("archive symlink %q collides with an entry already extracted", l.name)
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("archive symlink %q: %w", l.name, err)
-		}
-		if err := os.Symlink(l.link, l.dest); err != nil {
-			return fmt.Errorf("archive symlink %q: %w", l.name, err)
-		}
-	}
-	return nil
-}
-
-// dirMode narrows an archive's directory mode to the data directory's own: a
-// recording that lost the mode must not widen access inside a tree that is the
-// server's access control.
-func dirMode(mode os.FileMode) os.FileMode {
-	if mode == 0 {
-		return 0o700
-	}
-	return mode
-}
-
-// fileMode is dirMode for a regular file.
-func fileMode(mode os.FileMode) os.FileMode {
-	if mode == 0 {
-		return 0o600
-	}
-	return mode
-}
-
-// tarEntryKind names an archive entry type the way a refusal should read.
-func tarEntryKind(t byte) string {
-	switch t {
-	case tar.TypeFifo:
-		return "a fifo"
-	case tar.TypeChar:
-		return "a character device"
-	case tar.TypeBlock:
-		return "a block device"
-	case tar.TypeXHeader, tar.TypeXGlobalHeader:
-		return "a pax header"
-	case tar.TypeGNULongName, tar.TypeGNULongLink:
-		return "a GNU long-name entry"
-	}
-	return fmt.Sprintf("an entry of unsupported type %q", string(rune(t)))
-}
-
-// mkdirRestoreParents creates every component of dir under root, refusing to walk
-// through anything that is not a real directory. A component that already exists
-// as a symlink is an error, never something to follow.
-func mkdirRestoreParents(root, dir string) error {
-	rel, err := filepath.Rel(root, dir)
-	if err != nil {
-		return err
-	}
-	if rel == "." {
-		return nil
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%w: %s", errEscapesDataDir, dir)
-	}
-	cur := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
-		fi, err := os.Lstat(cur)
-		if err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-			if err := os.Mkdir(cur, 0o700); err != nil {
-				return err
-			}
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: %s is a symlink", errEscapesDataDir, cur)
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("%s is not a directory", cur)
-		}
-	}
-	return nil
-}
-
-// hasParentRestoreComponent reports whether a relative link target climbs with
-// `..`.
-func hasParentRestoreComponent(link string) bool {
-	for _, part := range strings.Split(link, "/") {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
-}
-
-// writeRestoreEntry creates dest with mode and copies the entry's body into it.
-// The final component must not be a symlink: O_NOFOLLOW makes the kernel refuse
-// one even if it appeared between the check and the open.
-func writeRestoreEntry(dest string, mode os.FileMode, r io.Reader) error {
-	if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: %s is a symlink", errEscapesDataDir, dest)
-	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, r); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return embedpg.ExtractTar(r, dir)
 }

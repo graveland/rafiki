@@ -570,6 +570,15 @@ func writeDataDirArchive(w io.Writer, dir, format string) error {
 // A socket or a fifo is REFUSED rather than skipped: a skipped entry would make
 // an incomplete archive that restores as a corrupt database, and a stopped
 // cluster has no business producing one.
+//
+// A symlink whose target is absolute or climbs with `..` is REFUSED for the same
+// reason, one step further out: `db restore` unpacks through
+// embedpg.ExtractTar, which refuses exactly those targets, so recording one here
+// would produce a backup its own restore rejects. A backup nobody can restore is
+// not a backup — the refusal names the entry rather than shipping the problem.
+// Every link a real cluster's data directory holds points at a sibling or down
+// into its own subtree; one that leaves the tree — a hand-moved pg_wal, a
+// tablespace kept outside it — has to be re-homed, or the backup taken as a dump.
 func tarDataDir(tw *tar.Writer, dir string) error {
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -595,6 +604,9 @@ func tarDataDir(tw *tar.Writer, dir string) error {
 			if link, err = os.Readlink(path); err != nil {
 				return err
 			}
+			if err := checkArchivableSymlink(path, link); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("%s is not a regular file, directory or symlink", path)
 		}
@@ -612,6 +624,27 @@ func tarDataDir(tw *tar.Writer, dir string) error {
 		}
 		return nil
 	})
+}
+
+// checkArchivableSymlink refuses a symlink whose target `db restore` would
+// refuse: an absolute one, or one that climbs with `..`. The two commands share
+// one extractor (embedpg.ExtractTar) and those are the targets it refuses, so
+// recording one would produce an archive this install cannot restore — a backup
+// that exists only to fail at the worst moment. The `..` test is the string test
+// embedpg.hasParentComponent applies, and no more: the containment decision
+// stays in one place.
+func checkArchivableSymlink(path, target string) error {
+	if filepath.IsAbs(target) {
+		return fmt.Errorf("%s is a symlink to the absolute path %q; db restore refuses an absolute "+
+			"symlink target, so this archive could not be restored", path, target)
+	}
+	for _, part := range strings.Split(target, "/") {
+		if part == ".." {
+			return fmt.Errorf("%s is a symlink to %q, which climbs with \"..\"; db restore refuses a "+
+				"symlink target that climbs, so this archive could not be restored", path, target)
+		}
+	}
+	return nil
 }
 
 // copyInto copies exactly size bytes of the file at path into w. The size is

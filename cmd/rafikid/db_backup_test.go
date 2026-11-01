@@ -664,6 +664,49 @@ func TestDbBackupArchiveRefusesAFifo(t *testing.T) {
 	c.StrContains(err.Error(), fifo, "the refusal must name the entry, got: %v", err)
 }
 
+// A symlink the restore would refuse is refused at ARCHIVE time instead: an
+// absolute target, or one that climbs with `..` (`db restore` unpacks through
+// pkg/embedpg's ExtractTar, which refuses exactly those). Recording one would
+// produce a backup that fails the moment it is needed, so the archiver names the
+// entry and writes nothing.
+func TestDbBackupArchiveRefusesAnEscapingSymlink(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "an absolute target", target: "/var/lib/postgresql/wal", want: "absolute path"},
+		{name: "a climbing target", target: "../../wal", want: "climbs"},
+		{name: "a target that only looks like it stays", target: "base/../base", want: "climbs"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			link := filepath.Join(dir, "pg_wal")
+			c := assert.NewAborting(t)
+			c.NoError(os.Symlink(tc.target, link), "symlink %s -> %s", link, tc.target)
+
+			var buf bytes.Buffer
+			err := writeDataDirArchive(&buf, dir, formatTGZ)
+
+			c.Error(err, "want a refusal for a symlink target the restore refuses, got nil")
+			c.StrContains(err.Error(), link, "the refusal must name the entry, got: %v", err)
+			c.StrContains(err.Error(), tc.want, "the refusal must say what is wrong with the target, got: %v", err)
+		})
+	}
+
+	// A relative target that stays inside the tree is archived as it is: the rule
+	// is escape, not relativity.
+	dir := t.TempDir()
+	c := assert.NewAborting(t)
+	c.NoError(os.WriteFile(filepath.Join(dir, "PG_VERSION"), []byte("18\n"), 0o600), "write PG_VERSION")
+	c.NoError(os.Symlink("PG_VERSION", filepath.Join(dir, "version-link")), "symlink")
+
+	var buf bytes.Buffer
+	c.NoError(writeDataDirArchive(&buf, dir, formatTGZ), "a sibling symlink must be archived, got error")
+}
+
 // The cobra wiring, not just the function: one path and no more, an unknown
 // --format refused before anything is created, and --force carried through to the
 // physical path (the only place the downtime is accepted).

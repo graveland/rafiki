@@ -241,7 +241,7 @@ func (s Server) extract(jarPath, url string, a artifact) error {
 	if err != nil {
 		return fmt.Errorf("embedpg: %w", err)
 	}
-	if err := extractTar(tar.NewReader(xr), tmp); err != nil {
+	if err := ExtractTar(xr, tmp); err != nil {
 		os.RemoveAll(tmp)
 		return err
 	}
@@ -260,7 +260,8 @@ func (s Server) extract(jarPath, url string, a artifact) error {
 }
 
 // errEscapesRoot is what every path check in the extractor reports. The archive
-// is the only untrusted input in this package.
+// is the only untrusted input in this package — and the reason ExtractTar is
+// exported, because `rafikid db restore` unpacks an archive just as untrusted.
 var errEscapesRoot = errors.New("escapes the extraction root")
 
 // resolveWithin maps dest onto the real path creating it would touch, and
@@ -277,10 +278,10 @@ var errEscapesRoot = errors.New("escapes the extraction root")
 // A DANGLING symlink is the subtle case: EvalSymlinks reports ErrNotExist for it
 // exactly as it does for a component that does not exist yet, and treating the
 // two alike hands the link back as a plain name for the kernel to follow. The
-// Lstat below separates them. (extractTar's phase ordering means no link exists
+// Lstat below separates them. (ExtractTar's phase ordering means no link exists
 // while files are written at all; this is the second, independent layer.)
 //
-// root must already be resolved; extractTar does that once, because the
+// root must already be resolved; ExtractTar does that once, because the
 // temporary directory is under a symlinked /tmp on macOS.
 func resolveWithin(root, dest string) (string, error) {
 	probe := dest
@@ -351,6 +352,8 @@ func mkdirParents(root, dir string) error {
 }
 
 // hasParentComponent reports whether a relative link target climbs with `..`.
+// `rafikid db backup` applies the same test before it writes a link, so an
+// archive it produces never carries one this refuses.
 func hasParentComponent(link string) bool {
 	for _, part := range strings.Split(link, "/") {
 		if part == ".." {
@@ -358,6 +361,34 @@ func hasParentComponent(link string) bool {
 		}
 	}
 	return false
+}
+
+// entryMode narrows an entry's recorded permission bits to def when it recorded
+// none. A zero-mode file is unreadable and a zero-mode directory unusable, so an
+// archive that lost the bits (or never had them) gets the private default rather
+// than a tree nothing can use.
+func entryMode(mode int64, def os.FileMode) os.FileMode {
+	if m := os.FileMode(mode) & os.ModePerm; m != 0 {
+		return m
+	}
+	return def
+}
+
+// tarEntryKind names an archive entry type the way a refusal should read.
+func tarEntryKind(t byte) string {
+	switch t {
+	case tar.TypeFifo:
+		return "a fifo"
+	case tar.TypeChar:
+		return "a character device"
+	case tar.TypeBlock:
+		return "a block device"
+	case tar.TypeXHeader, tar.TypeXGlobalHeader:
+		return "a pax header"
+	case tar.TypeGNULongName, tar.TypeGNULongLink:
+		return "a GNU long-name entry"
+	}
+	return fmt.Sprintf("an entry of unsupported type %q", string(rune(t)))
 }
 
 // pendingSymlink is a symlink entry held back until every directory and file has
@@ -368,8 +399,19 @@ type pendingSymlink struct {
 	link string
 }
 
-// extractTar writes every entry of tr under root. Anything that could land
-// outside root — an absolute name, a parent-relative name, a symlink chain
+// pendingDir is a directory whose recorded mode is applied once the whole
+// archive has been written. Directories are created with a mode anything under
+// them can be written into, so an entry recorded as read-only does not make the
+// entries under it unwritable — the same reason the links wait.
+type pendingDir struct {
+	name string
+	dest string
+	mode os.FileMode
+}
+
+// ExtractTar writes every entry of the tar stream r under root, keeping each
+// entry's file type, symlink target and permission bits. Anything that could
+// land outside root — an absolute name, a parent-relative name, a symlink chain
 // pointing out — aborts the extraction: a partial tree is discarded by the
 // caller.
 //
@@ -384,12 +426,23 @@ type pendingSymlink struct {
 // link is also refused when it is absolute or when its target climbs with `..`,
 // which leaves every link pointing strictly down inside its own directory — a
 // chain of those can never ascend.
-func extractTar(tr *tar.Reader, root string) error {
+//
+// Directory modes are held back the same way and applied after the links, so a
+// directory the archive recorded as read-only is not made read-only before the
+// entries under it have been written.
+//
+// It is EXPORTED because every archive this project unpacks is untrusted: the
+// downloaded build above is one, and `rafikid db restore`'s physical archive is
+// another. One implementation is what keeps the second from being a copy that
+// drifts from the first.
+func ExtractTar(r io.Reader, root string) error {
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return fmt.Errorf("embedpg: %w", err)
 	}
+	tr := tar.NewReader(r)
 	var links []pendingSymlink
+	var dirs []pendingDir
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -416,11 +469,12 @@ func extractTar(tr *tar.Reader, root string) error {
 			if err := mkdirParents(root, dest); err != nil {
 				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
 			}
+			dirs = append(dirs, pendingDir{name: name, dest: dest, mode: entryMode(hdr.Mode, 0o700)})
 		case tar.TypeReg:
 			if err := mkdirParents(root, filepath.Dir(dest)); err != nil {
 				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
 			}
-			if err := writeEntry(dest, os.FileMode(hdr.Mode)&0o777, tr); err != nil {
+			if err := writeEntry(dest, entryMode(hdr.Mode, 0o600), tr); err != nil {
 				return fmt.Errorf("embedpg: archive entry %q: %w", hdr.Name, err)
 			}
 		case tar.TypeSymlink:
@@ -432,7 +486,8 @@ func extractTar(tr *tar.Reader, root string) error {
 			}
 			links = append(links, pendingSymlink{name: name, dest: dest, link: hdr.Linkname})
 		default:
-			return fmt.Errorf("embedpg: archive entry %q has unsupported type %q", hdr.Name, string(hdr.Typeflag))
+			return fmt.Errorf("embedpg: archive entry %q is %s; only regular files, directories and "+
+				"symlinks can be extracted", hdr.Name, tarEntryKind(hdr.Typeflag))
 		}
 	}
 
@@ -447,6 +502,12 @@ func extractTar(tr *tar.Reader, root string) error {
 		}
 		if err := os.Symlink(l.link, l.dest); err != nil {
 			return fmt.Errorf("embedpg: archive symlink %q: %w", l.name, err)
+		}
+	}
+
+	for _, d := range dirs {
+		if err := os.Chmod(d.dest, d.mode); err != nil {
+			return fmt.Errorf("embedpg: archive directory %q: %w", d.name, err)
 		}
 	}
 	return nil

@@ -32,18 +32,12 @@ type tarEntry struct {
 	body     string
 }
 
-// buildJar packs entries as a tar.xz and wraps that as the single entry of a
-// zip, which is exactly the shape of the zonky embedded-postgres jar: a zip
-// whose only interesting member is a .txz.
-func buildJar(t *testing.T, entryName string, entries []tarEntry) []byte {
+// buildTar packs entries as a plain tar stream, which is what ExtractTar reads:
+// no jar, no compression — the extraction guards are the subject.
+func buildTar(t *testing.T, entries []tarEntry) []byte {
 	t.Helper()
-
-	var txz bytes.Buffer
-	xw, err := xz.NewWriter(&txz)
-	if err != nil {
-		t.Fatalf("xz.NewWriter: %v", err)
-	}
-	tw := tar.NewWriter(xw)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
 	for _, e := range entries {
 		hdr := &tar.Header{
 			Name:     e.name,
@@ -65,6 +59,23 @@ func buildJar(t *testing.T, entryName string, entries []tarEntry) []byte {
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatalf("tar.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// buildJar packs entries as a tar.xz and wraps that as the single entry of a
+// zip, which is exactly the shape of the zonky embedded-postgres jar: a zip
+// whose only interesting member is a .txz.
+func buildJar(t *testing.T, entryName string, entries []tarEntry) []byte {
+	t.Helper()
+
+	var txz bytes.Buffer
+	xw, err := xz.NewWriter(&txz)
+	if err != nil {
+		t.Fatalf("xz.NewWriter: %v", err)
+	}
+	if _, err := xw.Write(buildTar(t, entries)); err != nil {
+		t.Fatalf("xz.Write: %v", err)
 	}
 	if err := xw.Close(); err != nil {
 		t.Fatalf("xz.Close: %v", err)
@@ -268,7 +279,7 @@ func TestExtractRejectsSymlinkChain(t *testing.T) {
 // rule were dropped, `a` would still fail closed at the write, because
 // writeEntry's Lstat and O_NOFOLLOW refuse to write through a link. So this test
 // does NOT isolate the phase ordering — that is defence in depth and not
-// observable from outside extractTar. What it does pin: nothing may appear
+// observable from outside ExtractTar. What it does pin: nothing may appear
 // beside the extraction root, and the extraction must fail rather than
 // half-succeed.
 func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
@@ -296,11 +307,84 @@ func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
 	assertNoDebris(t, s)
 }
 
+// The containment guards live in ExtractTar and are shared with `rafikid db
+// restore`, so they are pinned here against the exported function itself — not
+// only through a download — covering the same table the restore's own copy of
+// the extractor used to carry. Each shape aborts the extraction, and nothing may
+// land beside the root: refusing after writing is not refusing.
+func TestExtractTarRefusesAnEscapingArchive(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries []tarEntry
+		want    string
+	}{
+		{
+			name:    "a parent-relative name",
+			entries: []tarEntry{{name: "../evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"}},
+			want:    "escapes the extraction root",
+		},
+		{
+			name:    "an absolute name",
+			entries: []tarEntry{{name: "/etc/evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"}},
+			want:    "escapes the extraction root",
+		},
+		{
+			name:    "a symlink to an absolute path",
+			entries: []tarEntry{{name: "passwd", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"}},
+			want:    "points at the absolute path",
+		},
+		{
+			name:    "a symlink that climbs out",
+			entries: []tarEntry{{name: "up", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "../../etc"}},
+			want:    "escapes the extraction root",
+		},
+		{
+			name: "a symlink a later entry walks through",
+			entries: []tarEntry{
+				{name: "sub", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "."},
+				{name: "sub/evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
+			},
+			want: "symlink",
+		},
+		{
+			name:    "a fifo",
+			entries: []tarEntry{{name: ".s.PGSQL.5432", mode: 0o644, typeflag: tar.TypeFifo}},
+			want:    "a fifo",
+		},
+		{
+			name:    "a character device",
+			entries: []tarEntry{{name: "dev0", mode: 0o644, typeflag: tar.TypeChar}},
+			want:    "a character device",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			root := filepath.Join(parent, "root")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatalf("mkdir %s: %v", root, err)
+			}
+
+			err := ExtractTar(bytes.NewReader(buildTar(t, tc.entries)), root)
+
+			c := assert.NewCollecting(t)
+			c.Error(err, "want a refusal for %s, got nil", tc.name)
+			c.ErrorContains(err, tc.want, "refusal, got: %v", err)
+			// The escape every one of these shapes aims at: something created
+			// beside the extraction root.
+			left, rerr := os.ReadDir(parent)
+			c.NoError(rerr)
+			c.Len(left, 1, "the extraction created something beside the root: %v", left)
+		})
+	}
+}
+
 // A regular entry named after an earlier symlink must fail closed rather than
 // resolve through the link. It fails at the write: writeEntry's Lstat sees the
 // symlink. The name describes the mechanism, not what this test isolates —
 // creating the links inline instead, the Lstat refuses the same archive and this
-// test still passes. The ordering is defence in depth (see extractTar); nothing
+// test still passes. The ordering is defence in depth (see ExtractTar); nothing
 // here would notice its absence.
 func TestExtractCreatesSymlinksLast(t *testing.T) {
 	jar := buildJar(t, "postgres-test.txz", []tarEntry{
@@ -422,7 +506,8 @@ func TestExtractRejectsUnsupportedEntryType(t *testing.T) {
 
 	err := s.ensureBinaries(context.Background())
 	c := assert.NewCollecting(t)
-	c.ErrorContains(err, "unsupported type")
+	c.ErrorContains(err, "a fifo")
+	c.ErrorContains(err, "only regular files, directories and symlinks")
 	c.ErrorContains(err, "bin/pipe")
 	c.NoDirExists(s.BinDir)
 	assertNoDebris(t, s)

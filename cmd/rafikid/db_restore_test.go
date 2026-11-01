@@ -649,6 +649,11 @@ func TestRestorePhysicalNeverOverwritesAReplacedDir(t *testing.T) {
 // directory, its server and the parent untouched. This is the brief's "every
 // refusal happens before any destructive step" applied to the BYTES: the unpack
 // runs into a staging directory first, and nothing has been stopped when it fails.
+//
+// The unpacker is pkg/embedpg's ExtractTar, so these cases are the restore path
+// over the shared guards; pkg/embedpg's TestExtractTarRefusesAnEscapingArchive
+// pins the same shapes against the function directly, without a restore around
+// them.
 func TestRestorePhysicalRefusesAnEscapingArchive(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -658,12 +663,12 @@ func TestRestorePhysicalRefusesAnEscapingArchive(t *testing.T) {
 		{
 			name:    "a parent-relative name",
 			entries: []tarFixtureEntry{{name: "../evil", body: "x"}},
-			want:    "escapes the restored data directory",
+			want:    "escapes the extraction root",
 		},
 		{
 			name:    "an absolute name",
 			entries: []tarFixtureEntry{{name: "/etc/evil", body: "x"}},
-			want:    "escapes the restored data directory",
+			want:    "escapes the extraction root",
 		},
 		{
 			name:    "a symlink to an absolute path",
@@ -673,7 +678,7 @@ func TestRestorePhysicalRefusesAnEscapingArchive(t *testing.T) {
 		{
 			name:    "a symlink that climbs out",
 			entries: []tarFixtureEntry{{name: "up", link: "../../etc"}},
-			want:    "escapes the restored data directory",
+			want:    "escapes the extraction root",
 		},
 		{
 			name: "a symlink a later entry walks through",
