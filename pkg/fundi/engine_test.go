@@ -138,6 +138,31 @@ func assertFrameTypes(t *testing.T, out string, want []string) {
 	assert.NewAborting(t).Eq(strings.Join(want, ","), strings.Join(got, ","), "frame sequence:\n got %v\nwant %v", got, want)
 }
 
+// assertFrameTypesUpdatesCollapsed compares frame types with consecutive
+// message_update entries collapsed to one, for a streamed turn whose update
+// count is a flush cadence (streamFlushInterval plus StreamEnd's final flush)
+// rather than a property of the turn. Every other frame type is asserted
+// exactly, so a duplicated message_start or message_end still fails, and a turn
+// that emitted NO message_update still fails.
+func assertFrameTypesUpdatesCollapsed(t *testing.T, out string, want []string) {
+	t.Helper()
+	got := collapseStreamUpdates(frameTypes(t, out))
+	assert.NewAborting(t).Eq(strings.Join(want, ","), strings.Join(got, ","), "frame sequence (message_update repeats collapsed):\n got %v\nwant %v", got, want)
+}
+
+// collapseStreamUpdates collapses ONLY consecutive message_update entries,
+// leaving every other frame type exactly as it was emitted.
+func collapseStreamUpdates(types []string) []string {
+	out := make([]string, 0, len(types))
+	for i, typ := range types {
+		if i > 0 && typ == "message_update" && types[i-1] == "message_update" {
+			continue
+		}
+		out = append(out, typ)
+	}
+	return out
+}
+
 // newTestEngine builds an engine over a store-less (in-memory) rafiki
 // conversation driven by a scripted sender.
 func newTestEngine(t *testing.T, ts fakeToolSet, bodies ...string) (*Engine, *syncBuffer) {
@@ -382,12 +407,12 @@ func TestEngineRunsScriptedTurn(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	assertFrameTypes(t, out.String(), []string{
+	assertFrameTypesUpdatesCollapsed(t, out.String(), []string{
 		"message_start", "message_end", // user echo, before agent_start
 		"agent_start",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
 		"tool_execution_start", "tool_execution_end",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn 2 (end_turn)
+		"message_start", "message_update", "message_end", // assistant turn 2 (end_turn)
 		"agent_end", "agent_settled"})
 
 	c.NotEq("", eng.State().SessionID, "State().SessionID is empty; the daemon sniffs it from get_state")
@@ -524,10 +549,10 @@ func TestEngineEmitsAgentErrorOnLoopFailure(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	assertFrameTypes(t, out.String(), []string{
+	assertFrameTypesUpdatesCollapsed(t, out.String(), []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
 		"tool_execution_start", "tool_execution_end",
 		"agent_error",
 		"agent_end", "agent_settled",
@@ -676,10 +701,10 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 	eng.HandleAbort()
 	eng.Wait()
 
-	assertFrameTypes(t, out.String(), []string{
+	assertFrameTypesUpdatesCollapsed(t, out.String(), []string{
 		"message_start", "message_end", // user echo: "go"
 		"agent_start",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
 		"tool_execution_start", "tool_execution_end", // isError, checked below
 		"agent_end", "agent_settled",
 	})
@@ -697,12 +722,12 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 	eng.HandlePrompt("second")
 	eng.Wait()
 
-	allTypes := frameTypes(t, out.String())
-	secondTurn := allTypes[len(allTypes)-9:]
+	allTypes := collapseStreamUpdates(frameTypes(t, out.String()))
+	secondTurn := allTypes[len(allTypes)-8:]
 	want := []string{
 		"message_start", "message_end", // user echo: "second"
 		"agent_start",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn (end_turn)
+		"message_start", "message_update", "message_end", // assistant turn (end_turn)
 		"agent_end", "agent_settled",
 	}
 	c.Eq(strings.Join(want, ","), strings.Join(secondTurn, ","), "second turn's frames:\n got %v\nwant %v (a clean run, no agent_error)", secondTurn, want)
@@ -855,10 +880,10 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 		t.Fatal("Frontend.Run did not return after stdin closed")
 	}
 
-	assertFrameTypes(t, out.String(), []string{
+	assertFrameTypesUpdatesCollapsed(t, out.String(), []string{
 		"message_start", "message_end", // user echo: "go"
 		"agent_start",
-		"message_start", "message_update", "message_update", "message_end", // assistant turn (tool_use)
+		"message_start", "message_update", "message_end", // assistant turn (tool_use)
 		"tool_execution_start", "tool_execution_end", // isError: the tool observed the abort
 		"agent_end", "agent_settled",
 	})
