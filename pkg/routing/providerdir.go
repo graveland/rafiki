@@ -120,6 +120,23 @@ func (d *ProviderDirectory) loaded() bool {
 	return !d.fetched.IsZero()
 }
 
+// knownSlug returns provider's slug when the guard may pin to it: the loaded
+// directory's answer, or a guess when no directory is configured at all (the
+// package-wide convention — a daemon with no OpenRouter provider never observes
+// a turn to pin in the first place). A directory that is configured but has not
+// finished its first load answers false: only= silently drops a slug OpenRouter
+// does not know, so a guess there would buy one request against nothing and
+// then ban a provider that does not exist.
+func (d *ProviderDirectory) knownSlug(provider string) (string, bool) {
+	if d == nil {
+		return guessSlug(provider), true
+	}
+	if !d.loaded() {
+		return "", false
+	}
+	return d.lookup(provider)
+}
+
 // stale reports whether a fetch is due: never fetched or past the TTL, and
 // not inside the failure backoff.
 func (d *ProviderDirectory) stale() bool {

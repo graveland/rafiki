@@ -485,6 +485,13 @@ func (c *Client) resendAfterNoEligible(ctx context.Context, decision providerDec
 	if !noEligibleUpstream(err) {
 		return false
 	}
+	// A refusal of a FALLBACK is not a refusal of this request: the fallback
+	// body was never pinned, so neither the pin's ban nor the line's lift
+	// applies, and resending would only repeat the same body.
+	var fb fallbackError
+	if errors.As(err, &fb) {
+		return false
+	}
 	if decision.pin != "" {
 		return true
 	}
@@ -528,15 +535,17 @@ func (c *Client) sendOnce(ctx context.Context, meta SendMeta, req *msg.Request, 
 	ctx, hdrs := c.rawTraceContext(ctx)
 
 	start := time.Now()
-	resp, servedBy, err := c.callModel(ctx, span, p.primary, p.fallbacks, p.req, p.extra, p.spec, p.decision)
+	resp, servedBy, err := c.callModel(ctx, span, p.primary, p.fallbacks, p.req, p.extra, p.spec, p.decision, ref)
 	latency := int(time.Since(start).Milliseconds())
 	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
 
 	if err != nil {
 		span.RecordError(errors.New(telemetry.ErrorText(err.Error())))
 		span.SetStatus(codes.Error, "")
+		// The guard was told about the PRIMARY's own attempt inside callModel,
+		// not here: the error reaching this line may be a fallback's, and a
+		// fallback is never pinned, so it is never attributable.
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
-		c.observeFailure(ref, p.decision, p.primary, err)
 		// Raw trace: non-streaming error path.
 		c.recordRawTrace(ctx, meta, ref.turnID, p.req, nil, 0, p.primary, latency, err, hdrs)
 		return nil, p.decision, err
@@ -911,6 +920,10 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, req *msg.Requ
 			resent = true
 			c.logger.Warn("no provider eligible; resending with the guard's new state",
 				"model", model, "pin", decision.pin, "had_automatic", decision.hadAutomatic)
+			// The resend is not a rate-limit retry: it must not spend one of the
+			// backoff budget's attempts, or a no-eligible landing on the last
+			// iteration would neither resend nor report its own error.
+			attempt--
 			continue
 		}
 		isRL, retryAfter := isRateLimit(err)
@@ -1195,7 +1208,7 @@ func callSender(ctx context.Context, s Sender, req *msg.Request, extra map[strin
 // the breaker entirely (direct primary, mirroring the routing core's
 // fallback-less behavior) — per the design, an empty Fallback chain is how a
 // consumer opts out of being pinned.
-func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, req *msg.Request, extra map[string]any, spec routing.Spec, decision providerDecision) (*msg.Response, string, error) {
+func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, req *msg.Request, extra map[string]any, spec routing.Spec, decision providerDecision, ref turnRef) (*msg.Response, string, error) {
 	sender := c.senders[primary]
 	if sender == nil {
 		return nil, primary, fmt.Errorf("llm: provider %q not configured", primary)
@@ -1206,6 +1219,9 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 	if breaker == nil {
 		resp, err := callSender(ctx, sender, req, extra)
 		c.recordModelResult(req, err, decision)
+		if err != nil {
+			c.observeFailure(ref, decision, primary, err)
+		}
 		return resp, primary, c.noEligibleError(spec, req.Model, err)
 	}
 
@@ -1216,6 +1232,12 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		if err == nil {
 			return resp, primary, nil
 		}
+		// The PRIMARY's own attempt, observed here rather than by the caller: the
+		// error the caller finally sees may be a fallback's, and a fallback is
+		// never pinned, so it is never attributable. A primary the breaker
+		// skipped reaches neither observation — no request was made, so there is
+		// nothing to blame on it.
+		c.observeFailure(ref, decision, primary, err)
 		if !routing.FailoverWorthy(err) {
 			// not failover-worthy: don't fail over or trip. The no-eligible
 			// wrap below is decoration only (%w), so this classification
@@ -1263,8 +1285,11 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			return resp, fb, nil
 		}
 		// Wrapped with the fallback's own (translated) model id, so the
-		// message names the id OpenRouter actually rejected.
-		lastErr = c.noEligibleError(spec, fbReq.Model, err)
+		// message names the id OpenRouter actually rejected, and marked as a
+		// fallback's failure: this request was never pinned, so its refusal is
+		// not evidence about the pin and must not trigger the no-eligible
+		// resend (see resendAfterNoEligible).
+		lastErr = fallbackError{err: c.noEligibleError(spec, fbReq.Model, err)}
 	}
 	return nil, primary, lastErr
 }
@@ -1325,8 +1350,16 @@ func applyProviderPrefs(model string, decl *providers.ModelDecl, g *routing.Prov
 	}
 	// Whether the guard's OWN ejections are what this request has to route
 	// around — the one thing a no-eligible rejection can be answered by lifting.
+	// A spec `only=` that NAMES providers drops the whole ignore list (see
+	// Spec.Prefs), so on such a request the automatic ejections never rode in it
+	// and lifting them would change nothing while wiping the line's verdicts
+	// process-wide. A cleared `only=` (non-nil, empty) still sends the bans.
 	_, automatic := g.ExclusionsFor(now, model)
-	decision := providerDecision{pin: pin, hadAutomatic: pin == "" && len(automatic) > 0, model: model}
+	decision := providerDecision{
+		pin:          pin,
+		hadAutomatic: pin == "" && len(spec.Only) == 0 && len(automatic) > 0,
+		model:        model,
+	}
 
 	var prefs routing.ProviderPrefs
 	var send bool

@@ -5,6 +5,10 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -575,4 +579,117 @@ func TestLiftedBanIsNotPersisted(t *testing.T) {
 
 	c.Require().Len(sink.recs, 1, "sink rows: the lift only")
 	c.Eq(ReasonLift, sink.recs[0].Reason, "a lifted ban must not be persisted after the lift")
+}
+
+// blockingSink parks its first Append until released, so a test can drive a
+// second guard operation while a ban is mid-append.
+type blockingSink struct {
+	entered chan struct{}
+	release chan struct{}
+	n       atomic.Int32
+	mu      sync.Mutex
+	recs    []EjectionRecord
+}
+
+func (s *blockingSink) Append(_ context.Context, e EjectionRecord) error {
+	// Only the FIRST append parks; later ones must not queue behind it, or the
+	// test would serialise the guard's two appends by itself.
+	if s.n.Add(1) == 1 {
+		close(s.entered)
+		<-s.release
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs = append(s.recs, e)
+	return nil
+}
+
+func (s *blockingSink) Active(context.Context, time.Time) ([]EjectionRecord, error) {
+	return nil, nil
+}
+
+// TestBanReportAndLiftAreSerialised proves the durable log and the map cannot
+// disagree: reporting a ban and lifting a line take the same lock (opMu), so a
+// lift can never slip between a ban's "still standing" check and its append.
+// Without that, a lift during the append leaves the ban row LAST — and the log
+// is latest-row-wins, so Rehydrate would restore a ban the guard had lifted.
+func TestBanReportAndLiftAreSerialised(t *testing.T) {
+	c := assert.NewAborting(t)
+	now := time.Now()
+	key := providerKey{provider: "deepinfra", modelLine: healthModel}
+
+	g := testGuard()
+	sink := &blockingSink{entered: make(chan struct{}), release: make(chan struct{})}
+	g.SetSink(sink)
+
+	g.mu.Lock()
+	rec := g.banLocked(now, key, ReasonOutputCap, structuralTTL, nil)
+	g.mu.Unlock()
+
+	reported := make(chan struct{})
+	go func() {
+		g.reportBan(rec, "c1")
+		close(reported)
+	}()
+	<-sink.entered
+
+	lifted := make(chan struct{})
+	var liftedCount int
+	go func() {
+		liftedCount = g.LiftLine(context.Background(), now, healthModel, "line exhausted")
+		close(lifted)
+	}()
+
+	// The lift either waits for the in-flight append (correct) or runs during it
+	// (wrong, and caught by the ordering assertion below). Waiting here rather
+	// than failing keeps the broken case from deadlocking the test.
+	select {
+	case <-lifted:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(sink.release)
+	<-reported
+	<-lifted
+
+	sink.mu.Lock()
+	recs := append([]EjectionRecord(nil), sink.recs...)
+	sink.mu.Unlock()
+
+	c.Require().Len(recs, 2, "sink rows")
+	c.Eq(ReasonOutputCap, recs[0].Reason, "the ban is appended before the lift")
+	c.Eq(ReasonLift, recs[1].Reason, "the lift is the last row for the key, so Rehydrate stays lifted")
+	c.Eq(1, liftedCount, "lifted count")
+	_, still := g.ejected[key]
+	c.False(still, "the lift removed the ban from memory")
+}
+
+// TestPinForRefusesAnUnloadedDirectory pins the design's "the slug resolves"
+// rule: a configured directory that has not finished its first load answers no
+// pin, because only= silently drops a slug OpenRouter does not know — a guess
+// would buy one request against nothing and then ban a provider that does not
+// exist.
+func TestPinForRefusesAnUnloadedDirectory(t *testing.T) {
+	c := assert.NewAborting(t)
+	now := time.Now()
+
+	g := testGuard()
+	dir := NewProviderDirectory(http.DefaultClient, slog.New(slog.DiscardHandler))
+	dir.mu.Lock()
+	dir.lastFail = now // inside the failure backoff: no fetch is attempted
+	dir.mu.Unlock()
+	g.SetDirectory(dir)
+
+	g.Observe(now, hit("c1", "DeepInfra"))
+	_, ok := g.PinFor(now, "c1", healthModel)
+	c.False(ok, "an unloaded directory must not pin a guessed slug")
+
+	// Once the directory has loaded and lists the provider, the pin resumes.
+	dir.mu.Lock()
+	dir.fetched = now
+	dir.slugs = map[string]string{"deepinfra": "deepinfra"}
+	dir.mu.Unlock()
+
+	slug, ok := g.PinFor(now, "c1", healthModel)
+	c.True(ok, "a loaded directory pins")
+	c.Eq("deepinfra", slug, "slug")
 }

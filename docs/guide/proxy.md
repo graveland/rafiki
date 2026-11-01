@@ -187,7 +187,10 @@ zero routing spec, or an empty conversation id says otherwise
 last served the conversation, so it moves when that provider is banned, when
 another provider serves the line, or when the spec starts excluding it. The
 proxy face (Claude Code children) does not pin: it honours every ban through
-`IgnoredFor` and lets OpenRouter choose.
+`IgnoredFor` and lets OpenRouter choose. It also has no exhaustion path — only a
+fundi child or a daemon job that comes back no-eligible lifts a line
+(`llm.resendAfterNoEligible`) — so on a line served only by Claude Code traffic,
+a set of automatic bans holds until its TTL expires.
 
 **Bans.** A provider is judged per conversation and banned per
 `(model line, provider)` for the whole process — every user's children and the

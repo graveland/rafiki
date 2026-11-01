@@ -159,14 +159,16 @@ func (g *ProviderGuard) banEvidenceLocked(key providerKey, obs Observation, extr
 // foreign code. extra carries any rule-specific log attribute (the no_cache
 // path's streak). The in-memory ban stands whatever the sink says.
 //
-// The durable append is skipped when the ban no longer stands in memory — the
-// log is latest-row-wins per (provider, model line) and seeds Rehydrate, so a
-// row appended after a concurrent LiftLine (a line exhausted while this ban was
-// being reported) would resurrect a ban the guard has already lifted.
+// The durable append runs under opMu — the lock Ban/Lift/LiftLine serialise on —
+// so the log and the map cannot disagree. The log is latest-row-wins per
+// (provider, model line) and seeds Rehydrate, so an append that slipped past a
+// concurrent LiftLine would resurrect a ban the guard has already lifted (or a
+// lift that slipped past a ban would drop one that stands). The standing check
+// and the append are therefore one critical section, and a ban no longer in the
+// map when that section is entered is not written at all.
 func (g *ProviderGuard) reportBan(rec EjectionRecord, conversation string, extra ...any) {
 	g.mu.Lock()
-	logger, sink, onEject, dir := g.logger, g.sink, g.onEject, g.dir
-	cur, standing := g.ejected[providerKey{provider: rec.Provider, modelLine: rec.ModelLine}]
+	logger, onEject, dir := g.logger, g.onEject, g.dir
 	g.mu.Unlock()
 	attrs := []any{"provider", dir.Slug(rec.Provider), "model_line", rec.ModelLine, "reason", string(rec.Reason)}
 	attrs = append(attrs, extra...)
@@ -175,6 +177,13 @@ func (g *ProviderGuard) reportBan(rec EjectionRecord, conversation string, extra
 	if onEject != nil {
 		onEject(rec.Provider, rec.ModelLine, rec.Reason)
 	}
+
+	g.opMu.Lock()
+	defer g.opMu.Unlock()
+	g.mu.Lock()
+	sink := g.sink
+	cur, standing := g.ejected[providerKey{provider: rec.Provider, modelLine: rec.ModelLine}]
+	g.mu.Unlock()
 	if !standing || cur.reason != rec.Reason || !cur.expiresAt.Equal(rec.ExpiresAt) {
 		// Lifted or superseded while this ban was being reported: the log must
 		// agree with memory, so there is nothing to persist.
@@ -378,8 +387,11 @@ func (g *ProviderGuard) ExclusionsFor(now time.Time, model string) (operator, au
 // PinFor returns the provider slug that served the conversation's last
 // successful turn on this model's line, when it is still routable: not in
 // ExclusionsFor's operator or automatic lists. ok is false for a nil guard, an
-// empty conversation, no remembered turn, a turn on another model line, or an
-// excluded provider. The caller still checks the spec (AllowsPin) and any
+// empty conversation, no remembered turn, a turn on another model line, a slug
+// the provider directory has not actually resolved (a guess is never pinned —
+// OpenRouter silently drops an unknown slug from only=, so a wrong guess would
+// buy a request against nothing and then ban a provider that does not exist),
+// or an excluded provider. The caller still checks the spec (AllowsPin) and any
 // model-declaration pin.
 //
 // With observation off (RAFIKI_PROVIDER_GUARD=off) nothing is remembered, so
@@ -395,7 +407,10 @@ func (g *ProviderGuard) PinFor(now time.Time, conversation, model string) (slug 
 	if !had || lt.provider == "" || lt.modelLine != line {
 		return "", false
 	}
-	slug = g.dir.Slug(lt.provider)
+	slug, known := g.dir.knownSlug(lt.provider)
+	if !known {
+		return "", false
+	}
 	operator, automatic := g.exclusionsLocked(now, line)
 	for _, s := range operator {
 		if s == slug {

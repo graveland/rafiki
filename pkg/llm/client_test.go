@@ -590,6 +590,29 @@ func TestNoEligibleOperatorOnlyDoesNotResend(t *testing.T) {
 		ck.Eq(1, openrouter.calls, "an operator ban must not be lifted by a resend")
 	})
 
+	t.Run("spec only with an automatic ban on the line", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		g, sink := pinTestGuard(t)
+		// A real automatic ban on this line, so hadAutomatic would be true if a
+		// spec only= did not suppress it: Spec.Prefs drops the whole ignore list
+		// when only= NAMES a provider, so the bans never rode in this request.
+		g.Observe(time.Now(), routing.Observation{
+			Model: guardModel, Conversation: "seed", Pinned: "deepinfra",
+			Failed: true, FailureKind: routing.FailureNoEligible,
+		})
+		openrouter := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+			respondErr(noEligibleErr(http.StatusBadRequest, "No allowed providers are available for the selected model.")),
+		}}
+		spec := pinSpec()
+		spec.Only = []string{"together"}
+		_, conv := pinConversation(t, pool, g, spec, openrouter)
+		_, err := conv.Send(context.Background(), UserText("hi"))
+		ck.Require().Error(err, "the no-eligible rejection must surface")
+		ck.Eq(1, openrouter.calls, "an ignore list this request never carried must not be lifted")
+		ck.EqDeep([]routing.EjectReason{routing.ReasonUnavailable}, sink.reasons(),
+			"the line's automatic bans must survive: only the seed ban was written")
+	})
+
 	t.Run("spec exclude", func(t *testing.T) {
 		ck := assert.NewCollecting(t)
 		g, _ := pinTestGuard(t)
@@ -642,4 +665,53 @@ func TestNoEligibleResendsOnlyOnce(t *testing.T) {
 		ck.Require().Error(err, "the second no-eligible must reach the caller")
 		ck.Eq(3, openrouter.calls, "one turn, the pinned refusal and ONE resend")
 	})
+}
+
+// TestFallbackFailureIsNotAttributedToThePin pins the attribution rule on the
+// failover path: only the PRIMARY's own attempt is evidence about the pin. A
+// fallback is never pinned (its body carries no auto-pin), so its failure must
+// not be judged against the provider the primary was pinned to — otherwise one
+// fallback no-eligible would ban a healthy provider for four hours.
+func TestFallbackFailureIsNotAttributedToThePin(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := convTestPool(t)
+	g, _ := pinTestGuard(t)
+
+	primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		respondWith(servedResponse("DeepInfra")), // turn 1 is served, so turn 2 is pinned
+		respondErr(overloadedErr()),
+	}}
+	backup := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		respondErr(noEligibleErr(http.StatusBadRequest, "No allowed providers are available for the selected model.")),
+	}}
+	set := &providers.Set{DefaultProvider: "openrouter", Providers: map[string]providers.Provider{
+		"openrouter": {Name: "openrouter", Kind: providers.KindAnthropicOpenRouter, Fallback: []string{"backup"}},
+		"backup":     {Name: "backup", Kind: providers.KindAnthropicOpenRouter},
+	}}
+	c, err := NewClient(
+		WithProviders(set),
+		WithProviderSender("openrouter", primary),
+		WithProviderSender("backup", backup),
+		WithStore(pool),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+		WithProviderGuard(g),
+		WithRouting(pinSpec()),
+		WithBreaker(15*time.Minute),
+	)
+	ck.Require().NoError(err, "NewClient")
+	conv, err := c.Conversation(context.Background(), NewConversation("", "test"),
+		Model("openrouter/"+guardModel), SystemText("sys"))
+	ck.Require().NoError(err, "Conversation")
+
+	sendPinTurn(t, conv) // served by DeepInfra: the conversation is pinned from here
+	_, err = conv.Send(context.Background(), UserText("hi"))
+	ck.Require().Error(err, "both upstreams failed")
+	ck.Eq(1, backup.calls, "the fallback was tried")
+
+	ck.Empty(g.IgnoredFor(time.Now(), guardModel),
+		"a fallback's no-eligible must not ban the pin: the primary's own attempt was merely overloaded")
+	if slug, ok := g.PinFor(time.Now(), conv.ID, guardModel); !ok || slug != "deepinfra" {
+		t.Errorf("PinFor = (%q, %v), want (deepinfra, true): one transient is not a ban", slug, ok)
+	}
 }

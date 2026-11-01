@@ -293,9 +293,11 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 	if obs.Provider != "" {
 		rec, banned := g.successBanLocked(now, line, obs)
 		if banned {
-			// Remember the turn before leaving: the ban's key is the slug, the
-			// no_cache path's key is the display name, so the already-ejected
-			// check below would NOT stop a second ban for the same provider.
+			// Remember the turn before leaving, then return: the ban's key is
+			// the slug while the no_cache path's key is the display name, so
+			// the already-ejected check below would NOT stop a second ban for
+			// the same provider in this same call. The early return is what
+			// keeps one observation to one ban.
 			if obs.Conversation != "" {
 				g.rememberLocked(now, obs)
 			}

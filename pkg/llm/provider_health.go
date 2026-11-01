@@ -74,6 +74,16 @@ func failureObservation(ref turnRef, d providerDecision, err error) routing.Obse
 	}
 }
 
+// fallbackError marks an error produced by the FALLBACK chain rather than by
+// the attempt this request's providerDecision describes. It wraps, so every
+// classifier (errors.As for *msg.APIError, FailoverWorthy, the retry rules)
+// still sees the real error; it exists so the no-eligible resend can tell a
+// refusal of the pinned request from a refusal of a fallback nobody pinned.
+type fallbackError struct{ err error }
+
+func (e fallbackError) Error() string { return e.err.Error() }
+func (e fallbackError) Unwrap() error { return e.err }
+
 // clipFailureDetail is the first failureDetailBytes of err's message, or "" for
 // a nil error.
 func clipFailureDetail(err error) string {
