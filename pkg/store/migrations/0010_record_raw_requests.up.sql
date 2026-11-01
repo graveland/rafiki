@@ -1,4 +1,19 @@
-CREATE TABLE conversations.raw_http_request (
+-- A hypertable when timescaledb is installed; a plain table otherwise (an
+-- embedded install has no timescaledb).
+DO $$
+DECLARE
+    ts_with text := '';
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        ts_with := $w$ WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'created_at',
+    tsdb.enable_columnstore = true,
+    tsdb.segmentby = 'source',
+    tsdb.orderby = 'created_at DESC'
+)$w$;
+    END IF;
+    EXECUTE $ddl$CREATE TABLE conversations.raw_http_request (
     id              UUID NOT NULL DEFAULT uuidv7(),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     conversation_id UUID,
@@ -22,11 +37,6 @@ CREATE TABLE conversations.raw_http_request (
     error           TEXT,
 
     PRIMARY KEY (id, created_at)
-) WITH (
-    tsdb.hypertable,
-    tsdb.partition_column = 'created_at',
-    tsdb.enable_columnstore = true,
-    tsdb.segmentby = 'source',
-    tsdb.orderby = 'created_at DESC'
-);
+)$ddl$ || ts_with;
+END $$;
 CREATE INDEX ON conversations.raw_http_request (conversation_id, created_at DESC);

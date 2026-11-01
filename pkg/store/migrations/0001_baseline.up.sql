@@ -32,7 +32,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS conversation_external_ref_uniq
 -- time-ordered); ordinal is a decorative hint only, NOT a uniqueness key — the
 -- client/proxy path writes 0 every turn. Write-ahead: request + status='pending'
 -- inserted before the call, response + usage filled after.
-CREATE TABLE IF NOT EXISTS conversations.conversation_turn (
+-- A hypertable when timescaledb is installed; a plain table otherwise (an
+-- embedded install has no timescaledb).
+DO $$
+DECLARE
+	ts_with text := '';
+BEGIN
+	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+		ts_with := $w$ WITH (
+	tsdb.hypertable,
+	tsdb.partition_column = 'created_at',
+	tsdb.enable_columnstore = true,
+	tsdb.segmentby = 'conversation_id',
+	tsdb.orderby = 'created_at DESC'
+)$w$;
+	END IF;
+	EXECUTE $ddl$CREATE TABLE IF NOT EXISTS conversations.conversation_turn (
 	id                    UUID NOT NULL DEFAULT uuidv7(),
 	conversation_id       UUID NOT NULL,
 	ordinal               INT NOT NULL,
@@ -53,13 +68,8 @@ CREATE TABLE IF NOT EXISTS conversations.conversation_turn (
 	-- composite is hypertable-legal and lets CompleteTurn/FailTurn prune to one
 	-- chunk. ordinal is retained only as a decorative ordering hint.
 	PRIMARY KEY (id, created_at)
-) WITH (
-	tsdb.hypertable,
-	tsdb.partition_column = 'created_at',
-	tsdb.enable_columnstore = true,
-	tsdb.segmentby = 'conversation_id',
-	tsdb.orderby = 'created_at DESC'
-);
+)$ddl$ || ts_with;
+END $$;
 CREATE INDEX IF NOT EXISTS conversation_turn_conv_idx ON conversations.conversation_turn (conversation_id, created_at DESC);
 -- tsdb.enable_columnstore=true (above) auto-creates a 7-day columnstore policy
 -- on TimescaleDB 2.23+ (see 0001_fleet_initial.up.sql), so no explicit
