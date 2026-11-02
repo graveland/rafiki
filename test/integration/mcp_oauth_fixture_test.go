@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -38,6 +39,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,6 +82,7 @@ type fakeMCPOAuth struct {
 	prmScopes     []string
 	asmIssuer     string // overrides the issuer AS metadata advertises
 	authorizeURL  string // overrides authorization_endpoint
+	tokenURL      string // overrides token_endpoint
 	advertiseIss  bool   // advertise + emit the RFC 9207 iss parameter
 	authorizeFail string // non-empty: answer the authorize GET with this OAuth error
 	dcrFail       bool
@@ -89,6 +92,7 @@ type fakeMCPOAuth struct {
 	// daemon abandoning the request rather than waiting it out.
 	prmGate      chan struct{}
 	prmAbandoned chan struct{}
+	prmArrived   chan struct{}
 
 	// ── MCP knobs ───────────────────────────────────────────────────────
 	tools       []string
@@ -111,6 +115,7 @@ type fakeMCPOAuth struct {
 	tokenCalls  int
 	mcpHeaders  []http.Header
 	mcpCalls    []string
+	codeSeqs    []string
 	mcpMethods  []string
 	revoked     []string
 	codes       map[string]*fakeAuthCode
@@ -171,6 +176,10 @@ func newFakeMCPOAuth(t *testing.T, tools ...string) *fakeMCPOAuth {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", f.handlePRMPath)
+	// The same document at any deeper endpoint path: a test that needs a unique
+	// resource per run names /mcp/<suffix>, and the metadata for it has to live
+	// at the matching well-known path (RFC 9728's path location).
+	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp/", f.handlePRMPath)
 	mux.HandleFunc("/.well-known/oauth-protected-resource", f.handlePRMRoot)
 	mux.HandleFunc("/.well-known/oauth-authorization-server", f.handleASM)
 	mux.HandleFunc("/.well-known/openid-configuration", f.handleASM)
@@ -234,10 +243,13 @@ func writeFakeJSON(w http.ResponseWriter, status int, body any) {
 func (f *fakeMCPOAuth) handlePRMPath(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.prmHits[r.URL.Path]++
-	serve, malformed, gate, abandoned := f.servePRMPath, f.malformedPRM, f.prmGate, f.prmAbandoned
+	serve, malformed, gate, abandoned, arrived := f.servePRMPath, f.malformedPRM, f.prmGate, f.prmAbandoned, f.prmArrived
 	resource := f.prmPathRes
 	if resource == "" {
-		resource = f.endpoint()
+		// This document describes the endpoint at the same path, so the resource
+		// is the origin plus the path it was requested under: /mcp for the shared
+		// endpoint, /mcp/<suffix> for a per-run one.
+		resource = f.srv.URL + strings.TrimPrefix(r.URL.Path, "/.well-known/oauth-protected-resource")
 	}
 	scopes := slices.Clone(f.prmScopes)
 	servers := []string{f.issuer()}
@@ -252,6 +264,12 @@ func (f *fakeMCPOAuth) handlePRMPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if gate != nil {
+		if arrived != nil {
+			select {
+			case arrived <- struct{}{}:
+			default:
+			}
+		}
 		select {
 		case <-gate:
 		case <-r.Context().Done():
@@ -308,6 +326,10 @@ func (f *fakeMCPOAuth) handleASM(w http.ResponseWriter, r *http.Request) {
 	if authorize == "" {
 		authorize = f.srv.URL + "/authorize"
 	}
+	token := f.tokenURL
+	if token == "" {
+		token = f.srv.URL + "/token"
+	}
 	scopes := append(slices.Clone(f.prmScopes), "offline_access")
 	issSupported := f.advertiseIss
 	f.mu.Unlock()
@@ -323,7 +345,7 @@ func (f *fakeMCPOAuth) handleASM(w http.ResponseWriter, r *http.Request) {
 	meta := map[string]any{
 		"issuer":                                issuer,
 		"authorization_endpoint":                authorize,
-		"token_endpoint":                        f.srv.URL + "/token",
+		"token_endpoint":                        token,
 		"registration_endpoint":                 f.srv.URL + "/register",
 		"revocation_endpoint":                   f.srv.URL + "/revoke",
 		"scopes_supported":                      scopes,
@@ -395,6 +417,7 @@ func (f *fakeMCPOAuth) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	code := fmt.Sprintf("code-%d", len(f.codes)+1)
+	f.codeSeqs = append(f.codeSeqs, code)
 	f.codes[code] = &fakeAuthCode{
 		challenge:   q.Get("code_challenge"),
 		resource:    q.Get("resource"),
@@ -662,6 +685,26 @@ func (f *fakeMCPOAuth) oauthRequests() []string {
 // headersOnPath is every header set a non-MCP path was shown, in arrival
 // order. Discovery, registration, authorize, token and revocation requests must
 // never carry a project's configured headers or a bearer.
+// headerOnPath is one header's value on every request one path received, in
+// arrival order. It is how a test states both halves of the containment rule: a
+// configured header DOES reach the MCP endpoint and never reaches an OAuth leg.
+func (f *fakeMCPOAuth) headerOnPath(path, key string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.pathHeaders[path]))
+	for _, h := range f.pathHeaders[path] {
+		out = append(out, h.Get(key))
+	}
+	return out
+}
+
+// issuedCodes is every authorization code the fixture handed out, in order.
+func (f *fakeMCPOAuth) issuedCodes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.codeSeqs)
+}
+
 func (f *fakeMCPOAuth) headersOnPath(path string) []http.Header {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -794,6 +837,77 @@ func (f *fakeMCPOAuth) waitRevocation(t *testing.T, token string, d time.Duratio
 	}
 }
 
+// ─── observability the adversarial cases need ──────────────────────────────
+
+// newCountingDestination is a live TCP listener that counts accepted
+// connections and answers nothing useful. It exists to make "this destination
+// was never dialled" observable from the far end: the listener is unquestionably
+// up, so a count of zero means the daemon refused the destination instead of
+// connecting to it.
+func newCountingDestination(t *testing.T) (addr string, dials func() int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	assert.NewAborting(t).NoError(err, "listen for the counting destination")
+	var count atomic.Int64
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no request may reach a refused destination", http.StatusTeapot)
+	})}
+	go func() { _ = srv.Serve(&countingListener{Listener: ln, count: &count}) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+	})
+	return ln.Addr().String(), count.Load
+}
+
+type countingListener struct {
+	net.Listener
+	count *atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.count.Add(1)
+	}
+	return conn, err
+}
+
+// uniqueEndpointSuffix mints a per-run path segment. It is unique in this
+// process AND across runs, so the resource derived from it (the endpoint URL
+// itself) identifies exactly one run's rows in the shared, never-reset database.
+func uniqueEndpointSuffix() string { return "run-" + uniqueSuffix() }
+
+// sweepMCPRows deletes every MCP OAuth row this run created. The endpoint path
+// carries the run's unique segment and the document at that path declares the
+// endpoint as its resource, so one LIKE covers both tables — which is what keeps
+// the shared disposable database from accumulating grants that a later run could
+// match.
+func sweepMCPRows(t *testing.T, suffix string) {
+	t.Helper()
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		return
+	}
+	t.Cleanup(func() {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Logf("sweep MCP rows for %s: pool: %v", suffix, err)
+			return
+		}
+		defer pool.Close()
+		like := "%" + suffix + "%"
+		if _, err := pool.Exec(context.Background(),
+			`DELETE FROM conversations.mcp_endpoint WHERE endpoint LIKE $1`, like); err != nil {
+			t.Logf("sweep MCP endpoint rows for %s: %v", suffix, err)
+		}
+		if _, err := pool.Exec(context.Background(),
+			`DELETE FROM conversations.mcp_credential WHERE resource LIKE $1`, like); err != nil {
+			t.Logf("sweep MCP credential rows for %s: %v", suffix, err)
+		}
+	})
+}
+
 // ─── mcp.json / rafikid.toml fixtures ───────────────────────────────────────
 
 // writeMCPJSON writes an .mcp.json-shaped file and returns its absolute path.
@@ -858,21 +972,24 @@ func bootMCPOAuthDaemon(t *testing.T, extraEnv ...string) *daemon {
 	return d
 }
 
-// waitStderrContains polls the daemon's captured stderr for sub. Daemon logs
-// are the only place a skipped MCP server's reason appears, and the passive
-// re-login hint is exactly such a reason.
-func waitStderrContains(t *testing.T, d *daemon, sub string, timeout time.Duration) string {
+// waitStderrContainsAfter is waitStderrContains restricted to text written after
+// byte offset from, so an assertion cannot be satisfied by an earlier line that
+// happened to carry the same words. The buffer only grows, so from is a stable
+// boundary.
+func waitStderrContainsAfter(t *testing.T, d *daemon, sub string, from int, timeout time.Duration) string {
 	t.Helper()
 	if d.stderr == nil {
 		t.Fatalf("this daemon's stderr is not captured, so %q cannot be observed", sub)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if s := d.stderr.String(); strings.Contains(s, sub) {
+		s := d.stderr.String()
+		if len(s) >= from && strings.Contains(s[from:], sub) {
 			return s
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("the daemon never logged %q within %s\nstderr tail:\n%s", sub, timeout, d.stderr.tail(6000))
+			t.Fatalf("the daemon logged no %q within %s after byte %d\nnew stderr:\n%s",
+				sub, timeout, from, s[min(from, len(s)):])
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

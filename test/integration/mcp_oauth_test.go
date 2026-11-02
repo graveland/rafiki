@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -119,17 +120,36 @@ func sendChildPrompt(t *testing.T, client rafikiv1connect.ControlClient, childID
 // acquisition. The sealed credential blob is untouched — the access token
 // itself is still the one the authorization server issued, so a request after
 // this can only succeed by refreshing.
+//
+// The UPDATE matches the OWNER and the resource, never the resource alone: the
+// suite shares one database that is never reset, so a resource-only match could
+// touch a row another run left (or match two rows and fail for no real reason).
+// The owner is read from the row the resource names, which is itself unique per
+// run because the endpoint path carries a per-run segment.
 func expireGrantInDB(t *testing.T, resource string) {
 	t.Helper()
 	c := assert.NewAborting(t)
 	pool := openPool(t, os.Getenv("RAFIKI_TEST_DSN"))
 	defer pool.Close()
-	tag, err := pool.Exec(context.Background(),
+	ctx := context.Background()
+
+	// Exactly ONE row may carry this resource. The endpoint path is unique per
+	// run, so a second row here means a leftover from an earlier run (a reused
+	// port, a rollback of the per-run segment) — and then "which grant am I
+	// expiring" has no answer, so refuse rather than touch somebody else's.
+	var rows int
+	var owner string
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*), coalesce(min(owner_user_id::text), ''::text)
+		   FROM conversations.mcp_credential WHERE resource = $1`, resource).Scan(&rows, &owner),
+		"read the grant for %q", resource)
+	c.Eq(1, rows, "exactly one stored grant must carry %q (a leftover row from an earlier run would make this ambiguous)", resource)
+	tag, err := pool.Exec(ctx,
 		`UPDATE conversations.mcp_credential
 		    SET access_expiry = now() - interval '1 minute'
-		  WHERE resource = $1 AND invalidated_at IS NULL`, resource)
+		  WHERE owner_user_id = $1::uuid AND resource = $2 AND invalidated_at IS NULL`, owner, resource)
 	c.NoError(err, "expire the stored access token")
-	c.Eq(int64(1), tag.RowsAffected(), "expire the stored access token: rows matched (resource %s)", resource)
+	c.Eq(int64(1), tag.RowsAffected(), "expire the stored access token: rows matched (owner %s, resource %s)", owner, resource)
 }
 
 // toolCallCount is how many real `tools/call <name>` invocations the fixture's
@@ -238,14 +258,28 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	fx := newFakeMCPOAuth(t)
 	d := bootMCPOAuthDaemon(t)
 	token, configDir := scriptUser(t, d)
+
+	// A UNIQUE endpoint path per run, and the rows it creates are swept: the
+	// suite shares one never-reset database, and every grant this test leaves
+	// behind is a row a later run could match by resource.
+	suffix := uniqueEndpointSuffix()
+	endpoint := fx.endpointAt(suffix)
+	mcpPath := "/mcp/" + suffix
+	sweepMCPRows(t, suffix)
+
+	// The entry carries a NON-Authorization project header on purpose: it is the
+	// configured header whose containment the OAuth legs are asserted against.
 	cfgPath := writeMCPJSON(t, map[string]any{
-		"fixture": map[string]any{"url": fx.endpoint()},
+		"fixture": map[string]any{
+			"url":     endpoint,
+			"headers": map[string]any{"X-Tenant": "acme"},
+		},
 	})
 
 	// ── the explicit login, through the CLI ────────────────────────────────
 	stdout, stderr := mcpLoginCLI(t, d, fx, configDir, "fixture", cfgPath)
 	c.StrContains(stderr, "logged in to fixture", "login stderr:\n%s", stderr)
-	c.StrContains(stderr, "resource "+fx.endpoint(), "the login names the resource it bound:\n%s", stderr)
+	c.StrContains(stderr, "resource "+endpoint, "the login names the resource it bound:\n%s", stderr)
 	c.StrContains(stderr, "2 tool(s)", "the login verified the server's tools:\n%s", stderr)
 
 	access, refresh := fx.issued()
@@ -256,7 +290,11 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	// travelled only inside Complete's REQUEST, and the fixture still holds it.
 	assertNoSecret(t, "the login's stdout", append(access, refresh...), stdout)
 	assertNoSecret(t, "the login's stderr", append(access, refresh...), stderr)
-	c.NotStrContains(stdout+stderr, "code-1", "the CLI printed the authorization code")
+	assertNoSecret(t, "the daemon's own log", append(access, refresh...), d.stderr.String())
+	for _, code := range fx.issuedCodes() {
+		c.NotStrContains(stdout+stderr, code, "the CLI printed the authorization code %q", code)
+		c.NotStrContains(d.stderr.String(), code, "the daemon logged the authorization code %q", code)
+	}
 
 	// ── what the login asked the authorization server for ───────────────────
 	dcr := fx.dcrBodySnapshot()
@@ -272,7 +310,7 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	c.NotEq("", beginParams[0].Get("code_challenge"), "PKCE challenge on the consent URL")
 	c.Eq("", beginParams[0].Get("code_verifier"), "the verifier must never be in the authorization request")
 	c.NotEq("", beginParams[0].Get("state"), "state on the consent URL")
-	c.Eq(fx.endpoint(), beginParams[0].Get("resource"), "RFC 8707 resource on the consent URL")
+	c.Eq(endpoint, beginParams[0].Get("resource"), "RFC 8707 resource on the consent URL")
 	c.Eq(mcpoauth.CallbackURL, beginParams[0].Get("redirect_uri"), "the fixed loopback redirect")
 	c.StrContains(beginParams[0].Get("scope"), "read", "the requested scope carries the resource's advertised scope")
 
@@ -280,14 +318,23 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	c.Require().Eq(1, len(exchange), "token requests")
 	c.Eq("authorization_code", exchange[0].Get("grant_type"))
 	c.NotEq("", exchange[0].Get("code_verifier"), "PKCE verifier on the exchange")
-	c.Eq(fx.endpoint(), exchange[0].Get("resource"), "RFC 8707 resource on the exchange")
+	c.Eq(endpoint, exchange[0].Get("resource"), "RFC 8707 resource on the exchange")
 	c.Eq("", exchange[0].Get("client_secret"), "a public client sends no client secret")
 
-	// Nothing on the OAuth legs carried an Authorization header: a project's
-	// configured headers never reach discovery, registration or the token
-	// endpoint, and this client has no bearer of its own.
-	for _, path := range []string{"/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"} {
+	// Nothing on the LOGIN's OAuth legs carried the configured project header or
+	// an Authorization header: discovery, registration and the code exchange are
+	// governed by the operator's client, never by the entry's headers.
+	for _, path := range []string{
+		"/.well-known/oauth-protected-resource/mcp/" + suffix,
+		"/.well-known/oauth-protected-resource",
+		"/.well-known/oauth-authorization-server",
+		"/.well-known/openid-configuration",
+		"/register",
+		"/authorize",
+		"/token",
+	} {
 		for _, h := range fx.headersOnPath(path) {
+			c.Eq("", h.Get("X-Tenant"), "%s was sent the entry's configured header", path)
 			c.Eq("", h.Get("Authorization"), "%s was sent an Authorization header", path)
 		}
 	}
@@ -300,12 +347,19 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 
 	sendChildPrompt(t, client, childID, "call one")
 	es.waitEvent(t, userTextContains(childID, "echo ok"), 90*time.Second)
-	c.Eq("Bearer "+access[0], fx.waitToolCall(t, "echo", 1, 30*time.Second),
+	c.Eq("Bearer "+access[0], fx.waitToolCall(t, "echo", 1, 60*time.Second),
 		"the fundi tool call's bearer is not the token the login persisted")
 	c.Eq(0, fx.refreshCount(), "the first tool call refreshed a credential it should have used")
 
+	// The configured header DOES reach the MCP endpoint — which is what makes
+	// the negative assertion below about the OAuth legs meaningful rather than
+	// vacuous: this entry's headers are plumbed, and they stopped at the
+	// endpoint.
+	c.Contains(fx.headerOnPath(mcpPath, "X-Tenant"), "acme",
+		"the entry's configured header never reached the MCP endpoint: %v", fx.headerOnPath(mcpPath, "X-Tenant"))
+
 	// ── expire the access token: one refresh, RFC 8707, rotated ─────────────
-	expireGrantInDB(t, fx.endpoint())
+	expireGrantInDB(t, endpoint)
 	sendChildPrompt(t, client, childID, "call two")
 	fx.waitToolCall(t, "echo", 2, 90*time.Second)
 
@@ -315,7 +369,7 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	refreshed := fx.refreshFormSnapshot()
 	c.Require().Eq(1, len(refreshed), "refreshes after one expiry")
 	c.Eq(refresh[0], refreshed[0].Get("refresh_token"), "the refresh spent a token other than the stored one")
-	c.Eq(fx.endpoint(), refreshed[0].Get("resource"), "RFC 8707 resource on the refresh")
+	c.Eq(endpoint, refreshed[0].Get("resource"), "RFC 8707 resource on the refresh")
 	c.Eq("", refreshed[0].Get("client_secret"), "the persisted registration is a public client")
 	c.Eq("refresh_token", refreshed[0].Get("grant_type"))
 	c.Eq(fx.bearerOnMCP()[len(fx.bearerOnMCP())-1], "Bearer "+access[1],
@@ -348,9 +402,32 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	c.Eq(before, toolCallCount(fx, "echo"), "a tool call reached the server after logout")
 	c.True(revoked, "the logout's best-effort revocation never reached the fixture")
 
+	// The PERSISTED-STATE legs are the ones the daemon makes on its own before
+	// any entry is involved: the refresh exchange and the revocation. Both are
+	// observed here (the exchange and the refresh make two /token requests; the
+	// logout makes one /revoke), and neither may carry the entry's configured
+	// header or a bearer of its own.
+	tokenSets := fx.headersOnPath("/token")
+	c.True(len(tokenSets) >= 2, "the token endpoint was seen %d time(s); the refresh leg was not observed", len(tokenSets))
+	revokeSets := fx.headersOnPath("/revoke")
+	c.True(len(revokeSets) >= 1, "the revocation endpoint was never reached, so its headers were not observed")
+	for _, leg := range []struct {
+		path string
+		sets []http.Header
+	}{{"/token", tokenSets}, {"/revoke", revokeSets}} {
+		for _, h := range leg.sets {
+			c.Eq("", h.Get("X-Tenant"), "%s (a persisted-state leg) was sent the entry's configured header", leg.path)
+			c.Eq("", h.Get("Authorization"), "%s (a persisted-state leg) was sent an Authorization header", leg.path)
+		}
+	}
+
 	// ── a NEW spawn produces the passive re-login hint ─────────────────────
+	// Only log lines written AFTER this point count: the call-four hint above
+	// already put the same text on stderr, so a scan of the whole buffer would
+	// prove nothing about the new spawn.
+	stderrMark := len(d.stderr.String())
 	_ = spawnFundiOwningMCP(t, d, token, cfgPath, fakeTurnsToolCalls(t, "mcp__fixture__echo", 1))
-	waitStderrContains(t, d, "needs a login: run `rafiki mcp login fixture`", 60*time.Second)
+	waitStderrContainsAfter(t, d, "needs a login: run `rafiki mcp login fixture`", stderrMark, 60*time.Second)
 
 	// ── an explicit later login restores use ───────────────────────────────
 	_, stderr = mcpLoginCLI(t, d, fx, configDir, "fixture", cfgPath)
@@ -358,6 +435,11 @@ func TestMcpOAuthEndToEnd(t *testing.T) {
 	access, refresh = fx.issued()
 	c.Require().Eq(3, len(access), "the second login issued no token: %v", access)
 	assertNoSecret(t, "the second login's stderr", append(access, refresh...), stderr)
+	assertNoSecret(t, "the daemon's own log", append(access, refresh...), d.stderr.String())
+	for _, code := range fx.issuedCodes() {
+		c.NotStrContains(stderr, code, "the second login printed the authorization code %q", code)
+		c.NotStrContains(d.stderr.String(), code, "the daemon logged the authorization code %q", code)
+	}
 
 	recovered := spawnFundiOwningMCP(t, d, token, cfgPath, fakeTurnsToolCalls(t, "mcp__fixture__echo", 1))
 	recoveredEvents := d.openEvents(t, childEventsSubject(recovered), map[string]int32{recovered: -1}, 0)
@@ -378,7 +460,10 @@ func TestMcpOAuthLoginDescriptorAndCallback(t *testing.T) {
 	d := bootMCPOAuthDaemon(t)
 	token := d.createMCPUser(t)
 	client := faceClient(t, d, token)
-	cfgPath := writeMCPJSON(t, map[string]any{"fixture": map[string]any{"url": fx.endpoint()}})
+	suffix := uniqueEndpointSuffix()
+	endpoint := fx.endpointAt(suffix)
+	sweepMCPRows(t, suffix)
+	cfgPath := writeMCPJSON(t, map[string]any{"fixture": map[string]any{"url": endpoint}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -395,7 +480,7 @@ func TestMcpOAuthLoginDescriptorAndCallback(t *testing.T) {
 
 	authorize, err := url.Parse(begin.Msg.GetAuthorizeUrl())
 	c.NoError(err, "authorize URL")
-	c.Eq(fx.endpoint(), authorize.Query().Get("resource"), "resource on the consent URL")
+	c.Eq(endpoint, authorize.Query().Get("resource"), "resource on the consent URL")
 	c.Eq("S256", authorize.Query().Get("code_challenge_method"), "PKCE method")
 
 	// No response field carries a credential, by value: every string of the
@@ -435,7 +520,7 @@ func TestMcpOAuthLoginDescriptorAndCallback(t *testing.T) {
 	c.NoError(err, "CompleteMcpLogin")
 	c.Nil(done.Msg.GetContinuation(), "unexpected continuation")
 	c.Eq("fixture", done.Msg.GetServer(), "the daemon names the verified server")
-	c.Eq(fx.endpoint(), done.Msg.GetResource(), "the resource the login bound")
+	c.Eq(endpoint, done.Msg.GetResource(), "the resource the login bound")
 	c.Eq(fmt.Sprint([]string{"echo", "whoami"}), fmt.Sprint(done.Msg.GetTools()), "the verified tool names, sorted")
 	c.Eq("", done.Msg.GetAccountId(), "no validated source exists for an account id")
 
@@ -453,7 +538,7 @@ func TestMcpOAuthLoginDescriptorAndCallback(t *testing.T) {
 	var blob, clientID, tokenEndpoint string
 	err = pool.QueryRow(context.Background(), `
 		SELECT encode(credential_sealed, 'escape'), client_id, token_endpoint
-		  FROM conversations.mcp_credential WHERE resource = $1`, fx.endpoint()).Scan(&blob, &clientID, &tokenEndpoint)
+		  FROM conversations.mcp_credential WHERE resource = $1`, endpoint).Scan(&blob, &clientID, &tokenEndpoint)
 	c.NoError(err, "read the stored credential row")
 	assertNoSecret(t, "the sealed credential column", append(access, refresh...), blob)
 	c.NotEq("", clientID, "the row carries the public client id")
@@ -480,7 +565,10 @@ func TestMcpOAuthOwnerIsolation(t *testing.T) {
 	_, tokenB := createRecallUser(t, pool, "mcp-oauth-b-"+uniqueSuffix(), false)
 	_, tokenAdmin := createRecallUser(t, pool, "mcp-oauth-admin-"+uniqueSuffix(), true)
 
-	cfgPath := writeMCPJSON(t, map[string]any{"fixture": map[string]any{"url": fx.endpoint()}})
+	suffix := uniqueEndpointSuffix()
+	endpoint := fx.endpointAt(suffix)
+	sweepMCPRows(t, suffix)
+	cfgPath := writeMCPJSON(t, map[string]any{"fixture": map[string]any{"url": endpoint}})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	faceA, faceB := faceClient(t, d, tokenA), faceClient(t, d, tokenB)
@@ -510,7 +598,7 @@ func TestMcpOAuthOwnerIsolation(t *testing.T) {
 
 	// B cannot remove A's grant, by resource...
 	_, err = faceB.DeleteMcpCredential(ctx, connect.NewRequest(&rafikiv1.DeleteMcpCredentialRequest{
-		Resource: fx.endpoint(),
+		Resource: endpoint,
 	}))
 	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "B deleting A's grant: %v", err)
 
@@ -518,7 +606,7 @@ func TestMcpOAuthOwnerIsolation(t *testing.T) {
 	// never named in the request, so an admin holds only its own grants.
 	faceAdmin := faceClient(t, d, tokenAdmin)
 	_, err = faceAdmin.DeleteMcpCredential(ctx, connect.NewRequest(&rafikiv1.DeleteMcpCredentialRequest{
-		Resource: fx.endpoint(),
+		Resource: endpoint,
 	}))
 	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "an admin deleting another user's grant: %v", err)
 
@@ -532,11 +620,11 @@ func TestMcpOAuthOwnerIsolation(t *testing.T) {
 	}))
 	c.NoError(err, "the admin completes its own login")
 	_, err = faceAdmin.DeleteMcpCredential(ctx, connect.NewRequest(&rafikiv1.DeleteMcpCredentialRequest{
-		Resource: fx.endpoint(),
+		Resource: endpoint,
 	}))
 	c.NoError(err, "the admin removes its own grant")
 	_, err = faceA.DeleteMcpCredential(ctx, connect.NewRequest(&rafikiv1.DeleteMcpCredentialRequest{
-		Resource: fx.endpoint(),
+		Resource: endpoint,
 	}))
 	c.NoError(err, "A's grant survived another owner's login and logout")
 
@@ -578,7 +666,10 @@ func TestMcpOAuthNoBearerReachesAChild(t *testing.T) {
 		"FAKE_CLAUDE_DIR="+dumps,
 	)
 	token := d.createMCPUser(t)
-	cfgPath := writeMCPJSON(t, map[string]any{"fixture": map[string]any{"url": fx.endpoint()}})
+	suffix := uniqueEndpointSuffix()
+	endpoint := fx.endpointAt(suffix)
+	sweepMCPRows(t, suffix)
+	cfgPath := writeMCPJSON(t, map[string]any{"fixture": map[string]any{"url": endpoint}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -1070,9 +1161,10 @@ func TestMcpOAuthFencesBeatRefreshAndOlderLogins(t *testing.T) {
 		h.login(fx, "fixture", fx.endpointAt("removal"))
 		endpoint := fx.endpointAt("removal")
 		generation := h.binding(endpoint).GrantGeneration
-		// This login discovered the ROOT as its resource, so that is the grant
+		// This login discovered the endpoint under test as its resource (the path
+		// document lives at the matching well-known path), so that is the grant
 		// row whose expiry has to move.
-		expireGrantInDB(t, fx.canonicalRoot(t))
+		expireGrantInDB(t, fx.endpointAt("removal"))
 
 		started := make(chan struct{})
 		release := make(chan struct{})
@@ -1137,15 +1229,17 @@ func TestMcpOAuthPendingWorkIsFreed(t *testing.T) {
 		c.True(time.Since(started) < 5*time.Second, "Complete blocked for %s after the engine closed", time.Since(started))
 	})
 
-	t.Run("shutdown does not wait out a gated discovery request", func(t *testing.T) {
-		// The authorization server holds its metadata response open. If shutdown
-		// merely stopped waiting — leaving the round trip to run out the 30s
-		// operation bound — Close would take that long. It must not: the flow's
-		// context is what the request is issued under.
+	t.Run("shutdown cancels an in-flight discovery request", func(t *testing.T) {
+		// The authorization server holds its metadata response open. Shutdown
+		// must both release the caller PROMPTLY (not wait out the request's own
+		// 30s operation bound) and actually END the request: the fixture signals
+		// when the server observed the request's context close.
 		gate := make(chan struct{})
-		fx.set(func(f *fakeMCPOAuth) { f.prmGate = gate })
+		abandoned := make(chan struct{}, 1)
+		arrived := make(chan struct{}, 1)
+		fx.set(func(f *fakeMCPOAuth) { f.prmGate, f.prmAbandoned, f.prmArrived = gate, abandoned, arrived })
 		t.Cleanup(func() {
-			fx.set(func(f *fakeMCPOAuth) { f.prmGate = nil })
+			fx.set(func(f *fakeMCPOAuth) { f.prmGate, f.prmAbandoned, f.prmArrived = nil, nil, nil })
 			close(gate)
 		})
 
@@ -1158,13 +1252,13 @@ func TestMcpOAuthPendingWorkIsFreed(t *testing.T) {
 			beginErr <- err
 		}()
 
-		// Wait until the metadata request is genuinely in flight at the server.
-		deadline := time.Now().Add(30 * time.Second)
-		for fx.prmHitsFor("/.well-known/oauth-protected-resource/mcp") == 0 {
-			if !time.Now().Before(deadline) {
-				t.Fatal("the login never reached protected-resource discovery")
-			}
-			time.Sleep(10 * time.Millisecond)
+		// Wait until the gated metadata request is genuinely in flight. The
+		// fixture signals on entry, so this cannot be satisfied by an earlier
+		// request another subtest made.
+		select {
+		case <-arrived:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the login never reached protected-resource discovery")
 		}
 
 		start := time.Now()
@@ -1176,6 +1270,14 @@ func TestMcpOAuthPendingWorkIsFreed(t *testing.T) {
 			c.Error(err, "a cancelled Begin returned a descriptor")
 		case <-time.After(10 * time.Second):
 			t.Fatal("Begin did not return after the engine closed")
+		}
+		// The server's side: the request's context ended, which is only possible
+		// if the daemon closed the connection rather than leaving the round trip
+		// to run out its own timeout.
+		select {
+		case <-abandoned:
+		case <-time.After(15 * time.Second):
+			t.Fatal("the fixture never saw the discovery request's context end: the request outlived the flow")
 		}
 	})
 
@@ -1224,31 +1326,124 @@ func TestMcpOAuthPendingWorkIsFreed(t *testing.T) {
 // OAuth error. Each must fail the login (or bind only the documented fallback)
 // and leave no grant behind for a damaged flow.
 func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
+	// Per-case evidence. "the login failed" is not evidence: every case names the
+	// EXACT authored refusal it expects (which pins the step, and proves no
+	// decoder error, resolver error or issuer text survived into it) and the
+	// fixture-side fact that makes the case real — otherwise a case could pass
+	// because of an unrelated failure.
 	cases := []struct {
-		name  string
-		shape func(*fakeMCPOAuth)
-		// wantHint is a substring the surfaced error must carry.
-		wantHint string
-		// mustNotContain are strings that must NOT survive into the refusal:
-		// addresses chosen by remote metadata are redacted, not echoed.
-		mustNotContain []string
-		// wantErr is the sentinel the refusal keeps, when it keeps one.
+		name string
+		// shape configures the fixture; it returns a check that the shape really
+		// took effect, which runs after the refusal.
+		shape func(*fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string)
+		// wantErr is the sentinel the refusal must keep. Nil for the deliberately
+		// coarse metadata failures.
 		wantErr error
+		// refusal is the exact error text expected, given the endpoint.
+		refusal func(endpoint string) string
+		// refusalSubstr (with optional alsoSubstr) is used when the refusal is a
+		// sentence that continues with the operator policy's own words.
+		refusalSubstr string
+		alsoSubstr    string
+		// mustNotContain are strings chosen by remote metadata that must not
+		// survive into the refusal.
+		mustNotContain []string
+		// driveOnSuccess finishes the login when Begin did NOT refuse, so the
+		// destination the case names is genuinely reached and the fixture-side
+		// counters say so. Under the production behaviour Begin refuses first and
+		// this never runs; under a regression it does, and both the refusal
+		// assertions and the counters fail loudly.
+		driveOnSuccess bool
 	}{
 		{
-			name:     "undecodable authorization-server metadata",
-			shape:    func(f *fakeMCPOAuth) { f.malformedASM = true },
-			wantHint: "failed",
+			name: "undecodable authorization-server metadata",
+			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
+				f.malformedASM = true
+				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
+					t.Helper()
+					f.mu.Lock()
+					hits := f.asmHits
+					f.mu.Unlock()
+					assert.NewAborting(t).True(hits >= 1, "the authorization-server metadata was never fetched, so the undecodable body was never the input")
+					assert.NewAborting(t).Eq(0, len(f.dcrBodySnapshot()), "the daemon registered a client from metadata it could not read")
+				}
+			},
+			refusal: func(endpoint string) string { return "mcpoauth: authenticating to " + endpoint + " failed" },
 		},
 		{
-			name:     "issuer does not match",
-			shape:    func(f *fakeMCPOAuth) { f.asmIssuer = "https://issuer.invalid" },
-			wantHint: "failed",
+			name: "issuer does not match",
+			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
+				f.asmIssuer = "https://issuer.invalid"
+				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
+					t.Helper()
+					f.mu.Lock()
+					advertised, hits := f.asmIssuer, f.asmHits
+					f.mu.Unlock()
+					assert.NewAborting(t).Eq("https://issuer.invalid", advertised, "the mismatch knob never applied")
+					assert.NewAborting(t).True(hits >= 1, "the authorization-server metadata was never fetched")
+					assert.NewAborting(t).Eq(0, len(f.dcrBodySnapshot()), "the daemon registered a client with an issuer it did not validate")
+				}
+			},
+			refusal: func(endpoint string) string { return "mcpoauth: authenticating to " + endpoint + " failed" },
 		},
 		{
-			name:           "authorization endpoint on a private address",
-			shape:          func(f *fakeMCPOAuth) { f.authorizeURL = "https://10.0.0.1/authorize" },
-			wantHint:       "failed",
+			// The TOKEN endpoint is a destination the daemon itself fetches, so
+			// "it was never dialled" is observable from the far end: the
+			// listener behind the name is live and counts connections. The
+			// operator's policy must refuse the name before any connect, and the
+			// refusal must happen before a consent URL exists.
+			name: "token endpoint on a refused (non-public) destination",
+			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
+				addr, dials := newCountingDestination(f.t)
+				_, port, err := net.SplitHostPort(addr)
+				assert.NewAborting(f.t).NoError(err, "split %q", addr)
+				f.tokenURL = "https://localhost:" + port + "/token"
+				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
+					t.Helper()
+					assert.NewAborting(t).Eq(int64(0), dials(),
+						"the daemon dialled a destination its policy refuses")
+					assert.NewAborting(t).Eq(0, len(f.headersOnPath("/authorize")),
+						"the daemon handed a browser a consent URL for a login it refuses")
+				}
+			},
+			wantErr:        mcpoauth.ErrDestinationDenied,
+			refusalSubstr:  "mcpoauth: discovered token endpoint",
+			alsoSubstr:     "destination not allowed by [mcp_oauth]",
+			driveOnSuccess: true,
+		},
+		{
+			// The AUTHORIZATION endpoint is a browser hand-off, not something the
+			// daemon fetches, so the two facts that matter here are that the
+			// operator's policy refuses the destination and that no consent URL is
+			// ever published for it (the fixture serves no /authorize request).
+			name: "authorization endpoint on a refused (non-public) destination",
+			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
+				f.authorizeURL = "https://localhost:1/authorize"
+				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
+					t.Helper()
+					assert.NewAborting(t).Eq(0, len(f.headersOnPath("/authorize")),
+						"the daemon handed a browser a consent URL for a destination it refuses")
+				}
+			},
+			wantErr:       mcpoauth.ErrDestinationDenied,
+			refusalSubstr: "mcpoauth: discovered authorization endpoint",
+			alsoSubstr:    "destination not allowed by [mcp_oauth]",
+		},
+		{
+			// A private IP LITERAL: the SDK's own metadata check refuses it
+			// before the operator's policy is even consulted, so the refusal is
+			// the coarse login-failed sentence and the address must not survive
+			// into it (the SDK's own message quotes the URL).
+			name: "authorization endpoint on a private literal",
+			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
+				f.authorizeURL = "https://10.0.0.1/authorize"
+				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
+					t.Helper()
+					assert.NewAborting(t).Eq(0, len(f.headersOnPath("/authorize")),
+						"the daemon sent a browser to a private address")
+				}
+			},
+			refusal:        func(endpoint string) string { return "mcpoauth: authenticating to " + endpoint + " failed" },
 			mustNotContain: []string{"10.0.0.1"},
 		},
 	}
@@ -1257,22 +1452,36 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 			c := assert.NewAborting(t)
 			h := newMcpOAuthHarness(t)
 			fx := newFakeMCPOAuth(t)
-			fx.set(tc.shape)
+			check := tc.shape(fx)
 
 			descriptor, err := h.engine.Begin(context.Background(), mcpoauth.BeginRequest{
 				OwnerUserID: h.owner, Server: "fixture", Endpoint: fx.endpoint(),
 			})
 			// Either Begin or the round it publishes fails; both are refusals.
-			if err == nil {
+			if err == nil && tc.driveOnSuccess {
+				_, err = h.engine.Complete(context.Background(), h.owner, descriptor.LoginID,
+					fx.callbackQuery(t, descriptor.AuthorizeURL))
+			} else if err == nil {
 				_, err = h.engine.Complete(context.Background(), h.owner, descriptor.LoginID, "code=x&state=y")
 			}
 			c.Error(err, "a damaged discovery/redirect produced a login")
-			c.StrContains(err.Error(), tc.wantHint, "the refusal is authored and names the step: %v", err)
+			// The fixture-side evidence runs FIRST: "it was refused" is only half
+			// the claim, and a case whose destination was in fact reached must
+			// fail on the counter even though it also failed to refuse.
+			check(t, fx, fx.endpoint())
+			switch {
+			case tc.refusal != nil:
+				c.Eq(tc.refusal(fx.endpoint()), err.Error(),
+					"the refusal must be the authored sentence for its step, with no upstream text")
+			case tc.refusalSubstr != "":
+				c.StrContains(err.Error(), tc.refusalSubstr, "the refusal must name the step that failed")
+				c.StrContains(err.Error(), tc.alsoSubstr, "the refusal must carry the operator-policy reason")
+			}
 			if tc.wantErr != nil {
-				c.True(errors.Is(err, tc.wantErr), "the refusal keeps the sentinel: %v", err)
+				c.True(errors.Is(err, tc.wantErr), "the refusal keeps the sentinel it was written against: %v", err)
 			}
 			for _, forbidden := range tc.mustNotContain {
-				c.NotStrContains(err.Error(), forbidden, "remote metadata's choice survives into the refusal")
+				c.NotStrContains(err.Error(), forbidden, "a destination chosen by remote metadata survives into the refusal")
 			}
 			_, lookupErr := h.lookup(fx.endpoint())
 			c.True(errors.Is(lookupErr, mcpoauth.ErrMissing), "a damaged login left a binding: %v", lookupErr)
@@ -1283,8 +1492,6 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 				`SELECT count(*) FROM conversations.mcp_credential WHERE owner_user_id = $1::uuid`, h.owner).Scan(&grant),
 				"count grants")
 			c.Eq(0, grant, "a damaged login stored a grant")
-			c.Eq(0, len(fx.headersOnPath("/authorize")),
-				"a browser was sent to an authorization endpoint the daemon refuses")
 		})
 	}
 
