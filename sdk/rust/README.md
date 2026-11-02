@@ -399,10 +399,25 @@ with one tool. **No real vendor account is involved and no request leaves the
 loopback interface.** It is checked in as a command (not a throwaway file) so
 this run is reproducible from a clean checkout.
 
+It also answers a small test control surface on the same origin, because two of
+the claims the run makes are only observable from the authorization server's
+side: `GET /_state` reports the token exchanges it served (which refresh token
+was presented and what replaced it), the revocations it received with their
+`token_type_hint`, every MCP request with the bearer it carried, and which
+access tokens are still valid; `POST /_expire` invalidates every access token it
+has issued. A login's access token is issued with a ONE-SECOND lifetime — the
+only lever a fixture has on the daemon's refresh decision, since a 401 is
+answered with the login hint rather than a refresh — so the next MCP-backed call
+must refresh, and the run asserts the rotation and the refreshed bearer.
+
 What passes, and what needs a different daemon:
 
-- The three MCP OAuth tests pass: `a_live_daemon_starts_and_completes_an_mcp_login`,
-  `a_live_daemon_logs_out_an_mcp_grant`, and
+- The four MCP OAuth tests pass: `a_live_daemon_starts_and_completes_an_mcp_login`,
+  `a_live_daemon_logs_out_an_mcp_grant` (which also asserts the upstream
+  revocation arrived, naming the token type),
+  `a_live_daemon_refreshes_an_expired_mcp_grant` (a fundi spawn materializes the
+  server's tools through the stored grant after the token was forced to expire,
+  and the refreshed bearer is the one the fixture saw), and
   `a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server`.
 - `a_live_daemon_answers_a_unary_call` and
   `a_live_daemon_refuses_a_stale_client_on_both_codecs` pass against any live
@@ -413,9 +428,18 @@ What passes, and what needs a different daemon:
   `a_live_follower_reopens_across_idle_windows_without_repeats`,
   `a_live_child_follower_never_replays_history`, and
   `a_live_history_pages_backwards_without_gaps_or_repeats`. They FAIL in this
-  run by design (the scratch daemon has spawned nothing) and the driver reports
-  them as expected. They are not MCP OAuth tests and this run does not claim
-  them; `RAFIKI_SDK_LIVE_STRICT=1` turns any of them into a failure.
+  run by design (the scratch daemon has spawned nothing). They are not MCP
+  OAuth tests and this run does not claim them.
+
+The driver does not allowlist those four by name. It requires the passed set and
+the failed set to each equal the expected one exactly, requires every expected
+failure to carry its documented missing-history panic once, requires the harness
+summary to agree with the per-test lines, and requires cargo's exit status to be
+the one those failures explain. A regression inside an expected-failure test, an
+extra or missing test, a harness that ran nothing and a build error after the
+tests all fail the run. `test/livefixture/run.sh --check-outcome <cargo-log>
+[exit-status]` runs that classification alone — no database, no daemon, no
+cargo — so the rule itself is testable.
 
 For those four, or for a daemon of your own, run the suite directly — it is the
 plain `cargo` invocation the driver makes:
@@ -426,14 +450,17 @@ RAFIKI_SDK_TEST_URL=unix:///…/controller.sock RAFIKI_SDK_TEST_TOKEN=… \
   cargo test --locked --all-features --test daemon -- --ignored
 ```
 
-The tests only read: a unary call, a stream that replays a child's recent
-events, idles and resumes from its cursor without a repeat, a follower that
-does the same across several silent idle re-opens, a live child follower that
-never replays history, backward `GetHistory` paging checked against one
-unbounded read, the daemon's own epoch refusal on both codecs (sent through
+The tests otherwise only read: a unary call, a stream that replays a child's
+recent events, idles and resumes from its cursor without a repeat, a follower
+that does the same across several silent idle re-opens, a live child follower
+that never replays history, backward `GetHistory` paging checked against one
+unbounded read, and the daemon's own epoch refusal on both codecs (sent through
 `Client::with_wire_epoch`, which exists only under the `test-hooks` feature —
-never enable it in a consumer), and the three MCP OAuth verbs. A daemon NEWER
-than the client cannot be provoked live; the stub tests cover it.
+never enable it in a consumer). The MCP OAuth tests are the exception: they log
+in and out explicitly, and one of them spawns a fundi child with the fixture's
+MCP config and kills it again — with no prompt, a spawn does no model call, and
+the tools it materializes are what prove the refresh. A daemon NEWER than the
+client cannot be provoked live; the stub tests cover it.
 
 `cargo tree -i aws-lc-rs` must keep reporting nothing: the crate builds TLS
 with rustls + ring only, so it can be a dependency of a consumer that forbids

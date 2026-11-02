@@ -17,6 +17,27 @@
 //	          code exchange + refresh         POST /token
 //	RFC 7009  revocation                      POST /revoke
 //	          the MCP resource itself         ANY  /mcp (streamable HTTP, one tool)
+//	          test control surface          GET  /_state, POST /_expire
+//
+// The control surface exists because the two claims a live run makes about the
+// credential — that an expired access token is replaced by a REFRESH (not by a
+// second login), and that a logout reaches the server's revocation endpoint —
+// are only observable from this side. /_state reports what the fixture has seen
+// (token exchanges, revocations, MCP requests and the bearer each carried) and
+// /_expire invalidates every access token it has issued, so a client that skips
+// the refresh is refused rather than silently served. Both are test-only, both
+// answer on the same loopback origin, and neither carries a token the caller did
+// not already receive.
+//
+// The authorization-code exchange answers a ONE-SECOND lifetime: a login's
+// access token is expired by the time anything else uses it, so the next
+// MCP-backed call must refresh. That is the only lever a fixture has on the
+// daemon's refresh decision — mcpauthdb's Acquire refreshes when its stored
+// access_expiry has passed, and a server-side 401 is answered with the login
+// hint, not a refresh — and it is stated in the run's output rather than left
+// implicit. /_expire then invalidates the token server-side as well, so a client
+// that tried to skip the refresh would be refused rather than accidentally
+// served.
 //
 // The authorization endpoint completes the grant itself: it answers with a 302
 // to the daemon's loopback callback carrying the state it was given, a
@@ -36,6 +57,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -43,6 +65,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -50,6 +73,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -60,8 +84,8 @@ import (
 
 // fixture is the whole server: metadata, registration, authorization, tokens,
 // revocation and the MCP endpoint. Its state is what makes the flow checkable
-// (a code is single use, a refresh token dies when it is rotated), not what
-// makes the Rust tests pass — they assert the daemon's answers.
+// (a code is single use, a refresh token dies when it is rotated, an expired
+// access token is refused), and the same state is what /_state reports.
 type fixture struct {
 	base string // "http://127.0.0.1:PORT", the origin everything below is derived from
 	log  *log.Logger
@@ -69,8 +93,34 @@ type fixture struct {
 	mu      sync.Mutex
 	nextSeq int
 	codes   map[string]*authCode
-	access  map[string][]string // access token → scopes
-	refresh map[string]bool     // refresh tokens still exchangeable
+	access  map[string]*issuedToken // access token → what it is good for
+	refresh map[string]bool         // refresh tokens still exchangeable
+	// accessOrder is every access token in issue order, so /_state reports them
+	// deterministically rather than in map order.
+	accessOrder []string
+
+	// Recorded traffic, snapshotted by /_state.
+	exchanges   []exchange
+	revocations []revocation
+	mcpRequests []mcpRequest
+}
+
+// issuedToken is one access token. valid turns false when /_expire invalidates
+// it. It is true at issue whatever LIFETIME the endpoint advertises: the token
+// is real and the login's own tool verification presents it immediately. The
+// advertised expiry is what makes the daemon refresh before a later use (see
+// loginTokenLifetimeSeconds), and /_expire is the server-side refusal a client
+// that skipped that refresh would meet.
+type issuedToken struct {
+	scopes []string
+	valid  bool
+}
+
+// accessTokenState is one row of /_state's access_tokens: the token's name and
+// whether this fixture still accepts it.
+type accessTokenState struct {
+	Token string `json:"token"`
+	Valid bool   `json:"valid"`
 }
 
 // authCode is one issued authorization code, single use.
@@ -80,12 +130,62 @@ type authCode struct {
 	scopes      string
 }
 
+// exchange is one successful /token call: what grant it was, which refresh
+// token (if any) the client presented, and what it was handed in return. The
+// refresh pair is what makes ROTATION observable: issued_refresh must differ
+// from presented_refresh for a single-use token.
+type exchange struct {
+	GrantType        string `json:"grant_type"`
+	PresentedRefresh string `json:"presented_refresh,omitempty"`
+	IssuedAccess     string `json:"issued_access"`
+	IssuedRefresh    string `json:"issued_refresh,omitempty"`
+	ExpiresIn        int    `json:"expires_in"`
+}
+
+// revocation is one RFC 7009 call: the token offered and the hint that named
+// its type. Both are recorded because a daemon that revoked the wrong half of
+// the grant is a different behaviour from one that revoked nothing.
+type revocation struct {
+	Token         string `json:"token"`
+	TokenTypeHint string `json:"token_type_hint"`
+}
+
+// mcpRequest is one request the protected MCP endpoint answered, with the
+// bearer it carried. accepted=false means the fixture refused it (unknown or
+// expired token), which is how a test proves the refused credential was
+// actually presented rather than never sent.
+type mcpRequest struct {
+	Seq      int    `json:"seq"`
+	Method   string `json:"method,omitempty"`
+	Bearer   string `json:"bearer,omitempty"`
+	Accepted bool   `json:"accepted"`
+}
+
+// Access-token lifetimes, in seconds.
+//
+// The login's is ONE, and that is the whole mechanism behind the live refresh
+// test: the daemon's store refreshes a grant only when its stored access_expiry
+// has passed (a 401 from the resource server is answered with the login hint,
+// never with a refresh), so an access token that is already expired at the time
+// of the next call is the only way a fixture can force the refresh path — and
+// the alternative, scheduling the call after an hour, is not a test.
+//
+// One second rather than a past timestamp: expires_in is a lifetime and a
+// negative or zero value would be modelling a server that does not exist
+// (oauth2 reads 0 as "no expiry at all"). A test that needs the token to be dead
+// waits for the deadline this number advertises, and states that it is doing so.
+// Tokens a refresh issues live an hour, so a session rotates exactly once.
+const (
+	loginTokenLifetimeSeconds   = 1
+	refreshTokenLifetimeSeconds = 3600
+)
+
 func newFixture(base string, logger *log.Logger) *fixture {
 	return &fixture{
 		base:    base,
 		log:     logger,
 		codes:   map[string]*authCode{},
-		access:  map[string][]string{},
+		access:  map[string]*issuedToken{},
 		refresh: map[string]bool{},
 	}
 }
@@ -108,6 +208,8 @@ func (f *fixture) routes() http.Handler {
 	mux.HandleFunc("/authorize", f.handleAuthorize)
 	mux.HandleFunc("/token", f.handleToken)
 	mux.HandleFunc("/revoke", f.handleRevoke)
+	mux.HandleFunc("/_state", f.handleState)
+	mux.HandleFunc("/_expire", f.handleExpire)
 	mux.Handle("/mcp", f.guard(f.mcpHandler()))
 	mux.Handle("/mcp/", f.guard(f.mcpHandler()))
 	return mux
@@ -140,12 +242,19 @@ func (f *fixture) mcpHandler() http.Handler {
 }
 
 // guard is the protected-resource half: a request without a token this fixture
-// issued gets a 401 carrying the resource_metadata challenge a client uses to
-// find the authorization server. That is what makes the endpoint "protected"
-// rather than merely authenticated by convention.
+// issued — or with one /_expire has invalidated — gets a 401 carrying the
+// resource_metadata challenge a client uses to find the authorization server.
+// That is what makes the endpoint "protected" rather than merely authenticated
+// by convention.
+//
+// It also records the request and the bearer it carried, because the assertion
+// that matters for the refresh test is about WHICH credential arrived, not about
+// the daemon's own report of one.
 func (f *fixture) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := f.scopesOf(r); !ok {
+		bearer, ok := f.accept(r)
+		f.recordMCP(r, bearer, ok)
+		if !ok {
 			w.Header().Set("WWW-Authenticate",
 				`Bearer resource_metadata="`+f.base+`/.well-known/oauth-protected-resource/mcp"`)
 			http.Error(w, "a bearer token from this fixture is required", http.StatusUnauthorized)
@@ -155,25 +264,72 @@ func (f *fixture) guard(next http.Handler) http.Handler {
 	})
 }
 
-func (f *fixture) scopesOf(r *http.Request) ([]string, bool) {
+// accept returns the request's bearer when it names a token this fixture still
+// considers valid.
+func (f *fixture) accept(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(strings.ToLower(h), "bearer ") {
-		return nil, false
+		return "", false
 	}
 	token := strings.TrimSpace(h[len("Bearer "):])
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	scopes, ok := f.access[token]
-	return scopes, ok
+	issued, ok := f.access[token]
+	return token, ok && issued.valid
+}
+
+// recordMCP appends one MCP request for /_state. The JSON-RPC method is read
+// from a POST body (which is then restored for the MCP handler); a GET carries
+// the standalone stream and has none.
+func (f *fixture) recordMCP(r *http.Request, bearer string, accepted bool) {
+	method := ""
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var msg struct {
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(body, &msg) == nil {
+				method = msg.Method
+			}
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mcpRequests = append(f.mcpRequests, mcpRequest{
+		Seq:      len(f.mcpRequests) + 1,
+		Method:   method,
+		Bearer:   bearer,
+		Accepted: accepted,
+	})
 }
 
 // ─── metadata ───────────────────────────────────────────────────────────────
 
+// writeJSON answers with a JSON body of a KNOWN length.
+//
+// The explicit Content-Length matters: net/http switches to chunked encoding
+// once a response outgrows its small-response buffer, and /_state's grows with
+// every test that runs. A client that reads the body verbatim would then get
+// chunk-size lines mixed into the JSON — a failure that appears only when the
+// run is busy, which is the worst kind.
 func writeJSON(w http.ResponseWriter, status int, body any) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		// Nothing this package marshals can fail, but a broken handler must not
+		// write a half response.
+		http.Error(w, "the fixture could not encode its answer", http.StatusInternalServerError)
+		return
+	}
+	raw = append(raw, '\n')
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
 	w.WriteHeader(status)
-	// The client is gone if this fails; there is nothing left to report to.
-	_ = json.NewEncoder(w).Encode(body)
+	if _, err := w.Write(raw); err != nil {
+		// The client is gone; there is nothing left to report to.
+		_ = err
+	}
 }
 
 // handlePRM answers the protected-resource metadata. Two documents, one origin,
@@ -284,12 +440,18 @@ func (f *fixture) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 // issue mints one access/refresh pair under the shared sequence, so a token
 // name says which issue produced it and a rotation is distinguishable from the
 // token it replaced. The caller holds f.mu.
+//
+// The token is VALID at issue whatever lifetime the caller advertises: "this
+// token is accepted" and "this token claims to expire immediately" are two
+// different facts, and the login's own tool verification needs the first one
+// true while the second one is what makes the next session refresh.
 func (f *fixture) issue(scopes string) (access, refresh string) {
 	f.nextSeq++
 	n := f.nextSeq
 	access = fmt.Sprintf("access-%d", n)
 	refresh = fmt.Sprintf("refresh-%d", n)
-	f.access[access] = strings.Fields(scopes)
+	f.access[access] = &issuedToken{scopes: strings.Fields(scopes), valid: true}
+	f.accessOrder = append(f.accessOrder, access)
 	f.refresh[refresh] = true
 	return access, refresh
 }
@@ -326,12 +488,18 @@ func (f *fixture) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		access, refresh := f.issue(code.scopes)
+		f.exchanges = append(f.exchanges, exchange{
+			GrantType:     "authorization_code",
+			IssuedAccess:  access,
+			IssuedRefresh: refresh,
+			ExpiresIn:     loginTokenLifetimeSeconds,
+		})
 		f.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"access_token":  access,
 			"refresh_token": refresh,
 			"token_type":    "Bearer",
-			"expires_in":    3600,
+			"expires_in":    loginTokenLifetimeSeconds,
 			"scope":         code.scopes,
 		})
 	case "refresh_token":
@@ -348,6 +516,13 @@ func (f *fixture) handleToken(w http.ResponseWriter, r *http.Request) {
 		access, next := "", ""
 		if ok {
 			access, next = f.issue("read")
+			f.exchanges = append(f.exchanges, exchange{
+				GrantType:        "refresh_token",
+				PresentedRefresh: presented,
+				IssuedAccess:     access,
+				IssuedRefresh:    next,
+				ExpiresIn:        refreshTokenLifetimeSeconds,
+			})
 		}
 		f.mu.Unlock()
 		if !ok {
@@ -358,7 +533,7 @@ func (f *fixture) handleToken(w http.ResponseWriter, r *http.Request) {
 			"access_token":  access,
 			"refresh_token": next,
 			"token_type":    "Bearer",
-			"expires_in":    3600,
+			"expires_in":    refreshTokenLifetimeSeconds,
 			"scope":         "read",
 		})
 	default:
@@ -371,11 +546,76 @@ func (f *fixture) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		f.refuse(w, "revoke: the body is not a form: %v", err)
 		return
 	}
+	// Record what the daemon offered and how it labelled it: "a revocation
+	// arrived" and "a revocation arrived for the REFRESH token" are different
+	// claims, and only the second one means the live grant was retired.
+	f.mu.Lock()
+	f.revocations = append(f.revocations, revocation{
+		Token:         r.PostForm.Get("token"),
+		TokenTypeHint: r.PostForm.Get("token_type_hint"),
+	})
+	f.mu.Unlock()
 	// RFC 7009 §2.2: the answer is 200 even for a token this server never
-	// issued, so a caller cannot use revocation as an oracle. Nothing is
-	// invalidated here: the grant the daemon revokes belongs to a fixture this
-	// run is about to discard.
+	// issued, so a caller cannot use revocation as an oracle. The token is not
+	// invalidated here — the grant it belonged to is being discarded with the
+	// run, and a 200 that changed state would prove less, not more.
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// ─── the control surface ────────────────────────────────────────────────────
+
+// handleState reports what this fixture has seen, so a test can assert on
+// upstream traffic instead of on the daemon's description of it. It carries
+// token NAMES the caller was already issued — never a client secret, and never
+// anything the caller could not have learned from the token endpoint.
+func (f *fixture) handleState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	f.mu.Lock()
+	state := map[string]any{
+		"resource":     f.base + "/mcp",
+		"issuer":       f.base,
+		"lifetimes":    map[string]int{"authorization_code": loginTokenLifetimeSeconds, "refresh_token": refreshTokenLifetimeSeconds},
+		"exchanges":    append([]exchange{}, f.exchanges...),
+		"revocations":  append([]revocation{}, f.revocations...),
+		"mcp_requests": append([]mcpRequest{}, f.mcpRequests...),
+	}
+	access := make([]accessTokenState, 0, len(f.accessOrder))
+	for _, token := range f.accessOrder {
+		if issued := f.access[token]; issued != nil {
+			access = append(access, accessTokenState{Token: token, Valid: issued.valid})
+		}
+	}
+	f.mu.Unlock()
+	state["access_tokens"] = access
+	writeJSON(w, http.StatusOK, state)
+}
+
+// handleExpire invalidates every access token this fixture has issued, so a
+// client that skips the refresh is refused instead of served. It is the
+// server-side half of "this credential is dead now": the daemon's own refresh
+// decision is driven by the stored expiry (see loginTokenLifetimeSeconds), and
+// this makes sure a reuse of the old token could not have succeeded.
+func (f *fixture) handleExpire(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	f.mu.Lock()
+	expired := []string{}
+	for _, token := range f.accessOrder {
+		if issued := f.access[token]; issued != nil && issued.valid {
+			issued.valid = false
+			expired = append(expired, token)
+		}
+	}
+	f.mu.Unlock()
+	f.log.Printf("expire: invalidated %d access token(s)", len(expired))
+	writeJSON(w, http.StatusOK, map[string]any{"expired": expired})
 }
 
 // refuse answers a request this fixture cannot honour, naming the reason on

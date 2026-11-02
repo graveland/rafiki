@@ -13,14 +13,23 @@
 #   3. test/livefixture: a fake authorization server and a real MCP SDK server
 #      on loopback. No vendor account, no network traffic to a real provider.
 #
-# It then runs `cargo test --locked --all-features --test daemon -- --ignored`.
+# It then runs `cargo test --locked --all-features --test daemon -- --ignored`,
+# and it PROVES the outcome rather than looking for the tests it likes: the
+# passed set and the failed set must each equal an expected set exactly, every
+# expected failure must have failed with its documented missing-history panic
+# (not merely with the right name), the harness summary must agree with the
+# per-test lines, and cargo's exit status must be the one those failures explain.
+# A regression inside an allowlisted test, an extra or missing test, a harness
+# that ran nothing and a cargo error after the tests all fail the run.
 #
-# The three MCP OAuth tests are the point of the run and must pass. The four
-# pre-existing live tests that need a daemon HOLDING CHILD HISTORY (a spawn, a
-# durable event, a child to replay) fail here by design and are reported as
-# expected; they are not this feature's tests. Every other ignored test must
-# pass. `RAFIKI_SDK_LIVE_STRICT=1` demands a fully green run instead, which only
-# a daemon with child history could give.
+#   --check-outcome <log> [exit-status]
+#       Run only that classification against a cargo log (no database, no
+#       daemon, no cargo), so the rule itself is testable. Exit 0 = the log
+#       shows exactly the expected outcome.
+#
+# The six tests a scratch daemon can pass must pass — the four MCP OAuth ones
+# included. The four pre-existing live tests that need a daemon HOLDING CHILD
+# HISTORY fail here by design; they are not this feature's tests.
 #
 # Requirements, each failing loudly rather than skipping:
 #   - cargo on PATH (the Rust crate and its lockfile are the thing under test)
@@ -43,6 +52,160 @@ die() {
 }
 
 say() { printf '%s\n' "$*"; }
+
+# ─── the outcome this daemon can produce ────────────────────────────────────
+#
+# Two exact sets, not allowlists. The passed set is every ignored test a scratch
+# daemon with no child history can pass; the failed set is the four that need a
+# spawn, a durable event and a child to replay — each with the panic message
+# that names the missing precondition, because a test that fails for another
+# reason has regressed and must not be mistaken for the expected failure.
+expected_pass="a_live_daemon_answers_a_unary_call
+a_live_daemon_refuses_a_stale_client_on_both_codecs
+a_live_daemon_starts_and_completes_an_mcp_login
+a_live_daemon_logs_out_an_mcp_grant
+a_live_daemon_refreshes_an_expired_mcp_grant
+a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server"
+
+expected_fail="a_live_stream_idles_and_resumes_from_its_cursor|the daemon needs a child that is not working and has a durable event
+a_live_follower_reopens_across_idle_windows_without_repeats|the daemon needs a child that is not working and has a durable event
+a_live_child_follower_never_replays_history|the daemon needs a child that is not working and has a durable event
+a_live_history_pages_backwards_without_gaps_or_repeats|the daemon needs a child with at least two history events"
+
+# extra_in <wanted> <actual> prints the members of <actual> that <wanted> lacks.
+# Both arguments are newline-separated sets.
+extra_in() {
+	comm -13 <(printf '%s\n' "$1" | sed '/^$/d' | sort -u) <(printf '%s\n' "$2" | sed '/^$/d' | sort -u)
+}
+# missing_from is the other direction.
+missing_from() {
+	comm -23 <(printf '%s\n' "$1" | sed '/^$/d' | sort -u) <(printf '%s\n' "$2" | sed '/^$/d' | sort -u)
+}
+
+# classify_outcome <log> [cargo-exit-status]
+#
+# Prints one line per check and a final VERDICT, and returns 0 only when the log
+# is exactly the expected outcome. With no exit status it judges consistency
+# from the summary alone, which is what --check-outcome does.
+classify_outcome() {
+	local log=$1 rc=${2:-}
+	local bad=0
+
+	if [ ! -r "$log" ]; then
+		printf '  readable log .................. FAIL (%s)\n' "$log"
+		printf 'VERDICT: UNEXPECTED\n'
+		return 1
+	fi
+
+	local summary
+	summary=$(grep -E '^test result: (ok|FAILED)\. ' "$log" | tail -n 1)
+	if [ -z "$summary" ]; then
+		printf '  harness summary ............... FAIL (no "test result:" line: nothing ran, or the binary died before finishing)\n'
+		printf 'VERDICT: UNEXPECTED\n'
+		return 1
+	fi
+	local passed_n failed_n
+	passed_n=$(printf '%s\n' "$summary" | sed -n 's/.*\. \([0-9][0-9]*\) passed.*/\1/p')
+	failed_n=$(printf '%s\n' "$summary" | sed -n 's/.* \([0-9][0-9]*\) failed.*/\1/p')
+	[ -n "$passed_n" ] && [ -n "$failed_n" ] || {
+		printf '  harness summary ............... FAIL (unparseable: %s)\n' "$summary"
+		printf 'VERDICT: UNEXPECTED\n'
+		return 1
+	}
+
+	local ok_names failed_names
+	ok_names=$(sed -n 's/^test \([A-Za-z0-9_]*\) \.\.\. ok$/\1/p' "$log")
+	failed_names=$(sed -n 's/^test \([A-Za-z0-9_]*\) \.\.\. FAILED$/\1/p' "$log")
+	local want_fail_names
+	want_fail_names=$(printf '%s\n' "$expected_fail" | cut -d'|' -f1)
+
+	# 1. The summary must agree with the per-test lines: a harness that printed
+	#    counts its lines do not back up is not evidence.
+	local ok_n failed_n_lines
+	ok_n=$(printf '%s\n' "$ok_names" | sed '/^$/d' | wc -l | tr -d ' ')
+	failed_n_lines=$(printf '%s\n' "$failed_names" | sed '/^$/d' | wc -l | tr -d ' ')
+	if [ "$passed_n" = "$ok_n" ] && [ "$failed_n" = "$failed_n_lines" ]; then
+		printf '  harness summary ............... ok (%s passed; %s failed)\n' "$passed_n" "$failed_n"
+	else
+		printf '  harness summary ............... FAIL (summary says %s passed / %s failed, lines show %s / %s)\n' \
+			"$passed_n" "$failed_n" "$ok_n" "$failed_n_lines"
+		bad=1
+	fi
+
+	# 2. The passed set must be EXACTLY the expected one.
+	local missing extra
+	missing=$(missing_from "$expected_pass" "$ok_names")
+	extra=$(extra_in "$expected_pass" "$ok_names")
+	if [ -z "$missing" ] && [ -z "$extra" ]; then
+		printf '  passed set .................... ok (%s tests)\n' "$ok_n"
+	else
+		[ -z "$missing" ] || printf '  passed set .................... FAIL (expected but did not pass: %s)\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
+		[ -z "$extra" ] || printf '  passed set .................... FAIL (passed but not expected: %s)\n' "$(printf '%s' "$extra" | tr '\n' ' ')"
+		bad=1
+	fi
+
+	# 3. The failed set must be EXACTLY the four documented tests.
+	missing=$(missing_from "$want_fail_names" "$failed_names")
+	extra=$(extra_in "$want_fail_names" "$failed_names")
+	if [ -z "$missing" ] && [ -z "$extra" ]; then
+		printf '  failed set .................... ok (%s tests)\n' "$failed_n_lines"
+	else
+		[ -z "$missing" ] || printf '  failed set .................... FAIL (expected failure did not happen: %s)\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
+		[ -z "$extra" ] || printf '  failed set .................... FAIL (unexpected failure: %s)\n' "$(printf '%s' "$extra" | tr '\n' ' ')"
+		bad=1
+	fi
+
+	# 4. Each expected failure must have failed for the documented reason: the
+	#    exact missing-history panic, once. A changed assertion, a protocol
+	#    error or a panic somewhere else is a regression wearing the right name.
+	local entry name want block panics
+	while IFS= read -r entry; do
+		[ -n "$entry" ] || continue
+		name=${entry%%|*}
+		want=${entry#*|}
+		block=$(awk -v h="---- $name stdout ----" \
+			'$0 == h { inblock = 1; next } inblock && (/^---- / || /^failures:$/) { exit } inblock { print }' "$log")
+		panics=$(printf '%s\n' "$block" | grep -c 'panicked at' || true)
+		if [ -n "$block" ] && [ "$panics" = 1 ] && printf '%s' "$block" | grep -qF "$want"; then
+			printf '  %-30s ok (documented missing-history panic)\n' "$name"
+		else
+			printf '  %-30s FAIL (expected exactly one panic saying "%s"; got %s panic line(s): %s)\n' \
+				"$name" "$want" "$panics" "$(printf '%s' "$block" | tr '\n' ' ' | cut -c1-160)"
+			bad=1
+		fi
+	done <<< "$expected_fail"
+
+	# 5. cargo's exit status must be the one those failures explain.
+	if grep -qE '^error\[E|^error: could not compile' "$log"; then
+		printf '  exit status ................... FAIL (the log carries a build error)\n'
+		bad=1
+	elif [ -z "$rc" ]; then
+		printf '  exit status ................... skipped (judged from the summary)\n'
+	elif [ "$rc" -eq 0 ] && [ "$failed_n" -ne 0 ]; then
+		printf '  exit status ................... FAIL (cargo exited 0 while %s test(s) failed)\n' "$failed_n"
+		bad=1
+	elif [ "$rc" -ne 0 ] && [ "$failed_n" -eq 0 ]; then
+		printf '  exit status ................... FAIL (cargo exited %s although no test failed)\n' "$rc"
+		bad=1
+	else
+		printf '  exit status ................... ok (%s, explained by the expected failures)\n' "$rc"
+	fi
+
+	if [ "$bad" -eq 0 ]; then
+		printf 'VERDICT: EXPECTED\n'
+		return 0
+	fi
+	printf 'VERDICT: UNEXPECTED\n'
+	return 1
+}
+
+# --check-outcome runs the classification and nothing else: no database, no
+# daemon, no cargo. That is what makes the rule itself testable.
+if [ "${1:-}" = "--check-outcome" ]; then
+	[ -n "${2:-}" ] || die "usage: $0 --check-outcome <cargo-test-log> [cargo-exit-status]"
+	classify_outcome "$2" "${3:-}" || exit 1
+	exit 0
+fi
 
 # ─── prerequisites ──────────────────────────────────────────────────────────
 
@@ -316,20 +479,6 @@ done
 
 # ─── the run ───────────────────────────────────────────────────────────────
 
-# The three tests this driver exists for, and the four pre-existing live tests
-# that need a daemon HOLDING CHILD HISTORY. The latter need a spawned child with
-# durable events to replay and page; this daemon has never spawned anything, and
-# no MCP OAuth test spawns, so they fail here by design. They are named so the
-# script can tell "expected" from "regression" instead of hiding either.
-mcp_tests="a_live_daemon_starts_and_completes_an_mcp_login
-a_live_daemon_logs_out_an_mcp_grant
-a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server"
-
-history_tests="a_live_stream_idles_and_resumes_from_its_cursor
-a_live_follower_reopens_across_idle_windows_without_repeats
-a_live_child_follower_never_replays_history
-a_live_history_pages_backwards_without_gaps_or_repeats"
-
 say "running the Rust SDK's live-daemon tests"
 # The four history tests are EXPECTED to fail, so cargo's exit code is a signal
 # to classify, not to abort: pipefail plus -e would kill the run before the
@@ -347,34 +496,12 @@ set +e
 cargo_rc=${PIPESTATUS[0]}
 set -e
 
-passed=$(sed -n 's/^test \([A-Za-z0-9_]*\) \.\.\. ok$/\1/p' "$tmp/cargo.log" | sort -u)
-failed=$(sed -n 's/^test \([A-Za-z0-9_]*\) \.\.\. FAILED$/\1/p' "$tmp/cargo.log" | sort -u)
-contains() { printf '%s\n' "$1" | grep -qx "$2"; }
-
-missing=""
-for t in $mcp_tests; do
-	if ! contains "$passed" "$t"; then
-		missing="$missing
-  $t"
-	fi
-done
-if [ -n "$missing" ]; then
-	die "the MCP OAuth live tests did not pass:$missing
-This run is the one that must reproduce them; see the cargo output above."
-fi
-
-unexpected=""
-for t in $failed; do
-	contains "$history_tests" "$t" || unexpected="$unexpected
-  $t"
-done
-if [ -n "$unexpected" ]; then
-	die "tests outside the documented set failed:$unexpected
-Only the four child-history live tests may fail in this run."
-fi
-
-if [ -n "${RAFIKI_SDK_LIVE_STRICT:-}" ] && [ "$cargo_rc" -ne 0 ]; then
-	die "RAFIKI_SDK_LIVE_STRICT is set and the run was not green (exit $cargo_rc)."
+say ""
+say "== outcome =="
+if ! classify_outcome "$tmp/cargo.log" "$cargo_rc"; then
+	die "the live run did not produce the expected outcome (see the checks above).
+Every line marked FAIL is a regression or a broken harness, and the log is
+printed by the cleanup trap below."
 fi
 
 # Leave the shared database as tidy as it can be: the grant this run logged in
@@ -387,15 +514,15 @@ if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
 fi
 
 say ""
-say "== MCP OAuth live tests (the point of this run) =="
-for t in $mcp_tests; do say "PASS  $t"; done
+say "== passed =="
+for t in $expected_pass; do say "PASS  $t"; done
 say ""
-say "== pre-existing live tests that need a daemon holding child history =="
-if [ -n "$failed" ]; then
-	for t in $failed; do say "FAIL  $t   (expected: this daemon has spawned no child)"; done
-else
-	say "(all four passed: this database supplied a child with durable events)"
-fi
+say "== failed, expected: a daemon holding child history =="
+while IFS= read -r entry; do
+	[ -n "$entry" ] || continue
+	say "FAIL  ${entry%%|*}"
+done <<< "$expected_fail"
 say ""
-say "reproduced: daemon-brokered MCP OAuth login, logout and refusal, against a"
+say "reproduced: daemon-brokered MCP OAuth login, logout, refusal and a forced"
+say "refresh (with refresh-token rotation and upstream revocation), against a"
 say "loopback fixture. No vendor account was involved."

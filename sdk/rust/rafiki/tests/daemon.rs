@@ -13,11 +13,14 @@
 //! `cargo test --all-features --test daemon -- --ignored`. Asked to run with no
 //! endpoint, they FAIL: a live test that skips itself is not a test.
 //!
-//! The tests only read: they list, stream and page, and never spawn, send or
-//! kill — except the three MCP OAuth ones, which perform an explicit login and
-//! logout. The four history tests need a child that is not working and has at
-//! least two durable events, so they fail against a daemon that has never
-//! spawned anything (the scratch one `make check-sdk-rust-live` starts).
+//! The tests otherwise only read: they list, stream and page, and never spawn,
+//! send or kill. The four MCP OAuth tests are the exception — they log in and
+//! out explicitly, and the refresh one spawns a child with the fixture's MCP
+//! config (no prompt, so no model call) and kills it again, because a real MCP
+//! session is what proves the credential was refreshed. The four history tests
+//! need a child that is not working and has at least two durable events, so they
+//! fail against a daemon that has never spawned anything (the scratch one
+//! `make check-sdk-rust-live` starts).
 //!
 //! The other half of the protocol-mismatch pair — a daemon speaking an epoch
 //! this client does not — cannot be provoked against a real daemon, so it is
@@ -425,34 +428,95 @@ fn live_mcp_config() -> (String, String) {
     (config, server)
 }
 
-/// One plain-HTTP GET, returning (status, Location). Enough to play the browser
-/// against a loopback fake authorization server, and deliberately not a general
-/// HTTP client: the redirect is the only thing read.
-fn http_get_location(url: &str) -> (u16, Option<String>) {
+/// One plain-HTTP request, returning (status, headers, body). Enough to play the
+/// browser against a loopback fake authorization server and to read its control
+/// surface, and deliberately not a general HTTP client.
+fn http_call(method: &str, url: &str, body: &str) -> (u16, String, String) {
     use std::io::{Read, Write};
-    let rest = url
-        .strip_prefix("http://")
-        .unwrap_or_else(|| panic!("{url}: the MCP OAuth live tests need a loopback http:// authorization endpoint (the fake fixture)"));
+    let rest = url.strip_prefix("http://").unwrap_or_else(|| {
+        panic!(
+            "{url}: the live fixture answers on loopback http:// only \
+             (the tests never reach an https:// authorization server)"
+        )
+    });
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
     let mut stream = std::net::TcpStream::connect(authority)
         .unwrap_or_else(|err| panic!("connect to {authority}: {err}"));
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
     stream
         .write_all(request.as_bytes())
-        .expect("write the consent request");
+        .expect("write the fixture request");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
-        .expect("read the consent response");
-    let status = response
+        .expect("read the fixture response");
+    let (headers, body) = match response.split_once("\r\n\r\n") {
+        Some((head, body)) => (head.to_string(), body.to_string()),
+        None => (response.clone(), String::new()),
+    };
+    let status = headers
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or_else(|| panic!("no status line in the consent response: {response:?}"));
-    let location = response.lines().find_map(|line| {
+        .unwrap_or_else(|| panic!("no status line in the fixture response: {response:?}"));
+    let body = if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        dechunk(&body)
+    } else {
+        body
+    };
+    (status, headers, body)
+}
+
+/// Decode a chunked body. The fixture sets Content-Length (so this normally does
+/// nothing), but a response that outgrew net/http's buffer used to arrive
+/// chunked and the chunk-size line is not JSON — the helper reads the wire
+/// honestly rather than assuming one framing.
+fn dechunk(body: &str) -> String {
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut rest = body.as_bytes();
+    while let Some(pos) = find(rest, b"\r\n") {
+        let size = match std::str::from_utf8(&rest[..pos])
+            .ok()
+            .and_then(|line| usize::from_str_radix(line.trim(), 16).ok())
+        {
+            Some(size) => size,
+            None => break,
+        };
+        let after = &rest[pos + 2..];
+        if size == 0 {
+            break;
+        }
+        if after.len() < size {
+            out.extend_from_slice(after);
+            break;
+        }
+        out.extend_from_slice(&after[..size]);
+        rest = if after.len() >= size + 2 {
+            &after[size + 2..]
+        } else {
+            &[]
+        };
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One plain-HTTP GET, returning (status, Location). The consent round's
+/// redirect is the only header read directly.
+fn http_get_location(url: &str) -> (u16, Option<String>) {
+    let (status, headers, _) = http_call("GET", url, "");
+    let location = headers.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
         if name.eq_ignore_ascii_case("location") {
             Some(value.trim().to_string())
@@ -463,10 +527,87 @@ fn http_get_location(url: &str) -> (u16, Option<String>) {
     (status, location)
 }
 
-/// Drive one whole explicit login: begin, play the browser (another round if the
-/// daemon asks for one), and return (server, resource, tools).
+/// The fixture's origin, taken from the entry the daemon is configured with —
+/// the same file the login reads, so the control surface cannot point somewhere
+/// else.
+fn fixture_base() -> String {
+    let (config, server) = live_mcp_config();
+    let raw = std::fs::read_to_string(&config)
+        .unwrap_or_else(|err| panic!("read the MCP config {config}: {err}"));
+    let doc: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("the MCP config {config} is not JSON: {err}"));
+    let url = doc["mcpServers"][&server]["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the MCP config {config} has no url for entry {server}"));
+    let rest = url
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("{url}: the live fixture is a loopback http:// server"));
+    let authority = match rest.find('/') {
+        Some(i) => &rest[..i],
+        None => rest,
+    };
+    format!("http://{authority}")
+}
+
+/// One request to the fixture's control surface, parsed. The whole document is
+/// needed for the assertions (token names, request bearers, hint strings), and
+/// nothing in it is secret the caller did not already hold.
+fn fixture_call(method: &str, path: &str) -> serde_json::Value {
+    let url = format!("{}{path}", fixture_base());
+    let (status, _, body) = http_call(method, &url, "");
+    assert_eq!(200, status, "{method} {url} answered {status}: {body}");
+    serde_json::from_str(&body).unwrap_or_else(|err| panic!("{method} {url}: {err}: {body}"))
+}
+
+fn fixture_state() -> serde_json::Value {
+    fixture_call("GET", "/_state")
+}
+
+/// Poll the fixture until `pred` holds, then return that state. Bounded, not
+/// timed: nothing here sleeps to make an expiry happen — the expiry is a
+/// property of the token the fixture issued.
+async fn wait_for_fixture(
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = fixture_state();
+        if pred(&state) {
+            return state;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fixture never saw {what}; last state: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// The newest authorization_code exchange, which is this run's login: the login
+/// slot serializes the MCP tests, so the newest one is the caller's.
+fn last_login_exchange(state: &serde_json::Value) -> &serde_json::Value {
+    state["exchanges"]
+        .as_array()
+        .expect("the fixture reports its exchanges")
+        .iter()
+        .rev()
+        .find(|x| x["grant_type"] == "authorization_code")
+        .expect("a completed login left an authorization_code exchange")
+}
+
+/// Drive one whole explicit login under the login slot: begin, play the
+/// browser (another round if the daemon asks for one), and return (server,
+/// resource, tools).
 async fn live_mcp_login(client: &Client) -> (String, String, Vec<String>) {
     let _slot = login_slot().await;
+    live_mcp_login_locked(client).await
+}
+
+/// The login itself. Callers that keep the slot for work AFTER the login (the
+/// refresh and revocation tests) call this directly, so the whole test stays one
+/// critical section — the slot is not reentrant.
+async fn live_mcp_login_locked(client: &Client) -> (String, String, Vec<String>) {
     let (config, server) = live_mcp_config();
     let begin = client
         .begin_mcp_login(&pb::BeginMcpLoginRequest {
@@ -566,8 +707,19 @@ async fn a_live_daemon_starts_and_completes_an_mcp_login() {
 #[tokio::test]
 #[ignore = "needs a live rafikid + RAFIKI_SDK_TEST_MCP_CONFIG: run with --ignored"]
 async fn a_live_daemon_logs_out_an_mcp_grant() {
+    let _slot = login_slot().await;
     let client = live_client();
-    let (_, resource, _) = live_mcp_login(&client).await;
+    let (_, resource, _) = live_mcp_login_locked(&client).await;
+
+    // The grant's own refresh token. The revocation the daemon sends upstream
+    // must name THIS token: that is what makes "the logout reached the
+    // authorization server" a fact rather than an inference from the RPC's
+    // success.
+    let state = fixture_state();
+    let refresh = last_login_exchange(&state)["issued_refresh"]
+        .as_str()
+        .expect("the login issued a refresh token")
+        .to_string();
 
     // The resource form needs no config file at all, which is how a grant is
     // removed once its project file is gone.
@@ -578,6 +730,28 @@ async fn a_live_daemon_logs_out_an_mcp_grant() {
         })
         .await
         .expect("delete_mcp_credential by resource");
+
+    // The upstream revocation is detached and best-effort — the logout does not
+    // wait on it — so wait for the fixture to report it.
+    let state = wait_for_fixture("a revocation for the logged-out grant", |s| {
+        s["revocations"]
+            .as_array()
+            .map(|rows| rows.iter().any(|r| r["token"] == refresh.as_str()))
+            .unwrap_or(false)
+    })
+    .await;
+    let entry = state["revocations"]
+        .as_array()
+        .expect("the fixture reports revocations")
+        .iter()
+        .find(|r| r["token"] == refresh.as_str())
+        .expect("the revocation that was just waited for");
+    let hint = entry["token_type_hint"].as_str().unwrap_or("");
+    assert_eq!(
+        "refresh_token", hint,
+        "the revocation named another token type: {entry}"
+    );
+    println!("revoked {refresh} upstream with token_type_hint={hint}");
 
     // Logging the same grant out again is IDEMPOTENT: the tombstone is already
     // there, so the local invalidation has nothing left to do and succeeds. A
@@ -609,6 +783,155 @@ async fn a_live_daemon_logs_out_an_mcp_grant() {
         .await
         .expect_err("both delete selectors were accepted");
     assert_eq!(err.code, Code::InvalidArgument, "both selectors: {err}");
+}
+
+#[tokio::test]
+#[ignore = "needs a live rafikid + RAFIKI_SDK_TEST_MCP_CONFIG: run with --ignored"]
+async fn a_live_daemon_refreshes_an_expired_mcp_grant() {
+    let _slot = login_slot().await;
+    let client = live_client();
+    let (config, _) = live_mcp_config();
+    let (_, resource, _) = live_mcp_login_locked(&client).await;
+    // Taken the moment the login returned, which is already after the
+    // authorization server minted the access token: `issued_at + lifetime` is
+    // therefore an UPPER bound on the expiry the daemon stored.
+    let issued_at = std::time::Instant::now();
+
+    // What the login stored: the access token a later session would otherwise
+    // send, and the refresh token that must rotate.
+    //
+    // `before` also pins the fixture's request count. The fixture is shared by
+    // every MCP test in this binary, so "a tools/list with some other bearer"
+    // must mean a request made AFTER this point — an earlier test's session is
+    // not evidence about this one.
+    let state = fixture_state();
+    let requests_before = state["mcp_requests"]
+        .as_array()
+        .map(|rows| rows.len() as i64)
+        .unwrap_or(0);
+    let grant = last_login_exchange(&state);
+    let login_access = grant["issued_access"]
+        .as_str()
+        .expect("the login issued an access token")
+        .to_string();
+    let login_refresh = grant["issued_refresh"]
+        .as_str()
+        .expect("the login issued a refresh token")
+        .to_string();
+
+    // Force expiry from the server side as well, so a session that reuses the
+    // login's access token cannot succeed even if the daemon ignored the
+    // expiry. The daemon's own reason to refresh is the LIFETIME the exchange
+    // advertised (one second — see the wait below); this makes the stale token
+    // unusable rather than merely old.
+    let expired = fixture_call("POST", "/_expire");
+    let expired = expired["expired"]
+        .as_array()
+        .expect("the fixture reports what it expired");
+    assert!(
+        expired.iter().any(|t| t == login_access.as_str()),
+        "/_expire did not invalidate the login's access token {login_access}: {expired:?}"
+    );
+
+    // The fixture issues a login's access token with a one-second lifetime, so
+    // the daemon's stored expiry has passed by the time the session dials. Wait
+    // for that deadline instead of hoping the run was slow: the bound above
+    // makes "expired" a fact before the call is made.
+    let lifetime = state["lifetimes"]["authorization_code"]
+        .as_u64()
+        .expect("the fixture reports the lifetime it advertised");
+    let deadline = issued_at + Duration::from_secs(lifetime) + Duration::from_millis(250);
+    if let Some(wait) = deadline.checked_duration_since(std::time::Instant::now()) {
+        tokio::time::sleep(wait).await;
+    }
+
+    // One MCP-backed call through the daemon, driven by the SDK: a fundi spawn
+    // materializes the configured server's tools over a real MCP session before
+    // any model call, so this needs no provider key and no prompt.
+    let spawned = client
+        .spawn(&pb::SpawnRequest {
+            kind: "fundi".to_string(),
+            model: "anthropic/claude-x".to_string(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            mcp_config: config,
+            no_session: true,
+            ..Default::default()
+        })
+        .await
+        .expect("spawn with the OAuth MCP config");
+    assert!(!spawned.child_id.is_empty(), "spawn returned no child id");
+
+    // The fixture must serve a tools/list to a bearer that is NOT the login's:
+    // the only way to obtain one is the refresh the daemon was forced to make.
+    let after_marker = |r: &serde_json::Value| -> bool {
+        r["seq"].as_i64().is_some_and(|seq| seq > requests_before)
+    };
+    let state = wait_for_fixture("a tools/list with a refreshed bearer", |s| {
+        s["mcp_requests"]
+            .as_array()
+            .map(|rows| {
+                rows.iter().any(|r| {
+                    after_marker(r)
+                        && r["method"] == "tools/list"
+                        && r["accepted"] == true
+                        && r["bearer"]
+                            .as_str()
+                            .is_some_and(|bearer| bearer != login_access)
+                })
+            })
+            .unwrap_or(false)
+    })
+    .await;
+
+    // The refresh presented the stored refresh token and issued a DIFFERENT
+    // one: single-use rotation, not a re-login and not a silent reuse.
+    let exchange = state["exchanges"]
+        .as_array()
+        .expect("the fixture reports exchanges")
+        .iter()
+        .find(|x| {
+            x["grant_type"] == "refresh_token" && x["presented_refresh"] == login_refresh.as_str()
+        })
+        .unwrap_or_else(|| {
+            panic!("the daemon never refreshed with the stored refresh token {login_refresh}")
+        });
+    let fresh_access = exchange["issued_access"]
+        .as_str()
+        .expect("the refresh issued an access token");
+    let fresh_refresh = exchange["issued_refresh"]
+        .as_str()
+        .expect("the refresh issued a refresh token");
+    assert_ne!(
+        login_refresh, fresh_refresh,
+        "the refresh token was not rotated: {exchange}"
+    );
+
+    // And the session that succeeded carried that refreshed token.
+    let carried = state["mcp_requests"]
+        .as_array()
+        .expect("the fixture reports MCP requests")
+        .iter()
+        .any(|r| {
+            after_marker(r)
+                && r["method"] == "tools/list"
+                && r["accepted"] == true
+                && r["bearer"] == fresh_access
+        });
+    assert!(
+        carried,
+        "the verified MCP session did not carry the refreshed token {fresh_access}"
+    );
+    println!(
+        "{resource}: refreshed {login_refresh} -> {fresh_refresh}; the MCP session carried {fresh_access}"
+    );
+
+    client
+        .kill(&pb::KillRequest {
+            child_id: spawned.child_id,
+            ..Default::default()
+        })
+        .await
+        .expect("kill the child that opened the session");
 }
 
 #[tokio::test]
