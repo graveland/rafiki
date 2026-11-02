@@ -16,6 +16,14 @@ By convention a group has four seats: `<group>:coordinator`,
 are always a fresh spawn — never the agent (or the model) that wrote the code.
 The whole-change review runs on `:final-reviewer` and is budgeted first.
 
+A review seat may be plural: `<group>:reviewer-1`, `<group>:reviewer-2`,
+`<group>:final-reviewer-1`, ... Fill them with deliberately different models
+and prompts — every checkpoint dispatches one review per member, so diversity
+is the point, and two members on the same model buy cost without depth. Plans
+and coordinators discover members with `preset_list` (`reviewer` /
+`reviewer-*`, `final-reviewer` / `final-reviewer-*`), so adding a member needs
+no plan change; each one adds a review to every checkpoint's cost.
+
 ## Survey before you write
 
 Never carry a model id in memory or in a habit. Prices, availability and

@@ -108,6 +108,20 @@ does not infer ceremony. The rules:
 - **The whole-change `:final-reviewer` review is mandatory and budgeted
   first** — it is the seat that catches what every per-task review missed, and
   it is the one a budget shortfall silently deletes.
+- **A review role is every seat in the group that fills it, not one named
+  seat.** A group may hold several members per role (`default:reviewer-1`,
+  `default:reviewer-2`, `default:final-reviewer-1`, `default:final-reviewer-2`),
+  deliberately filled with different models and prompts so the reviews reach
+  different depth. Discover the members with `preset_list` when writing the
+  plan: a reviewer seat is any `<group>:` preset whose name is `reviewer` or
+  `reviewer-*`; a final-reviewer seat is `final-reviewer` or `final-reviewer-*`.
+  Never assume the bare `:reviewer` / `:final-reviewer` exists. **Every
+  review checkpoint dispatches one fresh review per member** (all concurrently,
+  each on the same diff file), and the plan lists the resolved preset names in
+  the checkpoint so the coordinator does not re-derive them. A group with a
+  single member of a role just gets one review. A group with none of a
+  required role is a plan blocker: say so and ask, do not substitute another
+  role.
 
 ## Waves
 
@@ -193,7 +207,10 @@ because every task carries a spawn and possibly a review.
 Every task carries `max_cost`; the header states the total. **That total is not
 the sum of the implementer caps** — it is the implementers, plus the review
 checkpoints the plan places, plus the fix rounds they allow, plus the
-whole-branch `:final-reviewer` review, named and budgeted first. Stating only
+whole-branch `:final-reviewer` review, named and budgeted first. **Each
+checkpoint costs one review per group member of that role**, so two reviewers
+doubles every checkpoint line and two final-reviewers doubles the final one.
+Stating only
 the implementer caps understates a plan by roughly half, and the review a
 shortfall silently deletes runs last, after everything else has consumed the
 margin.

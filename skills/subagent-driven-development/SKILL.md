@@ -137,7 +137,13 @@ agent_spawn(cwd: "<abs worktree>", preset: "<group>:<role>", max_cost: <plan val
 The role per task is the plan writer's placement call — it is written into the
 plan, not resolved here. Implementers and reviewers get different roles
 (`<group>:implementer` vs `<group>:reviewer`); reviewers are always a fresh
-spawn, never the agent that wrote the code.
+spawn, never the agent that wrote the code. A group may hold several members
+of a review role (`<group>:reviewer-1`, `<group>:reviewer-2`, ...); the plan
+lists the resolved names at each checkpoint, and a checkpoint dispatches
+**one fresh review per listed preset**, concurrently, each on the same diff
+file. If the plan names only a bare role, discover the members with
+`preset_list` (`reviewer` / `reviewer-*`, `final-reviewer` /
+`final-reviewer-*`) rather than assuming `:reviewer` exists.
 
 Extraction runs from each `^### ` heading to the next `^### ` or a `^---$`
 separator — derive the boundary from the plan in front of you rather than
@@ -206,8 +212,11 @@ to execute it. Two standing rules hold everywhere:
 - **Reviewers are always a fresh spawn** — a different agent, never the
   implementer's conversation, because same-agent review is correlation rather
   than verification.
+- **With several reviewers, triage the union.** Each reviewer settles
+  separately; a finding raised by any of them is open until fixed or ruled
+  out, and the same finding from two is one finding, not two.
 - **A fix round is one fix dispatch plus one scoped re-review of the fix
-  diff.** Rounds 1 and 2 resume the original implementer — its context is
+  diff** (re-reviewed by the member(s) that raised the open findings). Rounds 1 and 2 resume the original implementer — its context is
   intact. Beyond that, dispatch a **fresh** implementer pointed at the report
   file: a task that survives two resumes usually means the implementer cannot
   see its own problem.
@@ -316,7 +325,8 @@ branches merged only into the integration branch refuse; verify with
 
 ## Finishing
 
-1. One whole-branch review on `<group>:final-reviewer`, pointed at the parked
+1. One whole-branch review per final-reviewer seat in the group
+   (`<group>:final-reviewer`, or each `<group>:final-reviewer-<n>`), pointed at the parked
    minor findings — funded out of the reserve you set aside at Setup. One fix
    dispatch, one scoped re-review, adjudicate what is left.
 2. `make check` green, with the evidence in the ledger. Not "should pass".
