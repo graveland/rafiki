@@ -26,7 +26,7 @@ func memClient(t *testing.T, sender Sender) *Client {
 	c, err := NewClient(
 		WithProviderSender("anthropic", sender),
 		WithCatalog(seededCatalog(t)),
-		WithDefaultModel("haiku-latest"),
+		WithDefaultModel("anthropic/haiku-latest"),
 		WithLogger(testLogger(t)),
 	)
 	assert.NewAborting(t).NoError(err)

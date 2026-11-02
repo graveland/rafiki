@@ -68,7 +68,7 @@ func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
 		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
-		WithDefaultModel("haiku-latest"), // conversations created without Model() intend this default
+		WithDefaultModel("anthropic/haiku-latest"), // conversations created without Model() intend this default
 		WithLogger(testLogger(t)),
 	)
 	assert.NewAborting(t).NoError(err)
@@ -140,11 +140,11 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(cat),
-		WithDefaultModel("haiku-latest"),
+		WithDefaultModel("anthropic/haiku-latest"),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err)
-	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("anthropic/sonnet-latest"))
 	ck.Require().NoError(err, "Conversation")
 	if _, err := conv.Send(ctx, UserText("one")); err != nil {
 		t.Fatalf("Send 1: %v", err)
@@ -159,7 +159,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 	ck.LessOrEqual(1e-9, math.Abs(got-want), "ConversationCost = %v, want %v", got, want)
 
 	// A store-less client reports 0 rather than a bogus figure.
-	bare, err := NewClient(WithProviderSender("anthropic", sender), WithDefaultModel("haiku-latest"))
+	bare, err := NewClient(WithProviderSender("anthropic", sender), WithDefaultModel("anthropic/haiku-latest"))
 	ck.Require().NoError(err)
 	ck.Eq(0, bare.ConversationCost(ctx, "some-id"), "ConversationCost without a store")
 }
@@ -176,7 +176,7 @@ func TestConversationSendPersistsBothGranularities(t *testing.T) {
 
 	conv, err := c.Conversation(ctx,
 		NewConversation("", "test"),
-		Model("sonnet-latest"), // must resolve at creation via the seeded catalog
+		Model("anthropic/sonnet-latest"), // must resolve at creation via the seeded catalog
 		SystemText("you are a test"),
 	)
 	ck.Require().NoError(err, "Conversation")
@@ -358,7 +358,7 @@ func TestConversationStoresPrefixOnChange(t *testing.T) {
 	c := testClient(t, pool, sender)
 
 	conv, err := c.Conversation(ctx, NewConversation("", "test"),
-		Model("sonnet-latest"), SystemText("you are a test"))
+		Model("anthropic/sonnet-latest"), SystemText("you are a test"))
 	ck.Require().NoError(err, "Conversation")
 	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
 		t.Fatalf("Send 1: %v", err)
@@ -415,7 +415,7 @@ func TestConversationWithToolChoice(t *testing.T) {
 
 	conv, err := c.Conversation(ctx,
 		NewConversation("", "test"),
-		Model("sonnet-latest"),
+		Model("anthropic/sonnet-latest"),
 		SystemText("you are a test"))
 	ck.Require().NoError(err, "Conversation")
 
@@ -455,7 +455,7 @@ func TestConversationPersistsUserIDsNotNames(t *testing.T) {
 	}}
 	c := testClient(t, pool, sender)
 
-	conv, err := c.Conversation(ctx, NewConversation(userID, "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation(userID, "test"), Model("anthropic/sonnet-latest"))
 	ck.Require().NoError(err, "Conversation")
 	if _, err := conv.Send(ctx, UserText("hello"), WithAuthorUserID(userID)); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -489,7 +489,7 @@ func TestConversationEmptyUserIDPersistsAsNull(t *testing.T) {
 	}}
 	c := testClient(t, pool, sender)
 
-	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("anthropic/sonnet-latest"))
 	ck.Require().NoError(err, "Conversation")
 	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -1017,11 +1017,11 @@ func TestCompleteTurnStoresNativeResponseUnderProtocolRafiki(t *testing.T) {
 		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
-		WithDefaultModel("haiku-latest"),
+		WithDefaultModel("anthropic/haiku-latest"),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err, "NewClient")
-	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("anthropic/sonnet-latest"))
 	ck.Require().NoError(err, "Conversation")
 	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -1139,11 +1139,11 @@ func TestCompleteTurnKeepsAnUnmodelledStopReason(t *testing.T) {
 		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
-		WithDefaultModel("haiku-latest"),
+		WithDefaultModel("anthropic/haiku-latest"),
 		WithLogger(testLogger(t)),
 	)
 	ck.Require().NoError(err, "NewClient")
-	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("anthropic/sonnet-latest"))
 	ck.Require().NoError(err, "Conversation")
 	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
 		t.Fatalf("Send: %v", err)

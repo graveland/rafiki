@@ -42,7 +42,7 @@ func TestOriginLLMAppendsAreFundi(t *testing.T) {
 	}}
 	c := testClient(t, pool, sender)
 
-	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("anthropic/sonnet-latest"))
 	ck.Require().NoError(err, "Conversation")
 
 	ck.Require().NoError(conv.SeedHistory(ctx, []msg.Message{

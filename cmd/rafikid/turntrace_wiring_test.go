@@ -211,7 +211,7 @@ func TestTurnTraceChildMetaProvider(t *testing.T) {
 		Status: protocol.StatusIdle, StartedAt: time.Now(),
 	})
 	ctrl.st.Insert(&childstore.Session{
-		ChildID: "c_claude", Kind: protocol.KindClaude, Model: "sonnet-latest",
+		ChildID: "c_claude", Kind: protocol.KindClaude, Model: "anthropic/sonnet-latest",
 		Status: protocol.StatusIdle, StartedAt: time.Now(),
 	})
 	ctrl.st.Insert(&childstore.Session{

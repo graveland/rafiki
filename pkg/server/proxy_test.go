@@ -949,7 +949,7 @@ func TestProxyResolveModel(t *testing.T) {
 	c := assert.NewCollecting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cat := routing.NewModelCatalog(nil, time.Minute, logger)
-	p := &MessagesProxy{logger: logger, catalog: cat, defaultModel: "haiku-latest"}
+	p := &MessagesProxy{logger: logger, catalog: cat, defaultModel: "anthropic/haiku-latest"}
 	// Seed the catalog via its test hook instead of the network:
 	cat.SeedForTest([]routing.CatalogEntry{
 		{ID: "anthropic/claude-haiku-4.5", Created: 1},
@@ -957,16 +957,16 @@ func TestProxyResolveModel(t *testing.T) {
 		{ID: "moonshotai/kimi-k3", Created: 3},
 	})
 
-	// empty model -> default (haiku-latest) -> concrete anthropic id
+	// empty model -> default (anthropic/haiku-latest) -> concrete anthropic id
 	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"max_tokens":1,"messages":[]}`))
 	c.Require().NoError(err, "empty->default errored")
 	c.Eq("claude-haiku-4-5", modelOf(t, body), "empty->default")
 	c.Eq("claude-haiku-4-5", resolved, "empty->default resolved")
-	// explicit sonnet-latest -> concrete
-	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"sonnet-latest","max_tokens":1}`))
-	c.Require().NoError(err, "sonnet-latest errored")
-	c.Eq("claude-sonnet-5", modelOf(t, body), "sonnet-latest")
-	c.Eq("claude-sonnet-5", resolved, "sonnet-latest resolved")
+	// explicit anthropic/sonnet-latest -> concrete
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"anthropic/sonnet-latest","max_tokens":1}`))
+	c.Require().NoError(err, "anthropic/sonnet-latest errored")
+	c.Eq("claude-sonnet-5", modelOf(t, body), "anthropic/sonnet-latest")
+	c.Eq("claude-sonnet-5", resolved, "anthropic/sonnet-latest resolved")
 	// concrete id -> untouched
 	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"claude-opus-4-8"}`))
 	c.Require().NoError(err, "concrete errored")
@@ -979,8 +979,8 @@ func TestProxyResolveModel(t *testing.T) {
 	c.Eq("kimi-k3", modelOf(t, body), "kimi-k3")
 	c.Eq("kimi-k3", resolved, "kimi-k3 resolved")
 	// a "<family>-latest" the catalog can't resolve -> error (no hardcoded fallback)
-	if _, _, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"opus-latest"}`)); err == nil {
-		t.Error("opus-latest absent from catalog must error")
+	if _, _, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"anthropic/opus-latest"}`)); err == nil {
+		t.Error("anthropic/opus-latest absent from catalog must error")
 	}
 	// malformed body -> best-effort passthrough, no error
 	garbage := []byte(`not json`)

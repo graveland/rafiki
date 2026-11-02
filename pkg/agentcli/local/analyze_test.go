@@ -103,7 +103,7 @@ func testAnalyzeClient(t *testing.T, sender llm.Sender) *llm.Client {
 	// a zero-value Profile resolves its model from this default.
 	c, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
-		llm.WithDefaultModel("haiku-latest"),
+		llm.WithDefaultModel("anthropic/haiku-latest"),
 	)
 	assert.NewAborting(t).NoError(err, "NewClient")
 	return c

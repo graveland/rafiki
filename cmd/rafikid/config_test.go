@@ -22,14 +22,14 @@ func TestLoadConfig_ParsesRoutesAndModel(t *testing.T) {
 	body := `openai_routes:
   - prefix: "moonshotai/"
     upstream: openrouter
-default_model: haiku-latest
+default_model: anthropic/haiku-latest
 `
 	c.Require().NoError(os.WriteFile(path, []byte(body), 0o600))
 
 	cfg, err := loadConfig(path)
 	c.Require().NoError(err, "loadConfig")
 	c.False(len(cfg.OpenAIRoutes) != 1 || cfg.OpenAIRoutes[0].Prefix != "moonshotai/", "OpenAIRoutes = %+v, want one moonshotai/ route", cfg.OpenAIRoutes)
-	c.Eq("haiku-latest", cfg.DefaultModel, "DefaultModel")
+	c.Eq("anthropic/haiku-latest", cfg.DefaultModel, "DefaultModel")
 }
 
 func TestLoadConfig_MissingFileIsAnError(t *testing.T) {

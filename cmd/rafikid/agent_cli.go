@@ -788,7 +788,7 @@ func compareRunsJSON(runs []agentcli.CompareRun) []compareRunJSON {
 // DetectorModel/DraftModel unset). llm.NewClient invents no default of its
 // own, so every caller that wants one supplies it — for this CLI that keeps
 // the historical behaviour of defaulting to haiku.
-const cliDefaultModel = "haiku-latest"
+const cliDefaultModel = "anthropic/haiku-latest"
 
 // resolveUpstream builds the llm.Client Analyze runs against, per the
 // brief's upstream rules: a rafiki proxy (--proxy-url/-token or
