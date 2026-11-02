@@ -2486,7 +2486,9 @@ func TestPastingTwiceInsertsTheFullText(t *testing.T) {
 	c.Update(tea.PasteMsg{Content: big})
 	c.Update(tea.PasteMsg{Content: big})
 
-	assert.NewCollecting(t).StrContains(c.ta.Value(), "a line", "pasting the same content twice must insert it in full")
+	ck := assert.NewCollecting(t)
+	ck.Eq(big, c.ta.Value(), "the second paste must replace the token with the text, not sit beside it")
+	ck.Eq(big, strings.TrimSpace(c.expandPastes(c.ta.Value()))+"\n", "the prompt that leaves carries the text once")
 }
 
 // The prompt that leaves is the full text, and the tokens leave with it.

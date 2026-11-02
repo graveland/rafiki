@@ -1735,8 +1735,9 @@ func (c *Cockpit) applyClipboardPaste(msg clipboardPasteMsg) tea.Cmd {
 
 // handlePaste folds a large paste into a token rather than unrolling it.
 //
-// Pasting the SAME content again inserts it in full — the second paste is how
-// you say you actually wanted to see it, and it costs no key of its own.
+// Pasting the SAME content again expands its token in full — the second paste
+// is how you say you actually wanted to see it, and it costs no key of its own.
+// With the token gone from the box the content is simply inserted.
 func (c *Cockpit) handlePaste(content string) tea.Cmd {
 	if c.focus != focusInput || content == "" {
 		return nil
@@ -1761,10 +1762,18 @@ func (c *Cockpit) handlePaste(content string) tea.Cmd {
 		return nil
 	}
 	for _, p := range c.pastes {
-		if p.text == content {
-			c.ta.InsertString(content)
+		if p.text != content {
+			continue
+		}
+		// Expand the token in place; inserting beside it would send the
+		// text twice, since the token expands again at send.
+		if v := c.ta.Value(); strings.Contains(v, p.token) {
+			c.ta.SetValue(strings.Replace(v, p.token, content, 1))
+			c.setNotice("")
 			return nil
 		}
+		c.ta.InsertString(content)
+		return nil
 	}
 	// Describe it in the unit that made it too big: "1 lines" tells a reader
 	// nothing about a 40KB paste that happens to contain no line breaks.
