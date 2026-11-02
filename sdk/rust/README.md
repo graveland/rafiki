@@ -363,22 +363,77 @@ the protos.
 
 ```bash
 make check-sdk-rust       # cargo fmt --check, then test + clippy -D warnings (--locked --all-features)
-make check-sdk-rust-live  # tests/daemon.rs against RAFIKI_SDK_TEST_URL
+make check-sdk-rust-live  # one command: a scratch daemon plus the loopback MCP OAuth fixture
 ```
 
 `make check-sdk-rust` is offline: the transport tests run against an
 in-process hyper server on `127.0.0.1:0`, and the live-daemon tests in
-`tests/daemon.rs` report as ignored. `make check-sdk-rust-live` runs them
-against the daemon at `RAFIKI_SDK_TEST_URL` (with `RAFIKI_SDK_TEST_TOKEN` as an
-optional bearer token), and FAILS when it is unset. They only read: a unary
-call, a stream that replays a child's recent events, idles and resumes from
-its cursor without a repeat, a follower that does the same across several
-silent idle re-opens, a live child follower that never replays history, backward `GetHistory` paging checked against one
-unbounded read, and the daemon's own epoch refusal on both codecs (sent through
+`tests/daemon.rs` report as ignored. Neither it nor `make check` needs anything
+below.
+
+### The live run: `make check-sdk-rust-live`
+
+One command reproduces the live-daemon tests from a clean checkout. It builds
+`rafikid`, `rafiki` and `test/livefixture` **from this tree** (never a `$PATH`
+binary), isolates `HOME` and every XDG base under a temp dir, migrates the
+database named by `RAFIKI_TEST_DSN` (override with `RAFIKI_SDK_LIVE_DSN`),
+mints a user token with `rafikid user create --token`, writes a scratch
+`rafikid.toml` carrying the operator `[mcp_oauth]` allowance loopback and
+cleartext need, starts the daemon and the fixture, waits for the control
+socket by making one authenticated Connect call, then runs
+`cargo test --locked --all-features --test daemon -- --ignored`. Everything it
+started is torn down on every exit path; `RAFIKI_SDK_LIVE_KEEP=1` keeps the
+scratch tree (with the daemon and fixture logs) for debugging.
+
+It needs cargo, Go and the disposable database. Each missing piece is a loud
+failure naming the fix, never a skip: a live run that silently passes nothing
+is the defect this command exists to prevent.
+
+`test/livefixture/main.go` is a loopback origin that is both a protected MCP
+resource and its own authorization server: RFC 9728 protected-resource
+metadata, RFC 8414 authorization-server metadata, RFC 7591 dynamic client
+registration, a scripted `authorize` that answers with the 302 a consenting
+browser would follow (so no browser or person is involved), a code exchange
+with a rotating refresh token, RFC 7009 revocation, and a real MCP SDK server
+with one tool. **No real vendor account is involved and no request leaves the
+loopback interface.** It is checked in as a command (not a throwaway file) so
+this run is reproducible from a clean checkout.
+
+What passes, and what needs a different daemon:
+
+- The three MCP OAuth tests pass: `a_live_daemon_starts_and_completes_an_mcp_login`,
+  `a_live_daemon_logs_out_an_mcp_grant`, and
+  `a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server`.
+- `a_live_daemon_answers_a_unary_call` and
+  `a_live_daemon_refuses_a_stale_client_on_both_codecs` pass against any live
+  daemon.
+- Four PRE-EXISTING tests need a daemon holding child history — a spawned
+  child that is not working and has at least two durable events:
+  `a_live_stream_idles_and_resumes_from_its_cursor`,
+  `a_live_follower_reopens_across_idle_windows_without_repeats`,
+  `a_live_child_follower_never_replays_history`, and
+  `a_live_history_pages_backwards_without_gaps_or_repeats`. They FAIL in this
+  run by design (the scratch daemon has spawned nothing) and the driver reports
+  them as expected. They are not MCP OAuth tests and this run does not claim
+  them; `RAFIKI_SDK_LIVE_STRICT=1` turns any of them into a failure.
+
+For those four, or for a daemon of your own, run the suite directly — it is the
+plain `cargo` invocation the driver makes:
+
+```bash
+cd sdk/rust
+RAFIKI_SDK_TEST_URL=unix:///…/controller.sock RAFIKI_SDK_TEST_TOKEN=… \
+  cargo test --locked --all-features --test daemon -- --ignored
+```
+
+The tests only read: a unary call, a stream that replays a child's recent
+events, idles and resumes from its cursor without a repeat, a follower that
+does the same across several silent idle re-opens, a live child follower that
+never replays history, backward `GetHistory` paging checked against one
+unbounded read, the daemon's own epoch refusal on both codecs (sent through
 `Client::with_wire_epoch`, which exists only under the `test-hooks` feature —
-never enable it in a consumer). The daemon needs a child that is not working
-and has at least two history events. A daemon NEWER than the client cannot be
-provoked live; the stub tests cover it.
+never enable it in a consumer), and the three MCP OAuth verbs. A daemon NEWER
+than the client cannot be provoked live; the stub tests cover it.
 
 `cargo tree -i aws-lc-rs` must keep reporting nothing: the crate builds TLS
 with rustls + ring only, so it can be a dependency of a consumer that forbids

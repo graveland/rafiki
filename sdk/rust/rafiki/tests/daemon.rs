@@ -2,16 +2,22 @@
 //! The live-daemon tests: a real `rafikid`, not a stub.
 //!
 //! Every test here is `#[ignore]`d, so an offline `cargo test` reports them as
-//! ignored rather than passed. Run them with `make check-sdk-rust-live` (or
-//! `cargo test --all-features --test daemon -- --ignored`) and
-//! `RAFIKI_SDK_TEST_URL` set to a client endpoint (`unix:///…`, a bare path,
-//! or `https://…`), with `RAFIKI_SDK_TEST_TOKEN` as an optional bearer token.
-//! Asked to run with no endpoint, they FAIL: a live test that skips itself is
-//! not a test.
+//! ignored rather than passed. `make check-sdk-rust-live` needs no arguments:
+//! it builds the daemon and the CLI from this tree, starts a scratch daemon
+//! with the loopback MCP OAuth fixture (`test/livefixture`), and runs this file
+//! against it — see `sdk/rust/README.md`.
+//!
+//! To run the file by hand instead, set `RAFIKI_SDK_TEST_URL` to a client
+//! endpoint (`unix:///…`, a bare path, or `https://…`) with
+//! `RAFIKI_SDK_TEST_TOKEN` as an optional bearer token, and run
+//! `cargo test --all-features --test daemon -- --ignored`. Asked to run with no
+//! endpoint, they FAIL: a live test that skips itself is not a test.
 //!
 //! The tests only read: they list, stream and page, and never spawn, send or
-//! kill. The resume test needs one child that is not working and has at least
-//! one durable event.
+//! kill — except the three MCP OAuth ones, which perform an explicit login and
+//! logout. The four history tests need a child that is not working and has at
+//! least two durable events, so they fail against a daemon that has never
+//! spawned anything (the scratch one `make check-sdk-rust-live` starts).
 //!
 //! The other half of the protocol-mismatch pair — a daemon speaking an epoch
 //! this client does not — cannot be provoked against a real daemon, so it is

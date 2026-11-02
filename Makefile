@@ -305,9 +305,14 @@ check-web: ## Typecheck, lint and test the web UI (needs node + pnpm + protoc).
 check-sdk-rust: ## Test, lint and format-check the Rust SDK (needs cargo).
 	cd sdk/rust && cargo fmt --check && cargo test --locked --all-features && cargo clippy --locked --all-targets --all-features -- -D warnings
 
+# Opt-in, and deliberately NOT part of `check` or `check-sdk-rust`: it needs
+# cargo, Go and a migrated database, and it starts a real daemon. One command
+# reproduces the live-daemon suite from a clean checkout — see
+# test/livefixture/run.sh for what it starts and sdk/rust/README.md for which
+# live tests pass and which four need a daemon holding child history.
 .PHONY: check-sdk-rust-live
-check-sdk-rust-live: ## Run the Rust SDK's live-daemon test (needs cargo and RAFIKI_SDK_TEST_URL).
-	cd sdk/rust && cargo test --locked --all-features --test daemon -- --ignored
+check-sdk-rust-live: ## Run the Rust SDK's live-daemon tests against a scratch daemon and the loopback MCP OAuth fixture (needs cargo, Go and RAFIKI_TEST_DSN).
+	bash test/livefixture/run.sh
 
 # vet, lint and test run concurrently: lint's serial analysis chain and the
 # test suite each take minutes and use different resources. Each target's
