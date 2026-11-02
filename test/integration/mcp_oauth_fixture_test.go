@@ -892,18 +892,20 @@ func sweepMCPRows(t *testing.T, suffix string) {
 	t.Cleanup(func() {
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
-			t.Logf("sweep MCP rows for %s: pool: %v", suffix, err)
+			t.Errorf("sweep MCP rows for %s: pool: %v", suffix, err)
 			return
 		}
 		defer pool.Close()
 		like := "%" + suffix + "%"
+		// A failed sweep is a leak in a database that is never reset, so it is
+		// reported rather than logged.
 		if _, err := pool.Exec(context.Background(),
 			`DELETE FROM conversations.mcp_endpoint WHERE endpoint LIKE $1`, like); err != nil {
-			t.Logf("sweep MCP endpoint rows for %s: %v", suffix, err)
+			t.Errorf("sweep MCP endpoint rows for %s: %v", suffix, err)
 		}
 		if _, err := pool.Exec(context.Background(),
 			`DELETE FROM conversations.mcp_credential WHERE resource LIKE $1`, like); err != nil {
-			t.Logf("sweep MCP credential rows for %s: %v", suffix, err)
+			t.Errorf("sweep MCP credential rows for %s: %v", suffix, err)
 		}
 	})
 }
@@ -1039,11 +1041,29 @@ func newMcpOAuthHarness(t *testing.T) *mcpOAuthHarness {
 	h.engine = h.newEngine(context.Background())
 	t.Cleanup(func() {
 		_ = h.engine.Close()
-		// The grant and endpoint rows reference the user row by UUID and are
-		// not cascaded by the tombstone usersdb.Delete writes, so they are
-		// swept explicitly: the shared disposable database is never reset.
-		_, _ = pool.Exec(context.Background(), `DELETE FROM conversations.mcp_endpoint WHERE owner_user_id = $1::uuid`, owner)
-		_, _ = pool.Exec(context.Background(), `DELETE FROM conversations.mcp_credential WHERE owner_user_id = $1::uuid`, owner)
+		// The grant and endpoint rows reference the user row by UUID and are not
+		// cascaded by the tombstone usersdb.Delete writes, so they are swept
+		// explicitly: the shared disposable database is never reset.
+		//
+		// The sweep uses a FRESH pool and reports its own failure: a test is
+		// allowed to close the harness's pool (the store-outage case does
+		// exactly that), and a sweep that silently ran against a closed pool
+		// left one grant and one endpoint row behind on every run.
+		sweep, sweepErr := pgxpool.New(context.Background(), dsn)
+		if sweepErr != nil {
+			t.Errorf("sweep MCP rows for owner %s: pool: %v", owner, sweepErr)
+			pool.Close()
+			return
+		}
+		if _, err := sweep.Exec(context.Background(),
+			`DELETE FROM conversations.mcp_endpoint WHERE owner_user_id = $1::uuid`, owner); err != nil {
+			t.Errorf("sweep MCP endpoint rows for owner %s: %v", owner, err)
+		}
+		if _, err := sweep.Exec(context.Background(),
+			`DELETE FROM conversations.mcp_credential WHERE owner_user_id = $1::uuid`, owner); err != nil {
+			t.Errorf("sweep MCP credential rows for owner %s: %v", owner, err)
+		}
+		sweep.Close()
 		pool.Close()
 	})
 	return h
@@ -1074,6 +1094,14 @@ func (h *mcpOAuthHarness) newEngineWith(ctx context.Context, after func(time.Dur
 	assert.NewAborting(h.t).NoError(err, "new engine")
 	h.t.Cleanup(func() { _ = e.Close() })
 	return e
+}
+
+// endpointForRun is a per-run unique MCP endpoint on fx. The resource a login
+// binds is derived from the endpoint path, so the rows this harness creates are
+// identified by THIS run alone — which is what makes an expiry keyed on the
+// resource unambiguous in a shared, never-reset database.
+func (h *mcpOAuthHarness) endpointForRun(fx *fakeMCPOAuth) string {
+	return fx.endpointAt(uniqueEndpointSuffix())
 }
 
 // lookup resolves one endpoint's binding without failing the test.

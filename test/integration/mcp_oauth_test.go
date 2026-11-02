@@ -980,21 +980,27 @@ func TestMcpOAuthStoreOutageRefusesTheDial(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := newMcpOAuthHarness(t)
 	fx := newFakeMCPOAuth(t)
-	h.login(fx, "fixture", fx.endpoint())
+	// A per-run unique endpoint, swept through a pool of its own: this test
+	// closes the harness's pool on purpose, so a sweep that reused it would
+	// leave one grant and one endpoint row behind on every run.
+	suffix := uniqueEndpointSuffix()
+	endpoint := fx.endpointAt(suffix)
+	sweepMCPRows(t, suffix)
+	h.login(fx, "fixture", endpoint)
 
 	requestsBefore := len(fx.requestLog())
 	// The pool the store reads through goes away. Nothing else about the engine
 	// changes, which is exactly the shape of a database outage.
 	h.pool.Close()
 
-	handler, client, err := h.passive(fx.endpoint(), nil)
+	handler, client, err := h.passive(endpoint, nil)
 	c.Error(err, "a store outage handed back a handler")
 	c.Nil(handler, "a store outage handed back a credential handler")
 	c.Nil(client, "a store outage handed back a client")
 	c.True(errors.Is(err, mcpoauth.ErrUnavailable), "the outage must stay distinguishable from a missing credential, got %v", err)
 	c.NotStrContains(err.Error(), "needs a login", "a store outage must not be reported as a missing login")
 
-	_, err = h.store.Acquire(context.Background(), h.owner, fx.endpoint(), 1, nil)
+	_, err = h.store.Acquire(context.Background(), h.owner, endpoint, 1, nil)
 	c.True(errors.Is(err, mcpoauth.ErrUnavailable), "Acquire during an outage: %v", err)
 
 	// And nothing reached the server: the refusal happened before any request.
@@ -1012,9 +1018,10 @@ func TestMcpOAuthConcurrentRefreshSpendsOneRotation(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := newMcpOAuthHarness(t)
 	fx := newFakeMCPOAuth(t)
-	h.login(fx, "fixture", fx.endpoint())
-	generation := h.binding(fx.endpoint()).GrantGeneration
-	expireGrantInDB(t, fx.endpoint())
+	endpoint := h.endpointForRun(fx)
+	h.login(fx, "fixture", endpoint)
+	generation := h.binding(endpoint).GrantGeneration
+	expireGrantInDB(t, endpoint)
 
 	second, secondPool := h.secondStore()
 	c.NotNil(secondPool, "an independent store")
@@ -1027,7 +1034,7 @@ func TestMcpOAuthConcurrentRefreshSpendsOneRotation(t *testing.T) {
 		err   error
 	}, 1)
 	go func() {
-		grant, err := h.store.Acquire(context.Background(), h.owner, fx.endpoint(), generation,
+		grant, err := h.store.Acquire(context.Background(), h.owner, endpoint, generation,
 			func(context.Context, mcpoauth.Grant) (mcpoauth.RefreshResult, error) {
 				refreshCalls++
 				close(started)
@@ -1053,7 +1060,7 @@ func TestMcpOAuthConcurrentRefreshSpendsOneRotation(t *testing.T) {
 
 	// The independent session sees the committed intent and refuses. It must not
 	// spend the refresh token again — its own refresh func fails the test.
-	_, err := second.Acquire(context.Background(), h.owner, fx.endpoint(), generation,
+	_, err := second.Acquire(context.Background(), h.owner, endpoint, generation,
 		func(context.Context, mcpoauth.Grant) (mcpoauth.RefreshResult, error) {
 			t.Error("a second session refreshed the same version")
 			return mcpoauth.RefreshResult{}, errors.New("unreachable")
@@ -1067,7 +1074,7 @@ func TestMcpOAuthConcurrentRefreshSpendsOneRotation(t *testing.T) {
 	c.Eq(1, refreshCalls, "upstream refreshes for one version")
 
 	// The rotation is PERSISTED: another session reads it with no refresh at all.
-	later, err := second.Acquire(context.Background(), h.owner, fx.endpoint(), generation, nil)
+	later, err := second.Acquire(context.Background(), h.owner, endpoint, generation, nil)
 	c.NoError(err, "a later acquisition after the rotation")
 	c.Eq("rotated-access-1", later.Token.AccessToken, "the persisted access token")
 	c.Eq("rotated-refresh-1", later.Token.RefreshToken, "the persisted rotation")
@@ -1092,15 +1099,16 @@ func TestMcpOAuthFencesBeatRefreshAndOlderLogins(t *testing.T) {
 	second, _ := h.secondStore()
 
 	t.Run("logout during a refresh", func(t *testing.T) {
-		h.login(fx, "fixture", fx.endpoint())
-		generation := h.binding(fx.endpoint()).GrantGeneration
-		expireGrantInDB(t, fx.endpoint())
+		endpoint := h.endpointForRun(fx)
+		h.login(fx, "fixture", endpoint)
+		generation := h.binding(endpoint).GrantGeneration
+		expireGrantInDB(t, endpoint)
 
 		started := make(chan struct{})
 		release := make(chan struct{})
 		done := make(chan error, 1)
 		go func() {
-			_, err := h.store.Acquire(context.Background(), h.owner, fx.endpoint(), generation,
+			_, err := h.store.Acquire(context.Background(), h.owner, endpoint, generation,
 				func(context.Context, mcpoauth.Grant) (mcpoauth.RefreshResult, error) {
 					close(started)
 					<-release
@@ -1119,14 +1127,14 @@ func TestMcpOAuthFencesBeatRefreshAndOlderLogins(t *testing.T) {
 
 		// The logout commits while the upstream call is in flight. It must not
 		// block on that call: the intent committed and released its lock.
-		_, err := second.InvalidateEndpoint(context.Background(), h.owner, fx.endpoint())
+		_, err := second.InvalidateEndpoint(context.Background(), h.owner, endpoint)
 		c.NoError(err, "logout during a refresh")
 		close(release)
 		err = <-done
 		c.Error(err, "a refresh that finished after a logout returned a usable token")
 		c.True(errors.Is(err, mcpoauth.ErrLoginRequired) || errors.Is(err, mcpoauth.ErrStaleFence),
 			"the refresh's outcome: %v", err)
-		_, lookupErr := h.lookup(fx.endpoint())
+		_, lookupErr := h.lookup(endpoint)
 		c.True(errors.Is(lookupErr, mcpoauth.ErrMissing), "the binding after the logout: %v", lookupErr)
 	})
 
@@ -1158,13 +1166,13 @@ func TestMcpOAuthFencesBeatRefreshAndOlderLogins(t *testing.T) {
 	})
 
 	t.Run("user removal during a refresh", func(t *testing.T) {
-		h.login(fx, "fixture", fx.endpointAt("removal"))
-		endpoint := fx.endpointAt("removal")
+		endpoint := h.endpointForRun(fx)
+		h.login(fx, "fixture", endpoint)
 		generation := h.binding(endpoint).GrantGeneration
 		// This login discovered the endpoint under test as its resource (the path
 		// document lives at the matching well-known path), so that is the grant
 		// row whose expiry has to move.
-		expireGrantInDB(t, fx.endpointAt("removal"))
+		expireGrantInDB(t, endpoint)
 
 		started := make(chan struct{})
 		release := make(chan struct{})
@@ -1354,6 +1362,11 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 		// this never runs; under a regression it does, and both the refusal
 		// assertions and the counters fail loudly.
 		driveOnSuccess bool
+		// controlAfterRefusal runs a second login on the SAME fixture with the
+		// case's shape removed. It is what attributes the refusal to the shape
+		// rather than to the fixture, the harness or the policy: with the shape
+		// gone, the login must simply work.
+		controlAfterRefusal bool
 	}{
 		{
 			name: "undecodable authorization-server metadata",
@@ -1429,10 +1442,15 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 				f.authorizeURL = "https://localhost:" + port + "/authorize"
 				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
 					t.Helper()
+					// Only the connection count is asserted here. The fixture
+					// cannot see an /authorize request for this case (the URL
+					// points at the refused listener, not at the fixture), so a
+					// "/authorize was never served" check would be vacuous. What
+					// pins the case is the sentinel and the policy sentence; this
+					// counter is the guard against a code path that starts
+					// fetching consent URLs where it should only validate them.
 					assert.NewAborting(t).Eq(int64(0), dials(),
 						"the daemon dialled the authorization destination it refuses")
-					assert.NewAborting(t).Eq(0, len(f.headersOnPath("/authorize")),
-						"the daemon handed a browser a consent URL for a destination it refuses")
 				}
 			},
 			wantErr:       mcpoauth.ErrDestinationDenied,
@@ -1444,17 +1462,39 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 			// before the operator's policy is even consulted, so the refusal is
 			// the coarse login-failed sentence and the address must not survive
 			// into it (the SDK's own message quotes the URL).
+			// The SDK's own metadata-URL check refuses a private IP literal before
+			// the operator's policy is consulted, so the wire carries the authored
+			// login-failed sentence and there is no daemon sentinel to assert: for
+			// an IP literal, every private literal is refused by the SDK and every
+			// allow-listed one (loopback) is accepted by the policy, so this path
+			// cannot produce ErrDestinationDenied (measured; the refused NAME case
+			// above is the one that does). The refusal is therefore pinned three
+			// ways: the exact authored sentence, the traffic proving the step it
+			// failed at (AS metadata consumed, nothing registered, exchanged or
+			// consented), and a positive control on the same fixture.
 			name: "authorization endpoint on a private literal",
 			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
 				f.authorizeURL = "https://10.0.0.1/authorize"
 				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
 					t.Helper()
-					assert.NewAborting(t).Eq(0, len(f.headersOnPath("/authorize")),
-						"the daemon sent a browser to a private address")
+					f.mu.Lock()
+					advertised, hits := f.authorizeURL, f.asmHits
+					f.mu.Unlock()
+					assert.NewAborting(t).Eq("https://10.0.0.1/authorize", advertised,
+						"the private literal was never advertised, so the case proves nothing")
+					assert.NewAborting(t).True(hits >= 1,
+						"the authorization-server metadata was never fetched, so the literal was never the input")
+					assert.NewAborting(t).Eq(0, len(f.dcrBodySnapshot()),
+						"the daemon registered a client past the refused literal")
+					assert.NewAborting(t).Eq(0, len(f.tokenFormSnapshot()),
+						"the daemon reached the token endpoint past the refused literal")
+					assert.NewAborting(t).Eq(0, len(f.authorizeParamsSnapshot()),
+						"the daemon asked the fixture for consent for a refused destination")
 				}
 			},
-			refusal:        func(endpoint string) string { return "mcpoauth: authenticating to " + endpoint + " failed" },
-			mustNotContain: []string{"10.0.0.1"},
+			refusal:             func(endpoint string) string { return "mcpoauth: authenticating to " + endpoint + " failed" },
+			mustNotContain:      []string{"10.0.0.1"},
+			controlAfterRefusal: true,
 		},
 	}
 	for _, tc := range cases {
@@ -1502,6 +1542,17 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 				`SELECT count(*) FROM conversations.mcp_credential WHERE owner_user_id = $1::uuid`, h.owner).Scan(&grant),
 				"count grants")
 			c.Eq(0, grant, "a damaged login stored a grant")
+
+			if tc.controlAfterRefusal {
+				// Positive control, same fixture and harness, run LAST because it
+				// legitimately creates the binding and grant the assertions above
+				// require to be absent: remove the shape and the login completes.
+				// Without it, "the login failed" could be this case's own setup
+				// rather than the thing under test.
+				fx.set(func(f *fakeMCPOAuth) { f.authorizeURL = "" })
+				control := h.login(fx, "fixture", fx.endpoint())
+				c.Eq(fx.endpoint(), control.Resource, "the control login bound another resource")
+			}
 		})
 	}
 
