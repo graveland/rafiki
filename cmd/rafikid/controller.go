@@ -1841,12 +1841,17 @@ func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scop
 // only accepts "openrouter/<id>", which is the spelling the daemon's own
 // surfaces (ListModelRows, agent_models, the picker) offer, and no catalog
 // carries that prefix.
+//
+// A "<name>-latest" request additionally gets the same pin the conversation
+// client applies (llm.ResolveProviderLatest) before the catalog is asked: the
+// picker offers "<provider>/gpt-<tier>-latest" and "anthropic/<tier>-latest",
+// and neither spelling is a catalog key — only what they RESOLVE to is.
 func (c *Controller) reviewModelResolves(model string) bool {
 	set := c.providers
 	if set == nil {
 		set = providers.Default()
 	}
-	p, resolvedID, err := set.Split(model)
+	p, _, err := set.Split(model)
 	if err != nil {
 		return false
 	}
@@ -1862,8 +1867,25 @@ func (c *Controller) reviewModelResolves(model string) bool {
 	if c.catalog == nil {
 		return false
 	}
-	_, ok := c.catalog.ResolveID(resolvedID)
-	return ok
+	// Resolve the REQUEST first, exactly as the conversation hook does, so a
+	// latest name becomes the concrete model it means (and a tier nothing
+	// serves stays unresolved, which a spawn refuses the same way).
+	pinned, err := llm.ResolveProviderLatest(set, c.catalog, model)
+	if err != nil {
+		return false
+	}
+	if _, ok := c.catalog.ResolveID(pinned); ok {
+		return true
+	}
+	// The pinned id is the provider's own spelling ("<provider>/gpt-6.1-terra"),
+	// and the catalog only carries OpenRouter ids. Map it through the kind, as
+	// fundi's sender selection does: a Responses-kind provider's model lives at
+	// "openai/<local>", while an Anthropic-kind one is already catalog-named.
+	if pp, local, serr := set.Split(pinned); serr == nil && local != pinned {
+		_, ok := c.catalog.ResolveID(providers.CatalogModelID(pp.Kind, local))
+		return ok
+	}
+	return false
 }
 
 // ConversationFindings delegates to the review read surface (pkg/insights

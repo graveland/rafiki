@@ -430,6 +430,79 @@ context_window = 16384
 	})
 }
 
+// reviewLatestProviders is the registry reviewModelResolves' latest-name cases
+// share: a provider per vendor kind, plus a second Anthropic-kind provider
+// whose NAME is not "anthropic" (the picker spells a latest row after the
+// operator's provider, not the vendor).
+const reviewLatestProviders = `
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.gpt]
+kind = "openai-responses"
+
+[providers.work]
+kind = "anthropic"
+`
+
+// reviewLatestCatalog seeds the models a latest name can pin to: one concrete
+// OpenAI id, two concrete Anthropic ids ("opus", a family the old hardcoded
+// alias table knew, and "vela", one only the catalog knows), the alias rows
+// that ADVERTISE a tier, and a "nova" alias with no model behind it.
+func reviewLatestCatalog(t *testing.T) *routing.ModelCatalog {
+	t.Helper()
+	return seedTestCatalog(t, map[string]int{
+		"openai/gpt-6.1-terra":          400000,
+		"~openai/gpt-terra-latest":      0, // advertises the terra tier
+		"~openai/gpt-nova-latest":       0, // advertises nova with nothing behind it
+		"anthropic/claude-opus-4.8":     200000,
+		"anthropic/claude-vela-2":       200000,
+		"~anthropic/claude-vela-latest": 0, // advertises the vela tier
+	})
+}
+
+// A "<name>-latest" row is exactly what the listing offers, so the review
+// admission check must resolve it the way the conversation client does: pin the
+// request to the concrete model it means, then ask the catalog about THAT.
+// Asking for the latest spelling always missed — no catalog carries
+// "<provider>/gpt-terra-latest", a Responses-kind provider's model lives at
+// "openai/<local>" while the request names the operator's provider, and a tier
+// the catalog newly advertises is not in the old hardcoded family table — which
+// refused the latest rows the picker offered.
+func TestReviewModelResolvesProviderLatest(t *testing.T) {
+	for _, tt := range []struct {
+		name, model string
+		want        bool
+	}{
+		// The Responses-kind mapping: the pinned id is the operator's own
+		// "gpt/gpt-6.1-terra", and only CatalogModelID turns that into the
+		// catalog's "openai/gpt-6.1-terra".
+		{"a Responses-kind provider's gpt tier pins and resolves", "gpt/gpt-terra-latest", true},
+		// A tier beyond the old hardcoded family table, reached through a
+		// provider whose name is not "anthropic" — the catalog decides.
+		{"an Anthropic-kind provider's catalog-only tier pins and resolves", "work/vela-latest", true},
+		// The long-standing families, through a non-"anthropic" provider name
+		// and through the native one (which resolves on the first try, since
+		// the pinned id is already "anthropic/<native-id>").
+		{"an Anthropic-kind provider's opus tier pins and resolves", "work/opus-latest", true},
+		{"the native anthropic provider's opus tier pins and resolves", "anthropic/opus-latest", true},
+		// An advertised tier is not a model: nothing resolves, so the request is
+		// refused here exactly as a spawn would refuse it.
+		{"an advertised tier with no model stays refused", "gpt/gpt-nova-latest", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			c := reviewTestController(t, fakeReviewReads{})
+			c.providers = mustParseProviders(t, reviewLatestProviders)
+			c.SetCatalog(reviewLatestCatalog(t))
+			ck.Eq(tt.want, c.reviewModelResolves(tt.model),
+				"reviewModelResolves(%q) =", tt.model)
+		})
+	}
+}
+
 // TestReviewAcceptancePathsMatchTheVerifyPattern exists because the plan's
 // verify command selects with -run TestReview, an unanchored substring
 // match, and the four acceptance-path tests above carry pinned

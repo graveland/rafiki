@@ -409,6 +409,11 @@ func TestListModelRowsOffersLatestNames(t *testing.T) {
 	// provider must not carry the OpenAI vendor's names.
 	ck.False(byID["anthropic/gpt-terra-latest"].ID != "",
 		"anthropic provider offered the OpenAI vendor's name %q", "gpt-terra-latest")
+	// A tier the catalog ADVERTISES with no model behind it (the fixture's
+	// "~openai/gpt-nova-latest" row) is not offered: the alias row alone is not
+	// a model, so listing it would hand the picker a name every spawn refuses.
+	_, offered := byID["gpt/gpt-nova-latest"]
+	ck.False(offered, "gpt/gpt-nova-latest was listed, but the catalog resolves no model for that tier")
 }
 
 // A latest row must carry the facts of the model it resolves to — the model id
