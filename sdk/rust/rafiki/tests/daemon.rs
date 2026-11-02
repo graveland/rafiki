@@ -18,9 +18,10 @@
 //! out explicitly, and the refresh one spawns a child with the fixture's MCP
 //! config (no prompt, so no model call) and kills it again, because a real MCP
 //! session is what proves the credential was refreshed. The four history tests
-//! need a child that is not working and has at least two durable events, so they
-//! fail against a daemon that has never spawned anything (the scratch one
-//! `make check-sdk-rust-live` starts).
+//! need a child that is not working and has at least two durable events;
+//! `make check-sdk-rust-live` provisions exactly that (a detached fundi child,
+//! two scripted turns, then killed), so on that driver every ignored test
+//! passes. Run by hand, they need a daemon that already has such a child.
 //!
 //! The other half of the protocol-mismatch pair — a daemon speaking an epoch
 //! this client does not — cannot be provoked against a real daemon, so it is

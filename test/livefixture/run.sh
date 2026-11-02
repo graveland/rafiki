@@ -12,24 +12,25 @@
 #      allowance for loopback + cleartext, so a login can reach the fixture.
 #   3. test/livefixture: a fake authorization server and a real MCP SDK server
 #      on loopback. No vendor account, no network traffic to a real provider.
+#   4. A fundi child, given two scripted turns and then killed, so the
+#      follower/history tests have history to follow and page.
 #
-# It then runs `cargo test --locked --all-features --test daemon -- --ignored`,
-# and it PROVES the outcome rather than looking for the tests it likes: the
-# passed set and the failed set must each equal an expected set exactly, every
-# expected failure must have failed with its documented missing-history panic
-# (not merely with the right name), the harness summary must agree with the
-# per-test lines, and cargo's exit status must be the one those failures explain.
-# A regression inside an allowlisted test, an extra or missing test, a harness
-# that ran nothing and a cargo error after the tests all fail the run.
+# It then spawns the ONE child the follower/history tests need and kills it, so
+# a scratch daemon has the history those four tests follow and page; see "the
+# child history the follower tests need". Without it they fail on their missing
+# precondition, which this script refuses to call an outcome.
+#
+# Then it runs `cargo test --locked --all-features --test daemon -- --ignored`
+# and PROVES the outcome: every ignored test must pass. The passed set is
+# compared EXACTLY, the harness summary must agree with the per-test lines, no
+# test may fail, and cargo's exit status must be 0. An extra or missing test, a
+# harness that ran nothing, a build error and a regression all fail the run —
+# there is no allowlist and nothing is expected to fail.
 #
 #   --check-outcome <log> [exit-status]
 #       Run only that classification against a cargo log (no database, no
 #       daemon, no cargo), so the rule itself is testable. Exit 0 = the log
-#       shows exactly the expected outcome.
-#
-# The six tests a scratch daemon can pass must pass — the four MCP OAuth ones
-# included. The four pre-existing live tests that need a daemon HOLDING CHILD
-# HISTORY fail here by design; they are not this feature's tests.
+#       shows every ignored test passing.
 #
 # Requirements, each failing loudly rather than skipping:
 #   - cargo on PATH (the Rust crate and its lockfile are the thing under test)
@@ -53,24 +54,25 @@ die() {
 
 say() { printf '%s\n' "$*"; }
 
-# ─── the outcome this daemon can produce ────────────────────────────────────
+# ─── the outcome this run must produce ─────────────────────────────────────
 #
-# Two exact sets, not allowlists. The passed set is every ignored test a scratch
-# daemon with no child history can pass; the failed set is the four that need a
-# spawn, a durable event and a child to replay — each with the panic message
-# that names the missing precondition, because a test that fails for another
-# reason has regressed and must not be mistaken for the expected failure.
+# One exact set, and no allowlist: every ignored test in the live-daemon suite
+# must pass. The driver provisions the child history the follower/history tests
+# need (see "the child history the follower tests need"), so there is no
+# "expected failure" left to tolerate — a failure is a regression. The passed
+# set is compared EXACTLY, so a test that silently stops running, a test that
+# appears without being classified, and a harness that ran nothing all fail the
+# run rather than passing it.
 expected_pass="a_live_daemon_answers_a_unary_call
 a_live_daemon_refuses_a_stale_client_on_both_codecs
 a_live_daemon_starts_and_completes_an_mcp_login
 a_live_daemon_logs_out_an_mcp_grant
 a_live_daemon_refreshes_an_expired_mcp_grant
-a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server"
-
-expected_fail="a_live_stream_idles_and_resumes_from_its_cursor|the daemon needs a child that is not working and has a durable event
-a_live_follower_reopens_across_idle_windows_without_repeats|the daemon needs a child that is not working and has a durable event
-a_live_child_follower_never_replays_history|the daemon needs a child that is not working and has a durable event
-a_live_history_pages_backwards_without_gaps_or_repeats|the daemon needs a child with at least two history events"
+a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server
+a_live_stream_idles_and_resumes_from_its_cursor
+a_live_follower_reopens_across_idle_windows_without_repeats
+a_live_child_follower_never_replays_history
+a_live_history_pages_backwards_without_gaps_or_repeats"
 
 # extra_in <wanted> <actual> prints the members of <actual> that <wanted> lacks.
 # Both arguments are newline-separated sets.
@@ -84,9 +86,9 @@ missing_from() {
 
 # classify_outcome <log> [cargo-exit-status]
 #
-# Prints one line per check and a final VERDICT, and returns 0 only when the log
-# is exactly the expected outcome. With no exit status it judges consistency
-# from the summary alone, which is what --check-outcome does.
+# Prints one line per check and a final VERDICT, and returns 0 only when every
+# test passed. With no exit status it judges consistency from the summary alone,
+# which is what --check-outcome does.
 classify_outcome() {
 	local log=$1 rc=${2:-}
 	local bad=0
@@ -116,11 +118,9 @@ classify_outcome() {
 	local ok_names failed_names
 	ok_names=$(sed -n 's/^test \([A-Za-z0-9_]*\) \.\.\. ok$/\1/p' "$log")
 	failed_names=$(sed -n 's/^test \([A-Za-z0-9_]*\) \.\.\. FAILED$/\1/p' "$log")
-	local want_fail_names
-	want_fail_names=$(printf '%s\n' "$expected_fail" | cut -d'|' -f1)
 
-	# 1. The summary must agree with the per-test lines: a harness that printed
-	#    counts its lines do not back up is not evidence.
+	# 1. The summary must agree with the per-test lines: a harness whose counts
+	#    its own lines do not back up is not evidence.
 	local ok_n failed_n_lines
 	ok_n=$(printf '%s\n' "$ok_names" | sed '/^$/d' | wc -l | tr -d ' ')
 	failed_n_lines=$(printf '%s\n' "$failed_names" | sed '/^$/d' | wc -l | tr -d ' ')
@@ -132,63 +132,46 @@ classify_outcome() {
 		bad=1
 	fi
 
-	# 2. The passed set must be EXACTLY the expected one.
+	# 2. Every one of the nine must have passed, and nothing else may have run.
 	local missing extra
 	missing=$(missing_from "$expected_pass" "$ok_names")
 	extra=$(extra_in "$expected_pass" "$ok_names")
 	if [ -z "$missing" ] && [ -z "$extra" ]; then
 		printf '  passed set .................... ok (%s tests)\n' "$ok_n"
 	else
-		[ -z "$missing" ] || printf '  passed set .................... FAIL (expected but did not pass: %s)\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
+		[ -z "$missing" ] || printf '  passed set .................... FAIL (did not pass: %s)\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
 		[ -z "$extra" ] || printf '  passed set .................... FAIL (passed but not expected: %s)\n' "$(printf '%s' "$extra" | tr '\n' ' ')"
 		bad=1
 	fi
 
-	# 3. The failed set must be EXACTLY the four documented tests.
-	missing=$(missing_from "$want_fail_names" "$failed_names")
-	extra=$(extra_in "$want_fail_names" "$failed_names")
-	if [ -z "$missing" ] && [ -z "$extra" ]; then
-		printf '  failed set .................... ok (%s tests)\n' "$failed_n_lines"
+	# 3. Nothing may fail. The four follower/history tests are the ones a run
+	#    WITHOUT the provisioned child would fail, so a failure there means the
+	#    history provisioning did not take effect.
+	if [ "$failed_n_lines" -eq 0 ]; then
+		printf '  no failures ................... ok (0 failed)\n'
 	else
-		[ -z "$missing" ] || printf '  failed set .................... FAIL (expected failure did not happen: %s)\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
-		[ -z "$extra" ] || printf '  failed set .................... FAIL (unexpected failure: %s)\n' "$(printf '%s' "$extra" | tr '\n' ' ')"
+		printf '  no failures ................... FAIL (%s failed: %s)\n' \
+			"$failed_n_lines" "$(printf '%s' "$failed_names" | tr '\n' ' ')"
+		if printf '%s' "$failed_names" | grep -qE 'a_live_(stream_idles|follower_reopens|child_follower|history_pages)'; then
+			printf '                                  (a follower/history test failing means the provisioned history child did not satisfy it)\n'
+		fi
 		bad=1
 	fi
 
-	# 4. Each expected failure must have failed for the documented reason: the
-	#    exact missing-history panic, once. A changed assertion, a protocol
-	#    error or a panic somewhere else is a regression wearing the right name.
-	local entry name want block panics
-	while IFS= read -r entry; do
-		[ -n "$entry" ] || continue
-		name=${entry%%|*}
-		want=${entry#*|}
-		block=$(awk -v h="---- $name stdout ----" \
-			'$0 == h { inblock = 1; next } inblock && (/^---- / || /^failures:$/) { exit } inblock { print }' "$log")
-		panics=$(printf '%s\n' "$block" | grep -c 'panicked at' || true)
-		if [ -n "$block" ] && [ "$panics" = 1 ] && printf '%s' "$block" | grep -qF "$want"; then
-			printf '  %-30s ok (documented missing-history panic)\n' "$name"
-		else
-			printf '  %-30s FAIL (expected exactly one panic saying "%s"; got %s panic line(s): %s)\n' \
-				"$name" "$want" "$panics" "$(printf '%s' "$block" | tr '\n' ' ' | cut -c1-160)"
-			bad=1
-		fi
-	done <<< "$expected_fail"
-
-	# 5. cargo's exit status must be the one those failures explain.
+	# 4. cargo's exit status must agree, and the log must not carry a build error.
 	if grep -qE '^error\[E|^error: could not compile' "$log"; then
 		printf '  exit status ................... FAIL (the log carries a build error)\n'
 		bad=1
 	elif [ -z "$rc" ]; then
 		printf '  exit status ................... skipped (judged from the summary)\n'
-	elif [ "$rc" -eq 0 ] && [ "$failed_n" -ne 0 ]; then
+	elif [ "$failed_n" -ne 0 ] && [ "$rc" -eq 0 ]; then
 		printf '  exit status ................... FAIL (cargo exited 0 while %s test(s) failed)\n' "$failed_n"
 		bad=1
-	elif [ "$rc" -ne 0 ] && [ "$failed_n" -eq 0 ]; then
+	elif [ "$failed_n" -eq 0 ] && [ "$rc" -ne 0 ]; then
 		printf '  exit status ................... FAIL (cargo exited %s although no test failed)\n' "$rc"
 		bad=1
 	else
-		printf '  exit status ................... ok (%s, explained by the expected failures)\n' "$rc"
+		printf '  exit status ................... ok (%s)\n' "$rc"
 	fi
 
 	if [ "$bad" -eq 0 ]; then
@@ -297,6 +280,12 @@ unset RAFIKI_URL RAFIKI_TOKEN RAFIKI_SOCKET RAFIKI_PROFILE \
 # (and a pricing fetch) into a daemon this run only asks about MCP OAuth. The
 # integration harness blanks the same three.
 unset ANTHROPIC_API_KEY OPENROUTER_API_KEY ANTHROPIC_BASE_URL 2>/dev/null || true
+# An operator's executor configuration must not reach this run: the retired
+# spellings are hard errors (`RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC` refuses to
+# start), and a stray name, selector or root would silently repoint the fake
+# machine this run spawns through. Every RAFIKI_EXECUTOR_* is cleared first and
+# the two this run owns are set below.
+while IFS= read -r v; do unset "$v"; done < <(compgen -v RAFIKI_EXECUTOR || true)
 export RAFIKI_DB="$dsn"
 
 sock="$XDG_RUNTIME_DIR/rafiki/controller.sock"
@@ -308,6 +297,18 @@ Set RAFIKI_SDK_LIVE_TMPDIR to a shorter directory."
 fi
 
 daemon_id="sdk-live-$$"
+# This run keeps the executor POOL OFF. That is what lets a fundi child run
+# in-process, which both the history child below and the refresh test's spawn
+# rely on: with a pool on, an empty-selector spawn is refused unless a live
+# ENROLLED executor exists, and enrolling one is a credential dance this run
+# does not need. `rafiki create --no-local-executor` then skips the CLI's
+# workspace join, which is the only thing that required a pool.
+#
+# RAFIKI_EXECUTOR_NAME is still exported because the CLI labels this machine
+# with it; nothing in this run joins a pool.
+RAFIKI_EXECUTOR_NAME="sdk-live-exec-$$"
+export RAFIKI_EXECUTOR_NAME
+export RAFIKI_EXECUTORS_ENABLED=0
 user="sdk-live-$(date +%Y%m%d%H%M%S)-$$"
 secrets_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
 
@@ -446,6 +447,7 @@ say "starting rafikid ($daemon_id)"
 RAFIKI_DB="$dsn" \
 	RAFIKI_SECRETS_KEY="$secrets_key" \
 	RAFIKI_EXECUTORS_ENABLED=0 \
+	RAFIKI_EXECUTOR_NAME="$RAFIKI_EXECUTOR_NAME" \
 	RAFIKI_PROXY_LISTEN=127.0.0.1:0 \
 	RAFIKI_DAEMON_ID="$daemon_id" \
 	"$tmp/bin/rafikid" >"$tmp/daemon.log" 2>&1 &
@@ -476,6 +478,106 @@ $(tail -n 40 "$tmp/daemon.log")"
 	fi
 	sleep 0.25
 done
+
+# ─── the child history the follower tests need ─────────────────────────────
+
+# Four pre-existing live tests follow, page and replay CHILD HISTORY, so they
+# need a child that is not working and has real history: the follower tests
+# filter on a durable ordinal, and the paging test needs at least TWO history
+# events, which means at least two messages — a spawn alone has none. So the
+# driver spawns a fundi child detached, drives two SCRIPTED turns through it
+# (--fake-turns swaps the sender, so no provider is ever called and no key is
+# needed), waits for both to land, and kills it. The child then sits `exited`
+# with an ordinal, which is exactly what the four tests ask of the daemon.
+#
+# If any of this cannot be done the run FAILS: without the history those four
+# tests cannot pass, and calling that an outcome is what this script refuses.
+say "provisioning the history child the follower tests need"
+child="sdk-live-history-$$"
+
+cat >"$tmp/fake-turns.ndjson" <<'NDJSON'
+{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"first scripted turn"}],"usage":{"input_tokens":4,"output_tokens":2}}
+{"id":"msg_2","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"second scripted turn"}],"usage":{"input_tokens":4,"output_tokens":2}}
+NDJSON
+
+# The model is named explicitly: a daemon with no default configured refuses a
+# fundi spawn without one ("fundi kind requires a model"), and the scripted
+# turns mean it is never sent anywhere.
+"$tmp/bin/rafiki" create -d --no-local-executor --kind fundi --model anthropic/sonnet-latest \
+	--extra-arg=--fake-turns --extra-arg="$tmp/fake-turns.ndjson" "$child" >"$tmp/child.log" 2>&1 ||
+	die "could not spawn the history child. The four follower/history live tests need a child with history, and without one they cannot pass:
+$(cat "$tmp/child.log")
+daemon log:
+$(tail -n 20 "$tmp/daemon.log")"
+
+# child_row prints the one `rafiki list` line for our child, when it is there.
+# `-J` prints ONE ChildSummary per line (protojson lowerCamelCase), so this is a
+# grep, not a JSON parser — no dependency beyond the CLI itself.
+child_row() {
+	"$tmp/bin/rafiki" list -J >"$tmp/list.json" 2>/dev/null || return 1
+	grep -F "\"name\":\"$child\"" "$tmp/list.json" | head -n 1
+}
+
+# wait_until <what> <predicate...>: poll a predicate for 60s, then fail naming
+# what never happened together with the daemon's own answer.
+wait_until() {
+	local what=$1
+	shift
+	local deadline=$(( $(date +%s) + 60 ))
+	while :; do
+		if "$@"; then return 0; fi
+		if [ "$(date +%s)" -ge "$deadline" ]; then
+			die "$what. The four follower/history live tests need this child, and without it they cannot pass:
+$(cat "$tmp/list.json" 2>/dev/null || true)
+daemon log:
+$(tail -n 20 "$tmp/daemon.log")"
+		fi
+		sleep 0.25
+	done
+}
+
+child_present() { [ -n "$(child_row || true)" ]; }
+
+# The two properties the follower tests filter on: not working, and a durable
+# ordinal. Two events minimum, because the paging test needs a SECOND event.
+child_quiet_with_history() {
+	local row
+	row=$(child_row || true)
+	[ -n "$row" ] || return 1
+	printf '%s' "$row" | grep -q '"displayState":"working"' && return 1
+	printf '%s' "$row" | grep -qE '"latestOrdinal":([2-9]|[1-9][0-9]+)'
+}
+
+child_exited() {
+	local row
+	row=$(child_row || true)
+	[ -n "$row" ] || return 1
+	printf '%s' "$row" | grep -q '"displayState":"exited"'
+}
+
+# 1. It has to exist before it can be prompted.
+wait_until "the history child never appeared in 'rafiki list'" child_present
+
+# 2. Two prompts, two scripted turns: that is the history.
+for prompt in "first prompt" "second prompt"; do
+	"$tmp/bin/rafiki" send "$child" "$(printf '{"type":"prompt","message":"%s"}' "$prompt")" \
+		>"$tmp/send.log" 2>&1 ||
+		die "could not prompt the history child (the follower/history live tests need its messages):
+$(cat "$tmp/send.log")
+daemon log:
+$(tail -n 20 "$tmp/daemon.log")"
+done
+
+# 3. Both turns land: the child stops working and its history is durable.
+wait_until "the history child never reached a quiet state with at least two durable events" \
+	child_quiet_with_history
+
+# 4. A live session is not the state the follower tests filter for — they want a
+#    child that is NOT working, and a killed child is `exited`. The kill lands
+#    asynchronously, so this waits again.
+"$tmp/bin/rafiki" kill "$child" >"$tmp/kill.log" 2>&1 || true
+wait_until "the history child never settled as 'exited' after the kill" child_exited
+say "history child ready: $child"
 
 # ─── the run ───────────────────────────────────────────────────────────────
 
@@ -514,15 +616,10 @@ if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
 fi
 
 say ""
-say "== passed =="
+say "== passed (all of them) =="
 for t in $expected_pass; do say "PASS  $t"; done
-say ""
-say "== failed, expected: a daemon holding child history =="
-while IFS= read -r entry; do
-	[ -n "$entry" ] || continue
-	say "FAIL  ${entry%%|*}"
-done <<< "$expected_fail"
 say ""
 say "reproduced: daemon-brokered MCP OAuth login, logout, refusal and a forced"
 say "refresh (with refresh-token rotation and upstream revocation), against a"
-say "loopback fixture. No vendor account was involved."
+say "loopback fixture, plus the follower/history tests against the child this"
+say "driver spawned. No vendor account was involved."

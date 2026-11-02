@@ -410,39 +410,42 @@ only lever a fixture has on the daemon's refresh decision, since a 401 is
 answered with the login hint rather than a refresh — so the next MCP-backed call
 must refresh, and the run asserts the rotation and the refreshed bearer.
 
-What passes, and what needs a different daemon:
+The follower and history tests are the reason the driver also provisions state:
+four of them follow, page and replay CHILD HISTORY, which needs a child that is
+not working and has at least two durable events. The driver spawns a fundi child
+detached, drives two SCRIPTED turns through it (`--fake-turns` swaps the sender,
+so no provider is called and no key is needed), waits for both to land, and kills
+it — the child then sits `exited` with an ordinal. If that cannot be done the run
+FAILS; it does not run those tests against a daemon that cannot satisfy them and
+call the result an outcome.
 
-- The four MCP OAuth tests pass: `a_live_daemon_starts_and_completes_an_mcp_login`,
+So every ignored test passes in this run, and the driver requires exactly that:
+
+- the four MCP OAuth tests: `a_live_daemon_starts_and_completes_an_mcp_login`,
   `a_live_daemon_logs_out_an_mcp_grant` (which also asserts the upstream
   revocation arrived, naming the token type),
   `a_live_daemon_refreshes_an_expired_mcp_grant` (a fundi spawn materializes the
   server's tools through the stored grant after the token was forced to expire,
   and the refreshed bearer is the one the fixture saw), and
-  `a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server`.
+  `a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server`;
 - `a_live_daemon_answers_a_unary_call` and
-  `a_live_daemon_refuses_a_stale_client_on_both_codecs` pass against any live
-  daemon.
-- Four PRE-EXISTING tests need a daemon holding child history — a spawned
-  child that is not working and has at least two durable events:
+  `a_live_daemon_refuses_a_stale_client_on_both_codecs`;
+- the four history tests, against the provisioned child:
   `a_live_stream_idles_and_resumes_from_its_cursor`,
   `a_live_follower_reopens_across_idle_windows_without_repeats`,
   `a_live_child_follower_never_replays_history`, and
-  `a_live_history_pages_backwards_without_gaps_or_repeats`. They FAIL in this
-  run by design (the scratch daemon has spawned nothing). They are not MCP
-  OAuth tests and this run does not claim them.
+  `a_live_history_pages_backwards_without_gaps_or_repeats`.
 
-The driver does not allowlist those four by name. It requires the passed set and
-the failed set to each equal the expected one exactly, requires every expected
-failure to carry its documented missing-history panic once, requires the harness
-summary to agree with the per-test lines, and requires cargo's exit status to be
-the one those failures explain. A regression inside an expected-failure test, an
-extra or missing test, a harness that ran nothing and a build error after the
-tests all fail the run. `test/livefixture/run.sh --check-outcome <cargo-log>
-[exit-status]` runs that classification alone — no database, no daemon, no
-cargo — so the rule itself is testable.
+There is no allowlist and nothing is expected to fail. The driver requires the
+passed set to equal the expected ten EXACTLY, the harness summary to agree with
+the per-test lines, no test to fail, and cargo's exit status to be 0 — so an
+extra or missing test, a harness that ran nothing, a build error and a
+regression all fail the run. `test/livefixture/run.sh --check-outcome
+<cargo-log> [exit-status]` runs that classification alone — no database, no
+daemon, no cargo — so the rule itself is testable.
 
-For those four, or for a daemon of your own, run the suite directly — it is the
-plain `cargo` invocation the driver makes:
+For a daemon of your own, or to run one test alone, use the plain `cargo`
+invocation the driver makes:
 
 ```bash
 cd sdk/rust
