@@ -491,7 +491,10 @@ type fakeOAuthServer struct {
 	mu sync.Mutex
 
 	// Metadata shape.
-	prmScopes       []string
+	prmScopes []string
+	// endpointQuery is appended to the MCP endpoint URL, which is how a test drives
+	// a configured endpoint that carries a credential in its query.
+	endpointQuery   string
 	servePRMPath    bool
 	servePRMRoot    bool
 	prmResourcePath string
@@ -613,7 +616,16 @@ func newFakeOAuthServer(t *testing.T) *fakeOAuthServer {
 	return f
 }
 
-func (f *fakeOAuthServer) endpoint() string { return f.srv.URL + "/mcp" }
+func (f *fakeOAuthServer) endpoint() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.endpointLocked()
+}
+
+// endpointLocked is endpoint() for a caller that already holds f.mu.
+func (f *fakeOAuthServer) endpointLocked() string {
+	return f.srv.URL + "/mcp" + f.endpointQuery
+}
 
 // endpointAt is a second MCP endpoint on the same origin, which is what the
 // per-owner pending cap needs: one owner may hold only one pending login per
@@ -621,9 +633,22 @@ func (f *fakeOAuthServer) endpoint() string { return f.srv.URL + "/mcp" }
 func (f *fakeOAuthServer) endpointAt(suffix string) string { return f.srv.URL + "/mcp/" + suffix }
 func (f *fakeOAuthServer) issuer() string                  { return f.srv.URL }
 func (f *fakeOAuthServer) rootResource() string {
-	u, err := url.Parse(f.endpoint())
+	f.mu.Lock()
+	endpoint := f.endpointLocked()
+	f.mu.Unlock()
+	return rootOf(f.t, endpoint)
+}
+
+// rootResourceLocked is rootResource() for a caller that already holds f.mu.
+func (f *fakeOAuthServer) rootResourceLocked() string {
+	return rootOf(f.t, f.endpointLocked())
+}
+
+func rootOf(t *testing.T, endpoint string) string {
+	t.Helper()
+	u, err := url.Parse(endpoint)
 	if err != nil {
-		f.t.Fatalf("fixture endpoint: %v", err)
+		t.Fatalf("fixture endpoint: %v", err)
 	}
 	u.Path = ""
 	return u.String()
@@ -709,10 +734,10 @@ func (f *fakeOAuthServer) handlePRMPath(w http.ResponseWriter, r *http.Request) 
 	serve := f.servePRMPath
 	resource := f.prmResourcePath
 	if resource == "" {
-		resource = f.endpoint()
+		resource = f.endpointLocked()
 	}
 	if f.prmVaryOnSecondHit && f.prmHits[r.URL.Path] > 1 {
-		resource = f.endpoint()
+		resource = f.endpointLocked()
 	}
 	scopes := append([]string(nil), f.prmScopes...)
 	f.mu.Unlock()
@@ -738,7 +763,7 @@ func (f *fakeOAuthServer) handlePRMRoot(w http.ResponseWriter, r *http.Request) 
 	serve := f.servePRMRoot
 	resource := f.prmResourceRoot
 	if resource == "" {
-		resource = f.rootResource()
+		resource = f.rootResourceLocked()
 	}
 	scopes := append([]string(nil), f.prmScopes...)
 	f.mu.Unlock()
@@ -2260,5 +2285,34 @@ func TestMcpOAuthEngineRevokeDetachedIsBestEffort(t *testing.T) {
 	}
 	if got := fx.oauth.revokeCount(); got != 3 {
 		t.Fatalf("revocations attempted = %d, want 2 more", got)
+	}
+}
+
+func TestMcpOAuthEngineSecretsStayOutOfErrorsWhenTheEndpointCarriesOne(t *testing.T) {
+	const sentinel = "endpoint-query-token-5e18"
+	fx := newEngineFixture(t)
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.endpointQuery = "?access_token=" + sentinel
+		f.failTools = true
+	})
+
+	// The login runs far enough to fail at verification, which is where every
+	// message that names the endpoint is produced: the consent descriptor, the
+	// discovery capture, the verification failure and the log.
+	// The consent URL itself carries the resource verbatim (RFC 8707), and the
+	// resource here IS the credentialed endpoint: that part is the browser's, not an
+	// error string. What this test is about is everything this daemon REPORTS.
+	d := fx.begin()
+	_, err := fx.complete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if err == nil {
+		t.Fatal("Complete succeeded although the tools could not be listed")
+	}
+	for _, hay := range []string{err.Error(), fx.logs.String()} {
+		if strings.Contains(hay, sentinel) {
+			t.Fatalf("the endpoint's query token escaped: %s", hay)
+		}
+	}
+	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
+		t.Fatal("a grant was committed for a login that failed verification")
 	}
 }

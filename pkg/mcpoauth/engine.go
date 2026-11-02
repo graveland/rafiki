@@ -593,7 +593,7 @@ func (e *Engine) expire(f *flow) {
 		return
 	case <-e.after(PendingTTL):
 	}
-	e.log.Info("mcp oauth login expired", "server", f.server, "endpoint", displayURL(f.endpoint))
+	e.log.Info("mcp oauth login expired", "server", f.server, "endpoint", redactRawTarget(f.endpoint))
 	e.dropFlow(f)
 }
 
@@ -714,13 +714,13 @@ func (e *Engine) login(f *flow) (result CompleteResult, err error) {
 	session, err := mcp.NewClient(&mcp.Implementation{Name: mcpOAuthClientName, Version: "1"}, nil).
 		Connect(f.ctx, transport, nil)
 	if err != nil {
-		return CompleteResult{}, upstreamFailure("authenticating to "+displayURL(f.endpoint), err)
+		return CompleteResult{}, upstreamFailure("authenticating to "+redactRawTarget(f.endpoint), err)
 	}
 	defer func() { _ = session.Close() }()
 
 	tools, err := session.ListTools(f.ctx, nil)
 	if err != nil {
-		return CompleteResult{}, upstreamFailure("verifying the tools of "+displayURL(f.endpoint), err)
+		return CompleteResult{}, upstreamFailure("verifying the tools of "+redactRawTarget(f.endpoint), err)
 	}
 	return e.commit(f, tools)
 }
@@ -855,10 +855,10 @@ func validateConsentURL(ctx context.Context, p *Policy, raw string, discovery va
 	}
 	if !SameOrigin(consent, endpoint) || consent.EscapedPath() != endpoint.EscapedPath() {
 		return fmt.Errorf("mcpoauth: the authorization URL is for %s, but discovery validated %s",
-			displayURL(raw), displayURL(discovery.AuthorizationEndpoint))
+			redactRawTarget(raw), redactRawTarget(discovery.AuthorizationEndpoint))
 	}
 	if err := p.ValidateURL(ctx, consent); err != nil {
-		return fmt.Errorf("mcpoauth: the authorization URL %s: %w", displayURL(raw), err)
+		return fmt.Errorf("mcpoauth: the authorization URL %s: %w", redactRawTarget(raw), err)
 	}
 	return nil
 }
@@ -880,7 +880,7 @@ func (e *Engine) capture(f *flow, cfg *oauth2.Config, tok *oauth2.Token) (oauth2
 	// not agree with the metadata this flow captured, the capture is wrong and
 	// the credential must not be stored against the wrong issuer.
 	if cfg.Endpoint.AuthURL != discovery.AuthorizationEndpoint || cfg.Endpoint.TokenURL != discovery.TokenEndpoint {
-		return nil, fmt.Errorf("mcpoauth: the client configuration does not match the authorization server %s", discovery.Issuer)
+		return nil, fmt.Errorf("mcpoauth: the client configuration does not match the authorization server %s", redactRawTarget(discovery.Issuer))
 	}
 	reg := Registration{
 		ClientID:              cfg.ClientID,
@@ -945,21 +945,6 @@ func authStyleOf(style oauth2.AuthStyle) AuthStyle {
 	default:
 		return AuthStyleAuto
 	}
-}
-
-// displayURL is a URL safe to name in an error or a log line: scheme, host and
-// path, with any query or userinfo dropped. A configured endpoint may carry a
-// credential in its query, and an error message is not a place to repeat one.
-func displayURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "<unparsable url>"
-	}
-	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	return u.String()
 }
 
 // safeOAuthCode keeps an OAuth protocol error code and nothing else: a short

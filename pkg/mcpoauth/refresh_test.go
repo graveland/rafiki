@@ -334,3 +334,59 @@ func TestMcpOAuthRefreshErrorTextIsAuthored(t *testing.T) {
 		t.Fatalf("the refresh error repeated an undecodable body: %v", err)
 	}
 }
+
+func TestMcpOAuthRefreshRedactsURLCredentials(t *testing.T) {
+	const (
+		queryToken = "query-token-2f4a"
+		password   = "hunter2-in-the-userinfo"
+	)
+	secretFree := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if strings.Contains(err.Error(), queryToken) {
+			t.Fatalf("a token in the token endpoint's query reached the error: %v", err)
+		}
+		if strings.Contains(err.Error(), password) {
+			t.Fatalf("a password in the token endpoint's userinfo reached the error: %v", err)
+		}
+	}
+
+	t.Run("endpoint refused by the policy", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		grant := refreshableGrant(fx, "refresh-1")
+		grant.Registration.TokenEndpoint = "https://user:" + password + "@as.example/token?access_token=" + queryToken
+
+		_, err := fx.eng.refresh(context.Background(), grant)
+		// A credentialed URL is refused by the shape check (ErrInvalidURL) before the
+		// destination check ever runs; either is a policy refusal.
+		if !errors.Is(err, ErrDestinationDenied) && !errors.Is(err, ErrInvalidURL) {
+			t.Fatalf("refresh = %v, want a URL-policy refusal", err)
+		}
+		secretFree(t, err)
+		if got := fx.oauth.tokenCallCount(); got != 0 {
+			t.Fatalf("the refresh reached %d token endpoints", got)
+		}
+	})
+
+	t.Run("endpoint that cannot be reached", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		grant := refreshableGrant(fx, "refresh-1")
+		// Loopback is allowed by this policy, so the refusal comes from the dial and
+		// arrives as a *url.Error quoting the whole URL, query included.
+		grant.Registration.TokenEndpoint = "https://127.0.0.1:1/token?access_token=" + queryToken
+
+		_, err := fx.eng.refresh(context.Background(), grant)
+		secretFree(t, err)
+	})
+
+	t.Run("endpoint that is not a usable URL", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		grant := refreshableGrant(fx, "refresh-1")
+		grant.Registration.TokenEndpoint = "https://127.0.0.1:1/token?access_token=" + queryToken + "\n"
+
+		_, err := fx.eng.refresh(context.Background(), grant)
+		secretFree(t, err)
+	})
+}

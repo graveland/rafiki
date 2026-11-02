@@ -270,11 +270,15 @@ func newReplayClient(p *Policy, entries []*recordedResponse) *http.Client {
 }
 
 func (t *replayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The key is the exact request; the label is what an error may name. A
+	// metadata URL can carry a query (a resource with one propagates into its
+	// candidates), and an error string ends up in a log.
 	key := req.Method + " " + req.URL.String()
+	label := req.Method + " " + redactTarget(req.URL)
 	t.mu.Lock()
 	if t.served[key] {
 		t.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s was requested more than once", errorReplayUnavailable, key)
+		return nil, fmt.Errorf("%w: %s was requested more than once", errorReplayUnavailable, label)
 	}
 	var match *recordedResponse
 	duplicates := 0
@@ -299,17 +303,17 @@ func (t *replayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			if !match.equivalentTo(e) {
 				t.mu.Unlock()
-				return nil, fmt.Errorf("%w: %s was fetched %d times with different answers, so which response the SDK read is unknown", errorReplayAmbiguous, key, duplicates)
+				return nil, fmt.Errorf("%w: %s was fetched %d times with different answers, so which response the SDK read is unknown", errorReplayAmbiguous, label, duplicates)
 			}
 		}
 	}
 	if match == nil {
 		t.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s was never fetched", errorReplayUnavailable, key)
+		return nil, fmt.Errorf("%w: %s was never fetched", errorReplayUnavailable, label)
 	}
 	if !match.usable() {
 		t.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s has no complete recorded body", errorReplayUnavailable, key)
+		return nil, fmt.Errorf("%w: %s has no complete recorded body", errorReplayUnavailable, label)
 	}
 	t.served[key] = true
 	t.mu.Unlock()
@@ -354,7 +358,7 @@ func prmCandidates(challengeMetadataURL, endpoint string) ([]prmCandidate, error
 	}
 	ru, err := url.Parse(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("mcpoauth: mcp endpoint %q is not a URL: %w", endpoint, err)
+		return nil, fmt.Errorf("mcpoauth: mcp endpoint %q is not a URL: %w", redactRawTarget(endpoint), err)
 	}
 	mu := *ru
 	// "At the path of the server's MCP endpoint".
@@ -400,7 +404,9 @@ type discoveryInput struct {
 func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscovery, error) {
 	authURL, err := url.Parse(in.AuthorizationURL)
 	if err != nil {
-		return validatedDiscovery{}, fmt.Errorf("mcpoauth: authorization URL is not a URL: %w", err)
+		// Authored, never wrapped: url.Parse's error quotes the URL it was given,
+		// and this one carries the PKCE challenge and the state.
+		return validatedDiscovery{}, fmt.Errorf("mcpoauth: the authorization URL the SDK produced is not a URL: %w", ErrInvalidURL)
 	}
 	expected := authURL.Query().Get("resource")
 	if expected == "" {
@@ -428,13 +434,13 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 	// different metadata, and the flow must not bind anything. Canonicalisation
 	// happens only below, after this passes.
 	if prm.Resource != expected {
-		return validatedDiscovery{}, fmt.Errorf("mcpoauth: the protected resource metadata this login would bind is for %q, but the authorization request is for %q", prm.Resource, expected)
+		return validatedDiscovery{}, fmt.Errorf("mcpoauth: the protected resource metadata this login would bind is for %q, but the authorization request is for %q", redactRawTarget(prm.Resource), redactRawTarget(expected))
 	}
 	// The SDK reads AuthorizationServers[0] and nothing else, and its scheme
 	// check lets an empty string through, so an empty first entry is not
 	// "an issuer we did not check" — it is an issuer-less resource.
 	if prm.AuthorizationServers[0] == "" {
-		return validatedDiscovery{}, fmt.Errorf("mcpoauth: protected resource metadata for %s names an empty authorization server", prm.Resource)
+		return validatedDiscovery{}, fmt.Errorf("mcpoauth: protected resource metadata for %s names an empty authorization server", redactRawTarget(prm.Resource))
 	}
 
 	asm, err := replayAuthServerMetadata(ctx, in.Policy, entries, prm.AuthorizationServers[0])
@@ -484,7 +490,7 @@ func recordedChallengeMetadataURL(entries []*recordedResponse, endpoint string) 
 		// straight to the well-known locations.
 		return "", nil
 	}
-	return "", fmt.Errorf("mcpoauth: no authentication challenge was recorded for %s in this consent round", endpoint)
+	return "", fmt.Errorf("mcpoauth: no authentication challenge was recorded for %s in this consent round", redactRawTarget(endpoint))
 }
 
 // replayProtectedResourceMetadata re-runs the SDK's own PRM search over the
@@ -497,7 +503,12 @@ func replayProtectedResourceMetadata(ctx context.Context, p *Policy, entries []*
 			// round's evidence cannot be reproduced at all, and the fallback below
 			// would be built on the same ambiguity.
 			if errors.Is(err, errorReplayAmbiguous) {
-				return nil, fmt.Errorf("mcpoauth: the metadata for %s cannot be replayed: %w", candidate.URL, err)
+				// Authored, and the inner error is NOT wrapped: both the SDK's own
+				// message and the replay transport's quote the request URL, which here
+				// carries the resource's query. Only the sentinel survives, so a caller
+				// can still tell what kind of failure this is.
+				return nil, fmt.Errorf("mcpoauth: the metadata for %s cannot be replayed, because the same request was answered twice: %w",
+					redactRawTarget(candidate.URL), errorReplayAmbiguous)
 			}
 			continue
 		}
@@ -508,7 +519,7 @@ func replayProtectedResourceMetadata(ctx context.Context, p *Policy, entries []*
 			// The SDK refuses this outright rather than searching further, and
 			// so must the mirror: a PRM with no issuer cannot be one we skipped
 			// past.
-			return nil, fmt.Errorf("mcpoauth: protected resource metadata at %s has no authorization servers", candidate.URL)
+			return nil, fmt.Errorf("mcpoauth: protected resource metadata at %s has no authorization servers", redactRawTarget(candidate.URL))
 		}
 		return prm, nil
 	}
@@ -520,18 +531,18 @@ func replayProtectedResourceMetadata(ctx context.Context, p *Policy, entries []*
 	// indistinguishable from "the SDK never got that far".
 	for _, candidate := range candidates {
 		if !recordedGET(entries, candidate.URL) {
-			return nil, fmt.Errorf("mcpoauth: no recorded protected resource metadata for %s and the fallback is not established", candidate.URL)
+			return nil, fmt.Errorf("mcpoauth: no recorded protected resource metadata for %s and the fallback is not established", redactRawTarget(candidate.URL))
 		}
 	}
 	// The fallback's own resource is the MCP endpoint itself. Anything else means
 	// the SDK used a metadata document we could not reproduce, and a binding
 	// invented from the fallback would claim a resource nobody validated.
 	if expected != endpoint {
-		return nil, fmt.Errorf("mcpoauth: the authorization request is for resource %q, which no validated metadata describes", expected)
+		return nil, fmt.Errorf("mcpoauth: the authorization request is for resource %q, which no validated metadata describes", redactRawTarget(expected))
 	}
 	ru, err := url.Parse(expected)
 	if err != nil {
-		return nil, fmt.Errorf("mcpoauth: discovered resource %q is not a URL: %w", expected, err)
+		return nil, fmt.Errorf("mcpoauth: discovered resource %q is not a URL: %w", redactRawTarget(expected), err)
 	}
 	root := *ru
 	root.Path = ""
@@ -549,7 +560,7 @@ func replayAuthServerMetadata(ctx context.Context, p *Policy, entries []*recorde
 		// Authored, never wrapped: the SDK's own metadata errors quote whatever the
 		// server sent, and an error message is not a place to repeat it. The issuer
 		// is named because it is public, and the reason is not.
-		return nil, fmt.Errorf("mcpoauth: the authorization server metadata for %s is not usable", displayURL(issuer))
+		return nil, fmt.Errorf("mcpoauth: the authorization server metadata for %s is not usable", redactRawTarget(issuer))
 	}
 	if asm == nil {
 		// The SDK's fallback for an issuer that publishes no metadata at all.
@@ -584,7 +595,7 @@ func validateDiscovered(ctx context.Context, p *Policy, d validatedDiscovery) er
 		return errors.New("mcpoauth: discovered authorization server has no issuer")
 	}
 	if d.AuthorizationEndpoint == "" || d.TokenEndpoint == "" {
-		return fmt.Errorf("mcpoauth: authorization server %s advertises no authorization or token endpoint", d.Issuer)
+		return fmt.Errorf("mcpoauth: authorization server %s advertises no authorization or token endpoint", redactRawTarget(d.Issuer))
 	}
 	targets := []struct {
 		what string
@@ -603,7 +614,7 @@ func validateDiscovered(ctx context.Context, p *Policy, d validatedDiscovery) er
 	}
 	for _, t := range targets {
 		if err := p.ValidateDestination(ctx, t.url); err != nil {
-			return fmt.Errorf("mcpoauth: discovered %s %q: %w", t.what, t.url, err)
+			return fmt.Errorf("mcpoauth: discovered %s %q: %w", t.what, redactRawTarget(t.url), err)
 		}
 	}
 	return nil

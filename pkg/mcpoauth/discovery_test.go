@@ -502,9 +502,11 @@ func TestMcpOAuthDiscoveryRefusesAVaryingDuplicateRecording(t *testing.T) {
 	// rejects for that candidate) and the second describes the endpoint (which it
 	// accepts). One URL, two answers, one round: nothing about the round can be
 	// replayed, so no binding may be made.
+	// rootResource() takes the fixture's lock, so it must be read outside set().
+	rootResource := fx.oauth.rootResource()
 	fx.oauth.set(func(f *fakeOAuthServer) {
 		f.prmVaryOnSecondHit = true
-		f.prmResourcePath = f.rootResource()
+		f.prmResourcePath = rootResource
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -552,4 +554,180 @@ func TestMcpOAuthDiscoveryReplaysAnIdenticalDuplicate(t *testing.T) {
 	if !strings.Contains(string(body), `"https://mcp.example"`) {
 		t.Fatalf("replayed body = %q", body)
 	}
+}
+
+func TestMcpOAuthDiscoveryRedactsURLCredentials(t *testing.T) {
+	const (
+		password   = "hunter2-in-the-userinfo"
+		queryToken = "query-token-8c31"
+	)
+	credentialed := "https://user:" + password + "@mcp.example/mcp?access_token=" + queryToken
+	secretFree := func(t *testing.T, hay string) {
+		t.Helper()
+		if strings.Contains(hay, password) {
+			t.Fatalf("a password in the URL reached the message: %s", hay)
+		}
+		if strings.Contains(hay, queryToken) {
+			t.Fatalf("a token in the URL query reached the message: %s", hay)
+		}
+	}
+
+	ctx := context.Background()
+	policy := publicPolicy(t)
+
+	t.Run("a consent capture whose resource carries a query token", func(t *testing.T) {
+		// A resource keeps its query through canonicalisation, so a token can live
+		// there. The endpoint here is the resource, and the SDK asked for another
+		// one: the cross-check prints both, and neither may carry the credential.
+		endpoint := "https://mcp.example/mcp?access_token=" + queryToken
+		rec := recordScript(t, ctx, []scriptedExchange{
+			{
+				method: "POST", url: endpoint, status: http.StatusUnauthorized,
+				header: http.Header{"Www-Authenticate": []string{
+					`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`,
+				}},
+			},
+			{
+				method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource/mcp",
+				status: http.StatusOK,
+				body:   `{"resource":"` + endpoint + `","authorization_servers":["https://as.example"]}`,
+			},
+			{method: "GET", url: "https://as.example/.well-known/oauth-authorization-server", status: http.StatusOK, body: scriptedASM},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         endpoint,
+			AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape("https://other.example/resource"),
+			Recorder:         rec,
+			Policy:           policy,
+		})
+		if err == nil {
+			t.Fatal("captureDiscovery accepted metadata for the wrong resource")
+		}
+		secretFree(t, err.Error())
+		if !strings.Contains(err.Error(), "mcp.example") {
+			t.Fatalf("the message lost the endpoint it is about: %v", err)
+		}
+	})
+
+	t.Run("an authorization server URL carrying a query token", func(t *testing.T) {
+		// Metadata may name an authorization server whose URL carries a credential.
+		// The SDK's own scheme check refuses neither userinfo nor a query, so this
+		// engine's message is the only thing that can redact it.
+		issuer := "https://as.example?access_token=" + queryToken
+		rec := recordScript(t, ctx, []scriptedExchange{
+			{
+				method: "POST", url: "https://mcp.example/mcp", status: http.StatusUnauthorized,
+				header: http.Header{"Www-Authenticate": []string{
+					`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`,
+				}},
+			},
+			{
+				method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource/mcp",
+				status: http.StatusOK,
+				body:   `{"resource":"https://mcp.example/mcp","authorization_servers":["` + issuer + `"]}`,
+			},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         "https://mcp.example/mcp",
+			AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape("https://mcp.example/mcp"),
+			Recorder:         rec,
+			Policy:           policy,
+		})
+		if err == nil {
+			t.Fatal("captureDiscovery accepted an authorization server it could not verify")
+		}
+		secretFree(t, err.Error())
+	})
+
+	t.Run("a duplicated recording of a URL with a query token", func(t *testing.T) {
+		// The ambiguity error names the request it could not resolve, and that
+		// request is a real URL — with the endpoint's query token on it.
+		endpoint := "https://mcp.example/mcp?access_token=" + queryToken
+		prmURL := "https://mcp.example/.well-known/oauth-protected-resource/mcp?access_token=" + queryToken
+		rec := recordScript(t, ctx, []scriptedExchange{
+			{
+				method: "POST", url: endpoint, status: http.StatusUnauthorized,
+				header: http.Header{"Www-Authenticate": []string{
+					`Bearer resource_metadata="` + prmURL + `"`,
+				}},
+			},
+			{method: "GET", url: prmURL, status: http.StatusOK, body: `{"resource":"` + endpoint + `","authorization_servers":["https://as.example"]}`},
+			{method: "GET", url: prmURL, status: http.StatusForbidden, body: `{"resource":"` + endpoint + `"}`},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         endpoint,
+			AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape(endpoint),
+			Recorder:         rec,
+			Policy:           policy,
+		})
+		if err == nil {
+			t.Fatal("captureDiscovery accepted a round with two answers for one request")
+		}
+		if !errors.Is(err, errorReplayAmbiguous) {
+			t.Fatalf("error = %v, want errorReplayAmbiguous", err)
+		}
+		secretFree(t, err.Error())
+	})
+
+	t.Run("the replay transport's own refusal", func(t *testing.T) {
+		// The transport's errors carry the sentinel a caller branches on, so a
+		// caller may wrap one: its message must be redacted even in isolation.
+		target := "https://mcp.example/.well-known/oauth-protected-resource?access_token=" + queryToken
+		rec := recordScript(t, ctx, []scriptedExchange{
+			{method: "GET", url: target, status: http.StatusOK, body: `{"resource":"https://mcp.example"}`},
+			{method: "GET", url: target, status: http.StatusForbidden, body: `{}`},
+		})
+		transport := newReplayClient(nil, rec.since(0)).Transport
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		// The transport directly, not through http.Client: net/http wraps any
+		// transport error in a *url.Error that quotes the whole URL, and that wrapper
+		// is not this package's to redact. What must hold is that OUR message — the
+		// one a caller's errors.Is/errors.As sees — carries no credential.
+		resp, err := transport.RoundTrip(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("replay resolved an ambiguous recording")
+		}
+		secretFree(t, err.Error())
+		if !errors.Is(err, errorReplayAmbiguous) {
+			t.Fatalf("replay = %v, want errorReplayAmbiguous", err)
+		}
+		if !strings.Contains(err.Error(), "mcp.example") {
+			t.Fatalf("the refusal lost the request it is about: %v", err)
+		}
+	})
+
+	t.Run("an unparsable consent URL", func(t *testing.T) {
+		// The consent URL arrives from the SDK; one that does not parse must not be
+		// quoted back, because it carries the PKCE challenge and the state. url.Parse
+		// reports a control character with the whole URL in its error.
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         "https://mcp.example/mcp",
+			AuthorizationURL: "https://as.example/authorize?code_challenge=" + queryToken + "\x00",
+			Recorder:         recordScript(t, ctx, nil),
+			Policy:           policy,
+		})
+		if err == nil {
+			t.Fatal("captureDiscovery accepted an unparsable consent URL")
+		}
+		secretFree(t, err.Error())
+	})
+
+	t.Run("a discovered endpoint with userinfo", func(t *testing.T) {
+		// validateDiscovered names each target it refuses. url.go redacts the parse
+		// error it wraps, and this message must not put the raw URL back beside it.
+		err := validateDiscovered(ctx, policy, validatedDiscovery{
+			RawResource:           "https://mcp.example/mcp",
+			Issuer:                "https://as.example",
+			AuthorizationEndpoint: "https://as.example/authorize",
+			TokenEndpoint:         credentialed,
+		})
+		if err == nil {
+			t.Fatal("validateDiscovered accepted a token endpoint with userinfo")
+		}
+		secretFree(t, err.Error())
+	})
 }

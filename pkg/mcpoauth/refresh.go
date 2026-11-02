@@ -44,7 +44,7 @@ func (e *Engine) refresh(ctx context.Context, cur Grant) (RefreshResult, error) 
 		return RefreshResult{}, fmt.Errorf("%w: the stored grant has no refresh token", ErrLoginRequired)
 	}
 	if err := e.policy.ValidateDestination(ctx, endpoint); err != nil {
-		return RefreshResult{}, fmt.Errorf("mcpoauth: token endpoint %q: %w", endpoint, err)
+		return RefreshResult{}, fmt.Errorf("mcpoauth: token endpoint %q: %w", redactRawTarget(endpoint), err)
 	}
 
 	form := url.Values{}
@@ -163,7 +163,7 @@ func (e *Engine) tokenRequest(ctx context.Context, endpoint string, reg Registra
 	encoded := body.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(encoded))
 	if err != nil {
-		return nil, fmt.Errorf("mcpoauth: building the token request: %w", err)
+		return nil, fmt.Errorf("mcpoauth: the token endpoint %s is not a usable URL", redactRawTarget(endpoint))
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
@@ -309,7 +309,7 @@ func (e *Engine) revokeDetached(ctx context.Context, rev Revocation) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), RevocationTimeout)
 	defer cancel()
 	if err := e.revokeOne(ctx, rev); err != nil {
-		e.log.Debug("mcp oauth revocation failed", "resource", displayURL(rev.Resource), "reason", err.Error())
+		e.log.Debug("mcp oauth revocation failed", "resource", redactRawTarget(rev.Resource), "reason", err.Error())
 	}
 }
 
@@ -332,19 +332,19 @@ func (e *Engine) revokeOne(ctx context.Context, rev Revocation) error {
 		return nil
 	}
 	if err := e.policy.ValidateDestination(ctx, endpoint); err != nil {
-		return fmt.Errorf("%w: revocation endpoint for %s", ErrDestinationDenied, displayURL(rev.Resource))
+		return fmt.Errorf("%w: revocation endpoint for %s", ErrDestinationDenied, redactRawTarget(rev.Resource))
 	}
 	form := url.Values{}
 	form.Set("token", token)
 	form.Set("token_type_hint", hint)
 	resp, err := e.postToken(ctx, endpoint, rev.Registration, form)
 	if err != nil {
-		return fmt.Errorf("mcpoauth: revocation for %s could not be sent", displayURL(rev.Resource))
+		return fmt.Errorf("mcpoauth: revocation for %s could not be sent", redactRawTarget(rev.Resource))
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxResponseBytes))
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("mcpoauth: revocation for %s was refused (status %d)", displayURL(rev.Resource), resp.StatusCode)
+		return fmt.Errorf("mcpoauth: revocation for %s was refused (status %d)", redactRawTarget(rev.Resource), resp.StatusCode)
 	}
 	return nil
 }
