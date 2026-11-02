@@ -301,11 +301,18 @@ server deployment has to get right:
   explicit `Authorization` header, an entry with no stored grant (a public or
   unauthenticated server, or one using other custom headers), and every stdio
   and `via_executor` entry keep the transport they had before —
-  `DefaultTransport` and the daemon's proxy environment included. The destination
-  policy and the no-credential-across-an-origin-changing-redirect rule cover the
-  OAuth-backed dials. A protected server with no stored grant still answers 401
-  with the `server <name> needs a login` hint, because the passive handler is
-  attached to every direct-`url` entry that names no `Authorization` of its own.
+  `DefaultTransport` and the daemon's proxy environment included. Two rules with
+  two scopes: the exact-endpoint header containment covers EVERY direct-`url`
+  entry that carries configured headers (a static `X-Api-Key` or a hand-set
+  `Authorization` never follows a redirect either), while the destination policy
+  and the bearer drop on an origin change belong to OAuth-backed dials. A
+  protected server with no stored grant still answers 401 with the
+  `server <name> needs a login` hint, because the passive handler is attached to
+  every direct-`url` entry that names no `Authorization` of its own. One case
+  gets no hint: a connection with no authenticated owner (a token-less local
+  caller). Its entry dials unauthenticated, and a 401 on it stays a 401 — there
+  is nobody for `rafiki mcp login` to store a grant for, so the daemon does not
+  pretend a login would help.
 - **The config file must exist on the daemon host.** `rafiki mcp login` resolves
   an ABSOLUTE path (`--mcp-config` > `./.mcp.json` > `$RAFIKI_MCP_CONFIG` >
   `<config dir>/mcp.json`) and then the daemon reads that exact file and entry;
@@ -336,10 +343,12 @@ server deployment has to get right:
   refusal, a crash or a rotation that cannot be committed leaves that grant
   login-required: there is no automatic replay, even after a restart, and the
   fix is `rafiki mcp login <server>` again. A refresh merely IN FLIGHT in
-  another session is the transient case — a second acquisition is refused for
-  its duration and resolves to the rotated token once the first finalizes. A
-  database error refuses use of the credential and is reported as a store
-  failure, never as "no credential".
+  another session is the transient case, and it reads like the permanent one: a
+  second acquisition is refused as login-required for the duration, so a turn
+  can tell the user to log in while a concurrent session is already rotating the
+  token. Retrying once that refresh completes succeeds with the rotated token
+  and needs no login. A database error refuses use of the credential and is
+  reported as a store failure, never as "no credential".
 - **Logout is authoritative; upstream revocation is best effort.** `rafiki mcp
   logout` drops every endpoint binding to the grant locally first, advancing a
   fence so an older in-flight login cannot recreate it, and only then offers the
