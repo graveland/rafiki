@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm/llmtest"
 	"go.graveland.dev/rafiki/pkg/msg"
 	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -212,6 +213,66 @@ func TestSendFailsOverAndMapsModel(t *testing.T) {
 		t.Fatalf("send (pinned): %v", err)
 	}
 	ck.Eq(1, primary.calls, "primary called")
+}
+
+func TestSendFailoverTranslatesByPrimaryKind(t *testing.T) {
+	newClient := func(t *testing.T, kind providers.Kind, primary, fallback Sender) *Client {
+		t.Helper()
+		set := &providers.Set{DefaultProvider: "gpt", Providers: map[string]providers.Provider{
+			"gpt":        {Name: "gpt", Kind: kind, Fallback: []string{"openrouter"}},
+			"openrouter": {Name: "openrouter", Kind: providers.KindAnthropicOpenRouter},
+		}}
+		c, err := NewClient(
+			WithProviders(set),
+			WithProviderSender("gpt", primary),
+			WithProviderSender("openrouter", fallback),
+			WithBreaker(15*time.Minute),
+			WithCatalog(seededCatalog(t)),
+			WithLogger(testLogger(t)),
+		)
+		assert.NewAborting(t).NoError(err, "NewClient")
+		return c
+	}
+	send := func(c *Client, model string) error {
+		_, err := c.send(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, userTextRequest(model), nil)
+		return err
+	}
+
+	t.Run("openai responses primary reaches openrouter under its openai/ id", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondErr(overloadedErr())}}
+		fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondText("from fallback")}}
+		c := newClient(t, providers.KindOpenAIResponses, primary, fallback)
+		ck.Require().NoError(send(c, "gpt/gpt-6.1-terra"))
+		ck.Eq("gpt-6.1-terra", primary.lastReq[0].Model, "primary keeps its provider-local id")
+		ck.Eq("openai/gpt-6.1-terra", fallback.lastReq[0].Model, "fallback model")
+	})
+	t.Run("chatgpt dialect translates the same way", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondErr(overloadedErr())}}
+		fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondText("from fallback")}}
+		c := newClient(t, providers.KindOpenAIResponsesChatGPT, primary, fallback)
+		ck.Require().NoError(send(c, "gpt/gpt-6.1-terra"))
+		ck.Eq("openai/gpt-6.1-terra", fallback.lastReq[0].Model, "fallback model")
+	})
+	t.Run("a generic openai-compatible primary with a bare id is refused, not guessed", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondErr(overloadedErr())}}
+		fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondText("must not be reached")}}
+		c := newClient(t, providers.KindOpenAI, primary, fallback)
+		err := send(c, "gpt/some-local-model")
+		ck.Require().Error(err, "the fallback must not be called with a guessed id")
+		ck.Eq(0, fallback.calls, "fallback calls")
+		ck.StrContains(err.Error(), `no OpenRouter id for model "some-local-model"`)
+	})
+	t.Run("a generic primary with a slash id passes it through", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		primary := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondErr(overloadedErr())}}
+		fallback := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){respondText("from fallback")}}
+		c := newClient(t, providers.KindOpenAI, primary, fallback)
+		ck.Require().NoError(send(c, "gpt/meta-llama/llama-4"))
+		ck.Eq("meta-llama/llama-4", fallback.lastReq[0].Model, "fallback model")
+	})
 }
 
 func TestSendNonRetryableDoesNotFailOver(t *testing.T) {

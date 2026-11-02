@@ -1202,12 +1202,34 @@ func callSender(ctx context.Context, s Sender, req *msg.Request, extra map[strin
 	return s.Send(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
 }
 
+// fallbackOpenRouterID translates the primary's provider-local model id to the
+// id a fallback of kind anthropic-openrouter is addressed with. The PRIMARY's
+// kind decides how, because only it knows what the id means: an Anthropic id
+// maps through the catalog's dotted spelling, an OpenAI Responses id gains its
+// "openai/" catalog prefix, and any other kind passes a slash id through and
+// refuses a bare one rather than guess a vendor.
+func (c *Client) fallbackOpenRouterID(primary, model string) (string, error) {
+	p, ok := c.set.Get(primary)
+	if !ok {
+		return "", fmt.Errorf("primary provider %q not in the registry", primary)
+	}
+	switch p.Kind {
+	case providers.KindAnthropic, providers.KindAnthropicOpenRouter:
+		return c.catalog.OpenRouterModel(model), nil
+	case providers.KindOpenAIResponses, providers.KindOpenAIResponsesChatGPT:
+		return providers.CatalogModelID(p.Kind, model), nil
+	}
+	if strings.Contains(model, "/") {
+		return model, nil
+	}
+	return "", fmt.Errorf("no OpenRouter id for model %q on a %s provider", model, p.Kind)
+}
+
 // callModel routes primary-with-breaker then the fallback chain. Fallback
-// sends rewrite the model via the catalog (Anthropic id → OpenRouter id when
-// the fallback is OpenRouter). A send with NO fallback configured bypasses
-// the breaker entirely (direct primary, mirroring the routing core's
-// fallback-less behavior) — per the design, an empty Fallback chain is how a
-// consumer opts out of being pinned.
+// sends rewrite the model by the primary's kind (see fallbackOpenRouterID). A
+// send with NO fallback configured bypasses the breaker entirely (direct
+// primary, mirroring the routing core's fallback-less behavior) — per the
+// design, an empty Fallback chain is how a consumer opts out of being pinned.
 func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, req *msg.Request, extra map[string]any, spec routing.Spec, decision providerDecision, ref turnRef) (*msg.Response, string, error) {
 	sender := c.senders[primary]
 	if sender == nil {
@@ -1264,10 +1286,16 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		// primary's, and the primary's request must stay the one it was.
 		fbReq := *req
 		// Model-id translation between a primary and its fallback is the
-		// RECEIVING kind's job: anthropic-openrouter maps an Anthropic id
-		// through the catalog; an anthropic -> anthropic fallback needs none.
+		// PRIMARY kind's job: only it knows what its provider-local id means.
+		// anthropic-openrouter maps it through the catalog; an anthropic ->
+		// anthropic fallback needs none.
 		if fbProvider.Kind == providers.KindAnthropicOpenRouter {
-			fbReq.Model = c.catalog.OpenRouterModel(req.Model)
+			orID, terr := c.fallbackOpenRouterID(primary, req.Model)
+			if terr != nil {
+				lastErr = fmt.Errorf("llm: fallback provider %q: %w", fb, terr)
+				continue
+			}
+			fbReq.Model = orID
 		}
 		// The fallback path has no declaration: the model was re-resolved
 		// against the FALLBACK provider via the catalog, which knows nothing
