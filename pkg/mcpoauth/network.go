@@ -38,11 +38,13 @@ const (
 	// response: an SSE session may live as long as its caller's context, but it
 	// may not hang before the first byte.
 	ResponseHeaderTimeout = 30 * time.Second
-	// MaxResponseBytes caps a response body, on BOTH clients: the one exception is
-	// a text/event-stream reply, which has no natural end. Reading past it is an
-	// ERROR, never a truncated success: a JSON body cut in half parses as garbage
-	// a caller cannot tell from a server bug, and a token response that happens to
-	// fit would hide the ones that did not.
+	// MaxResponseBytes caps a response body, on BOTH clients. The one exception
+	// is a text/event-stream reply, and only on the streaming client: the content
+	// type is the server's to choose, and no OAuth leg reads an event stream, so
+	// honouring it there would let a hostile endpoint opt out of the cap. Reading
+	// past it is an ERROR, never a truncated success: a JSON body cut in half
+	// parses as garbage a caller cannot tell from a server bug, and a token
+	// response that happens to fit would hide the ones that did not.
 	MaxResponseBytes = 1 << 20
 	// MaxRedirects is how many redirects one request may follow. Every hop is
 	// re-checked, and only same-origin hops are followed at all.
@@ -201,10 +203,10 @@ func (p *Policy) ValidateDestination(ctx context.Context, raw string) error {
 //
 // One request through it is one operation: the whole redirect chain, body read
 // included, is bounded to OperationTimeout (http.Client.Timeout, so a chain of
-// MaxRedirects hops cannot multiply it), its body to MaxResponseBytes, its
-// redirects to same-origin MaxRedirects hops, and its destination to the policy
-// — checked before the request and again at dial time. There is no proxy: see
-// transport.
+// MaxRedirects hops cannot multiply it), its body to MaxResponseBytes whatever
+// content type the server claimed, its redirects to same-origin MaxRedirects
+// hops, and its destination to the policy — checked before the request and again
+// at dial time. There is no proxy: see transport.
 func (p *Policy) Client() *http.Client {
 	p = p.orDefault()
 	return &http.Client{
@@ -225,10 +227,12 @@ func (p *Policy) Client() *http.Client {
 // still capped at MaxResponseBytes UNLESS it is text/event-stream, because this
 // client also reads ordinary JSON replies and those are finite like any other; an
 // event stream has no natural end, so it stays uncapped and its caller meters it.
+// That exemption exists HERE and nowhere else: Client() caps every body whatever
+// content type the server claims.
 func (p *Policy) StreamClient() *http.Client {
 	p = p.orDefault()
 	return &http.Client{
-		Transport:     &policyTransport{policy: p, base: p.baseTransport()},
+		Transport:     &policyTransport{policy: p, base: p.baseTransport(), stream: true},
 		CheckRedirect: p.checkRedirect,
 	}
 }
@@ -513,6 +517,11 @@ func (p *Policy) checkRedirect(req *http.Request, via []*http.Request) error {
 type policyTransport struct {
 	policy *Policy
 	base   http.RoundTripper
+	// stream marks the transport StreamClient built. Only that one exempts a
+	// text/event-stream body from the cap: on Client() the content type is the
+	// server's to choose and the OAuth legs never read an event stream, so an
+	// exemption there is a hostile endpoint opting out of the cap.
+	stream bool
 }
 
 func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -530,15 +539,21 @@ func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !isEventStream(resp.Header.Get("Content-Type")) {
+	if !t.exemptFromCap(resp.Header.Get("Content-Type")) {
 		resp.Body = &limitedBody{rc: resp.Body}
 	}
 	return resp, nil
 }
 
-// isEventStream reports whether ct is the one content type that is exempt from
-// the body cap. Everything else on either client — a JSON-RPC reply, an OAuth
-// error document, a redirect body — is finite and capped like any other response.
+// exemptFromCap reports whether this transport leaves the body uncapped, which is
+// true only for an event stream fetched through the streaming client.
+func (t *policyTransport) exemptFromCap(contentType string) bool {
+	return t.stream && isEventStream(contentType)
+}
+
+// isEventStream reports whether ct is an SSE content type. It decides the
+// exemption only for the streaming client; every other reply — a JSON-RPC answer,
+// an OAuth error document, a redirect body — is finite and capped like any other.
 func isEventStream(ct string) bool {
 	mediaType, _, err := mime.ParseMediaType(ct)
 	if err != nil {

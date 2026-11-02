@@ -741,6 +741,34 @@ func TestMcpOAuthNetworkBoundsResponseBody(t *testing.T) {
 			collect.Eq(MaxResponseBytes+1, len(body), "an event stream has no natural end: %s", contentType)
 		}
 	})
+
+	// The exemption belongs to StreamClient alone. The content type is the
+	// server's to choose and no OAuth leg reads an event stream, so a token,
+	// discovery or DCR endpoint labelling its body text/event-stream must not opt
+	// out of the cap — while the very same response must still flow through the
+	// client that exists to stream.
+	t.Run("an event stream is exempt on the stream client only", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			stream bool
+		}{
+			{name: "client", stream: false},
+			{name: "stream client", stream: true},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				remote := serve(MaxResponseBytes+1, "text/event-stream")
+				_, body, err := get(build(remote, c.stream), "http://mcp.example/mcp")
+				collect := assert.NewCollecting(t)
+				if c.stream {
+					collect.NoError(err, "a stream has no natural end")
+					collect.Eq(MaxResponseBytes+1, len(body))
+					return
+				}
+				collect.ErrorIs(err, ErrResponseTooLarge, "the content type cannot opt an OAuth leg out of the cap")
+				collect.ErrorContains(err, "response body exceeds")
+			})
+		}
+	})
 }
 
 // TestMcpOAuthNetworkStreamsUncappedAndUndeadlined is the streaming client's
