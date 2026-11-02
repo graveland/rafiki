@@ -470,6 +470,17 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	}
 	ro.MCPDial = dial
 
+	// The other half of the MCP seam: the owner-bound factory a direct-URL
+	// entry dials through, which is where a stored OAuth grant is spent. It is
+	// bound to credentialOwner — the user whose credential may be spent — and
+	// NOT to ownerUserID, which on a resume/recovery is best effort and can come
+	// from an owner label. An empty credentialOwner leaves the option nil, which
+	// the runtime reads as "this process holds no MCP credentials": the entry
+	// still dials, unauthenticated, exactly as it did before this feature.
+	if credentialOwner != "" && c.mcpOAuth != nil {
+		ro.MCPHTTP = c.mcpOAuth.passiveFactory(credentialOwner)
+	}
+
 	// The daemon's ONE shared model catalog, so this child's llm.Client never
 	// builds (and OpenRouter-fetches) its own — N in-process children used to
 	// mean N model-list fetches and N copies of the same ~MB of models. This

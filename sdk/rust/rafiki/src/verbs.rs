@@ -223,4 +223,72 @@ impl Client {
     ) -> Result<pb::DeleteProviderCredentialResponse, Error> {
         self.unary("DeleteProviderCredential", req).await
     }
+
+    /// Start an OAuth login for one direct-url entry of an MCP config file.
+    /// `config_path` is an ABSOLUTE path ON THE DAEMON HOST: the daemon reads
+    /// that exact file and that exact `mcpServers` entry, so a client on
+    /// another machine cannot upload its project config here. `scopes`
+    /// overrides what discovery would request; empty asks for the challenged
+    /// scopes, else the resource's advertised ones.
+    ///
+    /// The answer carries the `login_id` to complete with, the `authorize_url`
+    /// to open, and where the server sends the browser back: listen on
+    /// `redirect_port` at `callback_path` on every host in `redirect_hosts`,
+    /// or accept a pasted redirect URL. The grant is stored against the
+    /// CALLING USER and is never returned — no token, no client secret and no
+    /// callback code crosses this seam. Needs a user credential on the client:
+    /// `failed_precondition` when the connection has none, `permission_denied`
+    /// for a child's credential. A path the daemon cannot read, an entry it
+    /// does not declare, and an entry that cannot log in here (a stdio server,
+    /// a `via_executor` server, an entry with its own `Authorization` header)
+    /// are all `invalid_argument`. Nothing is prompted during a spawn: an
+    /// explicit login is the only way a grant exists.
+    pub async fn begin_mcp_login(
+        &self,
+        req: &pb::BeginMcpLoginRequest,
+    ) -> Result<pb::BeginMcpLoginResponse, Error> {
+        self.unary("BeginMcpLogin", req).await
+    }
+
+    /// Finish one consent round of the login [`Client::begin_mcp_login`]
+    /// started, handing back the raw query string the server redirected to
+    /// loopback with (`callback_query`, leading `?` optional). A code is single
+    /// use: replaying one is `invalid_argument`.
+    ///
+    /// EXACTLY ONE OUTCOME. When `continuation` is set the login is not
+    /// finished — nothing is stored yet, the same `login_id` carries on, and
+    /// the continuation is another Begin-shaped descriptor to drive another
+    /// round. Only a response with no continuation is a success, and then
+    /// `server`, `resource`, `account_id` (empty unless a validated source
+    /// names one) and the sorted tool NAMES are set.
+    ///
+    /// `not_found` for a login id that is unknown, expired, or was begun by
+    /// another user: one identical answer for all three, so no caller can
+    /// probe which logins exist. A refused consent round, a replayed callback
+    /// and a callback that does not match the login's state/issuer are
+    /// `invalid_argument`: the login is over and must be started again.
+    pub async fn complete_mcp_login(
+        &self,
+        req: &pb::CompleteMcpLoginRequest,
+    ) -> Result<pb::CompleteMcpLoginResponse, Error> {
+        self.unary("CompleteMcpLogin", req).await
+    }
+
+    /// Delete one of the calling user's stored MCP grants. Two exclusive
+    /// forms: `config_path` + `server` resolves the configured direct-url
+    /// entry and invalidates its endpoint (which also fences a first login
+    /// still in flight), or `resource` names the canonical resource URL
+    /// directly and touches no config at all — that is how a grant is removed
+    /// once its project file is gone. Passing both, or neither, is
+    /// `invalid_argument`.
+    ///
+    /// A grant the caller does not have is `not_found`. The local invalidation
+    /// is what logout means: an upstream revocation that fails does not
+    /// restore the grant, and the user's children then get the re-login hint.
+    pub async fn delete_mcp_credential(
+        &self,
+        req: &pb::DeleteMcpCredentialRequest,
+    ) -> Result<pb::DeleteMcpCredentialResponse, Error> {
+        self.unary("DeleteMcpCredential", req).await
+    }
 }

@@ -73,6 +73,19 @@ func TestProviderLoginRPCsAreOwnerExempt(t *testing.T) {
 	}
 }
 
+// TestMcpLoginRPCsAreOwnerExempt pins the VALUE for the three MCP OAuth verbs,
+// the pessimistic twin of the completeness walk: they must stay ownerExempt with
+// a non-empty reason, because the handler derives and enforces the caller's OWN
+// user identity (mcpLoginOwner) and there is no target row to authorize. The
+// policy half is TestMcpLoginRPCsAreUserOnly (connect_policy_test.go).
+func TestMcpLoginRPCsAreOwnerExempt(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"BeginMcpLogin", "CompleteMcpLogin", "DeleteMcpCredential"} {
+		c.Eq(ownerExempt, ownerIsolationTable[name], "ownerIsolationTable[%q]", name)
+		c.True(ownerExemptReasons[name] != "", "ownerExemptReasons[%q] must explain the exemption", name)
+	}
+}
+
 // TestOwnerGuardForIdentityShapes pins the source's identity table: only a
 // non-admin user credential resolves a guard. Everything else — the unix
 // socket's local trust, an admin, a child credential (ChildScope governs), and

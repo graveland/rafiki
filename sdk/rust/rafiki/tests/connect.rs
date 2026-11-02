@@ -514,3 +514,207 @@ async fn a_unary_timeout_is_not_idle() {
     assert_eq!(err.code, rafiki::Code::DeadlineExceeded, "{err}");
     assert!(!err.is_idle(), "{err}");
 }
+
+// ─── MCP OAuth: the three additive verbs ────────────────────────────────────
+//
+// They are ordinary unary RPCs on the Control service, so the transport is the
+// one every other verb already uses: nothing here is new plumbing, and the
+// point of these tests is the WIRE — the exact requests the SDK sends, the
+// continuation outcome, the two refusals a caller must branch on, and the fact
+// that no credential ever appears in a message.
+
+/// Every request the stub saw: (path, body bytes).
+type Seen = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+/// What a recorded stub answers for one request path.
+type Reply = Arc<dyn Fn(&str) -> Response<TestBody> + Send + Sync>;
+
+fn recording_stub(seen: Seen, reply: Reply) -> Stub {
+    Arc::new(move |req: Request<Incoming>| {
+        let seen = seen.clone();
+        let reply = reply.clone();
+        Box::pin(async move {
+            let path = req.uri().path().to_string();
+            let body = req
+                .into_body()
+                .collect()
+                .await
+                .expect("the request body")
+                .to_bytes()
+                .to_vec();
+            let response = reply(&path);
+            seen.lock().expect("lock").push((path, body));
+            Ok(with_epoch(response))
+        })
+    })
+}
+
+#[tokio::test]
+async fn begin_mcp_login_sends_the_exact_request_and_decodes_the_descriptor() {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let stub = recording_stub(
+        seen.clone(),
+        Arc::new(|_| {
+            let reply = pb::BeginMcpLoginResponse {
+                login_id: "ml-1".to_string(),
+                authorize_url: "https://auth.example.net/authorize?client_id=rafiki".to_string(),
+                redirect_port: 1456,
+                callback_path: "/mcp/oauth/callback".to_string(),
+                redirect_hosts: vec!["127.0.0.1".to_string()],
+            };
+            Response::new(full(reply.encode_to_vec()))
+        }),
+    );
+    let url = serve(stub).await;
+    let client = Client::new(&url, None).expect("a client");
+
+    let request = pb::BeginMcpLoginRequest {
+        config_path: "/srv/app/.mcp.json".to_string(),
+        server: "linear".to_string(),
+        scopes: vec!["tools:read".to_string(), "tools:write".to_string()],
+    };
+    let response = client
+        .begin_mcp_login(&request)
+        .await
+        .expect("begin_mcp_login");
+    assert_eq!(response.login_id, "ml-1");
+    assert_eq!(response.redirect_port, 1456);
+    assert_eq!(response.callback_path, "/mcp/oauth/callback");
+    assert_eq!(response.redirect_hosts, vec!["127.0.0.1".to_string()]);
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1);
+    let (path, body) = &seen[0];
+    assert_eq!(path, "/rafiki.v1.Control/BeginMcpLogin");
+    let decoded =
+        pb::BeginMcpLoginRequest::decode(body.as_slice()).expect("a BeginMcpLoginRequest");
+    assert_eq!(decoded, request, "the request message encodes verbatim");
+}
+
+#[tokio::test]
+async fn complete_mcp_login_answers_a_continuation_as_the_sole_outcome() {
+    let stub: Stub = Arc::new(|_req: Request<Incoming>| {
+        Box::pin(async move {
+            // A step-up round: a continuation and NOTHING else. The SDK must
+            // not read the absent final fields as a finished login.
+            let reply = pb::CompleteMcpLoginResponse {
+                continuation: Some(pb::BeginMcpLoginResponse {
+                    login_id: "ml-1".to_string(),
+                    authorize_url: "https://auth.example.net/authorize?scope=more".to_string(),
+                    redirect_port: 1456,
+                    callback_path: "/mcp/oauth/callback".to_string(),
+                    redirect_hosts: vec!["127.0.0.1".to_string()],
+                }),
+                ..Default::default()
+            };
+            Ok(with_epoch(Response::new(full(reply.encode_to_vec()))))
+        })
+    });
+    let url = serve(stub).await;
+    let client = Client::new(&url, None).expect("a client");
+
+    let response = client
+        .complete_mcp_login(&pb::CompleteMcpLoginRequest {
+            login_id: "ml-1".to_string(),
+            callback_query: "code=abc&state=xyz".to_string(),
+        })
+        .await
+        .expect("complete_mcp_login");
+    let continuation = response.continuation.expect("a continuation");
+    assert_eq!(continuation.login_id, "ml-1", "the same login continues");
+    assert!(continuation.authorize_url.contains("scope=more"));
+    assert_eq!(
+        response.server, "",
+        "a continuation carries no final server"
+    );
+    assert_eq!(
+        response.resource, "",
+        "a continuation carries no final resource"
+    );
+    assert!(
+        response.tools.is_empty(),
+        "a continuation carries no tool list"
+    );
+
+    // And the final shape: one outcome, no continuation.
+    let stub: Stub = Arc::new(|_req: Request<Incoming>| {
+        Box::pin(async move {
+            let reply = pb::CompleteMcpLoginResponse {
+                server: "linear".to_string(),
+                resource: "https://mcp.example.net/mcp".to_string(),
+                account_id: String::new(),
+                tools: vec!["create_issue".to_string(), "list_issues".to_string()],
+                continuation: None,
+            };
+            Ok(with_epoch(Response::new(full(reply.encode_to_vec()))))
+        })
+    });
+    let url = serve(stub).await;
+    let client = Client::new(&url, None).expect("a client");
+    let response = client
+        .complete_mcp_login(&pb::CompleteMcpLoginRequest {
+            login_id: "ml-1".to_string(),
+            callback_query: "code=abc&state=xyz".to_string(),
+        })
+        .await
+        .expect("complete_mcp_login");
+    assert!(response.continuation.is_none());
+    assert_eq!(response.server, "linear");
+    assert_eq!(response.resource, "https://mcp.example.net/mcp");
+    assert_eq!(response.tools, vec!["create_issue", "list_issues"]);
+}
+
+#[tokio::test]
+async fn mcp_login_refusals_keep_their_codes() {
+    for (code, expected) in [
+        ("permission_denied", rafiki::Code::PermissionDenied),
+        ("not_found", rafiki::Code::NotFound),
+        ("invalid_argument", rafiki::Code::InvalidArgument),
+    ] {
+        let body = serde_json::json!({ "code": code, "message": "refused" }).to_string();
+        let stub: Stub = Arc::new(move |_req: Request<Incoming>| {
+            let body = body.clone();
+            Box::pin(async move {
+                let mut response = Response::new(full(body));
+                *response.status_mut() = http::StatusCode::BAD_REQUEST;
+                Ok(with_epoch(response))
+            })
+        });
+        let url = serve(stub).await;
+        let client = Client::new(&url, None).expect("a client");
+        let err = client
+            .begin_mcp_login(&pb::BeginMcpLoginRequest::default())
+            .await
+            .expect_err("a refusal");
+        assert_eq!(err.code, expected, "{code}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn delete_mcp_credential_carries_the_selector_and_returns_no_credential() {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let stub = recording_stub(
+        seen.clone(),
+        Arc::new(|_| Response::new(full(pb::DeleteMcpCredentialResponse {}.encode_to_vec()))),
+    );
+    let url = serve(stub).await;
+    let client = Client::new(&url, None).expect("a client");
+
+    let by_resource = pb::DeleteMcpCredentialRequest {
+        resource: "https://mcp.example.net/mcp".to_string(),
+        ..Default::default()
+    };
+    client
+        .delete_mcp_credential(&by_resource)
+        .await
+        .expect("delete_mcp_credential");
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "/rafiki.v1.Control/DeleteMcpCredential");
+    let decoded = pb::DeleteMcpCredentialRequest::decode(seen[0].1.as_slice()).expect("a request");
+    assert_eq!(
+        decoded, by_resource,
+        "the selector encodes verbatim, config path empty"
+    );
+}

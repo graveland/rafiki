@@ -525,6 +525,15 @@ type Controller struct {
 	// ChatGPT-kind provider as having no usable credential and says why.
 	providerCreds *providerCreds
 
+	// mcpOAuth is the daemon's MCP OAuth broker: the interactive login engine
+	// the Control verbs reach, and the owner-bound passive factory every fundi
+	// child binds its direct-URL MCP servers through (RuntimeOptions.MCPHTTP).
+	// Nil on a Controller a test built by hand and on a daemon whose
+	// RAFIKI_SECRETS_KEY or database is missing: a child then dials exactly as
+	// it always did — unauthenticated, which is fine for a public server and
+	// produces the `rafiki mcp login` hint for a protected one.
+	mcpOAuth *mcpOAuth
+
 	// display-state refresh worker (see display_state_service.go). displayWake
 	// is nil on a hand-built Controller that never ran NewController, which is
 	// what makes refreshDisplayState a no-op there. displayMu guards the
@@ -6579,6 +6588,14 @@ func (c *Controller) UserRm(ctx context.Context, username string) error {
 	// keeps billing the account. Deleting them is best effort — it logs a WARN
 	// and does not fail the removal, which has already happened.
 	c.providerCreds.DeleteOwnerCredentials(ctx, userID)
+	// The MCP grants go the same way, with the order the design fixes: local
+	// invalidation FIRST (cancel this daemon's pending logins, then advance
+	// every grant/binding/endpoint fence), and only a bounded best-effort
+	// afterwards. The users-row tombstone written above is the fail-closed
+	// authority — every engine read and write re-checks it — so cleanup that
+	// fails, or a login another daemon instance still holds, cannot resurrect a
+	// grant for a removed user.
+	c.mcpOAuth.deleteOwner(ctx, userID)
 	slog.Info("user removed", "username", username, "streams_cancelled", streams, "executors_disconnected", disconnected)
 	return nil
 }

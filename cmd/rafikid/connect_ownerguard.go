@@ -229,6 +229,10 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"CompleteProviderLogin":    ownerExempt,
 	"DeleteProviderCredential": ownerExempt,
 
+	"BeginMcpLogin":       ownerExempt,
+	"CompleteMcpLogin":    ownerExempt,
+	"DeleteMcpCredential": ownerExempt,
+
 	"ListSkills":      ownerExempt,
 	"GetSkill":        ownerExempt,
 	"DeleteSkill":     ownerExempt,
@@ -332,6 +336,10 @@ var ownerExemptReasons = map[string]string{
 	"BeginProviderLogin":       "self-scoped: a user manages its own provider logins",
 	"CompleteProviderLogin":    "self-scoped: a user manages its own provider logins",
 	"DeleteProviderCredential": "self-scoped: a user manages its own provider logins",
+
+	"BeginMcpLogin":       "self-scoped: the handler binds the grant to the caller's OWN user id (mcpLoginOwner) — an admin gets only its own grants and cannot name another user's",
+	"CompleteMcpLogin":    "self-scoped: the handler completes only a login the caller's own user id began (mcpLoginOwner + the engine's owner binding)",
+	"DeleteMcpCredential": "self-scoped: the handler deletes only the caller's own grants (mcpLoginOwner); the store is owner-keyed",
 
 	"ListSkills":      "owner-layered skill store",
 	"GetSkill":        "owner-layered skill store",

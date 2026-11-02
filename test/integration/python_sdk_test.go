@@ -600,6 +600,190 @@ func TestPythonSDK_TransportRetry(t *testing.T) {
 	runSDKScript(t, py, strings.ReplaceAll(sdkTransportDriver, "%SDKDIR%", filepath.Join(repoRoot, "sdk", "python")), sdkDriverEnv(t, "", ""))
 }
 
+// ─── 1b. MCP OAuth verbs, without a daemon ────────────────────────────────
+
+// sdkMcpOAuthDriver drives the three MCP OAuth verbs against a fake Connect
+// server: the EXACT requests the SDK sends, the continuation outcome, the two
+// refusals a caller branches on (permission_denied, not_found), and the
+// token-free shape of the generated responses. It needs no daemon and no vendor
+// account, so it runs everywhere the SDK's dependencies do.
+const sdkMcpOAuthDriver = `
+import json, sys, traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, "%SDKDIR%")
+from rafiki import Client, ConnectError
+from rafiki._gen import control_pb
+
+probe = sys.argv[sys.argv.index("--probe-out") + 1]
+def note(s):
+    with open(probe, "a") as f:
+        f.write(s + "\n")
+
+STATE = {"requests": [], "rounds": 0}
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def send_response(self, *a, **k):
+        super().send_response(*a, **k)
+        self.send_header("Rafiki-Protocol", "4")
+
+    def _json(self, obj, status=200):
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _err(self, code, message):
+        self._json({"code": code, "message": message}, 400)
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(n) or b"{}")
+        STATE["requests"].append((self.path, dict(self.headers), body))
+        if self.path.endswith("/BeginMcpLogin"):
+            if body.get("server") == "forbidden":
+                self._err("permission_denied", "MCP login is a user-credential surface")
+                return
+            self._json({
+                "loginId": "ml-1",
+                "authorizeUrl": "https://auth.example.net/authorize?client_id=rafiki",
+                "redirectPort": 1456,
+                "callbackPath": "/mcp/oauth/callback",
+                "redirectHosts": ["127.0.0.1"],
+            })
+            return
+        if self.path.endswith("/CompleteMcpLogin"):
+            STATE["rounds"] += 1
+            if body.get("loginId") != "ml-1":
+                self._err("not_found", "unknown or expired MCP login; start the login again")
+                return
+            if STATE["rounds"] == 1:
+                # A step-up: a continuation and NOTHING else.
+                self._json({"continuation": {
+                    "loginId": "ml-1",
+                    "authorizeUrl": "https://auth.example.net/authorize?scope=more",
+                    "redirectPort": 1456,
+                    "callbackPath": "/mcp/oauth/callback",
+                    "redirectHosts": ["127.0.0.1"],
+                }})
+                return
+            self._json({
+                "server": "linear",
+                "resource": "https://mcp.example.net/mcp",
+                "tools": ["create_issue", "list_issues"],
+            })
+            return
+        if self.path.endswith("/DeleteMcpCredential"):
+            if body.get("resource") == "https://nowhere.example/mcp":
+                self._err("not_found", "no MCP credential is stored for resource")
+                return
+            self._json({})
+            return
+        self._err("unimplemented", self.path)
+
+def run():
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        import threading
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:%d" % srv.server_address[1]
+        c = Client(url)
+
+        # 1. Begin: the exact body and path the wire expects.
+        begin = c.begin_mcp_login("/srv/app/.mcp.json", "linear", scopes=["tools:read", "tools:write"])
+        assert begin.login_id == "ml-1", begin
+        assert begin.authorize_url.startswith("https://auth.example.net/"), begin
+        assert begin.redirect_port == 1456 and begin.callback_path == "/mcp/oauth/callback", begin
+        assert begin.redirect_hosts == ["127.0.0.1"], begin
+        path, headers, body = STATE["requests"][-1]
+        assert path == "/rafiki.v1.Control/BeginMcpLogin", path
+        assert headers.get("Connect-Protocol-Version") == "1", headers
+        assert headers.get("Rafiki-Protocol") == "4", headers
+        assert body == {
+            "configPath": "/srv/app/.mcp.json",
+            "server": "linear",
+            "scopes": ["tools:read", "tools:write"],
+        }, body
+        note("begin OK")
+
+        # 2. Complete: a continuation is not success, and the loop finishes.
+        first = c.complete_mcp_login(begin.login_id, "code=abc&state=xyz")
+        assert first.continuation is not None, first
+        assert first.continuation.login_id == "ml-1", first.continuation
+        assert first.server == "" and first.resource == "" and first.tools == [], first
+        path, _, body = STATE["requests"][-1]
+        assert path == "/rafiki.v1.Control/CompleteMcpLogin", path
+        assert body == {"loginId": "ml-1", "callbackQuery": "code=abc&state=xyz"}, body
+
+        done = c.complete_mcp_login(first.continuation.login_id, "code=def&state=xyz")
+        assert done.continuation is None, done
+        assert done.server == "linear", done
+        assert done.resource == "https://mcp.example.net/mcp", done
+        assert done.tools == ["create_issue", "list_issues"], done
+        note("complete OK")
+
+        # 3. The token-free shape: no generated response field can hold a
+        #    credential or a code.
+        forbidden = ("token", "secret", "code", "password", "authorization")
+        for cls in (control_pb.BeginMcpLoginResponse, control_pb.CompleteMcpLoginResponse):
+            for name in cls.__dataclass_fields__:
+                for bad in forbidden:
+                    assert bad not in name.lower(), (cls.__name__, name)
+        note("no credential fields OK")
+
+        # 4. Refusals keep their codes.
+        try:
+            c.begin_mcp_login("/srv/app/.mcp.json", "forbidden")
+            raise AssertionError("a permission_denied begin was accepted")
+        except ConnectError as e:
+            assert e.code == "permission_denied", e
+        try:
+            c.complete_mcp_login("ml-elsewhere", "code=abc")
+            raise AssertionError("an unknown login id was accepted")
+        except ConnectError as e:
+            assert e.code == "not_found", e
+        note("refusals OK")
+
+        # 5. Delete: both selector forms, and not_found for an absent grant.
+        c.delete_mcp_credential(config_path="/srv/app/.mcp.json", server="linear")
+        path, _, body = STATE["requests"][-1]
+        assert path == "/rafiki.v1.Control/DeleteMcpCredential", path
+        assert body == {"configPath": "/srv/app/.mcp.json", "server": "linear"}, body
+        c.delete_mcp_credential(resource="https://mcp.example.net/mcp")
+        _, _, body = STATE["requests"][-1]
+        assert body == {"resource": "https://mcp.example.net/mcp"}, body
+        try:
+            c.delete_mcp_credential(resource="https://nowhere.example/mcp")
+            raise AssertionError("an absent grant was accepted")
+        except ConnectError as e:
+            assert e.code == "not_found", e
+        note("delete OK")
+        note("MCP OAUTH PASS")
+    except Exception:
+        note(traceback.format_exc())
+        sys.exit(1)
+
+run()
+`
+
+// TestPythonSDKMcpOAuthVerbs pins the SDK half of the MCP OAuth contract: the
+// exact requests, the continuation outcome, the two refusals, and the fact that
+// no generated response field can carry a credential. It needs no daemon, so it
+// runs whenever the SDK's own dependencies do — and it SKIPS loudly when uv is
+// missing, which `make test` prints too.
+func TestPythonSDKMcpOAuthVerbs(t *testing.T) {
+	t.Parallel()
+	py := sdkPython(t)
+	runSDKScript(t, py,
+		strings.ReplaceAll(sdkMcpOAuthDriver, "%SDKDIR%", filepath.Join(repoRoot, "sdk", "python")),
+		sdkDriverEnv(t, "", ""))
+}
+
 // ─── 2. the standalone profile lifecycle, on the real daemon ─────────────────
 
 // sdkProfileDriver shells out to from_profile against the scratch daemon and

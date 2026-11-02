@@ -172,6 +172,33 @@ done = c.complete_provider_login(begin.login_id, "code=...&state=...")
                                            # login id, or one another user began
 c.delete_provider_credential("chatgpt")    # not_found when there is none
 
+# MCP OAuth (per-user credentials for remote MCP servers). An explicit login for
+# one direct-url entry of an MCP config file; the grant belongs to the CALLING
+# USER and is spendable only by that user's children. `config_path` is an
+# ABSOLUTE path ON THE DAEMON HOST (the daemon reads that exact file and entry;
+# nothing is uploaded and no project file is read client-side), and `scopes`
+# overrides what discovery would request. Needs a user credential:
+# failed_precondition with none, permission_denied for a child's.
+begin = c.begin_mcp_login("/srv/app/.mcp.json", "linear", scopes=["tools:read"])
+print(begin.authorize_url)                 # open it in a browser, or listen on
+                                           # begin.redirect_port (1456) at
+                                           # begin.callback_path on every host in
+                                           # begin.redirect_hosts — the redirect
+                                           # URI rafiki registers — and accept a
+                                           # pasted redirect URL
+round = c.complete_mcp_login(begin.login_id, "code=...&state=...")
+# EXACTLY ONE OUTCOME. A continuation is NOT success: nothing is stored yet, the
+# same login_id carries on, and the descriptor above drives another round (a
+# server may ask for a wider scope once it has seen your tool list).
+while round.continuation is not None:
+    print(round.continuation.authorize_url)
+    round = c.complete_mcp_login(round.continuation.login_id, "code=...&state=...")
+print(round.server, round.resource, round.tools)   # sorted tool NAMES
+# delete answers a grant the caller does not have with not_found; the two forms
+# are exclusive and the resource form needs no config file at all.
+c.delete_mcp_credential(config_path="/srv/app/.mcp.json", server="linear")
+c.delete_mcp_credential(resource="https://mcp.example.net/mcp")
+
 # Script-child verbs (identity = the child; from a user credential they
 # are refused — a user has no position in the tree to report from):
 c.report("progress", {"stage": "halfway"})     # → the parent's event buffer

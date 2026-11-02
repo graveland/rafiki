@@ -51,6 +51,10 @@ func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	// names match the seam, so main.go needs no adapter). A rename there would
 	// otherwise silently leave every login RPC answering "not yet wired".
 	var _ connectapi.ProviderLoginBackend = (*providerCreds)(nil)
+	// And the MCP OAuth backend: *mcpOAuth is wired as itself (its method names
+	// match the seam), so a rename there would silently leave every MCP login
+	// verb answering "not yet wired".
+	var _ connectapi.McpLoginBackend = (*mcpOAuth)(nil)
 }
 
 // stubChildStore is a no-op childstore.ChildStore; stubLineageStore embeds it

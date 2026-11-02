@@ -76,7 +76,8 @@ returning the generated `pb::` types: `get_history`, `stream_events(req,
 idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
 `list_model_aliases`, `put_model_alias`, `delete_model_alias`, `tag`, `untag`, `list_tags`, `list_executors`, `begin_provider_login`, `complete_provider_login`,
-`delete_provider_credential`. `unary` and `server_stream` are public, so an
+`delete_provider_credential`, `begin_mcp_login`, `complete_mcp_login`,
+`delete_mcp_credential`. `unary` and `server_stream` are public, so an
 RPC added to `control.proto` is callable immediately (regenerate first). `pb`
 holds the `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the
 `Daraja*` RPCs carry.
@@ -193,6 +194,38 @@ configured (a login stored under a name since removed from `providers.toml`
 can still be cleared). A login id that is unknown, expired or was begun by
 another user is `not_found` too (one identical answer, so no caller can probe
 which logins exist).
+
+`begin_mcp_login` / `complete_mcp_login` / `delete_mcp_credential` are the same
+shape for a remote MCP server that authenticates with OAuth. They are explicit
+and interactive — nothing prompts during a spawn — and the grant belongs to the
+CALLING USER: an admin gets only their own grants, and a child credential cannot
+start, finish or delete one (`permission_denied`; `failed_precondition` for a
+connection with no user identity at all). `config_path` is an ABSOLUTE path ON
+THE DAEMON HOST: the daemon reads that exact file and that exact `mcpServers`
+entry, so a client on another machine cannot upload its project config here, and
+the SDK reads nothing client-side. A path the daemon cannot read, an entry it
+does not declare, and an entry that cannot log in here (a stdio server, a
+`via_executor` server, an entry with its own `Authorization` header) are
+`invalid_argument`.
+
+`complete_mcp_login` has EXACTLY ONE outcome: when `continuation` is set the
+login is not finished — nothing is stored, the same `login_id` carries on, and
+the continuation is another Begin-shaped descriptor to drive another round (a
+server may ask for a wider scope once it has seen the tool list). Only a
+continuation-free answer is success, and then `server`, `resource`,
+`account_id` (empty unless a validated source names one) and the sorted tool
+NAMES it serves are set. A callback code is single use; a replayed one, a
+refused consent round and a mismatched `state`/`iss` are all `invalid_argument`
+("start again"). A login id that is unknown, expired or was begun by another
+user is `not_found`.
+
+`delete_mcp_credential` takes two exclusive forms: `config_path` + `server`
+resolves the configured entry and invalidates its endpoint (fencing a first
+login still in flight), or `resource` names the canonical resource and touches
+no config at all, which is how a grant is removed after its project file is
+gone. Both or neither is `invalid_argument`; a grant the caller does not have is
+`not_found`. No token, client secret or callback code ever appears in a
+response — the daemon holds every credential.
 
 ## Errors: nothing is retried
 

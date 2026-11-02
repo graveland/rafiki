@@ -1428,6 +1428,13 @@ service Control {
   rpc BeginProviderLogin(BeginProviderLoginRequest) returns (BeginProviderLoginResponse);
   rpc CompleteProviderLogin(CompleteProviderLoginRequest) returns (CompleteProviderLoginResponse);
   rpc DeleteProviderCredential(DeleteProviderCredentialRequest) returns (DeleteProviderCredentialResponse);
+  // MCP OAuth: an explicit, interactive login for a remote MCP server, stored
+  // against the CALLER's own user id. Additive and userOnly; the handlers
+  // derive the owner from the connection and refuse a caller with no user
+  // identity, so an admin can never name another user's grant.
+  rpc BeginMcpLogin(BeginMcpLoginRequest) returns (BeginMcpLoginResponse);
+  rpc CompleteMcpLogin(CompleteMcpLoginRequest) returns (CompleteMcpLoginResponse);
+  rpc DeleteMcpCredential(DeleteMcpCredentialRequest) returns (DeleteMcpCredentialResponse);
   rpc GetStreams(GetStreamsRequest) returns (GetStreamsResponse);
   // A raw child-protocol frame, for debugging/scripting. userOnly: children
   // use Send.
@@ -2352,6 +2359,62 @@ message CompleteProviderLoginRequest { string login_id = 1; string callback_quer
 message CompleteProviderLoginResponse { string provider = 1; string account_id = 2; }
 message DeleteProviderCredentialRequest { string provider = 1; }
 message DeleteProviderCredentialResponse {}
+
+// ─── MCP OAuth login (per-user credentials for remote MCP servers) ───────
+//
+// An MCP server entry that is a direct URL can authenticate with OAuth. The
+// login is EXPLICIT (never during a spawn, never from a project file) and
+// USER-ONLY: the grant is stored against the caller's own user id and only
+// that user's children may spend it. An admin calling these verbs gets their
+// OWN grants, never another user's.
+//
+// Nothing secret crosses these messages. Begin answers a consent URL and where
+// the browser comes back; Complete answers which server/resource was verified
+// and the tool NAMES it serves. The bearer, the client secret, the refresh
+// token and the callback query's code are never in a response, never in a log
+// and never in an error.
+//
+// config_path is an ABSOLUTE path ON THE DAEMON HOST: the daemon reads that
+// exact file and that exact server entry. A client on another machine cannot
+// upload its project config through this RPC — it must name a path the daemon
+// can already read.
+message BeginMcpLoginRequest {
+  string config_path = 1;
+  string server = 2;
+  // scopes overrides what SDK discovery would request; empty means the
+  // challenged scopes, else the resource's advertised scopes.
+  repeated string scopes = 3;
+}
+// The client must listen on redirect_port at callback_path on every host in
+// redirect_hosts, or accept a pasted redirect URL.
+message BeginMcpLoginResponse {
+  string login_id = 1;
+  string authorize_url = 2;
+  uint32 redirect_port = 3;
+  string callback_path = 4;
+  repeated string redirect_hosts = 5;
+}
+message CompleteMcpLoginRequest { string login_id = 1; string callback_query = 2; }
+// Exactly ONE outcome: the final fields, or `continuation`. A continuation is
+// another consent round for the SAME login id (a step-up scope challenge);
+// follow its authorize_url and complete again. A consumed callback cannot be
+// replayed. account_id is empty unless a validated source names one.
+message CompleteMcpLoginResponse {
+  string server = 1;
+  string resource = 2;
+  string account_id = 3;
+  repeated string tools = 4;
+  BeginMcpLoginResponse continuation = 5;
+}
+// Accepts EITHER config_path+server (the configured entry, which fences even a
+// pending first login) OR resource (the canonical resource, so a grant can be
+// removed after its project config is gone). Never both.
+message DeleteMcpCredentialRequest {
+  string config_path = 1;
+  string server = 2;
+  string resource = 3;
+}
+message DeleteMcpCredentialResponse {}
 
 // ─── OIDC login service ───────────────────────────────────────────────────
 

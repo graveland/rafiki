@@ -3610,6 +3610,88 @@ pub struct DeleteProviderCredentialRequest {
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct DeleteProviderCredentialResponse {}
+/// ─── MCP OAuth login (per-user credentials for remote MCP servers) ───────
+///
+/// An MCP server entry that is a direct URL can authenticate with OAuth. The
+/// login is EXPLICIT (never during a spawn, never from a project file) and
+/// USER-ONLY: the grant is stored against the caller's own user id and only
+/// that user's children may spend it. An admin calling these verbs gets their
+/// OWN grants, never another user's.
+///
+/// Nothing secret crosses these messages. Begin answers a consent URL and where
+/// the browser comes back; Complete answers which server/resource was verified
+/// and the tool NAMES it serves. The bearer, the client secret, the refresh
+/// token and the callback query's code are never in a response, never in a log
+/// and never in an error.
+///
+/// config_path is an ABSOLUTE path ON THE DAEMON HOST: the daemon reads that
+/// exact file and that exact server entry. A client on another machine cannot
+/// upload its project config through this RPC — it must name a path the daemon
+/// can already read.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BeginMcpLoginRequest {
+    #[prost(string, tag = "1")]
+    pub config_path: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub server: ::prost::alloc::string::String,
+    /// scopes overrides what SDK discovery would request; empty means the
+    /// challenged scopes, else the resource's advertised scopes.
+    #[prost(string, repeated, tag = "3")]
+    pub scopes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// The client must listen on redirect_port at callback_path on every host in
+/// redirect_hosts, or accept a pasted redirect URL.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BeginMcpLoginResponse {
+    #[prost(string, tag = "1")]
+    pub login_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub authorize_url: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub redirect_port: u32,
+    #[prost(string, tag = "4")]
+    pub callback_path: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "5")]
+    pub redirect_hosts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CompleteMcpLoginRequest {
+    #[prost(string, tag = "1")]
+    pub login_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub callback_query: ::prost::alloc::string::String,
+}
+/// Exactly ONE outcome: the final fields, or `continuation`. A continuation is
+/// another consent round for the SAME login id (a step-up scope challenge);
+/// follow its authorize_url and complete again. A consumed callback cannot be
+/// replayed. account_id is empty unless a validated source names one.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CompleteMcpLoginResponse {
+    #[prost(string, tag = "1")]
+    pub server: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub resource: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub tools: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    pub continuation: ::core::option::Option<BeginMcpLoginResponse>,
+}
+/// Accepts EITHER config_path+server (the configured entry, which fences even a
+/// pending first login) OR resource (the canonical resource, so a grant can be
+/// removed after its project config is gone). Never both.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeleteMcpCredentialRequest {
+    #[prost(string, tag = "1")]
+    pub config_path: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub server: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub resource: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct DeleteMcpCredentialResponse {}
 /// redirect_port: the loopback port the client bound. client_host names the
 /// token ("login <client_host> <date>").
 #[derive(Clone, PartialEq, ::prost::Message)]

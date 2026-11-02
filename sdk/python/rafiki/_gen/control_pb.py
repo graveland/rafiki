@@ -7265,6 +7265,181 @@ class DeleteProviderCredentialResponse:
         return obj
 
 @dataclasses.dataclass
+class BeginMcpLoginRequest:
+    config_path: str = ""
+    server: str = ""
+    scopes: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.config_path != "":
+            out["configPath"] = self.config_path
+        if self.server != "":
+            out["server"] = self.server
+        if self.scopes:
+            out["scopes"] = [x for x in self.scopes]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BeginMcpLoginRequest":
+        obj = cls()
+        _v = _d.get("configPath")
+        if _v is not None:
+            obj.config_path = _v
+        _v = _d.get("server")
+        if _v is not None:
+            obj.server = _v
+        _v = _d.get("scopes")
+        if _v is not None:
+            obj.scopes = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class BeginMcpLoginResponse:
+    login_id: str = ""
+    authorize_url: str = ""
+    redirect_port: int = 0
+    callback_path: str = ""
+    redirect_hosts: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.login_id != "":
+            out["loginId"] = self.login_id
+        if self.authorize_url != "":
+            out["authorizeUrl"] = self.authorize_url
+        if self.redirect_port != 0:
+            out["redirectPort"] = self.redirect_port
+        if self.callback_path != "":
+            out["callbackPath"] = self.callback_path
+        if self.redirect_hosts:
+            out["redirectHosts"] = [x for x in self.redirect_hosts]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BeginMcpLoginResponse":
+        obj = cls()
+        _v = _d.get("loginId")
+        if _v is not None:
+            obj.login_id = _v
+        _v = _d.get("authorizeUrl")
+        if _v is not None:
+            obj.authorize_url = _v
+        _v = _d.get("redirectPort")
+        if _v is not None:
+            obj.redirect_port = _int_in(_v)
+        _v = _d.get("callbackPath")
+        if _v is not None:
+            obj.callback_path = _v
+        _v = _d.get("redirectHosts")
+        if _v is not None:
+            obj.redirect_hosts = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class CompleteMcpLoginRequest:
+    login_id: str = ""
+    callback_query: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.login_id != "":
+            out["loginId"] = self.login_id
+        if self.callback_query != "":
+            out["callbackQuery"] = self.callback_query
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CompleteMcpLoginRequest":
+        obj = cls()
+        _v = _d.get("loginId")
+        if _v is not None:
+            obj.login_id = _v
+        _v = _d.get("callbackQuery")
+        if _v is not None:
+            obj.callback_query = _v
+        return obj
+
+@dataclasses.dataclass
+class CompleteMcpLoginResponse:
+    server: str = ""
+    resource: str = ""
+    account_id: str = ""
+    tools: list[str] = dataclasses.field(default_factory=list)
+    continuation: Optional[BeginMcpLoginResponse] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.server != "":
+            out["server"] = self.server
+        if self.resource != "":
+            out["resource"] = self.resource
+        if self.account_id != "":
+            out["accountId"] = self.account_id
+        if self.tools:
+            out["tools"] = [x for x in self.tools]
+        if self.continuation is not None:
+            out["continuation"] = self.continuation.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CompleteMcpLoginResponse":
+        obj = cls()
+        _v = _d.get("server")
+        if _v is not None:
+            obj.server = _v
+        _v = _d.get("resource")
+        if _v is not None:
+            obj.resource = _v
+        _v = _d.get("accountId")
+        if _v is not None:
+            obj.account_id = _v
+        _v = _d.get("tools")
+        if _v is not None:
+            obj.tools = [x for x in _v]
+        _v = _d.get("continuation")
+        if _v is not None:
+            obj.continuation = BeginMcpLoginResponse.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class DeleteMcpCredentialRequest:
+    config_path: str = ""
+    server: str = ""
+    resource: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.config_path != "":
+            out["configPath"] = self.config_path
+        if self.server != "":
+            out["server"] = self.server
+        if self.resource != "":
+            out["resource"] = self.resource
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteMcpCredentialRequest":
+        obj = cls()
+        _v = _d.get("configPath")
+        if _v is not None:
+            obj.config_path = _v
+        _v = _d.get("server")
+        if _v is not None:
+            obj.server = _v
+        _v = _d.get("resource")
+        if _v is not None:
+            obj.resource = _v
+        return obj
+
+@dataclasses.dataclass
+class DeleteMcpCredentialResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteMcpCredentialResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
 class BeginLoginRequest:
     redirect_port: int = 0
     client_host: str = ""

@@ -762,6 +762,84 @@ class Client:
         req = _gen.control_pb.DeleteProviderCredentialRequest(provider=provider)
         self._call("DeleteProviderCredential", req, _gen.control_pb.DeleteProviderCredentialResponse)
 
+    # ── MCP OAuth (per-user credentials for remote MCP servers) ──────────────
+
+    def begin_mcp_login(
+        self,
+        config_path: str,
+        server: str,
+        scopes: "Iterable[str] | None" = None,
+    ) -> _gen.control_pb.BeginMcpLoginResponse:
+        """Start an OAuth login for one direct-url entry of an MCP config file.
+        ``config_path`` is an ABSOLUTE path ON THE DAEMON HOST — the daemon
+        reads that exact file and that exact ``mcpServers`` entry, so a client
+        on another machine cannot upload its project config here. ``scopes``
+        overrides what discovery would request; empty (the default) asks for
+        the challenged scopes, else the resource's advertised ones.
+
+        Returns the ``login_id`` to complete with, the ``authorize_url`` to open
+        in a browser, and where the server sends the browser back: listen on
+        ``redirect_port`` at ``callback_path`` on every host in
+        ``redirect_hosts``, or accept a pasted redirect URL. The grant is stored
+        against the CALLING USER and is never returned: no token, no client
+        secret and no callback code crosses this seam.
+
+        Needs a user credential: ``failed_precondition`` when the profile has
+        none, ``permission_denied`` for a child's credential. A path the daemon
+        cannot read, an entry it does not declare, and an entry that cannot log
+        in here (a stdio server, a via_executor server, an entry with its own
+        Authorization header) are all ``invalid_argument``. This call performs
+        no network work until discovery starts, and it never prompts during a
+        spawn — an explicit login is the only way a grant exists."""
+        req = _gen.control_pb.BeginMcpLoginRequest(
+            config_path=config_path, server=server, scopes=list(scopes) if scopes else []
+        )
+        return self._call("BeginMcpLogin", req, _gen.control_pb.BeginMcpLoginResponse)
+
+    def complete_mcp_login(
+        self, login_id: str, callback_query: str
+    ) -> _gen.control_pb.CompleteMcpLoginResponse:
+        """Finish one consent round of the login :meth:`begin_mcp_login`
+        started, handing back the raw query string the server redirected to
+        loopback with (``callback_query``, leading ``?`` optional). A callback
+        code is single use: replaying one is ``invalid_argument``.
+
+        EXACTLY ONE OUTCOME. When ``continuation`` is set the login is not
+        finished: nothing is stored yet, the same ``login_id`` carries on, and
+        the continuation is another Begin-shaped descriptor (authorize URL, port,
+        path, hosts) to drive another round. Only a response with no
+        continuation is a success, and then ``server``, ``resource``,
+        ``account_id`` (empty unless a validated source names one) and the sorted
+        tool NAMES it serves are set.
+
+        ``not_found`` for a login id that is unknown, expired, or was begun by
+        another user: one identical answer for all three, so no caller can probe
+        which logins exist. A refused consent round, a replayed callback and a
+        callback that does not match the login's state/issuer are all
+        ``invalid_argument``: the login is over and must be started again."""
+        req = _gen.control_pb.CompleteMcpLoginRequest(login_id=login_id, callback_query=callback_query)
+        return self._call("CompleteMcpLogin", req, _gen.control_pb.CompleteMcpLoginResponse)
+
+    def delete_mcp_credential(
+        self, config_path: str = "", server: str = "", resource: str = ""
+    ) -> None:
+        """Delete one of the calling user's stored MCP grants. Two exclusive
+        forms: ``config_path`` + ``server`` resolves the configured direct-url
+        entry and invalidates its endpoint (which also fences a first login
+        still in flight), or ``resource`` names the canonical resource URL
+        directly and touches no config at all — that is how a grant is removed
+        once its project file is gone. Passing both, or neither, is
+        ``invalid_argument``.
+
+        A grant the caller does not have is ``not_found``. The local
+        invalidation is what logout means: an upstream revocation that fails
+        does not restore the grant, and the next authenticated MCP request from
+        the user's children fails with the re-login hint."""
+        req = _gen.control_pb.DeleteMcpCredentialRequest(
+            config_path=config_path, server=server, resource=resource
+        )
+        self._call("DeleteMcpCredential", req, _gen.control_pb.DeleteMcpCredentialResponse)
+
     # ── script-child verbs (Report / Receive / SetResult) ────────────────────
 
     def report(self, kind: str, data) -> None:

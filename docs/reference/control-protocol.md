@@ -2503,6 +2503,108 @@ retrying save and a concurrent refresh are separate transactions that would
 otherwise read that tombstone as one predating them; the owner is then asked to
 log in again instead of every later turn failing on a dead token.
 
+### MCP OAuth login (`BeginMcpLogin`, `CompleteMcpLogin`, `DeleteMcpCredential`)
+
+These three verbs are the explicit, interactive half of OAuth for remote MCP
+servers. A direct-`url` entry of an `.mcp.json` can authenticate with OAuth;
+the login is started HERE and nowhere else — never during a spawn, never from a
+project file, and never automatically. All three are `userOnly` at the policy
+gate and owner-exempt below it, because the grant is bound to the CALLER's own
+user id and the handler enforces that itself
+(`pkg/connectapi/mcp_login.go`, behind `Server.SetMcpLoginBackend`).
+
+The addition is backward-compatible: no existing message or field changed, so
+the protocol epoch is unchanged.
+
+**Messages** (field numbers are part of the contract):
+
+| message | fields |
+|---|---|
+| `BeginMcpLoginRequest` | `config_path = 1`, `server = 2`, `repeated scopes = 3` |
+| `BeginMcpLoginResponse` | `login_id = 1`, `authorize_url = 2`, `redirect_port = 3`, `callback_path = 4`, `repeated redirect_hosts = 5` |
+| `CompleteMcpLoginRequest` | `login_id = 1`, `callback_query = 2` |
+| `CompleteMcpLoginResponse` | `server = 1`, `resource = 2`, `account_id = 3`, `repeated tools = 4`, `BeginMcpLoginResponse continuation = 5` |
+| `DeleteMcpCredentialRequest` | `config_path = 1`, `server = 2`, `resource = 3` |
+| `DeleteMcpCredentialResponse` | (empty) |
+
+`scopes` empty means "what discovery would request": the challenged scopes,
+else the resource's advertised ones. `tools` are NAMES, sorted — never
+descriptions, never a response body. `account_id` is empty unless a validated
+source names one; nothing decodes an unverified token to invent one.
+
+**`config_path` is an absolute path ON THE DAEMON HOST.** The daemon reads that
+exact file and that exact `mcpServers` entry; a relative path is refused
+(`CodeInvalidArgument`) because the daemon's working directory is not the
+caller's. A client on another machine cannot upload its project config through
+this RPC — that file must already exist where the daemon runs. The CLI resolves
+the path (`--mcp-config` > `./.mcp.json` > `$RAFIKI_MCP_CONFIG` >
+`<config-dir>/mcp.json`) and neither reads nor stats it, so a path that only
+exists on the daemon host works.
+
+**Exactly one outcome per `CompleteMcpLogin`.** When `continuation` is set the
+login is NOT finished: nothing is stored, the same `login_id` carries on, and
+the continuation is another `BeginMcpLoginResponse`-shaped descriptor (a
+step-up scope challenge, or an issuer that redirected to another authorization
+server). The handler clears every final field in that case, so a half-finished
+round cannot be read as a success. A continuation-free answer carries `server`,
+`resource` and the verified tool names, and only then does a grant exist. A
+callback is single use: replaying one is refused.
+
+**Entry shapes refused before any network work** (`mcpServerEndpoint`,
+`cmd/rafikid/mcp_oauth.go`), all `CodeInvalidArgument`: a server the file does
+not declare; a stdio entry (`command`); a `via_executor` entry (its transport
+and credentials live on the executor machine); an entry with no `url`; and an
+entry carrying an explicit `Authorization` header under ANY capitalization,
+including an empty value — that header disables stored OAuth, so a login would
+store a grant nothing ever spends, and the refusal names the header and says to
+remove it. Unrelated headers coexist with OAuth and are not a reason to refuse.
+No configured header value is ever read out, logged, or handed to discovery,
+registration or token requests: the engine is given an endpoint and scopes only.
+A URL's presence in the file also says nothing about reachability — the
+operator's `[mcp_oauth]` policy decides, and it is checked by the engine.
+
+**Errors:**
+
+| condition | code |
+|---|---|
+| no identity, or an identity with no user id (unix socket local trust) | `CodeFailedPrecondition` |
+| a non-user credential (per-child secret, per-boot+session, `{notify}` token) | `CodePermissionDenied` |
+| unknown, expired or FOREIGN-owner `login_id` | `CodeNotFound` — one identical answer for all three |
+| malformed request, bad selector, unreadable path, unsupported entry shape | `CodeInvalidArgument` |
+| a rejected consent round: `access_denied`, a bad `state`/`iss`, a replayed callback, an oversized callback | `CodeInvalidArgument`, always with "start again" — the login is over and the SDK must not mint a second consent URL for the rejected input |
+| too many pending logins for the owner | `CodeResourceExhausted` (retryable) |
+| the login was superseded by a logout or a newer login | `CodeFailedPrecondition` |
+| the store is unavailable, or the daemon is shutting down | `CodeUnavailable` |
+| absent grant on `DeleteMcpCredential` | `CodeNotFound` |
+| any error the daemon did not author | `CodeInternal`, text redacted (`internal error`) |
+
+**`DeleteMcpCredential` selectors** are exclusive, and the handler refuses both
+or neither with `CodeInvalidArgument`:
+
+- `config_path` + `server` resolves the same direct-`url` endpoint a login
+  would and invalidates that ENDPOINT — which advances its fence, so a first
+  login still in flight cannot complete afterwards. It needs no stored grant.
+- `resource` names the canonical resource and touches NO config: that is how a
+  grant is removed after its project file is gone.
+
+Logout removes every endpoint binding to the deleted grant, keeps a
+generation-tombstone so a late completion or an older pending login cannot
+recreate it, and never resurrects anything by a client retry. Upstream
+revocation is best effort: the local invalidation is what logout means.
+
+**Callback code secrecy.** `callback_query` is an INPUT only. It is never
+returned, never logged, and never quoted in an error — the daemon's refusals
+name the condition ("a bad code, state or issuer"), not the value. No response
+on this plane carries an access token, a refresh token, a client secret or a
+code, and the CLI prints none of them either.
+
+**Related surfaces**. No anonymous login and no token RPC exist for MCP
+credentials: a grant is created only by an authenticated user's interactive
+flow and is spent only by that user's children (see `docs/guide/agents.md`).
+Rafiki's own MCP agent-control surface (`2.4`) is NOT an OAuth protected
+resource: it never serves `/.well-known/oauth-protected-resource` and never
+answers with a `WWW-Authenticate` challenge naming one.
+
 ### The Login service (`rafiki.v1.Login`: `BeginLogin`, `CompleteLogin`)
 
 A separate Connect service on the same proto file, served OUTSIDE

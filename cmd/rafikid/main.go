@@ -540,16 +540,49 @@ func runDaemon(opts runDaemonOpts) error {
 	// store is not constructed at all (providercredsdb.New panics on a nil box,
 	// deliberately, because a plaintext fallback must be impossible), the
 	// capability is unavailable with the reason, and every ChatGPT-kind
-	// provider refuses with it. newCredentialStore also strips the key from the
+	// provider refuses with it. newCredentialBox also strips the key from the
 	// environment once it is in memory, so nothing this daemon execs can read
 	// it.
-	credStore, credsWhy := newCredentialStore(pool)
+	//
+	// ONE box, TWO sealed stores (provider credentials and MCP OAuth). They are
+	// built from the same box because the key is read once and then unset: a
+	// second secretbox.FromEnv after this point would find nothing, and a
+	// second read of the environment would be a second chance to leak it.
+	credBox, credsWhy := newCredentialBox(pool)
+	var credStore providercreds.Store
+	if credBox != nil {
+		credStore = providercredsdb.New(pool, credBox)
+	}
 	creds := newProviderCreds(baseCtx, credStore, chatgptauth.New(http.DefaultClient), credsWhy,
 		func() *providers.Set { return prov })
 	if credsWhy != "" && usesProviderLogins(prov) {
 		// Only warn when a configured provider actually needs this: a daemon
 		// with no ChatGPT-kind provider has nothing to be unavailable about.
 		slog.Warn("ChatGPT logins are unavailable", "reason", credsWhy)
+	}
+
+	// MCP OAuth: the interactive login engine for remote MCP servers plus the
+	// owner-bound passive factory fundi children dial direct-URL entries with.
+	// Same degradation as the provider store — no pool or no key means the
+	// capability answers Unavailable with its reason, and static or
+	// unauthenticated MCP servers keep working.
+	//
+	// The policy compiled here is the operator's [mcp_oauth] section, and
+	// rafikidconfig.Load already refused an invalid one above whether or not
+	// this daemon has credentials: a bad destination policy is a startup error,
+	// never a permission that silently matches nothing. The policy is passed as
+	// the COMPILED section (zero value = public HTTPS only), never nil, so a
+	// later caller cannot widen it by omission.
+	mcpPolicy, policyErr := rcfg.MCPOAuth.Policy()
+	if policyErr != nil {
+		// Unreachable through Load, which validates the same section; kept so a
+		// future load path cannot skip the check silently.
+		slog.Error("invalid [mcp_oauth] configuration", "error", policyErr)
+		os.Exit(1)
+	}
+	mcpAuth := newMCPOAuth(baseCtx, pool, credBox, mcpPolicy, credsWhy, slog.Default())
+	if ok, why := mcpAuth.available(); !ok {
+		slog.Info("MCP OAuth is unavailable", "reason", why)
 	}
 
 	// Validate [telemetry] once providers.toml's names are known: a rule
@@ -690,6 +723,12 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.sandboxBootTime = time.Now()
 	ctrl.streamRevoke = streamRevoke
 	ctrl.providerCreds = creds
+	// The MCP OAuth broker: the login engine the Connect verbs reach (wired
+	// onto the face below) and the passive factory every fundi child binds its
+	// direct-URL MCP servers through. One broker per daemon, shared by both
+	// Connect mounts and every child, like the provider credential machinery
+	// beside it.
+	ctrl.mcpOAuth = mcpAuth
 	// The daemon's one conversation store: this Controller's capture store and
 	// every fundi child's llm.Client go through the same cache the proxy face
 	// captures into.
@@ -967,6 +1006,13 @@ func runDaemon(opts runDaemonOpts) error {
 			// reason rather than "not yet wired" when the key or the database is
 			// missing.
 			face.Control.SetProviderLoginBackend(creds)
+			// The MCP OAuth verbs: the same broker the fundi runtime dials
+			// through, so an interactive login and a child's passive dial can
+			// never disagree about what is stored. An unavailable broker answers
+			// its own reason (no key, no database) rather than "not yet wired".
+			// One Server instance serves both Control mounts, so this one wire
+			// covers the proxy face and the local socket.
+			face.Control.SetMcpLoginBackend(mcpAuth)
 			face.Control.SetConversationInsights(connectConversations{c: ctrl})
 			face.Control.SetConversationReviewer(connectReview{c: ctrl})
 			face.Control.SetConversationFindingsReader(connectFindingsReader{c: ctrl})
@@ -1308,6 +1354,11 @@ func runDaemon(opts runDaemonOpts) error {
 	// the database has stopped answering; then it logs the rotations it could
 	// not save and shutdown continues.
 	creds.Wait()
+	// Same rule for MCP logins: closing the engine terminates every pending flow
+	// and waits for its task, so no flow is mid-exchange when the pool goes. A
+	// flow that outlived it would write through a closed database and lose a
+	// rotation the authorization server has already issued.
+	mcpAuth.close()
 	if pool != nil {
 		closePoolBounded(pool, poolCloseTimeout)
 	}
@@ -1316,19 +1367,23 @@ func runDaemon(opts runDaemonOpts) error {
 	return nil
 }
 
-// newCredentialStore builds the sealed provider-credential store, or explains
-// why the capability is unavailable (the store is then nil, and every
-// ChatGPT-kind provider reports that reason instead of failing startup).
+// newCredentialBox resolves RAFIKI_SECRETS_KEY once and returns the sealed box
+// both credential stores are built from, or explains why the capability is
+// unavailable (the box is then nil, and every capability that needs one reports
+// that reason instead of failing startup).
 //
 // The key is REMOVED from the process environment as soon as the box exists.
 // Nothing after this point reads RAFIKI_SECRETS_KEY: the box holds it in
 // memory, and the environment is inherited by every process this daemon starts
 // (a stdio MCP server, a child's shell, an executor enrolled from the same
 // shell), so an exported key beside a DSN would open every user's ChatGPT grant
-// to agent-run code. On the failure paths the variable is left exactly as it
-// was: there is no box, and the variable is what the operator's service file
-// sets for the next start.
-func newCredentialStore(pool *pgxpool.Pool) (providercreds.Store, string) {
+// and every MCP grant to agent-run code. On the failure paths the variable is
+// left exactly as it was: there is no box, and the variable is what the
+// operator's service file sets for the next start.
+//
+// ONE call per process. The provider store and the MCP store share this box
+// (main.go), because a second secretbox.FromEnv after the unset finds nothing.
+func newCredentialBox(pool *pgxpool.Pool) (*secretbox.Box, string) {
 	if pool == nil {
 		return nil, "provider credentials need a database; no agent database is configured"
 	}
@@ -1340,6 +1395,19 @@ func newCredentialStore(pool *pgxpool.Pool) (providercreds.Store, string) {
 		return nil, err.Error()
 	}
 	os.Unsetenv(secretbox.EnvKey)
+	return box, ""
+}
+
+// newCredentialStore is the provider-only entry point: newCredentialBox plus
+// the provider store built over it. The daemon itself builds BOTH sealed stores
+// from one newCredentialBox call (a second resolution would find the key
+// already unset); this wrapper is what a caller that needs only the provider
+// store — and the test that pins the environment rule — uses.
+func newCredentialStore(pool *pgxpool.Pool) (providercreds.Store, string) {
+	box, why := newCredentialBox(pool)
+	if box == nil {
+		return nil, why
+	}
 	return providercredsdb.New(pool, box), ""
 }
 

@@ -248,3 +248,75 @@ narrow `tools`/`skills`/`mcp_servers`/`context_files` — a preset's allowlist
 never widens, and its system prompt is never replaced. A claude-kind preset
 accepts only `model`, `provider`, `append_system_prompt`, `executor`,
 `labels` and budgets.
+
+## MCP servers and OAuth
+
+A child's MCP servers come from an `.mcp.json` file (`--mcp-config`, else
+`./.mcp.json`, else `$RAFIKI_MCP_CONFIG`, else the config directory's
+`mcp.json`), and an entry is either a local process (`command`) or a direct
+`url`. A direct-URL server that requires OAuth is logged in **explicitly**, by
+the user, with `rafiki mcp login`:
+
+```
+rafiki mcp login linear
+rafiki mcp login linear --scope tools:read --scope tools:write
+rafiki mcp login linear --no-browser          # browser on another machine
+rafiki mcp logout linear
+rafiki mcp logout --resource https://mcp.example.net/mcp
+```
+
+The daemon runs the whole flow — SDK discovery, dynamic client registration,
+the code exchange, and an authenticated `initialize` + tool listing to prove
+the grant works — and stores the result encrypted against **your** user id. The
+CLI only ferries the consent URL to a browser and the redirect query back, so
+the access token, the refresh token and the client secret never leave the
+daemon and never enter a child process.
+
+What a login is **not**:
+
+- **Not interactive during a spawn.** Nothing prompts while a child starts.
+  A child whose server answers 401 gets a skipped server with the hint
+  ``server X needs a login: run `rafiki mcp login X` `` — that child keeps its
+  other tools, and the fix is a login you run.
+- **Not automatic from a project file.** An entry has no `oauth: true` switch,
+  and `MCPServerConfig` gained no field: the credential is out of band.
+- **Not available for a stdio server** (a local process needs no OAuth) or for
+  a `via_executor` server (its argv, environment and credentials live on the
+  executor machine; the daemon cannot log in on its behalf). Not for an entry
+  that sets its own `Authorization` header either — that header deliberately
+  disables stored OAuth, and the login is refused with a message telling you to
+  remove it. Unrelated headers coexist with a stored grant.
+- **Not usable across users.** A grant belongs to the user who made it. An
+  admin gets only their own grants, and a child credential cannot start,
+  finish or delete one.
+
+The config path is the **daemon's**: the daemon reads the absolute path the CLI
+resolves, so with a remote profile that file must exist on the daemon host.
+Nothing uploads a project file, and the CLI never reads one.
+
+A login may take more than one consent round (a server can ask for a wider
+scope once it has seen your tool list). Each round opens a new URL on the same
+login, and the grant is stored only when the last round succeeds — a
+continuation is never reported as a successful login. The callback is served on
+port 1456 at `/mcp/oauth/callback` on 127.0.0.1, the redirect URI rafiki
+registers: a busy port is an error naming the port (free it and retry, or use
+`--no-browser` and paste the redirect URL), never a silent substitution.
+
+Once a grant exists, the child spends it **passively**: the daemon resolves the
+exact configured endpoint's binding (no rediscovery, no guessing a resource from
+the URL's origin), asks the database for the credential on every request, and
+refreshes under a row lock. A logout invalidates locally first, so a revocation
+that fails upstream does not bring the grant back; a running child then fails
+its next authenticated MCP request with the re-login hint.
+
+OAuth's reach is bounded by the daemon operator's `[mcp_oauth]` section in
+`rafikid.toml` (`allow_hosts`, `allow_cidrs`, `allow_http_hosts`): public HTTPS
+only unless the operator says otherwise. A project entry, a login flag or a
+discovery response cannot widen it.
+
+Two boundaries worth stating plainly: **Claude children do not get stored MCP
+OAuth credentials** — nothing is injected into a claude child's argv,
+environment or staged MCP config, so a claude child's direct-URL servers behave
+exactly as they did before (its own MCP client does whatever the entry says) —
+and **an executor never performs an OAuth login**, so a `via_executor` server
+gets its credentials from the executor's operator, not from rafiki.

@@ -288,8 +288,17 @@ var controlPolicyTable = map[string]controlPolicy{
 	"BeginProviderLogin":       policyUserOnly,
 	"CompleteProviderLogin":    policyUserOnly,
 	"DeleteProviderCredential": policyUserOnly,
-	"GetStreams":               policyUserOnly,
-	"SendFrame":                policyUserOnly,
+	// The MCP OAuth verbs are userOnly for the same reason, and the grant they
+	// manage is spendable by that user's CHILDREN — which is precisely why a
+	// child credential must never reach them: an interactive login bound to the
+	// child's owner would let a child plant a credential its siblings then use.
+	// The handler additionally refuses an identity with no user id (a
+	// unix-socket caller has no owner to store a grant for).
+	"BeginMcpLogin":       policyUserOnly,
+	"CompleteMcpLogin":    policyUserOnly,
+	"DeleteMcpCredential": policyUserOnly,
+	"GetStreams":          policyUserOnly,
+	"SendFrame":           policyUserOnly,
 }
 
 // policyFor resolves a Connect procedure path to its policy. A path that is

@@ -237,6 +237,14 @@ const (
 	// ControlDeleteProviderCredentialProcedure is the fully-qualified name of the Control's
 	// DeleteProviderCredential RPC.
 	ControlDeleteProviderCredentialProcedure = "/rafiki.v1.Control/DeleteProviderCredential"
+	// ControlBeginMcpLoginProcedure is the fully-qualified name of the Control's BeginMcpLogin RPC.
+	ControlBeginMcpLoginProcedure = "/rafiki.v1.Control/BeginMcpLogin"
+	// ControlCompleteMcpLoginProcedure is the fully-qualified name of the Control's CompleteMcpLogin
+	// RPC.
+	ControlCompleteMcpLoginProcedure = "/rafiki.v1.Control/CompleteMcpLogin"
+	// ControlDeleteMcpCredentialProcedure is the fully-qualified name of the Control's
+	// DeleteMcpCredential RPC.
+	ControlDeleteMcpCredentialProcedure = "/rafiki.v1.Control/DeleteMcpCredential"
 	// ControlGetStreamsProcedure is the fully-qualified name of the Control's GetStreams RPC.
 	ControlGetStreamsProcedure = "/rafiki.v1.Control/GetStreams"
 	// ControlSendFrameProcedure is the fully-qualified name of the Control's SendFrame RPC.
@@ -372,6 +380,13 @@ type ControlClient interface {
 	BeginProviderLogin(context.Context, *connect.Request[v1.BeginProviderLoginRequest]) (*connect.Response[v1.BeginProviderLoginResponse], error)
 	CompleteProviderLogin(context.Context, *connect.Request[v1.CompleteProviderLoginRequest]) (*connect.Response[v1.CompleteProviderLoginResponse], error)
 	DeleteProviderCredential(context.Context, *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error)
+	// MCP OAuth: an explicit, interactive login for a remote MCP server, stored
+	// against the CALLER's own user id. Additive and userOnly; the handlers
+	// derive the owner from the connection and refuse a caller with no user
+	// identity, so an admin can never name another user's grant.
+	BeginMcpLogin(context.Context, *connect.Request[v1.BeginMcpLoginRequest]) (*connect.Response[v1.BeginMcpLoginResponse], error)
+	CompleteMcpLogin(context.Context, *connect.Request[v1.CompleteMcpLoginRequest]) (*connect.Response[v1.CompleteMcpLoginResponse], error)
+	DeleteMcpCredential(context.Context, *connect.Request[v1.DeleteMcpCredentialRequest]) (*connect.Response[v1.DeleteMcpCredentialResponse], error)
 	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
@@ -949,6 +964,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("DeleteProviderCredential")),
 			connect.WithClientOptions(opts...),
 		),
+		beginMcpLogin: connect.NewClient[v1.BeginMcpLoginRequest, v1.BeginMcpLoginResponse](
+			httpClient,
+			baseURL+ControlBeginMcpLoginProcedure,
+			connect.WithSchema(controlMethods.ByName("BeginMcpLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		completeMcpLogin: connect.NewClient[v1.CompleteMcpLoginRequest, v1.CompleteMcpLoginResponse](
+			httpClient,
+			baseURL+ControlCompleteMcpLoginProcedure,
+			connect.WithSchema(controlMethods.ByName("CompleteMcpLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteMcpCredential: connect.NewClient[v1.DeleteMcpCredentialRequest, v1.DeleteMcpCredentialResponse](
+			httpClient,
+			baseURL+ControlDeleteMcpCredentialProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteMcpCredential")),
+			connect.WithClientOptions(opts...),
+		),
 		getStreams: connect.NewClient[v1.GetStreamsRequest, v1.GetStreamsResponse](
 			httpClient,
 			baseURL+ControlGetStreamsProcedure,
@@ -1076,6 +1109,9 @@ type controlClient struct {
 	beginProviderLogin       *connect.Client[v1.BeginProviderLoginRequest, v1.BeginProviderLoginResponse]
 	completeProviderLogin    *connect.Client[v1.CompleteProviderLoginRequest, v1.CompleteProviderLoginResponse]
 	deleteProviderCredential *connect.Client[v1.DeleteProviderCredentialRequest, v1.DeleteProviderCredentialResponse]
+	beginMcpLogin            *connect.Client[v1.BeginMcpLoginRequest, v1.BeginMcpLoginResponse]
+	completeMcpLogin         *connect.Client[v1.CompleteMcpLoginRequest, v1.CompleteMcpLoginResponse]
+	deleteMcpCredential      *connect.Client[v1.DeleteMcpCredentialRequest, v1.DeleteMcpCredentialResponse]
 	getStreams               *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
 	sendFrame                *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
 	tag                      *connect.Client[v1.TagRequest, v1.TagResponse]
@@ -1543,6 +1579,21 @@ func (c *controlClient) DeleteProviderCredential(ctx context.Context, req *conne
 	return c.deleteProviderCredential.CallUnary(ctx, req)
 }
 
+// BeginMcpLogin calls rafiki.v1.Control.BeginMcpLogin.
+func (c *controlClient) BeginMcpLogin(ctx context.Context, req *connect.Request[v1.BeginMcpLoginRequest]) (*connect.Response[v1.BeginMcpLoginResponse], error) {
+	return c.beginMcpLogin.CallUnary(ctx, req)
+}
+
+// CompleteMcpLogin calls rafiki.v1.Control.CompleteMcpLogin.
+func (c *controlClient) CompleteMcpLogin(ctx context.Context, req *connect.Request[v1.CompleteMcpLoginRequest]) (*connect.Response[v1.CompleteMcpLoginResponse], error) {
+	return c.completeMcpLogin.CallUnary(ctx, req)
+}
+
+// DeleteMcpCredential calls rafiki.v1.Control.DeleteMcpCredential.
+func (c *controlClient) DeleteMcpCredential(ctx context.Context, req *connect.Request[v1.DeleteMcpCredentialRequest]) (*connect.Response[v1.DeleteMcpCredentialResponse], error) {
+	return c.deleteMcpCredential.CallUnary(ctx, req)
+}
+
 // GetStreams calls rafiki.v1.Control.GetStreams.
 func (c *controlClient) GetStreams(ctx context.Context, req *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {
 	return c.getStreams.CallUnary(ctx, req)
@@ -1687,6 +1738,13 @@ type ControlHandler interface {
 	BeginProviderLogin(context.Context, *connect.Request[v1.BeginProviderLoginRequest]) (*connect.Response[v1.BeginProviderLoginResponse], error)
 	CompleteProviderLogin(context.Context, *connect.Request[v1.CompleteProviderLoginRequest]) (*connect.Response[v1.CompleteProviderLoginResponse], error)
 	DeleteProviderCredential(context.Context, *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error)
+	// MCP OAuth: an explicit, interactive login for a remote MCP server, stored
+	// against the CALLER's own user id. Additive and userOnly; the handlers
+	// derive the owner from the connection and refuse a caller with no user
+	// identity, so an admin can never name another user's grant.
+	BeginMcpLogin(context.Context, *connect.Request[v1.BeginMcpLoginRequest]) (*connect.Response[v1.BeginMcpLoginResponse], error)
+	CompleteMcpLogin(context.Context, *connect.Request[v1.CompleteMcpLoginRequest]) (*connect.Response[v1.CompleteMcpLoginResponse], error)
+	DeleteMcpCredential(context.Context, *connect.Request[v1.DeleteMcpCredentialRequest]) (*connect.Response[v1.DeleteMcpCredentialResponse], error)
 	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
@@ -2260,6 +2318,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("DeleteProviderCredential")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlBeginMcpLoginHandler := connect.NewUnaryHandler(
+		ControlBeginMcpLoginProcedure,
+		svc.BeginMcpLogin,
+		connect.WithSchema(controlMethods.ByName("BeginMcpLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlCompleteMcpLoginHandler := connect.NewUnaryHandler(
+		ControlCompleteMcpLoginProcedure,
+		svc.CompleteMcpLogin,
+		connect.WithSchema(controlMethods.ByName("CompleteMcpLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteMcpCredentialHandler := connect.NewUnaryHandler(
+		ControlDeleteMcpCredentialProcedure,
+		svc.DeleteMcpCredential,
+		connect.WithSchema(controlMethods.ByName("DeleteMcpCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlGetStreamsHandler := connect.NewUnaryHandler(
 		ControlGetStreamsProcedure,
 		svc.GetStreams,
@@ -2476,6 +2552,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlCompleteProviderLoginHandler.ServeHTTP(w, r)
 		case ControlDeleteProviderCredentialProcedure:
 			controlDeleteProviderCredentialHandler.ServeHTTP(w, r)
+		case ControlBeginMcpLoginProcedure:
+			controlBeginMcpLoginHandler.ServeHTTP(w, r)
+		case ControlCompleteMcpLoginProcedure:
+			controlCompleteMcpLoginHandler.ServeHTTP(w, r)
+		case ControlDeleteMcpCredentialProcedure:
+			controlDeleteMcpCredentialHandler.ServeHTTP(w, r)
 		case ControlGetStreamsProcedure:
 			controlGetStreamsHandler.ServeHTTP(w, r)
 		case ControlSendFrameProcedure:
@@ -2861,6 +2943,18 @@ func (UnimplementedControlHandler) CompleteProviderLogin(context.Context, *conne
 
 func (UnimplementedControlHandler) DeleteProviderCredential(context.Context, *connect.Request[v1.DeleteProviderCredentialRequest]) (*connect.Response[v1.DeleteProviderCredentialResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteProviderCredential is not implemented"))
+}
+
+func (UnimplementedControlHandler) BeginMcpLogin(context.Context, *connect.Request[v1.BeginMcpLoginRequest]) (*connect.Response[v1.BeginMcpLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.BeginMcpLogin is not implemented"))
+}
+
+func (UnimplementedControlHandler) CompleteMcpLogin(context.Context, *connect.Request[v1.CompleteMcpLoginRequest]) (*connect.Response[v1.CompleteMcpLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.CompleteMcpLogin is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteMcpCredential(context.Context, *connect.Request[v1.DeleteMcpCredentialRequest]) (*connect.Response[v1.DeleteMcpCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteMcpCredential is not implemented"))
 }
 
 func (UnimplementedControlHandler) GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {

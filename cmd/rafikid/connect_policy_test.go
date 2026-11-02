@@ -550,6 +550,54 @@ func TestProviderLoginRPCsAreUserOnly(t *testing.T) {
 	}
 }
 
+// TestMcpLoginRPCsRefuseEveryChildCredential is the same gate-level assertion
+// for the three MCP OAuth verbs, and it matters for a sharper reason: an MCP
+// grant is spendable by the owner's CHILDREN, so a child that got past this gate
+// would be planting a credential its own siblings then dial with. A {notify}
+// token is refused by the branch ahead of the table, and both admitted shapes
+// (a real user credential, and the unix socket's nil identity — which the
+// handler then refuses with FailedPrecondition, because there is no user to bind
+// a grant to) still pass, so the row is userOnly rather than accidentally
+// stricter.
+func TestMcpLoginRPCsRefuseEveryChildCredential(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"BeginMcpLogin", "CompleteMcpLogin", "DeleteMcpCredential"} {
+		procedure := controlProcedurePrefix + name
+		for _, id := range []*server.Identity{
+			{UserID: "u1", ChildID: "c_child", Via: server.ProvenanceChildToken},
+			{UserID: "u1", Via: server.ProvenanceChildAttributed},
+			{},
+		} {
+			ctx := server.WithIdentity(context.Background(), id)
+			err := authorizeControlProcedure(ctx, procedure)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a %s credential: %v, want", procedure, childCredentialKind(id), err)
+		}
+
+		notifyCtx := server.WithIdentity(context.Background(),
+			&server.Identity{UserID: "u1", TokenID: "tok-1", Via: server.ProvenanceNotify})
+		err := authorizeControlProcedure(notifyCtx, procedure)
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a notify-scoped token: %v, want", procedure, err)
+
+		c.NoError(authorizeControlProcedure(server.WithIdentity(context.Background(),
+			&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser}), procedure),
+			"%s must admit a real user credential", procedure)
+		c.NoError(authorizeControlProcedure(context.Background(), procedure),
+			"%s must admit the unix socket's nil identity", procedure)
+	}
+}
+
+// TestMcpLoginRPCsAreUserOnly pins the VALUE: the completeness walk accepts any
+// in-range policy, so a flip of one of these three to childScoped would leave it
+// green while handing a child credential the ability to bind its owner's MCP
+// grants.
+func TestMcpLoginRPCsAreUserOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"BeginMcpLogin", "CompleteMcpLogin", "DeleteMcpCredential"} {
+		got := policyFor(controlProcedurePrefix + name)
+		c.Eq(policyUserOnly, got, "policyFor(Control.%s) = %v, want policyUserOnly", name, got)
+	}
+}
+
 // TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs pins the OTHER
 // mount of the Control service: the local socket composes the same policy
 // gate behind its optional identity interceptor, and the same child-subtree

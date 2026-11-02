@@ -86,6 +86,7 @@ type Server struct {
 	userAdmin      atomic.Pointer[UserAdmin]
 	login          atomic.Pointer[LoginBackend]
 	providerLogin  atomic.Pointer[ProviderLoginBackend]
+	mcpLogin       atomic.Pointer[McpLoginBackend]
 	rawIO          atomic.Pointer[RawChildIO]
 	execSessions   atomic.Pointer[ExecutorSessions]
 	sandboxes      atomic.Pointer[SandboxManager]
