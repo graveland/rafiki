@@ -340,9 +340,11 @@ func TestContextWindowOverrideReachesEngine(t *testing.T) {
 // from the concrete models, so "the concrete model answered" and "the alias
 // row answered" are not the same observation.
 //
-// Deleting the ResolveProviderLatest block in BuildEngine fails both assertions
-// in both subtests: ModelID reverts to the requested "<name>-latest", and the
-// window comes back as the alias row's (or 0).
+// Deleting the ResolveProviderLatest block in BuildEngine fails the ModelID
+// assertion in every subtest (and the Responses window assertion); deleting only
+// its routing.ResolveModel step fails the NATIVE subtest, because
+// ResolveProviderLatest leaves "anthropic/opus-latest" alone by design and a
+// half-pin therefore hands "opus-latest" to the catalog.
 func TestBuildEnginePinsALatestModelForCatalogLookups(t *testing.T) {
 	silenceSlog(t)
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
@@ -375,14 +377,26 @@ func TestBuildEnginePinsALatestModelForCatalogLookups(t *testing.T) {
 			wantLocal:  "claude-opus-4-8",
 			wantWindow: 200_000,
 		},
+		{
+			// The native spelling: ResolveProviderLatest returns this unchanged
+			// (the "anthropic/" arm is routing.ResolveModel's), so only the
+			// second step — which Conversation() also runs — turns it into the
+			// concrete native id.
+			name:       "the native anthropic/ spelling pins through ResolveModel",
+			kind:       providers.KindAnthropic,
+			model:      "anthropic/opus-latest",
+			wantLocal:  "claude-opus-4-8",
+			wantWindow: 200_000,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ck := assert.NewAborting(t)
 			set := &providers.Set{
 				DefaultProvider: "work",
 				Providers: map[string]providers.Provider{
-					"gpt":  {Name: "gpt", Kind: providers.KindOpenAIResponses},
-					"work": {Name: "work", Kind: providers.KindAnthropic},
+					"gpt":       {Name: "gpt", Kind: providers.KindOpenAIResponses},
+					"work":      {Name: "work", Kind: providers.KindAnthropic},
+					"anthropic": {Name: "anthropic", Kind: providers.KindAnthropic},
 				},
 			}
 			eng := buildEngineForModel(t, cat, set, tc.model)

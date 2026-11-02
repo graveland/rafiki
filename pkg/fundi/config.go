@@ -331,9 +331,20 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	// pin here so the compaction and pre-fill window lookups below ask the
 	// catalog about the model the child actually runs, not about a name no
 	// entry carries.
+	//
+	// The two steps below are EXACTLY Conversation()'s, in its order: the
+	// provider pin, then routing.ResolveModel. A half-pin is how the native
+	// spelling got missed — ResolveProviderLatest returns "anthropic/<tier>-latest"
+	// unchanged on purpose (that arm is ResolveModel's), so stopping after the
+	// first step leaves "opus-latest" as the id every catalog lookup sees.
 	if pinned, perr := llm.ResolveProviderLatest(c.Providers, client.Catalog(), c.Model); perr == nil {
+		if resolved, rerr := routing.ResolveModel(client.Catalog(), "", pinned); rerr == nil && resolved != "" {
+			pinned = resolved
+		}
 		// Set.Split reports (provider, provider-local id, error); the pinned id
-		// came from this same registry, so the error arm is a guard, not a path.
+		// came from this same registry (or a slash-free native id, which Split
+		// resolves against DefaultProvider), so the error arm is a guard, not a
+		// path.
 		if _, local, serr := c.Providers.Split(pinned); serr == nil && local != "" {
 			modelID = local
 		}
