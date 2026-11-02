@@ -1418,9 +1418,19 @@ func TestMcpOAuthRefusesDamagedDiscoveryAndRedirects(t *testing.T) {
 			// ever published for it (the fixture serves no /authorize request).
 			name: "authorization endpoint on a refused (non-public) destination",
 			shape: func(f *fakeMCPOAuth) func(*testing.T, *fakeMCPOAuth, string) {
-				f.authorizeURL = "https://localhost:1/authorize"
+				// A live listener behind the refused name here too, so the case
+				// reports a connection count and not only "no consent URL was
+				// served". The daemon never fetches an authorization endpoint
+				// (it is a browser hand-off), so this counter is the evidence
+				// that no code path started to.
+				addr, dials := newCountingDestination(f.t)
+				_, port, err := net.SplitHostPort(addr)
+				assert.NewAborting(f.t).NoError(err, "split %q", addr)
+				f.authorizeURL = "https://localhost:" + port + "/authorize"
 				return func(t *testing.T, f *fakeMCPOAuth, _ string) {
 					t.Helper()
+					assert.NewAborting(t).Eq(int64(0), dials(),
+						"the daemon dialled the authorization destination it refuses")
 					assert.NewAborting(t).Eq(0, len(f.headersOnPath("/authorize")),
 						"the daemon handed a browser a consent URL for a destination it refuses")
 				}
