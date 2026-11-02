@@ -884,22 +884,22 @@ func TestMcpOAuthDiscoveryRedactsEachMessage(t *testing.T) {
 	})
 }
 
-func TestMcpOAuthDiscoveryUsesTheChallengeTheSDKWasHanded(t *testing.T) {
+func TestMcpOAuthDiscoveryUsesTheChallengeThatDroveDiscovery(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "https://mcp.example/mcp"
-	challenge := func(metadata string) scriptedExchange {
+	challenge := func(status int, metadata string) scriptedExchange {
 		return scriptedExchange{
-			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			method: "POST", url: endpoint, status: status,
 			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="` + metadata + `"`}},
 		}
 	}
-	first := "https://mcp.example/.well-known/oauth-protected-resource/mcp"
-	second := "https://mcp.example/.well-known/oauth-protected-resource/other"
+	driving := "https://mcp.example/.well-known/oauth-protected-resource/mcp"
+	decoy := "https://mcp.example/.well-known/oauth-protected-resource/decoy"
 
-	// Two challenges in one window: the round starts at the first, which is the
-	// response the SDK's Authorize was handed. A backward scan would answer for
-	// the retry instead.
-	rec := recordScript(t, ctx, []scriptedExchange{challenge(first), challenge(second)})
+	// A 403 that is not an insufficient_scope challenge makes the SDK answer "retry"
+	// and re-send; the 401 on the retry is the response whose metadata drove
+	// discovery. The decoy must not be used.
+	rec := recordScript(t, ctx, []scriptedExchange{challenge(http.StatusForbidden, decoy), challenge(http.StatusUnauthorized, driving)})
 	entries, err := rec.since(0)
 	if err != nil {
 		t.Fatalf("since: %v", err)
@@ -908,24 +908,62 @@ func TestMcpOAuthDiscoveryUsesTheChallengeTheSDKWasHanded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recordedChallengeMetadataURL: %v", err)
 	}
-	if got != first {
-		t.Fatalf("challenge metadata URL = %q, want the first one %q", got, first)
+	if got != driving {
+		t.Fatalf("challenge metadata URL = %q, want the one that drove discovery %q", got, driving)
+	}
+
+	// The single-challenge case a step-up round has: unchanged.
+	rec = recordScript(t, ctx, []scriptedExchange{challenge(http.StatusForbidden, decoy)})
+	entries, err = rec.since(0)
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
+	if got, err := recordedChallengeMetadataURL(entries, endpoint); err != nil || got != decoy {
+		t.Fatalf("single challenge = %q, %v; want %q", got, err, decoy)
+	}
+}
+
+func TestMcpOAuthDiscoveryRefusesToDeriveFromAnotherDialledSpelling(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "https://mcp.example/mcp"
+	// The candidates come from the canonical endpoint; the SDK's come from
+	// req.URL.String(). A future change that dialled the configured spelling would
+	// otherwise fail every login with "no authentication challenge", which blames the
+	// server for our own mismatch.
+	rec := recordScript(t, ctx, []scriptedExchange{{
+		method: "POST", url: "https://MCP.example:443/mcp", status: http.StatusUnauthorized,
+		header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`}},
+	}})
+	entries, err := rec.since(0)
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
+	_, err = recordedChallengeMetadataURL(entries, endpoint)
+	if err == nil {
+		t.Fatal("a differently spelled dial was accepted silently")
+	}
+	if !strings.Contains(err.Error(), "dialled") {
+		t.Fatalf("error = %v, want the spelling mismatch", err)
+	}
+	if strings.Contains(err.Error(), "no authentication challenge") {
+		t.Fatalf("the mismatch is reported as a missing challenge: %v", err)
 	}
 }
 
 func TestMcpOAuthDiscoveryRefusesAnUnparsableChallenge(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "https://mcp.example/mcp"
-	// The SDK fails Authorize outright on a challenge it cannot parse, so a later
-	// well-formed one must not be used in its place.
+	// The challenge that drove discovery is the last one in the window. If it cannot
+	// be parsed, the SDK's own Authorize fails outright and there is nothing to fall
+	// back to.
 	rec := recordScript(t, ctx, []scriptedExchange{
 		{
 			method: "POST", url: endpoint, status: http.StatusUnauthorized,
-			header: http.Header{"Www-Authenticate": []string{"Bearer scope"}},
+			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`}},
 		},
 		{
 			method: "POST", url: endpoint, status: http.StatusUnauthorized,
-			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`}},
+			header: http.Header{"Www-Authenticate": []string{"Bearer scope"}},
 		},
 	})
 	entries, err := rec.since(0)
@@ -936,6 +974,30 @@ func TestMcpOAuthDiscoveryRefusesAnUnparsableChallenge(t *testing.T) {
 		t.Fatal("an unparsable challenge was skipped instead of failing the round")
 	} else if !strings.Contains(err.Error(), "cannot be parsed") {
 		t.Fatalf("error = %v, want the parse refusal", err)
+	}
+
+	// An earlier unparsable challenge is a different matter: the SDK answered it
+	// with a retry, so the well-formed last one is what drove discovery.
+	rec = recordScript(t, ctx, []scriptedExchange{
+		{
+			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			header: http.Header{"Www-Authenticate": []string{"Bearer scope"}},
+		},
+		{
+			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`}},
+		},
+	})
+	entries, err = rec.since(0)
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
+	got, err := recordedChallengeMetadataURL(entries, endpoint)
+	if err != nil {
+		t.Fatalf("recordedChallengeMetadataURL: %v", err)
+	}
+	if got != "https://mcp.example/.well-known/oauth-protected-resource/mcp" {
+		t.Fatalf("challenge metadata URL = %q", got)
 	}
 }
 

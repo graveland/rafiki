@@ -100,6 +100,14 @@ type recordedResponse struct {
 
 func (r *recordedResponse) key() string { return r.method + " " + r.url }
 
+// markComplete records that this entry's body was read to its end.
+func (r *recordedResponse) markComplete() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bodySeen = true
+	r.bodyOK = !r.overflow
+}
+
 // complete reports whether this entry's body was captured whole.
 func (r *recordedResponse) complete() bool {
 	r.mu.Lock()
@@ -249,29 +257,77 @@ type recordBody struct {
 func (b *recordBody) Read(p []byte) (int, error) {
 	n, err := b.rc.Read(p)
 	if n > 0 {
-		e := b.entry
-		e.mu.Lock()
-		if !e.overflow {
-			if e.body.Len()+n > MaxResponseBytes {
-				e.overflow = true
-				e.body.Reset()
-			} else {
-				e.body.Write(p[:n])
-			}
-		}
-		e.mu.Unlock()
+		b.record(p[:n])
 	}
 	if errors.Is(err, io.EOF) {
-		e := b.entry
-		e.mu.Lock()
-		e.bodySeen = true
-		e.bodyOK = !e.overflow
-		e.mu.Unlock()
+		b.entry.markComplete()
 	}
 	return n, err
 }
 
-func (b *recordBody) Close() error { return b.rc.Close() }
+// record appends bytes the SDK read. Past the cap the entry is marked unusable and
+// the buffer dropped: a truncated body would replay as valid JSON garbage or, worse,
+// as a *different* metadata document.
+func (b *recordBody) record(p []byte) {
+	e := b.entry
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.overflow {
+		return
+	}
+	if e.body.Len()+len(p) > MaxResponseBytes {
+		e.overflow = true
+		e.body.Reset()
+		return
+	}
+	e.body.Write(p)
+}
+
+// Close drains whatever the SDK left unread, then closes.
+//
+// It is not tidiness, it is what makes the recording complete for a whole class of
+// servers. The SDK decodes metadata with json.Decoder.Decode, which stops at the end
+// of the first JSON value: on a CHUNKED response — a handler that flushes, a body
+// built as it is written, most CDN and proxy paths — Decode returns after one value
+// and the body never reaches EOF. Without this drain every such document would be
+// incomplete evidence, every candidate would be unusable, the no-metadata fallback
+// could not be established, and a perfectly good server would be refused at login.
+//
+// The recording then holds a SUPERSET of the bytes the SDK read, which is still
+// exact evidence: json.Decoder.Decode yields the same first value from a longer
+// buffer, so the validator judges precisely the document the SDK judged. Past the
+// cap the entry becomes the explicit too-large case, never a truncation.
+func (b *recordBody) Close() error {
+	if b.drain() {
+		b.entry.markComplete()
+	}
+	return b.rc.Close()
+}
+
+// drain reads the rest of the body into the recording and reports whether it
+// reached EOF. It stops as soon as the entry overflows: the remaining bytes cannot
+// make the evidence usable again, and reading them would only hold the connection.
+func (b *recordBody) drain() bool {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := b.rc.Read(buf)
+		if n > 0 {
+			b.record(buf[:n])
+			b.entry.mu.Lock()
+			overflow := b.entry.overflow
+			b.entry.mu.Unlock()
+			if overflow {
+				return false
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+	}
+}
 
 // replayTransport serves recorded responses back, immutably: one request per
 // recorded response and nothing else. It is what makes "the exact bytes the SDK
@@ -514,39 +570,59 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 // 401/403 it was handed; the recorder saw the same response, so the same
 // parameter is recovered here without asking again.
 func recordedChallengeMetadataURL(entries []*recordedResponse, endpoint string) (string, error) {
-	// Forward, not backward: a consent round starts at the challenge that sent the
-	// SDK into Authorize, so the FIRST 401/403 to the endpoint in the window is the
-	// response the SDK was handed. Scanning backwards would pick a later one — the
-	// retry that a failed Authorize produces — and answer for a response the SDK
-	// never read.
-	for _, e := range entries {
+	// The LAST challenge to the endpoint in the window, scanned backwards.
+	//
+	// Every earlier 401/403 in a round was answered with a retry, not with a consent
+	// round: a 403 whose challenge is not insufficient_scope makes the SDK return
+	// nil and re-send the request, and the retry's 401 is the response whose
+	// metadata actually drove discovery. Taking the first one would build the
+	// candidates from a document the SDK never fetched. A step-up round has exactly
+	// one challenge, so this costs nothing there.
+	var chosen *recordedResponse
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
 		if e.status != http.StatusUnauthorized && e.status != http.StatusForbidden {
 			continue
 		}
-		if canonical, err := Canonicalize(e.url); err != nil || canonical != endpoint {
+		canonical, err := Canonicalize(e.url)
+		if err != nil || canonical != endpoint {
 			continue
 		}
-		challenges, err := oauthex.ParseWWWAuthenticate(e.header.Values("WWW-Authenticate"))
-		if err != nil {
-			// The SDK fails Authorize outright when a challenge does not parse, so
-			// this cannot be a candidate to skip past: the round is already over.
-			return "", fmt.Errorf("mcpoauth: the authentication challenge for %s cannot be parsed", redactRawTarget(endpoint))
+		// The candidate URLs are derived from the CANONICAL endpoint, while the SDK
+		// derives its own from req.URL.String(). They agree because this engine
+		// dials the canonical form; if a future change dials a different spelling,
+		// every login would otherwise fail closed with "no authentication
+		// challenge", blaming the server for our own mismatch. Say what happened.
+		if e.url != endpoint {
+			return "", fmt.Errorf("mcpoauth: the transport dialled %s but this login derives its metadata URLs from %s",
+				redactRawTarget(e.url), redactRawTarget(endpoint))
 		}
-		if len(challenges) == 0 {
-			// No challenge at all (an empty header) is not a parse failure: the SDK
-			// then goes straight to the well-known locations.
-			return "", nil
-		}
-		for _, c := range challenges {
-			if u := c.Params["resource_metadata"]; u != "" {
-				return u, nil
-			}
-		}
-		// A challenge without resource_metadata is legal; the SDK then goes
-		// straight to the well-known locations.
+		chosen = e
+		break
+	}
+	if chosen == nil {
+		return "", fmt.Errorf("mcpoauth: no authentication challenge was recorded for %s in this consent round", redactRawTarget(endpoint))
+	}
+
+	challenges, err := oauthex.ParseWWWAuthenticate(chosen.header.Values("WWW-Authenticate"))
+	if err != nil {
+		// The SDK fails Authorize outright when the challenge it was handed does not
+		// parse, so there is nothing here to skip past: the round would be over.
+		return "", fmt.Errorf("mcpoauth: the authentication challenge for %s cannot be parsed", redactRawTarget(endpoint))
+	}
+	if len(challenges) == 0 {
+		// No challenge at all (an empty header) is not a parse failure: the SDK then
+		// goes straight to the well-known locations.
 		return "", nil
 	}
-	return "", fmt.Errorf("mcpoauth: no authentication challenge was recorded for %s in this consent round", redactRawTarget(endpoint))
+	for _, c := range challenges {
+		if u := c.Params["resource_metadata"]; u != "" {
+			return u, nil
+		}
+	}
+	// A challenge without resource_metadata is legal; the SDK then goes straight to
+	// the well-known locations.
+	return "", nil
 }
 
 // replayProtectedResourceMetadata re-runs the SDK's own PRM search over the

@@ -588,6 +588,18 @@ type fakeOAuthServer struct {
 	// resource from its second hit on, which is how a server "moves" a resource
 	// between two consent rounds.
 	prmSwitchToRootOnSecondHit bool
+	// prmChunked flushes the metadata body instead of letting it end with the
+	// handler, so the response is chunked and has no Content-Length. That is the
+	// shape a real streaming/proxy path produces, and the one the SDK's
+	// json.Decoder never reads to EOF.
+	prmChunked bool
+	// forbidFirstUnauth answers the FIRST unauthenticated POST with a 403 that is not
+	// an insufficient_scope challenge, carrying decoyMetadataURL. The SDK answers
+	// that with a retry rather than a consent round, so the 401 on the retry is what
+	// drives discovery.
+	forbidFirstUnauth bool
+	decoyMetadataURL  string
+	unauthPosts       int
 	// lastTokenHadBasicAuth records how the most recent token request presented
 	// its client credentials.
 	lastTokenHadBasicAuth bool
@@ -781,11 +793,41 @@ func (f *fakeOAuthServer) handlePRMPath(w http.ResponseWriter, r *http.Request) 
 	if !waitBarrier(r.Context(), block, arrived) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"resource":              resource,
 		"authorization_servers": f.authorizationServers(),
 		"scopes_supported":      scopes,
 	})
+	if err != nil {
+		http.Error(w, "fixture: metadata marshal", http.StatusInternalServerError)
+		return
+	}
+	f.mu.Lock()
+	chunked := f.prmChunked
+	f.mu.Unlock()
+	if !chunked {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"resource":              resource,
+			"authorization_servers": f.authorizationServers(),
+			"scopes_supported":      scopes,
+		})
+		return
+	}
+	// Flushed before returning (no Content-Length, so chunked) and padded past the
+	// JSON value: the SDK's decoder stops at the end of that value, so the rest of
+	// the body is never read and EOF is never reached. Both halves matter — the
+	// flush is the shape a proxy produces, and the padding makes the early stop
+	// deterministic rather than dependent on how much one socket read delivered.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	_, _ = w.Write([]byte(strings.Repeat(" ", 64<<10)))
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (f *fakeOAuthServer) handlePRMRoot(w http.ResponseWriter, r *http.Request) {
@@ -1051,6 +1093,16 @@ func (f *fakeOAuthServer) guard(next http.Handler) http.Handler {
 		f.mu.Unlock()
 		scopes, ok := f.scopesOf(r)
 		if !ok {
+			f.mu.Lock()
+			f.unauthPosts++
+			decoy := f.forbidFirstUnauth && f.unauthPosts == 1
+			decoyURL := f.decoyMetadataURL
+			f.mu.Unlock()
+			if decoy && decoyURL != "" {
+				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+decoyURL+`"`)
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 			f.challenge(w, http.StatusUnauthorized, "", "")
 			return
 		}
@@ -2699,5 +2751,59 @@ func TestMcpOAuthEngineAnswersBeforeRevoking(t *testing.T) {
 	waitForGroupDone(t, &fx.eng.wg)
 	if got := fx.oauth.revokeCount(); got == 0 {
 		t.Fatal("the abandoned token was never offered back")
+	}
+}
+
+func TestMcpOAuthEngineLogsInAgainstChunkedMetadata(t *testing.T) {
+	fx := newEngineFixture(t)
+	// A metadata response that is flushed instead of Content-Length'd: the SDK's
+	// json.Decoder stops at the end of the JSON value, so the body it hands back is
+	// never at EOF. The recording must still be complete, or this legitimate server
+	// is refused with "the fallback is not established".
+	fx.oauth.set(func(f *fakeOAuthServer) { f.prmChunked = true })
+
+	d := fx.begin()
+	res := fx.mustComplete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if res.Continuation != nil {
+		t.Fatal("unexpected continuation")
+	}
+	if got, want := res.Resource, fx.oauth.endpoint(); got != want {
+		t.Fatalf("resource = %q, want %q", got, want)
+	}
+	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); !ok {
+		t.Fatal("no grant for a server that serves its metadata chunked")
+	}
+}
+
+func TestMcpOAuthEngineIgnoresAnUndrivenChallenge(t *testing.T) {
+	fx := newEngineFixture(t)
+	// The first unauthenticated request is answered 403 with a resource_metadata the
+	// SDK never fetches (it answers 403-without-insufficient_scope with a retry); the
+	// 401 on the retry is what drives discovery. The login must bind the resource
+	// that challenge named, never the decoy's.
+	//
+	// End-to-end this pins the outcome: a real login through that sequence completes
+	// on the driving challenge's resource and never even fetches the decoy. Which
+	// challenge the mirror SELECTS is pinned separately, by
+	// TestMcpOAuthDiscoveryUsesTheChallengeThatDroveDiscovery — that is the test that
+	// fails if the scan direction is reverted, because both directions happen to
+	// converge on the same binding here (the decoy is unrecorded, so it can only be
+	// skipped or refused, never believed).
+	decoy := fx.oauth.srv.URL + "/.well-known/oauth-protected-resource/decoy"
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.forbidFirstUnauth = true
+		f.decoyMetadataURL = decoy
+	})
+
+	d := fx.begin()
+	res := fx.mustComplete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if res.Continuation != nil {
+		t.Fatal("unexpected continuation")
+	}
+	if got, want := res.Resource, fx.oauth.endpoint(); got != want {
+		t.Fatalf("resource = %q, want the endpoint the driving challenge named %q", got, want)
+	}
+	if got := fx.oauth.prmRequestCount("/.well-known/oauth-protected-resource/decoy"); got != 0 {
+		t.Fatalf("the decoy metadata URL was fetched %d times", got)
 	}
 }
