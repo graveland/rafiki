@@ -348,24 +348,22 @@ func hostaddrOrLocal(kw map[string]string) string {
 	return "(the local socket)"
 }
 
-// lookPgRestore finds pg_restore, or reports the install remedy.
-func lookPgRestore() (string, error) {
-	return lookPgClient("pg_restore", pgRestoreMissing)
-}
-
 // restoreDumpArchive restores a pg_dump custom archive over the wire.
 func restoreDumpArchive(ctx context.Context, configured, path string, noOwner bool, stderr io.Writer) error {
-	// The client is looked up BEFORE the DSN is resolved, as psql and pg_dump do
-	// it: resolving an embedded DSN downloads and initdbs, and an operator
-	// without pg_restore should learn that in a millisecond rather than after
-	// that.
-	pgRestore, err := lookPgRestore()
-	if err != nil {
+	// A pg_restore a target needs from PATH is looked up BEFORE the DSN is
+	// resolved, as psql and pg_dump do it: an operator without one should learn
+	// that in a millisecond. An embedded target is never refused here — its own
+	// tree ships pg_restore, and resolving the DSN is what extracts it.
+	if err := precheckPgClient(configured, "pg_restore", pgRestoreMissing); err != nil {
 		return fmt.Errorf("rafikid db restore: %w", err)
 	}
 	dsn, err := resolveDSN(ctx, configured)
 	if err != nil {
 		return err
+	}
+	pgRestore, err := pgClientPath(configured, "pg_restore", pgRestoreMissing)
+	if err != nil {
+		return fmt.Errorf("rafikid db restore: %w", err)
 	}
 	// pg_restore needs the database named explicitly; the name rides argv, the
 	// connection does not.

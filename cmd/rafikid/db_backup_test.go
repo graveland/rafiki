@@ -67,14 +67,12 @@ func stubServerMajor(t *testing.T, major int) {
 	serverMajorVersion = func(context.Context, string) (int, error) { return major, nil }
 }
 
-// The default format is resolved at run time, so the same command on the same
-// host produces a dump where a USABLE pg_dump exists and a physical copy where
-// it does not or cannot do the job — and refuses when neither is available.
-//
-// The version is part of "usable": an embedded install knows its server's major
-// without starting anything, so an old pg_dump falls through to the physical copy
-// and says so, instead of being chosen and then refused. A configured DSN has no
-// data directory to fall back to, so its answer there is still the dump (the
+// The default format is a logical dump wherever one can be taken. An embedded
+// install always can: the pg_dump in its own tree is built with the server, so
+// whatever is (or is not) on PATH is irrelevant to it — an old or unreadable
+// PATH pg_dump must neither be chosen nor cause a fall back to a physical copy.
+// A configured DSN has to find pg_dump on PATH and has no data directory to fall
+// back to, so a missing one is the answer, and an old one is still the dump (the
 // run-time gate asks the server's own version and refuses if it has to).
 func TestDbBackupFormatPriority(t *testing.T) {
 	cases := []struct {
@@ -83,28 +81,15 @@ func TestDbBackupFormatPriority(t *testing.T) {
 		pgDump     string // "" = nothing on PATH, otherwise the --version it reports
 		want       string
 		wantErr    string
-		wantOnErr  string // a stderr line the fallback must have printed
 	}{
-		{name: "usable pg_dump, embedded", configured: embeddedDSN, pgDump: "18.3", want: formatDump},
-		{name: "usable pg_dump, configured DSN", configured: "postgres://u@h/db", pgDump: "18.3", want: formatDump},
-		{name: "no pg_dump, embedded", configured: embeddedDSN, want: formatTXZ},
-		{name: "no pg_dump, configured DSN", configured: "postgres://u@h/db", wantErr: "pg_dump not found"},
+		{name: "embedded, usable pg_dump on PATH", configured: embeddedDSN, pgDump: "18.3", want: formatDump},
+		{name: "embedded, no pg_dump on PATH: its own tree has one", configured: embeddedDSN, want: formatDump},
+		{name: "embedded, older pg_dump on PATH: not consulted", configured: embeddedDSN, pgDump: "16.4", want: formatDump},
+		{name: "embedded, unreadable pg_dump on PATH: not consulted", configured: embeddedDSN, pgDump: "not a version", want: formatDump},
+		{name: "configured DSN, usable pg_dump", configured: "postgres://u@h/db", pgDump: "18.3", want: formatDump},
+		{name: "configured DSN, no pg_dump", configured: "postgres://u@h/db", wantErr: "pg_dump not found"},
 		{
-			name:       "older pg_dump, embedded: falls back and says so",
-			configured: embeddedDSN,
-			pgDump:     "16.4",
-			want:       formatTXZ,
-			wantOnErr:  "falling back to a physical copy",
-		},
-		{
-			name:       "unreadable pg_dump version, embedded: falls back",
-			configured: embeddedDSN,
-			pgDump:     "not a version",
-			want:       formatTXZ,
-			wantOnErr:  "cannot read a version",
-		},
-		{
-			name:       "older pg_dump, configured DSN: the run-time gate owns it",
+			name:       "configured DSN, older pg_dump: the run-time gate owns it",
 			configured: "postgres://u@h/db",
 			pgDump:     "16.4",
 			want:       formatDump,
@@ -119,8 +104,7 @@ func TestDbBackupFormatPriority(t *testing.T) {
 				t.Setenv("PATH", t.TempDir())
 			}
 
-			var stderr bytes.Buffer
-			got, err := backupFormatPriority(context.Background(), tc.configured, &stderr)
+			got, err := backupFormatPriority(context.Background(), tc.configured)
 			if tc.wantErr != "" {
 				c.Error(err, "want a refusal, got nil")
 				c.StrContains(err.Error(), tc.wantErr, "error, got: %v", err)
@@ -128,13 +112,6 @@ func TestDbBackupFormatPriority(t *testing.T) {
 			}
 			c.NoError(err, "backupFormatPriority returned error")
 			c.Eq(tc.want, got, "format, got")
-			if tc.wantOnErr != "" {
-				c.StrContains(stderr.String(), tc.wantOnErr,
-					"the fallback must say why, got: %s", stderr.String())
-			}
-			if tc.want == formatTXZ && tc.wantOnErr == "" {
-				c.Eq("", stderr.String(), "a fallback with nothing to explain must be silent, got: %s", stderr.String())
-			}
 		})
 	}
 }

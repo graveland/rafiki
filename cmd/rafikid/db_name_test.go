@@ -168,7 +168,7 @@ func TestResolveDSNEmbeddedRefusesAfterACreateFailure(t *testing.T) {
 // database, and the second resolveDSN finds it and reapplies role defaults.
 //
 // Gated on RAFIKI_TEST_EMBEDPG=1 because the first run downloads the pinned
-// binaries (~33 MB on macOS, ~15 MB on Linux) from Maven Central; the cache is
+// artifact (~73 MB on macOS, ~17 MB on Linux) from the embedpg release; the cache is
 // shared with test/integration's embedded test, so a suite that ran that one
 // pays nothing here. -count=1 always: go test's cache cannot see through to a
 // server subprocess.

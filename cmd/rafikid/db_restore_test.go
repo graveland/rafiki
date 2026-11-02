@@ -934,28 +934,51 @@ func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	c.Eq(1, hooks.postCalls, "the post hook must run exactly once")
 }
 
-// A restore with no pg_restore refuses in a millisecond, BEFORE the DSN is
-// resolved: resolving an embedded one downloads and initdbs a server, and a
-// missing client must not cost that. The check is exercised on the dump path
-// itself, because the --force gate legitimately names an embedded target's data
-// directory first (which builds paths and starts nothing).
-func TestRestoreDumpChecksTheClientBeforeResolving(t *testing.T) {
+// A restore of a REMOTE database with no pg_restore on PATH refuses in a
+// millisecond, before anything is resolved. The check is exercised on the dump
+// path itself, because the --force gate legitimately names an embedded target's
+// data directory first (which builds paths and starts nothing).
+func TestRestoreDumpChecksTheClientBeforeConnecting(t *testing.T) {
 	c := assert.NewAborting(t)
 	t.Setenv("PATH", t.TempDir()) // no pg_restore anywhere
 	orig := newEmbeddedServer
 	t.Cleanup(func() { newEmbeddedServer = orig })
 	newEmbeddedServer = func() embedpg.Server {
-		t.Fatal("the embedded server was resolved before pg_restore was looked up")
+		t.Fatal("the embedded server was consulted for a remote database")
 		return embedpg.Server{}
+	}
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+	err := restoreDumpArchive(context.Background(), "postgres://u@h/app", archive, false, &stderr)
+
+	c.Error(err, "want a refusal for a missing pg_restore, got nil")
+	c.ErrorContains(err, "pg_restore not found on PATH", "refusal, got: %v", err)
+	c.StrContains(err.Error(), "apt install postgresql-client", "the refusal must carry the remedy, got: %v", err)
+}
+
+// The embedded server's own tree ships pg_restore, so an embedded restore with
+// nothing on PATH is NOT refused up front: it goes on to resolve the DSN, which
+// is what extracts the tree.
+func TestRestoreDumpEmbeddedNeedsNoClientOnPath(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("PATH", t.TempDir())
+	resolved := false
+	orig := newEmbeddedServer
+	t.Cleanup(func() { newEmbeddedServer = orig })
+	newEmbeddedServer = func() embedpg.Server {
+		resolved = true
+		return embedpg.Server{} // not a usable server: resolving it fails, which is enough
 	}
 
 	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
 	var stderr bytes.Buffer
 	err := restoreDumpArchive(context.Background(), embeddedDSN, archive, false, &stderr)
 
-	c.Error(err, "want a refusal for a missing pg_restore, got nil")
-	c.ErrorContains(err, "pg_restore not found on PATH", "refusal, got: %v", err)
-	c.StrContains(err.Error(), "apt install postgresql-client", "the refusal must carry the remedy, got: %v", err)
+	c.True(resolved, "the embedded DSN was never resolved")
+	c.Error(err, "an unusable embedded server must fail to resolve")
+	c.False(strings.Contains(err.Error(), "pg_restore not found"),
+		"a missing PATH pg_restore must not be reported for an embedded target: %v", err)
 }
 
 // A DSN that names no database cannot be restored into: pg_restore will not infer

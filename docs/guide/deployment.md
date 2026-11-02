@@ -83,12 +83,13 @@ database, below.)
 
 `rafikid db backup <path>` writes a `pg_dump -Fc` archive over the wire (the
 connection rides `PG*`, never argv), and `rafikid db restore <path> --force`
-puts one back. Both need a `pg_dump`/`pg_restore` on the daemon host's `PATH`:
-`pg_dump` is refused when it is older than the server (it cannot dump a newer
-one), `pg_restore` must be new enough to read the archive it is given, and the
-embedded bundle ships no client tools at all. A physical copy of the data
-directory (`--format txz|tgz`) is a different thing, embedded-only, and stops
-that server for the duration.
+puts one back. For a configured `RAFIKI_DB` both need a `pg_dump`/`pg_restore` on
+the daemon host's `PATH`: `pg_dump` is refused when it is older than the server
+(it cannot dump a newer one), and `pg_restore` must be new enough to read the
+archive it is given. The embedded server needs neither: its own tree ships them,
+at its exact major, and they are what run. A physical copy of the data directory
+(`--format txz|tgz`) is a different thing, embedded-only, chosen only explicitly,
+and stops that server for the duration.
 
 The restore is `pg_restore --clean --if-exists --no-owner --single-transaction`:
 every object the ARCHIVE contains is dropped and recreated in one transaction, so

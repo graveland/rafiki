@@ -53,16 +53,18 @@ instead or as well.
 ### The embedded database
 
 The default database mode. `RAFIKI_DB=embedded` makes `rafikid` run its own
-PostgreSQL 18.3, on a unix socket only — no TCP listener, no Docker, nothing to
+PostgreSQL 18.6 with the `vector` and `pg_textsearch` extensions (so recall
+search works), on a unix socket only — no TCP listener, no Docker, nothing to
 install:
 
 | | |
 |---|---|
-| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from Maven Central (~15 MB on Linux, ~33 MB on macOS) and verified against a sha256 pinned in `rafikid` |
+| binaries | `~/.cache/rafiki/embedpg/` (`$XDG_CACHE_HOME`), downloaded once from this repository's `embedpg-v<version>` release (~17 MB on Linux, ~73 MB on macOS) and verified against a sha256 pinned in `rafikid`; they include `psql`, `pg_dump` and `pg_restore` |
 | data | `~/.local/share/rafiki/pg` (`$XDG_DATA_HOME`), mode 0700 — also the socket directory |
 | log | `~/.local/state/rafiki/pg.log` (`$XDG_STATE_HOME`) |
 
-Supported: macOS arm64/amd64, Linux amd64/arm64 on glibc (not Alpine/musl). It
+Supported: macOS arm64/amd64, and Linux amd64/arm64 on glibc 2.38 or newer
+(Ubuntu 24.04, Debian 13; not Alpine/musl). It
 starts on demand, from the first `rafikid` command that needs the database, and
 `rafikid` never stops it as a side effect. The deliberate exceptions are both
 physical ones — `rafikid db backup --format txz|tgz` and `rafikid db restore` —
@@ -76,7 +78,7 @@ server lives outside the unit and keeps running after the service stops, until
 you stop it yourself:
 
 ```sh
-~/.cache/rafiki/embedpg/18.3.0-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
+~/.cache/rafiki/embedpg/18.6-1-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
 ```
 
 `rafikid db psql` opens `psql` on whatever `RAFIKI_DB` names, the embedded
@@ -96,23 +98,28 @@ and never holds rafiki data. Embedded provisioning also sets the `rafiki` role's
 default on existing installs as well. `db psql` independently supplies the same
 session default (including for external databases); explicit DSN `options` can
 override it. `public` stays first so extension creation still uses that schema.
-The embedded bundle ships no client tools (it
-carries `initdb`, `pg_ctl` and `postgres` only), so `psql`, `pg_dump` and
-`pg_restore` all come from `PATH`; `pg_dump` is refused when it is older than
-the server (it cannot dump a newer one), and `pg_restore` must be new enough to
-read the archive it is handed, so install the server's own major (18):
+Its extensions are managed for you. Each time `rafikid` resolves the embedded
+database it installs `vector` and `pg_textsearch` if they are missing and brings an
+installed one to the version the downloaded tree ships, so a new tree updates them
+on the next start. That is the embedded server only: any other `RAFIKI_DB`'s
+extensions are its operator's. The reconcile installs the extension and nothing
+else; the columns and indexes that use it come from the migrations.
+
+For the embedded server, `psql`, `pg_dump` and `pg_restore` are the ones its own
+tree ships, built with the server and so exactly its major version: nothing to
+install, and nothing on `PATH` is consulted. For any other `RAFIKI_DB` they come
+from `PATH`; `pg_dump` is refused when it is older than the server (it cannot
+dump a newer one), and `pg_restore` must be new enough to read the archive it is
+handed, so install the server's own major:
 `brew install libpq && brew link --force libpq` on macOS,
 `apt install postgresql-client` on Debian/Ubuntu (the distro package may lag the
 server's major; add the PGDG repository if it does).
 
-**Backing it up.** `rafikid db backup <path>` writes one file and picks the
-format from what this host can do: a `pg_dump -Fc` logical dump when a usable
-`pg_dump` is on `PATH` (the portable one), otherwise a physical copy of the data
-directory — `.txz`, or `.tgz` with `--format tgz`; `--format` names one
-explicitly. A `pg_dump` older than the server is skipped on an embedded install
-(it cannot dump a newer server) and the fall-through to a physical copy is
-reported; against a configured `RAFIKI_DB` it is refused instead, because there
-is no data directory here to fall back to.
+**Backing it up.** `rafikid db backup <path>` writes one file. By default it is a
+`pg_dump -Fc` logical dump (the portable one): for the embedded server taken with
+the `pg_dump` in its own tree, for any other `RAFIKI_DB` with the one on `PATH`
+(refused if there is none, or if it is older than the server). A physical copy of
+the data directory is chosen only explicitly — `--format txz`, or `--format tgz`.
 
 A dump copies over the wire and never stops anything. A physical copy has to
 stop the embedded server for the whole copy plus its compression, taking the

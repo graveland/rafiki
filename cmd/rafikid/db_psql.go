@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -16,10 +17,10 @@ import (
 )
 
 // newDbPsqlCmd opens psql on whatever database rafikid is configured for,
-// including the embedded one. It exists because the embedded server's binaries
-// ship no client (the zonky artifacts carry initdb, pg_ctl and postgres only),
-// so an operator inspecting that database needs the system psql pointed at the
-// right socket — which is a data directory path, not a hostname.
+// including the embedded one. The embedded server's socket is a data directory
+// path, not a hostname, so an operator cannot simply point a client at it; this
+// command resolves it, and for the embedded server runs the psql its own tree
+// ships (pgClientPath).
 func newDbPsqlCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "psql [-- psql args...]",
@@ -49,11 +50,11 @@ Everything after "--" is handed to psql unchanged.`,
 			if db == "" {
 				return errors.New("--db (or RAFIKI_DB) is required")
 			}
-			// The client is looked up BEFORE the DSN is resolved: resolving an
-			// embedded DSN can download tens of megabytes and run initdb, and a
-			// user with no psql installed should learn that in a millisecond
-			// rather than after that.
-			if _, err := lookPsql(); err != nil {
+			// A client a target needs from PATH is looked up BEFORE the DSN is
+			// resolved: a user with no psql installed should learn that at once.
+			// The embedded server's own tree ships psql, so it has nothing to
+			// look up yet (precheckPgClient).
+			if err := precheckPgClient(db, "psql", psqlMissing); err != nil {
 				return err
 			}
 			dsn, err := resolveDSN(cmd.Context(), db)
@@ -90,12 +91,13 @@ type pgToolInv struct {
 	target string   // one line naming where the program will connect
 }
 
-// psqlMissing is the whole remedy an operator needs, in the error itself: psql
-// is a separate package from the server on every platform rafiki runs on.
+// psqlMissing is the whole remedy an operator needs, in the error itself, for a
+// database whose psql has to come from PATH: it is a separate package from the
+// server on every platform rafiki runs on.
 const psqlMissing = "psql not found on PATH; install the PostgreSQL client " + pgClientInstallHint
 
 // pgClientInstallHint is the install remedy every libpq client these commands
-// need shares, so psql and pg_dump never drift apart.
+// need shares, so psql, pg_dump and pg_restore never drift apart.
 const pgClientInstallHint = "(macOS: brew install libpq && brew link --force libpq; " +
 	"Debian/Ubuntu: apt install postgresql-client)"
 
@@ -131,18 +133,49 @@ func lookPgClient(name, missing string) (string, error) {
 	return path, nil
 }
 
-// lookPsql finds the psql binary, or reports the install remedy. RunE calls it
-// before resolving the DSN and psqlInvocation calls it again, so the cheap check
-// is what a user without psql sees first.
-func lookPsql() (string, error) {
-	return lookPgClient("psql", psqlMissing)
+// embeddedClientPath is the embedded server's own copy of a libpq client, or ""
+// when configured is not the embedded server or its tree is not extracted yet.
+// The tree ships psql, pg_dump and pg_restore built with the server, so they are
+// exactly its major version and need nothing installed.
+func embeddedClientPath(configured, name string) string {
+	if !isEmbedded(configured) {
+		return ""
+	}
+	path := filepath.Join(embeddedServer().BinDir, "bin", name)
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		return path
+	}
+	return ""
+}
+
+// pgClientPath is the program a run of name against configured executes: the
+// embedded tree's when configured is the embedded server and the tree has it,
+// PATH's otherwise. Call it AFTER resolveDSN, which is what extracts the tree.
+func pgClientPath(configured, name, missing string) (string, error) {
+	if path := embeddedClientPath(configured, name); path != "" {
+		return path, nil
+	}
+	return lookPgClient(name, missing)
+}
+
+// precheckPgClient is the cheap look-up that runs BEFORE the DSN is resolved, so
+// a client a target needs from PATH is reported in a millisecond rather than
+// after a download. An embedded target needs nothing from PATH — resolving it
+// extracts a tree that carries every client — so nothing can be missing yet and
+// it is never refused here.
+func precheckPgClient(configured, name, missing string) error {
+	if isEmbedded(configured) {
+		return nil
+	}
+	_, err := lookPgClient(name, missing)
+	return err
 }
 
 // psqlInvocation resolves psql and the environment it should run in. configured
 // is the DSN as the operator wrote it (it selects the wording of target); dsn is
 // what resolveDSN returned. The connection reaches psql only through env.
 func psqlInvocation(configured, dsn string, args, environ []string) (pgToolInv, error) {
-	path, err := lookPsql()
+	path, err := pgClientPath(configured, "psql", psqlMissing)
 	if err != nil {
 		return pgToolInv{}, err
 	}

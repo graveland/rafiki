@@ -12,14 +12,14 @@ rafiki follows the XDG base directories:
 | records | `~/.local/share/rafiki/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `profiles.toml`, `rafikid.toml`) | `$XDG_CONFIG_HOME` |
-| embedded postgres binaries | `~/.cache/rafiki/embedpg/18.3.0-<os>-<arch>` | `$XDG_CACHE_HOME` |
+| embedded postgres binaries | `~/.cache/rafiki/embedpg/18.6-1-<os>-<arch>` | `$XDG_CACHE_HOME` |
 | embedded postgres data | `~/.local/share/rafiki/pg` (mode 0700; also its unix socket directory) | `$XDG_DATA_HOME` |
 | embedded postgres log | `~/.local/state/rafiki/pg.log` | `$XDG_STATE_HOME` |
 
 The last three belong to the `embedded` database mode (`RAFIKI_DB=embedded`):
 `rafikid` runs its own PostgreSQL 18 there, downloading and verifying the
-binaries on first use. `rafikid db psql` opens a `psql` from `PATH` on whatever
-`RAFIKI_DB` names, embedded included; `rafikid db backup` and `rafikid db
+binaries on first use. `rafikid db psql` opens `psql` on whatever `RAFIKI_DB`
+names (for the embedded database, the one in its own tree); `rafikid db backup` and `rafikid db
 restore` write and put back a backup of the same database. See [Installing
 rafiki](install.md#the-embedded-database) for operating it.
 

@@ -1909,8 +1909,8 @@ an empty `query`, an empty `id`, an unknown source name, non-JSON
 When the daemon has recall unwired (no database), all eight answer
 `CodeUnavailable`.
 
-**A database without the `pg_textsearch` extension searches nothing** (always
-the case on an `embedded` install today): `Recall` and `RecallBackfill` answer
+**A database without the `pg_textsearch` extension searches nothing** (the
+`embedded` server ships it; an external PostgreSQL may not have it): `Recall` and `RecallBackfill` answer
 `CodeUnavailable` with `recall.ErrSearchUnavailable` — "recall search needs the
 pg_textsearch extension, which this database does not have" — and the recall
 indexer and summarizer never start, so no window, embedding or summary is

@@ -5,11 +5,12 @@ package integration_test
 // The embedded-database end-to-end proof: RAFIKI_DB=embedded makes rafikid run
 // its own PostgreSQL (pkg/embedpg), and this is the only test that exercises a
 // REAL extracted server — a real migration chain applied to it, a real daemon
-// serving from it, a real child turn written to it, and the degradation that
-// server's missing extensions impose on recall.
+// serving from it, a real child turn written to it, recall search through the
+// bm25 index, and the migration branch for a server without the recall
+// extensions.
 //
 // Gated on RAFIKI_TEST_EMBEDPG=1 because the first run downloads the pinned
-// binaries from Maven Central (~15 MB for one platform, cached under
+// artifact from the embedpg release (17-70 MB for one platform, cached under
 // $XDG_CACHE_HOME/rafiki-test-embedpg so later runs reuse them). -count=1
 // always: go test caching cannot see through to a daemon subprocess.
 //
@@ -23,6 +24,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -260,10 +263,10 @@ func queryInt(t *testing.T, pool *pgxpool.Pool, what, sql string, args ...any) i
 }
 
 // TestEmbeddedPostgresMigratesAndServes is the design's end-to-end claim, on a
-// real server: RAFIKI_DB=embedded starts a private PostgreSQL that has none of
-// timescaledb/vector/pg_textsearch, the migration chain still applies cleanly
-// to it, the daemon serves from it, recall search degrades to Unavailable
-// naming the missing extension, and memories keep working.
+// real server: RAFIKI_DB=embedded starts a private PostgreSQL that ships vector
+// and pg_textsearch but not timescaledb, the migration chain applies cleanly to
+// it (taking the extensions-available branch of 0036), the daemon serves from
+// it, and recall search finds a memory through the bm25 index.
 func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
 		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads ~15 MB once)")
@@ -294,13 +297,14 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 
 	env := dirs.env()
 
-	// ── the migration chain applies to a server with no extensions ────────
+	// ── the migration chain applies to a server with vector and pg_textsearch ─
 	//
 	// 0001/0009/0010 create plain tables instead of hypertables when
-	// timescaledb is absent, and 0036 keeps bytea embedding placeholders and
-	// skips the bm25 indexes when vector/pg_textsearch are. A chain that still
-	// assumed them would fail here, on the first CREATE TABLE, rather than in
-	// production.
+	// timescaledb is absent, and 0036 converts the embedding columns to vector
+	// and builds the bm25 indexes because vector/pg_textsearch ARE available. A
+	// chain that assumed timescaledb would fail here, on the first CREATE TABLE,
+	// rather than in production; the branch without them is pinned by
+	// TestEmbeddedPostgresMigratesWithoutExtensions.
 	//
 	// The SECOND run is a separate claim: Ensure must reuse the running server
 	// (flock, then pg_ctl status) rather than starting a second cluster on the
@@ -325,12 +329,14 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	c.NoError(pool.QueryRow(ctx, "SELECT current_database()").Scan(&servedDB), "current_database")
 	c.Eq(embedpg.Database, servedDB, "the daemon's database must be %q", embedpg.Database)
 
-	c.Eq(int64(0), queryInt(t, pool, "count the extensions an embedded install must not have",
-		`SELECT count(*) FROM pg_extension WHERE extname IN ('timescaledb','vector','pg_textsearch')`),
-		"the embedded server must have none of timescaledb, vector or pg_textsearch")
-	// ltree is unconditional (0036 creates it), so its presence is what makes
-	// the migrations' conditional blocks a real test of the conditionals rather
-	// than of a database that creates no extension at all.
+	c.Eq(int64(0), queryInt(t, pool, "count timescaledb",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
+		"the embedded server must not have timescaledb")
+	c.Eq(int64(2), queryInt(t, pool, "count the extensions an embedded install ships",
+		`SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pg_textsearch')`),
+		"the embedded server must have both vector and pg_textsearch")
+	// ltree is unconditional (0036 creates it), whereas vector and pg_textsearch
+	// are created only because the server lists them as available.
 	c.Eq(int64(1), queryInt(t, pool, "count ltree",
 		`SELECT count(*) FROM pg_extension WHERE extname = 'ltree'`),
 		"ltree must be installed: 0036 creates it unconditionally")
@@ -383,13 +389,13 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 		   AND c.relname IN ('memory', 'conversation_window', 'conversation_summary')`)
 	c.Eq(3, len(embeddingType), "expected an embedding column on all three recall tables, got %v", embeddingType)
 	for _, table := range []string{"memory", "conversation_window", "conversation_summary"} {
-		c.Eq("bytea", embeddingType[table], "conversations.%s.embedding is %q, want the bytea placeholder", table, embeddingType[table])
+		c.Eq("vector", embeddingType[table], "conversations.%s.embedding is %q, want vector", table, embeddingType[table])
 	}
 
-	c.Eq(int64(0), queryInt(t, pool, "count the bm25 indexes",
+	c.Eq(int64(3), queryInt(t, pool, "count the bm25 indexes",
 		`SELECT count(*) FROM pg_indexes
 		  WHERE indexname IN ('memory_bm25','conversation_window_bm25','conversation_summary_bm25')`),
-		"no bm25 index may exist without the pg_textsearch access method")
+		"all three bm25 indexes must exist: pg_textsearch is installed")
 
 	// The data directory is the access control for this server, and the
 	// socket inside it is the only way in.
@@ -425,24 +431,10 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	d := bootEmbeddedDaemon(t, dirs, "RAFIKI_PROVIDERS="+writeFakeSSEProviders(t, fake.srv.URL))
 	client := d.control(t)
 
-	// Search is off: startRecall probed pg_extension once at startup, so the
-	// refusal is a decision about THIS database, not a failed query. The code
-	// is Unavailable (the deployment's gap, not the caller's) and the text
-	// names the extension, which is the whole remedy.
-	_, err = client.Recall(ctx, authorize(token, connect.NewRequest(&rafikiv1.RecallRequest{
-		Query: "embedded postgres",
-	})))
-	c.Error(err, "Recall must be refused on a database without pg_textsearch")
-	c.Eq(connect.CodeUnavailable, connect.CodeOf(err),
-		"Recall code = %v, want %v: %v", connect.CodeOf(err), connect.CodeUnavailable, err)
-	c.ErrorContains(err, "pg_textsearch", "the refusal must name the missing extension: %v", err)
-
-	// Memories are plain SQL and do not go through search, so they keep
-	// working on the same database — this is the degradation's other half.
 	const (
 		memPath = "embedded_pg"
 		memName = "roundtrip"
-		memBody = "the embedded server keeps memories even though it cannot search"
+		memBody = "the embedded server keeps memories and searches them through the bm25 index"
 	)
 	_, err = client.PutMemory(ctx, authorize(token, connect.NewRequest(&rafikiv1.PutMemoryRequest{
 		Path: memPath, Name: memName, Body: memBody,
@@ -453,6 +445,27 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	})))
 	c.NoError(err, "GetMemory on the embedded server")
 	c.Eq(memBody, got.Msg.GetMemory().GetBody(), "the memory body did not round-trip")
+
+	// Search is on: startRecall probed pg_extension at startup and found
+	// pg_textsearch, so the memory just written is found through the bm25 index
+	// rather than refused as Unavailable (what a server without the extension
+	// answers). Eventually, because the daemon's recall runtime is built
+	// asynchronously after the control socket opens.
+	c.Eventually(30*time.Second, "recall finds the memory through bm25", func() error {
+		resp, err := client.Recall(ctx, authorize(token, connect.NewRequest(&rafikiv1.RecallRequest{
+			Query:   "bm25 index",
+			Sources: []string{"memory"},
+		})))
+		if err != nil {
+			return fmt.Errorf("Recall: %w", err)
+		}
+		for _, h := range resp.Msg.GetHits() {
+			if h.GetPath() == memPath && h.GetName() == memName {
+				return nil
+			}
+		}
+		return fmt.Errorf("no hit for %s/%s among %d hit(s)", memPath, memName, len(resp.Msg.GetHits()))
+	})
 
 	// ── a child spawns and completes a turn ──────────────────────────────
 	//
@@ -510,6 +523,158 @@ func TestEmbeddedPostgresMigratesAndServes(t *testing.T) {
 	waitForStatus(t, d, childID, "idle", 30*time.Second)
 	c.Eq(int64(1), queryInt(t, pool, "turns recorded for the child's conversation", turnSQL, childID),
 		"the fundi turn must be recorded exactly once in conversation_turn")
+}
+
+// copyEmbeddedTree copies the extracted tree at src to dst, recreating symlinks
+// as symlinks, leaving out every entry skip names (a slash-separated path
+// relative to src; a skipped directory is skipped whole).
+func copyEmbeddedTree(t *testing.T, src, dst string, skip func(rel string) bool) {
+	t.Helper()
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o700)
+		}
+		if skip(filepath.ToSlash(rel)) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case d.Type()&fs.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		case d.Type().IsRegular():
+			in, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, in); err != nil {
+				out.Close()
+				return err
+			}
+			return out.Close()
+		default:
+			return fmt.Errorf("unsupported entry %s (%s)", rel, d.Type())
+		}
+	})
+	assert.NewAborting(t).NoError(err, "copy the embedded tree")
+}
+
+// TestEmbeddedPostgresMigratesWithoutExtensions pins the branch of the
+// migrations' extension conditionals that TestEmbeddedPostgresMigratesAndServes
+// does not take: a server whose share/postgresql/extension lists neither vector
+// nor pg_textsearch — what an install on plain PostgreSQL looks like — still
+// migrates, keeps bytea embedding placeholders and builds no bm25 index.
+//
+// It works on a COPY of the cached tree with those extensions' control and SQL
+// files removed, in a cache of its own: the shared cache is what every other
+// test in this file reuses, and must not be edited.
+func TestEmbeddedPostgresMigratesWithoutExtensions(t *testing.T) {
+	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
+		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads the pinned artifact once)")
+	}
+	c := assert.NewAborting(t)
+
+	dirs := newEmbeddedDirs(t)
+	t.Setenv("XDG_DATA_HOME", dirs.data)
+	t.Setenv("XDG_STATE_HOME", dirs.state)
+
+	// The shared tree, fetched if this is the first run: Ensure on a throwaway
+	// data directory does the download and extraction, and nothing else is kept.
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+	shared := embedpg.Default().BinDir
+	if _, err := os.Stat(filepath.Join(shared, "bin", "postgres")); err != nil {
+		prefetch := embedpg.Server{
+			BinDir:   shared,
+			DataDir:  filepath.Join(dirs.root, "prefetch", "pg"),
+			LogPath:  filepath.Join(dirs.root, "prefetch", "pg.log"),
+			LockPath: filepath.Join(dirs.root, "prefetch", "pg.lock"),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		_, err := prefetch.Ensure(ctx)
+		cancel()
+		c.NoError(err, "fetch the embedded binaries")
+		c.True(stopEmbeddedServer(t, prefetch), "stop the prefetch server")
+		c.NoError(os.RemoveAll(filepath.Dir(prefetch.DataDir)), "remove the prefetch data directory")
+	}
+
+	// This test's own cache, holding the copy.
+	dirs.cache = filepath.Join(dirs.root, "cache")
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+	server := embedpg.Default()
+	copyEmbeddedTree(t, shared, server.BinDir, func(rel string) bool {
+		base := filepath.Base(rel)
+		return filepath.Dir(rel) == "share/postgresql/extension" &&
+			(strings.HasPrefix(base, "vector") || strings.HasPrefix(base, "pg_textsearch"))
+	})
+
+	t.Cleanup(func() {
+		if !stopEmbeddedServer(t, server) {
+			return // the data dir is what lets a human finish the job
+		}
+		if err := os.RemoveAll(dirs.root); err != nil {
+			t.Logf("remove %s: %v", dirs.root, err)
+		}
+	})
+
+	out, err := runRafikid(dirs.env(), "migrate")
+	c.NoError(err, "rafikid migrate on a server without the recall extensions: %v\noutput: %s", err, out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, server.DSN())
+	c.NoError(err, "open the embedded server")
+	defer pool.Close()
+
+	c.Eq(int64(0), queryInt(t, pool, "count the extensions this server must not list",
+		`SELECT count(*) FROM pg_available_extensions WHERE name IN ('vector','pg_textsearch')`),
+		"the copied tree must not list vector or pg_textsearch")
+	c.Eq(int64(0), queryInt(t, pool, "count the recall extensions",
+		`SELECT count(*) FROM pg_extension WHERE extname IN ('vector','pg_textsearch')`),
+		"neither extension may be installed")
+	c.Eq(int64(1), queryInt(t, pool, "count ltree",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'ltree'`),
+		"ltree is unconditional: 0036 creates it")
+
+	embeddingType := queryStrings(t, pool, "embedding column types", `
+		SELECT c.relname, format_type(a.atttypid, a.atttypmod)
+		  FROM pg_attribute a
+		  JOIN pg_class c ON c.oid = a.attrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'conversations'
+		   AND a.attname = 'embedding'
+		   AND c.relname IN ('memory', 'conversation_window', 'conversation_summary')`)
+	c.Eq(3, len(embeddingType), "expected an embedding column on all three recall tables, got %v", embeddingType)
+	for _, table := range []string{"memory", "conversation_window", "conversation_summary"} {
+		c.Eq("bytea", embeddingType[table], "conversations.%s.embedding is %q, want the bytea placeholder", table, embeddingType[table])
+	}
+	c.Eq(int64(0), queryInt(t, pool, "count the bm25 indexes",
+		`SELECT count(*) FROM pg_indexes
+		  WHERE indexname IN ('memory_bm25','conversation_window_bm25','conversation_summary_bm25')`),
+		"no bm25 index may exist without the pg_textsearch access method")
 }
 
 // TestEmbeddedPostgresBackupRestoreRoundTrip proves `rafikid db backup` and
@@ -773,6 +938,160 @@ func dsnForDatabase(t *testing.T, dsn, name string) string {
 		return u.String()
 	}
 	return dsn + " dbname=" + name
+}
+
+// TestEmbeddedPostgresInstallsAndUpdatesExtensions pins the start-up reconcile on a
+// real server: the first resolve of a fresh install CREATEs vector and
+// pg_textsearch (nothing ran migrate, so only the reconcile could have), and a
+// resolve after the recorded version has fallen behind the tree's runs ALTER
+// EXTENSION UPDATE. Only the current base script of each extension is installed,
+// so an old version cannot be truly installed: the drift is faked by rewriting
+// the recorded version, which makes the test about the reconcile's decision and
+// the statement it issues, not about an old-to-new schema transition (that is the
+// extension's own update script's business).
+//
+// Everything goes through `rafikid db psql` with an empty PATH, so the clients
+// are the tree's own, and each call's resolve is what runs the reconcile BEFORE
+// its query.
+func TestEmbeddedPostgresInstallsAndUpdatesExtensions(t *testing.T) {
+	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
+		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads the pinned artifact once)")
+	}
+	c := assert.NewAborting(t)
+
+	dirs := newEmbeddedDirs(t)
+	t.Setenv("XDG_DATA_HOME", dirs.data)
+	t.Setenv("XDG_STATE_HOME", dirs.state)
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+
+	server := embedpg.Default()
+	t.Cleanup(func() {
+		if !stopEmbeddedServer(t, server) {
+			return // the data dir is what lets a human finish the job
+		}
+		if err := os.RemoveAll(dirs.root); err != nil {
+			t.Logf("remove %s: %v", dirs.root, err)
+		}
+	})
+
+	env := append(dirs.env(), "PATH="+t.TempDir())
+	// psql runs the SQL args through `rafikid db psql` and returns the last line of
+	// its output (the target line is printed first, on stderr).
+	psql := func(args ...string) string {
+		t.Helper()
+		out, err := runRafikid(env, append([]string{"db", "psql", "--", "-X", "-At", "-v", "ON_ERROR_STOP=1"}, args...)...)
+		c.NoError(err, "rafikid db psql %v: %v\noutput: %s", args, err, out)
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		return strings.TrimSpace(lines[len(lines)-1])
+	}
+	const (
+		installedSQL = `SELECT coalesce(string_agg(extname || '=' || extversion, ',' ORDER BY extname), '')
+		                  FROM pg_extension WHERE extname IN ('vector', 'pg_textsearch')`
+		shippedSQL = `SELECT string_agg(name || '=' || default_version, ',' ORDER BY name)
+		                FROM pg_available_extensions WHERE name IN ('vector', 'pg_textsearch')`
+	)
+
+	// A fresh install: the database does not exist before this call, and no
+	// migration has run, so only the reconcile can have installed anything.
+	shipped := psql("-c", shippedSQL)
+	c.StrContains(shipped, "vector=", "the tree must ship vector: %s", shipped)
+	c.StrContains(shipped, "pg_textsearch=", "the tree must ship pg_textsearch: %s", shipped)
+	c.Eq(shipped, psql("-c", installedSQL), "a fresh install must have both extensions at the shipped versions")
+
+	// The recorded versions fall behind the tree's, as they do after a new tree
+	// replaces an old one. The same call reads them back to prove the drift is
+	// really there before the next resolve fixes it.
+	drifted := psql("-c", `UPDATE pg_extension SET extversion = '0.8.6' WHERE extname = 'vector'`,
+		"-c", `UPDATE pg_extension SET extversion = '1.5.0' WHERE extname = 'pg_textsearch'`,
+		"-c", installedSQL)
+	c.Eq("pg_textsearch=1.5.0,vector=0.8.6", drifted, "the drift must be in place before the next resolve")
+
+	c.Eq(shipped, psql("-c", installedSQL),
+		"the next resolve must update both extensions to the versions the tree ships")
+}
+
+// TestEmbeddedPostgresDumpRoundTripUsesTheBundledClients is the default backup of
+// an embedded install, on a real server with NOTHING on PATH: `db backup` with no
+// --format takes a logical dump with the pg_dump in the server's own tree, and
+// `db restore` puts it back with that tree's pg_restore. The PATH is an empty
+// directory so a client the host happened to have installed cannot be what ran.
+func TestEmbeddedPostgresDumpRoundTripUsesTheBundledClients(t *testing.T) {
+	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
+		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads the pinned artifact once)")
+	}
+	c := assert.NewAborting(t)
+
+	dirs := newEmbeddedDirs(t)
+	t.Setenv("XDG_DATA_HOME", dirs.data)
+	t.Setenv("XDG_STATE_HOME", dirs.state)
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+
+	server := embedpg.Default()
+	t.Cleanup(func() {
+		if !stopEmbeddedServer(t, server) {
+			return // the data dir is what lets a human finish the job
+		}
+		if err := os.RemoveAll(dirs.root); err != nil {
+			t.Logf("remove %s: %v", dirs.root, err)
+		}
+	})
+
+	// Last entry wins (exec.Cmd.Env), so this replaces any PATH os.Environ held.
+	env := append(dirs.env(), "PATH="+t.TempDir())
+	out, err := runRafikid(env, "migrate")
+	c.NoError(err, "rafikid migrate: %v\noutput: %s", err, out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, server.DSN())
+	c.NoError(err, "open the embedded server")
+	defer pool.Close()
+
+	const (
+		username = "epg-dump"
+		memName  = "roundtrip"
+		memBody  = "the row the logical dump has to bring back"
+	)
+	var ownerID string
+	c.NoError(pool.QueryRow(ctx, `INSERT INTO conversations.users (username, token_sha256)
+		VALUES ($1, $2) RETURNING id`, username, "embedded-dump-roundtrip").Scan(&ownerID),
+		"insert the memory's owner")
+	_, err = pool.Exec(ctx, `INSERT INTO conversations.memory (owner_user_id, path, name, body)
+		VALUES ($1, 'embedded_pg', $2, $3)`, ownerID, memName, memBody)
+	c.NoError(err, "write the memory")
+
+	// No --format and no --force: a dump needs neither. The default must be the
+	// dump, and its suffix the dump's.
+	backupPath := filepath.Join(dirs.root, "backup")
+	out, err = runRafikid(env, "db", "backup", backupPath)
+	c.NoError(err, "rafikid db backup: %v\noutput: %s", err, out)
+	archive := backupPath + ".dump"
+	c.FileExists(archive, "the default embedded backup must be a logical dump")
+	head, err := os.ReadFile(archive)
+	c.NoError(err, "read the archive")
+	c.True(len(head) > 5 && string(head[:5]) == "PGDMP", "the archive must be a pg_dump custom archive")
+
+	_, err = pool.Exec(ctx, `DELETE FROM conversations.memory WHERE owner_user_id = $1 AND name = $2`, ownerID, memName)
+	c.NoError(err, "delete the memory")
+	c.Eq(int64(0), queryInt(t, pool, "count the memory before the restore",
+		`SELECT count(*) FROM conversations.memory WHERE owner_user_id = $1`, ownerID),
+		"the row must be gone before the restore, or the read-back proves nothing")
+
+	// A restore drops and recreates everything the archive holds, so it is gated
+	// on --force; the backup above was not.
+	out, err = runRafikid(env, "db", "restore", "--force", archive)
+	c.NoError(err, "rafikid db restore: %v\noutput: %s", err, out)
+
+	// The restore replaced the schema under the open pool's feet; a fresh pool.
+	pool.Close()
+	pool, err = pgxpool.New(ctx, server.DSN())
+	c.NoError(err, "reopen the embedded server")
+	defer pool.Close()
+	var body string
+	c.NoError(pool.QueryRow(ctx, `SELECT body FROM conversations.memory
+		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName).Scan(&body),
+		"read the memory back after the restore")
+	c.Eq(memBody, body, "the row a dump restore brings back must be the one the dump took")
 }
 
 // TestEmbeddedPostgresDaemonReconnectsAfterAPhysicalBackup pins what an operator

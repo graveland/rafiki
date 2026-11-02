@@ -17,7 +17,7 @@ import (
 // directory is a hard failure — and one that must be reported before a single
 // byte is downloaded, since the operator can only fix it by moving the data dir.
 func TestSocketPathTooLong(t *testing.T) {
-	srv, hits := serveJar(t, []byte("must not be requested"))
+	srv, hits := serveArtifact(t, []byte("must not be requested"))
 	s := Server{
 		BinDir:   filepath.Join(t.TempDir(), "bin"),
 		DataDir:  filepath.Join(t.TempDir(), strings.Repeat("a", 120)),
@@ -124,7 +124,8 @@ func TestRafikiConfQuotesSocketDir(t *testing.T) {
 		"listen_addresses = ''\n" +
 		"port = 5432\n" +
 		"unix_socket_directories = '" + dir + `/o''brien\\pg'` + "\n" +
-		"unix_socket_permissions = 0700\n"
+		"unix_socket_permissions = 0700\n" +
+		"shared_preload_libraries = 'pg_textsearch'\n"
 	c.Eq(want, string(body), "rafiki.conf")
 
 	info, err := os.Stat(filepath.Join(dataDir, "rafiki.conf"))

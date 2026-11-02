@@ -35,7 +35,7 @@ type Server struct {
 	DataDir  string       // PGDATA, mode 0700; also the unix socket directory
 	LogPath  string       // server log, pg_ctl -l
 	LockPath string       // flock serialising Ensure across processes
-	BaseURL  string       // Maven base; DefaultBaseURL when empty
+	BaseURL  string       // release download base; DefaultBaseURL when empty
 	Client   *http.Client // http.DefaultClient when nil
 	Progress io.Writer    // download progress lines; nil = silent
 }
@@ -424,7 +424,12 @@ func (s Server) writeRafikiConf() error {
 		// The socket inherits the data directory's mode by default, but the
 		// setting is what makes the guarantee independent of the directory's
 		// mode on disk; 0700 is octal, as postgresql.conf reads it.
-		"unix_socket_permissions = 0700\n"
+		"unix_socket_permissions = 0700\n" +
+		// pg_textsearch hooks the planner at load time, so CREATE EXTENSION alone
+		// leaves its BM25 index unusable. Every artifact ships it
+		// (build/embedpg), and rafiki.conf is rewritten on every start, so a data
+		// directory created before it was preloaded picks it up too.
+		"shared_preload_libraries = 'pg_textsearch'\n"
 
 	path := filepath.Join(s.DataDir, "rafiki.conf")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

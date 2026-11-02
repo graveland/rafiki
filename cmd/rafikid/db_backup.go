@@ -57,20 +57,19 @@ func newDbBackupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backup <path>",
 		Short: "Write a backup of rafikid's database to <path>",
-		Long: `Writes one backup file, choosing the format by what this host can actually do:
+		Long: `Writes one backup file, in one of three formats:
 
   dump  pg_dump -Fc, a logical copy that works against any server the DSN names.
   txz   a physical copy of the embedded server's data directory (xz).
   tgz   the same copy, gzip-compressed.
 
---format picks one explicitly; without it the priority is dump > txz > tgz
-resolved at run time: when pg_dump is on PATH AND can dump this server the dump
-is preferred (it is the portable one). An embedded install knows its server's
-major version without starting anything, so a pg_dump that is absent, older, or
-unreadable is skipped — the priority falls through to the physical copy and says
-so on stderr — while a configured DSN, which has no data directory to fall back
-to, refuses. tgz is never chosen automatically because xz is linked into rafikid
-and cannot be missing; it is there for a consumer that only speaks gzip.
+--format picks one explicitly; without it the backup is the dump, the portable
+one. For the embedded server it is taken with the pg_dump in the server's own
+tree (nothing to install, and the server is started if it is down); for a
+configured DSN it needs a pg_dump on PATH and is refused when there is none. The
+physical formats are chosen only explicitly: a dump needs no downtime, and a
+physical copy of a running server does. tgz is there for a consumer that only
+speaks gzip.
 
 The dump is taken over the wire with the connection in the PG* environment,
 never on pg_dump's command line, exactly as psql receives it. A pg_dump older
@@ -109,7 +108,7 @@ clean. The extension is appended when <path> has none.`,
 	}
 
 	cmd.Flags().StringVar(&format, "format", "",
-		"dump (pg_dump -Fc), txz or tgz (physical, embedded only); default: dump when a usable pg_dump is on PATH, else txz")
+		"dump (pg_dump -Fc), txz or tgz (physical, embedded only); default: dump")
 	cmd.Flags().BoolVar(&force, "force", false,
 		"stop the embedded server for a physical copy even though it is running (its users lose the database for the whole copy)")
 
@@ -122,7 +121,7 @@ func runBackup(ctx context.Context, configured, path, format string, force bool,
 		return errors.New("--db (or RAFIKI_DB) is required")
 	}
 	if format == "" {
-		resolved, err := backupFormatPriority(ctx, configured, stderr)
+		resolved, err := backupFormatPriority(ctx, configured)
 		if err != nil {
 			return err
 		}
@@ -146,30 +145,17 @@ func runBackup(ctx context.Context, configured, path, format string, force bool,
 // through, because only the first is self-evident.
 var errPgDumpMissing = errors.New(pgDumpMissing)
 
-// backupFormatPriority resolves the default format against what this host can do
-// right now: dump > txz > tgz, where a step is skipped when its tool is not
-// there OR cannot do this job.
+// backupFormatPriority resolves the default format: a logical dump whenever one
+// can be taken, because a dump is portable and restores into any server of that
+// major. The physical formats (txz, tgz) are chosen only explicitly.
 //
-// The version matters here and not only at run time: an embedded install knows
-// its server's major without starting anything, so an old pg_dump is skipped and
-// the physical copy taken, rather than chosen and then refused. A configured DSN
-// has no data directory to fall back to, so there the refusal is the answer.
-//
-// tgz is unreachable by priority — xz is linked into rafikid, so the physical
-// copy it guards is never unavailable — and is chosen only explicitly.
-func backupFormatPriority(ctx context.Context, configured string, stderr io.Writer) (string, error) {
+// An embedded install can always dump: its own tree ships pg_dump at exactly the
+// server's major. A configured DSN has no data directory to fall back to, so a
+// pg_dump it cannot use is the answer, not a reason to copy files.
+func backupFormatPriority(ctx context.Context, configured string) (string, error) {
 	unusable := pgDumpUnusable(ctx, configured)
 	if unusable == nil {
 		return formatDump, nil
-	}
-	if isEmbedded(configured) {
-		// Say it: an operator who expected a dump needs to know why the file is
-		// an archive, and why it needs the server stopped.
-		if !errors.Is(unusable, errPgDumpMissing) {
-			fmt.Fprintf(stderr, "rafikid db backup: %v; falling back to a physical copy (%s)\n",
-				unusable, formatTXZ)
-		}
-		return formatTXZ, nil
 	}
 	if errors.Is(unusable, errPgDumpMissing) {
 		return "", fmt.Errorf("rafikid db backup: %w; a physical format (txz, tgz) copies the embedded "+
@@ -180,10 +166,13 @@ func backupFormatPriority(ctx context.Context, configured string, stderr io.Writ
 }
 
 // pgDumpUnusable reports why a dump cannot be taken from here, or nil when it
-// can. For an embedded install it also compares the client's major against the
-// server's, which is what makes the priority fall through instead of failing.
+// can. An embedded install always can: the pg_dump in its tree is built with the
+// server, so there is no client to find and no major to compare.
 func pgDumpUnusable(ctx context.Context, configured string) error {
-	pgDump, err := lookPgDump()
+	if isEmbedded(configured) {
+		return nil
+	}
+	pgDump, err := lookPgClient("pg_dump", pgDumpMissing)
 	if err != nil {
 		return errPgDumpMissing
 	}
@@ -191,22 +180,10 @@ func pgDumpUnusable(ctx context.Context, configured string) error {
 	if err != nil {
 		return fmt.Errorf("pg_dump --version: %w", err)
 	}
-	toolMajor, err := pgDumpMajor(string(out))
-	if err != nil {
+	// The server's own major needs a connection, and the run-time gate asks it
+	// there; the priority only decides what this host can offer.
+	if _, err := pgDumpMajor(string(out)); err != nil {
 		return err
-	}
-	if !isEmbedded(configured) {
-		// The server's own major needs a connection, and the run-time gate asks
-		// it there; the priority only decides what this host can offer.
-		return nil
-	}
-	serverMajor, err := embeddedServerMajor()
-	if err != nil {
-		return err
-	}
-	if toolMajor < serverMajor {
-		return fmt.Errorf("pg_dump is PostgreSQL %d, older than the embedded server's major "+
-			"version %d, so it cannot dump it", toolMajor, serverMajor)
 	}
 	return nil
 }
@@ -231,23 +208,22 @@ func withExtension(path, ext string) string {
 	}
 }
 
-// lookPgDump finds pg_dump, or reports the install remedy.
-func lookPgDump() (string, error) {
-	return lookPgClient("pg_dump", pgDumpMissing)
-}
-
 // runDumpBackup takes a logical backup with pg_dump -Fc.
 func runDumpBackup(ctx context.Context, configured, path string, stderr io.Writer) error {
-	// The client is looked up BEFORE the DSN is resolved, as psql does it:
-	// resolving an embedded DSN downloads and initdbs, and an operator without
-	// pg_dump should learn that in a millisecond rather than after that.
-	pgDump, err := lookPgDump()
-	if err != nil {
+	// A pg_dump a target needs from PATH is looked up BEFORE the DSN is resolved,
+	// as psql does it: an operator without one should learn that in a
+	// millisecond. An embedded target is never refused here — its own tree ships
+	// pg_dump, and resolving the DSN is what extracts it.
+	if err := precheckPgClient(configured, "pg_dump", pgDumpMissing); err != nil {
 		return fmt.Errorf("rafikid db backup: %w", err)
 	}
 	dsn, err := resolveDSN(ctx, configured)
 	if err != nil {
 		return err
+	}
+	pgDump, err := pgClientPath(configured, "pg_dump", pgDumpMissing)
+	if err != nil {
+		return fmt.Errorf("rafikid db backup: %w", err)
 	}
 	if err := checkPgDumpVersion(ctx, pgDump, dsn); err != nil {
 		return err

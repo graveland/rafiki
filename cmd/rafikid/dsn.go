@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -55,17 +55,6 @@ const embeddedSettingHint = "RAFIKI_DB=" + embeddedDSN
 // is up — a physical backup — needs the struct and nothing more.
 func embeddedServer() embedpg.Server {
 	return newEmbeddedServer()
-}
-
-// embeddedServerMajor is the PostgreSQL major the private server's binaries
-// carry, known without starting anything and without reading a data directory.
-func embeddedServerMajor() (int, error) {
-	major, err := strconv.Atoi(embedpg.MajorVersion)
-	if err != nil {
-		return 0, fmt.Errorf("embedded database: cannot read the server's major version %q: %w",
-			embedpg.MajorVersion, err)
-	}
-	return major, nil
 }
 
 // resolveDSN turns a configured DSN into one pgx can dial. "embedded" starts
@@ -125,8 +114,85 @@ func createEmbeddedDatabaseFor(ctx context.Context, s embedpg.Server) error {
 		defer cancel()
 		_ = conn.Close(cctx)
 	}()
-	return provisionEmbeddedDatabase(ctx, conn)
+	if err := provisionEmbeddedDatabase(ctx, conn); err != nil {
+		return err
+	}
+	return reconcileEmbeddedExtensions(ctx, s)
 }
+
+// embeddedExtensions are the extensions the embedded server's tree ships for
+// rafiki to use. Contrib is not listed: it is only ever created by the
+// migration that needs it.
+var embeddedExtensions = []string{"vector", "pg_textsearch"}
+
+// reconcileEmbeddedExtensions installs each embeddedExtensions entry the server
+// has and the database lacks, and brings an installed one to the version the
+// tree ships. Extension state is per database, so this dials the rafiki
+// database, which provisionEmbeddedDatabase has just made sure exists.
+//
+// It runs on every resolve, for the embedded server only: that server and its
+// tree are rafiki's, and its role is a superuser. Any other database's
+// extensions belong to whoever runs it. The versions come from the server itself
+// (pg_available_extensions), so there is nothing in Go to keep in step with the
+// artifact: a new tree is what makes an installed extension out of date.
+func reconcileEmbeddedExtensions(ctx context.Context, s embedpg.Server) error {
+	conn, err := pgx.Connect(ctx, s.DSN())
+	if err != nil {
+		return fmt.Errorf("connecting to the %s database to reconcile extensions: %w", embedpg.Database, err)
+	}
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), databaseCloseTimeout)
+		defer cancel()
+		_ = conn.Close(cctx)
+	}()
+	return reconcileExtensions(ctx, conn)
+}
+
+// reconcileExtensions runs the reconcile on a connection to the rafiki database.
+func reconcileExtensions(ctx context.Context, c dbCatalog) error {
+	if _, err := c.Exec(ctx, embeddedExtensionsStatement()); err != nil {
+		return fmt.Errorf("installing or updating the embedded server's extensions: %w", err)
+	}
+	return nil
+}
+
+// embeddedExtensionsStatement is the whole reconcile as one statement, so it is
+// atomic and its advisory lock is transaction-scoped, serializing concurrent
+// resolvers without leaving a session lock. An extension the server does not
+// list is skipped: that is a tree without it, not an error to refuse a start for.
+// A failed CREATE or UPDATE is an error, and names the extension in PostgreSQL's
+// own text.
+func embeddedExtensionsStatement() string {
+	quoted := make([]string, len(embeddedExtensions))
+	for i, name := range embeddedExtensions {
+		quoted[i] = "'" + strings.ReplaceAll(name, "'", "''") + "'"
+	}
+	return fmt.Sprintf(`DO $rafiki$
+DECLARE
+    ext  text;
+    want text;
+    have text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(%d);
+    FOREACH ext IN ARRAY ARRAY[%s] LOOP
+        SELECT default_version, installed_version INTO want, have
+          FROM pg_available_extensions WHERE name = ext;
+        IF NOT FOUND THEN
+            CONTINUE;
+        END IF;
+        IF have IS NULL THEN
+            EXECUTE format('CREATE EXTENSION %%I', ext);
+        ELSIF have <> want THEN
+            EXECUTE format('ALTER EXTENSION %%I UPDATE', ext);
+        END IF;
+    END LOOP;
+END;
+$rafiki$;`, embeddedExtensionsLockKey, strings.Join(quoted, ", "))
+}
+
+// embeddedExtensionsLockKey is the advisory lock the extension reconcile takes,
+// distinct from the role-defaults lock so the two never wait on each other.
+const embeddedExtensionsLockKey = 7261666970
 
 // provisionEmbeddedDatabase repairs existing installs as well as fresh ones.
 // A concurrent CREATE's duplicate is success here, BEFORE applying defaults;

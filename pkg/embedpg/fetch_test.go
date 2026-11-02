@@ -2,7 +2,6 @@ package embedpg
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -63,10 +62,9 @@ func buildTar(t *testing.T, entries []tarEntry) []byte {
 	return buf.Bytes()
 }
 
-// buildJar packs entries as a tar.xz and wraps that as the single entry of a
-// zip, which is exactly the shape of the zonky embedded-postgres jar: a zip
-// whose only interesting member is a .txz.
-func buildJar(t *testing.T, entryName string, entries []tarEntry) []byte {
+// buildTxz packs entries as a tar.xz, which is exactly the shape of a release
+// asset: the downloaded file is the archive, with no wrapper around it.
+func buildTxz(t *testing.T, entries []tarEntry) []byte {
 	t.Helper()
 
 	var txz bytes.Buffer
@@ -80,20 +78,7 @@ func buildJar(t *testing.T, entryName string, entries []tarEntry) []byte {
 	if err := xw.Close(); err != nil {
 		t.Fatalf("xz.Close: %v", err)
 	}
-
-	var jar bytes.Buffer
-	zw := zip.NewWriter(&jar)
-	w, err := zw.Create(entryName)
-	if err != nil {
-		t.Fatalf("zip.Create: %v", err)
-	}
-	if _, err := w.Write(txz.Bytes()); err != nil {
-		t.Fatalf("zip write: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("zip.Close: %v", err)
-	}
-	return jar.Bytes()
+	return txz.Bytes()
 }
 
 // sha256Hex is the digest the artifact table would carry for these bytes.
@@ -118,14 +103,14 @@ func overrideArtifact(t *testing.T, a artifact) {
 	})
 }
 
-// serveJar answers every request with jar and counts them.
-func serveJar(t *testing.T, jar []byte) (*httptest.Server, *atomic.Int64) {
+// serveArtifact answers every request with body and counts them.
+func serveArtifact(t *testing.T, body []byte) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		if _, err := w.Write(jar); err != nil {
-			t.Logf("write jar: %v", err)
+		if _, err := w.Write(body); err != nil {
+			t.Logf("write artifact: %v", err)
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -145,7 +130,7 @@ func testServer(t *testing.T) Server {
 	}
 }
 
-// assertNoDebris checks that a failed download or extraction left neither a jar
+// assertNoDebris checks that a failed download or extraction left neither an archive
 // nor a half-extracted tree beside BinDir. Both cleanups are error paths, so
 // without this they can be deleted and every test still passes.
 func assertNoDebris(t *testing.T, s Server) {
@@ -160,22 +145,28 @@ func TestArtifactForUnsupportedPlatform(t *testing.T) {
 	assert.NewCollecting(t).ErrorContains(err, "supported: darwin/amd64, darwin/arm64, linux/amd64, linux/arm64")
 }
 
-func TestJarURL(t *testing.T) {
-	got := jarURL(DefaultBaseURL, artifacts["darwin/arm64"])
-	want := "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-darwin-arm64v8/18.3.0/embedded-postgres-binaries-darwin-arm64v8-18.3.0.jar"
-	assert.NewCollecting(t).Eq(want, got, "jarURL")
+func TestAssetURL(t *testing.T) {
+	got := assetURL(DefaultBaseURL, artifacts["linux/arm64"])
+	want := "https://github.com/graveland/rafiki/releases/download/embedpg-v" + Version + "/postgres-linux-arm64.txz"
+	assert.NewCollecting(t).Eq(want, got, "assetURL")
 }
 
-// A jar that does not match its pinned digest must be rejected before anything
+// darwin is one universal tree: both architectures name the same asset, so one
+// published file and one digest serve them.
+func TestDarwinArchitecturesShareOneAsset(t *testing.T) {
+	assert.NewCollecting(t).EqDeep(artifacts["darwin/arm64"], artifacts["darwin/amd64"])
+}
+
+// An archive that does not match its pinned digest must be rejected before anything
 // is unpacked, and must leave nothing behind: neither a BinDir that later looks
 // complete nor a temporary download.
 func TestEnsureBinariesRejectsHashMismatch(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "bin", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "bin/postgres", mode: 0o755, typeflag: tar.TypeReg, body: "binary"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", strings.Repeat("ab", 32)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", strings.Repeat("ab", 32)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -195,15 +186,15 @@ func TestEnsureBinariesRejectsHashMismatch(t *testing.T) {
 // the symlink survive, and a second call is a no-op that never touches the
 // network again.
 func TestEnsureBinariesExtracts(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "bin", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "bin/postgres", mode: 0o755, typeflag: tar.TypeReg, body: "#!/bin/sh\n"},
 		{name: "lib", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "lib/libx.so.1", mode: 0o644, typeflag: tar.TypeReg, body: "shared object"},
 		{name: "lib/libx.so", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "libx.so.1"},
 	})
-	srv, hits := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, hits := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -229,13 +220,13 @@ func TestEnsureBinariesExtracts(t *testing.T) {
 }
 
 // An entry that climbs out of the extraction root aborts the whole extraction,
-// and nothing it produced survives: no BinDir, no jar, no temporary tree.
+// and nothing it produced survives: no BinDir, no archive, no temporary tree.
 func TestExtractRejectsPathTraversal(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "../evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -254,13 +245,13 @@ func TestExtractRejectsPathTraversal(t *testing.T) {
 // entry at the parent of the extraction root. The chain has to be resolved, not
 // read.
 func TestExtractRejectsSymlinkChain(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "a", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "."},
 		{name: "a/b", mode: 0o777, typeflag: tar.TypeSymlink, linkname: ".."},
 		{name: "a/b/evil", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -283,7 +274,7 @@ func TestExtractRejectsSymlinkChain(t *testing.T) {
 // beside the extraction root, and the extraction must fail rather than
 // half-succeed.
 func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "p", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "p/q", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "p/q/s", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "../.."},
@@ -291,8 +282,8 @@ func TestExtractRejectsDanglingSymlinkChain(t *testing.T) {
 		{name: "d", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "p/q/s/.."},
 		{name: "a", mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -387,12 +378,12 @@ func TestExtractTarRefusesAnEscapingArchive(t *testing.T) {
 // test still passes. The ordering is defence in depth (see ExtractTar); nothing
 // here would notice its absence.
 func TestExtractCreatesSymlinksLast(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "f", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "t"},
 		{name: "f", mode: 0o644, typeflag: tar.TypeReg, body: "body"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -409,12 +400,12 @@ func TestExtractCreatesSymlinksLast(t *testing.T) {
 // a directory-traversing name: writing the link is harmless, following it later
 // is not.
 func TestExtractRejectsEscapingSymlink(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "lib", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "lib/x", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "../../outside"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -427,14 +418,13 @@ func TestExtractRejectsEscapingSymlink(t *testing.T) {
 	assertNoDebris(t, s)
 }
 
-// A jar whose layout does not match the pinned artifact is an error naming the
-// entry that was looked for — not a silent empty tree.
-func TestEnsureBinariesMissingTxz(t *testing.T) {
-	jar := buildJar(t, "postgres-other.txz", []tarEntry{
-		{name: "bin/postgres", mode: 0o755, typeflag: tar.TypeReg, body: "binary"},
-	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+// A download that matches its pinned digest but is not an xz archive is an error,
+// not a silent empty tree: the digest vouches for who published the bytes, not
+// for what they are.
+func TestEnsureBinariesRejectsANonXZArchive(t *testing.T) {
+	body := []byte("not an archive")
+	srv, _ := serveArtifact(t, body)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(body)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -442,8 +432,9 @@ func TestEnsureBinariesMissingTxz(t *testing.T) {
 
 	err := s.ensureBinaries(context.Background())
 	c := assert.NewCollecting(t)
-	c.ErrorContains(err, "postgres-test.txz")
+	c.ErrorContains(err, "xz")
 	c.NoDirExists(s.BinDir)
+	assertNoDebris(t, s)
 }
 
 // An absolute entry name is refused by the extractor's own check. Without it,
@@ -451,11 +442,11 @@ func TestEnsureBinariesMissingTxz(t *testing.T) {
 // archive would appear to succeed, which is why the assertion is on the error
 // and on BinDir, not on a file beside it.
 func TestExtractRejectsAbsoluteEntryName(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: filepath.Join(t.TempDir(), "evil"), mode: 0o644, typeflag: tar.TypeReg, body: "pwned"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -471,12 +462,12 @@ func TestExtractRejectsAbsoluteEntryName(t *testing.T) {
 // A symlink inside the tree may point at anything except an absolute path: the
 // link itself is harmless to create, but following it later is not.
 func TestExtractRejectsAbsoluteSymlinkTarget(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "lib", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "lib/x", mode: 0o777, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -493,12 +484,12 @@ func TestExtractRejectsAbsoluteSymlinkTarget(t *testing.T) {
 // everything else rather than guessing: a device node or a fifo in the archive
 // is not something this package can make.
 func TestExtractRejectsUnsupportedEntryType(t *testing.T) {
-	jar := buildJar(t, "postgres-test.txz", []tarEntry{
+	txz := buildTxz(t, []tarEntry{
 		{name: "bin", mode: 0o755, typeflag: tar.TypeDir},
 		{name: "bin/pipe", mode: 0o644, typeflag: tar.TypeFifo},
 	})
-	srv, _ := serveJar(t, jar)
-	overrideArtifact(t, artifact{"test-platform", "postgres-test.txz", sha256Hex(jar)})
+	srv, _ := serveArtifact(t, txz)
+	overrideArtifact(t, artifact{"postgres-test.txz", sha256Hex(txz)})
 
 	s := testServer(t)
 	s.BaseURL = srv.URL
@@ -514,7 +505,7 @@ func TestExtractRejectsUnsupportedEntryType(t *testing.T) {
 }
 
 // A mirror answering anything but 200 is an error naming the status, and it
-// leaves nothing behind: no jar, no tree.
+// leaves nothing behind: no archive, no tree.
 func TestEnsureBinariesRejectsNon200(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -607,7 +598,7 @@ func TestDownloadStopsAtLimitWhenLengthIsNotDeclared(t *testing.T) {
 		read: &read,
 	}}
 
-	_, _, err := s.download(context.Background(), "http://example.invalid/jar", filepath.Dir(s.BinDir))
+	_, _, err := s.download(context.Background(), "http://example.invalid/postgres.txz", filepath.Dir(s.BinDir))
 	c := assert.NewCollecting(t)
 	c.ErrorContains(err, "exceeds the")
 	c.ErrorContains(err, "limit")

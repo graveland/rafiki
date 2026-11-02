@@ -2,7 +2,6 @@ package embedpg
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,36 +21,39 @@ import (
 )
 
 const (
-	// Version is the PostgreSQL release the pinned artifacts below carry. It
-	// moves only together with the four sha256 digests: a version bump without
-	// re-pinned digests fails every download closed.
-	Version = "18.3.0"
+	// Version names the artifact build: the PostgreSQL release and the build
+	// revision (build/embedpg/versions.env: PG_VERSION-BUILD_REV). The revision
+	// moves when only the extensions or bundled libraries change, because Default
+	// keys the extracted tree by this string. It moves only together with the
+	// sha256 digests below: a bump without re-pinned digests fails every
+	// download closed.
+	Version = "18.6-1"
 	// MajorVersion is what a data directory must report in PG_VERSION. A data
 	// directory from another major cannot be opened by these binaries, and
 	// pg_upgrade is not something this package does.
 	MajorVersion = "18"
-	// DefaultBaseURL is the Maven repository the zonky embedded-postgres
-	// binaries are published to.
-	DefaultBaseURL = "https://repo1.maven.org/maven2"
+	// DefaultBaseURL is where the embedpg-v<Version> release assets are
+	// published (.github/workflows/embedpg.yml).
+	DefaultBaseURL = "https://github.com/graveland/rafiki/releases/download"
 	// Port is the TCP port the server is configured for. It never listens on
 	// TCP (listen_addresses is empty); the port only names the unix socket
 	// file, .s.PGSQL.<Port>, inside the data directory.
 	Port = 5432
 )
 
-// artifact is one platform's build of the server binaries: the Maven artifact
-// suffix, the .txz entry inside the jar, and the digest of the jar itself.
+// artifact is one platform's build of the server tree: the release asset's file
+// name and the digest of that file.
 type artifact struct {
-	platform string // Maven artifact platform suffix
-	txz      string // the .txz entry inside the jar
-	sha256   string // hex sha256 of the downloaded .jar
+	file   string // release asset name, a .txz of the extracted tree
+	sha256 string // hex sha256 of the downloaded file
 }
 
+// darwin ships one universal (x86_64 + arm64) tree for both architectures.
 var artifacts = map[string]artifact{
-	"darwin/arm64": {"darwin-arm64v8", "postgres-darwin-arm_64.txz", "a18ec9ec6a905e04f5a08a8f7870bddadd635feb54dee332a3daf80fada3cb1a"},
-	"darwin/amd64": {"darwin-amd64", "postgres-darwin-x86_64.txz", "cb68c57232945f5e74db946e6077d70cec56bfed35959b21acc750cc80ca0977"},
-	"linux/amd64":  {"linux-amd64", "postgres-linux-x86_64.txz", "1974c3a59c3ae010e9818e81637e425aad94eaac26e4ef533b42e081fe7ca345"},
-	"linux/arm64":  {"linux-arm64v8", "postgres-linux-arm_64.txz", "1fb555a6602c13a113ab1f0cc9224d599948e85e51ac5f001393605505eaf78e"},
+	"darwin/arm64": {"postgres-darwin-universal.txz", "cfdb27871e5ad87e5a69be1e4d62c15a6158dad553e634bbbcb9451d00ec70ed"},
+	"darwin/amd64": {"postgres-darwin-universal.txz", "cfdb27871e5ad87e5a69be1e4d62c15a6158dad553e634bbbcb9451d00ec70ed"},
+	"linux/amd64":  {"postgres-linux-amd64.txz", "14daf3936b0bc2ee00e220cc750647e96eaf3b3b04665b1f6f9d1dae24386c14"},
+	"linux/arm64":  {"postgres-linux-arm64.txz", "519d4417a4a8d65ac2bfba34a4679798704cbcd7589e3161bb9f04e0be5b7abe"},
 }
 
 // artifactFor returns the pinned build for goos/goarch. The platform list in
@@ -74,11 +76,9 @@ func supportedPlatforms() []string {
 	return keys
 }
 
-// jarURL is the Maven download URL of a's jar under base.
-func jarURL(base string, a artifact) string {
-	const prefix = "/io/zonky/test/postgres/embedded-postgres-binaries-"
-	name := "embedded-postgres-binaries-" + a.platform + "-" + Version + ".jar"
-	return base + prefix + a.platform + "/" + Version + "/" + name
+// assetURL is the download URL of a's release asset under base.
+func assetURL(base string, a artifact) string {
+	return base + "/embedpg-v" + Version + "/" + a.file
 }
 
 // baseURL is BaseURL with the default filled in.
@@ -113,7 +113,7 @@ func (s Server) ensureBinaries(ctx context.Context) error {
 		return fmt.Errorf("embedpg: %w", err)
 	}
 	// Debris from a run that was killed mid-download or mid-extract: neither a
-	// partial jar nor a partial tree can be resumed, and nothing else ever
+	// partial download nor a partial tree can be resumed, and nothing else ever
 	// removes them.
 	if stale, err := filepath.Glob(filepath.Join(dir, "embedpg-*")); err == nil {
 		for _, path := range stale {
@@ -121,34 +121,34 @@ func (s Server) ensureBinaries(ctx context.Context) error {
 		}
 	}
 
-	url := jarURL(s.baseURL(), a)
+	url := assetURL(s.baseURL(), a)
 	if s.Progress != nil {
-		fmt.Fprintf(s.Progress, "downloading PostgreSQL %s (%s)...\n", Version, a.platform)
+		fmt.Fprintf(s.Progress, "downloading PostgreSQL %s (%s)...\n", Version, a.file)
 	}
-	jar, digest, err := s.download(ctx, url, dir)
+	archive, digest, err := s.download(ctx, url, dir)
 	if err != nil {
 		return err
 	}
 	if digest != a.sha256 {
-		os.Remove(jar)
+		os.Remove(archive)
 		return fmt.Errorf("embedpg: %s: sha256 mismatch: want %s, got %s", url, a.sha256, digest)
 	}
 	if s.Progress != nil {
 		fmt.Fprintf(s.Progress, "verified sha256 %s\n", digest)
 	}
-	if err := s.extract(jar, url, a); err != nil {
-		os.Remove(jar)
+	if err := s.extract(archive, url); err != nil {
+		os.Remove(archive)
 		return err
 	}
-	// The tree is what this function is for, and it is complete: a jar that will
-	// not go away is debris the next run's embedpg-* sweep collects, not a failed
-	// install.
-	_ = os.Remove(jar)
+	// The tree is what this function is for, and it is complete: an archive that
+	// will not go away is debris the next run's embedpg-* sweep collects, not a
+	// failed install.
+	_ = os.Remove(archive)
 	return nil
 }
 
-// maxDownloadBytes bounds one jar download. The pinned artifacts are 15-35 MB;
-// the limit is generous enough for a future build and small enough that a
+// maxDownloadBytes bounds one archive download. The pinned artifacts are 17-70
+// MB; the limit is generous enough for a future build and small enough that a
 // broken or hostile mirror cannot fill the cache disk before the digest check
 // refuses the bytes.
 //
@@ -180,7 +180,7 @@ func (s Server) download(ctx context.Context, url, dir string) (string, string, 
 			url, resp.ContentLength, maxDownloadBytes)
 	}
 
-	f, err := os.CreateTemp(dir, "embedpg-*.jar")
+	f, err := os.CreateTemp(dir, "embedpg-*.txz")
 	if err != nil {
 		return "", "", fmt.Errorf("embedpg: %w", err)
 	}
@@ -205,36 +205,19 @@ func (s Server) download(ctx context.Context, url, dir string) (string, string, 
 	return f.Name(), hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// extract unpacks the .txz entry of the jar at jarPath into BinDir, atomically:
-// the tree is built in a sibling temporary directory and renamed into place, so
-// an interrupted extraction leaves no half-populated BinDir to be mistaken for
-// a complete one.
-func (s Server) extract(jarPath, url string, a artifact) error {
-	zr, err := zip.OpenReader(jarPath)
+// extract unpacks the .txz at archivePath into BinDir, atomically: the tree is
+// built in a sibling temporary directory and renamed into place, so an
+// interrupted extraction leaves no half-populated BinDir to be mistaken for a
+// complete one.
+func (s Server) extract(archivePath, url string) error {
+	f, err := os.Open(archivePath)
 	if err != nil {
-		return fmt.Errorf("embedpg: %s: %w", jarPath, err)
+		return fmt.Errorf("embedpg: %w", err)
 	}
-	defer zr.Close()
-
-	var entry *zip.File
-	for _, f := range zr.File {
-		if f.Name == a.txz {
-			entry = f
-			break
-		}
-	}
-	if entry == nil {
-		return fmt.Errorf("embedpg: %s has no %s", url, a.txz)
-	}
-
-	rc, err := entry.Open()
+	defer f.Close()
+	xr, err := xz.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("embedpg: %s: %w", url, err)
-	}
-	defer rc.Close()
-	xr, err := xz.NewReader(rc)
-	if err != nil {
-		return fmt.Errorf("embedpg: %s: %s: %w", url, a.txz, err)
 	}
 
 	tmp, err := os.MkdirTemp(filepath.Dir(s.BinDir), "embedpg-extract-*")

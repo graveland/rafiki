@@ -174,16 +174,58 @@ func TestPsqlInvocationMissingPsql(t *testing.T) {
 	c.StrContains(err.Error(), "brew install libpq", "error must name the install remedy, got: %v", err)
 }
 
-// The missing-client error must win over resolving the DSN: on RAFIKI_DB=embedded
-// resolving downloads tens of megabytes and runs initdb, and a user with no psql
-// should not sit through that to be told to install it.
-func TestPsqlCmdChecksTheClientBeforeResolving(t *testing.T) {
+// fakeEmbeddedTree points the embedded server at a scratch tree whose bin/ holds
+// an executable stub for each name, and returns the bin/ directory.
+func fakeEmbeddedTree(t *testing.T, names ...string) string {
+	t.Helper()
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", bin, err)
+	}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	orig := newEmbeddedServer
+	t.Cleanup(func() { newEmbeddedServer = orig })
+	newEmbeddedServer = func() embedpg.Server { return embedpg.Server{BinDir: root} }
+	return bin
+}
+
+// A client a REMOTE database needs from PATH is refused before anything else
+// happens: a user with no psql should learn that at once, and nothing about the
+// embedded server is touched.
+func TestPsqlCmdChecksTheClientBeforeConnecting(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	orig := newEmbeddedServer
 	t.Cleanup(func() { newEmbeddedServer = orig })
 	newEmbeddedServer = func() embedpg.Server {
-		t.Fatal("the DSN was resolved before psql was looked up")
+		t.Fatal("the embedded server was consulted for a remote database")
 		return embedpg.Server{}
+	}
+
+	cmd := newDbCmd()
+	cmd.SetArgs([]string{"psql", "--db", "postgres://u@h/db"})
+	err := cmd.Execute()
+
+	c := assert.NewAborting(t)
+	c.Error(err, "want the missing-psql error, got nil")
+	c.StrContains(err.Error(), "brew install libpq", "error must be the install remedy, got: %v", err)
+}
+
+// The embedded server's own tree ships psql, so an embedded target with nothing
+// on PATH is NOT refused up front: the command goes on to resolve the DSN, which
+// is what extracts the tree.
+func TestPsqlCmdEmbeddedNeedsNoClientOnPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	resolved := false
+	orig := newEmbeddedServer
+	t.Cleanup(func() { newEmbeddedServer = orig })
+	newEmbeddedServer = func() embedpg.Server {
+		resolved = true
+		return embedpg.Server{} // not a usable server: resolving it fails, which is enough
 	}
 
 	cmd := newDbCmd()
@@ -191,8 +233,64 @@ func TestPsqlCmdChecksTheClientBeforeResolving(t *testing.T) {
 	err := cmd.Execute()
 
 	c := assert.NewAborting(t)
-	c.Error(err, "want the missing-psql error, got nil")
-	c.StrContains(err.Error(), "brew install libpq", "error must be the install remedy, got: %v", err)
+	c.True(resolved, "the embedded DSN was never resolved")
+	c.Error(err, "an unusable embedded server must fail to resolve")
+	c.False(strings.Contains(err.Error(), "brew install libpq"),
+		"a missing PATH psql must not be reported for an embedded target: %v", err)
+}
+
+// pgClientPath prefers the embedded tree's program for the embedded server and
+// only for it: another database never runs a client from a tree it does not
+// belong to, and a tree without the program falls back to PATH.
+func TestPgClientPath(t *testing.T) {
+	bin := fakeEmbeddedTree(t, "pg_dump", "psql")
+	pathDir := t.TempDir()
+	for _, name := range []string{"pg_dump", "pg_restore"} {
+		if err := os.WriteFile(filepath.Join(pathDir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", pathDir)
+	remote := "postgres://u@h/db"
+
+	c := assert.NewCollecting(t)
+
+	got, err := pgClientPath(embeddedDSN, "pg_dump", pgDumpMissing)
+	c.NoError(err)
+	c.Eq(filepath.Join(bin, "pg_dump"), got, "embedded: the tree's pg_dump wins over PATH's")
+
+	got, err = pgClientPath(embeddedDSN, "pg_restore", pgRestoreMissing)
+	c.NoError(err)
+	c.Eq(filepath.Join(pathDir, "pg_restore"), got, "embedded: a program the tree lacks falls back to PATH")
+
+	got, err = pgClientPath(remote, "pg_dump", pgDumpMissing)
+	c.NoError(err)
+	c.Eq(filepath.Join(pathDir, "pg_dump"), got, "a remote database uses PATH even when the tree has the program")
+
+	t.Setenv("PATH", t.TempDir())
+	_, err = pgClientPath(remote, "psql", psqlMissing)
+	c.ErrorContains(err, "brew install libpq", "a remote database must not borrow the embedded tree's psql")
+}
+
+// The cheap look-up before the DSN is resolved never refuses an embedded target
+// (its tree supplies the client) and always refuses a remote one that has none.
+func TestPrecheckPgClient(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	c := assert.NewCollecting(t)
+	c.NoError(precheckPgClient(embeddedDSN, "pg_restore", pgRestoreMissing), "embedded is never refused up front")
+	c.ErrorContains(precheckPgClient("postgres://u@h/db", "pg_restore", pgRestoreMissing),
+		"pg_restore not found on PATH", "a remote database with no client is refused")
+}
+
+// psqlInvocation runs the embedded tree's psql for the embedded server.
+func TestPsqlInvocationUsesTheEmbeddedTree(t *testing.T) {
+	bin := fakeEmbeddedTree(t, "psql")
+	t.Setenv("PATH", t.TempDir())
+
+	inv, err := psqlInvocation(embeddedDSN, "host=/tmp/x port=5432 user=rafiki dbname=rafiki", nil, nil)
+	c := assert.NewCollecting(t)
+	c.NoError(err, "psqlInvocation returned error")
+	c.Eq(filepath.Join(bin, "psql"), inv.path, "psql path")
 }
 
 // No error on the psql path may echo any part of a password. A password that an
