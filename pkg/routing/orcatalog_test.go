@@ -53,15 +53,25 @@ func TestResolveLatest(t *testing.T) {
 // Anthropic tier name to the same native id, and TestResolveModelBareLatestIsRefused
 // pins the fourth: a bare "<tier>-latest" is a model alias or an error, never a
 // model, so it is refused with the provider-qualified spelling as the hint.
+//
+// A routing spec's bracket tail is not part of the id: it rides ALONG onto the
+// resolved id, exactly as llm.ResolveProviderLatest carries one onto a
+// provider-pinned id, and it never turns the name into a refusal.
 func TestResolveModelProviderLatest(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c, srv := newTestCatalog(t, orFixture)
 	defer srv.Close()
 
-	for _, req := range []string{"anthropic/haiku-latest", "anthropic/claude-haiku-latest", "~anthropic/claude-haiku-latest"} {
-		got, err := ResolveModel(c, "", req)
-		ck.Require().NoError(err, "ResolveModel(%q)", req)
-		ck.Eq("claude-haiku-4-5", got, "ResolveModel(%q) =", req)
+	for _, tc := range []struct{ req, want string }{
+		{"anthropic/haiku-latest", "claude-haiku-4-5"},
+		{"anthropic/claude-haiku-latest", "claude-haiku-4-5"},
+		{"~anthropic/claude-haiku-latest", "claude-haiku-4-5"},
+		{"anthropic/opus-latest[sort=price]", "claude-opus-4-8[sort=price]"},
+		{"~anthropic/claude-opus-latest[sort=price,nodata]", "claude-opus-4-8[sort=price,nodata]"},
+	} {
+		got, err := ResolveModel(c, "", tc.req)
+		ck.Require().NoError(err, "ResolveModel(%q)", tc.req)
+		ck.Eq(tc.want, got, "ResolveModel(%q) =", tc.req)
 	}
 }
 

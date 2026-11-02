@@ -92,6 +92,22 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 	if requested == "" {
 		return "", errors.New("no model specified: set a per-conversation model or a default (WithDefaultModel)")
 	}
+	// A bracketed tail is a routing spec, not part of the id. A parsed spec RIDES
+	// ALONG onto a resolved latest id — llm.ResolveProviderLatest carries one over
+	// onto a provider-pinned id the same way — so every decision below reads the
+	// BASE and the tail is re-appended to whatever the tier resolves to. A spec
+	// ParseModel refuses is still cut at its "[" for the bare-name test (the tail
+	// is no part of the id either way, and the parse error belongs to the spec
+	// layer, never to model resolution), but it is NOT carried onto a tier: an
+	// unparsable spec must keep falling through as it always did, never be
+	// silently dropped from a resolved id.
+	base, spec := requested, ""
+	specOK := true
+	if b, _, perr := ParseModel(requested); perr == nil {
+		base, spec = b, requested[len(b):]
+	} else if i := strings.IndexByte(requested, '['); i > 0 {
+		base, specOK = requested[:i], false
+	}
 	// An "anthropic/<x>" id names the native Anthropic sender under the shared
 	// "provider/model" convention: strip the prefix and resolve <x> exactly as a
 	// bare id, so the concrete result has no slash and downstream slash-routing
@@ -99,36 +115,28 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 	// and is handled in the last arm as a slash id.)
 	//
 	// "anthropic/<tier>-latest" and OpenRouter's "~anthropic/claude-<tier>-latest"
-	// pin to the newest native id. A bare "<tier>-latest" is not a spelling:
-	// slash-free names are aliases, and a provider-less latest would need a
-	// global owner.
-	local, native := StripNativeAnthropicPrefix(requested)
-	if rest, ok := strings.CutPrefix(requested, "~"+NativeAnthropicPrefix); ok {
+	// pin to the newest native id, carrying their routing spec with them. A bare
+	// "<tier>-latest" is not a spelling: slash-free names are aliases, and a
+	// provider-less latest would need a global owner.
+	local, native := StripNativeAnthropicPrefix(base)
+	if rest, ok := strings.CutPrefix(base, "~"+NativeAnthropicPrefix); ok {
 		local, native = rest, true
 	}
-	if native {
+	if native && specOK {
 		if tier, isLatest := LatestTier(VendorAnthropic, local); isLatest {
 			if cat != nil {
 				if antID, _, resolved := cat.ResolveTier(VendorAnthropic, tier); resolved {
-					return antID, nil
+					return antID + spec, nil
 				}
 			}
 			return "", fmt.Errorf("cannot resolve %q: OpenRouter model catalog unavailable", requested)
 		}
 	}
-	if stripped, ok := StripNativeAnthropicPrefix(requested); ok {
-		requested = stripped
-	}
-	// A bracketed tail is a routing spec, not part of the id, so the bare-name
-	// test reads the BASE: "haiku-latest[sort=price]" is refused like
-	// "haiku-latest". A spec ParseModel refuses is still cut at its "[" — the
-	// tail is no part of the id either way, and the parse error is the spec
-	// layer's to report, never this function's.
-	base := requested
-	if b, _, perr := ParseModel(requested); perr == nil {
-		base = b
-	} else if i := strings.IndexByte(base, '['); i > 0 {
-		base = base[:i]
+	if stripped, ok := StripNativeAnthropicPrefix(base); ok {
+		// The marker is dropped from what is RETURNED too: the concrete result has
+		// no slash, so downstream slash-routing leaves it on the direct Anthropic
+		// path. The spec tail is re-attached, exactly as it was on the way in.
+		base, requested = stripped, stripped+spec
 	}
 	if !strings.Contains(base, "/") && !strings.HasPrefix(base, "~") && strings.HasSuffix(base, "-latest") {
 		return "", fmt.Errorf("model %q: a bare -latest name is not a model; spell it with its provider, e.g. %q",
