@@ -196,15 +196,6 @@ func rawEndpointGeneration(t *testing.T, pool *pgxpool.Pool, owner, endpoint str
 	return generation
 }
 
-func rawBinding(t *testing.T, pool *pgxpool.Pool, owner, endpoint string) (resource *string, generation *int64) {
-	t.Helper()
-	err := pool.QueryRow(context.Background(), `
-		SELECT bound_resource, bound_grant_generation FROM conversations.mcp_endpoint
-		 WHERE owner_user_id = $1::uuid AND endpoint = $2`, owner, endpoint).Scan(&resource, &generation)
-	assert.NewAborting(t).NoError(err, "read endpoint binding")
-	return resource, generation
-}
-
 // The AAD is a wire format between everything that ever seals or opens these
 // blobs, so its exact shape is pinned here, including the owner normalisation.
 func TestMcpOAuthStoreAADShape(t *testing.T) {
