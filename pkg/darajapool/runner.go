@@ -125,14 +125,16 @@ func NewRunner(pool *Pool, childID string) *Runner {
 // local subprocess often exits on its own once it sees stdin EOF, and only
 // escalates to Terminate() after waiting out the full shutdownTimeout (which
 // defaults to 180s — see Controller.Kill) if that assumption doesn't pan out.
-// A daraja-hosted claude has no such EOF-triggered exit at all, so a no-op
-// Close here meant every kill silently sat idle for the full grace window
-// before Terminate ever ran. Close instead triggers the real shutdown
-// sequence immediately — the same one Terminate itself uses — which is safe
-// to invoke early since shutdown() is idempotent on the "already told to
-// stop" part (doneOnce) and a redundant later Terminate() call (if the
-// escalation timer fires before this one completes) just repeats the same
-// RPC against an already-gone connection.
+// A no-op Close here would never reach the hosted process: the EOF a
+// daraja-hosted claude answers is its own stdin at the far end, and only the
+// host's Shutdown closes that (then waits eofGrace for the exit before
+// signalling — pkg/daraja's stopLocked). So every kill silently sat idle for
+// the full graceful window before Terminate ever ran. Close instead triggers
+// the real shutdown sequence immediately — the same one Terminate itself
+// uses — which is safe to invoke early since shutdown() is idempotent on the
+// "already told to stop" part (doneOnce) and a redundant later Terminate() call
+// (if the escalation timer fires before this one completes) just repeats the
+// same RPC against an already-gone connection.
 type darajaStdin struct {
 	runner *Runner
 }
