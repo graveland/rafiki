@@ -14,6 +14,16 @@
 // wrapper belongs to the runtime and sits OUTSIDE these checks; the redirect
 // rule in network.go is what keeps it from re-applying a credential to a
 // redirected URL.
+//
+// What a logout can and cannot undo: invalidating a grant is local and complete —
+// the rows are tombstoned and every fence advances — and the token the store
+// detaches is then offered to the authorization server's revocation endpoint,
+// bounded and best effort. Only the REFRESH token is offered (the access token
+// when the grant has no refresh token, which is the only case it is sent at all):
+// refresh tokens are the long-lived half, and RFC 7009 accepts one token per
+// request. An access token that leaked therefore stays valid until its own expiry,
+// which is why nothing in this package ever puts one in a log, an error or an RPC
+// response.
 package mcpoauth
 
 import (

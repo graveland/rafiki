@@ -164,25 +164,27 @@ func TestMcpOAuthDiscoveryFetchesMetadataOnlyOnce(t *testing.T) {
 	d := fx.begin()
 	fx.mustComplete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
 
-	// Replaying the SDK's own validation must not cost a single request beyond
-	// the ones the SDK itself made.
-	if got := fx.oauth.prmRequestCount("/.well-known/oauth-protected-resource/mcp"); got != 1 {
-		t.Fatalf("path metadata hits = %d, want 1", got)
+	// Replaying the SDK's own validation must not cost a single request beyond the
+	// ones the SDK itself made, counted per URL: a total leaves room for one URL to
+	// be fetched twice while another is skipped, which is exactly the failure this
+	// pins.
+	fx.oauth.mu.Lock()
+	prmPathHits := fx.oauth.prmHits["/.well-known/oauth-protected-resource/mcp"]
+	prmRootHits := fx.oauth.prmHits["/.well-known/oauth-protected-resource"]
+	asmOAuthHits := fx.oauth.asmHits["/.well-known/oauth-authorization-server"]
+	asmOIDCHits := fx.oauth.asmHits["/.well-known/openid-configuration"]
+	fx.oauth.mu.Unlock()
+	if prmPathHits != 1 {
+		t.Fatalf("path metadata hits = %d, want 1", prmPathHits)
 	}
-	if got := fx.oauth.prmRequestCount("/.well-known/oauth-protected-resource"); got > 1 {
-		t.Fatalf("root metadata hits = %d, want at most 1", got)
+	if prmRootHits != 0 {
+		t.Fatalf("root metadata hits = %d, want 0 (the path location answered)", prmRootHits)
 	}
-	if got := fx.oauth.asmHitCount(); got != 1 {
-		t.Fatalf("authorization server metadata hits = %d, want 1", got)
+	if asmOAuthHits != 1 {
+		t.Fatalf("authorization server metadata hits = %d, want 1", asmOAuthHits)
 	}
-	gets := 0
-	for _, req := range fx.oauth.requestLog() {
-		if strings.HasPrefix(req, "GET ") {
-			gets++
-		}
-	}
-	if gets > 3 {
-		t.Fatalf("the login made %d metadata GETs: %v", gets, fx.oauth.requestLog())
+	if asmOIDCHits != 0 {
+		t.Fatalf("OIDC discovery hits = %d, want 0", asmOIDCHits)
 	}
 }
 
@@ -221,7 +223,10 @@ func TestMcpOAuthDiscoveryReplayServesOnlyRecordedBytes(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
-	entries := recorder.since(0)
+	entries, err := recorder.since(0)
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
 	if len(entries) != 2 {
 		t.Fatalf("recorded %d responses, want 2", len(entries))
 	}
@@ -480,7 +485,11 @@ func TestMcpOAuthDiscoveryRefusesADuplicateRecording(t *testing.T) {
 			body: `{"resource":"https://mcp.example/mcp","authorization_servers":["https://as.example"]}`},
 	})
 
-	client := newReplayClient(nil, rec.since(0))
+	entries, serr := rec.since(0)
+	if serr != nil {
+		t.Fatalf("since: %v", serr)
+	}
+	client := newReplayClient(nil, entries)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://mcp.example/.well-known/oauth-protected-resource", nil)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -537,7 +546,11 @@ func TestMcpOAuthDiscoveryReplaysAnIdenticalDuplicate(t *testing.T) {
 			body: `{"resource":"https://mcp.example","authorization_servers":["https://as.example"]}`},
 	})
 
-	client := newReplayClient(nil, rec.since(0))
+	entries, serr := rec.since(0)
+	if serr != nil {
+		t.Fatalf("since: %v", serr)
+	}
+	client := newReplayClient(nil, entries)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://mcp.example/.well-known/oauth-protected-resource", nil)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -677,7 +690,11 @@ func TestMcpOAuthDiscoveryRedactsURLCredentials(t *testing.T) {
 			{method: "GET", url: target, status: http.StatusOK, body: `{"resource":"https://mcp.example"}`},
 			{method: "GET", url: target, status: http.StatusForbidden, body: `{}`},
 		})
-		transport := newReplayClient(nil, rec.since(0)).Transport
+		entries, serr := rec.since(0)
+		if serr != nil {
+			t.Fatalf("since: %v", serr)
+		}
+		transport := newReplayClient(nil, entries).Transport
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 		if err != nil {
 			t.Fatalf("request: %v", err)
@@ -865,4 +882,146 @@ func TestMcpOAuthDiscoveryRedactsEachMessage(t *testing.T) {
 			t.Fatalf("error = %v, want the missing-endpoint refusal", err)
 		}
 	})
+}
+
+func TestMcpOAuthDiscoveryUsesTheChallengeTheSDKWasHanded(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "https://mcp.example/mcp"
+	challenge := func(metadata string) scriptedExchange {
+		return scriptedExchange{
+			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="` + metadata + `"`}},
+		}
+	}
+	first := "https://mcp.example/.well-known/oauth-protected-resource/mcp"
+	second := "https://mcp.example/.well-known/oauth-protected-resource/other"
+
+	// Two challenges in one window: the round starts at the first, which is the
+	// response the SDK's Authorize was handed. A backward scan would answer for
+	// the retry instead.
+	rec := recordScript(t, ctx, []scriptedExchange{challenge(first), challenge(second)})
+	entries, err := rec.since(0)
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
+	got, err := recordedChallengeMetadataURL(entries, endpoint)
+	if err != nil {
+		t.Fatalf("recordedChallengeMetadataURL: %v", err)
+	}
+	if got != first {
+		t.Fatalf("challenge metadata URL = %q, want the first one %q", got, first)
+	}
+}
+
+func TestMcpOAuthDiscoveryRefusesAnUnparsableChallenge(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "https://mcp.example/mcp"
+	// The SDK fails Authorize outright on a challenge it cannot parse, so a later
+	// well-formed one must not be used in its place.
+	rec := recordScript(t, ctx, []scriptedExchange{
+		{
+			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			header: http.Header{"Www-Authenticate": []string{"Bearer scope"}},
+		},
+		{
+			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`}},
+		},
+	})
+	entries, err := rec.since(0)
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
+	if _, err := recordedChallengeMetadataURL(entries, endpoint); err == nil {
+		t.Fatal("an unparsable challenge was skipped instead of failing the round")
+	} else if !strings.Contains(err.Error(), "cannot be parsed") {
+		t.Fatalf("error = %v, want the parse refusal", err)
+	}
+}
+
+func TestMcpOAuthDiscoveryValidatesTheRegistrationEndpoint(t *testing.T) {
+	// DCR has already happened by the time metadata is captured, so this is a
+	// post-hoc gate: metadata naming a registration endpoint outside the operator's
+	// policy fails the login rather than being accepted as the round's truth.
+	strict := testPolicy(t, Config{}, nil, nil)
+	// IP literals so nothing here depends on a lookup: the registration endpoint is
+	// the only target the policy refuses.
+	err := validateDiscovered(context.Background(), strict, validatedDiscovery{
+		RawResource:           "https://93.184.216.34/mcp",
+		Issuer:                "https://93.184.216.34",
+		AuthorizationEndpoint: "https://93.184.216.34/authorize",
+		TokenEndpoint:         "https://93.184.216.34/token",
+		RegistrationEndpoint:  "http://127.0.0.1/register",
+	})
+	if err == nil {
+		t.Fatal("a registration endpoint outside the policy was accepted")
+	}
+	if !strings.Contains(err.Error(), "registration endpoint") {
+		t.Fatalf("error = %v, want it to name the registration endpoint", err)
+	}
+
+	// The same metadata with a policy-allowed registration endpoint passes.
+	if err := validateDiscovered(context.Background(), strict, validatedDiscovery{
+		RawResource:           "https://93.184.216.34/mcp",
+		Issuer:                "https://93.184.216.34",
+		AuthorizationEndpoint: "https://93.184.216.34/authorize",
+		TokenEndpoint:         "https://93.184.216.34/token",
+		RegistrationEndpoint:  "https://93.184.216.34/register",
+	}); err != nil {
+		t.Fatalf("validateDiscovered: %v", err)
+	}
+}
+
+func TestMcpOAuthDiscoveryReportsAnOverflowedRecorder(t *testing.T) {
+	ctx := context.Background()
+	var calls int
+	rec := newRecordRequest(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"n":` + fmt.Sprint(calls) + `}`)),
+			Request:    req,
+		}, nil
+	}), ctx)
+
+	for i := 0; i < discoveryMaxRecordedResponses+1; i++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://mcp.example/x", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		resp, err := rec.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("record: %v", err)
+		}
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+
+	// The window no longer holds this round's evidence, and it says so instead of
+	// blaming a missing challenge.
+	entries, err := rec.since(0)
+	if err == nil {
+		t.Fatalf("since returned %d entries for an overflowed recorder", len(entries))
+	}
+	if !errors.Is(err, errObservationOverflow) {
+		t.Fatalf("since = %v, want errObservationOverflow", err)
+	}
+	if strings.Contains(err.Error(), "authentication challenge") {
+		t.Fatalf("the failure blames the challenge: %v", err)
+	}
+	// And a capture over that recorder surfaces the same reason rather than the
+	// misleading one.
+	if _, capErr := captureDiscovery(ctx, discoveryInput{
+		Endpoint:         "https://mcp.example/mcp",
+		AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape("https://mcp.example/mcp"),
+		Recorder:         rec,
+		Policy:           publicPolicy(t),
+	}); !errors.Is(capErr, errObservationOverflow) {
+		t.Fatalf("captureDiscovery = %v, want errObservationOverflow", capErr)
+	}
 }

@@ -47,9 +47,18 @@ import (
 //     is an error, not a request.
 
 // discoveryMaxRecordedResponses bounds how many responses one login flow keeps.
-// A flow makes a handful of metadata requests per consent round; the cap exists
-// so a hostile or broken server cannot grow the recorder without bound.
+// A flow makes a handful of metadata requests per consent round, so reaching this
+// is a server asking for far more than any login needs. It is a hard stop, not a
+// quiet one: see recordRequest.overflowAt.
 const discoveryMaxRecordedResponses = 64
+
+// errObservationOverflow reports that a login flow made more HTTP requests than
+// the recorder keeps, so the evidence for its consent round no longer exists.
+//
+// It is deliberately its own error: the alternative is the mirror looking at an
+// empty window and refusing the round with "no authentication challenge", which
+// blames the wrong thing and hides a recording limit behind a server's fault.
+var errObservationOverflow = errors.New("mcpoauth: the login made more requests than can be recorded")
 
 // errorReplayUnavailable reports that a replay could not be answered from
 // recorded evidence: the request was never made, or its body was not captured
@@ -147,6 +156,11 @@ type recordRequest struct {
 
 	mu      sync.Mutex
 	entries []*recordedResponse
+	// overflowAt is the entry count at which the cap was first reached, or 0 when
+	// it never was. Once set, nothing further is recorded and no body is teed: an
+	// entry kept outside the slice would be an orphan whose body grew with no
+	// reader, and a window that silently lost entries is not evidence.
+	overflowAt int
 }
 
 func newRecordRequest(next http.RoundTripper, ctx context.Context) *recordRequest {
@@ -183,14 +197,18 @@ func (r *recordRequest) RoundTrip(req *http.Request) (*http.Response, error) {
 		header: resp.Header.Clone(),
 	}
 	r.mu.Lock()
-	if len(r.entries) < discoveryMaxRecordedResponses {
+	recorded := len(r.entries) < discoveryMaxRecordedResponses
+	if recorded {
 		r.entries = append(r.entries, entry)
+	} else if r.overflowAt == 0 {
+		r.overflowAt = len(r.entries)
 	}
 	r.mu.Unlock()
-	// Only a GET body is metadata. Teeing a POST response would put token
-	// material in the recorder, and teeing the MCP endpoint's event stream would
-	// buffer a stream that has no end.
-	if req.Method == http.MethodGet && resp.Body != nil {
+	// Only a GET body is metadata, and only an entry this recorder keeps gets one.
+	// Teeing a POST response would put token material in the recorder, teeing the
+	// MCP endpoint's event stream would buffer a stream that has no end, and teeing
+	// into a dropped entry would be memory nobody can read.
+	if recorded && req.Method == http.MethodGet && resp.Body != nil {
 		resp.Body = &recordBody{rc: resp.Body, entry: entry}
 	}
 	return resp, nil
@@ -204,15 +222,20 @@ func (r *recordRequest) mark() int {
 	return len(r.entries)
 }
 
-func (r *recordRequest) since(mark int) []*recordedResponse {
+// since returns the evidence recorded after mark, or errObservationOverflow when
+// the recorder stopped keeping entries at or after that position.
+func (r *recordRequest) since(mark int) ([]*recordedResponse, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if mark < 0 || mark > len(r.entries) {
 		mark = 0
 	}
+	if r.overflowAt > 0 && mark <= r.overflowAt {
+		return nil, fmt.Errorf("%w: the cap is %d responses", errObservationOverflow, discoveryMaxRecordedResponses)
+	}
 	out := make([]*recordedResponse, len(r.entries)-mark)
 	copy(out, r.entries[mark:])
-	return out
+	return out, nil
 }
 
 // recordBody copies the bytes the SDK reads. Past the cap it stops recording and
@@ -386,6 +409,16 @@ type validatedDiscovery struct {
 	TokenEndpoint         string
 	// RevocationEndpoint is empty when the issuer advertised none.
 	RevocationEndpoint string
+	// RegistrationEndpoint is what dynamic client registration was sent to. It is
+	// validated like every other advertised endpoint, and the check is
+	// deliberately post-hoc: DCR runs BEFORE the fetcher that captures this
+	// metadata, so by the time the endpoint is named here the registration has
+	// already happened — under the guarded client, whose dial-time check refused an
+	// out-of-policy destination then. Validating it here still fails the login
+	// closed when discovery names a registration endpoint the operator's policy
+	// would not allow, instead of accepting a round whose metadata contradicts the
+	// policy in a way the next step might trust.
+	RegistrationEndpoint string
 	// TokenEndpointAuthMethods is the issuer's
 	// token_endpoint_auth_methods_supported, which is what decides how a client
 	// secret is presented once a login is over: the login persists the resolved
@@ -419,7 +452,10 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 	if expected == "" {
 		return validatedDiscovery{}, errors.New("mcpoauth: the authorization request carries no resource parameter, so the resource it is for cannot be established")
 	}
-	entries := in.Recorder.since(in.Mark)
+	entries, err := in.Recorder.since(in.Mark)
+	if err != nil {
+		return validatedDiscovery{}, err
+	}
 
 	challengeURL, err := recordedChallengeMetadataURL(entries, in.Endpoint)
 	if err != nil {
@@ -461,6 +497,7 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 		AuthorizationEndpoint:    asm.AuthorizationEndpoint,
 		TokenEndpoint:            asm.TokenEndpoint,
 		RevocationEndpoint:       asm.RevocationEndpoint,
+		RegistrationEndpoint:     asm.RegistrationEndpoint,
 		TokenEndpointAuthMethods: asm.TokenEndpointAuthMethodsSupported,
 	}
 	if out.Resource, err = Canonicalize(prm.Resource); err != nil {
@@ -477,8 +514,12 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 // 401/403 it was handed; the recorder saw the same response, so the same
 // parameter is recovered here without asking again.
 func recordedChallengeMetadataURL(entries []*recordedResponse, endpoint string) (string, error) {
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
+	// Forward, not backward: a consent round starts at the challenge that sent the
+	// SDK into Authorize, so the FIRST 401/403 to the endpoint in the window is the
+	// response the SDK was handed. Scanning backwards would pick a later one — the
+	// retry that a failed Authorize produces — and answer for a response the SDK
+	// never read.
+	for _, e := range entries {
 		if e.status != http.StatusUnauthorized && e.status != http.StatusForbidden {
 			continue
 		}
@@ -486,8 +527,15 @@ func recordedChallengeMetadataURL(entries []*recordedResponse, endpoint string) 
 			continue
 		}
 		challenges, err := oauthex.ParseWWWAuthenticate(e.header.Values("WWW-Authenticate"))
-		if err != nil || len(challenges) == 0 {
-			continue
+		if err != nil {
+			// The SDK fails Authorize outright when a challenge does not parse, so
+			// this cannot be a candidate to skip past: the round is already over.
+			return "", fmt.Errorf("mcpoauth: the authentication challenge for %s cannot be parsed", redactRawTarget(endpoint))
+		}
+		if len(challenges) == 0 {
+			// No challenge at all (an empty header) is not a parse failure: the SDK
+			// then goes straight to the well-known locations.
+			return "", nil
 		}
 		for _, c := range challenges {
 			if u := c.Params["resource_metadata"]; u != "" {
@@ -619,6 +667,12 @@ func validateDiscovered(ctx context.Context, p *Policy, d validatedDiscovery) er
 			what string
 			url  string
 		}{"revocation endpoint", d.RevocationEndpoint})
+	}
+	if d.RegistrationEndpoint != "" {
+		targets = append(targets, struct {
+			what string
+			url  string
+		}{"registration endpoint", d.RegistrationEndpoint})
 	}
 	for _, t := range targets {
 		if err := p.ValidateDestination(ctx, t.url); err != nil {

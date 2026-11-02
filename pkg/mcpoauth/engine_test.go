@@ -575,12 +575,25 @@ type fakeOAuthServer struct {
 	// revokeFailFirst refuses only the FIRST revocation request, so a batch can
 	// have a failing item in the middle of it.
 	revokeFailFirst bool
+	// revokeBlock holds a revocation request open until it is closed, and
+	// revokeArrived signals that one is in flight.
+	revokeBlock   chan struct{}
+	revokeArrived chan struct{}
+	// pageSize pages the fake's tool list, which is how a multi-page listing is
+	// exercised.
+	pageSize int
+	// toolsListCalls counts the tools/list requests served.
+	toolsListCalls int
+	// prmSwitchToRootOnSecondHit makes the path location answer with the ROOT
+	// resource from its second hit on, which is how a server "moves" a resource
+	// between two consent rounds.
+	prmSwitchToRootOnSecondHit bool
 	// lastTokenHadBasicAuth records how the most recent token request presented
 	// its client credentials.
 	lastTokenHadBasicAuth bool
 }
 
-func newFakeOAuthServer(t *testing.T) *fakeOAuthServer {
+func newFakeOAuthServer(t *testing.T, configure ...func(*fakeOAuthServer)) *fakeOAuthServer {
 	t.Helper()
 	f := &fakeOAuthServer{
 		t:              t,
@@ -599,7 +612,12 @@ func newFakeOAuthServer(t *testing.T) *fakeOAuthServer {
 		refreshOK:      map[string]bool{},
 	}
 
-	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
+	for _, fn := range configure {
+		fn(f)
+	}
+
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"},
+		&mcp.ServerOptions{PageSize: f.pageSize})
 	for _, name := range f.tools {
 		name := name
 		mcpServer.AddTool(&mcp.Tool{
@@ -750,6 +768,9 @@ func (f *fakeOAuthServer) handlePRMPath(w http.ResponseWriter, r *http.Request) 
 	}
 	if f.prmVaryOnSecondHit && f.prmHits[r.URL.Path] > 1 {
 		resource = f.endpointLocked()
+	}
+	if f.prmSwitchToRootOnSecondHit && f.prmHits[r.URL.Path] > 1 {
+		resource = f.rootResourceLocked()
 	}
 	scopes := append([]string(nil), f.prmScopes...)
 	f.mu.Unlock()
@@ -1009,7 +1030,11 @@ func (f *fakeOAuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	if f.revokeFailFirst && f.revokeHits == 1 {
 		status = http.StatusInternalServerError
 	}
+	block, arrived := f.revokeBlock, f.revokeArrived
 	f.mu.Unlock()
+	if !waitBarrier(r.Context(), block, arrived) {
+		return
+	}
 	if status == 0 {
 		status = http.StatusOK
 	}
@@ -1081,6 +1106,9 @@ func (f *fakeOAuthServer) intercept(next http.Handler) http.Handler {
 			}
 			_ = json.Unmarshal(body, &msg)
 			if msg.Method == "tools/list" {
+				f.mu.Lock()
+				f.toolsListCalls++
+				f.mu.Unlock()
 				f.mu.Lock()
 				stepUp := f.stepUpLeft > 0
 				if stepUp {
@@ -1212,7 +1240,19 @@ func (b *lockedBuffer) String() string {
 
 func newEngineFixture(t *testing.T, tweaks ...func(*EngineOptions)) *engineFixture {
 	t.Helper()
-	oauth := newFakeOAuthServer(t)
+	return newEngineFixtureConfigured(t, nil, tweaks...)
+}
+
+// newEngineFixtureConfigured builds the fixture with a hook that runs before the
+// fixture's server exists, for the shapes that are fixed at construction (the
+// page size of its tool list, its tool set).
+func newEngineFixtureConfigured(t *testing.T, configure func(*fakeOAuthServer), tweaks ...func(*EngineOptions)) *engineFixture {
+	t.Helper()
+	var hook []func(*fakeOAuthServer)
+	if configure != nil {
+		hook = append(hook, configure)
+	}
+	oauth := newFakeOAuthServer(t, hook...)
 	store := newFakeStore()
 	logs := &lockedBuffer{}
 	timer := make(chan time.Time, 8)
@@ -1477,16 +1517,6 @@ func (f *fakeOAuthServer) revokeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.revokeHits
-}
-
-func (f *fakeOAuthServer) asmHitCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	total := 0
-	for _, n := range f.asmHits {
-		total += n
-	}
-	return total
 }
 
 func (f *fakeOAuthServer) tokenCallCount() int {
@@ -1844,6 +1874,7 @@ func TestMcpOAuthEngineStaleFenceRefusesTheCommit(t *testing.T) {
 	}
 	// The token it had already obtained is offered back to the authorization
 	// server, since nothing local will ever use it.
+	waitForGroupDone(t, &fx.eng.wg)
 	if got := fx.oauth.revokeCount(); got == 0 {
 		t.Fatal("provisional token material was not revoked after a refused commit")
 	}
@@ -1857,8 +1888,14 @@ func TestMcpOAuthEngineTombstonedOwnerRefusesTheCommit(t *testing.T) {
 	// is the fail-closed authority even when cleanup never ran.
 	fx.store.deleteOwner(fx.owner)
 
-	if _, err := fx.complete(d.LoginID, fx.oauth.callback(d.AuthorizeURL)); err == nil {
+	_, err := fx.complete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if err == nil {
 		t.Fatal("Complete succeeded for a tombstoned owner")
+	}
+	// Pinned by identity, not just non-nil: a tombstoned owner is a login the store
+	// refuses, and that is what a caller branches on.
+	if !errors.Is(err, ErrLoginRequired) {
+		t.Fatalf("Complete = %v, want ErrLoginRequired", err)
 	}
 	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
 		t.Fatal("a grant was stored for a tombstoned owner")
@@ -1876,6 +1913,7 @@ func TestMcpOAuthEngineNoGrantWhenToolsCannotBeListed(t *testing.T) {
 	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
 		t.Fatal("a grant was committed although the tools could not be listed")
 	}
+	waitForGroupDone(t, &fx.eng.wg)
 	if got := fx.oauth.revokeCount(); got == 0 {
 		t.Fatal("the provisional token was not revoked")
 	}
@@ -2432,4 +2470,234 @@ func TestMcpOAuthEngineRevokeDetachedContinuesPastAFailure(t *testing.T) {
 			t.Fatalf("the error quoted a token: %v", err)
 		}
 	})
+}
+
+func TestMcpOAuthEngineListToolsCoversEveryPage(t *testing.T) {
+	fx := newEngineFixtureConfigured(t, func(f *fakeOAuthServer) {
+		// Three tools, two per page: a single page would verify and report two.
+		f.tools = []string{"alpha", "beta", "gamma"}
+		f.pageSize = 2
+	})
+
+	d := fx.begin()
+	res := fx.mustComplete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if got, want := strings.Join(res.Tools, ","), "alpha,beta,gamma"; got != want {
+		t.Fatalf("tools = %q, want every page's names %q", got, want)
+	}
+	fx.oauth.mu.Lock()
+	pages := fx.oauth.toolsListCalls
+	fx.oauth.mu.Unlock()
+	if pages < 2 {
+		t.Fatalf("tools/list requests = %d, want a paginated listing", pages)
+	}
+}
+
+func TestMcpOAuthEngineSupersededRoundTokenIsRevoked(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.oauth.set(func(f *fakeOAuthServer) { f.stepUpLeft = 1 })
+
+	first := fx.begin()
+	res := fx.mustComplete(first.LoginID, fx.oauth.callback(first.AuthorizeURL))
+	if res.Continuation == nil {
+		t.Fatal("expected a step-up continuation")
+	}
+	final := fx.mustComplete(res.Continuation.LoginID, fx.oauth.callback(res.Continuation.AuthorizeURL))
+	if final.Continuation != nil {
+		t.Fatal("the step-up round did not finish")
+	}
+
+	grant, ok := fx.store.grant(fx.owner, fx.oauth.endpoint())
+	if !ok {
+		t.Fatal("no grant after the step-up")
+	}
+	// The revoke happens after the caller is answered, so wait for the task.
+	waitForGroupDone(t, &fx.eng.wg)
+	fx.oauth.mu.Lock()
+	revoked := append([]string(nil), fx.oauth.revoked...)
+	fx.oauth.mu.Unlock()
+	if len(revoked) == 0 {
+		t.Fatal("the superseded round's token was never offered back")
+	}
+	// Round 1's refresh token is the one that must die; the committed grant's must
+	// not be revoked.
+	for _, tok := range revoked {
+		if tok == grant.Token.RefreshToken {
+			t.Fatalf("the committed grant's token was revoked: %q", tok)
+		}
+	}
+	if revoked[0] != "refresh-1" {
+		t.Fatalf("revoked %q, want the superseded round's refresh-1", revoked[0])
+	}
+}
+
+func TestMcpOAuthEngineReloginMustKeepTheSameResource(t *testing.T) {
+	fx := newEngineFixture(t)
+	// Round 1 binds the endpoint's resource; on the step-up round the server moves
+	// the resource to its root. A login may not follow that: the fence was bound to
+	// one resource, and a step-up is the same login continuing.
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.stepUpLeft = 1
+		f.prmSwitchToRootOnSecondHit = true
+	})
+
+	d := fx.begin()
+	// The divergence is noticed by whichever Complete is waiting when the step-up
+	// round's discovery is captured: it may be this one or the continuation's.
+	res, err := fx.complete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if err == nil {
+		if res.Continuation == nil {
+			t.Fatal("the step-up round neither continued nor failed")
+		}
+		_, err = fx.complete(res.Continuation.LoginID, fx.oauth.callback(res.Continuation.AuthorizeURL))
+	}
+	if !errors.Is(err, ErrConsentRejected) {
+		t.Fatalf("login = %v, want ErrConsentRejected", err)
+	}
+	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
+		t.Fatal("a login that changed resource mid-flow committed a grant")
+	}
+}
+
+func TestMcpOAuthEngineCloseRacingBeginIsSafe(t *testing.T) {
+	// The flow's tasks are claimed under the same lock that admits the flow and
+	// that Close checks, so a Begin that loses the race is refused rather than
+	// leaving a task that outlives the shutdown.
+	for i := 0; i < 50; i++ {
+		fx := newEngineFixture(t)
+		start := make(chan struct{})
+		type result struct {
+			d   LoginDescriptor
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			d, err := fx.eng.Begin(ctx, BeginRequest{
+				OwnerUserID: fx.owner,
+				Server:      "fixture",
+				Endpoint:    fx.oauth.endpoint(),
+			})
+			done <- result{d: d, err: err}
+		}()
+		closed := make(chan error, 1)
+		go func() {
+			<-start
+			closed <- fx.eng.Close()
+		}()
+		close(start)
+
+		select {
+		case res := <-done:
+			if res.err != nil && res.d.LoginID != "" {
+				t.Fatalf("iteration %d: a failed Begin returned login id %q", i, res.d.LoginID)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("iteration %d: Begin never returned", i)
+		}
+		if err := <-closed; err != nil {
+			t.Fatalf("iteration %d: Close: %v", i, err)
+		}
+		waitForGroupDone(t, &fx.eng.wg)
+	}
+}
+
+func TestMcpOAuthEngineConcurrentCompleteIsSerialized(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.oauth.set(func(f *fakeOAuthServer) { f.stepUpLeft = 1 })
+
+	d := fx.begin()
+	query := fx.oauth.callback(d.AuthorizeURL)
+
+	type result struct {
+		res CompleteResult
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			res, err := fx.eng.Complete(ctx, fx.owner, d.LoginID, query)
+			results <- result{res: res, err: err}
+		}()
+	}
+	close(start)
+
+	var ok, refused int
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-results:
+			switch {
+			case r.err == nil:
+				ok++
+			case errors.Is(r.err, ErrCallbackReplayed):
+				refused++
+			default:
+				t.Fatalf("unexpected concurrent Complete outcome: %v", r.err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("a concurrent Complete never returned")
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("outcomes: %d answered, %d replayed, want exactly one of each", ok, refused)
+	}
+}
+
+func TestMcpOAuthEngineRefusesACallbackWithoutState(t *testing.T) {
+	fx := newEngineFixture(t)
+	d := fx.begin()
+
+	// A successful callback with no state cannot answer any round this daemon
+	// published, and would otherwise consume the round's single slot untracked.
+	if _, err := fx.complete(d.LoginID, "code=abc"); !errors.Is(err, ErrInvalidCallback) {
+		t.Fatalf("stateless callback = %v, want ErrInvalidCallback", err)
+	}
+	// The round is untouched, so the real callback still works.
+	res := fx.mustComplete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+	if res.Continuation != nil {
+		t.Fatal("the login did not complete after a refused stateless callback")
+	}
+}
+
+func TestMcpOAuthEngineAnswersBeforeRevoking(t *testing.T) {
+	fx := newEngineFixture(t)
+	block := make(chan struct{})
+	arrived := make(chan struct{}, 1)
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.failTools = true
+		f.revokeBlock = block
+		f.revokeArrived = arrived
+	})
+
+	d := fx.begin()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fx.complete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+		done <- err
+	}()
+
+	// The failure is reported while the revocation is still in flight: a caller must
+	// not wait five seconds for the cleanup of the thing it is being told failed.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Complete succeeded although the tools could not be listed")
+		}
+	case <-time.After(3 * time.Second):
+		// Three seconds, not a hang guard: the revocation this login would have to
+		// wait for is bounded at five, so a synchronous revoke cannot beat this
+		// bound while the ordered one answers in milliseconds.
+		t.Fatal("Complete waited for the revocation it was about to report")
+	}
+
+	close(block)
+	waitForGroupDone(t, &fx.eng.wg)
+	if got := fx.oauth.revokeCount(); got == 0 {
+		t.Fatal("the abandoned token was never offered back")
+	}
 }

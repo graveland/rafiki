@@ -353,7 +353,6 @@ func (e *Engine) Begin(ctx context.Context, req BeginRequest) (LoginDescriptor, 
 		return LoginDescriptor{}, err
 	}
 
-	e.wg.Add(2)
 	go e.expire(f)
 	go e.runLogin(f)
 
@@ -379,11 +378,25 @@ func (e *Engine) Begin(ctx context.Context, req BeginRequest) (LoginDescriptor, 
 // else: a caller cannot tell a login that expired from one that never existed,
 // nor from one belonging to somebody else — and probing another owner's id
 // changes nothing about that owner's flow.
+//
+// A login that Close terminated answers ErrMissing too, and that is the
+// deliberate choice: Close drops the flow table exactly as expiry does, and "this
+// login is no longer being tracked" is the one thing a client can act on — start
+// again elsewhere. ErrClosed is reserved for STARTING work (Begin), where it means
+// something the caller can report about the daemon itself rather than about its
+// own login.
 func (e *Engine) Complete(ctx context.Context, owner, loginID, callbackQuery string) (CompleteResult, error) {
 	f, err := e.lookup(strings.ToLower(strings.TrimSpace(owner)), loginID)
 	if err != nil {
 		return CompleteResult{}, err
 	}
+	// One login takes one callback at a time. Two concurrent calls would race for
+	// the flow's single event channel, and one could be handed the other's result;
+	// serializing them here means the second waits for the first to be answered
+	// instead. The lock is the flow's, not the engine's, and the wait it covers
+	// selects on this caller's cancellation.
+	f.complete.Lock()
+	defer f.complete.Unlock()
 	if len(callbackQuery) > MaxCallbackQueryBytes {
 		return CompleteResult{}, ErrCallbackTooLarge
 	}
@@ -392,6 +405,15 @@ func (e *Engine) Complete(ctx context.Context, owner, loginID, callbackQuery str
 		// The parse error would quote the offending substring, which may be part
 		// of a code; the caller only needs to know it was not a query string.
 		return CompleteResult{}, fmt.Errorf("%w: it is not a query string", ErrInvalidCallback)
+	}
+	if values.Get("state") == "" && values.Get("error") == "" {
+		// Every consent round's URL carries a state, and the SDK compares it, so a
+		// successful callback without one cannot be the answer to any round this
+		// daemon published — and it would otherwise consume the round's single slot
+		// untracked. An ERROR callback is exempt: it ends the login rather than
+		// answering it, and an authorization server is not obliged to keep the
+		// state through an error redirect.
+		return CompleteResult{}, fmt.Errorf("%w: it carries no state", ErrInvalidCallback)
 	}
 	if err := e.deliver(ctx, f, values); err != nil {
 		return CompleteResult{}, err
@@ -530,6 +552,11 @@ func (e *Engine) register(f *flow) error {
 	}
 	e.flows[f.id] = f
 	e.perOwner[f.owner]++
+	// The flow's two tasks are claimed HERE, under the same lock that admits the
+	// flow and that Close checks `closed` with. Adding them afterwards would let
+	// Close set closed, snapshot the table and reach Wait between the two, which is
+	// both a WaitGroup misuse and a task outliving the shutdown.
+	e.wg.Add(2)
 	return nil
 }
 
@@ -657,30 +684,41 @@ func (e *Engine) deliver(ctx context.Context, f *flow, values url.Values) error 
 }
 
 // runLogin is the flow's task: the whole SDK-driven login, ending in one event.
+//
+// The caller is answered BEFORE any provisional token is offered back. A revoke is
+// bounded at five seconds and may fail; making Complete wait for it would stall the
+// very error it is about to report. The revoke still happens inside this task, so
+// Close waits for it.
 func (e *Engine) runLogin(f *flow) {
 	defer e.wg.Done()
 	result, err := e.login(f)
 	if err != nil {
 		_ = f.fail(err)
+	} else {
+		_ = f.publish(flowEvent{kind: eventDone, result: result})
+	}
+	e.revokeAbandoned(f, err != nil)
+}
+
+// revokeAbandoned offers back every token this login obtained that no grant will
+// keep: the ones a later consent round replaced, and — when the login failed — the
+// last one, which was never committed.
+func (e *Engine) revokeAbandoned(f *flow, failed bool) {
+	stale := f.takeStale()
+	for _, p := range stale {
+		e.revokeProvisional(f, p.registration, p.token)
+	}
+	if !failed {
 		return
 	}
-	_ = f.publish(flowEvent{kind: eventDone, result: result})
+	if reg, tok, _, _ := f.credentials(); tok.AccessToken != "" || tok.RefreshToken != "" {
+		e.revokeProvisional(f, reg, tok)
+	}
 }
 
 // login runs the SDK's handler to completion and commits only if the credential
 // it produced actually opens the MCP session.
-func (e *Engine) login(f *flow) (result CompleteResult, err error) {
-	defer func() {
-		if err == nil {
-			return
-		}
-		// Whatever went wrong, token material this login obtained belongs to a
-		// grant that will never exist here. Offering it back is best-effort and
-		// bounded; the local record is already nothing.
-		if reg, tok, _, _ := f.credentials(); tok.AccessToken != "" || tok.RefreshToken != "" {
-			e.revokeProvisional(f, reg, tok)
-		}
-	}()
+func (e *Engine) login(f *flow) (CompleteResult, error) {
 	handler, err := auth.NewAuthorizationCodeHandler(&auth.AuthorizationCodeHandlerConfig{
 		DynamicClientRegistrationConfig: &auth.DynamicClientRegistrationConfig{
 			Metadata: registrationMetadata(),
@@ -718,15 +756,21 @@ func (e *Engine) login(f *flow) (result CompleteResult, err error) {
 	}
 	defer func() { _ = session.Close() }()
 
-	tools, err := session.ListTools(f.ctx, nil)
-	if err != nil {
-		return CompleteResult{}, upstreamFailure("verifying the tools of "+redactRawTarget(f.endpoint), err)
+	// Every page, not the first one: a server that pages its tool list would
+	// otherwise be verified on a subset and reported with a subset. The iterator
+	// follows the cursor to the end.
+	var tools []string
+	for tool, iterErr := range session.Tools(f.ctx, nil) {
+		if iterErr != nil {
+			return CompleteResult{}, upstreamFailure("verifying the tools of "+redactRawTarget(f.endpoint), iterErr)
+		}
+		tools = append(tools, tool.Name)
 	}
 	return e.commit(f, tools)
 }
 
 // commit installs the grant and answers with what the verified session served.
-func (e *Engine) commit(f *flow, tools *mcp.ListToolsResult) (CompleteResult, error) {
+func (e *Engine) commit(f *flow, tools []string) (CompleteResult, error) {
 	reg, token, scopes, discovery := f.credentials()
 	if discovery.Resource == "" {
 		return CompleteResult{}, errors.New("mcpoauth: the login finished without validated discovery")
@@ -747,10 +791,7 @@ func (e *Engine) commit(f *flow, tools *mcp.ListToolsResult) (CompleteResult, er
 		// no local record refers to it.
 		return CompleteResult{}, err
 	}
-	names := make([]string, 0, len(tools.Tools))
-	for _, t := range tools.Tools {
-		names = append(names, t.Name)
-	}
+	names := append([]string(nil), tools...)
 	sort.Strings(names)
 	return CompleteResult{
 		Server:   f.server,
@@ -790,6 +831,14 @@ func (e *Engine) fetch(f *flow, args *auth.AuthorizationArgs) (*auth.Authorizati
 	// open is the URL this daemon validated, not merely a URL the SDK built.
 	if err := validateConsentURL(f.ctx, e.policy, args.URL, discovery); err != nil {
 		return nil, f.fail(err)
+	}
+	// A step-up round is the same login continuing. If its discovery names another
+	// resource or issuer, the metadata moved under us between rounds — the one
+	// thing a fenced login must not silently follow.
+	if resource, issuer := f.firstDiscovery(); round > 1 && (resource != discovery.Resource || issuer != discovery.Issuer) {
+		return nil, f.fail(fmt.Errorf("%w: consent round %d discovered resource %q issuer %q, but this login is for resource %q issuer %q",
+			ErrConsentRejected, round, redactRawTarget(discovery.Resource), redactRawTarget(discovery.Issuer),
+			redactRawTarget(resource), redactRawTarget(issuer)))
 	}
 	// The fence moves to the resource and exact issuer BEFORE a browser is told
 	// where to go: a logout that lands afterwards advances the fence and this
@@ -895,12 +944,13 @@ func (e *Engine) capture(f *flow, cfg *oauth2.Config, tok *oauth2.Token) (oauth2
 	// makes, from public fields.
 	f.countCapture()
 	extra, _ := tok.Extra("scope").(string)
-	f.setCredentials(reg, Token{
+	grantedScopes := scopesFromScopeParam(extra)
+	f.supersedeCredentials(reg, Token{
 		AccessToken:  tok.AccessToken,
 		RefreshToken: tok.RefreshToken,
 		TokenType:    tok.TokenType,
 		Expiry:       tok.Expiry,
-	}, scopesFromScopeParam(extra))
+	}, grantedScopes)
 	// A login-owned source, not oauth2's refreshing one: a refresh here would
 	// spend the single-use token behind a grant that does not exist yet.
 	return oauth2.StaticTokenSource(tok), nil
@@ -1131,6 +1181,13 @@ type flow struct {
 	events    chan flowEvent
 	callbacks chan callbackDelivery
 
+	// complete serializes Complete for this flow. Two concurrent calls on one
+	// login would otherwise race for the single event channel, and one could be
+	// handed the other's outcome. It is the flow's own lock, never the engine's,
+	// and the wait it covers selects on cancellation, so a caller that gives up
+	// still returns.
+	complete sync.Mutex
+
 	mu sync.Mutex
 	// fence is the persisted fence this login commits against: the endpoint
 	// generation from Begin, then the bound resource, issuer and grant
@@ -1157,6 +1214,48 @@ type flow struct {
 	// fatal, once set, is the reason this login is over. It is returned to every
 	// later fetcher call so the SDK's own retries cannot restart the flow.
 	fatal error
+	// stale holds token material a later consent round replaced. A refresh token
+	// from round 1 is still a live credential at the authorization server, so it
+	// is offered back when the login ends rather than dropped.
+	stale []provisionalToken
+}
+
+// provisionalToken is one round's token material, kept only long enough to be
+// offered back to the authorization server.
+type provisionalToken struct {
+	registration Registration
+	token        Token
+}
+
+// supersedeCredentials installs this round's material and remembers the round it
+// replaces, so the superseded token can be revoked when the login ends.
+func (f *flow) supersedeCredentials(reg Registration, tok Token, granted []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.token.AccessToken != "" || f.token.RefreshToken != "" {
+		f.stale = append(f.stale, provisionalToken{registration: f.registration, token: f.token})
+	}
+	f.registration = reg
+	f.token = tok
+	f.scopesGranted = granted
+}
+
+// takeStale returns and clears the superseded material collected so far.
+func (f *flow) takeStale() []provisionalToken {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.stale
+	f.stale = nil
+	return out
+}
+
+// firstDiscovery is the resource and issuer the FIRST consent round validated.
+// Later rounds must agree with it: a step-up is the same login continuing, not a
+// chance to bind a different resource or issuer.
+func (f *flow) firstDiscovery() (resource, issuer string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.discovery.Resource, f.discovery.Issuer
 }
 
 // fail ends the flow with err and reports it to the caller exactly once.
@@ -1287,14 +1386,6 @@ func (f *flow) countCapture() {
 	f.mu.Lock()
 	f.captures++
 	f.mu.Unlock()
-}
-
-func (f *flow) setCredentials(reg Registration, tok Token, granted []string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.registration = reg
-	f.token = tok
-	f.scopesGranted = granted
 }
 
 // credentials returns the provisional material a successful verification is
