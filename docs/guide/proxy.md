@@ -159,6 +159,14 @@ not part of a policy line, and the store refuses longer shapes. Among matching
 line rows the LONGEST line wins, and only that row participates: shorter rows
 do not fill its gaps.
 
+The catalog's **`~` auto-latest marker is not part of the family a line
+names**. `openrouter/~openai/gpt-latest` is a real id people spawn, and its
+line carries the marker, so one leading `~` is dropped from BOTH sides before
+matching: a row `openai/*` governs `~openai/gpt-latest` exactly as it governs
+`openai/gpt-5`, and a row written `~openai/*` governs the plain ids too. The
+vendor boundary still holds — the marker never makes `openai/*` match
+`~anthropic/...`.
+
 A row's spec is a **default, not authority**: any caller who can spawn can
 route around it with a bracket spec, and a `prefer=` row still respects the
 operator's bans (a banned provider is skipped and the fallback continues) —

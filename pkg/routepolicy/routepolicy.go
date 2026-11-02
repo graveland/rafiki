@@ -209,6 +209,12 @@ func (p *Policy) Load(rows []Row) error {
 // family rule has been removed in favour of explicit globs like
 // "z-ai/glm-5.3*"). When several line rows match, the LONGEST line wins
 // and only that row participates — shorter rows do not fill its gaps.
+//
+// A leading "~" — the catalog's auto-latest alias marker
+// (~openai/gpt-latest) — is not part of the model FAMILY a line names, so it
+// is ignored on both sides of the match: the row "openai/*" governs
+// "~openai/gpt-latest" as well as "openai/gpt-5", and a row written
+// "~openai/*" governs the plain ids too (lineMatches).
 func (p *Policy) Resolve(modelID string) routing.Spec {
 	line := modelLineOf(modelID)
 	p.mu.RLock()
@@ -223,7 +229,7 @@ func (p *Policy) Resolve(modelID string) routing.Spec {
 		if l == routing.AllModelLines || len(l) <= bestLen {
 			continue
 		}
-		if line == l || (globMatch(l, line)) {
+		if lineMatches(l, line) {
 			best, bestLen = spec, len(l)
 		}
 	}
@@ -243,12 +249,29 @@ func (p *Policy) Rows() []Row {
 	return out
 }
 
+// lineMatches reports whether a row line governs the reduced id's line: exact
+// equality, or filepath.Match when the row carries glob metacharacters. The
+// catalog's "~" auto-latest marker is an alias of the SAME model family
+// (~openai/gpt-latest is openai's latest), so one leading "~" is dropped from
+// BOTH sides and the whole test repeats — a row "openai/*" governs
+// "~openai/gpt-latest" as much as "openai/gpt-5", and a row written
+// "~openai/*" governs the plain ids too. The raw forms are compared first, so
+// nothing that matched before stops matching.
+func lineMatches(pattern, line string) bool {
+	if pattern == line {
+		return true
+	}
+	pattern, line = strings.TrimPrefix(pattern, "~"), strings.TrimPrefix(line, "~")
+	return pattern == line || globMatch(pattern, line)
+}
+
 // globMatch reports whether a row line containing glob metacharacters matches
 // the reduced id via filepath.Match. A line without metacharacters (or the
 // bare global "*", which Resolve skips anyway) is not a glob: exact equality
-// is handled by Resolve's first arm, so globMatch can be strict. filepath.Match
-// errors are impossible here for lines validModelLine admitted (a malformed
-// pattern is refused at Set/Load), so a false is returned if one ever occurs.
+// is handled by lineMatches's first arm, so globMatch can be strict.
+// filepath.Match errors are impossible here for lines validModelLine admitted
+// (a malformed pattern is refused at Set/Load), so a false is returned if one
+// ever occurs.
 func globMatch(pattern, s string) bool {
 	if pattern == routing.AllModelLines || !strings.ContainsAny(pattern, "*?[") {
 		return false

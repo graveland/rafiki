@@ -58,8 +58,10 @@ metacharacters: "z-ai/*" is every model under z-ai/, "z-ai/glm-5.3*" is that
 family, and "*" alone is the global line. A model id is matched with its
 provider segment stripped (openrouter/z-ai/glm-5.3-flash -> z-ai/glm-5.3-flash),
 a "*" never crosses "/", the LONGEST matching line wins, and only that row
-participates. set appends (the history is kept; the newest row per line wins),
-delete appends a tombstone.
+participates. The catalog's "~" auto-latest marker is not part of the family:
+it is ignored on both sides, so "openai/*" governs "~openai/gpt-latest" too.
+set appends (the history is kept; the newest row per line wins), delete appends
+a tombstone.
 
 THE SPEC is the same comma-separated grammar a spawn's "[...]" and a preset
 take; every key is optional and order-free:

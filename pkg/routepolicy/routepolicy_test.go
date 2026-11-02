@@ -344,6 +344,42 @@ func TestPolicyResolveGlobDoesNotCrossSlash(t *testing.T) {
 	c.True(p.Resolve("deepseek/deepseek-chat").IsZero(), "* must not cross /")
 }
 
+// TestPolicyResolveIgnoresTildeAliasMarker pins that the catalog's "~"
+// auto-latest marker is not part of the model FAMILY a line names: a row
+// "openai/*" governs "~openai/gpt-latest" (bare, and provider-prefixed — that
+// spelling reduces to the alias id) exactly as it governs a plain openai id,
+// and a row written with the marker governs the plain ids too. The vendor
+// boundary still holds: the marker never makes an unrelated vendor match.
+func TestPolicyResolveIgnoresTildeAliasMarker(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := NewPolicy()
+	c.Require().NoError(p.Load([]Row{{ModelLine: "openai/*", Spec: "sort=price,quant=fp8+"}}), "Load openai/*")
+
+	checkSpec(c, p.Resolve("openrouter/~openai/gpt-latest"), "provider-prefixed alias id",
+		routing.SortPrice, []string{"fp8+"}, nil, false, false)
+	checkSpec(c, p.Resolve("~openai/gpt-latest"), "bare alias id",
+		routing.SortPrice, []string{"fp8+"}, nil, false, false)
+	checkSpec(c, p.Resolve("openai/gpt-5-terra"), "plain id under the same line",
+		routing.SortPrice, []string{"fp8+"}, nil, false, false)
+	c.True(p.Resolve("~anthropic/claude-haiku").IsZero(), "the marker must not cross vendors")
+
+	// The other direction: a row written with the marker governs the plain
+	// ids of the same family too.
+	c.Require().NoError(p.Load([]Row{{ModelLine: "~openai/*", Spec: "sort=latency"}}), "Load ~openai/*")
+	checkSpec(c, p.Resolve("openai/gpt-5-terra"), "a ~ row governs the plain id",
+		routing.SortLatency, nil, nil, false, false)
+	checkSpec(c, p.Resolve("openrouter/~openai/gpt-latest"), "a ~ row governs its alias",
+		routing.SortLatency, nil, nil, false, false)
+
+	// An exact alias line matches its alias as written, and the plain
+	// spelling of the same id.
+	c.Require().NoError(p.Load([]Row{{ModelLine: "~openai/gpt-latest", Spec: "nodata"}}), "Load exact alias line")
+	checkSpec(c, p.Resolve("openrouter/~openai/gpt-latest"), "exact alias line matches its alias",
+		routing.SortInherit, nil, nil, true, false)
+	checkSpec(c, p.Resolve("openrouter/openai/gpt-latest"), "exact alias line matches the plain spelling",
+		routing.SortInherit, nil, nil, true, false)
+}
+
 // TestPolicyResolveGlobQuestionMark pins that ? matches a single character.
 func TestPolicyResolveGlobQuestionMark(t *testing.T) {
 	c := assert.NewCollecting(t)

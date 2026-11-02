@@ -116,6 +116,30 @@ func TestRoutingPolicyFillsGaps(t *testing.T) {
 	ck.Eq("quant=fp8+,only=together", req.Routing, "policy fills the keys the spawn spec leaves unset")
 }
 
+// TestRoutingPolicyLineGovernsTildeAlias pins the whole spawn-side chain over
+// the catalog's "~" auto-latest alias: a spawn naming
+// openrouter/~openai/gpt-latest reduces to the line ~openai/gpt-latest, and a
+// policy row written "openai/*" must still fill its gaps (the "~" is an alias
+// marker, not part of the model family). The global "*" row keeps its own
+// keys, and the model stays the alias base id as spawned.
+func TestRoutingPolicyLineGovernsTildeAlias(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.SetRoutePolicy(routingPolicy(t,
+		routepolicy.Row{ModelLine: "*", Spec: "sort=price"},
+		routepolicy.Row{ModelLine: "openai/*", Spec: "quant=fp8+"},
+	))
+
+	req, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/~openai/gpt-latest",
+	})
+	ck.Require().NoError(err, "resolveRouting")
+	ck.Eq("sort=price,quant=fp8+", req.Routing, "the openai/* row must govern the ~openai alias")
+	ck.Eq("openrouter/~openai/gpt-latest", req.Model, "Model must stay the alias base id as spawned")
+}
+
 // TestRoutingDataFlagsSurviveSpawnSpec pins the monotone leg: nodata/zdr are
 // confidentiality, not preference — set at ANY level they hold. A policy "*"
 // row carrying zdr must survive a spawn spec that says nothing about data
