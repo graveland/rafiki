@@ -300,12 +300,41 @@ func (c *Controller) catalogFactsByID(rows []routing.CatalogRow) map[string]cata
 			out["anthropic/"+r.AnthropicID] = f // native spelling: dashes, not dots
 		}
 	}
-	// A <family>-latest alias carries the facts of the entry it resolves to.
-	for _, alias := range routing.LatestFamilies() {
-		fam, _ := routing.LatestAlias(alias)
-		if _, orID, ok := c.catalog.ResolveLatest(fam); ok {
-			if f, found := out[orID]; found {
-				out["anthropic/"+alias] = f
+	// A <name>-latest alias carries the facts of the entry it resolves to.
+	for _, a := range c.latestAliases() {
+		if f, found := out[a.orID]; found {
+			out[a.provider+"/"+a.name] = f
+		}
+	}
+	return out
+}
+
+// latestAlias is one provider-qualified "<name>-latest" the catalog resolves
+// right now: provider "gpt", name "gpt-terra-latest", orID the OpenRouter id
+// of the model it currently means.
+type latestAlias struct {
+	provider, name, orID string
+}
+
+// latestAliases lists, for every configured provider whose kind has a vendor,
+// each latest name the catalog can resolve. A name the catalog cannot resolve
+// is omitted, so a listing never offers something a spawn would refuse.
+func (c *Controller) latestAliases() []latestAlias {
+	if c.catalog == nil {
+		return nil
+	}
+	set := providersOrDefault(c.providers)
+	var out []latestAlias
+	for _, pname := range set.Names() {
+		p, _ := set.Get(pname)
+		vendor := routing.Vendor(p.Kind.Vendor())
+		for _, name := range c.catalog.LatestNames(vendor) {
+			tier, ok := routing.LatestTier(vendor, name)
+			if !ok {
+				continue
+			}
+			if _, orID, ok := c.catalog.ResolveTier(vendor, tier); ok {
+				out = append(out, latestAlias{provider: pname, name: name, orID: orID})
 			}
 		}
 	}
@@ -486,6 +515,14 @@ func (c *Controller) ListModelRows(ctx context.Context, ownerUserID, provider, k
 				add(models.Model{
 					ID: "openrouter/" + r.ID, Provider: "openrouter", Model: r.ID,
 					Name: r.Name, Source: models.SourceOpenRouter,
+				})
+			}
+		}
+		if want[models.SourceBuiltin] {
+			for _, a := range c.latestAliases() {
+				add(models.Model{
+					ID: a.provider + "/" + a.name, Provider: a.provider, Model: a.name,
+					Source: models.SourceBuiltin,
 				})
 			}
 		}

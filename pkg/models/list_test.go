@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/providers"
-	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -21,22 +20,19 @@ import (
 
 func TestLoadBuiltins_Count(t *testing.T) {
 	got := loadBuiltins()
-	want := len(knownModels) + len(routing.LatestFamilies())
-	assert.NewCollecting(t).Len(got, want, "loadBuiltins returned %d entries, want %d (%d curated + %d family aliases)", len(got), want, len(knownModels), len(routing.LatestFamilies()))
+	assert.NewCollecting(t).Len(got, len(knownModels), "loadBuiltins returned %d entries, want the %d curated ids", len(got), len(knownModels))
 }
 
-// The "<family>-latest" aliases are what keeps completion current across a
-// model release without anyone editing knownModels, so their presence is the
-// contract rather than an implementation detail.
-func TestLoadBuiltins_ContainsFamilyAliases(t *testing.T) {
-	got := loadBuiltins()
-	have := make(map[string]bool, len(got))
-	for _, m := range got {
-		have[m.ID] = true
-	}
-	for _, fam := range routing.LatestFamilies() {
-		id := "anthropic/" + fam
-		assert.NewCollecting(t).False(!have[id], "loadBuiltins is missing the family alias %s", id)
+// The "<name>-latest" rows are the DAEMON's to offer, because they need the
+// live catalog to resolve (cmd/rafikid ListModelRows). pkg/models has no
+// catalog here, so a builtin row claiming one would be a lie: it would offer a
+// name nothing in this package can tell you the meaning of.
+func TestLoadBuiltinsHaveNoLatestRows(t *testing.T) {
+	assert.NewCollecting(t).False(len(loadBuiltins()) != len(knownModels),
+		"loadBuiltins returned %d entries, want exactly the %d curated ids — no -latest rows", len(loadBuiltins()), len(knownModels))
+	for _, m := range loadBuiltins() {
+		assert.NewCollecting(t).False(strings.HasSuffix(m.Model, "-latest"),
+			"loadBuiltins offered the latest row %q; those need the live catalog and belong to the daemon", m.ID)
 	}
 }
 

@@ -27,7 +27,7 @@ type Source string
 
 const (
 	SourceUserConfig Source = "user-config" // ~/.pi/agent/models.json
-	SourceBuiltin    Source = "builtin"     // curated list + <family>-latest aliases
+	SourceBuiltin    Source = "builtin"     // curated knownModels list
 	SourceDeclared   Source = "declared"    // providers.toml [providers.<name>.models.<id>] declarations
 	SourceOpenRouter Source = "openrouter"  // live OpenRouter catalog (non-anthropic ids)
 	SourceLocal      Source = "local"       // live probe of a configured local provider
@@ -64,8 +64,8 @@ type Model struct {
 // Anthropic ids (cmd/rafikid ListModelRows), and every other provider's ids
 // arrive from the catalog directly.
 var knownModels = []string{
-	// Anthropic. Concrete ids date quickly — prefer the "<family>-latest"
-	// aliases loadBuiltins appends, which resolve live against the catalog.
+	// Anthropic. Concrete ids date quickly — the live catalog is where the
+	// "<name>-latest" names come from now (see loadBuiltins).
 	"anthropic/claude-opus-5",
 	"anthropic/claude-sonnet-5",
 	"anthropic/claude-fable-5",
@@ -208,21 +208,13 @@ func loadUserConfig() []Model {
 	return out
 }
 
-// loadBuiltins returns the curated knownModels list plus the Anthropic
-// "<family>-latest" aliases, as Model entries.
-//
-// The aliases are the answer to this list going stale: routing.LatestFamilies
-// returns family *names*, and the newest version per family is resolved live at
-// request time, so "anthropic/opus-latest" keeps working across a model release
-// with nobody editing anything. Concrete ids stay listed because people do pin
-// deliberately, and because a pinned id is what makes a captured conversation
-// reproducible later.
+// loadBuiltins returns the curated knownModels list. The `<name>-latest` rows
+// are the daemon's to offer, because they need the live catalog (cmd/rafikid
+// ListModelRows); concrete ids stay listed because people pin deliberately, and
+// a pinned id is what makes a captured conversation reproducible later.
 func loadBuiltins() []Model {
-	ids := make([]string, 0, len(knownModels)+4)
+	ids := make([]string, 0, len(knownModels))
 	ids = append(ids, knownModels...)
-	for _, fam := range routing.LatestFamilies() {
-		ids = append(ids, "anthropic/"+fam)
-	}
 	out := make([]Model, 0, len(ids))
 	for _, id := range ids {
 		provider, model := splitID(id)

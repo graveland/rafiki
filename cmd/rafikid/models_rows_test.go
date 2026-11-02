@@ -12,6 +12,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
@@ -310,6 +311,9 @@ func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
 		{ID: "anthropic/claude-opus-5.5:batch", Created: 9, Pricing: price(2.5e-6)},
 		{ID: "anthropic/claude-haiku-4.5", Created: 3, Pricing: price(1e-6)},
 		{ID: "openai/gpt-4o", Created: 1, Pricing: price(2.5e-6)},
+		// The catalog advertises the tier; without this row the catalog does
+		// not offer "opus-latest" at all and no such row may appear.
+		{ID: "~anthropic/claude-opus-latest", Created: 10},
 	})
 	c := &Controller{catalog: cat}
 	rows, err := c.ListModelRows(context.Background(), "", "", protocol.KindClaude)
@@ -331,4 +335,111 @@ func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
 		}
 		ck.False(r.PromptUSD == nil || *r.PromptUSD != want, "%s: PromptUSD = %v, want %v", id, r.PromptUSD, want)
 	}
+}
+
+// latestFixture is the catalog + provider set the "<name>-latest" tests share.
+//
+// The catalog advertises exactly two tiers, each with a "~<vendor>/…-latest"
+// alias entry — that advertisement is what makes a tier offerable at all — and
+// a "nova" tier advertised with no model behind it, which must stay unofferable.
+// The provider set names one provider per vendor plus "local", whose kind has
+// no vendor and therefore no latest names.
+func latestFixture(t *testing.T) (*routing.ModelCatalog, *providers.Set) {
+	t.Helper()
+	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "openai/gpt-6.1-terra", Created: 5,
+			Pricing: &routing.ModelPricing{PromptUSD: 5e-6, CompletionUSD: 1.5e-5}},
+		{ID: "~openai/gpt-terra-latest", Created: 6},
+		{ID: "anthropic/claude-opus-4.8", Created: 3},
+		{ID: "~anthropic/claude-opus-latest", Created: 4},
+		{ID: "~openai/gpt-nova-latest", Created: 7}, // advertised, nothing behind it
+	})
+	set := &providers.Set{
+		DefaultProvider: "anthropic",
+		Providers: map[string]providers.Provider{
+			"anthropic": {Kind: providers.KindAnthropic},
+			"gpt":       {Kind: providers.KindOpenAIResponses},
+			"local":     {Kind: providers.KindOpenAI},
+		},
+	}
+	return cat, set
+}
+
+// A "<name>-latest" row is offered under the OPERATOR's provider name, and only
+// for a vendor that provider's kind can actually reach — the naming is what a
+// spawn accepts, so a row whose id no spawner resolves is worse than no row.
+// A tier the catalog cannot resolve stays off the list entirely.
+func TestListModelRowsOffersLatestNames(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	// HOME is not isolated package-wide, and the builtin source reads
+	// ~/.pi/agent/models.json; keep this listing hermetic.
+	t.Setenv("HOME", t.TempDir())
+	cat, set := latestFixture(t)
+	c := &Controller{catalog: cat, providers: set}
+
+	rows, err := c.ListModelRows(context.Background(), "", "", "")
+	ck.Require().NoError(err)
+	byID := make(map[string]connectapi.ModelRow, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	for _, want := range []struct{ id, provider string }{
+		{"gpt/gpt-terra-latest", "gpt"},
+		{"anthropic/opus-latest", "anthropic"},
+	} {
+		r, ok := byID[want.id]
+		if !ok {
+			t.Errorf("row %q missing; the catalog resolves that tier for its provider's kind", want.id)
+			continue
+		}
+		ck.Eq(want.provider, r.Provider, "%s: Provider", want.id)
+		ck.Eq(models.SourceBuiltin, models.Source(r.Source), "%s: Source", want.id)
+	}
+
+	// A provider whose kind has no vendor gets no latest rows: "openai" is not
+	// a vendor for a plain Chat-Completions endpoint, and inventing one would
+	// offer names the spawn path cannot resolve.
+	for _, r := range rows {
+		ck.False(r.Provider == "local" && strings.HasSuffix(r.Model, "-latest"),
+			"provider \"local\" (KindOpenAI, no vendor) was offered the latest row %q", r.ID)
+	}
+	// Names are per vendor, never shared across providers: the anthropic
+	// provider must not carry the OpenAI vendor's names.
+	ck.False(byID["anthropic/gpt-terra-latest"].ID != "",
+		"anthropic provider offered the OpenAI vendor's name %q", "gpt-terra-latest")
+}
+
+// A latest row must carry the facts of the model it resolves to — the model id
+// it means is what gets priced, so an unpriced alias silently records cost 0
+// and defeats a child's maxCost guardrail.
+func TestCatalogFactsCoverLatestNames(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	cat, set := latestFixture(t)
+	c := &Controller{catalog: cat, providers: set}
+
+	facts := c.catalogFactsByID(cat.Rows())
+
+	target, ok := facts["openrouter/openai/gpt-6.1-terra"]
+	ck.Require().True(ok, "the resolved model has no facts; the fixture seeded no price")
+	latest, ok := facts["gpt/gpt-terra-latest"]
+	ck.Require().True(ok, "gpt/gpt-terra-latest has no facts; a latest row must carry what it resolves to")
+	ck.Require().NotNil(latest.promptUSD, "gpt/gpt-terra-latest: promptUSD")
+	ck.Require().NotNil(target.promptUSD, "openrouter/openai/gpt-6.1-terra: promptUSD")
+	ck.Eq(*target.promptUSD, *latest.promptUSD, "latest row prompt price")
+	if latest.completionUSD == nil || target.completionUSD == nil {
+		t.Fatalf("completion prices: latest=%v target=%v, want both present", latest.completionUSD, target.completionUSD)
+	}
+	ck.Eq(*target.completionUSD, *latest.completionUSD, "latest row completion price")
+
+	// The Anthropic arm resolves through the native spelling, and the fact must
+	// land on the same row id the listing offers.
+	_, ok = facts["anthropic/opus-latest"]
+	ck.True(ok, "anthropic/opus-latest has no facts; the Anthropic arm of the vendor loop is not covered")
+
+	// An advertised tier with no model behind it is not offered, so it must have
+	// no facts either — a listing never offers what a spawn would refuse.
+	_, found := facts["gpt/gpt-nova-latest"]
+	ck.False(found, "gpt/gpt-nova-latest has facts but the catalog resolves no model for that tier")
 }
