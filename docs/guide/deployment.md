@@ -284,19 +284,28 @@ server deployment has to get right:
   and not the executor, contacts the configured MCP endpoint plus whatever
   discovery points at — protected-resource metadata, authorization-server
   metadata, dynamic client registration, the token endpoint, and revocation. All
-  of them must be reachable from the daemon host. The daemon's own
-  `HTTP_PROXY`/`HTTPS_PROXY` are ignored (a proxy resolves the name itself, so
-  the destination check would not see the address reached): route by DNS or
-  firewall, not by proxy env.
-- **Public HTTPS is the default; the opt-in is the operator's.** A destination
-  must resolve to a public unicast address, and a cleartext `http://` URL is
-  refused. An internal MCP server therefore needs its exact host in
-  `[mcp_oauth] allow_hosts` (or its range in `allow_cidrs`), and `http://` in
-  addition needs the host in `allow_http_hosts` — see
-  [Configuration](configuration.md#mcp-oauth) for all three lists and the
-  bounds. That file is the only thing that can widen the policy: a project
-  `.mcp.json`, a flag passed to `rafiki mcp login`, and a server's own metadata
-  cannot.
+  of them must be reachable from the daemon host.
+- **Public HTTPS is the default; the opt-in is the operator's — for servers you
+  log into.** Only an entry with a stored grant dials through the guarded
+  client: that destination must resolve to a public unicast address, a cleartext
+  `http://` URL is refused, and the daemon's own `HTTP_PROXY`/`HTTPS_PROXY` are
+  ignored for that dial (a proxy resolves the name itself, so the destination
+  check would not see the address reached). An internal MCP server you log into
+  therefore needs its exact host in `[mcp_oauth] allow_hosts` (or its range in
+  `allow_cidrs`), and an `http://` one additionally needs the host in
+  `allow_http_hosts` — see [Configuration](configuration.md#mcp-oauth) for all
+  three lists and the bounds. That file is the only thing that can widen the
+  policy: a project `.mcp.json`, a flag passed to `rafiki mcp login`, and a
+  server's own metadata cannot.
+- **Logging in does not re-route your other MCP servers.** An entry with an
+  explicit `Authorization` header, an entry with no stored grant (a public or
+  unauthenticated server, or one using other custom headers), and every stdio
+  and `via_executor` entry keep the transport they had before —
+  `DefaultTransport` and the daemon's proxy environment included. The destination
+  policy and the no-credential-across-an-origin-changing-redirect rule cover the
+  OAuth-backed dials. A protected server with no stored grant still answers 401
+  with the `server <name> needs a login` hint, because the passive handler is
+  attached to every direct-`url` entry that names no `Authorization` of its own.
 - **The config file must exist on the daemon host.** `rafiki mcp login` resolves
   an ABSOLUTE path (`--mcp-config` > `./.mcp.json` > `$RAFIKI_MCP_CONFIG` >
   `<config dir>/mcp.json`) and then the daemon reads that exact file and entry;
@@ -313,27 +322,32 @@ server deployment has to get right:
   machine (clipboard the URL across, paste the redirect back into the
   terminal). Nothing is relayed through the daemon.
 - **Without the key, this feature is unavailable and nothing else degrades.**
-  The daemon logs it once (`MCP OAuth is unavailable` with the reason), the
-  three login verbs answer `Unavailable`, and children dial exactly as before: a
-  static-header or unauthenticated MCP server keeps working, and a protected one
-  is skipped with the login hint until an operator sets a key. A database-less
-  daemon gives the same answer; standalone `rafikid fundi` is unaffected, since
-  it holds no store and its direct-URL entries dial exactly as they always did.
+  The capability needs the daemon's credential store — the database, which
+  `rafikid` cannot start without — and `RAFIKI_SECRETS_KEY`, so the key is the
+  part an operator supplies. Without it the daemon logs the fact once (`MCP
+  OAuth is unavailable` with the reason), the three login verbs answer
+  `Unavailable`, and children dial exactly as before: a static-header or
+  unauthenticated MCP server keeps working, and a protected one is skipped with
+  the login hint. Standalone `rafikid fundi` is unaffected either way, since it
+  holds no store.
 - **A refresh that cannot be completed fails closed.** Before spending a
   single-use refresh token the store commits a durable intent, makes at most one
   upstream attempt, and then re-checks the grant under the owner lock. A
-  refusal, a crash or a lost rotation leaves the grant login-required: there is
-  no automatic replay, even after a restart, and retrying the turn does not help
-  — the fix is `rafiki mcp login <server>` again. A database error refuses use
-  of the credential and is reported as a store failure, never as "no
-  credential".
+  refusal, a crash or a rotation that cannot be committed leaves that grant
+  login-required: there is no automatic replay, even after a restart, and the
+  fix is `rafiki mcp login <server>` again. A refresh merely IN FLIGHT in
+  another session is the transient case — a second acquisition is refused for
+  its duration and resolves to the rotated token once the first finalizes. A
+  database error refuses use of the credential and is reported as a store
+  failure, never as "no credential".
 - **Logout is authoritative; upstream revocation is best effort.** `rafiki mcp
   logout` drops every endpoint binding to the grant locally first, advancing a
   fence so an older in-flight login cannot recreate it, and only then offers the
-  token back to the authorization server — one bounded attempt per grant (5s),
-  skipped when the issuer advertises no revocation endpoint. A failed revocation
-  changes nothing: the local invalidation already stands, and the child's next
-  request gets the re-login hint.
+  token back to the authorization server — one attempt per grant, bounded at
+  5s, which is how long the logout call itself can block; it is skipped when the
+  issuer advertises no revocation endpoint. A failed revocation changes nothing:
+  the local invalidation already stands, and the child's next request gets the
+  re-login hint.
 - **Scope.** This is the direct-`url` `fundi` path only. `via_executor` entries
   keep their static headers (their argv, environment and credentials live on the
   executor machine), stdio servers keep their own credential management,
@@ -367,7 +381,9 @@ response codes and the deploy-order rule for notify tokens are in
 1. Upgrade the **daemon** first, and run `rafikid migrate` before starting it
    (a production daemon does not migrate itself — only `--dev` does). Migration
    0067, the MCP OAuth credential tables, is part of this step: a daemon serving
-   `rafiki mcp login` needs it.
+   `rafiki mcp login` needs it. Setting `RAFIKI_SECRETS_KEY` and logging into a
+   server does not change which destinations your other MCP servers may reach —
+   only an entry with a stored grant dials through the guarded client.
 2. Then upgrade executors and clients. The wire protocol carries an epoch that
    is bumped on every breaking change; a mismatched peer is refused loudly
    rather than misbehaving, so a client or executor left behind shows up as an
@@ -430,4 +446,4 @@ and 49 s for the check, about 2 minutes of downtime, 63 MB peak RSS.
 - [ ] `/healthz` wired to your probes, `/metrics` scraped, an OTLP endpoint configured if you want traces
 - [ ] The webhook gateway, if any, runs as its own image with only a notify-scoped token
 - [ ] `RAFIKI_SECRETS_KEY` is set, backed up and identical on every daemon sharing the database
-- [ ] `[mcp_oauth]` names any internal MCP server and its OAuth endpoints if they are not public HTTPS
+- [ ] `[mcp_oauth]` names each internal MCP server you log into, and its OAuth endpoints, if they are not public HTTPS; other MCP servers keep their own transport

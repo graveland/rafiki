@@ -67,7 +67,9 @@ The daemon runs the whole flow and seals the grant against your user id, so no
 token is written into the file and no child process ever holds one. There is no
 `"oauth": true` switch. Your `fundi` children then spend the grant passively: a
 server they cannot authenticate is skipped with a hint naming that login, never
-a prompt mid-spawn. `rafiki mcp logout linear` forgets it.
+a prompt mid-spawn. `rafiki mcp logout linear` forgets it — and logging in
+re-routes nothing else: a server you have not logged into keeps its own
+transport and reach.
 
 Only direct-`url` entries of a daemon-side `mcp.json` are in scope; executor
 entries keep their own static headers, and Claude Code logs in for itself on
