@@ -643,3 +643,26 @@ func TestExtractTarAppliesDirectoryModesAfterTheirEntries(t *testing.T) {
 	c.NoError(cerr, "stat the extracted file")
 	c.Eq(os.FileMode(0o640), child.Mode().Perm(), "the archived file mode, got")
 }
+
+func TestProgressWriterReportsEveryTenPercent(t *testing.T) {
+	var out bytes.Buffer
+	p := &progressWriter{out: &out, total: 100 << 20}
+	for i := 0; i < 100; i++ {
+		_, err := p.Write(make([]byte, 1<<20))
+		assert.NewAborting(t).NoError(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	c := assert.NewCollecting(t)
+	c.Eq(10, len(lines), "ten lines for a known length: %q", out.String())
+	c.StrContains(lines[0], "10% (10 of 100 MB)")
+	c.StrContains(lines[9], "100% (100 of 100 MB)")
+}
+
+func TestProgressWriterWithoutALengthReportsEveryStep(t *testing.T) {
+	var out bytes.Buffer
+	p := &progressWriter{out: &out, total: -1}
+	_, err := p.Write(make([]byte, 20<<20))
+	c := assert.NewCollecting(t)
+	c.NoError(err)
+	c.Eq("  8 MB\n  16 MB\n", out.String(), "a line per 8 MB")
+}

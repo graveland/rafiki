@@ -17,6 +17,10 @@ type runner interface {
 	// Run executes argv with extra env appended to os.Environ(); stdout and
 	// stderr are returned separately. A non-zero exit is an *exec.ExitError.
 	Run(ctx context.Context, env []string, argv ...string) (stdout, stderr []byte, err error)
+	// RunLive is Run that also copies the process's stderr to live as it is
+	// written, for a command whose progress the operator is waiting on. The
+	// whole of stderr is still returned, so a failure reports it as Run does.
+	RunLive(ctx context.Context, env []string, live io.Writer, argv ...string) (stdout, stderr []byte, err error)
 	// Stream starts argv and returns its stdout and stderr, interleaved, as a
 	// line reader; the process is killed when ctx is done. Used for `docker
 	// events` and `docker logs -f` — and docker logs replays the container's
@@ -43,6 +47,18 @@ func (execRunner) Run(ctx context.Context, env []string, argv ...string) ([]byte
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func (execRunner) RunLive(ctx context.Context, env []string, live io.Writer, argv ...string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = io.MultiWriter(&stderr, live)
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
 }

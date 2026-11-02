@@ -84,6 +84,13 @@ func (f *fakeRunner) Run(_ context.Context, env []string, argv ...string) ([]byt
 	return nil, nil, nil
 }
 
+// RunLive records the call exactly as Run does and shows its stderr on live.
+func (f *fakeRunner) RunLive(ctx context.Context, env []string, live io.Writer, argv ...string) ([]byte, []byte, error) {
+	stdout, stderr, err := f.Run(ctx, env, argv...)
+	_, _ = live.Write(stderr)
+	return stdout, stderr, err
+}
+
 func (f *fakeRunner) RunInteractive(_ context.Context, argv ...string) error {
 	f.interCalls = append(f.interCalls, fakeCall{argv: argv})
 	if s, ok := f.scripts["interactive "+runKey(argv)]; ok {

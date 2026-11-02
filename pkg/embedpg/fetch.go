@@ -185,7 +185,11 @@ func (s Server) download(ctx context.Context, url, dir string) (string, string, 
 		return "", "", fmt.Errorf("embedpg: %w", err)
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxDownloadBytes+1))
+	dst := io.MultiWriter(f, h)
+	if s.Progress != nil {
+		dst = io.MultiWriter(dst, &progressWriter{out: s.Progress, total: resp.ContentLength})
+	}
+	n, err := io.Copy(dst, io.LimitReader(resp.Body, maxDownloadBytes+1))
 	if err != nil {
 		f.Close()
 		os.Remove(f.Name())
@@ -203,6 +207,41 @@ func (s Server) download(ctx context.Context, url, dir string) (string, string, 
 		return "", "", fmt.Errorf("embedpg: %s: %w", url, err)
 	}
 	return f.Name(), hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// progressWriter reports a download as it is written: a line per 10% when the
+// length is known, otherwise a line per progressStep bytes. Lines, not a
+// carriage-return meter, because the output may be a log or a pipe.
+type progressWriter struct {
+	out   io.Writer
+	total int64 // -1 when the server declared no length
+	done  int64
+	next  int64 // the byte count at which the next line is due
+}
+
+const progressStep = 8 << 20
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	if p.next == 0 {
+		p.next = p.step()
+	}
+	p.done += int64(len(b))
+	for p.done >= p.next {
+		if p.total > 0 {
+			fmt.Fprintf(p.out, "  %d%% (%d of %d MB)\n", p.next*100/p.total, p.next>>20, p.total>>20)
+		} else {
+			fmt.Fprintf(p.out, "  %d MB\n", p.next>>20)
+		}
+		p.next += p.step()
+	}
+	return len(b), nil
+}
+
+func (p *progressWriter) step() int64 {
+	if p.total > 0 {
+		return max(p.total/10, 1)
+	}
+	return progressStep
 }
 
 // extract unpacks the .txz at archivePath into BinDir, atomically: the tree is

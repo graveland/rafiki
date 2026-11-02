@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -349,7 +350,16 @@ func lastDockerLogs(ctx context.Context, r runner) string {
 // telling the operator about server extensions would point them at the wrong
 // thing entirely — the first thing they read on the most likely failure.
 func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mode installstate.DBMode) error {
-	_, stderr, err := r.Run(ctx, []string{"RAFIKI_DB=" + dsn}, rafikidPath, "migrate")
+	env := []string{"RAFIKI_DB=" + dsn}
+	var stderr []byte
+	var err error
+	if mode == installstate.DBModeEmbedded {
+		// The first embedded migrate downloads tens of megabytes and runs initdb,
+		// so rafikid's own progress lines are shown as they are written.
+		_, stderr, err = r.RunLive(ctx, env, os.Stderr, rafikidPath, "migrate")
+	} else {
+		_, stderr, err = r.Run(ctx, env, rafikidPath, "migrate")
+	}
 	if err != nil {
 		hint := "hint: a bring-your-own database needs vector and pg_textsearch (with shared_preload_libraries=pg_textsearch) for recall search; timescaledb is optional and only turns the large tables into hypertables"
 		if mode == installstate.DBModeEmbedded {
