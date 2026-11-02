@@ -128,9 +128,10 @@ Examples:
 //
 // It is resolved HERE and not by the daemon because only the client knows which
 // directory the user meant — and it is not resolved further than that: the file
-// is neither read nor stat'd, so a path that only exists on the daemon host
-// works, and a missing one is the daemon's refusal to make (it names the path
-// and the problem).
+// is never read or parsed here, and it is stat'd only to decide precedence (a
+// ./.mcp.json that exists outranks $RAFIKI_MCP_CONFIG and the config-dir file),
+// so a path that only exists on the daemon host still works, and a missing one
+// is the daemon's refusal to make (it names the path and the problem).
 func mcpConfigPath(explicit string) (string, error) {
 	if explicit != "" {
 		abs, err := filepath.Abs(explicit)

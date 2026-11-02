@@ -570,18 +570,32 @@ func TestMcpOAuthEntryRefusalAdviceMatchesTheVerb(t *testing.T) {
 	}
 }
 
-// TestMcpOAuthDeleteOwnerInvalidatesLocallyOnly pins what the removal does
-// TODAY: the local invalidation is the whole of it, and the payload the store
-// detached is deliberately not spent here. Upstream revocation follows through
-// Engine.RevokeDetached once the engine exposes it (a second round owns that
-// file); until then nothing may reach an authorization server from a removal.
-func TestMcpOAuthDeleteOwnerInvalidatesLocallyOnly(t *testing.T) {
-	c := assert.NewCollecting(t)
+// TestMcpOAuthDeleteOwnerSpendsTheDetachedPayload pins the removal's two steps
+// in order: the local invalidation happens first and is what removal MEANS, and
+// the payload the store detached is then spent at the authorization server's
+// revocation endpoint, bounded and best effort. The fixture is loopback, so the
+// engine is given the operator allowance a real daemon would need for a local
+// server — with the default policy this test would pass for the wrong reason
+// (nothing is reachable), which is exactly the hole this replaces.
+func TestMcpOAuthDeleteOwnerSpendsTheDetachedPayload(t *testing.T) {
+	c := assert.NewAborting(t)
 
-	// A revocation endpoint that must never be called from this path.
 	revoker := &recordingRevocationEndpoint{}
 	srv := httptest.NewServer(revoker)
 	defer srv.Close()
+
+	policy, err := mcpoauth.Config{
+		AllowHosts:     []string{"127.0.0.1"},
+		AllowCIDRs:     []string{"127.0.0.1/32"},
+		AllowHTTPHosts: []string{"127.0.0.1"},
+	}.Policy()
+	c.NoError(err, "operator allowance for the loopback fixture")
+	engine, err := mcpoauth.NewEngine(context.Background(), mcpoauth.EngineOptions{
+		Store:  &fakeMcpStore{},
+		Policy: policy,
+	})
+	c.NoError(err, "new engine")
+	t.Cleanup(func() { _ = engine.Close() })
 
 	store := &fakeMcpStore{revocations: []mcpoauth.Revocation{{
 		OwnerUserID: "u1",
@@ -593,34 +607,38 @@ func TestMcpOAuthDeleteOwnerInvalidatesLocallyOnly(t *testing.T) {
 		},
 		RefreshToken: "rt-detached",
 	}}}
-	broker := newTestBroker(t, store)
+	broker := &mcpOAuth{engine: engine, store: store, log: slog.Default()}
 
 	broker.deleteOwner(context.Background(), "u1")
 
 	store.mu.Lock()
-	c.Eq(1, store.invalidateCalls, "the local invalidation must happen exactly once")
+	c.Eq(1, store.invalidateCalls, "the local invalidation happens exactly once")
 	c.EqDeep([]string{"u1"}, store.invalidatedOwners, "and for the removed user")
 	store.mu.Unlock()
-	c.Eq(0, revoker.count(), "a removal must not reach an authorization server until the engine exposes revocation")
+	c.Eq(1, revoker.count(), "the detached refresh token is offered to the revocation endpoint")
+	c.EqDeep([]string{"rt-detached"}, revoker.tokens(), "and it is the token the store detached")
 
-	// A store failure is the other half: the removal is not failed, and still
-	// nothing is revoked.
+	// A store failure is the other half: the removal is not failed, and nothing
+	// is revoked, because there is no payload to spend.
 	failing := &fakeMcpStore{invalidateErr: errors.New("store is down")}
-	broker2 := newTestBroker(t, failing)
-	broker2.deleteOwner(context.Background(), "u1")
-	c.Eq(0, revoker.count(), "a failed cleanup must not reach the authorization server")
+	broker2 := &mcpOAuth{engine: engine, store: failing, log: slog.Default()}
+	broker2.deleteOwner(context.Background(), "u2")
+	c.Eq(1, revoker.count(), "a failed cleanup leaves the revocation count alone")
 }
 
 // recordingRevocationEndpoint counts revocation posts, so a test can assert that
 // a path does NOT revoke.
 type recordingRevocationEndpoint struct {
-	mu  sync.Mutex
-	got int
+	mu     sync.Mutex
+	got    int
+	posted []string
 }
 
-func (r *recordingRevocationEndpoint) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+func (r *recordingRevocationEndpoint) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	_ = req.ParseForm()
 	r.mu.Lock()
 	r.got++
+	r.posted = append(r.posted, req.PostForm.Get("token"))
 	r.mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 }
@@ -629,6 +647,12 @@ func (r *recordingRevocationEndpoint) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.got
+}
+
+func (r *recordingRevocationEndpoint) tokens() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.posted...)
 }
 
 // TestMcpOAuthRuntimeOptionsBindTheFactoryToTheCredentialOwner is the E-minor
