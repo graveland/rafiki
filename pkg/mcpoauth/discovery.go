@@ -100,6 +100,11 @@ type recordedResponse struct {
 
 func (r *recordedResponse) key() string { return r.method + " " + r.url }
 
+// contentType is the media type this response was served with.
+func (r *recordedResponse) contentType() string {
+	return r.header.Get("Content-Type")
+}
+
 // markComplete records that this entry's body was read to its end.
 func (r *recordedResponse) markComplete() {
 	r.mu.Lock()
@@ -307,7 +312,18 @@ func (b *recordBody) Close() error {
 // drain reads the rest of the body into the recording and reports whether it
 // reached EOF. It stops as soon as the entry overflows: the remaining bytes cannot
 // make the evidence usable again, and reading them would only hold the connection.
+//
+// It does not run at all for an event stream. That body has no end by design, so
+// draining it would block Close for as long as the stream lives — and the exchange
+// this protects is metadata, which is never an event stream. It is unreachable
+// today because the login transport disables the standalone SSE stream, which is
+// precisely why the rule belongs here rather than in a comment: the day that flag
+// changes, Close must still return. isEventStream is the network layer's own
+// content-type rule, reused so there is one spelling of it.
 func (b *recordBody) drain() bool {
+	if isEventStream(b.entry.contentType()) {
+		return false
+	}
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := b.rc.Read(buf)

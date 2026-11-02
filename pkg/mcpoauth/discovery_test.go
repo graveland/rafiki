@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1086,4 +1087,87 @@ func TestMcpOAuthDiscoveryReportsAnOverflowedRecorder(t *testing.T) {
 	}); !errors.Is(capErr, errObservationOverflow) {
 		t.Fatalf("captureDiscovery = %v, want errObservationOverflow", capErr)
 	}
+}
+
+// stubbornBody never produces bytes and never ends until it is released, which is
+// what an event stream looks like from a recorder that might try to read it to EOF.
+type stubbornBody struct {
+	mu      sync.Mutex
+	reads   int
+	release chan struct{}
+}
+
+func (b *stubbornBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	b.reads++
+	b.mu.Unlock()
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *stubbornBody) Close() error { return nil }
+
+func (b *stubbornBody) readCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reads
+}
+
+func TestMcpOAuthDiscoveryDoesNotDrainAnEventStream(t *testing.T) {
+	// The recorder must never wait on a body that has no end. The login transport
+	// disables the standalone SSE stream today, which is exactly why this is checked
+	// here: the rule has to hold when someone flips that flag, not only while nobody
+	// has.
+	t.Run("an event stream closes without being read", func(t *testing.T) {
+		entry := &recordedResponse{
+			method: http.MethodGet,
+			url:    "https://mcp.example/events",
+			status: http.StatusOK,
+			header: http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
+		}
+		body := &stubbornBody{release: make(chan struct{})}
+		recording := &recordBody{rc: body, entry: entry}
+
+		closed := make(chan struct{})
+		go func() {
+			_ = recording.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			close(body.release)
+			t.Fatal("Close drained an event stream instead of returning")
+		}
+		// Not merely prompt: it never touched the stream at all.
+		if got := body.readCount(); got != 0 {
+			t.Fatalf("Close read the event stream %d time(s)", got)
+		}
+		close(body.release)
+		if entry.complete() {
+			t.Fatal("an event-stream body was marked complete")
+		}
+	})
+
+	t.Run("a JSON body still drains to its end", func(t *testing.T) {
+		entry := &recordedResponse{
+			method: http.MethodGet,
+			url:    "https://mcp.example/.well-known/oauth-protected-resource/mcp",
+			status: http.StatusOK,
+			header: http.Header{"Content-Type": []string{"application/json"}},
+		}
+		recording := &recordBody{rc: io.NopCloser(strings.NewReader(`{"resource":"https://mcp.example/mcp"}`)), entry: entry}
+		if err := recording.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if !entry.complete() {
+			t.Fatal("a metadata body was not drained to completion")
+		}
+		entry.mu.Lock()
+		body := entry.body.String()
+		entry.mu.Unlock()
+		if !strings.Contains(body, `"resource"`) {
+			t.Fatalf("recorded body = %q", body)
+		}
+	})
 }
