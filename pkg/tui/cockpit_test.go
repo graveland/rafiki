@@ -3071,3 +3071,20 @@ func TestPendingClearsWhenHistoryHoldsTheEchoBehindAReply(t *testing.T) {
 	}})
 	ck.EqDeep([]string(nil), pendingTexts(c), "the transcript held the echo and the ghost survived")
 }
+
+// Sends made before the agent's next turn arrive as one merged user message;
+// its single echo answers all of them.
+func TestOneMergedEchoRetiresEverySendItAnswers(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "first", nil)
+	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "second", nil)
+	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "third", nil)
+
+	c.applyEvent(userMessageEventFor("c_1", "first\n\nsecond", 5))
+	ck.EqDeep([]string{"third"}, pendingTexts(c), "a merged echo left its sends behind")
+}

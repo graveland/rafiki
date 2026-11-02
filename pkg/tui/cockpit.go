@@ -3230,10 +3230,30 @@ func (c *Cockpit) ghostRows(child string, width int) []string {
 	return rows
 }
 
-// ackPending retires the oldest pending send to child that the echoed text
-// answers: an exact match if there is one, else the oldest (an image-only
-// message echoes no text to match).
+// ackPending retires the pending sends to child that the echoed text answers.
+// Sends made before the agent's next turn can be merged into ONE user message
+// (the API forbids consecutive user turns), so one echo may answer several:
+// every pending send, oldest first, that the echo reads as a consecutive run
+// of is retired. With no such run an exact match wins, else the oldest send
+// (an image-only message echoes no text to match).
 func (c *Cockpit) ackPending(child, text string) {
+	rest := strings.TrimSpace(text)
+	retired := false
+	for rest != "" {
+		i := slices.IndexFunc(c.pending, func(p pendingSend) bool {
+			t := strings.TrimSpace(p.text)
+			return p.childID == child && t != "" && strings.HasPrefix(rest, t)
+		})
+		if i < 0 {
+			break
+		}
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, strings.TrimSpace(c.pending[i].text)))
+		c.pending = slices.Delete(c.pending, i, i+1)
+		retired = true
+	}
+	if retired {
+		return
+	}
 	first := -1
 	for i, p := range c.pending {
 		if p.childID != child {
