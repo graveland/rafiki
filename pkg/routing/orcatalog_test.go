@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -663,14 +662,18 @@ func TestCatalogStaleSnapshotDecodesWithoutNewFields(t *testing.T) {
 	}
 }
 
-// Rows() must skip the "~" alias ids for the same reason AllIDs does: they are
-// routing aliases, not models a user picks.
-func TestRowsSkipsTildeAliases(t *testing.T) {
+// Rows() enumerates the "~" alias ids: they are real OpenRouter ids that users
+// spawn by name, and a listing that omits them cannot complete or show them.
+func TestRowsIncludesTildeAliases(t *testing.T) {
 	c, srv := newTestCatalog(t, orFixture)
 	defer srv.Close()
+	var found bool
 	for _, r := range c.Rows() {
-		assert.NewCollecting(t).False(strings.HasPrefix(r.ID, "~"), "Rows() returned alias id %q", r.ID)
+		if r.ID == "~anthropic/claude-sonnet-latest" {
+			found = true
+		}
 	}
+	assert.NewCollecting(t).True(found, "Rows() omitted the ~anthropic/claude-sonnet-latest alias")
 }
 
 // Presence must survive enumeration for ALL SIX optional numeric fields, in

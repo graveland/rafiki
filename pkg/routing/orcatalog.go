@@ -893,9 +893,10 @@ func formatPrice(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) 
 // One accessor rather than per-id ContextWindow/Pricing calls: each of those
 // runs ResolveModel and takes the mutex, so enumerating a ~300-model catalog
 // through them costs 300 resolutions and 300 lock acquisitions to answer a
-// question the snapshot can answer in one pass. Alias ids ("~"-prefixed) are
-// skipped for the same reason AllIDs skips them — they are routing aliases,
-// not models anyone picks.
+// question the snapshot can answer in one pass. Alias ids ("~"-prefixed, e.g.
+// ~deepseek/deepseek-flash-latest) are real OpenRouter ids that people spawn
+// by name, so they are enumerated like any other row; AllIDs strips the marker
+// only because its callers feed shell completion and pricing.
 func (c *ModelCatalog) Rows() []CatalogRow {
 	if c == nil {
 		return nil
@@ -906,7 +907,7 @@ func (c *ModelCatalog) Rows() []CatalogRow {
 	seen := make(map[string]bool, len(c.models))
 	out := make([]CatalogRow, 0, len(c.models))
 	for _, m := range c.models {
-		if strings.HasPrefix(m.ID, "~") || m.ID == "" || seen[m.ID] {
+		if m.ID == "" || seen[m.ID] {
 			continue
 		}
 		seen[m.ID] = true

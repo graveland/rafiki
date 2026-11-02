@@ -116,6 +116,22 @@ func TestListModelRowsPreservesCachePriceAbsence(t *testing.T) {
 	}
 }
 
+// OpenRouter's "~" auto-latest aliases are real ids users spawn by name, so the
+// listing offers them as openrouter/~<id> rows — completion and `rafiki models`
+// both read this path.
+func TestListModelRowsIncludesTildeAliases(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := &Controller{catalog: seedCatalogWithPricing(t, "~deepseek/deepseek-flash-latest", nil)}
+	rows, err := c.ListModelRows(context.Background(), "", "", "")
+	ck.NoError(err)
+	for _, r := range rows {
+		if r.ID == "openrouter/~deepseek/deepseek-flash-latest" {
+			return
+		}
+	}
+	t.Fatalf("alias row missing from %d rows", len(rows))
+}
+
 // seedCatalogWithPricing seeds a catalog with base prices only; cache rates
 // unset, which OpenRouter sends by omitting the fields entirely.
 type models2Pricing struct {
